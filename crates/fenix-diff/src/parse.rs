@@ -105,9 +105,9 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
             // hunk: dropping it -- or worse, letting it fall through
             // into the header -- produces a patch `git apply` rejects
             // outright as "patch with only garbage".
-            if line.starts_with('\\') {
+            if let Some(rest) = line.strip_prefix('\\') {
                 if let Some(hunk) = file.hunks.last_mut() {
-                    hunk.lines.push(DiffLine { kind: LineKind::NoNewline, old_line: None, new_line: None, text: line[1..].to_string() });
+                    hunk.lines.push(DiffLine { kind: LineKind::NoNewline, old_line: None, new_line: None, text: rest.to_string() });
                     continue;
                 }
             }

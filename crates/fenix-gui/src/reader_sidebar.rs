@@ -107,7 +107,7 @@ impl Sidebar {
     }
 
     /// Puts the cursor on the row marked `here`, if there is one.
-    pub fn to_here(&mut self, rows: &[Row]) {
+    pub fn move_to_here(&mut self, rows: &[Row]) {
         if let Some(at) = rows.iter().position(|r| r.here) {
             self.cursor = at;
         }

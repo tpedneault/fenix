@@ -13,6 +13,9 @@
 /// misbehaving or momentarily-out-of-sync server sending a rect that
 /// overruns the framebuffer shouldn't be able to crash the editor over
 /// it, it should just have its overrun portion silently dropped.
+// Eight plain numbers in the order a VNC rectangle arrives in; a struct
+// for them would only be unpacked again on the next line.
+#[allow(clippy::too_many_arguments)]
 pub fn blit_rect(dest: &mut [u8], dest_width: u16, dest_height: u16, x: u16, y: u16, width: u16, height: u16, src: &[u8]) {
     const BYTES_PER_PIXEL: usize = 4;
     if x >= dest_width || y >= dest_height {

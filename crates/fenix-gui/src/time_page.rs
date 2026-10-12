@@ -228,11 +228,10 @@ pub fn layout(p: &TimePage, cols: usize) -> Page {
     } else if p.profile.epoch.level1 { "1958 TAI (level 1)".to_string() } else { format!("{} TAI", (base_1958() + Duration::seconds(p.profile.epoch.tai.0 as i64)).format("%Y-%m-%d %H:%M:%S")) };
     let info = format!("{} · epoch {epoch} · TAI - UTC {} s", p.profile.tm_time.label(), p.profile.leap.offset(time::tai_to_utc(p.tai, &p.profile.leap).date()));
     g.put(1, (left + width).saturating_sub(info.chars().count()), &info, Role::Muted);
-    let mut y = 3;
     if let Some((text, bad)) = &p.note {
         g.put(2, left, &fit(text, width), if *bad { Role::Bad } else { Role::Good });
     }
-    for (i, row) in p.rows().iter().enumerate() {
+    for (y, (i, row)) in (3..).zip(p.rows().iter().enumerate()) {
         g.put(y, left, &p.label(*row), Role::Muted);
         let on = i == p.sel;
         let x = left + 24;
@@ -248,7 +247,6 @@ pub fn layout(p: &TimePage, cols: usize) -> Page {
         if on {
             g.focus(y, left..left + width);
         }
-        y += 1;
     }
     let keys: &[(&str, &str)] = if p.editing.is_some() {
         &[("Enter", "convert"), ("Esc", "leave it")]

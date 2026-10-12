@@ -8,7 +8,7 @@ use super::notebook_host::NotebookPick;
 use super::pages::PageModel;
 use super::*;
 use crate::backlinks_page::{Action as BlAction, BacklinksPage, Item as BlItem};
-use fenix_notebook::{Kind as NbKind, Link, Target};
+use fenix_notebook::{Link, Target};
 
 impl App {
     /// Whether the focused buffer is Markdown.
@@ -158,7 +158,7 @@ impl App {
         let mut out = Vec::new();
         for e in nb.recent() {
             let name = e.display_name();
-            let target = if e.kind == NbKind::Day { e.name.clone() } else { e.name.clone() };
+            let target = e.name.clone();
             let insert = if closed { target.clone() } else { format!("{target}]]") };
             let mut item = crate::completion::Item::text(insert, crate::completion::Source::Note);
             item.label = name.clone();

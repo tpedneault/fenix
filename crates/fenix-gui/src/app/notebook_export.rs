@@ -199,7 +199,7 @@ impl App {
         let dir = match (&self.project_root, what) {
             (Some(root), ExportWhat::Diagram(_)) => root.join("docs").join("diagrams"),
             (Some(root), ExportWhat::Note(_)) => root.join("docs"),
-            (None, _) => dirs::download_dir().unwrap_or_else(|| env::temp_dir()),
+            (None, _) => dirs::download_dir().unwrap_or_else(env::temp_dir),
         };
         dir.join(file)
     }
@@ -494,7 +494,7 @@ impl App {
             self.notebook_insert_text(&format!("```mermaid\n{}\n```\n", src.trim_end()));
             return;
         }
-        let here = self.open().buffer.path().and_then(Path::parent).map(Path::to_path_buf).or_else(|| self.project_root.clone()).unwrap_or_else(|| env::temp_dir());
+        let here = self.open().buffer.path().and_then(Path::parent).map(Path::to_path_buf).or_else(|| self.project_root.clone()).unwrap_or_else(env::temp_dir);
         let file = here.join(format!("{}.svg", fenix_notebook::slug(&e.name)));
         let b = self.buffer_for_path(&e.path);
         match self.export_file(&ExportWhat::Diagram(b), ExportHow::FileSvg, &file) {

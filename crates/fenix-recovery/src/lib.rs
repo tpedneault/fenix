@@ -169,7 +169,7 @@ pub fn list(dir: &Path) -> Vec<Snapshot> {
             parse(&raw, path)
         })
         .collect();
-    out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
+    out.sort_by_key(|snapshot| std::cmp::Reverse(snapshot.saved_at));
     out
 }
 

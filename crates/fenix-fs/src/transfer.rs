@@ -687,7 +687,7 @@ mod tests {
         let dest = TempDir::new("move_dest");
         let a = src.write("a.txt", "hello");
 
-        let outcomes = move_into(&[a.clone()], dest.path(), OnConflict::Overwrite);
+        let outcomes = move_into(std::slice::from_ref(&a), dest.path(), OnConflict::Overwrite);
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
         assert!(!a.exists());
@@ -703,7 +703,7 @@ mod tests {
         let a = src.write("a.txt", "new");
         dest.write("a.txt", "old");
 
-        move_into(&[a.clone()], dest.path(), OnConflict::Skip);
+        move_into(std::slice::from_ref(&a), dest.path(), OnConflict::Skip);
 
         assert!(a.exists(), "the source is still there");
         assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old");
@@ -714,7 +714,7 @@ mod tests {
         let dir = TempDir::new("copy_self");
         let a = dir.write("a.txt", "x");
 
-        let outcomes = copy_into(&[a.clone()], dir.path(), OnConflict::Overwrite);
+        let outcomes = copy_into(std::slice::from_ref(&a), dir.path(), OnConflict::Overwrite);
 
         assert!(!outcomes[0].succeeded());
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "x", "and it is still there");

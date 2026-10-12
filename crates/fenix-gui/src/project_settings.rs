@@ -150,7 +150,7 @@ impl Settings {
                 Key::Enter => return self.commit(),
                 Key::CtrlO => match field {
                     Field::Program | Field::Cwd => {
-                        let start = Some(self.root.join(text.trim())).filter(|_| !text.trim().is_empty());
+                        let start = (!text.trim().is_empty()).then(|| self.root.join(text.trim()));
                         return Action::Browse { start, folder: *field == Field::Cwd };
                     }
                     _ => self.note = Some("Ctrl-O browses for the program or the cwd".to_string()),

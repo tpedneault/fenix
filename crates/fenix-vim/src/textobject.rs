@@ -141,7 +141,7 @@ pub(crate) fn quote_positions(buffer: &Buffer, cursor: &Cursor, quote: char) -> 
     let line_start = buffer.line_start_char(line);
     let line_end = line_start + buffer.line_len(line);
     let positions: Vec<usize> = (line_start..line_end).filter(|&i| buffer.char_at(i) == Some(quote)).collect();
-    positions.chunks_exact(2).map(|pair| (pair[0], pair[1])).find(|&(_, close)| close >= at)
+    positions.as_chunks::<2>().0.iter().map(|&[open, close]| (open, close)).find(|&(_, close)| close >= at)
 }
 
 /// `AQuote` includes both delimiters; no whitespace-eating refinement

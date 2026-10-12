@@ -996,7 +996,7 @@ six
         let prefs = Prefs::from_config(&c);
         let rect = fenix_window::Rect { x: 10.0, y: 10.0, w: 100.0, h: 40.0 };
         let now = Instant::now();
-        let open = |now| vec![(popup::PopupId::Hover, rect, vec![("x".to_string(), glyphon::Color::rgb(1, 1, 1), false)], None)];
+        let open = |_now| vec![(popup::PopupId::Hover, rect, vec![("x".to_string(), glyphon::Color::rgb(1, 1, 1), false)], None)];
         let first = state.popup_draws(prefs, open(now), now);
         assert!(first[0].alpha < 0.1 && first[0].rect.y > rect.y, "starts faint and low");
         let later = state.popup_draws(prefs, open(now), now + Duration::from_millis(500));

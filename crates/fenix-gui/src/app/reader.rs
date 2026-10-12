@@ -1095,7 +1095,7 @@ impl App {
     fn pdf_sidebar_to_here(&mut self, key: ViewKey) {
         let rows = self.pdf_sidebar_rows(key);
         if let Some(side) = self.pdf_views.get_mut(&key).and_then(|v| v.sidebar.as_mut()) {
-            side.to_here(&rows);
+            side.move_to_here(&rows);
         }
     }
 
@@ -1500,7 +1500,9 @@ impl App {
     // -- Reload -----------------------------------------------------------
 
     /// A PDF rewritten on disk (a build, a download) is read again, each
-    /// view keeping its place. From the regular disk poll.
+    /// view keeping its place. Tests only: the app goes through the
+    /// disk probe and `pdf_reload_seen`.
+    #[cfg(test)]
     pub(super) fn pdf_reload_changed(&mut self) {
         let seen: HashMap<BufferId, Option<std::time::SystemTime>> =
             self.pdf_docs.iter().map(|(&id, d)| (id, std::fs::metadata(&d.path).and_then(|m| m.modified()).ok())).collect();

@@ -243,7 +243,7 @@ impl App {
             (Some(old), Some(new)) => text.replacen(&old, &new, 1),
             (Some(old), None) => text.replacen(&old, "## Agenda\n\nNothing due.", 1),
             (None, Some(new)) => match text.find("\n## ") {
-                Some(at) => format!("{}\n\n{new}\n{}", &text[..at].trim_end(), &text[at..]),
+                Some(at) => format!("{}\n\n{new}\n{}", text[..at].trim_end(), &text[at..]),
                 None => format!("{}\n\n{new}\n", text.trim_end()),
             },
             (None, None) => {

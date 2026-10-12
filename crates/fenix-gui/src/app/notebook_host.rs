@@ -23,8 +23,6 @@ pub(crate) enum NotebookPick {
     Open(String),
     /// A note from this template text.
     Template { name: String, body: String },
-    /// Open the journal day.
-    Day(chrono::NaiveDate),
     /// Type `[[name]]` at the cursor.
     InsertLink(String),
     /// A new diagram of `fenix_diagram::KINDS[i]`: its starter next.
@@ -326,8 +324,7 @@ impl App {
                 let tags = nb.tags().into_iter().map(|(t, _)| t).collect();
                 let searches = nb.searches().to_vec();
                 let folder = nb.root().display().to_string();
-                let project = self.notebook_project();
-                self.open_page(PageModel::Notebook(Box::new(NotebookPage::new(rows, tags, searches, project, folder))));
+                self.open_page(PageModel::Notebook(Box::new(NotebookPage::new(rows, tags, searches, folder))));
             }
         }
     }
@@ -391,12 +388,6 @@ impl App {
         Some(self.with_reading_ctx(base.as_deref(), |ctx| crate::notebook_page::layout(p, cols, ctx)))
     }
 
-    /// The entry a buffer is, if it's a notebook file.
-    pub(super) fn notebook_entry_of(&self, id: BufferId) -> Option<fenix_notebook::Entry> {
-        let path = self.buffers.get(id)?.buffer.path()?.to_path_buf();
-        self.notebook.book.as_ref()?.by_path(&path).cloned()
-    }
-
     /// Opens an entry for editing in the focused pane.
     pub(super) fn open_notebook_entry(&mut self, id: &str) {
         let Some(path) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else {
@@ -452,7 +443,6 @@ impl App {
                 self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::NoteName { template: name, body }, input: String::new() });
                 self.wake_caret();
             }
-            NotebookPick::Day(date) => self.open_journal_day(date),
             NotebookPick::InsertLink(name) => self.notebook_insert_text(&format!("[[{name}]]")),
             NotebookPick::DiagramKind(i) => self.diagram_kind_picked(i),
             NotebookPick::Starter(text) => self.diagram_starter_picked(text),
@@ -881,7 +871,7 @@ impl App {
     /// Autosave: writes each notebook buffer a second after its last
     /// change. When to look again, if anything is waiting.
     pub(super) fn notebook_autosave(&mut self, now: Instant) -> Option<Instant> {
-        let Some(nb) = self.notebook.book.as_ref() else { return None };
+        let nb = self.notebook.book.as_ref()?;
         let root = nb.root().to_path_buf();
         let mut due = Vec::new();
         let mut next: Option<Instant> = None;

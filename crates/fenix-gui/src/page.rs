@@ -364,7 +364,7 @@ pub fn with_caret(text: &str, caret: usize, max: usize) -> String {
         return fit_tail(&all.into_iter().collect::<String>(), max);
     }
     // The caret near the end: the end, as `fit_tail` shows it.
-    if n - at <= max - 1 {
+    if n - at < max {
         return std::iter::once('…').chain(all[n - (max - 1)..].iter().copied()).collect();
     }
     let start = at.saturating_sub(max / 2);

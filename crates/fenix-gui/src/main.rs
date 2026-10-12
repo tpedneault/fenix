@@ -1,6 +1,11 @@
 // No console window on Windows: Fenix is a GUI program. `fenix --console`
 // gives it one when you want to read what it prints (see `console`).
 #![cfg_attr(not(test), windows_subsystem = "windows")]
+// Drawing code passes geometry as plain numbers, the event enum carries
+// whole payloads across threads, and state shared with background
+// threads is spelled out where it's declared: each of these lints would
+// trade that directness for a type alias or a struct used once.
+#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::large_enum_variant)]
 
 mod agenda_page;
 mod jira_page;

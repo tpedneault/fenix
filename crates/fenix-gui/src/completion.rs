@@ -487,8 +487,7 @@ mod tests {
     #[test]
     fn lsp_edits_use_utf16_and_keep_import_and_replacement_in_one_undo() {
         let mut buffer = buf("😀\npri");
-        let mut cursor = Cursor::default();
-        cursor.char_idx = 5;
+        let mut cursor = Cursor { char_idx: 5, ..Cursor::default() };
         let item: lsp_types::CompletionItem = serde_json::from_value(serde_json::json!({
             "label": "print(value)", "textEdit": {
                 "range": {"start":{"line":1,"character":0},"end":{"line":1,"character":3}},
@@ -509,8 +508,7 @@ mod tests {
     #[test]
     fn lsp_insert_text_and_invalid_edits() {
         let mut buffer = buf("pr");
-        let mut cursor = Cursor::default();
-        cursor.char_idx = 2;
+        let mut cursor = Cursor { char_idx: 2, ..Cursor::default() };
         let mut item = lsp_types::CompletionItem {
             label: "print(value)".into(),
             insert_text: Some("print".into()),

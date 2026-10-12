@@ -220,10 +220,8 @@ fn apply_iskeyword_token(token: &str, extra: &mut Vec<char>) -> Option<bool> {
         ('+', v)
     } else if let Some(v) = token.strip_prefix("iskeyword-=").or_else(|| token.strip_prefix("isk-=")) {
         ('-', v)
-    } else if let Some(v) = token.strip_prefix("iskeyword=").or_else(|| token.strip_prefix("isk=")) {
-        ('=', v)
     } else {
-        return None;
+        ('=', token.strip_prefix("iskeyword=").or_else(|| token.strip_prefix("isk="))?)
     };
     let chars: Vec<char> = value.split(',').filter(|s| !s.is_empty()).filter_map(|s| {
         let mut it = s.chars();

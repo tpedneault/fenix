@@ -3695,7 +3695,7 @@ fn gutter_marks_from_hunks(hunks: &[fenix_diff::Hunk]) -> Vec<GutterMark> {
 fn indent_guide_columns(leading_columns: usize, indent_width: usize) -> impl Iterator<Item = usize> {
     // Returning an iterator keeps the visible-row redraw path allocation
     // free. It used to build and discard one Vec per visible line.
-    let levels = if indent_width == 0 { 0 } else { leading_columns / indent_width };
+    let levels = leading_columns.checked_div(indent_width).unwrap_or(0);
     (0..levels).map(move |level| level * indent_width)
 }
 
@@ -6212,6 +6212,7 @@ const TAB_CLOSE_CHARS: usize = 3;
 /// `(buffer, filename char count)` pairs, left to right; tabs that would
 /// run past the strip's right edge are simply omitted (clipped, not
 /// scrolled) -- a disclosed v1 simplification.
+#[cfg(test)]
 fn pane_tab_layout(rect: fenix_window::Rect, char_width: f32, tabs: &[(BufferId, usize)]) -> Vec<TabRect> {
     pane_tab_layout_iter(rect, char_width, tabs.iter().copied())
 }
@@ -13627,37 +13628,6 @@ impl App {
         }
     }
 
-    /// Fills a diff buffer with a message instead of a diff -- what a
-    /// failed comparison shows. Deliberately *not* `set_diff_buffer`
-    /// with an empty diff: that renders "(no changes)", which claims
-    /// the two sides are identical rather than admitting the question
-    /// couldn't be answered.
-    ///
-    /// The model is left empty, so every hunk action correctly declines
-    /// on these rows.
-    fn set_diff_buffer_message(&mut self, id: BufferId, rows: &[(String, diff_view::DiffStyle)], repo_root: &Path) {
-        let mut text = String::new();
-        let mut lines = Vec::new();
-        for (row, style) in rows {
-            text.push_str(row);
-            text.push('\n');
-            lines.push(Some(diff_view::DiffViewLine { style: *style, content_from: 0, anchor: None, thread: None }));
-        }
-        self.diff_lines.insert(id, lines);
-        self.diff_models.insert(
-            id,
-            DiffModel {
-                repo_root: repo_root.to_path_buf(),
-                files: Vec::new(),
-                collapsed: HashSet::new(),
-                source: DiffSource::ReadOnly,
-                header: Vec::new(),
-                threads: Vec::new(),
-            },
-        );
-        self.replace_buffer_text(id, &text);
-    }
-
     /// Re-renders a diff buffer from its already-parsed model, keeping
     /// every pane's cursor on the same line index -- for fold toggles,
     /// where the content above the cursor is unchanged and resetting to
@@ -13748,11 +13718,10 @@ impl App {
             self.set_error("this file is conflicted -- resolve it (SPC g x o/t/b) rather than staging a hunk".to_string());
             return;
         }
-        let allowed = match (model.source, target) {
-            (DiffSource::Unstaged, fenix_git::ApplyTarget::Stage | fenix_git::ApplyTarget::Discard) => true,
-            (DiffSource::Staged, fenix_git::ApplyTarget::Unstage) => true,
-            _ => false,
-        };
+        let allowed = matches!(
+            (model.source, target),
+            (DiffSource::Unstaged, fenix_git::ApplyTarget::Stage | fenix_git::ApplyTarget::Discard) | (DiffSource::Staged, fenix_git::ApplyTarget::Unstage)
+        );
         if !allowed {
             let why = match model.source {
                 DiffSource::Unstaged => "this hunk isn't staged yet -- `s` stages it, `d` discards it",
@@ -21954,9 +21923,7 @@ impl App {
         // lists rather than no menu at all.
         if let Some(session) = &self.history_session {
             let focused = self.focused_pane_id();
-            let bindings: Option<&[(&str, &str)]> = if focused == session.graph_pane {
-                Some(&[("1/2/3", "go to pane"), ("u", "refresh"), ("f", "fetch")])
-            } else if focused == session.refs_pane {
+            let bindings: Option<&[(&str, &str)]> = if focused == session.graph_pane || focused == session.refs_pane {
                 Some(&[("1/2/3", "go to pane"), ("u", "refresh"), ("f", "fetch")])
             } else if focused == session.detail_pane {
                 Some(&[("Tab", "fold/unfold file"), ("]", "next hunk"), ("[", "prev hunk"), ("Enter", "open file here"), ("u", "refresh")])
@@ -22214,7 +22181,7 @@ impl App {
             crate::page::Role::Good => theme.git_staged,
             crate::page::Role::Warn => theme.git_modified,
             crate::page::Role::Bad => theme.git_conflicted,
-            crate::page::Role::Kind(kind) => projects::kind_color(kind, &theme),
+            crate::page::Role::Kind(kind) => projects::kind_color(kind, theme),
             crate::page::Role::Syntax(name) => theme.syntax_color(name),
         };
         let bottom = modeline_top.min(at.pane.y + at.pane.h);
@@ -23936,9 +23903,7 @@ impl App {
             // gutter mark but one flat color per buffer kind rather than
             // a per-hunk choice -- see `PaneRender::row_accents`'s own
             // doc comment for why this isn't just another `GutterMark`.
-            let row_accents: Vec<(usize, [f32; 4])> = match self.buffers.get(buffer_id).map(|ob| ob.kind) {
-                _ => Vec::new(),
-            };
+            let row_accents: Vec<(usize, [f32; 4])> = Vec::new();
 
             let (home_segments, home_overlay) =
                 if is_page {
@@ -24193,8 +24158,8 @@ impl App {
                     pane.tab_ranges.iter().flat_map(|&(bs, be, cs, ce)| [(bs, be), (cs, ce)]).collect();
                 let bounds = text.title_span_bounds(pane.pane, &probes);
                 let text_origin = pane.rect.x + text::PAD_LEFT;
-                for (tab, measured) in pane.tabs_layout.iter_mut().zip(bounds.chunks_exact(2)) {
-                    let (Some((body_left, body_right)), Some((close_left, close_right))) = (measured[0], measured[1]) else {
+                for (tab, measured) in pane.tabs_layout.iter_mut().zip(bounds.as_chunks::<2>().0) {
+                    let [Some((body_left, body_right)), Some((close_left, close_right))] = *measured else {
                         continue;
                     };
                     tab.body.x = text_origin + body_left;
@@ -24241,7 +24206,7 @@ impl App {
             let is_error_message =
                 self.status_message.as_ref().is_some_and(|m| m.is_error && m.set_at.elapsed() < MESSAGE_DURATION);
             let suffix_fg = if is_error_message { theme.git_conflicted } else { theme.fg_modeline };
-            let mut suffix_spans = modeline_suffix_spans(suffix, &theme, suffix_fg);
+            let mut suffix_spans = modeline_suffix_spans(suffix, theme, suffix_fg);
             // A message fades in and out; the file's own details don't.
             if self.status_message.as_ref().is_some_and(|m| m.set_at.elapsed() < MESSAGE_DURATION) {
                 for (_, color) in &mut suffix_spans {
@@ -24475,7 +24440,7 @@ impl App {
         // a fractional x rasterizes across two columns at partial coverage
         // each, which on an already-faint rule is the difference between a
         // hairline and a smudge you can't see at all.
-        let rule = modeline_rule_color(&theme);
+        let rule = modeline_rule_color(theme);
         let mode_divider_x = (text::PAD_LEFT + (mode_segment_chars as f32 - 1.0) * modeline_char_width).round();
         bg_rect.push_rect(gpu, mode_divider_x, modeline_top, 1.0, modeline_height, rule);
         // One `PAD_LEFT` gap ahead of the clock's own measured left edge.
@@ -26359,7 +26324,7 @@ index 0000000..1111111 100644
         // exercises `refresh_all_gutter_hunks` itself, not that call.
         let id = app.focused_buffer_id();
         app.gutter_hunks.remove(&id);
-        assert!(app.gutter_hunks.get(&id).is_none());
+        assert!(!app.gutter_hunks.contains_key(&id));
 
         app.refresh_all_gutter_hunks();
 
@@ -29315,7 +29280,7 @@ configure_board stm32
         if !made {
             return; // no permission to create links here
         }
-        let mut app = app_with_places("last_mile_link", dir.path());
+        let app = app_with_places("last_mile_link", dir.path());
 
         let text = app.open().buffer.text();
         let row = text.lines().find(|l| l.contains("shortcut")).expect("the link is listed");
@@ -33521,7 +33486,6 @@ configure_board stm32
     }
 
     #[test]
-        #[test]
     fn home_is_called_home() {
         let app = App::with_file(None);
         assert!(app.modeline_text().contains("home"));
@@ -38133,7 +38097,7 @@ configure_board stm32
         let id = app.focused_buffer_id();
         app.toggle_table_view();
         assert_eq!(app.open().kind, BufferKind::Text);
-        assert!(app.table_views.get(&id).is_none());
+        assert!(!app.table_views.contains_key(&id));
     }
 
     #[test]

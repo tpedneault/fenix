@@ -166,7 +166,7 @@ mod tests {
         let dir = TempDir::new("recycle_file");
         let path = dir.write("gone.txt", "bye");
 
-        let outcomes = to_recycle_bin(&[path.clone()]);
+        let outcomes = to_recycle_bin(std::slice::from_ref(&path));
 
         assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].succeeded(), "expected the bin to accept it: {:?}", outcomes[0].error);
@@ -179,7 +179,7 @@ mod tests {
         let sub = dir.mkdir("tree");
         std::fs::write(sub.join("inner.txt"), "x").unwrap();
 
-        let outcomes = to_recycle_bin(&[sub.clone()]);
+        let outcomes = to_recycle_bin(std::slice::from_ref(&sub));
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
         assert!(!sub.exists());
@@ -208,7 +208,7 @@ mod tests {
     fn a_failure_says_which_path_it_was_about() {
         let dir = TempDir::new("recycle_names_path");
         let missing = dir.path().join("never-existed.txt");
-        let outcomes = to_recycle_bin(&[missing.clone()]);
+        let outcomes = to_recycle_bin(std::slice::from_ref(&missing));
         assert_eq!(outcomes[0].path, missing);
         assert!(outcomes[0].error.as_ref().is_some_and(|e| !e.is_empty()), "an empty reason is no reason");
     }
@@ -239,7 +239,7 @@ mod tests {
         perms.set_readonly(true);
         std::fs::set_permissions(&locked, perms).unwrap();
 
-        let outcomes = permanently(&[tree.clone()]);
+        let outcomes = permanently(std::slice::from_ref(&tree));
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
         assert!(!tree.exists());
@@ -257,7 +257,7 @@ mod tests {
             return; // no permission to create links here; nothing to check
         }
 
-        let outcomes = permanently(&[link.clone()]);
+        let outcomes = permanently(std::slice::from_ref(&link));
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
         assert!(!link.exists());
