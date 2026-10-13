@@ -429,8 +429,10 @@ mod tests {
     use super::super::tests::unique;
     use super::*;
     use std::ffi::OsStr;
-    use windows_sys::Win32::Security::Authorization::ConvertSecurityDescriptorToStringSecurityDescriptorW;
-    use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSidToSidW,
+    };
+    use windows_sys::Win32::Security::{EqualSid, DACL_SECURITY_INFORMATION};
 
     #[test]
     fn the_name_holds_the_user_the_session_and_the_home() {
@@ -499,6 +501,28 @@ mod tests {
         }
     }
 
+    /// Whether two SIDs in SDDL form are the same account. SDDL writes
+    /// some well-known accounts as an alias rather than `S-1-...` --
+    /// the built-in Administrator, which CI runners run as, is `LA` --
+    /// so comparing the text isn't enough.
+    fn same_sid(a: &str, b: &str) -> bool {
+        let parse = |text: &str| {
+            let mut sid: PSID = ptr::null_mut();
+            // SAFETY: a NUL-terminated string in; `sid` is freed below.
+            let ok = unsafe { ConvertStringSidToSidW(wide(text).as_ptr(), &mut sid) };
+            assert_ne!(ok, 0, "not a SID: {text}");
+            sid
+        };
+        let (a, b) = (parse(a), parse(b));
+        // SAFETY: two valid SIDs, freed right after.
+        unsafe {
+            let same = EqualSid(a, b) != 0;
+            LocalFree(a);
+            LocalFree(b);
+            same
+        }
+    }
+
     #[test]
     fn only_this_user_may_open_the_pipe() {
         let listener = unique().bind().unwrap();
@@ -506,12 +530,35 @@ mod tests {
         let dacl = dacl_of(listener.pending);
         // Protected (nothing inherited) and a single allow entry, for us.
         // Windows reports GENERIC_ALL mapped to the pipe's own rights.
-        assert!(dacl.starts_with("D:P("), "{dacl}");
+        assert!(dacl.starts_with("D:P(A;;"), "{dacl}");
         assert_eq!(dacl.matches('(').count(), 1, "{dacl}");
-        assert!(
-            dacl.starts_with("D:P(A;;") && dacl.ends_with(&format!(";;;{sid})")),
-            "{dacl}"
+        let trustee = dacl
+            .strip_suffix(')')
+            .and_then(|ace| ace.rsplit(';').next())
+            .unwrap_or_else(|| panic!("{dacl}"));
+        assert!(same_sid(trustee, &sid), "{dacl} isn't for {sid}");
+    }
+
+    #[test]
+    fn an_aliased_sid_is_the_same_account() {
+        // `LA`, the built-in Administrator, against its `S-1-5-21-...-500`.
+        let mut sid: PSID = ptr::null_mut();
+        // SAFETY: a NUL-terminated string in; `sid` is freed below.
+        assert_ne!(
+            unsafe { ConvertStringSidToSidW(wide("LA").as_ptr(), &mut sid) },
+            0
         );
+        let full = sid_string(sid).unwrap();
+        // SAFETY: allocated by the call above.
+        unsafe { LocalFree(sid) };
+        assert!(
+            full.starts_with("S-1-5-21-") && full.ends_with("-500"),
+            "{full}"
+        );
+        assert!(same_sid("LA", &full));
+        let user = UserIdentity::current().unwrap().sid;
+        assert!(same_sid(&user, &user));
+        assert!(!same_sid("WD", &user));
     }
 
     #[test]

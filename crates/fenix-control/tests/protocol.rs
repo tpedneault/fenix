@@ -8,16 +8,14 @@ use std::sync::{Arc, Mutex};
 
 use fenix_control::protocol::{code, method, OpenProjectParams, CAPABILITIES, MAX_BODY, PROTOCOL};
 use fenix_control::{
-    serve, Call, Client, ClientError, Endpoint, OpenParams, OpenPath, RpcError, ServerInfo,
-    StateResult,
+    serve, AgendaTask, AgendaTimer, Call, CaptureParams, CaptureResult, CaptureTarget, Client,
+    ClientError, ClockInParams, CommandInfo, CommandsResult, Endpoint, OpenParams, OpenPath,
+    RpcError, RunCommandParams, ServerInfo, StateResult, TaskStatus, TasksParams, TasksResult,
 };
 use serde_json::{json, Value};
 
 fn info() -> ServerInfo {
-    ServerInfo {
-        version: "9.8.7".to_string(),
-        pid: 4242,
-    }
+    ServerInfo::new("9.8.7", 4242)
 }
 
 fn unique() -> Endpoint {
@@ -30,8 +28,28 @@ fn unique() -> Endpoint {
     ))
 }
 
-/// A stand-in editor: records every call and answers `fenix/state` with
-/// a fixed state.
+/// The stand-in editor's agenda.
+fn tasks() -> Vec<AgendaTask> {
+    vec![
+        AgendaTask {
+            id: 1,
+            title: "Write the report".into(),
+            status: TaskStatus::InProgress,
+            jira_key: Some("ABC-12".into()),
+            elapsed_minutes: 95,
+        },
+        AgendaTask {
+            id: 2,
+            title: "File it".into(),
+            status: TaskStatus::Todo,
+            jira_key: None,
+            elapsed_minutes: 0,
+        },
+    ]
+}
+
+/// A stand-in editor: records every call and answers each the way
+/// Fenix would, from fixed data.
 fn editor(calls: Arc<Mutex<Vec<Call>>>) -> impl FnMut(Call) -> Result<Value, RpcError> {
     move |call| {
         let reply = match &call {
@@ -39,10 +57,61 @@ fn editor(calls: Arc<Mutex<Vec<Call>>>) -> impl FnMut(Call) -> Result<Value, Rpc
                 project: Some("C:\\work\\fenix".to_string()),
                 file: Some("C:\\work\\fenix\\Cargo.toml".to_string()),
                 line: Some(3),
+                agenda_timer: Some(AgendaTimer {
+                    task_id: 1,
+                    title: "Write the report".into(),
+                    since: "2026-10-12T09:30:00+02:00".into(),
+                }),
             })
             .unwrap()),
             Call::OpenProject(p) if p.root.is_empty() => {
                 Err(RpcError::invalid_params("not a folder"))
+            }
+            Call::Commands => Ok(serde_json::to_value(CommandsResult {
+                commands: vec![
+                    CommandInfo {
+                        id: "agenda.open".into(),
+                        description: "Open the agenda".into(),
+                        keys: Some("SPC a a".into()),
+                        external: true,
+                    },
+                    CommandInfo {
+                        id: "file.save".into(),
+                        description: "Save the current file".into(),
+                        keys: Some("SPC f s".into()),
+                        external: false,
+                    },
+                    CommandInfo {
+                        id: "view.reset_font_size".into(),
+                        description: "Reset the body text size".into(),
+                        keys: None,
+                        external: false,
+                    },
+                ],
+            })
+            .unwrap()),
+            Call::RunCommand(p) if p.id == "file.save" => Err(RpcError::invalid_params(
+                "file.save can't be run from outside Fenix",
+            )),
+            Call::RunCommand(p) if p.id != "agenda.open" => {
+                Err(RpcError::invalid_params(format!("no command {}", p.id)))
+            }
+            Call::NotebookCapture(p) => Ok(serde_json::to_value(CaptureResult {
+                entry: match p.target {
+                    CaptureTarget::Inbox => "C:\\nb\\notes\\inbox.md".into(),
+                    CaptureTarget::Journal => "C:\\nb\\journal\\2026-10-12.md".into(),
+                },
+            })
+            .unwrap()),
+            Call::AgendaTasks(p) => Ok(serde_json::to_value(TasksResult {
+                tasks: tasks()
+                    .into_iter()
+                    .filter(|t| p.status.as_ref().is_none_or(|s| s.contains(&t.status)))
+                    .collect(),
+            })
+            .unwrap()),
+            Call::AgendaClockIn(p) if p.task_id > 2 => {
+                Err(RpcError::invalid_params(format!("no task {}", p.task_id)))
             }
             _ => Ok(json!({})),
         };
@@ -84,7 +153,17 @@ fn hello_reports_the_version_pid_and_capabilities() {
     assert_eq!(hello.pid, 4242);
     assert_eq!(
         hello.capabilities,
-        vec!["fenix/open", "fenix/openProject", "fenix/state"]
+        vec![
+            "fenix/open",
+            "fenix/openProject",
+            "fenix/state",
+            "fenix/commands",
+            "fenix/runCommand",
+            "fenix/notebook.capture",
+            "fenix/agenda.tasks",
+            "fenix/agenda.clockIn",
+            "fenix/agenda.clockOut",
+        ]
     );
     assert_eq!(hello.capabilities, CAPABILITIES);
     drop(client);
@@ -122,6 +201,7 @@ fn several_requests_on_one_connection_each_get_an_answer() {
     client.open(&open).unwrap();
     client.open_project("C:\\work\\fenix").unwrap();
     let state = client.state().unwrap();
+    assert_eq!(state.agenda_timer.as_ref().map(|t| t.task_id), Some(1));
     assert_eq!(state.project.as_deref(), Some("C:\\work\\fenix"));
     assert_eq!(state.file.as_deref(), Some("C:\\work\\fenix\\Cargo.toml"));
     assert_eq!(state.line, Some(3));
@@ -192,11 +272,198 @@ fn an_unknown_method_is_not_found() {
     let mut client = Client::connect(&endpoint).unwrap().expect("listening");
     client.hello("test", "0.1").unwrap();
     assert_eq!(
-        rpc_code(client.request::<Value>("fenix/runCommand", json!({ "id": "x" }))).0,
+        rpc_code(client.request::<Value>("fenix/stateChanged", json!({}))).0,
         code::METHOD_NOT_FOUND
     );
     // The connection is still good afterwards.
     assert!(client.state().is_ok());
+}
+
+#[test]
+fn commands_list_keys_and_whether_they_run_from_outside() {
+    let endpoint = unique();
+    let calls = serve_one(&endpoint);
+    let mut client = Client::connect(&endpoint).unwrap().expect("listening");
+    client.hello("test", "0.1").unwrap();
+    let raw: Value = client.request(method::COMMANDS, json!({})).unwrap();
+    assert_eq!(
+        raw["commands"][0],
+        json!({ "id": "agenda.open", "description": "Open the agenda", "keys": "SPC a a", "external": true })
+    );
+    // `keys` is left out, not null, when nothing is bound.
+    assert_eq!(
+        raw["commands"][2],
+        json!({ "id": "view.reset_font_size", "description": "Reset the body text size", "external": false })
+    );
+    assert_eq!(client.commands().unwrap().len(), 3);
+    drop(client);
+    assert_eq!(calls.recv().unwrap(), vec![Call::Commands, Call::Commands]);
+}
+
+#[test]
+fn run_command_hands_over_the_id_and_relays_a_refusal() {
+    let endpoint = unique();
+    let calls = serve_one(&endpoint);
+    let mut client = Client::connect(&endpoint).unwrap().expect("listening");
+    client.hello("test", "0.1").unwrap();
+    client.run_command("agenda.open").unwrap();
+    let refused = client.run_command("file.save").unwrap_err();
+    let ClientError::Rpc(e) = refused else {
+        panic!("{refused:?}")
+    };
+    assert_eq!(e.code, code::INVALID_PARAMS);
+    assert!(e.message.contains("outside"), "{}", e.message);
+    assert_eq!(
+        rpc_code(client.run_command("no.such")).0,
+        code::INVALID_PARAMS
+    );
+    // No id at all is the server's own refusal; the editor never sees it.
+    assert_eq!(
+        rpc_code(client.request::<Value>(method::RUN_COMMAND, json!({}))).0,
+        code::INVALID_PARAMS
+    );
+    drop(client);
+    let ids: Vec<String> = calls
+        .recv()
+        .unwrap()
+        .into_iter()
+        .map(|c| match c {
+            Call::RunCommand(RunCommandParams { id }) => id,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(ids, ["agenda.open", "file.save", "no.such"]);
+}
+
+#[test]
+fn capture_defaults_to_the_inbox_and_refuses_empty_text() {
+    let endpoint = unique();
+    let calls = serve_one(&endpoint);
+    let mut client = Client::connect(&endpoint).unwrap().expect("listening");
+    client.hello("test", "0.1").unwrap();
+    let entry: CaptureResult = client
+        .request(method::NOTEBOOK_CAPTURE, json!({ "text": "call OBSW" }))
+        .unwrap();
+    assert!(entry.entry.ends_with("inbox.md"));
+    let entry = client
+        .notebook_capture("retry is 3", CaptureTarget::Journal)
+        .unwrap();
+    assert!(entry.ends_with("2026-10-12.md"));
+    for params in [
+        json!({ "text": "  \n" }),
+        json!({}),
+        json!({ "text": "x", "target": "desk" }),
+    ] {
+        assert_eq!(
+            rpc_code(client.request::<Value>(method::NOTEBOOK_CAPTURE, params)).0,
+            code::INVALID_PARAMS
+        );
+    }
+    drop(client);
+    assert_eq!(
+        calls.recv().unwrap(),
+        vec![
+            Call::NotebookCapture(CaptureParams {
+                text: "call OBSW".into(),
+                target: CaptureTarget::Inbox
+            }),
+            Call::NotebookCapture(CaptureParams {
+                text: "retry is 3".into(),
+                target: CaptureTarget::Journal
+            }),
+        ]
+    );
+}
+
+#[test]
+fn agenda_tasks_filter_by_status_and_clock_in_takes_their_ids() {
+    let endpoint = unique();
+    let calls = serve_one(&endpoint);
+    let mut client = Client::connect(&endpoint).unwrap().expect("listening");
+    client.hello("test", "0.1").unwrap();
+    let raw: Value = client.request(method::AGENDA_TASKS, json!({})).unwrap();
+    assert_eq!(
+        raw["tasks"][0],
+        json!({ "id": 1, "title": "Write the report", "status": "inProgress", "jiraKey": "ABC-12", "elapsedMinutes": 95 })
+    );
+    assert!(raw["tasks"][1].get("jiraKey").is_none());
+    let todo = client.agenda_tasks(Some(vec![TaskStatus::Todo])).unwrap();
+    assert_eq!(todo.tasks.len(), 1);
+    assert_eq!(todo.tasks[0].id, 2);
+    assert_eq!(
+        rpc_code(client.request::<Value>(method::AGENDA_TASKS, json!({ "status": ["someday"] }))).0,
+        code::INVALID_PARAMS
+    );
+    client.agenda_clock_in(1).unwrap();
+    // An id kept as text is the same id.
+    client
+        .request::<Value>(method::AGENDA_CLOCK_IN, json!({ "taskId": "2" }))
+        .unwrap();
+    assert_eq!(rpc_code(client.agenda_clock_in(9)).0, code::INVALID_PARAMS);
+    for params in [
+        json!({}),
+        json!({ "taskId": "t1" }),
+        json!({ "taskId": -1 }),
+    ] {
+        assert_eq!(
+            rpc_code(client.request::<Value>(method::AGENDA_CLOCK_IN, params)).0,
+            code::INVALID_PARAMS
+        );
+    }
+    client.agenda_clock_out().unwrap();
+    drop(client);
+    assert_eq!(
+        calls.recv().unwrap(),
+        vec![
+            Call::AgendaTasks(TasksParams { status: None }),
+            Call::AgendaTasks(TasksParams {
+                status: Some(vec![TaskStatus::Todo])
+            }),
+            Call::AgendaClockIn(ClockInParams { task_id: 1 }),
+            Call::AgendaClockIn(ClockInParams { task_id: 2 }),
+            Call::AgendaClockIn(ClockInParams { task_id: 9 }),
+            Call::AgendaClockOut,
+        ]
+    );
+}
+
+#[test]
+fn a_server_with_fewer_capabilities_lists_and_answers_only_those() {
+    let mut info = ServerInfo::new("1.1.0", 7);
+    info.capabilities = vec![method::OPEN.into(), method::STATE.into()];
+    let mut input = frame(HELLO);
+    for (id, m) in [
+        (2, method::AGENDA_TASKS),
+        (3, method::COMMANDS),
+        (4, method::RUN_COMMAND),
+        (5, method::STATE),
+    ] {
+        input.extend(frame(&format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"{m}","params":{{"id":"agenda.open"}}}}"#
+        )));
+    }
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut output = Vec::new();
+    let _ = serve(
+        Cursor::new(input),
+        &mut output,
+        &info,
+        editor(Arc::clone(&calls)),
+    );
+    let mut cursor = Cursor::new(output);
+    let mut replies: Vec<Value> = Vec::new();
+    while let Some(body) = fenix_rpc::read_message(&mut cursor).unwrap() {
+        replies.push(serde_json::from_slice(&body).unwrap());
+    }
+    assert_eq!(
+        replies[0]["result"]["capabilities"],
+        json!(["fenix/open", "fenix/state"])
+    );
+    for reply in &replies[1..4] {
+        assert_eq!(reply["error"]["code"], json!(code::METHOD_NOT_FOUND));
+    }
+    assert!(replies[4]["result"].is_object());
+    assert_eq!(*calls.lock().unwrap(), vec![Call::State]);
 }
 
 #[test]

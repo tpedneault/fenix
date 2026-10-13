@@ -21,7 +21,11 @@ with the reason -- and a change applies at once and is saved at once.
 | Unsaved buffers, downloaded tools, backups | `%LocalAppData%\fenix\recovery`, `\tools`, `\backup` | `~/.local/state/fenix/...` |
 
 What you chose roams with your Windows profile; what Fenix noticed about
-this machine, and what it downloaded, doesn't. `FENIX_HOME=<folder>`
+this machine, and what it downloaded, doesn't. Since the agenda roams,
+another machine can change `agenda.json` while Fenix is open here: Fenix
+reads it again when it changes (a file it can't read is left alone, and
+the agenda it has kept). Other tools change the agenda and notebook
+through [the control channel](CONTROL.md), never by writing the files. `FENIX_HOME=<folder>`
 puts all of it in one folder instead -- a portable install, or a test
 run that mustn't touch your real settings. A second `fenix` normally
 hands its files to the one already running with the same `FENIX_HOME`

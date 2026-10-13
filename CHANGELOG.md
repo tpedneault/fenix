@@ -16,6 +16,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A control channel other tools can script: JSON-RPC to open files at a
   position, open a project, or ask which project, file and line are in
   focus. [docs/CONTROL.md](docs/CONTROL.md) is the reference.
+- Through the control channel, a launcher or script can also list
+  Fenix's commands with their leader keys and run the ones that make
+  sense from outside (`fenix/commands`, `fenix/runCommand`), capture a
+  line into the notebook's Inbox or journal (`fenix/notebook.capture`),
+  list agenda tasks and clock in or out (`fenix/agenda.*`), and see the
+  running clock in `fenix/state`. Fenix stays the only writer of its
+  agenda and notebook.
+- `agenda.json` is read again when it changes on disk, so an agenda
+  roaming between machines isn't overwritten by the next save.
 
 - The Compare page (`SPC g c`) replaces the two-pane Compare view: HEAD
   -- or the working tree, untracked files included -- against any

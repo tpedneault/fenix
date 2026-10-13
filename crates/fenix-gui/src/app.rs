@@ -5749,7 +5749,8 @@ pub struct App {
     /// `GitSession`'s own doc comment.
     git_session: Option<GitSession>,
     /// The personal task/time-tracking agenda's own data (`SPC a`) --
-    /// loaded once at startup from `agenda_path` and saved back after
+    /// loaded at startup from `agenda_path`, read again when another
+    /// writer changes the file (`reload_agenda_if_changed`), and saved back after
     /// every mutation (create/status/priority/category/note/subtask/
     /// dependency/time), the same "save immediately, not on quit" posture
     /// `Config` already has. Unlike `jira_session`, this is never `None`:
@@ -5757,6 +5758,10 @@ pub struct App {
     agenda_store: fenix_agenda::AgendaStore,
     /// `fenix_agenda::default_path()`, resolved once at startup.
     agenda_path: std::path::PathBuf,
+    /// `agenda_path`'s modification time as Fenix last read or wrote
+    /// it: a different one on the disk poll's tick means someone else
+    /// wrote the file (another machine, through a roaming profile).
+    agenda_stamp: Option<std::time::SystemTime>,
     /// Linking a task to an issue typed by key, or naming the issue type
     /// of one being created from it.
     agenda_prompt: Option<AgendaPrompt>,
@@ -6764,6 +6769,7 @@ impl App {
             git_prompt: None,
             git_menu_open: false,
             git_session: None,
+            agenda_stamp: std::fs::metadata(&agenda_path).and_then(|m| m.modified()).ok(),
             agenda_store,
             agenda_path,
             agenda_prompt: None,
@@ -14615,6 +14621,7 @@ impl App {
         self.refresh_python_environments();
         self.refresh_git_pages(true);
         self.reload_settings_if_changed();
+        self.reload_agenda_if_changed();
         self.mib_check_scripts();
         self.pdf_save_places();
         // The files themselves -- open buffers, PDFs, the MIBs, the
@@ -16638,6 +16645,30 @@ impl App {
     fn save_agenda(&mut self) {
         if let Err(err) = fenix_agenda::save(&self.agenda_path, &self.agenda_store) {
             self.set_error(format!("couldn't save agenda.json: {err}"));
+        }
+        // Fenix's own write isn't a change to read back.
+        self.agenda_stamp = std::fs::metadata(&self.agenda_path).and_then(|m| m.modified()).ok();
+    }
+
+    /// Takes in `agenda.json` written by someone else since Fenix last
+    /// read or wrote it, on the disk poll's tick, so Fenix's next save
+    /// doesn't put back what the other writer changed. Fenix saves after
+    /// every change of its own, so there's nothing unsaved here to lose.
+    /// A file that's gone or unreadable is left alone, and the agenda in
+    /// memory kept: reading it as empty would wipe it at the next save.
+    pub(super) fn reload_agenda_if_changed(&mut self) {
+        let stamp = std::fs::metadata(&self.agenda_path).and_then(|m| m.modified()).ok();
+        if stamp.is_none() || stamp == self.agenda_stamp {
+            return;
+        }
+        self.agenda_stamp = stamp;
+        match fenix_agenda::reload(&self.agenda_path) {
+            Ok(Some(store)) => {
+                self.agenda_store = store;
+                self.refresh_agenda_pages();
+            }
+            Ok(None) => {}
+            Err(err) => self.set_error(format!("agenda.json changed on disk but can't be read ({err}) -- keeping the agenda as it was")),
         }
     }
 

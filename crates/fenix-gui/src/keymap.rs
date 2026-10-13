@@ -617,6 +617,25 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     })
 }
 
+/// The leader sequence that runs each command, as the which-key menu
+/// writes it (`SPC a a`): what `fenix/commands` reports. A command bound
+/// twice gets its shortest sequence, the first in order among equals, so
+/// the answer doesn't change from one run to the next.
+pub fn leader_keys() -> std::collections::HashMap<&'static str, String> {
+    let mut keys: std::collections::HashMap<&'static str, (usize, String)> = std::collections::HashMap::new();
+    for (seq, id) in leader_trie().bindings() {
+        let text = seq.iter().map(describe_keypress).collect::<Vec<_>>().join(" ");
+        let candidate = (seq.len(), text);
+        match keys.get(*id) {
+            Some(best) if *best <= candidate => {}
+            _ => {
+                keys.insert(*id, candidate);
+            }
+        }
+    }
+    keys.into_iter().map(|(id, (_, text))| (id, text)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
