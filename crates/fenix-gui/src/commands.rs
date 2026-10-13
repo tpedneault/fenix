@@ -11,8 +11,17 @@ pub struct CommandCtx<'a> {
 
 type CommandFn = fn(&mut CommandCtx);
 
-fn cmd_snippets_open(ctx: &mut CommandCtx) {
-    ctx.app.open_snippets_page(None);
+/// What a command marked external runs: the editor and nothing else.
+/// No event loop, so it can be run from the control channel (which has
+/// none to hand). Nor should it read the focused buffer: a caller
+/// outside Fenix can't know what that is. `control_host`'s
+/// `external_commands_dont_assume_a_focused_text_buffer` holds every
+/// external command to that.
+type ExternalFn = fn(&mut App);
+
+enum Handler {
+    Ctx(CommandFn),
+    External(ExternalFn),
 }
 
 fn cmd_snippets_from_selection(ctx: &mut CommandCtx) {
@@ -29,9 +38,26 @@ fn cmd_insert_snippet(ctx: &mut CommandCtx) {
 /// later, exposed to Lua scripting (Phase 6) without a rewrite.
 pub struct Command {
     pub id: &'static str,
-    #[allow(dead_code)] // will back a command palette in a later phase
     pub description: &'static str,
-    run: CommandFn,
+    run: Handler,
+}
+
+impl Command {
+    /// Whether it may be run from outside Fenix (`fenix/runCommand`):
+    /// it makes sense with nobody looking at a file in Fenix, like
+    /// opening the agenda or switching project, rather than acting on
+    /// what's in front of you, like saving or staging a hunk.
+    pub fn external(&self) -> bool {
+        matches!(self.run, Handler::External(_))
+    }
+}
+
+/// Why `run_external` didn't run a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalError {
+    Unknown,
+    /// It acts on what's in front of you in Fenix.
+    NotExternal,
 }
 
 pub struct CommandRegistry {
@@ -41,7 +67,7 @@ pub struct CommandRegistry {
 impl CommandRegistry {
     pub fn with_builtins() -> Self {
         let mut registry = Self { commands: Vec::new() };
-        registry.register("snippets.open", "Every snippet: make, edit, copy, delete and try them", cmd_snippets_open);
+        registry.external("snippets.open", "Every snippet: make, edit, copy, delete and try them", |app| app.open_snippets_page(None));
         registry.register("snippets.from_selection", "Make a snippet from the last Visual selection", cmd_snippets_from_selection);
         registry.register("insert.snippet", "Choose a snippet for the current document", cmd_insert_snippet);
         registry.register("file.save", "Save the current file", cmd_save);
@@ -57,7 +83,7 @@ impl CommandRegistry {
             "Cycle the line-number gutter: off, absolute, relative",
             cmd_cycle_line_numbers,
         );
-        registry.register("view.pick_theme", "Pick a theme by name", cmd_pick_theme);
+        registry.external("view.pick_theme", "Pick a theme by name", |app| app.picker_pick_theme());
         registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
         registry.register("view.toggle_animations", "Cycle motion: off, subtle, full", cmd_toggle_animations);
         registry.register("view.cycle_diagnostics", "Cycle inline problems: all, errors, off", |ctx| ctx.app.cycle_inline_diagnostics());
@@ -74,7 +100,7 @@ impl CommandRegistry {
         );
         registry.register("search.buffer", "Fuzzy-find a line in the current buffer", cmd_search_buffer);
         registry.register("search.todos", "List the TODO comments in the current buffer", cmd_search_todos);
-        registry.register("search.todos_project", "List the TODO comments across the project", cmd_search_todos_project);
+        registry.external("search.todos_project", "List the TODO comments across the project", |app| app.picker_project_todos());
         registry.register("code.xml_validate", "Check the current XML buffer is well-formed", cmd_code_xml_validate);
         registry.register("code.xml_path", "Copy the XPath of the XML element under the cursor", cmd_code_xml_path);
         registry.register("search.replace_buffer", "Search and replace in the current buffer", cmd_search_replace_buffer);
@@ -83,39 +109,35 @@ impl CommandRegistry {
             "Search and replace across the project",
             cmd_search_replace_project,
         );
-        registry.register("file.find", "Open a file by typing its path (bypasses .gitignore)", cmd_file_find);
-        registry.register(
-            "file.explore",
-            "Browse the filesystem from your home directory; open a file directly, or fuzzy-search recursively from wherever you navigate to",
-            cmd_file_explore,
-        );
-        registry.register("file.find_all", "Fuzzy-find a file in the project, including gitignored ones", cmd_file_find_all);
-        registry.register("file.recent", "Fuzzy-find a recently-opened file", cmd_file_recent);
-        registry.register("file.recover", "Recover unsaved work a previous session left behind", cmd_file_recover);
+        registry.external("file.find", "Open a file by typing its path (bypasses .gitignore)", |app| app.start_find_file_prompt());
+        registry.external("file.explore", "Browse the filesystem from your home directory; open a file directly, or fuzzy-search recursively from wherever you navigate to", |app| app.start_explore_from_home());
+        registry.external("file.find_all", "Fuzzy-find a file in the project, including gitignored ones", |app| app.picker_find_file_all());
+        registry.external("file.recent", "Fuzzy-find a recently-opened file", |app| app.picker_recent_files());
+        registry.external("file.recover", "Recover unsaved work a previous session left behind", |app| app.picker_recovery());
         registry.register("file.rename", "Rename the current file on disk", cmd_file_rename);
         registry.register("file.delete", "Delete the current file (with confirmation)", cmd_file_delete);
         registry.register("file.yank_path", "Copy the current file's path to the clipboard", cmd_file_yank_path);
-        registry.register("project.find_file", "Fuzzy-find a file in the current project", cmd_project_find_file);
-        registry.register("project.grep", "Search the current project (ripgrep)", cmd_project_grep);
+        registry.external("project.find_file", "Fuzzy-find a file in the current project", |app| app.picker_find_file());
+        registry.external("project.grep", "Search the current project (ripgrep)", |app| app.picker_grep_prompt());
         registry.register("project.quickfix_next", "Jump to the next match in the last project search", cmd_quickfix_next);
         registry.register(
             "project.quickfix_prev",
             "Jump to the previous match in the last project search",
             cmd_quickfix_prev,
         );
-        registry.register("project.switch_project", "Switch to a different known project", cmd_project_switch);
-        registry.register("project.new", "Create a new project from a template", cmd_project_new);
-        registry.register("project.hub", "Every project: what it is, how it's doing, open one", cmd_project_hub);
-        registry.register("project.doctor", "Check the project's toolchain and offer fixes", cmd_project_doctor);
-        registry.register("project.settings", "The project's tasks, servers, launch and kind", cmd_project_settings);
-        registry.register("project.add", "Register a project in the switch-project list", cmd_project_add);
+        registry.external("project.switch_project", "Switch to a different known project", |app| app.picker_switch_project());
+        registry.external("project.new", "Create a new project from a template", |app| app.cmd_project_new());
+        registry.external("project.hub", "Every project: what it is, how it's doing, open one", |app| app.cmd_project_hub());
+        registry.external("project.doctor", "Check the project's toolchain and offer fixes", |app| app.cmd_project_doctor());
+        registry.external("project.settings", "The project's tasks, servers, launch and kind", |app| app.cmd_project_settings());
+        registry.external("project.add", "Register a project in the switch-project list", |app| app.picker_add_project_prompt());
         registry.register("project.delete", "Remove a project from the switch-project list", cmd_project_delete);
-        registry.register("task.run", "Fuzzy-pick and run a discovered project task", cmd_task_run);
-        registry.register("task.rerun_last", "Rerun the most recently run task", cmd_task_rerun_last);
+        registry.external("task.run", "Fuzzy-pick and run a discovered project task", |app| app.picker_tasks());
+        registry.external("task.rerun_last", "Rerun the most recently run task", |app| app.rerun_last_task());
         registry.register("task.kill", "End the currently running task", cmd_task_kill);
-        registry.register("dashboard.open", "Show Home, the start-up dashboard", cmd_dashboard_open);
-        registry.register("terminal.toggle", "Toggle the terminal panel", cmd_toggle_terminal);
-        registry.register("terminal.open_buffer", "Open a shell in the focused pane", cmd_open_terminal_buffer);
+        registry.external("dashboard.open", "Show Home, the start-up dashboard", |app| app.open_dashboard());
+        registry.external("terminal.toggle", "Toggle the terminal panel", |app| app.toggle_terminal());
+        registry.external("terminal.open_buffer", "Open a shell in the focused pane", |app| app.open_terminal_buffer());
         registry.register("explorer.dual_pane", "Two listings side by side", cmd_explorer_dual_pane);
         registry.register("explorer.cancel", "Stop the running file operation", cmd_explorer_cancel);
         registry.register("explorer.open_external", "Open with the system's default application", cmd_explorer_open_external);
@@ -127,10 +149,10 @@ impl CommandRegistry {
         registry.register("explorer.rename_mode", "Edit the listing's names as text", cmd_explorer_rename_mode);
         registry.register("explorer.rename_apply", "Apply the edited names", cmd_explorer_rename_apply);
         registry.register("explorer.go_to_path", "Go to a path you type", cmd_explorer_go_to_path);
-        registry.register("explorer.places", "Bookmarks, drives, recent directories", cmd_explorer_places);
-        registry.register("explorer.recent_dirs", "Directories you have been to", cmd_explorer_recent_dirs);
+        registry.external("explorer.places", "Bookmarks, drives, recent directories", |app| app.picker_places());
+        registry.external("explorer.recent_dirs", "Directories you have been to", |app| app.picker_recent_dirs());
         registry.register("explorer.bookmark", "Bookmark the directory you are in", cmd_explorer_bookmark);
-        registry.register("docker.open", "Show the Docker container/image panel", cmd_docker_open);
+        registry.external("docker.open", "Show the Docker container/image panel", |app| app.open_docker_panel());
         registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
         registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
         registry.register("debug.start_or_continue", "Start a debug session, or continue one that's stopped", cmd_debug_start_or_continue);
@@ -140,13 +162,13 @@ impl CommandRegistry {
         registry.register("debug.step_out", "Step out of the current function", cmd_debug_step_out);
         registry.register("debug.add_watch", "Watch the identifier before the cursor", cmd_debug_add_watch);
         registry.register("debug.stop", "End the running debug session", cmd_debug_stop);
-        registry.register("tools.status", "Show which LSP servers/DAP adapters are found on PATH and running", cmd_tools_status);
-        registry.register("vnc.open", "Open or switch to a configured VNC session", cmd_vnc_open);
+        registry.external("tools.status", "Show which LSP servers/DAP adapters are found on PATH and running", |app| app.open_tool_status_panel());
+        registry.external("vnc.open", "Open or switch to a configured VNC session", |app| app.start_vnc_picker());
         registry.register("vnc.close", "Close the focused VNC session", cmd_vnc_close);
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
         registry.register("pdf.next_page", "Turn the focused PDF session to the next page", cmd_pdf_next_page);
         registry.register("pdf.prev_page", "Turn the focused PDF session to the previous page", cmd_pdf_prev_page);
-        registry.register("pdf.documents", "Open a document from the document index (SPC , Documents)", cmd_pdf_documents);
+        registry.external("pdf.documents", "Open a document from the document index (SPC , Documents)", |app| app.start_document_picker());
         registry.register("pdf.first_page", "Jump the focused PDF session to the first page", cmd_pdf_first_page);
         registry.register("pdf.last_page", "Jump the focused PDF session to the last page", cmd_pdf_last_page);
         registry.register("pdf.goto_page", "Prompt for a page number and jump to it", cmd_pdf_goto_page);
@@ -159,16 +181,16 @@ impl CommandRegistry {
         registry.register("pdf.headings", "Go to one of the PDF's headings, picked by name", cmd_pdf_headings);
         registry.register("pdf.colors", "Draw PDF pages as printed or in the theme's colours", cmd_pdf_colors);
         registry.register("pdf.copy_link", "Copy a link to the PDF page being read", cmd_pdf_copy_link);
-        registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", cmd_git_open);
+        registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", |ctx| ctx.app.open_git());
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
-        registry.register("git.history", "Show the commit graph, refs and commit detail", cmd_git_history);
+        registry.register("git.history", "Show the commit graph, refs and commit detail", |ctx| ctx.app.open_history_view());
         registry.register("git.history_close", "Close the History view", cmd_git_history_close);
-        registry.register("git.fetch", "Fetch all remotes and prune deleted branches", cmd_git_fetch);
+        registry.register("git.fetch", "Fetch all remotes and prune deleted branches", |ctx| ctx.app.git_fetch());
         registry.register("git.versus", "Set this file beside its version on a branch, lined up", cmd_git_versus);
-        registry.register("git.compare", "Compare HEAD (or the working tree) with a branch: files, commits, diffs", cmd_git_compare);
-        registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", cmd_git_operations);
-        registry.register("settings.open", "Every setting, on one page: search, change, reset", cmd_settings_open);
-        registry.register("git.log", "Show the history, with a menu on every commit", cmd_git_log);
+        registry.register("git.compare", "Compare HEAD (or the working tree) with a branch: files, commits, diffs", |ctx| ctx.app.start_compare_picker());
+        registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", |ctx| ctx.app.open_git_operations());
+        registry.external("settings.open", "Every setting, on one page: search, change, reset", |app| app.open_settings_page(crate::settings_page::Scope::You, None));
+        registry.register("git.log", "Show the history, with a menu on every commit", |ctx| ctx.app.open_git_log(crate::git_log::Scope::Branch));
         registry.register("git.close_view", "Close the Git view in front: the panel, graph, comparison, conflicts or merge requests", cmd_git_close_view);
         registry.register("git.pull_request", "Open a pull (merge) request for this branch, prefilled from its commits", cmd_git_pull_request);
         registry.register("git.file_history", "Show the history of the focused file", cmd_git_file_history);
@@ -176,7 +198,7 @@ impl CommandRegistry {
         registry.register("git.hunk_stage", "Stage the changed hunk under the cursor", cmd_git_hunk_stage);
         registry.register("git.hunk_discard", "Discard the changed hunk under the cursor", cmd_git_hunk_discard);
         registry.register("git.hunk_preview", "Show the changed hunk under the cursor", cmd_git_hunk_preview);
-        registry.register("git.switch", "Switch branch, most recently used first", cmd_git_switch);
+        registry.register("git.switch", "Switch branch, most recently used first", |ctx| ctx.app.start_switch_picker());
         registry.register("git.blame", "Show or hide who last changed each line", cmd_git_blame);
         registry.register("git.blame_explain", "Show the commit that last changed this line", cmd_git_blame_explain);
         registry.register("git.rebase", "Rebase the current branch onto another ref", cmd_git_rebase);
@@ -190,16 +212,16 @@ impl CommandRegistry {
         registry.register("git.keep_ours", "Resolve the conflict under the cursor, keeping ours", cmd_git_keep_ours);
         registry.register("git.keep_theirs", "Resolve the conflict under the cursor, keeping theirs", cmd_git_keep_theirs);
         registry.register("git.keep_both", "Resolve the conflict under the cursor, keeping both sides", cmd_git_keep_both);
-        registry.register("git.merge_requests", "Open the Merge Requests view (GitLab)", cmd_git_merge_requests);
+        registry.register("git.merge_requests", "Open the Merge Requests view (GitLab)", |ctx| ctx.app.open_reviews());
         registry.register("git.merge_requests_close", "Close the Merge Requests view", cmd_git_merge_requests_close);
         registry.register("git.merge_view", "Open the Merge view (resolve conflicts side by side)", cmd_git_merge_view);
         registry.register("git.merge_close", "Close the Merge view", cmd_git_merge_close);
         registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
-        registry.register("jira.open", "Open the Jira page: your searches, their issues, a preview", cmd_jira_open);
+        registry.external("jira.open", "Open the Jira page: your searches, their issues, a preview", |app| { app.open_jira_page(); });
         registry.register("jira.refresh", "Run the Jira page's search again", cmd_jira_refresh);
-        registry.register("jira.goto_issue", "Open any issue by key", cmd_jira_goto_issue);
-        registry.register("jira.search", "Search Jira: words, or JQL after :", cmd_jira_search);
-        registry.register("jira.create_issue", "Create an issue, with the project's real types and fields", cmd_jira_create_issue);
+        registry.external("jira.goto_issue", "Open any issue by key", |app| app.cmd_jira_goto());
+        registry.external("jira.search", "Search Jira: words, or JQL after :", |app| app.cmd_jira_search());
+        registry.external("jira.create_issue", "Create an issue, with the project's real types and fields", |app| app.cmd_jira_new_issue());
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
         registry.register("embedded.build", "Compile the sketch for its board", cmd_embedded_build);
         registry.register("embedded.upload", "Compile and flash the sketch to the board", cmd_embedded_upload);
@@ -213,12 +235,12 @@ impl CommandRegistry {
         registry.register("embedded.debug", "Debug the sketch on the board, if the board supports it", cmd_embedded_debug);
         registry.register("embedded.new_sketch", "Create a new sketch", cmd_embedded_new_sketch);
         registry.register("embedded.info", "Show the sketch's board, port, speed and tools", cmd_embedded_info);
-        registry.register("notebook.open", "The notebook: every note, journal day and diagram", |ctx| ctx.app.open_notebook_page());
-        registry.register("notebook.new_note", "A new note, from a template", |ctx| ctx.app.notebook_new_note());
-        registry.register("notebook.new_diagram", "A new Mermaid diagram", |ctx| ctx.app.notebook_new_diagram());
-        registry.register("notebook.find", "Find a note or diagram by name", |ctx| ctx.app.notebook_find());
-        registry.register("notebook.recent", "Reopen the note or diagram you touched last", |ctx| ctx.app.notebook_reopen());
-        registry.register("notebook.journal", "Today's journal day", |ctx| ctx.app.notebook_today());
+        registry.external("notebook.open", "The notebook: every note, journal day and diagram", |app| app.open_notebook_page());
+        registry.external("notebook.new_note", "A new note, from a template", |app| app.notebook_new_note());
+        registry.external("notebook.new_diagram", "A new Mermaid diagram", |app| app.notebook_new_diagram());
+        registry.external("notebook.find", "Find a note or diagram by name", |app| app.notebook_find());
+        registry.external("notebook.recent", "Reopen the note or diagram you touched last", |app| app.notebook_reopen());
+        registry.external("notebook.journal", "Today's journal day", |app| app.notebook_today());
         registry.register("notebook.preview", "The reading view, beside the Markdown (again closes it)", |ctx| ctx.app.open_reading_view(false));
         registry.register("notebook.read", "Read this Markdown rendered, in its place (again goes back)", |ctx| ctx.app.open_reading_view(true));
         registry.register("diagram.preview", "The diagram drawn beside its source (again closes it)", |ctx| ctx.app.toggle_diagram_preview());
@@ -226,9 +248,9 @@ impl CommandRegistry {
         registry.register("diagram.theme", "Set the diagram's theme", |ctx| ctx.app.diagram_pick_theme_here());
         registry.register("diagram.export", "Export the diagram", |ctx| ctx.app.diagram_export_here());
         registry.register("notebook.capture", "Capture a line into the journal or the Inbox", |ctx| ctx.app.notebook_capture());
-        registry.register("notebook.search", "Search every note and diagram", |ctx| ctx.app.notebook_search());
-        registry.register("notebook.tags", "Every tag in the notebook", |ctx| ctx.app.notebook_tags());
-        registry.register("notebook.project", "The notes about this project", |ctx| ctx.app.notebook_project_notes());
+        registry.external("notebook.search", "Search every note and diagram", |app| app.notebook_search());
+        registry.external("notebook.tags", "Every tag in the notebook", |app| app.notebook_tags());
+        registry.external("notebook.project", "The notes about this project", |app| app.notebook_project_notes());
         registry.register("notebook.to_agenda", "Send the checkbox under the cursor to the agenda", |ctx| ctx.app.notebook_to_agenda());
         registry.register("notebook.journal_agenda", "Refresh a journal day's agenda list", |ctx| ctx.app.journal_refresh_agenda());
         registry.register("notebook.journal_commits", "Add today's commits to a journal day", |ctx| ctx.app.journal_commits());
@@ -240,18 +262,18 @@ impl CommandRegistry {
         registry.register("notebook.insert_link", "Insert a link to a note", |ctx| ctx.app.notebook_insert_link());
         registry.register("notebook.copy_link", "Copy a link to this line, for a note", |ctx| ctx.app.notebook_copy_link());
         registry.register("notebook.paste_image", "Paste the clipboard's picture into the note", |ctx| ctx.app.notebook_paste_image());
-        registry.register("agenda.open", "Open the agenda page where it was left", cmd_agenda_open);
-        registry.register("agenda.board", "Open the agenda on its board", cmd_agenda_board);
-        registry.register("agenda.list", "Open the agenda on its list", cmd_agenda_list);
-        registry.register("agenda.report", "Open the agenda on this week's time", cmd_agenda_report);
-        registry.register("agenda.new_task", "Add a task to the agenda", cmd_agenda_new_task);
+        registry.external("agenda.open", "Open the agenda page where it was left", |app| app.cmd_agenda_open());
+        registry.external("agenda.board", "Open the agenda on its board", |app| app.cmd_agenda_board());
+        registry.external("agenda.list", "Open the agenda on its list", |app| app.cmd_agenda_list());
+        registry.external("agenda.report", "Open the agenda on this week's time", |app| app.cmd_agenda_report());
+        registry.external("agenda.new_task", "Add a task to the agenda", |app| app.cmd_agenda_new_task());
         registry.register("agenda.from_here", "Add a task about the selection or line here", cmd_agenda_from_here);
-        registry.register("agenda.find", "Search every task", cmd_agenda_find);
-        registry.register("agenda.toggle_clock", "Stop the clock, resume the last task, or switch to another", cmd_agenda_toggle_clock);
-        registry.register("agenda.resume", "Start the clock again on what you worked on last", cmd_agenda_resume);
-        registry.register("agenda.import", "Pick Jira issues assigned to you to add to the agenda", cmd_agenda_import);
-        registry.register("agenda.sync", "Refresh linked tasks from Jira and send pending changes", cmd_agenda_sync);
-        registry.register("agenda.worklogs", "Review unsent time on linked tasks and send it to Jira", cmd_agenda_worklogs);
+        registry.external("agenda.find", "Search every task", |app| app.cmd_agenda_find());
+        registry.external("agenda.toggle_clock", "Stop the clock, resume the last task, or switch to another", |app| app.cmd_agenda_toggle_clock());
+        registry.external("agenda.resume", "Start the clock again on what you worked on last", |app| app.cmd_agenda_resume());
+        registry.external("agenda.import", "Pick Jira issues assigned to you to add to the agenda", |app| app.cmd_agenda_import());
+        registry.external("agenda.sync", "Refresh linked tasks from Jira and send pending changes", |app| app.cmd_agenda_sync());
+        registry.external("agenda.worklogs", "Review unsent time on linked tasks and send it to Jira", |app| app.cmd_agenda_worklogs());
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -268,7 +290,7 @@ impl CommandRegistry {
         registry.register("frame.cycle", "Cycle focus to the next OS window", cmd_cycle_frame);
         registry.register("frame.only", "Close every OS window except the focused one", cmd_only_frame);
         registry.register("window.balance", "Reset every split ratio to 0.5", cmd_balance_windows);
-        registry.register("buffer.switch", "Fuzzy-switch to another open buffer", cmd_switch_buffer);
+        registry.external("buffer.switch", "Fuzzy-switch to another open buffer", |app| app.picker_switch_buffer());
         registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
         registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
         registry.register("buffer.kill", "Close the focused buffer (refuses if it has unsaved changes)", cmd_kill_buffer);
@@ -280,17 +302,13 @@ impl CommandRegistry {
         registry.register("tab.move_right", "Move the tab one place right", |ctx| ctx.app.shift_focused_tab(1));
         registry.register("buffer.kill_force", "Close the focused buffer immediately, discarding any unsaved changes", cmd_kill_buffer_force);
         registry.register("buffer.save_and_kill", "Save the focused buffer (if needed) then close it", cmd_save_and_kill_buffer);
-        registry.register("buffer.scratch", "Open a new scratch buffer", cmd_new_scratch_buffer);
-        registry.register("workspace.new", "Create a new workspace", cmd_new_workspace);
+        registry.external("buffer.scratch", "Open a new scratch buffer", |app| app.new_scratch_buffer());
+        registry.external("workspace.new", "Create a new workspace", |app| app.new_workspace());
         registry.register("workspace.next", "Switch to the next workspace", cmd_next_workspace);
         registry.register("workspace.prev", "Switch to the previous workspace", cmd_prev_workspace);
         registry.register("workspace.remove", "Remove the active workspace", cmd_remove_workspace);
-        registry.register("workspace.switch", "Switch to an open workspace by name", cmd_switch_workspace);
-        registry.register(
-            "workspace.find",
-            "Open a configured workspace by name, creating it if it isn't already open",
-            cmd_find_workspace,
-        );
+        registry.external("workspace.switch", "Switch to an open workspace by name", |app| app.picker_switch_workspace());
+        registry.external("workspace.find", "Open a configured workspace by name, creating it if it isn't already open", |app| app.start_workspace_launcher_picker());
         registry.register("workspace.rename", "Rename the active workspace", cmd_rename_workspace);
         registry.register(
             "completion.refresh_tags",
@@ -329,8 +347,8 @@ impl CommandRegistry {
         registry.register("code.toggle_fold", "Collapse or expand the current code scope", |ctx| ctx.app.toggle_code_fold());
         registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
         registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
-        registry.register("mib.page", "The MIB page: telecommands, TC and TM parameters, TM packets, calibrations", cmd_mib_page);
-        registry.register("mib.search", "Search every kind of MIB definition", cmd_mib_search);
+        registry.external("mib.page", "The MIB page: telecommands, TC and TM parameters, TM packets, calibrations", |app| app.cmd_mib_page());
+        registry.external("mib.search", "Search every kind of MIB definition", |app| app.cmd_mib_search());
         registry.register("mib.telecommand", "Open a MIB telecommand by name", cmd_mib_telecommand);
         registry.register("mib.tc_parameter", "Open a MIB TC parameter by name", cmd_mib_tc_parameter);
         registry.register("mib.tm_packet", "Open a MIB TM packet by SPID or name", cmd_mib_tm_packet);
@@ -341,12 +359,12 @@ impl CommandRegistry {
         registry.register("mib.reload", "Read the project's MIBs again", cmd_mib_reload);
         registry.register("mib.settings", "This project's MIB settings", cmd_mib_settings);
         registry.register("mib.copy_bytes", "Copy the telecommand call on this line as its packet's bytes", cmd_mib_copy_bytes);
-        registry.register("ccsds.time", "Time converter: on-board time codes, UTC, TAI, GPS, CDS", cmd_ccsds_time);
+        registry.external("ccsds.time", "Time converter: on-board time codes, UTC, TAI, GPS, CDS", |app| app.cmd_ccsds_time());
         registry.register("ccsds.hex", "Show the file as hex (view only)", cmd_ccsds_hex);
-        registry.register("ccsds.recording", "Open a telemetry recording: packets, gaps, checks, parameters over time", cmd_ccsds_recording);
-        registry.register("ccsds.live", "Follow a live telemetry source: TCP, UDP, a file being written, NATS", cmd_ccsds_live);
-        registry.register("mib.generate", "Generate XTCE, a Wireshark dissector, C, Python, an ICD or TC test vectors from the MIB", cmd_mib_generate);
-        registry.register("ccsds.standards", "The CCSDS and ECSS standards, and their PDFs", cmd_ccsds_standards);
+        registry.register("ccsds.recording", "Open a telemetry recording: packets, gaps, checks, parameters over time", |ctx| ctx.app.cmd_ccsds_recording());
+        registry.external("ccsds.live", "Follow a live telemetry source: TCP, UDP, a file being written, NATS", |app| app.cmd_ccsds_live());
+        registry.external("mib.generate", "Generate XTCE, a Wireshark dissector, C, Python, an ICD or TC test vectors from the MIB", |app| app.cmd_mib_generate());
+        registry.external("ccsds.standards", "The CCSDS and ECSS standards, and their PDFs", |app| app.cmd_ccsds_standards());
         registry.register("ccsds.decode", "Decode the hex under the cursor, selected or on the clipboard: packets, frames, CLTUs", cmd_ccsds_decode);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
@@ -355,10 +373,16 @@ impl CommandRegistry {
     }
 
     fn register(&mut self, id: &'static str, description: &'static str, run: CommandFn) {
-        self.commands.push(Command { id, description, run });
+        self.commands.push(Command { id, description, run: Handler::Ctx(run) });
     }
 
-    #[allow(dead_code)] // will back a command palette in a later phase
+    /// Registers a command that also makes sense run from outside Fenix
+    /// (`Command::external`). Deliberately a choice per command: the
+    /// default, `register`, is not external.
+    fn external(&mut self, id: &'static str, description: &'static str, run: ExternalFn) {
+        self.commands.push(Command { id, description, run: Handler::External(run) });
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Command> {
         self.commands.iter()
     }
@@ -367,9 +391,24 @@ impl CommandRegistry {
     /// command with that id is registered.
     pub fn run(&self, app: &mut App, event_loop: &ActiveEventLoop, id: &str) -> bool {
         let Some(cmd) = self.commands.iter().find(|c| c.id == id) else { return false };
-        let mut ctx = CommandCtx { app, event_loop };
-        (cmd.run)(&mut ctx);
+        match cmd.run {
+            Handler::Ctx(run) => run(&mut CommandCtx { app, event_loop }),
+            Handler::External(run) => run(app),
+        }
         true
+    }
+
+    /// Runs `id` for a caller outside Fenix, which only external
+    /// commands allow.
+    pub fn run_external(&self, app: &mut App, id: &str) -> Result<(), ExternalError> {
+        let cmd = self.commands.iter().find(|c| c.id == id).ok_or(ExternalError::Unknown)?;
+        match cmd.run {
+            Handler::External(run) => {
+                run(app);
+                Ok(())
+            }
+            Handler::Ctx(_) => Err(ExternalError::NotExternal),
+        }
     }
 }
 
@@ -401,10 +440,6 @@ fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
     ctx.app.cycle_line_number_mode();
 }
 
-fn cmd_pick_theme(ctx: &mut CommandCtx) {
-    ctx.app.picker_pick_theme();
-}
-
 fn cmd_toggle_fullscreen(ctx: &mut CommandCtx) {
     ctx.app.toggle_fullscreen();
 }
@@ -433,10 +468,6 @@ fn cmd_search_todos(ctx: &mut CommandCtx) {
     ctx.app.picker_buffer_todos();
 }
 
-fn cmd_search_todos_project(ctx: &mut CommandCtx) {
-    ctx.app.picker_project_todos();
-}
-
 fn cmd_code_xml_validate(ctx: &mut CommandCtx) {
     ctx.app.xml_validate();
 }
@@ -461,26 +492,6 @@ fn cmd_file_reload(ctx: &mut CommandCtx) {
     ctx.app.reload_focused_file();
 }
 
-fn cmd_file_find(ctx: &mut CommandCtx) {
-    ctx.app.start_find_file_prompt();
-}
-
-fn cmd_file_explore(ctx: &mut CommandCtx) {
-    ctx.app.start_explore_from_home();
-}
-
-fn cmd_file_find_all(ctx: &mut CommandCtx) {
-    ctx.app.picker_find_file_all();
-}
-
-fn cmd_file_recent(ctx: &mut CommandCtx) {
-    ctx.app.picker_recent_files();
-}
-
-fn cmd_file_recover(ctx: &mut CommandCtx) {
-    ctx.app.picker_recovery();
-}
-
 fn cmd_file_rename(ctx: &mut CommandCtx) {
     ctx.app.start_rename_file_prompt();
 }
@@ -493,14 +504,6 @@ fn cmd_file_yank_path(ctx: &mut CommandCtx) {
     ctx.app.yank_file_path();
 }
 
-fn cmd_project_find_file(ctx: &mut CommandCtx) {
-    ctx.app.picker_find_file();
-}
-
-fn cmd_project_grep(ctx: &mut CommandCtx) {
-    ctx.app.picker_grep_prompt();
-}
-
 fn cmd_quickfix_next(ctx: &mut CommandCtx) {
     ctx.app.quickfix_next();
 }
@@ -509,56 +512,12 @@ fn cmd_quickfix_prev(ctx: &mut CommandCtx) {
     ctx.app.quickfix_prev();
 }
 
-fn cmd_project_switch(ctx: &mut CommandCtx) {
-    ctx.app.picker_switch_project();
-}
-
-fn cmd_project_new(ctx: &mut CommandCtx) {
-    ctx.app.cmd_project_new();
-}
-
-fn cmd_project_hub(ctx: &mut CommandCtx) {
-    ctx.app.cmd_project_hub();
-}
-
-fn cmd_project_doctor(ctx: &mut CommandCtx) {
-    ctx.app.cmd_project_doctor();
-}
-
-fn cmd_project_settings(ctx: &mut CommandCtx) {
-    ctx.app.cmd_project_settings();
-}
-
-fn cmd_project_add(ctx: &mut CommandCtx) {
-    ctx.app.picker_add_project_prompt();
-}
-
 fn cmd_project_delete(ctx: &mut CommandCtx) {
     ctx.app.picker_delete_project();
 }
 
-fn cmd_task_run(ctx: &mut CommandCtx) {
-    ctx.app.picker_tasks();
-}
-
-fn cmd_task_rerun_last(ctx: &mut CommandCtx) {
-    ctx.app.rerun_last_task();
-}
-
 fn cmd_task_kill(ctx: &mut CommandCtx) {
     ctx.app.kill_running_task();
-}
-
-fn cmd_dashboard_open(ctx: &mut CommandCtx) {
-    ctx.app.open_dashboard();
-}
-
-fn cmd_toggle_terminal(ctx: &mut CommandCtx) {
-    ctx.app.toggle_terminal();
-}
-
-fn cmd_open_terminal_buffer(ctx: &mut CommandCtx) {
-    ctx.app.open_terminal_buffer();
 }
 
 fn cmd_explorer_dual_pane(ctx: &mut CommandCtx) {
@@ -605,20 +564,8 @@ fn cmd_explorer_go_to_path(ctx: &mut CommandCtx) {
     ctx.app.start_path_prompt();
 }
 
-fn cmd_explorer_places(ctx: &mut CommandCtx) {
-    ctx.app.picker_places();
-}
-
-fn cmd_explorer_recent_dirs(ctx: &mut CommandCtx) {
-    ctx.app.picker_recent_dirs();
-}
-
 fn cmd_explorer_bookmark(ctx: &mut CommandCtx) {
     ctx.app.bookmark_current_directory();
-}
-
-fn cmd_docker_open(ctx: &mut CommandCtx) {
-    ctx.app.open_docker_panel();
 }
 
 fn cmd_docker_build(ctx: &mut CommandCtx) {
@@ -657,14 +604,6 @@ fn cmd_debug_stop(ctx: &mut CommandCtx) {
     ctx.app.debug_stop();
 }
 
-fn cmd_tools_status(ctx: &mut CommandCtx) {
-    ctx.app.open_tool_status_panel();
-}
-
-fn cmd_vnc_open(ctx: &mut CommandCtx) {
-    ctx.app.start_vnc_picker();
-}
-
 fn cmd_vnc_close(ctx: &mut CommandCtx) {
     ctx.app.vnc_close_focused_session();
 }
@@ -679,10 +618,6 @@ fn cmd_pdf_next_page(ctx: &mut CommandCtx) {
 
 fn cmd_pdf_prev_page(ctx: &mut CommandCtx) {
     ctx.app.pdf_prev_page();
-}
-
-fn cmd_pdf_documents(ctx: &mut CommandCtx) {
-    ctx.app.start_document_picker();
 }
 
 fn cmd_pdf_first_page(ctx: &mut CommandCtx) {
@@ -733,28 +668,12 @@ fn cmd_pdf_copy_link(ctx: &mut CommandCtx) {
     ctx.app.pdf_copy_link();
 }
 
-fn cmd_git_open(ctx: &mut CommandCtx) {
-    ctx.app.open_git();
-}
-
 fn cmd_git_close(ctx: &mut CommandCtx) {
     ctx.app.git_session_close();
 }
 
-fn cmd_jira_open(ctx: &mut CommandCtx) {
-    ctx.app.open_jira_page();
-}
-
 fn cmd_jira_refresh(ctx: &mut CommandCtx) {
     ctx.app.jira_refresh();
-}
-
-fn cmd_jira_goto_issue(ctx: &mut CommandCtx) {
-    ctx.app.cmd_jira_goto();
-}
-
-fn cmd_jira_search(ctx: &mut CommandCtx) {
-    ctx.app.cmd_jira_search();
 }
 
 fn cmd_embedded_build(ctx: &mut CommandCtx) {
@@ -809,56 +728,8 @@ fn cmd_leader_local(ctx: &mut CommandCtx) {
     ctx.app.start_local_leader();
 }
 
-fn cmd_agenda_open(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_open();
-}
-
-fn cmd_agenda_board(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_board();
-}
-
-fn cmd_agenda_list(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_list();
-}
-
-fn cmd_agenda_report(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_report();
-}
-
-fn cmd_agenda_new_task(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_new_task();
-}
-
 fn cmd_agenda_from_here(ctx: &mut CommandCtx) {
     ctx.app.cmd_agenda_task_from_here();
-}
-
-fn cmd_agenda_resume(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_resume();
-}
-
-fn cmd_agenda_find(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_find();
-}
-
-fn cmd_agenda_toggle_clock(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_toggle_clock();
-}
-
-fn cmd_jira_create_issue(ctx: &mut CommandCtx) {
-    ctx.app.cmd_jira_new_issue();
-}
-
-fn cmd_agenda_import(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_import();
-}
-
-fn cmd_agenda_sync(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_sync();
-}
-
-fn cmd_agenda_worklogs(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_worklogs();
 }
 
 fn cmd_split_vertical(ctx: &mut CommandCtx) {
@@ -917,10 +788,6 @@ fn cmd_balance_windows(ctx: &mut CommandCtx) {
     ctx.app.balance_windows();
 }
 
-fn cmd_switch_buffer(ctx: &mut CommandCtx) {
-    ctx.app.picker_switch_buffer();
-}
-
 fn cmd_next_buffer(ctx: &mut CommandCtx) {
     ctx.app.next_buffer();
 }
@@ -941,14 +808,6 @@ fn cmd_save_and_kill_buffer(ctx: &mut CommandCtx) {
     ctx.app.save_and_close_buffer();
 }
 
-fn cmd_new_scratch_buffer(ctx: &mut CommandCtx) {
-    ctx.app.new_scratch_buffer();
-}
-
-fn cmd_new_workspace(ctx: &mut CommandCtx) {
-    ctx.app.new_workspace();
-}
-
 fn cmd_next_workspace(ctx: &mut CommandCtx) {
     ctx.app.next_workspace();
 }
@@ -959,14 +818,6 @@ fn cmd_prev_workspace(ctx: &mut CommandCtx) {
 
 fn cmd_remove_workspace(ctx: &mut CommandCtx) {
     ctx.app.remove_workspace();
-}
-
-fn cmd_switch_workspace(ctx: &mut CommandCtx) {
-    ctx.app.picker_switch_workspace();
-}
-
-fn cmd_find_workspace(ctx: &mut CommandCtx) {
-    ctx.app.start_workspace_launcher_picker();
 }
 
 fn cmd_rename_workspace(ctx: &mut CommandCtx) {
@@ -1016,14 +867,6 @@ fn cmd_jump_forward(ctx: &mut CommandCtx) {
     ctx.app.jump_forward();
 }
 
-fn cmd_mib_page(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_page();
-}
-
-fn cmd_mib_search(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_search();
-}
-
 fn cmd_mib_telecommand(ctx: &mut CommandCtx) {
     ctx.app.cmd_mib_pick(fenix_mib::Kind::Telecommand);
 }
@@ -1064,28 +907,8 @@ fn cmd_mib_copy_bytes(ctx: &mut CommandCtx) {
     ctx.app.cmd_mib_copy_bytes();
 }
 
-fn cmd_ccsds_time(ctx: &mut CommandCtx) {
-    ctx.app.cmd_ccsds_time();
-}
-
 fn cmd_ccsds_hex(ctx: &mut CommandCtx) {
     ctx.app.cmd_hex_view();
-}
-
-fn cmd_ccsds_recording(ctx: &mut CommandCtx) {
-    ctx.app.cmd_ccsds_recording();
-}
-
-fn cmd_ccsds_live(ctx: &mut CommandCtx) {
-    ctx.app.cmd_ccsds_live();
-}
-
-fn cmd_mib_generate(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_generate();
-}
-
-fn cmd_ccsds_standards(ctx: &mut CommandCtx) {
-    ctx.app.cmd_ccsds_standards();
 }
 
 fn cmd_ccsds_decode(ctx: &mut CommandCtx) {
@@ -1104,16 +927,8 @@ fn cmd_reset_font_size(ctx: &mut CommandCtx) {
     ctx.app.reset_font_size();
 }
 
-fn cmd_git_history(ctx: &mut CommandCtx) {
-    ctx.app.open_history_view();
-}
-
 fn cmd_git_history_close(ctx: &mut CommandCtx) {
     ctx.app.history_close();
-}
-
-fn cmd_git_fetch(ctx: &mut CommandCtx) {
-    ctx.app.git_fetch();
 }
 
 fn cmd_git_hunk_stage(ctx: &mut CommandCtx) {
@@ -1126,10 +941,6 @@ fn cmd_git_hunk_discard(ctx: &mut CommandCtx) {
 
 fn cmd_git_hunk_preview(ctx: &mut CommandCtx) {
     ctx.app.git_hunk_preview();
-}
-
-fn cmd_git_switch(ctx: &mut CommandCtx) {
-    ctx.app.start_switch_picker();
 }
 
 fn cmd_git_blame(ctx: &mut CommandCtx) {
@@ -1148,14 +959,6 @@ fn cmd_git_pull_request(ctx: &mut CommandCtx) {
     ctx.app.open_new_request();
 }
 
-fn cmd_settings_open(ctx: &mut CommandCtx) {
-    ctx.app.open_settings_page(crate::settings_page::Scope::You, None);
-}
-
-fn cmd_git_log(ctx: &mut CommandCtx) {
-    ctx.app.open_git_log(crate::git_log::Scope::Branch);
-}
-
 fn cmd_git_file_history(ctx: &mut CommandCtx) {
     ctx.app.open_file_history();
 }
@@ -1164,16 +967,8 @@ fn cmd_git_line_history(ctx: &mut CommandCtx) {
     ctx.app.open_line_history();
 }
 
-fn cmd_git_operations(ctx: &mut CommandCtx) {
-    ctx.app.open_git_operations();
-}
-
 fn cmd_git_versus(ctx: &mut CommandCtx) {
     ctx.app.start_side_by_side_picker();
-}
-
-fn cmd_git_compare(ctx: &mut CommandCtx) {
-    ctx.app.start_compare_picker();
 }
 
 fn cmd_git_rebase(ctx: &mut CommandCtx) {
@@ -1218,10 +1013,6 @@ fn cmd_git_keep_theirs(ctx: &mut CommandCtx) {
 
 fn cmd_git_keep_both(ctx: &mut CommandCtx) {
     ctx.app.resolve_conflict_at_cursor(fenix_git::Resolution::Both);
-}
-
-fn cmd_git_merge_requests(ctx: &mut CommandCtx) {
-    ctx.app.open_reviews();
 }
 
 fn cmd_git_merge_requests_close(ctx: &mut CommandCtx) {

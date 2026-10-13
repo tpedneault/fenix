@@ -48,7 +48,7 @@ that's practical.
 | Crate | Role |
 |---|---|
 | `fenix-rpc` | `Content-Length`-framed message transport over a child process's stdio, shared by LSP and DAP, with a bounded reader for peers Fenix didn't spawn |
-| `fenix-control` | The control channel: a per-user named pipe or Unix socket, and its JSON-RPC protocol (`fenix/open`, `fenix/openProject`, `fenix/state`) on both ends -- see [CONTROL.md](CONTROL.md) |
+| `fenix-control` | The control channel: a per-user named pipe or Unix socket, and its JSON-RPC protocol (open files and projects, state, commands, notebook capture, agenda tasks and clock) on both ends -- see [CONTROL.md](CONTROL.md) |
 | `fenix-lsp` | A Language Server Protocol client: handshake, document sync, requests, and transactional workspace edits |
 | `fenix-dap` | A Debug Adapter Protocol client on the same transport |
 | `fenix-tasks` | Project task discovery, output parsing, `path:line:col` reading (shared with the command line), and process-tree supervision |

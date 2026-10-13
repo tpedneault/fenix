@@ -22,11 +22,28 @@ pub mod method {
     pub const OPEN: &str = "fenix/open";
     pub const OPEN_PROJECT: &str = "fenix/openProject";
     pub const STATE: &str = "fenix/state";
+    pub const COMMANDS: &str = "fenix/commands";
+    pub const RUN_COMMAND: &str = "fenix/runCommand";
+    pub const NOTEBOOK_CAPTURE: &str = "fenix/notebook.capture";
+    pub const AGENDA_TASKS: &str = "fenix/agenda.tasks";
+    pub const AGENDA_CLOCK_IN: &str = "fenix/agenda.clockIn";
+    pub const AGENDA_CLOCK_OUT: &str = "fenix/agenda.clockOut";
 }
 
-/// What `fenix/hello` lists in `capabilities`: every method this build
-/// implements besides `fenix/hello` itself, which every build has.
-pub const CAPABILITIES: &[&str] = &[method::OPEN, method::OPEN_PROJECT, method::STATE];
+/// Every method this crate knows, besides `fenix/hello` itself, which
+/// every build has: what Fenix lists in `capabilities` unless a server
+/// is set up with fewer ([`crate::ServerInfo::capabilities`]).
+pub const CAPABILITIES: &[&str] = &[
+    method::OPEN,
+    method::OPEN_PROJECT,
+    method::STATE,
+    method::COMMANDS,
+    method::RUN_COMMAND,
+    method::NOTEBOOK_CAPTURE,
+    method::AGENDA_TASKS,
+    method::AGENDA_CLOCK_IN,
+    method::AGENDA_CLOCK_OUT,
+];
 
 /// Error codes: JSON-RPC's own, and Fenix's in the range JSON-RPC
 /// leaves to servers.
@@ -151,6 +168,143 @@ pub struct StateResult {
     /// The cursor's line in `file`, 1-based.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line: Option<usize>,
+    /// The agenda's clock, while it runs.
+    #[serde(
+        default,
+        rename = "agendaTimer",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub agenda_timer: Option<AgendaTimer>,
+}
+
+/// The agenda clock that's running: on which task, since when.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgendaTimer {
+    pub task_id: u32,
+    pub title: String,
+    /// When the clock started, RFC 3339 with the local offset.
+    pub since: String,
+}
+
+/// `fenix/commands`' result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandsResult {
+    pub commands: Vec<CommandInfo>,
+}
+
+/// One of Fenix's commands, as a launcher or palette lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandInfo {
+    /// What `fenix/runCommand` takes: `agenda.open`.
+    pub id: String,
+    pub description: String,
+    /// The leader sequence that runs it, as Fenix's own key menu writes
+    /// it (`SPC a a`); absent when no key does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<String>,
+    /// Whether `fenix/runCommand` runs it: true for commands that make
+    /// sense with nobody looking at a file in Fenix (open the agenda,
+    /// switch project), false for ones that act on what's in front of
+    /// you (save, undo, stage this hunk).
+    pub external: bool,
+}
+
+/// `fenix/runCommand`'s params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunCommandParams {
+    pub id: String,
+}
+
+/// Where `fenix/notebook.capture` files a line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureTarget {
+    /// The notebook's Inbox note, made if it isn't there yet.
+    #[default]
+    Inbox,
+    /// Today's journal day, under its Log.
+    Journal,
+}
+
+/// `fenix/notebook.capture`'s params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureParams {
+    pub text: String,
+    #[serde(default)]
+    pub target: CaptureTarget,
+}
+
+/// `fenix/notebook.capture`'s result: the file the line went into.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptureResult {
+    pub entry: String,
+}
+
+/// A task's place on the agenda's board, as the protocol writes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TaskStatus {
+    Todo,
+    InProgress,
+    Blocked,
+    Done,
+}
+
+/// `fenix/agenda.tasks`' params.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TasksParams {
+    /// Only tasks in one of these; every task when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Vec<TaskStatus>>,
+}
+
+/// `fenix/agenda.tasks`' result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TasksResult {
+    pub tasks: Vec<AgendaTask>,
+}
+
+/// One agenda task.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgendaTask {
+    /// What `fenix/agenda.clockIn` takes. Stable for the task's life
+    /// and never reused.
+    pub id: u32,
+    pub title: String,
+    pub status: TaskStatus,
+    /// The Jira issue it's linked to, `ABC-12`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jira_key: Option<String>,
+    /// Every minute logged on it, the running clock's included.
+    pub elapsed_minutes: i64,
+}
+
+/// `fenix/agenda.clockIn`'s params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClockInParams {
+    /// A task's `id` from `fenix/agenda.tasks`. Its decimal string is
+    /// taken too, for clients that keep every id as text.
+    #[serde(deserialize_with = "task_id")]
+    pub task_id: u32,
+}
+
+/// A task id given as a number or as its decimal string.
+fn task_id<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        Number(u32),
+        Text(String),
+    }
+    match Id::deserialize(deserializer)? {
+        Id::Number(id) => Ok(id),
+        Id::Text(text) => text
+            .parse()
+            .map_err(|_| serde::de::Error::custom(format!("no task has the id {text:?}"))),
+    }
 }
 
 /// A request the editor itself has to answer, on its UI thread: what
@@ -160,4 +314,10 @@ pub enum Call {
     Open(OpenParams),
     OpenProject(OpenProjectParams),
     State,
+    Commands,
+    RunCommand(RunCommandParams),
+    NotebookCapture(CaptureParams),
+    AgendaTasks(TasksParams),
+    AgendaClockIn(ClockInParams),
+    AgendaClockOut,
 }

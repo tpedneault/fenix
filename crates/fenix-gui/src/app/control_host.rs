@@ -1,15 +1,34 @@
 //! The editor's answers to the control channel (`crate::ipc`): every
-//! `fenix/open`, `fenix/openProject` and `fenix/state` arrives here, on
-//! the UI thread, as a `FenixUserEvent::Control`. The command line ends
+//! request the protocol itself can't answer arrives here, on the UI
+//! thread, as a `FenixUserEvent::Control`. The command line ends
 //! up here too when this launch is the editor, so `fenix x.rs:12` means
 //! the same whether or not Fenix was already running.
 
 use fenix_control::protocol::OpenProjectParams;
-use fenix_control::{Call, RpcError, StateResult};
+use fenix_control::{
+    AgendaTask, AgendaTimer, Call, CaptureParams, CaptureResult, CaptureTarget, CommandInfo,
+    CommandsResult, RpcError, StateResult, TaskStatus, TasksParams, TasksResult,
+};
 use fenix_tasks::PathPosition;
 use serde_json::{json, Value};
 
+use super::notebook_capture::CaptureTo;
 use super::*;
+use crate::commands::{CommandRegistry, ExternalError};
+
+/// The agenda's status as the protocol writes it.
+fn task_status(status: fenix_agenda::Status) -> TaskStatus {
+    match status {
+        fenix_agenda::Status::Todo => TaskStatus::Todo,
+        fenix_agenda::Status::InProgress => TaskStatus::InProgress,
+        fenix_agenda::Status::Blocked => TaskStatus::Blocked,
+        fenix_agenda::Status::Done => TaskStatus::Done,
+    }
+}
+
+fn to_value(value: impl serde::Serialize) -> Value {
+    serde_json::to_value(value).expect("plain data serializes")
+}
 
 impl App {
     /// Answers one control request.
@@ -31,9 +50,98 @@ impl App {
                 self.raise_window();
                 Ok(json!({}))
             }
-            Call::State => {
-                Ok(serde_json::to_value(self.control_state()).expect("plain data serializes"))
+            Call::State => Ok(to_value(self.control_state())),
+            Call::Commands => Ok(to_value(control_commands())),
+            Call::RunCommand(params) => {
+                match CommandRegistry::with_builtins().run_external(self, &params.id) {
+                    Ok(()) => {
+                        self.raise_window();
+                        self.wake_caret();
+                        Ok(json!({}))
+                    }
+                    Err(ExternalError::Unknown) => {
+                        Err(RpcError::invalid_params(format!("no command {}", params.id)))
+                    }
+                    Err(ExternalError::NotExternal) => Err(RpcError::invalid_params(format!(
+                        "{} can't be run from outside Fenix: it acts on what's in front of you there",
+                        params.id
+                    ))),
+                }
             }
+            Call::NotebookCapture(params) => self.control_capture(&params).map(to_value),
+            Call::AgendaTasks(params) => Ok(to_value(self.control_tasks(&params))),
+            Call::AgendaClockIn(params) => {
+                let id = TaskId(params.task_id);
+                if !self.agenda_store.task(id).is_some_and(|t| !t.archived) {
+                    return Err(RpcError::invalid_params(format!(
+                        "no agenda task {}",
+                        params.task_id
+                    )));
+                }
+                self.agenda_clock_pick(super::agenda_host::ClockPick::Start(id));
+                Ok(json!({}))
+            }
+            Call::AgendaClockOut => {
+                if self.agenda_store.active_timer.is_some() {
+                    self.agenda_clock_pick(super::agenda_host::ClockPick::Stop);
+                }
+                Ok(json!({}))
+            }
+        }
+    }
+
+    /// `fenix/notebook.capture`: the line filed as `SPC n c` files it,
+    /// without a link back (there's no "here" for a caller outside) and
+    /// without taking the focus from whatever the user is in.
+    fn control_capture(&mut self, params: &CaptureParams) -> Result<CaptureResult, RpcError> {
+        let to = match params.target {
+            CaptureTarget::Inbox => CaptureTo::Inbox,
+            CaptureTarget::Journal => CaptureTo::Journal,
+        };
+        let path = self
+            .notebook_capture_into(to, false, None, &params.text)
+            .map_err(RpcError::internal)?;
+        self.set_message(format!("captured to {}", to.label()));
+        Ok(CaptureResult {
+            entry: fenix_lsp::normalize(path).to_string_lossy().into_owned(),
+        })
+    }
+
+    /// `fenix/agenda.tasks`: the tasks not archived, in board order
+    /// (by status, then as arranged within it), only those in
+    /// `params.status` when given.
+    fn control_tasks(&self, params: &TasksParams) -> TasksResult {
+        let store = &self.agenda_store;
+        let mut tasks: Vec<&fenix_agenda::Task> = store
+            .tasks
+            .iter()
+            .filter(|t| !t.archived)
+            .filter(|t| {
+                params
+                    .status
+                    .as_ref()
+                    .is_none_or(|wanted| wanted.contains(&task_status(t.status)))
+            })
+            .collect();
+        tasks.sort_by_key(|t| {
+            (
+                fenix_agenda::Status::ALL
+                    .iter()
+                    .position(|s| *s == t.status),
+                t.order,
+            )
+        });
+        TasksResult {
+            tasks: tasks
+                .into_iter()
+                .map(|t| AgendaTask {
+                    id: t.id.0,
+                    title: t.title.clone(),
+                    status: task_status(t.status),
+                    jira_key: t.jira_key().map(str::to_string),
+                    elapsed_minutes: store.elapsed_on(t.id).num_minutes(),
+                })
+                .collect(),
         }
     }
 
@@ -92,6 +200,19 @@ impl App {
         };
         let mut state = StateResult {
             project: self.project_root.as_deref().map(plain),
+            agenda_timer: self
+                .agenda_store
+                .active_timer
+                .as_ref()
+                .map(|timer| AgendaTimer {
+                    task_id: timer.task_id.0,
+                    title: self
+                        .agenda_store
+                        .task(timer.task_id)
+                        .map(|t| t.title.clone())
+                        .unwrap_or_default(),
+                    since: timer.started_at.to_rfc3339(),
+                }),
             ..StateResult::default()
         };
         if self.main_view == MainView::Editor {
@@ -152,6 +273,23 @@ impl App {
         if files.len() > 1 {
             self.open_positions(&files[1..], false);
         }
+    }
+}
+
+/// `fenix/commands`: every command in the registry, in its order, with
+/// the leader keys that run it and whether it may run from outside.
+pub(crate) fn control_commands() -> CommandsResult {
+    let keys = crate::keymap::leader_keys();
+    CommandsResult {
+        commands: CommandRegistry::with_builtins()
+            .iter()
+            .map(|c| CommandInfo {
+                id: c.id.to_string(),
+                description: c.description.to_string(),
+                keys: keys.get(c.id).cloned(),
+                external: c.external(),
+            })
+            .collect(),
     }
 }
 
@@ -341,5 +479,384 @@ mod tests {
         assert!(app.active_picker.is_none());
         assert_eq!(app.main_view, MainView::Editor);
         assert_eq!(app.open().buffer.text(), "b1\nb2\n");
+    }
+
+    // -- Commands -----------------------------------------------------------
+
+    #[test]
+    fn commands_carry_their_keys_and_whether_they_run_from_outside() {
+        let commands = control_commands().commands;
+        let get = |id: &str| {
+            commands
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap_or_else(|| panic!("no {id}"))
+        };
+        let agenda = get("agenda.open");
+        assert!(agenda.external);
+        assert_eq!(agenda.keys.as_deref(), Some("SPC a a"));
+        assert!(!agenda.description.is_empty());
+        let save = get("file.save");
+        assert!(!save.external);
+        assert_eq!(save.keys.as_deref(), Some("SPC f s"));
+        // Bound twice: the shorter sequence is the one listed.
+        assert_eq!(get("project.find_file").keys.as_deref(), Some("SPC SPC"));
+        // Run by a Ctrl chord, not the leader: no keys.
+        assert_eq!(get("nav.jump_back").keys, None);
+        for id in [
+            "project.switch_project",
+            "agenda.open",
+            "notebook.journal",
+            "agenda.toggle_clock",
+        ] {
+            assert!(get(id).external, "{id}");
+        }
+        for id in ["edit.undo", "git.hunk_stage", "app.quit", "frame.new"] {
+            assert!(!get(id).external, "{id}");
+        }
+        let mut ids: Vec<&str> = commands.iter().map(|c| c.id.as_str()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(
+            ids.len(),
+            commands.len(),
+            "a command id is registered twice"
+        );
+    }
+
+    /// An app whose agenda and notebook live in `dir`, never the ones of
+    /// the Fenix you use, with one task to clock in on.
+    fn isolated(dir: &Path, file: Option<&Path>) -> App {
+        let mut app = App::with_file(file.map(|f| f.display().to_string()));
+        app.agenda_path = dir.join("agenda.json");
+        app.agenda_store = fenix_agenda::AgendaStore::default();
+        app.agenda_store.create_task(
+            "Write the report".into(),
+            String::new(),
+            fenix_agenda::Priority::Medium,
+            None,
+        );
+        app.config.notebook_folder = Some(dir.join("nb"));
+        app
+    }
+
+    /// What a command visibly did: what's in front, and what it said.
+    #[derive(Debug, PartialEq)]
+    struct Outcome {
+        view: MainView,
+        picker: Option<std::mem::Discriminant<ActivePicker>>,
+        prompt: Option<String>,
+        status: Option<(String, bool)>,
+        /// What the focus moved to, when it moved.
+        focused: Option<String>,
+    }
+
+    fn outcome(app: &App, before: BufferId) -> Outcome {
+        let now = app.focused_buffer_id();
+        Outcome {
+            view: app.main_view,
+            picker: app.active_picker.as_ref().map(std::mem::discriminant),
+            prompt: app.active_prompt_text(),
+            status: app
+                .status_message
+                .as_ref()
+                .map(|m| (m.text.clone(), m.is_error)),
+            focused: (now != before).then(|| app.buffer_display_name(now)),
+        }
+    }
+
+    /// The guard on `external`: each external command is run once with
+    /// a text buffer in focus and once with a page in focus (a hex view,
+    /// which no external command opens, the same text buffer still open
+    /// behind it), and must do the same thing both times without
+    /// touching that buffer. A command that acts on "the buffer in front
+    /// of you" -- saving it, undoing in it, staging its hunk -- does
+    /// something else, or nothing, with a page in front, and fails here.
+    #[test]
+    fn external_commands_dont_assume_a_focused_text_buffer() {
+        let registry = CommandRegistry::with_builtins();
+        let external: Vec<&str> = registry
+            .iter()
+            .filter(|c| c.external())
+            .map(|c| c.id)
+            .collect();
+        assert!(external.len() > 20, "{external:?}");
+        let mut differ = Vec::new();
+        for id in external {
+            let mut outcomes = Vec::new();
+            for page in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let file = dir.path().join("notes.txt");
+                std::fs::write(&file, "one\ntwo\n").unwrap();
+                let mut app = isolated(dir.path(), Some(&file));
+                let text_buffer = app.focused_buffer_id();
+                // An edit, saved: something to undo, nothing unsaved.
+                let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+                buffer.insert_str(cursor, "zero\n");
+                buffer.save().unwrap();
+                if page {
+                    let bytes = dir.path().join("frame.bin");
+                    std::fs::write(&bytes, [0x1a, 0xcf, 0xfc, 0x1d]).unwrap();
+                    app.open_hex_view(bytes);
+                    assert_ne!(app.focused_buffer_id(), text_buffer);
+                    assert_ne!(app.open().kind, BufferKind::Text);
+                }
+                app.status_message = None;
+                let before = app.focused_buffer_id();
+                registry.run_external(&mut app, id).unwrap();
+                outcomes.push(outcome(&app, before));
+                let ob = app
+                    .buffers
+                    .get(text_buffer)
+                    .expect("the text buffer is still open");
+                assert_eq!(
+                    ob.buffer.text(),
+                    "zero\none\ntwo\n",
+                    "{id} changed the text buffer"
+                );
+                assert!(!ob.buffer.is_dirty(), "{id} changed the text buffer");
+            }
+            if outcomes[0] != outcomes[1] {
+                differ.push(format!(
+                    "{id}
+  text buffer in front: {:?}
+  page in front:        {:?}",
+                    outcomes[0], outcomes[1]
+                ));
+            }
+        }
+        assert!(
+            differ.is_empty(),
+            "external commands that do something else when no text buffer is in focus:
+{}",
+            differ.join(
+                "
+"
+            )
+        );
+    }
+
+    #[test]
+    fn run_command_runs_external_commands_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = isolated(dir.path(), None);
+        let run = |app: &mut App, id: &str| {
+            app.apply_control(Call::RunCommand(fenix_control::RunCommandParams {
+                id: id.into(),
+            }))
+        };
+        assert_eq!(run(&mut app, "agenda.open").unwrap(), json!({}));
+        assert!(matches!(
+            app.pages.get(&app.focused_buffer_id()).map(|p| &p.model),
+            Some(super::super::pages::PageModel::Agenda(_))
+        ));
+        let err = run(&mut app, "file.save").unwrap_err();
+        assert_eq!(err.code, fenix_control::protocol::code::INVALID_PARAMS);
+        assert!(err.message.contains("outside"), "{}", err.message);
+        let err = run(&mut app, "no.such.command").unwrap_err();
+        assert_eq!(err.code, fenix_control::protocol::code::INVALID_PARAMS);
+    }
+
+    // -- Notebook -----------------------------------------------------------
+
+    fn capture(app: &mut App, text: &str, target: CaptureTarget) -> PathBuf {
+        let reply = app
+            .apply_control(Call::NotebookCapture(CaptureParams {
+                text: text.into(),
+                target,
+            }))
+            .unwrap();
+        PathBuf::from(reply["entry"].as_str().unwrap())
+    }
+
+    #[test]
+    fn capture_writes_the_inbox_or_journal_through_the_notebook() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = isolated(dir.path(), None);
+        let inbox = capture(&mut app, "call OBSW", CaptureTarget::Inbox);
+        let text = std::fs::read_to_string(&inbox).unwrap();
+        assert!(
+            text.starts_with("# Inbox") && text.trim_end().ends_with("call OBSW"),
+            "{text}"
+        );
+        assert!(!inbox.to_string_lossy().starts_with(r"\\?\"));
+        let again = capture(&mut app, "and the ground segment", CaptureTarget::Inbox);
+        assert_eq!(again, inbox);
+        let journal = capture(&mut app, "retry is 3", CaptureTarget::Journal);
+        assert_ne!(journal, inbox);
+        assert!(std::fs::read_to_string(&journal)
+            .unwrap()
+            .contains("retry is 3"));
+        // The index agrees with the files: a fresh look at the notebook
+        // finds both, as they are on disk.
+        let fresh = fenix_notebook::Notebook::open(&dir.path().join("nb")).unwrap();
+        let entry = fresh.by_name("Inbox").unwrap();
+        assert!(entry.text.contains("call OBSW") && entry.text.contains("and the ground segment"));
+        assert!(fresh
+            .day(chrono::Local::now().date_naive())
+            .unwrap()
+            .text
+            .contains("retry is 3"));
+        // Nothing was opened or focused for it.
+        assert_eq!(app.open().kind, BufferKind::Dashboard);
+    }
+
+    #[test]
+    fn capture_into_an_open_buffer_of_the_entry_keeps_it_in_step() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = isolated(dir.path(), None);
+        let path = capture(&mut app, "one", CaptureTarget::Inbox);
+        app.open_startup_file(&path);
+        capture(&mut app, "two", CaptureTarget::Inbox);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("one") && on_disk.contains("two"),
+            "{on_disk}"
+        );
+        assert_eq!(app.open().buffer.text(), on_disk);
+        assert!(!app.open().buffer.is_dirty());
+    }
+
+    // -- Agenda -------------------------------------------------------------
+
+    fn tasks(app: &mut App, status: Option<Vec<TaskStatus>>) -> Vec<AgendaTask> {
+        let reply = app
+            .apply_control(Call::AgendaTasks(TasksParams { status }))
+            .unwrap();
+        serde_json::from_value::<TasksResult>(reply).unwrap().tasks
+    }
+
+    fn clock_in(app: &mut App, task_id: u32) -> Result<Value, RpcError> {
+        app.apply_control(Call::AgendaClockIn(fenix_control::ClockInParams {
+            task_id,
+        }))
+    }
+
+    #[test]
+    fn tasks_come_in_board_order_filtered_by_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = isolated(dir.path(), None);
+        let low = fenix_agenda::Priority::Low;
+        let store = &mut app.agenda_store;
+        let done = store.create_task("Old".into(), String::new(), low, None);
+        store.set_status(done, fenix_agenda::Status::Done);
+        let doing = store.create_task("Doing".into(), String::new(), low, None);
+        store.set_status(doing, fenix_agenda::Status::InProgress);
+        store.log_manual_time(doing, chrono::Duration::minutes(90));
+        let gone = store.create_task("Gone".into(), String::new(), low, None);
+        store.archive(gone);
+        let all = tasks(&mut app, None);
+        let ids: Vec<u32> = all.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![0, doing.0, done.0]);
+        assert_eq!(all[1].elapsed_minutes, 90);
+        assert_eq!(all[1].status, TaskStatus::InProgress);
+        assert_eq!(all[0].jira_key, None);
+        let open = tasks(
+            &mut app,
+            Some(vec![TaskStatus::Todo, TaskStatus::InProgress]),
+        );
+        assert_eq!(
+            open.iter().map(|t| t.title.as_str()).collect::<Vec<_>>(),
+            ["Write the report", "Doing"]
+        );
+    }
+
+    #[test]
+    fn clock_in_and_out_round_trip_through_agenda_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = isolated(dir.path(), None);
+        let id = app.agenda_store.tasks[0].id;
+        clock_in(&mut app, id.0).unwrap();
+        let saved = fenix_agenda::load(&app.agenda_path);
+        assert_eq!(saved.active_timer.as_ref().map(|t| t.task_id), Some(id));
+        let timer = app.control_state().agenda_timer.expect("the clock runs");
+        assert_eq!(
+            (timer.task_id, timer.title.as_str()),
+            (id.0, "Write the report")
+        );
+        let since = chrono::DateTime::parse_from_rfc3339(&timer.since).unwrap();
+        assert_eq!(since, saved.active_timer.unwrap().started_at);
+        // Backdated, so stopping records a span.
+        app.agenda_store.active_timer.as_mut().unwrap().started_at -= chrono::Duration::minutes(5);
+        app.apply_control(Call::AgendaClockOut).unwrap();
+        let saved = fenix_agenda::load(&app.agenda_path);
+        assert!(saved.active_timer.is_none());
+        assert_eq!(saved.task(id).unwrap().time_entries.len(), 1);
+        assert_eq!(app.control_state().agenda_timer, None);
+        // Stopping a clock that isn't running is fine, and does nothing.
+        app.apply_control(Call::AgendaClockOut).unwrap();
+        let saved = fenix_agenda::load(&app.agenda_path);
+        assert_eq!(saved.task(id).unwrap().time_entries.len(), 1);
+    }
+
+    #[test]
+    fn clock_in_refuses_a_task_that_isnt_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = isolated(dir.path(), None);
+        let gone = app.agenda_store.create_task(
+            "Gone".into(),
+            String::new(),
+            fenix_agenda::Priority::Low,
+            None,
+        );
+        app.agenda_store.archive(gone);
+        for task_id in [99, gone.0] {
+            let err = clock_in(&mut app, task_id).unwrap_err();
+            assert_eq!(err.code, fenix_control::protocol::code::INVALID_PARAMS);
+        }
+        assert!(app.agenda_store.active_timer.is_none());
+        assert!(!app.agenda_path.exists(), "nothing to save");
+    }
+
+    /// Sets `path`'s modification time well away from now, so a write
+    /// within the same tick of a coarse clock still reads as a change.
+    fn backdate(path: &Path) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+    }
+
+    #[test]
+    fn agenda_json_written_elsewhere_is_read_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = isolated(dir.path(), None);
+        app.save_agenda();
+        // Fenix's own save isn't a change.
+        app.reload_agenda_if_changed();
+        assert_eq!(app.agenda_store.tasks.len(), 1);
+        let mut theirs = fenix_agenda::load(&app.agenda_path);
+        theirs.create_task(
+            "From the laptop".into(),
+            String::new(),
+            fenix_agenda::Priority::High,
+            None,
+        );
+        fenix_agenda::save(&app.agenda_path, &theirs).unwrap();
+        backdate(&app.agenda_path);
+        app.reload_agenda_if_changed();
+        assert_eq!(app.agenda_store.tasks.len(), 2);
+        // And Fenix's next save keeps their task.
+        let first = app.agenda_store.tasks[0].id.0;
+        clock_in(&mut app, first).unwrap();
+        assert_eq!(fenix_agenda::load(&app.agenda_path).tasks.len(), 2);
+    }
+
+    #[test]
+    fn an_unreadable_agenda_json_keeps_the_agenda_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = isolated(dir.path(), None);
+        app.save_agenda();
+        std::fs::write(&app.agenda_path, b"{ half written").unwrap();
+        backdate(&app.agenda_path);
+        app.reload_agenda_if_changed();
+        assert_eq!(app.agenda_store.tasks.len(), 1);
+        assert!(app
+            .status_message
+            .as_ref()
+            .is_some_and(|m| m.is_error && m.text.contains("agenda.json")));
+        // Said once, not on every tick.
+        app.status_message = None;
+        app.reload_agenda_if_changed();
+        assert!(app.status_message.is_none());
     }
 }

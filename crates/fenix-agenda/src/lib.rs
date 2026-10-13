@@ -10,7 +10,7 @@ mod store;
 mod sync;
 mod task;
 
-pub use persist::{default_path, load, save};
+pub use persist::{default_path, load, reload, save};
 pub use jira::{Conflict, JiraLink, OpKind, PendingOp, RemoteComment, RemoteSnapshot, RemoteUpdate, SyncField};
 pub use store::{ActiveTimer, AgendaStore};
 pub use sync::{parse_due, WorklogRow};

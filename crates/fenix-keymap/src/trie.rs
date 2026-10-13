@@ -92,6 +92,26 @@ impl<A> KeyTrie<A> {
     pub fn matcher(&self) -> Matcher<'_, A> {
         Matcher { trie: self, current: None, path: Vec::new() }
     }
+
+    /// Every sequence that reaches an action, with the action: what a
+    /// list of commands needs to say which keys run each. A sequence
+    /// that runs through another action's key isn't listed, since the
+    /// shorter one always wins (see `KeyTrie`). In no particular order.
+    pub fn bindings(&self) -> Vec<(Vec<KeyPress>, &A)> {
+        fn walk<'t, A>(node: &'t Node<A>, path: &mut Vec<KeyPress>, out: &mut Vec<(Vec<KeyPress>, &'t A)>) {
+            for (key, child) in &node.children {
+                path.push(*key);
+                match &child.leaf {
+                    Some(action) => out.push((path.clone(), action)),
+                    None => walk(child, path, out),
+                }
+                path.pop();
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.root, &mut Vec::new(), &mut out);
+        out
+    }
 }
 
 /// The result of feeding one keypress into a `Matcher`.
@@ -197,6 +217,21 @@ fn children_labels<A>(node: &Node<A>) -> Vec<(KeyPress, &'static str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bindings_list_every_reachable_action() {
+        let mut trie = KeyTrie::new();
+        let (d, w, x) = (KeyPress::char('d'), KeyPress::char('w'), KeyPress::char('x'));
+        trie.insert(&[d, d], "delete line", 1);
+        trie.insert(&[d, w], "delete word", 2);
+        trie.insert(&[x], "delete char", 3);
+        // Shadowed by `x`, which matches first.
+        trie.insert(&[x, x], "never", 4);
+        trie.label_group(&[d], "delete");
+        let mut found: Vec<(Vec<KeyPress>, i32)> = trie.bindings().into_iter().map(|(seq, a)| (seq, *a)).collect();
+        found.sort_by_key(|(_, a)| *a);
+        assert_eq!(found, vec![(vec![d, d], 1), (vec![d, w], 2), (vec![x], 3)]);
+    }
 
     #[test]
     fn single_key_matches_immediately() {

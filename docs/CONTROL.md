@@ -2,7 +2,8 @@
 
 A running Fenix listens on a channel only you can reach, and anything
 you run can use it to ask Fenix to open files at a line, open a project,
-or say what it's showing. `fenix somefile` uses it to hand the file to
+say what it's showing, run one of its commands, capture a line into the
+notebook, or clock in on an agenda task. `fenix somefile` uses it to hand the file to
 the Fenix already running instead of starting a second one; a launcher,
 a terminal's link handler or a `git difftool` script can use it the
 same way. This page is the reference for writing such a client.
@@ -134,13 +135,15 @@ Every connection starts with `fenix/hello`; anything else first gets
 ```
 
 ```json
-{ "protocol": 1, "version": "1.1.0", "pid": 9732, "capabilities": ["fenix/open", "fenix/openProject", "fenix/state"] }
+{ "protocol": 1, "version": "1.1.0", "pid": 9732, "capabilities": ["fenix/open", "fenix/openProject", "fenix/state", "fenix/commands", "fenix/runCommand", "fenix/notebook.capture", "fenix/agenda.tasks", "fenix/agenda.clockIn", "fenix/agenda.clockOut"] }
 ```
 
 `capabilities` lists the methods this Fenix implements besides
 `fenix/hello`. Check it rather than the version: a method missing from it
-answers `-32601`. `client` is for Fenix's diagnostics; `version` and
-`pid` may be left out.
+answers `-32601`, and every method below appears in it only in a Fenix
+that answers it (builds from before the commands, notebook and agenda
+methods list only the first three). `client` is for Fenix's
+diagnostics; `version` and `pid` may be left out.
 
 On Windows, pass the `pid` you get back to `AllowSetForegroundWindow`
 before a request that should bring Fenix to the front. Windows only lets
@@ -191,6 +194,123 @@ Params: `{}`. Result, each field left out when there's nothing to report:
 pane (absent when a page or tool is in focus) and `line` the cursor's
 line in it, from 1.
 
+While the agenda's clock runs, there's also:
+
+```json
+{ "agendaTimer": { "taskId": 7, "title": "Write the report", "since": "2026-10-12T09:30:00+02:00" } }
+```
+
+`taskId` is the task's `id` in `fenix/agenda.tasks`; `since`, when the
+clock started, is RFC 3339 with the local offset.
+
+### `fenix/commands`
+
+Params: `{}`. Result:
+
+```json
+{ "commands": [
+  { "id": "agenda.open", "description": "Open the agenda page where it was left", "keys": "SPC a a", "external": true },
+  { "id": "file.save", "description": "Save the current file", "keys": "SPC f s", "external": false },
+  { "id": "view.reset_font_size", "description": "Reset the body text size to the default", "external": false }
+] }
+```
+
+Every command Fenix has, in the order it registers them. `keys` is the
+leader sequence that runs it, written as Fenix's key menu writes it
+(`SPC` for the space bar, `C-x` for Ctrl+x, keys separated by spaces);
+the shortest one when there are several, and absent when no leader key
+runs it. The buffer-specific `SPC m` menu isn't included.
+
+`external` says whether `fenix/runCommand` runs it: true for commands
+that make sense with nobody looking at a file in Fenix (open the
+agenda, switch project, today's journal, the clock picker), false for
+ones that act on what's in front of you there (save, undo, stage the
+hunk under the cursor), that start from the file you're in (the Git
+page of its repository, a capture linking back to it) or that need more
+than the editor (quit, open an OS window). For a capture from outside,
+use `fenix/notebook.capture`.
+
+### `fenix/runCommand`
+
+```json
+{ "id": "project.switch_project" }
+```
+
+Result: `{}`, once the command has run. Fenix comes forward, as for
+`fenix/open`: most external commands open a page, a picker or a prompt
+for you to carry on in. A command that isn't `external`, or an id Fenix
+doesn't have, answers `-32602` with a message saying which.
+
+### `fenix/notebook.capture`
+
+```json
+{ "text": "call the ground station about the pass", "target": "inbox" }
+```
+
+Result:
+
+```json
+{ "entry": "C:\Users\you\AppData\Roaming\fenix\data\notebook\Inbox.md" }
+```
+
+Files the line exactly as `SPC n c` does, stamped with the time: under
+the notebook's Inbox note (made if it isn't there yet) with `"target":
+"inbox"`, the default, or under the Log of today's journal day with
+`"journal"`. `entry` is the file it went into. Fenix writes it, keeping
+the notebook's index and any open buffer of that file in step, and
+doesn't take the focus. Text that's empty or only whitespace answers
+`-32602`; a notebook that can't be written, `-32603` with why.
+
+### `fenix/agenda.tasks`
+
+```json
+{ "status": ["todo", "inProgress"] }
+```
+
+Result:
+
+```json
+{ "tasks": [
+  { "id": 7, "title": "Write the report", "status": "inProgress", "jiraKey": "ABC-12", "elapsedMinutes": 95 },
+  { "id": 9, "title": "File it", "status": "todo", "elapsedMinutes": 0 }
+] }
+```
+
+The agenda's tasks, archived ones left out, in the board's order (by
+status, then as arranged within it). `status` (optional) keeps those in
+any of `todo`, `inProgress`, `blocked`, `done`; another value answers
+`-32602`. `id` is a number, stable for the task's life and never reused.
+`jiraKey` is there when the task is linked to an issue.
+`elapsedMinutes` counts every minute logged on it, the running clock's
+included.
+
+### `fenix/agenda.clockIn`
+
+```json
+{ "taskId": 7 }
+```
+
+Result: `{}`. Starts the clock on the task, stopping whatever clock was
+running first, exactly as choosing it in `SPC a t` does; the agenda is
+saved at once. `taskId` may also be given as its decimal string
+(`"7"`). A task that doesn't exist, or is archived, answers `-32602`.
+
+### `fenix/agenda.clockOut`
+
+Params: `{}`. Result: `{}`. Stops the clock, recording the time on its
+task, as `Stop` in `SPC a t` does. With no clock running it does
+nothing.
+
+## Fenix's files
+
+Tools should change the agenda and notebook through these methods, not
+by writing `agenda.json` or the notebook's files: Fenix saves the agenda
+whole, so a change written behind its back can be lost, and the
+notebook's index assumes Fenix made every change. Reading them is fine.
+Fenix does read `agenda.json` again when it changes on disk, for the
+agenda that roams with a Windows profile between machines, but that is
+a safety net, not a way in.
+
 ## Errors
 
 | Code | Meaning |
@@ -198,7 +318,7 @@ line in it, from 1.
 | `-32700` | The body isn't JSON |
 | `-32600` | Not a JSON-RPC 2.0 request, or a message the framing refuses |
 | `-32601` | No such method |
-| `-32602` | The params don't fit the method |
+| `-32602` | The params don't fit the method, or name something Fenix doesn't have (a command, a task) or won't do from outside (a command that isn't `external`) |
 | `-32603` | Fenix failed inside, or didn't answer within 30 seconds |
 | `-32001` | Unsupported protocol (`data.supported` lists the ones that are) |
 | `-32002` | Send `fenix/hello` first |

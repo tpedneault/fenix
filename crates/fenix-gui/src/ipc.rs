@@ -147,10 +147,7 @@ pub type Reply = Result<Value, RpcError>;
 /// keeps one open doesn't hold up the next. Each request the editor has
 /// to answer goes to it as `FenixUserEvent::Control`.
 pub fn spawn_accept_loop(mut listener: Listener, proxy: EventLoopProxy<FenixUserEvent>) {
-    let info = ServerInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        pid: std::process::id(),
-    };
+    let info = ServerInfo::new(env!("CARGO_PKG_VERSION"), std::process::id());
     std::thread::spawn(move || loop {
         let stream = match listener.accept() {
             Ok(stream) => stream,
@@ -220,10 +217,7 @@ mod tests {
             let writer = stream.try_clone().unwrap();
             let calls = Arc::new(Mutex::new(Vec::new()));
             let seen = Arc::clone(&calls);
-            let info = ServerInfo {
-                version: "1".into(),
-                pid: 1,
-            };
+            let info = ServerInfo::new("1", 1);
             let _ = fenix_control::serve(stream, writer, &info, move |call| {
                 seen.lock().unwrap().push(call);
                 Ok(serde_json::json!({}))

@@ -429,7 +429,10 @@ Everything Fenix does, by area. For the keys, see
   Unix socket in a private folder on Linux), so on a shared machine
   your files never open in someone else's editor. Other tools can
   script it -- open files at a position, open a project, ask what's in
-  focus -- with the JSON-RPC protocol in [CONTROL.md](CONTROL.md).
+  focus, list Fenix's commands with their keys and run the ones that
+  make sense from outside (the agenda, switching project...), capture a
+  line into the notebook, list agenda tasks and clock in or out -- with
+  the JSON-RPC protocol in [CONTROL.md](CONTROL.md).
 
 ## Windows and the UI
 
@@ -874,7 +877,9 @@ Everything Fenix does, by area. For the keys, see
   clock ran while you were away, Fenix asks what to keep. Tasks can be
   linked to Jira issues and stay in step both ways, due dates included;
   time on them is sent as worklogs from the Time tab (`W`). `?` on the
-  page lists every key.
+  page lists every key. When `agenda.json` changes on disk -- your
+  roaming profile bringing in what another machine did -- the agenda is
+  read again rather than overwritten at the next save.
 - **Jira** (`SPC j j`): a page of searches -- assigned to you, reported
   by you, watching, recently updated, each tracked project's current
   sprint and open issues, each tracked person's, and any saved JQL --

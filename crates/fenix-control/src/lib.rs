@@ -1,6 +1,7 @@
 //! Fenix's control channel: how a later `fenix` launch, or any tool the
 //! user runs, asks the running Fenix to do something -- open files at a
-//! line, open a project, say what it's showing.
+//! line, open a project, say what it's showing, run one of its
+//! commands, capture a note, clock in on an agenda task.
 //!
 //! - [`endpoint`]: where it listens, reachable by this user in this
 //!   login session only (a named pipe on Windows, a Unix socket in a
@@ -21,5 +22,9 @@ pub mod server;
 
 pub use client::{Client, ClientError};
 pub use endpoint::{BindError, Endpoint, Listener, Stream};
-pub use protocol::{Call, OpenParams, OpenPath, RpcError, StateResult};
+pub use protocol::{
+    AgendaTask, AgendaTimer, Call, CaptureParams, CaptureResult, CaptureTarget, ClockInParams,
+    CommandInfo, CommandsResult, OpenParams, OpenPath, RpcError, RunCommandParams, StateResult,
+    TaskStatus, TasksParams, TasksResult,
+};
 pub use server::{serve, ServerInfo};

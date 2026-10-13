@@ -17,6 +17,20 @@ pub fn load(path: &std::path::Path) -> AgendaStore {
     std::fs::read_to_string(path).ok().and_then(|contents| serde_json::from_str(&contents).ok()).unwrap_or_default()
 }
 
+/// Reads the store from `path` for a reload: `None` when the file isn't
+/// there, an error when it can't be read or isn't an agenda (a sync
+/// tool's half-written copy, a hand edit gone wrong). Unlike `load`, a
+/// bad file isn't taken for an empty agenda, so the caller can keep the
+/// one it has rather than lose it at the next save.
+pub fn reload(path: &std::path::Path) -> std::io::Result<Option<AgendaStore>> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    serde_json::from_str(&contents).map(Some).map_err(std::io::Error::other)
+}
+
 pub fn save(path: &std::path::Path, store: &AgendaStore) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -50,6 +64,18 @@ mod tests {
         std::fs::write(&path, b"not json").unwrap();
         let store = load(&path);
         assert!(store.tasks.is_empty());
+    }
+
+    #[test]
+    fn reload_tells_a_missing_file_from_a_bad_one() {
+        assert!(reload(&temp_path("reload-missing")).unwrap().is_none());
+        let path = temp_path("reload-bad");
+        std::fs::write(&path, b"{\"tasks\": [").unwrap();
+        assert!(reload(&path).is_err());
+        let mut store = AgendaStore::default();
+        store.create_task("Ship it".to_string(), String::new(), Priority::Medium, None);
+        save(&path, &store).unwrap();
+        assert_eq!(reload(&path).unwrap().unwrap().tasks[0].title, "Ship it");
     }
 
     #[test]

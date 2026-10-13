@@ -12,8 +12,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    code, method, Call, HelloParams, HelloResult, OpenParams, OpenPath, RpcError, CAPABILITIES,
-    MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
+    code, method, Call, CaptureParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError,
+    CAPABILITIES, MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
 };
 
 /// What the server says about itself in `fenix/hello`.
@@ -21,6 +21,21 @@ use crate::protocol::{
 pub struct ServerInfo {
     pub version: String,
     pub pid: u32,
+    /// The methods it answers, listed in `capabilities`. Anything else
+    /// is `-32601`, even a method this crate knows, so a client that
+    /// checks the list is never told one thing and served another.
+    pub capabilities: Vec<String>,
+}
+
+impl ServerInfo {
+    /// A server answering every method in [`CAPABILITIES`].
+    pub fn new(version: impl Into<String>, pid: u32) -> Self {
+        ServerInfo {
+            version: version.into(),
+            pid,
+            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+        }
+    }
 }
 
 /// The first bytes of every framed message.
@@ -182,15 +197,40 @@ impl Session<'_> {
                 format!("send {} first", method::HELLO),
             ));
         }
-        match method {
-            method::OPEN => handle(Call::Open(params_of(params)?)),
-            method::OPEN_PROJECT => handle(Call::OpenProject(params_of(params)?)),
-            method::STATE => handle(Call::State),
-            _ => Err(RpcError::new(
+        if !self.info.capabilities.iter().any(|c| c == method) {
+            return Err(RpcError::new(
                 code::METHOD_NOT_FOUND,
                 format!("no method {method}"),
-            )),
+            ));
         }
+        let call = match method {
+            method::OPEN => Call::Open(params_of(params)?),
+            method::OPEN_PROJECT => Call::OpenProject(params_of(params)?),
+            method::STATE => Call::State,
+            method::COMMANDS => Call::Commands,
+            method::RUN_COMMAND => Call::RunCommand(params_of(params)?),
+            method::NOTEBOOK_CAPTURE => {
+                let capture: CaptureParams = params_of(params)?;
+                if capture.text.trim().is_empty() {
+                    return Err(RpcError::invalid_params(
+                        "nothing to capture: text is empty",
+                    ));
+                }
+                Call::NotebookCapture(capture)
+            }
+            method::AGENDA_TASKS => Call::AgendaTasks(params_of(params)?),
+            method::AGENDA_CLOCK_IN => Call::AgendaClockIn(params_of(params)?),
+            method::AGENDA_CLOCK_OUT => Call::AgendaClockOut,
+            // Listed in the server's capabilities but unknown here: the
+            // caller asked for more than this crate implements.
+            _ => {
+                return Err(RpcError::new(
+                    code::METHOD_NOT_FOUND,
+                    format!("no method {method}"),
+                ))
+            }
+        };
+        handle(call)
     }
 
     fn hello(&mut self, params: Value) -> Result<Value, RpcError> {
@@ -208,7 +248,7 @@ impl Session<'_> {
             protocol: PROTOCOL,
             version: self.info.version.clone(),
             pid: self.info.pid,
-            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            capabilities: self.info.capabilities.clone(),
         };
         Ok(serde_json::to_value(result).expect("plain data serializes"))
     }

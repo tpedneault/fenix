@@ -10,8 +10,10 @@ use serde_json::{json, Value};
 
 use crate::endpoint::{Endpoint, Stream};
 use crate::protocol::{
-    method, ClientInfo, HelloParams, HelloResult, OpenParams, OpenProjectParams, RpcError,
-    StateResult, MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
+    method, CaptureParams, CaptureResult, CaptureTarget, ClientInfo, ClockInParams, CommandInfo,
+    CommandsResult, HelloParams, HelloResult, OpenParams, OpenProjectParams, RpcError,
+    RunCommandParams, StateResult, TaskStatus, TasksParams, TasksResult, MAX_BODY, MAX_HEADER_LINE,
+    PROTOCOL,
 };
 
 /// Why a request didn't get a result.
@@ -143,5 +145,62 @@ impl<R: Read, W: Write> Client<R, W> {
 
     pub fn state(&mut self) -> Result<StateResult, ClientError> {
         self.request(method::STATE, json!({}))
+    }
+
+    pub fn commands(&mut self) -> Result<Vec<CommandInfo>, ClientError> {
+        self.request::<CommandsResult>(method::COMMANDS, json!({}))
+            .map(|r| r.commands)
+    }
+
+    pub fn run_command(&mut self, id: &str) -> Result<(), ClientError> {
+        let params = RunCommandParams { id: id.to_string() };
+        self.request::<Value>(
+            method::RUN_COMMAND,
+            serde_json::to_value(params).expect("plain data serializes"),
+        )
+        .map(drop)
+    }
+
+    /// Captures `text` into the notebook; the file it went into.
+    pub fn notebook_capture(
+        &mut self,
+        text: &str,
+        target: CaptureTarget,
+    ) -> Result<String, ClientError> {
+        let params = CaptureParams {
+            text: text.to_string(),
+            target,
+        };
+        self.request::<CaptureResult>(
+            method::NOTEBOOK_CAPTURE,
+            serde_json::to_value(params).expect("plain data serializes"),
+        )
+        .map(|r| r.entry)
+    }
+
+    /// The agenda's tasks, only those in `status` when given.
+    pub fn agenda_tasks(
+        &mut self,
+        status: Option<Vec<TaskStatus>>,
+    ) -> Result<TasksResult, ClientError> {
+        let params = TasksParams { status };
+        self.request(
+            method::AGENDA_TASKS,
+            serde_json::to_value(params).expect("plain data serializes"),
+        )
+    }
+
+    pub fn agenda_clock_in(&mut self, task_id: u32) -> Result<(), ClientError> {
+        let params = ClockInParams { task_id };
+        self.request::<Value>(
+            method::AGENDA_CLOCK_IN,
+            serde_json::to_value(params).expect("plain data serializes"),
+        )
+        .map(drop)
+    }
+
+    pub fn agenda_clock_out(&mut self) -> Result<(), ClientError> {
+        self.request::<Value>(method::AGENDA_CLOCK_OUT, json!({}))
+            .map(drop)
     }
 }

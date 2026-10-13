@@ -70,35 +70,46 @@ impl App {
 
     /// Files a capture.
     pub(super) fn notebook_capture_done(&mut self, to: CaptureTo, task: bool, link: Option<String>, text: &str) {
-        let text = text.trim();
-        if text.is_empty() {
+        if text.trim().is_empty() {
             return;
         }
+        match self.notebook_capture_into(to, task, link.as_deref(), text) {
+            Ok(_) => self.set_message(format!("captured to {}", to.label())),
+            Err(why) => self.set_error(why),
+        }
+    }
+
+    /// Appends `text` to the journal day's Log or the Inbox, as `SPC n
+    /// c` does, through the notebook so its index and any open buffer of
+    /// the entry stay in step. The file it went into; why not, when it
+    /// couldn't. `fenix/notebook.capture` comes here too.
+    pub(super) fn notebook_capture_into(&mut self, to: CaptureTo, task: bool, link: Option<&str>, text: &str) -> Result<PathBuf, String> {
+        let text = text.trim();
         let now = chrono::Local::now();
-        let line = fenix_notebook::templates::capture_line(text, task, link.as_deref(), now.time());
+        let line = fenix_notebook::templates::capture_line(text, task, link, now.time());
         let id = match to {
             CaptureTo::Journal => {
                 let date = now.date_naive();
                 let template = self.journal_template(date);
                 self.notebook().and_then(|nb| nb.ensure_day(date, || template).ok()).map(|(id, _)| id)
             }
-            CaptureTo::Inbox => {
-                let Some(nb) = self.notebook() else { return };
-                match nb.by_name("Inbox") {
-                    Some(e) => Some(e.id.clone()),
-                    None => nb.create(NbKind::Note, "Inbox", "# Inbox\n\nThings captured to sort out later.\n").ok(),
-                }
-            }
+            CaptureTo::Inbox => self.notebook().and_then(|nb| match nb.by_name("Inbox") {
+                Some(e) => Some(e.id.clone()),
+                None => nb.create(NbKind::Note, "Inbox", "# Inbox\n\nThings captured to sort out later.\n").ok(),
+            }),
         };
         let Some(id) = id else {
-            self.set_error("couldn't open the notebook to capture into");
-            return;
+            return Err(self.notebook.error.clone().unwrap_or_else(|| "couldn't open the notebook to capture into".to_string()));
         };
         self.notebook_flush(&id);
         let before = self.notebook.book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.text.clone()).unwrap_or_default();
         let after = fenix_notebook::templates::append_to_log(&before, &line);
         self.notebook_write_entry(&id, &after);
-        self.set_message(format!("captured to {}", to.label()));
+        match self.notebook.book.as_ref().and_then(|nb| nb.get(&id)) {
+            Some(e) if e.text == after => Ok(e.path.clone()),
+            Some(e) => Err(format!("couldn't write {}", e.path.display())),
+            None => Err("the notebook lost the entry it was capturing into".to_string()),
+        }
     }
 
     // ------------------------------------------------------------------
