@@ -1197,6 +1197,21 @@ Everything Fenix does, by area. For the keys, see
   outside a project or in one without its own (`mib.include_yours` adds
   them to a project's). MIBs are read in the background and again when
   a `.dat` file changes.
+  - **ICD issues and XTCE**: a MIB folder is read as the SCOS-2000
+    Database Import ICD issue it follows -- 7.x (7.2) by default, or
+    6.9, 6.x, 5.x, 4.x -- with every table the issue has, monitoring,
+    displays, commanding, verification, parameter sets and sequences
+    (`mib.icd`; `auto` works it out from each MIB's column counts, and
+    `mib.icd_per_mib` sets one MIB apart). A mission whose tables differ,
+    or that adds its own, gives their columns (`mib.columns`). A MIB can
+    also be an XTCE 1.0, 1.1 or 1.2 file (`.xml` or `.xtce` as the MIB's
+    path): its parameters, packets and commands are read into the same
+    tables -- types and the types they extend, calibrations, alarm
+    limits, valid ranges, containers with what they extend and include,
+    commands with their base command's arguments and assignments, and
+    verifiers. Which parameters identify a packet can be named
+    (`mib.xtce_fields`) when their names don't say. The MIB page's header
+    shows what each MIB was read as.
   - **The MIB page** (`SPC k k`): a tab per kind -- `1` telecommands,
     `2` TC parameters, `3` TM packets, `4` TM parameters, `5`
     calibrations -- each a list with its own columns (PUS type,
@@ -1243,7 +1258,8 @@ Everything Fenix does, by area. For the keys, see
     missing or unknown arguments, values out of range.
   - **Services** (`6` on the MIB page): the telecommands and packets by
     PUS service and subtype, named as ECSS-E-ST-70-41C names them.
-  - **Generating from the MIB** (`SPC k g`): XTCE, a Wireshark Lua
+  - **Generating from the MIB** (`SPC k g`): XTCE (1.2, or 1.1 with
+    `mib.xtce_version`), a Wireshark Lua
     dissector, a C header, a Python module that encodes telecommands and
     decodes packets, an ICD in Markdown, or a test vector per
     telecommand, written to the project's `generated/` folder.

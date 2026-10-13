@@ -81,7 +81,7 @@ pub fn identify_tm(set: &MibSet, pkt: &Packet, sec: Option<&Secondary>) -> Optio
 /// (XTCE locations are from the container's start).
 pub fn params_start(set: &MibSet, spid: DefRef, profile: &Profile, base: OffsetBase) -> usize {
     let row = &set.get(spid).row;
-    if row.source.file.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")) {
+    if row.source.file.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml") || e.eq_ignore_ascii_case("xtce")) {
         return 0;
     }
     match base {

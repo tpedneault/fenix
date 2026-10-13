@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use crate::parse::Problem;
 use crate::row::Row;
-use crate::{schema, types, MibIndex, MibRoot};
+use crate::{types, MibIndex, MibRoot, ReadOptions};
 
 /// The kinds of definition the MIB page has a tab for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -179,8 +179,17 @@ impl Stamp {
                 files.push((root.path.clone(), meta));
                 continue;
             }
-            for table in schema::all_tables() {
-                let path = root.path.join(format!("{table}.dat"));
+            // Every table file, the ICD's or the mission's own -- and one
+            // appearing or going away changes the stamp too.
+            let mut tables: Vec<PathBuf> = std::fs::read_dir(&root.path)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dat")))
+                .collect();
+            tables.sort();
+            for path in tables {
                 let meta = std::fs::metadata(&path).ok().and_then(|m| Some((m.modified().ok()?, m.len())));
                 files.push((path, meta));
             }
@@ -194,6 +203,8 @@ impl Stamp {
 pub struct RootInfo {
     /// `VDF_NAME` and `VDF_COMMENT`, when it has a `vdf.dat`.
     pub version: Option<String>,
+    /// What it was read as: `ICD 7.x`, `ICD 6.9, detected`, `XTCE 1.2`.
+    pub format: Option<String>,
     pub tables: usize,
     pub rows: usize,
 }
@@ -246,9 +257,15 @@ impl MibSet {
     /// or names none of them. Never fails: what's wrong is in
     /// `problems`.
     pub fn load(roots: Vec<MibRoot>, default: Option<&str>) -> MibSet {
+        MibSet::load_with(roots, default, ReadOptions::default())
+    }
+
+    /// `load`, reading the MIBs as `options` says: which ICD issue, which
+    /// tables of the mission's own, how XTCE identifies packets.
+    pub fn load_with(roots: Vec<MibRoot>, default: Option<&str>, options: ReadOptions) -> MibSet {
         let stamp = Stamp::of(&roots);
         let default_root = default.and_then(|d| roots.iter().position(|r| r.label == d)).unwrap_or(0);
-        let mut index = MibIndex::new(roots);
+        let mut index = MibIndex::with_options(roots, options);
         index.refresh();
         let mut set = MibSet {
             entries: Default::default(),
@@ -486,9 +503,9 @@ impl MibSet {
         }
 
         for (i, _) in index.roots().iter().enumerate() {
-            let mut info = RootInfo::default();
-            for table in schema::all_tables() {
-                let n = index.rows(table).iter().filter(|r| r.source.root_index == i).count();
+            let mut info = RootInfo { format: index.format(i).map(ToString::to_string), ..RootInfo::default() };
+            for table in index.options().schema.tables() {
+                let n = index.rows(&table).iter().filter(|r| r.source.root_index == i).count();
                 if n > 0 {
                     info.tables += 1;
                     info.rows += n;

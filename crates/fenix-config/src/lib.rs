@@ -244,6 +244,19 @@ pub struct Config {
     pub mib_watch: Option<bool>,
     /// Diagnostics for telecommand calls in scripts.
     pub mib_check_scripts: Option<bool>,
+    /// The Database Import ICD issue the MIBs follow: "7.x", "6.9",
+    /// "6.x", "5.x", "4.x", or "auto" to work it out from each MIB's files.
+    pub mib_icd: Option<String>,
+    /// One MIB's own issue, `(label, issue)`, in place of `mib_icd`.
+    pub mib_icd_per_mib: Vec<(String, String)>,
+    /// A table's columns in file order, `(table, columns)`, in place of
+    /// the ICD's -- or a table of the mission's own.
+    pub mib_columns: Vec<(String, String)>,
+    /// Which parameters identify a packet in an XTCE MIB, `(field,
+    /// names)`: apid, service, subtype, pi1, pi2.
+    pub mib_xtce_fields: Vec<(String, String)>,
+    /// The XTCE version an export is written in: "1.2" or "1.1".
+    pub mib_xtce_version: Option<String>,
     /// The CCSDS and PUS profile: how a mission's packets and frames
     /// are laid out beyond what its MIB says.
     pub ccsds_pus: Option<String>,
@@ -589,6 +602,11 @@ impl Config {
             mib_apid_format: None,
             mib_watch: None,
             mib_check_scripts: None,
+            mib_icd: None,
+            mib_icd_per_mib: Vec::new(),
+            mib_columns: Vec::new(),
+            mib_xtce_fields: Vec::new(),
+            mib_xtce_version: None,
             ccsds_pus: None,
             ccsds_tm_time: None,
             ccsds_epoch: None,
@@ -1326,8 +1344,15 @@ mod tests {
             _ => Value::Text(r#"C:\a "b"\c = d"#.into()),
         };
         let settable: Vec<&Setting> = settings().iter().filter(|s| !matches!(s.kind, Kind::Secret(_))).collect();
+        // Maps whose values have a form of their own.
+        let sample_for = |s: &Setting| match s.key {
+            "mib.icd_per_mib" => Value::Map(vec![("OPS 1".into(), "6.9".into()), ("SIM".into(), "auto".into())]),
+            "mib.columns" => Value::Map(vec![("ccf".into(), "CCF_CNAME, CCF_DESCR".into()), ("xyz".into(), "XYZ_A".into())]),
+            "mib.xtce_fields" => Value::Map(vec![("apid".into(), "APPLICATION_ID".into()), ("pi1".into(), "SID, STRUCT".into())]),
+            _ => sample(&s.kind),
+        };
         for s in &settable {
-            s.set(&mut config, Some(sample(&s.kind))).unwrap_or_else(|e| panic!("{}: {e}", s.key));
+            s.set(&mut config, Some(sample_for(s))).unwrap_or_else(|e| panic!("{}: {e}", s.key));
         }
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
