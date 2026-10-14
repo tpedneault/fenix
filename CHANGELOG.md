@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Catppuccin themes, all four flavours: `Catppuccin Latte`,
+  `Catppuccin Frappé`, `Catppuccin Macchiato` and `Catppuccin Mocha`, in
+  the theme picker (`SPC t p`) and `editor.theme`. Latte's accents are
+  darkened just enough to read on its light background.
 - MIBs of every main SCOS-2000 Database Import ICD issue -- 7.x, 6.9,
   6.x, 5.x and 4.x -- with all of the ICD's tables, including
   verification, parameter sets, groups and displays. `mib.icd` picks the

@@ -790,9 +790,237 @@ pub const VISUAL_STUDIO_DARK: Theme = Theme {
     git_conflicted: text_color(0xf46a6a),
 };
 
+/// Catppuccin Latte, the light flavour. Catppuccin's accents are pastels
+/// meant to sit on a dark base; on Latte's near-white page most of them fall
+/// short of the 4.5:1 this file's contrast tests ask of every text color, so
+/// each text accent is darkened toward black -- same hue -- only as far as it
+/// takes to pass, and the mode badges likewise so `base` lettering reads on
+/// them. The caret rect itself stays Catppuccin's own rosewater.
+pub const CATPPUCCIN_LATTE: Theme = Theme {
+    name: "Catppuccin Latte",
+    font_family: None,
+    border: None,
+    divider: rgba(0xacb0be),
+    tabs: TabStyle::Underline,
+
+    bg: rgba(0xeff1f5),
+    sidebar_bg: rgba(0xe6e9ef),
+    bg_modeline: rgba(0xe6e9ef),
+    fg: text_color(0x4c4f69),
+    fg_modeline: text_color(0x4c4f69),
+    caret: rgba(0xdc8a78),
+    caret_text: text_color(0x865449),
+    hl_line: rgba(0xd9dce4),
+    selection: rgba_alpha(0x7c7f93, 0.25),
+    bracket_match: rgba_alpha(0xfe640b, 0.15),
+    search_match: rgba_alpha(0x04a5e5, 0.18),
+
+    mode_normal: rgba(0x1d63ee),
+    mode_insert: rgba(0x327d22),
+    mode_visual: rgba(0x8839ef),
+    mode_replace: rgba(0xd20f39),
+    mode_command: rgba(0xbc4a08),
+    mode_explorer: rgba(0x187788),
+    mode_picker: rgba(0xa1518c),
+    mode_text_dark: text_color(0xeff1f5),
+    mode_text_light: text_color(0xeff1f5),
+
+    gutter_fg: text_color(0x5e606c),
+
+    syntax_keyword: text_color(0x7d34dc),
+    syntax_string: text_color(0x2c6e1e),
+    syntax_comment: text_color(0x5d5f6e),
+    syntax_function: text_color(0x1a58d3),
+    syntax_type: text_color(0x865511),
+    syntax_number: text_color(0xa54107),
+    syntax_constant: text_color(0xa54107),
+    syntax_variable: text_color(0x4c4f69),
+    syntax_operator: text_color(0x036890),
+    syntax_punctuation: text_color(0x036890),
+    syntax_attribute: text_color(0x116b70),
+
+    icon_folder: text_color(0x1a58d3),
+    icon_file: text_color(0x4c4f69),
+    git_modified: text_color(0x865511),
+    git_staged: text_color(0x2c6e1e),
+    git_untracked: text_color(0x156977),
+    git_ignored: text_color(0x5e606c),
+    git_conflicted: text_color(0xc10e34),
+};
+
+/// Catppuccin Frappé, the lightest of the three dark flavours.
+pub const CATPPUCCIN_FRAPPE: Theme = Theme {
+    name: "Catppuccin Frappé",
+    font_family: None,
+    border: None,
+    divider: rgba(0x51576d),
+    tabs: TabStyle::Underline,
+
+    bg: rgba(0x303446),
+    sidebar_bg: rgba(0x292c3c),
+    bg_modeline: rgba(0x292c3c),
+    fg: text_color(0xc6d0f5),
+    fg_modeline: text_color(0xc6d0f5),
+    caret: rgba(0xf2d5cf),
+    caret_text: text_color(0xf2d5cf),
+    hl_line: rgba(0x3b3f52),
+    selection: rgba_alpha(0x949cbb, 0.25),
+    bracket_match: rgba_alpha(0xef9f76, 0.15),
+    search_match: rgba_alpha(0x99d1db, 0.18),
+
+    mode_normal: rgba(0x8caaee),
+    mode_insert: rgba(0xa6d189),
+    mode_visual: rgba(0xca9ee6),
+    mode_replace: rgba(0xe78284),
+    mode_command: rgba(0xef9f76),
+    mode_explorer: rgba(0x85c1dc),
+    mode_picker: rgba(0xf4b8e4),
+    mode_text_dark: text_color(0x232634),
+    mode_text_light: text_color(0x232634),
+
+    gutter_fg: text_color(0xa6abc0),
+
+    syntax_keyword: text_color(0xca9ee6),
+    syntax_string: text_color(0xa6d189),
+    syntax_comment: text_color(0xa3aac5),
+    syntax_function: text_color(0x8caaee),
+    syntax_type: text_color(0xe5c890),
+    syntax_number: text_color(0xef9f76),
+    syntax_constant: text_color(0xef9f76),
+    syntax_variable: text_color(0xc6d0f5),
+    syntax_operator: text_color(0x99d1db),
+    syntax_punctuation: text_color(0x99d1db),
+    syntax_attribute: text_color(0x81c8be),
+
+    icon_folder: text_color(0x8caaee),
+    icon_file: text_color(0xc6d0f5),
+    git_modified: text_color(0xe5c890),
+    git_staged: text_color(0xa6d189),
+    git_untracked: text_color(0x85c1dc),
+    git_ignored: text_color(0xa6abc0),
+    git_conflicted: text_color(0xea9395),
+};
+
+/// Catppuccin Macchiato.
+pub const CATPPUCCIN_MACCHIATO: Theme = Theme {
+    name: "Catppuccin Macchiato",
+    font_family: None,
+    border: None,
+    divider: rgba(0x494d64),
+    tabs: TabStyle::Underline,
+
+    bg: rgba(0x24273a),
+    sidebar_bg: rgba(0x1e2030),
+    bg_modeline: rgba(0x1e2030),
+    fg: text_color(0xcad3f5),
+    fg_modeline: text_color(0xcad3f5),
+    caret: rgba(0xf4dbd6),
+    caret_text: text_color(0xf4dbd6),
+    hl_line: rgba(0x303347),
+    selection: rgba_alpha(0x939ab7, 0.25),
+    bracket_match: rgba_alpha(0xf5a97f, 0.15),
+    search_match: rgba_alpha(0x91d7e3, 0.18),
+
+    mode_normal: rgba(0x8aadf4),
+    mode_insert: rgba(0xa6da95),
+    mode_visual: rgba(0xc6a0f6),
+    mode_replace: rgba(0xed8796),
+    mode_command: rgba(0xf5a97f),
+    mode_explorer: rgba(0x7dc4e4),
+    mode_picker: rgba(0xf5bde6),
+    mode_text_dark: text_color(0x181926),
+    mode_text_light: text_color(0x181926),
+
+    gutter_fg: text_color(0x979db3),
+
+    syntax_keyword: text_color(0xc6a0f6),
+    syntax_string: text_color(0xa6da95),
+    syntax_comment: text_color(0x969db9),
+    syntax_function: text_color(0x8aadf4),
+    syntax_type: text_color(0xeed49f),
+    syntax_number: text_color(0xf5a97f),
+    syntax_constant: text_color(0xf5a97f),
+    syntax_variable: text_color(0xcad3f5),
+    syntax_operator: text_color(0x91d7e3),
+    syntax_punctuation: text_color(0x91d7e3),
+    syntax_attribute: text_color(0x8bd5ca),
+
+    icon_folder: text_color(0x8aadf4),
+    icon_file: text_color(0xcad3f5),
+    git_modified: text_color(0xeed49f),
+    git_staged: text_color(0xa6da95),
+    git_untracked: text_color(0x7dc4e4),
+    git_ignored: text_color(0x979db3),
+    git_conflicted: text_color(0xed8796),
+};
+
+/// Catppuccin Mocha, the darkest flavour.
+pub const CATPPUCCIN_MOCHA: Theme = Theme {
+    name: "Catppuccin Mocha",
+    font_family: None,
+    border: None,
+    divider: rgba(0x45475a),
+    tabs: TabStyle::Underline,
+
+    bg: rgba(0x1e1e2e),
+    sidebar_bg: rgba(0x181825),
+    bg_modeline: rgba(0x181825),
+    fg: text_color(0xcdd6f4),
+    fg_modeline: text_color(0xcdd6f4),
+    caret: rgba(0xf5e0dc),
+    caret_text: text_color(0xf5e0dc),
+    hl_line: rgba(0x2a2b3c),
+    selection: rgba_alpha(0x9399b2, 0.25),
+    bracket_match: rgba_alpha(0xfab387, 0.15),
+    search_match: rgba_alpha(0x89dceb, 0.18),
+
+    mode_normal: rgba(0x89b4fa),
+    mode_insert: rgba(0xa6e3a1),
+    mode_visual: rgba(0xcba6f7),
+    mode_replace: rgba(0xf38ba8),
+    mode_command: rgba(0xfab387),
+    mode_explorer: rgba(0x74c7ec),
+    mode_picker: rgba(0xf5c2e7),
+    mode_text_dark: text_color(0x11111b),
+    mode_text_light: text_color(0x11111b),
+
+    gutter_fg: text_color(0x9195aa),
+
+    syntax_keyword: text_color(0xcba6f7),
+    syntax_string: text_color(0xa6e3a1),
+    syntax_comment: text_color(0x9399b2),
+    syntax_function: text_color(0x89b4fa),
+    syntax_type: text_color(0xf9e2af),
+    syntax_number: text_color(0xfab387),
+    syntax_constant: text_color(0xfab387),
+    syntax_variable: text_color(0xcdd6f4),
+    syntax_operator: text_color(0x89dceb),
+    syntax_punctuation: text_color(0x89dceb),
+    syntax_attribute: text_color(0x94e2d5),
+
+    icon_folder: text_color(0x89b4fa),
+    icon_file: text_color(0xcdd6f4),
+    git_modified: text_color(0xf9e2af),
+    git_staged: text_color(0xa6e3a1),
+    git_untracked: text_color(0x74c7ec),
+    git_ignored: text_color(0x9195aa),
+    git_conflicted: text_color(0xf38ba8),
+};
 /// Every theme Fenix ships. `by_name` works off this.
-pub const ALL: &[&Theme] =
-    &[&ORBIT_DARK, &TEMPLEOS, &GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK, &VISUAL_STUDIO_DARK];
+pub const ALL: &[&Theme] = &[
+    &ORBIT_DARK,
+    &TEMPLEOS,
+    &GRUVBOX_DARK,
+    &NORD,
+    &DRACULA,
+    &SOLARIZED_DARK,
+    &ONE_DARK,
+    &VISUAL_STUDIO_DARK,
+    &CATPPUCCIN_LATTE,
+    &CATPPUCCIN_FRAPPE,
+    &CATPPUCCIN_MACCHIATO,
+    &CATPPUCCIN_MOCHA,
+];
 
 /// Case-insensitive lookup by `Theme::name` -- used for persistence
 /// (the saved file just holds a name) and is the reason `name` exists
@@ -1046,7 +1274,11 @@ mod tests {
                 "Dracula",
                 "Solarized Dark",
                 "One Dark",
-                "Visual Studio Dark"
+                "Visual Studio Dark",
+                "Catppuccin Latte",
+                "Catppuccin Frappé",
+                "Catppuccin Macchiato",
+                "Catppuccin Mocha"
             ]
         );
     }
@@ -1058,7 +1290,18 @@ mod tests {
         // no special-casing needed anywhere `syntax_color`/`git_status_
         // color` are called.
         use fenix_explorer::GitStatus;
-        for theme in [&GRUVBOX_DARK, &NORD, &DRACULA, &SOLARIZED_DARK, &ONE_DARK, &VISUAL_STUDIO_DARK] {
+        for theme in [
+            &GRUVBOX_DARK,
+            &NORD,
+            &DRACULA,
+            &SOLARIZED_DARK,
+            &ONE_DARK,
+            &VISUAL_STUDIO_DARK,
+            &CATPPUCCIN_LATTE,
+            &CATPPUCCIN_FRAPPE,
+            &CATPPUCCIN_MACCHIATO,
+            &CATPPUCCIN_MOCHA,
+        ] {
             assert_eq!(theme.syntax_color("keyword"), theme.syntax_keyword, "{}", theme.name);
             assert_eq!(theme.syntax_color("function.method"), theme.syntax_function, "{}", theme.name);
             assert_eq!(theme.syntax_color("some.unknown.capture"), theme.fg, "{}", theme.name);
@@ -1070,7 +1313,18 @@ mod tests {
 
     #[test]
     fn by_name_resolves_every_new_theme_case_insensitively() {
-        for name in ["Gruvbox Dark", "Nord", "Dracula", "Solarized Dark", "One Dark", "Visual Studio Dark"] {
+        for name in [
+            "Gruvbox Dark",
+            "Nord",
+            "Dracula",
+            "Solarized Dark",
+            "One Dark",
+            "Visual Studio Dark",
+            "Catppuccin Latte",
+            "Catppuccin Frappé",
+            "Catppuccin Macchiato",
+            "Catppuccin Mocha",
+        ] {
             assert_eq!(by_name(&name.to_lowercase()).map(|t| t.name), Some(name));
         }
     }

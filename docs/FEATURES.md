@@ -1334,8 +1334,11 @@ Everything Fenix does, by area. For the keys, see
 ## Themes, terminals and tables
 
 - **Themes**: `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`,
-  `Solarized Dark`, and `One Dark`, jumped to directly by name with a
-  fuzzy picker (`SPC t p`), persisted. Two rules hold across all of
+  `Solarized Dark`, `One Dark`, `Visual Studio Dark`, and Catppuccin's
+  four flavours -- `Catppuccin Latte` (light), `Catppuccin Frappé`,
+  `Catppuccin Macchiato` and `Catppuccin Mocha` -- jumped to directly by
+  name with a fuzzy picker (`SPC t p`), persisted. Latte's accents are
+  darkened from Catppuccin's own so text keeps 4.5:1 on its light page. Two rules hold across all of
   them, and are pinned by tests: comments sit closer to the background
   than body text does, so they read as quieter rather than as more
   code; and operators and punctuation share an accent that is neither
