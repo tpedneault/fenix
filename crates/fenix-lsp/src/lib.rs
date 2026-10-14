@@ -25,6 +25,7 @@ pub mod workspace_edit;
 
 mod client;
 mod envelope;
+pub mod fanout;
 pub mod per_language;
 mod position;
 mod sync;

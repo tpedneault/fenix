@@ -515,7 +515,10 @@ fn project(d: &mut Doctor, tools: Result<ProjectTools, String>) {
         match tools {
             Ok(tools) => {
                 let n = tools.tasks.len();
-                d.push(Check::new(Section::Project, "tools.json", Health::Ok, format!("valid · {n} task{}", if n == 1 { "" } else { "s" })).at(tools_path, 1));
+                d.push(Check::new(Section::Project, "tools.json", Health::Ok, format!("valid · {n} task{}", if n == 1 { "" } else { "s" })).at(tools_path.clone(), 1));
+                for server in &tools.lsp.additional {
+                    additional_server(d, server, &tools_path);
+                }
             }
             Err(e) => d.push(Check::new(Section::Project, "tools.json", Health::Bad, e).at(tools_path, 1)),
         }
@@ -535,6 +538,25 @@ fn project(d: &mut Doctor, tools: Result<ProjectTools, String>) {
     } else {
         d.push(Check::new(Section::Project, "git", Health::Info, "not a repository").run("git init", "git", &["init"], true));
     }
+}
+
+/// An additional language server's check: its program found (as a
+/// project-relative path or on PATH), and which languages it serves.
+fn additional_server(d: &mut Doctor, server: &crate::tools::AdditionalServer, tools_path: &Path) {
+    let label = format!("{} (additional server)", server.name);
+    let languages = server.languages.join(", ");
+    let path = Path::new(&server.executable);
+    let found = if path.is_absolute() || server.executable.contains(['/', '\\']) {
+        let path = if path.is_absolute() { path.to_path_buf() } else { d.root.join(path) };
+        path.is_file().then_some(path)
+    } else {
+        d.probe.locate(&server.executable)
+    };
+    let check = match found {
+        Some(path) => Check::new(Section::Toolchain, label, Health::Ok, format!("{languages} · {}", path.display())),
+        None => Check::new(Section::Toolchain, label, Health::Warn, format!("{} not found -- {languages} buffers get only their primary server", server.executable)),
+    };
+    d.push(check.at(tools_path.to_path_buf(), 1));
 }
 
 #[cfg(test)]
@@ -713,6 +735,25 @@ mod tests {
         assert_eq!(git.health, Health::Ok);
         assert!(git.detail.starts_with("trunk · part of the "), "{}", git.detail);
         assert!(git.fix.is_none());
+    }
+
+    #[test]
+    fn additional_servers_are_checked_by_name() {
+        let dir = TempDir::new("doctor_additional");
+        dir.write(".fenix/tools.json", r#"{"lsp":{"additional":[
+            {"name":"kiln","executable":"kiln","args":["lsp"],"languages":["rust","markdown"]},
+            {"name":"spell","executable":"bin/spell-ls","languages":["markdown"]}]}}"#);
+        let probe = FakeProbe { programs: vec!["kiln"], ..Default::default() };
+        let checks = diagnose(dir.path(), ProjectKind::Other, &probe, false);
+        let kiln = find(&checks, "kiln (additional server)");
+        assert_eq!(kiln.health, Health::Ok);
+        assert!(kiln.detail.starts_with("rust, markdown"), "{}", kiln.detail);
+        let spell = find(&checks, "spell (additional server)");
+        assert_eq!(spell.health, Health::Warn);
+        assert!(spell.detail.contains("not found"), "{}", spell.detail);
+        dir.write("bin/spell-ls", "");
+        let checks = diagnose(dir.path(), ProjectKind::Other, &probe, false);
+        assert_eq!(find(&checks, "spell (additional server)").health, Health::Ok, "a project-relative program is looked for in the project");
     }
 
     #[test]

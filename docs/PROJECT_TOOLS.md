@@ -1,7 +1,8 @@
 # Project tool settings
 
-Fenix runs one language server per language and canonical project root. Opening
-two Python or Rust projects no longer routes their requests to the same server.
+Fenix runs one primary language server per language and canonical project root,
+plus any additional servers a project declares (see below). Opening two Python
+or Rust projects no longer routes their requests to the same server.
 Relative aliases of a root reuse the same session. The nearest project marker
 determines ownership; `.fenix/settings.toml` and `.fenix/tools.json` are also markers.
 
@@ -55,6 +56,77 @@ bare executables and npm `.cmd` shims are resolved using the child's `PATH` and
 `PATHEXT`. An explicit `PATH` override cannot silently fall back to the parent's
 search path. `%PATH%`, `$PATH`, and `${workspaceFolder}` are literal strings here.
 
+## Additional language servers
+
+A buffer can be served by more than one language server: its language's own
+(the *primary*, configured as above or built in) and any number of additional
+servers. Declare them under `"lsp"` as `"additional"`, each with a `name`, the
+`languages` it serves, and the same `executable`/`args`/`cwd`/`env` as any
+other command. For example, rust-analyzer for Rust plus a requirements server
+that also serves Markdown and Tcl:
+
+```json
+{
+  "lsp": {
+    "rust": { "executable": "rust-analyzer" },
+    "additional": [
+      {
+        "name": "kiln",
+        "executable": "kiln",
+        "args": ["lsp"],
+        "languages": ["rust", "markdown", "tcl"]
+      },
+      {
+        "name": "spell",
+        "executable": "spell-ls",
+        "args": ["--stdio"],
+        "languages": ["markdown"]
+      }
+    ]
+  }
+}
+```
+
+Here a `.rs` file is served by rust-analyzer and `kiln`, a Markdown file by
+`kiln` and `spell` (Markdown has no primary server), and a `.tcl` file by `kiln`
+alone. The per-language entries keep working exactly as before, and a project
+with no `"additional"` behaves as it always has.
+
+- **One process per server and project.** `kiln` above runs once per project
+  and is told about every Rust, Markdown and Tcl buffer you open there
+  (`didOpen`, `didChange`). Each server keeps its own capabilities and its own
+  document versions.
+- **Diagnostics** from every server are shown together; each names its source
+  (the server's own `source`, else its name). A server clearing its
+  diagnostics leaves the others'.
+- **Completion** merges every server's items. A character a server declared a
+  trigger (`.`, `-`) asks only the servers that declared it. While the popup
+  stays at one place, only servers that said their list was incomplete are
+  asked again as you type. Inside a comment or a string, local words are left
+  out but servers are still asked, so a server can complete an ID in
+  `// implements: REQ-014`. With more than one server answering, the popup
+  names the server of each item.
+- **Hover** (`K`) shows every server's answer, the primary's first, separated by
+  a rule; empty answers are dropped, and answers show as they arrive.
+- **Definition, references and code actions** are merged (locations without
+  repeats); with several servers, each code action names its server, and
+  applying it is checked against that server's view of the documents.
+- **Rename and formatting** go to the primary only -- unless the primary can't,
+  and exactly one additional server can.
+- **A slow server** doesn't hold the others up: after a short deadline (0.8 s),
+  `gd`, `gr` and code actions use what has arrived; a server that errors on a
+  request is skipped for it.
+- **A server that fails** to start or crashes is reported by name, like a
+  primary's failure, and leaves the buffer's other servers running. It waits for
+  `:lsp-restart` rather than retrying every frame.
+
+Names are unique, and `languages` are lowercase language names as above. A
+missing name or language, a duplicate name, or an unknown field is reported
+like any other invalid `tools.json`. The project doctor (`SPC p h`) checks each
+additional server's program, the tool status (`SPC l m`) lists them with what
+they serve and whether they're running, and the project settings (`SPC p ,`)
+edit them as `name: languages = command`.
+
 ## Precedence and lifetime
 
 - Project LSP commands override global `[lsp] serverN` INI entries and built-in
@@ -69,7 +141,9 @@ search path. `%PATH%`, `$PATH`, and `${workspaceFolder}` are literal strings her
   selected executable and arguments; output paths resolve against its actual cwd.
 - LSP environment and command settings stay fixed for the session. Run
   `:lsp-restart` from the project to reload them. It restarts that project's
-  servers only. Failed/unavailable servers wait for this command rather than
+  servers only (and re-reads its additional servers); `:lsp-restart NAME`
+  restarts one -- an additional server's name, a primary server's program,
+  or a language. Failed/unavailable servers wait for this command rather than
   retrying every frame. Debug settings are frozen when a session starts.
 
 Missing `tools.json` preserves the old configuration. Invalid JSON, unknown

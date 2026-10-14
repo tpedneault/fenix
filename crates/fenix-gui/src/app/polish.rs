@@ -492,7 +492,8 @@ mod tests {
         let key = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap());
         let range = lsp_types::Range { start: lsp_types::Position { line, character: start }, end: lsp_types::Position { line, character: end } };
         let diag = lsp_types::Diagnostic { range, message: "name is not defined".into(), severity: Some(lsp_types::DiagnosticSeverity::ERROR), ..Default::default() };
-        app.diagnostics.insert(key, vec![diag]);
+        let server = app.lsp_key(fenix_syntax::LanguageId::Python);
+        app.diagnostics.publish(key, server, "pyright", vec![diag]);
         app
     }
 

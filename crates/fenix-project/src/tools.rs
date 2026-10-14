@@ -111,11 +111,92 @@ impl Launch {
     }
 }
 
+/// A language server that runs beside each language's primary one --
+/// `"additional"` under `"lsp"`. One process per project serves every
+/// buffer of every language it lists, alongside whatever primary server
+/// that language has (or none).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdditionalServer {
+    /// What Fenix calls it in messages, the tool status and `:lsp-restart NAME`.
+    pub name: String,
+    /// The language names it serves, as the per-language keys spell them.
+    pub languages: Vec<String>,
+    pub executable: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl AdditionalServer {
+    /// The process to start, with the same rules as a primary server's.
+    pub fn command(&self) -> CommandSpec {
+        CommandSpec { executable: self.executable.clone(), args: self.args.clone(), cwd: self.cwd.clone(), env: self.env.clone() }
+    }
+
+    pub fn serves(&self, language: &str) -> bool {
+        self.languages.iter().any(|l| l == language)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() || self.name.trim() != self.name {
+            return Err("an additional server needs a name without surrounding spaces".to_string());
+        }
+        let at = |e: String| format!("(lsp.additional {}): {e}", self.name);
+        if self.languages.is_empty() {
+            return Err(at("it needs at least one language".to_string()));
+        }
+        for language in &self.languages {
+            if language.is_empty() || language.chars().any(|c| c.is_uppercase() || c.is_whitespace()) {
+                return Err(at(format!("language names are lowercase, like rust or markdown, not {language:?}")));
+            }
+        }
+        self.command().validate().map_err(at)
+    }
+}
+
+/// `"lsp"`: one primary server per language, plus any additional servers.
+/// Derefs to the per-language map, so `lsp.get("rust")` reads as before.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+pub struct LspTools {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional: Vec<AdditionalServer>,
+    #[serde(flatten)]
+    pub languages: BTreeMap<String, CommandSpec>,
+}
+
+impl LspTools {
+    pub fn is_empty(&self) -> bool {
+        self.languages.is_empty() && self.additional.is_empty()
+    }
+
+    /// The additional servers for `language`, in the order they're written.
+    pub fn additional_for<'a>(&'a self, language: &'a str) -> impl Iterator<Item = &'a AdditionalServer> + 'a {
+        self.additional.iter().filter(move |server| server.serves(language))
+    }
+}
+
+impl std::ops::Deref for LspTools {
+    type Target = BTreeMap<String, CommandSpec>;
+    fn deref(&self) -> &Self::Target {
+        &self.languages
+    }
+}
+
+impl std::ops::DerefMut for LspTools {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.languages
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectTools {
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub lsp: BTreeMap<String, CommandSpec>,
+    #[serde(default, skip_serializing_if = "LspTools::is_empty")]
+    pub lsp: LspTools,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dap: BTreeMap<String, CommandSpec>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -158,7 +239,14 @@ impl ProjectTools {
     /// text that isn't on disk yet (a template's generated file).
     pub fn parse(text: &str) -> Result<Self, String> {
         let result: Self = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        for (name, command) in result.lsp.iter().chain(&result.dap).chain(&result.tasks) {
+        let mut names = std::collections::HashSet::new();
+        for server in &result.lsp.additional {
+            server.validate()?;
+            if !names.insert(server.name.as_str()) {
+                return Err(format!("(lsp.additional): two servers are called {}", server.name));
+            }
+        }
+        for (name, command) in result.lsp.languages.iter().chain(&result.dap).chain(&result.tasks) {
             if name.trim().is_empty() {
                 return Err("empty tool name".to_string());
             }
@@ -278,6 +366,38 @@ mod tests {
             assert!(ProjectTools::read(dir.path()).is_err());
         }
     }
+    #[test]
+    fn additional_servers_sit_beside_the_primary_ones() {
+        let text = r#"{"lsp":{"rust":{"executable":"rust-analyzer"},
+            "additional":[{"name":"kiln","executable":"kiln","args":["lsp"],"languages":["rust","markdown"]}]}}"#;
+        let tools = ProjectTools::parse(text).unwrap();
+        assert_eq!(tools.lsp.get("rust").unwrap().executable, "rust-analyzer", "the primary reads as before");
+        assert_eq!(tools.lsp.len(), 1, "additional isn't a language");
+        let kiln: Vec<_> = tools.lsp.additional_for("markdown").collect();
+        assert_eq!(kiln.len(), 1);
+        assert_eq!(kiln[0].command().args, ["lsp"]);
+        assert_eq!(tools.lsp.additional_for("tcl").count(), 0);
+        assert_eq!(ProjectTools::parse(&tools.to_json().unwrap()).unwrap(), tools, "round-trips");
+        let only_additional = ProjectTools::parse(r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["tcl"]}]}}"#).unwrap();
+        assert!(only_additional.lsp.languages.is_empty());
+    }
+
+    #[test]
+    fn bad_additional_servers_are_refused_with_a_reason() {
+        for (text, why) in [
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":[]}]}}"#, "at least one language"),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["Rust"]}]}}"#, "lowercase"),
+            (r#"{"lsp":{"additional":[{"name":"","executable":"k","languages":["rust"]}]}}"#, "name"),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"","languages":["rust"]}]}}"#, "executable"),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["rust"]},{"name":"k","executable":"j","languages":["tcl"]}]}}"#, "two servers"),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["rust"],"typo":1}]}}"#, "typo"),
+            (r#"{"lsp":{"additional":{"name":"k"}}}"#, ""),
+        ] {
+            let error = ProjectTools::parse(text).unwrap_err();
+            assert!(error.contains(why), "{text}: {error}");
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn resolves_against_the_child_path_without_changing_host_environment() {
