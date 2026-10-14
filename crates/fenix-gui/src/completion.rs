@@ -52,6 +52,9 @@ pub struct Item {
     pub detail: String,
     pub documentation: String,
     pub insertion: Insertion,
+    /// The language server that offered it, named when more than one
+    /// answered -- shown in place of "LSP".
+    pub server: Option<String>,
 }
 
 impl From<fenix_completion::CompletionItem> for Item {
@@ -73,6 +76,7 @@ impl Item {
             source,
             detail: String::new(),
             documentation: String::new(),
+            server: None,
         }
     }
 
@@ -86,6 +90,7 @@ impl Item {
                 .render(&Default::default(), &fenix_snippets::Context::default(), "")
                 .text,
             insertion: Insertion::Snippet(snippet.template.clone()),
+            server: None,
         }
     }
 
@@ -108,7 +113,13 @@ impl Item {
             detail: item.detail.clone().unwrap_or_default(),
             documentation,
             insertion: Insertion::Lsp(Box::new(item)),
+            server: None,
         })
+    }
+
+    /// What the popup's right-hand column says it is.
+    pub fn source_label(&self) -> &str {
+        self.server.as_deref().unwrap_or(self.source.label())
     }
 }
 
@@ -179,11 +190,19 @@ pub fn apply_lsp(
             (convert(edit.replace)?, edit.new_text.clone())
         }
         None => (
-            fallback,
+            fallback.clone(),
             item.insert_text
                 .clone()
                 .unwrap_or_else(|| item.label.clone()),
         ),
+    };
+    // An item kept from a complete list asked for a few keystrokes ago
+    // ends where the cursor was then; what was typed since is part of the
+    // word it replaces.
+    let main = if main.end < cursor.char_idx && main.start <= cursor.char_idx && main.end >= fallback.start && buffer.line_col(&Cursor { char_idx: main.end, sticky_col: 0 }).0 == buffer.line_col(cursor).0 {
+        main.start..cursor.char_idx
+    } else {
+        main
     };
     if main.start > cursor.char_idx || main.end < cursor.char_idx {
         return Err("completion edit does not contain the cursor".into());
@@ -525,5 +544,23 @@ mod tests {
         }]);
         assert!(apply_lsp(&mut buffer, &mut cursor, 0..5, &item).is_err());
         assert_eq!(buffer.text(), "print");
+    }
+
+    #[test]
+    fn a_kept_item_replaces_what_was_typed_since_it_was_asked_for() {
+        // Asked at "REQ-0|"; the list was complete, so after typing "1"
+        // the same item is applied with its range ending one short.
+        let mut buffer = buf("// implements: REQ-01");
+        let mut cursor = Cursor { char_idx: 21, ..Cursor::default() };
+        let item: lsp_types::CompletionItem = serde_json::from_value(serde_json::json!({
+            "label": "REQ-014", "textEdit": {
+                "range": {"start":{"line":0,"character":15},"end":{"line":0,"character":20}},
+                "newText":"REQ-014"
+            }
+        }))
+        .unwrap();
+        apply_lsp(&mut buffer, &mut cursor, 19..21, &item).unwrap();
+        assert_eq!(buffer.text(), "// implements: REQ-014");
+        assert_eq!(cursor.char_idx, 22);
     }
 }

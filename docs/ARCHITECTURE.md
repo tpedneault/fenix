@@ -49,7 +49,7 @@ that's practical.
 |---|---|
 | `fenix-rpc` | `Content-Length`-framed message transport over a child process's stdio, shared by LSP and DAP, with a bounded reader for peers Fenix didn't spawn |
 | `fenix-control` | The control channel: a per-user named pipe or Unix socket, and its JSON-RPC protocol (open files and projects, state, commands, notebook capture, agenda tasks and clock) on both ends -- see [CONTROL.md](CONTROL.md) |
-| `fenix-lsp` | A Language Server Protocol client: handshake, document sync, requests, and transactional workspace edits |
+| `fenix-lsp` | A Language Server Protocol client: handshake, document sync, requests, and transactional workspace edits; `fanout`, the pure routing and merging for several servers on one document (which servers a request goes to, merged completion/hover/locations, per-server diagnostics), tested against two real processes of its `fake-language-server` test binary |
 | `fenix-dap` | A Debug Adapter Protocol client on the same transport |
 | `fenix-tasks` | Project task discovery, output parsing, `path:line:col` reading (shared with the command line), and process-tree supervision |
 | `fenix-terminal` | PTY spawn/read/write/resize (`portable-pty`) plus ANSI screen-grid state (`vt100`) and terminal-query replies for both terminal surfaces — no thread/event-loop knowledge of its own |

@@ -14,6 +14,7 @@ Fenix (some remote-desktop and UI-automation tools don't send it).
 | `SPC SPC` | Find file in project (same as `SPC p f`) |
 | `SPC f s` | Save |
 | `:w!` / `:e!` | Save over a file that changed on disk / re-read it, discarding your edits |
+| `:lsp-restart` / `:lsp-restart NAME` | Restart this project's language servers / just the one called NAME |
 | `SPC f v` | Recover unsaved work a previous session left behind |
 | `SPC f j` | Open the file explorer at the current file's directory |
 | `SPC f e` | Open the file explorer at your home directory; open a file directly, or `S` fuzzy-searches recursively from wherever you navigate to |

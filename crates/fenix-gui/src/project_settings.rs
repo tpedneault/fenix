@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use fenix_project::tools::{join_command_line, split_command_line, CommandSpec, ProjectTools};
+use fenix_project::tools::{join_command_line, split_command_line, AdditionalServer, CommandSpec, ProjectTools};
 use fenix_project::ProjectKind;
 
 use crate::page::{edit_line, fit, insert_at, with_caret, Grid, Key, Page, Role};
@@ -23,6 +23,9 @@ pub enum Field {
     AddTask,
     Lsp(String),
     AddLsp,
+    /// An additional language server, by name.
+    Extra(String),
+    AddExtra,
     Program,
     Args,
     Cwd,
@@ -106,6 +109,8 @@ impl Settings {
         fields.push(Field::AddTask);
         fields.extend(self.tools.lsp.keys().cloned().map(Field::Lsp));
         fields.push(Field::AddLsp);
+        fields.extend(self.tools.lsp.additional.iter().map(|server| Field::Extra(server.name.clone())));
+        fields.push(Field::AddExtra);
         fields.extend([Field::Program, Field::Args, Field::Cwd]);
         fields.extend(self.tools.launch.env.keys().cloned().map(Field::Env));
         fields.push(Field::AddEnv);
@@ -123,12 +128,17 @@ impl Settings {
             Field::Jira => self.jira.clone(),
             Field::Task(name) => self.tools.tasks.get(name).map(command_line).unwrap_or_default(),
             Field::Lsp(lang) => self.tools.lsp.get(lang).map(command_line).unwrap_or_default(),
+            Field::Extra(name) => self.extra(name).map(|server| format!("{} = {}", server.languages.join(", "), command_line(&server.command()))).unwrap_or_default(),
             Field::Program => self.tools.launch.program.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             Field::Args => self.tools.launch.args.as_deref().map(join_command_line).unwrap_or_default(),
             Field::Cwd => self.tools.launch.cwd.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             Field::Env(key) => self.tools.launch.env.get(key).cloned().unwrap_or_default(),
             _ => String::new(),
         }
+    }
+
+    fn extra(&self, name: &str) -> Option<&AdditionalServer> {
+        self.tools.lsp.additional.iter().find(|server| server.name == name)
     }
 
     fn is_text(field: &Field) -> bool {
@@ -184,6 +194,7 @@ impl Settings {
                 let add = match field {
                     Some(Field::Task(_) | Field::AddTask) => Some(Field::AddTask),
                     Some(Field::Lsp(_) | Field::AddLsp) => Some(Field::AddLsp),
+                    Some(Field::Extra(_) | Field::AddExtra) => Some(Field::AddExtra),
                     Some(Field::Env(_) | Field::AddEnv | Field::Program | Field::Args | Field::Cwd) => Some(Field::AddEnv),
                     _ => None,
                 };
@@ -193,7 +204,7 @@ impl Settings {
                 }
             }
             Key::Char('d') => {
-                if let Some(field @ (Field::Task(_) | Field::Lsp(_) | Field::Env(_))) = field {
+                if let Some(field @ (Field::Task(_) | Field::Lsp(_) | Field::Extra(_) | Field::Env(_))) = field {
                     if pending_delete.as_ref() == Some(&field) {
                         return self.delete(&field);
                     }
@@ -217,7 +228,7 @@ impl Settings {
                 }
                 Some(Field::Kind) => return self.cycle_kind(true),
                 Some(field) if Self::is_text(&field) => {
-                    let text = if key == Key::Char('c') || matches!(field, Field::AddTask | Field::AddLsp | Field::AddEnv) { String::new() } else { self.value(&field) };
+                    let text = if key == Key::Char('c') || matches!(field, Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv) { String::new() } else { self.value(&field) };
                     self.editing = Some((field, text));
                 }
                 _ => {}
@@ -272,7 +283,7 @@ impl Settings {
             Ok(_) => {
                 self.tools = tools.clone();
                 self.problem = None;
-                if matches!(field, Field::Lsp(_) | Field::AddLsp) {
+                if matches!(field, Field::Lsp(_) | Field::AddLsp | Field::Extra(_) | Field::AddExtra) {
                     self.note = Some("language servers read their settings once -- :lsp-restart to use this".to_string());
                 }
                 Action::SaveTools(tools)
@@ -333,6 +344,39 @@ impl Settings {
                     Err(e) => self.refuse(field, e),
                 }
             }
+            Field::Extra(name) => {
+                let Some(at) = tools.lsp.additional.iter().position(|server| server.name == *name) else { return Action::None };
+                match parse_additional(name, &text_trimmed, Some(&tools.lsp.additional[at])) {
+                    Ok(server) => {
+                        tools.lsp.additional[at] = server;
+                        self.save(field, tools)
+                    }
+                    Err(e) => self.refuse(field, e),
+                }
+            }
+            Field::AddExtra => {
+                let Some((name, rest)) = text_trimmed.split_once(':') else {
+                    return self.refuse(field, "write it as name: languages = command, e.g. kiln: rust, markdown = kiln lsp".to_string());
+                };
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    return self.refuse(field, "it needs a name before the :".to_string());
+                }
+                if tools.lsp.additional.iter().any(|server| server.name == name) {
+                    return self.refuse(field, format!("there's already one called {name}"));
+                }
+                match parse_additional(&name, rest.trim(), None) {
+                    Ok(server) => {
+                        tools.lsp.additional.push(server);
+                        let action = self.save(field, tools);
+                        if matches!(action, Action::SaveTools(_)) {
+                            self.focus_on(&Field::Extra(name));
+                        }
+                        action
+                    }
+                    Err(e) => self.refuse(field, e),
+                }
+            }
             Field::Program => {
                 tools.launch.program = (!text_trimmed.is_empty()).then(|| PathBuf::from(&text_trimmed));
                 self.save(field, tools)
@@ -377,6 +421,9 @@ impl Settings {
             Field::Lsp(lang) => {
                 tools.lsp.remove(lang);
             }
+            Field::Extra(name) => {
+                tools.lsp.additional.retain(|server| server.name != *name);
+            }
             Field::Env(key) => {
                 tools.launch.env.remove(key);
             }
@@ -409,6 +456,17 @@ fn parse_command(line: &str, existing: Option<&CommandSpec>) -> Result<CommandSp
     Ok(spec)
 }
 
+/// An additional server from `languages = command line`, keeping
+/// `existing`'s working directory and environment.
+fn parse_additional(name: &str, text: &str, existing: Option<&AdditionalServer>) -> Result<AdditionalServer, String> {
+    let Some((languages, command)) = text.split_once('=') else {
+        return Err("write it as languages = command, e.g. rust, markdown = kiln lsp".to_string());
+    };
+    let languages: Vec<String> = languages.split([',', ' ']).map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty()).collect();
+    let spec = parse_command(command.trim(), existing.map(AdditionalServer::command).as_ref())?;
+    Ok(AdditionalServer { name: name.to_string(), languages, executable: spec.executable, args: spec.args, cwd: spec.cwd, env: spec.env })
+}
+
 /// The page as the settings page's "Project & tasks" section shows it:
 /// `cols` wide, from its first row, with no header of its own (the
 /// settings page names the project already).
@@ -431,6 +489,7 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
             Field::Kind | Field::Group | Field::Pinned | Field::Jira => "General",
             Field::Task(_) | Field::AddTask => "Tasks",
             Field::Lsp(_) | Field::AddLsp => "Language servers",
+            Field::Extra(_) | Field::AddExtra => "Additional language servers",
             Field::Program | Field::Args | Field::Cwd => "Debug launch",
             Field::Env(_) | Field::AddEnv => "Environment",
         };
@@ -454,13 +513,13 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
             Field::Group => "Group".to_string(),
             Field::Pinned => "Pinned".to_string(),
             Field::Jira => "Jira".to_string(),
-            Field::Task(name) | Field::Lsp(name) | Field::Env(name) => name.clone(),
-            Field::AddTask | Field::AddLsp | Field::AddEnv => "+ add".to_string(),
+            Field::Task(name) | Field::Lsp(name) | Field::Extra(name) | Field::Env(name) => name.clone(),
+            Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv => "+ add".to_string(),
             Field::Program => "program".to_string(),
             Field::Args => "args".to_string(),
             Field::Cwd => "cwd".to_string(),
         };
-        let add_row = matches!(field, Field::AddTask | Field::AddLsp | Field::AddEnv);
+        let add_row = matches!(field, Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv);
         g.put(y, label_x, &fit(&label, 15), if add_row { Role::Accent } else { Role::Muted });
         let editing = settings.editing.as_ref().filter(|(f, _)| *f == field);
         if let Some((_, text)) = editing {
@@ -471,6 +530,7 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
                 let hint = match field {
                     Field::AddEnv => "NAME = value",
                     Field::AddLsp => "language = command",
+                    Field::AddExtra => "name: languages = command",
                     _ => "name = command",
                 };
                 g.put(y, end + 2, hint, Role::Muted);
@@ -638,6 +698,40 @@ mod tests {
         s.key(Key::Enter);
         type_in(&mut s, "Mission ops");
         assert_eq!(s.key(Key::Enter), Action::SetGroup("Mission ops".into()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn additional_servers_are_listed_added_edited_and_deleted() {
+        let (mut s, root) = settings("extra", Some(r#"{"lsp":{"rust":{"executable":"rust-analyzer"},"additional":[{"name":"kiln","executable":"kiln","args":["lsp"],"languages":["rust","markdown"],"env":{"K":"1"}}]}}"#));
+        let text = layout(&s, 100).text;
+        for needle in ["ADDITIONAL LANGUAGE SERVERS", "kiln", "rust, markdown = kiln lsp"] {
+            assert!(text.contains(needle), "{needle:?} missing:\n{text}");
+        }
+        s.focus_on(&Field::Extra("kiln".into()));
+        s.key(Key::Char('c'));
+        type_in(&mut s, "rust tcl = kiln lsp --stdio");
+        let Action::SaveTools(tools) = s.key(Key::Enter) else { panic!() };
+        assert_eq!(tools.lsp.additional[0].languages, ["rust", "tcl"]);
+        assert_eq!(tools.lsp.additional[0].args, ["lsp", "--stdio"]);
+        assert_eq!(tools.lsp.additional[0].env["K"], "1", "the environment is kept");
+        assert!(s.note.as_ref().is_some_and(|n| n.contains(":lsp-restart")));
+
+        s.focus_on(&Field::AddExtra);
+        s.key(Key::Enter);
+        type_in(&mut s, "spell = spell-ls");
+        assert_eq!(s.key(Key::Enter), Action::None, "it needs a name and languages");
+        s.key(Key::Enter);
+        type_in(&mut s, "spell: = spell-ls");
+        assert_eq!(s.key(Key::Enter), Action::None);
+        assert!(s.problem.as_ref().is_some_and(|(_, why)| why.contains("language")), "{:?}", s.problem);
+        s.key(Key::Enter);
+        type_in(&mut s, "spell: markdown = spell-ls --stdio");
+        assert!(matches!(s.key(Key::Enter), Action::SaveTools(t) if t.lsp.additional.len() == 2));
+        assert_eq!(s.focused(), Some(Field::Extra("spell".into())));
+
+        s.key(Key::Char('d'));
+        assert!(matches!(s.key(Key::Char('d')), Action::SaveTools(t) if t.lsp.additional.len() == 1 && t.lsp.additional[0].name == "kiln"));
         let _ = std::fs::remove_dir_all(root);
     }
 

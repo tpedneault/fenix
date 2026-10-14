@@ -32,7 +32,6 @@ pub fn run_ex_command(
     match cmd {
         "session-save" => return VimEvent::RequestSessionSave,
         "session-quit" => return VimEvent::RequestSessionQuit,
-        "lsp-restart" => return VimEvent::RequestRestartLsp,
         "undo-refactor" => return VimEvent::RequestUndoRefactor,
         "w" => return VimEvent::RequestSave,
         "w!" => return VimEvent::RequestForceSave,
@@ -44,6 +43,10 @@ pub fn run_ex_command(
         "qa!" | "quitall!" => return VimEvent::RequestForceQuitAll,
         "wqa" | "xa" => return VimEvent::RequestSaveAllAndQuit,
         _ => {}
+    }
+
+    if cmd == "lsp-restart" || cmd.starts_with("lsp-restart ") {
+        return VimEvent::RequestRestartLsp(cmd["lsp-restart".len()..].trim().to_string());
     }
 
     if cmd == "project-new" || cmd.starts_with("project-new ") {
@@ -754,7 +757,8 @@ mod tests {
     fn lsp_restart_dispatches_to_the_project_host() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(run_ex_command("lsp-restart", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestRestartLsp);
+        assert_eq!(run_ex_command("lsp-restart", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestRestartLsp(String::new()));
+        assert_eq!(run_ex_command("lsp-restart kiln", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestRestartLsp("kiln".to_string()));
         assert_eq!(run_ex_command("session-save", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestSessionSave);
         assert_eq!(run_ex_command("project-new", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestProjectNew(String::new()));
         assert_eq!(

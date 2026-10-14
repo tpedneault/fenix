@@ -609,9 +609,9 @@ impl App {
         if self.agenda_sync.pulling {
             jobs.push("syncing Jira".to_string());
         }
-        for (key, session) in &self.lsp_sessions {
+        for session in self.lsp_sessions.values() {
             if session.capabilities.is_none() {
-                jobs.push(format!("starting {:?} server", key.language).to_lowercase());
+                jobs.push(format!("starting {}", session.name));
             }
         }
         jobs

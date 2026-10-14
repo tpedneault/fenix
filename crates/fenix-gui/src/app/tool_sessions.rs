@@ -1,11 +1,35 @@
 use super::*;
 
-/// One language in one canonical project. Its server's environment is frozen
-/// at launch; restarting the server re-reads that project's tool configuration.
+/// Which server: a language's primary one, or an additional server
+/// (`tools.json`'s `lsp.additional`) by name, which may serve several
+/// languages from one process.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum LspServer {
+    Primary(fenix_syntax::LanguageId),
+    Additional(String),
+}
+
+/// One server in one canonical project: one process, shared by every
+/// buffer it serves there. Its environment is frozen at launch;
+/// restarting the server re-reads that project's tool configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LspKey {
-    pub language: fenix_syntax::LanguageId,
+    pub server: LspServer,
     pub root: PathBuf,
+}
+
+impl LspKey {
+    pub fn primary(language: fenix_syntax::LanguageId, root: PathBuf) -> Self {
+        LspKey { server: LspServer::Primary(language), root }
+    }
+
+    pub fn is_primary(&self) -> bool {
+        matches!(self.server, LspServer::Primary(_))
+    }
+
+    pub fn is_primary_for(&self, language: fenix_syntax::LanguageId) -> bool {
+        self.server == LspServer::Primary(language)
+    }
 }
 
 pub(super) fn root_for_path(path: &Path) -> PathBuf {
@@ -47,24 +71,72 @@ impl App {
         fenix_lsp::normalize(refactor::identity(&self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))))
     }
 
+    #[cfg(test)]
     pub(super) fn lsp_key(&self, language: fenix_syntax::LanguageId) -> LspKey {
-        LspKey { language, root: self.integration_root() }
+        LspKey::primary(language, self.integration_root())
     }
 
-    pub(super) fn restart_project_lsp(&mut self) {
+    /// `:lsp-restart [NAME]`: restarts this project's language servers --
+    /// all of them, or the one called `NAME` (an additional server's name,
+    /// a primary server's program, or a language). Each re-reads the
+    /// project's tool configuration as it starts again.
+    pub(super) fn restart_project_lsp(&mut self, name: &str) {
         let root = self.integration_root();
-        self.lsp_unavailable.retain(|key| key.root != root);
-        let removed: Vec<_> = self.lsp_sessions.keys().filter(|key| key.root == root).cloned().collect();
+        let name = name.trim();
+        let matches = |app: &App, key: &LspKey| {
+            key.root == root
+                && (name.is_empty()
+                    || app.lsp_server_name(key) == name
+                    || match &key.server {
+                        LspServer::Primary(language) => crate::lsp::language_config_name(*language) == name,
+                        LspServer::Additional(server) => server == name,
+                    })
+        };
+        let removed: Vec<_> = self.lsp_sessions.keys().filter(|key| matches(self, key)).cloned().collect();
+        let unavailable: Vec<_> = self.lsp_unavailable.iter().filter(|key| matches(self, key)).cloned().collect();
+        if !name.is_empty() && removed.is_empty() && unavailable.is_empty() {
+            self.set_error(format!("no language server called {name} in {}", root.display()));
+            return;
+        }
+        for key in &unavailable {
+            self.lsp_unavailable.remove(key);
+        }
+        if name.is_empty() {
+            // The list of additional servers is re-read too.
+            self.lsp_additional.remove(&root);
+        }
+        let names: Vec<String> = removed.iter().map(|key| self.lsp_server_name(key)).collect();
         for key in removed {
-            if let Some(session) = self.lsp_sessions.remove(&key) {
-                for path in session.open_documents.keys() {
-                    self.diagnostics.remove(path);
-                }
-            }
+            self.stop_lsp_session(&key);
         }
         self.sync_lsp_for_focused_buffer();
-        if !self.lsp_unavailable.iter().any(|key| key.root == root) {
-            self.set_message(format!("restarted language services for {}", root.display()));
+        let failed = |app: &App| app.lsp_unavailable.iter().any(|key| key.root == root && (name.is_empty() || matches(app, key)));
+        if !failed(self) {
+            let what = if name.is_empty() || names.is_empty() { "language services".to_string() } else { names.join(", ") };
+            self.set_message(format!("restarted {what} for {}", root.display()));
+        }
+    }
+
+    /// Stops one server: its process, its diagnostics, and anything still
+    /// waiting on its answers.
+    pub(super) fn stop_lsp_session(&mut self, key: &LspKey) {
+        if let Some(session) = self.lsp_sessions.remove(key) {
+            self.diagnostics.forget_server(key);
+            for pending in session.pending.into_values() {
+                self.lsp_request_failed(key, pending);
+            }
+        }
+    }
+
+    /// What a server is called in messages: an additional server's own
+    /// name, or the program a primary server runs.
+    pub(super) fn lsp_server_name(&self, key: &LspKey) -> String {
+        if let Some(session) = self.lsp_sessions.get(key) {
+            return session.name.clone();
+        }
+        match &key.server {
+            LspServer::Primary(language) => format!("{} language server", crate::lsp::language_config_name(*language)),
+            LspServer::Additional(name) => name.clone(),
         }
     }
 

@@ -479,11 +479,7 @@ impl App {
         self.lsp_unavailable.retain(|key| key.root != root);
         let removed: Vec<_> = self.lsp_sessions.keys().filter(|key| key.root == root).cloned().collect();
         for key in removed {
-            if let Some(session) = self.lsp_sessions.remove(&key) {
-                for path in session.open_documents.keys() {
-                    self.diagnostics.remove(path);
-                }
-            }
+            self.stop_lsp_session(&key);
         }
         self.sync_lsp_for_focused_buffer();
     }

@@ -41,7 +41,7 @@ mod notebook_export;
 mod reading_host;
 mod diagram_host;
 mod control_host;
-use tool_sessions::LspKey;
+use tool_sessions::{LspKey, LspServer};
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -1431,8 +1431,9 @@ struct VncSession {
     resize_requested_for: (u16, u16),
 }
 
-/// One running language server for one language and canonical project root.
-/// Unlike `VncSession`/`PdfSession`/etc., this has no pane/buffer/
+/// One running language server in one canonical project root: a
+/// language's primary server, or an additional one serving several
+/// languages (see `LspKey`). Unlike `VncSession`/`PdfSession`/etc., this has no pane/buffer/
 /// workspace of its own -- a language server has no UI surface by
 /// itself; it's attached to whichever ordinary text buffers share its
 /// language, feeding diagnostics/completion/hover/etc. into panes that
@@ -1440,6 +1441,12 @@ struct VncSession {
 struct LspSession {
     generation: u64,
     client: fenix_lsp::LspClient,
+    /// What it's called in messages and listings: an additional server's
+    /// configured name, or the program a primary server runs.
+    name: String,
+    /// The language names (`lsp::language_config_name`) whose buffers it
+    /// is told about.
+    languages: Vec<String>,
     /// The project root this session was spawned for (`ensure_lsp_
     /// session`'s own `cwd`) -- kept around so the `initialize`
     /// response handler can run a per-language environment resolver
@@ -1500,21 +1507,91 @@ fn push_python_environment(session: &mut LspSession) {
     let _ = session.client.notify::<lsp_types::notification::DidChangeConfiguration>(lsp_types::DidChangeConfigurationParams { settings });
 }
 
+/// Brings one server's picture of one document up to date: `didOpen` the
+/// first time (once the server is initialized, and only if it serves
+/// `language`), `didChange` whenever the buffer was edited since.
+fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language: fenix_syntax::LanguageId, text: &str, edit_count: u64) {
+    if session.capabilities.is_none() {
+        return;
+    }
+    let language_id = crate::lsp::language_config_name(language);
+    if !session.languages.contains(&language_id) {
+        return;
+    }
+    let Some(uri) = fenix_lsp::path_to_uri(canonical) else { return };
+    match session.open_documents.get(canonical).copied() {
+        None => {
+            let params = lsp_types::DidOpenTextDocumentParams { text_document: lsp_types::TextDocumentItem { uri, language_id, version: 0, text: text.to_string() } };
+            if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
+                session.open_documents.insert(canonical.to_path_buf(), (edit_count, 1));
+                session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+            }
+        }
+        Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count => {
+            let incremental = session.capabilities.as_ref().is_some_and(fenix_lsp::wants_incremental);
+            let change = fenix_lsp::change_event(session.synced_text.get(canonical).map(String::as_str), text, incremental);
+            let params = lsp_types::DidChangeTextDocumentParams {
+                text_document: lsp_types::VersionedTextDocumentIdentifier { uri, version: next_version },
+                content_changes: vec![change],
+            };
+            if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
+                session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version + 1));
+                session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+            }
+        }
+        Some(_) => {} // already open and already in sync -- the common case, most frames
+    }
+}
+
 /// What an in-flight LSP request was for -- see `LspSession::pending`'s
 /// own doc comment. One variant per request kind this app actually
 /// sends; each carries whatever its own response handling needs beyond
 /// the response body itself (which buffer to act on, mainly, since a
 /// slow response can outlast the focus having moved elsewhere).
+///
+/// Requests sent to several servers at once carry the id of their
+/// `LspFanout`, where the answers are gathered.
 #[derive(Debug, Clone)]
 enum PendingLspRequest {
     Initialize,
-    Hover { buffer: BufferId },
-    Definition { buffer: BufferId },
-    References { buffer: BufferId },
+    Hover { fanout: u64 },
+    Definition { fanout: u64 },
+    References { fanout: u64 },
     Rename { buffer: BufferId, context: refactor::Context },
-    CodeAction { buffer: BufferId, context: refactor::Context },
+    CodeAction { fanout: u64 },
     Format { buffer: BufferId, revision: u64 },
     Completion { buffer: BufferId, prefix_start: usize, generation: u64 },
+}
+
+/// How long a request sent to several servers waits for a slow one
+/// before acting on what the others answered.
+const LSP_FANOUT_DEADLINE: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// One request sent to several language servers, its answers gathered
+/// as they arrive (`fenix_lsp::fanout::Gather`).
+enum LspFanout {
+    /// `K`: shown as answers arrive, the primary's first.
+    Hover { buffer: BufferId, gather: fenix_lsp::fanout::Gather<LspKey, Option<String>> },
+    /// `gd`/`gr`: merged and acted on once everyone answered, or once the
+    /// deadline passed with something to show.
+    Locations { buffer: BufferId, references: bool, gather: fenix_lsp::fanout::Gather<LspKey, Vec<lsp_types::Location>> },
+    /// `SPC c a`: every server's actions in one list, each remembering its
+    /// server's view of the documents (`refactor::Context`).
+    CodeActions {
+        buffer: BufferId,
+        gather: fenix_lsp::fanout::Gather<LspKey, Vec<lsp_types::CodeActionOrCommand>>,
+        contexts: HashMap<LspKey, refactor::Context>,
+        errors: Vec<String>,
+    },
+}
+
+/// The completion popup's server answers while it stays anchored at one
+/// place: complete lists are kept and filtered as you type; only servers
+/// that said `isIncomplete` are asked again.
+struct LspCompletion {
+    buffer: BufferId,
+    prefix_start: usize,
+    answers: fenix_lsp::fanout::CompletionSet<LspKey>,
 }
 
 /// Background reader for one `LspSession` -- drains `fenix_lsp::
@@ -1530,7 +1607,7 @@ struct LspReader {
 }
 
 impl LspReader {
-    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_lsp::LspEvent>, language: LspKey, generation: u64, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
+    fn spawn(receiver: std::sync::mpsc::Receiver<fenix_lsp::LspEvent>, key: LspKey, generation: u64, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let handle = std::thread::spawn(move || loop {
@@ -1543,7 +1620,7 @@ impl LspReader {
                         return;
                     }
                     let disconnected = matches!(event, fenix_lsp::LspEvent::Disconnected(_));
-                    if !send(FenixUserEvent::Lsp { language: language.clone(), generation, event }) || disconnected {
+                    if !send(FenixUserEvent::Lsp { key: key.clone(), generation, event }) || disconnected {
                         return;
                     }
                 }
@@ -1856,11 +1933,14 @@ struct AgendaPrompt {
 pub enum FenixUserEvent {
     /// One decoded event from a language server's connection (a
     /// response, notification, server-initiated request, or a
-    /// disconnect), from that language's `LspReader`. Carries `language`
-    /// explicitly since more than one server can be live at once and
-    /// events from a slow-to-answer one can arrive well after focus
-    /// moved to a different language's buffer.
-    Lsp { language: LspKey, generation: u64, event: fenix_lsp::LspEvent },
+    /// disconnect), from that server's `LspReader`. Carries its `key`
+    /// explicitly since more than one server can be live at once -- several
+    /// on one buffer -- and events from a slow-to-answer one can arrive
+    /// well after focus moved elsewhere.
+    Lsp { key: LspKey, generation: u64, event: fenix_lsp::LspEvent },
+    /// A request sent to several language servers reached its deadline:
+    /// act on what has arrived if a slow server is still out.
+    LspDeadline(u64),
     /// One decoded event from the active debug session's adapter
     /// connection, from `DapReader` -- only one debug session is ever
     /// live at a time. The generation rejects queued events from a retired adapter.
@@ -2027,6 +2107,7 @@ impl FenixUserEvent {
     fn label(&self) -> &'static str {
         match self {
             Self::Lsp { .. } => "Lsp",
+            Self::LspDeadline(_) => "LspDeadline",
             Self::Dap { .. } => "Dap",
             Self::StatsReady { .. } => "StatsReady",
             Self::LogLine { .. } => "LogLine",
@@ -5802,13 +5883,24 @@ pub struct App {
     /// order the transport itself was already built in.
     lsp_sessions: HashMap<LspKey, LspSession>,
     lsp_unavailable: std::collections::HashSet<LspKey>,
+    /// Each project root's additional servers (`tools.json`'s
+    /// `lsp.additional`), read once and again on `:lsp-restart`.
+    lsp_additional: HashMap<PathBuf, Vec<fenix_project::tools::AdditionalServer>>,
+    /// Requests out to several servers, by id (`PendingLspRequest`'s
+    /// `fanout`).
+    lsp_fanouts: HashMap<u64, LspFanout>,
+    next_lsp_fanout: u64,
+    /// The hover request `lsp_hover` is showing answers for; a keypress
+    /// clears it, and later answers are dropped.
+    lsp_hover_fanout: Option<u64>,
+    lsp_completion: Option<LspCompletion>,
     /// The most recent `textDocument/publishDiagnostics` for each file,
     /// keyed by its canonical path (LSP publishes per-URI regardless of
     /// whether a buffer for it is currently open, so this can't be keyed
     /// by `BufferId`). Cleared for a path when a server publishes an
     /// empty list for it (which means "no more diagnostics," not "no
     /// change") or when that path's buffer closes.
-    diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    diagnostics: fenix_lsp::fanout::Diagnostics<LspKey>,
     /// `K`'s hover popup text, flattened from whatever `textDocument/
     /// hover` last answered (`hover_contents_text`) -- `Some` shows the
     /// popup (`hover_popup`), cleared on the next keypress `route_
@@ -5950,6 +6042,10 @@ pub struct App {
     completion: Option<CompletionState>,
     completion_selected: bool,
     completion_generation: u64,
+    /// Whether the open popup offers local candidates (buffer words,
+    /// keywords, snippets) beside the servers' -- not in a comment or a
+    /// string, where only servers are asked.
+    completion_local: bool,
     completion_context: Option<(BufferId, fenix_window::WindowId, usize, u64)>,
     snippet: Option<snippets::ActiveSnippet>,
     /// One cached `(project_root, candidates)` pair for Tcl completion,
@@ -6782,7 +6878,12 @@ impl App {
             vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
-            diagnostics: HashMap::new(),
+            lsp_additional: HashMap::new(),
+            lsp_fanouts: HashMap::new(),
+            next_lsp_fanout: 1,
+            lsp_hover_fanout: None,
+            lsp_completion: None,
+            diagnostics: Default::default(),
             lsp_hover: None,
             vnc_upload_scratch: Vec::new(),
             vnc_focused: None,
@@ -6814,6 +6915,7 @@ impl App {
             completion: None,
             completion_selected: false,
             completion_generation: 0,
+            completion_local: true,
             completion_context: None,
             snippet: None,
             tcl_candidates_cache: None,
@@ -7577,17 +7679,16 @@ impl App {
         self.sync_lsp_for_focused_buffer();
     }
 
-    /// Makes sure the focused buffer's language server (if any is
-    /// configured/available for its language) has an up to date picture
-    /// of it: spawns that language's server if it isn't already running
-    /// (`ensure_lsp_session`), sends `textDocument/didOpen` the first
-    /// time (once the session is actually initialized), and after that
-    /// compares `Buffer::edit_count()` against what was last synced --
-    /// a mismatch means real edits landed since, answered with a full-
-    /// text `textDocument/didChange` (whole-document sync for v1, not
-    /// incremental range edits -- `Buffer::drain_edits`/`EditDelta`
-    /// would let this send just the changed range later, but full-text
-    /// is correct today, just not maximally efficient on a large file).
+    /// Makes sure every language server for the focused buffer -- its
+    /// language's primary server and any additional servers the project
+    /// configures for that language -- has an up to date picture of it:
+    /// spawns each that isn't running yet (`ensure_lsp_session`/
+    /// `ensure_additional_lsp_session`), sends `textDocument/didOpen` the
+    /// first time (once that server is initialized), and after that
+    /// compares `Buffer::edit_count()` against what was last synced with
+    /// that server -- a mismatch means real edits landed since, answered
+    /// with a `textDocument/didChange` (incremental or whole-text, as each
+    /// server asked).
     ///
     /// Called from `refresh_project_root` (every focus change) *and*
     /// every `redraw` (every rendered frame) -- focus change alone
@@ -7600,7 +7701,9 @@ impl App {
         let Some(language) = fenix_syntax::detect_language_from_path(&path) else { return };
         let cwd = tool_sessions::lsp_root_for_path(&path);
         self.ensure_lsp_session(language, &cwd);
-        let language = LspKey { language, root: cwd };
+        for server in self.additional_lsp_servers(&cwd, language) {
+            self.ensure_additional_lsp_session(&server, &cwd);
+        }
 
         // `fenix_lsp::normalize` strips Windows' `\\?\` verbatim prefix
         // (which `canonicalize` always adds there) -- everywhere else
@@ -7608,60 +7711,55 @@ impl App {
         // from a server's URI (`open_documents`, `App::diagnostics`'
         // own keys) needs the same normalized form, or two spellings of
         // the same file stop matching each other.
-        let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path));
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path.clone()));
         let edit_count = self.open().buffer.edit_count();
-        // Fetched unconditionally, before `session` below takes a
-        // mutable borrow of `self.lsp_sessions` -- both branches that
-        // might actually use it need the buffer's *current* text, and
-        // `self.open()` (an immutable borrow of a different `self`
-        // field) can't coexist with that mutable borrow.
         let text = self.open().buffer.text();
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
-        if session.capabilities.is_none() {
-            return;
-        }
-        let Some(uri) = fenix_lsp::path_to_uri(&canonical) else { return };
-
-        match session.open_documents.get(&canonical).copied() {
-            None => {
-                let params = lsp_types::DidOpenTextDocumentParams {
-                    text_document: lsp_types::TextDocumentItem { uri, language_id: crate::lsp::language_config_name(language.language), version: 0, text: text.clone() },
-                };
-                if session.client.notify::<lsp_types::notification::DidOpenTextDocument>(params).is_ok() {
-                    session.open_documents.insert(canonical.clone(), (edit_count, 1));
-                    session.synced_text.insert(canonical, text);
-                }
-            }
-            Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count => {
-                let incremental = session.capabilities.as_ref().is_some_and(fenix_lsp::wants_incremental);
-                let change = fenix_lsp::change_event(session.synced_text.get(&canonical).map(String::as_str), &text, incremental);
-                let params = lsp_types::DidChangeTextDocumentParams {
-                    text_document: lsp_types::VersionedTextDocumentIdentifier { uri, version: next_version },
-                    content_changes: vec![change],
-                };
-                if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
-                    session.open_documents.insert(canonical.clone(), (edit_count, next_version + 1));
-                    session.synced_text.insert(canonical, text);
-                }
-            }
-            Some(_) => {} // already open and already in sync -- the common case, most frames
+        for key in self.cached_lsp_keys(&path) {
+            let Some(session) = self.lsp_sessions.get_mut(&key) else { continue };
+            sync_lsp_document(session, &canonical, language, &text, edit_count);
         }
     }
 
-    /// Spawns a language server for `language` if one isn't already
-    /// running (a no-op otherwise, regardless of whether the existing
-    /// session is healthy -- a dead one is replaced by `apply_lsp_event`'s
-    /// own `Disconnected` handling removing it first, not respawned here
-    /// on every focus change), resolving its command via `lsp::resolve_
-    /// server_command` (a `[lsp]` override, or `fenix-lsp`'s built-in
-    /// per-language default) and using `cwd` as both its working
-    /// directory and its advertised project root -- a server has no
-    /// other way to know what "the project" even is. Silently does
-    /// nothing if no command is configured or known for `language` (same
-    /// posture as completion quietly having nothing to offer for a
-    /// language with no ctags support).
+    /// The additional servers `root`'s `tools.json` declares for
+    /// `language`, in the order they're written -- read once per root
+    /// (a broken file is reported where the primary server's
+    /// configuration is read, and means none here).
+    fn additional_lsp_servers(&mut self, root: &Path, language: fenix_syntax::LanguageId) -> Vec<fenix_project::tools::AdditionalServer> {
+        let all = self
+            .lsp_additional
+            .entry(root.to_path_buf())
+            .or_insert_with(|| fenix_project::tools::ProjectTools::read(root).map(|tools| tools.lsp.additional).unwrap_or_default());
+        let name = crate::lsp::language_config_name(language);
+        all.iter().filter(|server| server.serves(&name)).cloned().collect()
+    }
+
+    /// Every server key for `path`, primary first, whether or not each is
+    /// running -- from the additional servers already read for its root.
+    fn cached_lsp_keys(&self, path: &Path) -> Vec<LspKey> {
+        let Some(language) = fenix_syntax::detect_language_from_path(path) else { return Vec::new() };
+        let root = tool_sessions::lsp_root_for_path(path);
+        let name = crate::lsp::language_config_name(language);
+        let mut keys = vec![LspKey::primary(language, root.clone())];
+        for server in self.lsp_additional.get(&root).into_iter().flatten().filter(|server| server.serves(&name)) {
+            keys.push(LspKey { server: LspServer::Additional(server.name.clone()), root: root.clone() });
+        }
+        keys
+    }
+
+    /// Spawns `language`'s primary language server for the project at
+    /// `cwd` if one isn't already running (a no-op otherwise, regardless
+    /// of whether the existing session is healthy -- a dead one is
+    /// replaced by `apply_lsp_event`'s own `Disconnected` handling removing
+    /// it first, not respawned here on every focus change), resolving its
+    /// command from the project's `tools.json`, then `[lsp]`/`fenix-lsp`'s
+    /// built-in per-language default, and using `cwd` as both its working
+    /// directory and its advertised project root -- a server has no other
+    /// way to know what "the project" even is. Silently does nothing if no
+    /// command is configured or known for `language` (same posture as
+    /// completion quietly having nothing to offer for a language with no
+    /// ctags support).
     fn ensure_lsp_session(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
-        let key = LspKey { language, root: fenix_lsp::normalize(refactor::identity(cwd)) };
+        let key = LspKey::primary(language, fenix_lsp::normalize(refactor::identity(cwd)));
         if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) { return; }
         let configured = match fenix_project::tools::ProjectTools::read(&key.root) {
             Ok(config) => config,
@@ -7683,29 +7781,47 @@ impl App {
             crate::lsp::resolve_server_command(language, &self.config.lsp_servers).map(|(program, args)| fenix_project::tools::CommandSpec::new(program, args))
         });
         let Some(spec) = spec else { self.lsp_unavailable.insert(key); return };
+        let name = Path::new(&spec.executable).file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_else(|| spec.executable.clone());
+        self.start_lsp_session(key, name, vec![crate::lsp::language_config_name(language)], &spec, cwd);
+    }
+
+    /// Spawns an additional server for the project at `cwd` if it isn't
+    /// running (or known to have failed) already -- one process for every
+    /// language it serves there.
+    fn ensure_additional_lsp_session(&mut self, server: &fenix_project::tools::AdditionalServer, cwd: &Path) {
+        let key = LspKey { server: LspServer::Additional(server.name.clone()), root: fenix_lsp::normalize(refactor::identity(cwd)) };
+        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) { return; }
+        self.start_lsp_session(key, server.name.clone(), server.languages.clone(), &server.command(), cwd);
+    }
+
+    /// Starts `spec` as the server `key` and sends it `initialize`. A
+    /// server that can't start is reported and left alone until
+    /// `:lsp-restart`; the buffer's other servers carry on without it.
+    fn start_lsp_session(&mut self, key: LspKey, name: String, languages: Vec<String>, spec: &fenix_project::tools::CommandSpec, cwd: &Path) {
         let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
         match spawned {
             Ok((client, receiver)) => {
                 let generation = tool_sessions::generation();
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
-                self.lsp_sessions.insert(key.clone(), LspSession { generation, client, root: key.root.clone(), reader, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None });
+                self.lsp_sessions.insert(key.clone(), LspSession {
+                    generation, client, name, languages, root: key.root.clone(), reader, capabilities: None,
+                    open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None,
+                });
                 self.send_lsp_initialize(key, cwd);
             }
-            Err(err) => { self.lsp_unavailable.insert(key); self.set_error(format!("couldn't start {} for {}: {err}", spec.executable, cwd.display())); },
+            Err(err) => {
+                self.lsp_unavailable.insert(key);
+                self.set_error(format!("couldn't start {name} ({}) for {}: {err}", spec.executable, cwd.display()));
+            }
         }
     }
 
     /// Sends the `initialize` request for a freshly-spawned session --
     /// deliberately not folded into `ensure_lsp_session` itself, so a
     /// later reconnect (once one exists) can re-send just this without
-    /// re-spawning the process. `initialize` is always the very first
-    /// request sent on a fresh connection (see `fenix_lsp::LspClient::
-    /// next_id`'s own doc comment: it starts at 1 and only ever
-    /// increments), so its response is always id 1 -- relied on by
-    /// `apply_lsp_event` instead of a general pending-request map, which
-    /// nothing else needs yet.
-    fn send_lsp_initialize(&mut self, language: LspKey, cwd: &Path) {
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+    /// re-spawning the process.
+    fn send_lsp_initialize(&mut self, key: LspKey, cwd: &Path) {
+        let Some(session) = self.lsp_sessions.get_mut(&key) else { return };
         let root_uri = fenix_lsp::path_to_uri(cwd);
         let params = lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
@@ -7721,18 +7837,18 @@ impl App {
     }
 
     /// Dispatches one decoded event from a language server's connection.
-    fn apply_lsp_event(&mut self, language: LspKey, generation: u64, event: fenix_lsp::LspEvent) {
-        if !self.lsp_sessions.get(&language).is_some_and(|s| s.generation == generation) { return; }
+    fn apply_lsp_event(&mut self, key: LspKey, generation: u64, event: fenix_lsp::LspEvent) {
+        if !self.lsp_sessions.get(&key).is_some_and(|s| s.generation == generation) { return; }
         match event {
             fenix_lsp::LspEvent::Response { id, result } => {
-                let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+                let Some(session) = self.lsp_sessions.get_mut(&key) else { return };
                 let Some(pending) = session.pending.remove(&id) else { return };
-                self.apply_lsp_response(language, pending, result);
+                self.apply_lsp_response(key, pending, result);
             }
             fenix_lsp::LspEvent::Notification { method, params } => {
                 if method == <lsp_types::notification::PublishDiagnostics as lsp_types::notification::Notification>::METHOD {
                     if let Ok(diagnostics) = serde_json::from_value::<lsp_types::PublishDiagnosticsParams>(params) {
-                        if fenix_lsp::uri_to_path(&diagnostics.uri).is_some_and(|path| tool_sessions::lsp_root_for_path(&path) == language.root) { self.apply_lsp_diagnostics(diagnostics); }
+                        if fenix_lsp::uri_to_path(&diagnostics.uri).is_some_and(|path| tool_sessions::lsp_root_for_path(&path) == key.root) { self.apply_lsp_diagnostics(&key, diagnostics); }
                     }
                 }
             }
@@ -7740,16 +7856,17 @@ impl App {
                 // Only bookkeeping requests (progress tokens, capability
                 // registration) are accepted; everything else is refused
                 // with "method not found" rather than left unanswered.
-                if let Some(session) = self.lsp_sessions.get(&language) {
+                if let Some(session) = self.lsp_sessions.get(&key) {
                     let _ = session.client.respond(id, fenix_lsp::server_request_reply(&method));
                 }
             }
             fenix_lsp::LspEvent::Disconnected(reason) => {
-                if let Some(session) = self.lsp_sessions.remove(&language) {
-                    for path in session.open_documents.keys() { self.diagnostics.remove(path); }
-                }
-                self.set_error(format!("{language:?} language server disconnected: {reason}"));
-                self.lsp_unavailable.insert(language);
+                // Only this server goes: the buffer's other servers keep
+                // their sessions, diagnostics and requests.
+                let name = self.lsp_server_name(&key);
+                self.stop_lsp_session(&key);
+                self.set_error(format!("{name} disconnected: {reason}"));
+                self.lsp_unavailable.insert(key);
             }
         }
     }
@@ -7757,12 +7874,12 @@ impl App {
     /// Routes one arrived response to whatever `pending` says the
     /// original request was for -- the single dispatch point every
     /// request-sending method's eventual answer passes through.
-    fn apply_lsp_response(&mut self, language: LspKey, pending: PendingLspRequest, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
+    fn apply_lsp_response(&mut self, key: LspKey, pending: PendingLspRequest, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         match pending {
             PendingLspRequest::Initialize => match result {
                 Ok(value) => {
                     let capabilities = serde_json::from_value::<lsp_types::InitializeResult>(value).ok().map(|r| r.capabilities);
-                    if let Some(session) = self.lsp_sessions.get_mut(&language) {
+                    if let Some(session) = self.lsp_sessions.get_mut(&key) {
                         session.capabilities = capabilities;
                         let _ = session.client.notify::<lsp_types::notification::Initialized>(lsp_types::InitializedParams {});
                         // pyright doesn't infer which interpreter/venv a
@@ -7778,41 +7895,42 @@ impl App {
                         // is the one required step, not just an optimization.
                         // Pushed again whenever the environment changes --
                         // see `refresh_python_environments`.
-                        if language.language == fenix_syntax::LanguageId::Python {
+                        if key.is_primary_for(fenix_syntax::LanguageId::Python) {
                             push_python_environment(session);
                         }
                     }
                     // Now that the session is actually initialized,
-                    // send `didOpen` for the focused buffer if it's this
-                    // language (the request that triggered spawning
-                    // this session in the first place couldn't send it
-                    // yet -- capabilities weren't known).
+                    // send `didOpen` for the focused buffer if it's one
+                    // this server serves (the request that triggered
+                    // spawning this session in the first place couldn't
+                    // send it yet -- capabilities weren't known).
                     self.sync_lsp_for_focused_buffer();
                 }
-                Err(err) => self.set_error(format!("{language:?} language server failed to initialize: {}", err.message)),
+                Err(err) => {
+                    let name = self.lsp_server_name(&key);
+                    self.set_error(format!("{name} failed to initialize: {}", err.message));
+                }
             },
-            PendingLspRequest::Hover { buffer } => {
-                self.lsp_hover = None;
-                if let Ok(Some(hover)) = result.map(|v| serde_json::from_value::<Option<lsp_types::Hover>>(v).ok().flatten()) {
-                    if buffer == self.focused_buffer_id() {
-                        self.lsp_hover = Some(crate::lsp::hover_contents_text(hover.contents));
-                        self.wake_caret();
-                    }
+            PendingLspRequest::Hover { fanout } => {
+                let text = result.ok().and_then(|v| serde_json::from_value::<Option<lsp_types::Hover>>(v).ok()).map(|hover| hover.map(|h| crate::lsp::hover_contents_text(h.contents)));
+                if let Some(LspFanout::Hover { gather, .. }) = self.lsp_fanouts.get_mut(&fanout) {
+                    gather.answer(&key, text);
                 }
+                self.lsp_fanout_progress(fanout);
             }
-            PendingLspRequest::Definition { buffer } => {
-                if let Ok(Some(response)) = result.map(|v| serde_json::from_value::<Option<lsp_types::GotoDefinitionResponse>>(v).ok().flatten()) {
-                    if buffer == self.focused_buffer_id() {
-                        self.goto_lsp_location_response(response);
-                    }
+            PendingLspRequest::Definition { fanout } => {
+                let locations = result.ok().and_then(|v| serde_json::from_value::<Option<lsp_types::GotoDefinitionResponse>>(v).ok()).map(|r| r.map(fenix_lsp::fanout::locations_of).unwrap_or_default());
+                if let Some(LspFanout::Locations { gather, .. }) = self.lsp_fanouts.get_mut(&fanout) {
+                    gather.answer(&key, locations);
                 }
+                self.lsp_fanout_progress(fanout);
             }
-            PendingLspRequest::References { buffer } => {
-                if let Ok(Some(locations)) = result.map(|v| serde_json::from_value::<Option<Vec<lsp_types::Location>>>(v).ok().flatten()) {
-                    if buffer == self.focused_buffer_id() {
-                        self.apply_lsp_references(locations);
-                    }
+            PendingLspRequest::References { fanout } => {
+                let locations = result.ok().and_then(|v| serde_json::from_value::<Option<Vec<lsp_types::Location>>>(v).ok()).map(Option::unwrap_or_default);
+                if let Some(LspFanout::Locations { gather, .. }) = self.lsp_fanouts.get_mut(&fanout) {
+                    gather.answer(&key, locations);
                 }
+                self.lsp_fanout_progress(fanout);
             }
             PendingLspRequest::Rename { buffer, context } => match result {
                 Ok(value) => match serde_json::from_value::<Option<lsp_types::WorkspaceEdit>>(value) {
@@ -7823,15 +7941,26 @@ impl App {
                 },
                 Err(err) => self.set_error(format!("rename failed: {}", err.message)),
             },
-            PendingLspRequest::CodeAction { buffer, context } => match result {
-                Ok(value) => match serde_json::from_value::<Option<Vec<lsp_types::CodeActionOrCommand>>>(value) {
-                    Ok(Some(actions)) if buffer == self.focused_buffer_id() => self.preview_lsp_actions(actions, context),
-                    Ok(Some(_)) => self.set_error("code actions cancelled: focus changed; request them again"),
-                    Ok(None) => self.set_message("no code actions available"),
-                    Err(error) => self.set_error(format!("invalid code action response: {error}")),
-                },
-                Err(err) => self.set_error(format!("code actions failed: {}", err.message)),
-            },
+            PendingLspRequest::CodeAction { fanout } => {
+                let name = self.lsp_server_name(&key);
+                if let Some(LspFanout::CodeActions { gather, errors, .. }) = self.lsp_fanouts.get_mut(&fanout) {
+                    let answer = match result {
+                        Ok(value) => match serde_json::from_value::<Option<Vec<lsp_types::CodeActionOrCommand>>>(value) {
+                            Ok(actions) => Some(actions.unwrap_or_default()),
+                            Err(error) => {
+                                errors.push(format!("{name}: invalid code action response: {error}"));
+                                None
+                            }
+                        },
+                        Err(err) => {
+                            errors.push(format!("{name}: {}", err.message));
+                            None
+                        }
+                    };
+                    gather.answer(&key, answer);
+                }
+                self.lsp_fanout_progress(fanout);
+            }
             PendingLspRequest::Format { buffer, revision } => {
                 if let Ok(Some(edits)) = result.map(|v| serde_json::from_value::<Option<Vec<lsp_types::TextEdit>>>(v).ok().flatten()) {
                     if self.buffers.get(buffer).is_some_and(|ob| ob.buffer.edit_count() == revision) {
@@ -7841,11 +7970,132 @@ impl App {
                     }
                 }
             }
-            PendingLspRequest::Completion { buffer, prefix_start, generation } => { if generation != self.completion_generation || !self.completion_context_valid() { return; }
-                if let Ok(value) = result {
-                    self.apply_lsp_completion(buffer, prefix_start, value);
+            PendingLspRequest::Completion { buffer, prefix_start, generation } => {
+                if generation != self.completion_generation || !self.completion_context_valid() {
+                    return;
+                }
+                let Some(state) = self.lsp_completion.as_mut().filter(|c| c.buffer == buffer && c.prefix_start == prefix_start) else { return };
+                match result.ok().and_then(|value| serde_json::from_value::<Option<lsp_types::CompletionResponse>>(value).ok()) {
+                    Some(response) => state.answers.store(key, response.unwrap_or(lsp_types::CompletionResponse::Array(Vec::new()))),
+                    // An error skips this server for this request.
+                    None => state.answers.forget(&key),
+                }
+                self.apply_lsp_completion(buffer, prefix_start);
+            }
+        }
+    }
+
+    /// A request out to `key` that will never be answered -- its server
+    /// went away. Counted as that server's failure, so the request's
+    /// other servers aren't kept waiting for it.
+    fn lsp_request_failed(&mut self, key: &LspKey, pending: PendingLspRequest) {
+        let fanout = match pending {
+            PendingLspRequest::Hover { fanout } | PendingLspRequest::Definition { fanout } | PendingLspRequest::References { fanout } | PendingLspRequest::CodeAction { fanout } => fanout,
+            PendingLspRequest::Completion { .. } => {
+                if let Some(state) = &mut self.lsp_completion {
+                    state.answers.forget(key);
+                }
+                return;
+            }
+            _ => return,
+        };
+        match self.lsp_fanouts.get_mut(&fanout) {
+            Some(LspFanout::Hover { gather, .. }) => { gather.answer(key, None); }
+            Some(LspFanout::Locations { gather, .. }) => { gather.answer(key, None); }
+            Some(LspFanout::CodeActions { gather, .. }) => { gather.answer(key, None); }
+            None => return,
+        }
+        self.lsp_fanout_progress(fanout);
+    }
+
+    /// Starts gathering a request sent to `servers` (in display order):
+    /// returns its id, and arranges a wake-up at its deadline so a slow
+    /// server can't hold the others' answers back.
+    fn start_lsp_fanout(&mut self, make: impl FnOnce(std::time::Instant) -> LspFanout, servers: usize) -> u64 {
+        let id = self.next_lsp_fanout;
+        self.next_lsp_fanout += 1;
+        let deadline = std::time::Instant::now() + LSP_FANOUT_DEADLINE;
+        let fanout = make(deadline);
+        // A newer request of the same kind supersedes one still waiting
+        // on a server that may never answer; its late answers are dropped.
+        let kind = std::mem::discriminant(&fanout);
+        self.lsp_fanouts.retain(|_, older| std::mem::discriminant(older) != kind);
+        self.lsp_fanouts.insert(id, fanout);
+        if servers > 1 {
+            if let Some(proxy) = self.event_proxy.clone() {
+                std::thread::spawn(move || {
+                    std::thread::sleep(LSP_FANOUT_DEADLINE);
+                    let _ = proxy.send_event(FenixUserEvent::LspDeadline(id));
+                });
+            }
+        }
+        id
+    }
+
+    /// Acts on whatever a fan-out request has gathered so far: a hover
+    /// shows every answer as it arrives; a jump, a reference list or a
+    /// code action list waits for everyone, or for the deadline with
+    /// something to show.
+    fn lsp_fanout_progress(&mut self, id: u64) {
+        let now = std::time::Instant::now();
+        let focused = self.focused_buffer_id();
+        let done = match self.lsp_fanouts.get(&id) {
+            None => return,
+            Some(LspFanout::Hover { buffer, gather }) => {
+                let text = (self.lsp_hover_fanout == Some(id) && *buffer == focused)
+                    .then(|| fenix_lsp::fanout::join_hovers(gather.arrived().map(|(_, text)| text.clone())))
+                    .flatten();
+                let complete = gather.is_complete();
+                if text.is_some() {
+                    self.lsp_hover = text;
+                    self.wake_caret();
+                }
+                complete
+            }
+            Some(LspFanout::Locations { gather, .. }) => gather.is_ready(now, |locations| !locations.is_empty()),
+            Some(LspFanout::CodeActions { gather, .. }) => gather.is_ready(now, |actions| !actions.is_empty()),
+        };
+        if !done {
+            return;
+        }
+        match self.lsp_fanouts.remove(&id) {
+            Some(LspFanout::Locations { buffer, references, gather }) => {
+                if buffer != focused {
+                    return;
+                }
+                let locations = fenix_lsp::fanout::merge_locations(gather.into_arrived().into_iter().map(|(_, locations)| locations));
+                if references {
+                    self.apply_lsp_references(locations);
+                } else {
+                    self.goto_lsp_locations(locations);
                 }
             }
+            Some(LspFanout::CodeActions { buffer, gather, mut contexts, errors }) => {
+                let answers = gather.into_arrived();
+                if answers.is_empty() && !errors.is_empty() {
+                    self.set_error(format!("code actions failed: {}", errors.join("; ")));
+                    return;
+                }
+                if buffer != focused {
+                    self.set_error("code actions cancelled: focus changed; request them again");
+                    return;
+                }
+                let several = answers.len() > 1;
+                let mut actions = Vec::new();
+                for (key, list) in answers {
+                    let name = self.lsp_server_name(&key);
+                    let Some(context) = contexts.remove(&key) else { continue };
+                    for action in list {
+                        actions.push((action, context.clone(), several.then(|| name.clone())));
+                    }
+                }
+                if actions.is_empty() {
+                    self.set_message("no code actions available");
+                } else {
+                    self.preview_lsp_actions(actions);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -7855,9 +8105,9 @@ impl App {
     /// server's way of saying "no more diagnostics here," not "nothing
     /// changed," so it's stored as an actual removal rather than an
     /// empty `Vec` left behind.
-    /// A file's problems: its language server's, and the MIB's.
+    /// A file's problems: every language server's, and the MIB's.
     fn all_diagnostics(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
-        let mut all = self.diagnostics.get(path).cloned().unwrap_or_default();
+        let mut all = self.diagnostics.for_path(path);
         all.extend(self.mib_diagnostics.get(path).cloned().unwrap_or_default());
         all.extend(self.notebook.diagrams.diagnostics.get(path).cloned().unwrap_or_default());
         all
@@ -7901,36 +8151,52 @@ impl App {
         self.set_message(message);
     }
 
-    fn apply_lsp_diagnostics(&mut self, params: lsp_types::PublishDiagnosticsParams) {
+    /// `key`'s diagnostics for one document, replacing only its own
+    /// earlier ones -- the document's other servers keep theirs.
+    fn apply_lsp_diagnostics(&mut self, key: &LspKey, params: lsp_types::PublishDiagnosticsParams) {
         let Some(path) = fenix_lsp::uri_to_path(&params.uri) else { return };
-        if params.diagnostics.is_empty() {
-            self.diagnostics.remove(&path);
-        } else {
-            self.diagnostics.insert(path, params.diagnostics);
-        }
+        let name = self.lsp_server_name(key);
+        self.diagnostics.publish(path, key.clone(), &name, params.diagnostics);
     }
 
-    /// The language, session, and current-cursor-as-LSP-`Position` for
-    /// the focused buffer -- `None` unless a fully initialized language
-    /// server is actually attached to it (checked via `open_documents`,
-    /// not just `capabilities.is_some()`: a session can be initialized
-    /// for a *different* buffer's `didOpen` before this one's has landed).
-    /// The shared precondition every LSP request this app sends starts
-    /// from (`gd`/`gr`/`K`/rename/code actions/format all begin here).
-    fn focused_lsp_context(&self) -> Option<(LspKey, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
+    /// The servers, document and current-cursor-as-LSP-`Position` for
+    /// the focused buffer -- `None` unless at least one fully initialized
+    /// language server is actually attached to it (checked via
+    /// `open_documents`, not just `capabilities.is_some()`: a session can
+    /// be initialized for a *different* buffer's `didOpen` before this
+    /// one's has landed). The servers come primary first. The shared
+    /// precondition every LSP request this app sends starts from
+    /// (`gd`/`gr`/`K`/rename/code actions/format all begin here).
+    fn focused_lsp_context(&self) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
         let ob = self.open();
         let path = ob.buffer.path()?;
-        let language = fenix_syntax::detect_language_from_path(path)?;
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
-        let language = LspKey { language, root: tool_sessions::lsp_root_for_path(path) };
-        let session = self.lsp_sessions.get(&language)?;
-        session.capabilities.as_ref()?;
-        if !session.open_documents.contains_key(&canonical) {
+        let keys: Vec<LspKey> = self
+            .cached_lsp_keys(path)
+            .into_iter()
+            .filter(|key| self.lsp_sessions.get(key).is_some_and(|session| session.capabilities.is_some() && session.open_documents.contains_key(&canonical)))
+            .collect();
+        if keys.is_empty() {
             return None;
         }
         let uri = fenix_lsp::path_to_uri(&canonical)?;
         let position = fenix_lsp::char_offset_to_position(ob.buffer.rope(), self.cursor().char_idx);
-        Some((language, lsp_types::TextDocumentIdentifier { uri }, position))
+        Some((keys, lsp_types::TextDocumentIdentifier { uri }, position))
+    }
+
+    /// Which of `keys` (attached, primary first) to ask for `feature` --
+    /// see `fenix_lsp::fanout::route`.
+    fn lsp_route(&self, keys: &[LspKey], feature: fenix_lsp::fanout::Feature) -> Vec<LspKey> {
+        self.lsp_route_with(keys, |attached| fenix_lsp::fanout::route(feature, attached))
+    }
+
+    fn lsp_route_with(&self, keys: &[LspKey], pick: impl FnOnce(&[fenix_lsp::fanout::Attached]) -> Vec<usize>) -> Vec<LspKey> {
+        let keys: Vec<&LspKey> = keys.iter().filter(|key| self.lsp_sessions.get(*key).is_some_and(|s| s.capabilities.is_some())).collect();
+        let attached: Vec<fenix_lsp::fanout::Attached> = keys
+            .iter()
+            .map(|key| fenix_lsp::fanout::Attached { primary: key.is_primary(), capabilities: self.lsp_sessions[*key].capabilities.as_ref().unwrap() })
+            .collect();
+        pick(&attached).into_iter().map(|i| keys[i].clone()).collect()
     }
 
     /// Match all open documents by filesystem identity, including nonfocused
@@ -7968,21 +8234,14 @@ impl App {
         self.goto_lsp_position(location.range.start);
     }
 
-    /// `textDocument/definition`'s response: a single location jumps
-    /// straight there (recorded on the jumplist first, so `Ctrl-O` gets
-    /// back); a list (rare -- an overloaded/ambiguous declaration) or a
-    /// `LocationLink` list (newer servers' richer shape) instead
-    /// populates the same generalized `quickfix` list `gr` uses, so
+    /// `textDocument/definition`'s answers, merged across servers: a
+    /// single location jumps straight there (recorded on the jumplist
+    /// first, so `Ctrl-O` gets back); several (an overloaded/ambiguous
+    /// declaration, or two servers each knowing a different place)
+    /// instead populate the same generalized `quickfix` list `gr` uses, so
     /// `SPC p n`/`SPC p N` step through them exactly the same way
     /// regardless of which populated it.
-    fn goto_lsp_location_response(&mut self, response: lsp_types::GotoDefinitionResponse) {
-        let locations: Vec<lsp_types::Location> = match response {
-            lsp_types::GotoDefinitionResponse::Scalar(loc) => vec![loc],
-            lsp_types::GotoDefinitionResponse::Array(locs) => locs,
-            lsp_types::GotoDefinitionResponse::Link(links) => {
-                links.into_iter().map(|link| lsp_types::Location { uri: link.target_uri, range: link.target_selection_range }).collect()
-            }
-        };
+    fn goto_lsp_locations(&mut self, locations: Vec<lsp_types::Location>) {
         match locations.len() {
             0 => self.set_error("no definition found".to_string()),
             1 => {
@@ -7994,8 +8253,8 @@ impl App {
         }
     }
 
-    /// Turns `textDocument/references`' response (or `goto_lsp_location_
-    /// response`'s multi-location fallback) into the generalized
+    /// Turns `textDocument/references`' merged answers (or `goto_lsp_
+    /// locations`' multi-location fallback) into the generalized
     /// `quickfix` list, then jumps to the first entry immediately --
     /// matching real Vim's own `:grep`/tag-list auto-jump-to-first
     /// convention, and `run_grep`'s own precedent in this codebase.
@@ -8033,13 +8292,13 @@ impl App {
         }
     }
 
-    /// `textDocument/completion`'s response merged into whatever
+    /// Every server's completion items so far merged into whatever
     /// completion popup is already open -- see `sync_completion`'s own
     /// call site for how `CompletionKind::Lsp` items reach the same
     /// picker buffer-word/ctags candidates already do. A no-op if the
     /// popup closed (moved on to something else) before this arrived,
     /// or if `buffer` isn't focused any more.
-    fn apply_lsp_completion(&mut self, buffer: BufferId, prefix_start: usize, value: serde_json::Value) {
+    fn apply_lsp_completion(&mut self, buffer: BufferId, prefix_start: usize) {
         if buffer != self.focused_buffer_id() || self.vim.mode() != Mode::Insert || !self.completion_context_valid() {
             return;
         }
@@ -8050,7 +8309,7 @@ impl App {
         // since an LSP response is inherently async relative to the
         // keystroke that triggered it). Rebuilt from scratch instead,
         // combining the always-available local candidates
-        // (`completion_candidates`) with these LSP ones, then
+        // (`completion_candidates`) with every server's items, then
         // re-applying whatever query was already typed -- cheap enough
         // (a handful of candidates, not thousands) that rebuilding isn't
         // worth avoiding.
@@ -8060,18 +8319,28 @@ impl App {
         if current_prefix_start != prefix_start {
             return; // superseded by a newer prefix since this request was sent
         }
-        let items: Vec<lsp_types::CompletionItem> = serde_json::from_value::<lsp_types::CompletionResponse>(value)
-            .map(|r| match r {
-                lsp_types::CompletionResponse::Array(items) => items,
-                lsp_types::CompletionResponse::List(list) => list.items,
+        let Some(state) = self.lsp_completion.as_ref().filter(|c| c.buffer == buffer && c.prefix_start == prefix_start) else { return };
+        // With more than one server answering, each item names its own.
+        let servers: std::collections::HashSet<&LspKey> = state.answers.items().map(|(key, _)| key).collect();
+        let several = servers.len() > 1;
+        let items: Vec<completion::Item> = state
+            .answers
+            .items()
+            .filter_map(|(key, item)| {
+                let mut item = completion::Item::lsp(item.clone())?;
+                if several {
+                    item.server = Some(self.lsp_server_name(key));
+                }
+                Some(item)
             })
-            .unwrap_or_default();
+            .collect();
         if items.is_empty() {
             return;
         }
         let selected = self.completion.as_ref().and_then(|s| s.picker.selected())
             .map(|c| (c.payload.label.clone(), c.payload.source));
-        let candidates = completion::merge(self.completion_candidates(), items.into_iter().filter_map(completion::Item::lsp).collect());
+        let local = if self.completion_local { self.completion_candidates() } else { Vec::new() };
+        let candidates = completion::merge(local, items);
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&query);
         if self.completion_selected {
@@ -8091,15 +8360,34 @@ impl App {
             self.lsp_hover = Some(card);
             return;
         }
-        let Some((language, text_document, position)) = self.focused_lsp_context() else {
+        let Some((keys, text_document, position)) = self.focused_lsp_context() else {
             self.lsp_hover = self.tcl_builtin_hover();
             return;
         };
         let buffer = self.focused_buffer_id();
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
-        let params = lsp_types::HoverParams { text_document_position_params: lsp_types::TextDocumentPositionParams { text_document, position }, work_done_progress_params: Default::default() };
-        if let Ok(id) = session.client.request::<lsp_types::request::HoverRequest>(params) {
-            session.pending.insert(id, PendingLspRequest::Hover { buffer });
+        let targets = self.lsp_route(&keys, fenix_lsp::fanout::Feature::Hover);
+        if targets.is_empty() {
+            return;
+        }
+        let order = targets.clone();
+        let fanout = self.start_lsp_fanout(|deadline| LspFanout::Hover { buffer, gather: fenix_lsp::fanout::Gather::new(order, deadline) }, targets.len());
+        self.lsp_hover_fanout = Some(fanout);
+        for key in targets {
+            let params = lsp_types::HoverParams { text_document_position_params: lsp_types::TextDocumentPositionParams { text_document: text_document.clone(), position }, work_done_progress_params: Default::default() };
+            self.send_lsp_fanout_request::<lsp_types::request::HoverRequest>(&key, params, PendingLspRequest::Hover { fanout });
+        }
+    }
+
+    /// Sends one server its part of a fan-out request; one that can't be
+    /// written to is counted as having failed, so the others aren't kept
+    /// waiting for it.
+    fn send_lsp_fanout_request<R: lsp_types::request::Request>(&mut self, key: &LspKey, params: R::Params, pending: PendingLspRequest) {
+        let Some(session) = self.lsp_sessions.get_mut(key) else { return };
+        match session.client.request::<R>(params) {
+            Ok(id) => {
+                session.pending.insert(id, pending);
+            }
+            Err(_) => self.lsp_request_failed(key, pending),
         }
     }
 
@@ -8130,34 +8418,43 @@ impl App {
         if self.mib_goto_definition() {
             return;
         }
-        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
-        let buffer = self.focused_buffer_id();
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
-        let params = lsp_types::GotoDefinitionParams {
-            text_document_position_params: lsp_types::TextDocumentPositionParams { text_document, position },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
-        if let Ok(id) = session.client.request::<lsp_types::request::GotoDefinition>(params) {
-            session.pending.insert(id, PendingLspRequest::Definition { buffer });
-        }
+        self.request_lsp_locations(false);
     }
 
     /// `gr` -- requests `textDocument/references` (including the
     /// declaration itself in the results, matching what most editors'
     /// own "find references" shows by default).
     pub(crate) fn request_references(&mut self) {
-        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        self.request_lsp_locations(true);
+    }
+
+    /// `gd`/`gr` sent to every attached server that can answer, the
+    /// answers merged once gathered (`lsp_fanout_progress`).
+    fn request_lsp_locations(&mut self, references: bool) {
+        let Some((keys, text_document, position)) = self.focused_lsp_context() else { return };
         let buffer = self.focused_buffer_id();
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
-        let params = lsp_types::ReferenceParams {
-            text_document_position: lsp_types::TextDocumentPositionParams { text_document, position },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-            context: lsp_types::ReferenceContext { include_declaration: true },
-        };
-        if let Ok(id) = session.client.request::<lsp_types::request::References>(params) {
-            session.pending.insert(id, PendingLspRequest::References { buffer });
+        let feature = if references { fenix_lsp::fanout::Feature::References } else { fenix_lsp::fanout::Feature::Definition };
+        let targets = self.lsp_route(&keys, feature);
+        if targets.is_empty() {
+            self.set_error(if references { "no language server here finds references" } else { "no language server here finds definitions" });
+            return;
+        }
+        let order = targets.clone();
+        let fanout = self.start_lsp_fanout(|deadline| LspFanout::Locations { buffer, references, gather: fenix_lsp::fanout::Gather::new(order, deadline) }, targets.len());
+        let at = lsp_types::TextDocumentPositionParams { text_document, position };
+        for key in targets {
+            if references {
+                let params = lsp_types::ReferenceParams {
+                    text_document_position: at.clone(),
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: lsp_types::ReferenceContext { include_declaration: true },
+                };
+                self.send_lsp_fanout_request::<lsp_types::request::References>(&key, params, PendingLspRequest::References { fanout });
+            } else {
+                let params = lsp_types::GotoDefinitionParams { text_document_position_params: at.clone(), work_done_progress_params: Default::default(), partial_result_params: Default::default() };
+                self.send_lsp_fanout_request::<lsp_types::request::GotoDefinition>(&key, params, PendingLspRequest::Definition { fanout });
+            }
         }
     }
 
@@ -8167,21 +8464,32 @@ impl App {
     /// has no separate "code action for this selection" entry point yet).
     pub(crate) fn request_code_action(&mut self) {
         self.sync_lsp_for_focused_buffer();
-        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let Some((keys, text_document, position)) = self.focused_lsp_context() else { return };
         let buffer = self.focused_buffer_id();
-        let context = self.refactor_context(language.language);
-        let diagnostics = self.open().buffer.path().and_then(|p| std::fs::canonicalize(p).ok()).and_then(|p| self.diagnostics.get(&fenix_lsp::normalize(p)).cloned()).unwrap_or_default();
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        let targets = self.lsp_route(&keys, fenix_lsp::fanout::Feature::CodeAction);
+        if targets.is_empty() {
+            self.set_message("no code actions available");
+            return;
+        }
+        let path = self.open().buffer.path().map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())));
+        let contexts: HashMap<LspKey, refactor::Context> = targets.iter().map(|key| (key.clone(), self.refactor_context(key))).collect();
+        let order = targets.clone();
+        let fanout = self.start_lsp_fanout(
+            |deadline| LspFanout::CodeActions { buffer, gather: fenix_lsp::fanout::Gather::new(order, deadline), contexts, errors: Vec::new() },
+            targets.len(),
+        );
         let line_range = lsp_types::Range { start: lsp_types::Position { line: position.line, character: 0 }, end: lsp_types::Position { line: position.line, character: u32::MAX } };
-        let params = lsp_types::CodeActionParams {
-            text_document,
-            range: line_range,
-            context: lsp_types::CodeActionContext { diagnostics, only: None, trigger_kind: None },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
-        if let Ok(id) = session.client.request::<lsp_types::request::CodeActionRequest>(params) {
-            session.pending.insert(id, PendingLspRequest::CodeAction { buffer, context });
+        for key in targets {
+            // Each server is shown only the diagnostics it reported itself.
+            let diagnostics = path.as_deref().map(|p| self.diagnostics.from_server(p, &key)).unwrap_or_default();
+            let params = lsp_types::CodeActionParams {
+                text_document: text_document.clone(),
+                range: line_range,
+                context: lsp_types::CodeActionContext { diagnostics, only: None, trigger_kind: None },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+            self.send_lsp_fanout_request::<lsp_types::request::CodeActionRequest>(&key, params, PendingLspRequest::CodeAction { fanout });
         }
     }
 
@@ -8197,13 +8505,13 @@ impl App {
     /// gets the whole file reformatted.
     pub(crate) fn request_lsp_format(&mut self) -> bool {
         self.sync_lsp_for_focused_buffer();
-        let Some((language, text_document, _)) = self.focused_lsp_context() else { return false };
+        let Some((keys, text_document, _)) = self.focused_lsp_context() else { return false };
         let buffer = self.focused_buffer_id();
         let revision = self.open().buffer.edit_count();
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return false };
-        if !session.capabilities.as_ref().is_some_and(|c| matches!(c.document_formatting_provider, Some(lsp_types::OneOf::Left(true)) | Some(lsp_types::OneOf::Right(_)))) {
-            return false;
-        }
+        // The primary formats; an additional server only when the
+        // primary can't and it's the one other server that can.
+        let Some(key) = self.lsp_route(&keys, fenix_lsp::fanout::Feature::Formatting).pop() else { return false };
+        let Some(session) = self.lsp_sessions.get_mut(&key) else { return false };
         let params = lsp_types::DocumentFormattingParams {
             text_document,
             options: lsp_types::FormattingOptions { tab_size: 4, insert_spaces: true, ..Default::default() },
@@ -8226,18 +8534,38 @@ impl App {
     /// A no-op if no server is attached -- the popup still works from
     /// local candidates alone, same as it always has for a language
     /// with none configured.
-    fn request_lsp_completion(&mut self, prefix_start: usize) { self.completion_generation = self.completion_generation.wrapping_add(1);
-        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+    ///
+    /// Sent to every attached server that completes -- or, when `trigger`
+    /// (a character just typed) is set, only to those that declared it a
+    /// trigger character. While the popup stays anchored at
+    /// `prefix_start`, a server whose last list was complete isn't asked
+    /// again: its items are already in `lsp_completion` and the popup
+    /// filters them as you type.
+    fn request_lsp_completion(&mut self, prefix_start: usize, trigger: Option<char>) {
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        let Some((keys, text_document, position)) = self.focused_lsp_context() else { return };
         let buffer = self.focused_buffer_id();
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
-        let params = lsp_types::CompletionParams {
-            text_document_position: lsp_types::TextDocumentPositionParams { text_document, position },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-            context: None,
+        let all = self.lsp_route(&keys, fenix_lsp::fanout::Feature::Completion);
+        let targets = match trigger {
+            Some(c) => self.lsp_route_with(&keys, |attached| fenix_lsp::fanout::completion_targets(attached, Some(c))),
+            None => all.clone(),
         };
-        if let Ok(id) = session.client.request::<lsp_types::request::Completion>(params) {
-            session.pending.insert(id, PendingLspRequest::Completion { buffer, prefix_start, generation: self.completion_generation });
+        if !self.lsp_completion.as_ref().is_some_and(|c| c.buffer == buffer && c.prefix_start == prefix_start) {
+            self.lsp_completion = Some(LspCompletion { buffer, prefix_start, answers: fenix_lsp::fanout::CompletionSet::new(all) });
+        }
+        let to_ask = self.lsp_completion.as_ref().map(|c| c.answers.to_ask(&targets)).unwrap_or_default();
+        // What complete lists already said shows straight away.
+        self.apply_lsp_completion(buffer, prefix_start);
+        let context = trigger.map(|c| lsp_types::CompletionContext { trigger_kind: lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER, trigger_character: Some(c.to_string()) });
+        let generation = self.completion_generation;
+        for key in to_ask {
+            let params = lsp_types::CompletionParams {
+                text_document_position: lsp_types::TextDocumentPositionParams { text_document: text_document.clone(), position },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: context.clone(),
+            };
+            self.send_lsp_fanout_request::<lsp_types::request::Completion>(&key, params, PendingLspRequest::Completion { buffer, prefix_start, generation });
         }
     }
 
@@ -8294,10 +8622,16 @@ impl App {
         if new_name.is_empty() {
             return;
         }
-        let Some((language, text_document, position)) = self.focused_lsp_context() else { return };
+        let Some((keys, text_document, position)) = self.focused_lsp_context() else { return };
         let buffer = self.focused_buffer_id();
-        let context = self.refactor_context(language.language);
-        let Some(session) = self.lsp_sessions.get_mut(&language) else { return };
+        // The primary renames; an additional server only when the
+        // primary can't and it's the one other server that can.
+        let Some(key) = self.lsp_route(&keys, fenix_lsp::fanout::Feature::Rename).pop() else {
+            self.set_error("no language server here can rename");
+            return;
+        };
+        let context = self.refactor_context(&key);
+        let Some(session) = self.lsp_sessions.get_mut(&key) else { return };
         let params = lsp_types::RenameParams { text_document_position: lsp_types::TextDocumentPositionParams { text_document, position }, new_name: new_name.to_string(), work_done_progress_params: Default::default() };
         if let Ok(id) = session.client.request::<lsp_types::request::Rename>(params) {
             session.pending.insert(id, PendingLspRequest::Rename { buffer, context });
@@ -8479,18 +8813,33 @@ impl App {
             self.completion = None;
             return;
         }
-        if self.cursor_in_comment_or_string() {
+        let cursor = self.cursor();
+        let lsp_attached = self.focused_lsp_context().is_some();
+        // In a comment or a string, local words and keywords would only
+        // get in the way -- but a language server may know exactly what
+        // goes there (a requirement ID in `// implements: REQ-014`), so
+        // attached servers are still asked.
+        let in_comment = self.cursor_in_comment_or_string();
+        if in_comment && !lsp_attached {
             self.completion = None;
             return;
         }
-        let cursor = self.cursor();
-        let Some((start, prefix, candidates)) = self.completion_at_cursor() else {
+        // A character a server declared a trigger (`.`, `::`'s `:`, `-`)
+        // asks those servers even with no word typed after it yet.
+        let trigger = lsp_attached.then(|| self.completion_trigger_before(cursor.char_idx)).flatten();
+        let found = if in_comment {
+            completion::prefix_at_cursor(&self.open().buffer, &cursor).map(|(start, prefix)| (start, prefix, Vec::new()))
+        } else {
+            self.completion_at_cursor()
+        };
+        let Some((start, prefix, candidates)) = found.or_else(|| trigger.map(|_| (cursor.char_idx, String::new(), Vec::new()))) else {
             self.completion = None;
             return;
         };
 
         self.completion_context = Some((self.focused_buffer_id(), self.focused_pane_id(), cursor.char_idx, self.open().buffer.edit_count()));
         self.completion_selected = false;
+        self.completion_local = !in_comment;
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
         self.completion = Some(CompletionState { prefix_start: start, picker });
@@ -8499,9 +8848,8 @@ impl App {
         // even if the locally-known candidates are empty right now --
         // so an empty popup isn't closed out from under that pending
         // request the way it is when there's no server to wait on.
-        let lsp_attached = self.focused_lsp_context().is_some();
         if lsp_attached {
-            self.request_lsp_completion(start);
+            self.request_lsp_completion(start, if start == cursor.char_idx { trigger } else { None });
         }
         if !lsp_attached && self.completion.as_ref().is_some_and(|state| state.picker.is_empty()) {
             self.completion = None;
@@ -8576,6 +8924,16 @@ impl App {
     /// prefix, bypassing the normal ">=1 char" auto-trigger threshold --
     /// `Ctrl-Space`'s effect, the near-universal manual-trigger
     /// convention.
+    /// The character just before `at`, when an attached server declared
+    /// it a completion trigger character.
+    fn completion_trigger_before(&self, at: usize) -> Option<char> {
+        let c = at.checked_sub(1).and_then(|i| self.open().buffer.char_at(i))?;
+        let (keys, _, _) = self.focused_lsp_context()?;
+        keys.iter()
+            .any(|key| self.lsp_sessions.get(key).and_then(|s| s.capabilities.as_ref()).is_some_and(|caps| fenix_lsp::fanout::declares_trigger(caps, c)))
+            .then_some(c)
+    }
+
     fn completion_context_valid(&self) -> bool {
         self.completion_context.is_none_or(|context| context ==
             (self.focused_buffer_id(), self.focused_pane_id(), self.cursor().char_idx, self.open().buffer.edit_count()))
@@ -8591,10 +8949,11 @@ impl App {
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
         let lsp_attached = self.focused_lsp_context().is_some();
+        self.completion_local = true;
         self.completion =
             if picker.is_empty() && !lsp_attached { None } else { Some(CompletionState { prefix_start, picker }) };
         if lsp_attached {
-            self.request_lsp_completion(prefix_start);
+            self.request_lsp_completion(prefix_start, None);
         }
         self.completion_scroll = 0;
     }
@@ -13211,7 +13570,12 @@ impl App {
     /// DAP adapter actually exists.
     pub(crate) fn open_tool_status_panel(&mut self) {
         let configured = self.config.lsp_servers.clone();
-        let lsp_sessions: std::collections::HashSet<fenix_syntax::LanguageId> = self.lsp_sessions.keys().filter(|key| key.root == self.integration_root()).map(|key| key.language).collect();
+        let lsp_sessions: std::collections::HashSet<fenix_syntax::LanguageId> = self
+            .lsp_sessions
+            .keys()
+            .filter(|key| key.root == self.integration_root())
+            .filter_map(|key| match key.server { LspServer::Primary(language) => Some(language), LspServer::Additional(_) => None })
+            .collect();
         let root = self.integration_root();
         let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
         let dap_language = self.debug_session.as_ref().filter(|s| s.root == root).map(|s| s.language);
@@ -13224,7 +13588,24 @@ impl App {
             |language| lsp_sessions.contains(&language),
             |language| dap_language == Some(language),
         );
-        let text = crate::tool_status::render(&entries);
+        let additional: Vec<crate::tool_status::AdditionalEntry> = tools
+            .lsp
+            .additional
+            .iter()
+            .map(|server| {
+                let key = LspKey { server: LspServer::Additional(server.name.clone()), root: root.clone() };
+                let command = configured_command(&server.command()).map(|(program, _)| program).unwrap_or_else(|| server.executable.clone());
+                crate::tool_status::AdditionalEntry {
+                    name: server.name.clone(),
+                    found_on_path: crate::tool_status::is_on_path(&command),
+                    command,
+                    languages: server.languages.clone(),
+                    running: self.lsp_sessions.contains_key(&key),
+                    failed: self.lsp_unavailable.contains(&key),
+                }
+            })
+            .collect();
+        let text = crate::tool_status::render(&entries) + &crate::tool_status::render_additional(&additional);
 
         if let Some(session) = &self.tool_status_session {
             let (workspace_index, pane, buffer) = (session.workspace_index, session.pane, session.buffer);
@@ -14598,7 +14979,7 @@ impl App {
     /// `workspace/didChangeConfiguration` is what makes it look again.
     fn refresh_python_environments(&mut self) {
         for (key, session) in &mut self.lsp_sessions {
-            if key.language != fenix_syntax::LanguageId::Python || session.capabilities.is_none() {
+            if !key.is_primary_for(fenix_syntax::LanguageId::Python) || session.capabilities.is_none() {
                 continue;
             }
             if session.python_env.as_ref().is_some_and(|last| last.is_stale(&session.root)) {
@@ -19191,7 +19572,8 @@ impl App {
     /// for keyboard input.
     fn handle_user_event(&mut self, event: FenixUserEvent) {
         match event {
-            FenixUserEvent::Lsp { language, generation, event } => self.apply_lsp_event(language, generation, event),
+            FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
+            FenixUserEvent::LspDeadline(fanout) => self.lsp_fanout_progress(fanout),
             FenixUserEvent::StatsReady(stats) => self.apply_docker_stats(stats),
             FenixUserEvent::LogLine(buffer_id, line) => self.append_docker_log_line(buffer_id, line),
             FenixUserEvent::LogEnded(buffer_id) => self.finish_docker_log_stream(buffer_id),
@@ -19366,6 +19748,7 @@ impl App {
         // informational, dismissed by whatever key comes next rather
         // than needing its own dedicated close key.
         self.lsp_hover = None;
+        self.lsp_hover_fanout = None;
 
         // The terminal panel, when focused, owns *every* key -- checked
         // before even the capturing prompts/confirms below, since a
@@ -20396,7 +20779,7 @@ impl App {
             VimEvent::RequestSessionSave => { self.save_session_explicit(); }
             VimEvent::RequestProjectNew(args) => self.project_new_with(&args),
             VimEvent::RequestSessionQuit => { if self.save_session_explicit() { event_loop.exit(); } }
-            VimEvent::RequestRestartLsp => { self.restart_project_lsp(); }
+            VimEvent::RequestRestartLsp(name) => { self.restart_project_lsp(&name); }
             VimEvent::RequestUndoRefactor => { self.undo_refactor(); }
             VimEvent::RequestSave => {
                 CommandRegistry::with_builtins().run(self, event_loop, "file.save");
@@ -22153,7 +22536,7 @@ impl App {
             let label = completion::clipped_line(&candidate.payload.label, label_columns);
             let padding = label_columns.saturating_sub(label.chars().count()) + 2;
             spans.push((label, color, false));
-            spans.push((format!("{}{}", " ".repeat(padding), completion::clipped_line(candidate.payload.source.label(), columns.saturating_sub(label_columns + 2))), theme.fg_modeline, false));
+            spans.push((format!("{}{}", " ".repeat(padding), completion::clipped_line(candidate.payload.source_label(), columns.saturating_sub(label_columns + 2))), theme.fg_modeline, false));
         }
         for (line, color) in &extra {
             spans.push(("\n".into(), theme.fg_modeline, false));
@@ -33998,7 +34381,7 @@ configure_board stm32
         app.handle_user_event(FenixUserEvent::LogLine(app.focused_buffer_id(), "a line".to_string()));
         app.handle_user_event(FenixUserEvent::LogEnded(app.focused_buffer_id()));
         app.handle_user_event(FenixUserEvent::Lsp {
-            language: app.lsp_key(fenix_syntax::LanguageId::Python),
+            key: app.lsp_key(fenix_syntax::LanguageId::Python),
             generation: 0,
             event: fenix_lsp::LspEvent::Disconnected("test".to_string()),
         });
@@ -34230,8 +34613,8 @@ configure_board stm32
     /// receiving side is under test.
     fn debug_test_session(app: &mut App) {
         let dir = TempDir::new("debug_session_probe");
-        let (program, args) = echo_command("noop");
-        let (client, _rx) = fenix_dap::DapClient::spawn(&program, &args, dir.path()).expect("echo/cmd should be launchable in any test environment");
+        // A process that stays alive: requests the test makes must reach it.
+        let (client, _rx) = fenix_dap::DapClient::spawn_command(sink_command(dir.path())).expect("the test binary can start itself");
         let call_stack_buffer = app.buffers.open_debug("");
         let variables_buffer = app.buffers.open_debug("");
         let watches_buffer = app.buffers.open_debug("");
@@ -34396,13 +34779,16 @@ configure_board stm32
         let path = std::env::temp_dir().join("fenix-lsp-test-diagnostics.py");
         let uri = fenix_lsp::path_to_uri(&path).unwrap();
         let diag = lsp_types::Diagnostic { range: lsp_types::Range::default(), message: "oops".to_string(), ..Default::default() };
-        app.apply_lsp_diagnostics(lsp_types::PublishDiagnosticsParams { uri: uri.clone(), diagnostics: vec![diag.clone()], version: None });
-        assert_eq!(app.diagnostics.get(&path), Some(&vec![diag]));
+        let key = app.lsp_key(fenix_syntax::LanguageId::Python);
+        app.apply_lsp_diagnostics(&key, lsp_types::PublishDiagnosticsParams { uri: uri.clone(), diagnostics: vec![diag.clone()], version: None });
+        let shown = app.diagnostics.for_path(&path);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].message, diag.message);
 
         // An empty list clears it -- that's the server's own "no more
         // diagnostics here" signal, not "nothing changed."
-        app.apply_lsp_diagnostics(lsp_types::PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None });
-        assert_eq!(app.diagnostics.get(&path), None);
+        app.apply_lsp_diagnostics(&key, lsp_types::PublishDiagnosticsParams { uri, diagnostics: Vec::new(), version: None });
+        assert!(app.diagnostics.for_path(&path).is_empty());
     }
 
     #[test]
@@ -34416,7 +34802,8 @@ configure_board stm32
         let uri = fenix_lsp::path_to_uri(&canonical).unwrap();
         let error = lsp_types::Diagnostic { severity: Some(lsp_types::DiagnosticSeverity::ERROR), message: "bad".to_string(), ..Default::default() };
         let warning = lsp_types::Diagnostic { severity: Some(lsp_types::DiagnosticSeverity::WARNING), message: "meh".to_string(), ..Default::default() };
-        app.apply_lsp_diagnostics(lsp_types::PublishDiagnosticsParams { uri, diagnostics: vec![error, warning], version: None });
+        let key = app.lsp_key(fenix_syntax::LanguageId::Python);
+        app.apply_lsp_diagnostics(&key, lsp_types::PublishDiagnosticsParams { uri, diagnostics: vec![error, warning], version: None });
 
         let modeline = app.modeline_text();
         assert!(modeline.contains("1E 1W"), "expected a 1E 1W indicator, got: {modeline}");
@@ -34426,7 +34813,7 @@ configure_board stm32
     fn ensure_lsp_session_is_a_no_op_for_a_language_with_no_configured_or_default_command() {
         let mut app = App::with_file(None);
         app.ensure_lsp_session(fenix_syntax::LanguageId::Batch, &std::env::temp_dir());
-        assert!(!app.lsp_sessions.keys().any(|key| key.language == fenix_syntax::LanguageId::Batch));
+        assert!(!app.lsp_sessions.keys().any(|key| key.is_primary_for(fenix_syntax::LanguageId::Batch)));
     }
 
     #[test]
@@ -39431,11 +39818,11 @@ name = \"orbit\"
         let path = dir.write("main.py", "import pandas
 ");
         let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
-        let key = LspKey { language: fenix_syntax::LanguageId::Python, root: tool_sessions::lsp_root_for_path(&path) };
+        let key = LspKey::primary(fenix_syntax::LanguageId::Python, tool_sessions::lsp_root_for_path(&path));
         let (program, args) = echo_command("fixture");
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let mut session = LspSession {
-            generation: tool_sessions::generation(), client, root: key.root.clone(), reader: None,
+            generation: tool_sessions::generation(), client, name: "pyright-langserver".into(), languages: vec!["python".into()], root: key.root.clone(), reader: None,
             capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None,
         };
         push_python_environment(&mut session);
@@ -39463,12 +39850,12 @@ name = \"orbit\"
     }
 
     fn install_test_lsp(app: &mut App, path: &Path) -> LspKey {
-        let key = LspKey { language: fenix_syntax::LanguageId::Rust, root: tool_sessions::lsp_root_for_path(path) };
+        let key = LspKey::primary(fenix_syntax::LanguageId::Rust, tool_sessions::lsp_root_for_path(path));
         let (program, args) = echo_command("fixture");
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
-            generation: tool_sessions::generation(), client, root: key.root.clone(), reader: None,
+            generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
             capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None,
         });
         key
@@ -39484,7 +39871,7 @@ name = \"orbit\"
         let a_key = install_test_lsp(&mut app, &a);
         let b_key = install_test_lsp(&mut app, &b);
         assert_ne!(a_key, b_key);
-        assert_eq!(app.focused_lsp_context().unwrap().0, a_key);
+        assert_eq!(app.focused_lsp_context().unwrap().0, std::slice::from_ref(&a_key));
         for (key, buffer) in [(&a_key,a_id),(&b_key,b_id)] {
             app.lsp_sessions.get_mut(key).unwrap().pending.insert(9, PendingLspRequest::Format { buffer, revision:0 });
         }
@@ -39522,7 +39909,7 @@ name = \"orbit\"
         let (_a, a) = project_scope_fixture("refactor_scope_a");
         let (_b, b) = project_scope_fixture("refactor_scope_b");
         let mut app = App::with_file(Some(a.to_string_lossy().into_owned()));
-        let context = app.refactor_context(fenix_syntax::LanguageId::Rust);
+        let context = app.refactor_context(&app.lsp_key(fenix_syntax::LanguageId::Rust));
         let edit = serde_json::from_value(serde_json::json!({"changes":{fenix_lsp::path_to_uri(&b).unwrap().as_str():[
             {"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}},"newText":"new"}
         ]}})).unwrap();
@@ -39619,6 +40006,308 @@ name = \"orbit\"
         app.ensure_lsp_session(fenix_syntax::LanguageId::Rust,&a.path().join("."));
         assert_eq!(app.lsp_sessions.len(),2);
     }
+    /// Stands in for a language server or a debug adapter in tests: stays
+    /// alive reading messages until LSP's `exit` or DAP's `disconnect`,
+    /// answering nothing -- each test answers as the server itself,
+    /// through `apply_lsp_event`/`apply_dap_event`. Unlike `echo`, it's
+    /// still there when a test writes to it. (Its stdout carries the test
+    /// harness's own output, which no test reads.)
+    #[test]
+    #[ignore = "a fixture other tests start as a process"]
+    fn lsp_sink_fixture() {
+        if std::env::var_os("FENIX_LSP_SINK").is_none() {
+            return;
+        }
+        use std::io::Read;
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while let Ok(n @ 1..) = std::io::stdin().read(&mut chunk) {
+            seen.extend_from_slice(&chunk[..n]);
+            if seen.windows(15).any(|w| w == br#""method":"exit""#) || seen.windows(22).any(|w| w == br#""command":"disconnect""#) {
+                return;
+            }
+        }
+    }
+
+    fn sink_command(root: &Path) -> std::process::Command {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--ignored", "--exact", "app::tests::lsp_sink_fixture", "--nocapture"]).env("FENIX_LSP_SINK", "1").current_dir(root);
+        command
+    }
+
+    fn sink_client(root: &Path) -> fenix_lsp::LspClient {
+        fenix_lsp::LspClient::spawn_command(sink_command(root)).unwrap().0
+    }
+
+    /// A running, initialized server for `path`'s project, serving
+    /// `languages` and offering `capabilities`.
+    fn install_server(app: &mut App, path: &Path, server: LspServer, name: &str, languages: &[&str], capabilities: lsp_types::ServerCapabilities) -> LspKey {
+        let key = LspKey { server, root: tool_sessions::lsp_root_for_path(path) };
+        if let LspServer::Additional(name) = &key.server {
+            let additional = fenix_project::tools::AdditionalServer { name: name.clone(), languages: languages.iter().map(|l| l.to_string()).collect(), executable: name.clone(), ..Default::default() };
+            app.lsp_additional.entry(key.root.clone()).or_default().push(additional);
+        }
+        app.lsp_sessions.insert(key.clone(), LspSession {
+            generation: tool_sessions::generation(), client: sink_client(&key.root), name: name.into(), languages: languages.iter().map(|l| l.to_string()).collect(),
+            root: key.root.clone(), reader: None, capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None,
+        });
+        key
+    }
+
+    fn capabilities(json: serde_json::Value) -> lsp_types::ServerCapabilities {
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// The one pending request `key` has, and its id.
+    fn only_pending(app: &App, key: &LspKey) -> (i64, PendingLspRequest) {
+        let pending = &app.lsp_sessions[key].pending;
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        pending.iter().map(|(id, p)| (*id, p.clone())).next().unwrap()
+    }
+
+    fn answer(app: &mut App, key: &LspKey, id: i64, result: serde_json::Value) {
+        let generation = app.lsp_sessions[key].generation;
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Response { id, result: Ok(result) });
+    }
+
+    /// A Rust file served by a primary server and an additional one that
+    /// also serves Markdown.
+    fn two_servers(name: &str) -> (TempDir, App, PathBuf, LspKey, LspKey) {
+        let (dir, path) = project_scope_fixture(name);
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let all = serde_json::json!({"textDocumentSync": 2, "hoverProvider": true, "definitionProvider": true, "referencesProvider": true, "codeActionProvider": true,
+            "completionProvider": {"triggerCharacters": ["."]}, "renameProvider": true});
+        let primary = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], capabilities(all));
+        let extra = install_server(&mut app, &path, LspServer::Additional("kiln".into()), "kiln", &["rust", "markdown"],
+            capabilities(serde_json::json!({"textDocumentSync": 1, "hoverProvider": true, "definitionProvider": true, "completionProvider": {"triggerCharacters": ["-"]}, "documentFormattingProvider": true})));
+        app.sync_lsp_for_focused_buffer();
+        (dir, app, path, primary, extra)
+    }
+
+    #[test]
+    fn one_buffer_is_opened_on_every_server_that_serves_its_language() {
+        let (dir, mut app, path, primary, extra) = two_servers("multi_open");
+        let canonical = fenix_lsp::normalize(refactor::identity(&path));
+        assert!(app.lsp_sessions[&primary].open_documents.contains_key(&canonical));
+        assert!(app.lsp_sessions[&extra].open_documents.contains_key(&canonical), "the additional server is told about the Rust file too");
+        assert_eq!(app.focused_lsp_context().unwrap().0, [primary.clone(), extra.clone()], "primary first");
+
+        // An edit reaches both, each at its own version.
+        app.test_insert_str("x");
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(app.lsp_sessions[&primary].open_documents[&canonical].1, 2);
+        assert_eq!(app.lsp_sessions[&extra].open_documents[&canonical].1, 2);
+
+        // A TOML file is served by neither.
+        let other = dir.write("Cargo.toml", "[package]\n");
+        app.open_file_from_picker(&other);
+        app.sync_lsp_for_focused_buffer();
+        assert!(app.focused_lsp_context().is_none());
+        assert_eq!(app.lsp_sessions[&extra].open_documents.len(), 1);
+    }
+
+    #[test]
+    fn hover_shows_every_servers_answer_primary_first_as_they_arrive() {
+        let (_dir, mut app, _path, primary, extra) = two_servers("multi_hover");
+        app.request_hover();
+        let (p_id, _) = only_pending(&app, &primary);
+        let (e_id, _) = only_pending(&app, &extra);
+        answer(&mut app, &extra, e_id, serde_json::json!({"contents": "REQ-014: the editor boots"}));
+        assert_eq!(app.lsp_hover.as_deref(), Some("REQ-014: the editor boots"), "the faster server shows without waiting");
+        answer(&mut app, &primary, p_id, serde_json::json!({"contents": {"kind": "markdown", "value": "fn main()"}}));
+        assert_eq!(app.lsp_hover.clone().unwrap(), format!("fn main(){}REQ-014: the editor boots", fenix_lsp::fanout::HOVER_SEPARATOR));
+        assert!(app.lsp_fanouts.is_empty(), "done once everyone answered");
+
+        // An empty answer drops out.
+        app.request_hover();
+        let (p_id, _) = only_pending(&app, &primary);
+        let (e_id, _) = only_pending(&app, &extra);
+        answer(&mut app, &primary, p_id, serde_json::Value::Null);
+        answer(&mut app, &extra, e_id, serde_json::json!({"contents": "only kiln"}));
+        assert_eq!(app.lsp_hover.as_deref(), Some("only kiln"));
+    }
+
+    #[test]
+    fn definitions_merge_and_wait_for_a_slow_server_only_until_the_deadline() {
+        let (_dir, mut app, path, primary, extra) = two_servers("multi_definition");
+        let uri = fenix_lsp::path_to_uri(&fenix_lsp::normalize(refactor::identity(&path))).unwrap();
+        let at = |line: u32| serde_json::json!({"uri": uri, "range": {"start": {"line": line, "character": 0}, "end": {"line": line, "character": 2}}});
+        app.request_goto_definition();
+        let (p_id, _) = only_pending(&app, &primary);
+        let (e_id, pending) = only_pending(&app, &extra);
+        let PendingLspRequest::Definition { fanout } = pending else { panic!("{pending:?}") };
+        answer(&mut app, &primary, p_id, serde_json::json!([at(0)]));
+        assert!(app.lsp_fanouts.contains_key(&fanout), "kiln may still know another place");
+        answer(&mut app, &extra, e_id, serde_json::json!([at(0), at(1)]));
+        assert!(!app.lsp_fanouts.contains_key(&fanout));
+        assert_eq!(app.quickfix.len(), 2, "the shared place once, kiln's other place too");
+
+        // kiln never answers: past the deadline, the primary's answer stands.
+        app.request_goto_definition();
+        let (p_id, _) = only_pending(&app, &primary);
+        let (_, pending) = only_pending(&app, &extra);
+        let PendingLspRequest::Definition { fanout } = pending else { panic!() };
+        // Pretend the deadline has already passed.
+        if let Some(LspFanout::Locations { gather, .. }) = app.lsp_fanouts.get_mut(&fanout) {
+            *gather = fenix_lsp::fanout::Gather::new(vec![primary.clone(), extra.clone()], std::time::Instant::now());
+        }
+        answer(&mut app, &primary, p_id, serde_json::json!([at(0)]));
+        app.handle_user_event(FenixUserEvent::LspDeadline(fanout));
+        assert!(!app.lsp_fanouts.contains_key(&fanout), "acted on without kiln");
+        assert_eq!(app.test_cursor().char_idx, 0);
+
+        // A server that never answers doesn't leave its request behind for good.
+        app.request_goto_definition();
+        app.request_goto_definition();
+        assert_eq!(app.lsp_fanouts.len(), 1, "the newer gd supersedes the older one");
+    }
+
+    #[test]
+    fn completion_asks_again_only_the_servers_whose_list_was_incomplete() {
+        let (_dir, mut app, _path, primary, extra) = two_servers("multi_completion");
+        app.test_vim_key(KeyPress::char('i'));
+        app.request_lsp_completion(0, None);
+        let (p_id, PendingLspRequest::Completion { .. }) = only_pending(&app, &primary) else { panic!() };
+        let (e_id, _) = only_pending(&app, &extra);
+        answer(&mut app, &primary, p_id, serde_json::json!({"isIncomplete": false, "items": [{"label": "main"}]}));
+        answer(&mut app, &extra, e_id, serde_json::json!({"isIncomplete": true, "items": [{"label": "REQ-014"}]}));
+        let labels: Vec<String> = app.lsp_completion.as_ref().unwrap().answers.items().map(|(_, item)| item.label.clone()).collect();
+        assert_eq!(labels, ["main", "REQ-014"]);
+
+        app.request_lsp_completion(0, None);
+        assert!(app.lsp_sessions[&primary].pending.is_empty(), "rust-analyzer's list was complete: not asked again");
+        assert_eq!(app.lsp_sessions[&extra].pending.len(), 1, "kiln said its list was incomplete");
+
+        // A trigger character asks only the server that declared it, at a new anchor.
+        app.lsp_sessions.get_mut(&extra).unwrap().pending.clear();
+        app.request_lsp_completion(5, Some('.'));
+        assert_eq!(app.lsp_sessions[&primary].pending.len(), 1);
+        assert!(app.lsp_sessions[&extra].pending.is_empty(), "kiln triggers on - only");
+    }
+
+    #[test]
+    fn in_a_comment_only_servers_are_asked_and_a_trigger_character_asks_its_server() {
+        let (_dir, mut app, _path, primary, extra) = two_servers("multi_comment");
+        app.test_vim_key(KeyPress::char('A'));
+        for c in "\n// implements: REQ".chars() {
+            app.test_insert_str(&c.to_string());
+        }
+        app.sync_lsp_for_focused_buffer();
+        app.sync_completion();
+        assert!(app.completion.is_some(), "a server may know what goes in a comment");
+        assert!(!app.completion_local, "local words don't crowd it");
+        assert_eq!(app.lsp_sessions[&extra].pending.len(), 1);
+        app.lsp_sessions.get_mut(&primary).unwrap().pending.clear();
+        app.lsp_sessions.get_mut(&extra).unwrap().pending.clear();
+
+        // `-` is kiln's trigger character: just typed, only kiln is asked.
+        app.test_insert_str("-");
+        app.sync_lsp_for_focused_buffer();
+        app.sync_completion();
+        assert!(app.completion.is_some());
+        assert_eq!(app.lsp_sessions[&extra].pending.len(), 1);
+        assert!(app.lsp_sessions[&primary].pending.is_empty(), "rust-analyzer didn't declare -");
+    }
+
+    #[test]
+    fn rename_goes_to_the_primary_and_formatting_to_the_one_server_that_formats() {
+        let (_dir, mut app, _path, primary, extra) = two_servers("multi_exclusive");
+        app.send_lsp_rename("renamed");
+        assert!(matches!(only_pending(&app, &primary).1, PendingLspRequest::Rename { .. }));
+        assert!(app.lsp_sessions[&extra].pending.is_empty());
+        assert!(app.request_lsp_format(), "the primary can't format; kiln is the one server that can");
+        assert!(matches!(only_pending(&app, &extra).1, PendingLspRequest::Format { .. }));
+    }
+
+    #[test]
+    fn diagnostics_from_two_servers_are_shown_together_and_each_keeps_its_own() {
+        let (_dir, mut app, path, primary, extra) = two_servers("multi_diagnostics");
+        let canonical = fenix_lsp::normalize(refactor::identity(&path));
+        let uri = fenix_lsp::path_to_uri(&canonical).unwrap();
+        let publish = |app: &mut App, key: &LspKey, messages: &[&str]| {
+            let generation = app.lsp_sessions[key].generation;
+            let diagnostics: Vec<_> = messages.iter().map(|m| serde_json::json!({"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "message": m, "severity": 1})).collect();
+            app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Notification { method: "textDocument/publishDiagnostics".into(), params: serde_json::json!({"uri": uri, "diagnostics": diagnostics}) });
+        };
+        publish(&mut app, &primary, &["mismatched types"]);
+        publish(&mut app, &extra, &["REQ-999 doesn't exist"]);
+        let shown = app.all_diagnostics(&canonical);
+        assert_eq!(shown.iter().map(|d| (d.source.clone().unwrap(), d.message.clone())).collect::<Vec<_>>(),
+            [("rust-analyzer".to_string(), "mismatched types".to_string()), ("kiln".to_string(), "REQ-999 doesn't exist".to_string())]);
+        assert!(app.modeline_text().contains("2E"), "{}", app.modeline_text());
+        publish(&mut app, &extra, &[]);
+        assert_eq!(app.all_diagnostics(&canonical).len(), 1, "kiln clearing its own leaves rust-analyzer's");
+
+        // A code action request shows each server only its own.
+        publish(&mut app, &extra, &["REQ-999 doesn't exist"]);
+        assert_eq!(app.diagnostics.from_server(&canonical, &primary)[0].message, "mismatched types");
+    }
+
+    #[test]
+    fn a_crashed_additional_server_leaves_the_primary_working() {
+        let (_dir, mut app, path, primary, extra) = two_servers("multi_crash");
+        let canonical = fenix_lsp::normalize(refactor::identity(&path));
+        let uri = fenix_lsp::path_to_uri(&canonical).unwrap();
+        app.diagnostics.publish(canonical.clone(), primary.clone(), "rust-analyzer", vec![lsp_types::Diagnostic { message: "kept".into(), ..Default::default() }]);
+        app.diagnostics.publish(canonical.clone(), extra.clone(), "kiln", vec![lsp_types::Diagnostic { message: "gone".into(), ..Default::default() }]);
+        app.request_goto_definition();
+        let (p_id, _) = only_pending(&app, &primary);
+
+        let generation = app.lsp_sessions[&extra].generation;
+        app.apply_lsp_event(extra.clone(), generation, fenix_lsp::LspEvent::Disconnected("server closed its stdout".into()));
+        assert!(app.status_message.as_ref().unwrap().text.contains("kiln disconnected"), "reported by name, like a primary's crash");
+        assert!(!app.lsp_sessions.contains_key(&extra));
+        assert!(app.lsp_unavailable.contains(&extra), "not restarted every frame; :lsp-restart retries it");
+        assert!(app.lsp_sessions.contains_key(&primary));
+        assert_eq!(app.all_diagnostics(&canonical).iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["kept"]);
+
+        // The request in flight isn't left waiting on the crashed server.
+        answer(&mut app, &primary, p_id, serde_json::json!([{"uri": uri, "range": {"start": {"line": 0, "character": 2}, "end": {"line": 0, "character": 3}}}]));
+        assert_eq!(app.test_cursor().char_idx, 2, "the primary's definition is jumped to");
+        assert!(app.lsp_fanouts.is_empty());
+
+        // And the primary keeps serving the buffer alone.
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(app.focused_lsp_context().unwrap().0, std::slice::from_ref(&primary));
+        app.request_hover();
+        assert!(matches!(only_pending(&app, &primary).1, PendingLspRequest::Hover { .. }));
+    }
+
+    #[test]
+    fn an_additional_server_that_cannot_start_is_reported_and_the_primary_still_starts() {
+        let (dir, path) = project_scope_fixture("multi_start");
+        dir.write(".fenix/tools.json", &serde_json::json!({"lsp": {
+            "rust": {"executable": std::env::current_exe().unwrap(), "args": ["--ignored", "--exact", "app::tests::lsp_sink_fixture"], "env": {"FENIX_LSP_SINK": "1"}},
+            "additional": [{"name": "kiln", "executable": "definitely-not-a-real-kiln-xyz", "args": ["lsp"], "languages": ["rust", "markdown"]}]
+        }}).to_string());
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.sync_lsp_for_focused_buffer();
+        let root = tool_sessions::lsp_root_for_path(&path);
+        let kiln = LspKey { server: LspServer::Additional("kiln".into()), root: root.clone() };
+        assert!(app.lsp_sessions.contains_key(&LspKey::primary(fenix_syntax::LanguageId::Rust, root.clone())), "the primary started");
+        assert!(app.lsp_unavailable.contains(&kiln));
+        assert!(app.status_message.as_ref().unwrap().text.contains("couldn't start kiln"), "{:?}", app.status_message.as_ref().map(|m| &m.text));
+
+        // `:lsp-restart kiln` tries kiln again and leaves the primary alone.
+        let primary_generation = app.lsp_sessions[&LspKey::primary(fenix_syntax::LanguageId::Rust, root.clone())].generation;
+        app.restart_project_lsp("kiln");
+        assert_eq!(app.lsp_sessions[&LspKey::primary(fenix_syntax::LanguageId::Rust, root.clone())].generation, primary_generation);
+        assert!(app.status_message.as_ref().unwrap().text.contains("couldn't start kiln"), "tried again");
+        app.restart_project_lsp("nonesuch");
+        assert!(app.status_message.as_ref().unwrap().text.contains("no language server called nonesuch"));
+    }
+
+    #[test]
+    fn restarting_one_server_by_name_keeps_the_others() {
+        let (_dir, mut app, _path, primary, extra) = two_servers("multi_restart");
+        app.project_root = Some(primary.root.clone());
+        let generation = app.lsp_sessions[&primary].generation;
+        let kiln_generation = app.lsp_sessions[&extra].generation;
+        app.restart_project_lsp("kiln");
+        assert!(app.lsp_sessions.get(&extra).is_none_or(|s| s.generation != kiln_generation), "kiln was stopped and started again");
+        assert_eq!(app.lsp_sessions[&primary].generation, generation, "rust-analyzer kept running");
+    }
+
     #[test]
     fn project_scoped_restart_leaves_other_projects_servers_running() {
         let (_a,a) = project_scope_fixture("restart_a");
@@ -39628,7 +40317,7 @@ name = \"orbit\"
         let b_key = install_test_lsp(&mut app,&b);
         // A dashboard with an explicit project root avoids spawning a real language server.
         app.project_root = Some(a_key.root.clone());
-        app.restart_project_lsp();
+        app.restart_project_lsp("");
         assert!(!app.lsp_sessions.contains_key(&a_key));
         assert!(app.lsp_sessions.contains_key(&b_key));
     }
@@ -39756,7 +40445,8 @@ name = \"orbit\"
         };
         // One from the MIB script check, one from a language server.
         app.mib_diagnostics.insert(path.clone(), vec![diag(2, 28, "PTH00101: 99 is outside 1..8")]);
-        app.diagnostics.insert(path, vec![diag(0, 9, "unknown mnemonic ZTC0810 -- ZTC08101?")]);
+        let server = app.lsp_key(fenix_syntax::LanguageId::Tcl);
+        app.diagnostics.publish(path, server, "tcl", vec![diag(0, 9, "unknown mnemonic ZTC0810 -- ZTC08101?")]);
         keys(&mut app, "]d");
         assert_eq!(app.test_cursor().char_idx, 9);
         assert!(app.status_message.as_ref().is_some_and(|m| m.text.contains("ZTC08101?")));

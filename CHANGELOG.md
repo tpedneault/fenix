@@ -8,6 +8,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- More than one language server per buffer: `"additional"` servers under
+  `"lsp"` in `.fenix/tools.json` run beside each language's own, one
+  process per project serving every language they list -- so a `.rs`
+  file can have rust-analyzer and a requirements server at once, and a
+  Markdown file a spell checker too. Diagnostics, completion, hover,
+  definitions, references and code actions are merged across them;
+  rename and formatting stay with the primary server. A slow or crashed
+  server doesn't hold up the others. `:lsp-restart NAME` restarts one
+  server; the tool status, the project doctor and the project settings
+  show them all.
+
 - Catppuccin themes, all four flavours: `Catppuccin Latte`,
   `Catppuccin Frappé`, `Catppuccin Macchiato` and `Catppuccin Mocha`, in
   the theme picker (`SPC t p`) and `editor.theme`. Latte's accents are
@@ -193,6 +204,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   diff buffers stop copying their line data on every frame.
 
 ### Changed
+
+- A language server's completions are asked for inside comments and
+  strings too (local words still aren't offered there), and a server's
+  completion trigger characters (`.`, `-`) open the popup. A server
+  whose completion list was complete isn't asked again while you keep
+  typing the same word.
 
 - A launch now finds the running Fenix by your `FENIX_HOME`: a Fenix
   with its own `FENIX_HOME` has its own channel and runs beside your

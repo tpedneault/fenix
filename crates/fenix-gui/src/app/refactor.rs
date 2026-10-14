@@ -24,7 +24,8 @@ struct Target {
     disk: String,
 }
 enum Contents {
-    Actions(Vec<lsp_types::CodeAction>, Context),
+    /// Each action with its own server's view of the documents.
+    Actions(Vec<(lsp_types::CodeAction, Context)>),
     Edits(Vec<PlannedDocument>, HashMap<PathBuf, Target>),
 }
 pub(super) struct Preview {
@@ -45,12 +46,16 @@ pub(super) struct Undo {
 }
 
 impl App {
-    pub(super) fn refactor_context(&self, language: fenix_syntax::LanguageId) -> Context {
+    /// The documents as `key`'s server has them right now: each open
+    /// buffer's edit count and the version that server was last sent --
+    /// what an edit it proposes is checked against. Every server keeps its
+    /// own versions, so an edit is checked against its own server's.
+    pub(super) fn refactor_context(&self, key: &LspKey) -> Context {
         let mut revisions = HashMap::new();
         for id in self.buffers.ids_sorted_by_path() {
             let ob = self.buffers.get(id).unwrap();
             let Some(path) = ob.buffer.path() else { continue };
-            let version = self.lsp_sessions.get(&self.lsp_key(language)).and_then(|session| {
+            let version = self.lsp_sessions.get(key).and_then(|session| {
                 session.open_documents.iter().find_map(|(known, (edits, next))| (identity(known) == identity(path) && *edits == ob.buffer.edit_count()).then_some(next - 1))
             });
             revisions.insert(identity(path), Revision { buffer: id, edits: ob.buffer.edit_count(), version });
@@ -124,7 +129,10 @@ impl App {
         self.wake_caret();
     }
 
-    pub(super) fn preview_lsp_actions(&mut self, actions: Vec<lsp_types::CodeActionOrCommand>, context: Context) {
+    /// Every server's code actions in one list -- each with the context of
+    /// the server that offered it, and that server's name (`Some` when
+    /// more than one answered) in front of its title.
+    pub(super) fn preview_lsp_actions(&mut self, actions: Vec<(lsp_types::CodeActionOrCommand, Context, Option<String>)>) {
         if self.refactor_preview.is_some() {
             self.set_error("finish or cancel the current refactor preview first");
             return;
@@ -132,8 +140,8 @@ impl App {
         // Never apply the edit half of an edit+command action: both are required.
         let actions: Vec<_> = actions
             .into_iter()
-            .filter_map(|action| match action {
-                lsp_types::CodeActionOrCommand::CodeAction(action) if action.disabled.is_none() && action.command.is_none() && action.edit.is_some() => Some(action),
+            .filter_map(|(action, context, server)| match action {
+                lsp_types::CodeActionOrCommand::CodeAction(action) if action.disabled.is_none() && action.command.is_none() && action.edit.is_some() => Some((action, context, server)),
                 _ => None,
             })
             .collect();
@@ -142,15 +150,20 @@ impl App {
             return;
         }
         if actions.len() == 1 {
-            self.preview_lsp_edit(actions.into_iter().next().unwrap().edit.unwrap(), context);
+            let (action, context, _) = actions.into_iter().next().unwrap();
+            self.preview_lsp_edit(action.edit.unwrap(), context);
             return;
         }
         let mut text = "Code actions — Enter previews the action under the cursor; q cancels\n\n".to_string();
-        for action in &actions {
+        for (action, _, server) in &actions {
+            if let Some(server) = server {
+                text.push_str(&format!("[{server}] "));
+            }
             text.push_str(&action.title.replace(['\n', '\r'], " "));
             text.push('\n');
         }
-        self.open_refactor_preview(&text, Contents::Actions(actions, context));
+        let actions = actions.into_iter().map(|(action, context, _)| (action, context)).collect();
+        self.open_refactor_preview(&text, Contents::Actions(actions));
         let line = self.open().buffer.line_start_char(2);
         self.pane_state_mut(self.focused_pane_id()).cursor = Cursor { char_idx: line, sticky_col: 0 };
     }
@@ -166,7 +179,7 @@ impl App {
         if key == KeyPress::char('a') || key == KeyPress::named(FenixNamedKey::Enter) {
             let row = self.open().buffer.line_col(&self.cursor()).0;
             let selection = self.refactor_preview.as_ref().and_then(|p| match &p.contents {
-                Contents::Actions(actions, context) => row.checked_sub(2).and_then(|index| actions.get(index)).map(|a| (a.edit.clone().unwrap(), context.clone())),
+                Contents::Actions(actions) => row.checked_sub(2).and_then(|index| actions.get(index)).map(|(a, context)| (a.edit.clone().unwrap(), context.clone())),
                 _ => None,
             });
             if let Some((edit, context)) = selection {
@@ -305,7 +318,8 @@ impl App {
             let language = fenix_syntax::detect_language_from_path(path);
             let text = ob.buffer.text();
             let revision = ob.buffer.edit_count();
-            for (server_language, session) in &mut self.lsp_sessions {
+            let language_name = language.map(crate::lsp::language_config_name);
+            for (key, session) in &mut self.lsp_sessions {
                 if session.capabilities.is_none() {
                     continue;
                 }
@@ -320,13 +334,13 @@ impl App {
                             content_changes: vec![change],
                         })
                         .map(|_| version + 1)
-                } else if language == Some(server_language.language) && tool_sessions::lsp_root_for_path(path) == server_language.root {
+                } else if language_name.as_ref().is_some_and(|name| session.languages.contains(name)) && tool_sessions::lsp_root_for_path(path) == key.root {
                     session
                         .client
                         .notify::<lsp_types::notification::DidOpenTextDocument>(lsp_types::DidOpenTextDocumentParams {
                             text_document: lsp_types::TextDocumentItem {
                                 uri: uri.clone(),
-                                language_id: crate::lsp::language_config_name(server_language.language),
+                                language_id: language_name.clone().unwrap_or_default(),
                                 version: 0,
                                 text: text.clone(),
                             },
@@ -414,7 +428,7 @@ mod tests {
         }
     }
     fn preview(app: &mut App, paths: &[&Path]) {
-        let context = app.refactor_context(fenix_syntax::LanguageId::Rust);
+        let context = app.refactor_context(&app.lsp_key(fenix_syntax::LanguageId::Rust));
         app.preview_lsp_edit(proposal(paths), context);
         assert!(app.refactor_preview.is_some(), "{:?}", app.status_message.as_ref().map(|m| &m.text));
     }
@@ -452,7 +466,7 @@ mod tests {
     #[test]
     fn stale_request_and_stale_undo_are_refused() {
         let (_dir, mut app, a, b) = fixture();
-        let context = app.refactor_context(fenix_syntax::LanguageId::Rust);
+        let context = app.refactor_context(&app.lsp_key(fenix_syntax::LanguageId::Rust));
         app.test_insert_str("x");
         app.preview_lsp_edit(proposal(&[&a, &b]), context);
         assert!(app.refactor_preview.is_none());
@@ -476,15 +490,17 @@ mod tests {
     #[test]
     fn multiple_actions_require_selection_then_preview() {
         let (_dir, mut app, a, b) = fixture();
-        let context = app.refactor_context(fenix_syntax::LanguageId::Rust);
+        let context = app.refactor_context(&app.lsp_key(fenix_syntax::LanguageId::Rust));
         let actions = [&a, &b]
             .iter()
             .enumerate()
             .map(|(index, path)| {
-                lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction { title: format!("action {index}"), edit: Some(proposal(&[path])), ..Default::default() })
+                let action = lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction { title: format!("action {index}"), edit: Some(proposal(&[path])), ..Default::default() });
+                (action, context.clone(), Some(format!("server {index}")))
             })
             .collect();
-        app.preview_lsp_actions(actions, context);
+        app.preview_lsp_actions(actions);
+        assert!(app.open().buffer.text().contains("[server 1] action 1"), "with several servers, each action names its own");
         assert!(matches!(app.refactor_preview.as_ref().unwrap().contents, Contents::Actions(..)));
         app.refactor_key(KeyPress::named(FenixNamedKey::Enter));
         assert!(matches!(app.refactor_preview.as_ref().unwrap().contents, Contents::Edits(..)));
