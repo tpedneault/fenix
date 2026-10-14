@@ -450,11 +450,12 @@ mod tests {
             .unwrap();
         state.picker.move_selection(row as isize);
         app.completion_selected = true;
-        app.apply_lsp_completion(
-            app.focused_buffer_id(),
-            0,
-            serde_json::json!([{"label":"print","detail":"print(value)"}]),
-        );
+        let buffer = app.focused_buffer_id();
+        let key = app.lsp_key(fenix_syntax::LanguageId::Tcl);
+        let mut answers = fenix_lsp::fanout::CompletionSet::new(vec![key.clone()]);
+        answers.store(key, serde_json::from_value(serde_json::json!([{"label":"print","detail":"print(value)"}])).unwrap());
+        app.lsp_completion = Some(LspCompletion { buffer, prefix_start: 0, answers });
+        app.apply_lsp_completion(buffer, 0);
         assert_eq!(
             app.completion
                 .as_ref()

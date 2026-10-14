@@ -161,9 +161,55 @@ pub fn render(entries: &[ToolEntry]) -> String {
     out
 }
 
+/// An additional language server (`tools.json`'s `lsp.additional`):
+/// one process per project, beside the primary servers of every
+/// language it lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdditionalEntry {
+    pub name: String,
+    pub command: String,
+    pub languages: Vec<String>,
+    pub found_on_path: bool,
+    pub running: bool,
+    /// It failed to start or crashed, and waits for `:lsp-restart`.
+    pub failed: bool,
+}
+
+/// The additional servers' rows, under their own heading -- empty when
+/// the project has none.
+pub fn render_additional(entries: &[AdditionalEntry]) -> String {
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nAdditional language servers (beside each language's own)\n");
+    for entry in entries {
+        let status = if entry.found_on_path { "found" } else { "missing" };
+        let state = if entry.running {
+            ", running"
+        } else if entry.failed {
+            ", failed -- :lsp-restart to retry"
+        } else {
+            ""
+        };
+        out.push_str(&format!("{:<12} LSP+ {:<28} [{status}{state}]\n", entry.name, entry.command));
+        out.push_str(&format!("             serves: {}\n", entry.languages.join(", ")));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn additional_servers_are_listed_with_what_they_serve_and_how_they_are() {
+        let entry = |running, failed| AdditionalEntry { name: "kiln".into(), command: "kiln".into(), languages: vec!["rust".into(), "markdown".into()], found_on_path: true, running, failed };
+        let text = render_additional(&[entry(true, false)]);
+        assert!(text.contains("Additional language servers"));
+        assert!(text.contains("kiln") && text.contains("running") && text.contains("serves: rust, markdown"), "{text}");
+        assert!(render_additional(&[entry(false, true)]).contains(":lsp-restart"));
+        assert_eq!(render_additional(&[]), "");
+    }
 
     #[test]
     fn scan_includes_one_lsp_row_per_known_language_with_a_default() {

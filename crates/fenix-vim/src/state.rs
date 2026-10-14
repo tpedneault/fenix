@@ -22,7 +22,9 @@ use crate::textobject;
 pub enum VimEvent {
     None,
     RequestUndoRefactor,
-    RequestRestartLsp,
+    /// `:lsp-restart [NAME]` -- every language server of the project, or
+    /// the one called NAME (empty for all).
+    RequestRestartLsp(String),
     RequestSessionSave,
     RequestSessionQuit,
     RequestSave,

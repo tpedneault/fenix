@@ -1034,7 +1034,12 @@ Everything Fenix does, by area. For the keys, see
   autocompletion already opens (`CompletionKind::Lsp`), rather than
   being a separate mechanism. Every one of these degrades gracefully to
   "not available" (not a hard error) when no server is attached, or the
-  attached one doesn't advertise that capability. On Windows, a server
+  attached one doesn't advertise that capability. A project can attach
+  more than one server to a buffer -- `"additional"` servers in
+  `.fenix/tools.json` run beside each language's own, with diagnostics,
+  completion, hover, definitions, references and code actions merged
+  across them (see [project tool settings](PROJECT_TOOLS.md#additional-language-servers)).
+  On Windows, a server
   installed as an npm-style `.cmd` shim (`typescript-language-server`,
   `bash-language-server`, and most other JS-ecosystem tooling) launches
   correctly despite `PATH` resolution quirks Rust's own process-spawning
@@ -1417,10 +1422,13 @@ lazy action resolution are not supported; unsupported edits are rejected whole.
 
 ## Project tool environments
 
-Language servers are scoped by language and project root. Configure literal
-executables, argument arrays, working directories, and child environment values
-in `.fenix/tools.json` for LSP, DAP, and tasks. `:lsp-restart` reloads language
-services for the current project. Task rerun history is per project; debugger
+Language servers are scoped by server and project root: each language's
+primary server, plus any additional servers a project declares, which can serve
+several languages from one process and share a buffer with its primary.
+Configure literal executables, argument arrays, working directories, and child
+environment values in `.fenix/tools.json` for LSP, DAP, and tasks.
+`:lsp-restart` reloads language services for the current project;
+`:lsp-restart NAME` restarts one server. Task rerun history is per project; debugger
 and task controls guard against operating on another project's active process.
 See [project tool settings](PROJECT_TOOLS.md) for examples and precedence.
 
