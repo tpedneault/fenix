@@ -1,6 +1,7 @@
 //! SCOS-2000 MIB lookup: parses tab-separated MIB tables (`.dat` files,
-//! per the Database Import ICD 7.2 schema -- see `schema`) from one or
-//! more configured root directories into an in-memory index, and
+//! per any main issue of the Database Import ICD, 4.x to 7.x -- see
+//! `schema`) and XTCE files (1.0 to 1.2 -- see `xtce`) from one or more
+//! configured roots into an in-memory index, and
 //! provides the queries `fenix-gui` needs for telecommand/TM-packet/
 //! TM-parameter/calibration lookup and building a telecommand call from
 //! its MIB definition (`telecommand`). `MibSet` joins a project's MIBs
@@ -29,12 +30,46 @@ mod xtce;
 
 use std::path::PathBuf;
 
-type HashMapRows = std::collections::HashMap<String, Vec<Row>>;
-
 pub use parse::Problem;
 pub use query::Query;
 pub use row::{Row, RowSource};
+pub use schema::{Icd, Schema};
 pub use set::{CalKind, DefRef, Entry, Kind, MibSet, Stamp};
+pub use xtce::XtceOptions;
+
+/// How a project's MIBs are read: the ICD layout of `.dat` folders, and
+/// how an XTCE file says which packet is which.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ReadOptions {
+    pub schema: Schema,
+    pub xtce: XtceOptions,
+}
+
+/// What one root was read as.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Format {
+    /// A folder of `.dat` tables, laid out as `issue` has them --
+    /// `detected` when it was worked out from the files.
+    Icd { issue: Icd, detected: bool },
+    /// An XTCE file, of the version its namespace says when it says one.
+    Xtce { version: Option<&'static str> },
+}
+
+impl std::fmt::Display for Format {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Format::Icd { issue, detected: false } => write!(f, "ICD {issue}"),
+            Format::Icd { issue, detected: true } => write!(f, "ICD {issue}, detected"),
+            Format::Xtce { version: Some(v) } => write!(f, "XTCE {v}"),
+            Format::Xtce { version: None } => write!(f, "XTCE"),
+        }
+    }
+}
+
+/// Whether a root is an XTCE file rather than a folder of tables.
+pub fn is_xtce_file(path: &std::path::Path) -> bool {
+    path.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml") || e.eq_ignore_ascii_case("xtce"))
+}
 
 /// One configured MIB directory -- a label (shown in candidate lists and
 /// detail views) plus the directory containing its `.dat` table files.
@@ -52,13 +87,29 @@ pub struct MibRoot {
 /// until `refresh` is called at least once.
 pub struct MibIndex {
     roots: Vec<MibRoot>,
+    options: ReadOptions,
     tables: std::collections::HashMap<String, Vec<Row>>,
     problems: Vec<Problem>,
+    formats: Vec<Option<Format>>,
 }
 
 impl MibIndex {
     pub fn new(roots: Vec<MibRoot>) -> Self {
-        Self { roots, tables: std::collections::HashMap::new(), problems: Vec::new() }
+        Self::with_options(roots, ReadOptions::default())
+    }
+
+    pub fn with_options(roots: Vec<MibRoot>, options: ReadOptions) -> Self {
+        Self { roots, options, tables: std::collections::HashMap::new(), problems: Vec::new(), formats: Vec::new() }
+    }
+
+    pub fn options(&self) -> &ReadOptions {
+        &self.options
+    }
+
+    /// What root `root` was read as; `None` before `refresh`, or when
+    /// there's nothing there.
+    pub fn format(&self, root: usize) -> Option<&Format> {
+        self.formats.get(root).and_then(Option::as_ref)
     }
 
     pub fn roots(&self) -> &[MibRoot] {
@@ -70,42 +121,66 @@ impl MibIndex {
         &self.problems
     }
 
-    /// Reparses every known table (`schema::all_tables`) under every
-    /// configured root that exists on disk, replacing whatever was
-    /// previously loaded. Called once lazily on the first MIB command
-    /// and again on a manual refresh (`SPC m r`) -- MIB data doesn't
-    /// change while Fenix is running unless the user edits the raw
-    /// `.dat` files elsewhere, so this isn't re-run automatically.
+    /// Reparses every known table (`Schema::tables`) under every
+    /// configured root that exists on disk, and every XTCE file root,
+    /// replacing whatever was previously loaded. Called once lazily on
+    /// the first MIB command and again on a manual refresh (`SPC m r`).
+    /// A folder's tables are laid out as the issue it follows has them:
+    /// the one the options give it, else the one its files fit.
     pub fn refresh(&mut self) {
         self.tables.clear();
         self.problems.clear();
-        // An XTCE file as a root: its rows, table by table.
-        let mut xtce: Vec<HashMapRows> = Vec::new();
+        self.formats.clear();
+        let schema = &self.options.schema;
         for (root_index, root) in self.roots.iter().enumerate() {
-            if root.path.is_file() && root.path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")) {
-                let (tables, problems) = xtce::read(root_index, &root.label, &root.path);
-                xtce.push(tables);
-                self.problems.extend(problems);
-            }
-        }
-        for table in schema::all_tables() {
-            let mut rows = Vec::new();
-            for from_xml in &mut xtce {
-                rows.extend(from_xml.remove(table).unwrap_or_default());
-            }
-            for (root_index, root) in self.roots.iter().enumerate() {
-                if root.path.is_file() {
-                    continue;
+            if is_xtce_file(&root.path) {
+                let (tables, problems, version) = xtce::read(root_index, &root.label, &root.path, &self.options.xtce);
+                // In table order, so rows come out the same way every time.
+                let mut tables: Vec<(String, Vec<Row>)> = tables.into_iter().collect();
+                tables.sort_by(|a, b| a.0.cmp(&b.0));
+                for (table, rows) in tables {
+                    self.tables.entry(table).or_default().extend(rows);
                 }
+                self.problems.extend(problems);
+                self.formats.push(Some(Format::Xtce { version }));
+                continue;
+            }
+            if !root.path.is_dir() {
+                self.formats.push(None);
+                continue;
+            }
+            let mut texts: Vec<(String, PathBuf, String)> = Vec::new();
+            for table in schema.tables() {
                 let file = root.path.join(format!("{table}.dat"));
-                let (found, problems) = parse::parse_table_file(root_index, &root.label, table, &file);
-                rows.extend(found);
+                match parse::read_table_file(root_index, &file) {
+                    Ok(Some(text)) => texts.push((table, file, text)),
+                    Ok(None) => {}
+                    Err(problem) => self.problems.push(problem),
+                }
+            }
+            let (issue, detected) = match schema.icd_for(&root.label) {
+                Some(issue) => (issue, false),
+                None => (schema.detect(texts.iter().map(|(t, _, s)| (t.as_str(), s.as_str()))), true),
+            };
+            for (table, file, text) in &texts {
+                let own = schema.columns.iter().any(|(t, _)| t.eq_ignore_ascii_case(table));
+                let (columns, layout) = match schema.columns(issue, table) {
+                    Some(c) if own => (c, "mib.columns".to_string()),
+                    Some(c) => (c, format!("ICD {issue}")),
+                    None => {
+                        let Some(c) = schema.columns_any(table) else { continue };
+                        let since = schema::since(table).map(|s| s.label()).unwrap_or("?");
+                        self.problems.push(Problem { root: root_index, file: file.clone(), line: None, message: format!("{table}.dat came in with ICD {since}, after the {issue} this MIB follows; read as {since} lays it out") });
+                        (c, format!("ICD {}", Icd::LATEST))
+                    }
+                };
+                let (found, problems) = parse::parse_table_text(root_index, &root.label, table, file, &columns, &layout, text);
+                self.tables.entry(table.clone()).or_default().extend(found);
                 self.problems.extend(problems);
             }
-            if !rows.is_empty() {
-                self.tables.insert(table.to_string(), rows);
-            }
+            self.formats.push(Some(Format::Icd { issue, detected }));
         }
+        self.tables.retain(|_, rows| !rows.is_empty());
     }
 
     /// Every row of `table` across every root (or an empty slice if the
@@ -232,6 +307,80 @@ mod tests {
         let mut index = MibIndex::new(vec![MibRoot { label: "GONE".to_string(), path: std::env::temp_dir().join("fenix-mib-does-not-exist") }]);
         index.refresh();
         assert!(index.rows("ccf").is_empty());
+    }
+
+    fn ccf_line(columns: usize) -> String {
+        let mut v = vec!["AAA001".to_string(), "first".to_string()];
+        v.resize(columns, String::new());
+        v.join("\t") + "\n"
+    }
+
+    #[test]
+    fn a_mib_is_read_as_the_issue_it_is_set_to() {
+        let root = temp_root("issue-set");
+        write(&root, "ccf", &ccf_line(21));
+        let options = ReadOptions { schema: Schema { icd: Some(Icd::V5), ..Schema::default() }, ..Default::default() };
+        let mut index = MibIndex::with_options(vec![root.clone()], options);
+        index.refresh();
+        assert_eq!(index.rows("ccf")[0].fields.len(), 19);
+        assert_eq!(index.format(0), Some(&Format::Icd { issue: Icd::V5, detected: false }));
+        assert!(index.problems()[0].message.contains("ICD 5.x has 19"), "{:?}", index.problems());
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn a_mib_set_to_auto_is_read_as_the_issue_its_files_fit() {
+        let root = temp_root("issue-auto");
+        write(&root, "ccf", &ccf_line(17));
+        write(&root, "pid", &vec!["1"; 13].join("\t"));
+        let mut index = MibIndex::with_options(vec![root.clone()], ReadOptions { schema: Schema::auto(), ..Default::default() });
+        index.refresh();
+        assert_eq!(index.format(0), Some(&Format::Icd { issue: Icd::V4, detected: true }));
+        assert_eq!(index.format(0).unwrap().to_string(), "ICD 4.x, detected");
+        assert!(index.problems().is_empty(), "{:?}", index.problems());
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn a_table_newer_than_the_issue_is_read_all_the_same_with_a_problem() {
+        let root = temp_root("issue-newer");
+        write(&root, "pst", "SET1\tfirst\n");
+        let options = ReadOptions { schema: Schema { icd: Some(Icd::V4), ..Schema::default() }, ..Default::default() };
+        let mut index = MibIndex::with_options(vec![root.clone()], options);
+        index.refresh();
+        assert_eq!(index.rows("pst").len(), 1);
+        assert!(index.problems()[0].message.contains("came in with ICD 6.x"), "{:?}", index.problems());
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn a_missions_own_table_and_columns_are_read() {
+        let root = temp_root("own-columns");
+        write(&root, "xyz", "A\tB\n");
+        write(&root, "prv", "1\t0\t9\tmine\n");
+        let schema = Schema { columns: vec![("xyz".into(), vec!["XYZ_ONE".into(), "XYZ_TWO".into()]), ("prv".into(), vec!["PRV_NUMBR".into(), "PRV_MINVAL".into(), "PRV_MAXVAL".into(), "PRV_NOTE".into()])], ..Schema::default() };
+        let mut index = MibIndex::with_options(vec![root.clone()], ReadOptions { schema, ..Default::default() });
+        index.refresh();
+        assert_eq!(index.rows("xyz")[0].get("XYZ_TWO"), Some("B"));
+        assert_eq!(index.rows("prv")[0].get("PRV_NOTE"), Some("mine"));
+        assert!(index.problems().is_empty());
+        std::fs::remove_dir_all(&root.path).ok();
+    }
+
+    #[test]
+    fn each_mib_can_follow_its_own_issue() {
+        let old = temp_root("per-root-old");
+        let new = temp_root("per-root-new");
+        write(&old, "ccf", &ccf_line(17));
+        write(&new, "ccf", &ccf_line(21));
+        let schema = Schema { per_root: vec![(old.label.clone(), Some(Icd::V4))], ..Schema::default() };
+        let mut index = MibIndex::with_options(vec![old.clone(), new.clone()], ReadOptions { schema, ..Default::default() });
+        index.refresh();
+        assert_eq!(index.format(0).unwrap().to_string(), "ICD 4.x");
+        assert_eq!(index.format(1).unwrap().to_string(), "ICD 7.x");
+        assert!(index.problems().is_empty());
+        std::fs::remove_dir_all(&old.path).ok();
+        std::fs::remove_dir_all(&new.path).ok();
     }
 
     #[test]

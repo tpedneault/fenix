@@ -8,6 +8,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- MIBs of every main SCOS-2000 Database Import ICD issue -- 7.x, 6.9,
+  6.x, 5.x and 4.x -- with all of the ICD's tables, including
+  verification, parameter sets, groups and displays. `mib.icd` picks the
+  issue (or `auto` to work it out from the files), `mib.icd_per_mib`
+  sets one MIB apart, and `mib.columns` gives a table's columns where a
+  mission's differ or adds a table of its own. The MIB page and the
+  project doctor say what each MIB was read as.
+- XTCE MIBs (1.0 to 1.2, `.xml` or `.xtce`) are read much more fully:
+  types that extend others, time, binary, array and aggregate types,
+  alarm limits, valid ranges, byte order, packets identified through the
+  containers they extend, included and repeated entries, base commands'
+  arguments and assignments, significance and verifiers.
+  `mib.xtce_fields` names the parameters that identify packets, and
+  `mib.xtce_version` exports XTCE 1.1 instead of 1.2.
 - `fenix file:12` and `fenix file:12:3` open a file at a line and
   column, whether or not Fenix is already running (a Windows drive
   letter is part of the path); `--goto file:line:col` always reads a

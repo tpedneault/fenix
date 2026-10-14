@@ -370,7 +370,9 @@ fn mib(d: &mut Doctor) {
     let root = d.root;
     let dir = if root.join("mib").is_dir() { root.join("mib") } else { root.to_path_buf() };
     let label = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let set = fenix_mib::MibSet::load(vec![fenix_mib::MibRoot { label, path: dir.clone() }], None);
+    let schema = mib_schema(root);
+    let options = fenix_mib::ReadOptions { schema: schema.clone(), ..Default::default() };
+    let set = fenix_mib::MibSet::load_with(vec![fenix_mib::MibRoot { label, path: dir.clone() }], None, options);
     let info = set.root_info(0);
     let health = if info.tables == 0 { Health::Warn } else { Health::Ok };
     let (tables, rows) = (info.tables, info.rows);
@@ -379,6 +381,9 @@ fn mib(d: &mut Doctor) {
         summary = format!("{v} -- {summary}");
     }
     d.push(Check::new(Section::Database, "tables", health, summary));
+    if let Some(format) = &info.format {
+        d.push(Check::new(Section::Database, "layout", Health::Info, format!("{format} -- mib.icd in the project's settings (SPC k ,) says which")));
+    }
     let problems = set.problems();
     let shown = problems.len().min(20);
     for p in &problems[..shown] {
@@ -390,7 +395,6 @@ fn mib(d: &mut Doctor) {
     if problems.len() > shown {
         d.push(Check::new(Section::Database, "and more", Health::Warn, format!("{} more -- ! on the MIB page lists them all", problems.len() - shown)));
     }
-    let known: Vec<&str> = fenix_mib::schema::all_tables().collect();
     let mut unknown: Vec<String> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
@@ -398,16 +402,36 @@ fn mib(d: &mut Doctor) {
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dat")))
         .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default())
-        .filter(|t| !known.contains(&t.as_str()))
+        .filter(|t| !schema.knows(t))
         .collect();
     unknown.sort();
     if !unknown.is_empty() {
-        d.push(Check::new(Section::Database, "not ICD 7.2", Health::Info, format!("{}.dat -- ignored", unknown.join(".dat, "))));
+        d.push(Check::new(Section::Database, "not in the ICD", Health::Info, format!("{}.dat -- ignored; mib.columns reads a table of the mission's own", unknown.join(".dat, "))));
     }
     if info.tables > 0 {
         d.push(Check::new(Section::Database, "browse", Health::Ok, "this project is its own MIB -- SPC k k lists what's in it"));
         mission(d, &set);
     }
+}
+
+/// How the project says its MIB is laid out: `[mib]`'s `icd`,
+/// `icd_per_mib` and `columns` in `.fenix/settings.toml`, as the MIB page
+/// reads them.
+fn mib_schema(root: &Path) -> fenix_mib::Schema {
+    use fenix_mib::{schema, Icd, Schema};
+    let table: toml::Table = std::fs::read_to_string(root.join(".fenix").join("settings.toml")).ok().and_then(|t| t.parse().ok()).unwrap_or_default();
+    let mib = table.get("mib").and_then(|v| v.as_table());
+    let issue = |t: &str| if t.trim() == "auto" { None } else { Some(Icd::parse(t).unwrap_or(Icd::LATEST)) };
+    let pairs = |key: &str| -> Vec<(String, String)> {
+        mib.and_then(|m| m.get(key)).and_then(|v| v.as_table()).into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()
+    };
+    let mut s = Schema::default();
+    if let Some(icd) = mib.and_then(|m| m.get("icd")).and_then(|v| v.as_str()) {
+        s.icd = issue(icd);
+    }
+    s.per_root = pairs("icd_per_mib").into_iter().map(|(l, t)| (l, issue(&t))).collect();
+    s.columns = pairs("columns").into_iter().map(|(t, c)| (t.trim().to_ascii_lowercase(), schema::parse_columns(&c))).collect();
+    s
 }
 
 /// The project's mission profile (`[ccsds]` in `.fenix/settings.toml`,
@@ -665,7 +689,16 @@ mod tests {
         assert_eq!(find(&checks, "tables").detail, "2 tables, 4 rows");
         let bad = find(&checks, "pcf.dat:2");
         assert_eq!(bad.location, Some((dir.path().join("mib/pcf.dat"), 2)));
-        assert_eq!(find(&checks, "not ICD 7.2").detail, "zzz.dat -- ignored");
+        assert!(find(&checks, "not in the ICD").detail.starts_with("zzz.dat -- ignored"));
+        assert_eq!(find(&checks, "layout").detail.split(" -- ").next(), Some("ICD 7.x"));
+        // The project says how its MIB is laid out: an issue, and a table
+        // of its own.
+        dir.write(".fenix/settings.toml", "[mib]\nicd = \"auto\"\n\n[mib.columns]\nzzz = \"ZZZ_A, ZZZ_B\"\n");
+        dir.write("mib/zzz.dat", "a\tb\n");
+        let checks = diagnose(dir.path(), ProjectKind::Mib, &probe, false);
+        assert_eq!(find(&checks, "tables").detail, "3 tables, 5 rows");
+        assert!(find(&checks, "layout").detail.contains("detected"));
+        assert!(checks.iter().all(|c| c.label != "not in the ICD"));
         assert_eq!(find(&checks, "browse").health, Health::Ok);
     }
 

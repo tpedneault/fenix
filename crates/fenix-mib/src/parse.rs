@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use crate::row::{Row, RowSource};
-use crate::schema;
 
 /// Something wrong with a MIB's files or rows, and where: shown on the
 /// MIB page, in the project's MIB settings and by the project doctor.
@@ -14,37 +13,57 @@ pub struct Problem {
     pub message: String,
 }
 
-/// Parses `table`'s `.dat` file under one MIB root into `Row`s. A
-/// missing file is normal (a MIB root has only some of the known
-/// tables) and yields nothing. A file that exists but can't be read, or
-/// isn't UTF-8, yields no rows and a problem. Each non-empty line is
-/// split on tabs and zipped against the table's schema column names:
-/// a line with fewer values leaves the trailing columns absent
-/// (`Row::get` reports `None`), and one with more drops the extras,
-/// with a problem saying so.
+/// Parses `table`'s `.dat` file under one MIB root into `Row`s, laid
+/// out as the newest ICD issue has it. A missing file is normal (a MIB
+/// root has only some of the known tables) and yields nothing. A file
+/// that exists but can't be read, or isn't UTF-8, yields no rows and a
+/// problem.
+#[cfg(test)]
 pub fn parse_table_file(root_index: usize, root_label: &str, table: &str, file: &Path) -> (Vec<Row>, Vec<Problem>) {
-    let Some(columns) = schema::columns(table) else { return (Vec::new(), Vec::new()) };
-    let problem = |line: Option<usize>, message: String| Problem { root: root_index, file: file.to_path_buf(), line, message };
-    let contents = match std::fs::read(file) {
+    let Some(columns) = crate::schema::columns(table) else { return (Vec::new(), Vec::new()) };
+    let columns: Vec<String> = columns.iter().map(|c| c.to_string()).collect();
+    match read_table_file(root_index, file) {
+        Ok(Some(text)) => parse_table_text(root_index, root_label, table, file, &columns, &format!("ICD {}", crate::schema::Icd::LATEST), &text),
+        Ok(None) => (Vec::new(), Vec::new()),
+        Err(problem) => (Vec::new(), vec![problem]),
+    }
+}
+
+/// A table file's text: `None` when there's no such file, a problem
+/// when it can't be read or isn't UTF-8.
+pub fn read_table_file(root_index: usize, file: &Path) -> Result<Option<String>, Problem> {
+    let problem = |message: String| Problem { root: root_index, file: file.to_path_buf(), line: None, message };
+    match std::fs::read(file) {
         Ok(bytes) => match String::from_utf8(bytes) {
-            Ok(text) => text,
-            Err(_) => return (Vec::new(), vec![problem(None, "isn't UTF-8 text -- no rows read".to_string())]),
+            Ok(text) => Ok(Some(text)),
+            Err(_) => Err(problem("isn't UTF-8 text -- no rows read".to_string())),
         },
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
-        Err(err) => return (Vec::new(), vec![problem(None, format!("couldn't be read ({err})"))]),
-    };
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(problem(format!("couldn't be read ({err})"))),
+    }
+}
+
+/// A table file's text as rows of `columns`. Each non-empty line is
+/// split on tabs and zipped against the column names: a line with fewer
+/// values leaves the trailing columns absent (`Row::get` reports
+/// `None`), and one with more drops the extras, with a problem saying
+/// so -- `layout` names what has that many columns (`ICD 7.x`).
+pub fn parse_table_text(root_index: usize, root_label: &str, table: &str, file: &Path, columns: &[String], layout: &str, contents: &str) -> (Vec<Row>, Vec<Problem>) {
+    let problem = |line: Option<usize>, message: String| Problem { root: root_index, file: file.to_path_buf(), line, message };
     let mut rows = Vec::new();
     let mut problems = Vec::new();
     for (i, line) in contents.lines().enumerate() {
+        // A file written on Windows.
+        let line = line.strip_suffix('\r').unwrap_or(line);
         if line.is_empty() {
             continue;
         }
         let count = line.split('\t').count();
         if count > columns.len() {
-            problems.push(problem(Some(i + 1), format!("{count} columns, ICD 7.2 has {}; the extra ones were dropped", columns.len())));
+            problems.push(problem(Some(i + 1), format!("{count} columns, {layout} has {}; the extra ones were dropped", columns.len())));
         }
         let fields: Vec<(String, String)> =
-            columns.iter().zip(line.split('\t')).map(|(name, value)| (name.to_string(), value.to_string())).collect();
+            columns.iter().zip(line.split('\t')).map(|(name, value)| (name.clone(), value.to_string())).collect();
         rows.push(Row {
             table: table.to_string(),
             fields,
@@ -129,6 +148,15 @@ mod tests {
         assert_eq!(rows[0].fields.len(), 3); // schema has exactly 3 columns
         let (_, problems) = parse_table_file(0, "TEST", "prv", &file);
         assert_eq!(problems[0].line, Some(1));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn windows_line_endings_are_not_part_of_the_last_value() {
+        let dir = temp_dir("crlf");
+        let file = dir.join("prv.dat");
+        std::fs::write(&file, "1\t0\t100\r\n").unwrap();
+        assert_eq!(parse_table_file(0, "TEST", "prv", &file).0[0].get("PRV_MAXVAL"), Some("100"));
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -84,11 +84,45 @@ impl App {
             (false, _) if roots.is_empty() => String::new(),
             (false, _) => "from your settings".to_string(),
         };
-        (MibKey { roots, default, project }, source)
+        (MibKey { roots, default, project, options: self.mib_read_options() }, source)
     }
 
     fn mib_project_value(&self, key: &str) -> Option<&fenix_config::Value> {
         self.project_settings.as_ref().and_then(|(_, p)| p.get(key))
+    }
+
+    /// A MIB setting's text: the project's, else yours.
+    fn mib_text(&self, key: &str, mine: &Option<String>) -> Option<String> {
+        match self.mib_project_value(key) {
+            Some(fenix_config::Value::Text(t)) => Some(t.clone()),
+            _ => mine.clone(),
+        }
+    }
+
+    /// A MIB setting's entries: the project's, else yours.
+    fn mib_map(&self, key: &str, mine: &[(String, String)]) -> Vec<(String, String)> {
+        match self.mib_project_value(key) {
+            Some(fenix_config::Value::Map(m)) => m.clone(),
+            _ => mine.to_vec(),
+        }
+    }
+
+    /// How the focused project's MIBs are read: `mib.icd`,
+    /// `mib.icd_per_mib`, `mib.columns` and `mib.xtce_fields`.
+    pub(super) fn mib_read_options(&self) -> fenix_mib::ReadOptions {
+        use fenix_mib::{schema, Icd, Schema, XtceOptions};
+        let issue = |t: &str| if t.trim() == "auto" { None } else { Some(Icd::parse(t).unwrap_or(Icd::LATEST)) };
+        let schema = Schema {
+            icd: self.mib_text("mib.icd", &self.config.mib_icd).map_or(Some(Icd::LATEST), |t| issue(&t)),
+            per_root: self.mib_map("mib.icd_per_mib", &self.config.mib_icd_per_mib).into_iter().map(|(label, t)| (label, issue(&t))).collect(),
+            columns: self.mib_map("mib.columns", &self.config.mib_columns).into_iter().map(|(t, c)| (t.trim().to_ascii_lowercase(), schema::parse_columns(&c))).collect(),
+        };
+        let fields = self.mib_map("mib.xtce_fields", &self.config.mib_xtce_fields);
+        let names = |field: &str| -> Vec<String> {
+            fields.iter().filter(|(f, _)| f.trim().eq_ignore_ascii_case(field)).flat_map(|(_, v)| v.split([',', ' ']).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect::<Vec<_>>()).collect()
+        };
+        let xtce = XtceOptions { apid: names("apid"), service: names("service"), subtype: names("subtype"), pi1: names("pi1"), pi2: names("pi2") };
+        fenix_mib::ReadOptions { schema, xtce }
     }
 
     pub(super) fn mib_apid_hex(&self) -> bool {
@@ -130,7 +164,7 @@ impl App {
         slot.loading = true;
         let mission = self.mission(key.project.as_deref());
         self.page_spawn(move |send| {
-            let mut set = MibSet::load(key.roots.clone(), key.default.as_deref());
+            let mut set = MibSet::load_with(key.roots.clone(), key.default.as_deref(), key.options.clone());
             let options = fenix_mib::checks::Options { disabled: &mission.checks_off, base: mission.base, profile: &mission.profile };
             let found = fenix_mib::checks::run(&set, &options);
             set.add_problems(found);
@@ -646,7 +680,8 @@ impl App {
         let Some((key, set)) = self.mib_set_here(MibPending::Search) else { return };
         let Some((name, file, _)) = fenix_mib::generate::KINDS.get(kind) else { return };
         let mission = self.mission(key.project.as_deref());
-        let Some(text) = fenix_mib::generate::generate(name, &set, &mission.profile, mission.base) else { return };
+        let xtce = self.mib_text("mib.xtce_version", &self.config.mib_xtce_version).and_then(|v| fenix_mib::generate::XtceVersion::parse(&v).ok()).unwrap_or_default();
+        let Some(text) = fenix_mib::generate::generate_with(name, &set, &mission.profile, mission.base, xtce) else { return };
         let dir = key.project.clone().unwrap_or_else(|| PathBuf::from(".")).join("generated");
         let path = dir.join(file);
         match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text)) {
@@ -862,6 +897,30 @@ mod tests {
         assert!(source.contains("settings"), "{source}");
         app.config.mib_include_yours = Some(true);
         assert_eq!(app.mib_key_here().0.roots.len(), 2, "yours added when asked");
+    }
+
+    #[test]
+    fn how_the_mibs_are_read_comes_from_the_projects_settings_else_yours() {
+        let (p, mut app) = project("read-options", "");
+        let options = app.mib_key_here().0.options;
+        assert_eq!(options.schema.icd, Some(fenix_mib::Icd::V7), "7.x unless said");
+        app.config.mib_icd = Some("6.9".into());
+        app.config.mib_xtce_fields = vec![("pi1".into(), "SID, STRUCT".into())];
+        let options = app.mib_key_here().0.options;
+        assert_eq!(options.schema.icd, Some(fenix_mib::Icd::V6_9));
+        assert_eq!(options.xtce.pi1, vec!["SID".to_string(), "STRUCT".into()]);
+        std::fs::write(
+            p.0.join(".fenix").join("settings.toml"),
+            "[mib]\nicd = \"auto\"\n\n[mib.roots]\nOPS = \"ops\"\n\n[mib.icd_per_mib]\nOPS = \"5.x\"\n\n[mib.columns]\nXYZ = \"xyz_a, xyz_b\"\n",
+        )
+        .unwrap();
+        app.project_settings = Some((p.0.clone(), fenix_config::ProjectSettings::load(&p.0)));
+        let key = app.mib_key_here().0;
+        assert_eq!(key.options.schema.icd, None, "the project's auto wins over your 6.9");
+        assert_eq!(key.options.schema.icd_for("OPS"), Some(fenix_mib::Icd::V5));
+        assert_eq!(key.options.schema.columns, vec![("xyz".to_string(), vec!["XYZ_A".to_string(), "XYZ_B".into()])]);
+        let set = MibSet::load_with(key.roots.clone(), None, key.options.clone());
+        assert_eq!(set.root_info(0).format.as_deref(), Some("ICD 5.x"));
     }
 
     #[test]

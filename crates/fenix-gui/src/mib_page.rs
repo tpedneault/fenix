@@ -55,6 +55,9 @@ pub struct MibKey {
     pub roots: Vec<fenix_mib::MibRoot>,
     pub default: Option<String>,
     pub project: Option<std::path::PathBuf>,
+    /// How they're read: the ICD issue, the mission's own columns, how
+    /// XTCE identifies packets -- a change reads them again.
+    pub options: fenix_mib::ReadOptions,
 }
 
 /// How many rows the list lays out around the selected one: enough to
@@ -664,8 +667,10 @@ pub fn layout(page: &MibPage, ctx: &Ctx, cols: usize) -> Page {
     let mut x = left + 5;
     if let Some(set) = ctx.set {
         for (i, root) in set.roots().iter().enumerate() {
-            let version = set.root_info(i).version.map(|v| format!(" · {v}")).unwrap_or_default();
-            let text = format!("{}{version}", root.label);
+            let info = set.root_info(i);
+            let version = info.version.map(|v| format!(" · {v}")).unwrap_or_default();
+            let format = info.format.map(|f| format!(" · {f}")).unwrap_or_default();
+            let text = format!("{}{version}{format}", root.label);
             let on = page.only.is_none_or(|o| o == i);
             let role = if page.only == Some(i) { Role::Title } else if on { Role::Text } else { Role::Muted };
             let end = g.put(1, x, &text, role);

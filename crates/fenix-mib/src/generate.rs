@@ -109,14 +109,47 @@ fn xtce_type(ptc: &str, pfc: &str, name: &str, unit: &str, cal: Option<(DefRef, 
     }
 }
 
+/// The XTCE version an export is written in: what the namespace says --
+/// everything Fenix writes is in both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum XtceVersion {
+    /// XTCE 1.1 (OMG formal/2008-03-01), as older ground systems read it.
+    V1_1,
+    /// XTCE 1.2 (OMG formal/2018-02-04; CCSDS 660.0-B-2).
+    #[default]
+    V1_2,
+}
+
+impl XtceVersion {
+    pub fn parse(s: &str) -> Result<XtceVersion, String> {
+        match s.trim() {
+            "1.0" | "1.1" => Ok(XtceVersion::V1_1),
+            "1.2" | "" => Ok(XtceVersion::V1_2),
+            other => Err(format!("\"{other}\": expected 1.1 or 1.2")),
+        }
+    }
+
+    fn namespace(self) -> &'static str {
+        match self {
+            XtceVersion::V1_1 => "http://www.omg.org/space/xtce",
+            XtceVersion::V1_2 => "http://www.omg.org/spec/XTCE/20180204",
+        }
+    }
+}
+
+/// XTCE 1.2 for every definition: `xtce_as`.
+pub fn xtce(set: &MibSet, profile: &Profile, base: OffsetBase) -> String {
+    xtce_as(set, profile, base, XtceVersion::V1_2)
+}
+
 /// XTCE for every definition: parameters with their types and
 /// calibrations, a packet container per SPID restricted by APID, service
 /// and subtype, a meta-command per telecommand.
-pub fn xtce(set: &MibSet, profile: &Profile, base: OffsetBase) -> String {
+pub fn xtce_as(set: &MibSet, profile: &Profile, base: OffsetBase, version: XtceVersion) -> String {
     let mut out = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     // XML comments can't hold "--".
     out.push_str(&format!("<!-- {} -->\n", stamp(set, "").trim().replace("--", ";")));
-    out.push_str("<xtce:SpaceSystem xmlns:xtce=\"http://www.omg.org/spec/XTCE/20180204\" name=\"MIB\">\n");
+    out.push_str(&format!("<xtce:SpaceSystem xmlns:xtce=\"{}\" name=\"MIB\">\n", version.namespace()));
     // Telemetry.
     out.push_str("  <xtce:TelemetryMetaData>\n    <xtce:ParameterTypeSet>\n");
     for h in [("CCSDS_APID", 11), ("PUS_SERVICE", 8), ("PUS_SUBTYPE", 8)] {
@@ -531,8 +564,13 @@ pub fn vectors(set: &MibSet, profile: &Profile) -> String {
 
 /// The file generator `kind` makes.
 pub fn generate(kind: &str, set: &MibSet, profile: &Profile, base: OffsetBase) -> Option<String> {
+    generate_with(kind, set, profile, base, XtceVersion::default())
+}
+
+/// `generate`, writing XTCE in `xtce`'s version.
+pub fn generate_with(kind: &str, set: &MibSet, profile: &Profile, base: OffsetBase, xtce: XtceVersion) -> Option<String> {
     Some(match kind {
-        "xtce" => xtce(set, profile, base),
+        "xtce" => xtce_as(set, profile, base, xtce),
         "wireshark" => wireshark(set, profile, base),
         "c" => c_header(set, profile, base),
         "python" => python(set, profile, base),
@@ -590,5 +628,24 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         assert_eq!(text.lines().collect::<Vec<_>>(), ["1bf2c007000929080100000c03023fa3", "30211 3000 2600", "None"]);
+    }
+
+    #[test]
+    fn xtce_is_written_in_the_version_asked_for_and_reads_back() {
+        let root = fixture();
+        let set = MibSet::load(vec![root.clone()], None);
+        let p = Profile::default();
+        let old = generate_with("xtce", &set, &p, OffsetBase::AfterHeaders, XtceVersion::V1_1).unwrap();
+        assert!(old.contains("xmlns:xtce=\"http://www.omg.org/space/xtce\""));
+        let dir = crate::set::tests::temp_root("xtce-1-1");
+        let file = dir.path.join("mission.xml");
+        std::fs::write(&file, &old).unwrap();
+        let back = MibSet::load(vec![crate::MibRoot { label: "X".into(), path: file }], None);
+        assert_eq!(back.root_info(0).format.as_deref(), Some("XTCE 1.1"));
+        assert_eq!(back.entries(Kind::Telecommand).len(), set.entries(Kind::Telecommand).len());
+        assert_eq!(XtceVersion::parse("1.1"), Ok(XtceVersion::V1_1));
+        assert!(XtceVersion::parse("2").is_err());
+        std::fs::remove_dir_all(&root.path).ok();
+        std::fs::remove_dir_all(&dir.path).ok();
     }
 }

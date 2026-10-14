@@ -221,6 +221,11 @@ when it's out of date).
 | `mib.telecommand_argument_template` | text | {name}={value} | How each argument is written: {name} and {value} are filled in. *A project can set it.* |
 | `mib.telecommand_argument_separator` | text | ", " | What goes between arguments. *A project can set it.* |
 | `mib.editor_files` | a list | every file | Extensions of the files where K, gd and completion know MIB names (tcl, py). Empty: every file. *A project can set it.* |
+| `mib.icd` | 7.x / 6.9 / 6.x / 5.x / 4.x / auto | 7.x | The SCOS-2000 Database Import ICD issue the MIBs' .dat tables follow: which tables there are and their columns. Auto works it out from each MIB's files. *A project can set it.* |
+| `mib.icd_per_mib` | mib = issue | – | A MIB that follows another issue than the rest: its name, and 7.x, 6.9, 6.x, 5.x, 4.x or auto. *A project can set it.* |
+| `mib.columns` | table = columns | – | A table's columns in file order, separated by commas, in place of the ICD's: for a mission whose tables differ, or a table of its own (xyz reads xyz.dat). *A project can set it.* |
+| `mib.xtce_fields` | field = parameters | – | In an XTCE MIB, the parameters whose restriction values identify a packet, and the arguments that say a telecommand's: apid, service, subtype, pi1 or pi2, each with its names separated by commas. A field not given goes by the names: APID, SERVICE, SUBTYPE, SID. *A project can set it.* |
+| `mib.xtce_version` | 1.2 / 1.1 | 1.2 | The XTCE version a MIB is exported in (SPC k g): 1.2, or 1.1 for ground systems that read only that. *A project can set it.* |
 | `mib.apid_format` | hex / decimal | hex | How APIDs are shown. |
 | `mib.watch` | true / false | on | Reload a MIB when one of its .dat files changes on disk. |
 | `mib.check_scripts` | true / false | on | Underline telecommand calls in scripts that the MIB disagrees with: unknown mnemonics, missing or out-of-range arguments. *A project can set it.* |
@@ -268,10 +273,6 @@ when it's out of date).
 | `session.restore_windows` | true / false | on | Put Fenix's windows back where they were, on the monitors they were on. *Needs a restart.* |
 | `session.restore_session` | true / false | on | Reopen the workspaces and files you had open. *Needs a restart.* |
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
-.
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
-.
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
 
 **Shelves, not autostart.** VNC hosts, documents and the workspace
 shelf make things selectable (`SPC v v`, `SPC r f`, `SPC TAB f`); none of

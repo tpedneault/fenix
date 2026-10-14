@@ -270,6 +270,19 @@ fn map_set(v: Option<Value>) -> Result<Vec<(String, String)>, String> {
         Some(other) => Err(format!("expected named entries, got {}", other.describe())),
     }
 }
+/// The ICD issues `mib.icd` offers.
+pub const MIB_ICDS: &[&str] = &["7.x", "6.9", "6.x", "5.x", "4.x", "auto"];
+/// The packet identification fields `mib.xtce_fields` names.
+pub const XTCE_FIELDS: &[&str] = &["apid", "service", "subtype", "pi1", "pi2"];
+
+/// An issue as `mib.icd_per_mib` takes one: auto, or 4 to 7 with any
+/// minor part (`7.2`, `6.x`).
+fn icd_issue(text: &str) -> bool {
+    let t = text.trim();
+    let (major, minor) = t.split_once('.').unwrap_or((t, "0"));
+    t == "auto" || (matches!(major, "4" | "5" | "6" | "7") && (minor == "x" || minor.parse::<u32>().is_ok()))
+}
+
 fn path_map_get(v: &[(String, PathBuf)]) -> Option<Value> {
     (!v.is_empty()).then(|| Value::Map(v.iter().map(|(k, p)| (k.clone(), p.display().to_string())).collect()))
 }
@@ -462,6 +475,32 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             c.mib_editor_files = list_set(v)?;
             Ok(())
         })).default("every file").project(),
+        s("mib.icd", Mib, "ICD issue", Kind::Choice(MIB_ICDS), "The SCOS-2000 Database Import ICD issue the MIBs' .dat tables follow: which tables there are and their columns. Auto works it out from each MIB's files.", field!(mib_icd, text_get, text_set)).default("7.x").project(),
+        s("mib.icd_per_mib", Mib, "ICD issue per MIB", Kind::Map { key: "MIB", value: "Issue", paths: false }, "A MIB that follows another issue than the rest: its name, and 7.x, 6.9, 6.x, 5.x, 4.x or auto.", (|c: &Config| map_get(&c.mib_icd_per_mib), |c: &mut Config, v| {
+            let m = map_set(v)?;
+            if let Some((name, issue)) = m.iter().find(|(_, i)| !icd_issue(i)) {
+                return Err(format!("{name}: \"{issue}\" isn't an issue -- one of {} (7.2 counts as 7.x)", MIB_ICDS.join(", ")));
+            }
+            c.mib_icd_per_mib = m;
+            Ok(())
+        })).project(),
+        s("mib.columns", Mib, "Table columns", Kind::Map { key: "Table", value: "Columns", paths: false }, "A table's columns in file order, separated by commas, in place of the ICD's: for a mission whose tables differ, or a table of its own (xyz reads xyz.dat).", (|c: &Config| map_get(&c.mib_columns), |c: &mut Config, v| {
+            let m = map_set(v)?;
+            if let Some((table, _)) = m.iter().find(|(t, cols)| t.trim().is_empty() || t.contains(['/', '\\', '.']) || cols.trim().is_empty()) {
+                return Err(format!("{table}: a table is a .dat file's name with its columns, like ccf = CCF_CNAME, CCF_DESCR"));
+            }
+            c.mib_columns = m;
+            Ok(())
+        })).project(),
+        s("mib.xtce_fields", Mib, "XTCE identification", Kind::Map { key: "Field", value: "Parameters", paths: false }, "In an XTCE MIB, the parameters whose restriction values identify a packet, and the arguments that say a telecommand's: apid, service, subtype, pi1 or pi2, each with its names separated by commas. A field not given goes by the names: APID, SERVICE, SUBTYPE, SID.", (|c: &Config| map_get(&c.mib_xtce_fields), |c: &mut Config, v| {
+            let m = map_set(v)?;
+            if let Some((field, _)) = m.iter().find(|(f, _)| !XTCE_FIELDS.contains(&f.trim().to_ascii_lowercase().as_str())) {
+                return Err(format!("\"{field}\": one of {}", XTCE_FIELDS.join(", ")));
+            }
+            c.mib_xtce_fields = m;
+            Ok(())
+        })).project(),
+        s("mib.xtce_version", Mib, "XTCE export", Kind::Choice(&["1.2", "1.1"]), "The XTCE version a MIB is exported in (SPC k g): 1.2, or 1.1 for ground systems that read only that.", field!(mib_xtce_version, text_get, text_set)).default("1.2").project(),
         s("mib.apid_format", Mib, "APIDs in", Kind::Choice(&["hex", "decimal"]), "How APIDs are shown.", field!(mib_apid_format, text_get, text_set)).default("hex"),
         s("mib.watch", Mib, "Reload on change", Kind::Bool, "Reload a MIB when one of its .dat files changes on disk.", field!(mib_watch, bool_get, bool_set)).default("on"),
         s("mib.check_scripts", Mib, "Check scripts", Kind::Bool, "Underline telecommand calls in scripts that the MIB disagrees with: unknown mnemonics, missing or out-of-range arguments.", field!(mib_check_scripts, bool_get, bool_set)).default("on").project(),
