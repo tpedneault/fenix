@@ -105,8 +105,7 @@ use crate::rect::RectRenderer;
 use crate::tabstops::{self, TabStops};
 use crate::text::{self, TextPipeline};
 use crate::theme::{self, Theme};
-use crate::pdf_texture::{PdfPipeline, PdfTexture};
-use crate::vnc_texture::{VncPipeline, VncTexture};
+use crate::surface::{Blend, Surface, SurfacePipeline};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
 /// How long the caret takes to fade in/out at each blink toggle, instead
@@ -1008,7 +1007,7 @@ struct VncCursor {
     hotspot_x: u16,
     hotspot_y: u16,
     bgra: Vec<u8>,
-    texture: Option<VncTexture>,
+    texture: Option<Surface>,
 }
 
 /// Streams decoded `fenix_vnc::VncFrame`s for one VNC session --
@@ -1164,11 +1163,11 @@ struct VncSession {
     /// frame, to pull whatever's changed since the last time it looked.
     framebuffer: Arc<Mutex<fenix_vnc::framebuffer::VncFramebuffer>>,
     /// `None` until the GPU exists *and* a resolution is known -- created
-    /// lazily in `redraw` (see `VncPipeline::create_texture`), recreated
+    /// lazily in `redraw` (see `SurfacePipeline::create`), recreated
     /// whenever `framebuffer`'s dimensions change.
-    texture: Option<VncTexture>,
-    /// The `(width, height)` `texture` was created for -- `VncTexture`
-    /// itself doesn't record its own size, and `redraw`'s dirty-upload
+    texture: Option<Surface>,
+    /// The `(width, height)` `texture` was created for -- kept here
+    /// rather than read off the `Surface`, and `redraw`'s dirty-upload
     /// path needs this to detect when `framebuffer` has already been
     /// resized (by `reader`'s thread) past what the currently-bound GPU
     /// texture covers, before the `Resolution` event that will reset
@@ -4916,16 +4915,11 @@ pub struct App {
     caret_rect: Option<RectRenderer>,
     /// What the animations and polish draw with -- see `MotionGpu`.
     motion_gpu: Option<motion_host::MotionGpu>,
-    /// The textured-quad pipeline every open VNC session's live
-    /// framebuffer is drawn through -- one pipeline shared by every
-    /// session (each owns its own `VncTexture`, see `VncSession`).
-    /// `None` until a real GPU exists, same posture as `text`/`bg_rect`/
-    /// `caret_rect`.
-    vnc_pipeline: Option<VncPipeline>,
-    /// The textured-quad pipeline every open PDF session's current page
-    /// render is drawn through -- mirrors `vnc_pipeline` exactly, just
-    /// for `PdfTexture` instead of `VncTexture`.
-    pdf_pipeline: Option<PdfPipeline>,
+    /// Draws every surface: VNC framebuffers and their cursors, PDF
+    /// pages, pictures on pages, Home's logo -- each owned (as a
+    /// `Surface`) by whatever owns its pixels. `None` until a real GPU
+    /// exists, same posture as `text`/`bg_rect`/`caret_rect`.
+    surfaces: Option<SurfacePipeline>,
 
     /// Every open buffer, keyed by `BufferId` -- syntax state lives on
     /// each buffer's own `OpenBuffer`. Live cursor/scroll position is
@@ -5285,9 +5279,6 @@ pub struct App {
     home_todos_pending: HashSet<PathBuf>,
     /// The logo lockup image and its GPU copy.
     home_logo: Option<home::HomeLogo>,
-    /// An alpha-blended textured-quad pipeline for the logo -- the PDF
-    /// pane's own draws opaque pages.
-    logo_pipeline: Option<PdfPipeline>,
 
     /// The live, mutable directory-listing state for every real
     /// `BufferKind::Explorer` buffer currently open (`SPC f j`), keyed by
@@ -6275,8 +6266,7 @@ impl App {
             popup_rect: None,
             caret_rect: None,
             motion_gpu: None,
-            vnc_pipeline: None,
-            pdf_pipeline: None,
+            surfaces: None,
             buffers,
             workspaces,
             line_number_mode: LineNumberMode::Absolute,
@@ -6344,7 +6334,6 @@ impl App {
             home_todos: HashMap::new(),
             home_todos_pending: HashSet::new(),
             home_logo: None,
-            logo_pipeline: None,
             dired_states: HashMap::new(),
             dired_lines: HashMap::new(),
             explorer_requests: HashMap::new(),
@@ -22190,8 +22179,8 @@ impl App {
         let mut panes_render: Vec<PaneRender> = Vec::with_capacity(layout.len());
         // Every pane this frame whose buffer is `BufferKind::Vnc`, with
         // its on-screen content rect -- drawn as textured quads once
-        // `gpu`/`vnc_pipeline` are available, well after this CPU-side
-        // prep loop (see this function's own later `vnc_pipeline.draw`
+        // `gpu`/`surfaces` are available, well after this CPU-side
+        // prep loop (see this function's own later `surfaces.draw`
         // call site).
         // Carries each pane's buffer alongside it because that -- not the
         // pane -- is what identifies the session to upload/draw (see
@@ -22339,7 +22328,7 @@ impl App {
 
             // A VNC pane's content is a live pixel framebuffer, not
             // text -- rendered as a separate textured-quad layer (see
-            // `vnc_panes`/`vnc_pipeline.draw`'s call site below, after
+            // `vnc_panes`/`surfaces.draw`'s call site below, after
             // `bg_rect`/`text` are available), regardless of whether
             // this pane is focused (unlike Explorer/Picker, which are
             // per-`MainView` overlays shown only in the focused pane --
@@ -23024,8 +23013,7 @@ impl App {
             Some(bg_rect),
             Some(popup_rect),
             Some(caret_rect),
-            Some(vnc_pipeline),
-            Some(pdf_pipeline),
+            Some(surfaces),
             Some(motion_gpu),
         ) = (
             &self.window,
@@ -23035,10 +23023,9 @@ impl App {
             &mut self.popup_rect,
             &mut self.caret_rect,
             // Mutable: quads are accumulated into it before the render
-            // pass and drawn by slot inside it (see `VncPipeline::
-            // push_quad`), rather than written one-at-a-time mid-pass.
-            &mut self.vnc_pipeline,
-            &self.pdf_pipeline,
+            // pass and drawn by slot inside it (see `SurfacePipeline`),
+            // rather than written one-at-a-time mid-pass.
+            &mut self.surfaces,
             &mut self.motion_gpu,
         ) else {
             return;
@@ -23849,8 +23836,8 @@ impl App {
                 let mut fb = session.framebuffer.lock().unwrap();
                 let (w, h) = fb.dimensions();
                 if w > 0 && h > 0 {
-                    let texture = vnc_pipeline.create_texture(gpu, w as u32, h as u32);
-                    vnc_pipeline.upload_rect(gpu, &texture, 0, 0, w as u32, h as u32, fb.pixels());
+                    let texture = surfaces.create(gpu, w as u32, h as u32);
+                    surfaces.upload_rect(gpu, &texture, 0, 0, w as u32, h as u32, fb.pixels());
                     // The whole texture is now current, so whatever
                     // region was outstanding has just been covered.
                     fb.take_dirty();
@@ -23878,7 +23865,7 @@ impl App {
                 if fb.dimensions() == session.texture_dims {
                     if let Some((x, y, w, h)) = fb.take_dirty() {
                         fb.copy_region(x, y, w, h, &mut upload_scratch);
-                        vnc_pipeline.upload_rect(gpu, texture, x as u32, y as u32, w as u32, h as u32, &upload_scratch);
+                        surfaces.upload_rect(gpu, texture, x as u32, y as u32, w as u32, h as u32, &upload_scratch);
                     }
                 }
                 // Else (dimension mismatch): `framebuffer` was already
@@ -23896,12 +23883,12 @@ impl App {
             // Upload the cursor image the server last sent, if it hasn't
             // been turned into a texture yet. Its own texture rather than
             // part of the framebuffer's: it has to be alpha blended over
-            // the pane (`VncPipeline::draw_cursor`), and it moves with the
+            // the pane (`Blend::Over`), and it moves with the
             // pointer without the framebuffer changing at all.
             if let Some(cursor) = &mut session.cursor {
                 if cursor.texture.is_none() {
-                    let texture = vnc_pipeline.create_texture(gpu, cursor.width as u32, cursor.height as u32);
-                    vnc_pipeline.upload_rect(gpu, &texture, 0, 0, cursor.width as u32, cursor.height as u32, &cursor.bgra);
+                    let texture = surfaces.create(gpu, cursor.width as u32, cursor.height as u32);
+                    surfaces.upload_rect(gpu, &texture, 0, 0, cursor.width as u32, cursor.height as u32, &cursor.bgra);
                     cursor.texture = Some(texture);
                 }
             }
@@ -23919,13 +23906,13 @@ impl App {
         // `(buffer, pane slot, cursor slot)` -- resolved back to a
         // session by buffer inside the pass.
         let mut vnc_draws: Vec<(BufferId, usize, Option<usize>)> = Vec::with_capacity(vnc_panes.len());
-        vnc_pipeline.clear();
+        surfaces.clear();
         for (_, buffer_id, rect) in &vnc_panes {
             let Some(session) = self.vnc_sessions.values().find(|s| s.buffer == *buffer_id) else { continue };
             if session.texture.is_none() {
                 continue;
             }
-            let pane_slot = vnc_pipeline.push_quad(gpu, rect.x, rect.y, rect.w, rect.h);
+            let pane_slot = surfaces.push(gpu, (rect.x, rect.y, rect.w, rect.h), crate::surface::FULL, None);
             // The guest's pointer, placed on top of its own pane. The
             // server stopped compositing it into the framebuffer when we
             // asked for `CursorPseudo` -- which is what keeps pointer
@@ -23945,11 +23932,10 @@ impl App {
                 let (scale_x, scale_y) = (rect.w / fb_w as f32, rect.h / fb_h as f32);
                 let dest_x = rect.x + (px as f32 - cursor.hotspot_x as f32) * scale_x;
                 let dest_y = rect.y + (py as f32 - cursor.hotspot_y as f32) * scale_y;
-                Some(vnc_pipeline.push_quad(gpu, dest_x, dest_y, cursor.width as f32 * scale_x, cursor.height as f32 * scale_y))
+                Some(surfaces.push(gpu, (dest_x, dest_y, cursor.width as f32 * scale_x, cursor.height as f32 * scale_y), crate::surface::FULL, None))
             })();
             vnc_draws.push((*buffer_id, pane_slot, cursor_slot));
         }
-        vnc_pipeline.flush(gpu);
 
         // Rendered pages the worker has sent since the last frame go into
         // textures of their own; the pixels are let go once uploaded.
@@ -23959,23 +23945,21 @@ impl App {
                 let Some(page) = view.cache.get_mut(&draw.page) else { continue };
                 let Some(bgra) = page.bgra.take() else { continue };
                 if page.texture.as_ref().map(|t| t.size()) != Some((page.w, page.h)) {
-                    page.texture = Some(pdf_pipeline.create_texture(gpu, page.w, page.h));
+                    page.texture = Some(surfaces.create(gpu, page.w, page.h));
                 }
                 if let Some(texture) = &page.texture {
-                    pdf_pipeline.upload_rect(gpu, texture, 0, 0, page.w, page.h, &bgra);
+                    surfaces.upload_rect(gpu, texture, 0, 0, page.w, page.h, &bgra);
                 }
             }
         }
 
         // Pictures pages show, read since the last frame: uploaded once.
-        if let Some(pipeline) = self.logo_pipeline.as_ref() {
-            for tex in self.page_images.textures.values_mut() {
-                if let Some(bgra) = tex.bgra.take() {
-                    if tex.w > 0 && tex.h > 0 {
-                        let texture = pipeline.create_texture(gpu, tex.w, tex.h);
-                        pipeline.upload_rect(gpu, &texture, 0, 0, tex.w, tex.h, &bgra);
-                        tex.texture = Some(texture);
-                    }
+        for tex in self.page_images.textures.values_mut() {
+            if let Some(bgra) = tex.bgra.take() {
+                if tex.w > 0 && tex.h > 0 {
+                    let texture = surfaces.create(gpu, tex.w, tex.h);
+                    surfaces.upload_rect(gpu, &texture, 0, 0, tex.w, tex.h, &bgra);
+                    tex.texture = Some(texture);
                 }
             }
         }
@@ -23989,14 +23973,59 @@ impl App {
             if self.home_logo.as_ref().is_none_or(|logo| logo.key != key) {
                 self.home_logo = Some(home::HomeLogo { key, image: fenix_brand::lockup(height, key.1), texture: None });
             }
-            if let (Some(logo), Some(pipeline)) = (self.home_logo.as_mut(), self.logo_pipeline.as_ref()) {
+            if let Some(logo) = self.home_logo.as_mut() {
                 if logo.texture.is_none() {
-                    let texture = pipeline.create_texture(gpu, logo.image.width, logo.image.height);
-                    pipeline.upload_rect(gpu, &texture, 0, 0, logo.image.width, logo.image.height, &logo.image.to_bgra());
+                    let texture = surfaces.create(gpu, logo.image.width, logo.image.height);
+                    surfaces.upload_rect(gpu, &texture, 0, 0, logo.image.width, logo.image.height, &logo.image.to_bgra());
                     logo.texture = Some(texture);
                 }
             }
         }
+
+        // Every other quad this frame draws, after the VNC ones: each
+        // PDF page in sight cut to its pane, Home's logo, and the
+        // pictures on pages fitted into the cells their page left for
+        // them. Resolved back to their surfaces inside the pass.
+        let mut pdf_draws: Vec<(usize, usize, usize)> = Vec::new();
+        for (plan, (key, draws)) in pdf_plans.iter().enumerate() {
+            let Some(view) = self.pdf_views.get(key) else { continue };
+            for (index, draw) in draws.iter().enumerate() {
+                if view.cache.get(&draw.page).and_then(|page| page.texture.as_ref()).is_none() {
+                    continue; // still being rendered: the paper `bg_rect` already drew
+                }
+                pdf_draws.push((plan, index, surfaces.push(gpu, draw.dest, draw.uv, pdf_recolor)));
+            }
+        }
+        let logo_slot = (|| {
+            let logo = self.home_logo.as_ref()?;
+            logo.texture.as_ref()?;
+            let pane = panes_render.iter().find(|p| p.home.logo.is_some())?;
+            let (row, col, lines) = pane.home.logo.expect("found by it");
+            let (w, h) = (logo.image.width as f32, logo.image.height as f32);
+            let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + col as f32 * char_width;
+            let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
+            let y = top + (lines as f32 * line_height - h) / 2.0;
+            Some(surfaces.push(gpu, (x.round(), y.round(), w, h), crate::surface::FULL, None))
+        })();
+        let mut picture_draws: Vec<(&crate::page::ImageKey, usize)> = Vec::new();
+        for pane in &panes_render {
+            for (row, col, rows, cols, key, view) in &pane.home.images {
+                let Some(tex) = self.page_images.textures.get(key) else { continue };
+                if tex.texture.is_none() {
+                    continue;
+                }
+                let cell_box = (
+                    pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width,
+                    pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height,
+                    *cols as f32 * char_width,
+                    *rows as f32 * line_height,
+                );
+                let clip = (pane.rect.x, pane.rect.y + text::PAD_TOP, pane.rect.x + pane.rect.w, pane.rect.y + pane.rect.h);
+                let Some((dest, uv, _)) = reading_host::place_picture(cell_box, clip, (tex.w, tex.h), *view) else { continue };
+                picture_draws.push((key, surfaces.push(gpu, (dest.0.round(), dest.1.round(), dest.2.round(), dest.3.round()), uv, None)));
+            }
+        }
+        surfaces.flush(gpu);
 
         _profile.mark("text and geometry preparation complete");
         let Some(surface) = &gpu.surface else { return };
@@ -24052,57 +24081,29 @@ impl App {
             for (buffer_id, pane_slot, cursor_slot) in &vnc_draws {
                 let Some(session) = self.vnc_sessions.values().find(|s| s.buffer == *buffer_id) else { continue };
                 let Some(texture) = &session.texture else { continue };
-                vnc_pipeline.draw_quad(&mut pass, texture, *pane_slot);
+                surfaces.draw(&mut pass, texture, *pane_slot, Blend::Opaque);
+                // The guest's cursor, blended so its transparent pixels
+                // let the desktop underneath show through.
                 if let Some((slot, cursor_texture)) = cursor_slot.zip(session.cursor.as_ref().and_then(|c| c.texture.as_ref())) {
-                    vnc_pipeline.draw_cursor_quad(&mut pass, cursor_texture, slot);
+                    surfaces.draw(&mut pass, cursor_texture, slot, Blend::Over);
                 }
             }
             // Same "before text, so title bars stay legible" reasoning as
             // the VNC loop just above.
-            // Each page in sight, cut to its pane; a page still being
-            // rendered is the paper `bg_rect` already drew.
-            let mut slot = 0;
-            for (key, draws) in &pdf_plans {
+            for &(plan, index, slot) in &pdf_draws {
+                let (key, draws) = &pdf_plans[plan];
                 let Some(view) = self.pdf_views.get(key) else { continue };
-                for draw in draws {
-                    let Some(texture) = view.cache.get(&draw.page).and_then(|page| page.texture.as_ref()) else { continue };
-                    pdf_pipeline.draw_region(gpu, &mut pass, texture, slot, draw.dest, draw.uv, pdf_recolor);
-                    slot += 1;
+                let Some(texture) = view.cache.get(&draws[index].page).and_then(|page| page.texture.as_ref()) else { continue };
+                surfaces.draw(&mut pass, texture, slot, Blend::Opaque);
+            }
+            if let Some(slot) = logo_slot {
+                if let Some(texture) = self.home_logo.as_ref().and_then(|logo| logo.texture.as_ref()) {
+                    surfaces.draw(&mut pass, texture, slot, Blend::Over);
                 }
             }
-            if let (Some(logo), Some(pipeline)) = (self.home_logo.as_ref(), self.logo_pipeline.as_ref()) {
-                if let Some(texture) = &logo.texture {
-                    // One logo per frame: the logo pipeline's single quad
-                    // buffer holds one draw.
-                    if let Some(pane) = panes_render.iter().find(|p| p.home.logo.is_some()) {
-                        let (row, col, lines) = pane.home.logo.expect("found by it");
-                        let (w, h) = (logo.image.width as f32, logo.image.height as f32);
-                        let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + col as f32 * char_width;
-                        let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
-                        let y = top + (lines as f32 * line_height - h) / 2.0;
-                        pipeline.draw(gpu, &mut pass, texture, 0, x.round(), y.round(), w, h);
-                    }
-                }
-            }
-            // Pictures on pages (a note's images, diagrams): each fitted
-            // into the cells the page left for it, cut to its pane.
-            if let Some(pipeline) = self.logo_pipeline.as_ref() {
-                let mut slot = 1;
-                for pane in &panes_render {
-                    for (row, col, rows, cols, key, view) in &pane.home.images {
-                        let Some(tex) = self.page_images.textures.get(key) else { continue };
-                        let Some(texture) = &tex.texture else { continue };
-                        let cell_box = (
-                            pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width,
-                            pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height,
-                            *cols as f32 * char_width,
-                            *rows as f32 * line_height,
-                        );
-                        let clip = (pane.rect.x, pane.rect.y + text::PAD_TOP, pane.rect.x + pane.rect.w, pane.rect.y + pane.rect.h);
-                        let Some((dest, uv, _)) = reading_host::place_picture(cell_box, clip, (tex.w, tex.h), *view) else { continue };
-                        pipeline.draw_region(gpu, &mut pass, texture, slot, (dest.0.round(), dest.1.round(), dest.2.round(), dest.3.round()), uv, None);
-                        slot += 1;
-                    }
+            for &(key, slot) in &picture_draws {
+                if let Some(texture) = self.page_images.textures.get(key).and_then(|tex| tex.texture.as_ref()) {
+                    surfaces.draw(&mut pass, texture, slot, Blend::Over);
                 }
             }
             text.render(&mut pass);
@@ -24301,9 +24302,7 @@ impl App {
         let bg_rect = RectRenderer::new(&gpu);
         let popup_rect = RectRenderer::new(&gpu);
         let caret_rect = RectRenderer::new(&gpu);
-        let vnc_pipeline = VncPipeline::new(&gpu);
-        let pdf_pipeline = PdfPipeline::new(&gpu);
-        let logo_pipeline = PdfPipeline::new_blended(&gpu);
+        let surfaces = SurfacePipeline::new(&gpu);
         self.motion_gpu = Some(motion_host::MotionGpu::new(&gpu));
         progress(0.85);
 
@@ -24315,9 +24314,7 @@ impl App {
         self.bg_rect = Some(bg_rect);
         self.popup_rect = Some(popup_rect);
         self.caret_rect = Some(caret_rect);
-        self.vnc_pipeline = Some(vnc_pipeline);
-        self.pdf_pipeline = Some(pdf_pipeline);
-        self.logo_pipeline = Some(logo_pipeline);
+        self.surfaces = Some(surfaces);
         // A fully transparent (alpha 0) 1x1 image -- `from_rgba` fails
         // only for a malformed buffer/dimension mismatch, never for a
         // legitimately empty-looking one, so this is as safe as the

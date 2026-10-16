@@ -92,7 +92,7 @@ impl GpuContext {
         // `get_default_config` just takes the adapter's first reported
         // format, which on this stack (Windows/DX12 in particular) is
         // very often an `*Srgb` variant. Every pipeline here (`rect.rs`,
-        // `text`, `vnc_texture.rs`, ...) writes already-final display
+        // `text`, `surface.rs`, ...) writes already-final display
         // colors straight out of its fragment shader with no linear
         // color management anywhere in this codebase -- an `*Srgb`
         // *render target* asks the GPU to treat that fragment output as

@@ -6,7 +6,7 @@
 use super::pages::{PageEvent, PageModel};
 use super::*;
 use crate::page::ImageKey;
-use crate::pdf_texture::PdfTexture;
+use crate::surface::Surface;
 use crate::reading::{self, Action as RAction};
 use crate::reading_page::{Action as ReadAction, ReadingPage};
 
@@ -16,7 +16,7 @@ pub(super) struct PageTex {
     pub(super) h: u32,
     /// Waiting to be uploaded.
     pub(super) bgra: Option<Vec<u8>>,
-    pub(super) texture: Option<PdfTexture>,
+    pub(super) texture: Option<Surface>,
 }
 
 /// The widest a picture in a note is kept; bigger ones are scaled down.

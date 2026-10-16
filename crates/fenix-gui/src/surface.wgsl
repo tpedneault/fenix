@@ -22,13 +22,13 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-@group(0) @binding(0) var t_page: texture_2d<f32>;
-@group(0) @binding(1) var s_page: sampler;
+@group(0) @binding(0) var t_surface: texture_2d<f32>;
+@group(0) @binding(1) var s_surface: sampler;
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let c = textureSample(t_page, s_page, in.uv);
-    // `paper.w` on: the page in the theme's colours. Its lightness picks
+    let c = textureSample(t_surface, s_surface, in.uv);
+    // `paper.w` on: the image in the theme's colours. Its lightness picks
     // between ink (black) and paper (white); what a colour had besides
     // lightness is added back, so it keeps its hue.
     if (in.paper.w > 0.5) {

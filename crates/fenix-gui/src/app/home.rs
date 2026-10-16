@@ -14,7 +14,7 @@ pub(super) const RAIL_PX: f32 = 2.0;
 pub(super) struct HomeLogo {
     pub(super) key: (u32, [u8; 3]),
     pub(super) image: fenix_brand::Image,
-    pub(super) texture: Option<PdfTexture>,
+    pub(super) texture: Option<crate::surface::Surface>,
 }
 
 /// Where Home's extra drawing goes in one pane, in that pane's rows and

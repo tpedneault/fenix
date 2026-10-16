@@ -123,7 +123,7 @@ pub(super) struct CachedPage {
     /// The pixels until the frame drawing the view has put them in
     /// `texture`.
     pub(super) bgra: Option<Vec<u8>>,
-    pub(super) texture: Option<PdfTexture>,
+    pub(super) texture: Option<crate::surface::Surface>,
 }
 
 /// One pane's view of a document -- `pdf_views[(pane, buffer)]`.
