@@ -1,9 +1,9 @@
-# Extensions: a phased plan for Fenix 1.1
+# Extensions: a phased plan for Fenix 2.0
 
 Status: accepted direction; nothing built yet. Work happens on the
-`release/1.1` branch (see §2).
+`release/2.0` branch (see §2).
 
-Fenix 1.1 turns Fenix into a **core editor plus extensions**. The core
+Fenix 2.0 turns Fenix into a **core editor plus extensions**. The core
 is what any good text editor needs: editing, projects, language servers,
 the debugger, Git, terminals. Everything else becomes an extension you
 can install, enable and disable from an in-editor browser. That covers
@@ -15,11 +15,15 @@ tools, Tcl and Arduino. First-party extensions are published from
 
 | Question | Decision |
 |---|---|
-| What becomes an extension | Everything that isn't core (§3) |
+| What becomes an extension | Everything that isn't core (§3), including GitHub/GitLab review |
+| What stays core | Git, the project manager, LSP, DAP, every theme, and the rest of §3 |
+| Naming | "Extension" for everything, compiled-in or installed. No "modules" |
 | Runtime for extension code | WASM components (wasmtime + WIT) |
-| Scripting language | Lua, first for user scripting, later powerful enough to write full extensions, as in Neovim |
+| Scripting language | Lua, specifically **Luau** (§8): first for user scripting, later powerful enough to write full extensions, as in Neovim |
 | Default install | The core only |
-| Where the work lands | `release/1.1`, merged to `master` when 1.1 ships |
+| Bundling | Every 2.x release zip carries the first-party extensions, installed but switched off (§7) |
+| Version | **2.0** (a major release) |
+| Where the work lands | `release/2.0`, merged to `master` when 2.0 ships |
 
 It's written against the code as it stands (`bcdd773`), so it starts
 with what is in the way.
@@ -62,35 +66,42 @@ Two existing pieces help a lot:
 
 ---
 
-## 2. Branching and releasing 1.1
+## 2. Branching and releasing 2.0
 
-- **`release/1.1`** was cut from `master` at `bcdd773`. Every pull request
-  for this project targets it, not `master`. When 1.1 is done,
-  `release/1.1` is merged into `master` and `v1.1.0` is tagged from
+- **`release/2.0`** was cut from `master` at `bcdd773`. Every pull request
+  for this project targets it, not `master`. When 2.0 is done,
+  `release/2.0` is merged into `master` and `v2.0.0` is tagged from
   `master`.
 - **Keep `master` flowing in.** Bug fixes land on `master` (so 1.0.x
-  patches can still ship) and `master` is merged into `release/1.1` at
+  patches can still ship) and `master` is merged into `release/2.0` at
   least weekly, and always before a large refactor PR. Use merge commits,
   never rebase: other people's branches sit on top of it.
 - **Freeze feature work on `master`** while Phase 0 is in flight. Phase 0
   moves code out of `app.rs`, and new features added there at the same
   time would each mean a painful merge. A new feature should either wait
-  or be built as an extension against `release/1.1`.
+  or be built as an extension against `release/2.0`.
 - **Pre-releases from the branch.** `release.yml` builds any `v*.*.*`
   tag and checks it against the workspace version. Setting the version
-  on `release/1.1` to `1.1.0-alpha.1`, `-beta.1`, ... gives testers real
+  on `release/2.0` to `2.0.0-alpha.1`, `-beta.1`, ... gives testers real
   builds without touching `master`. (Mark those GitHub releases as
   pre-releases.)
 - **CI already covers it.** `ci.yml` runs on every push and pull request,
   whatever the branch. Phase 1 adds a second build of the core alone
   (Cargo features off) so the core can't quietly depend on an extension.
-- **1.1 is a minor release, so nothing may break.** `CONTRIBUTING.md`
-  allows a minor version only if existing settings, files and keys keep
-  working. Moving features out therefore requires the upgrade path in §7:
-  someone upgrading from 1.0 keeps every feature they use.
-- **Scope:** 1.1 ships Phases 0–4: the platform and every feature moved
-  out. Lua scripting (Phase 5) and Lua extensions (Phase 6) follow in
-  1.2+, on `master` or a `release/1.2` branch cut the same way.
+- **Test on Windows before merging.** Windows is the primary platform,
+  and CI doesn't exercise the GUI. Every PR to `release/2.0` runs
+  `scripts/ci.ps1 -Suite Workspace` on Windows and gets a hand smoke test
+  of what it touched. The smoke test runs `fenix --console` with its own
+  `FENIX_HOME` and `FENIX_STANDALONE=1`, so it never touches real
+  settings or a running Fenix. The PR description records what was
+  tried.
+- **Why 2.0.** The default install loses features and the way Fenix is
+  put together changes, which is a major version under `CONTRIBUTING.md`'s
+  semver rules. Being a major version doesn't excuse a rough upgrade,
+  though: §7 still makes sure a 1.x user keeps every feature they use.
+- **Scope:** 2.0 ships Phases 0–4: the platform and every feature moved
+  out. Lua scripting (Phase 5) and Lua extensions (Phase 6) add things
+  without breaking any, so they ship as 2.x minor releases from `master`.
 
 ---
 
@@ -107,8 +118,8 @@ Two existing pieces help a lot:
 | Code intelligence | tree-sitter highlighting/folding for mainstream languages, LSP (several servers per buffer), DAP debugger, task runner |
 | Git | Status, hunk staging, blame, log/graph, compare, rebase, conflicts, worktrees, undo; the diff and merge views |
 | Tools | Terminals (panel and in panes), Markdown reading view, control channel |
-| UI | A small set of themes, settings page, Home |
-| New in 1.1 | Command palette, keybinding tools, the Extensions page |
+| UI | Every theme Fenix ships today, settings page, Home |
+| New in 2.0 | Command palette, keybinding tools, the Extensions page |
 
 **Extensions (first-party, in `fenix-extensions`):**
 
@@ -126,12 +137,12 @@ Two existing pieces help a lot:
 | `fenix.tcl` | Tcl grammar, keywords, ctags completion | A language pack |
 | `fenix.mib`, `fenix.ccsds` | `fenix-mib`, `fenix-ccsds`, MIB/packet/stream pages, hex view | |
 | `fenix.mission` | Mission template, mission clock | An extension pack: depends on `fenix.mib`, `fenix.ccsds`, `fenix.tcl` |
-| `fenix.themes-*` | Extra themes (Catppuccin, ...) | Data only |
 
-*Assumption to confirm:* Git (but not GitHub/GitLab review) stays core,
-as in VS Code and Zed. Mainstream tree-sitter grammars stay compiled in
-for 1.1. Moving them to WASM language packs is a later option (§6,
-Phase 4).
+Git stays core; only GitHub/GitLab review moves out. Every built-in
+theme stays core. Extensions and users can *add* themes as data (Phase
+2), but none of today's move out. Mainstream tree-sitter grammars stay
+compiled in for 2.0. Moving them to WASM language packs is a later
+option (§6, Phase 4).
 
 ---
 
@@ -188,7 +199,7 @@ categories = ["integrations"]
 runtime = "wasm"                  # wasm | lua | none (data only)
 
 [engine]
-fenix = ">=1.1, <2"               # which Fenix releases it runs in
+fenix = ">=2.0, <3"               # which Fenix releases it runs in
 api = "0.3"                       # the host API version it was built against
 
 [dependencies]                    # required, by id
@@ -368,7 +379,7 @@ writing a `fenix-gui` page today.
 
 Each phase ships something on its own and has exit criteria. Sizes are
 relative: S is about a week of focused work, M a few weeks, L a month or
-more. Phases 0–4 are 1.1.
+more. Phases 0–4 are 2.0.
 
 ### Phase 0: Find the seams (L, internal only)
 
@@ -387,7 +398,7 @@ This is the bulk of the risk and the bulk of the value.
    agenda→Jira go through named services and the `agenda_sync`
    contribution point instead of direct calls.
 3. **A dynamic `CommandRegistry`.** Make ids `Cow<'static, str>`, handlers
-   boxed closures, and add `source` (core / module / extension id),
+   boxed closures, and add `source` (core or an extension id),
    `category` and a `when` predicate.
 4. **Keymaps as data.** Move the default leader map and `SPC m` menus into
    an embedded TOML table, loaded through the same code that will load
@@ -409,19 +420,23 @@ with no feature fields on `App`. CI is green and behaviour is unchanged.
 
 ### Phase 1: The core alone, a command palette, your own keys (M)
 
-1. **Modules you can switch off.** Each `Feature` outside the core is a
-   module: `modules.disabled = [...]` in `settings.toml`. A disabled
-   module registers no commands, keys, settings sections, `SPC m`
-   entries, home tiles, doctor checks or control methods.
+1. **Built-in extensions you can switch off.** Each `Feature` outside
+   the core is already an extension in name, even while it's still
+   compiled in: `extensions.disabled = [...]` in `settings.toml`, with
+   the ids it will keep (`fenix.jira`, `fenix.pdf`). A disabled extension
+   registers no commands, keys, settings sections, `SPC m` entries, home
+   tiles, doctor checks or control methods. The Extensions page and the
+   settings never change shape when a built-in later becomes a WASM
+   extension.
 2. **Cargo features.** `cargo build --no-default-features` builds the
    core only. CI builds both the core alone and everything, so the core
    can't depend on an extension by accident.
 3. **The Extensions page, v0** (`SPC h x`, `extensions.open`): lists the
-   modules with enable/disable, built on the existing `Page`
+   built-in extensions with enable/disable, built on the existing `Page`
    infrastructure.
 4. **First-run welcome.** A fresh install starts with the core and offers
    packs ("Personal: notebook, agenda, diagrams", "Mission", "Review:
-   GitHub, GitLab"). An upgrade from 1.0 keeps everything enabled (§7).
+   GitHub, GitLab"). An upgrade from 1.x keeps everything it used enabled (§7).
 5. **Command palette** (`SPC :` and `M-x`, both free). Fuzzy over every
    registered command with its key and where it's from, recent first.
 6. **User keybindings.** `keybindings.toml` over the defaults; `SPC h k`
@@ -434,8 +449,9 @@ rebound.
 
 ### Phase 2: Declarative extensions and the store (M)
 
-1. **Themes as data.** Move `theme.rs` consts to a TOML theme format.
-   The core keeps a few. The rest become theme extensions.
+1. **Themes as data.** Move `theme.rs` consts to a TOML theme format
+   and load the built-in themes through it. Every built-in theme stays in
+   the core. The format lets extensions and users add their own.
 2. **Data-only extensions**: themes, snippets, project templates,
    language definitions, keymaps.
 3. **Install/uninstall/enable/disable/update** under
@@ -452,8 +468,8 @@ rebound.
    `extensions.registry` / `extensions.store = false` (§11).
 7. **Safe mode**: `fenix --disable-extensions`.
 
-*Exit:* A theme pack installs from `fenix-extensions` through the
-browser, and from a file with no network.
+*Exit:* A data-only extension (a snippet or template pack) installs from
+`fenix-extensions` through the browser, and from a file with no network.
 
 ### Phase 3: The WASM runtime and API v0 (L)
 
@@ -489,11 +505,11 @@ Three tracks once API v0 exists:
   pack; GitHub and GitLab review through a `forge` provider.
 - **4c, surfaces**: VNC and PDF on the surface API.
 
-*Exit (= 1.1):* The default install is the core. A 1.0 user who upgrades
+*Exit (= 2.0):* The default install is the core. A 1.x user who upgrades
 keeps every feature they used. Every non-core crate is gone from
 `fenix-gui`'s dependencies.
 
-### Phase 5: Lua scripting (M, 1.2)
+### Phase 5: Lua scripting (M, 2.1)
 
 Lua for users: `init.lua` in the config directory, personal commands,
 keymaps bound to functions, options, hooks (`on_save`, `on_open`,
@@ -501,7 +517,7 @@ keymaps bound to functions, options, hooks (`on_save`, `on_open`,
 pickers and prompts. Bindings are generated from the WIT host API, so
 everything an extension can do, a script can do. See §8.
 
-### Phase 6: Lua extensions, Neovim-class (L, 1.2+)
+### Phase 6: Lua extensions, Neovim-class (L, 2.x)
 
 Lua becomes a second runtime for full extensions: `runtime = "lua"`,
 packaged and permissioned like WASM, with complete API parity (pages,
@@ -512,49 +528,64 @@ opening the registry to external repositories.
 
 ---
 
-## 7. Upgrading from 1.0 without losing anything
+## 7. Bundling, and upgrading from 1.x without losing anything
 
-1.1 is a minor release, so this is a requirement, not a courtesy.
+**Bundling (decided).** Every 2.x release zip carries all first-party
+extensions as `.fenixext` files in `extensions/bundled/` next to
+`fenix.exe`. They are **installed but switched off**, so:
 
-- **Bundle the first-party extensions** in the 1.1 release zip (and at
-  least the next minor). They install from the bundle with no network.
-- **On first launch after an upgrade**, enable the extensions matching
-  what this user used: `[jira]`, `[agenda]`, `mib.*`, `ccsds.*` in
-  settings, a notebook directory, agenda files, known PDF/VNC places,
-  open buffers in the saved session. Show a one-time notice listing what
-  moved and how to turn things off.
+- the default install behaves as the core alone;
+- turning one on needs no network, which matters on air-gapped mission
+  machines;
+- an upgrade can turn on what the user had without downloading
+  anything.
+
+The store still delivers updates newer than the bundled copy, and Fenix
+uses the newer of the two. Bundling is reconsidered for 3.0, once the
+store has a track record. (The WASM extensions are small. Only PDF,
+with a PDFium build, adds noticeably to the zip.)
+
+**Upgrading from 1.x.** Being a major release doesn't excuse a rough
+upgrade:
+
+- **On first launch after an upgrade**, switch on the extensions
+  matching what this user used: `[jira]`, `[agenda]`, `mib.*`, `ccsds.*`,
+  forge tokens in settings, a notebook directory, agenda files, known
+  PDF/VNC places, buffers in the saved session. Show a one-time notice
+  listing what moved and how to turn things off.
 - **A fresh install** gets the core and the first-run welcome (Phase 1).
 - **Session restore** shows a placeholder for a buffer whose extension is
-  missing or disabled ("Needs *PDF*: Install / Enable / Dismiss") instead
-  of dropping it.
+  off ("Needs *PDF*: Enable / Dismiss") instead of dropping it.
 - **Names don't change**: command ids, settings keys, default keys and
-  control channel methods. `fenix/agenda.clockIn` keeps working when the
-  agenda extension is enabled.
+  control channel methods. `fenix/agenda.clockIn` keeps working while
+  the agenda extension is enabled.
 - **Data stays where it is**: notebook files, agenda files, PDF places
-  and MIB caches aren't moved. Each extension reads them from where 1.0
+  and MIB caches aren't moved. Each extension reads them from where 1.x
   wrote them.
 
 ---
 
 ## 8. Lua
 
-**Selected.** It will become a full extension language, so choose the
-implementation with that end in mind. With `mlua`, all three options
-below are vendored and need nothing on `PATH`.
+**Decided: Luau**, embedded with `mlua` (vendored, so nothing is needed
+on `PATH`, and it builds with MSVC on Windows).
 
 | Option | For | Against |
 |---|---|---|
-| **Lua 5.4** | Current language, integers, good tooling | Slower than LuaJIT; sandboxing is up to us |
-| **LuaJIT** | Fastest; what Neovim uses, so familiar to plugin authors | Lua 5.1 semantics; upstream development is slow; no instruction or memory limits |
-| **Luau** | Built for running untrusted scripts (sandbox, interrupts, memory limits); gradual types; fast | A dialect (5.1-based plus extensions), less familiar |
+| Lua 5.4 | Current language, integers, good tooling | Slower than LuaJIT; sandboxing is up to us |
+| LuaJIT | Fastest; what Neovim uses, so familiar to plugin authors | Lua 5.1 semantics; upstream development is slow; no instruction or memory limits, so untrusted code can't be contained |
+| **Luau** | Built for running untrusted scripts: a sandboxed library, interrupts, memory limits; gradual types; fast, with native code generation on x64 | A dialect (5.1-based plus extensions), so slightly less familiar |
 
-**Recommendation:** decide in a Phase 5 spike. Lean **Luau** if Lua
-extensions will come from third parties and must be sandboxed like WASM
-ones. Lean **Lua 5.4** if Lua stays for trusted, personal code. Neovim
-plugins won't run unchanged in any case, because the editor API is
-different.
+Why Luau: Lua is meant to grow into a full extension language (Phase 6),
+and those extensions will come from people other than the user. Each one
+must be contained the way a WASM extension is, with no exceptions, and
+Luau is the only one of the three designed for that. Its types make
+large extensions maintainable and give `luau-lsp` real completion from
+stubs generated from the host API. It's fast enough for editor work.
+Anyone who knows Lua already knows Luau. Neovim plugins wouldn't have
+run unchanged anyway, because the editor API is different.
 
-The design rules either way:
+The design rules:
 
 - **One API.** Lua bindings are generated from the WIT host API, so Lua
   and WASM extensions never drift apart, and the Lua API is documented
@@ -567,8 +598,8 @@ The design rules either way:
   so a script can't block the UI thread.
 - **Developer loop:** `:lua` and `:luafile`, a Lua REPL page, reload on
   save for `init.lua` and for an unpacked extension under development,
-  and type stubs generated from WIT for `lua-language-server` (already
-  Fenix's default Lua server).
+  and Luau type definitions generated from WIT for `luau-lsp`, added to
+  the core's default language servers for `.luau` files.
 
 ---
 
@@ -581,7 +612,6 @@ fenix-extensions/
 │   ├── arduino/  notebook/  diagrams/  agenda/  jira/  pdf/  vnc/
 │   ├── github/   gitlab/   tcl/   mib/   ccsds/
 │   ├── mission/         # a pack: depends on mib + ccsds + tcl, adds templates
-│   └── themes-catppuccin/
 ├── xtask/               # validate manifests, build, pack, sign, update the index
 ├── Cargo.toml           # workspace; depends on fenix-extension-api
 └── .github/workflows/
@@ -600,7 +630,7 @@ fenix-extensions/
 
 **Timing:** create the repo in Phase 2 for the index and the data-only
 extensions. Keep the *code* extensions in the main repo
-(`extensions/` on `release/1.1`) while the WIT API is still changing,
+(`extensions/` on `release/2.0`) while the WIT API is still changing,
 so an API change and every extension it breaks land in one PR. Move
 them over once the API settles, at the latest at API 1.0.
 
@@ -640,9 +670,9 @@ them over once the API settles, at the latest at API 1.0.
 feature per PR, add headless tests per host before moving it, and add
 no new `App` fields.
 
-**A long-lived branch.** `release/1.1` will live for months while
+**A long-lived branch.** `release/2.0` will live for months while
 `master` gets fixes. Merge `master` in weekly, freeze feature work on
-`master` during Phase 0, and keep each PR to `release/1.1` small. The
+`master` during Phase 0, and keep each PR to `release/2.0` small. The
 longer a merge waits, the worse it gets.
 
 **PDF and VNC are the hardest ports.** No PDF renderer runs in WASM
@@ -671,7 +701,7 @@ and support one previous minor. Lua parity (Phase 6) doubles the cost of
 every API change, which is another reason to generate the Lua bindings.
 
 **Lua sandboxing.** Neovim's Lua isn't sandboxed. Third-party Lua
-extensions here must be, which drives the Luau-or-5.4 choice (§8).
+extensions here must be, which is why Luau was chosen (§8).
 
 **Performance in hot paths.** Pass ranges and incremental changes, not
 whole buffers. Use deadlines, cached pages and lazy activation.
@@ -700,13 +730,8 @@ packing and indexing.
 
 ## 12. Still open
 
-1. **Naming**: "extensions" for everything, or "modules" for compiled-in
-   ones during Phase 1? (This plan uses "module" only for Phase 1's
-   switchable built-ins.)
-2. **Git in core**: confirm that core Git stays and only GitHub/GitLab
-   review moves out.
-3. **Lua implementation**: Lua 5.4, LuaJIT or Luau (§8), decided in the
-   Phase 5 spike.
-4. **Bundling window**: how many minor releases ship the first-party
-   extensions in the zip.
-5. **Which themes stay core.**
+Nothing blocks starting Phase 0. These are settled inside a phase:
+
+1. **Wasmtime: Cranelift or the Pulley interpreter**, and the PDF
+   renderer (§5.4). Both are settled in the Phase 3 spike.
+2. **The 3.0 bundling review** (§7).
