@@ -10,6 +10,80 @@ use crate::review_page::{FileView, ReviewAction, ReviewData, ReviewPage};
 use crate::review_store::{self, Pending};
 use fenix_forge::{Forge, Verdict};
 
+/// Code review on GitHub and GitLab: the reviews (`SPC g M`) and opening
+/// a pull request (`SPC g P`). One feature while both forges share this
+/// code; they become `fenix.github` and `fenix.gitlab` over a `forge`
+/// provider once there's a contribution point for it. Core Git stays.
+pub(crate) static SPEC: super::feature::FeatureSpec = {
+    use super::feature::FeatureCommand as C;
+    use super::feature::LeaderEntry::Bind;
+    super::feature::FeatureSpec {
+        id: "fenix.review",
+        commands: &[
+            C { id: "git.pull_request", description: "Open a pull (merge) request for this branch, prefilled from its commits", external: false, run: |app| app.open_new_request() },
+            C { id: "git.merge_requests", description: "Open the Merge Requests view (GitLab)", external: false, run: |app| app.open_reviews() },
+            C { id: "git.merge_requests_close", description: "Close the Merge Requests view", external: false, run: |app| app.forge_close() },
+        ],
+        leader: &[
+            // `M`, not `m` -- `SPC g m` is the merge *operation*, and the two
+            // are asked for in completely different moods.
+            Bind(&['g', 'P'], "open a pull request", "git.pull_request"),
+            Bind(&['g', 'M'], "reviews", "git.merge_requests"),
+        ],
+        local_menu: &[],
+        local_context: None,
+        language_server: None,
+        tasks: None,
+        hover_fallback: None,
+        completion_at_cursor: None,
+        completion_pool_at: None,
+        hover_first: None,
+        picker_confirm: None,
+        picker_cancel: None,
+        modeline_clock: None,
+    }
+};
+
+/// The review feature's state: the Merge Requests view's panes, when
+/// `git_layout = "panes"` opens it in place of the review inbox. Its
+/// code is still `App` methods (its pages are core `PageModel`s), so it
+/// reaches this by type (`Features::review`), and it has no instance
+/// hooks that run code.
+#[derive(Default)]
+pub(crate) struct ReviewHost {
+    pub(super) state: ReviewState,
+}
+
+#[derive(Default)]
+pub(crate) struct ReviewState {
+    /// The open Merge Requests view (`SPC g M` with the panes layout).
+    pub(super) session: Option<ForgeSession>,
+}
+
+impl super::feature::Feature for ReviewHost {
+    fn spec(&self) -> &'static super::feature::FeatureSpec {
+        &SPEC
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl super::feature::Features {
+    pub(super) fn review(&self) -> &ReviewState {
+        &self.get::<ReviewHost>().expect("review has no instance hooks that run code, so it's always in place").state
+    }
+
+    pub(super) fn review_mut(&mut self) -> &mut ReviewState {
+        &mut self.get_mut::<ReviewHost>().expect("review has no instance hooks that run code, so it's always in place").state
+    }
+}
+
 /// What to do once a write to the forge has come back.
 #[derive(Debug, Clone, PartialEq)]
 pub enum After {
@@ -725,5 +799,19 @@ mod tests {
         let threads = &page.data.as_ref().unwrap().threads;
         assert!(threads.len() > before && threads.iter().any(|t| t.first().is_some_and(|n| n.body.contains("GitLab live test"))), "on GitLab now");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Through its spec, the way `App` reaches review now.
+
+    #[test]
+    fn review_contributes_its_commands_and_keys_from_its_spec() {
+        let registry = CommandRegistry::with_builtins();
+        let ids: Vec<&str> = SPEC.commands.iter().map(|c| c.id).collect();
+        assert_eq!(ids, ["git.pull_request", "git.merge_requests", "git.merge_requests_close"]);
+        assert!(ids.iter().all(|id| registry.iter().any(|c| c.id == *id && !c.external())));
+        let keys = keymap::leader_keys();
+        assert_eq!(keys.get("git.pull_request").map(String::as_str), Some("SPC g P"));
+        assert_eq!(keys.get("git.merge_requests").map(String::as_str), Some("SPC g M"));
+        assert_eq!(keys.get("git.merge").map(String::as_str), Some("SPC g m"), "core Git's merge is still beside it");
     }
 }

@@ -31,6 +31,7 @@ mod migrate;
 mod settings_host;
 mod snippets_host;
 mod review_host;
+pub(crate) use review_host::SPEC as REVIEW_SPEC;
 mod motion_host;
 mod polish;
 mod which_key;
@@ -5403,7 +5404,6 @@ pub struct App {
     /// the buffer line `render_base_line` stands for (see its comment).
     render_base_override: std::cell::Cell<Option<usize>>,
     merge_session: Option<MergeSession>,
-    forge_session: Option<ForgeSession>,
     compose: Option<ComposeSession>,
     /// Each file-backed buffer's file as Fenix last saw it. Absent for a
     /// buffer whose file hasn't been looked at yet, which the sweep
@@ -6368,7 +6368,6 @@ impl App {
             side_by_sides: Vec::new(),
             render_base_override: std::cell::Cell::new(None),
             merge_session: None,
-            forge_session: None,
             compose: None,
             disk_state,
             externally_changed: HashSet::new(),
@@ -7101,7 +7100,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|s| focused == s.graph_pane || focused == s.refs_pane || focused == s.detail_pane)
             || self.merge_session.as_ref().is_some_and(|s| focused == s.files_pane || focused == s.merge_pane)
-            || self.forge_session.as_ref().is_some_and(|s| focused == s.list_pane || focused == s.detail_pane || focused == s.review_pane)
+            || self.features.review().session.as_ref().is_some_and(|s| focused == s.list_pane || focused == s.detail_pane || focused == s.review_pane)
             || self.compose.as_ref().is_some_and(|c| focused == c.pane)
     }
 
@@ -14024,7 +14023,7 @@ impl App {
     /// `SPC g M`: opens (or refocuses and refreshes) the Merge Requests
     /// view.
     pub(crate) fn open_forge_view(&mut self) {
-        if let Some(session) = &self.forge_session {
+        if let Some(session) = &self.features.review().session {
             let (workspace_index, list_pane) = (session.workspace_index, session.list_pane);
             self.workspaces.switch_to_index(workspace_index);
             self.windows_mut().focus(list_pane);
@@ -14073,7 +14072,7 @@ impl App {
         self.pane_titles.insert(detail_pane, "2. Detail".to_string());
         self.pane_titles.insert(review_pane, "3. Review".to_string());
 
-        self.forge_session = Some(ForgeSession {
+        self.features.review_mut().session = Some(ForgeSession {
             workspace_index,
             list_pane,
             detail_pane,
@@ -14099,12 +14098,12 @@ impl App {
 
     /// Re-renders both panes from what's already cached -- no network.
     fn forge_render(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         // Wrapped to the panes they're going into, not to a fixed
         // width: this view is an even split, so each pane is about half
         // as wide as the fixed default assumes.
         let (list_cols, detail_cols) = (self.pane_cols(session.list_pane), self.pane_cols(session.detail_pane));
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let list = forge_panel::render_list(&session.project, session.filter, &session.requests, session.list_error.as_deref(), list_cols);
         let detail = match &session.detail {
             Some(detail) => forge_panel::render_detail(
@@ -14132,7 +14131,7 @@ impl App {
     /// folding, hunk navigation and "open the real file here" work
     /// without this view knowing anything about them.
     fn forge_render_review(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let (review_buffer, repo_root) = (session.review_buffer, session.repo_root.clone());
         let Some(detail) = session.detail.as_ref() else {
             self.set_diff_buffer(review_buffer, None, DiffSource::ReadOnly, &repo_root);
@@ -14153,7 +14152,7 @@ impl App {
 
     /// The review thread under the cursor, if the cursor is on one.
     fn forge_thread_at_cursor(&self) -> Option<String> {
-        let session = self.forge_session.as_ref()?;
+        let session = self.features.review().session.as_ref()?;
         if self.focused_pane_id() != session.review_pane {
             return None;
         }
@@ -14164,7 +14163,7 @@ impl App {
     /// `r` in the review pane: open a compose buffer to reply to the
     /// thread under the cursor.
     pub(crate) fn forge_reply_at_cursor(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let Some(number) = session.selected else { return };
         let Some(discussion) = self.forge_thread_at_cursor() else {
             self.set_message("put the cursor on a review comment to reply to it");
@@ -14176,7 +14175,7 @@ impl App {
     /// `R` in the review pane: resolve the thread under the cursor, or
     /// reopen it if it's already resolved.
     pub(crate) fn forge_resolve_at_cursor(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let Some(number) = session.selected else { return };
         let Some(discussion) = self.forge_thread_at_cursor() else {
             self.set_message("put the cursor on a review comment to resolve it");
@@ -14209,7 +14208,7 @@ impl App {
     /// `C` in the review pane: start a new thread on the diff line
     /// under the cursor.
     pub(crate) fn forge_comment_at_cursor(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         if self.focused_pane_id() != session.review_pane {
             self.set_message("comment from the Review pane (3)");
             return;
@@ -14253,7 +14252,7 @@ impl App {
     /// `A`: approve the selected merge request, or withdraw an approval
     /// already given.
     pub(crate) fn forge_toggle_approval(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let Some(number) = session.selected else {
             self.set_message("no merge request selected");
             return;
@@ -14288,7 +14287,7 @@ impl App {
     /// hanging can't fire later on a keystroke meant for something
     /// else.
     fn forge_disarm_merge(&mut self) {
-        if let Some(session) = self.forge_session.as_mut() {
+        if let Some(session) = self.features.review_mut().session.as_mut() {
             session.merge_armed = false;
         }
     }
@@ -14299,13 +14298,13 @@ impl App {
     /// doesn't happen on a single keystroke -- the same arm-then-confirm
     /// the Git panel's destructive actions already use.
     pub(crate) fn forge_merge_request(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let Some(number) = session.selected else {
             self.set_message("no merge request selected");
             return;
         };
         if !session.merge_armed {
-            if let Some(session) = self.forge_session.as_mut() {
+            if let Some(session) = self.features.review_mut().session.as_mut() {
                 session.merge_armed = true;
             }
             self.set_message(format!("merge !{number}? press m again to confirm, any other key cancels"));
@@ -14313,7 +14312,7 @@ impl App {
             return;
         }
         let (repo_root, detail) = (session.repo_root.clone(), session.detail.clone());
-        if let Some(session) = self.forge_session.as_mut() {
+        if let Some(session) = self.features.review_mut().session.as_mut() {
             session.merge_armed = false;
         }
         let client = match self.forge_client(&repo_root) {
@@ -14346,12 +14345,12 @@ impl App {
 
     /// Fetches the merge request list for the current filter.
     fn forge_refresh_list(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let (repo_root, filter) = (session.repo_root.clone(), session.filter);
         let client = match self.forge_client(&repo_root) {
             Ok(client) => client,
             Err(err) => {
-                if let Some(session) = self.forge_session.as_mut() {
+                if let Some(session) = self.features.review_mut().session.as_mut() {
                     session.list_error = Some(err.clone());
                     session.requests.clear();
                 }
@@ -14360,7 +14359,7 @@ impl App {
                 return;
             }
         };
-        let Some(session) = self.forge_session.as_mut() else { return };
+        let Some(session) = self.features.review_mut().session.as_mut() else { return };
         session.list_request_id += 1;
         let request_id = session.list_request_id;
         self.set_message(format!("loading merge requests ({})...", filter.label()));
@@ -14380,7 +14379,7 @@ impl App {
     }
 
     fn apply_forge_list(&mut self, request_id: u64, result: Result<Vec<fenix_forge::MergeRequest>, String>) {
-        let Some(session) = self.forge_session.as_mut() else { return };
+        let Some(session) = self.features.review_mut().session.as_mut() else { return };
         // A slower earlier request answering after a newer one would
         // otherwise put the previous filter's list back on screen.
         if request_id != session.list_request_id {
@@ -14402,7 +14401,7 @@ impl App {
                 self.forge_render();
                 if let Some(number) = next {
                     self.forge_select(number);
-                } else if let Some(session) = self.forge_session.as_mut() {
+                } else if let Some(session) = self.features.review_mut().session.as_mut() {
                     session.selected = None;
                     session.detail = None;
                     self.forge_render();
@@ -14421,7 +14420,7 @@ impl App {
 
     /// Loads one merge request's detail into the right pane.
     fn forge_select(&mut self, number: u64) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         let client = match self.forge_client(&repo_root) {
             Ok(client) => client,
@@ -14430,7 +14429,7 @@ impl App {
                 return;
             }
         };
-        let Some(session) = self.forge_session.as_mut() else { return };
+        let Some(session) = self.features.review_mut().session.as_mut() else { return };
         session.selected = Some(number);
         session.detail_request_id += 1;
         let request_id = session.detail_request_id;
@@ -14450,7 +14449,7 @@ impl App {
     }
 
     fn apply_forge_detail(&mut self, request_id: u64, number: u64, result: Result<ForgeDetail, String>) {
-        let Some(session) = self.forge_session.as_mut() else { return };
+        let Some(session) = self.features.review_mut().session.as_mut() else { return };
         if request_id != session.detail_request_id {
             return;
         }
@@ -14467,7 +14466,7 @@ impl App {
 
     /// The merge request number under the cursor in the list pane.
     fn forge_number_at_cursor(&self) -> Option<u64> {
-        let session = self.forge_session.as_ref()?;
+        let session = self.features.review().session.as_ref()?;
         if self.focused_pane_id() != session.list_pane {
             return None;
         }
@@ -14489,7 +14488,7 @@ impl App {
 
     /// `f`: cycle the list filter (all open / mine / assigned to me).
     pub(crate) fn forge_cycle_filter(&mut self) {
-        let Some(session) = self.forge_session.as_mut() else { return };
+        let Some(session) = self.features.review_mut().session.as_mut() else { return };
         session.filter = session.filter.next();
         self.forge_render();
         self.forge_refresh_list();
@@ -14505,7 +14504,7 @@ impl App {
     /// branch's name, which may not exist locally, may point somewhere
     /// else, or may collide with an unrelated branch.
     pub(crate) fn forge_checkout_selected(&mut self) {
-        let Some(session) = self.forge_session.as_ref() else { return };
+        let Some(session) = self.features.review().session.as_ref() else { return };
         let (repo_root, selected) = (session.repo_root.clone(), session.selected);
         let Some(number) = self.forge_number_at_cursor().or(selected) else {
             self.set_message("no merge request selected");
@@ -14535,7 +14534,7 @@ impl App {
     }
 
     fn forge_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
-        let session = self.forge_session.as_ref()?;
+        let session = self.features.review().session.as_ref()?;
         match n {
             1 => Some(session.list_pane),
             2 => Some(session.detail_pane),
@@ -14546,7 +14545,7 @@ impl App {
 
     /// `SPC g q` (in its workspace): closes the Merge Requests view.
     pub(crate) fn forge_close(&mut self) {
-        let Some(session) = self.forge_session.take() else { return };
+        let Some(session) = self.features.review_mut().session.take() else { return };
         for id in [session.list_buffer, session.detail_buffer, session.review_buffer] {
             self.buffers.close(id);
             self.git_lines.remove(&id);
@@ -14720,7 +14719,7 @@ impl App {
             return;
         }
 
-        let repo_root = match self.forge_session.as_ref() {
+        let repo_root = match self.features.review().session.as_ref() {
             Some(session) => session.repo_root.clone(),
             None => {
                 self.set_error("the Merge Requests view was closed -- nothing to send this to".to_string());
@@ -15620,7 +15619,7 @@ impl App {
             self.history_close();
         } else if self.merge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
             self.merge_close();
-        } else if self.forge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
+        } else if self.features.review().session.as_ref().is_some_and(|s| s.workspace_index == here) {
             self.forge_close();
         } else if self.git_session.as_ref().is_some_and(|s| panes.contains(&s.status_pane)) {
             self.git_session_close();
@@ -19088,7 +19087,7 @@ impl App {
             }
         }
         // The Merge Requests view's own keys.
-        if let Some((on_list, on_detail, on_review)) = self.forge_session.as_ref().map(|s| {
+        if let Some((on_list, on_detail, on_review)) = self.features.review().session.as_ref().map(|s| {
             let focused = self.focused_pane_id();
             (focused == s.list_pane, focused == s.detail_pane, focused == s.review_pane)
         }) {
@@ -20882,7 +20881,7 @@ impl App {
                 return self.git_menu_popup_at(bindings, window_width, modeline_top);
             }
         }
-        if let Some(session) = &self.forge_session {
+        if let Some(session) = &self.features.review().session {
             let focused = self.focused_pane_id();
             if focused == session.list_pane || focused == session.detail_pane || focused == session.review_pane {
                 let mut bindings: Vec<(&str, &str)> = vec![
@@ -33807,7 +33806,7 @@ configure_board stm32
 
         app.open_forge_view();
 
-        assert!(app.forge_session.is_none(), "no workspace should have been opened");
+        assert!(app.features.review().session.is_none(), "no workspace should have been opened");
         assert!(app.modeline_pieces().1.contains("GitLab server"), "got: {}", app.modeline_pieces().1);
     }
 
@@ -33869,7 +33868,7 @@ configure_board stm32
 
         app.open_forge_view();
 
-        let session = app.forge_session.as_ref().expect("the panes open");
+        let session = app.features.review().session.as_ref().expect("the panes open");
         assert_eq!(session.project, "group/project", "inferred from origin, not configured");
         let list = app.buffers.get(session.list_buffer).unwrap().buffer.text();
         assert!(list.contains("couldn't reach GitLab"), "the error belongs in the pane:\n{list}");
@@ -33885,13 +33884,13 @@ configure_board stm32
         app.config.gitlab_token = Some("tok".to_string());
         app.open_forge_view();
         let (list_buffer, detail_buffer) = {
-            let s = app.forge_session.as_ref().unwrap();
+            let s = app.features.review().session.as_ref().unwrap();
             (s.list_buffer, s.detail_buffer)
         };
 
         app.forge_close();
 
-        assert!(app.forge_session.is_none());
+        assert!(app.features.review().session.is_none());
         assert!(app.buffers.get(list_buffer).is_none());
         assert!(app.buffers.get(detail_buffer).is_none());
     }
@@ -33927,13 +33926,22 @@ configure_board stm32
     }
 
     #[test]
+    fn the_merge_requests_view_lives_on_the_review_feature_and_its_command_closes_it() {
+        let (_dir, mut app) = opened_forge_view("forge_on_the_feature");
+        assert!(app.features.review().session.is_some());
+        let close = REVIEW_SPEC.commands.iter().find(|c| c.id == "git.merge_requests_close").unwrap();
+        (close.run)(&mut app);
+        assert!(app.features.review().session.is_none());
+    }
+
+    #[test]
     fn a_finished_listing_renders_and_selects_the_first_entry() {
         let (_dir, mut app) = opened_forge_view("forge_apply_list");
-        let request_id = app.forge_session.as_ref().unwrap().list_request_id;
+        let request_id = app.features.review().session.as_ref().unwrap().list_request_id;
 
         app.apply_forge_list(request_id, Ok(vec![sample_mr(42, "Add the thing"), sample_mr(7, "Fix the other")]));
 
-        let session = app.forge_session.as_ref().unwrap();
+        let session = app.features.review().session.as_ref().unwrap();
         assert_eq!(session.requests.len(), 2);
         assert_eq!(session.selected, Some(42), "the first entry is shown without another keypress");
         let list = app.buffers.get(session.list_buffer).unwrap().buffer.text();
@@ -33947,16 +33955,16 @@ configure_board stm32
         // answering out of order is normal, and without the guard an
         // earlier filter's results would replace a newer filter's.
         let (_dir, mut app) = opened_forge_view("forge_stale_list");
-        let stale = app.forge_session.as_ref().unwrap().list_request_id;
+        let stale = app.features.review().session.as_ref().unwrap().list_request_id;
         // A newer request goes out (the filter changed, or `u` was
         // pressed again) and comes back first.
-        app.forge_session.as_mut().unwrap().list_request_id = stale + 1;
+        app.features.review_mut().session.as_mut().unwrap().list_request_id = stale + 1;
         app.apply_forge_list(stale + 1, Ok(vec![sample_mr(1, "newer")]));
 
         // Then the older one finally crawls in.
         app.apply_forge_list(stale, Ok(vec![sample_mr(99, "older, slower")]));
 
-        let session = app.forge_session.as_ref().unwrap();
+        let session = app.features.review().session.as_ref().unwrap();
         assert_eq!(session.requests.len(), 1);
         assert_eq!(session.requests[0].number, 1, "the newer answer stands");
     }
@@ -33964,40 +33972,40 @@ configure_board stm32
     #[test]
     fn a_selection_that_survives_a_filter_change_is_kept() {
         let (_dir, mut app) = opened_forge_view("forge_keep_selection");
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         app.apply_forge_list(id, Ok(vec![sample_mr(42, "a"), sample_mr(7, "b")]));
-        app.forge_session.as_mut().unwrap().selected = Some(7);
+        app.features.review_mut().session.as_mut().unwrap().selected = Some(7);
 
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         app.apply_forge_list(id, Ok(vec![sample_mr(7, "b"), sample_mr(9, "c")]));
 
-        assert_eq!(app.forge_session.as_ref().unwrap().selected, Some(7));
+        assert_eq!(app.features.review().session.as_ref().unwrap().selected, Some(7));
     }
 
     #[test]
     fn a_selection_that_the_new_filter_dropped_moves_to_the_first_entry() {
         let (_dir, mut app) = opened_forge_view("forge_drop_selection");
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         app.apply_forge_list(id, Ok(vec![sample_mr(42, "a")]));
-        assert_eq!(app.forge_session.as_ref().unwrap().selected, Some(42));
+        assert_eq!(app.features.review().session.as_ref().unwrap().selected, Some(42));
 
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         app.apply_forge_list(id, Ok(vec![sample_mr(7, "b")]));
 
         // Never left describing something the list no longer contains.
-        assert_eq!(app.forge_session.as_ref().unwrap().selected, Some(7));
+        assert_eq!(app.features.review().session.as_ref().unwrap().selected, Some(7));
     }
 
     #[test]
     fn an_empty_listing_clears_the_detail_pane_rather_than_leaving_it_stale() {
         let (_dir, mut app) = opened_forge_view("forge_empty_list");
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         app.apply_forge_list(id, Ok(vec![sample_mr(42, "a")]));
 
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         app.apply_forge_list(id, Ok(Vec::new()));
 
-        let session = app.forge_session.as_ref().unwrap();
+        let session = app.features.review().session.as_ref().unwrap();
         assert_eq!(session.selected, None);
         assert!(session.detail.is_none());
         let detail = app.buffers.get(session.detail_buffer).unwrap().buffer.text();
@@ -34007,10 +34015,10 @@ configure_board stm32
     #[test]
     fn the_detail_pane_renders_a_finished_fetch() {
         let (_dir, mut app) = opened_forge_view("forge_apply_detail");
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         app.apply_forge_list(id, Ok(vec![sample_mr(42, "Add the thing")]));
 
-        let detail_id = app.forge_session.as_ref().unwrap().detail_request_id;
+        let detail_id = app.features.review().session.as_ref().unwrap().detail_request_id;
         let detail = ForgeDetail {
             request: sample_mr(42, "Add the thing"),
             approvals: Some(fenix_forge::Approvals { approved: false, required: 2, left: 1, approved_by: vec!["Alice".to_string()] }),
@@ -34025,7 +34033,7 @@ configure_board stm32
         };
         app.apply_forge_detail(detail_id, 42, Ok(detail));
 
-        let text = app.buffers.get(app.forge_session.as_ref().unwrap().detail_buffer).unwrap().buffer.text();
+        let text = app.buffers.get(app.features.review().session.as_ref().unwrap().detail_buffer).unwrap().buffer.text();
         assert!(text.contains("!42 Add the thing"), "got:\n{text}");
         assert!(text.contains("feature -> main"), "got:\n{text}");
         assert!(text.contains("Approvals: 1 of 2 -- Alice"), "got:\n{text}");
@@ -34069,7 +34077,7 @@ configure_board stm32
         app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
         app.config.gitlab_token = Some("tok".to_string());
         app.open_forge_view();
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         app.apply_forge_list(id, Ok(vec![sample_mr(42, "Add the thing")]));
 
         app.forge_checkout_selected();
@@ -34084,16 +34092,16 @@ configure_board stm32
     #[test]
     fn cycling_the_filter_moves_through_all_three_and_says_which() {
         let (_dir, mut app) = opened_forge_view("forge_filter");
-        assert_eq!(app.forge_session.as_ref().unwrap().filter, fenix_forge::MrFilter::AllOpen);
+        assert_eq!(app.features.review().session.as_ref().unwrap().filter, fenix_forge::MrFilter::AllOpen);
 
         app.forge_cycle_filter();
-        assert_eq!(app.forge_session.as_ref().unwrap().filter, fenix_forge::MrFilter::Mine);
+        assert_eq!(app.features.review().session.as_ref().unwrap().filter, fenix_forge::MrFilter::Mine);
         app.forge_cycle_filter();
-        assert_eq!(app.forge_session.as_ref().unwrap().filter, fenix_forge::MrFilter::ForMe);
+        assert_eq!(app.features.review().session.as_ref().unwrap().filter, fenix_forge::MrFilter::ForMe);
         app.forge_cycle_filter();
-        assert_eq!(app.forge_session.as_ref().unwrap().filter, fenix_forge::MrFilter::AllOpen);
+        assert_eq!(app.features.review().session.as_ref().unwrap().filter, fenix_forge::MrFilter::AllOpen);
 
-        let list = app.buffers.get(app.forge_session.as_ref().unwrap().list_buffer).unwrap().buffer.text();
+        let list = app.buffers.get(app.features.review().session.as_ref().unwrap().list_buffer).unwrap().buffer.text();
         assert!(list.contains("showing: all open"), "got:\n{list}");
     }
 
@@ -34103,10 +34111,10 @@ configure_board stm32
         // Output and Debug: a session's pane must never be quietly
         // repurposed by "open this wherever I'm looking".
         let (_dir, mut app) = opened_forge_view("forge_tracked");
-        let list_pane = app.forge_session.as_ref().unwrap().list_pane;
+        let list_pane = app.features.review().session.as_ref().unwrap().list_pane;
         app.windows_mut().focus(list_pane);
         assert!(app.focused_pane_holds_a_tracked_session());
-        let detail_pane = app.forge_session.as_ref().unwrap().detail_pane;
+        let detail_pane = app.features.review().session.as_ref().unwrap().detail_pane;
         app.windows_mut().focus(detail_pane);
         assert!(app.focused_pane_holds_a_tracked_session());
     }
@@ -34126,7 +34134,7 @@ configure_board stm32
 
         // Merge Requests: an even split, as asked for.
         let (_dir, app) = opened_forge_view("ratio_forge");
-        let session = app.forge_session.as_ref().unwrap();
+        let session = app.features.review().session.as_ref().unwrap();
         assert_eq!(width_of(&app, session.list_pane), 500.0);
         assert_eq!(width_of(&app, session.detail_pane), 500.0);
 
@@ -34161,7 +34169,7 @@ configure_board stm32
     /// it adds, loaded into the view.
     fn reviewing(name: &str) -> (TempDir, App) {
         let (dir, mut app) = opened_forge_view(name);
-        let id = app.forge_session.as_ref().unwrap().list_request_id;
+        let id = app.features.review().session.as_ref().unwrap().list_request_id;
         let mut request = sample_mr(42, "Add the widget");
         request.diff_refs = sample_refs();
         request.sha = "h1".to_string();
@@ -34185,19 +34193,19 @@ configure_board stm32
             }],
             error: None,
         };
-        let detail_id = app.forge_session.as_ref().unwrap().detail_request_id;
+        let detail_id = app.features.review().session.as_ref().unwrap().detail_request_id;
         app.apply_forge_detail(detail_id, 42, Ok(detail));
         (dir, app)
     }
 
     fn review_text(app: &App) -> String {
-        let session = app.forge_session.as_ref().expect("a forge session");
+        let session = app.features.review().session.as_ref().expect("a forge session");
         app.buffers.get(session.review_buffer).unwrap().buffer.text()
     }
 
     /// Puts the cursor on the first review pane row whose text matches.
     fn cursor_on_review_row(app: &mut App, needle: &str) {
-        let session = app.forge_session.as_ref().unwrap();
+        let session = app.features.review().session.as_ref().unwrap();
         let (pane, buffer) = (session.review_pane, session.review_buffer);
         app.windows_mut().focus(pane);
         let row = app
@@ -34230,8 +34238,8 @@ configure_board stm32
     #[test]
     fn the_forges_own_narration_is_kept_off_the_diff() {
         let (_dir, mut app) = reviewing("review_system_notes");
-        let detail_id = app.forge_session.as_ref().unwrap().detail_request_id;
-        let mut detail = app.forge_session.as_ref().unwrap().detail.clone().unwrap();
+        let detail_id = app.features.review().session.as_ref().unwrap().detail_request_id;
+        let mut detail = app.features.review().session.as_ref().unwrap().detail.clone().unwrap();
         detail.discussions[0].notes = vec![sample_note("Alice", "approved this merge request", true)];
         app.apply_forge_detail(detail_id, 42, Ok(detail));
 
@@ -34244,7 +34252,7 @@ configure_board stm32
         // build time would vanish on the first Tab, which is exactly
         // how the commit header was lost once before.
         let (_dir, mut app) = reviewing("review_fold");
-        let session = app.forge_session.as_ref().unwrap();
+        let session = app.features.review().session.as_ref().unwrap();
         let (pane, buffer) = (session.review_pane, session.review_buffer);
         app.windows_mut().focus(pane);
         let char_idx = app.buffers.get(buffer).unwrap().buffer.line_start_char(1);
@@ -34352,8 +34360,8 @@ configure_board stm32
         // line or is rejected -- better to say so than to post it and
         // find out on the forge.
         let (_dir, mut app) = reviewing("review_comment_no_refs");
-        let detail_id = app.forge_session.as_ref().unwrap().detail_request_id;
-        let mut detail = app.forge_session.as_ref().unwrap().detail.clone().unwrap();
+        let detail_id = app.features.review().session.as_ref().unwrap().detail_request_id;
+        let mut detail = app.features.review().session.as_ref().unwrap().detail.clone().unwrap();
         detail.request.diff_refs = fenix_forge::DiffRefs::default();
         app.apply_forge_detail(detail_id, 42, Ok(detail));
         cursor_on_review_row(&mut app, "+let new = 2;");
@@ -34396,7 +34404,7 @@ configure_board stm32
     #[test]
     fn cancelling_throws_the_draft_away_and_returns_focus() {
         let (_dir, mut app) = reviewing("review_cancel");
-        let review_pane = app.forge_session.as_ref().unwrap().review_pane;
+        let review_pane = app.features.review().session.as_ref().unwrap().review_pane;
         cursor_on_review_row(&mut app, "Alice:");
         app.forge_reply_at_cursor();
         let (pane, buffer) = {
@@ -34433,7 +34441,7 @@ configure_board stm32
 
         app.forge_merge_request();
 
-        assert!(app.forge_session.as_ref().unwrap().merge_armed);
+        assert!(app.features.review().session.as_ref().unwrap().merge_armed);
         assert!(app.modeline_pieces().1.contains("press m again to confirm"), "got: {}", app.modeline_pieces().1);
     }
 
@@ -34441,13 +34449,13 @@ configure_board stm32
     fn an_armed_merge_is_cancelled_by_any_other_key() {
         let (_dir, mut app) = reviewing("review_merge_cancel");
         app.forge_merge_request();
-        assert!(app.forge_session.as_ref().unwrap().merge_armed);
+        assert!(app.features.review().session.as_ref().unwrap().merge_armed);
 
         // What the key handler calls for every key in this view that
         // isn't a second `m`.
         app.forge_disarm_merge();
 
-        assert!(!app.forge_session.as_ref().unwrap().merge_armed, "anything else backs out");
+        assert!(!app.features.review().session.as_ref().unwrap().merge_armed, "anything else backs out");
     }
 
     #[test]
@@ -34457,14 +34465,14 @@ configure_board stm32
 
         app.forge_merge_request();
 
-        assert!(!app.forge_session.as_ref().unwrap().merge_armed, "disarmed either way");
+        assert!(!app.features.review().session.as_ref().unwrap().merge_armed, "disarmed either way");
         assert!(app.modeline_pieces().1.contains("couldn't merge !42"), "got: {}", app.modeline_pieces().1);
     }
 
     #[test]
     fn a_review_pane_is_a_tracked_session_so_opening_a_file_does_not_hijack_it() {
         let (_dir, mut app) = reviewing("review_tracked");
-        let review_pane = app.forge_session.as_ref().unwrap().review_pane;
+        let review_pane = app.features.review().session.as_ref().unwrap().review_pane;
         app.windows_mut().focus(review_pane);
         assert!(app.focused_pane_holds_a_tracked_session());
         cursor_on_review_row(&mut app, "Alice:");
@@ -35160,7 +35168,9 @@ configure_board stm32
     /// is not necessarily this one.
     fn live_select_timeout_mr(app: &mut App) -> u64 {
         let number = app
-            .forge_session
+            .features
+            .review()
+            .session
             .as_ref()
             .unwrap()
             .requests
@@ -35176,7 +35186,7 @@ configure_board stm32
     #[ignore = "needs the dev GitLab instance; see dev/gitlab/README.md"]
     fn live_the_project_is_inferred_from_the_clones_own_origin() {
         let (_dir, app) = live_app("live_project");
-        let session = app.forge_session.as_ref().expect("the view opened");
+        let session = app.features.review().session.as_ref().expect("the view opened");
         assert_eq!(session.project, "fenix-dev/widget", "nothing about the project is configured");
         assert!(session.list_error.is_none(), "got: {:?}", session.list_error);
     }
@@ -35185,7 +35195,7 @@ configure_board stm32
     #[ignore = "needs the dev GitLab instance; see dev/gitlab/README.md"]
     fn live_the_list_renders_both_seeded_requests() {
         let (_dir, app) = live_app("live_list");
-        let session = app.forge_session.as_ref().unwrap();
+        let session = app.features.review().session.as_ref().unwrap();
         let list = app.buffers.get(session.list_buffer).unwrap().buffer.text();
         assert!(list.contains("Make the timeout configurable"), "got:\n{list}");
         // Seeded with `Draft:` already in the title *and* the flag set,
@@ -35200,7 +35210,7 @@ configure_board stm32
     fn live_the_detail_pane_fills_in_from_a_real_instance() {
         let (_dir, mut app) = live_app("live_detail");
         live_select_timeout_mr(&mut app);
-        let session = app.forge_session.as_ref().unwrap();
+        let session = app.features.review().session.as_ref().unwrap();
         let detail = app.buffers.get(session.detail_buffer).unwrap().buffer.text();
         assert!(detail.contains("feature/configurable-timeout -> main"), "got:\n{detail}");
         assert!(detail.contains("State: open"), "got:\n{detail}");
