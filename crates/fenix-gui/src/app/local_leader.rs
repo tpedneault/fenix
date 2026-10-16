@@ -17,9 +17,6 @@ impl App {
         }
         contexts.extend(self.features.specs().filter_map(|spec| spec.local_context).filter_map(|context| context(self)));
         let language = self.open().buffer.path().and_then(fenix_syntax::detect_language_from_path);
-        if language == Some(fenix_syntax::LanguageId::Tcl) {
-            contexts.push(LocalContext::Tcl);
-        }
         let reading = matches!(self.pages.get(&self.focused_buffer_id()).map(|s| &s.model), Some(super::pages::PageModel::Reading(_)));
         if language == Some(fenix_syntax::LanguageId::Markdown) || reading {
             contexts.push(LocalContext::Markdown);

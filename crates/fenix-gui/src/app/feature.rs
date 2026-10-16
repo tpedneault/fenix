@@ -24,6 +24,7 @@ use std::any::Any;
 
 use super::docker_host::DockerHost;
 use super::embedded_host::EmbeddedHost;
+use super::tcl_host::TclHost;
 use super::*;
 use crate::popup::PopupId;
 
@@ -63,7 +64,25 @@ pub(crate) struct FeatureSpec {
     pub language_server: Option<LanguageServerFn>,
     /// Tasks it offers in the task picker for the project at `root`.
     pub tasks: Option<fn(&App, &Path) -> Vec<fenix_tasks::TaskDef>>,
+    /// What `K` shows when no language server answers for the focused
+    /// buffer.
+    pub hover: Option<fn(&App) -> Option<String>>,
+    /// A completion that takes over at the cursor before any other
+    /// (Tcl's `-option` after a command that takes them).
+    pub completion_at_cursor: Option<fn(&App) -> Option<CompletionAt>>,
+    /// The only valid candidates for a word starting at char offset
+    /// `at`, replacing the general pool (an ensemble's subcommands).
+    pub completion_pool_at:
+        Option<fn(&App, usize) -> Vec<fenix_picker::Candidate<completion::Item>>>,
 }
+
+/// A completion in progress: where its prefix starts, the prefix, and
+/// the candidates to filter with it.
+pub(crate) type CompletionAt = (
+    usize,
+    String,
+    Vec<fenix_picker::Candidate<completion::Item>>,
+);
 
 /// See `FeatureSpec::language_server`.
 pub(crate) type LanguageServerFn = fn(
@@ -181,6 +200,25 @@ pub(crate) trait Feature: Any {
     /// A `Notice`.
     fn notice(&mut self, _app: &mut App, _notice: &Notice) {}
 
+    /// Candidates it adds to the focused buffer's general completion
+    /// pool.
+    fn completion_items(
+        &mut self,
+        _app: &mut App,
+    ) -> Vec<fenix_picker::Candidate<completion::Item>> {
+        Vec::new()
+    }
+    /// For a buffer in its language: the names a generic `function`
+    /// capture may be colored as, when the grammar can't tell a call
+    /// from any other word in command position.
+    fn known_commands(
+        &mut self,
+        _app: &mut App,
+        _buffer: BufferId,
+    ) -> Option<std::collections::HashSet<String>> {
+        None
+    }
+
     /// The title text of this feature's open picker (`ActivePicker::
     /// Feature`), what it's choosing.
     fn picker_label(&self) -> Option<&str> {
@@ -230,6 +268,7 @@ impl Features {
         let slots: Vec<Option<Box<dyn Feature>>> = vec![
             Some(Box::new(DockerHost::default())),
             Some(Box::new(EmbeddedHost::default())),
+            Some(Box::new(TclHost::default())),
         ];
         let specs = slots
             .iter()

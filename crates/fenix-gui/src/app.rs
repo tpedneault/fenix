@@ -11,6 +11,8 @@ mod agenda_sync;
 mod agenda_host;
 mod jira_host;
 mod embedded_host;
+mod tcl_host;
+pub(crate) use tcl_host::SPEC as TCL_SPEC;
 pub(crate) use embedded_host::SPEC as EMBEDDED_SPEC;
 mod local_leader;
 mod xml;
@@ -1867,18 +1869,6 @@ pub enum FenixUserEvent {
     /// A project page's background job reporting in -- see
     /// `pages::PageEvent`.
     Page(pages::PageEvent),
-    /// A background `ctags` scan of `root` finished, from the thread
-    /// `start_tcl_tags_scan` spawned. `scan` drops a result some newer
-    /// scan has since superseded.
-    TclTagsScanned { scan: u64, root: PathBuf, tags: Vec<fenix_completion::ctags::TagEntry> },
-}
-
-/// See `App::tcl_tags_scan`.
-struct TclTagsScan {
-    id: u64,
-    root: PathBuf,
-    /// A manual `SPC m T` refresh, which reports its count when it lands.
-    report: bool,
 }
 
 impl FenixUserEvent {
@@ -1918,7 +1908,6 @@ impl FenixUserEvent {
             Self::VncFrame { .. } => "VncFrame",
             Self::PdfResponse { .. } => "PdfResponse",
             Self::Page { .. } => "Page",
-            Self::TclTagsScanned { .. } => "TclTagsScanned",
         }
     }
 }
@@ -5743,28 +5732,6 @@ pub struct App {
     completion_local: bool,
     completion_context: Option<(BufferId, fenix_window::WindowId, usize, u64)>,
     snippet: Option<snippets::ActiveSnippet>,
-    /// One cached `(project_root, candidates)` pair for Tcl completion,
-    /// rebuilt only when the current buffer's project root differs from
-    /// what's cached -- not a map of every project root ever visited
-    /// this session (disclosed simplification: matches the common
-    /// single-active-project case, see the plan's Scope). Cleared by
-    /// `SPC c r` to force a fresh `ctags` scan.
-    tcl_candidates_cache: Option<(Option<PathBuf>, Vec<fenix_picker::Candidate<fenix_completion::CompletionItem>>)>,
-    /// The raw `ctags`-shelled Tcl tag list `tcl_candidates` derives its
-    /// own `Tag`-kind `CompletionItem`s from (see `tcl_tags`) -- a
-    /// separate cache because completion only ever needs the name, but
-    /// the `SPC c s` symbol picker also needs the file/line that
-    /// conversion throws away. Same staleness rule and `SPC c r` reset as
-    /// `tcl_candidates_cache`.
-    tcl_tags_cache: Option<(Option<PathBuf>, Vec<fenix_completion::ctags::TagEntry>)>,
-    /// The `ctags` scan running in the background, if any -- a big
-    /// project takes seconds to scan, so `tcl_tags` never waits on it:
-    /// it answers from whatever `tcl_tags_cache` holds (nothing yet, for
-    /// a newly opened project) and the result lands through
-    /// `FenixUserEvent::TclTagsScanned`, which refills both caches and
-    /// redraws so highlighting and completion pick it up.
-    tcl_tags_scan: Option<TclTagsScan>,
-    next_tcl_tags_scan: u64,
     /// Same role as `picker_scroll`, for the completion popup's own
     /// candidate window.
     completion_scroll: usize,
@@ -6617,10 +6584,6 @@ impl App {
             completion_local: true,
             completion_context: None,
             snippet: None,
-            tcl_candidates_cache: None,
-            tcl_tags_cache: None,
-            tcl_tags_scan: None,
-            next_tcl_tags_scan: 0,
             completion_scroll: 0,
             pending_grep_query: None,
             find_file_prompt: None,
@@ -8062,7 +8025,7 @@ impl App {
             return;
         }
         let Some((keys, text_document, position)) = self.focused_lsp_context() else {
-            self.lsp_hover = self.tcl_builtin_hover();
+            self.lsp_hover = self.features.specs().filter_map(|spec| spec.hover).find_map(|hover| hover(self));
             return;
         };
         let buffer = self.focused_buffer_id();
@@ -8090,28 +8053,6 @@ impl App {
             }
             Err(_) => self.lsp_request_failed(key, pending),
         }
-    }
-
-    /// What `K` shows in a Tcl buffer with no language server: Tcl's own
-    /// usage line for the built-in the cursor is on (or is inside an
-    /// argument of -- `K` on the `$s` in `string compare $s $t` still
-    /// names `string compare`), plus the subcommand list for an
-    /// ensemble. `None` on a user proc, a variable, whitespace, or in a
-    /// non-Tcl buffer -- see `tcl::hover_text`.
-    fn tcl_builtin_hover(&self) -> Option<String> {
-        if self.focused_language() != Some(fenix_syntax::LanguageId::Tcl) {
-            return None;
-        }
-        let cursor = self.cursor();
-        let buffer = &self.open().buffer;
-        let (line, col) = buffer.line_col(&cursor);
-        let text = buffer.line(line).to_string();
-        let (word_start, word_end) = fenix_completion::tcl::word_at(&text, col)?;
-        let chars: Vec<char> = text.chars().collect();
-        let before: String = chars[..word_start].iter().collect();
-        let word: String = chars[word_start..word_end].iter().collect();
-        let words = fenix_completion::tcl::command_words_before(&before)?;
-        fenix_completion::tcl::hover_text(&words, &word)
     }
 
     /// `gd` -- requests `textDocument/definition`.
@@ -8359,143 +8300,6 @@ impl App {
         }
     }
 
-    /// The Tcl completion candidate pool (keywords + `ctags`-sourced
-    /// definitions + any entries from `self.config.completion_symbols_
-    /// file`, deduped against each other), rebuilding only when `root`
-    /// differs from what's cached -- `ctags::run` shells a real
-    /// subprocess, so this is worth avoiding on every keystroke (matches
-    /// the "expensive work only on real state changes" discipline
-    /// already used for git-status-on-explorer-open). The symbols file
-    /// is re-read on the same cadence, not independently -- both sources
-    /// share one manual refresh (`refresh_completion_tags`/`SPC c r`).
-    /// Cloning the cached `Vec` on a cache hit is cheap: dozens to low
-    /// hundreds of small entries. Also rebuilt when a background `ctags`
-    /// scan lands (`apply_tcl_tags_scanned` drops this cache), since a
-    /// pool built while the scan was still running has no tags in it.
-    fn tcl_candidates(&mut self, root: Option<&Path>) -> Vec<fenix_picker::Candidate<fenix_completion::CompletionItem>> {
-        let stale = match &self.tcl_candidates_cache {
-            Some((cached_root, _)) => cached_root.as_deref() != root,
-            None => true,
-        };
-        if stale {
-            let mut seen = std::collections::HashSet::new();
-            let mut candidates = Vec::new();
-            for &keyword in fenix_completion::tcl::KEYWORDS {
-                if seen.insert(keyword.to_string()) {
-                    let item = fenix_completion::CompletionItem {
-                        label: keyword.to_string(),
-                        kind: fenix_completion::CompletionKind::Keyword,
-                        detail: fenix_completion::tcl::signature(keyword).unwrap_or_default().to_string(),
-                    };
-                    candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
-                }
-            }
-            for tag in self.tcl_tags(root) {
-                if seen.insert(tag.name.clone()) {
-                    let item = fenix_completion::CompletionItem { label: tag.name, kind: fenix_completion::CompletionKind::Tag, detail: String::new() };
-                    candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
-                }
-            }
-            if let Some(symbols_file) = &self.config.completion_symbols_file {
-                for item in fenix_completion::custom::load(symbols_file) {
-                    if seen.insert(item.label.clone()) {
-                        candidates.push(fenix_picker::Candidate::new(item.label.clone(), item));
-                    }
-                }
-            }
-            self.tcl_candidates_cache = Some((root.map(PathBuf::from), candidates));
-        }
-        self.tcl_candidates_cache.as_ref().expect("just populated above if it was missing").1.clone()
-    }
-
-    /// The raw `ctags`-shelled Tcl tag list (name/file/line preserved)
-    /// for `root` -- same cache shape as `tcl_candidates`, which this
-    /// backs (see its own doc comment) alongside the `SPC c s` symbol
-    /// picker (`picker_symbols`), which needs the location `tcl_
-    /// candidates`'s `CompletionItem` conversion throws away. `None`
-    /// root (no known project) always yields an empty list without
-    /// shelling anything.
-    ///
-    /// Never blocks on `ctags`: when nothing is cached for `root` yet,
-    /// this starts a background scan (once -- not again while it's in
-    /// flight) and answers with an empty list in the meantime; the scan
-    /// landing refills the caches and redraws.
-    fn tcl_tags(&mut self, root: Option<&Path>) -> Vec<fenix_completion::ctags::TagEntry> {
-        let cached = |cache: &Option<(Option<PathBuf>, Vec<fenix_completion::ctags::TagEntry>)>| {
-            cache.as_ref().is_some_and(|(cached_root, _)| cached_root.as_deref() == root)
-        };
-        if !cached(&self.tcl_tags_cache) {
-            match root {
-                None => self.tcl_tags_cache = Some((None, Vec::new())),
-                Some(root) => self.start_tcl_tags_scan(root, false),
-            }
-        }
-        match &self.tcl_tags_cache {
-            Some((cached_root, tags)) if cached_root.as_deref() == root => tags.clone(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Scans `root` with `ctags` off the UI thread, reporting back via
-    /// `FenixUserEvent::TclTagsScanned`. A scan of the same root already
-    /// in flight is left to finish, unless this is a manual refresh
-    /// (`report`), which starts over so it sees files saved since.
-    fn start_tcl_tags_scan(&mut self, root: &Path, report: bool) {
-        if let Some(scan) = &self.tcl_tags_scan {
-            if scan.root == root && !report {
-                return;
-            }
-        }
-        self.next_tcl_tags_scan += 1;
-        let id = self.next_tcl_tags_scan;
-        let root = root.to_path_buf();
-        self.tcl_tags_scan = Some(TclTagsScan { id, root: root.clone(), report });
-        match self.event_proxy.clone() {
-            Some(proxy) => {
-                std::thread::spawn(move || {
-                    let tags = fenix_completion::ctags::run(&root, "Tcl");
-                    let _ = proxy.send_event(FenixUserEvent::TclTagsScanned { scan: id, root, tags });
-                });
-            }
-            None => {
-                // No event loop to report back through (every test) --
-                // scan and apply inline, same posture as `explorer_navigate`.
-                let tags = fenix_completion::ctags::run(&root, "Tcl");
-                self.apply_tcl_tags_scanned(id, root, tags);
-            }
-        }
-    }
-
-    /// `FenixUserEvent::TclTagsScanned`: swaps in the new tags, unless a
-    /// newer scan has superseded this one, and drops the derived
-    /// completion pool so the next frame's highlighting and completion
-    /// rebuild from them.
-    fn apply_tcl_tags_scanned(&mut self, id: u64, root: PathBuf, tags: Vec<fenix_completion::ctags::TagEntry>) {
-        if self.tcl_tags_scan.as_ref().is_none_or(|scan| scan.id != id) {
-            return;
-        }
-        let scan = self.tcl_tags_scan.take().expect("checked just above");
-        let count = tags.len();
-        self.tcl_tags_cache = Some((Some(root.clone()), tags));
-        self.tcl_candidates_cache = None;
-        if scan.report {
-            self.set_message(format!("refreshed Tcl completion tags for {} -- {count} definition(s) found", root.display()));
-        }
-    }
-
-    /// `SPC c s` -- fuzzy-find any known Tcl definition (proc/namespace)
-    /// by its fully-qualified name and jump straight to where it's
-    /// defined. Sourced from `tcl_tags`, so it shares that cache (and
-    /// `SPC c r`'s manual refresh) with the Insert-mode completion
-    /// popup's own `Tag`-kind entries -- opening this picker never
-    /// re-shells `ctags` on its own.
-    pub(crate) fn picker_symbols(&mut self) {
-        let root = self.project_root.clone();
-        let candidates =
-            self.tcl_tags(root.as_deref()).into_iter().map(|tag| fenix_picker::Candidate::new(tag.name.clone(), tag)).collect();
-        self.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
-    }
-
     /// Whether the char immediately before the cursor sits inside a
     /// comment or string literal -- `sync_completion`'s auto-trigger
     /// gate, so typing an ordinary word inside a comment or a string
@@ -8725,68 +8529,6 @@ impl App {
         (buffer.line_start_char(line)..at).filter_map(|i| buffer.char_at(i)).collect()
     }
 
-    /// Subcommand candidates for the Tcl ensemble the cursor is inside,
-    /// when `at` (the completion prefix's start) sits right after its
-    /// leading words: `string |` and `string co|` both get `string`'s
-    /// subcommands, `binary encode |` gets `hex`/`base64`/`uuencode`,
-    /// `string is |` gets the character classes. Empty for a non-Tcl
-    /// buffer, for a position that isn't right after a command's
-    /// leading words, or for a command that has no subcommands (`puts
-    /// |`). Each candidate's detail is Tcl's own usage line for it.
-    /// Keyed as `Keyword` -- the same "this is the language's own
-    /// vocabulary" bucket the command names themselves use.
-    fn tcl_subcommand_candidates(&self, at: usize) -> Vec<fenix_picker::Candidate<completion::Item>> {
-        if self.focused_language() != Some(fenix_syntax::LanguageId::Tcl) {
-            return Vec::new();
-        }
-        let before = self.line_before(at);
-        let Some(words) = fenix_completion::tcl::command_words_before(&before) else { return Vec::new() };
-        if words.is_empty() {
-            return Vec::new();
-        }
-        fenix_completion::tcl::subcommands(&words.join(" "))
-            .into_iter()
-            .map(|(name, usage)| {
-                let mut item = completion::Item::text(name.to_string(), completion::Source::Keyword);
-                item.detail = usage.to_string();
-                fenix_picker::Candidate::new(name.to_string(), item)
-            })
-            .collect()
-    }
-
-    /// The `-flag` completion in progress at the cursor, if the cursor
-    /// is at the end of a dash-word inside a Tcl command that takes
-    /// options: `lsort -|` and `lsort -uni|` both give `(char offset of
-    /// the dash, "-"/"-uni", lsort's options)`, and `string compare
-    /// -nocase -|` gives `string compare`'s (see `tcl::options_at`).
-    /// `None` when there's no dash-word at the cursor, or the command
-    /// (`set x -`, `expr {$a -`) has no options for it to be -- so an
-    /// arithmetic minus never opens a popup. Same `Keyword`/detail
-    /// shape as `tcl_subcommand_candidates`.
-    fn tcl_option_completion(&self) -> Option<(usize, String, Vec<fenix_picker::Candidate<completion::Item>>)> {
-        if self.focused_language() != Some(fenix_syntax::LanguageId::Tcl) {
-            return None;
-        }
-        let cursor = self.cursor();
-        let before = self.line_before(cursor.char_idx);
-        let (dash_col, flag) = fenix_completion::tcl::option_prefix(&before)?;
-        let words = fenix_completion::tcl::command_words_before(&before[..before.len() - flag.len()])?;
-        let options = fenix_completion::tcl::options_at(&words);
-        if options.is_empty() {
-            return None;
-        }
-        let line_start = cursor.char_idx - before.chars().count();
-        let candidates = options
-            .into_iter()
-            .map(|(name, usage)| {
-                let mut item = completion::Item::text(name.to_string(), completion::Source::Keyword);
-                item.detail = usage.to_string();
-                fenix_picker::Candidate::new(name.to_string(), item)
-            })
-            .collect();
-        Some((line_start + dash_col, flag.to_string(), candidates))
-    }
-
     /// What the popup would complete at the cursor right now: the
     /// prefix's start, the prefix itself, and the pool to filter with
     /// it. In order: a `-flag` inside a command with options (`lsort
@@ -8802,8 +8544,8 @@ impl App {
     /// while `force_open_completion` (`Ctrl-Space`) falls back to the
     /// whole pool on an empty prefix.
     fn completion_at_cursor(&mut self) -> Option<(usize, String, Vec<fenix_picker::Candidate<completion::Item>>)> {
-        if let Some(option) = self.tcl_option_completion() {
-            return Some(option);
+        if let Some(found) = self.features.specs().filter_map(|spec| spec.completion_at_cursor).find_map(|at_cursor| at_cursor(self)) {
+            return Some(found);
         }
         // `[[` in Markdown: the notebook's names.
         if let Some(links) = self.notebook_link_completion() {
@@ -8812,12 +8554,12 @@ impl App {
         let cursor = self.cursor();
         match completion::prefix_at_cursor(&self.open().buffer, &cursor) {
             Some((start, prefix)) => {
-                let subcommands = self.tcl_subcommand_candidates(start);
+                let subcommands = self.completion_pool_at(start);
                 let pool = if subcommands.is_empty() { self.completion_candidates() } else { subcommands };
                 Some((start, prefix, pool))
             }
             None => {
-                let subcommands = self.tcl_subcommand_candidates(cursor.char_idx);
+                let subcommands = self.completion_pool_at(cursor.char_idx);
                 (!subcommands.is_empty()).then(|| (cursor.char_idx, String::new(), subcommands))
             }
         }
@@ -8837,12 +8579,8 @@ impl App {
     /// already share -- see that variant's own doc comment for why a
     /// third kind isn't worth a new calibrated popup color.
     fn completion_candidates(&mut self) -> Vec<fenix_picker::Candidate<completion::Item>> {
-        let mut candidates = if self.focused_language() == Some(fenix_syntax::LanguageId::Tcl) {
-            let root = self.project_root.clone();
-            self.tcl_candidates(root.as_deref()).into_iter().map(|c| fenix_picker::Candidate::new(c.label, completion::Item::from(c.payload))).collect::<Vec<_>>()
-        } else {
-            Vec::new()
-        };
+        let mut candidates = Vec::new();
+        self.each_feature(|feature, app| candidates.extend(feature.completion_items(app)));
         let mut seen: std::collections::HashSet<String> = candidates.iter().map(|c| c.label.clone()).collect();
         let mut words: Vec<_> = completion::buffer_words(&self.open().buffer).into_iter().collect();
         words.sort();
@@ -8864,36 +8602,10 @@ impl App {
         candidates
     }
 
-    /// `SPC c r` -- clears the cached Tcl completion candidates *and*
-    /// eagerly re-shells `ctags` right away in the background (rather
-    /// than leaving it to the next `sync_completion`/`force_open_
-    /// completion` call to trigger lazily), so pressing this key has a
-    /// visible result: a message reporting how many definitions were
-    /// found once the scan lands, or, if there's no known project root
-    /// at all, that there was nothing to scan. The previous tags keep
-    /// serving completion and highlighting until the new ones arrive. `ctags::run` itself already reports *why* a
-    /// scan came back empty (missing binary, non-zero exit, its stderr,
-    /// ...) -- this is the "did the refresh actually do anything"
-    /// summary on top of that, since a manually-triggered action with no
-    /// feedback at all is indistinguishable from one that silently
-    /// failed. Manual only (no save-hook/file-watcher refresh) -- see
-    /// the plan's Scope.
-    pub(crate) fn refresh_completion_tags(&mut self) {
-        self.tcl_candidates_cache = None;
-        match self.project_root.clone() {
-            Some(root) => {
-                if self.event_proxy.is_some() {
-                    self.set_message(format!("scanning {} for Tcl definitions...", root.display()));
-                }
-                self.start_tcl_tags_scan(&root, true);
-            }
-            None => {
-                self.set_error(
-                    "no project root detected for the focused buffer -- open a file inside a recognized project \
-                     (a `.git`/`Cargo.toml`/etc. marker somewhere above it) first",
-                );
-            }
-        }
+    /// The candidates a feature says are the only valid ones for a word
+    /// starting at `at` (an ensemble's subcommands), or none.
+    fn completion_pool_at(&self, at: usize) -> Vec<fenix_picker::Candidate<completion::Item>> {
+        self.features.specs().filter_map(|spec| spec.completion_pool_at).map(|pool| pool(self, at)).find(|pool| !pool.is_empty()).unwrap_or_default()
     }
 
     /// The focused buffer's detected language -- a path-extension check
@@ -18827,7 +18539,6 @@ impl App {
             FenixUserEvent::JiraActionDone(result) => self.apply_jira_action_done(result),
             FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
             FenixUserEvent::Page(event) => self.apply_page_event(event),
-            FenixUserEvent::TclTagsScanned { scan, root, tags } => self.apply_tcl_tags_scanned(scan, root, tags),
             // A new window asked for here is opened by `about_to_wait`:
             // that needs an `&ActiveEventLoop`, which `handle_user_event`
             // doesn't take (it's deliberately the `ActiveEventLoop`-free
@@ -21016,34 +20727,16 @@ impl App {
         let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
 
-        // Same reasoning, for Tcl: `tcl.scm`'s own `(command name: (_)
-        // @function)` rule captures *every* word in command position,
-        // since a tree-sitter query has no way to know whether it's a
-        // real command -- only Fenix's own known-symbols set (built-in
-        // keywords, ctags, the external symbols file: the exact same
-        // three sources `tcl_candidates` already merges for completion)
-        // can validate that. Built up here, before `self.buffers.get_mut`
-        // below, since `tcl_candidates` is itself a `&mut self` call.
-        let is_tcl = self.buffers.get(id).is_some_and(|ob| {
-            ob.buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language)
-                == Some(fenix_syntax::LanguageId::Tcl)
-        });
-        let known_tcl_commands: Option<std::collections::HashSet<String>> = if is_tcl {
-            let root = self.project_root.clone();
-            let mut known: std::collections::HashSet<String> =
-                self.tcl_candidates(root.as_deref()).into_iter().map(|c| fenix_picker::Candidate::new(c.label, completion::Item::from(c.payload))).collect::<Vec<_>>().into_iter().map(|c| c.payload.label).collect();
-            // Plus whatever this file itself defines. Without it, a call
-            // to a proc defined twenty lines up renders as plain body
-            // text whenever `ctags` has nothing to say -- which is every
-            // single-file script (no project root, so `tcl_tags` never
-            // runs) and every proc added since the last index.
-            if let Some(ob) = self.buffers.get(id) {
-                known.extend(fenix_completion::tcl::procs_defined_in(&ob.buffer.text()));
+        // A feature narrowing which words in command position are real
+        // calls (Tcl: the grammar captures every one). Built up here,
+        // before `self.buffers.get_mut` below, since the hook is a
+        // `&mut` call.
+        let mut known_commands = None;
+        self.each_feature(|feature, app| {
+            if known_commands.is_none() {
+                known_commands = feature.known_commands(app, id);
             }
-            Some(known)
-        } else {
-            None
-        };
+        });
 
         self.todo_spans.remove(&id);
         let Some(ob) = self.buffers.get_mut(id) else { return Vec::new() };
@@ -21117,7 +20810,7 @@ impl App {
                 // keywords, the switch/unset/variable special cases, ...)
                 // is already validated by the query's own static
                 // `#any-of?` lists, so it's left alone here.
-                let Some(known) = &known_tcl_commands else { return true };
+                let Some(known) = &known_commands else { return true };
                 if *name != "function" {
                     return true;
                 }
@@ -28229,13 +27922,13 @@ configure_board stm32
         // sends -- no `ctags` on `PATH` needed.
         let root = PathBuf::from("/project");
         let mut app = App::with_file(None);
-        app.tcl_tags_scan = Some(TclTagsScan { id: 1, root: root.clone(), report: false });
-        app.tcl_candidates_cache = Some((Some(root.clone()), Vec::new()));
+        app.tcl_mut().tags_scan = Some(tcl_host::TclTagsScan { id: 1, root: root.clone(), report: false });
+        app.tcl_mut().candidates_cache = Some((Some(root.clone()), Vec::new()));
 
         let tag = fenix_completion::ctags::TagEntry { name: "landed_proc".to_string(), file: root.join("lib.tcl"), line: 1 };
-        app.handle_user_event(FenixUserEvent::TclTagsScanned { scan: 1, root: root.clone(), tags: vec![tag] });
+        app.handle_user_event(App::tags_scanned_event(1, root.clone(), vec![tag]));
 
-        assert!(app.tcl_tags_scan.is_none());
+        assert!(app.tcl().tags_scan.is_none());
         let labels: Vec<String> = app.tcl_candidates(Some(&root)).into_iter().map(|c| c.label).collect();
         assert!(labels.contains(&"landed_proc".to_string()), "expected the scanned proc, got {labels:?}");
     }
@@ -28244,13 +27937,13 @@ configure_board stm32
     fn a_superseded_tcl_tags_scan_is_dropped() {
         let root = PathBuf::from("/project");
         let mut app = App::with_file(None);
-        app.tcl_tags_scan = Some(TclTagsScan { id: 2, root: root.clone(), report: false });
+        app.tcl_mut().tags_scan = Some(tcl_host::TclTagsScan { id: 2, root: root.clone(), report: false });
 
         let tag = fenix_completion::ctags::TagEntry { name: "stale_proc".to_string(), file: root.join("lib.tcl"), line: 1 };
-        app.handle_user_event(FenixUserEvent::TclTagsScanned { scan: 1, root, tags: vec![tag] });
+        app.handle_user_event(App::tags_scanned_event(1, root, vec![tag]));
 
-        assert!(app.tcl_tags_cache.is_none());
-        assert_eq!(app.tcl_tags_scan.as_ref().map(|scan| scan.id), Some(2));
+        assert!(app.tcl().tags_cache.is_none());
+        assert_eq!(app.tcl().tags_scan.as_ref().map(|scan| scan.id), Some(2));
     }
 
     #[test]

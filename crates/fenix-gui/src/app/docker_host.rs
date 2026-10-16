@@ -58,6 +58,9 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     local_context: None,
     language_server: None,
     tasks: None,
+    hover: None,
+    completion_at_cursor: None,
+    completion_pool_at: None,
 };
 
 /// What Docker's background threads report, as a `FeatureEvent`'s

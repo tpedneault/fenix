@@ -150,8 +150,7 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('c')], "calibration", "mib.calibration");
                 t.insert(&[KeyPress::char('m')], "MIB page", "mib.page");
                 t.insert(&[KeyPress::char('r')], "read the MIBs again", "mib.reload");
-                t.insert(&[KeyPress::char('s')], "symbols", "code.symbols");
-                t.insert(&[KeyPress::char('T')], "refresh tags", "completion.refresh_tags");
+                insert_entries(t, &[], crate::app::TCL_SPEC.local_menu);
             }
         }
     }
