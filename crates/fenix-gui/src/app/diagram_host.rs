@@ -23,7 +23,76 @@ const DIAGRAM_SCALE: f32 = 2.0;
 /// What a diagram's drawing came to.
 pub(super) type DrawResult = Result<Drawn, (usize, String)>;
 
-/// The diagram side of `NotebookState`.
+/// The diagrams' commands and their `SPC m` menu in a Mermaid file or
+/// its preview.
+pub(crate) static SPEC: super::feature::FeatureSpec = {
+    use super::feature::FeatureCommand as C;
+    use super::feature::LeaderEntry::Bind;
+    super::feature::FeatureSpec {
+        id: "fenix.diagrams",
+        commands: &[
+            C { id: "diagram.preview", description: "The diagram drawn beside its source (again closes it)", external: false, run: |app| app.toggle_diagram_preview() },
+            C { id: "diagram.viewer", description: "The diagram on its own: zoom, pan, walk its nodes", external: false, run: |app| app.open_diagram_viewer() },
+            C { id: "diagram.theme", description: "Set the diagram's theme", external: false, run: |app| app.diagram_pick_theme_here() },
+            C { id: "diagram.export", description: "Export the diagram", external: false, run: |app| app.diagram_export_here() },
+        ],
+        leader: &[],
+        local_menu: &[
+            Bind(&['p'], "preview beside", "diagram.preview"),
+            Bind(&['v'], "view it on its own", "diagram.viewer"),
+            Bind(&['t'], "set its theme", "diagram.theme"),
+            Bind(&['e'], "export", "diagram.export"),
+        ],
+        local_context: None,
+        language_server: None,
+        tasks: None,
+        hover_fallback: None,
+        completion_at_cursor: None,
+        completion_pool_at: None,
+        hover_first: None,
+        picker_confirm: None,
+        modeline_clock: None,
+    }
+};
+
+/// The diagrams' state. Like the notebook's, reached by type
+/// (`Features::diagram_state`) by code that's still `App` methods; its
+/// only instance hook, `diagnostics`, only reads.
+#[derive(Default)]
+pub(crate) struct DiagramsHost {
+    pub(super) state: DiagramState,
+}
+
+impl super::feature::Feature for DiagramsHost {
+    fn spec(&self) -> &'static super::feature::FeatureSpec {
+        &SPEC
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    /// A diagram's drawing error, as a problem on its line.
+    fn diagnostics(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
+        self.state.diagnostics.get(path).cloned().unwrap_or_default()
+    }
+}
+
+impl super::feature::Features {
+    pub(super) fn diagram_state(&self) -> &DiagramState {
+        &self.get::<DiagramsHost>().expect("the diagrams have no instance hooks that run code, so they're always in place").state
+    }
+
+    pub(super) fn diagram_state_mut(&mut self) -> &mut DiagramState {
+        &mut self.get_mut::<DiagramsHost>().expect("the diagrams have no instance hooks that run code, so they're always in place").state
+    }
+}
+
+/// What the diagrams keep: drawings by key, problems by file.
 #[derive(Default)]
 pub(super) struct DiagramState {
     /// The source (and theme shown instead, if any) behind each key.
@@ -96,18 +165,18 @@ impl App {
         self.config.diagrams_themes.hash(&mut h);
         self.config.diagrams_font.hash(&mut h);
         let key = h.finish();
-        self.notebook.diagrams.sources.borrow_mut().entry(key).or_insert_with(|| (source.to_string(), over.map(str::to_string)));
+        self.features.diagram_state().sources.borrow_mut().entry(key).or_insert_with(|| (source.to_string(), over.map(str::to_string)));
         key
     }
 
     /// Starts drawing a diagram picture, when it isn't drawn or drawing.
     pub(super) fn request_diagram_image(&mut self, key: ImageKey) {
         let ImageKey::Diagram(h) = key else { return };
-        if self.notebook.diagrams.results.contains_key(&h) || self.notebook.diagrams.pending.contains(&h) {
+        if self.features.diagram_state().results.contains_key(&h) || self.features.diagram_state().pending.contains(&h) {
             return;
         }
-        let Some((source, over)) = self.notebook.diagrams.sources.borrow().get(&h).cloned() else { return };
-        self.notebook.diagrams.pending.insert(h);
+        let Some((source, over)) = self.features.diagram_state().sources.borrow().get(&h).cloned() else { return };
+        self.features.diagram_state_mut().pending.insert(h);
         let themes = self.diagram_themes();
         self.page_spawn(move |send| {
             let result = fenix_diagram::render(&source, &themes, over.as_deref()).map_err(|d| (d.line, d.message)).and_then(|r| {
@@ -121,17 +190,17 @@ impl App {
     /// A drawing arrived: its picture kept for upload, pages showing it
     /// laid out again, its problem (or none) on its file.
     pub(super) fn apply_diagram_drawn(&mut self, h: u64, result: Result<(Drawn, u32, u32, Vec<u8>), (usize, String)>) {
-        self.notebook.diagrams.pending.remove(&h);
+        self.features.diagram_state_mut().pending.remove(&h);
         let key = ImageKey::Diagram(h);
         let stored = match result {
             Ok((drawn, w, hh, bgra)) => {
-                self.notebook.image_sizes.insert(key.clone(), (drawn.size.0.round() as u32, drawn.size.1.round() as u32));
-                self.notebook.textures.insert(key.clone(), PageTex { w, h: hh, bgra: Some(bgra), texture: None });
+                self.page_images.image_sizes.insert(key.clone(), (drawn.size.0.round() as u32, drawn.size.1.round() as u32));
+                self.page_images.textures.insert(key.clone(), PageTex { w, h: hh, bgra: Some(bgra), texture: None });
                 Ok(drawn)
             }
             Err(e) => Err(e),
         };
-        self.notebook.diagrams.results.insert(h, stored);
+        self.features.diagram_state_mut().results.insert(h, stored);
         self.evict_pictures();
         for state in self.pages.values_mut() {
             match &mut state.model {
@@ -151,7 +220,7 @@ impl App {
     /// Keeps the pictures pages still show; lets go of the rest once
     /// there are many.
     fn evict_pictures(&mut self) {
-        if self.notebook.textures.len() < 48 {
+        if self.page_images.textures.len() < 48 {
             return;
         }
         let mut keep: std::collections::HashSet<ImageKey> = self.pages.values().flat_map(|s| s.page.images.iter().map(|i| i.key.clone())).collect();
@@ -161,17 +230,17 @@ impl App {
                 keep.extend(p.want.clone());
             }
         }
-        self.notebook.textures.retain(|k, _| keep.contains(k));
-        self.notebook.image_sizes.retain(|k, _| keep.contains(k));
+        self.page_images.textures.retain(|k, _| keep.contains(k));
+        self.page_images.image_sizes.retain(|k, _| keep.contains(k));
         let hashes: std::collections::HashSet<u64> = keep.iter().filter_map(|k| if let ImageKey::Diagram(h) = k { Some(*h) } else { None }).collect();
-        self.notebook.diagrams.results.retain(|h, _| hashes.contains(h));
-        self.notebook.diagrams.sources.borrow_mut().retain(|h, _| hashes.contains(h));
+        self.features.diagram_state_mut().results.retain(|h, _| hashes.contains(h));
+        self.features.diagram_state().sources.borrow_mut().retain(|h, _| hashes.contains(h));
     }
 
     /// Why `source` doesn't draw, once it's been tried.
     pub(super) fn diagram_problem(&self, source: &str) -> Option<String> {
         let h = self.diagram_key(source, None);
-        match self.notebook.diagrams.results.get(&h) {
+        match self.features.diagram_state().results.get(&h) {
             Some(Err((line, message))) => Some(format!("line {}: {message}", line + 1)),
             _ => None,
         }
@@ -184,7 +253,7 @@ impl App {
     /// Before a diagram page is borrowed: what it should show now.
     pub(super) fn diagram_precompute(&self, id: BufferId) -> Option<DiagramPre> {
         let Some(PageModel::Diagram(p)) = self.pages.get(&id).map(|s| &s.model) else { return None };
-        let rows = self.notebook.diagrams.rows.get(&id).copied().unwrap_or(30);
+        let rows = self.features.diagram_state().rows.get(&id).copied().unwrap_or(30);
         let ob = p.source.and_then(|s| self.buffers.get(s))?;
         let edits = ob.buffer.edit_count();
         let (want, seen) = if p.seen != Some(edits) || p.want.is_none() {
@@ -197,7 +266,7 @@ impl App {
             Some(ImageKey::Diagram(h)) => Some(*h),
             _ => None,
         });
-        let ready = target.and_then(|h| self.notebook.diagrams.results.get(&h).cloned());
+        let ready = target.and_then(|h| self.features.diagram_state().results.get(&h).cloned());
         // The node the source cursor is on, when the source is in a pane.
         let cursor_node = p.source.and_then(|src| {
             let pane = self.windows().windows().into_iter().find(|&w| self.windows().content(w) == Some(&src))?;
@@ -262,10 +331,10 @@ impl App {
                     message,
                     ..Default::default()
                 };
-                self.notebook.diagrams.diagnostics.insert(path, vec![d]);
+                self.features.diagram_state_mut().diagnostics.insert(path, vec![d]);
             }
             None => {
-                self.notebook.diagrams.diagnostics.remove(&path);
+                self.features.diagram_state_mut().diagnostics.remove(&path);
             }
         }
     }
@@ -273,7 +342,7 @@ impl App {
     /// Records how tall a page's pane is; a page that fills it is laid
     /// out again when that changes.
     pub(super) fn note_page_rows(&mut self, id: BufferId, rows: usize) {
-        if self.notebook.diagrams.rows.insert(id, rows) != Some(rows) {
+        if self.features.diagram_state_mut().rows.insert(id, rows) != Some(rows) {
             if let Some(state) = self.pages.get_mut(&id) {
                 if matches!(state.model, PageModel::Diagram(_)) {
                     state.stale = true;
@@ -326,7 +395,7 @@ impl App {
     /// A diagram's name: the notebook's, else its file's.
     fn diagram_title(&self, source: BufferId) -> String {
         let path = self.buffers.get(source).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf);
-        match path.as_deref().and_then(|p| self.notebook.book.as_ref().and_then(|nb| nb.by_path(p))) {
+        match path.as_deref().and_then(|p| self.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(p))) {
             Some(e) => e.name.clone(),
             None => path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "diagram".into()),
         }
@@ -347,7 +416,7 @@ impl App {
 
     /// Opens the viewer for a notebook diagram.
     pub(super) fn open_entry_viewer(&mut self, id: &str) {
-        let Some(path) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
         let buffer = match self.buffers.id_for_path(&path) {
             Some(b) => b,
             None => {
@@ -434,7 +503,7 @@ impl App {
             .map(|(i, k)| fenix_picker::Candidate::new(format!("{:<7} {:<19} {}", k.tag, k.header, k.about), NotebookPick::DiagramKind(i)))
             .collect();
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "DIAGRAM", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("DIAGRAM", candidates));
     }
 
     pub(super) fn diagram_kind_picked(&mut self, i: usize) {
@@ -453,11 +522,11 @@ impl App {
                 }
             }
         }
-        self.enter_picker(ActivePicker::Notebook { title: "STARTER", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("STARTER", candidates));
     }
 
     pub(super) fn diagram_starter_picked(&mut self, text: String) {
-        self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::DiagramName { text }, input: String::new() });
+        self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::DiagramName { text }, input: String::new() });
         self.wake_caret();
     }
 
@@ -510,7 +579,7 @@ impl App {
             })
             .collect();
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "THEME", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("THEME", candidates));
     }
 
     /// `SPC m t` in a diagram.
@@ -550,7 +619,7 @@ impl App {
     /// A notebook diagram's theme, from the notebook page.
     pub(super) fn diagram_pick_theme(&mut self, id: Option<String>) {
         let Some(id) = id else { return };
-        let Some(path) = self.notebook.book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.path.clone()) else { return };
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.path.clone()) else { return };
         let buffer = match self.buffers.id_for_path(&path) {
             Some(b) => b,
             None => {
@@ -597,7 +666,7 @@ mod tests {
         assert_eq!(p.drawn.nodes.len(), 2);
         assert_eq!(p.drawn.theme, "fenix");
         let key = p.key.clone().unwrap();
-        assert!(app.notebook.textures.get(&key).is_some_and(|t| t.w > 0));
+        assert!(app.page_images.textures.get(&key).is_some_and(|t| t.w > 0));
         // Break it: the error shows, on its line, and the drawing stays.
         let ob = app.buffers.get_mut(source).unwrap();
         let end = ob.buffer.len_chars();
@@ -610,9 +679,31 @@ mod tests {
         assert_eq!(p.key.as_ref(), Some(&key), "the last good drawing");
         let path = app.buffers.get(source).unwrap().buffer.path().unwrap().to_path_buf();
         let path = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap());
-        assert_eq!(app.notebook.diagrams.diagnostics.get(&path).map(|d| d[0].range.start.line), Some(2));
+        assert_eq!(app.features.diagram_state().diagnostics.get(&path).map(|d| d[0].range.start.line), Some(2));
         // A theme written into the source.
         app.diagram_set_theme(source, "forest");
         assert!(app.buffers.get(source).unwrap().buffer.text().starts_with("---\nconfig:\n  theme: forest\n---\n"));
+    }
+
+    // Through its spec and hooks, the way `App` reaches the diagrams now.
+
+    #[test]
+    fn the_diagrams_contribute_their_commands_and_mermaid_menu_from_their_spec() {
+        let registry = CommandRegistry::with_builtins();
+        let ids: Vec<&str> = registry.iter().filter(|c| c.id.starts_with("diagram.")).map(|c| c.id).collect();
+        assert_eq!(ids, ["diagram.preview", "diagram.viewer", "diagram.theme", "diagram.export"]);
+        let menu = keymap::local_trie(&[crate::keymap::LocalContext::Mermaid]);
+        assert!(matches!(menu.matcher().feed(KeyPress::char('v')), fenix_keymap::Step::Matched(&"diagram.viewer")));
+    }
+
+    #[test]
+    fn a_drawing_error_reaches_the_files_diagnostics_through_the_hook() {
+        let mut app = App::with_file(None);
+        let path = PathBuf::from("flow.mmd");
+        let problem = lsp_types::Diagnostic { message: "unknown or missing Mermaid diagram header".into(), ..Default::default() };
+        app.features.diagram_state_mut().diagnostics.insert(path.clone(), vec![problem]);
+        let found: Vec<_> = app.features.iter().flat_map(|f| f.diagnostics(&path)).collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(app.all_diagnostics(&path).len(), 1);
     }
 }

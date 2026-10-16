@@ -40,7 +40,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     completion_at_cursor: None,
     completion_pool_at: None,
     hover_first: Some(|app| app.ccsds_hex_hover()),
-    picker_confirm: Some(|app, pick| {
+    picker_confirm: Some(|app, pick, _query| {
         if let Some(&source) = pick.downcast_ref::<usize>() {
             app.open_live(source);
         }

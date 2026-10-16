@@ -42,7 +42,7 @@ impl App {
         if self.notebook().is_none() {
             return;
         }
-        let target = self.notebook.book.as_ref().map(|nb| nb.resolve(&link, from.as_deref())).unwrap_or(Target::Missing(link.target.clone()));
+        let target = self.features.notebook_state().book.as_ref().map(|nb| nb.resolve(&link, from.as_deref())).unwrap_or(Target::Missing(link.target.clone()));
         match target {
             Target::Entry { id, heading } => {
                 self.open_notebook_entry(&id);
@@ -181,7 +181,7 @@ impl App {
             .map(|e| fenix_picker::Candidate::new(format!("{}  {}", e.kind.tag(), e.display_name()), NotebookPick::InsertLink(e.name.clone())))
             .collect();
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "LINK", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("LINK", candidates));
     }
 
     /// Types `text` at the focused buffer's cursor.
@@ -209,7 +209,7 @@ impl App {
     /// A link to `path` (at `line`, 1-based): a notebook entry by name, a
     /// project file as `project:path:line`, anything else by full path.
     pub(super) fn notebook_link_to(&mut self, path: &Path, line: Option<usize>) -> String {
-        if let Some(e) = self.notebook.book.as_ref().and_then(|nb| nb.by_path(path)) {
+        if let Some(e) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(path)) {
             return format!("[[{}]]", e.name);
         }
         let root = self.project_root.clone().filter(|r| path.starts_with(r));
@@ -247,7 +247,7 @@ impl App {
             }
         };
         let entry = self.notebook().and_then(|nb| nb.by_path(&path).map(|e| e.id.clone()));
-        let dir = match entry.and_then(|id| self.notebook.book.as_ref().and_then(|nb| nb.attachments_dir(&id))) {
+        let dir = match entry.and_then(|id| self.features.notebook_state().book.as_ref().and_then(|nb| nb.attachments_dir(&id))) {
             Some(dir) => dir,
             None => path.parent().map(|p| p.join(format!("{}_files", path.file_stem().unwrap_or_default().to_string_lossy()))).unwrap_or_default(),
         };
@@ -280,7 +280,7 @@ impl App {
         if self.notebook().is_none() {
             return;
         }
-        let Some(entry) = self.notebook.book.as_ref().and_then(|nb| nb.by_path(&path)).cloned() else {
+        let Some(entry) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(&path)).cloned() else {
             self.set_error("this file isn't in the notebook -- SPC n i imports it");
             return;
         };
@@ -296,7 +296,7 @@ impl App {
             }
             None => self.open_page_beside(PageModel::Backlinks(Box::new(BacklinksPage::new(entry.id.clone(), entry.display_name()))), 0.3),
         };
-        self.notebook.sidebar_origin = Some(origin);
+        self.features.notebook_state_mut().sidebar_origin = Some(origin);
         self.refresh_backlinks();
         if existing.is_some() {
             self.show_page(page_id);
@@ -319,7 +319,7 @@ impl App {
         let Some(page_id) = self.find_page(|m| matches!(m, PageModel::Backlinks(_))) else { return };
         let Some(PageModel::Backlinks(p)) = self.pages.get(&page_id).map(|s| &s.model) else { return };
         let id = p.id.clone();
-        let Some(nb) = self.notebook.book.as_ref() else { return };
+        let Some(nb) = self.features.notebook_state().book.as_ref() else { return };
         let Some(entry) = nb.get(&id).cloned() else { return };
         let row = |nb: &fenix_notebook::Notebook, b: fenix_notebook::Backlink| {
             let e = nb.get(&b.from);
@@ -361,7 +361,7 @@ impl App {
 
     /// Focuses the pane the sidebar's note is in (or any other one).
     fn focus_sidebar_origin(&mut self, page_id: BufferId) {
-        let origin = self.notebook.sidebar_origin.filter(|p| self.windows().windows().contains(p));
+        let origin = self.features.notebook_state().sidebar_origin.filter(|p| self.windows().windows().contains(p));
         let target = origin.or_else(|| self.windows().windows().into_iter().find(|&p| self.windows().content(p) != Some(&page_id)));
         if let Some(p) = target {
             self.windows_mut().focus(p);
@@ -394,15 +394,15 @@ impl App {
                 self.notebook_place_cursor(line, 0);
             }
             BlAction::Follow { name: _, line } => {
-                let link = self.notebook.book.as_ref().and_then(|nb| nb.get(&note_id)).and_then(|e| e.links.iter().find(|l| l.line == line).cloned());
-                let from = self.notebook.book.as_ref().and_then(|nb| nb.get(&note_id)).map(|e| e.path.clone());
+                let link = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&note_id)).and_then(|e| e.links.iter().find(|l| l.line == line).cloned());
+                let from = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&note_id)).map(|e| e.path.clone());
                 self.focus_sidebar_origin(page_id);
                 if let Some(link) = link {
                     self.notebook_follow(link, from);
                 }
             }
             BlAction::Link { id, line } => {
-                let Some(nb) = self.notebook.book.as_ref() else { return };
+                let Some(nb) = self.features.notebook_state().book.as_ref() else { return };
                 let (Some(target), Some(entry)) = (nb.get(&note_id).cloned(), nb.get(&id).cloned()) else { return };
                 let mut lines: Vec<String> = entry.text.lines().map(str::to_string).collect();
                 if let Some(l) = lines.get_mut(line) {
@@ -493,7 +493,7 @@ mod tests {
         app.notebook_create_note("Uplink", "# Uplink\n## Retries\n");
         app.notebook_create_note("Log", "see [[Uplink]]\n");
         app.notebook_create_note("Other", "the uplink is slow\n");
-        let uplink = app.notebook.book.as_ref().unwrap().by_name("Uplink").unwrap().path.clone();
+        let uplink = app.features.notebook_state().book.as_ref().unwrap().by_name("Uplink").unwrap().path.clone();
         app.open_file_from_picker(&uplink);
         app.notebook_backlinks();
         let page = app.focused_buffer_id();
@@ -503,6 +503,6 @@ mod tests {
         assert_eq!(p.outline.len(), 2);
         let other = p.mentions[0].id.clone();
         app.backlinks_action(page, BlAction::Link { id: other.clone(), line: 0 });
-        assert_eq!(app.notebook.book.as_ref().unwrap().get(&other).unwrap().text, "the [[Uplink|uplink]] is slow\n");
+        assert_eq!(app.features.notebook_state().book.as_ref().unwrap().get(&other).unwrap().text, "the [[Uplink|uplink]] is slow\n");
     }
 }

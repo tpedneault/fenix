@@ -291,7 +291,7 @@ impl App {
     /// then the last touched -- a project's Home, the notes about it.
     /// Only once the notebook has been opened (it's never read for Home).
     fn home_notebook(&self, scope: Option<&Path>) -> Vec<dashboard::FileItem> {
-        let Some(nb) = self.notebook.book.as_ref() else { return Vec::new() };
+        let Some(nb) = self.features.notebook_state().book.as_ref() else { return Vec::new() };
         let project = scope.and_then(|r| r.file_name()).map(|n| n.to_string_lossy().to_string());
         let today = chrono::Local::now().date_naive();
         let mut out = Vec::new();
