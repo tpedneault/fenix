@@ -164,9 +164,7 @@ impl CommandRegistry {
         registry.register("debug.add_watch", "Watch the identifier before the cursor", cmd_debug_add_watch);
         registry.register("debug.stop", "End the running debug session", cmd_debug_stop);
         registry.external("tools.status", "Show which LSP servers/DAP adapters are found on PATH and running", |app| app.open_tool_status_panel());
-        registry.external("vnc.open", "Open or switch to a configured VNC session", |app| app.start_vnc_picker());
-        registry.register("vnc.close", "Close the focused VNC session", cmd_vnc_close);
-        registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
+        registry.feature(&crate::app::VNC_SPEC);
         registry.feature(&crate::app::PDF_SPEC);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", |ctx| ctx.app.open_git());
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
@@ -512,14 +510,6 @@ fn cmd_debug_add_watch(ctx: &mut CommandCtx) {
 
 fn cmd_debug_stop(ctx: &mut CommandCtx) {
     ctx.app.debug_stop();
-}
-
-fn cmd_vnc_close(ctx: &mut CommandCtx) {
-    ctx.app.vnc_close_focused_session();
-}
-
-fn cmd_vnc_screenshot(ctx: &mut CommandCtx) {
-    ctx.app.vnc_screenshot();
 }
 
 fn cmd_git_close(ctx: &mut CommandCtx) {

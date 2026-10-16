@@ -441,10 +441,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // configured `Config.vnc_hosts` entry, each staying live in the
         // background once opened. Mirrors the docker/jira groups' exact
         // shape.
-        t.label_group(&[spc, KeyPress::char('v')], "vnc");
-        t.insert(&[spc, KeyPress::char('v'), KeyPress::char('v')], "open/switch vnc session", "vnc.open");
-        t.insert(&[spc, KeyPress::char('v'), KeyPress::char('q')], "close vnc session", "vnc.close");
-        t.insert(&[spc, KeyPress::char('v'), KeyPress::char('s')], "save vnc screenshot", "vnc.screenshot");
+        insert_feature_keys(&mut t, spc, &crate::app::VNC_SPEC);
 
         // The PDF reader (`SPC r`): its keys are the reader feature's.
         insert_feature_keys(&mut t, spc, &crate::app::PDF_SPEC);

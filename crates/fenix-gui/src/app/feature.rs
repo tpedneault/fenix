@@ -33,6 +33,7 @@ use super::notebook_host::NotebookHost;
 use super::pdf_host::PdfHost;
 use super::review_host::ReviewHost;
 use super::tcl_host::TclHost;
+use super::vnc_host::VncHost;
 use super::*;
 use crate::popup::PopupId;
 
@@ -323,6 +324,7 @@ impl Features {
             Some(Box::new(JiraHost)),
             Some(Box::new(ReviewHost::default())),
             Some(Box::new(PdfHost::default())),
+            Some(Box::new(VncHost::default())),
         ];
         let specs = slots
             .iter()

@@ -8,6 +8,8 @@ mod home;
 mod tabs;
 mod reader;
 mod pdf_host;
+mod vnc_host;
+pub(crate) use vnc_host::SPEC as VNC_SPEC;
 pub(crate) use pdf_host::SPEC as PDF_SPEC;
 mod agenda_sync;
 mod agenda_host;
@@ -2155,12 +2157,6 @@ enum ActivePicker {
     /// The Git status page's `b b`: a branch to switch to -- local ones
     /// first, then remote branches with no local counterpart.
     SwitchBranch(fenix_picker::PickerState<String>),
-    /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
-    /// `String`-identity picker -- confirming calls
-    /// `open_vnc_session` with the picked name (connects if this is the
-    /// first time it's been opened this run, otherwise just switches to
-    /// the already-live session).
-    VncHost(fenix_picker::PickerState<String>),
     /// `SPC r f`: `config.documents`' configured reference shelf, one
     /// candidate per `[documents]` entry -- the label is the name the
     /// user gave it ("Space Packet Protocol"), the payload the path it
@@ -2222,7 +2218,6 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Snippet(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
-        ActivePicker::VncHost(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
         ActivePicker::BufferSearch(s) => s.push_char(c),
@@ -2257,7 +2252,6 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Snippet(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
-        ActivePicker::VncHost(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
         ActivePicker::BufferSearch(s) => s.backspace(),
@@ -2292,7 +2286,6 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Snippet(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
-        ActivePicker::VncHost(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
         ActivePicker::BufferSearch(s) => s.move_selection(delta),
@@ -2330,7 +2323,6 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Theme(s) => s.toggle_mark(),
         ActivePicker::Snippet(s) => s.toggle_mark(),
         ActivePicker::Symbol(s) => s.toggle_mark(),
-        ActivePicker::VncHost(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
         ActivePicker::BufferSearch(s) => s.toggle_mark(),
@@ -2365,7 +2357,6 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Snippet(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
-        ActivePicker::VncHost(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
         ActivePicker::BufferSearch(s) => s.query(),
@@ -2400,7 +2391,6 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Snippet(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
-        ActivePicker::VncHost(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
         ActivePicker::BufferSearch(s) => s.len(),
@@ -2435,7 +2425,6 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Snippet(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
-        ActivePicker::VncHost(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
         ActivePicker::BufferSearch(s) => s.selected_row(),
@@ -2474,7 +2463,6 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Snippet(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::BufferSearch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -4993,7 +4981,7 @@ pub struct App {
     /// the workspace-bound counterpart to `terminal`'s one shared popup
     /// (see `TerminalTarget` for why both exist).
     ///
-    /// Keyed by buffer, not by pane, for the reason `vnc_sessions`
+    /// Keyed by buffer, not by pane, for the reason `VncState::sessions`
     /// settled on the hard way: a buffer can be shown by any number of
     /// panes at once (that is what a split *is*), so a session pinned to
     /// one pane silently stops existing for every other pane showing the
@@ -5008,7 +4996,7 @@ pub struct App {
     /// it would make `Ctrl-\` useless -- the release would last exactly
     /// until the next pane switch and back. Capture is engaged by asking
     /// for it (`SPC o T`, or a click into the pane), the same bargain
-    /// `vnc_focused` already strikes.
+    /// `VncState::focused` already strikes.
     terminal_buffer_focused: Option<BufferId>,
     /// Buffers whose shell is still being spawned -- same "show an
     /// honest placeholder rather than an unexplained blank" job as
@@ -5426,20 +5414,6 @@ pub struct App {
     /// Pictures pages show, read and uploaded (the reading view's, a
     /// note's, a diagram's drawing).
     page_images: reading_host::PageImages,
-    /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
-    /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
-    /// `Option<VncSession>` like `DockerHost::session`/`git_session`/
-    /// `jira_session`: those are each a singleton tool where a second
-    /// concurrent session has no meaning, while several simultaneous,
-    /// independently-live VM consoles is the entire point here.
-    vnc_sessions: HashMap<String, VncSession>,
-    /// Reusable staging buffer for VNC texture uploads -- `redraw`
-    /// extracts each session's dirty sub-rectangle into this before
-    /// handing it to the GPU (the framebuffer itself is strided by its
-    /// full width, so a sub-rect can't be uploaded in place). Held here,
-    /// rather than allocated per frame, because a full-screen dirty
-    /// region runs to several megabytes.
-    vnc_upload_scratch: Vec<u8>,
     /// One running language server per language, keyed by
     /// `fenix_syntax::LanguageId` -- spawned lazily the first time a
     /// buffer of that language is focused (`ensure_lsp_session`). A
@@ -5476,27 +5450,6 @@ pub struct App {
     /// menu) or if a newer hover request superseded it before this one's
     /// answer arrived (`apply_lsp_response`'s own `buffer` check).
     lsp_hover: Option<String>,
-    /// The VM name whose session currently owns raw keyboard input, if
-    /// any -- same "this pane eats every key, Vim doesn't apply" role as
-    /// `terminal_focused`, generalized to name *which* of up to several
-    /// concurrent sessions it refers to (there's still only ever one
-    /// focused at a time). `Ctrl-\` clears it, same chord/meaning as
-    /// `terminal_focused`'s own.
-    vnc_focused: Option<String>,
-    /// A fully transparent 1x1 cursor image, created once against the
-    /// first frame's `ActiveEventLoop` (`resumed`) and reused for every
-    /// window/session after that -- `set_vnc_focused`'s way of hiding
-    /// the host cursor while a VNC session has capture. See that
-    /// field's own doc comment for why this exists instead of the
-    /// obvious `Window::set_cursor_visible(false)`. `None` until the
-    /// first `resumed`, same posture as `gpu`/`text`/every other
-    /// GPU-loop-owned resource.
-    vnc_hidden_cursor: Option<winit::window::CustomCursor>,
-    /// VM names with a connect currently in flight on a background
-    /// thread -- lets `open_vnc_session` show a "Connecting..."
-    /// placeholder and refuse a redundant second connect attempt if the
-    /// picker is used again on the same name before the first finishes.
-    vnc_connecting: HashSet<String>,
 
     /// Elastic-column layout for every real `BufferKind::Table` buffer
     /// currently toggled on (`SPC f t`), keyed by `BufferId` -- same
@@ -6355,7 +6308,6 @@ impl App {
             git_menu_open: false,
             git_session: None,
             page_images: Default::default(),
-            vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
             lsp_additional: HashMap::new(),
@@ -6365,10 +6317,6 @@ impl App {
             lsp_completion: None,
             diagnostics: Default::default(),
             lsp_hover: None,
-            vnc_upload_scratch: Vec::new(),
-            vnc_focused: None,
-            vnc_hidden_cursor: None,
-            vnc_connecting: HashSet::new(),
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
             macro_recording_append: false,
@@ -9949,7 +9897,7 @@ impl App {
     /// otherwise freeze the whole editor for as long as the handshake
     /// takes).
     pub(crate) fn open_vnc_session(&mut self, name: &str) {
-        if let Some(session) = self.vnc_sessions.get(name) {
+        if let Some(session) = self.features.vnc().sessions.get(name) {
             let (workspace_index, buffer, link) = (session.workspace_index, session.buffer, session.link);
             self.workspaces.switch_to_index(workspace_index);
             // Focus whichever pane is already showing this session, if
@@ -9988,14 +9936,14 @@ impl App {
             self.wake_caret();
             return;
         }
-        if self.vnc_connecting.contains(name) {
+        if self.features.vnc().connecting.contains(name) {
             return; // already dialing this one -- SPC v v pressed twice in a row
         }
         let Some((_, host, port)) = self.config.vnc_hosts.iter().find(|(n, _, _)| n == name).cloned() else {
             self.set_error(format!("no VNC host configured named {name}"));
             return;
         };
-        self.vnc_connecting.insert(name.to_string());
+        self.features.vnc_mut().connecting.insert(name.to_string());
         self.start_vnc_connect(name.to_string(), host, port);
         self.set_message(format!("Connecting to {name}..."));
         self.wake_caret();
@@ -10095,11 +10043,10 @@ impl App {
     }
 
     /// `SPC v v`: a fuzzy picker over every configured VNC host name --
-    /// confirming calls `open_vnc_session`, same "one candidate list,
-    /// one picker variant" shape as `picker_pick_theme`.
+    /// confirming calls `open_vnc_session` (see `vnc_host::SPEC`).
     pub(crate) fn start_vnc_picker(&mut self) {
         let candidates = self.config.vnc_hosts.iter().map(|(name, _, _)| fenix_picker::Candidate::new(name.clone(), name.clone())).collect();
-        self.enter_picker(ActivePicker::VncHost(fenix_picker::PickerState::new(candidates)));
+        self.enter_picker(vnc_host::vnc_picker(candidates));
     }
 
     /// The actual background-thread connect, shared by the first connect
@@ -10125,7 +10072,7 @@ impl App {
     }
 
     /// `FenixUserEvent::VncConnected` handling -- covers both a brand
-    /// new session (nothing in `vnc_sessions` for `name` yet) and a
+    /// new session (nothing in `VncState::sessions` for `name` yet) and a
     /// reconnect attempt after a `Disconnected` frame (the session, and
     /// its pane/buffer/workspace, are kept alive across the gap -- see
     /// `VncSession`'s own doc comment on field drop order). A failed
@@ -10135,8 +10082,8 @@ impl App {
     /// RECONNECT_ATTEMPTS` times before giving up and leaving the pane
     /// showing its last-known frame, reopenable manually.
     fn apply_vnc_connected(&mut self, name: String, host: String, port: u16, result: std::io::Result<(fenix_vnc::VncClient, std::sync::mpsc::Receiver<fenix_vnc::VncFrame>)>) {
-        let first_connect = self.vnc_connecting.remove(&name);
-        if let Some(link) = self.vnc_sessions.get(&name).map(|s| s.link) {
+        let first_connect = self.features.vnc_mut().connecting.remove(&name);
+        if let Some(link) = self.features.vnc().sessions.get(&name).map(|s| s.link) {
             if link != VncLink::Reconnecting {
                 // Nobody is waiting for this: a reconnect scheduled for an
                 // earlier session under the same name, since closed and
@@ -10151,11 +10098,11 @@ impl App {
                     // picture stays visible across the reconnect gap,
                     // same posture as never resetting it here before
                     // this rewrite.
-                    let Some(framebuffer) = self.vnc_sessions.get(&name).map(|s| s.framebuffer.clone()) else { return };
+                    let Some(framebuffer) = self.features.vnc().sessions.get(&name).map(|s| s.framebuffer.clone()) else { return };
                     let reader = self.event_proxy.clone().map(|proxy| {
                         VncReader::spawn(receiver, name.clone(), framebuffer, move |event| proxy.send_event(event).is_ok())
                     });
-                    if let Some(session) = self.vnc_sessions.get_mut(&name) {
+                    if let Some(session) = self.features.vnc_mut().sessions.get_mut(&name) {
                         session.client = client;
                         session.reader = reader;
                         session.reconnect_attempts = 0;
@@ -10176,12 +10123,12 @@ impl App {
                     self.set_message(format!("VNC {name} reconnected"));
                 }
                 Err(err) => {
-                    let attempts = self.vnc_sessions.get(&name).map_or(0, |s| s.reconnect_attempts) + 1;
-                    if let Some(session) = self.vnc_sessions.get_mut(&name) {
+                    let attempts = self.features.vnc().sessions.get(&name).map_or(0, |s| s.reconnect_attempts) + 1;
+                    if let Some(session) = self.features.vnc_mut().sessions.get_mut(&name) {
                         session.reconnect_attempts = attempts;
                     }
                     if attempts >= MAX_VNC_RECONNECT_ATTEMPTS {
-                        if let Some(session) = self.vnc_sessions.get_mut(&name) {
+                        if let Some(session) = self.features.vnc_mut().sessions.get_mut(&name) {
                             session.link = VncLink::Down;
                         }
                         self.set_vnc_pane_titles(&name);
@@ -10230,7 +10177,7 @@ impl App {
                 let reader = self.event_proxy.clone().map(|proxy| {
                     VncReader::spawn(receiver, name.clone(), framebuffer.clone(), move |event| proxy.send_event(event).is_ok())
                 });
-                self.vnc_sessions.insert(
+                self.features.vnc_mut().sessions.insert(
                     name,
                     VncSession {
                         client,
@@ -10271,7 +10218,7 @@ impl App {
     /// `SPC v v` on a session whose reconnecting gave up: starts over,
     /// immediately and with a fresh attempt budget.
     fn vnc_reconnect_now(&mut self, name: &str) {
-        let Some(session) = self.vnc_sessions.get_mut(name) else { return };
+        let Some(session) = self.features.vnc_mut().sessions.get_mut(name) else { return };
         session.link = VncLink::Reconnecting;
         session.reconnect_attempts = 0;
         let (host, port) = (session.host.clone(), session.port);
@@ -10283,7 +10230,7 @@ impl App {
     /// Re-titles every visible pane showing session `name` for its
     /// current `link` state.
     fn set_vnc_pane_titles(&mut self, name: &str) {
-        let Some((buffer, link)) = self.vnc_sessions.get(name).map(|s| (s.buffer, s.link)) else { return };
+        let Some((buffer, link)) = self.features.vnc().sessions.get(name).map(|s| (s.buffer, s.link)) else { return };
         let panes: Vec<_> = self.windows().windows().into_iter().filter(|&p| self.windows().content(p) == Some(&buffer)).collect();
         for pane in panes {
             self.pane_titles.insert(pane, vnc_pane_title(name, link));
@@ -10330,8 +10277,8 @@ impl App {
     /// the next frame crashed. Those panes now just show another buffer,
     /// the same as closing any other buffer.
     pub(crate) fn vnc_session_close(&mut self, name: &str) {
-        let Some(session) = self.vnc_sessions.remove(name) else { return };
-        if self.vnc_focused.as_deref() == Some(name) {
+        let Some(session) = self.features.vnc_mut().sessions.remove(name) else { return };
+        if self.features.vnc().focused.as_deref() == Some(name) {
             self.set_vnc_focused(None);
         }
         // Found by what it shows, not by `session.workspace_index`: that
@@ -10403,7 +10350,7 @@ impl App {
     /// real cost; needed because sessions are keyed by name, not by
     /// buffer, unlike Docker/Git/Jira's flat per-session buffer-id lists.
     fn vnc_session_key_for_buffer(&self, id: BufferId) -> Option<String> {
-        self.vnc_sessions.iter().find(|(_, session)| session.buffer == id).map(|(key, _)| key.clone())
+        self.features.vnc().sessions.iter().find(|(_, session)| session.buffer == id).map(|(key, _)| key.clone())
     }
 
     /// Same as `vnc_session_key_for_buffer`, for callers that start from
@@ -10423,7 +10370,7 @@ impl App {
         self.vnc_session_key_for_buffer(buffer)
     }
 
-    /// Recomputes `vnc_focused` from whichever pane is actually focused
+    /// Recomputes `VncState::focused` from whichever pane is actually focused
     /// right now -- called after every focus-changing action (opening a
     /// session, pane navigation, a click) instead of trying to intercept
     /// every such call site individually. Also throttles every *other*
@@ -10436,10 +10383,10 @@ impl App {
         // handling for why a dropped one lets go of it.
         let focused_key = self
             .vnc_session_key_for_buffer(self.focused_buffer_id())
-            .filter(|key| self.vnc_sessions.get(key).is_some_and(|s| s.link == VncLink::Live));
-        let newly_focused = focused_key.is_some() && focused_key != self.vnc_focused;
+            .filter(|key| self.features.vnc().sessions.get(key).is_some_and(|s| s.link == VncLink::Live));
+        let newly_focused = focused_key.is_some() && focused_key != self.features.vnc().focused;
         self.set_vnc_focused(focused_key.clone());
-        for (key, session) in self.vnc_sessions.iter() {
+        for (key, session) in self.features.vnc().sessions.iter() {
             session.client.set_active(Some(key) == focused_key.as_ref());
         }
         // Mirror the local clipboard to the VM on genuinely *becoming*
@@ -10451,20 +10398,20 @@ impl App {
         // (typed normally) then just forwards as an ordinary keysym.
         if newly_focused {
             if let Some((key, text)) = focused_key.clone().zip(self.clipboard.as_mut().and_then(|c| c.get_text().ok())) {
-                if let Some(session) = self.vnc_sessions.get(&key) {
+                if let Some(session) = self.features.vnc().sessions.get(&key) {
                     session.client.send_clipboard(text);
                 }
             }
         }
     }
 
-    /// The one place `vnc_focused` is actually written -- besides the
+    /// The one place `VncState::focused` is actually written -- besides the
     /// field itself, keeps two OS-level pointer concerns in sync with
     /// input capture.
     ///
     /// The cursor *grab*: confined to the window while some VNC session
     /// has capture, released the moment it doesn't. Keyboard capture
-    /// (`vnc_focused`) already means every keystroke goes straight to the
+    /// (`VncState::focused`) already means every keystroke goes straight to the
     /// guest instead of vim's own dispatch; without also confining the
     /// pointer, a drag started inside a VNC pane can wander onto another
     /// window or monitor mid-gesture and strand a mouse button held down
@@ -10484,7 +10431,7 @@ impl App {
     /// always exists, so hiding the host's can't leave a captured session
     /// with no pointer at all.
     ///
-    /// Achieved by swapping in `vnc_hidden_cursor` (a transparent 1x1
+    /// Achieved by swapping in `VncState::hidden_cursor` (a transparent 1x1
     /// image), not `Window::set_cursor_visible(false)` -- a real,
     /// confirmed bug the obvious approach has on Windows: winit's own
     /// Windows backend, whenever *both* its grabbed and hidden cursor
@@ -10508,12 +10455,12 @@ impl App {
     /// and a failure isn't fatal to using the app, just to the
     /// convenience.
     fn set_vnc_focused(&mut self, key: Option<String>) {
-        if key == self.vnc_focused {
+        if key == self.features.vnc().focused {
             return;
         }
-        self.vnc_focused = key;
+        self.features.vnc_mut().focused = key;
         if let Some(window) = &self.window {
-            let captured = self.vnc_focused.is_some();
+            let captured = self.features.vnc().focused.is_some();
             let mode = if captured { CursorGrabMode::Confined } else { CursorGrabMode::None };
             let _ = window.set_cursor_grab(mode);
             // Not `Window::set_cursor_visible(false)` -- see `vnc_
@@ -10524,7 +10471,7 @@ impl App {
             // the same "just the guest's own pointer is visible" result
             // without ever setting the flag that triggers it.
             if captured {
-                if let Some(hidden) = &self.vnc_hidden_cursor {
+                if let Some(hidden) = &self.features.vnc().hidden_cursor {
                     window.set_cursor(hidden.clone());
                 }
             } else {
@@ -10543,7 +10490,7 @@ impl App {
     /// connection.
     fn send_vnc_key(&mut self, key: &str, keypress: KeyPress, down: bool) {
         let Some(keysym) = fenix_vnc::keysym::keysym_for(keypress) else { return };
-        let Some(session) = self.vnc_sessions.get(key) else { return };
+        let Some(session) = self.features.vnc().sessions.get(key) else { return };
         for (sym, sym_down) in vnc_key_sequence(keysym, keypress.mods, down) {
             session.client.send_key(sym, sym_down);
         }
@@ -10568,7 +10515,7 @@ impl App {
     fn apply_vnc_frame(&mut self, key: String, frame: fenix_vnc::VncFrame) {
         match frame {
             fenix_vnc::VncFrame::Resolution { .. } => {
-                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                let Some(session) = self.features.vnc_mut().sessions.get_mut(&key) else { return };
                 // Recreated lazily next redraw, once the new size is
                 // known and (if not already) a real GPU exists.
                 session.texture = None;
@@ -10580,7 +10527,7 @@ impl App {
                 debug_assert!(false, "VncReader applies Rect/Copy/UpdateEnd directly and never forwards them");
             }
             fenix_vnc::VncFrame::Cursor { width, height, hotspot_x, hotspot_y, bgra } => {
-                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                let Some(session) = self.features.vnc_mut().sessions.get_mut(&key) else { return };
                 // A zero-sized cursor is the server's way of saying "draw
                 // nothing here" -- keeping an empty `VncCursor` around
                 // would just mean a zero-area quad every frame.
@@ -10605,7 +10552,7 @@ impl App {
             }
             fenix_vnc::VncFrame::Bell => {}
             fenix_vnc::VncFrame::Disconnected(reason) => {
-                let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+                let Some(session) = self.features.vnc_mut().sessions.get_mut(&key) else { return };
                 session.reader = None;
                 session.link = VncLink::Reconnecting;
                 let (host, port) = (session.host.clone(), session.port);
@@ -10613,7 +10560,7 @@ impl App {
                 // other end, keys typed into the pane just vanish, and
                 // the pointer stays confined to a window showing a
                 // frozen frame.
-                if self.vnc_focused.as_deref() == Some(key.as_str()) {
+                if self.features.vnc().focused.as_deref() == Some(key.as_str()) {
                     self.set_vnc_focused(None);
                 }
                 self.set_vnc_pane_titles(&key);
@@ -10636,7 +10583,7 @@ impl App {
             self.set_error("no VNC session focused");
             return;
         };
-        let Some(session) = self.vnc_sessions.get(&key) else { return };
+        let Some(session) = self.features.vnc().sessions.get(&key) else { return };
         let (fb_width, fb_height, snapshot) = {
             let fb = session.framebuffer.lock().unwrap();
             let (w, h) = fb.dimensions();
@@ -16068,12 +16015,6 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.git_switch_to(&branch);
             }
-            Some(ActivePicker::VncHost(state)) => {
-                let Some(name) = state.selected().map(|c| c.payload.clone()) else { return };
-                self.active_picker = None;
-                self.main_view = MainView::Editor;
-                self.open_vnc_session(&name);
-            }
             Some(ActivePicker::Document(state)) => {
                 let Some(path) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
@@ -18327,8 +18268,8 @@ impl App {
         // drift apart the moment they didn't already agree, with no key
         // that can resync them afterward.
         if event.logical_key == Key::Named(NamedKey::CapsLock) {
-            if let Some(key) = self.vnc_focused.clone() {
-                if let Some(session) = self.vnc_sessions.get(&key) {
+            if let Some(key) = self.features.vnc().focused.clone() {
+                if let Some(session) = self.features.vnc().sessions.get(&key) {
                     session.client.send_key(fenix_vnc::keysym::CAPS_LOCK, event.state == ElementState::Pressed);
                 }
             }
@@ -18344,7 +18285,7 @@ impl App {
             // `dispatch_keypress`/`route_keypress` entirely (macro
             // recording/dot-repeat have no meaningful notion of a key
             // release either).
-            if let Some(key) = self.vnc_focused.clone() {
+            if let Some(key) = self.features.vnc().focused.clone() {
                 if let Some(keypress) = keymap::to_keypress(event, self.modifiers) {
                     if keypress != KeyPress::char('\\').with_ctrl() {
                         self.send_vnc_key(&key, keypress, false);
@@ -18460,18 +18401,18 @@ impl App {
 
         // A focused VNC pane owns every key the same way a focused
         // terminal does (same priority tier, same reserved `Ctrl-\`
-        // release chord) -- see `App::vnc_focused`'s own doc comment.
+        // release chord) -- see `VncState::focused`'s own doc comment.
         // Key *presses* are handled here; the corresponding key
         // *releases* are handled earlier, directly in `handle_key`,
         // since `route_keypress`/`dispatch_keypress` are never reached
         // for anything but a press (see `handle_key`'s own doc comment).
-        if let Some(key) = self.vnc_focused.clone() {
+        if let Some(key) = self.features.vnc().focused.clone() {
             if keypress == KeyPress::char('\\').with_ctrl() {
                 // Releases keyboard capture only -- the VNC pane stays
                 // exactly as focused/visible as it was; a plain click
                 // back into it (or reopening it via `SPC v v`) is what
                 // re-engages capture, not anything automatic here. Not
-                // `sync_vnc_focus()`: that derives `vnc_focused` from
+                // `sync_vnc_focus()`: that derives `VncState::focused` from
                 // which pane is *focused*, which this doesn't change, so
                 // calling it here would just immediately re-capture.
                 self.set_vnc_focused(None);
@@ -19801,13 +19742,13 @@ impl App {
     }
 
     /// The modeline's mode badge: "VNC" while some session has input
-    /// capture (`vnc_focused`), overriding the vim mode label the same
+    /// capture (`VncState::focused`), overriding the vim mode label the same
     /// way a captured VNC pane already overrides every keystroke (see
     /// `route_keypress`'s own VNC-focused branch) -- there's no Normal/
     /// Insert/Visual distinction worth showing while every key goes
     /// straight to the guest instead of vim's own dispatch.
     fn mode_badge_label(&self) -> &'static str {
-        if self.vnc_focused.is_some() {
+        if self.features.vnc().focused.is_some() {
             return "VNC";
         }
         if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() }
@@ -19886,7 +19827,6 @@ impl App {
                 Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
-                Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
                 Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
                 Some(picker @ ActivePicker::BufferSearch(_)) => ("SEARCH", picker_len(picker)),
@@ -21539,7 +21479,7 @@ impl App {
     /// cursor_icon`) -- `CursorMoved` can fire hundreds of times a second,
     /// and the OS call isn't free.
     fn update_hover_cursor(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
-        if self.vnc_focused.is_some() {
+        if self.features.vnc().focused.is_some() {
             return;
         }
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
@@ -21771,7 +21711,7 @@ impl App {
                     // notch (there's no separate "wheel" message).
                     let bit = if lines > 0 { 0x08 } else { 0x10 };
                     if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane).copied() {
-                        if let Some(session) = self.vnc_sessions.get_mut(&key) {
+                        if let Some(session) = self.features.vnc_mut().sessions.get_mut(&key) {
                             let local = (pos.0 - rect.x, pos.1 - rect.y);
                             let fb_size = session.framebuffer.lock().unwrap().dimensions();
                             let (fb_x, fb_y) = fenix_vnc::coords::pane_to_framebuffer(local, (rect.w, rect.h), fb_size);
@@ -21838,7 +21778,7 @@ impl App {
     fn handle_vnc_pointer_move(&mut self, pos: (f32, f32)) {
         let Some((pane, rect)) = self.pane_rect_at(pos) else { return };
         let Some(key) = self.vnc_session_key_for_pane(pane) else { return };
-        let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+        let Some(session) = self.features.vnc_mut().sessions.get_mut(&key) else { return };
         let local = (pos.0 - rect.x, pos.1 - rect.y);
         let fb_size = session.framebuffer.lock().unwrap().dimensions();
         let (fb_x, fb_y) = fenix_vnc::coords::pane_to_framebuffer(local, (rect.w, rect.h), fb_size);
@@ -21863,7 +21803,7 @@ impl App {
             MouseButton::Right => 0x04,
             _ => return,
         };
-        let Some(session) = self.vnc_sessions.get_mut(&key) else { return };
+        let Some(session) = self.features.vnc_mut().sessions.get_mut(&key) else { return };
         if pressed {
             session.pointer_buttons |= bit;
         } else {
@@ -22316,7 +22256,7 @@ impl App {
                 let drives_resize = is_focused || self.windows().content(focused_pane) != Some(&buffer_id);
                 if let Some(key) = self.vnc_session_key_for_pane(pane).filter(|_| drives_resize) {
                     let pane_px = (rect.w.round().max(1.0) as u16, rect.h.round().max(1.0) as u16);
-                    if let Some(session) = self.vnc_sessions.get_mut(&key) {
+                    if let Some(session) = self.features.vnc_mut().sessions.get_mut(&key) {
                         let now = Instant::now();
                         let decision = vnc_resize_tick(pane_px, session.last_pane_size, session.pane_size_stable_since, session.resize_requested_for, now);
                         session.last_pane_size = decision.last_pane_size;
@@ -23780,18 +23720,18 @@ impl App {
         // `last_uploaded_generation` branch below for why that withholding
         // was tried and reverted).
         // Moved out of `self` for the loop below and put back after: the
-        // loop needs `self.vnc_sessions` borrowed mutably, so it can't
+        // loop needs `self.features.vnc().sessions` borrowed mutably, so it can't
         // also touch another `self` field. Reused across frames rather
         // than allocated per frame -- a full-screen dirty region is
         // several megabytes.
-        let mut upload_scratch = std::mem::take(&mut self.vnc_upload_scratch);
+        let mut upload_scratch = std::mem::take(&mut self.features.vnc_mut().upload_scratch);
         for (_, buffer_id, _) in &vnc_panes {
-            // A direct `self.vnc_sessions` field access, not `self.vnc_
+            // A direct `self.features.vnc().sessions` field access, not `self.vnc_
             // session_key_for_pane(...)` -- that method takes `&self`
             // for the whole struct, which the borrow checker can't
             // reconcile with `gpu`/`text`/etc. already being borrowed as
             // separate field-only bindings above.
-            let Some(session) = self.vnc_sessions.values_mut().find(|s| s.buffer == *buffer_id) else { continue };
+            let Some(session) = self.features.vnc_mut().sessions.values_mut().find(|s| s.buffer == *buffer_id) else { continue };
             if session.texture.is_none() {
                 let mut fb = session.framebuffer.lock().unwrap();
                 let (w, h) = fb.dimensions();
@@ -23853,7 +23793,7 @@ impl App {
                 }
             }
         }
-        self.vnc_upload_scratch = upload_scratch;
+        self.features.vnc_mut().upload_scratch = upload_scratch;
 
         // Records every VNC quad this frame will draw -- one per pane,
         // plus one per visible guest cursor -- and uploads them in a
@@ -23868,7 +23808,7 @@ impl App {
         let mut vnc_draws: Vec<(BufferId, usize, Option<usize>)> = Vec::with_capacity(vnc_panes.len());
         surfaces.clear();
         for (_, buffer_id, rect) in &vnc_panes {
-            let Some(session) = self.vnc_sessions.values().find(|s| s.buffer == *buffer_id) else { continue };
+            let Some(session) = self.features.vnc().sessions.values().find(|s| s.buffer == *buffer_id) else { continue };
             if session.texture.is_none() {
                 continue;
             }
@@ -24039,7 +23979,7 @@ impl App {
             // before the pass opened; this only picks the texture and
             // the slot to draw it over.
             for (buffer_id, pane_slot, cursor_slot) in &vnc_draws {
-                let Some(session) = self.vnc_sessions.values().find(|s| s.buffer == *buffer_id) else { continue };
+                let Some(session) = self.features.vnc().sessions.values().find(|s| s.buffer == *buffer_id) else { continue };
                 let Some(texture) = &session.texture else { continue };
                 surfaces.draw(&mut pass, texture, *pane_slot, Blend::Opaque);
                 // The guest's cursor, blended so its transparent pixels
@@ -24282,7 +24222,7 @@ impl App {
         // bundled resource that's known to be well-formed.
         let hidden_cursor_source = winit::window::CustomCursor::from_rgba(vec![0, 0, 0, 0], 1, 1, 0, 0)
             .expect("a 1x1 transparent RGBA buffer is always a valid cursor image");
-        self.vnc_hidden_cursor = Some(event_loop.create_custom_cursor(hidden_cursor_source));
+        self.features.vnc_mut().hidden_cursor = Some(event_loop.create_custom_cursor(hidden_cursor_source));
         self.refresh_frame_origin();
         self.restore_saved_windows(event_loop);
         progress(0.95);
@@ -24510,7 +24450,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // the server at the much slower `IDLE_REFRESH_MILLIS`, so the
         // ordinary blink-driven redraw below is more than enough to
         // eventually show its (much less frequent) updates.
-        let vnc_focused = self.vnc_focused.is_some();
+        let vnc_focused = self.features.vnc().focused.is_some();
         // Any frame's focused pane mid-scroll keeps the clock running,
         // not just the active frame's -- a smooth scroll started on one
         // monitor has to keep easing after focus moves to another.
@@ -32711,11 +32651,11 @@ configure_board stm32
     #[test]
     fn open_vnc_session_on_an_unconfigured_name_errors_and_creates_nothing() {
         let mut app = App::with_file(None);
-        let sessions_before = app.vnc_sessions.len();
+        let sessions_before = app.features.vnc().sessions.len();
 
         app.open_vnc_session("no-such-vm");
 
-        assert_eq!(app.vnc_sessions.len(), sessions_before);
+        assert_eq!(app.features.vnc().sessions.len(), sessions_before);
         assert!(app.modeline_pieces().1.contains("no VNC host configured"));
     }
 
@@ -32782,11 +32722,11 @@ configure_board stm32
         app.start_vnc_picker();
 
         match &app.active_picker {
-            Some(ActivePicker::VncHost(state)) => {
+            Some(ActivePicker::Feature { feature: "fenix.vnc", badge: "VNC", state }) => {
                 let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
                 assert_eq!(labels, vec!["build-vm", "test-vm"]);
             }
-            other => panic!("expected an open VncHost picker, got is_some={}", other.is_some()),
+            other => panic!("expected an open VNC host picker, got is_some={}", other.is_some()),
         }
         assert_eq!(app.main_view, MainView::Picker);
     }
@@ -32799,10 +32739,7 @@ configure_board stm32
         // own "not configured" error) rather than that this particular
         // connect attempt succeeds.
         app.start_vnc_picker();
-        app.active_picker = Some(ActivePicker::VncHost(fenix_picker::PickerState::new(vec![fenix_picker::Candidate::new(
-            "ghost-vm".to_string(),
-            "ghost-vm".to_string(),
-        )])));
+        app.active_picker = Some(vnc_host::vnc_picker(vec![fenix_picker::Candidate::new("ghost-vm".to_string(), "ghost-vm".to_string())]));
 
         app.picker_confirm();
 
@@ -38628,8 +38565,8 @@ FIVE
         let mut app = App::with_file(None);
         app.config.vnc_hosts.push(("vm".to_string(), "127.0.0.1".to_string(), server.port()));
         app.open_vnc_session("vm");
-        assert_eq!(app.vnc_sessions.get("vm").map(|s| s.link), Some(VncLink::Live));
-        assert_eq!(app.vnc_focused.as_deref(), Some("vm"), "a focused live session captures input");
+        assert_eq!(app.features.vnc().sessions.get("vm").map(|s| s.link), Some(VncLink::Live));
+        assert_eq!(app.features.vnc().focused.as_deref(), Some("vm"), "a focused live session captures input");
         (app, server)
     }
 
@@ -38643,12 +38580,12 @@ FIVE
         server.go_down();
         app.apply_vnc_frame("vm".to_string(), fenix_vnc::VncFrame::Disconnected(fenix_vnc::SERVER_CLOSED.to_string()));
 
-        assert_eq!(app.vnc_sessions["vm"].link, VncLink::Reconnecting);
-        assert_eq!(app.vnc_focused, None, "keys shouldn't vanish into a dead connection");
+        assert_eq!(app.features.vnc().sessions["vm"].link, VncLink::Reconnecting);
+        assert_eq!(app.features.vnc().focused, None, "keys shouldn't vanish into a dead connection");
         assert!(vnc_title(&app).contains("reconnecting"), "{}", vnc_title(&app));
         // Refocusing the pane doesn't grab input back while it's down.
         app.sync_vnc_focus();
-        assert_eq!(app.vnc_focused, None);
+        assert_eq!(app.features.vnc().focused, None);
     }
 
     #[test]
@@ -38662,17 +38599,17 @@ FIVE
             assert!(refused.is_err());
             app.apply_vnc_connected("vm".to_string(), "127.0.0.1".to_string(), port, refused);
         }
-        assert_eq!(app.vnc_sessions["vm"].link, VncLink::Down);
+        assert_eq!(app.features.vnc().sessions["vm"].link, VncLink::Down);
         assert!(vnc_title(&app).contains("SPC v v"), "{}", vnc_title(&app));
 
         // The server is back; asking for the session again reconnects it
         // rather than only switching to its frozen last frame.
         server.come_back();
         app.open_vnc_session("vm");
-        assert_eq!(app.vnc_sessions["vm"].link, VncLink::Live);
-        assert_eq!(app.vnc_sessions["vm"].reconnect_attempts, 0);
+        assert_eq!(app.features.vnc().sessions["vm"].link, VncLink::Live);
+        assert_eq!(app.features.vnc().sessions["vm"].reconnect_attempts, 0);
         assert_eq!(vnc_title(&app), "VNC: vm");
-        assert_eq!(app.vnc_focused.as_deref(), Some("vm"), "input is captured again");
+        assert_eq!(app.features.vnc().focused.as_deref(), Some("vm"), "input is captured again");
     }
 
     #[test]
@@ -38682,7 +38619,7 @@ FIVE
         app.vnc_session_close("vm");
         let late = fenix_vnc::VncClient::connect("127.0.0.1", server.port());
         app.apply_vnc_connected("vm".to_string(), "127.0.0.1".to_string(), server.port(), late);
-        assert!(app.vnc_sessions.is_empty(), "the closed session came back");
+        assert!(app.features.vnc().sessions.is_empty(), "the closed session came back");
     }
 
     #[test]
@@ -38691,7 +38628,7 @@ FIVE
         app.set_message("before");
         let stale = fenix_vnc::VncClient::connect("127.0.0.1", server.port());
         app.apply_vnc_connected("vm".to_string(), "127.0.0.1".to_string(), server.port(), stale);
-        assert_eq!(app.vnc_sessions["vm"].link, VncLink::Live);
+        assert_eq!(app.features.vnc().sessions["vm"].link, VncLink::Live);
         assert!(!app.modeline_pieces().1.contains("reconnected"));
     }
 
@@ -38702,7 +38639,7 @@ FIVE
         let (mut app, _server) = app_with_vnc_session();
         let workspaces = app.workspaces.len();
         app.vnc_close_focused_session();
-        assert!(app.vnc_sessions.is_empty());
+        assert!(app.features.vnc().sessions.is_empty());
         assert_eq!(app.workspaces.len(), workspaces);
         let id = app.focused_buffer_id();
         assert!(app.buffers.get(id).is_some(), "the pane shows a buffer that exists");
