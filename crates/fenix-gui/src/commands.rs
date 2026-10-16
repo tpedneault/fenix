@@ -167,21 +167,7 @@ impl CommandRegistry {
         registry.external("vnc.open", "Open or switch to a configured VNC session", |app| app.start_vnc_picker());
         registry.register("vnc.close", "Close the focused VNC session", cmd_vnc_close);
         registry.register("vnc.screenshot", "Save the focused VNC session's current frame as a PNG", cmd_vnc_screenshot);
-        registry.register("pdf.next_page", "Turn the focused PDF session to the next page", cmd_pdf_next_page);
-        registry.register("pdf.prev_page", "Turn the focused PDF session to the previous page", cmd_pdf_prev_page);
-        registry.external("pdf.documents", "Open a document from the document index (SPC , Documents)", |app| app.start_document_picker());
-        registry.register("pdf.first_page", "Jump the focused PDF session to the first page", cmd_pdf_first_page);
-        registry.register("pdf.last_page", "Jump the focused PDF session to the last page", cmd_pdf_last_page);
-        registry.register("pdf.goto_page", "Prompt for a page number and jump to it", cmd_pdf_goto_page);
-        registry.register("pdf.zoom_in", "Zoom the focused PDF session in", cmd_pdf_zoom_in);
-        registry.register("pdf.zoom_out", "Zoom the focused PDF session out", cmd_pdf_zoom_out);
-        registry.register("pdf.fit_page", "Fit the focused PDF session's page to the pane", cmd_pdf_fit_page);
-        registry.register("pdf.fit_width", "Fit the focused PDF session's page to the pane's width", cmd_pdf_fit_width);
-        registry.register("pdf.toggle_outline", "Toggle the focused PDF session's outline/bookmarks panel", cmd_pdf_toggle_outline);
-        registry.register("pdf.search", "Search the focused PDF session's text for a word or phrase", cmd_pdf_search);
-        registry.register("pdf.headings", "Go to one of the PDF's headings, picked by name", cmd_pdf_headings);
-        registry.register("pdf.colors", "Draw PDF pages as printed or in the theme's colours", cmd_pdf_colors);
-        registry.register("pdf.copy_link", "Copy a link to the PDF page being read", cmd_pdf_copy_link);
+        registry.feature(&crate::app::PDF_SPEC);
         registry.register("git.open", "Show the Git status/files/branches/commits/stash panel", |ctx| ctx.app.open_git());
         registry.register("git.close", "Close the Git panel session", cmd_git_close);
         registry.register("git.history", "Show the commit graph, refs and commit detail", |ctx| ctx.app.open_history_view());
@@ -534,62 +520,6 @@ fn cmd_vnc_close(ctx: &mut CommandCtx) {
 
 fn cmd_vnc_screenshot(ctx: &mut CommandCtx) {
     ctx.app.vnc_screenshot();
-}
-
-fn cmd_pdf_next_page(ctx: &mut CommandCtx) {
-    ctx.app.pdf_next_page();
-}
-
-fn cmd_pdf_prev_page(ctx: &mut CommandCtx) {
-    ctx.app.pdf_prev_page();
-}
-
-fn cmd_pdf_first_page(ctx: &mut CommandCtx) {
-    ctx.app.pdf_first_page();
-}
-
-fn cmd_pdf_last_page(ctx: &mut CommandCtx) {
-    ctx.app.pdf_last_page();
-}
-
-fn cmd_pdf_goto_page(ctx: &mut CommandCtx) {
-    ctx.app.start_pdf_goto_page_prompt();
-}
-
-fn cmd_pdf_zoom_in(ctx: &mut CommandCtx) {
-    ctx.app.pdf_zoom_in();
-}
-
-fn cmd_pdf_zoom_out(ctx: &mut CommandCtx) {
-    ctx.app.pdf_zoom_out();
-}
-
-fn cmd_pdf_fit_page(ctx: &mut CommandCtx) {
-    ctx.app.pdf_zoom_fit_page();
-}
-
-fn cmd_pdf_fit_width(ctx: &mut CommandCtx) {
-    ctx.app.pdf_zoom_fit_width();
-}
-
-fn cmd_pdf_toggle_outline(ctx: &mut CommandCtx) {
-    ctx.app.pdf_toggle_outline();
-}
-
-fn cmd_pdf_search(ctx: &mut CommandCtx) {
-    ctx.app.start_pdf_search_prompt();
-}
-
-fn cmd_pdf_headings(ctx: &mut CommandCtx) {
-    ctx.app.pdf_pick_heading();
-}
-
-fn cmd_pdf_colors(ctx: &mut CommandCtx) {
-    ctx.app.pdf_toggle_colors();
-}
-
-fn cmd_pdf_copy_link(ctx: &mut CommandCtx) {
-    ctx.app.pdf_copy_link();
 }
 
 fn cmd_git_close(ctx: &mut CommandCtx) {

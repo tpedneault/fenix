@@ -7,6 +7,8 @@ mod todos;
 mod home;
 mod tabs;
 mod reader;
+mod pdf_host;
+pub(crate) use pdf_host::SPEC as PDF_SPEC;
 mod agenda_sync;
 mod agenda_host;
 pub(crate) use agenda_host::SPEC as AGENDA_SPEC;
@@ -1865,7 +1867,7 @@ pub enum FenixUserEvent {
     /// thread. Carries the VM's name explicitly, same reasoning as
     /// `VncConnected`/`LogLine`.
     VncFrame(String, fenix_vnc::VncFrame),
-    /// One reply from the shared PDF worker thread (`App::pdf_worker`) --
+    /// One reply from the shared PDF worker thread (`PdfState::worker`) --
     /// see `fenix_pdf::PdfResponse`'s own doc comment for what each
     /// variant means. Unlike `VncFrame`, this carries the *whole*
     /// response rather than routing through a separate per-session key
@@ -5190,14 +5192,6 @@ pub struct App {
     /// `SPC f f`'s typed-path prompt, when in progress -- a plain
     /// capturing prompt, same shape as `pending_grep_query`.
     find_file_prompt: Option<String>,
-    /// `SPC r g`'s type-a-page-number prompt, when in progress -- same
-    /// self-contained capturing-prompt shape as `find_file_prompt`, just
-    /// digits-only (see `pdf_goto_page_prompt_key`).
-    pdf_goto_page_prompt: Option<String>,
-    /// `SPC r /`'s type-a-query prompt, when in progress -- same self-
-    /// contained capturing-prompt shape as `pdf_goto_page_prompt`, free
-    /// text instead of digits-only (see `pdf_search_prompt_key`).
-    pdf_search_prompt: Option<String>,
     /// `SPC f R`'s new-name prompt, when in progress -- pre-seeded with
     /// the current filename (see `start_rename_file_prompt`).
     rename_file_prompt: Option<String>,
@@ -5503,32 +5497,6 @@ pub struct App {
     /// placeholder and refuse a redundant second connect attempt if the
     /// picker is used again on the same name before the first finishes.
     vnc_connecting: HashSet<String>,
-    /// Every open PDF document, by its buffer -- see `reader::PdfDoc`.
-    pdf_docs: HashMap<BufferId, reader::PdfDoc>,
-    /// Each pane's view of a document it shows, by pane and buffer -- see
-    /// `reader::PdfView`.
-    pdf_views: HashMap<reader::ViewKey, reader::PdfView>,
-    /// The view read last -- what `SPC r` acts on from outside a PDF pane.
-    pdf_last_view: Option<reader::ViewKey>,
-    /// The reader's keys: a count or a `g`/`z` waiting for its next key,
-    /// and the view it was typed in (a count doesn't follow you to
-    /// another pane).
-    pdf_keys: crate::reader::Keys,
-    pdf_keys_view: Option<reader::ViewKey>,
-    /// Hands out view and request ids, unique across every document.
-    pdf_next_id: u64,
-    /// Renders asked for and not back yet: request -> the view and page.
-    pdf_requests: HashMap<u64, (reader::ViewKey, u32)>,
-    /// Where each PDF was left (`reader.remember`), from the places file
-    /// next to the recent files; written when it changed.
-    pdf_places: HashMap<PathBuf, crate::reader::SavedPlace>,
-    pdf_places_path: PathBuf,
-    pdf_places_dirty: bool,
-    /// `f`'s link labels, while they show.
-    pdf_hints: Option<reader::Hints>,
-    /// The one pdfium worker for every document (pdfium can't be called
-    /// from two threads), spawned with the first PDF opened.
-    pdf_worker: Option<fenix_pdf::PdfWorker>,
 
     /// Elastic-column layout for every real `BufferKind::Table` buffer
     /// currently toggled on (`SPC f t`), keyed by `BufferId` -- same
@@ -6184,6 +6152,12 @@ impl App {
             fenix_project::RecentFiles::default_path().unwrap_or_else(|| PathBuf::from("fenix-recent-files.txt"))
         };
         let pdf_places_path = if cfg!(test) { isolated_test_path("pdf_places.tsv") } else { recent_files_path.with_file_name("pdf_places.tsv") };
+        let mut features = feature::Features::builtin();
+        {
+            let pdf = features.pdf_mut();
+            pdf.places = crate::reader::parse_places(&std::fs::read_to_string(&pdf_places_path).unwrap_or_default());
+            pdf.places_path = pdf_places_path;
+        }
         let recent_files = fenix_project::RecentFiles::load_or_default(recent_files_path);
 
         let mut buffers = BufferList::new();
@@ -6345,7 +6319,7 @@ impl App {
             chrome_git: None,
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
-            features: feature::Features::builtin(),
+            features,
             task_session: None,
             project_last_tasks: HashMap::new(),
             debug_session: None,
@@ -6395,18 +6369,6 @@ impl App {
             vnc_focused: None,
             vnc_hidden_cursor: None,
             vnc_connecting: HashSet::new(),
-            pdf_docs: HashMap::new(),
-            pdf_views: HashMap::new(),
-            pdf_last_view: None,
-            pdf_keys: crate::reader::Keys::default(),
-            pdf_keys_view: None,
-            pdf_next_id: 0,
-            pdf_requests: HashMap::new(),
-            pdf_places: crate::reader::parse_places(&std::fs::read_to_string(&pdf_places_path).unwrap_or_default()),
-            pdf_places_path,
-            pdf_places_dirty: false,
-            pdf_hints: None,
-            pdf_worker: None,
             table_views: HashMap::new(),
             macro_capture: Vec::new(),
             macro_recording_append: false,
@@ -6427,8 +6389,6 @@ impl App {
             completion_scroll: 0,
             pending_grep_query: None,
             find_file_prompt: None,
-            pdf_goto_page_prompt: None,
-            pdf_search_prompt: None,
             rename_file_prompt: None,
             lsp_rename_prompt: None,
             refactor_preview: None,
@@ -10088,7 +10048,7 @@ impl App {
         }
         for path in self.recent_files.paths().iter().filter(|p| Self::looks_like_pdf(p) && p.exists()) {
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let at = self.pdf_places.get(path).map(|p| format!("  p. {} / {}", p.page + 1, p.pages)).unwrap_or_default();
+            let at = self.features.pdf().places.get(path).map(|p| format!("  p. {} / {}", p.page + 1, p.pages)).unwrap_or_default();
             add(&mut list, format!("recent \u{b7} {name}{at}"), path.clone());
         }
         if let Some(root) = &root {
@@ -11519,7 +11479,7 @@ impl App {
         }
         // A document goes with its buffer; the buffer is closed below
         // like any other.
-        if self.pdf_docs.contains_key(&id) {
+        if self.features.pdf().docs.contains_key(&id) {
             self.pdf_close_doc(id);
         }
         // A pane-resident terminal's shell dies with its buffer -- see
@@ -18588,12 +18548,12 @@ impl App {
             return;
         }
         // `SPC r g` -- same capturing-prompt tier.
-        if self.pdf_goto_page_prompt.is_some() {
+        if self.features.pdf().goto_page_prompt.is_some() {
             self.pdf_goto_page_prompt_key(keypress);
             return;
         }
         // `SPC r /` -- same capturing-prompt tier.
-        if self.pdf_search_prompt.is_some() {
+        if self.features.pdf().search_prompt.is_some() {
             self.pdf_search_prompt_key(keypress);
             return;
         }
@@ -19794,7 +19754,7 @@ impl App {
                 // registered.
                 self.vnc_session_key_for_buffer(buffer_id).map(|name| format!("VNC: {name}")).unwrap_or_else(|| "*vnc*".to_string())
             } else if ob.kind == BufferKind::Pdf {
-                self.pdf_docs.get(&buffer_id).map(|doc| doc.name.clone()).unwrap_or_else(|| "*pdf*".to_string())
+                self.features.pdf().docs.get(&buffer_id).map(|doc| doc.name.clone()).unwrap_or_else(|| "*pdf*".to_string())
             } else if ob.kind == BufferKind::TaskOutput {
                 "*task output*".to_string()
             } else if ob.kind == BufferKind::Debug {
@@ -23343,7 +23303,7 @@ impl App {
         // Blank paper where a PDF page is still being rendered, so the
         // column keeps its shape while the pages come in.
         for (key, draws) in &pdf_plans {
-            let Some(view) = self.pdf_views.get(key) else { continue };
+            let Some(view) = self.features.pdf().views.get(key) else { continue };
             for draw in draws.iter().filter(|d| !view.cache.contains_key(&d.page)) {
                 let (x, y, w, h) = draw.dest;
                 bg_rect.push_rect(gpu, x, y, w, h, pdf_paper);
@@ -23940,7 +23900,7 @@ impl App {
         // Rendered pages the worker has sent since the last frame go into
         // textures of their own; the pixels are let go once uploaded.
         for (key, draws) in &pdf_plans {
-            let Some(view) = self.pdf_views.get_mut(key) else { continue };
+            let Some(view) = self.features.pdf_mut().views.get_mut(key) else { continue };
             for draw in draws {
                 let Some(page) = view.cache.get_mut(&draw.page) else { continue };
                 let Some(bgra) = page.bgra.take() else { continue };
@@ -23988,7 +23948,7 @@ impl App {
         // them. Resolved back to their surfaces inside the pass.
         let mut pdf_draws: Vec<(usize, usize, usize)> = Vec::new();
         for (plan, (key, draws)) in pdf_plans.iter().enumerate() {
-            let Some(view) = self.pdf_views.get(key) else { continue };
+            let Some(view) = self.features.pdf().views.get(key) else { continue };
             for (index, draw) in draws.iter().enumerate() {
                 if view.cache.get(&draw.page).and_then(|page| page.texture.as_ref()).is_none() {
                     continue; // still being rendered: the paper `bg_rect` already drew
@@ -24092,7 +24052,7 @@ impl App {
             // the VNC loop just above.
             for &(plan, index, slot) in &pdf_draws {
                 let (key, draws) = &pdf_plans[plan];
-                let Some(view) = self.pdf_views.get(key) else { continue };
+                let Some(view) = self.features.pdf().views.get(key) else { continue };
                 let Some(texture) = view.cache.get(&draws[index].page).and_then(|page| page.texture.as_ref()) else { continue };
                 surfaces.draw(&mut pass, texture, slot, Blend::Opaque);
             }

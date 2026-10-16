@@ -166,7 +166,7 @@ impl App {
             });
         }
         // Each open PDF, by its path.
-        let mut pdfs: Vec<(BufferId, PathBuf)> = self.pdf_docs.iter().map(|(&id, doc)| (id, doc.path.clone())).collect();
+        let mut pdfs: Vec<(BufferId, PathBuf)> = self.features.pdf().docs.iter().map(|(&id, doc)| (id, doc.path.clone())).collect();
         pdfs.sort_by(|a, b| a.1.cmp(&b.1));
         for (id, path) in pdfs {
             ids.insert(id, documents.len());
