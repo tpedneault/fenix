@@ -38,7 +38,10 @@ instance in [`dev/gitlab`](dev/gitlab/README.md).
 
 ## Making a change
 
-1. Branch from `master`.
+1. Branch from `master`. Work on the extensions platform and anything
+   moving into an extension (see
+   [docs/EXTENSIONS_PLAN.md](docs/EXTENSIONS_PLAN.md)) branches from
+   `release/1.1` instead, and its pull request targets `release/1.1`.
 2. Keep each pull request to one change. Add or update tests alongside
    it: most of Fenix lives in host-agnostic crates precisely so it can
    be unit-tested (see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
