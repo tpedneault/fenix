@@ -496,8 +496,8 @@ impl App {
 
     pub(crate) fn open_recording(&mut self, path: PathBuf, framing: Option<Framing>) {
         self.main_view = MainView::Editor;
-        let (key, _) = self.mib_key_here();
-        let set = if key.roots.is_empty() { None } else { self.mib_set(&key) };
+        let (key, _) = super::mib_host::key_here(self);
+        let set = if key.roots.is_empty() { None } else { self.with_mib(|m, a| m.set(a, &key)).flatten() };
         let mission = self.mission(key.project.as_deref());
         let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let page = StreamPage::new(key, title, false);
@@ -548,8 +548,8 @@ impl App {
     pub(crate) fn open_live(&mut self, index: usize) {
         let Some(src) = self.ccsds_sources().into_iter().nth(index) else { return };
         self.main_view = MainView::Editor;
-        let (key, _) = self.mib_key_here();
-        let set = if key.roots.is_empty() { None } else { self.mib_set(&key) };
+        let (key, _) = super::mib_host::key_here(self);
+        let set = if key.roots.is_empty() { None } else { self.with_mib(|m, a| m.set(a, &key)).flatten() };
         let mission = self.mission(key.project.as_deref());
         let page = StreamPage::new(key, src.name.clone(), true);
         let stop = page.stop.clone();
@@ -568,7 +568,7 @@ impl App {
             PageEvent::StreamRows { buffer, rows, lost, junk, done } => {
                 // What the followed parameter needs, before the page is borrowed.
                 let follow = self.stream_page(buffer).and_then(|p| Some((p.key.clone(), p.param_def?)));
-                let follow = follow.and_then(|(key, def)| Some((self.mib_set_ready(&key)?, self.mission(key.project.as_deref()), def)));
+                let follow = follow.and_then(|(key, def)| Some((self.mib().and_then(|m| m.set_ready(&key))?, self.mission(key.project.as_deref()), def)));
                 let Some(p) = self.stream_page(buffer) else { return };
                 let from = p.rows.len();
                 p.rows.extend(rows);
@@ -664,19 +664,17 @@ impl App {
             }
             A::PickParameter => {
                 let Some(key) = self.stream_page(id).map(|p| p.key.clone()) else { return };
-                let Some(set) = self.mib_set_ready(&key) else {
+                let Some(set) = self.mib().and_then(|m| m.set_ready(&key)) else {
                     self.set_error("no MIB for this project, so no parameters to follow");
                     return;
                 };
-                let candidates = set
+                let rows = set
                     .entries(Kind::TmParam)
                     .iter()
                     .enumerate()
-                    .map(|(index, e)| fenix_picker::Candidate::new(format!("{:<10}  {}", e.name, e.description), DefRef { kind: Kind::TmParam, index }))
+                    .map(|(index, e)| (format!("{:<10}  {}", e.name, e.description), DefRef { kind: Kind::TmParam, index }))
                     .collect();
-                self.mib_picker_key = key;
-                self.mib_pick_for_stream = Some(id);
-                self.enter_picker(ActivePicker::MibDef(fenix_picker::PickerState::new(candidates)));
+                super::mib_host::enter_stream_picker(self, id, key, rows);
             }
             A::Write(kind) => self.stream_write(id, kind),
             A::Reframe => {
@@ -702,7 +700,7 @@ impl App {
     /// The parameter picked on a stream page: its samples.
     pub(super) fn stream_follow(&mut self, id: BufferId, param: DefRef) {
         let Some(key) = self.stream_page(id).map(|p| p.key.clone()) else { return };
-        let Some(set) = self.mib_set_ready(&key) else { return };
+        let Some(set) = self.mib().and_then(|m| m.set_ready(&key)) else { return };
         let mission = self.mission(key.project.as_deref());
         let name = set.get(param).name.clone();
         let carriers: Vec<String> = set.used_by(param).iter().map(|d| set.get(*d).name.clone()).collect();
@@ -844,7 +842,7 @@ mod tests {
         assert!(text.contains("3 missing on APID 0x3F2"), "{text}");
 
         let key = app.stream_page(id).unwrap().key.clone();
-        let set = app.mib_set_ready(&key).unwrap();
+        let set = app.mib().and_then(|m| m.set_ready(&key)).unwrap();
         let param = set.find(Kind::TmParam, 0, "NTH00123").unwrap();
         app.stream_follow(id, param);
         let (name, samples) = app.stream_page(id).unwrap().param.clone().unwrap();
@@ -890,8 +888,8 @@ mod tests {
         let mission = fenix_lsp::normalize(std::fs::canonicalize(mission).unwrap());
         let mut app = App::with_file(Some(mission.join("thermal_checkout.tcl").display().to_string()));
         app.refresh_project_root();
-        let (key, _) = app.mib_key_here();
-        let set = app.mib_set(&key).expect("the mission's MIB");
+        let (key, _) = super::mib_host::key_here(&app);
+        let set = app.with_mib(|m, a| m.set(a, &key)).flatten().expect("the mission's MIB");
         let m = app.mission(key.project.as_deref());
         let buffer = app.focused_buffer_id();
         let sources = app.ccsds_sources();

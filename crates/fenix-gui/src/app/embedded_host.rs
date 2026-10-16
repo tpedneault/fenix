@@ -60,7 +60,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     local_context: Some(local_context),
     language_server: Some(language_server),
     tasks: Some(tasks),
-    hover: None,
+    hover_fallback: None,
     completion_at_cursor: None,
     completion_pool_at: None,
 };
@@ -851,6 +851,7 @@ impl Feature for EmbeddedHost {
             Notice::TaskFinished { root, success } => self.after_task_finished(app, root, *success),
             // Forget a closed terminal if it was a monitor.
             Notice::TerminalClosed(buffer) => self.monitors.retain(|_, m| m.buffer != *buffer),
+            Notice::Tick => {}
         }
     }
 

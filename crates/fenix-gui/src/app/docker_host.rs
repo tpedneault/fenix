@@ -58,7 +58,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     local_context: None,
     language_server: None,
     tasks: None,
-    hover: None,
+    hover_fallback: None,
     completion_at_cursor: None,
     completion_pool_at: None,
 };

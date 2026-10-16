@@ -187,8 +187,8 @@ impl App {
     /// The inspector on `bytes`, reading a CADU or CLTU with `profile`
     /// when given (how the source that received it read it).
     pub(crate) fn open_packet_page_as(&mut self, bytes: Vec<u8>, source: String, profile: Option<FrameProfile>) {
-        let (key, _) = self.mib_key_here();
-        let _ = self.mib_set(&key);
+        let (key, _) = super::mib_host::key_here(self);
+        let _ = self.with_mib(|m, a| m.set(a, &key)).flatten();
         let mut page = PacketPage::new(key, bytes, source);
         page.profile = profile;
         let id = self.open_page(PageModel::Packet(Box::new(page)));
@@ -199,7 +199,7 @@ impl App {
     pub(super) fn packet_redecode(&mut self, id: BufferId) {
         let Some(PageModel::Packet(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
         let (key, bytes, reading, profile) = (p.key.clone(), p.bytes.clone(), p.reading, p.profile.clone());
-        let set = self.mib_set_ready(&key);
+        let set = self.mib().and_then(|m| m.set_ready(&key));
         let mut mission = self.mission(key.project.as_deref());
         match profile {
             Some(p) if p.kind == FrameKind::Tc => mission.tc = p,
@@ -236,7 +236,7 @@ impl App {
             }
             A::Settings => self.ccsds_open_settings(),
             A::Follow(link) => self.follow_link(key, link),
-            A::FollowParameter(name) => match self.mib_set_ready(&key).and_then(|set| set.resolve(&name)) {
+            A::FollowParameter(name) => match self.mib().and_then(|m| m.set_ready(&key)).and_then(|set| set.resolve(&name)) {
                 Some(def) => self.follow_on_stream(def),
                 None => self.set_error(format!("{name} isn't in the project's MIBs")),
             },
@@ -266,14 +266,14 @@ impl App {
 
     /// Opens what a decoded field names.
     pub(crate) fn follow_link(&mut self, key: MibKey, link: Link) {
-        let set = self.mib_set_ready(&key);
+        let set = self.mib().and_then(|m| m.set_ready(&key));
         let def = set.as_ref().and_then(|set| match &link {
             Link::Parameter(n) | Link::Telecommand(n) => set.resolve(n),
             Link::Spid(spid) => (0..set.roots().len()).find_map(|r| set.find(Kind::TmPacket, r, spid)),
             Link::Standard(..) => None,
         });
         match (def, link) {
-            (Some(def), _) => self.open_mib_def(key, def),
+            (Some(def), _) => super::mib_host::open_def(self, key, def),
             (None, Link::Standard(std, heading)) => self.open_standard(std, Some(heading)),
             (None, other) => self.set_message(format!("{other:?} isn't in this project's MIBs")),
         }
@@ -287,7 +287,7 @@ impl App {
         let (line, col) = self.open().buffer.line_col(&self.cursor());
         let text = self.open().buffer.line(line).to_string();
         let text = text.trim_end_matches(['\n', '\r']);
-        let (key, _) = self.mib_key_here();
+        let (key, _) = super::mib_host::key_here(self);
         let mission = self.mission(key.project.as_deref());
         if let Some(hover) = time_hover(text, col, &mission) {
             return Some(hover);
@@ -296,7 +296,7 @@ impl App {
         if bytes.len() < 6 {
             return None;
         }
-        let set = if key.roots.is_empty() { None } else { self.mib_set(&key) };
+        let set = if key.roots.is_empty() { None } else { self.with_mib(|m, a| m.set(a, &key)).flatten() };
         let (root, def) = decode_bytes(&bytes, DecodeAs::Auto, set.as_deref(), &mission);
         let walk = root.walk();
         let bad: Vec<String> = walk
@@ -639,7 +639,9 @@ impl App {
         page.nominal = mission.nominal_epoch;
         let id = self.open_page(PageModel::Time(Box::new(page)));
         if let Some(o) = origin {
-            self.mib_origins.insert(id, o);
+            if let Some(mib) = self.features.get_mut::<super::mib_host::MibHost>() {
+                mib.origins.insert(id, o);
+            }
         }
     }
 
@@ -671,7 +673,9 @@ impl App {
         match action {
             time_page::Action::None => {}
             time_page::Action::Close => {
-                self.mib_origins.remove(&id);
+                if let Some(mib) = self.features.get_mut::<super::mib_host::MibHost>() {
+                    mib.origins.remove(&id);
+                }
                 self.close_page(id);
             }
             time_page::Action::Copy(text) => {
@@ -681,14 +685,14 @@ impl App {
                 self.set_message(format!("copied {text}"));
             }
             time_page::Action::Insert(text) => {
-                let Some(o) = self.mib_origins.get(&id).cloned() else {
+                let Some(o) = self.mib().and_then(|mib| mib.origins.get(&id).cloned()) else {
                     self.set_error("open the file the time goes in first");
                     return;
                 };
                 let Some(ob) = self.buffers.get_mut(o.buffer) else { return };
                 let mut cursor = Cursor { char_idx: o.range.start.min(ob.buffer.len_chars()), sticky_col: 0 };
                 ob.buffer.insert_str(&mut cursor, &text);
-                if let Some(o) = self.mib_origins.get_mut(&id) {
+                if let Some(o) = self.features.get_mut::<super::mib_host::MibHost>().and_then(|mib| mib.origins.get_mut(&id)) {
                     o.range = cursor.char_idx..cursor.char_idx;
                 }
                 self.set_message(format!("inserted {text}"));
