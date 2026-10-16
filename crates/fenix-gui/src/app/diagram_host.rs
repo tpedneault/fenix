@@ -51,6 +51,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         completion_pool_at: None,
         hover_first: None,
         picker_confirm: None,
+        picker_cancel: None,
         modeline_clock: None,
     }
 };

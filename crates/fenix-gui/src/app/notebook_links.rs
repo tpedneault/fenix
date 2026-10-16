@@ -103,7 +103,7 @@ impl App {
             }
             Target::Mib(name) => self.notebook_open_mib(&name),
             Target::Task(key) => {
-                let found = self.agenda_store.tasks.iter().find(|t| t.jira_key() == Some(key.as_str())).map(|t| t.title.clone());
+                let found = self.features.agenda().store.tasks.iter().find(|t| t.jira_key() == Some(key.as_str())).map(|t| t.title.clone());
                 self.open_agenda_page(None);
                 match found {
                     Some(title) => self.set_message(format!("{key}: {title}")),

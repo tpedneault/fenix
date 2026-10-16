@@ -543,7 +543,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_file(None);
         app.config.notebook_folder = Some(dir.path().join("nb"));
-        app.agenda_path = dir.path().join("agenda.json");
+        app.features.agenda_mut().path = dir.path().join("agenda.json");
         (dir, app)
     }
 

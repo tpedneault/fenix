@@ -606,7 +606,7 @@ impl App {
         if self.task_session.as_ref().is_some_and(|s| s.runner.is_some()) {
             jobs.push("running task".to_string());
         }
-        if self.agenda_sync.pulling {
+        if self.features.agenda().sync.pulling {
             jobs.push("syncing Jira".to_string());
         }
         for session in self.lsp_sessions.values() {

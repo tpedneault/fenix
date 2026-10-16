@@ -38,7 +38,7 @@ pub(super) struct AgendaSyncState {
     /// The Flagged field's id: `None` until asked, `Some(None)` when the
     /// instance has none.
     pub(super) flag_field: Option<Option<String>>,
-    /// What the open `ActivePicker::WorkSync` picker is for.
+    /// What the open Jira picker (`agenda_host::agenda_picker`) is for.
     pub(super) picker: Option<SyncPickerCtx>,
     /// Worklog review edits and drops, by (task, day). Reset each time
     /// the review is opened.
@@ -58,7 +58,7 @@ pub(super) struct SyncPickerCtx {
     pub(super) revert: Option<(Status, i64)>,
 }
 
-/// One row of an `ActivePicker::WorkSync` picker.
+/// One row of the agenda's Jira picker.
 #[derive(Debug, Clone)]
 pub(crate) enum SyncPick {
     /// Link to this issue.
@@ -202,7 +202,7 @@ impl App {
             },
             status: self.agenda_status_for(project, &d.status_id, &d.status_category, d.flagged),
             priority: d.priority.as_deref().map(|p| self.agenda_map_priority(p)).unwrap_or(fenix_agenda::Priority::Medium),
-            mine: self.agenda_sync.me.as_ref().map(|me| d.assignee_id.as_deref() == Some(me.as_str())),
+            mine: self.features.agenda().sync.me.as_ref().map(|me| d.assignee_id.as_deref() == Some(me.as_str())),
         }
     }
 
@@ -213,7 +213,7 @@ impl App {
 
     fn agenda_flag_field_wanted(&self) -> Option<Option<String>> {
         let wanted = self.config.jira_blocked.iter().any(|(_, b)| *b == JiraBlocked::Flag);
-        wanted.then(|| self.agenda_sync.flag_field.clone().flatten())
+        wanted.then(|| self.features.agenda().sync.flag_field.clone().flatten())
     }
 
     // -- Background plumbing ----------------------------------------------
@@ -250,7 +250,7 @@ impl App {
     /// Starts the periodic sync timer, once, when there's an event loop
     /// to deliver its ticks and it isn't turned off.
     pub(super) fn agenda_start_ticker(&mut self) {
-        if self.agenda_sync.ticker_started {
+        if self.features.agenda().sync.ticker_started {
             return;
         }
         let minutes = self.config.jira_sync_minutes.unwrap_or(10);
@@ -258,7 +258,7 @@ impl App {
         if minutes == 0 {
             return;
         }
-        self.agenda_sync.ticker_started = true;
+        self.features.agenda_mut().sync.ticker_started = true;
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(u64::from(minutes) * 60));
             if proxy.send_event(FenixUserEvent::AgendaSync(AgendaSyncEvent::Tick)).is_err() {
@@ -280,21 +280,21 @@ impl App {
     /// opening the agenda, where a dropped VPN shouldn't shout.
     pub(super) fn agenda_sync_now(&mut self, quiet: bool) {
         self.agenda_start_ticker();
-        if self.agenda_sync.pulling {
+        if self.features.agenda().sync.pulling {
             return;
         }
-        let keys: Vec<String> = self.agenda_store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
+        let keys: Vec<String> = self.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
         if keys.is_empty() {
             if !quiet {
                 self.set_message("No tasks are linked to Jira yet -- I on a task links one, SPC a i imports your issues");
             }
             return;
         }
-        let need_me = self.agenda_sync.me.is_none();
+        let need_me = self.features.agenda().sync.me.is_none();
         let want_flag = self.config.jira_blocked.iter().any(|(_, b)| *b == JiraBlocked::Flag);
-        let known_flag = self.agenda_sync.flag_field.clone();
-        self.agenda_sync.pulling = true;
-        self.agenda_sync.last_pull = Some(Instant::now());
+        let known_flag = self.features.agenda().sync.flag_field.clone();
+        self.features.agenda_mut().sync.pulling = true;
+        self.features.agenda_mut().sync.last_pull = Some(Instant::now());
         let spawned = self.agenda_spawn(move |client| {
             let me = if need_me { client.myself().ok() } else { None };
             let flag_field = match (&known_flag, want_flag) {
@@ -312,20 +312,20 @@ impl App {
             AgendaSyncEvent::Pulled { keys, quiet, me, flag_field, result: Ok(issues) }
         });
         if !spawned {
-            self.agenda_sync.pulling = false;
+            self.features.agenda_mut().sync.pulling = false;
         }
     }
 
     /// Opening the agenda refreshes it quietly unless it just did.
     pub(super) fn agenda_sync_if_stale(&mut self) {
-        let fresh = self.agenda_sync.last_pull.is_some_and(|at| at.elapsed() < STALE_AFTER);
-        if !fresh && self.agenda_store.tasks.iter().any(|t| t.jira.is_some()) {
+        let fresh = self.features.agenda().sync.last_pull.is_some_and(|at| at.elapsed() < STALE_AFTER);
+        if !fresh && self.features.agenda().store.tasks.iter().any(|t| t.jira.is_some()) {
             self.agenda_sync_now(true);
         }
     }
 
     fn apply_agenda_pulled(&mut self, keys: Vec<String>, quiet: bool, result: Result<Vec<fenix_jira::IssueDetail>, String>) {
-        self.agenda_sync.pulling = false;
+        self.features.agenda_mut().sync.pulling = false;
         let issues = match result {
             Ok(issues) => issues,
             Err(err) => {
@@ -337,18 +337,18 @@ impl App {
         };
         let mut conflicts = 0;
         for detail in &issues {
-            let Some(id) = self.agenda_store.find_by_key(&detail.key) else { continue };
+            let Some(id) = self.features.agenda().store.find_by_key(&detail.key) else { continue };
             let update = self.agenda_remote_update(detail);
-            self.agenda_store.apply_remote(id, update);
-            if self.agenda_store.task(id).and_then(|t| t.jira.as_ref()).is_some_and(|l| l.error.as_deref() == Some(NOT_FOUND)) {
-                self.agenda_store.set_link_error(id, None);
+            self.features.agenda_mut().store.apply_remote(id, update);
+            if self.features.agenda().store.task(id).and_then(|t| t.jira.as_ref()).is_some_and(|l| l.error.as_deref() == Some(NOT_FOUND)) {
+                self.features.agenda_mut().store.set_link_error(id, None);
             }
-            conflicts += self.agenda_store.task(id).and_then(|t| t.jira.as_ref()).map_or(0, |l| l.conflicts.len());
+            conflicts += self.features.agenda().store.task(id).and_then(|t| t.jira.as_ref()).map_or(0, |l| l.conflicts.len());
         }
         for key in &keys {
             if !issues.iter().any(|d| &d.key == key) {
-                if let Some(id) = self.agenda_store.find_by_key(key) {
-                    self.agenda_store.set_link_error(id, Some(NOT_FOUND.to_string()));
+                if let Some(id) = self.features.agenda().store.find_by_key(key) {
+                    self.features.agenda_mut().store.set_link_error(id, Some(NOT_FOUND.to_string()));
                 }
             }
         }
@@ -365,21 +365,21 @@ impl App {
 
     /// Sends the next queued op, if nothing's already in flight.
     pub(super) fn agenda_drain_outbox(&mut self) {
-        if self.agenda_sync.in_flight.is_some() {
+        if self.features.agenda().sync.in_flight.is_some() {
             return;
         }
-        let Some(op) = self.agenda_store.next_op().cloned() else {
-            if std::mem::take(&mut self.agenda_sync.pull_after_drain) {
+        let Some(op) = self.features.agenda().store.next_op().cloned() else {
+            if std::mem::take(&mut self.features.agenda_mut().sync.pull_after_drain) {
                 self.agenda_sync_now(true);
             }
             return;
         };
-        let Some(key) = self.agenda_store.task(op.task).and_then(|t| t.jira_key()).map(str::to_string) else {
-            self.agenda_store.discard_op(op.id);
+        let Some(key) = self.features.agenda().store.task(op.task).and_then(|t| t.jira_key()).map(str::to_string) else {
+            self.features.agenda_mut().store.discard_op(op.id);
             return;
         };
-        let known_flag = self.agenda_sync.flag_field.clone();
-        self.agenda_sync.in_flight = Some(op.id);
+        let known_flag = self.features.agenda().sync.flag_field.clone();
+        self.features.agenda_mut().sync.in_flight = Some(op.id);
         let spawned = self.agenda_spawn(move |client| {
             let mut fetched_flag = None;
             let result = match &op.kind {
@@ -405,23 +405,23 @@ impl App {
             AgendaSyncEvent::OpDone { op_id: op.id, key, what: op.kind.describe(), flag_field: fetched_flag, result }
         });
         if !spawned {
-            self.agenda_sync.in_flight = None;
+            self.features.agenda_mut().sync.in_flight = None;
         }
     }
 
     fn apply_agenda_op_done(&mut self, op_id: u64, key: String, what: String, result: Result<(), String>) {
-        self.agenda_sync.in_flight = None;
-        let comment = self.agenda_store.outbox.iter().any(|op| op.id == op_id && matches!(op.kind, OpKind::AddComment(_)));
+        self.features.agenda_mut().sync.in_flight = None;
+        let comment = self.features.agenda().store.outbox.iter().any(|op| op.id == op_id && matches!(op.kind, OpKind::AddComment(_)));
         match result {
             Ok(()) => {
-                self.agenda_store.op_succeeded(op_id);
-                self.agenda_sync.pull_after_drain |= comment;
+                self.features.agenda_mut().store.op_succeeded(op_id);
+                self.features.agenda_mut().sync.pull_after_drain |= comment;
                 self.set_message(format!("{key}: {what}"));
                 self.agenda_save_and_refresh();
                 self.agenda_drain_outbox();
             }
             Err(err) => {
-                self.agenda_store.op_failed(op_id, err.clone());
+                self.features.agenda_mut().store.op_failed(op_id, err.clone());
                 self.set_error(format!("{key}: Jira refused a change ({what}): {err} -- r on the task retries"));
                 self.agenda_save_and_refresh();
             }
@@ -430,10 +430,10 @@ impl App {
 
     /// `r` on a task: clears a failed push and tries again.
     pub(super) fn agenda_retry(&mut self, id: TaskId) {
-        if self.agenda_store.task(id).and_then(|t| t.jira.as_ref()).is_none() {
+        if self.features.agenda().store.task(id).and_then(|t| t.jira.as_ref()).is_none() {
             return;
         }
-        self.agenda_store.retry(id);
+        self.features.agenda_mut().store.retry(id);
         self.agenda_after_edit();
         self.agenda_sync_now(true);
     }
@@ -447,10 +447,10 @@ impl App {
     /// fresh, since which ones exist depends on where the issue is now).
     /// If no transition gets there, the card goes back where it was.
     pub(super) fn agenda_set_status(&mut self, id: TaskId, target: Status) {
-        let Some(task) = self.agenda_store.task(id) else { return };
+        let Some(task) = self.features.agenda().store.task(id) else { return };
         let prev = (task.status, task.order);
         let Some(link) = task.jira.clone() else {
-            self.agenda_store.move_to_status(id, target);
+            self.features.agenda_mut().store.move_to_status(id, target);
             self.agenda_save_and_refresh();
             return;
         };
@@ -459,16 +459,16 @@ impl App {
         }
         let project = link.project().to_string();
         let blocked = self.config.jira_blocked_for(&project).cloned();
-        self.agenda_store.move_to_status(id, target);
+        self.features.agenda_mut().store.move_to_status(id, target);
 
         if prev.0 == Status::Blocked && blocked == Some(JiraBlocked::Flag) && link.base.flagged {
-            self.agenda_store.enqueue(id, OpKind::SetFlag(false));
+            self.features.agenda_mut().store.enqueue(id, OpKind::SetFlag(false));
         }
         let on_blocked_status = matches!(&blocked, Some(JiraBlocked::Status { id: sid, .. }) if *sid == link.base.status_id);
         let need_transition = match (target, &blocked) {
             (Status::Blocked, Some(JiraBlocked::Local)) => false,
             (Status::Blocked, Some(JiraBlocked::Flag)) => {
-                self.agenda_store.enqueue(id, OpKind::SetFlag(true));
+                self.features.agenda_mut().store.enqueue(id, OpKind::SetFlag(true));
                 false
             }
             (Status::Blocked, Some(JiraBlocked::Status { .. })) => !on_blocked_status,
@@ -482,7 +482,7 @@ impl App {
             self.agenda_after_edit();
             return;
         }
-        self.agenda_store.set_resolving(id, true);
+        self.features.agenda_mut().store.set_resolving(id, true);
         self.agenda_save_and_refresh();
         let key = link.key.clone();
         let spawned = self.agenda_spawn(move |client| AgendaSyncEvent::Transitions {
@@ -492,8 +492,8 @@ impl App {
             result: client.list_transitions(&key),
         });
         if !spawned {
-            self.agenda_store.set_resolving(id, false);
-            self.agenda_store.restore_status(id, prev.0, prev.1);
+            self.features.agenda_mut().store.set_resolving(id, false);
+            self.features.agenda_mut().store.restore_status(id, prev.0, prev.1);
             self.agenda_save_and_refresh();
         }
     }
@@ -501,7 +501,7 @@ impl App {
     /// `s` on a linked task: the issue's real transitions, by name, plus
     /// a Blocked row for whatever Blocked means in its project.
     pub(super) fn agenda_start_linked_status_picker(&mut self, id: TaskId) {
-        let Some(task) = self.agenda_store.task(id) else { return };
+        let Some(task) = self.features.agenda().store.task(id) else { return };
         let Some(key) = task.jira_key().map(str::to_string) else { return };
         let prev = (task.status, task.order);
         self.agenda_spawn(move |client| AgendaSyncEvent::Transitions { task: id, target: None, prev, result: client.list_transitions(&key) });
@@ -514,14 +514,14 @@ impl App {
         prev: (Status, i64),
         result: Result<Vec<fenix_jira::Transition>, String>,
     ) {
-        self.agenda_store.set_resolving(id, false);
-        let Some(link) = self.agenda_store.task(id).and_then(|t| t.jira.clone()) else { return };
+        self.features.agenda_mut().store.set_resolving(id, false);
+        let Some(link) = self.features.agenda().store.task(id).and_then(|t| t.jira.clone()) else { return };
         let key = link.key.clone();
         let project = link.project().to_string();
         let current = link.base.status_name.clone();
         let revert = |app: &mut App| {
             if target.is_some() {
-                app.agenda_store.restore_status(id, prev.0, prev.1);
+                app.features.agenda_mut().store.restore_status(id, prev.0, prev.1);
             }
             app.agenda_save_and_refresh();
         };
@@ -621,14 +621,14 @@ impl App {
 
     /// Queues `t` and puts the card in the column it lands in.
     fn agenda_enqueue_transition(&mut self, id: TaskId, t: fenix_jira::Transition) {
-        let Some(key) = self.agenda_store.task(id).and_then(|t| t.jira_key()).map(str::to_string) else { return };
+        let Some(key) = self.features.agenda().store.task(id).and_then(|t| t.jira_key()).map(str::to_string) else { return };
         let project = fenix_jira::project_of(&key).to_string();
-        let flagged = self.agenda_store.task(id).and_then(|t| t.jira.as_ref()).is_some_and(|l| l.base.flagged);
+        let flagged = self.features.agenda().store.task(id).and_then(|t| t.jira.as_ref()).is_some_and(|l| l.base.flagged);
         let status = self.agenda_status_for(&project, &t.to_id, &t.to_category, flagged);
-        if self.agenda_store.task(id).is_some_and(|task| task.status != status) {
-            self.agenda_store.move_to_status(id, status);
+        if self.features.agenda().store.task(id).is_some_and(|task| task.status != status) {
+            self.features.agenda_mut().store.move_to_status(id, status);
         }
-        self.agenda_store.enqueue(
+        self.features.agenda_mut().store.enqueue(
             id,
             OpKind::Transition { id: t.id, to_id: t.to_id, to_name: t.to_name, to_category: t.to_category },
         );
@@ -643,7 +643,7 @@ impl App {
 
     /// `A` on a linked task: one of the tracked users.
     pub(super) fn agenda_start_assignee_picker(&mut self, id: TaskId) {
-        let Some(key) = self.agenda_store.task(id).and_then(|t| t.jira_key()).map(str::to_string) else {
+        let Some(key) = self.features.agenda().store.task(id).and_then(|t| t.jira_key()).map(str::to_string) else {
             self.set_message("A reassigns a Jira issue -- link this task first with I");
             return;
         };
@@ -665,7 +665,7 @@ impl App {
     /// `I`: link a task to an issue (or, if it already has one, unlink or
     /// open it).
     pub(super) fn agenda_start_link(&mut self, id: TaskId) {
-        let Some(task) = self.agenda_store.task(id) else { return };
+        let Some(task) = self.features.agenda().store.task(id) else { return };
         if let Some(key) = task.jira_key().map(str::to_string) {
             let candidates = vec![
                 fenix_picker::Candidate::new(format!("Open {key} in the browser"), SyncPick::OpenInBrowser),
@@ -702,13 +702,13 @@ impl App {
     }
 
     fn agenda_link_detail(&mut self, id: TaskId, detail: &fenix_jira::IssueDetail) {
-        if let Some(existing) = self.agenda_store.find_by_key(&detail.key).filter(|&t| t != id) {
-            let title = self.agenda_store.task(existing).map(|t| t.title.clone()).unwrap_or_default();
+        if let Some(existing) = self.features.agenda().store.find_by_key(&detail.key).filter(|&t| t != id) {
+            let title = self.features.agenda().store.task(existing).map(|t| t.title.clone()).unwrap_or_default();
             self.set_error(format!("{} is already linked to \"{title}\"", detail.key));
             return;
         }
         let update = self.agenda_remote_update(detail);
-        self.agenda_store.link(id, detail.key.clone(), update);
+        self.features.agenda_mut().store.link(id, detail.key.clone(), update);
         self.agenda_start_ticker();
         self.agenda_save_and_refresh();
         self.jira_rerender_issues();
@@ -726,7 +726,7 @@ impl App {
                     Ok(issues) => candidates.extend(
                         issues
                             .into_iter()
-                            .filter(|d| self.agenda_store.find_by_key(&d.key).is_none())
+                            .filter(|d| self.features.agenda().store.find_by_key(&d.key).is_none())
                             .map(|d| fenix_picker::Candidate::new(issue_label(&d), SyncPick::Issue(Box::new(d)))),
                     ),
                     Err(err) => self.set_error(format!("couldn't list your Jira issues: {err}")),
@@ -746,7 +746,7 @@ impl App {
                 };
                 let candidates: Vec<_> = issues
                     .into_iter()
-                    .filter(|d| self.agenda_store.find_by_key(&d.key).is_none())
+                    .filter(|d| self.features.agenda().store.find_by_key(&d.key).is_none())
                     .map(|d| fenix_picker::Candidate::new(issue_label(&d), SyncPick::Import(Box::new(d))))
                     .collect();
                 if candidates.is_empty() {
@@ -772,11 +772,11 @@ impl App {
             IssueFetch::AddFromJira { clock } => match result {
                 Ok(issues) => {
                     let Some(detail) = issues.first().cloned() else { return };
-                    let id = match self.agenda_store.find_by_key(&detail.key) {
+                    let id = match self.features.agenda().store.find_by_key(&detail.key) {
                         Some(id) => id,
                         None => {
                             let update = self.agenda_remote_update(&detail);
-                            self.agenda_store.create_linked(detail.key.clone(), update, None)
+                            self.features.agenda_mut().store.create_linked(detail.key.clone(), update, None)
                         }
                     };
                     self.agenda_finish_add_from_jira(id, &detail.key, clock);
@@ -789,7 +789,7 @@ impl App {
     fn agenda_finish_add_from_jira(&mut self, id: TaskId, key: &str, clock: bool) {
         self.agenda_start_ticker();
         if clock {
-            self.agenda_store.clock_in(id);
+            self.features.agenda_mut().store.clock_in(id);
             self.set_message(format!("{key} is in your agenda, clock running"));
         } else {
             self.set_message(format!("{key} is in your agenda"));
@@ -802,7 +802,7 @@ impl App {
     /// also starts the clock on it). One that's already there isn't added
     /// twice.
     pub(crate) fn jira_add_to_agenda(&mut self, key: String, clock: bool) {
-        if let Some(id) = self.agenda_store.find_by_key(&key) {
+        if let Some(id) = self.features.agenda().store.find_by_key(&key) {
             self.agenda_finish_add_from_jira(id, &key, clock);
             return;
         }
@@ -818,7 +818,7 @@ impl App {
     }
 
     pub(super) fn agenda_issue_url(&mut self, id: TaskId) -> Option<String> {
-        let key = self.agenda_store.task(id).and_then(|t| t.jira_key()).map(str::to_string);
+        let key = self.features.agenda().store.task(id).and_then(|t| t.jira_key()).map(str::to_string);
         let Some(key) = key else {
             self.set_message("This task isn't linked to Jira -- I links it");
             return None;
@@ -896,28 +896,28 @@ impl App {
         );
     }
 
-    // -- The WorkSync picker ------------------------------------------------
+    // -- The Jira picker ---------------------------------------------------
 
     fn agenda_enter_sync_picker(&mut self, ctx: SyncPickerCtx, candidates: Vec<fenix_picker::Candidate<SyncPick>>) {
-        self.agenda_sync.picker = Some(ctx);
-        self.enter_picker(ActivePicker::WorkSync(fenix_picker::PickerState::new(candidates)));
+        self.features.agenda_mut().sync.picker = Some(ctx);
+        self.enter_picker(super::agenda_host::agenda_picker("JIRA", candidates));
     }
 
-    /// `Esc` on the WorkSync picker: a board move it was finishing goes
+    /// `Esc` on the Jira picker: a board move it was finishing goes
     /// back where it came from.
     pub(super) fn agenda_sync_picker_cancel(&mut self) {
-        let Some(ctx) = self.agenda_sync.picker.take() else { return };
+        let Some(ctx) = self.features.agenda_mut().sync.picker.take() else { return };
         if let (Some(id), Some((status, order))) = (ctx.task, ctx.revert) {
-            self.agenda_store.restore_status(id, status, order);
+            self.features.agenda_mut().store.restore_status(id, status, order);
             self.agenda_save_and_refresh();
             self.set_message("Move cancelled");
         }
     }
 
-    /// `Enter` on the WorkSync picker. `marked` is what `Tab` marked (the
+    /// `Enter` on the Jira picker. `marked` is what `Tab` marked (the
     /// import picker's multi-select).
     pub(super) fn agenda_sync_picker_confirm(&mut self, pick: SyncPick, marked: Vec<SyncPick>) {
-        let ctx = self.agenda_sync.picker.take();
+        let ctx = self.features.agenda_mut().sync.picker.take();
         let task = ctx.as_ref().and_then(|c| c.task);
         let project = ctx.as_ref().and_then(|c| c.project.clone());
         match pick {
@@ -933,13 +933,13 @@ impl App {
             }
             SyncPick::TypeKey => {
                 if let Some(id) = task {
-                    self.agenda_prompt = Some(AgendaPrompt { kind: AgendaPromptKind::LinkKey { id }, input: String::new() });
+                    self.features.agenda_mut().prompt = Some(AgendaPrompt { kind: AgendaPromptKind::LinkKey { id }, input: String::new() });
                 }
             }
             SyncPick::Unlink => {
                 if let Some(id) = task {
-                    let key = self.agenda_store.task(id).and_then(|t| t.jira_key()).map(str::to_string).unwrap_or_default();
-                    self.agenda_store.unlink(id);
+                    let key = self.features.agenda().store.task(id).and_then(|t| t.jira_key()).map(str::to_string).unwrap_or_default();
+                    self.features.agenda_mut().store.unlink(id);
                     self.agenda_save_and_refresh();
                     self.jira_rerender_issues();
                     self.set_message(format!("Unlinked {key} -- the task stays, Jira isn't touched"));
@@ -959,9 +959,9 @@ impl App {
                 let count = issues.len();
                 self.agenda_start_ticker();
                 for detail in issues {
-                    if self.agenda_store.find_by_key(&detail.key).is_none() {
+                    if self.features.agenda().store.find_by_key(&detail.key).is_none() {
                         let update = self.agenda_remote_update(&detail);
-                        self.agenda_store.create_linked(detail.key.clone(), update, None);
+                        self.features.agenda_mut().store.create_linked(detail.key.clone(), update, None);
                     }
                 }
                 self.agenda_save_and_refresh();
@@ -993,7 +993,7 @@ impl App {
                 if let Some(id) = task {
                     match (&blocked, transition) {
                         (JiraBlocked::Status { .. }, Some(t)) => self.agenda_enqueue_transition(id, t),
-                        (JiraBlocked::Flag, _) => self.agenda_store.enqueue(id, OpKind::SetFlag(true)),
+                        (JiraBlocked::Flag, _) => self.features.agenda_mut().store.enqueue(id, OpKind::SetFlag(true)),
                         _ => {}
                     }
                     self.agenda_after_edit();
@@ -1003,14 +1003,14 @@ impl App {
             SyncPick::Priority(name) => {
                 if let Some(id) = task {
                     let level = self.agenda_map_priority(&name);
-                    self.agenda_store.set_priority(id, level);
-                    self.agenda_store.enqueue(id, OpKind::SetPriority(name));
+                    self.features.agenda_mut().store.set_priority(id, level);
+                    self.features.agenda_mut().store.enqueue(id, OpKind::SetPriority(name));
                     self.agenda_after_edit();
                 }
             }
             SyncPick::Assignee(uid, name) => {
                 if let Some(id) = task {
-                    self.agenda_store.enqueue(id, OpKind::SetAssignee { id: uid, name });
+                    self.features.agenda_mut().store.enqueue(id, OpKind::SetAssignee { id: uid, name });
                     self.agenda_after_edit();
                 }
             }
@@ -1033,10 +1033,10 @@ impl App {
 
     /// The review's rows: the store's batch minus drops, with edits.
     pub(super) fn agenda_worklog_rows(&self) -> Vec<WorklogRow> {
-        let mut rows = self.agenda_store.worklog_batch(self.agenda_worklog_round());
-        rows.retain(|r| !self.agenda_sync.worklog_dropped.contains(&(r.task, r.date)));
+        let mut rows = self.features.agenda().store.worklog_batch(self.agenda_worklog_round());
+        rows.retain(|r| !self.features.agenda().sync.worklog_dropped.contains(&(r.task, r.date)));
         for row in &mut rows {
-            if let Some(&minutes) = self.agenda_sync.worklog_edits.get(&(row.task, row.date)) {
+            if let Some(&minutes) = self.features.agenda().sync.worklog_edits.get(&(row.task, row.date)) {
                 row.minutes = minutes;
             }
         }
@@ -1045,7 +1045,7 @@ impl App {
     /// `W` on the review: sends every row, one worklog each, filed on the
     /// day the work happened.
     pub(super) fn agenda_send_worklogs(&mut self) {
-        if self.agenda_sync.sending_worklogs {
+        if self.features.agenda().sync.sending_worklogs {
             return;
         }
         let rows: Vec<WorklogRow> = self.agenda_worklog_rows().into_iter().filter(|r| r.minutes > 0).collect();
@@ -1053,7 +1053,7 @@ impl App {
             self.set_message("Nothing to send");
             return;
         }
-        self.agenda_sync.sending_worklogs = true;
+        self.features.agenda_mut().sync.sending_worklogs = true;
         self.set_message("Sending worklogs...");
         let spawned = self.agenda_spawn(move |client| {
             let results = rows
@@ -1067,20 +1067,20 @@ impl App {
             AgendaSyncEvent::WorklogsSent { results }
         });
         if !spawned {
-            self.agenda_sync.sending_worklogs = false;
+            self.features.agenda_mut().sync.sending_worklogs = false;
         }
     }
 
     fn apply_agenda_worklogs_sent(&mut self, results: Vec<WorklogSent>) {
-        self.agenda_sync.sending_worklogs = false;
+        self.features.agenda_mut().sync.sending_worklogs = false;
         let mut sent = 0;
         let mut minutes = 0;
         let mut failures = Vec::new();
         for WorklogSent { task, entries, key, minutes: row_minutes, result } in results {
             match result {
                 Ok(()) => {
-                    self.agenda_store.mark_sent(task, &entries);
-                    self.agenda_sync.worklog_edits.retain(|(t, _), _| *t != task);
+                    self.features.agenda_mut().store.mark_sent(task, &entries);
+                    self.features.agenda_mut().sync.worklog_edits.retain(|(t, _), _| *t != task);
                     sent += 1;
                     minutes += row_minutes;
                 }
@@ -1101,16 +1101,16 @@ impl App {
         match event {
             AgendaSyncEvent::Pulled { keys, quiet, me, flag_field, result } => {
                 if me.is_some() {
-                    self.agenda_sync.me = me;
+                    self.features.agenda_mut().sync.me = me;
                 }
                 if flag_field.is_some() {
-                    self.agenda_sync.flag_field = flag_field;
+                    self.features.agenda_mut().sync.flag_field = flag_field;
                 }
                 self.apply_agenda_pulled(keys, quiet, result);
             }
             AgendaSyncEvent::OpDone { op_id, key, what, flag_field, result } => {
                 if flag_field.is_some() {
-                    self.agenda_sync.flag_field = flag_field;
+                    self.features.agenda_mut().sync.flag_field = flag_field;
                 }
                 self.apply_agenda_op_done(op_id, key, what, result);
             }
@@ -1118,7 +1118,7 @@ impl App {
             AgendaSyncEvent::Transitions { task, target, prev, result } => self.apply_agenda_transitions(task, target, prev, result),
             AgendaSyncEvent::Priorities { task, result } => match result {
                 Ok(priorities) => {
-                    let key = self.agenda_store.task(task).and_then(|t| t.jira_key()).unwrap_or_default().to_string();
+                    let key = self.features.agenda().store.task(task).and_then(|t| t.jira_key()).unwrap_or_default().to_string();
                     let candidates =
                         priorities.into_iter().map(|p| fenix_picker::Candidate::new(p.name.clone(), SyncPick::Priority(p.name))).collect();
                     self.agenda_enter_sync_picker(
@@ -1134,14 +1134,16 @@ impl App {
                 // A dropped connection shouldn't need a manual retry once
                 // it's back.
                 let transient: Vec<TaskId> = self
-                    .agenda_store
+                    .features
+                    .agenda()
+                    .store
                     .tasks
                     .iter()
                     .filter(|t| t.jira.as_ref().and_then(|l| l.error.as_deref()).is_some_and(|e| e.starts_with("request failed")))
                     .map(|t| t.id)
                     .collect();
                 for id in transient {
-                    self.agenda_store.retry(id);
+                    self.features.agenda_mut().store.retry(id);
                 }
                 self.agenda_sync_now(true);
                 self.agenda_drain_outbox();
@@ -1167,8 +1169,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let mut app = App::with_file(None);
-        app.agenda_store = fenix_agenda::AgendaStore::default();
-        app.agenda_path = dir.join("agenda.json");
+        app.features.agenda_mut().store = fenix_agenda::AgendaStore::default();
+        app.features.agenda_mut().path = dir.join("agenda.json");
         app.config = fenix_config::Config::load_or_default(dir.join("settings.toml"));
         app
     }
@@ -1202,7 +1204,7 @@ mod tests {
     /// A task linked to `key`, in the column `status` maps to.
     fn linked(app: &mut App, key: &str, status: (&str, &str, &str)) -> TaskId {
         let update = app.agenda_remote_update(&detail(key, status));
-        app.agenda_store.create_linked(key.to_string(), update, None)
+        app.features.agenda_mut().store.create_linked(key.to_string(), update, None)
     }
 
     fn last_error(app: &App) -> Option<String> {
@@ -1211,13 +1213,13 @@ mod tests {
 
     fn picker_labels(app: &App) -> Vec<String> {
         match &app.active_picker {
-            Some(ActivePicker::WorkSync(state)) => state.visible_rows(0, 100).map(|(_, c)| c.label.clone()).collect(),
-            _ => panic!("expected the WorkSync picker to be open"),
+            Some(ActivePicker::Feature { badge: "JIRA", state, .. }) => state.visible_rows(0, 100).map(|(_, c)| c.label.clone()).collect(),
+            _ => panic!("expected the Jira picker to be open"),
         }
     }
 
     fn confirm_row(app: &mut App, label_contains: &str) {
-        let Some(ActivePicker::WorkSync(state)) = &mut app.active_picker else { panic!("no WorkSync picker") };
+        let Some(ActivePicker::Feature { badge: "JIRA", state, .. }) = &mut app.active_picker else { panic!("no Jira picker") };
         for c in label_contains.chars() {
             state.push_char(c);
         }
@@ -1247,12 +1249,12 @@ mod tests {
     fn a_move_within_the_same_jira_category_needs_no_transition() {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", IN_REVIEW);
-        app.agenda_store.set_status(id, Status::Todo); // local-only drift
+        app.features.agenda_mut().store.set_status(id, Status::Todo); // local-only drift
 
         app.agenda_set_status(id, Status::InProgress);
 
-        assert_eq!(app.agenda_store.task(id).unwrap().status, Status::InProgress);
-        assert!(app.agenda_store.outbox.is_empty());
+        assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::InProgress);
+        assert!(app.features.agenda().store.outbox.is_empty());
         assert!(last_error(&app).is_none(), "no Jira call was needed, so no 'not configured' error either");
     }
 
@@ -1267,9 +1269,9 @@ mod tests {
         app.agenda_set_status(local, Status::Blocked);
         app.agenda_set_status(flag, Status::Blocked);
 
-        assert_eq!(app.agenda_store.task(local).unwrap().status, Status::Blocked);
-        assert!(app.agenda_store.pending_for(local).next().is_none());
-        assert_eq!(app.agenda_store.pending_for(flag).map(|op| op.kind.clone()).collect::<Vec<_>>(), vec![OpKind::SetFlag(true)]);
+        assert_eq!(app.features.agenda().store.task(local).unwrap().status, Status::Blocked);
+        assert!(app.features.agenda().store.pending_for(local).next().is_none());
+        assert_eq!(app.features.agenda().store.pending_for(flag).map(|op| op.kind.clone()).collect::<Vec<_>>(), vec![OpKind::SetFlag(true)]);
     }
 
     #[test]
@@ -1279,7 +1281,7 @@ mod tests {
 
         app.agenda_set_status(id, Status::Done);
 
-        assert_eq!(app.agenda_store.task(id).unwrap().status, Status::Todo);
+        assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::Todo);
         assert!(last_error(&app).unwrap().contains("Jira isn't set up"));
     }
 
@@ -1288,7 +1290,7 @@ mod tests {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", IN_REVIEW);
         let prev = (Status::InProgress, 0);
-        app.agenda_store.move_to_status(id, Status::Done);
+        app.features.agenda_mut().store.move_to_status(id, Status::Done);
 
         app.apply_agenda_sync(AgendaSyncEvent::Transitions {
             task: id,
@@ -1297,15 +1299,15 @@ mod tests {
             result: Ok(vec![transition("11", OPEN), transition("31", ("6", "Closed", "done"))]),
         });
 
-        assert_eq!(app.agenda_store.task(id).unwrap().status, Status::Done);
-        assert!(matches!(&app.agenda_store.outbox[0].kind, OpKind::Transition { id, to_name, .. } if id == "31" && to_name == "Closed"));
+        assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::Done);
+        assert!(matches!(&app.features.agenda().store.outbox[0].kind, OpKind::Transition { id, to_name, .. } if id == "31" && to_name == "Closed"));
     }
 
     #[test]
     fn a_move_with_no_matching_transition_snaps_back_with_the_reason() {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", OPEN);
-        app.agenda_store.move_to_status(id, Status::Done);
+        app.features.agenda_mut().store.move_to_status(id, Status::Done);
 
         app.apply_agenda_sync(AgendaSyncEvent::Transitions {
             task: id,
@@ -1314,8 +1316,8 @@ mod tests {
             result: Ok(vec![transition("21", IN_REVIEW)]),
         });
 
-        assert_eq!(app.agenda_store.task(id).unwrap().status, Status::Todo);
-        assert!(app.agenda_store.outbox.is_empty());
+        assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::Todo);
+        assert!(app.features.agenda().store.outbox.is_empty());
         assert!(last_error(&app).unwrap().contains("no transition from \"Open\" to a Done status"));
     }
 
@@ -1323,7 +1325,7 @@ mod tests {
     fn several_matching_transitions_ask_and_cancelling_puts_the_card_back() {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", OPEN);
-        app.agenda_store.move_to_status(id, Status::InProgress);
+        app.features.agenda_mut().store.move_to_status(id, Status::InProgress);
 
         app.apply_agenda_sync(AgendaSyncEvent::Transitions {
             task: id,
@@ -1335,15 +1337,15 @@ mod tests {
 
         app.picker_cancel();
 
-        assert_eq!(app.agenda_store.task(id).unwrap().status, Status::Todo);
-        assert!(app.agenda_store.outbox.is_empty());
+        assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::Todo);
+        assert!(app.features.agenda().store.outbox.is_empty());
     }
 
     #[test]
     fn blocking_in_an_unmapped_project_asks_once_and_remembers_the_answer() {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", IN_REVIEW);
-        app.agenda_store.move_to_status(id, Status::Blocked);
+        app.features.agenda_mut().store.move_to_status(id, Status::Blocked);
 
         app.apply_agenda_sync(AgendaSyncEvent::Transitions {
             task: id,
@@ -1361,8 +1363,8 @@ mod tests {
         assert_eq!(app.config.jira_blocked_for("PROJ"), Some(&JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() }));
         let reloaded = fenix_config::Config::load(app.config.path().to_path_buf()).unwrap();
         assert!(reloaded.jira_blocked_for("PROJ").is_some(), "the choice is saved to settings.toml");
-        assert_eq!(app.agenda_store.task(id).unwrap().status, Status::Blocked);
-        assert!(matches!(&app.agenda_store.outbox[0].kind, OpKind::Transition { to_id, .. } if to_id == "9"));
+        assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::Blocked);
+        assert!(matches!(&app.features.agenda().store.outbox[0].kind, OpKind::Transition { to_id, .. } if to_id == "9"));
     }
 
     #[test]
@@ -1370,7 +1372,7 @@ mod tests {
         let mut app = app();
         app.config.set_jira_blocked("PROJ", JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() });
         let id = linked(&mut app, "PROJ-1", OPEN);
-        app.agenda_store.move_to_status(id, Status::Blocked);
+        app.features.agenda_mut().store.move_to_status(id, Status::Blocked);
 
         app.apply_agenda_sync(AgendaSyncEvent::Transitions {
             task: id,
@@ -1379,7 +1381,7 @@ mod tests {
             result: Ok(vec![transition("21", IN_REVIEW)]),
         });
 
-        assert_eq!(app.agenda_store.task(id).unwrap().status, Status::Todo);
+        assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::Todo);
         assert!(last_error(&app).unwrap().contains("\"On Hold\" isn't reachable from \"Open\""));
         assert!(picker_labels(&app).iter().any(|l| l.contains("In Review")));
     }
@@ -1405,11 +1407,11 @@ mod tests {
     fn linking_an_issue_already_linked_elsewhere_is_refused() {
         let mut app = app();
         linked(&mut app, "PROJ-7", OPEN);
-        let id = app.agenda_store.create_task("other".to_string(), "".to_string(), Priority::Low, None);
+        let id = app.features.agenda_mut().store.create_task("other".to_string(), "".to_string(), Priority::Low, None);
 
         app.apply_agenda_sync(AgendaSyncEvent::Issues { purpose: IssueFetch::LinkKey(id), result: Ok(vec![detail("PROJ-7", OPEN)]) });
 
-        assert!(app.agenda_store.task(id).unwrap().jira.is_none());
+        assert!(app.features.agenda().store.task(id).unwrap().jira.is_none());
         assert!(last_error(&app).unwrap().contains("already linked"));
     }
 
@@ -1423,16 +1425,16 @@ mod tests {
             result: Ok(vec![detail("PROJ-1", OPEN), detail("PROJ-2", OPEN), detail("PROJ-3", IN_REVIEW)]),
         });
         assert_eq!(picker_labels(&app).len(), 2, "PROJ-1 is already in the agenda");
-        let Some(ActivePicker::WorkSync(state)) = &mut app.active_picker else { unreachable!() };
+        let Some(ActivePicker::Feature { badge: "JIRA", state, .. }) = &mut app.active_picker else { unreachable!() };
         state.toggle_mark();
         state.move_selection(1);
         state.toggle_mark();
         app.picker_confirm();
 
-        assert!(app.agenda_store.find_by_key("PROJ-2").is_some());
-        let review = app.agenda_store.find_by_key("PROJ-3").unwrap();
-        assert_eq!(app.agenda_store.task(review).unwrap().status, Status::InProgress);
-        assert_eq!(app.agenda_store.tasks.len(), 3);
+        assert!(app.features.agenda().store.find_by_key("PROJ-2").is_some());
+        let review = app.features.agenda().store.find_by_key("PROJ-3").unwrap();
+        assert_eq!(app.features.agenda().store.task(review).unwrap().status, Status::InProgress);
+        assert_eq!(app.features.agenda().store.tasks.len(), 3);
     }
 
     #[test]
@@ -1440,7 +1442,7 @@ mod tests {
         let mut app = app();
         let found = linked(&mut app, "PROJ-1", OPEN);
         let gone = linked(&mut app, "PROJ-2", OPEN);
-        app.agenda_sync.pulling = true;
+        app.features.agenda_mut().sync.pulling = true;
 
         let mut renamed = detail("PROJ-1", IN_REVIEW);
         renamed.summary = "Renamed in Jira".to_string();
@@ -1452,23 +1454,23 @@ mod tests {
             result: Ok(vec![renamed]),
         });
 
-        assert!(!app.agenda_sync.pulling);
-        assert_eq!(app.agenda_sync.me.as_deref(), Some("me"));
-        let task = app.agenda_store.task(found).unwrap();
+        assert!(!app.features.agenda().sync.pulling);
+        assert_eq!(app.features.agenda().sync.me.as_deref(), Some("me"));
+        let task = app.features.agenda().store.task(found).unwrap();
         assert_eq!(task.title, "Renamed in Jira");
         assert_eq!(task.status, Status::InProgress);
-        assert_eq!(app.agenda_store.task(gone).unwrap().jira.as_ref().unwrap().error.as_deref(), Some(NOT_FOUND));
+        assert_eq!(app.features.agenda().store.task(gone).unwrap().jira.as_ref().unwrap().error.as_deref(), Some(NOT_FOUND));
     }
 
     #[test]
     fn a_sent_op_leaves_the_outbox_and_a_refused_one_stays_with_its_reason() {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", OPEN);
-        app.agenda_store.enqueue(id, OpKind::SetSummary("a".to_string()));
-        app.agenda_store.enqueue(id, OpKind::SetSummary("b".to_string()));
-        let (first, second) = (app.agenda_store.outbox[0].id, app.agenda_store.outbox[1].id);
+        app.features.agenda_mut().store.enqueue(id, OpKind::SetSummary("a".to_string()));
+        app.features.agenda_mut().store.enqueue(id, OpKind::SetSummary("b".to_string()));
+        let (first, second) = (app.features.agenda().store.outbox[0].id, app.features.agenda().store.outbox[1].id);
 
-        app.agenda_sync.in_flight = Some(first);
+        app.features.agenda_mut().sync.in_flight = Some(first);
         app.apply_agenda_sync(AgendaSyncEvent::OpDone {
             op_id: first,
             key: "PROJ-1".to_string(),
@@ -1476,9 +1478,9 @@ mod tests {
             flag_field: None,
             result: Ok(()),
         });
-        assert_eq!(app.agenda_store.outbox.iter().map(|op| op.id).collect::<Vec<_>>(), vec![second]);
+        assert_eq!(app.features.agenda().store.outbox.iter().map(|op| op.id).collect::<Vec<_>>(), vec![second]);
 
-        app.agenda_sync.in_flight = Some(second);
+        app.features.agenda_mut().sync.in_flight = Some(second);
         app.apply_agenda_sync(AgendaSyncEvent::OpDone {
             op_id: second,
             key: "PROJ-1".to_string(),
@@ -1486,8 +1488,8 @@ mod tests {
             flag_field: None,
             result: Err("HTTP 403".to_string()),
         });
-        assert_eq!(app.agenda_store.outbox.len(), 1);
-        assert_eq!(app.agenda_store.task(id).unwrap().jira.as_ref().unwrap().error.as_deref(), Some("HTTP 403"));
+        assert_eq!(app.features.agenda().store.outbox.len(), 1);
+        assert_eq!(app.features.agenda().store.task(id).unwrap().jira.as_ref().unwrap().error.as_deref(), Some("HTTP 403"));
         assert!(last_error(&app).unwrap().contains("r on the task retries"));
     }
 
@@ -1502,8 +1504,8 @@ mod tests {
         app.compose_submit();
 
         assert!(app.compose.is_none());
-        assert_eq!(app.agenda_store.task(id).unwrap().description, "Updated: from Jira");
-        assert_eq!(app.agenda_store.outbox[0].kind, OpKind::SetDescription("Updated: from Jira".to_string()));
+        assert_eq!(app.features.agenda().store.task(id).unwrap().description, "Updated: from Jira");
+        assert_eq!(app.features.agenda().store.outbox[0].kind, OpKind::SetDescription("Updated: from Jira".to_string()));
     }
 
     #[test]
@@ -1516,7 +1518,7 @@ mod tests {
 
         app.compose_submit();
 
-        assert_eq!(app.agenda_store.outbox[0].kind, OpKind::AddComment("On it".to_string()));
+        assert_eq!(app.features.agenda().store.outbox[0].kind, OpKind::AddComment("On it".to_string()));
     }
 
     #[test]
@@ -1524,30 +1526,30 @@ mod tests {
         let mut app = app();
         let a = linked(&mut app, "PROJ-1", OPEN);
         let b = linked(&mut app, "PROJ-2", OPEN);
-        app.agenda_store.log_manual_time(a, chrono::Duration::minutes(50));
-        app.agenda_store.log_manual_time(b, chrono::Duration::minutes(20));
+        app.features.agenda_mut().store.log_manual_time(a, chrono::Duration::minutes(50));
+        app.features.agenda_mut().store.log_manual_time(b, chrono::Duration::minutes(20));
         let rows = app.agenda_worklog_rows();
         assert_eq!(rows.iter().map(|r| r.minutes).collect::<Vec<_>>(), vec![45, 15]);
 
-        app.agenda_sync.worklog_edits.insert((a, rows[0].date), 60);
-        app.agenda_sync.worklog_dropped.insert((b, rows[1].date));
+        app.features.agenda_mut().sync.worklog_edits.insert((a, rows[0].date), 60);
+        app.features.agenda_mut().sync.worklog_dropped.insert((b, rows[1].date));
         let rows = app.agenda_worklog_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].minutes, 60);
 
-        app.agenda_sync.sending_worklogs = true;
+        app.features.agenda_mut().sync.sending_worklogs = true;
         app.apply_agenda_sync(AgendaSyncEvent::WorklogsSent { results: vec![WorklogSent { task: a, entries: rows[0].entries.clone(), key: "PROJ-1".to_string(), minutes: 60, result: Ok(()) }] });
 
-        assert!(!app.agenda_sync.sending_worklogs);
-        assert!(app.agenda_store.task(a).unwrap().time_entries[0].sent);
-        assert_eq!(app.agenda_store.unsent_time().1, 1, "the dropped row is still unsent, just not in this batch");
+        assert!(!app.features.agenda().sync.sending_worklogs);
+        assert!(app.features.agenda().store.task(a).unwrap().time_entries[0].sent);
+        assert_eq!(app.features.agenda().store.unsent_time().1, 1, "the dropped row is still unsent, just not in this batch");
     }
 
     #[test]
     fn the_worklog_view_renders_from_the_review_rows() {
         let mut app = app();
         let a = linked(&mut app, "PROJ-1", OPEN);
-        app.agenda_store.log_manual_time(a, chrono::Duration::minutes(50));
+        app.features.agenda_mut().store.log_manual_time(a, chrono::Duration::minutes(50));
 
         app.cmd_agenda_worklogs();
 
@@ -1569,19 +1571,19 @@ mod tests {
         let Some(super::pages::PageModel::Agenda(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
         assert!(page.note.as_ref().unwrap().0.contains("PROJ-1 in Jira isn't touched"));
         app.page_key(KeyPress::char('D'));
-        assert!(app.agenda_store.tasks.is_empty());
+        assert!(app.features.agenda().store.tasks.is_empty());
     }
 
     #[test]
     fn a_conflict_is_settled_from_its_picker() {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", OPEN);
-        app.agenda_store.set_title(id, "Mine".to_string());
-        app.agenda_store.enqueue(id, OpKind::SetSummary("Mine".to_string()));
+        app.features.agenda_mut().store.set_title(id, "Mine".to_string());
+        app.features.agenda_mut().store.enqueue(id, OpKind::SetSummary("Mine".to_string()));
         let mut theirs = detail("PROJ-1", OPEN);
         theirs.summary = "Theirs".to_string();
         let update = app.agenda_remote_update(&theirs);
-        app.agenda_store.apply_remote(id, update);
+        app.features.agenda_mut().store.apply_remote(id, update);
 
         let page = app.open_agenda_page(Some(crate::agenda_page::Tab::List));
         app.page_key(KeyPress::named(FenixNamedKey::Enter));
@@ -1596,7 +1598,23 @@ mod tests {
         assert!(menu.contains("Keep mine: Mine") && menu.contains("Take Jira's: Theirs"), "{menu}");
         app.page_key(KeyPress::char('2'));
 
-        assert_eq!(app.agenda_store.task(id).unwrap().title, "Theirs");
-        assert!(app.agenda_store.outbox.is_empty());
+        assert_eq!(app.features.agenda().store.task(id).unwrap().title, "Theirs");
+        assert!(app.features.agenda().store.outbox.is_empty());
+    }
+
+    #[test]
+    fn the_jira_pickers_modeline_says_what_the_pick_is_for() {
+        let mut app = app();
+        let id = linked(&mut app, "PROJ-1", OPEN);
+        app.features.agenda_mut().store.move_to_status(id, Status::InProgress);
+        app.apply_agenda_sync(AgendaSyncEvent::Transitions {
+            task: id,
+            target: Some(Status::InProgress),
+            prev: (Status::Todo, 0),
+            result: Ok(vec![transition("21", IN_REVIEW), transition("22", ("7", "Coding", "indeterminate"))]),
+        });
+        let (badge, suffix) = app.modeline_pieces();
+        assert_eq!(badge, "JIRA");
+        assert!(suffix.starts_with("PROJ-1 STATUS"), "{suffix}");
     }
 }

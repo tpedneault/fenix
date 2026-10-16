@@ -147,11 +147,12 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         completion_at_cursor: None,
         completion_pool_at: None,
         hover_first: None,
-        picker_confirm: Some(|app, pick, query| {
+        picker_confirm: Some(|app, pick, _marked, query| {
             if let Some(pick) = pick.downcast_ref::<NotebookPick>() {
                 app.notebook_picked(pick.clone(), query.to_string());
             }
         }),
+        picker_cancel: None,
         modeline_clock: None,
     }
 };
@@ -681,7 +682,7 @@ impl App {
     /// then, and the last day's open checkboxes.
     pub(super) fn journal_template(&self, date: chrono::NaiveDate) -> String {
         let mut fill = fenix_notebook::templates::DayFill::default();
-        for t in &self.agenda_store.tasks {
+        for t in &self.features.agenda().store.tasks {
             if t.status == fenix_agenda::Status::Done || t.archived {
                 continue;
             }

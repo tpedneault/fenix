@@ -49,6 +49,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     completion_pool_at: Some(subcommand_candidates),
     hover_first: None,
     picker_confirm: None,
+    picker_cancel: None,
     modeline_clock: None,
 };
 

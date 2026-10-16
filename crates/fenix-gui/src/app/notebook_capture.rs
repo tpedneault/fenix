@@ -213,9 +213,9 @@ impl App {
             return;
         }
         let title: String = task.text.split(" · ").next().unwrap_or(&task.text).trim().to_string();
-        let id = self.agenda_store.create_task(title.clone(), String::new(), fenix_agenda::Priority::Medium, None);
+        let id = self.features.agenda_mut().store.create_task(title.clone(), String::new(), fenix_agenda::Priority::Medium, None);
         if let Some(path) = self.open().buffer.path().map(Path::to_path_buf) {
-            self.agenda_store.set_code(id, Some(fenix_agenda::CodeRef { path, line: line + 1 }));
+            self.features.agenda_mut().store.set_code(id, Some(fenix_agenda::CodeRef { path, line: line + 1 }));
         }
         self.agenda_save_and_refresh();
         let end = self.open().buffer.line_start_char(line) + self.open().buffer.line_len(line);
@@ -340,8 +340,8 @@ mod tests {
         let mut app = App::with_file(None);
         app.config.notebook_folder = Some(dir.path().join("nb"));
         // Never the agenda of the Fenix you use.
-        app.agenda_path = dir.path().join("agenda.json");
-        app.agenda_store = Default::default();
+        app.features.agenda_mut().path = dir.path().join("agenda.json");
+        app.features.agenda_mut().store = Default::default();
         (dir, app)
     }
 
@@ -363,13 +363,13 @@ mod tests {
         let (_dir, mut app) = app();
         app.notebook_create_note("Meeting", "# Meeting\n- [ ] Raise FSW-212\n");
         app.notebook_place_cursor(1, 0);
-        let before = app.agenda_store.tasks.len();
+        let before = app.features.agenda().store.tasks.len();
         app.notebook_to_agenda();
-        assert_eq!(app.agenda_store.tasks.len(), before + 1);
-        assert_eq!(app.agenda_store.tasks.last().unwrap().title, "Raise FSW-212");
+        assert_eq!(app.features.agenda().store.tasks.len(), before + 1);
+        assert_eq!(app.features.agenda().store.tasks.last().unwrap().title, "Raise FSW-212");
         assert_eq!(app.open().buffer.text(), "# Meeting\n- [ ] Raise FSW-212 → agenda\n");
         app.notebook_to_agenda();
-        assert_eq!(app.agenda_store.tasks.len(), before + 1);
+        assert_eq!(app.features.agenda().store.tasks.len(), before + 1);
     }
 
     #[test]

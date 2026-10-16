@@ -22,10 +22,12 @@
 
 use std::any::Any;
 
+use super::agenda_host::AgendaHost;
 use super::ccsds_host::CcsdsHost;
 use super::diagram_host::DiagramsHost;
 use super::docker_host::DockerHost;
 use super::embedded_host::EmbeddedHost;
+use super::jira_host::JiraHost;
 use super::mib_host::MibHost;
 use super::notebook_host::NotebookHost;
 use super::tcl_host::TclHost;
@@ -81,9 +83,11 @@ pub(crate) struct FeatureSpec {
     /// What `K` shows for the word under the cursor, ahead of any
     /// language server -- after the instances' own `Feature::hover`.
     pub hover_first: Option<fn(&mut App) -> Option<String>>,
-    /// A row of this feature's picker was chosen, with what was typed --
-    /// instead of `Feature::picker_confirm`.
-    pub picker_confirm: Option<fn(&mut App, &dyn Any, &str)>,
+    /// A row of this feature's picker was chosen, with the rows marked
+    /// (`Tab`) and what was typed -- instead of `Feature::picker_confirm`.
+    pub picker_confirm: Option<fn(&mut App, &dyn Any, &[FeaturePick], &str)>,
+    /// Its picker was dismissed -- instead of `Feature::picker_cancel`.
+    pub picker_cancel: Option<fn(&mut App)>,
     /// The modeline's clock text, in place of the wall clock (the
     /// mission clock).
     pub modeline_clock: Option<fn(&mut App) -> Option<String>>,
@@ -313,6 +317,8 @@ impl Features {
             Some(Box::new(CcsdsHost::default())),
             Some(Box::new(NotebookHost::default())),
             Some(Box::new(DiagramsHost::default())),
+            Some(Box::new(AgendaHost::default())),
+            Some(Box::new(JiraHost)),
         ];
         let specs = slots
             .iter()
