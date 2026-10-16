@@ -183,13 +183,11 @@ pub(crate) fn items_from_ranges(source: &str, mut ranges: Vec<(Range<usize>, Tod
 }
 
 fn clean_message(rest: &str) -> String {
-    let mut s = rest.trim();
-    for closer in ["-->", "*/", "--]]", "#>", "\"\"\""] {
-        if let Some(stripped) = s.strip_suffix(closer) {
-            s = stripped.trim_end();
-        }
-    }
-    s.trim_start_matches(':').trim().to_string()
+    // A block comment can close before the line ends (`<!-- TODO: x
+    // --></a>`), so the message stops at the first closing delimiter
+    // rather than only losing one that ends the line.
+    let end = ["-->", "*/", "--]]", "#>", "\"\"\""].iter().filter_map(|closer| rest.find(closer)).min().unwrap_or(rest.len());
+    rest[..end].trim().trim_start_matches(':').trim().to_string()
 }
 
 /// TODO items in a file no grammar is registered for (plain text, logs,
@@ -261,6 +259,16 @@ mod tests {
         assert_eq!(items[0].line, 1);
         assert_eq!(items[0].col, 7);
         assert_eq!(items[0].message, "wire this up");
+    }
+
+    #[test]
+    fn the_message_stops_where_the_comment_closes() {
+        let items = find_in_plain_text("<a><!-- FIXME: in xml --></a>
+");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].message, "in xml");
+        assert_eq!(find_in_plain_text("/* TODO: later */ int x;
+")[0].message, "later");
     }
 
     #[test]
