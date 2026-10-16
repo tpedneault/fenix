@@ -61,6 +61,9 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     hover_fallback: None,
     completion_at_cursor: None,
     completion_pool_at: None,
+    hover_first: None,
+    picker_confirm: None,
+    modeline_clock: None,
 };
 
 /// What Docker's background threads report, as a `FeatureEvent`'s

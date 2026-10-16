@@ -35,6 +35,7 @@ mod which_key;
 mod mib_host;
 pub(crate) use mib_host::SPEC as MIB_SPEC;
 mod ccsds_host;
+pub(crate) use ccsds_host::SPEC as CCSDS_SPEC;
 mod stream_host;
 mod file_index;
 mod disk_probe;
@@ -2152,8 +2153,6 @@ enum ActivePicker {
     /// The Git status page's `b b`: a branch to switch to -- local ones
     /// first, then remote branches with no local counterpart.
     SwitchBranch(fenix_picker::PickerState<String>),
-    /// `SPC k l`: a live source, by its index in `ccsds_sources`.
-    CcsdsSource(fenix_picker::PickerState<usize>),
     /// `SPC v v`: `config.vnc_hosts`' configured names, same bare-
     /// `String`-identity picker -- confirming calls
     /// `open_vnc_session` with the picked name (connects if this is the
@@ -2233,7 +2232,6 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Snippet(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
-        ActivePicker::CcsdsSource(s) => s.push_char(c),
         ActivePicker::VncHost(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
         ActivePicker::TableColumn(s) => s.push_char(c),
@@ -2272,7 +2270,6 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Snippet(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
-        ActivePicker::CcsdsSource(s) => s.backspace(),
         ActivePicker::VncHost(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
         ActivePicker::TableColumn(s) => s.backspace(),
@@ -2311,7 +2308,6 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Snippet(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
-        ActivePicker::CcsdsSource(s) => s.move_selection(delta),
         ActivePicker::VncHost(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
         ActivePicker::TableColumn(s) => s.move_selection(delta),
@@ -2353,7 +2349,6 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Theme(s) => s.toggle_mark(),
         ActivePicker::Snippet(s) => s.toggle_mark(),
         ActivePicker::Symbol(s) => s.toggle_mark(),
-        ActivePicker::CcsdsSource(s) => s.toggle_mark(),
         ActivePicker::VncHost(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
         ActivePicker::TableColumn(s) => s.toggle_mark(),
@@ -2392,7 +2387,6 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Snippet(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
-        ActivePicker::CcsdsSource(s) => s.query(),
         ActivePicker::VncHost(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
         ActivePicker::TableColumn(s) => s.query(),
@@ -2431,7 +2425,6 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Snippet(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
-        ActivePicker::CcsdsSource(s) => s.len(),
         ActivePicker::VncHost(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
         ActivePicker::TableColumn(s) => s.len(),
@@ -2470,7 +2463,6 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Snippet(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
-        ActivePicker::CcsdsSource(s) => s.selected_row(),
         ActivePicker::VncHost(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
         ActivePicker::TableColumn(s) => s.selected_row(),
@@ -2513,7 +2505,6 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Snippet(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::CcsdsSource(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::VncHost(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::TableColumn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5758,14 +5749,6 @@ pub struct App {
     /// The project the snippets page is showing, while it's in front.
     snippets_project: Option<PathBuf>,
 
-    /// Where each stream page's packets come from.
-    stream_sources: HashMap<BufferId, stream_host::StreamSource>,
-    /// The modeline's mission clock, with the quarter second it's for.
-    mission_clock: Option<(i64, String)>,
-    /// A standards search's documents on the PDF worker: the page asking
-    /// and the standard each is; the query per page.
-    standards_search: HashMap<fenix_pdf::PdfDocKey, (BufferId, usize)>,
-    standards_query: HashMap<BufferId, String>,
 
     /// The active `SPC s r`/`SPC s p` search/replace text-entry wizard,
     /// if any -- see `ReplaceWizard`'s own doc comment.
@@ -6556,10 +6539,6 @@ impl App {
             snippets_dir: if cfg!(test) { isolated_test_path("snippets") } else { fenix_storage::paths::snippets_dir().unwrap_or_else(|| PathBuf::from("snippets")) },
             snippets_origin: None,
             snippets_project: None,
-            stream_sources: HashMap::new(),
-            mission_clock: None,
-            standards_search: HashMap::new(),
-            standards_query: HashMap::new(),
             replace_wizard: None,
             project_replace: None,
             project_replace_lines: HashMap::new(),
@@ -7967,7 +7946,9 @@ impl App {
                 card = feature.hover(app);
             }
         });
-        if let Some(card) = card.or_else(|| self.ccsds_hex_hover()) {
+        let first: Vec<fn(&mut App) -> Option<String>> = self.features.specs().filter_map(|spec| spec.hover_first).collect();
+        let card = card.or_else(|| first.into_iter().find_map(|hover| hover(self)));
+        if let Some(card) = card {
             self.lsp_hover = Some(card);
             return;
         }
@@ -16223,12 +16204,6 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.git_switch_to(&branch);
             }
-            Some(ActivePicker::CcsdsSource(state)) => {
-                let Some(i) = state.selected().map(|c| c.payload) else { return };
-                self.active_picker = None;
-                self.main_view = MainView::Editor;
-                self.open_live(i);
-            }
             Some(ActivePicker::VncHost(state)) => {
                 let Some(name) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
@@ -16300,7 +16275,13 @@ impl App {
                 let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                self.with_feature_id(feature, |feature, app| feature.picker_confirm(app, &*pick.0));
+                let confirm = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.picker_confirm);
+                match confirm {
+                    Some(confirm) => confirm(self, &*pick.0),
+                    None => {
+                        self.with_feature_id(feature, |feature, app| feature.picker_confirm(app, &*pick.0));
+                    }
+                }
             }
             None => {}
         }
@@ -20053,7 +20034,6 @@ impl App {
                 Some(picker @ ActivePicker::Notebook { title, .. }) => (*title, picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
-                Some(picker @ ActivePicker::CcsdsSource(_)) => ("SOURCE", picker_len(picker)),
                 Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
                 Some(picker @ ActivePicker::Document(_)) => ("DOCUMENT", picker_len(picker)),
                 Some(picker @ ActivePicker::TableColumn(_)) => ("COLUMN", picker_len(picker)),
@@ -22054,7 +22034,8 @@ impl App {
 
     fn redraw(&mut self) {
         // The mission clock, worked out before the GPU is borrowed.
-        let mission_clock = self.mission_clock_text();
+        let clocks: Vec<fn(&mut App) -> Option<String>> = self.features.specs().filter_map(|spec| spec.modeline_clock).collect();
+        let mission_clock = clocks.into_iter().find_map(|clock| clock(self));
         // Every pane's strip starts with the workspace's Home.
         self.ensure_workspace_home();
         let _profile = crate::profile::Scope::new("redraw");

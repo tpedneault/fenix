@@ -62,7 +62,9 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     tasks: Some(tasks),
     hover_fallback: None,
     completion_at_cursor: None,
-    completion_pool_at: None,
+    completion_pool_at: None,    hover_first: None,
+    picker_confirm: None,
+    modeline_clock: None,
 };
 
 /// Anything inside an Arduino sketch gets its `SPC m` menu.
