@@ -193,7 +193,6 @@ impl CommandRegistry {
         registry.external("settings.open", "Every setting, on one page: search, change, reset", |app| app.open_settings_page(crate::settings_page::Scope::You, None));
         registry.register("git.log", "Show the history, with a menu on every commit", |ctx| ctx.app.open_git_log(crate::git_log::Scope::Branch));
         registry.register("git.close_view", "Close the Git view in front: the panel, graph, comparison, conflicts or merge requests", cmd_git_close_view);
-        registry.register("git.pull_request", "Open a pull (merge) request for this branch, prefilled from its commits", cmd_git_pull_request);
         registry.register("git.file_history", "Show the history of the focused file", cmd_git_file_history);
         registry.register("git.line_history", "Show the history of the selected lines", cmd_git_line_history);
         registry.register("git.hunk_stage", "Stage the changed hunk under the cursor", cmd_git_hunk_stage);
@@ -213,8 +212,7 @@ impl CommandRegistry {
         registry.register("git.keep_ours", "Resolve the conflict under the cursor, keeping ours", cmd_git_keep_ours);
         registry.register("git.keep_theirs", "Resolve the conflict under the cursor, keeping theirs", cmd_git_keep_theirs);
         registry.register("git.keep_both", "Resolve the conflict under the cursor, keeping both sides", cmd_git_keep_both);
-        registry.register("git.merge_requests", "Open the Merge Requests view (GitLab)", |ctx| ctx.app.open_reviews());
-        registry.register("git.merge_requests_close", "Close the Merge Requests view", cmd_git_merge_requests_close);
+        registry.feature(&crate::app::REVIEW_SPEC);
         registry.register("git.merge_view", "Open the Merge view (resolve conflicts side by side)", cmd_git_merge_view);
         registry.register("git.merge_close", "Close the Merge view", cmd_git_merge_close);
         registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
@@ -769,10 +767,6 @@ fn cmd_git_close_view(ctx: &mut CommandCtx) {
     ctx.app.close_git_view();
 }
 
-fn cmd_git_pull_request(ctx: &mut CommandCtx) {
-    ctx.app.open_new_request();
-}
-
 fn cmd_git_file_history(ctx: &mut CommandCtx) {
     ctx.app.open_file_history();
 }
@@ -827,10 +821,6 @@ fn cmd_git_keep_theirs(ctx: &mut CommandCtx) {
 
 fn cmd_git_keep_both(ctx: &mut CommandCtx) {
     ctx.app.resolve_conflict_at_cursor(fenix_git::Resolution::Both);
-}
-
-fn cmd_git_merge_requests_close(ctx: &mut CommandCtx) {
-    ctx.app.forge_close();
 }
 
 fn cmd_git_merge_view(ctx: &mut CommandCtx) {

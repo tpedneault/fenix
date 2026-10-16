@@ -30,6 +30,7 @@ use super::embedded_host::EmbeddedHost;
 use super::jira_host::JiraHost;
 use super::mib_host::MibHost;
 use super::notebook_host::NotebookHost;
+use super::review_host::ReviewHost;
 use super::tcl_host::TclHost;
 use super::*;
 use crate::popup::PopupId;
@@ -319,6 +320,7 @@ impl Features {
             Some(Box::new(DiagramsHost::default())),
             Some(Box::new(AgendaHost::default())),
             Some(Box::new(JiraHost)),
+            Some(Box::new(ReviewHost::default())),
         ];
         let specs = slots
             .iter()

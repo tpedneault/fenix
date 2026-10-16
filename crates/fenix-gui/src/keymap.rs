@@ -372,10 +372,9 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('p')], "pull --rebase", "git.pull_rebase");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('r')], "rebase onto...", "git.rebase");
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('m')], "merge...", "git.merge");
-        // `M`, not `m` -- `SPC g m` is the merge *operation*, and the two
-        // are asked for in completely different moods.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('P')], "open a pull request", "git.pull_request");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('M')], "reviews", "git.merge_requests");
+        // Opening a pull request and the reviews (`SPC g P`, `SPC g M`):
+        // the review feature's, under core's Git group.
+        insert_feature_keys(&mut t, spc, &crate::app::REVIEW_SPEC);
         // The file being edited: its hunks (`]h`/`[h` move between them)
         // and its blame.
         t.insert(&[spc, KeyPress::char('g'), KeyPress::char('a')], "stage hunk", "git.hunk_stage");
