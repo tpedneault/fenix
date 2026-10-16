@@ -406,12 +406,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // Jira: the page (searches, issues, a preview), and what you
         // reach for from a file -- an issue by key, a search, a new one.
         // Tracking projects and people happens on the page itself.
-        t.label_group(&[spc, KeyPress::char('j')], "jira");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('j')], "open jira", "jira.open");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('r')], "refresh jira", "jira.refresh");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('g')], "go to issue", "jira.goto_issue");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('/')], "search jira", "jira.search");
-        t.insert(&[spc, KeyPress::char('j'), KeyPress::char('n')], "new issue", "jira.create_issue");
+        insert_feature_keys(&mut t, spc, &crate::app::JIRA_SPEC);
 
         // SCOS-2000 MIBs: the MIB page, a definition by kind, inserting
         // or editing a telecommand call. The project's MIBs are used.
@@ -435,29 +430,13 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('g')], "generate from the MIB", "mib.generate");
         t.insert(&[spc, KeyPress::char('k'), KeyPress::char('?')], "the standards library", "ccsds.standards");
 
-        // The agenda: the page and its tabs, and what you reach for from
-        // a file -- a new task, a task from here, the clock. A task's own
-        // keys (status, priority, clock, ...) are on the page.
         // The notebook: notes, journal days and diagrams Fenix keeps.
         insert_feature_keys(&mut t, spc, &crate::app::NOTEBOOK_SPEC);
 
-        t.label_group(&[spc, KeyPress::char('a')], "agenda");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('a')], "open agenda", "agenda.open");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('b')], "agenda: board", "agenda.board");
-        // The board's old key, kept for a release.
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('k')], "agenda: board (now SPC a b)", "agenda.board");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('l')], "agenda: list", "agenda.list");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('r')], "agenda: this week's time", "agenda.report");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('n')], "agenda: new task", "agenda.new_task");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('h')], "agenda: task from here", "agenda.from_here");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('/')], "agenda: find a task", "agenda.find");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('t')], "agenda: clock -- stop, resume, switch", "agenda.toggle_clock");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('T')], "agenda: resume the clock", "agenda.resume");
-        // The Jira side: pick which of your issues to track, refresh the
-        // ones you track, and review/send time as worklogs.
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('i')], "agenda: import Jira issues", "agenda.import");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('s')], "agenda: sync with Jira", "agenda.sync");
-        t.insert(&[spc, KeyPress::char('a'), KeyPress::char('w')], "agenda: review worklogs", "agenda.worklogs");
+        // The agenda: the page and its tabs, and what you reach for from
+        // a file -- a new task, a task from here, the clock. A task's own
+        // keys (status, priority, clock, ...) are on the page.
+        insert_feature_keys(&mut t, spc, &crate::app::AGENDA_SPEC);
 
         // VNC console panes (`fenix-vnc`) -- one connection per
         // configured `Config.vnc_hosts` entry, each staying live in the

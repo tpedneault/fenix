@@ -9,7 +9,9 @@ mod tabs;
 mod reader;
 mod agenda_sync;
 mod agenda_host;
+pub(crate) use agenda_host::SPEC as AGENDA_SPEC;
 mod jira_host;
+pub(crate) use jira_host::SPEC as JIRA_SPEC;
 mod embedded_host;
 mod tcl_host;
 pub(crate) use tcl_host::SPEC as TCL_SPEC;
@@ -83,7 +85,7 @@ use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 use fenix_core::{Buffer, Cursor};
 
 use crate::agenda_page;
-use agenda_sync::{AgendaSyncEvent, AgendaSyncState, SyncPick};
+use agenda_sync::AgendaSyncEvent;
 use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
@@ -2197,18 +2199,6 @@ enum ActivePicker {
     /// just filtered to headings and labeled by nesting depth
     /// (`markdown::heading_label`) instead of a line number.
     Outline(fenix_picker::PickerState<usize>),
-    /// `SPC a t` when no timer is currently running: every non-archived
-    /// task, confirming calls `AgendaStore::clock_in`. Not offered at all
-    /// when a timer *is* running -- `SPC a t` stops it directly instead
-    /// (see `App::cmd_agenda_toggle_clock`), since switching tasks via a
-    /// picker while one is already running is exactly what `clock_in`
-    /// already does for free the moment you start the next one.
-    AgendaClockIn(fenix_picker::PickerState<agenda_host::ClockPick>),
-    /// Everything the agenda's Jira side asks you to pick -- an issue to
-    /// link or import, a transition, what Blocked means in a project, a
-    /// priority, an assignee, a side of a conflict. What it's for lives
-    /// in `AgendaSyncState::picker`.
-    WorkSync(fenix_picker::PickerState<SyncPick>),
     /// A feature's own picker: which feature, the badge it shows, and
     /// rows whose payload only that feature understands.
     Feature { feature: &'static str, badge: &'static str, state: fenix_picker::PickerState<feature::FeaturePick> },
@@ -2244,8 +2234,6 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::RebaseOnto(s) => s.push_char(c),
         ActivePicker::MergeFrom(s) => s.push_char(c),
         ActivePicker::SwitchBranch(s) => s.push_char(c),
-        ActivePicker::AgendaClockIn(s) => s.push_char(c),
-        ActivePicker::WorkSync(s) => s.push_char(c),
         ActivePicker::Feature { state: s, .. } => s.push_char(c),
         ActivePicker::CompareOwn { picker, .. } => picker.push_char(c),
         ActivePicker::Versus { picker, .. } => picker.push_char(c),
@@ -2281,8 +2269,6 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::RebaseOnto(s) => s.backspace(),
         ActivePicker::MergeFrom(s) => s.backspace(),
         ActivePicker::SwitchBranch(s) => s.backspace(),
-        ActivePicker::AgendaClockIn(s) => s.backspace(),
-        ActivePicker::WorkSync(s) => s.backspace(),
         ActivePicker::Feature { state: s, .. } => s.backspace(),
         ActivePicker::CompareOwn { picker, .. } => picker.backspace(),
         ActivePicker::Versus { picker, .. } => picker.backspace(),
@@ -2318,8 +2304,6 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::RebaseOnto(s) => s.move_selection(delta),
         ActivePicker::MergeFrom(s) => s.move_selection(delta),
         ActivePicker::SwitchBranch(s) => s.move_selection(delta),
-        ActivePicker::AgendaClockIn(s) => s.move_selection(delta),
-        ActivePicker::WorkSync(s) => s.move_selection(delta),
         ActivePicker::Feature { state: s, .. } => s.move_selection(delta),
         ActivePicker::CompareOwn { picker, .. } => picker.move_selection(delta),
         ActivePicker::Versus { picker, .. } => picker.move_selection(delta),
@@ -2358,8 +2342,6 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::RebaseOnto(s) => s.toggle_mark(),
         ActivePicker::MergeFrom(s) => s.toggle_mark(),
         ActivePicker::SwitchBranch(s) => s.toggle_mark(),
-        ActivePicker::AgendaClockIn(s) => s.toggle_mark(),
-        ActivePicker::WorkSync(s) => s.toggle_mark(),
         ActivePicker::Feature { state: s, .. } => s.toggle_mark(),
         ActivePicker::CompareOwn { picker, .. } => picker.toggle_mark(),
         ActivePicker::Versus { picker, .. } => picker.toggle_mark(),
@@ -2395,8 +2377,6 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::RebaseOnto(s) => s.query(),
         ActivePicker::MergeFrom(s) => s.query(),
         ActivePicker::SwitchBranch(s) => s.query(),
-        ActivePicker::AgendaClockIn(s) => s.query(),
-        ActivePicker::WorkSync(s) => s.query(),
         ActivePicker::Feature { state: s, .. } => s.query(),
         ActivePicker::CompareOwn { picker, .. } => picker.query(),
         ActivePicker::Versus { picker, .. } => picker.query(),
@@ -2432,8 +2412,6 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::RebaseOnto(s) => s.len(),
         ActivePicker::MergeFrom(s) => s.len(),
         ActivePicker::SwitchBranch(s) => s.len(),
-        ActivePicker::AgendaClockIn(s) => s.len(),
-        ActivePicker::WorkSync(s) => s.len(),
         ActivePicker::Feature { state: s, .. } => s.len(),
         ActivePicker::CompareOwn { picker, .. } => picker.len(),
         ActivePicker::Versus { picker, .. } => picker.len(),
@@ -2469,8 +2447,6 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::RebaseOnto(s) => s.selected_row(),
         ActivePicker::MergeFrom(s) => s.selected_row(),
         ActivePicker::SwitchBranch(s) => s.selected_row(),
-        ActivePicker::AgendaClockIn(s) => s.selected_row(),
-        ActivePicker::WorkSync(s) => s.selected_row(),
         ActivePicker::Feature { state: s, .. } => s.selected_row(),
         ActivePicker::CompareOwn { picker, .. } => picker.selected_row(),
         ActivePicker::Versus { picker, .. } => picker.selected_row(),
@@ -2510,8 +2486,6 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::RebaseOnto(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::MergeFrom(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SwitchBranch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::AgendaClockIn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Feature { state: s, .. } => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareOwn { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Versus { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5464,34 +5438,9 @@ pub struct App {
     /// The active Git multi-pane session (`SPC g g`), if any -- see
     /// `GitSession`'s own doc comment.
     git_session: Option<GitSession>,
-    /// The personal task/time-tracking agenda's own data (`SPC a`) --
-    /// loaded at startup from `agenda_path`, read again when another
-    /// writer changes the file (`reload_agenda_if_changed`), and saved back after
-    /// every mutation (create/status/priority/category/note/subtask/
-    /// dependency/time), the same "save immediately, not on quit" posture
-    /// `Config` already has. Unlike `jira_session`, this is never `None`:
-    /// there's no credential/setup step, just a local JSON file.
-    agenda_store: fenix_agenda::AgendaStore,
-    /// `fenix_agenda::default_path()`, resolved once at startup.
-    agenda_path: std::path::PathBuf,
-    /// `agenda_path`'s modification time as Fenix last read or wrote
-    /// it: a different one on the disk poll's tick means someone else
-    /// wrote the file (another machine, through a roaming profile).
-    agenda_stamp: Option<std::time::SystemTime>,
-    /// Linking a task to an issue typed by key, or naming the issue type
-    /// of one being created from it.
-    agenda_prompt: Option<AgendaPrompt>,
     /// Pictures pages show, read and uploaded (the reading view's, a
     /// note's, a diagram's drawing).
     page_images: reading_host::PageImages,
-    /// What `SPC a h` captured for the new-task form it opened.
-    agenda_capture: Option<agenda_host::Capture>,
-    /// The clock picker open is asking about time away, not switching.
-    agenda_gap_asked: bool,
-    /// When the running clock's last-seen time was last saved.
-    agenda_seen_saved: Option<Instant>,
-    /// The agenda's Jira sync bookkeeping -- see `agenda_sync`.
-    agenda_sync: AgendaSyncState,
     /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
     /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
     /// `Option<VncSession>` like `DockerHost::session`/`git_session`/
@@ -6220,7 +6169,7 @@ impl App {
         }
         // Linked agenda tasks stay current while Fenix runs, and changes
         // queued before the last exit go out now.
-        if app.agenda_store.tasks.iter().any(|t| t.jira.is_some()) {
+        if app.features.agenda().store.tasks.iter().any(|t| t.jira.is_some()) {
             app.agenda_start_ticker();
             app.agenda_drain_outbox();
         }
@@ -6245,17 +6194,6 @@ impl App {
         };
         let pdf_places_path = if cfg!(test) { isolated_test_path("pdf_places.tsv") } else { recent_files_path.with_file_name("pdf_places.tsv") };
         let recent_files = fenix_project::RecentFiles::load_or_default(recent_files_path);
-        // Read-only here, same posture as `known_projects`/`recent_files`
-        // just above: a test that constructs `App` via `with_file` reads
-        // whatever real `agenda.json` happens to exist on the machine
-        // running the suite, but nothing in `with_file` itself ever
-        // writes -- only a later call to a mutating agenda method
-        // (`save_agenda`) does that, the same "load freely, save
-        // deliberately" split `config`/`known_projects` already have. A
-        // test that needs to exercise a save reassigns `agenda_path`
-        // first, mirroring how existing tests reassign `app.config`.
-        let agenda_path = fenix_agenda::default_path().unwrap_or_else(|| PathBuf::from("fenix-agenda.json"));
-        let agenda_store = fenix_agenda::load(&agenda_path);
 
         let mut buffers = BufferList::new();
         let initial_id = match &file_arg {
@@ -6454,15 +6392,7 @@ impl App {
             git_prompt: None,
             git_menu_open: false,
             git_session: None,
-            agenda_stamp: std::fs::metadata(&agenda_path).and_then(|m| m.modified()).ok(),
-            agenda_store,
-            agenda_path,
-            agenda_prompt: None,
             page_images: Default::default(),
-            agenda_capture: None,
-            agenda_gap_asked: false,
-            agenda_seen_saved: None,
-            agenda_sync: AgendaSyncState::default(),
             vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
@@ -14702,9 +14632,9 @@ impl App {
             ComposePurpose::TaskDescription { task } => {
                 let task = *task;
                 self.close_compose();
-                if self.agenda_store.task(task).is_some_and(|t| t.description != body) {
-                    self.agenda_store.set_description(task, body.clone());
-                    self.agenda_store.enqueue(task, fenix_agenda::OpKind::SetDescription(body));
+                if self.features.agenda().store.task(task).is_some_and(|t| t.description != body) {
+                    self.features.agenda_mut().store.set_description(task, body.clone());
+                    self.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::SetDescription(body));
                     self.agenda_after_edit();
                 }
                 self.wake_caret();
@@ -14732,7 +14662,7 @@ impl App {
             ComposePurpose::TaskComment { task } => {
                 let task = *task;
                 self.close_compose();
-                self.agenda_store.enqueue(task, fenix_agenda::OpKind::AddComment(body));
+                self.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::AddComment(body));
                 self.agenda_after_edit();
                 self.wake_caret();
                 return;
@@ -15863,11 +15793,11 @@ impl App {
     /// own error handling (surfaced, never a panic: a personal task list
     /// is a convenience, not something worth crashing the editor over).
     fn save_agenda(&mut self) {
-        if let Err(err) = fenix_agenda::save(&self.agenda_path, &self.agenda_store) {
+        if let Err(err) = fenix_agenda::save(&self.features.agenda().path, &self.features.agenda().store) {
             self.set_error(format!("couldn't save agenda.json: {err}"));
         }
         // Fenix's own write isn't a change to read back.
-        self.agenda_stamp = std::fs::metadata(&self.agenda_path).and_then(|m| m.modified()).ok();
+        self.features.agenda_mut().stamp = std::fs::metadata(&self.features.agenda().path).and_then(|m| m.modified()).ok();
     }
 
     /// Takes in `agenda.json` written by someone else since Fenix last
@@ -15877,14 +15807,14 @@ impl App {
     /// A file that's gone or unreadable is left alone, and the agenda in
     /// memory kept: reading it as empty would wipe it at the next save.
     pub(super) fn reload_agenda_if_changed(&mut self) {
-        let stamp = std::fs::metadata(&self.agenda_path).and_then(|m| m.modified()).ok();
-        if stamp.is_none() || stamp == self.agenda_stamp {
+        let stamp = std::fs::metadata(&self.features.agenda().path).and_then(|m| m.modified()).ok();
+        if stamp.is_none() || stamp == self.features.agenda().stamp {
             return;
         }
-        self.agenda_stamp = stamp;
-        match fenix_agenda::reload(&self.agenda_path) {
+        self.features.agenda_mut().stamp = stamp;
+        match fenix_agenda::reload(&self.features.agenda().path) {
             Ok(Some(store)) => {
-                self.agenda_store = store;
+                self.features.agenda_mut().store = store;
                 self.refresh_agenda_pages();
             }
             Ok(None) => {}
@@ -15898,11 +15828,11 @@ impl App {
     }
 
     fn agenda_clock_toggle(&mut self, id: TaskId) {
-        let already_running_here = matches!(&self.agenda_store.active_timer, Some(t) if t.task_id == id);
+        let already_running_here = matches!(&self.features.agenda().store.active_timer, Some(t) if t.task_id == id);
         if already_running_here {
-            self.agenda_store.clock_out();
+            self.features.agenda_mut().store.clock_out();
         } else {
-            self.agenda_store.clock_in(id);
+            self.features.agenda_mut().store.clock_in(id);
         }
         self.agenda_save_and_refresh();
     }
@@ -15927,7 +15857,7 @@ impl App {
     /// What to show in place of the modeline while `agenda_prompt` is
     /// active -- mirrors `jira_prompt_text`.
     fn agenda_prompt_text(&self) -> Option<String> {
-        let prompt = self.agenda_prompt.as_ref()?;
+        let prompt = self.features.agenda().prompt.as_ref()?;
         Some(match &prompt.kind {
             AgendaPromptKind::LinkKey { .. } => format!("Link to issue (e.g. PROJ-123): {}", prompt.input),
         })
@@ -15937,17 +15867,17 @@ impl App {
     fn agenda_prompt_key(&mut self, keypress: KeyPress) {
         if keypress == KeyPress::char('v').with_ctrl() {
             let pasted = self.clipboard_text();
-            if let (Some(prompt), Some(text)) = (&mut self.agenda_prompt, pasted) {
+            if let (Some(prompt), Some(text)) = (&mut self.features.agenda_mut().prompt, pasted) {
                 prompt.input.push_str(&text);
             }
             self.wake_caret();
             return;
         }
-        let Some(prompt) = &mut self.agenda_prompt else { return };
+        let Some(prompt) = &mut self.features.agenda_mut().prompt else { return };
         match keypress.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.agenda_prompt = None,
+            KeyCode::Named(FenixNamedKey::Escape) => self.features.agenda_mut().prompt = None,
             KeyCode::Named(FenixNamedKey::Enter) => {
-                let AgendaPrompt { kind, input } = self.agenda_prompt.take().unwrap();
+                let AgendaPrompt { kind, input } = self.features.agenda_mut().prompt.take().unwrap();
                 self.agenda_prompt_advance(kind, input);
             }
             KeyCode::Named(FenixNamedKey::Backspace) => {
@@ -16044,12 +15974,15 @@ impl App {
     /// focused pane's buffer was never touched, so returning to the
     /// editor just means switching `main_view` back.
     fn picker_cancel(&mut self) {
-        if matches!(self.active_picker, Some(ActivePicker::WorkSync(_))) {
-            self.agenda_sync_picker_cancel();
-        }
         if let Some(ActivePicker::Feature { feature, .. }) = &self.active_picker {
             let feature = *feature;
-            self.with_feature_id(feature, |feature, _| feature.picker_cancel());
+            let cancel = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.picker_cancel);
+            match cancel {
+                Some(cancel) => cancel(self),
+                None => {
+                    self.with_feature_id(feature, |feature, _| feature.picker_cancel());
+                }
+            }
         }
         self.active_picker = None;
         self.main_view = MainView::Editor;
@@ -16240,28 +16173,16 @@ impl App {
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
             }
-            Some(ActivePicker::AgendaClockIn(state)) => {
-                let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
-                self.active_picker = None;
-                self.main_view = MainView::Editor;
-                self.agenda_clock_pick(pick);
-            }
-            Some(ActivePicker::WorkSync(state)) => {
-                let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
-                let marked: Vec<SyncPick> = state.marked().cloned().collect();
-                self.active_picker = None;
-                self.main_view = MainView::Editor;
-                self.agenda_sync_picker_confirm(pick, marked);
-            }
             Some(ActivePicker::Feature { feature, state, .. }) => {
                 let feature = *feature;
                 let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
+                let marked: Vec<feature::FeaturePick> = state.marked().cloned().collect();
                 let query = state.query().to_string();
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 let confirm = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.picker_confirm);
                 match confirm {
-                    Some(confirm) => confirm(self, &*pick.0, &query),
+                    Some(confirm) => confirm(self, &*pick.0, &marked, &query),
                     None => {
                         self.with_feature_id(feature, |feature, app| feature.picker_confirm(app, &*pick.0));
                     }
@@ -18662,7 +18583,7 @@ impl App {
             return;
         }
         // Linking an agenda task to an issue by key -- mirrors `jira_prompt`.
-        if self.agenda_prompt.is_some() {
+        if self.features.agenda().prompt.is_some() {
             self.agenda_prompt_key(keypress);
             return;
         }
@@ -20031,8 +19952,6 @@ impl App {
                 Some(picker @ ActivePicker::SwitchBranch(_)) => ("SWITCH", picker_len(picker)),
                 Some(picker @ ActivePicker::CompareOwn { .. }) => ("COMPARE", picker_len(picker)),
                 Some(picker @ ActivePicker::Versus { .. }) => ("BESIDE", picker_len(picker)),
-                Some(picker @ ActivePicker::AgendaClockIn(_)) => (if self.agenda_gap_asked { "AWAY" } else { "CLOCK" }, picker_len(picker)),
-                Some(picker @ ActivePicker::WorkSync(_)) => ("JIRA", picker_len(picker)),
                 Some(picker @ ActivePicker::Feature { badge, .. }) => (*badge, picker_len(picker)),
                 None => ("PICKER", 0),
             };
@@ -20047,12 +19966,6 @@ impl App {
                     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     format!("{count} refs   set {name} beside its version on… ")
                 }
-                // What this pick is for ("WHAT DOES BLOCKED MEAN IN
-                // PROJ?", "PROJ-12 STATUS") -- the badge alone can't say.
-                Some(ActivePicker::WorkSync(_)) => match &self.agenda_sync.picker {
-                    Some(ctx) => format!("{}   {count} matches ", ctx.label),
-                    None => format!("{count} matches "),
-                },
                 Some(ActivePicker::Feature { feature, .. }) => match self.features.by_id(feature).and_then(|feature| feature.picker_label()) {
                     Some(label) => format!("{label}   {count} matches "),
                     None => format!("{count} matches "),
@@ -20100,9 +20013,9 @@ impl App {
         // and started editing the code the task is about, which is
         // exactly when this needs to stay visible rather than only
         // showing while the agenda buffer itself is focused.
-        let agenda_timer_indicator = match &self.agenda_store.active_timer {
+        let agenda_timer_indicator = match &self.features.agenda().store.active_timer {
             Some(timer) => {
-                let title = self.agenda_store.task(timer.task_id).map(|t| t.title.as_str()).unwrap_or("?");
+                let title = self.features.agenda().store.task(timer.task_id).map(|t| t.title.as_str()).unwrap_or("?");
                 let elapsed = agenda_page::format_minutes((chrono::Local::now() - timer.started_at).num_minutes());
                 format!("   \u{23f1} {title} {elapsed}")
             }
@@ -26122,7 +26035,7 @@ index 0000000..1111111 100644
     #[test]
     fn modeline_reflects_filename_dirty_state_mode_and_position() {
         let mut app = App::with_file(None);
-        app.agenda_store = fenix_agenda::AgendaStore::default(); // isolate from any real leftover active_timer
+        app.features.agenda_mut().store = fenix_agenda::AgendaStore::default(); // isolate from any real leftover active_timer
         app.new_scratch_buffer(); // with_file(None) now opens the dashboard, not a plain scratch buffer
         assert_eq!(app.modeline_text(), " \u{25B2}  NORMAL   [No Name]   Ln 1, Col 1   Plain text   Indent 4   UTF-8   No EOL ");
 
@@ -38391,8 +38304,8 @@ name = \"orbit\"
     /// own doc comment already prescribed, just actually applied.
     fn app_with_isolated_agenda(dir: &TempDir) -> App {
         let mut app = App::with_file(None);
-        app.agenda_store = fenix_agenda::AgendaStore::default();
-        app.agenda_path = dir.path().join("agenda.json");
+        app.features.agenda_mut().store = fenix_agenda::AgendaStore::default();
+        app.features.agenda_mut().path = dir.path().join("agenda.json");
         app
     }
 
@@ -38400,30 +38313,30 @@ name = \"orbit\"
     fn toggle_clock_with_nothing_running_opens_a_picker_and_confirming_clocks_in() {
         let dir = TempDir::new("toggle_clock_with_nothing_running_opens_");
         let mut app = app_with_isolated_agenda(&dir);
-        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        let a = app.features.agenda_mut().store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
 
         app.cmd_agenda_toggle_clock();
-        assert!(matches!(app.active_picker, Some(ActivePicker::AgendaClockIn(_))));
+        assert!(matches!(app.active_picker, Some(ActivePicker::Feature { badge: "CLOCK", .. })));
 
         app.picker_confirm();
 
-        assert!(app.agenda_store.active_timer.is_some());
-        assert_eq!(app.agenda_store.active_timer.as_ref().unwrap().task_id, a);
+        assert!(app.features.agenda().store.active_timer.is_some());
+        assert_eq!(app.features.agenda().store.active_timer.as_ref().unwrap().task_id, a);
     }
 
     #[test]
     fn toggle_clock_with_a_timer_running_offers_stop_first() {
         let dir = TempDir::new("toggle_clock_with_a_timer_running_stops_");
         let mut app = app_with_isolated_agenda(&dir);
-        let a = app.agenda_store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
-        app.agenda_store.clock_in(a);
+        let a = app.features.agenda_mut().store.create_task("A".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        app.features.agenda_mut().store.clock_in(a);
 
         app.cmd_agenda_toggle_clock();
         app.picker_confirm();
 
-        assert!(app.agenda_store.active_timer.is_none());
+        assert!(app.features.agenda().store.active_timer.is_none());
         assert!(app.active_picker.is_none());
-        assert_eq!(app.agenda_store.task(a).unwrap().time_entries.len(), 1, "stopping should record the elapsed span");
+        assert_eq!(app.features.agenda().store.task(a).unwrap().time_entries.len(), 1, "stopping should record the elapsed span");
     }
 
     #[test]
@@ -38439,10 +38352,10 @@ name = \"orbit\"
     fn modeline_shows_the_running_timers_task_and_elapsed_time() {
         let dir = TempDir::new("modeline_shows_the_running_timers_task_a");
         let mut app = app_with_isolated_agenda(&dir);
-        let a = app.agenda_store.create_task("Write the plan".to_string(), String::new(), fenix_agenda::Priority::Low, None);
+        let a = app.features.agenda_mut().store.create_task("Write the plan".to_string(), String::new(), fenix_agenda::Priority::Low, None);
         assert!(!app.modeline_text().contains("Write the plan"), "no timer running yet, nothing to show");
 
-        app.agenda_store.clock_in(a);
+        app.features.agenda_mut().store.clock_in(a);
 
         assert!(app.modeline_text().contains("Write the plan"));
     }

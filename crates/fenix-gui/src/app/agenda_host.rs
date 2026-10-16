@@ -7,6 +7,7 @@
 use super::pages::PageModel;
 use super::*;
 use crate::agenda_page::{self, Action as AgendaAction, AgendaPage, NewTask, Project, Tab};
+use super::agenda_sync::{AgendaSyncState, SyncPick};
 use fenix_agenda::{CodeRef, OpKind, Status};
 
 /// One row of the clock picker (`SPC a t`), or of the question asked
@@ -25,6 +26,165 @@ pub(crate) enum ClockPick {
 
 /// How often a running clock's last-seen time is saved.
 const SEEN_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The agenda's commands and its `SPC a` group.
+pub(crate) static SPEC: super::feature::FeatureSpec = {
+    use super::feature::FeatureCommand as C;
+    use super::feature::LeaderEntry::{Bind, Group};
+    super::feature::FeatureSpec {
+        id: "fenix.agenda",
+        commands: &[
+            C { id: "agenda.open", description: "Open the agenda page where it was left", external: true, run: |app| app.cmd_agenda_open() },
+            C { id: "agenda.board", description: "Open the agenda on its board", external: true, run: |app| app.cmd_agenda_board() },
+            C { id: "agenda.list", description: "Open the agenda on its list", external: true, run: |app| app.cmd_agenda_list() },
+            C { id: "agenda.report", description: "Open the agenda on this week's time", external: true, run: |app| app.cmd_agenda_report() },
+            C { id: "agenda.new_task", description: "Add a task to the agenda", external: true, run: |app| app.cmd_agenda_new_task() },
+            C { id: "agenda.from_here", description: "Add a task about the selection or line here", external: false, run: |app| app.cmd_agenda_task_from_here() },
+            C { id: "agenda.find", description: "Search every task", external: true, run: |app| app.cmd_agenda_find() },
+            C { id: "agenda.toggle_clock", description: "Stop the clock, resume the last task, or switch to another", external: true, run: |app| app.cmd_agenda_toggle_clock() },
+            C { id: "agenda.resume", description: "Start the clock again on what you worked on last", external: true, run: |app| app.cmd_agenda_resume() },
+            C { id: "agenda.import", description: "Pick Jira issues assigned to you to add to the agenda", external: true, run: |app| app.cmd_agenda_import() },
+            C { id: "agenda.sync", description: "Refresh linked tasks from Jira and send pending changes", external: true, run: |app| app.cmd_agenda_sync() },
+            C { id: "agenda.worklogs", description: "Review unsent time on linked tasks and send it to Jira", external: true, run: |app| app.cmd_agenda_worklogs() },
+        ],
+        leader: &[
+            Group(&['a'], "agenda"),
+            Bind(&['a', 'a'], "open agenda", "agenda.open"),
+            Bind(&['a', 'b'], "agenda: board", "agenda.board"),
+            // The board's old key, kept for a release.
+            Bind(&['a', 'k'], "agenda: board (now SPC a b)", "agenda.board"),
+            Bind(&['a', 'l'], "agenda: list", "agenda.list"),
+            Bind(&['a', 'r'], "agenda: this week's time", "agenda.report"),
+            Bind(&['a', 'n'], "agenda: new task", "agenda.new_task"),
+            Bind(&['a', 'h'], "agenda: task from here", "agenda.from_here"),
+            Bind(&['a', '/'], "agenda: find a task", "agenda.find"),
+            Bind(&['a', 't'], "agenda: clock -- stop, resume, switch", "agenda.toggle_clock"),
+            Bind(&['a', 'T'], "agenda: resume the clock", "agenda.resume"),
+            // The Jira side: pick which of your issues to track, refresh the
+            // ones you track, and review/send time as worklogs.
+            Bind(&['a', 'i'], "agenda: import Jira issues", "agenda.import"),
+            Bind(&['a', 's'], "agenda: sync with Jira", "agenda.sync"),
+            Bind(&['a', 'w'], "agenda: review worklogs", "agenda.worklogs"),
+        ],
+        local_menu: &[],
+        local_context: None,
+        language_server: None,
+        tasks: None,
+        hover_fallback: None,
+        completion_at_cursor: None,
+        completion_pool_at: None,
+        hover_first: None,
+        picker_confirm: Some(|app, pick, marked, _query| {
+            if let Some(pick) = pick.downcast_ref::<ClockPick>() {
+                app.agenda_clock_pick(pick.clone());
+            } else if let Some(pick) = pick.downcast_ref::<SyncPick>() {
+                let marked = marked.iter().filter_map(|m| m.0.downcast_ref::<SyncPick>().cloned()).collect();
+                app.agenda_sync_picker_confirm(pick.clone(), marked);
+            }
+        }),
+        picker_cancel: Some(|app| app.agenda_sync_picker_cancel()),
+        modeline_clock: None,
+    }
+};
+
+/// The agenda's state: the store and its file, the prompt and the
+/// pickers' context, and the Jira sync's bookkeeping. Its code is still
+/// `App` methods (its page is a core `PageModel`), so it reaches this by
+/// type (`Features::agenda`); every entry point is a spec function, which
+/// runs with it in place, and its only instance hook, `picker_label`,
+/// only reads.
+pub(crate) struct AgendaState {
+    /// The personal task/time-tracking agenda's own data (`SPC a`) --
+    /// loaded at startup from `path`, read again when another writer
+    /// changes the file (`reload_agenda_if_changed`), and saved back after
+    /// every mutation (create/status/priority/category/note/subtask/
+    /// dependency/time), the same "save immediately, not on quit" posture
+    /// `Config` already has. There's no credential/setup step, just a
+    /// local JSON file.
+    pub(super) store: fenix_agenda::AgendaStore,
+    /// `fenix_agenda::default_path()`, resolved once at startup.
+    pub(super) path: std::path::PathBuf,
+    /// `path`'s modification time as Fenix last read or wrote it: a
+    /// different one on the disk poll's tick means someone else wrote the
+    /// file (another machine, through a roaming profile).
+    pub(super) stamp: Option<std::time::SystemTime>,
+    /// Linking a task to an issue typed by key, or naming the issue type
+    /// of one being created from it.
+    pub(super) prompt: Option<AgendaPrompt>,
+    /// What `SPC a h` captured for the new-task form it opened.
+    pub(super) capture: Option<Capture>,
+    /// The clock picker open is asking about time away, not switching.
+    pub(super) gap_asked: bool,
+    /// When the running clock's last-seen time was last saved.
+    pub(super) seen_saved: Option<Instant>,
+    /// The agenda's Jira sync bookkeeping -- see `agenda_sync`.
+    pub(super) sync: AgendaSyncState,
+}
+
+impl Default for AgendaState {
+    /// Read-only, same posture as `known_projects`/`recent_files`: a test
+    /// that constructs `App` via `with_file` reads whatever real
+    /// `agenda.json` happens to exist on the machine running the suite,
+    /// but nothing here ever writes -- only a later call to a mutating
+    /// agenda method (`save_agenda`) does that, the same "load freely,
+    /// save deliberately" split `config`/`known_projects` already have. A
+    /// test that needs to exercise a save reassigns `path` first,
+    /// mirroring how existing tests reassign `app.config`.
+    fn default() -> Self {
+        let path = fenix_agenda::default_path().unwrap_or_else(|| PathBuf::from("fenix-agenda.json"));
+        Self {
+            store: fenix_agenda::load(&path),
+            stamp: std::fs::metadata(&path).and_then(|m| m.modified()).ok(),
+            path,
+            prompt: None,
+            capture: None,
+            gap_asked: false,
+            seen_saved: None,
+            sync: AgendaSyncState::default(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct AgendaHost {
+    pub(super) state: AgendaState,
+}
+
+impl super::feature::Feature for AgendaHost {
+    fn spec(&self) -> &'static super::feature::FeatureSpec {
+        &SPEC
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    /// What the open Jira pick is for ("WHAT DOES BLOCKED MEAN IN
+    /// PROJ?", "PROJ-12 STATUS") -- the badge alone can't say.
+    fn picker_label(&self) -> Option<&str> {
+        self.state.sync.picker.as_ref().map(|ctx| ctx.label.as_str())
+    }
+}
+
+impl super::feature::Features {
+    pub(super) fn agenda(&self) -> &AgendaState {
+        &self.get::<AgendaHost>().expect("the agenda has no instance hooks that run code, so it's always in place").state
+    }
+
+    pub(super) fn agenda_mut(&mut self) -> &mut AgendaState {
+        &mut self.get_mut::<AgendaHost>().expect("the agenda has no instance hooks that run code, so it's always in place").state
+    }
+}
+
+/// An agenda picker over `candidates`, with the badge `badge`.
+pub(super) fn agenda_picker<T: std::any::Any>(badge: &'static str, candidates: Vec<fenix_picker::Candidate<T>>) -> ActivePicker {
+    let candidates = candidates.into_iter().map(|c| super::feature::FeaturePick::candidate(c.label, c.payload)).collect();
+    ActivePicker::Feature { feature: SPEC.id, badge, state: fenix_picker::PickerState::new(candidates) }
+}
 
 /// What `SPC a h` captured, waiting for the new-task form to finish.
 pub(super) struct Capture {
@@ -59,13 +219,13 @@ impl App {
         if self.config.jira_base_url.is_none() {
             return String::new();
         }
-        if self.agenda_sync.pulling {
+        if self.features.agenda().sync.pulling {
             return "syncing".to_string();
         }
-        match self.agenda_sync.last_pull {
+        match self.features.agenda().sync.last_pull {
             Some(at) if at.elapsed().as_secs() < 60 => "synced just now".to_string(),
             Some(at) => format!("synced {}m ago", at.elapsed().as_secs() / 60),
-            None if self.agenda_store.tasks.iter().any(|t| t.jira.is_some()) => "not synced yet".to_string(),
+            None if self.features.agenda().store.tasks.iter().any(|t| t.jira.is_some()) => "not synced yet".to_string(),
             None => String::new(),
         }
     }
@@ -100,7 +260,7 @@ impl App {
     pub(super) fn refresh_agenda_pages(&mut self) {
         let ids: Vec<BufferId> = self.pages.iter().filter(|(_, s)| matches!(s.model, PageModel::Agenda(_))).map(|(id, _)| *id).collect();
         for id in ids {
-            let store = &self.agenda_store;
+            let store = &self.features.agenda().store;
             if let Some(state) = self.pages.get_mut(&id) {
                 state.stale = true;
                 if let PageModel::Agenda(p) = &mut state.model {
@@ -115,7 +275,7 @@ impl App {
 
     /// `SPC a n`: the page, with the new-task form open.
     pub(crate) fn cmd_agenda_new_task(&mut self) {
-        self.agenda_capture = None;
+        self.features.agenda_mut().capture = None;
         let id = self.open_agenda_page(None);
         self.agenda_page_key_now(id, crate::page::Key::Char('n'));
     }
@@ -151,7 +311,7 @@ impl App {
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let text = format!("{name}:{first_line}\n\n```{lang}\n{}\n```", body.trim_end());
         let _ = line;
-        self.agenda_capture = Some(Capture { code: CodeRef { path, line: first_line }, text });
+        self.features.agenda_mut().capture = Some(Capture { code: CodeRef { path, line: first_line }, text });
         let id = self.open_agenda_page(None);
         self.agenda_page_key_now(id, crate::page::Key::Char('n'));
     }
@@ -159,7 +319,7 @@ impl App {
     /// `SPC a t`: stop the running clock, resume what you worked on last,
     /// or switch -- recent tasks first, then what's in progress.
     pub(crate) fn cmd_agenda_toggle_clock(&mut self) {
-        let store = &self.agenda_store;
+        let store = &self.features.agenda().store;
         let running = store.active_timer.as_ref().map(|t| t.task_id);
         let label = |t: &fenix_agenda::Task| match t.jira_key() {
             Some(key) => format!("{key} {}", t.title),
@@ -194,18 +354,18 @@ impl App {
             self.set_error("no agenda tasks to clock in on yet -- SPC a n to add one");
             return;
         }
-        self.agenda_gap_asked = false;
-        self.enter_picker(ActivePicker::AgendaClockIn(fenix_picker::PickerState::new(candidates)));
+        self.features.agenda_mut().gap_asked = false;
+        self.enter_picker(agenda_picker("CLOCK", candidates));
     }
 
     /// `SPC a T`: the clock back on what you worked on last.
     pub(crate) fn cmd_agenda_resume(&mut self) {
-        if let Some(timer) = &self.agenda_store.active_timer {
-            let name = self.agenda_store.task(timer.task_id).map(|t| t.title.clone()).unwrap_or_default();
+        if let Some(timer) = &self.features.agenda().store.active_timer {
+            let name = self.features.agenda().store.task(timer.task_id).map(|t| t.title.clone()).unwrap_or_default();
             self.set_message(format!("The clock is already on \"{name}\""));
             return;
         }
-        let Some((id, _)) = self.agenda_store.recently_worked().into_iter().next() else {
+        let Some((id, _)) = self.features.agenda().store.recently_worked().into_iter().next() else {
             self.set_error("nothing worked on yet to resume -- SPC a t picks a task");
             return;
         };
@@ -213,29 +373,29 @@ impl App {
     }
 
     pub(super) fn agenda_clock_pick(&mut self, pick: ClockPick) {
-        self.agenda_gap_asked = false;
+        self.features.agenda_mut().gap_asked = false;
         match pick {
-            ClockPick::Stop => self.agenda_store.clock_out(),
+            ClockPick::Stop => self.features.agenda_mut().store.clock_out(),
             ClockPick::Start(id) => {
-                self.agenda_store.clock_in(id);
-                let name = self.agenda_store.task(id).map(|t| t.title.clone()).unwrap_or_default();
+                self.features.agenda_mut().store.clock_in(id);
+                let name = self.features.agenda().store.task(id).map(|t| t.title.clone()).unwrap_or_default();
                 self.set_message(format!("Clock on \"{name}\""));
             }
             ClockPick::KeepUntil(at) => {
-                self.agenda_store.clock_out_at(at);
+                self.features.agenda_mut().store.clock_out_at(at);
                 self.set_message(format!("Kept the time until {} -- SPC a T starts the clock again", at.format("%H:%M")));
             }
             ClockPick::KeepAll => {
-                if let Some(timer) = &mut self.agenda_store.active_timer {
+                if let Some(timer) = &mut self.features.agenda_mut().store.active_timer {
                     timer.last_seen = Some(chrono::Local::now());
                 }
             }
             ClockPick::Drop => {
-                self.agenda_store.drop_timer();
+                self.features.agenda_mut().store.drop_timer();
                 self.set_message("Dropped that sitting -- SPC a T starts the clock again");
             }
         }
-        self.agenda_seen_saved = Some(std::time::Instant::now());
+        self.features.agenda_mut().seen_saved = Some(std::time::Instant::now());
         self.agenda_save_and_refresh();
     }
 
@@ -244,8 +404,8 @@ impl App {
     /// asks what to keep instead -- returns true when it asked (that key
     /// is spent on bringing the question up).
     pub(super) fn agenda_note_activity(&mut self) -> bool {
-        let Some(timer) = &self.agenda_store.active_timer else { return false };
-        if self.agenda_gap_asked {
+        let Some(timer) = &self.features.agenda().store.active_timer else { return false };
+        if self.features.agenda().gap_asked {
             return false;
         }
         let now = chrono::Local::now();
@@ -257,20 +417,20 @@ impl App {
             self.agenda_ask_about_gap(last);
             return true;
         }
-        if let Some(timer) = &mut self.agenda_store.active_timer {
+        if let Some(timer) = &mut self.features.agenda_mut().store.active_timer {
             timer.last_seen = Some(now);
         }
-        if self.agenda_seen_saved.is_none_or(|at| at.elapsed() >= SEEN_SAVE_EVERY) {
-            self.agenda_seen_saved = Some(std::time::Instant::now());
+        if self.features.agenda().seen_saved.is_none_or(|at| at.elapsed() >= SEEN_SAVE_EVERY) {
+            self.features.agenda_mut().seen_saved = Some(std::time::Instant::now());
             self.save_agenda();
         }
         false
     }
 
     fn agenda_ask_about_gap(&mut self, last: chrono::DateTime<chrono::Local>) {
-        let Some(timer) = &self.agenda_store.active_timer else { return };
+        let Some(timer) = &self.features.agenda().store.active_timer else { return };
         let now = chrono::Local::now();
-        let name = self.agenda_store.task(timer.task_id).map(|t| t.title.clone()).unwrap_or_default();
+        let name = self.features.agenda().store.task(timer.task_id).map(|t| t.title.clone()).unwrap_or_default();
         let kept = agenda_page::format_minutes((last - timer.started_at).num_minutes());
         let all = agenda_page::format_minutes((now - timer.started_at).num_minutes());
         let candidates = vec![
@@ -283,8 +443,8 @@ impl App {
             last.format("%H:%M"),
             now.format("%H:%M")
         ));
-        self.agenda_gap_asked = true;
-        self.enter_picker(ActivePicker::AgendaClockIn(fenix_picker::PickerState::new(candidates)));
+        self.features.agenda_mut().gap_asked = true;
+        self.enter_picker(agenda_picker("AWAY", candidates));
     }
 
     /// `SPC a /`: the page, searching.
@@ -301,15 +461,15 @@ impl App {
         let Some(state) = self.pages.get_mut(&id) else { return };
         state.stale = true;
         let PageModel::Agenda(p) = &mut state.model else { return };
-        let ctx = agenda_page::Ctx { store: &self.agenda_store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
+        let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
         let action = p.key(key, &ctx);
         self.agenda_page_action(id, action);
     }
 
     /// Starts the worklog review afresh: no edits or drops carried over.
     pub(super) fn agenda_worklog_reset(&mut self) {
-        self.agenda_sync.worklog_edits.clear();
-        self.agenda_sync.worklog_dropped.clear();
+        self.features.agenda_mut().sync.worklog_edits.clear();
+        self.features.agenda_mut().sync.worklog_dropped.clear();
     }
 
     /// Adds `name` to the categories, if it isn't one.
@@ -324,22 +484,22 @@ impl App {
     }
 
     fn agenda_create(&mut self, id: BufferId, spec: NewTask) {
-        let capture = self.agenda_capture.take();
+        let capture = self.features.agenda_mut().capture.take();
         let description = capture.as_ref().map(|c| c.text.clone()).unwrap_or_default();
         if let Some(category) = &spec.category {
             self.agenda_ensure_category(category);
         }
         let category = spec.category.as_ref().and_then(|c| self.config.agenda_categories.iter().find(|x| x.eq_ignore_ascii_case(c)).cloned());
-        let task = self.agenda_store.create_task(spec.title.clone(), description, spec.priority, category);
+        let task = self.features.agenda_mut().store.create_task(spec.title.clone(), description, spec.priority, category);
         if spec.status != Status::Todo {
-            self.agenda_store.move_to_status(task, spec.status);
+            self.features.agenda_mut().store.move_to_status(task, spec.status);
         }
-        self.agenda_store.set_due(task, spec.due);
+        self.features.agenda_mut().store.set_due(task, spec.due);
         if let Some(capture) = capture {
-            self.agenda_store.set_code(task, Some(capture.code));
+            self.features.agenda_mut().store.set_code(task, Some(capture.code));
         }
         if spec.clock {
-            self.agenda_store.clock_in(task);
+            self.features.agenda_mut().store.clock_in(task);
         }
         self.agenda_save_and_refresh();
         if let Some(page) = self.agenda_page_mut(id) {
@@ -359,96 +519,96 @@ impl App {
             A::SetStatus(task, status) => self.agenda_set_status(task, status),
             A::JiraStatus(task) => self.agenda_start_linked_status_picker(task),
             A::SetPriority(task, priority) => {
-                self.agenda_store.set_priority(task, priority);
+                self.features.agenda_mut().store.set_priority(task, priority);
                 self.agenda_save_and_refresh();
             }
             A::JiraPriority(task) => self.agenda_start_linked_priority_picker(task),
             A::SetCategory(task, category) => {
-                self.agenda_store.set_category(task, category);
+                self.features.agenda_mut().store.set_category(task, category);
                 self.agenda_save_and_refresh();
             }
             A::AddCategory(task, name) => {
                 self.agenda_ensure_category(&name);
-                self.agenda_store.set_category(task, Some(name));
+                self.features.agenda_mut().store.set_category(task, Some(name));
                 self.agenda_save_and_refresh();
             }
             A::SetDue(task, due) => {
-                self.agenda_store.set_due(task, due);
-                self.agenda_store.enqueue(task, OpKind::SetDue(due.map(|d| d.format("%Y-%m-%d").to_string())));
+                self.features.agenda_mut().store.set_due(task, due);
+                self.features.agenda_mut().store.enqueue(task, OpKind::SetDue(due.map(|d| d.format("%Y-%m-%d").to_string())));
                 self.agenda_after_edit();
             }
             A::SetTitle(task, title) => {
-                self.agenda_store.set_title(task, title.clone());
-                self.agenda_store.enqueue(task, OpKind::SetSummary(title));
+                self.features.agenda_mut().store.set_title(task, title.clone());
+                self.features.agenda_mut().store.enqueue(task, OpKind::SetSummary(title));
                 self.agenda_after_edit();
             }
             A::EditDescription(task) => {
-                let seed = self.agenda_store.task(task).map(|t| t.description.clone()).unwrap_or_default();
+                let seed = self.features.agenda().store.task(task).map(|t| t.description.clone()).unwrap_or_default();
                 self.open_compose_seeded(ComposePurpose::TaskDescription { task }, &seed);
             }
             A::AddNote(task, text) => {
-                self.agenda_store.add_note(task, text);
+                self.features.agenda_mut().store.add_note(task, text);
                 self.agenda_save_and_refresh();
             }
             A::EditNote(task, i, text) => {
-                self.agenda_store.edit_note(task, i, text);
+                self.features.agenda_mut().store.edit_note(task, i, text);
                 self.agenda_save_and_refresh();
             }
             A::RemoveNote(task, i) => {
-                self.agenda_store.remove_note(task, i);
+                self.features.agenda_mut().store.remove_note(task, i);
                 self.agenda_save_and_refresh();
             }
             A::Comment(task) => self.open_compose_seeded(ComposePurpose::TaskComment { task }, ""),
             A::PostNote(task, i) => {
-                let Some(t) = self.agenda_store.task(task) else { return };
+                let Some(t) = self.features.agenda().store.task(task) else { return };
                 let (Some(key), Some(note)) = (t.jira_key().map(str::to_string), t.notes.get(i).map(|n| n.text.clone())) else { return };
-                self.agenda_store.enqueue(task, OpKind::AddComment(note));
+                self.features.agenda_mut().store.enqueue(task, OpKind::AddComment(note));
                 self.set_message(format!("Posting the note to {key} as a comment..."));
                 self.agenda_after_edit();
             }
             A::Clock(task) => self.agenda_clock_toggle(task),
             A::LogSpan(task, start, end) => {
-                self.agenda_store.log_span(task, start, end);
+                self.features.agenda_mut().store.log_span(task, start, end);
                 self.agenda_save_and_refresh();
             }
             A::EditTime(task, i, start, end) => {
-                if !self.agenda_store.edit_time_entry(task, i, start, end) {
+                if !self.features.agenda_mut().store.edit_time_entry(task, i, start, end) {
                     self.set_error("the end has to be after the start");
                 }
                 self.agenda_save_and_refresh();
             }
             A::RemoveTime(task, i) => {
-                self.agenda_store.remove_time_entry(task, i);
+                self.features.agenda_mut().store.remove_time_entry(task, i);
                 self.agenda_save_and_refresh();
             }
             A::AddCheck(task, text) => {
-                self.agenda_store.add_subtask(task, text);
+                self.features.agenda_mut().store.add_subtask(task, text);
                 self.agenda_save_and_refresh();
             }
             A::EditCheck(task, i, text) => {
-                self.agenda_store.edit_subtask(task, i, text);
+                self.features.agenda_mut().store.edit_subtask(task, i, text);
                 self.agenda_save_and_refresh();
             }
             A::ToggleCheck(task, i) => {
-                self.agenda_store.toggle_subtask(task, i);
+                self.features.agenda_mut().store.toggle_subtask(task, i);
                 self.agenda_save_and_refresh();
             }
             A::RemoveCheck(task, i) => {
-                self.agenda_store.remove_subtask(task, i);
+                self.features.agenda_mut().store.remove_subtask(task, i);
                 self.agenda_save_and_refresh();
             }
             A::AddDependency(task, on) => {
-                if !self.agenda_store.add_dependency(task, on) {
+                if !self.features.agenda_mut().store.add_dependency(task, on) {
                     self.set_error("that would make the two wait on each other");
                 }
                 self.agenda_save_and_refresh();
             }
             A::RemoveDependency(task, on) => {
-                self.agenda_store.remove_dependency(task, on);
+                self.features.agenda_mut().store.remove_dependency(task, on);
                 self.agenda_save_and_refresh();
             }
             A::Resolve(task, field, mine) => {
-                self.agenda_store.resolve_conflict(task, field, mine);
+                self.features.agenda_mut().store.resolve_conflict(task, field, mine);
                 self.agenda_after_edit();
             }
             A::Link(task) => self.agenda_start_link(task),
@@ -457,7 +617,7 @@ impl App {
             A::Browser(task) => self.agenda_open_in_browser(task),
             A::Retry(task) => self.agenda_retry(task),
             A::OpenCode(task) => {
-                let Some(code) = self.agenda_store.task(task).and_then(|t| t.code.clone()) else { return };
+                let Some(code) = self.features.agenda().store.task(task).and_then(|t| t.code.clone()) else { return };
                 if !code.path.exists() {
                     self.set_error(format!("{} isn't there any more", code.path.display()));
                     return;
@@ -466,12 +626,12 @@ impl App {
                 self.jump_to_grep_match(&fenix_project::GrepMatch { path: code.path, line: code.line, col: 1, text: String::new() });
             }
             A::Archive(task) => {
-                self.agenda_store.archive(task);
+                self.features.agenda_mut().store.archive(task);
                 self.agenda_save_and_refresh();
             }
             A::Delete(task) => {
-                let key = self.agenda_store.task(task).and_then(|t| t.jira_key()).map(str::to_string);
-                self.agenda_store.delete(task);
+                let key = self.features.agenda().store.task(task).and_then(|t| t.jira_key()).map(str::to_string);
+                self.features.agenda_mut().store.delete(task);
                 self.agenda_save_and_refresh();
                 self.set_message(match key {
                     Some(key) => format!("Deleted -- {key} in Jira isn't affected"),
@@ -479,22 +639,22 @@ impl App {
                 });
             }
             A::Reorder(task, by) => {
-                self.agenda_store.reorder_within_status(task, by);
+                self.features.agenda_mut().store.reorder_within_status(task, by);
                 self.agenda_save_and_refresh();
             }
             A::Create(spec) => self.agenda_create(id, spec),
             A::Sync => self.cmd_agenda_sync(),
             A::WorklogMinutes(task, date, minutes) => {
-                self.agenda_sync.worklog_edits.insert((task, date), minutes);
+                self.features.agenda_mut().sync.worklog_edits.insert((task, date), minutes);
                 self.refresh_agenda_pages();
             }
             A::WorklogDrop(task, date) => {
-                self.agenda_sync.worklog_dropped.insert((task, date));
+                self.features.agenda_mut().sync.worklog_dropped.insert((task, date));
                 self.refresh_agenda_pages();
             }
             A::WorklogDismiss(task, date) => {
                 let Some(row) = self.agenda_worklog_rows().into_iter().find(|r| r.task == task && r.date == date) else { return };
-                self.agenda_store.mark_sent(task, &row.entries);
+                self.features.agenda_mut().store.mark_sent(task, &row.entries);
                 self.agenda_save_and_refresh();
                 self.set_message(format!("{} on {}: dismissed, won't be sent", row.key, row.date));
             }
@@ -515,8 +675,8 @@ mod tests {
 
     fn app(dir: &tempfile::TempDir) -> App {
         let mut app = App::with_file(None);
-        app.agenda_path = dir.path().join("agenda.json");
-        app.agenda_store = fenix_agenda::AgendaStore::default();
+        app.features.agenda_mut().path = dir.path().join("agenda.json");
+        app.features.agenda_mut().store = fenix_agenda::AgendaStore::default();
         app.config.agenda_categories = vec!["ops".into()];
         app
     }
@@ -545,7 +705,7 @@ mod tests {
         app.cmd_agenda_new_task();
         press(&mut app, "Write the report !high #ops due:+2");
         enter(&mut app);
-        let task = &app.agenda_store.tasks[0];
+        let task = &app.features.agenda().store.tasks[0];
         assert_eq!(task.title, "Write the report");
         assert_eq!(task.priority, fenix_agenda::Priority::High);
         assert_eq!(task.category.as_deref(), Some("ops"));
@@ -559,12 +719,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(&dir);
         let home = app.ensure_workspace_home();
-        let first = app.agenda_store.create_task("First".into(), String::new(), fenix_agenda::Priority::Medium, None);
-        app.agenda_store.create_task("Second".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        let first = app.features.agenda_mut().store.create_task("First".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        app.features.agenda_mut().store.create_task("Second".into(), String::new(), fenix_agenda::Priority::Medium, None);
         let page = app.open_agenda_page(Some(Tab::List));
         // `gg` still means the top: `s` then acts on the first task.
         press(&mut app, "jggs2");
-        assert_eq!(app.agenda_store.task(first).unwrap().status, Status::InProgress);
+        assert_eq!(app.features.agenda().store.task(first).unwrap().status, Status::InProgress);
         press(&mut app, "gh");
         assert_eq!(app.focused_buffer_id(), home);
         app.move_tab(fenix_vim::TabMove::Prev(1));
@@ -577,16 +737,16 @@ mod tests {
     fn keys_on_a_row_change_the_task_and_the_page_follows() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(&dir);
-        let id = app.agenda_store.create_task("Tidy up".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        let id = app.features.agenda_mut().store.create_task("Tidy up".into(), String::new(), fenix_agenda::Priority::Medium, None);
         app.open_agenda_page(Some(Tab::List));
         press(&mut app, "s");
         press(&mut app, "2");
-        assert_eq!(app.agenda_store.task(id).unwrap().status, Status::InProgress);
+        assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::InProgress);
         press(&mut app, "t");
-        assert!(app.agenda_store.active_timer.is_some());
+        assert!(app.features.agenda().store.active_timer.is_some());
         press(&mut app, "c");
         press(&mut app, "2");
-        assert_eq!(app.agenda_store.task(id).unwrap().category.as_deref(), Some("ops"));
+        assert_eq!(app.features.agenda().store.task(id).unwrap().category.as_deref(), Some("ops"));
         assert!(page_text(&mut app).contains("#ops"));
     }
 
@@ -596,13 +756,13 @@ mod tests {
         let file = dir.path().join("main.rs");
         std::fs::write(&file, "fn main() {\n    todo!()\n}\n").unwrap();
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.agenda_path = dir.path().join("agenda.json");
-        app.agenda_store = fenix_agenda::AgendaStore::default();
+        app.features.agenda_mut().path = dir.path().join("agenda.json");
+        app.features.agenda_mut().store = fenix_agenda::AgendaStore::default();
         app.test_vim_key(KeyPress::char('j'));
         app.cmd_agenda_task_from_here();
         press(&mut app, "Finish main");
         enter(&mut app);
-        let task = &app.agenda_store.tasks[0];
+        let task = &app.features.agenda().store.tasks[0];
         assert_eq!(task.code.as_ref().map(|c| c.line), Some(2));
         assert!(task.description.contains("todo!()") && task.description.contains("main.rs:2"), "{}", task.description);
     }
@@ -611,42 +771,42 @@ mod tests {
     fn a_clock_left_running_while_away_asks_what_to_keep() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(&dir);
-        let id = app.agenda_store.create_task("Long one".into(), String::new(), fenix_agenda::Priority::Medium, None);
-        app.agenda_store.clock_in(id);
+        let id = app.features.agenda_mut().store.create_task("Long one".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        app.features.agenda_mut().store.clock_in(id);
         let now = chrono::Local::now();
-        let timer = app.agenda_store.active_timer.as_mut().unwrap();
+        let timer = app.features.agenda_mut().store.active_timer.as_mut().unwrap();
         timer.started_at = now - chrono::Duration::hours(5);
         timer.last_seen = Some(now - chrono::Duration::hours(4));
 
         assert!(app.agenda_note_activity(), "the key brings up the question");
-        assert!(app.agenda_gap_asked);
+        assert!(app.features.agenda().gap_asked);
         app.picker_confirm();
-        assert!(app.agenda_store.active_timer.is_none());
-        let entry = app.agenda_store.task(id).unwrap().time_entries[0];
+        assert!(app.features.agenda().store.active_timer.is_none());
+        let entry = app.features.agenda().store.task(id).unwrap().time_entries[0];
         assert_eq!(entry.duration().num_minutes(), 60, "kept until last seen");
 
         app.cmd_agenda_resume();
-        assert_eq!(app.agenda_store.active_timer.as_ref().map(|t| t.task_id), Some(id));
+        assert_eq!(app.features.agenda().store.active_timer.as_ref().map(|t| t.task_id), Some(id));
         assert!(!app.agenda_note_activity(), "just started: nothing to ask");
 
         // A clock that never saw you: nothing to go on, so nothing asked.
-        app.agenda_store.active_timer.as_mut().unwrap().started_at = now - chrono::Duration::hours(5);
-        app.agenda_store.active_timer.as_mut().unwrap().last_seen = None;
+        app.features.agenda_mut().store.active_timer.as_mut().unwrap().started_at = now - chrono::Duration::hours(5);
+        app.features.agenda_mut().store.active_timer.as_mut().unwrap().last_seen = None;
         assert!(!app.agenda_note_activity());
-        assert!(app.agenda_store.active_timer.as_ref().unwrap().last_seen.is_some(), "and now it knows");
+        assert!(app.features.agenda().store.active_timer.as_ref().unwrap().last_seen.is_some(), "and now it knows");
     }
 
     #[test]
     fn the_clock_picker_offers_stop_then_recent_tasks() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(&dir);
-        let a = app.agenda_store.create_task("Older".into(), String::new(), fenix_agenda::Priority::Medium, None);
-        let b = app.agenda_store.create_task("Recent".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        let a = app.features.agenda_mut().store.create_task("Older".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        let b = app.features.agenda_mut().store.create_task("Recent".into(), String::new(), fenix_agenda::Priority::Medium, None);
         let now = chrono::Local::now();
-        app.agenda_store.log_span(a, now - chrono::Duration::hours(5), now - chrono::Duration::hours(4));
-        app.agenda_store.log_span(b, now - chrono::Duration::hours(2), now - chrono::Duration::hours(1));
+        app.features.agenda_mut().store.log_span(a, now - chrono::Duration::hours(5), now - chrono::Duration::hours(4));
+        app.features.agenda_mut().store.log_span(b, now - chrono::Duration::hours(2), now - chrono::Duration::hours(1));
         app.cmd_agenda_toggle_clock();
-        let Some(ActivePicker::AgendaClockIn(state)) = &app.active_picker else { panic!() };
+        let Some(ActivePicker::Feature { badge: "CLOCK", state, .. }) = &app.active_picker else { panic!() };
         let labels: Vec<String> = state.visible_rows(0, 5).map(|(_, c)| c.label.clone()).collect();
         assert_eq!(labels[0], "Resume  ·  Recent");
         assert_eq!(labels[1], "Older");
@@ -656,11 +816,37 @@ mod tests {
     fn deleting_the_open_task_goes_back_to_the_tab() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = app(&dir);
-        app.agenda_store.create_task("Doomed".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        app.features.agenda_mut().store.create_task("Doomed".into(), String::new(), fenix_agenda::Priority::Medium, None);
         app.open_agenda_page(Some(Tab::List));
         enter(&mut app);
         press(&mut app, "DD");
-        assert!(app.agenda_store.tasks.is_empty());
+        assert!(app.features.agenda().store.tasks.is_empty());
         assert!(page_text(&mut app).contains("No tasks yet"));
+    }
+
+    // Through its spec, the way `App` reaches the agenda now.
+
+    #[test]
+    fn the_agenda_contributes_its_commands_and_keys_from_its_spec() {
+        let registry = CommandRegistry::with_builtins();
+        let agenda: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("agenda.")).map(|c| (c.id, c.external())).collect();
+        assert_eq!(agenda.len(), 12, "{agenda:?}");
+        assert!(agenda.contains(&("agenda.toggle_clock", true)) && agenda.contains(&("agenda.from_here", false)));
+        let keys = keymap::leader_keys();
+        assert_eq!(keys.get("agenda.open").map(String::as_str), Some("SPC a a"));
+        assert_eq!(keys.get("agenda.worklogs").map(String::as_str), Some("SPC a w"));
+    }
+
+    #[test]
+    fn the_clock_picker_is_the_agendas_and_a_pick_reaches_it_through_the_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        let a = app.features.agenda_mut().store.create_task("Write".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        app.cmd_agenda_toggle_clock();
+        let Some(ActivePicker::Feature { feature, badge, .. }) = &app.active_picker else { panic!("a feature picker") };
+        assert_eq!((*feature, *badge), ("fenix.agenda", "CLOCK"));
+        app.picker_confirm();
+        assert_eq!(app.features.agenda().store.active_timer.as_ref().map(|t| t.task_id), Some(a));
+        assert!(SPEC.picker_confirm.is_some() && SPEC.picker_cancel.is_some());
     }
 }

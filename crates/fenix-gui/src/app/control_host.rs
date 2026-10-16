@@ -72,7 +72,13 @@ impl App {
             Call::AgendaTasks(params) => Ok(to_value(self.control_tasks(&params))),
             Call::AgendaClockIn(params) => {
                 let id = TaskId(params.task_id);
-                if !self.agenda_store.task(id).is_some_and(|t| !t.archived) {
+                if !self
+                    .features
+                    .agenda()
+                    .store
+                    .task(id)
+                    .is_some_and(|t| !t.archived)
+                {
                     return Err(RpcError::invalid_params(format!(
                         "no agenda task {}",
                         params.task_id
@@ -82,7 +88,7 @@ impl App {
                 Ok(json!({}))
             }
             Call::AgendaClockOut => {
-                if self.agenda_store.active_timer.is_some() {
+                if self.features.agenda().store.active_timer.is_some() {
                     self.agenda_clock_pick(super::agenda_host::ClockPick::Stop);
                 }
                 Ok(json!({}))
@@ -111,7 +117,7 @@ impl App {
     /// (by status, then as arranged within it), only those in
     /// `params.status` when given.
     fn control_tasks(&self, params: &TasksParams) -> TasksResult {
-        let store = &self.agenda_store;
+        let store = &self.features.agenda().store;
         let mut tasks: Vec<&fenix_agenda::Task> = store
             .tasks
             .iter()
@@ -201,13 +207,17 @@ impl App {
         let mut state = StateResult {
             project: self.project_root.as_deref().map(plain),
             agenda_timer: self
-                .agenda_store
+                .features
+                .agenda()
+                .store
                 .active_timer
                 .as_ref()
                 .map(|timer| AgendaTimer {
                     task_id: timer.task_id.0,
                     title: self
-                        .agenda_store
+                        .features
+                        .agenda()
+                        .store
                         .task(timer.task_id)
                         .map(|t| t.title.clone())
                         .unwrap_or_default(),
@@ -528,9 +538,9 @@ mod tests {
     /// the Fenix you use, with one task to clock in on.
     fn isolated(dir: &Path, file: Option<&Path>) -> App {
         let mut app = App::with_file(file.map(|f| f.display().to_string()));
-        app.agenda_path = dir.join("agenda.json");
-        app.agenda_store = fenix_agenda::AgendaStore::default();
-        app.agenda_store.create_task(
+        app.features.agenda_mut().path = dir.join("agenda.json");
+        app.features.agenda_mut().store = fenix_agenda::AgendaStore::default();
+        app.features.agenda_mut().store.create_task(
             "Write the report".into(),
             String::new(),
             fenix_agenda::Priority::Medium,
@@ -737,7 +747,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = isolated(dir.path(), None);
         let low = fenix_agenda::Priority::Low;
-        let store = &mut app.agenda_store;
+        let store = &mut app.features.agenda_mut().store;
         let done = store.create_task("Old".into(), String::new(), low, None);
         store.set_status(done, fenix_agenda::Status::Done);
         let doing = store.create_task("Doing".into(), String::new(), low, None);
@@ -765,9 +775,9 @@ mod tests {
     fn clock_in_and_out_round_trip_through_agenda_json() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = isolated(dir.path(), None);
-        let id = app.agenda_store.tasks[0].id;
+        let id = app.features.agenda().store.tasks[0].id;
         clock_in(&mut app, id.0).unwrap();
-        let saved = fenix_agenda::load(&app.agenda_path);
+        let saved = fenix_agenda::load(&app.features.agenda().path);
         assert_eq!(saved.active_timer.as_ref().map(|t| t.task_id), Some(id));
         let timer = app.control_state().agenda_timer.expect("the clock runs");
         assert_eq!(
@@ -777,15 +787,21 @@ mod tests {
         let since = chrono::DateTime::parse_from_rfc3339(&timer.since).unwrap();
         assert_eq!(since, saved.active_timer.unwrap().started_at);
         // Backdated, so stopping records a span.
-        app.agenda_store.active_timer.as_mut().unwrap().started_at -= chrono::Duration::minutes(5);
+        app.features
+            .agenda_mut()
+            .store
+            .active_timer
+            .as_mut()
+            .unwrap()
+            .started_at -= chrono::Duration::minutes(5);
         app.apply_control(Call::AgendaClockOut).unwrap();
-        let saved = fenix_agenda::load(&app.agenda_path);
+        let saved = fenix_agenda::load(&app.features.agenda().path);
         assert!(saved.active_timer.is_none());
         assert_eq!(saved.task(id).unwrap().time_entries.len(), 1);
         assert_eq!(app.control_state().agenda_timer, None);
         // Stopping a clock that isn't running is fine, and does nothing.
         app.apply_control(Call::AgendaClockOut).unwrap();
-        let saved = fenix_agenda::load(&app.agenda_path);
+        let saved = fenix_agenda::load(&app.features.agenda().path);
         assert_eq!(saved.task(id).unwrap().time_entries.len(), 1);
     }
 
@@ -793,19 +809,19 @@ mod tests {
     fn clock_in_refuses_a_task_that_isnt_there() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = isolated(dir.path(), None);
-        let gone = app.agenda_store.create_task(
+        let gone = app.features.agenda_mut().store.create_task(
             "Gone".into(),
             String::new(),
             fenix_agenda::Priority::Low,
             None,
         );
-        app.agenda_store.archive(gone);
+        app.features.agenda_mut().store.archive(gone);
         for task_id in [99, gone.0] {
             let err = clock_in(&mut app, task_id).unwrap_err();
             assert_eq!(err.code, fenix_control::protocol::code::INVALID_PARAMS);
         }
-        assert!(app.agenda_store.active_timer.is_none());
-        assert!(!app.agenda_path.exists(), "nothing to save");
+        assert!(app.features.agenda().store.active_timer.is_none());
+        assert!(!app.features.agenda().path.exists(), "nothing to save");
     }
 
     /// Sets `path`'s modification time well away from now, so a write
@@ -823,22 +839,25 @@ mod tests {
         app.save_agenda();
         // Fenix's own save isn't a change.
         app.reload_agenda_if_changed();
-        assert_eq!(app.agenda_store.tasks.len(), 1);
-        let mut theirs = fenix_agenda::load(&app.agenda_path);
+        assert_eq!(app.features.agenda().store.tasks.len(), 1);
+        let mut theirs = fenix_agenda::load(&app.features.agenda().path);
         theirs.create_task(
             "From the laptop".into(),
             String::new(),
             fenix_agenda::Priority::High,
             None,
         );
-        fenix_agenda::save(&app.agenda_path, &theirs).unwrap();
-        backdate(&app.agenda_path);
+        fenix_agenda::save(&app.features.agenda().path, &theirs).unwrap();
+        backdate(&app.features.agenda().path);
         app.reload_agenda_if_changed();
-        assert_eq!(app.agenda_store.tasks.len(), 2);
+        assert_eq!(app.features.agenda().store.tasks.len(), 2);
         // And Fenix's next save keeps their task.
-        let first = app.agenda_store.tasks[0].id.0;
+        let first = app.features.agenda().store.tasks[0].id.0;
         clock_in(&mut app, first).unwrap();
-        assert_eq!(fenix_agenda::load(&app.agenda_path).tasks.len(), 2);
+        assert_eq!(
+            fenix_agenda::load(&app.features.agenda().path).tasks.len(),
+            2
+        );
     }
 
     #[test]
@@ -846,10 +865,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut app = isolated(dir.path(), None);
         app.save_agenda();
-        std::fs::write(&app.agenda_path, b"{ half written").unwrap();
-        backdate(&app.agenda_path);
+        std::fs::write(&app.features.agenda().path, b"{ half written").unwrap();
+        backdate(&app.features.agenda().path);
         app.reload_agenda_if_changed();
-        assert_eq!(app.agenda_store.tasks.len(), 1);
+        assert_eq!(app.features.agenda().store.tasks.len(), 1);
         assert!(app
             .status_message
             .as_ref()

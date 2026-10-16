@@ -508,7 +508,7 @@ impl App {
         }
         // A running clock's minutes move on by themselves.
         let minute = chrono::Local::now().timestamp() / 60;
-        if agenda.is_some() && self.agenda_store.active_timer.is_some() && state.minute != minute {
+        if agenda.is_some() && self.features.agenda().store.active_timer.is_some() && state.minute != minute {
             state.minute = minute;
             state.stale = true;
         }
@@ -518,11 +518,11 @@ impl App {
         state.page = match &state.model {
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
-                let ctx = agenda_page::Ctx { store: &self.agenda_store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
+                let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
                 agenda_page::layout(p, &ctx, cols)
             }
             PageModel::Jira(p) => {
-                let in_agenda: HashSet<String> = self.agenda_store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
+                let in_agenda: HashSet<String> = self.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
                 let ctx = jira_page::Ctx {
                     in_agenda: &in_agenda,
                     people: &self.config.jira_users,
@@ -745,12 +745,12 @@ impl App {
             }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
-                let ctx = agenda_page::Ctx { store: &self.agenda_store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
+                let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
                 let action = p.key(key, &ctx);
                 self.agenda_page_action(id, action);
             }
             PageModel::Jira(p) => {
-                let in_agenda: HashSet<String> = self.agenda_store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
+                let in_agenda: HashSet<String> = self.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
                 let ctx = jira_page::Ctx {
                     in_agenda: &in_agenda,
                     people: &self.config.jira_users,
@@ -1279,7 +1279,7 @@ impl App {
     /// doctor have reported in.
     fn hub_projects(&self) -> Vec<HubProject> {
         let open_work: Vec<&fenix_agenda::Task> =
-            self.agenda_store.tasks.iter().filter(|t| !t.archived && t.status != fenix_agenda::Status::Done && t.jira_key().is_some()).collect();
+            self.features.agenda().store.tasks.iter().filter(|t| !t.archived && t.status != fenix_agenda::Status::Done && t.jira_key().is_some()).collect();
         self.known_projects
             .roots()
             .iter()

@@ -10,6 +10,66 @@ use crate::jira_page::{self, Action as JiraAction, Choice, JiraPage, Loaded, Que
 /// How many issues a search lists.
 const SEARCH_LIMIT: u32 = 100;
 
+/// The Jira page's commands and the `SPC j` group. The agenda's Jira
+/// side (linking, sync, worklogs) is the agenda's.
+pub(crate) static SPEC: super::feature::FeatureSpec = {
+    use super::feature::FeatureCommand as C;
+    use super::feature::LeaderEntry::{Bind, Group};
+    super::feature::FeatureSpec {
+        id: "fenix.jira",
+        commands: &[
+            C {
+                id: "jira.open",
+                description: "Open the Jira page: your searches, their issues, a preview",
+                external: true,
+                run: |app| {
+                    app.open_jira_page();
+                },
+            },
+            C { id: "jira.refresh", description: "Run the Jira page's search again", external: false, run: |app| app.jira_refresh() },
+            C { id: "jira.goto_issue", description: "Open any issue by key", external: true, run: |app| app.cmd_jira_goto() },
+            C { id: "jira.search", description: "Search Jira: words, or JQL after :", external: true, run: |app| app.cmd_jira_search() },
+            C { id: "jira.create_issue", description: "Create an issue, with the project's real types and fields", external: true, run: |app| app.cmd_jira_new_issue() },
+        ],
+        leader: &[
+            Group(&['j'], "jira"),
+            Bind(&['j', 'j'], "open jira", "jira.open"),
+            Bind(&['j', 'r'], "refresh jira", "jira.refresh"),
+            Bind(&['j', 'g'], "go to issue", "jira.goto_issue"),
+            Bind(&['j', '/'], "search jira", "jira.search"),
+            Bind(&['j', 'n'], "new issue", "jira.create_issue"),
+        ],
+        local_menu: &[],
+        local_context: None,
+        language_server: None,
+        tasks: None,
+        hover_fallback: None,
+        completion_at_cursor: None,
+        completion_pool_at: None,
+        hover_first: None,
+        picker_confirm: None,
+        picker_cancel: None,
+        modeline_clock: None,
+    }
+};
+
+/// The Jira page keeps its state on the page, so its feature holds none.
+pub(crate) struct JiraHost;
+
+impl super::feature::Feature for JiraHost {
+    fn spec(&self) -> &'static super::feature::FeatureSpec {
+        &SPEC
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
 impl App {
     fn jira_page_mut(&mut self, id: BufferId) -> Option<&mut JiraPage> {
         match self.pages.get_mut(&id).map(|s| {
@@ -90,7 +150,7 @@ impl App {
     /// `I` on a task -> "+ Create a new Jira issue from this task": the
     /// form, filled from the task, linking the two when it's created.
     pub(super) fn jira_new_issue_from_task(&mut self, task: TaskId) {
-        let Some(t) = self.agenda_store.task(task) else { return };
+        let Some(t) = self.features.agenda().store.task(task) else { return };
         let from = (task, t.title.clone(), t.description.clone());
         let id = self.open_jira_page();
         let projects = self.jira_form_projects();
@@ -227,7 +287,7 @@ impl App {
                     self.jira_fetch(buffer, jql);
                 }
                 self.jira_fetch_detail(buffer, key.clone());
-                if self.agenda_store.find_by_key(&key).is_some() {
+                if self.features.agenda().store.find_by_key(&key).is_some() {
                     self.agenda_sync_now(true);
                 }
             }
@@ -262,7 +322,7 @@ impl App {
             A::Detail(key) => self.jira_fetch_detail(id, key),
             A::Refresh => self.jira_refresh(),
             A::OpenTask(key) => {
-                let Some(task) = self.agenda_store.find_by_key(&key) else { return };
+                let Some(task) = self.features.agenda().store.find_by_key(&key) else { return };
                 let page = self.open_agenda_page(None);
                 if let Some(p) = self.agenda_page_mut(page) {
                     p.open_task(task);
@@ -294,7 +354,7 @@ impl App {
             }
             A::Assign { key, id: user, name } => {
                 let k = key.clone();
-                let me = self.agenda_sync.me.clone();
+                let me = self.features.agenda().sync.me.clone();
                 self.jira_write(id, key, move |c| {
                     let user = if user.is_empty() { me.map(Ok).unwrap_or_else(|| c.myself())? } else { user };
                     c.update_assignee(&k, &user).map(|_| format!("{k} assigned to {}", if name.is_empty() { user.as_str() } else { name.as_str() }))
@@ -410,7 +470,7 @@ impl App {
             AgendaSyncEvent::Issues { purpose, result }
         });
         if let Some(task) = clock_after {
-            self.agenda_store.clock_in(task);
+            self.features.agenda_mut().store.clock_in(task);
             self.agenda_save_and_refresh();
         }
         let _ = buffer;
@@ -457,5 +517,14 @@ mod tests {
         app.page_key(KeyPress::named(FenixNamedKey::Enter));
         assert_eq!(app.config.jira_projects, vec![("FEN".to_string(), "Fenix".to_string())]);
         assert!(std::fs::read_to_string(dir.path().join("settings.toml")).unwrap().contains("FEN"));
+    }
+
+    #[test]
+    fn jira_contributes_its_commands_and_keys_from_its_spec() {
+        let registry = CommandRegistry::with_builtins();
+        let jira: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("jira.")).map(|c| (c.id, c.external())).collect();
+        assert_eq!(jira, [("jira.open", true), ("jira.refresh", false), ("jira.goto_issue", true), ("jira.search", true), ("jira.create_issue", true)]);
+        assert_eq!(keymap::leader_keys().get("jira.search").map(String::as_str), Some("SPC j /"));
+        assert!(app().features.specs().any(|spec| spec.id == "fenix.jira"));
     }
 }

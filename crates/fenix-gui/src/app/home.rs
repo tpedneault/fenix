@@ -163,9 +163,9 @@ impl App {
         // Open tasks the way the agenda's Today puts them: the one on the
         // clock, then in progress, then what's due within a week, then
         // what's ready to start. Waiting and blocked ones stay on the page.
-        let live = self.agenda_store.active_timer.as_ref().map(|t| (t.task_id, now.signed_duration_since(t.started_at)));
+        let live = self.features.agenda().store.active_timer.as_ref().map(|t| (t.task_id, now.signed_duration_since(t.started_at)));
         let week = now.date_naive() + chrono::Duration::days(7);
-        let store = &self.agenda_store;
+        let store = &self.features.agenda().store;
         let mut open: Vec<&fenix_agenda::Task> = store
             .tasks
             .iter()

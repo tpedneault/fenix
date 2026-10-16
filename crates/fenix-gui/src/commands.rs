@@ -218,29 +218,14 @@ impl CommandRegistry {
         registry.register("git.merge_view", "Open the Merge view (resolve conflicts side by side)", cmd_git_merge_view);
         registry.register("git.merge_close", "Close the Merge view", cmd_git_merge_close);
         registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
-        registry.external("jira.open", "Open the Jira page: your searches, their issues, a preview", |app| { app.open_jira_page(); });
-        registry.register("jira.refresh", "Run the Jira page's search again", cmd_jira_refresh);
-        registry.external("jira.goto_issue", "Open any issue by key", |app| app.cmd_jira_goto());
-        registry.external("jira.search", "Search Jira: words, or JQL after :", |app| app.cmd_jira_search());
-        registry.external("jira.create_issue", "Create an issue, with the project's real types and fields", |app| app.cmd_jira_new_issue());
+        registry.feature(&crate::app::JIRA_SPEC);
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
         registry.feature(&crate::app::EMBEDDED_SPEC);
         registry.feature(&crate::app::NOTEBOOK_SPEC);
         registry.feature(&crate::app::DIAGRAMS_SPEC);
         registry.register("notebook.preview", "The reading view, beside the Markdown (again closes it)", |ctx| ctx.app.open_reading_view(false));
         registry.register("notebook.read", "Read this Markdown rendered, in its place (again goes back)", |ctx| ctx.app.open_reading_view(true));
-        registry.external("agenda.open", "Open the agenda page where it was left", |app| app.cmd_agenda_open());
-        registry.external("agenda.board", "Open the agenda on its board", |app| app.cmd_agenda_board());
-        registry.external("agenda.list", "Open the agenda on its list", |app| app.cmd_agenda_list());
-        registry.external("agenda.report", "Open the agenda on this week's time", |app| app.cmd_agenda_report());
-        registry.external("agenda.new_task", "Add a task to the agenda", |app| app.cmd_agenda_new_task());
-        registry.register("agenda.from_here", "Add a task about the selection or line here", cmd_agenda_from_here);
-        registry.external("agenda.find", "Search every task", |app| app.cmd_agenda_find());
-        registry.external("agenda.toggle_clock", "Stop the clock, resume the last task, or switch to another", |app| app.cmd_agenda_toggle_clock());
-        registry.external("agenda.resume", "Start the clock again on what you worked on last", |app| app.cmd_agenda_resume());
-        registry.external("agenda.import", "Pick Jira issues assigned to you to add to the agenda", |app| app.cmd_agenda_import());
-        registry.external("agenda.sync", "Refresh linked tasks from Jira and send pending changes", |app| app.cmd_agenda_sync());
-        registry.external("agenda.worklogs", "Review unsent time on linked tasks and send it to Jira", |app| app.cmd_agenda_worklogs());
+        registry.feature(&crate::app::AGENDA_SPEC);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);
         registry.register("window.navigate_left", "Move focus to the window on the left", cmd_navigate_left);
@@ -613,16 +598,8 @@ fn cmd_git_close(ctx: &mut CommandCtx) {
     ctx.app.git_session_close();
 }
 
-fn cmd_jira_refresh(ctx: &mut CommandCtx) {
-    ctx.app.jira_refresh();
-}
-
 fn cmd_leader_local(ctx: &mut CommandCtx) {
     ctx.app.start_local_leader();
-}
-
-fn cmd_agenda_from_here(ctx: &mut CommandCtx) {
-    ctx.app.cmd_agenda_task_from_here();
 }
 
 fn cmd_split_vertical(ctx: &mut CommandCtx) {
