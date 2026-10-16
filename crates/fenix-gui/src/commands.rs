@@ -300,11 +300,7 @@ impl CommandRegistry {
         registry.external("workspace.switch", "Switch to an open workspace by name", |app| app.picker_switch_workspace());
         registry.external("workspace.find", "Open a configured workspace by name, creating it if it isn't already open", |app| app.start_workspace_launcher_picker());
         registry.register("workspace.rename", "Rename the active workspace", cmd_rename_workspace);
-        registry.register(
-            "completion.refresh_tags",
-            "Refresh Tcl completion tags (re-scans the project with ctags)",
-            cmd_completion_refresh_tags,
-        );
+        registry.feature(&crate::app::TCL_SPEC);
         registry.register(
             "code.lsp_rename",
             "Rename the symbol under the cursor across the project (LSP)",
@@ -324,11 +320,6 @@ impl CommandRegistry {
             "code.format_buffer",
             "Reindent the whole focused buffer structurally, language-independent (Emacs' indent-region)",
             cmd_format_buffer,
-        );
-        registry.register(
-            "code.symbols",
-            "Fuzzy-find a Tcl definition by its fully-qualified name and jump to it",
-            cmd_symbols,
         );
         registry.register("code.toggle_checkbox", "Toggle the GFM task checkbox on the current line", cmd_toggle_checkbox);
         registry.register("code.outline", "Fuzzy-find a Markdown heading and jump to it", cmd_outline);
@@ -766,10 +757,6 @@ fn cmd_rename_workspace(ctx: &mut CommandCtx) {
     ctx.app.start_rename_workspace_prompt();
 }
 
-fn cmd_completion_refresh_tags(ctx: &mut CommandCtx) {
-    ctx.app.refresh_completion_tags();
-}
-
 fn cmd_lsp_rename(ctx: &mut CommandCtx) {
     ctx.app.open_lsp_rename_prompt();
 }
@@ -795,10 +782,6 @@ fn cmd_toggle_checkbox(ctx: &mut CommandCtx) {
 
 fn cmd_outline(ctx: &mut CommandCtx) {
     ctx.app.picker_outline();
-}
-
-fn cmd_symbols(ctx: &mut CommandCtx) {
-    ctx.app.picker_symbols();
 }
 
 fn cmd_jump_back(ctx: &mut CommandCtx) {

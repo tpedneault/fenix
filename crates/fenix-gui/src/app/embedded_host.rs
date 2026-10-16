@@ -60,6 +60,9 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     local_context: Some(local_context),
     language_server: Some(language_server),
     tasks: Some(tasks),
+    hover: None,
+    completion_at_cursor: None,
+    completion_pool_at: None,
 };
 
 /// Anything inside an Arduino sketch gets its `SPC m` menu.
