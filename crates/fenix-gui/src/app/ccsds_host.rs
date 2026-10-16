@@ -19,6 +19,80 @@ use crate::hex_page::{self, HexPage};
 use crate::packet_page::{self, DecodeAs, PacketPage};
 use crate::time_page::{self, TimePage};
 
+/// CCSDS's commands and its `SPC f x`. Its `SPC k` keys stay in the
+/// keymap: that group is the mission pack's, shared with the MIB.
+pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpec {
+    id: "fenix.ccsds",
+    commands: &[
+        super::feature::FeatureCommand { id: "ccsds.time", description: "Time converter: on-board time codes, UTC, TAI, GPS, CDS", external: true, run: |app| app.cmd_ccsds_time() },
+        super::feature::FeatureCommand { id: "ccsds.hex", description: "Show the file as hex (view only)", external: false, run: |app| app.cmd_hex_view() },
+        super::feature::FeatureCommand { id: "ccsds.recording", description: "Open a telemetry recording: packets, gaps, checks, parameters over time", external: false, run: |app| app.cmd_ccsds_recording() },
+        super::feature::FeatureCommand { id: "ccsds.live", description: "Follow a live telemetry source: TCP, UDP, a file being written, NATS", external: true, run: |app| app.cmd_ccsds_live() },
+        super::feature::FeatureCommand { id: "ccsds.standards", description: "The CCSDS and ECSS standards, and their PDFs", external: true, run: |app| app.cmd_ccsds_standards() },
+        super::feature::FeatureCommand { id: "ccsds.decode", description: "Decode the hex under the cursor, selected or on the clipboard: packets, frames, CLTUs", external: false, run: |app| app.cmd_ccsds_decode() },
+    ],
+    leader: &[super::feature::LeaderEntry::Bind(&['f', 'x'], "hex view", "ccsds.hex")],
+    local_menu: &[],
+    local_context: None,
+    language_server: None,
+    tasks: None,
+    hover_fallback: None,
+    completion_at_cursor: None,
+    completion_pool_at: None,
+    hover_first: Some(|app| app.ccsds_hex_hover()),
+    picker_confirm: Some(|app, pick| {
+        if let Some(&source) = pick.downcast_ref::<usize>() {
+            app.open_live(source);
+        }
+    }),
+    modeline_clock: Some(|app| app.mission_clock_text()),
+};
+
+/// What CCSDS keeps between calls: each stream page's source, the
+/// mission clock's last reading, and the standards searches under way.
+///
+/// Its code is still `App` methods (its pages are core `PageModel`s), so
+/// it reaches this by type (`App::ccsds`). That's safe because all its
+/// entry points are spec functions, which run with it in place, and it
+/// has no instance hooks.
+#[derive(Default)]
+pub(crate) struct CcsdsHost {
+    /// Where each stream page's packets come from.
+    pub(super) stream_sources: HashMap<BufferId, super::stream_host::StreamSource>,
+    /// The mission clock's text and the quarter-second it was worked out
+    /// for.
+    pub(super) mission_clock: Option<(i64, String)>,
+    /// Each standards-search document open on the PDF worker: its page
+    /// and which standard it is.
+    pub(super) standards_search: HashMap<fenix_pdf::PdfDocKey, (BufferId, usize)>,
+    /// Each standards page's query under way.
+    pub(super) standards_query: HashMap<BufferId, String>,
+}
+
+impl super::feature::Feature for CcsdsHost {
+    fn spec(&self) -> &'static super::feature::FeatureSpec {
+        &SPEC
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl App {
+    pub(super) fn ccsds(&self) -> &CcsdsHost {
+        self.features.get::<CcsdsHost>().expect("CCSDS has no instance hooks, so it's always in place")
+    }
+
+    pub(super) fn ccsds_mut(&mut self) -> &mut CcsdsHost {
+        self.features.get_mut::<CcsdsHost>().expect("CCSDS has no instance hooks, so it's always in place")
+    }
+}
+
 /// Everything a project says about how its bytes are laid out.
 #[derive(Debug, Clone)]
 pub(crate) struct Mission {
@@ -364,9 +438,9 @@ impl App {
     /// to the page as each is read.
     fn standards_search(&mut self, id: BufferId, query: String) {
         // A search already under way for this page is dropped.
-        let old: Vec<fenix_pdf::PdfDocKey> = self.standards_search.iter().filter(|(_, (page, _))| *page == id).map(|(k, _)| *k).collect();
+        let old: Vec<fenix_pdf::PdfDocKey> = self.ccsds().standards_search.iter().filter(|(_, (page, _))| *page == id).map(|(k, _)| *k).collect();
         for key in old {
-            self.standards_search.remove(&key);
+            self.ccsds_mut().standards_search.remove(&key);
             self.pdf_send(fenix_pdf::PdfRequest::Close { key });
         }
         let Some(PageModel::Standards(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
@@ -381,10 +455,10 @@ impl App {
         self.pdf_worker_ready();
         for (standard, path) in files {
             let key = fenix_pdf::PdfDocKey::new();
-            self.standards_search.insert(key, (id, standard));
+            self.ccsds_mut().standards_search.insert(key, (id, standard));
             self.pdf_send(fenix_pdf::PdfRequest::Open { key, path });
         }
-        self.standards_query.insert(id, query);
+        self.ccsds_mut().standards_query.insert(id, query);
     }
 
     /// A PDF worker reply for a standards search; whether it was one.
@@ -394,8 +468,8 @@ impl App {
             R::Opened { key, .. } | R::OpenFailed { key, .. } | R::SearchResults { key, .. } => *key,
             _ => return false,
         };
-        let Some(&(page, standard)) = self.standards_search.get(&key) else { return false };
-        let query = self.standards_query.get(&page).cloned().unwrap_or_default();
+        let Some(&(page, standard)) = self.ccsds().standards_search.get(&key) else { return false };
+        let query = self.ccsds().standards_query.get(&page).cloned().unwrap_or_default();
         let found = |app: &mut App, hits: Vec<(u32, String)>, done: bool| {
             if let Some(PageModel::Standards(p)) = app.pages.get_mut(&page).map(|s| &mut s.model) {
                 p.found(standard, hits, done);
@@ -411,13 +485,13 @@ impl App {
                 self.pdf_send(fenix_pdf::PdfRequest::Search { key, request_id: 0, query, match_case, from_page: 0 });
             }
             R::OpenFailed { .. } => {
-                self.standards_search.remove(&key);
+                self.ccsds_mut().standards_search.remove(&key);
                 found(self, Vec::new(), true);
             }
             R::SearchResults { matches, done, .. } => {
                 found(self, matches.iter().map(|m| (m.page_index, m.context.clone())).collect(), *done);
                 if *done {
-                    self.standards_search.remove(&key);
+                    self.ccsds_mut().standards_search.remove(&key);
                     self.pdf_send(fenix_pdf::PdfRequest::Close { key });
                 }
             }
@@ -657,7 +731,7 @@ impl App {
             return None;
         }
         let tick = chrono::Utc::now().timestamp_millis() / 250;
-        if let Some((at, text)) = &self.mission_clock {
+        if let Some((at, text)) = &self.ccsds().mission_clock {
             if *at == tick {
                 return Some(text.clone());
             }
@@ -665,7 +739,7 @@ impl App {
         let m = self.mission(None);
         let tai = fenix_ccsds::time::utc_to_tai(chrono::Utc::now().naive_utc(), &m.profile.leap);
         let text = format!("OBT {}", time_page::mission_code(tai, &m.profile));
-        self.mission_clock = Some((tick, text.clone()));
+        self.ccsds_mut().mission_clock = Some((tick, text.clone()));
         Some(text)
     }
 
@@ -719,7 +793,7 @@ impl App {
         let id = self.focused_buffer_id();
         match self.pages.get(&id).map(|s| &s.model) {
             Some(PageModel::Hex(p)) => Some(p.path.clone()),
-            Some(PageModel::Stream(_)) => match self.stream_sources.get(&id) {
+            Some(PageModel::Stream(_)) => match self.ccsds().stream_sources.get(&id) {
                 Some(super::stream_host::StreamSource::File(path, _)) => Some(path.clone()),
                 _ => None,
             },
@@ -913,5 +987,44 @@ mod tests {
         broken[2 + 8 + 1] ^= 0x41;
         let (root, _) = decode_bytes(&broken, DecodeAs::Auto, Some(&set), &m);
         assert!(root.find("code block 2").and_then(|b| b.check.clone()).is_some_and(|c| c.is_bad()));
+    }
+
+    // Through its spec, the way `App` reaches CCSDS now.
+
+    #[test]
+    fn ccsds_contributes_its_commands_and_hex_key_from_its_spec() {
+        let registry = CommandRegistry::with_builtins();
+        let ccsds: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("ccsds.")).map(|c| (c.id, c.external())).collect();
+        assert_eq!(ccsds.len(), 6, "{ccsds:?}");
+        for id in ["ccsds.time", "ccsds.live", "ccsds.standards"] {
+            assert!(ccsds.contains(&(id, true)), "{id} stays external");
+        }
+        assert_eq!(keymap::leader_keys().get("ccsds.hex").map(String::as_str), Some("SPC f x"));
+    }
+
+    #[test]
+    fn the_mission_clock_comes_through_the_spec_and_is_kept_on_the_host() {
+        let mut app = App::with_file(None);
+        let clock = SPEC.modeline_clock.unwrap();
+        assert!(clock(&mut app).is_none(), "off by default");
+        app.config.ccsds_clock = Some(true);
+        let text = clock(&mut app).expect("on");
+        assert!(text.starts_with("OBT "), "{text}");
+        assert_eq!(app.ccsds().mission_clock.as_ref().map(|(_, t)| t.as_str()), Some(text.as_str()));
+    }
+
+    #[test]
+    fn a_live_source_picked_from_its_picker_opens_a_stream_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let recording = dir.path().join("live.bin");
+        std::fs::write(&recording, []).unwrap();
+        let mut app = App::with_file(None);
+        app.config.ccsds_sources = vec![vec!["sim".to_string(), format!("file://{}", recording.display())]];
+        app.cmd_ccsds_live();
+        assert!(matches!(app.active_picker, Some(ActivePicker::Feature { feature: "fenix.ccsds", badge: "SOURCE", .. })));
+        app.picker_confirm();
+        let id = app.focused_buffer_id();
+        assert!(matches!(app.pages.get(&id).map(|s| &s.model), Some(PageModel::Stream(_))));
+        assert!(matches!(app.ccsds().stream_sources.get(&id), Some(super::super::stream_host::StreamSource::Live(_))));
     }
 }

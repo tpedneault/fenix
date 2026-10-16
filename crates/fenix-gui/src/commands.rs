@@ -329,12 +329,7 @@ impl CommandRegistry {
         registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
         registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
         registry.feature(&crate::app::MIB_SPEC);
-        registry.external("ccsds.time", "Time converter: on-board time codes, UTC, TAI, GPS, CDS", |app| app.cmd_ccsds_time());
-        registry.register("ccsds.hex", "Show the file as hex (view only)", cmd_ccsds_hex);
-        registry.register("ccsds.recording", "Open a telemetry recording: packets, gaps, checks, parameters over time", |ctx| ctx.app.cmd_ccsds_recording());
-        registry.external("ccsds.live", "Follow a live telemetry source: TCP, UDP, a file being written, NATS", |app| app.cmd_ccsds_live());
-        registry.external("ccsds.standards", "The CCSDS and ECSS standards, and their PDFs", |app| app.cmd_ccsds_standards());
-        registry.register("ccsds.decode", "Decode the hex under the cursor, selected or on the clipboard: packets, frames, CLTUs", cmd_ccsds_decode);
+        registry.feature(&crate::app::CCSDS_SPEC);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
         registry.register("view.reset_font_size", "Reset the body text size to the default", cmd_reset_font_size);
@@ -778,14 +773,6 @@ fn cmd_jump_back(ctx: &mut CommandCtx) {
 
 fn cmd_jump_forward(ctx: &mut CommandCtx) {
     ctx.app.jump_forward();
-}
-
-fn cmd_ccsds_hex(ctx: &mut CommandCtx) {
-    ctx.app.cmd_hex_view();
-}
-
-fn cmd_ccsds_decode(ctx: &mut CommandCtx) {
-    ctx.app.cmd_ccsds_decode();
 }
 
 fn cmd_increase_font_size(ctx: &mut CommandCtx) {

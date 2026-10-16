@@ -47,6 +47,9 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     hover_fallback: Some(builtin_hover),
     completion_at_cursor: Some(option_completion),
     completion_pool_at: Some(subcommand_candidates),
+    hover_first: None,
+    picker_confirm: None,
+    modeline_clock: None,
 };
 
 /// A Tcl file gets the Tcl `SPC m` menu (which the MIB fills too).

@@ -503,7 +503,7 @@ impl App {
         let page = StreamPage::new(key, title, false);
         let stop = page.stop.clone();
         let id = self.open_page(PageModel::Stream(Box::new(page)));
-        self.stream_sources.insert(id, StreamSource::File(path.clone(), framing.clone()));
+        self.ccsds_mut().stream_sources.insert(id, StreamSource::File(path.clone(), framing.clone()));
         self.page_spawn(move |send| read_recording(path, framing, set, mission, id, send, stop));
     }
 
@@ -541,8 +541,8 @@ impl App {
             self.set_error("no live sources -- add one in the project's CCSDS settings (ccsds.sources)");
             return;
         }
-        let candidates = sources.iter().enumerate().map(|(i, s)| fenix_picker::Candidate::new(format!("{}  {}  {}", s.name, s.address, s.subject), i)).collect();
-        self.enter_picker(ActivePicker::CcsdsSource(fenix_picker::PickerState::new(candidates)));
+        let candidates = sources.iter().enumerate().map(|(i, s)| super::feature::FeaturePick::candidate(format!("{}  {}  {}", s.name, s.address, s.subject), i)).collect();
+        self.enter_picker(ActivePicker::Feature { feature: super::ccsds_host::SPEC.id, badge: "SOURCE", state: fenix_picker::PickerState::new(candidates) });
     }
 
     pub(crate) fn open_live(&mut self, index: usize) {
@@ -554,7 +554,7 @@ impl App {
         let page = StreamPage::new(key, src.name.clone(), true);
         let stop = page.stop.clone();
         let id = self.open_page(PageModel::Stream(Box::new(page)));
-        self.stream_sources.insert(id, StreamSource::Live(src.clone()));
+        self.ccsds_mut().stream_sources.insert(id, StreamSource::Live(src.clone()));
         let proxy = self.event_proxy.clone();
         if proxy.is_none() {
             // Tests: no event loop to receive on.
@@ -634,7 +634,7 @@ impl App {
                 if let Some(p) = self.stream_page(id) {
                     p.close();
                 }
-                self.stream_sources.remove(&id);
+                self.ccsds_mut().stream_sources.remove(&id);
                 self.close_page(id);
             }
             A::Inspect(row) => {
@@ -652,7 +652,7 @@ impl App {
                 self.open_packet_page_as(unit.to_vec(), source, profile);
             }
             A::Hex(offset) => {
-                if let Some(StreamSource::File(path, _)) = self.stream_sources.get(&id).cloned() {
+                if let Some(StreamSource::File(path, _)) = self.ccsds().stream_sources.get(&id).cloned() {
                     self.open_hex_view(path);
                     let hex = self.focused_buffer_id();
                     if let Some(PageModel::Hex(h)) = self.pages.get_mut(&hex).map(|s| &mut s.model) {
@@ -678,7 +678,7 @@ impl App {
             }
             A::Write(kind) => self.stream_write(id, kind),
             A::Reframe => {
-                let Some(StreamSource::File(path, framing)) = self.stream_sources.get(&id).cloned() else { return };
+                let Some(StreamSource::File(path, framing)) = self.ccsds().stream_sources.get(&id).cloned() else { return };
                 let mission = self.mission(None);
                 let next = match framing {
                     None => Some(Framing::Packets),
@@ -690,7 +690,7 @@ impl App {
                 if let Some(p) = self.stream_page(id) {
                     p.close();
                 }
-                self.stream_sources.remove(&id);
+                self.ccsds_mut().stream_sources.remove(&id);
                 self.close_page(id);
                 self.open_recording(path, next);
             }
@@ -718,7 +718,7 @@ impl App {
     /// Writes what the page shows beside the recording (or into the
     /// project's `recordings/` for a live source).
     fn stream_write(&mut self, id: BufferId, kind: stream_page::Write) {
-        let base = match self.stream_sources.get(&id) {
+        let base = match self.ccsds().stream_sources.get(&id) {
             Some(StreamSource::File(path, _)) => path.with_extension(""),
             Some(StreamSource::Live(src)) => {
                 let dir = self.project_root.clone().unwrap_or_else(|| PathBuf::from(".")).join("recordings");

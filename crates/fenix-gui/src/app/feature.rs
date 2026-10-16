@@ -22,6 +22,7 @@
 
 use std::any::Any;
 
+use super::ccsds_host::CcsdsHost;
 use super::docker_host::DockerHost;
 use super::embedded_host::EmbeddedHost;
 use super::mib_host::MibHost;
@@ -75,6 +76,15 @@ pub(crate) struct FeatureSpec {
     /// `at`, replacing the general pool (an ensemble's subcommands).
     pub completion_pool_at:
         Option<fn(&App, usize) -> Vec<fenix_picker::Candidate<completion::Item>>>,
+    /// What `K` shows for the word under the cursor, ahead of any
+    /// language server -- after the instances' own `Feature::hover`.
+    pub hover_first: Option<fn(&mut App) -> Option<String>>,
+    /// A row of this feature's picker was chosen -- instead of
+    /// `Feature::picker_confirm`.
+    pub picker_confirm: Option<fn(&mut App, &dyn Any)>,
+    /// The modeline's clock text, in place of the wall clock (the
+    /// mission clock).
+    pub modeline_clock: Option<fn(&mut App) -> Option<String>>,
 }
 
 /// A completion in progress: where its prefix starts, the prefix, and
@@ -92,10 +102,13 @@ pub(crate) type LanguageServerFn = fn(
     fenix_syntax::LanguageId,
 ) -> Option<Result<fenix_project::tools::CommandSpec, String>>;
 
-// The queries above live on the spec, not the instance, because they need
-// no state -- and a feature's instance is out of `App` while one of its own
-// hooks runs. A hook that opens a file or restarts a language server would
-// otherwise ask every feature but itself.
+// The functions above live on the spec, not the instance, and run with
+// the feature in place: a feature's instance is out of `App` while one
+// of its own hooks runs, so anything a hook sets off that asks the
+// features (a file opened, a language server restarted) would skip it.
+// A feature whose code reaches its state by type (`Features::get`) --
+// CCSDS, whose pages are still core -- uses spec functions for every
+// entry point, so its state is always in place when that code runs.
 
 /// Something that happened that features may want to follow up on. One
 /// that arrives while a feature is out (inside one of its own hooks) is
@@ -295,6 +308,7 @@ impl Features {
             Some(Box::new(EmbeddedHost::default())),
             Some(Box::new(TclHost::default())),
             Some(Box::new(MibHost::default())),
+            Some(Box::new(CcsdsHost::default())),
         ];
         let specs = slots
             .iter()

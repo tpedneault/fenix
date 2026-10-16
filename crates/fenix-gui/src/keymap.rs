@@ -212,7 +212,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('s')], "save", "file.save");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('j')], "dired-jump", "explorer.jump");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('t')], "table view", "table.toggle");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('x')], "hex view", "ccsds.hex");
+        insert_feature_keys(&mut t, spc, &crate::app::CCSDS_SPEC);
         // Global rather than under `SPC m`: `SPC m` only has the Arduino
         // menu inside a sketch, and your first sketch has to come from
         // somewhere.
