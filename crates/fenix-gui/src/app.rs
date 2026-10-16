@@ -2100,6 +2100,18 @@ pub enum FenixUserEvent {
     /// A project page's background job reporting in -- see
     /// `pages::PageEvent`.
     Page(pages::PageEvent),
+    /// A background `ctags` scan of `root` finished, from the thread
+    /// `start_tcl_tags_scan` spawned. `scan` drops a result some newer
+    /// scan has since superseded.
+    TclTagsScanned { scan: u64, root: PathBuf, tags: Vec<fenix_completion::ctags::TagEntry> },
+}
+
+/// See `App::tcl_tags_scan`.
+struct TclTagsScan {
+    id: u64,
+    root: PathBuf,
+    /// A manual `SPC m T` refresh, which reports its count when it lands.
+    report: bool,
 }
 
 impl FenixUserEvent {
@@ -2142,6 +2154,7 @@ impl FenixUserEvent {
             Self::PdfResponse { .. } => "PdfResponse",
             Self::Embedded { .. } => "Embedded",
             Self::Page { .. } => "Page",
+            Self::TclTagsScanned { .. } => "TclTagsScanned",
         }
     }
 }
@@ -6062,6 +6075,14 @@ pub struct App {
     /// conversion throws away. Same staleness rule and `SPC c r` reset as
     /// `tcl_candidates_cache`.
     tcl_tags_cache: Option<(Option<PathBuf>, Vec<fenix_completion::ctags::TagEntry>)>,
+    /// The `ctags` scan running in the background, if any -- a big
+    /// project takes seconds to scan, so `tcl_tags` never waits on it:
+    /// it answers from whatever `tcl_tags_cache` holds (nothing yet, for
+    /// a newly opened project) and the result lands through
+    /// `FenixUserEvent::TclTagsScanned`, which refills both caches and
+    /// redraws so highlighting and completion pick it up.
+    tcl_tags_scan: Option<TclTagsScan>,
+    next_tcl_tags_scan: u64,
     /// Same role as `picker_scroll`, for the completion popup's own
     /// candidate window.
     completion_scroll: usize,
@@ -6920,6 +6941,8 @@ impl App {
             snippet: None,
             tcl_candidates_cache: None,
             tcl_tags_cache: None,
+            tcl_tags_scan: None,
+            next_tcl_tags_scan: 0,
             completion_scroll: 0,
             pending_grep_query: None,
             find_file_prompt: None,
@@ -8668,7 +8691,9 @@ impl App {
     /// is re-read on the same cadence, not independently -- both sources
     /// share one manual refresh (`refresh_completion_tags`/`SPC c r`).
     /// Cloning the cached `Vec` on a cache hit is cheap: dozens to low
-    /// hundreds of small entries.
+    /// hundreds of small entries. Also rebuilt when a background `ctags`
+    /// scan lands (`apply_tcl_tags_scanned` drops this cache), since a
+    /// pool built while the scan was still running has no tags in it.
     fn tcl_candidates(&mut self, root: Option<&Path>) -> Vec<fenix_picker::Candidate<fenix_completion::CompletionItem>> {
         let stale = match &self.tcl_candidates_cache {
             Some((cached_root, _)) => cached_root.as_deref() != root,
@@ -8705,24 +8730,79 @@ impl App {
         self.tcl_candidates_cache.as_ref().expect("just populated above if it was missing").1.clone()
     }
 
-    /// The raw `ctags`-shelled Tcl tag list (name/file/line preserved),
-    /// rebuilding only when `root` differs from what's cached -- same
-    /// cost tradeoff and cache shape as `tcl_candidates`, which this now
+    /// The raw `ctags`-shelled Tcl tag list (name/file/line preserved)
+    /// for `root` -- same cache shape as `tcl_candidates`, which this
     /// backs (see its own doc comment) alongside the `SPC c s` symbol
     /// picker (`picker_symbols`), which needs the location `tcl_
     /// candidates`'s `CompletionItem` conversion throws away. `None`
     /// root (no known project) always yields an empty list without
-    /// shelling anything, same as `tcl_candidates` did inline before.
+    /// shelling anything.
+    ///
+    /// Never blocks on `ctags`: when nothing is cached for `root` yet,
+    /// this starts a background scan (once -- not again while it's in
+    /// flight) and answers with an empty list in the meantime; the scan
+    /// landing refills the caches and redraws.
     fn tcl_tags(&mut self, root: Option<&Path>) -> Vec<fenix_completion::ctags::TagEntry> {
-        let stale = match &self.tcl_tags_cache {
-            Some((cached_root, _)) => cached_root.as_deref() != root,
-            None => true,
+        let cached = |cache: &Option<(Option<PathBuf>, Vec<fenix_completion::ctags::TagEntry>)>| {
+            cache.as_ref().is_some_and(|(cached_root, _)| cached_root.as_deref() == root)
         };
-        if stale {
-            let tags = root.map(|r| fenix_completion::ctags::run(r, "Tcl")).unwrap_or_default();
-            self.tcl_tags_cache = Some((root.map(PathBuf::from), tags));
+        if !cached(&self.tcl_tags_cache) {
+            match root {
+                None => self.tcl_tags_cache = Some((None, Vec::new())),
+                Some(root) => self.start_tcl_tags_scan(root, false),
+            }
         }
-        self.tcl_tags_cache.as_ref().expect("just populated above if it was missing").1.clone()
+        match &self.tcl_tags_cache {
+            Some((cached_root, tags)) if cached_root.as_deref() == root => tags.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Scans `root` with `ctags` off the UI thread, reporting back via
+    /// `FenixUserEvent::TclTagsScanned`. A scan of the same root already
+    /// in flight is left to finish, unless this is a manual refresh
+    /// (`report`), which starts over so it sees files saved since.
+    fn start_tcl_tags_scan(&mut self, root: &Path, report: bool) {
+        if let Some(scan) = &self.tcl_tags_scan {
+            if scan.root == root && !report {
+                return;
+            }
+        }
+        self.next_tcl_tags_scan += 1;
+        let id = self.next_tcl_tags_scan;
+        let root = root.to_path_buf();
+        self.tcl_tags_scan = Some(TclTagsScan { id, root: root.clone(), report });
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let tags = fenix_completion::ctags::run(&root, "Tcl");
+                    let _ = proxy.send_event(FenixUserEvent::TclTagsScanned { scan: id, root, tags });
+                });
+            }
+            None => {
+                // No event loop to report back through (every test) --
+                // scan and apply inline, same posture as `explorer_navigate`.
+                let tags = fenix_completion::ctags::run(&root, "Tcl");
+                self.apply_tcl_tags_scanned(id, root, tags);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::TclTagsScanned`: swaps in the new tags, unless a
+    /// newer scan has superseded this one, and drops the derived
+    /// completion pool so the next frame's highlighting and completion
+    /// rebuild from them.
+    fn apply_tcl_tags_scanned(&mut self, id: u64, root: PathBuf, tags: Vec<fenix_completion::ctags::TagEntry>) {
+        if self.tcl_tags_scan.as_ref().is_none_or(|scan| scan.id != id) {
+            return;
+        }
+        let scan = self.tcl_tags_scan.take().expect("checked just above");
+        let count = tags.len();
+        self.tcl_tags_cache = Some((Some(root.clone()), tags));
+        self.tcl_candidates_cache = None;
+        if scan.report {
+            self.set_message(format!("refreshed Tcl completion tags for {} -- {count} definition(s) found", root.display()));
+        }
     }
 
     /// `SPC c s` -- fuzzy-find any known Tcl definition (proc/namespace)
@@ -9107,12 +9187,13 @@ impl App {
     }
 
     /// `SPC c r` -- clears the cached Tcl completion candidates *and*
-    /// eagerly re-shells `ctags` right away (rather than leaving it to
-    /// the next `sync_completion`/`force_open_completion` call to
-    /// trigger lazily), so pressing this key has an immediate, visible
-    /// result: an `eprintln!` reporting either how many definitions were
-    /// found or, if there's no known project root at all, that there
-    /// was nothing to scan. `ctags::run` itself already reports *why* a
+    /// eagerly re-shells `ctags` right away in the background (rather
+    /// than leaving it to the next `sync_completion`/`force_open_
+    /// completion` call to trigger lazily), so pressing this key has a
+    /// visible result: a message reporting how many definitions were
+    /// found once the scan lands, or, if there's no known project root
+    /// at all, that there was nothing to scan. The previous tags keep
+    /// serving completion and highlighting until the new ones arrive. `ctags::run` itself already reports *why* a
     /// scan came back empty (missing binary, non-zero exit, its stderr,
     /// ...) -- this is the "did the refresh actually do anything"
     /// summary on top of that, since a manually-triggered action with no
@@ -9121,11 +9202,12 @@ impl App {
     /// the plan's Scope.
     pub(crate) fn refresh_completion_tags(&mut self) {
         self.tcl_candidates_cache = None;
-        self.tcl_tags_cache = None;
         match self.project_root.clone() {
             Some(root) => {
-                let count = self.tcl_tags(Some(&root)).len();
-                self.set_message(format!("refreshed Tcl completion tags for {} -- {count} definition(s) found", root.display()));
+                if self.event_proxy.is_some() {
+                    self.set_message(format!("scanning {} for Tcl definitions...", root.display()));
+                }
+                self.start_tcl_tags_scan(&root, true);
             }
             None => {
                 self.set_error(
@@ -19618,6 +19700,7 @@ impl App {
             FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
             FenixUserEvent::Embedded(event) => self.apply_embedded_event(event),
             FenixUserEvent::Page(event) => self.apply_page_event(event),
+            FenixUserEvent::TclTagsScanned { scan, root, tags } => self.apply_tcl_tags_scanned(scan, root, tags),
             // A new window asked for here is opened by `about_to_wait`:
             // that needs an `&ActiveEventLoop`, which `handle_user_event`
             // doesn't take (it's deliberately the `ActiveEventLoop`-free
@@ -29158,6 +29241,36 @@ configure_board stm32
         let state = app.completion.as_ref().expect("popup should be open");
         let labels: Vec<String> = state.picker.visible_rows(0, state.picker.len()).map(|(_, c)| c.label.clone()).collect();
         assert!(labels.contains(&"my_custom_proc".to_string()), "expected a ctags-sourced proc, got {labels:?}");
+    }
+
+    #[test]
+    fn a_tcl_tags_scan_landing_refreshes_the_completion_pool() {
+        // Hand-built results, standing in for what the background thread
+        // sends -- no `ctags` on `PATH` needed.
+        let root = PathBuf::from("/project");
+        let mut app = App::with_file(None);
+        app.tcl_tags_scan = Some(TclTagsScan { id: 1, root: root.clone(), report: false });
+        app.tcl_candidates_cache = Some((Some(root.clone()), Vec::new()));
+
+        let tag = fenix_completion::ctags::TagEntry { name: "landed_proc".to_string(), file: root.join("lib.tcl"), line: 1 };
+        app.handle_user_event(FenixUserEvent::TclTagsScanned { scan: 1, root: root.clone(), tags: vec![tag] });
+
+        assert!(app.tcl_tags_scan.is_none());
+        let labels: Vec<String> = app.tcl_candidates(Some(&root)).into_iter().map(|c| c.label).collect();
+        assert!(labels.contains(&"landed_proc".to_string()), "expected the scanned proc, got {labels:?}");
+    }
+
+    #[test]
+    fn a_superseded_tcl_tags_scan_is_dropped() {
+        let root = PathBuf::from("/project");
+        let mut app = App::with_file(None);
+        app.tcl_tags_scan = Some(TclTagsScan { id: 2, root: root.clone(), report: false });
+
+        let tag = fenix_completion::ctags::TagEntry { name: "stale_proc".to_string(), file: root.join("lib.tcl"), line: 1 };
+        app.handle_user_event(FenixUserEvent::TclTagsScanned { scan: 1, root, tags: vec![tag] });
+
+        assert!(app.tcl_tags_cache.is_none());
+        assert_eq!(app.tcl_tags_scan.as_ref().map(|scan| scan.id), Some(2));
     }
 
     #[test]
