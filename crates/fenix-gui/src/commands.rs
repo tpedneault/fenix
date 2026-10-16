@@ -328,23 +328,11 @@ impl CommandRegistry {
         registry.register("code.toggle_fold", "Collapse or expand the current code scope", |ctx| ctx.app.toggle_code_fold());
         registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
         registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
-        registry.external("mib.page", "The MIB page: telecommands, TC and TM parameters, TM packets, calibrations", |app| app.cmd_mib_page());
-        registry.external("mib.search", "Search every kind of MIB definition", |app| app.cmd_mib_search());
-        registry.register("mib.telecommand", "Open a MIB telecommand by name", cmd_mib_telecommand);
-        registry.register("mib.tc_parameter", "Open a MIB TC parameter by name", cmd_mib_tc_parameter);
-        registry.register("mib.tm_packet", "Open a MIB TM packet by SPID or name", cmd_mib_tm_packet);
-        registry.register("mib.tm_parameter", "Open a MIB TM parameter by name", cmd_mib_tm_parameter);
-        registry.register("mib.calibration", "Open a MIB calibration by id", cmd_mib_calibration);
-        registry.register("mib.insert", "Insert a telecommand from the MIB, with a form for its arguments", cmd_mib_insert);
-        registry.register("mib.edit_call", "Edit the telecommand call on this line in the insert form", cmd_mib_edit_call);
-        registry.register("mib.reload", "Read the project's MIBs again", cmd_mib_reload);
-        registry.register("mib.settings", "This project's MIB settings", cmd_mib_settings);
-        registry.register("mib.copy_bytes", "Copy the telecommand call on this line as its packet's bytes", cmd_mib_copy_bytes);
+        registry.feature(&crate::app::MIB_SPEC);
         registry.external("ccsds.time", "Time converter: on-board time codes, UTC, TAI, GPS, CDS", |app| app.cmd_ccsds_time());
         registry.register("ccsds.hex", "Show the file as hex (view only)", cmd_ccsds_hex);
         registry.register("ccsds.recording", "Open a telemetry recording: packets, gaps, checks, parameters over time", |ctx| ctx.app.cmd_ccsds_recording());
         registry.external("ccsds.live", "Follow a live telemetry source: TCP, UDP, a file being written, NATS", |app| app.cmd_ccsds_live());
-        registry.external("mib.generate", "Generate XTCE, a Wireshark dissector, C, Python, an ICD or TC test vectors from the MIB", |app| app.cmd_mib_generate());
         registry.external("ccsds.standards", "The CCSDS and ECSS standards, and their PDFs", |app| app.cmd_ccsds_standards());
         registry.register("ccsds.decode", "Decode the hex under the cursor, selected or on the clipboard: packets, frames, CLTUs", cmd_ccsds_decode);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
@@ -790,46 +778,6 @@ fn cmd_jump_back(ctx: &mut CommandCtx) {
 
 fn cmd_jump_forward(ctx: &mut CommandCtx) {
     ctx.app.jump_forward();
-}
-
-fn cmd_mib_telecommand(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_pick(fenix_mib::Kind::Telecommand);
-}
-
-fn cmd_mib_tc_parameter(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_pick(fenix_mib::Kind::TcParam);
-}
-
-fn cmd_mib_tm_packet(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_pick(fenix_mib::Kind::TmPacket);
-}
-
-fn cmd_mib_tm_parameter(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_pick(fenix_mib::Kind::TmParam);
-}
-
-fn cmd_mib_calibration(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_pick(fenix_mib::Kind::Calibration);
-}
-
-fn cmd_mib_insert(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_insert();
-}
-
-fn cmd_mib_edit_call(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_edit_call();
-}
-
-fn cmd_mib_reload(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_reload();
-}
-
-fn cmd_mib_settings(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_settings();
-}
-
-fn cmd_mib_copy_bytes(ctx: &mut CommandCtx) {
-    ctx.app.cmd_mib_copy_bytes();
 }
 
 fn cmd_ccsds_hex(ctx: &mut CommandCtx) {

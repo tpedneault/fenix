@@ -44,7 +44,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     local_context: Some(local_context),
     language_server: None,
     tasks: None,
-    hover: Some(builtin_hover),
+    hover_fallback: Some(builtin_hover),
     completion_at_cursor: Some(option_completion),
     completion_pool_at: Some(subcommand_candidates),
 };
@@ -573,12 +573,12 @@ mod tests {
             char_idx: 2,
             sticky_col: 0,
         });
-        let hover = SPEC.hover.unwrap()(&at_string);
+        let hover = SPEC.hover_fallback.unwrap()(&at_string);
         assert!(hover.is_some_and(|h| h.contains("string")));
 
         let rust = app_with(&dir, "a.rs", "fn main() {}\n");
         assert!(rust.local_contexts().is_empty());
-        assert!(SPEC.hover.unwrap()(&rust).is_none());
+        assert!(SPEC.hover_fallback.unwrap()(&rust).is_none());
     }
 
     #[test]

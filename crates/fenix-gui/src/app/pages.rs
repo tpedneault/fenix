@@ -351,7 +351,7 @@ impl App {
             Some(PageModel::Agenda(_)) => "*agenda*".to_string(),
             Some(PageModel::Jira(_)) => "*jira*".to_string(),
             Some(PageModel::Mib(_)) => "*mib*".to_string(),
-            Some(PageModel::MibDef(p)) => mib_def::title(self.mib_set_ready(&p.key).as_deref(), p),
+            Some(PageModel::MibDef(p)) => mib_def::title(self.mib().and_then(|m| m.set_ready(&p.key)).as_deref(), p),
             Some(PageModel::MibForm(f)) => mib_form::title(f),
             Some(PageModel::Packet(p)) => packet_page::title(p),
             Some(PageModel::Time(_)) => "*time*".to_string(),
@@ -480,13 +480,13 @@ impl App {
             _ => None,
         };
         let mib = mib_key.map(|key| {
-            let (set, loading) = self.mib_page_ctx_set(&key);
-            let (here, source) = self.mib_key_here();
+            let (set, loading) = self.with_mib(|m, a| m.page_ctx_set(a, &key)).unwrap_or((None, false));
+            let (here, source) = super::mib_host::key_here(self);
             (set, loading, if here == key { source } else { String::new() })
         });
-        let apid_hex = self.mib_apid_hex();
+        let apid_hex = super::mib_host::apid_hex(self);
         let form_bytes = match self.pages.get(&id).map(|s| &s.model) {
-            Some(PageModel::MibForm(f)) if f.show_bytes => Some(self.mib_form_bytes(f)),
+            Some(PageModel::MibForm(f)) if f.show_bytes => Some(self.mib().map_or_else(|| Err("the MIB isn't read yet".to_string()), |mib| mib.form_bytes(self, f))),
             _ => None,
         };
         // Pages drawn with the reading layout borrow the app while they're
@@ -685,15 +685,15 @@ impl App {
             Some(PageModel::MibDef(p)) => Some(p.key.clone()),
             _ => None,
         }
-        .map(|key| (self.mib_page_ctx_set(&key), self.mib_key_here().1));
-        let apid_hex = self.mib_apid_hex();
+        .map(|key| (self.with_mib(|m, a| m.page_ctx_set(a, &key)).unwrap_or((None, false)), super::mib_host::key_here(self).1));
+        let apid_hex = super::mib_host::apid_hex(self);
         let Some(state) = self.pages.get_mut(&id) else { return false };
         state.stale = true;
         match &mut state.model {
             PageModel::Mib(p) => {
                 let ((set, loading), source) = mib.unwrap_or_default();
                 let action = p.key(key, &mib_page::Ctx { set: set.as_deref(), loading, apid_hex, source });
-                self.mib_page_action(action);
+                self.with_mib(|m, a| m.page_action(a, action));
             }
             PageModel::MibDef(p) => {
                 let action = match mib.and_then(|((set, _), _)| set) {
@@ -701,11 +701,11 @@ impl App {
                     None if matches!(key, Key::Char('q') | Key::Escape) => mib_def::Action::Close,
                     None => mib_def::Action::None,
                 };
-                self.mib_def_action(action);
+                self.with_mib(|m, a| m.def_action(a, action));
             }
             PageModel::MibForm(f) => {
                 let action = f.key(key);
-                self.mib_form_action(action);
+                self.with_mib(|m, a| m.form_action(a, action));
             }
             PageModel::Packet(p) => {
                 let action = p.key(key);
@@ -836,7 +836,11 @@ impl App {
             | PageEvent::JiraTypes { .. }
             | PageEvent::JiraFields { .. }
             | PageEvent::JiraDone { .. }) => self.apply_jira_event(event),
-            PageEvent::MibLoaded { key, set } => self.apply_mib_loaded(key, set),
+            PageEvent::MibLoaded { key, set } => {
+                // Through the feature event path, so a set read while the
+                // MIB is busy (inline, with no event loop) still lands.
+                self.deliver_feature_event(super::feature::FeatureEvent { feature: super::mib_host::SPEC.id, label: "MibLoaded", payload: Box::new((key, set)) });
+            }
             event @ (PageEvent::StreamRows { .. } | PageEvent::StreamInfo { .. } | PageEvent::StreamStatus { .. }) => self.apply_stream_event(event),
             PageEvent::PageImage { key, result } => self.apply_page_image(key, result),
             PageEvent::DiagramDrawn { key, result } => self.apply_diagram_drawn(key, result),

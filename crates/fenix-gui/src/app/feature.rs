@@ -24,6 +24,7 @@ use std::any::Any;
 
 use super::docker_host::DockerHost;
 use super::embedded_host::EmbeddedHost;
+use super::mib_host::MibHost;
 use super::tcl_host::TclHost;
 use super::*;
 use crate::popup::PopupId;
@@ -66,7 +67,7 @@ pub(crate) struct FeatureSpec {
     pub tasks: Option<fn(&App, &Path) -> Vec<fenix_tasks::TaskDef>>,
     /// What `K` shows when no language server answers for the focused
     /// buffer.
-    pub hover: Option<fn(&App) -> Option<String>>,
+    pub hover_fallback: Option<fn(&App) -> Option<String>>,
     /// A completion that takes over at the cursor before any other
     /// (Tcl's `-option` after a command that takes them).
     pub completion_at_cursor: Option<fn(&App) -> Option<CompletionAt>>,
@@ -108,6 +109,8 @@ pub(crate) enum Notice {
     TaskFinished { root: PathBuf, success: bool },
     /// A terminal buffer was closed.
     TerminalClosed(BufferId),
+    /// The periodic housekeeping tick (session checkpoint, disk probe).
+    Tick,
 }
 
 /// One row's payload in a feature's picker (`ActivePicker::Feature`):
@@ -140,6 +143,12 @@ impl std::fmt::Debug for FeatureEvent {
             .field("label", &self.label)
             .finish_non_exhaustive()
     }
+}
+
+/// What arrived for a feature while it was out.
+enum Missed {
+    Notice(Notice),
+    Event(Box<dyn Any + Send>),
 }
 
 /// Text colour ranges for the visible rows of a buffer a feature draws.
@@ -200,6 +209,22 @@ pub(crate) trait Feature: Any {
     /// A `Notice`.
     fn notice(&mut self, _app: &mut App, _notice: &Notice) {}
 
+    /// What `K` shows for the word under the cursor, ahead of any
+    /// language server (a MIB name's card).
+    fn hover(&mut self, _app: &mut App) -> Option<String> {
+        None
+    }
+    /// `gd` on the word under the cursor, ahead of any language server.
+    /// `true` when it went somewhere.
+    fn goto_definition(&mut self, _app: &mut App) -> bool {
+        false
+    }
+    /// Its problems in the file at `path`, shown with the language
+    /// servers'.
+    fn diagnostics(&self, _path: &Path) -> Vec<lsp_types::Diagnostic> {
+        Vec::new()
+    }
+
     /// Candidates it adds to the focused buffer's general completion
     /// pool.
     fn completion_items(
@@ -259,8 +284,8 @@ pub(crate) struct Features {
     slots: Vec<Option<Box<dyn Feature>>>,
     /// Each slot's spec, there even while the feature is out.
     specs: Vec<&'static FeatureSpec>,
-    /// Notices a feature missed while it was out, by slot.
-    missed: Vec<(usize, Notice)>,
+    /// Notices and events a feature missed while it was out, by slot.
+    missed: Vec<(usize, Missed)>,
 }
 
 impl Features {
@@ -269,6 +294,7 @@ impl Features {
             Some(Box::new(DockerHost::default())),
             Some(Box::new(EmbeddedHost::default())),
             Some(Box::new(TclHost::default())),
+            Some(Box::new(MibHost::default())),
         ];
         let specs = slots
             .iter()
@@ -295,14 +321,12 @@ impl Features {
         self.slots.iter().filter_map(|slot| slot.as_deref())
     }
 
-    /// Typed access. Only tests need it so far: everything else goes
-    /// through the hooks or `App::with_feature`.
-    #[cfg(test)]
+    /// Typed access, for the core code that still reaches a feature
+    /// directly (the MIB's pages and dependents). `None` while it's out.
     pub(crate) fn get<T: Feature>(&self) -> Option<&T> {
         self.iter().find_map(|f| f.as_any().downcast_ref::<T>())
     }
 
-    #[cfg(test)]
     pub(crate) fn get_mut<T: Feature>(&mut self) -> Option<&mut T> {
         self.slots
             .iter_mut()
@@ -341,14 +365,17 @@ impl App {
         Some(result)
     }
 
-    /// Puts feature `i` back, then delivers the notices it missed while it
-    /// was out -- including any those cause.
+    /// Puts feature `i` back, then delivers the notices and events it
+    /// missed while it was out -- including any those cause, in order.
     fn put_back(&mut self, i: usize, feature: Box<dyn Feature>) {
         self.features.slots[i] = Some(feature);
         while let Some(at) = self.features.missed.iter().position(|(slot, _)| *slot == i) {
-            let (_, notice) = self.features.missed.remove(at);
+            let (_, missed) = self.features.missed.remove(at);
             let mut feature = self.features.slots[i].take().expect("just put back");
-            feature.notice(self, &notice);
+            match missed {
+                Missed::Notice(notice) => feature.notice(self, &notice),
+                Missed::Event(payload) => feature.on_event(self, payload),
+            }
             self.features.slots[i] = Some(feature);
         }
     }
@@ -390,16 +417,26 @@ impl App {
             if self.features.slots[i].is_some() {
                 self.with_feature_at(i, |feature, app| feature.notice(app, &notice));
             } else {
-                self.features.missed.push((i, notice.clone()));
+                self.features
+                    .missed
+                    .push((i, Missed::Notice(notice.clone())));
             }
         }
     }
 
     /// Delivers a background event to the feature it's addressed to.
+    /// One that arrives while the feature is out (with no event loop,
+    /// work started from one of its own hooks reports back inline) waits
+    /// until it's back.
     pub(crate) fn deliver_feature_event(&mut self, event: FeatureEvent) {
-        self.with_feature_id(event.feature, |feature, app| {
-            feature.on_event(app, event.payload)
-        });
+        let Some(i) = self.features.position_of_id(event.feature) else {
+            return;
+        };
+        if self.features.slots[i].is_some() {
+            self.with_feature_at(i, |feature, app| feature.on_event(app, event.payload));
+        } else {
+            self.features.missed.push((i, Missed::Event(event.payload)));
+        }
     }
 
     /// Runs `f` with the feature whose id is `id`.

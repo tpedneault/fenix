@@ -150,7 +150,7 @@ impl App {
             request.pdfs = self.pdf_docs.iter().map(|(&id, d)| (id, d.path.clone())).collect();
         }
         if self.config.mib_watch.unwrap_or(true) {
-            request.mibs = self.mib_sets.iter().filter(|(_, slot)| !slot.loading && slot.set.is_some()).map(|(key, _)| key.clone()).collect();
+            request.mibs = self.mib().into_iter().flat_map(|mib| mib.sets.iter()).filter(|(_, slot)| !slot.loading && slot.set.is_some()).map(|(key, _)| key.clone()).collect();
         }
         request.project = self.project_root.clone();
         self.disk_probe_out = Some(Instant::now());
@@ -179,9 +179,9 @@ impl App {
             self.apply_project_settings(root, settings);
         }
         for (key, stamp) in result.mibs {
-            let stale = self.mib_sets.get(&key).is_some_and(|slot| !slot.loading && slot.set.as_ref().is_some_and(|set| *set.stamp() != stamp));
+            let stale = self.mib().and_then(|mib| mib.sets.get(&key)).is_some_and(|slot| !slot.loading && slot.set.as_ref().is_some_and(|set| *set.stamp() != stamp));
             if stale {
-                self.mib_load(key);
+                self.with_mib(|mib, app| mib.load(app, key));
             }
         }
         if !self.config.watch_files.unwrap_or(true) {

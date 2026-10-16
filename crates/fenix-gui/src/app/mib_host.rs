@@ -1,18 +1,70 @@
-//! The host half of the MIB pages (`mib_page`, `mib_def`, `mib_form`):
-//! which MIBs the focused project uses, reading them off the UI thread
-//! and again when their files change, the `SPC k` commands, what the
-//! pages' keys ask for, and the MIB in the editor -- `K`, `gd` and
-//! completion on a name from it.
+//! The MIB, as a `Feature`: which MIBs the focused project uses, reading
+//! them off the UI thread and again when their files change, the
+//! `SPC k` commands, what the MIB pages' keys ask for (`mib_page`,
+//! `mib_def`, `mib_form`), and the MIB in the editor -- `K`, `gd`,
+//! completion and script checks on names from it.
+//!
+//! What it keeps between calls lives on `MibHost`. The lookups that only
+//! read settings are free functions over `&App`. The MIB pages are still
+//! core `PageModel` variants, and the CCSDS and stream pages, notebook
+//! links and the disk poll reach `MibHost` by type: those wait for a page
+//! contribution point and services.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use fenix_mib::{DefRef, Kind, MibRoot, MibSet};
 
+use super::feature::{Feature, FeatureCommand, FeaturePick, FeatureSpec, LeaderEntry, Notice};
 use super::pages::{PageEvent, PageModel};
 use super::*;
 use crate::mib_def::{self, DefPage};
 use crate::mib_form::{self, InsertForm};
 use crate::mib_page::{self, MibKey, MibPage};
+
+fn on(app: &mut App, f: fn(&mut MibHost, &mut App)) {
+    app.with_feature::<MibHost, _>(f);
+}
+
+/// The MIB's commands and its entries in the Tcl `SPC m` menu. Its
+/// `SPC k` keys stay in the keymap for now: that group is the mission
+/// pack's, shared with CCSDS.
+pub(crate) static SPEC: FeatureSpec = FeatureSpec {
+    id: "fenix.mib",
+    commands: &[
+        FeatureCommand { id: "mib.page", description: "The MIB page: telecommands, TC and TM parameters, TM packets, calibrations", external: true, run: |app| on(app, MibHost::cmd_page) },
+        FeatureCommand { id: "mib.search", description: "Search every kind of MIB definition", external: true, run: |app| on(app, MibHost::cmd_search) },
+        FeatureCommand { id: "mib.telecommand", description: "Open a MIB telecommand by name", external: false, run: |app| on(app, |m, a| m.cmd_pick(a, Kind::Telecommand)) },
+        FeatureCommand { id: "mib.tc_parameter", description: "Open a MIB TC parameter by name", external: false, run: |app| on(app, |m, a| m.cmd_pick(a, Kind::TcParam)) },
+        FeatureCommand { id: "mib.tm_packet", description: "Open a MIB TM packet by SPID or name", external: false, run: |app| on(app, |m, a| m.cmd_pick(a, Kind::TmPacket)) },
+        FeatureCommand { id: "mib.tm_parameter", description: "Open a MIB TM parameter by name", external: false, run: |app| on(app, |m, a| m.cmd_pick(a, Kind::TmParam)) },
+        FeatureCommand { id: "mib.calibration", description: "Open a MIB calibration by id", external: false, run: |app| on(app, |m, a| m.cmd_pick(a, Kind::Calibration)) },
+        FeatureCommand { id: "mib.insert", description: "Insert a telecommand from the MIB, with a form for its arguments", external: false, run: |app| on(app, MibHost::cmd_insert) },
+        FeatureCommand { id: "mib.edit_call", description: "Edit the telecommand call on this line in the insert form", external: false, run: |app| on(app, MibHost::cmd_edit_call) },
+        FeatureCommand { id: "mib.reload", description: "Read the project's MIBs again", external: false, run: |app| on(app, MibHost::cmd_reload) },
+        FeatureCommand { id: "mib.settings", description: "This project's MIB settings", external: false, run: |app| open_settings(app, true) },
+        FeatureCommand { id: "mib.copy_bytes", description: "Copy the telecommand call on this line as its packet's bytes", external: false, run: |app| on(app, MibHost::cmd_copy_bytes) },
+        FeatureCommand { id: "mib.generate", description: "Generate XTCE, a Wireshark dissector, C, Python, an ICD or TC test vectors from the MIB", external: true, run: |app| on(app, MibHost::cmd_generate) },
+    ],
+    leader: &[],
+    local_menu: &[
+        LeaderEntry::Bind(&['i'], "insert a telecommand", "mib.insert"),
+        LeaderEntry::Bind(&['e'], "edit the telecommand call", "mib.edit_call"),
+        LeaderEntry::Bind(&['t'], "telecommand", "mib.telecommand"),
+        LeaderEntry::Bind(&['k'], "TM packet", "mib.tm_packet"),
+        LeaderEntry::Bind(&['p'], "TM parameter", "mib.tm_parameter"),
+        LeaderEntry::Bind(&['c'], "calibration", "mib.calibration"),
+        LeaderEntry::Bind(&['m'], "MIB page", "mib.page"),
+        LeaderEntry::Bind(&['r'], "read the MIBs again", "mib.reload"),
+    ],
+    // Its menu entries go in the Tcl context, which Tcl claims.
+    local_context: None,
+    language_server: None,
+    tasks: None,
+    hover_fallback: None,
+    completion_at_cursor: None,
+    completion_pool_at: None,
+};
 
 /// A set of MIBs, read or being read.
 pub(crate) struct MibSlot {
@@ -38,132 +90,318 @@ pub(crate) struct MibOrigin {
     pub(super) range: std::ops::Range<usize>,
 }
 
-impl App {
-    /// The MIBs the focused project uses: its own `mib.roots` (paths
-    /// relative to it), else the project itself when it's a MIB, else
-    /// yours -- with yours added to the project's when it says so. And
-    /// where they come from, for the page to say.
-    pub(super) fn mib_key_here(&self) -> (MibKey, String) {
-        let project = self.project_root.clone();
-        let name = project.as_ref().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let mut roots: Vec<MibRoot> = Vec::new();
-        if let (Some(root), Some(fenix_config::Value::Map(entries))) = (&project, self.mib_project_value("mib.roots")) {
-            for (label, path) in entries {
-                let path = PathBuf::from(path);
-                let path = if path.is_absolute() { path } else { root.join(path) };
-                roots.push(MibRoot { label: label.clone(), path });
+/// A row of one of the MIB's pickers.
+#[derive(Debug, Clone, Copy)]
+enum MibPick {
+    /// A definition, to open (or to follow on a stream).
+    Def(DefRef),
+    /// A telecommand, for its insert form.
+    Insert(DefRef),
+    /// One of `fenix_mib::generate::KINDS`.
+    Generate(usize),
+}
+
+/// Everything the MIB keeps between calls.
+#[derive(Default)]
+pub(crate) struct MibHost {
+    /// Every set of MIBs read or being read, by what it was read from.
+    pub(super) sets: HashMap<MibKey, MibSlot>,
+    /// A command waiting for its set to be read.
+    pub(super) pending: Option<(MibKey, MibPending)>,
+    /// The set a definition picker is choosing from.
+    pub(super) picker_key: MibKey,
+    /// Each open insert form's target.
+    pub(super) origins: HashMap<BufferId, MibOrigin>,
+    /// The last values used for each telecommand, by project.
+    pub(super) last: HashMap<(Option<PathBuf>, String), HashMap<String, String>>,
+    /// The stream page a definition picker is choosing a parameter for.
+    pub(super) pick_for_stream: Option<BufferId>,
+    /// The script checks' problems, by file.
+    pub(super) diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Each buffer's edit count when it was last checked.
+    pub(super) checked: HashMap<BufferId, u64>,
+}
+
+// -- Settings: what only reads `App` -----------------------------------------
+
+/// The MIBs the focused project uses: its own `mib.roots` (paths
+/// relative to it), else the project itself when it's a MIB, else yours
+/// -- with yours added to the project's when it says so. And where they
+/// come from, for the page to say.
+pub(super) fn key_here(app: &App) -> (MibKey, String) {
+    let project = app.project_root.clone();
+    let name = project.as_ref().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut roots: Vec<MibRoot> = Vec::new();
+    if let (Some(root), Some(fenix_config::Value::Map(entries))) = (&project, project_value(app, "mib.roots")) {
+        for (label, path) in entries {
+            let path = PathBuf::from(path);
+            let path = if path.is_absolute() { path } else { root.join(path) };
+            roots.push(MibRoot { label: label.clone(), path });
+        }
+    }
+    if roots.is_empty() {
+        if let Some(root) = &project {
+            if app.project_kind_of(root) == fenix_project::ProjectKind::Mib {
+                let dir = if root.join("mib").is_dir() { root.join("mib") } else { root.clone() };
+                roots.push(MibRoot { label: name.clone(), path: dir });
             }
         }
-        if roots.is_empty() {
-            if let Some(root) = &project {
-                if self.project_kind_of(root) == fenix_project::ProjectKind::Mib {
-                    let dir = if root.join("mib").is_dir() { root.join("mib") } else { root.clone() };
-                    roots.push(MibRoot { label: name.clone(), path: dir });
-                }
+    }
+    let own = !roots.is_empty();
+    let include = match project_value(app, "mib.include_yours") {
+        Some(fenix_config::Value::Bool(b)) => *b,
+        _ => app.config.mib_include_yours.unwrap_or(false),
+    };
+    if !own || include {
+        for (label, path) in &app.config.mib_roots {
+            if !roots.iter().any(|r| &r.path == path) {
+                roots.push(MibRoot { label: label.clone(), path: path.clone() });
             }
         }
-        let own = !roots.is_empty();
-        let include = match self.mib_project_value("mib.include_yours") {
-            Some(fenix_config::Value::Bool(b)) => *b,
-            _ => self.config.mib_include_yours.unwrap_or(false),
-        };
-        if !own || include {
-            for (label, path) in &self.config.mib_roots {
-                if !roots.iter().any(|r| &r.path == path) {
-                    roots.push(MibRoot { label: label.clone(), path: path.clone() });
-                }
+    }
+    let default = match project_value(app, "mib.default") {
+        Some(fenix_config::Value::Text(t)) => Some(t.clone()),
+        _ => app.config.mib_default.clone(),
+    };
+    let source = match (own, include && !app.config.mib_roots.is_empty()) {
+        (true, false) => format!("from {name}'s settings"),
+        (true, true) => format!("from {name}'s settings and yours"),
+        (false, _) if roots.is_empty() => String::new(),
+        (false, _) => "from your settings".to_string(),
+    };
+    (MibKey { roots, default, project, options: read_options(app) }, source)
+}
+
+fn project_value<'a>(app: &'a App, key: &str) -> Option<&'a fenix_config::Value> {
+    app.project_settings.as_ref().and_then(|(_, p)| p.get(key))
+}
+
+/// A MIB setting's text: the project's, else yours.
+fn text(app: &App, key: &str, mine: &Option<String>) -> Option<String> {
+    match project_value(app, key) {
+        Some(fenix_config::Value::Text(t)) => Some(t.clone()),
+        _ => mine.clone(),
+    }
+}
+
+/// A MIB setting's entries: the project's, else yours.
+fn map(app: &App, key: &str, mine: &[(String, String)]) -> Vec<(String, String)> {
+    match project_value(app, key) {
+        Some(fenix_config::Value::Map(m)) => m.clone(),
+        _ => mine.to_vec(),
+    }
+}
+
+/// How the focused project's MIBs are read: `mib.icd`,
+/// `mib.icd_per_mib`, `mib.columns` and `mib.xtce_fields`.
+pub(super) fn read_options(app: &App) -> fenix_mib::ReadOptions {
+    use fenix_mib::{schema, Icd, Schema, XtceOptions};
+    let issue = |t: &str| if t.trim() == "auto" { None } else { Some(Icd::parse(t).unwrap_or(Icd::LATEST)) };
+    let schema = Schema {
+        icd: text(app, "mib.icd", &app.config.mib_icd).map_or(Some(Icd::LATEST), |t| issue(&t)),
+        per_root: map(app, "mib.icd_per_mib", &app.config.mib_icd_per_mib).into_iter().map(|(label, t)| (label, issue(&t))).collect(),
+        columns: map(app, "mib.columns", &app.config.mib_columns).into_iter().map(|(t, c)| (t.trim().to_ascii_lowercase(), schema::parse_columns(&c))).collect(),
+    };
+    let fields = map(app, "mib.xtce_fields", &app.config.mib_xtce_fields);
+    let names = |field: &str| -> Vec<String> {
+        fields.iter().filter(|(f, _)| f.trim().eq_ignore_ascii_case(field)).flat_map(|(_, v)| v.split([',', ' ']).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect::<Vec<_>>()).collect()
+    };
+    let xtce = XtceOptions { apid: names("apid"), service: names("service"), subtype: names("subtype"), pi1: names("pi1"), pi2: names("pi2") };
+    fenix_mib::ReadOptions { schema, xtce }
+}
+
+pub(super) fn apid_hex(app: &App) -> bool {
+    app.config.mib_apid_format.as_deref() != Some("decimal")
+}
+
+/// How `key`'s project writes a command: its templates, else yours.
+fn templates(app: &App, key: &MibKey) -> mib_form::Templates {
+    let project = key.project.as_deref().map(fenix_config::ProjectSettings::load);
+    let text = |name: &str, mine: &Option<String>, default: &str| match project.as_ref().and_then(|p| p.get(name)) {
+        Some(fenix_config::Value::Text(t)) => t.clone(),
+        _ => mine.clone().unwrap_or_else(|| default.to_string()),
+    };
+    mib_form::Templates {
+        command: text("mib.telecommand_template", &app.config.mib_telecommand_template, fenix_mib::telecommand::DEFAULT_TEMPLATE),
+        argument: text("mib.telecommand_argument_template", &app.config.mib_telecommand_argument_template, fenix_mib::telecommand::DEFAULT_ARGUMENT_TEMPLATE),
+        separator: text("mib.telecommand_argument_separator", &app.config.mib_telecommand_argument_separator, fenix_mib::telecommand::DEFAULT_ARGUMENT_SEPARATOR),
+    }
+}
+
+/// `SPC k ,`: the MIB settings -- the project's, or yours outside one.
+fn open_settings(app: &mut App, project: bool) {
+    let scope = match app.settings_project() {
+        Some((root, name)) if project => crate::settings_page::Scope::Project { root, name },
+        _ => crate::settings_page::Scope::You,
+    };
+    app.open_settings_page(scope, Some("mib.roots"));
+}
+
+/// The text buffer a form's command goes into: the focused one, else
+/// the one used most recently.
+fn insert_target(app: &App) -> Option<BufferId> {
+    let editable = |id: BufferId| !app.is_page_buffer(id) && app.buffers.get(id).is_some_and(|ob| ob.kind.tracks_unsaved_changes());
+    let focused = app.focused_buffer_id();
+    if editable(focused) {
+        return Some(focused);
+    }
+    app.buffers.mru().iter().copied().find(|&id| editable(id))
+}
+
+/// Where `buffer`'s cursor is, in a pane showing it, else where it was
+/// left when its tab was last in front.
+fn buffer_cursor(app: &App, buffer: BufferId) -> usize {
+    let ws = app.workspaces.active_workspace();
+    ws.windows
+        .windows()
+        .into_iter()
+        .find(|pane| ws.windows.content(*pane) == Some(&buffer))
+        .and_then(|pane| app.workspaces.active_pane_states().get(&pane).map(|s| s.cursor.char_idx))
+        .or_else(|| app.buffers.get(buffer).map(|ob| ob.cursor.char_idx))
+        .unwrap_or(0)
+}
+
+fn copy(app: &mut App, text: String) {
+    if let Some(clipboard) = &mut app.clipboard {
+        let _ = clipboard.set_text(text.clone());
+    }
+    app.set_message(format!("Copied {text}"));
+}
+
+fn open_file(app: &mut App, path: PathBuf, line: usize) {
+    app.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col: 1, text: String::new() });
+}
+
+/// `bytes` on the clipboard, written the way `buffer`'s language writes
+/// bytes.
+fn copy_literal(app: &mut App, bytes: &[u8], buffer: Option<BufferId>, what: &str) {
+    let ext = buffer.and_then(|b| app.buffers.get(b)).and_then(|ob| ob.buffer.path()).and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let text = fenix_ccsds::hex::literal(bytes, &ext);
+    if let Some(clipboard) = &mut app.clipboard {
+        let _ = clipboard.set_text(text);
+    }
+    app.set_message(format!("copied {what}'s packet, {} bytes", bytes.len()));
+}
+
+/// The MIBs of the focused MIB page.
+fn focused_key(app: &App) -> MibKey {
+    match app.pages.get(&app.focused_buffer_id()).map(|s| &s.model) {
+        Some(PageModel::Mib(p)) => p.key.clone(),
+        Some(PageModel::MibDef(p)) => p.key.clone(),
+        Some(PageModel::MibForm(p)) => p.key.clone(),
+        _ => key_here(app).0,
+    }
+}
+
+/// Whether the focused file is one where MIB names mean something.
+fn in_this_file(app: &App) -> bool {
+    if app.is_page_buffer(app.focused_buffer_id()) {
+        return false;
+    }
+    let exts: Vec<String> = match project_value(app, "mib.editor_files") {
+        Some(fenix_config::Value::List(l)) => l.clone(),
+        _ => app.config.mib_editor_files.clone(),
+    };
+    if exts.is_empty() {
+        return true;
+    }
+    let ext = app.open().buffer.path().and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    exts.iter().any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(&ext))
+}
+
+/// Every MIB page is laid out again.
+fn mark_pages(app: &mut App) {
+    for state in app.pages.values_mut() {
+        if matches!(state.model, PageModel::Mib(_) | PageModel::MibDef(_) | PageModel::MibForm(_)) {
+            state.stale = true;
+        }
+    }
+    if let Some(window) = &app.window {
+        window.request_redraw();
+    }
+}
+
+/// `def`'s page: the open definition page goes to it (so `Ctrl-o` comes
+/// back), else a new one opens.
+pub(super) fn open_def(app: &mut App, key: MibKey, def: DefRef) {
+    let existing = app.find_page(|m| matches!(m, PageModel::MibDef(p) if p.key == key));
+    match existing {
+        Some(id) => {
+            if let Some(PageModel::MibDef(page)) = app.pages.get_mut(&id).map(|s| &mut s.model) {
+                page.go(def);
             }
+            app.show_page(id);
         }
-        let default = match self.mib_project_value("mib.default") {
-            Some(fenix_config::Value::Text(t)) => Some(t.clone()),
-            _ => self.config.mib_default.clone(),
-        };
-        let source = match (own, include && !self.config.mib_roots.is_empty()) {
-            (true, false) => format!("from {name}'s settings"),
-            (true, true) => format!("from {name}'s settings and yours"),
-            (false, _) if roots.is_empty() => String::new(),
-            (false, _) => "from your settings".to_string(),
-        };
-        (MibKey { roots, default, project, options: self.mib_read_options() }, source)
-    }
-
-    fn mib_project_value(&self, key: &str) -> Option<&fenix_config::Value> {
-        self.project_settings.as_ref().and_then(|(_, p)| p.get(key))
-    }
-
-    /// A MIB setting's text: the project's, else yours.
-    fn mib_text(&self, key: &str, mine: &Option<String>) -> Option<String> {
-        match self.mib_project_value(key) {
-            Some(fenix_config::Value::Text(t)) => Some(t.clone()),
-            _ => mine.clone(),
+        None => {
+            app.open_page(PageModel::MibDef(Box::new(DefPage::new(key, def))));
         }
     }
+}
 
-    /// A MIB setting's entries: the project's, else yours.
-    fn mib_map(&self, key: &str, mine: &[(String, String)]) -> Vec<(String, String)> {
-        match self.mib_project_value(key) {
-            Some(fenix_config::Value::Map(m)) => m.clone(),
-            _ => mine.to_vec(),
+fn picker_rows(app: &App, set: &MibSet, kinds: &[Kind], pick: fn(DefRef) -> MibPick) -> Vec<fenix_picker::Candidate<FeaturePick>> {
+    let hex = apid_hex(app);
+    let many = set.roots().len() > 1;
+    let mut out = Vec::new();
+    for &kind in kinds {
+        for (index, e) in set.entries(kind).iter().enumerate() {
+            let def = DefRef { kind, index };
+            let cols: Vec<String> = (1..kind.headers().len()).map(|c| mib_page::cell(set, def, c, hex)).filter(|c| !c.is_empty()).collect();
+            let mib = if many { format!("[{}]  ", set.root_label(e.root)) } else { String::new() };
+            let tag = if kinds.len() > 1 { format!("{:<4}", kind.tag()) } else { String::new() };
+            let label = format!("{tag}{:<10}  {:<24}  {mib}{}", e.name, cols.join("  "), e.description);
+            out.push(FeaturePick::candidate(label, pick(def)));
         }
     }
+    out
+}
 
-    /// How the focused project's MIBs are read: `mib.icd`,
-    /// `mib.icd_per_mib`, `mib.columns` and `mib.xtce_fields`.
-    pub(super) fn mib_read_options(&self) -> fenix_mib::ReadOptions {
-        use fenix_mib::{schema, Icd, Schema, XtceOptions};
-        let issue = |t: &str| if t.trim() == "auto" { None } else { Some(Icd::parse(t).unwrap_or(Icd::LATEST)) };
-        let schema = Schema {
-            icd: self.mib_text("mib.icd", &self.config.mib_icd).map_or(Some(Icd::LATEST), |t| issue(&t)),
-            per_root: self.mib_map("mib.icd_per_mib", &self.config.mib_icd_per_mib).into_iter().map(|(label, t)| (label, issue(&t))).collect(),
-            columns: self.mib_map("mib.columns", &self.config.mib_columns).into_iter().map(|(t, c)| (t.trim().to_ascii_lowercase(), schema::parse_columns(&c))).collect(),
-        };
-        let fields = self.mib_map("mib.xtce_fields", &self.config.mib_xtce_fields);
-        let names = |field: &str| -> Vec<String> {
-            fields.iter().filter(|(f, _)| f.trim().eq_ignore_ascii_case(field)).flat_map(|(_, v)| v.split([',', ' ']).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect::<Vec<_>>()).collect()
-        };
-        let xtce = XtceOptions { apid: names("apid"), service: names("service"), subtype: names("subtype"), pi1: names("pi1"), pi2: names("pi2") };
-        fenix_mib::ReadOptions { schema, xtce }
-    }
+/// A parameter picker for a stream page: the chosen parameter is
+/// followed on it. `rows` are the labels and definitions to offer.
+pub(super) fn enter_stream_picker(app: &mut App, stream: BufferId, key: MibKey, rows: Vec<(String, DefRef)>) {
+    let candidates = rows.into_iter().map(|(label, def)| FeaturePick::candidate(label, MibPick::Def(def))).collect();
+    app.with_feature::<MibHost, _>(|mib, _| {
+        mib.picker_key = key;
+        mib.pick_for_stream = Some(stream);
+    });
+    app.enter_picker(ActivePicker::Feature { feature: SPEC.id, badge: "MIB", state: fenix_picker::PickerState::new(candidates) });
+}
 
-    pub(super) fn mib_apid_hex(&self) -> bool {
-        self.config.mib_apid_format.as_deref() != Some("decimal")
-    }
-
+impl MibHost {
     /// The set for `key` when it's been read; starts reading it when it
     /// hasn't.
-    pub(super) fn mib_set(&mut self, key: &MibKey) -> Option<Arc<MibSet>> {
+    pub(super) fn set(&mut self, app: &mut App, key: &MibKey) -> Option<Arc<MibSet>> {
         if key.roots.is_empty() {
             return None;
         }
-        match self.mib_sets.get(key) {
+        match self.sets.get(key) {
             Some(slot) => slot.set.clone(),
             None => {
-                self.mib_load(key.clone());
-                self.mib_sets.get(key).and_then(|s| s.set.clone())
+                self.load(app, key.clone());
+                self.sets.get(key).and_then(|s| s.set.clone())
             }
         }
     }
 
     /// The set for `key`, only if it's already read -- for the editor,
     /// which never waits.
-    pub(super) fn mib_set_ready(&self, key: &MibKey) -> Option<Arc<MibSet>> {
-        self.mib_sets.get(key).and_then(|s| s.set.clone())
+    pub(super) fn set_ready(&self, key: &MibKey) -> Option<Arc<MibSet>> {
+        self.sets.get(key).and_then(|s| s.set.clone())
     }
 
-    fn mib_loading(&self, key: &MibKey) -> bool {
-        self.mib_sets.get(key).is_some_and(|s| s.loading)
+    fn loading(&self, key: &MibKey) -> bool {
+        self.sets.get(key).is_some_and(|s| s.loading)
     }
 
     /// Reads `key`'s MIBs off the UI thread; what was read before stays
     /// in use until the new set arrives.
-    pub(super) fn mib_load(&mut self, key: MibKey) {
-        let slot = self.mib_sets.entry(key.clone()).or_insert(MibSlot { set: None, loading: false });
+    pub(super) fn load(&mut self, app: &mut App, key: MibKey) {
+        let slot = self.sets.entry(key.clone()).or_insert(MibSlot { set: None, loading: false });
         if slot.loading {
             return;
         }
         slot.loading = true;
-        let mission = self.mission(key.project.as_deref());
-        self.page_spawn(move |send| {
+        let mission = app.mission(key.project.as_deref());
+        app.page_spawn(move |send| {
             let mut set = MibSet::load_with(key.roots.clone(), key.default.as_deref(), key.options.clone());
             let options = fenix_mib::checks::Options { disabled: &mission.checks_off, base: mission.base, profile: &mission.profile };
             let found = fenix_mib::checks::run(&set, &options);
@@ -172,93 +410,81 @@ impl App {
         });
     }
 
-    pub(super) fn apply_mib_loaded(&mut self, key: MibKey, set: Arc<MibSet>) {
+    pub(super) fn apply_loaded(&mut self, app: &mut App, key: MibKey, set: Arc<MibSet>) {
         let problems = set.problems().len();
-        let fresh = self.mib_sets.get(&key).is_none_or(|s| s.set.is_none());
-        self.mib_sets.insert(key.clone(), MibSlot { set: Some(set), loading: false });
-        self.mib_mark_pages();
+        let fresh = self.sets.get(&key).is_none_or(|s| s.set.is_none());
+        self.sets.insert(key.clone(), MibSlot { set: Some(set), loading: false });
+        mark_pages(app);
         if !fresh && problems > 0 {
-            self.set_message(format!("MIB read again -- {problems} problem{} (! on the MIB page)", if problems == 1 { "" } else { "s" }));
+            app.set_message(format!("MIB read again -- {problems} problem{} (! on the MIB page)", if problems == 1 { "" } else { "s" }));
         } else if !fresh {
-            self.set_message("MIB read again");
+            app.set_message("MIB read again");
         }
-        if let Some((pending_key, what)) = self.mib_pending.take() {
+        if let Some((pending_key, what)) = self.pending.take() {
             if pending_key == key {
                 match what {
-                    MibPending::Search => self.cmd_mib_search(),
-                    MibPending::Pick(kind) => self.cmd_mib_pick(kind),
-                    MibPending::Insert => self.cmd_mib_insert(),
-                    MibPending::EditCall => self.cmd_mib_edit_call(),
+                    MibPending::Search => self.cmd_search(app),
+                    MibPending::Pick(kind) => self.cmd_pick(app, kind),
+                    MibPending::Insert => self.cmd_insert(app),
+                    MibPending::EditCall => self.cmd_edit_call(app),
                 }
             } else {
-                self.mib_pending = Some((pending_key, what));
+                self.pending = Some((pending_key, what));
             }
-        }
-    }
-
-    /// Every MIB page is laid out again.
-    fn mib_mark_pages(&mut self) {
-        for state in self.pages.values_mut() {
-            if matches!(state.model, PageModel::Mib(_) | PageModel::MibDef(_) | PageModel::MibForm(_)) {
-                state.stale = true;
-            }
-        }
-        if let Some(window) = &self.window {
-            window.request_redraw();
         }
     }
 
     /// The disk poll's tick: a set whose files changed is read again.
     /// Tests only: the app polls through the disk probe instead.
     #[cfg(test)]
-    pub(super) fn mib_poll(&mut self) {
-        if !self.config.mib_watch.unwrap_or(true) {
+    pub(super) fn poll(&mut self, app: &mut App) {
+        if !app.config.mib_watch.unwrap_or(true) {
             return;
         }
         let stale: Vec<MibKey> = self
-            .mib_sets
+            .sets
             .iter()
             .filter(|(_, slot)| !slot.loading)
             .filter_map(|(key, slot)| slot.set.as_ref().filter(|set| fenix_mib::Stamp::of(&key.roots) != *set.stamp()).map(|_| key.clone()))
             .collect();
         for key in stale {
-            self.mib_load(key);
+            self.load(app, key);
         }
     }
 
     /// A project was focused: its MIBs start being read, so `K`, `gd` and
     /// completion have them by the time they're asked.
-    pub(super) fn mib_preload(&mut self) {
-        let (key, _) = self.mib_key_here();
-        if !key.roots.is_empty() && !self.mib_sets.contains_key(&key) {
-            self.mib_load(key);
+    fn preload(&mut self, app: &mut App) {
+        let (key, _) = key_here(app);
+        if !key.roots.is_empty() && !self.sets.contains_key(&key) {
+            self.load(app, key);
         }
     }
 
     /// The MIB settings changed: the MIB page follows the project's MIBs.
-    pub(super) fn mib_settings_changed(&mut self) {
-        let (key, _) = self.mib_key_here();
-        if let Some(id) = self.find_page(|m| matches!(m, PageModel::Mib(_))) {
-            if let Some(PageModel::Mib(page)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+    pub(super) fn settings_changed(&mut self, app: &mut App) {
+        let (key, _) = key_here(app);
+        if let Some(id) = app.find_page(|m| matches!(m, PageModel::Mib(_))) {
+            if let Some(PageModel::Mib(page)) = app.pages.get_mut(&id).map(|s| &mut s.model) {
                 page.key = key;
             }
         }
-        self.mib_mark_pages();
+        mark_pages(app);
     }
 
-    /// The set for the focused project, or a word about why there's
-    /// none yet -- `pending` runs once it's read.
-    fn mib_set_here(&mut self, pending: MibPending) -> Option<(MibKey, Arc<MibSet>)> {
-        let (key, _) = self.mib_key_here();
+    /// The set for the focused project, or a word about why there's none
+    /// yet -- `pending` runs once it's read.
+    fn set_here(&mut self, app: &mut App, pending: MibPending) -> Option<(MibKey, Arc<MibSet>)> {
+        let (key, _) = key_here(app);
         if key.roots.is_empty() {
-            self.set_error("no MIB for this project -- SPC k , lists one in its settings");
+            app.set_error("no MIB for this project -- SPC k , lists one in its settings");
             return None;
         }
-        match self.mib_set(&key) {
+        match self.set(app, &key) {
             Some(set) => Some((key, set)),
             None => {
-                self.set_message("reading the MIB…");
-                self.mib_pending = Some((key, pending));
+                app.set_message("reading the MIB…");
+                self.pending = Some((key, pending));
                 None
             }
         }
@@ -267,314 +493,209 @@ impl App {
     // -- Commands ---------------------------------------------------------
 
     /// `SPC k k`: the MIB page, on the focused project's MIBs.
-    pub(crate) fn cmd_mib_page(&mut self) {
-        let (key, _) = self.mib_key_here();
-        let _ = self.mib_set(&key);
-        match self.find_page(|m| matches!(m, PageModel::Mib(_))) {
+    pub(super) fn cmd_page(&mut self, app: &mut App) {
+        let (key, _) = key_here(app);
+        let _ = self.set(app, &key);
+        match app.find_page(|m| matches!(m, PageModel::Mib(_))) {
             Some(id) => {
-                if let Some(PageModel::Mib(page)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                if let Some(PageModel::Mib(page)) = app.pages.get_mut(&id).map(|s| &mut s.model) {
                     page.key = key;
                 }
-                self.show_page(id);
+                app.show_page(id);
             }
             None => {
-                self.open_page(PageModel::Mib(Box::new(MibPage::new(key))));
+                app.open_page(PageModel::Mib(Box::new(MibPage::new(key))));
             }
         }
     }
 
-    fn mib_picker(&mut self, set: &MibSet, kinds: &[Kind]) -> Vec<fenix_picker::Candidate<DefRef>> {
-        let hex = self.mib_apid_hex();
-        let many = set.roots().len() > 1;
-        let mut out = Vec::new();
-        for &kind in kinds {
-            for (index, e) in set.entries(kind).iter().enumerate() {
-                let def = DefRef { kind, index };
-                let cols: Vec<String> = (1..kind.headers().len()).map(|c| mib_page::cell(set, def, c, hex)).filter(|c| !c.is_empty()).collect();
-                let mib = if many { format!("[{}]  ", set.root_label(e.root)) } else { String::new() };
-                let tag = if kinds.len() > 1 { format!("{:<4}", kind.tag()) } else { String::new() };
-                let label = format!("{tag}{:<10}  {:<24}  {mib}{}", e.name, cols.join("  "), e.description);
-                out.push(fenix_picker::Candidate::new(label, def));
-            }
-        }
-        out
+    fn enter_picker(&mut self, app: &mut App, key: MibKey, badge: &'static str, candidates: Vec<fenix_picker::Candidate<FeaturePick>>) {
+        self.picker_key = key;
+        app.enter_picker(ActivePicker::Feature { feature: SPEC.id, badge, state: fenix_picker::PickerState::new(candidates) });
     }
 
     /// `SPC k /`: every kind of definition, by name or description.
-    pub(crate) fn cmd_mib_search(&mut self) {
-        let Some((key, set)) = self.mib_set_here(MibPending::Search) else { return };
-        let candidates = self.mib_picker(&set, &Kind::ALL);
-        self.mib_picker_key = key;
-        self.mib_pick_for_stream = None;
-        self.enter_picker(ActivePicker::MibDef(fenix_picker::PickerState::new(candidates)));
+    fn cmd_search(&mut self, app: &mut App) {
+        let Some((key, set)) = self.set_here(app, MibPending::Search) else { return };
+        let candidates = picker_rows(app, &set, &Kind::ALL, MibPick::Def);
+        self.pick_for_stream = None;
+        self.enter_picker(app, key, "MIB", candidates);
     }
 
     /// `SPC k t`/`p`/`m`/`n`/`c`: one kind of definition, by name.
-    pub(crate) fn cmd_mib_pick(&mut self, kind: Kind) {
-        let Some((key, set)) = self.mib_set_here(MibPending::Pick(kind)) else { return };
-        let candidates = self.mib_picker(&set, &[kind]);
+    fn cmd_pick(&mut self, app: &mut App, kind: Kind) {
+        let Some((key, set)) = self.set_here(app, MibPending::Pick(kind)) else { return };
+        let candidates = picker_rows(app, &set, &[kind], MibPick::Def);
         if candidates.is_empty() {
-            self.set_message(format!("no {} in this project's MIBs", kind.plural().to_lowercase()));
+            app.set_message(format!("no {} in this project's MIBs", kind.plural().to_lowercase()));
             return;
         }
-        self.mib_picker_key = key;
-        self.mib_pick_for_stream = None;
-        self.enter_picker(ActivePicker::MibDef(fenix_picker::PickerState::new(candidates)));
+        self.pick_for_stream = None;
+        self.enter_picker(app, key, "MIB", candidates);
     }
 
     /// `SPC k i`: a telecommand, then its insert form.
-    pub(crate) fn cmd_mib_insert(&mut self) {
-        let Some((key, set)) = self.mib_set_here(MibPending::Insert) else { return };
-        let candidates = self.mib_picker(&set, &[Kind::Telecommand]);
-        self.mib_picker_key = key;
-        self.enter_picker(ActivePicker::MibInsert(fenix_picker::PickerState::new(candidates)));
+    fn cmd_insert(&mut self, app: &mut App) {
+        let Some((key, set)) = self.set_here(app, MibPending::Insert) else { return };
+        let candidates = picker_rows(app, &set, &[Kind::Telecommand], MibPick::Insert);
+        self.enter_picker(app, key, "INSERT TC", candidates);
     }
 
     /// `SPC k r`: the MIBs read again now.
-    pub(crate) fn cmd_mib_reload(&mut self) {
-        let (key, _) = self.mib_key_here();
+    pub(super) fn cmd_reload(&mut self, app: &mut App) {
+        let (key, _) = key_here(app);
         if key.roots.is_empty() {
-            self.set_error("no MIB for this project -- SPC k , lists one in its settings");
+            app.set_error("no MIB for this project -- SPC k , lists one in its settings");
             return;
         }
-        self.set_message("reading the MIB again…");
-        self.mib_load(key);
-    }
-
-    /// `SPC k ,`: the MIB settings -- the project's, or yours outside one.
-    pub(crate) fn cmd_mib_settings(&mut self) {
-        self.mib_open_settings(true);
-    }
-
-    fn mib_open_settings(&mut self, project: bool) {
-        let scope = match self.settings_project() {
-            Some((root, name)) if project => crate::settings_page::Scope::Project { root, name },
-            _ => crate::settings_page::Scope::You,
-        };
-        self.open_settings_page(scope, Some("mib.roots"));
+        app.set_message("reading the MIB again…");
+        self.load(app, key);
     }
 
     /// `SPC k e`: the telecommand call on the cursor's line, back in the
     /// insert form; inserting puts it back in place of the line's call.
-    pub(crate) fn cmd_mib_edit_call(&mut self) {
-        let Some((key, set)) = self.mib_set_here(MibPending::EditCall) else { return };
-        let buffer = self.focused_buffer_id();
+    fn cmd_edit_call(&mut self, app: &mut App) {
+        let Some((key, set)) = self.set_here(app, MibPending::EditCall) else { return };
+        let buffer = app.focused_buffer_id();
         let (line_text, line_start) = {
-            let ob = self.open();
-            let (line, _) = ob.buffer.line_col(&self.cursor());
+            let ob = app.open();
+            let (line, _) = ob.buffer.line_col(&app.cursor());
             (ob.buffer.line(line).to_string(), ob.buffer.line_start_char(line))
         };
         let line_text = line_text.trim_end_matches(['\n', '\r']).to_string();
         let tc = words(&line_text).into_iter().find_map(|(_, w)| set.resolve(w).filter(|d| d.kind == Kind::Telecommand));
         let Some(tc) = tc else {
-            self.set_error("no telecommand from this project's MIBs on this line");
+            app.set_error("no telecommand from this project's MIBs on this line");
             return;
         };
-        let templates = self.mib_templates(&key);
+        let templates = templates(app, &key);
         let names: Vec<String> = fenix_mib::telecommand::tc_parameters(set.index(), &set.get(tc).row).into_iter().filter(|p| !p.fixed).map(|p| p.name).collect();
         let args = mib_form::read_arguments(&line_text, &set.get(tc).name, &names, &templates);
         let indent = line_text.chars().take_while(|c| c.is_whitespace()).count();
         let range = line_start + indent..line_start + line_text.chars().count();
-        let mut form = InsertForm::new(&set, key.clone(), tc, templates, None, self.mib_apid_hex());
+        let mut form = InsertForm::new(&set, key.clone(), tc, templates, None, apid_hex(app));
         form.fill(&args);
         form.replacing = true;
-        let id = self.open_page(PageModel::MibForm(Box::new(form)));
-        self.mib_origins.insert(id, MibOrigin { buffer, range });
-    }
-
-    /// How `key`'s project writes a command: its templates, else yours.
-    fn mib_templates(&self, key: &MibKey) -> mib_form::Templates {
-        let project = key.project.as_deref().map(fenix_config::ProjectSettings::load);
-        let text = |name: &str, mine: &Option<String>, default: &str| match project.as_ref().and_then(|p| p.get(name)) {
-            Some(fenix_config::Value::Text(t)) => t.clone(),
-            _ => mine.clone().unwrap_or_else(|| default.to_string()),
-        };
-        mib_form::Templates {
-            command: text("mib.telecommand_template", &self.config.mib_telecommand_template, fenix_mib::telecommand::DEFAULT_TEMPLATE),
-            argument: text("mib.telecommand_argument_template", &self.config.mib_telecommand_argument_template, fenix_mib::telecommand::DEFAULT_ARGUMENT_TEMPLATE),
-            separator: text("mib.telecommand_argument_separator", &self.config.mib_telecommand_argument_separator, fenix_mib::telecommand::DEFAULT_ARGUMENT_SEPARATOR),
-        }
+        let id = app.open_page(PageModel::MibForm(Box::new(form)));
+        self.origins.insert(id, MibOrigin { buffer, range });
     }
 
     // -- Pages --------------------------------------------------------------
 
-    /// `def`'s page: the open definition page goes to it (so `Ctrl-o`
-    /// comes back), else a new one opens.
-    pub(super) fn open_mib_def(&mut self, key: MibKey, def: DefRef) {
-        let existing = self.find_page(|m| matches!(m, PageModel::MibDef(p) if p.key == key));
-        match existing {
-            Some(id) => {
-                if let Some(PageModel::MibDef(page)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
-                    page.go(def);
-                }
-                self.show_page(id);
-            }
-            None => {
-                self.open_page(PageModel::MibDef(Box::new(DefPage::new(key, def))));
-            }
-        }
-    }
-
     /// The insert form for `tc`, inserting where the cursor was in the
     /// last file you were in.
-    pub(super) fn open_mib_form(&mut self, key: MibKey, tc: DefRef) {
-        let Some(set) = self.mib_set_ready(&key) else { return };
-        let Some(buffer) = self.mib_insert_target() else {
-            self.set_error("open the file the telecommand goes in first -- the form inserts where its cursor is");
+    pub(super) fn open_form(&mut self, app: &mut App, key: MibKey, tc: DefRef) {
+        let Some(set) = self.set_ready(&key) else { return };
+        let Some(buffer) = insert_target(app) else {
+            app.set_error("open the file the telecommand goes in first -- the form inserts where its cursor is");
             return;
         };
-        let at = if buffer == self.focused_buffer_id() { self.cursor().char_idx } else { self.mib_buffer_cursor(buffer) };
-        let remembered = self.mib_last.get(&(key.project.clone(), set.get(tc).name.clone()));
-        let templates = self.mib_templates(&key);
-        let form = InsertForm::new(&set, key, tc, templates, remembered, self.mib_apid_hex());
-        let id = self.open_page(PageModel::MibForm(Box::new(form)));
-        self.mib_origins.insert(id, MibOrigin { buffer, range: at..at });
+        let at = if buffer == app.focused_buffer_id() { app.cursor().char_idx } else { buffer_cursor(app, buffer) };
+        let remembered = self.last.get(&(key.project.clone(), set.get(tc).name.clone()));
+        let templates = templates(app, &key);
+        let form = InsertForm::new(&set, key, tc, templates, remembered, apid_hex(app));
+        let id = app.open_page(PageModel::MibForm(Box::new(form)));
+        self.origins.insert(id, MibOrigin { buffer, range: at..at });
     }
 
-    /// The text buffer a form's command goes into: the focused one, else
-    /// the one used most recently.
-    fn mib_insert_target(&self) -> Option<BufferId> {
-        let editable = |id: BufferId| !self.is_page_buffer(id) && self.buffers.get(id).is_some_and(|ob| ob.kind.tracks_unsaved_changes());
-        let focused = self.focused_buffer_id();
-        if editable(focused) {
-            return Some(focused);
-        }
-        self.buffers.mru().iter().copied().find(|&id| editable(id))
-    }
-
-    /// Where `buffer`'s cursor is, in a pane showing it, else where it
-    /// was left when its tab was last in front.
-    fn mib_buffer_cursor(&self, buffer: BufferId) -> usize {
-        let ws = self.workspaces.active_workspace();
-        ws.windows
-            .windows()
-            .into_iter()
-            .find(|pane| ws.windows.content(*pane) == Some(&buffer))
-            .and_then(|pane| self.workspaces.active_pane_states().get(&pane).map(|s| s.cursor.char_idx))
-            .or_else(|| self.buffers.get(buffer).map(|ob| ob.cursor.char_idx))
-            .unwrap_or(0)
-    }
-
-    fn mib_copy(&mut self, text: String) {
-        if let Some(clipboard) = &mut self.clipboard {
-            let _ = clipboard.set_text(text.clone());
-        }
-        self.set_message(format!("Copied {text}"));
-    }
-
-    fn mib_open_file(&mut self, path: PathBuf, line: usize) {
-        self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col: 1, text: String::new() });
-    }
-
-    pub(super) fn mib_page_action(&mut self, action: mib_page::Action) {
-        let key = self.mib_focused_key();
+    pub(super) fn page_action(&mut self, app: &mut App, action: mib_page::Action) {
+        let key = focused_key(app);
         match action {
             mib_page::Action::None => {}
             mib_page::Action::Close => {
-                let id = self.focused_buffer_id();
-                self.close_page(id);
+                let id = app.focused_buffer_id();
+                app.close_page(id);
             }
-            mib_page::Action::Open(def) => self.open_mib_def(key, def),
-            mib_page::Action::Insert(def) => self.open_mib_form(key, def),
-            mib_page::Action::Copy(text) => self.mib_copy(text),
-            mib_page::Action::Reload => self.cmd_mib_reload(),
-            mib_page::Action::Settings(project) => self.mib_open_settings(project),
-            mib_page::Action::OpenFile(path, line) => self.mib_open_file(path, line),
+            mib_page::Action::Open(def) => open_def(app, key, def),
+            mib_page::Action::Insert(def) => self.open_form(app, key, def),
+            mib_page::Action::Copy(text) => copy(app, text),
+            mib_page::Action::Reload => self.cmd_reload(app),
+            mib_page::Action::Settings(project) => open_settings(app, project),
+            mib_page::Action::OpenFile(path, line) => open_file(app, path, line),
         }
     }
 
-    pub(super) fn mib_def_action(&mut self, action: mib_def::Action) {
-        let key = self.mib_focused_key();
+    pub(super) fn def_action(&mut self, app: &mut App, action: mib_def::Action) {
+        let key = focused_key(app);
         match action {
             mib_def::Action::None => {}
             mib_def::Action::Close => {
-                let id = self.focused_buffer_id();
-                self.close_page(id);
+                let id = app.focused_buffer_id();
+                app.close_page(id);
             }
-            mib_def::Action::Insert(def) => self.open_mib_form(key, def),
-            mib_def::Action::Copy(text) => self.mib_copy(text),
-            mib_def::Action::OpenFile(path, line) => self.mib_open_file(path, line),
-            mib_def::Action::MibPage => self.cmd_mib_page(),
-            mib_def::Action::Follow(def) => self.follow_on_stream(def),
+            mib_def::Action::Insert(def) => self.open_form(app, key, def),
+            mib_def::Action::Copy(text) => copy(app, text),
+            mib_def::Action::OpenFile(path, line) => open_file(app, path, line),
+            mib_def::Action::MibPage => self.cmd_page(app),
+            mib_def::Action::Follow(def) => app.follow_on_stream(def),
         }
     }
 
-    pub(super) fn mib_form_action(&mut self, action: mib_form::Action) {
-        let id = self.focused_buffer_id();
-        let key = self.mib_focused_key();
+    pub(super) fn form_action(&mut self, app: &mut App, action: mib_form::Action) {
+        let id = app.focused_buffer_id();
+        let key = focused_key(app);
         match action {
             mib_form::Action::None => {}
             mib_form::Action::Close => {
-                self.mib_origins.remove(&id);
-                self.close_page(id);
+                self.origins.remove(&id);
+                app.close_page(id);
             }
-            mib_form::Action::Open(def) => self.open_mib_def(key, def),
-            mib_form::Action::Insert(text) => self.mib_form_insert(id, text),
+            mib_form::Action::Open(def) => open_def(app, key, def),
+            mib_form::Action::Insert(text) => self.form_insert(app, id, text),
             mib_form::Action::CopyBytes | mib_form::Action::DecodeBytes => {
-                let Some(PageModel::MibForm(f)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                let Some(PageModel::MibForm(f)) = app.pages.get(&id).map(|s| &s.model) else { return };
                 let name = f.name().to_string();
-                let origin = self.mib_origins.get(&id).map(|o| o.buffer);
-                match self.mib_form_bytes(f) {
-                    Ok(bytes) if action == mib_form::Action::DecodeBytes => self.open_packet_page(bytes, format!("{name} from the form")),
-                    Ok(bytes) => self.mib_copy_literal(&bytes, origin, &name),
-                    Err(e) => self.set_error(format!("can't build {name}'s packet: {e}")),
+                let origin = self.origins.get(&id).map(|o| o.buffer);
+                match self.form_bytes(app, f) {
+                    Ok(bytes) if action == mib_form::Action::DecodeBytes => app.open_packet_page(bytes, format!("{name} from the form")),
+                    Ok(bytes) => copy_literal(app, &bytes, origin, &name),
+                    Err(e) => app.set_error(format!("can't build {name}'s packet: {e}")),
                 }
             }
         }
     }
 
     /// The form's telecommand as a packet, from its arguments.
-    pub(super) fn mib_form_bytes(&self, f: &InsertForm) -> Result<Vec<u8>, String> {
-        let set = self.mib_set_ready(&f.key).ok_or("the MIB isn't read yet")?;
-        let mission = self.mission(f.key.project.as_deref());
+    pub(super) fn form_bytes(&self, app: &App, f: &InsertForm) -> Result<Vec<u8>, String> {
+        let set = self.set_ready(&f.key).ok_or("the MIB isn't read yet")?;
+        let mission = app.mission(f.key.project.as_deref());
         fenix_mib::packets::encode_tc(&set, f.tc, &f.arguments(), &mission.profile, f.seq).map(|p| p.bytes)
     }
 
-    /// `bytes` on the clipboard, written the way `buffer`'s language
-    /// writes bytes.
-    fn mib_copy_literal(&mut self, bytes: &[u8], buffer: Option<BufferId>, what: &str) {
-        let ext = buffer.and_then(|b| self.buffers.get(b)).and_then(|ob| ob.buffer.path()).and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        let text = fenix_ccsds::hex::literal(bytes, &ext);
-        if let Some(clipboard) = &mut self.clipboard {
-            let _ = clipboard.set_text(text);
-        }
-        self.set_message(format!("copied {what}'s packet, {} bytes", bytes.len()));
-    }
-
-    /// `SPC k b`: the telecommand call on this line, as its packet's
-    /// bytes on the clipboard.
-    pub(crate) fn cmd_mib_copy_bytes(&mut self) {
-        let Some((key, set)) = self.mib_set_here(MibPending::EditCall) else { return };
-        let buffer = self.focused_buffer_id();
-        let (line, _) = self.open().buffer.line_col(&self.cursor());
-        let text = self.open().buffer.line(line).to_string();
+    /// `SPC k b`: the telecommand call on this line, as its packet's bytes
+    /// on the clipboard.
+    fn cmd_copy_bytes(&mut self, app: &mut App) {
+        let Some((key, set)) = self.set_here(app, MibPending::EditCall) else { return };
+        let buffer = app.focused_buffer_id();
+        let (line, _) = app.open().buffer.line_col(&app.cursor());
+        let text = app.open().buffer.line(line).to_string();
         let text = text.trim_end_matches(['\n', '\r']);
         let Some(tc) = words(text).into_iter().find_map(|(_, w)| set.resolve(w).filter(|d| d.kind == Kind::Telecommand)) else {
-            self.set_error("no telecommand from this project's MIBs on this line");
+            app.set_error("no telecommand from this project's MIBs on this line");
             return;
         };
-        let templates = self.mib_templates(&key);
+        let templates = templates(app, &key);
         let names: Vec<String> = fenix_mib::telecommand::tc_parameters(set.index(), &set.get(tc).row).into_iter().filter(|p| !p.fixed).map(|p| p.name).collect();
         let args = mib_form::read_arguments(text, &set.get(tc).name, &names, &templates);
-        let mission = self.mission(key.project.as_deref());
+        let mission = app.mission(key.project.as_deref());
         let name = set.get(tc).name.clone();
         match fenix_mib::packets::encode_tc(&set, tc, &args, &mission.profile, 0) {
-            Ok(p) => self.mib_copy_literal(&p.bytes, Some(buffer), &name),
-            Err(e) => self.set_error(format!("can't build {name}'s packet: {e}")),
+            Ok(p) => copy_literal(app, &p.bytes, Some(buffer), &name),
+            Err(e) => app.set_error(format!("can't build {name}'s packet: {e}")),
         }
     }
 
     /// The form's command goes where it was opened, the form closes, and
     /// the file it went into is back in front with the cursor after it.
-    fn mib_form_insert(&mut self, id: BufferId, text: String) {
-        let Some(origin) = self.mib_origins.remove(&id) else { return };
-        let (tc, project, values) = match self.pages.get(&id).map(|s| &s.model) {
+    fn form_insert(&mut self, app: &mut App, id: BufferId, text: String) {
+        let Some(origin) = self.origins.remove(&id) else { return };
+        let (tc, project, values) = match app.pages.get(&id).map(|s| &s.model) {
             Some(PageModel::MibForm(form)) => (form.name().to_string(), form.key.project.clone(), form.values()),
             _ => return,
         };
-        self.mib_last.insert((project, tc.clone()), values);
-        let Some(ob) = self.buffers.get_mut(origin.buffer) else {
-            self.set_error("the file the form was opened from is closed");
+        self.last.insert((project, tc.clone()), values);
+        let Some(ob) = app.buffers.get_mut(origin.buffer) else {
+            app.set_error("the file the form was opened from is closed");
             return;
         };
         let len = ob.buffer.len_chars();
@@ -586,135 +707,94 @@ impl App {
         } else {
             ob.buffer.insert_str(&mut cursor, &text);
         }
-        self.close_page(id);
-        self.open_buffer_in_focused_pane(origin.buffer);
-        let pane = self.focused_pane_id();
-        if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
+        app.close_page(id);
+        app.open_buffer_in_focused_pane(origin.buffer);
+        let pane = app.focused_pane_id();
+        if let Some(state) = app.workspaces.active_pane_states_mut().get_mut(&pane) {
             state.cursor = cursor;
         }
-        self.refresh_project_root();
-        self.set_message(format!("inserted {tc}"));
-        self.wake_caret();
-    }
-
-    /// The MIBs of the focused MIB page.
-    fn mib_focused_key(&self) -> MibKey {
-        match self.pages.get(&self.focused_buffer_id()).map(|s| &s.model) {
-            Some(PageModel::Mib(p)) => p.key.clone(),
-            Some(PageModel::MibDef(p)) => p.key.clone(),
-            Some(PageModel::MibForm(p)) => p.key.clone(),
-            _ => self.mib_key_here().0,
-        }
+        app.refresh_project_root();
+        app.set_message(format!("inserted {tc}"));
+        app.wake_caret();
     }
 
     /// The focused page's MIB, for laying it out.
-    pub(super) fn mib_page_ctx_set(&mut self, key: &MibKey) -> (Option<Arc<MibSet>>, bool) {
-        let set = self.mib_set(key);
-        (set, self.mib_loading(key))
+    pub(super) fn page_ctx_set(&mut self, app: &mut App, key: &MibKey) -> (Option<Arc<MibSet>>, bool) {
+        let set = self.set(app, key);
+        (set, self.loading(key))
     }
 
     // -- The editor ---------------------------------------------------------
 
-    /// Whether the focused file is one where MIB names mean something.
-    fn mib_in_this_file(&self) -> bool {
-        if self.is_page_buffer(self.focused_buffer_id()) {
-            return false;
-        }
-        let exts: Vec<String> = match self.mib_project_value("mib.editor_files") {
-            Some(fenix_config::Value::List(l)) => l.clone(),
-            _ => self.config.mib_editor_files.clone(),
-        };
-        if exts.is_empty() {
-            return true;
-        }
-        let ext = self.open().buffer.path().and_then(|p| p.extension()).map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-        exts.iter().any(|e| e.trim_start_matches('.').eq_ignore_ascii_case(&ext))
-    }
-
     /// The MIB definition the word under the cursor names.
-    fn mib_word_here(&mut self) -> Option<(MibKey, Arc<MibSet>, DefRef)> {
-        if !self.mib_in_this_file() {
+    fn word_here(&mut self, app: &mut App) -> Option<(MibKey, Arc<MibSet>, DefRef)> {
+        if !in_this_file(app) {
             return None;
         }
-        let (key, _) = self.mib_key_here();
+        let (key, _) = key_here(app);
         if key.roots.is_empty() {
             return None;
         }
-        let set = self.mib_set(&key)?;
-        let (line, col) = self.open().buffer.line_col(&self.cursor());
-        let text = self.open().buffer.line(line).to_string();
+        let set = self.set(app, &key)?;
+        let (line, col) = app.open().buffer.line_col(&app.cursor());
+        let text = app.open().buffer.line(line).to_string();
         let word = words(&text).into_iter().find(|(range, _)| range.contains(&col)).map(|(_, w)| w.to_string())?;
         let def = set.resolve(&word)?;
         Some((key, set, def))
     }
 
-    /// `K` on a MIB name: its card.
-    pub(super) fn mib_hover(&mut self) -> Option<String> {
-        let (_, set, def) = self.mib_word_here()?;
-        Some(mib_hover_text(&set, def, self.mib_apid_hex()))
-    }
-
-    /// `gd` on a MIB name: its page. Whether it was one.
-    pub(super) fn mib_goto_definition(&mut self) -> bool {
-        let Some((key, _, def)) = self.mib_word_here() else { return false };
-        let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
-        self.record_jump(from);
-        self.open_mib_def(key, def);
-        true
-    }
-
     /// `SPC k g`: something to generate from the project's MIBs.
-    pub(crate) fn cmd_mib_generate(&mut self) {
-        let (key, _) = self.mib_key_here();
+    fn cmd_generate(&mut self, app: &mut App) {
+        let (key, _) = key_here(app);
         if key.roots.is_empty() {
-            self.set_error("no MIB for this project -- SPC k , lists one in its settings");
+            app.set_error("no MIB for this project -- SPC k , lists one in its settings");
             return;
         }
-        let candidates = fenix_mib::generate::KINDS.iter().enumerate().map(|(i, (_, file, what))| fenix_picker::Candidate::new(format!("{file:<18} {what}"), i)).collect();
-        self.enter_picker(ActivePicker::MibGenerate(fenix_picker::PickerState::new(candidates)));
+        let candidates = fenix_mib::generate::KINDS.iter().enumerate().map(|(i, (_, file, what))| FeaturePick::candidate(format!("{file:<18} {what}"), MibPick::Generate(i))).collect();
+        self.enter_picker(app, key, "GENERATE", candidates);
     }
 
     /// Writes generated file `kind` into the project's `generated/` and
     /// opens it.
-    pub(crate) fn mib_generate(&mut self, kind: usize) {
-        let Some((key, set)) = self.mib_set_here(MibPending::Search) else { return };
+    pub(super) fn generate(&mut self, app: &mut App, kind: usize) {
+        let Some((key, set)) = self.set_here(app, MibPending::Search) else { return };
         let Some((name, file, _)) = fenix_mib::generate::KINDS.get(kind) else { return };
-        let mission = self.mission(key.project.as_deref());
-        let xtce = self.mib_text("mib.xtce_version", &self.config.mib_xtce_version).and_then(|v| fenix_mib::generate::XtceVersion::parse(&v).ok()).unwrap_or_default();
-        let Some(text) = fenix_mib::generate::generate_with(name, &set, &mission.profile, mission.base, xtce) else { return };
+        let mission = app.mission(key.project.as_deref());
+        let xtce = text(app, "mib.xtce_version", &app.config.mib_xtce_version).and_then(|v| fenix_mib::generate::XtceVersion::parse(&v).ok()).unwrap_or_default();
+        let Some(generated) = fenix_mib::generate::generate_with(name, &set, &mission.profile, mission.base, xtce) else { return };
         let dir = key.project.clone().unwrap_or_else(|| PathBuf::from(".")).join("generated");
         let path = dir.join(file);
-        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, text)) {
+        match std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, generated)) {
             Ok(()) => {
-                self.open_file_from_picker(&path);
-                self.set_message(format!("wrote {} -- regenerate it with SPC k g after the MIB changes", path.display()));
+                app.open_file_from_picker(&path);
+                app.set_message(format!("wrote {} -- regenerate it with SPC k g after the MIB changes", path.display()));
             }
-            Err(e) => self.set_error(format!("couldn't write {}: {e}", path.display())),
+            Err(e) => app.set_error(format!("couldn't write {}: {e}", path.display())),
         }
     }
 
     /// Checks the telecommand calls of the focused file against the MIB,
     /// when it changed since the last look.
-    pub(super) fn mib_check_scripts(&mut self) {
-        let id = self.focused_buffer_id();
-        let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))) else { return };
-        let on = match self.mib_project_value("mib.check_scripts") {
+    pub(super) fn check_scripts(&mut self, app: &mut App) {
+        let id = app.focused_buffer_id();
+        let Some(path) = app.buffers.get(id).and_then(|ob| ob.buffer.path()).map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))) else { return };
+        let on = match project_value(app, "mib.check_scripts") {
             Some(fenix_config::Value::Bool(b)) => *b,
-            _ => self.config.mib_check_scripts.unwrap_or(true),
+            _ => app.config.mib_check_scripts.unwrap_or(true),
         };
-        if !on || !self.mib_in_this_file() {
-            self.mib_diagnostics.remove(&path);
+        if !on || !in_this_file(app) {
+            self.diagnostics.remove(&path);
             return;
         }
-        let edits = self.open().buffer.edit_count();
-        if self.mib_checked.get(&id) == Some(&edits) {
+        let edits = app.open().buffer.edit_count();
+        if self.checked.get(&id) == Some(&edits) {
             return;
         }
-        let (key, _) = self.mib_key_here();
-        let Some(set) = self.mib_set_ready(&key) else { return };
-        self.mib_checked.insert(id, edits);
-        let text = self.open().buffer.text();
-        let templates = self.mib_templates(&key);
+        let (key, _) = key_here(app);
+        let Some(set) = self.set_ready(&key) else { return };
+        self.checked.insert(id, edits);
+        let text = app.open().buffer.text();
+        let templates = templates(app, &key);
         let found = crate::mib_check::check(&text, &set, &templates);
         let diags: Vec<lsp_types::Diagnostic> = found
             .into_iter()
@@ -734,23 +814,23 @@ impl App {
             })
             .collect();
         if diags.is_empty() {
-            self.mib_diagnostics.remove(&path);
+            self.diagnostics.remove(&path);
         } else {
-            self.mib_diagnostics.insert(path, diags);
+            self.diagnostics.insert(path, diags);
         }
-        if let Some(window) = &self.window {
+        if let Some(window) = &app.window {
             window.request_redraw();
         }
     }
 
     /// Completion's MIB names: telecommands and parameters, with what
     /// they are.
-    pub(super) fn mib_completion_items(&mut self) -> Vec<fenix_picker::Candidate<crate::completion::Item>> {
-        if !self.mib_in_this_file() {
+    pub(super) fn completion_tail(&mut self, app: &mut App) -> Vec<fenix_picker::Candidate<crate::completion::Item>> {
+        if !in_this_file(app) {
             return Vec::new();
         }
-        let (key, _) = self.mib_key_here();
-        let Some(set) = self.mib_set(&key) else { return Vec::new() };
+        let (key, _) = key_here(app);
+        let Some(set) = self.set(app, &key) else { return Vec::new() };
         let mut out = Vec::new();
         for kind in [Kind::Telecommand, Kind::TcParam, Kind::TmParam] {
             for e in set.entries(kind) {
@@ -760,6 +840,85 @@ impl App {
             }
         }
         out
+    }
+}
+
+impl Feature for MibHost {
+    fn spec(&self) -> &'static FeatureSpec {
+        &SPEC
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    /// A set finished reading (`PageEvent::MibLoaded`, passed on by the
+    /// pages).
+    fn on_event(&mut self, app: &mut App, payload: Box<dyn Any + Send>) {
+        let Ok(loaded) = payload.downcast::<(MibKey, Arc<MibSet>)>() else { return };
+        let (key, set) = *loaded;
+        self.apply_loaded(app, key, set);
+    }
+
+    fn notice(&mut self, app: &mut App, notice: &Notice) {
+        match notice {
+            Notice::FocusChanged => self.preload(app),
+            Notice::Tick => self.check_scripts(app),
+            Notice::TaskFinished { .. } | Notice::TerminalClosed(_) => {}
+        }
+    }
+
+    /// `K` on a MIB name: its card -- ahead of any language server.
+    fn hover(&mut self, app: &mut App) -> Option<String> {
+        let (_, set, def) = self.word_here(app)?;
+        Some(hover_text(&set, def, apid_hex(app)))
+    }
+
+    /// `gd` on a MIB name: its page. Whether it was one.
+    fn goto_definition(&mut self, app: &mut App) -> bool {
+        let Some((key, _, def)) = self.word_here(app) else { return false };
+        let from = JumpEntry { buffer: app.focused_buffer_id(), char_idx: app.cursor().char_idx };
+        app.record_jump(from);
+        open_def(app, key, def);
+        true
+    }
+
+    fn diagnostics(&self, path: &Path) -> Vec<lsp_types::Diagnostic> {
+        self.diagnostics.get(path).cloned().unwrap_or_default()
+    }
+
+    fn picker_confirm(&mut self, app: &mut App, pick: &dyn Any) {
+        let Some(&pick) = pick.downcast_ref::<MibPick>() else { return };
+        let key = self.picker_key.clone();
+        match pick {
+            MibPick::Def(def) => match self.pick_for_stream.take() {
+                Some(page) => {
+                    app.show_page(page);
+                    app.stream_follow(page, def);
+                }
+                None => open_def(app, key, def),
+            },
+            MibPick::Insert(def) => self.open_form(app, key, def),
+            MibPick::Generate(kind) => self.generate(app, kind),
+        }
+    }
+}
+
+/// Typed access for the core code that still reaches the MIB directly:
+/// the MIB pages in `pages.rs`, CCSDS, streams, notebook links, the disk
+/// poll and settings. `None` while the MIB is inside one of its own
+/// hooks.
+impl App {
+    pub(super) fn mib(&self) -> Option<&MibHost> {
+        self.features.get::<MibHost>()
+    }
+
+    pub(super) fn with_mib<R>(&mut self, f: impl FnOnce(&mut MibHost, &mut App) -> R) -> Option<R> {
+        self.with_feature::<MibHost, _>(f)
     }
 }
 
@@ -787,7 +946,7 @@ fn words(line: &str) -> Vec<(std::ops::Range<usize>, &str)> {
 }
 
 /// What `K` shows on a MIB name.
-pub(super) fn mib_hover_text(set: &MibSet, def: DefRef, apid_hex: bool) -> String {
+fn hover_text(set: &MibSet, def: DefRef, apid_hex: bool) -> String {
     let e = set.get(def);
     let mut lines = vec![format!("{} {} · {}", def.kind.tag(), e.name, set.root_label(e.root)), e.description.clone()];
     let r = &e.row;
@@ -892,21 +1051,21 @@ mod tests {
     #[test]
     fn a_projects_mibs_take_the_place_of_yours_and_are_relative_to_it() {
         let (p, mut app) = project("replace", "");
-        let (key, source) = app.mib_key_here();
+        let (key, source) = key_here(&app);
         assert_eq!(key.roots, vec![MibRoot { label: "OPS".into(), path: p.0.join("ops") }]);
         assert!(source.contains("settings"), "{source}");
         app.config.mib_include_yours = Some(true);
-        assert_eq!(app.mib_key_here().0.roots.len(), 2, "yours added when asked");
+        assert_eq!(key_here(&app).0.roots.len(), 2, "yours added when asked");
     }
 
     #[test]
     fn how_the_mibs_are_read_comes_from_the_projects_settings_else_yours() {
         let (p, mut app) = project("read-options", "");
-        let options = app.mib_key_here().0.options;
+        let options = key_here(&app).0.options;
         assert_eq!(options.schema.icd, Some(fenix_mib::Icd::V7), "7.x unless said");
         app.config.mib_icd = Some("6.9".into());
         app.config.mib_xtce_fields = vec![("pi1".into(), "SID, STRUCT".into())];
-        let options = app.mib_key_here().0.options;
+        let options = key_here(&app).0.options;
         assert_eq!(options.schema.icd, Some(fenix_mib::Icd::V6_9));
         assert_eq!(options.xtce.pi1, vec!["SID".to_string(), "STRUCT".into()]);
         std::fs::write(
@@ -915,7 +1074,7 @@ mod tests {
         )
         .unwrap();
         app.project_settings = Some((p.0.clone(), fenix_config::ProjectSettings::load(&p.0)));
-        let key = app.mib_key_here().0;
+        let key = key_here(&app).0;
         assert_eq!(key.options.schema.icd, None, "the project's auto wins over your 6.9");
         assert_eq!(key.options.schema.icd_for("OPS"), Some(fenix_mib::Icd::V5));
         assert_eq!(key.options.schema.columns, vec![("xyz".to_string(), vec!["XYZ_A".to_string(), "XYZ_B".into()])]);
@@ -926,7 +1085,7 @@ mod tests {
     #[test]
     fn the_mib_page_lists_the_projects_definitions_and_opens_one() {
         let (_p, mut app) = project("page", "");
-        app.cmd_mib_page();
+        app.with_mib(|m, a| m.cmd_page(a));
         let text = page_text(&mut app);
         assert!(text.contains("ZTC08101") && text.contains("ZTC17001"), "{text}");
         assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*mib*");
@@ -941,17 +1100,18 @@ mod tests {
         let (_p, mut app) = project("insert", "proc main {} {\n    \n}\n");
         set_cursor(&mut app, 19);
         let script = app.focused_buffer_id();
-        let (key, _) = app.mib_key_here();
-        let set = app.mib_set(&key).unwrap();
+        let (key, _) = key_here(&app);
+        let set = app.with_mib(|m, a| m.set(a, &key)).flatten().unwrap();
         // From the MIB page, where no file is in front.
-        app.cmd_mib_page();
-        app.open_mib_form(key, set.find(Kind::Telecommand, 0, "ZTC08101").unwrap());
+        app.with_mib(|m, a| m.cmd_page(a));
+        let tc = set.find(Kind::Telecommand, 0, "ZTC08101").unwrap();
+        app.with_mib(|m, a| m.open_form(a, key, tc));
         assert!(page_text(&mut app).contains("Insert a telecommand"));
         let enter = KeyPress::named(FenixNamedKey::Enter);
         press(&mut app, &[enter, KeyPress::char('3'), enter, KeyPress::char('j'), KeyPress::char('h'), enter.with_ctrl()]);
         assert_eq!(app.focused_buffer_id(), script);
         assert_eq!(app.open().buffer.text(), "proc main {} {\n    tc::send ZTC08101 -PTH00101 3, -PTH00102 ON\n}\n");
-        let remembered = app.mib_last.values().next().unwrap();
+        let remembered = app.mib().unwrap().last.values().next().unwrap();
         assert_eq!(remembered.get("PTH00102@").map(String::as_str), Some("ON"));
     }
 
@@ -959,7 +1119,7 @@ mod tests {
     fn edit_call_reads_the_line_back_into_the_form_and_puts_it_back() {
         let (_p, mut app) = project("edit", "proc main {} {\n    tc::send ZTC08101 -PTH00101 3, -PTH00102 ON\n}\n");
         set_cursor(&mut app, 25);
-        app.cmd_mib_edit_call();
+        app.with_mib(|m, a| m.cmd_edit_call(a));
         assert!(page_text(&mut app).contains("Edit a telecommand call"));
         press(&mut app, &[KeyPress::char('j'), KeyPress::char('l'), KeyPress::named(FenixNamedKey::Enter).with_ctrl()]);
         assert_eq!(app.open().buffer.text(), "proc main {} {\n    tc::send ZTC08101 -PTH00101 3, -PTH00102 AUTO\n}\n");
@@ -990,14 +1150,14 @@ mod tests {
     #[test]
     fn a_changed_table_is_read_again_on_the_disk_poll() {
         let (p, mut app) = project("poll", "");
-        let (key, _) = app.mib_key_here();
-        assert_eq!(app.mib_set(&key).unwrap().entries(Kind::Telecommand).len(), 2);
+        let (key, _) = key_here(&app);
+        assert_eq!(app.with_mib(|m, a| m.set(a, &key)).flatten().unwrap().entries(Kind::Telecommand).len(), 2);
         let ccf = p.0.join("ops").join("ccf.dat");
         let mut text = std::fs::read_to_string(&ccf).unwrap();
         text.push_str("ZTC20003\tSet on-board parameter\t\t\tN\t\t20\t3\t1009\t0\n");
         std::fs::write(&ccf, text).unwrap();
-        app.mib_poll();
-        assert_eq!(app.mib_set(&key).unwrap().entries(Kind::Telecommand).len(), 3);
+        app.with_mib(|m, a| m.poll(a));
+        assert_eq!(app.with_mib(|m, a| m.set(a, &key)).flatten().unwrap().entries(Kind::Telecommand).len(), 3);
     }
 
     #[test]
@@ -1006,5 +1166,63 @@ mod tests {
         assert_eq!(w[0], (2..4, "tc"));
         assert_eq!(w[2], (11..19, "ZTC08101"));
         assert_eq!(w[3], (21..29, "PTH00101"));
+    }
+
+    // Through the `Feature` hooks, the way `App` reaches the MIB now.
+
+    #[test]
+    fn the_mib_contributes_its_commands_and_spc_m_keys_from_its_spec() {
+        let registry = CommandRegistry::with_builtins();
+        let mib: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("mib.")).map(|c| (c.id, c.external())).collect();
+        assert_eq!(mib.len(), 13, "{mib:?}");
+        for id in ["mib.page", "mib.search", "mib.generate"] {
+            assert!(mib.contains(&(id, true)), "{id} stays external");
+        }
+        let menu = keymap::local_trie(&[crate::keymap::LocalContext::Tcl]);
+        assert!(matches!(menu.matcher().feed(KeyPress::char('e')), fenix_keymap::Step::Matched(&"mib.edit_call")));
+        assert!(matches!(menu.matcher().feed(KeyPress::char('s')), fenix_keymap::Step::Matched(&"code.symbols")), "Tcl's entries still there");
+    }
+
+    #[test]
+    fn a_definition_picked_from_its_picker_opens_its_page() {
+        let (_p, mut app) = project("picker", "");
+        let (key, _) = key_here(&app);
+        assert!(app.with_mib(|m, a| m.set(a, &key)).flatten().is_some(), "read inline without an event loop");
+        app.with_mib(|m, a| m.cmd_pick(a, Kind::Telecommand));
+        assert!(matches!(app.active_picker, Some(ActivePicker::Feature { feature: "fenix.mib", badge: "MIB", .. })));
+        let Some(ActivePicker::Feature { state, .. }) = &mut app.active_picker else { unreachable!() };
+        for c in "ZTC17001".chars() {
+            state.push_char(c);
+        }
+        app.picker_confirm();
+        assert!(matches!(app.pages.get(&app.focused_buffer_id()).map(|s| &s.model), Some(PageModel::MibDef(_))));
+        assert!(page_text(&mut app).contains("ZTC17001"));
+    }
+
+    #[test]
+    fn a_set_read_while_the_mib_is_busy_lands_once_it_is_back() {
+        let (_p, mut app) = project("missed-event", "");
+        // A key nothing has read yet (focusing the project read the usual one).
+        let key = MibKey { default: Some("OTHER".to_string()), ..key_here(&app).0 };
+        let set = Arc::new(MibSet::load_with(key.roots.clone(), key.default.as_deref(), key.options.clone()));
+        app.with_mib(|m, a| {
+            let event = super::super::feature::FeatureEvent { feature: SPEC.id, label: "MibLoaded", payload: Box::new((key.clone(), set)) };
+            a.deliver_feature_event(event);
+            assert!(m.set_ready(&key).is_none(), "not yet: the MIB is out");
+        });
+        assert!(app.mib().unwrap().set_ready(&key).is_some());
+    }
+
+    #[test]
+    fn its_script_problems_show_with_the_files_diagnostics() {
+        let (p, mut app) = project("diagnostics", "tc::send ZTC08101 -Line 99 -Mode AUTO
+");
+        let (key, _) = key_here(&app);
+        let _ = app.with_mib(|m, a| m.set(a, &key));
+        app.notify_features(Notice::Tick);
+        let path = fenix_lsp::normalize(std::fs::canonicalize(p.0.join("checkout.tcl")).unwrap());
+        let found: Vec<_> = app.features.iter().flat_map(|f| f.diagnostics(&path)).collect();
+        assert!(!found.is_empty(), "the out-of-range line was flagged");
+        assert!(found.iter().all(|d| d.source.as_deref() == Some("MIB")));
     }
 }

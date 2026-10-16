@@ -142,14 +142,7 @@ impl LocalContext {
                 t.insert(&[KeyPress::char('e')], "export", "diagram.export");
             }
             LocalContext::Tcl => {
-                t.insert(&[KeyPress::char('i')], "insert a telecommand", "mib.insert");
-                t.insert(&[KeyPress::char('e')], "edit the telecommand call", "mib.edit_call");
-                t.insert(&[KeyPress::char('t')], "telecommand", "mib.telecommand");
-                t.insert(&[KeyPress::char('k')], "TM packet", "mib.tm_packet");
-                t.insert(&[KeyPress::char('p')], "TM parameter", "mib.tm_parameter");
-                t.insert(&[KeyPress::char('c')], "calibration", "mib.calibration");
-                t.insert(&[KeyPress::char('m')], "MIB page", "mib.page");
-                t.insert(&[KeyPress::char('r')], "read the MIBs again", "mib.reload");
+                insert_entries(t, &[], crate::app::MIB_SPEC.local_menu);
                 insert_entries(t, &[], crate::app::TCL_SPEC.local_menu);
             }
         }
