@@ -195,6 +195,19 @@ pub fn local_trie(contexts: &[LocalContext]) -> &'static KeyTrie<&'static str> {
 /// section follows these, and unsectioned keys come last.
 pub const WHICH_KEY_SECTIONS: &[&str] = &["View", "Branch & remote", "This change"];
 
+/// Adds a feature's leader groups and bindings (`FeatureSpec::leader`)
+/// under `spc`.
+fn insert_feature_keys(t: &mut KeyTrie<&'static str>, spc: KeyPress, spec: &crate::app::feature::FeatureSpec) {
+    use crate::app::feature::LeaderEntry;
+    let seq = |keys: &[char]| std::iter::once(spc).chain(keys.iter().map(|&c| KeyPress::char(c))).collect::<Vec<_>>();
+    for entry in spec.leader {
+        match entry {
+            LeaderEntry::Group(keys, label) => t.label_group(&seq(keys), label),
+            LeaderEntry::Bind(keys, label, command) => t.insert(&seq(keys), label, *command),
+        }
+    }
+}
+
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
@@ -325,13 +338,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('t')], "toggle terminal", "terminal.toggle");
         t.insert(&[spc, KeyPress::char('o'), KeyPress::char('T')], "terminal in this pane", "terminal.open_buffer");
 
-        // Reserved entirely for Docker (Lazydocker-style) -- the
-        // dashboard used to live at `SPC d d` but moved to `SPC o d`
-        // above so this whole group is free for docker commands.
-        t.label_group(&[spc, KeyPress::char('d')], "docker");
-        t.insert(&[spc, KeyPress::char('d'), KeyPress::char('d')], "open docker panel", "docker.open");
-        t.insert(&[spc, KeyPress::char('d'), KeyPress::char('b')], "build image", "docker.build");
-        t.insert(&[spc, KeyPress::char('d'), KeyPress::char('q')], "close docker panel", "docker.close");
+        // `SPC d`: Docker's own group, from its `FeatureSpec`.
+        insert_feature_keys(&mut t, spc, &crate::app::DOCKER_SPEC);
 
         // DAP debugger. `SPC d` is already Docker's own group (Doom
         // Emacs' own convention for debugging), so this nests under

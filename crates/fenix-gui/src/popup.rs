@@ -23,16 +23,17 @@ pub enum PopupId {
     /// mode -- so no popup-overlap handling is needed anywhere this id
     /// is used.
     Completion,
-    /// The Docker panel's contextual "view command options" popup
-    /// (`x` on a Containers/Images/Volumes pane), anchored `TopRight`
-    /// like `WhichKey`. Never coexists with `WhichKey`/`Completion`
-    /// either -- it only shows while the Docker panel has focus, where
+    /// A feature's own popup, by its feature id (`fenix.docker`: the
+    /// Docker panel's contextual "view command options" popup, `x` on a
+    /// Containers/Images/Volumes pane, anchored `TopRight` like
+    /// `WhichKey`). Never coexists with `WhichKey`/`Completion` either --
+    /// it only shows while one of the feature's panes has focus, where
     /// neither of those other two popups can appear.
-    DockerMenu,
+    Feature(&'static str),
     /// The Git panel's own contextual "view command options" popup
     /// (`x` on a Files/Branches/Commits/Stash pane) -- same shape and
-    /// same non-coexistence reasoning as `DockerMenu`, just for the Git
-    /// session instead.
+    /// same non-coexistence reasoning as the Docker panel's `Feature`
+    /// popup, just for the Git session instead.
     GitMenu,
     /// Whichever single-line prompt/confirmation is currently capturing
     /// input (Vim's own `:command`/`/`-`?`-search, the project-grep
@@ -41,7 +42,7 @@ pub enum PopupId {
     /// Never coexists with any popup above: a prompt captures every
     /// keystroke before `WhichKey`'s pending-sequence state or
     /// `Completion`'s Insert-mode dispatch could ever become active at
-    /// the same time, and `DockerMenu`/`GitMenu` are unconditionally
+    /// the same time, and `Feature`/`GitMenu` are unconditionally
     /// cleared at the very top of `route_keypress`, before any prompt-
     /// capturing check runs.
     Prompt,
@@ -49,7 +50,7 @@ pub enum PopupId {
     /// like `Completion` -- never coexists with it in practice, since
     /// `K` only runs in Normal mode and `Completion` only shows in
     /// Insert mode, and is cleared unconditionally on every keypress
-    /// (`route_keypress`) the same way `DockerMenu`/`GitMenu`
+    /// (`route_keypress`) the same way `Feature`/`GitMenu`
     /// are.
     Hover,
     /// A page's own menu, field or question (the Git pages' commit,

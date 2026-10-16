@@ -22,6 +22,9 @@ type ExternalFn = fn(&mut App);
 enum Handler {
     Ctx(CommandFn),
     External(ExternalFn),
+    /// A feature's command that isn't external: it needs no event loop
+    /// either, but only runs from inside Fenix.
+    App(ExternalFn),
 }
 
 fn cmd_snippets_from_selection(ctx: &mut CommandCtx) {
@@ -152,9 +155,7 @@ impl CommandRegistry {
         registry.external("explorer.places", "Bookmarks, drives, recent directories", |app| app.picker_places());
         registry.external("explorer.recent_dirs", "Directories you have been to", |app| app.picker_recent_dirs());
         registry.register("explorer.bookmark", "Bookmark the directory you are in", cmd_explorer_bookmark);
-        registry.external("docker.open", "Show the Docker container/image panel", |app| app.open_docker_panel());
-        registry.register("docker.build", "Build an image from the current project's Dockerfile", cmd_docker_build);
-        registry.register("docker.close", "Close the Docker panel session", cmd_docker_close);
+        registry.feature(&crate::app::DOCKER_SPEC);
         registry.register("debug.start_or_continue", "Start a debug session, or continue one that's stopped", cmd_debug_start_or_continue);
         registry.register("debug.toggle_breakpoint", "Toggle a breakpoint on the focused buffer's current line", cmd_debug_toggle_breakpoint);
         registry.register("debug.step_over", "Step over the current line", cmd_debug_step_over);
@@ -383,6 +384,14 @@ impl CommandRegistry {
         self.commands.push(Command { id, description, run: Handler::External(run) });
     }
 
+    /// Registers a feature's commands (`FeatureSpec::commands`), in order.
+    fn feature(&mut self, spec: &crate::app::feature::FeatureSpec) {
+        for command in spec.commands {
+            let run = if command.external { Handler::External(command.run) } else { Handler::App(command.run) };
+            self.commands.push(Command { id: command.id, description: command.description, run });
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Command> {
         self.commands.iter()
     }
@@ -393,7 +402,7 @@ impl CommandRegistry {
         let Some(cmd) = self.commands.iter().find(|c| c.id == id) else { return false };
         match cmd.run {
             Handler::Ctx(run) => run(&mut CommandCtx { app, event_loop }),
-            Handler::External(run) => run(app),
+            Handler::External(run) | Handler::App(run) => run(app),
         }
         true
     }
@@ -407,7 +416,7 @@ impl CommandRegistry {
                 run(app);
                 Ok(())
             }
-            Handler::Ctx(_) => Err(ExternalError::NotExternal),
+            Handler::Ctx(_) | Handler::App(_) => Err(ExternalError::NotExternal),
         }
     }
 }
@@ -566,14 +575,6 @@ fn cmd_explorer_go_to_path(ctx: &mut CommandCtx) {
 
 fn cmd_explorer_bookmark(ctx: &mut CommandCtx) {
     ctx.app.bookmark_current_directory();
-}
-
-fn cmd_docker_build(ctx: &mut CommandCtx) {
-    ctx.app.docker_build();
-}
-
-fn cmd_docker_close(ctx: &mut CommandCtx) {
-    ctx.app.docker_session_close();
 }
 
 fn cmd_debug_start_or_continue(ctx: &mut CommandCtx) {
