@@ -37,11 +37,11 @@ impl App {
         }
         let to = if self.config.notebook_journal.unwrap_or(true) { CaptureTo::Journal } else { CaptureTo::Inbox };
         // A link back to the line, when there's a file here.
-        let link = self.open().buffer.path().map(Path::to_path_buf).filter(|p| !self.notebook.book.as_ref().is_some_and(|nb| nb.by_path(p).is_some())).map(|path| {
+        let link = self.open().buffer.path().map(Path::to_path_buf).filter(|p| !self.features.notebook_state().book.as_ref().is_some_and(|nb| nb.by_path(p).is_some())).map(|path| {
             let (line, _) = self.open().buffer.line_col(&self.cursor());
             self.notebook_link_to(&path, Some(line + 1))
         });
-        self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::Capture { to, task: false, link }, input: String::new() });
+        self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::Capture { to, task: false, link }, input: String::new() });
         self.wake_caret();
     }
 
@@ -49,7 +49,7 @@ impl App {
     /// `Ctrl-T` makes it a task, `Ctrl-L` drops the link back. Whether
     /// the key was one of those.
     pub(super) fn notebook_capture_key(&mut self, keypress: KeyPress) -> bool {
-        let Some(NotebookPrompt { kind: NotebookPromptKind::Capture { to, task, link }, .. }) = &mut self.notebook.prompt else { return false };
+        let Some(NotebookPrompt { kind: NotebookPromptKind::Capture { to, task, link }, .. }) = &mut self.features.notebook_state_mut().prompt else { return false };
         if keypress.code == KeyCode::Named(FenixNamedKey::Tab) {
             *to = match to {
                 CaptureTo::Journal => CaptureTo::Inbox,
@@ -99,13 +99,13 @@ impl App {
             }),
         };
         let Some(id) = id else {
-            return Err(self.notebook.error.clone().unwrap_or_else(|| "couldn't open the notebook to capture into".to_string()));
+            return Err(self.features.notebook_state().error.clone().unwrap_or_else(|| "couldn't open the notebook to capture into".to_string()));
         };
         self.notebook_flush(&id);
-        let before = self.notebook.book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.text.clone()).unwrap_or_default();
+        let before = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.text.clone()).unwrap_or_default();
         let after = fenix_notebook::templates::append_to_log(&before, &line);
         self.notebook_write_entry(&id, &after);
-        match self.notebook.book.as_ref().and_then(|nb| nb.get(&id)) {
+        match self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&id)) {
             Some(e) if e.text == after => Ok(e.path.clone()),
             Some(e) => Err(format!("couldn't write {}", e.path.display())),
             None => Err("the notebook lost the entry it was capturing into".to_string()),
@@ -121,7 +121,7 @@ impl App {
         if self.notebook().is_none() {
             return;
         }
-        self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::Search, input: String::new() });
+        self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::Search, input: String::new() });
         self.wake_caret();
     }
 
@@ -148,7 +148,7 @@ impl App {
         }
         let found = results.len();
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "FOUND", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("FOUND", candidates));
         self.set_message(format!("{found} match{} -- typing narrows them", if found == 1 { "es" } else { "" }));
     }
 
@@ -170,7 +170,7 @@ impl App {
         }
         let candidates = tags.into_iter().map(|(t, n)| fenix_picker::Candidate::new(format!("#{t}  ({n})"), NotebookPick::Filter(format!("tag:{t}")))).collect();
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "TAG", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("TAG", candidates));
     }
 
     /// The notebook page, filtered.
@@ -233,7 +233,7 @@ impl App {
     /// The date of the focused journal day, if it is one.
     fn focused_day(&self) -> Option<chrono::NaiveDate> {
         let path = self.open().buffer.path()?;
-        self.notebook.book.as_ref()?.by_path(path)?.date()
+        self.features.notebook_state().book.as_ref()?.by_path(path)?.date()
     }
 
     /// `SPC m a` in a journal day: its agenda list, as the agenda is now.
@@ -351,10 +351,10 @@ mod tests {
         app.notebook();
         app.notebook_capture_done(CaptureTo::Journal, false, Some("[[fenix:src/a.c:3]]".into()), "retry is 3");
         let today = chrono::Local::now().date_naive();
-        let day = app.notebook.book.as_ref().unwrap().day(today).unwrap().text.clone();
+        let day = app.features.notebook_state().book.as_ref().unwrap().day(today).unwrap().text.clone();
         assert!(day.contains("## Log\n\n- `") && day.contains("` retry is 3 · [[fenix:src/a.c:3]]\n"), "{day}");
         app.notebook_capture_done(CaptureTo::Inbox, true, None, "call OBSW");
-        let inbox = app.notebook.book.as_ref().unwrap().by_name("Inbox").unwrap().text.clone();
+        let inbox = app.features.notebook_state().book.as_ref().unwrap().by_name("Inbox").unwrap().text.clone();
         assert!(inbox.ends_with("- [ ] call OBSW\n"), "{inbox}");
     }
 
@@ -378,7 +378,7 @@ mod tests {
         app.notebook_create_note("Bench", "---\ntags: [bench]\n---\nretry limit is 3\n");
         app.notebook_create_note("Other", "nothing\n");
         app.notebook_search_results("retry tag:bench");
-        let Some(ActivePicker::Notebook { title, picker }) = &app.active_picker else { panic!("the results") };
+        let Some(ActivePicker::Feature { badge: title, state: picker, .. }) = &app.active_picker else { panic!("the results") };
         assert_eq!(*title, "FOUND");
         assert_eq!(picker.len(), 1);
         assert!(picker.selected().unwrap().label.contains("retry limit is 3"));

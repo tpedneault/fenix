@@ -23,9 +23,11 @@
 use std::any::Any;
 
 use super::ccsds_host::CcsdsHost;
+use super::diagram_host::DiagramsHost;
 use super::docker_host::DockerHost;
 use super::embedded_host::EmbeddedHost;
 use super::mib_host::MibHost;
+use super::notebook_host::NotebookHost;
 use super::tcl_host::TclHost;
 use super::*;
 use crate::popup::PopupId;
@@ -79,9 +81,9 @@ pub(crate) struct FeatureSpec {
     /// What `K` shows for the word under the cursor, ahead of any
     /// language server -- after the instances' own `Feature::hover`.
     pub hover_first: Option<fn(&mut App) -> Option<String>>,
-    /// A row of this feature's picker was chosen -- instead of
-    /// `Feature::picker_confirm`.
-    pub picker_confirm: Option<fn(&mut App, &dyn Any)>,
+    /// A row of this feature's picker was chosen, with what was typed --
+    /// instead of `Feature::picker_confirm`.
+    pub picker_confirm: Option<fn(&mut App, &dyn Any, &str)>,
     /// The modeline's clock text, in place of the wall clock (the
     /// mission clock).
     pub modeline_clock: Option<fn(&mut App) -> Option<String>>,
@@ -309,6 +311,8 @@ impl Features {
             Some(Box::new(TclHost::default())),
             Some(Box::new(MibHost::default())),
             Some(Box::new(CcsdsHost::default())),
+            Some(Box::new(NotebookHost::default())),
+            Some(Box::new(DiagramsHost::default())),
         ];
         let specs = slots
             .iter()

@@ -91,6 +91,19 @@ impl ReadingPre {
     }
 }
 
+
+/// Pictures pages show (a note's images, a diagram's drawing), read and
+/// once drawn uploaded -- core, as the reading view is.
+#[derive(Default)]
+pub(super) struct PageImages {
+    /// Picture sizes known so far, for the reading layout.
+    pub(super) image_sizes: HashMap<crate::page::ImageKey, (u32, u32)>,
+    /// Pictures pages draw, read and (once drawn) uploaded.
+    pub(super) textures: HashMap<crate::page::ImageKey, PageTex>,
+    /// Pictures being read.
+    pub(super) pending: std::collections::HashSet<crate::page::ImageKey>,
+}
+
 impl App {
     /// `SPC m r` (`replace`) / `SPC m p`: the focused Markdown buffer
     /// rendered, in its place or beside it.
@@ -269,11 +282,11 @@ impl App {
     /// Starts reading the pictures page `id` shows that aren't read yet.
     pub(super) fn request_page_images(&mut self, id: BufferId) {
         let Some(state) = self.pages.get(&id) else { return };
-        let wanted: Vec<ImageKey> = state.page.images.iter().map(|i| i.key.clone()).filter(|k| !self.notebook.textures.contains_key(k) && !self.notebook.pending.contains(k)).collect();
+        let wanted: Vec<ImageKey> = state.page.images.iter().map(|i| i.key.clone()).filter(|k| !self.page_images.textures.contains_key(k) && !self.page_images.pending.contains(k)).collect();
         for key in wanted {
             match &key {
                 ImageKey::File(path) => {
-                    self.notebook.pending.insert(key.clone());
+                    self.page_images.pending.insert(key.clone());
                     let path = path.clone();
                     let key2 = key.clone();
                     self.page_spawn(move |send| send(PageEvent::PageImage { key: key2, result: decode_picture(&path) }));
@@ -286,17 +299,17 @@ impl App {
     /// A picture arrived: kept for upload, and pages showing it laid out
     /// again at its size.
     pub(super) fn apply_page_image(&mut self, key: ImageKey, result: Result<(u32, u32, Vec<u8>), String>) {
-        self.notebook.pending.remove(&key);
+        self.page_images.pending.remove(&key);
         match result {
             Ok((w, h, bgra)) => {
-                self.notebook.image_sizes.insert(key.clone(), (w, h));
-                self.notebook.textures.insert(key, PageTex { w, h, bgra: Some(bgra), texture: None });
+                self.page_images.image_sizes.insert(key.clone(), (w, h));
+                self.page_images.textures.insert(key, PageTex { w, h, bgra: Some(bgra), texture: None });
             }
             Err(e) => {
                 // Remembered as failed (1x1, nothing drawn) so it isn't
                 // asked for every frame.
                 eprintln!("fenix: couldn't read a picture: {e}");
-                self.notebook.textures.insert(key, PageTex { w: 0, h: 0, bgra: None, texture: None });
+                self.page_images.textures.insert(key, PageTex { w: 0, h: 0, bgra: None, texture: None });
             }
         }
         for state in self.pages.values_mut() {

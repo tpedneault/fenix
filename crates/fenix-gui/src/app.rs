@@ -40,11 +40,13 @@ mod stream_host;
 mod file_index;
 mod disk_probe;
 mod notebook_host;
+pub(crate) use notebook_host::SPEC as NOTEBOOK_SPEC;
 mod notebook_links;
 mod notebook_capture;
 mod notebook_export;
 mod reading_host;
 mod diagram_host;
+pub(crate) use diagram_host::SPEC as DIAGRAMS_SPEC;
 mod control_host;
 pub(crate) mod feature;
 mod docker_host;
@@ -2142,10 +2144,6 @@ enum ActivePicker {
     /// `SPC r t`: a PDF's headings, by name; confirming goes to the
     /// heading's page.
     PdfHeading(fenix_picker::PickerState<u32>),
-    /// Every notebook picker (`SPC n f`, templates, diagram types, tags,
-    /// search hits, links to insert, themes...): what confirming does is
-    /// in the payload. `title` names it in the modeline.
-    Notebook { title: &'static str, picker: fenix_picker::PickerState<notebook_host::NotebookPick> },
     /// `SPC g r`: pick the ref to replay the current branch onto.
     RebaseOnto(fenix_picker::PickerState<String>),
     /// `SPC g m`: pick the ref to merge into the current branch.
@@ -2254,7 +2252,6 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
         ActivePicker::PdfHeading(picker) => picker.push_char(c),
 
-        ActivePicker::Notebook { picker, .. } => picker.push_char(c),
     }
 }
 
@@ -2292,7 +2289,6 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
         ActivePicker::PdfHeading(picker) => picker.backspace(),
 
-        ActivePicker::Notebook { picker, .. } => picker.backspace(),
     }
 }
 
@@ -2330,7 +2326,6 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
         ActivePicker::PdfHeading(picker) => picker.move_selection(delta),
 
-        ActivePicker::Notebook { picker, .. } => picker.move_selection(delta),
     }
 }
 
@@ -2371,7 +2366,6 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
         ActivePicker::PdfHeading(picker) => picker.toggle_mark(),
 
-        ActivePicker::Notebook { picker, .. } => picker.toggle_mark(),
     }
 }
 
@@ -2409,7 +2403,6 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::SettingChoice { picker, .. } => picker.query(),
         ActivePicker::PdfHeading(picker) => picker.query(),
 
-        ActivePicker::Notebook { picker, .. } => picker.query(),
     }
 }
 
@@ -2447,7 +2440,6 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::SettingChoice { picker, .. } => picker.len(),
         ActivePicker::PdfHeading(picker) => picker.len(),
 
-        ActivePicker::Notebook { picker, .. } => picker.len(),
     }
 }
 
@@ -2485,7 +2477,6 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
         ActivePicker::PdfHeading(picker) => picker.selected_row(),
 
-        ActivePicker::Notebook { picker, .. } => picker.selected_row(),
     }
 }
 
@@ -2527,7 +2518,6 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::PdfHeading(picker) => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
 
-        ActivePicker::Notebook { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
     }
 }
 
@@ -5491,8 +5481,9 @@ pub struct App {
     /// Linking a task to an issue typed by key, or naming the issue type
     /// of one being created from it.
     agenda_prompt: Option<AgendaPrompt>,
-    /// The notebook: notes, journal days and diagrams (`SPC n`).
-    notebook: notebook_host::NotebookState,
+    /// Pictures pages show, read and uploaded (the reading view's, a
+    /// note's, a diagram's drawing).
+    page_images: reading_host::PageImages,
     /// What `SPC a h` captured for the new-task form it opened.
     agenda_capture: Option<agenda_host::Capture>,
     /// The clock picker open is asking about time away, not switching.
@@ -6467,7 +6458,7 @@ impl App {
             agenda_store,
             agenda_path,
             agenda_prompt: None,
-            notebook: Default::default(),
+            page_images: Default::default(),
             agenda_capture: None,
             agenda_gap_asked: false,
             agenda_seen_saved: None,
@@ -7693,7 +7684,6 @@ impl App {
         for feature in self.features.iter() {
             all.extend(feature.diagnostics(path));
         }
-        all.extend(self.notebook.diagrams.diagnostics.get(path).cloned().unwrap_or_default());
         all
     }
 
@@ -16146,13 +16136,6 @@ impl App {
                 let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
                 self.run_task(task, root);
             }
-            Some(ActivePicker::Notebook { picker, .. }) => {
-                let Some(choice) = picker.selected().map(|c| c.payload.clone()) else { return };
-                let query = picker.query().to_string();
-                self.active_picker = None;
-                self.main_view = MainView::Editor;
-                self.notebook_picked(choice, query);
-            }
             Some(ActivePicker::PdfHeading(picker)) => {
                 let Some(page) = picker.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -16273,11 +16256,12 @@ impl App {
             Some(ActivePicker::Feature { feature, state, .. }) => {
                 let feature = *feature;
                 let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
+                let query = state.query().to_string();
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
                 let confirm = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.picker_confirm);
                 match confirm {
-                    Some(confirm) => confirm(self, &*pick.0),
+                    Some(confirm) => confirm(self, &*pick.0, &query),
                     None => {
                         self.with_feature_id(feature, |feature, app| feature.picker_confirm(app, &*pick.0));
                     }
@@ -18683,7 +18667,7 @@ impl App {
             return;
         }
         // A new note's name, a capture, a diagram's name.
-        if self.notebook.prompt.is_some() {
+        if self.features.notebook_state().prompt.is_some() {
             self.notebook_prompt_key(keypress);
             return;
         }
@@ -20031,7 +20015,6 @@ impl App {
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
                 Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
                 Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
-                Some(picker @ ActivePicker::Notebook { title, .. }) => (*title, picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
                 Some(picker @ ActivePicker::Symbol(_)) => ("SYMBOL", picker_len(picker)),
                 Some(picker @ ActivePicker::VncHost(_)) => ("VNC", picker_len(picker)),
@@ -23861,7 +23844,7 @@ impl App {
         for pane in &panes_render {
             for &(i, (fx, fy, fw, fh), strong) in &pane.home.marks {
                 let Some((row, col, rows, cols, key, view)) = pane.home.images.get(i) else { continue };
-                let Some(tex) = self.notebook.textures.get(key).filter(|t| t.texture.is_some()) else { continue };
+                let Some(tex) = self.page_images.textures.get(key).filter(|t| t.texture.is_some()) else { continue };
                 let cell_box = (
                     pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width,
                     pane.rect.y + text::PAD_TOP + (*row as f32 - pane.content_frac) * line_height,
@@ -24074,7 +24057,7 @@ impl App {
 
         // Pictures pages show, read since the last frame: uploaded once.
         if let Some(pipeline) = self.logo_pipeline.as_ref() {
-            for tex in self.notebook.textures.values_mut() {
+            for tex in self.page_images.textures.values_mut() {
                 if let Some(bgra) = tex.bgra.take() {
                     if tex.w > 0 && tex.h > 0 {
                         let texture = pipeline.create_texture(gpu, tex.w, tex.h);
@@ -24195,7 +24178,7 @@ impl App {
                 let mut slot = 1;
                 for pane in &panes_render {
                     for (row, col, rows, cols, key, view) in &pane.home.images {
-                        let Some(tex) = self.notebook.textures.get(key) else { continue };
+                        let Some(tex) = self.page_images.textures.get(key) else { continue };
                         let Some(texture) = &tex.texture else { continue };
                         let cell_box = (
                             pane.rect.x + text::PAD_LEFT + pane.gutter_px + *col as f32 * char_width,

@@ -76,18 +76,123 @@ pub(super) struct NotebookState {
     /// Per notebook buffer: its edit count when it last changed, and when.
     pub(super) edits: HashMap<BufferId, (u64, Instant)>,
     pub(super) prompt: Option<NotebookPrompt>,
-    /// Picture sizes known so far, for the reading layout.
-    pub(super) image_sizes: HashMap<ImageKey, (u32, u32)>,
     /// The pane the backlinks sidebar's note is in.
     pub(super) sidebar_origin: Option<fenix_window::WindowId>,
-    /// Pictures pages draw, read and (once drawn) uploaded.
-    pub(super) textures: HashMap<ImageKey, super::reading_host::PageTex>,
-    /// Pictures being read.
-    pub(super) pending: std::collections::HashSet<ImageKey>,
-    /// Diagrams drawn and being drawn.
-    pub(super) diagrams: super::diagram_host::DiagramState,
     /// The notebook is being read off the UI thread (for Home).
     pub(super) opening: bool,
+}
+
+/// The notebook's commands, its `SPC n` group and `SPC i D`, and its
+/// entries in the Markdown `SPC m` menu (the reading view's own are core).
+pub(crate) static SPEC: super::feature::FeatureSpec = {
+    use super::feature::FeatureCommand as C;
+    use super::feature::LeaderEntry::{Bind, Group};
+    super::feature::FeatureSpec {
+        id: "fenix.notebook",
+        commands: &[
+            C { id: "notebook.open", description: "The notebook: every note, journal day and diagram", external: true, run: |app| app.open_notebook_page() },
+            C { id: "notebook.new_note", description: "A new note, from a template", external: true, run: |app| app.notebook_new_note() },
+            C { id: "notebook.new_diagram", description: "A new Mermaid diagram", external: true, run: |app| app.notebook_new_diagram() },
+            C { id: "notebook.find", description: "Find a note or diagram by name", external: true, run: |app| app.notebook_find() },
+            C { id: "notebook.recent", description: "Reopen the note or diagram you touched last", external: true, run: |app| app.notebook_reopen() },
+            C { id: "notebook.journal", description: "Today's journal day", external: true, run: |app| app.notebook_today() },
+            C { id: "notebook.capture", description: "Capture a line into the journal or the Inbox", external: false, run: |app| app.notebook_capture() },
+            C { id: "notebook.search", description: "Search every note and diagram", external: true, run: |app| app.notebook_search() },
+            C { id: "notebook.tags", description: "Every tag in the notebook", external: true, run: |app| app.notebook_tags() },
+            C { id: "notebook.project", description: "The notes about this project", external: true, run: |app| app.notebook_project_notes() },
+            C { id: "notebook.to_agenda", description: "Send the checkbox under the cursor to the agenda", external: false, run: |app| app.notebook_to_agenda() },
+            C { id: "notebook.journal_agenda", description: "Refresh a journal day's agenda list", external: false, run: |app| app.journal_refresh_agenda() },
+            C { id: "notebook.journal_commits", description: "Add today's commits to a journal day", external: false, run: |app| app.journal_commits() },
+            C { id: "notebook.export", description: "Export this diagram or note", external: false, run: |app| app.diagram_export_here() },
+            C { id: "notebook.save_block", description: "Save the ```mermaid block here to the notebook", external: false, run: |app| app.notebook_save_block() },
+            C { id: "notebook.import", description: "Copy a .md or .mmd file into the notebook", external: false, run: |app| app.notebook_import() },
+            C { id: "insert.diagram", description: "Insert a notebook diagram: its block, or an SVG and a link", external: false, run: |app| app.notebook_insert_diagram() },
+            C { id: "notebook.backlinks", description: "What links to this note, beside it", external: false, run: |app| app.notebook_backlinks() },
+            C { id: "notebook.insert_link", description: "Insert a link to a note", external: false, run: |app| app.notebook_insert_link() },
+            C { id: "notebook.copy_link", description: "Copy a link to this line, for a note", external: false, run: |app| app.notebook_copy_link() },
+            C { id: "notebook.paste_image", description: "Paste the clipboard's picture into the note", external: false, run: |app| app.notebook_paste_image() },
+        ],
+        leader: &[
+            Bind(&['i', 'D'], "a notebook diagram", "insert.diagram"),
+            Group(&['n'], "notebook"),
+            Bind(&['n', 'n'], "notebook page", "notebook.open"),
+            Bind(&['n', 'N'], "new note", "notebook.new_note"),
+            Bind(&['n', 'd'], "new diagram", "notebook.new_diagram"),
+            Bind(&['n', 'f'], "find by name", "notebook.find"),
+            Bind(&['n', 'r'], "reopen the last one", "notebook.recent"),
+            Bind(&['n', 'j'], "today's journal", "notebook.journal"),
+            Bind(&['n', 'b'], "links here (sidebar)", "notebook.backlinks"),
+            Bind(&['n', 'c'], "capture a line", "notebook.capture"),
+            Bind(&['n', '/'], "search the notebook", "notebook.search"),
+            Bind(&['n', '#'], "tags", "notebook.tags"),
+            Bind(&['n', 'p'], "this project's notes", "notebook.project"),
+            Bind(&['n', 't'], "checkbox to the agenda", "notebook.to_agenda"),
+            Bind(&['n', 'e'], "export", "notebook.export"),
+            Bind(&['n', 's'], "save the ```mermaid block", "notebook.save_block"),
+            Bind(&['n', 'i'], "import a file", "notebook.import"),
+            Bind(&['n', 'l'], "insert a link", "notebook.insert_link"),
+            Bind(&['n', 'y'], "copy a link to this line", "notebook.copy_link"),
+            Bind(&['n', 'v'], "paste a picture", "notebook.paste_image"),
+        ],
+        local_menu: &[
+            Bind(&['b'], "links here", "notebook.backlinks"),
+            Bind(&['a'], "journal: refresh the agenda list", "notebook.journal_agenda"),
+            Bind(&['g'], "journal: add today's commits", "notebook.journal_commits"),
+        ],
+        // The Markdown menu is the reading view's (core); the notebook adds to it.
+        local_context: None,
+        language_server: None,
+        tasks: None,
+        hover_fallback: None,
+        completion_at_cursor: None,
+        completion_pool_at: None,
+        hover_first: None,
+        picker_confirm: Some(|app, pick, query| {
+            if let Some(pick) = pick.downcast_ref::<NotebookPick>() {
+                app.notebook_picked(pick.clone(), query.to_string());
+            }
+        }),
+        modeline_clock: None,
+    }
+};
+
+/// The notebook's state. Its code is still `App` methods (its pages are
+/// core `PageModel`s), so it reaches this by type (`Features::
+/// notebook_state`); every entry point is a spec function, which runs
+/// with it in place, and it has no instance hooks that run code.
+#[derive(Default)]
+pub(crate) struct NotebookHost {
+    pub(super) state: NotebookState,
+}
+
+impl super::feature::Feature for NotebookHost {
+    fn spec(&self) -> &'static super::feature::FeatureSpec {
+        &SPEC
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl super::feature::Features {
+    pub(super) fn notebook_state(&self) -> &NotebookState {
+        &self.get::<NotebookHost>().expect("the notebook has no instance hooks that run code, so it's always in place").state
+    }
+
+    pub(super) fn notebook_state_mut(&mut self) -> &mut NotebookState {
+        &mut self.get_mut::<NotebookHost>().expect("the notebook has no instance hooks that run code, so it's always in place").state
+    }
+}
+
+/// A notebook picker over `candidates`, titled `title`.
+pub(super) fn notebook_picker(title: &'static str, candidates: Vec<fenix_picker::Candidate<NotebookPick>>) -> ActivePicker {
+    let candidates = candidates.into_iter().map(|c| super::feature::FeaturePick::candidate(c.label, c.payload)).collect();
+    ActivePicker::Feature { feature: SPEC.id, badge: title, state: fenix_picker::PickerState::new(candidates) }
 }
 
 /// A capture name from `fenix-syntax` as one the page roles can hold.
@@ -168,29 +273,29 @@ impl App {
 
     /// The notebook, opened the first time it's needed.
     pub(super) fn notebook(&mut self) -> Option<&mut Notebook> {
-        if self.notebook.book.is_none() {
+        if self.features.notebook_state().book.is_none() {
             let root = self.notebook_root();
             match Notebook::open(&root) {
                 Ok(mut nb) => {
                     nb.history_limit = self.config.notebook_history.unwrap_or(50);
-                    self.notebook.book = Some(nb);
-                    self.notebook.error = None;
+                    self.features.notebook_state_mut().book = Some(nb);
+                    self.features.notebook_state_mut().error = None;
                 }
                 Err(e) => {
                     let why = format!("couldn't open the notebook at {}: {e}", root.display());
                     self.set_error(why.clone());
-                    self.notebook.error = Some(why);
+                    self.features.notebook_state_mut().error = Some(why);
                     return None;
                 }
             }
         }
-        self.notebook.book.as_mut()
+        self.features.notebook_state_mut().book.as_mut()
     }
 
     /// Reads the notebook off the UI thread, if its folder exists and it
     /// isn't open: Home lists it without the launch waiting on it.
     pub(super) fn notebook_open_in_background(&mut self) {
-        if self.notebook.book.is_some() || self.notebook.opening {
+        if self.features.notebook_state().book.is_some() || self.features.notebook_state().opening {
             return;
         }
         // Tests never read the notebook of the Fenix you use.
@@ -201,7 +306,7 @@ impl App {
         if !root.is_dir() {
             return;
         }
-        self.notebook.opening = true;
+        self.features.notebook_state_mut().opening = true;
         self.page_spawn(move |send| {
             if let Ok(nb) = Notebook::open(&root) {
                 send(super::pages::PageEvent::NotebookOpened(Box::new(nb)));
@@ -211,10 +316,10 @@ impl App {
 
     /// The notebook, read in the background, arrived.
     pub(super) fn apply_notebook_opened(&mut self, mut nb: Notebook) {
-        self.notebook.opening = false;
-        if self.notebook.book.is_none() {
+        self.features.notebook_state_mut().opening = false;
+        if self.features.notebook_state().book.is_none() {
             nb.history_limit = self.config.notebook_history.unwrap_or(50);
-            self.notebook.book = Some(nb);
+            self.features.notebook_state_mut().book = Some(nb);
             self.refresh_home_data(false);
         }
     }
@@ -231,7 +336,7 @@ impl App {
         if self.notebook().is_none() {
             return Vec::new();
         }
-        let nb = self.notebook.book.as_ref().expect("opened above");
+        let nb = self.features.notebook_state().book.as_ref().expect("opened above");
         let mut rows: Vec<NbRow> = nb
             .entries()
             .iter()
@@ -296,7 +401,7 @@ impl App {
     pub(super) fn refresh_notebook_pages(&mut self) {
         let Some(id) = self.find_page(|m| matches!(m, PageModel::Notebook(_))) else { return };
         let rows = self.notebook_rows();
-        let (tags, searches) = match self.notebook.book.as_ref() {
+        let (tags, searches) = match self.features.notebook_state().book.as_ref() {
             Some(nb) => (nb.tags().into_iter().map(|(t, _)| t).collect(), nb.searches().to_vec()),
             None => (Vec::new(), Vec::new()),
         };
@@ -310,7 +415,7 @@ impl App {
         if self.notebook().is_none() {
             return;
         }
-        if let Some(nb) = self.notebook.book.as_mut() {
+        if let Some(nb) = self.features.notebook_state_mut().book.as_mut() {
             let _ = nb.rescan();
         }
         match self.find_page(|m| matches!(m, PageModel::Notebook(_))) {
@@ -320,7 +425,7 @@ impl App {
             }
             None => {
                 let rows = self.notebook_rows();
-                let nb = self.notebook.book.as_ref().expect("opened above");
+                let nb = self.features.notebook_state().book.as_ref().expect("opened above");
                 let tags = nb.tags().into_iter().map(|(t, _)| t).collect();
                 let searches = nb.searches().to_vec();
                 let folder = nb.root().display().to_string();
@@ -331,8 +436,8 @@ impl App {
 
     /// What the reading layout needs, borrowing only what it reads.
     pub(super) fn with_reading_ctx<R>(&self, base: Option<&Path>, f: impl FnOnce(&reading::Ctx) -> R) -> R {
-        let nb = self.notebook.book.as_ref();
-        let sizes = &self.notebook.image_sizes;
+        let nb = self.features.notebook_state().book.as_ref();
+        let sizes = &self.page_images.image_sizes;
         let (cw, lh) = match &self.text {
             Some(t) => (t.char_width(), t.line_height()),
             None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
@@ -384,13 +489,13 @@ impl App {
     pub(super) fn notebook_page_layout(&self, id: BufferId, cols: usize) -> Option<crate::page::Page> {
         let Some(PageModel::Notebook(p)) = self.pages.get(&id).map(|s| &s.model) else { return None };
         // The selected entry's links and pictures are relative to its file.
-        let base = p.selected().and_then(|r| r.project_file.clone().or_else(|| self.notebook.book.as_ref().and_then(|nb| nb.get(&r.id)).map(|e| e.path.clone())));
+        let base = p.selected().and_then(|r| r.project_file.clone().or_else(|| self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&r.id)).map(|e| e.path.clone())));
         Some(self.with_reading_ctx(base.as_deref(), |ctx| crate::notebook_page::layout(p, cols, ctx)))
     }
 
     /// Opens an entry for editing in the focused pane.
     pub(super) fn open_notebook_entry(&mut self, id: &str) {
-        let Some(path) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else {
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else {
             self.set_error("that entry isn't in the notebook any more");
             return;
         };
@@ -432,7 +537,7 @@ impl App {
             }
         }
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "TEMPLATE", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("TEMPLATE", candidates));
     }
 
     /// A notebook picker's choice.
@@ -440,7 +545,7 @@ impl App {
         match choice {
             NotebookPick::Open(id) => self.open_notebook_entry(&id),
             NotebookPick::Template { name, body } => {
-                self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::NoteName { template: name, body }, input: String::new() });
+                self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::NoteName { template: name, body }, input: String::new() });
                 self.wake_caret();
             }
             NotebookPick::InsertLink(name) => self.notebook_insert_text(&format!("[[{name}]]")),
@@ -455,7 +560,7 @@ impl App {
     }
 
     pub(super) fn notebook_prompt_text(&self) -> Option<String> {
-        let p = self.notebook.prompt.as_ref()?;
+        let p = self.features.notebook_state().prompt.as_ref()?;
         Some(match &p.kind {
             NotebookPromptKind::NoteName { template, .. } => format!("New note ({template}) -- name: {}▏", p.input),
             NotebookPromptKind::DiagramName { .. } => format!("New diagram -- name: {}▏", p.input),
@@ -473,9 +578,9 @@ impl App {
 
     pub(super) fn notebook_prompt_key(&mut self, keypress: KeyPress) {
         if keypress == KeyPress::char('v').with_ctrl() {
-            if let (Some(text), true) = (self.clipboard_text(), self.notebook.prompt.is_some()) {
+            if let (Some(text), true) = (self.clipboard_text(), self.features.notebook_state().prompt.is_some()) {
                 let text: String = text.chars().filter(|c| !c.is_control()).collect();
-                if let Some(p) = &mut self.notebook.prompt {
+                if let Some(p) = &mut self.features.notebook_state_mut().prompt {
                     p.input.push_str(&text);
                 }
             }
@@ -486,11 +591,11 @@ impl App {
             self.wake_caret();
             return;
         }
-        let Some(prompt) = &mut self.notebook.prompt else { return };
+        let Some(prompt) = &mut self.features.notebook_state_mut().prompt else { return };
         match keypress.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.notebook.prompt = None,
+            KeyCode::Named(FenixNamedKey::Escape) => self.features.notebook_state_mut().prompt = None,
             KeyCode::Named(FenixNamedKey::Enter) => {
-                let NotebookPrompt { kind, input } = self.notebook.prompt.take().unwrap();
+                let NotebookPrompt { kind, input } = self.features.notebook_state_mut().prompt.take().unwrap();
                 self.notebook_prompt_done(kind, input);
             }
             KeyCode::Named(FenixNamedKey::Backspace) => {
@@ -507,7 +612,7 @@ impl App {
         match kind {
             NotebookPromptKind::NoteName { body, template } => {
                 if name.is_empty() {
-                    self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::NoteName { template, body }, input });
+                    self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::NoteName { template, body }, input });
                     self.set_error("a note needs a name");
                     return;
                 }
@@ -515,7 +620,7 @@ impl App {
             }
             NotebookPromptKind::DiagramName { text } => {
                 if name.is_empty() {
-                    self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::DiagramName { text }, input });
+                    self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::DiagramName { text }, input });
                     self.set_error("a diagram needs a name");
                     return;
                 }
@@ -588,7 +693,7 @@ impl App {
                 }
             }
         }
-        if let Some(nb) = self.notebook.book.as_ref() {
+        if let Some(nb) = self.features.notebook_state().book.as_ref() {
             let before = nb.entries().iter().filter(|e| e.date().is_some_and(|d| d < date)).max_by_key(|e| e.date());
             if let Some(prev) = before {
                 fill.carried = prev.open_tasks().into_iter().map(|t| t.text).filter(|t| !t.is_empty() && !fill.agenda.iter().any(|a| a.contains(t.as_str()))).collect();
@@ -656,7 +761,7 @@ impl App {
                 Err(e) => note(self, e, true),
             },
             NbAction::SetTags(id, tags) => {
-                let text = self.notebook.book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.text.clone()).unwrap_or_default();
+                let text = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.text.clone()).unwrap_or_default();
                 let value = (!tags.is_empty()).then(|| fenix_notebook::meta::yaml_list(&tags));
                 let new_text = fenix_notebook::meta::set_front_matter(&text, "tags", value.as_deref());
                 self.notebook_write_entry(&id, &new_text);
@@ -687,7 +792,7 @@ impl App {
             }
             NbAction::Delete(id) => {
                 self.notebook_close_buffers_of(&id);
-                let name = self.notebook.book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.display_name()).unwrap_or_default();
+                let name = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.display_name()).unwrap_or_default();
                 let result = self.notebook().map(|nb| nb.delete(&id));
                 match result {
                     Some(Ok(())) => note(self, format!("{name} is in the Recycle Bin"), false),
@@ -698,7 +803,8 @@ impl App {
             }
             NbAction::History(id) => {
                 let versions: Vec<(String, PathBuf, String)> = self
-                    .notebook
+                    .features
+                    .notebook_state()
                     .book
                     .as_ref()
                     .map(|nb| nb.history(&id))
@@ -732,7 +838,7 @@ impl App {
                     return;
                 };
                 self.notebook_flush(&id);
-                let kind = self.notebook.book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.kind);
+                let kind = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.kind);
                 let dir = if kind == Some(NbKind::Diagram) { root.join("docs").join("diagrams") } else { root.join("docs") };
                 self.notebook_close_buffers_of(&id);
                 let moved = self.notebook().map(|nb| nb.move_out(&id, &dir));
@@ -755,10 +861,10 @@ impl App {
     /// How many other entries' links changed.
     fn notebook_rename(&mut self, id: &str, name: &str) -> Result<usize, String> {
         self.notebook_flush(id);
-        let old_path = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()).ok_or("no such entry")?;
+        let old_path = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()).ok_or("no such entry")?;
         let buffer = self.buffers.id_for_path(&old_path);
         let changes = self.notebook().ok_or("no notebook")?.rename(id, name).map_err(|e| e.to_string())?;
-        let new_path = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()).unwrap_or(old_path.clone());
+        let new_path = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()).unwrap_or(old_path.clone());
         if let (Some(b), true) = (buffer, new_path != old_path) {
             if let Some(ob) = self.buffers.get_mut(b) {
                 let _ = ob.buffer.save_as(&new_path);
@@ -777,7 +883,7 @@ impl App {
     /// Writes `text` into an entry: into its buffer when it's open (and
     /// saves), else to its file.
     pub(super) fn notebook_write_entry(&mut self, id: &str, text: &str) {
-        let Some(path) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
         match self.buffers.id_for_path(&path) {
             Some(b) => {
                 if let Some(ob) = self.buffers.get_mut(b) {
@@ -802,7 +908,7 @@ impl App {
 
     /// Puts `text` into an open buffer of the entry, as the file now is.
     fn notebook_reload_open(&mut self, id: &str, text: &str) {
-        let Some(path) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
         if let Some(b) = self.buffers.id_for_path(&path) {
             if let Some(ob) = self.buffers.get_mut(b) {
                 let end = ob.buffer.len_chars();
@@ -816,7 +922,7 @@ impl App {
 
     /// Writes an entry's open buffer now, if it has unsaved typing.
     pub(super) fn notebook_flush(&mut self, id: &str) {
-        let Some(path) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
         if let Some(b) = self.buffers.id_for_path(&path) {
             if self.buffers.get(b).is_some_and(|ob| ob.buffer.is_dirty()) {
                 self.notebook_save_buffer(b);
@@ -826,7 +932,7 @@ impl App {
 
     /// Closes the buffers showing an entry (before it moves or goes).
     fn notebook_close_buffers_of(&mut self, id: &str) {
-        let Some(path) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
         if let Some(b) = self.buffers.id_for_path(&path) {
             if self.buffers.get(b).is_some_and(|ob| ob.buffer.is_dirty()) {
                 self.notebook_save_buffer(b);
@@ -834,7 +940,7 @@ impl App {
             self.buffers.close(b);
             let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
             self.repoint_panes_showing(b, fallback);
-            self.notebook.edits.remove(&b);
+            self.features.notebook_state_mut().edits.remove(&b);
         }
     }
 
@@ -846,8 +952,8 @@ impl App {
     /// this editing session in the entry's history.
     pub(super) fn notebook_save_buffer(&mut self, id: BufferId) {
         let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return };
-        let entry = self.notebook.book.as_ref().and_then(|nb| nb.by_path(&path)).map(|e| e.id.clone());
-        if let (Some(eid), Some(nb)) = (&entry, self.notebook.book.as_mut()) {
+        let entry = self.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(&path)).map(|e| e.id.clone());
+        if let (Some(eid), Some(nb)) = (&entry, self.features.notebook_state_mut().book.as_mut()) {
             if let Err(e) = nb.snapshot(eid) {
                 eprintln!("fenix: couldn't keep a version of {}: {e}", path.display());
             }
@@ -859,10 +965,10 @@ impl App {
                 self.note_disk_state(id);
                 self.discard_recovery_for(id);
                 self.refresh_gutter_hunks(id);
-                if let (Some(eid), Some(nb)) = (&entry, self.notebook.book.as_mut()) {
+                if let (Some(eid), Some(nb)) = (&entry, self.features.notebook_state_mut().book.as_mut()) {
                     nb.refresh_text(eid, &text);
                 }
-                self.notebook.edits.remove(&id);
+                self.features.notebook_state_mut().edits.remove(&id);
             }
             Err(e) => self.set_error(format!("couldn't save {}: {e}", path.display())),
         }
@@ -871,7 +977,8 @@ impl App {
     /// Autosave: writes each notebook buffer a second after its last
     /// change. When to look again, if anything is waiting.
     pub(super) fn notebook_autosave(&mut self, now: Instant) -> Option<Instant> {
-        let nb = self.notebook.book.as_ref()?;
+        let state = self.features.notebook_state_mut();
+        let nb = state.book.as_ref()?;
         let root = nb.root().to_path_buf();
         let mut due = Vec::new();
         let mut next: Option<Instant> = None;
@@ -885,7 +992,7 @@ impl App {
                 continue;
             }
             let count = ob.buffer.edit_count();
-            let slot = self.notebook.edits.entry(id).or_insert((count, now));
+            let slot = state.edits.entry(id).or_insert((count, now));
             if slot.0 != count {
                 *slot = (count, now);
             }
@@ -933,7 +1040,7 @@ impl App {
             })
             .collect();
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "NOTEBOOK", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("NOTEBOOK", candidates));
     }
 
     /// `SPC n r`: the entry you touched last.
@@ -1008,7 +1115,7 @@ mod tests {
         assert!(!app.open().buffer.is_dirty());
         // A note is found by name; making it again opens it.
         app.notebook_create_note("bench session", "");
-        assert_eq!(app.notebook.book.as_ref().unwrap().entries().len(), 1);
+        assert_eq!(app.features.notebook_state().book.as_ref().unwrap().entries().len(), 1);
     }
 
     #[test]
@@ -1021,10 +1128,10 @@ mod tests {
         app.ensure_page_layout(id, app.focused_pane_id(), 140);
         let text = app.open().buffer.text();
         assert!(text.contains("Uplink") && text.contains("Log"), "{text}");
-        let uplink = app.notebook.book.as_ref().unwrap().by_name("Uplink").unwrap().id.clone();
+        let uplink = app.features.notebook_state().book.as_ref().unwrap().by_name("Uplink").unwrap().id.clone();
         assert!(page(&mut app).select(&uplink));
         app.notebook_action(id, NbAction::Rename(uplink, "TC uplink".into()));
-        let nb = app.notebook.book.as_ref().unwrap();
+        let nb = app.features.notebook_state().book.as_ref().unwrap();
         assert_eq!(nb.by_name("Log").unwrap().text, "see [[TC uplink]]\n");
         // The open buffer of Log has the new link too, and is saved.
         let log_path = nb.by_name("Log").unwrap().path.clone();
@@ -1039,9 +1146,9 @@ mod tests {
         app.notebook_create_note("N", "# N\n");
         app.open_notebook_page();
         let page_id = app.focused_buffer_id();
-        let id = app.notebook.book.as_ref().unwrap().by_name("N").unwrap().id.clone();
+        let id = app.features.notebook_state().book.as_ref().unwrap().by_name("N").unwrap().id.clone();
         app.notebook_action(page_id, NbAction::SetTags(id.clone(), vec!["bench".into(), "tc".into()]));
-        let nb = app.notebook.book.as_ref().unwrap();
+        let nb = app.features.notebook_state().book.as_ref().unwrap();
         assert_eq!(nb.get(&id).unwrap().text, "---\ntags: [bench, tc]\n---\n# N\n");
         assert_eq!(nb.get(&id).unwrap().tags, vec!["bench", "tc"]);
         let day = chrono::NaiveDate::from_ymd_opt(2026, 9, 29).unwrap();
@@ -1056,5 +1163,34 @@ mod tests {
         assert!(spans[0].iter().any(|(r, n)| *r == (0..2) && *n == "keyword"));
         assert!(spans[1].iter().any(|(r, n)| *r == (4..7) && *n == "keyword"));
         assert!(highlight_block("nope", "x").is_empty());
+    }
+
+    // Through its spec, the way `App` reaches the notebook now.
+
+    #[test]
+    fn the_notebook_contributes_its_commands_and_keys_from_its_spec() {
+        let registry = CommandRegistry::with_builtins();
+        let notebook: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("notebook.") || c.id == "insert.diagram").map(|c| (c.id, c.external())).collect();
+        // 21 from the spec, plus the reading view's two (core).
+        assert_eq!(notebook.len(), 23, "{notebook:?}");
+        for id in ["notebook.open", "notebook.search", "notebook.journal"] {
+            assert!(notebook.contains(&(id, true)), "{id} stays external");
+        }
+        assert!(notebook.contains(&("notebook.preview", false)) && notebook.contains(&("notebook.read", false)), "the reading view's are still there");
+        let keys = keymap::leader_keys();
+        assert_eq!(keys.get("notebook.open").map(String::as_str), Some("SPC n n"));
+        assert_eq!(keys.get("insert.diagram").map(String::as_str), Some("SPC i D"));
+        let menu = keymap::local_trie(&[crate::keymap::LocalContext::Markdown]);
+        assert!(matches!(menu.matcher().feed(KeyPress::char('p')), fenix_keymap::Step::Matched(&"notebook.preview")), "core's");
+        assert!(matches!(menu.matcher().feed(KeyPress::char('b')), fenix_keymap::Step::Matched(&"notebook.backlinks")), "the notebook's");
+    }
+
+    #[test]
+    fn a_notebook_pick_carries_its_query_through_the_spec() {
+        let picker = notebook_picker("FOUND", vec![fenix_picker::Candidate::new("a note", NotebookPick::Filter("tag".to_string()))]);
+        let ActivePicker::Feature { feature, badge, state } = picker else { panic!("a feature picker") };
+        assert_eq!((feature, badge), ("fenix.notebook", "FOUND"));
+        assert!(state.selected().is_some_and(|c| c.payload.0.downcast_ref::<NotebookPick>().is_some()));
+        assert!(SPEC.picker_confirm.is_some());
     }
 }

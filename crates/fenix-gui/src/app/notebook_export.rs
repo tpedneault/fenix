@@ -85,7 +85,7 @@ impl App {
             let b = self.buffer_for_path(&path);
             return self.diagram_or_note_menu(b, None);
         }
-        let Some(e) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).cloned() else { return };
+        let Some(e) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).cloned() else { return };
         if e.kind == NbKind::Diagram {
             let b = self.buffer_for_path(&e.path);
             self.export_menu(ExportWhat::Diagram(b));
@@ -124,7 +124,7 @@ impl App {
                 return self.export_menu(ExportWhat::Diagram(src));
             }
         }
-        let note = self.open().buffer.path().and_then(|p| self.notebook.book.as_ref().and_then(|nb| nb.by_path(p))).filter(|e| e.kind != NbKind::Diagram).map(|e| e.id.clone());
+        let note = self.open().buffer.path().and_then(|p| self.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(p))).filter(|e| e.kind != NbKind::Diagram).map(|e| e.id.clone());
         if let Some(id) = &note {
             self.notebook_flush(id);
         }
@@ -162,11 +162,11 @@ impl App {
         };
         let candidates = rows.into_iter().map(|(how, label)| fenix_picker::Candidate::new(label, NotebookPick::Export { what: what.clone(), how })).collect();
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "EXPORT", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("EXPORT", candidates));
     }
 
     fn export_records(&self, what: &ExportWhat) -> Vec<ExportRecord> {
-        let nb = self.notebook.book.as_ref();
+        let nb = self.features.notebook_state().book.as_ref();
         let entry = match what {
             ExportWhat::Note(id) => nb.and_then(|nb| nb.get(id)),
             ExportWhat::Diagram(b) => self.buffers.get(*b).and_then(|ob| ob.buffer.path()).and_then(|p| nb.and_then(|nb| nb.by_path(p))),
@@ -177,10 +177,10 @@ impl App {
     /// The name an export is called by: the entry's, else the file's.
     fn export_name(&self, what: &ExportWhat) -> String {
         match what {
-            ExportWhat::Note(id) => self.notebook.book.as_ref().and_then(|nb| nb.get(id)).map(|e| fenix_notebook::slug(&e.name)).unwrap_or_else(|| "note".into()),
+            ExportWhat::Note(id) => self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| fenix_notebook::slug(&e.name)).unwrap_or_else(|| "note".into()),
             ExportWhat::Diagram(b) => {
                 let path = self.buffers.get(*b).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf);
-                match path.as_deref().and_then(|p| self.notebook.book.as_ref().and_then(|nb| nb.by_path(p))) {
+                match path.as_deref().and_then(|p| self.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(p))) {
                     Some(e) => fenix_notebook::slug(&e.name),
                     None => path.and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string())).unwrap_or_else(|| "diagram".into()),
                 }
@@ -209,7 +209,7 @@ impl App {
         match how {
             ExportHow::FilePng | ExportHow::FileSvg | ExportHow::FileMmd | ExportHow::FileMarkdown | ExportHow::FileHtml => {
                 let path = self.export_default_path(&what, how);
-                self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::ExportPath { what, how }, input: path.display().to_string() });
+                self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::ExportPath { what, how }, input: path.display().to_string() });
                 self.wake_caret();
             }
             ExportHow::Again => {
@@ -289,7 +289,7 @@ impl App {
     /// pictures are copied there (for a Markdown file); without, an
     /// HTML page carries them inside it.
     fn note_export(&mut self, id: &str, files: Option<&Path>) -> Result<(String, String), String> {
-        let nb = self.notebook.book.as_ref().ok_or("no notebook")?;
+        let nb = self.features.notebook_state().book.as_ref().ok_or("no notebook")?;
         let entry = nb.get(id).cloned().ok_or("no such note")?;
         let themes = self.diagram_themes();
         let over = self.export_theme();
@@ -402,9 +402,9 @@ impl App {
         // Remembered on the entry, for `E`.
         let entry = match what {
             ExportWhat::Note(id) => Some(id.clone()),
-            ExportWhat::Diagram(b) => self.buffers.get(*b).and_then(|ob| ob.buffer.path()).and_then(|p| self.notebook.book.as_ref().and_then(|nb| nb.by_path(p))).map(|e| e.id.clone()),
+            ExportWhat::Diagram(b) => self.buffers.get(*b).and_then(|ob| ob.buffer.path()).and_then(|p| self.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(p))).map(|e| e.id.clone()),
         };
-        if let (Some(id), Some(nb)) = (entry, self.notebook.book.as_mut()) {
+        if let (Some(id), Some(nb)) = (entry, self.features.notebook_state_mut().book.as_mut()) {
             let _ = nb.add_export(&id, ExportRecord { path: path.to_path_buf(), format: format.to_string(), theme });
         }
         Ok(())
@@ -460,8 +460,8 @@ impl App {
             return;
         }
         let suggested = self.open().buffer.path().and_then(|p| p.file_stem()).map(|s| format!("{} diagram", s.to_string_lossy())).unwrap_or_default();
-        let name = self.notebook.book.as_ref().map(|nb| nb.free_name(&suggested)).unwrap_or(suggested);
-        self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::SaveBlock { text: format!("{}\n", source.trim_end()) }, input: name });
+        let name = self.features.notebook_state().book.as_ref().map(|nb| nb.free_name(&suggested)).unwrap_or(suggested);
+        self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::SaveBlock { text: format!("{}\n", source.trim_end()) }, input: name });
         self.wake_caret();
     }
 
@@ -483,11 +483,11 @@ impl App {
             return;
         }
         self.completion = None;
-        self.enter_picker(ActivePicker::Notebook { title: "DIAGRAM", picker: fenix_picker::PickerState::new(candidates) });
+        self.enter_picker(super::notebook_host::notebook_picker("DIAGRAM", candidates));
     }
 
     pub(super) fn insert_diagram_picked(&mut self, id: &str, svg: bool) {
-        let Some(e) = self.notebook.book.as_ref().and_then(|nb| nb.get(id)).cloned() else { return };
+        let Some(e) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).cloned() else { return };
         let target = self.focused_buffer_id();
         if !svg {
             let src = fenix_diagram::portable(&e.text, &self.diagram_themes(), self.export_theme().as_deref());
@@ -516,7 +516,7 @@ impl App {
             return;
         }
         let start = self.open().buffer.path().map(|p| p.display().to_string()).unwrap_or_default();
-        self.notebook.prompt = Some(NotebookPrompt { kind: NotebookPromptKind::Import, input: start });
+        self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::Import, input: start });
         self.wake_caret();
     }
 
@@ -558,7 +558,7 @@ mod tests {
     fn diagrams_export_to_files_and_again() {
         let (dir, mut app) = app();
         app.notebook_create_diagram("TC flow", "flowchart TD\n    a --> b\n");
-        let b = app.buffers.id_for_path(&app.notebook.book.as_ref().unwrap().by_name("TC flow").unwrap().path.clone()).unwrap();
+        let b = app.buffers.id_for_path(&app.features.notebook_state().book.as_ref().unwrap().by_name("TC flow").unwrap().path.clone()).unwrap();
         let what = ExportWhat::Diagram(b);
         let svg = dir.path().join("out").join("flow.svg");
         app.export_to_path(what.clone(), ExportHow::FileSvg, &svg.display().to_string());
@@ -585,7 +585,7 @@ mod tests {
         let (dir, mut app) = app();
         app.notebook_create_diagram("TC flow", "flowchart TD\n    a --> b\n");
         app.notebook_create_note("Bench", "# Bench\n\nSee [[TC flow]].\n\n![[TC flow]]\n");
-        let id = app.notebook.book.as_ref().unwrap().by_name("Bench").unwrap().id.clone();
+        let id = app.features.notebook_state().book.as_ref().unwrap().by_name("Bench").unwrap().id.clone();
         let md = dir.path().join("out").join("bench.md");
         app.export_to_path(ExportWhat::Note(id.clone()), ExportHow::FileMarkdown, &md.display().to_string());
         let text = std::fs::read_to_string(&md).unwrap();
@@ -604,11 +604,11 @@ mod tests {
         app.open_file_from_picker(&file);
         app.notebook_place_cursor(4, 0);
         app.notebook_save_block();
-        let Some(NotebookPrompt { kind: NotebookPromptKind::SaveBlock { text }, input }) = app.notebook.prompt.clone() else { panic!("the name prompt") };
+        let Some(NotebookPrompt { kind: NotebookPromptKind::SaveBlock { text }, input }) = app.features.notebook_state().prompt.clone() else { panic!("the name prompt") };
         assert_eq!(text, "flowchart LR\n  a --> b\n");
         assert_eq!(input, "README diagram");
-        app.notebook.prompt = None;
+        app.features.notebook_state_mut().prompt = None;
         app.notebook_create_diagram(&input, &text);
-        assert_eq!(app.notebook.book.as_ref().unwrap().by_name("README diagram").unwrap().kind, NbKind::Diagram);
+        assert_eq!(app.features.notebook_state().book.as_ref().unwrap().by_name("README diagram").unwrap().kind, NbKind::Diagram);
     }
 }

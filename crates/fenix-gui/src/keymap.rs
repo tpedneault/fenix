@@ -131,16 +131,9 @@ impl LocalContext {
             LocalContext::Markdown => {
                 t.insert(&[KeyPress::char('p')], "reading view beside", "notebook.preview");
                 t.insert(&[KeyPress::char('r')], "read here (swap)", "notebook.read");
-                t.insert(&[KeyPress::char('b')], "links here", "notebook.backlinks");
-                t.insert(&[KeyPress::char('a')], "journal: refresh the agenda list", "notebook.journal_agenda");
-                t.insert(&[KeyPress::char('g')], "journal: add today's commits", "notebook.journal_commits");
+                insert_entries(t, &[], crate::app::NOTEBOOK_SPEC.local_menu);
             }
-            LocalContext::Mermaid => {
-                t.insert(&[KeyPress::char('p')], "preview beside", "diagram.preview");
-                t.insert(&[KeyPress::char('v')], "view it on its own", "diagram.viewer");
-                t.insert(&[KeyPress::char('t')], "set its theme", "diagram.theme");
-                t.insert(&[KeyPress::char('e')], "export", "diagram.export");
-            }
+            LocalContext::Mermaid => insert_entries(t, &[], crate::app::DIAGRAMS_SPEC.local_menu),
             LocalContext::Tcl => {
                 insert_entries(t, &[], crate::app::MIB_SPEC.local_menu);
                 insert_entries(t, &[], crate::app::TCL_SPEC.local_menu);
@@ -202,7 +195,6 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('s')], "snippet", "insert.snippet");
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('S')], "manage snippets", "snippets.open");
         t.insert(&[spc, KeyPress::char('i'), KeyPress::char('n')], "snippet from the selection", "snippets.from_selection");
-        t.insert(&[spc, KeyPress::char('i'), KeyPress::char('D')], "a notebook diagram", "insert.diagram");
         // `SPC SPC` mirrors Doom Emacs's own "hit the leader twice for the
         // single most-used action" convention -- here, the same fuzzy
         // find-file-in-project picker as `SPC p f`.
@@ -447,25 +439,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // a file -- a new task, a task from here, the clock. A task's own
         // keys (status, priority, clock, ...) are on the page.
         // The notebook: notes, journal days and diagrams Fenix keeps.
-        t.label_group(&[spc, KeyPress::char('n')], "notebook");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('n')], "notebook page", "notebook.open");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('N')], "new note", "notebook.new_note");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('d')], "new diagram", "notebook.new_diagram");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('f')], "find by name", "notebook.find");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('r')], "reopen the last one", "notebook.recent");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('j')], "today's journal", "notebook.journal");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('b')], "links here (sidebar)", "notebook.backlinks");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('c')], "capture a line", "notebook.capture");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('/')], "search the notebook", "notebook.search");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('#')], "tags", "notebook.tags");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('p')], "this project's notes", "notebook.project");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('t')], "checkbox to the agenda", "notebook.to_agenda");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('e')], "export", "notebook.export");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('s')], "save the ```mermaid block", "notebook.save_block");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('i')], "import a file", "notebook.import");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('l')], "insert a link", "notebook.insert_link");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('y')], "copy a link to this line", "notebook.copy_link");
-        t.insert(&[spc, KeyPress::char('n'), KeyPress::char('v')], "paste a picture", "notebook.paste_image");
+        insert_feature_keys(&mut t, spc, &crate::app::NOTEBOOK_SPEC);
 
         t.label_group(&[spc, KeyPress::char('a')], "agenda");
         t.insert(&[spc, KeyPress::char('a'), KeyPress::char('a')], "open agenda", "agenda.open");
