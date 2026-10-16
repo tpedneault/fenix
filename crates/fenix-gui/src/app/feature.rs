@@ -23,6 +23,7 @@
 use std::any::Any;
 
 use super::docker_host::DockerHost;
+use super::embedded_host::EmbeddedHost;
 use super::*;
 use crate::popup::PopupId;
 
@@ -50,6 +51,58 @@ pub(crate) struct FeatureSpec {
     pub id: &'static str,
     pub commands: &'static [FeatureCommand],
     pub leader: &'static [LeaderEntry],
+    /// Its `SPC m` menu, as the keys after `SPC m`, shown in the buffers
+    /// `local_context` claims.
+    pub local_menu: &'static [LeaderEntry],
+    /// Whether its `SPC m` menu applies to the focused buffer, and under
+    /// which context.
+    pub local_context: Option<fn(&App) -> Option<crate::keymap::LocalContext>>,
+    /// The language server for `language` files under `root`, when this
+    /// feature knows better than the defaults. `Some(Err)` says why it
+    /// can't start one.
+    pub language_server: Option<LanguageServerFn>,
+    /// Tasks it offers in the task picker for the project at `root`.
+    pub tasks: Option<fn(&App, &Path) -> Vec<fenix_tasks::TaskDef>>,
+}
+
+/// See `FeatureSpec::language_server`.
+pub(crate) type LanguageServerFn = fn(
+    &App,
+    &Path,
+    fenix_syntax::LanguageId,
+) -> Option<Result<fenix_project::tools::CommandSpec, String>>;
+
+// The queries above live on the spec, not the instance, because they need
+// no state -- and a feature's instance is out of `App` while one of its own
+// hooks runs. A hook that opens a file or restarts a language server would
+// otherwise ask every feature but itself.
+
+/// Something that happened that features may want to follow up on. One
+/// that arrives while a feature is out (inside one of its own hooks) is
+/// kept and delivered when the feature is put back, so a feature hears
+/// about what its own hooks caused.
+#[derive(Debug, Clone)]
+pub(crate) enum Notice {
+    /// The focused buffer changed.
+    FocusChanged,
+    /// A task in the project at `root` finished.
+    TaskFinished { root: PathBuf, success: bool },
+    /// A terminal buffer was closed.
+    TerminalClosed(BufferId),
+}
+
+/// One row's payload in a feature's picker (`ActivePicker::Feature`):
+/// whatever the feature put there, handed back to its `picker_confirm`.
+#[derive(Clone)]
+pub(crate) struct FeaturePick(pub(crate) Rc<dyn Any>);
+
+impl FeaturePick {
+    pub(crate) fn candidate<T: Any>(
+        label: impl Into<String>,
+        payload: T,
+    ) -> fenix_picker::Candidate<FeaturePick> {
+        fenix_picker::Candidate::new(label, FeaturePick(Rc::new(payload)))
+    }
 }
 
 /// A message from one of a feature's background threads, delivered to
@@ -121,6 +174,23 @@ pub(crate) trait Feature: Any {
     fn prompt_text(&self) -> Option<String> {
         None
     }
+    /// Extra modeline text after the file name (Arduino's board and port).
+    fn modeline_indicator(&self) -> Option<&str> {
+        None
+    }
+    /// A `Notice`.
+    fn notice(&mut self, _app: &mut App, _notice: &Notice) {}
+
+    /// The title text of this feature's open picker (`ActivePicker::
+    /// Feature`), what it's choosing.
+    fn picker_label(&self) -> Option<&str> {
+        None
+    }
+    /// A row of this feature's picker was chosen.
+    fn picker_confirm(&mut self, _app: &mut App, _pick: &dyn Any) {}
+    /// This feature's picker was cancelled.
+    fn picker_cancel(&mut self) {}
+
     /// Colours for `buffer`'s visible rows, when this feature draws it.
     /// Given the theme rather than `App`: the caller holds the buffer
     /// mutably while it asks.
@@ -149,13 +219,32 @@ pub(crate) trait Feature: Any {
 /// out for a hook (`App::with_feature_at`).
 pub(crate) struct Features {
     slots: Vec<Option<Box<dyn Feature>>>,
+    /// Each slot's spec, there even while the feature is out.
+    specs: Vec<&'static FeatureSpec>,
+    /// Notices a feature missed while it was out, by slot.
+    missed: Vec<(usize, Notice)>,
 }
 
 impl Features {
     pub(crate) fn builtin() -> Self {
+        let slots: Vec<Option<Box<dyn Feature>>> = vec![
+            Some(Box::new(DockerHost::default())),
+            Some(Box::new(EmbeddedHost::default())),
+        ];
+        let specs = slots
+            .iter()
+            .map(|slot| slot.as_deref().expect("all in place").spec())
+            .collect();
         Self {
-            slots: vec![Some(Box::new(DockerHost::default()))],
+            slots,
+            specs,
+            missed: Vec::new(),
         }
+    }
+
+    /// Every feature's spec, whether or not it's in place.
+    pub(crate) fn specs(&self) -> impl Iterator<Item = &'static FeatureSpec> + '_ {
+        self.specs.iter().copied()
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -188,10 +277,13 @@ impl Features {
             .position(|slot| slot.as_deref().is_some_and(|f| f.as_any().is::<T>()))
     }
 
+    /// The feature whose id is `id`, if it's in place.
+    pub(crate) fn by_id(&self, id: &str) -> Option<&dyn Feature> {
+        self.iter().find(|f| f.spec().id == id)
+    }
+
     fn position_of_id(&self, id: &str) -> Option<usize> {
-        self.slots
-            .iter()
-            .position(|slot| slot.as_deref().is_some_and(|f| f.spec().id == id))
+        self.specs.iter().position(|spec| spec.id == id)
     }
 }
 
@@ -206,8 +298,20 @@ impl App {
     ) -> Option<R> {
         let mut feature = self.features.slots.get_mut(i)?.take()?;
         let result = f(feature.as_mut(), self);
-        self.features.slots[i] = Some(feature);
+        self.put_back(i, feature);
         Some(result)
+    }
+
+    /// Puts feature `i` back, then delivers the notices it missed while it
+    /// was out -- including any those cause.
+    fn put_back(&mut self, i: usize, feature: Box<dyn Feature>) {
+        self.features.slots[i] = Some(feature);
+        while let Some(at) = self.features.missed.iter().position(|(slot, _)| *slot == i) {
+            let (_, notice) = self.features.missed.remove(at);
+            let mut feature = self.features.slots[i].take().expect("just put back");
+            feature.notice(self, &notice);
+            self.features.slots[i] = Some(feature);
+        }
     }
 
     /// Runs `f` with the `T` feature and the rest of `App`.
@@ -240,10 +344,32 @@ impl App {
         }
     }
 
+    /// Tells every feature about `notice` -- now, or, for one that's out,
+    /// as soon as it's back.
+    pub(crate) fn notify_features(&mut self, notice: Notice) {
+        for i in 0..self.features.len() {
+            if self.features.slots[i].is_some() {
+                self.with_feature_at(i, |feature, app| feature.notice(app, &notice));
+            } else {
+                self.features.missed.push((i, notice.clone()));
+            }
+        }
+    }
+
     /// Delivers a background event to the feature it's addressed to.
     pub(crate) fn deliver_feature_event(&mut self, event: FeatureEvent) {
-        if let Some(i) = self.features.position_of_id(event.feature) {
-            self.with_feature_at(i, |feature, app| feature.on_event(app, event.payload));
-        }
+        self.with_feature_id(event.feature, |feature, app| {
+            feature.on_event(app, event.payload)
+        });
+    }
+
+    /// Runs `f` with the feature whose id is `id`.
+    pub(crate) fn with_feature_id<R>(
+        &mut self,
+        id: &str,
+        f: impl FnOnce(&mut dyn Feature, &mut App) -> R,
+    ) -> Option<R> {
+        let i = self.features.position_of_id(id)?;
+        self.with_feature_at(i, f)
     }
 }

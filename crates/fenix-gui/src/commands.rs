@@ -224,18 +224,7 @@ impl CommandRegistry {
         registry.external("jira.search", "Search Jira: words, or JQL after :", |app| app.cmd_jira_search());
         registry.external("jira.create_issue", "Create an issue, with the project's real types and fields", |app| app.cmd_jira_new_issue());
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
-        registry.register("embedded.build", "Compile the sketch for its board", cmd_embedded_build);
-        registry.register("embedded.upload", "Compile and flash the sketch to the board", cmd_embedded_upload);
-        registry.register("embedded.monitor", "Open the serial monitor for the sketch's port", cmd_embedded_monitor);
-        registry.register("embedded.baud", "Choose the serial monitor's speed", cmd_embedded_baud);
-        registry.register("embedded.port", "Choose the port the board is on", cmd_embedded_port);
-        registry.register("embedded.board", "Choose the board the sketch is built for", cmd_embedded_board);
-        registry.register("embedded.board_options", "Choose the board's options (processor, clock...)", cmd_embedded_board_options);
-        registry.register("embedded.library", "Install a library from the library index", cmd_embedded_library);
-        registry.register("embedded.package", "Install board support (a core)", cmd_embedded_package);
-        registry.register("embedded.debug", "Debug the sketch on the board, if the board supports it", cmd_embedded_debug);
-        registry.register("embedded.new_sketch", "Create a new sketch", cmd_embedded_new_sketch);
-        registry.register("embedded.info", "Show the sketch's board, port, speed and tools", cmd_embedded_info);
+        registry.feature(&crate::app::EMBEDDED_SPEC);
         registry.external("notebook.open", "The notebook: every note, journal day and diagram", |app| app.open_notebook_page());
         registry.external("notebook.new_note", "A new note, from a template", |app| app.notebook_new_note());
         registry.external("notebook.new_diagram", "A new Mermaid diagram", |app| app.notebook_new_diagram());
@@ -675,54 +664,6 @@ fn cmd_git_close(ctx: &mut CommandCtx) {
 
 fn cmd_jira_refresh(ctx: &mut CommandCtx) {
     ctx.app.jira_refresh();
-}
-
-fn cmd_embedded_build(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_build();
-}
-
-fn cmd_embedded_upload(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_upload();
-}
-
-fn cmd_embedded_monitor(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_monitor();
-}
-
-fn cmd_embedded_baud(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_baud();
-}
-
-fn cmd_embedded_port(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_port();
-}
-
-fn cmd_embedded_board(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_board();
-}
-
-fn cmd_embedded_board_options(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_board_options();
-}
-
-fn cmd_embedded_library(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_library();
-}
-
-fn cmd_embedded_package(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_package();
-}
-
-fn cmd_embedded_debug(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_debug();
-}
-
-fn cmd_embedded_new_sketch(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_new_sketch();
-}
-
-fn cmd_embedded_info(ctx: &mut CommandCtx) {
-    ctx.app.cmd_embedded_info();
 }
 
 fn cmd_leader_local(ctx: &mut CommandCtx) {

@@ -321,7 +321,7 @@ fn age_since(then: i64) -> String {
 
 impl App {
     pub(super) fn app_probe(&self) -> AppProbe {
-        AppProbe { tools: self.embedded_tools() }
+        AppProbe { tools: super::embedded_host::tools(self) }
     }
 
     /// Where a program a page runs is -- `AppProbe::locate`, for a command
@@ -1515,16 +1515,15 @@ impl App {
                         }
                     }
                     EditorFix::PickPort | EditorFix::PickBoard => {
-                        let Some(project) = self.embedded_project_at(&root) else {
+                        let Some(project) = super::embedded_host::project_at(self, &root) else {
                             self.set_error("not an Arduino sketch Fenix can drive -- is arduino-cli installed?");
                             return;
                         };
-                        let root = project.root().to_path_buf();
+                        use super::embedded_host::EmbeddedHost;
                         if fix == EditorFix::PickPort {
-                            self.set_message("looking for boards...");
-                            self.embedded_spawn(move || EmbeddedEvent::Ports { root, then: None, result: project.ports() });
+                            self.with_feature::<EmbeddedHost, _>(|host, app| host.doctor_pick_port(app, project));
                         } else {
-                            self.embedded_spawn(move || EmbeddedEvent::Boards { root, result: project.boards() });
+                            self.with_feature::<EmbeddedHost, _>(|host, app| host.doctor_pick_board(app, project));
                         }
                         // The picker has the keyboard now; r checks again
                         // once it's done.
