@@ -330,7 +330,7 @@ impl App {
             .filter(|p| Self::looks_like_pdf(p) && self.recent_shown(p) && under(p))
             .take(3)
             .map(|path| {
-                let place = self.pdf_places.get(path).or_else(|| self.pdf_places.get(&fenix_project::plain_path(path.clone())));
+                let place = self.features.pdf().places.get(path).or_else(|| self.features.pdf().places.get(&fenix_project::plain_path(path.clone())));
                 dashboard::FileItem {
                     path: path.clone(),
                     name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -648,7 +648,7 @@ mod tests {
         let read = dir.join("read.pdf");
         std::fs::write(&read, b"%PDF-1.4").unwrap();
         app.recent_files.add(read.clone());
-        app.pdf_places.insert(read.clone(), crate::reader::SavedPlace { page: 37, frac: 0.0, zoom: crate::reader::Zoom::FitWidth, pages: 212, marks: Default::default() });
+        app.features.pdf_mut().places.insert(read.clone(), crate::reader::SavedPlace { page: 37, frac: 0.0, zoom: crate::reader::Zoom::FitWidth, pages: 212, marks: Default::default() });
         let reading = app.home_reading(None);
         assert_eq!(reading.len(), 1);
         assert_eq!((reading[0].name.as_str(), reading[0].detail.as_str()), ("read.pdf", "p. 38 / 212"));

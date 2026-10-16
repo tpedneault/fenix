@@ -446,27 +446,8 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         t.insert(&[spc, KeyPress::char('v'), KeyPress::char('q')], "close vnc session", "vnc.close");
         t.insert(&[spc, KeyPress::char('v'), KeyPress::char('s')], "save vnc screenshot", "vnc.screenshot");
 
-        t.label_group(&[spc, KeyPress::char('r')], "reader (pdf)");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('n')], "next page", "pdf.next_page");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('p')], "previous page", "pdf.prev_page");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('[')], "first page", "pdf.first_page");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char(']')], "last page", "pdf.last_page");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('g')], "go to page", "pdf.goto_page");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('=')], "zoom in", "pdf.zoom_in");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('-')], "zoom out", "pdf.zoom_out");
-        // `f` is the document index, not fit-page: picking a reference
-        // off the shelf is something you do to *start* reading, from any
-        // buffer, while fit-page is a zoom adjustment you make while
-        // already in a PDF pane -- where the bare `0` binding sits under
-        // your fingers anyway. `SPC r 0` mirrors that bare key.
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('f')], "find document", "pdf.documents");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('0')], "fit page", "pdf.fit_page");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('w')], "fit width", "pdf.fit_width");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('o')], "outline sidebar", "pdf.toggle_outline");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('t')], "go to a heading", "pdf.headings");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('c')], "paper / theme colours", "pdf.colors");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('y')], "copy a link to this page", "pdf.copy_link");
-        t.insert(&[spc, KeyPress::char('r'), KeyPress::char('/')], "search", "pdf.search");
+        // The PDF reader (`SPC r`): its keys are the reader feature's.
+        insert_feature_keys(&mut t, spc, &crate::app::PDF_SPEC);
 
         t.label_group(&[spc, KeyPress::char('c')], "code");
         // `SPC c r` used to be ctags refresh -- moved to `SPC c T`

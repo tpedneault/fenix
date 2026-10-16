@@ -147,7 +147,7 @@ impl App {
                     request.buffers.push((id, path.to_path_buf()));
                 }
             }
-            request.pdfs = self.pdf_docs.iter().map(|(&id, d)| (id, d.path.clone())).collect();
+            request.pdfs = self.features.pdf().docs.iter().map(|(&id, d)| (id, d.path.clone())).collect();
         }
         if self.config.mib_watch.unwrap_or(true) {
             request.mibs = self.mib().into_iter().flat_map(|mib| mib.sets.iter()).filter(|(_, slot)| !slot.loading && slot.set.is_some()).map(|(key, _)| key.clone()).collect();
