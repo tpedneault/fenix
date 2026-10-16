@@ -10,7 +10,8 @@ mod reader;
 mod agenda_sync;
 mod agenda_host;
 mod jira_host;
-mod embedded;
+mod embedded_host;
+pub(crate) use embedded_host::SPEC as EMBEDDED_SPEC;
 mod local_leader;
 mod xml;
 mod projects;
@@ -77,7 +78,6 @@ use fenix_core::{Buffer, Cursor};
 
 use crate::agenda_page;
 use agenda_sync::{AgendaSyncEvent, AgendaSyncState, SyncPick};
-use embedded::{EmbeddedEvent, EmbeddedPick, EmbeddedState};
 use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
@@ -1864,9 +1864,6 @@ pub enum FenixUserEvent {
     /// field: `fenix_pdf::PdfDocKey` already rides along inside every
     /// `PdfResponse` variant, so there's nothing to add out here.
     PdfResponse(fenix_pdf::PdfResponse),
-    /// A microcontroller toolchain query's answer -- see
-    /// `embedded::EmbeddedEvent`.
-    Embedded(EmbeddedEvent),
     /// A project page's background job reporting in -- see
     /// `pages::PageEvent`.
     Page(pages::PageEvent),
@@ -1920,7 +1917,6 @@ impl FenixUserEvent {
             Self::VncConnected { .. } => "VncConnected",
             Self::VncFrame { .. } => "VncFrame",
             Self::PdfResponse { .. } => "PdfResponse",
-            Self::Embedded { .. } => "Embedded",
             Self::Page { .. } => "Page",
             Self::TclTagsScanned { .. } => "TclTagsScanned",
         }
@@ -2235,10 +2231,9 @@ enum ActivePicker {
     /// priority, an assignee, a side of a conflict. What it's for lives
     /// in `AgendaSyncState::picker`.
     WorkSync(fenix_picker::PickerState<SyncPick>),
-    /// Every choice the Arduino `SPC m` menu asks for -- board, board option, port, serial
-    /// speed, library, board package. What it's for lives in
-    /// `EmbeddedState::picker`.
-    Embedded(fenix_picker::PickerState<EmbeddedPick>),
+    /// A feature's own picker: which feature, the badge it shows, and
+    /// rows whose payload only that feature understands.
+    Feature { feature: &'static str, badge: &'static str, state: fenix_picker::PickerState<feature::FeaturePick> },
 }
 
 // The three `ActivePicker` variants wrap `PickerState<T>` for different
@@ -2277,7 +2272,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::SwitchBranch(s) => s.push_char(c),
         ActivePicker::AgendaClockIn(s) => s.push_char(c),
         ActivePicker::WorkSync(s) => s.push_char(c),
-        ActivePicker::Embedded(s) => s.push_char(c),
+        ActivePicker::Feature { state: s, .. } => s.push_char(c),
         ActivePicker::CompareOwn { picker, .. } => picker.push_char(c),
         ActivePicker::Versus { picker, .. } => picker.push_char(c),
         ActivePicker::SettingChoice { picker, .. } => picker.push_char(c),
@@ -2319,7 +2314,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::SwitchBranch(s) => s.backspace(),
         ActivePicker::AgendaClockIn(s) => s.backspace(),
         ActivePicker::WorkSync(s) => s.backspace(),
-        ActivePicker::Embedded(s) => s.backspace(),
+        ActivePicker::Feature { state: s, .. } => s.backspace(),
         ActivePicker::CompareOwn { picker, .. } => picker.backspace(),
         ActivePicker::Versus { picker, .. } => picker.backspace(),
         ActivePicker::SettingChoice { picker, .. } => picker.backspace(),
@@ -2361,7 +2356,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::SwitchBranch(s) => s.move_selection(delta),
         ActivePicker::AgendaClockIn(s) => s.move_selection(delta),
         ActivePicker::WorkSync(s) => s.move_selection(delta),
-        ActivePicker::Embedded(s) => s.move_selection(delta),
+        ActivePicker::Feature { state: s, .. } => s.move_selection(delta),
         ActivePicker::CompareOwn { picker, .. } => picker.move_selection(delta),
         ActivePicker::Versus { picker, .. } => picker.move_selection(delta),
         ActivePicker::SettingChoice { picker, .. } => picker.move_selection(delta),
@@ -2406,7 +2401,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::SwitchBranch(s) => s.toggle_mark(),
         ActivePicker::AgendaClockIn(s) => s.toggle_mark(),
         ActivePicker::WorkSync(s) => s.toggle_mark(),
-        ActivePicker::Embedded(s) => s.toggle_mark(),
+        ActivePicker::Feature { state: s, .. } => s.toggle_mark(),
         ActivePicker::CompareOwn { picker, .. } => picker.toggle_mark(),
         ActivePicker::Versus { picker, .. } => picker.toggle_mark(),
         ActivePicker::SettingChoice { picker, .. } => picker.toggle_mark(),
@@ -2448,7 +2443,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::SwitchBranch(s) => s.query(),
         ActivePicker::AgendaClockIn(s) => s.query(),
         ActivePicker::WorkSync(s) => s.query(),
-        ActivePicker::Embedded(s) => s.query(),
+        ActivePicker::Feature { state: s, .. } => s.query(),
         ActivePicker::CompareOwn { picker, .. } => picker.query(),
         ActivePicker::Versus { picker, .. } => picker.query(),
         ActivePicker::SettingChoice { picker, .. } => picker.query(),
@@ -2490,7 +2485,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchBranch(s) => s.len(),
         ActivePicker::AgendaClockIn(s) => s.len(),
         ActivePicker::WorkSync(s) => s.len(),
-        ActivePicker::Embedded(s) => s.len(),
+        ActivePicker::Feature { state: s, .. } => s.len(),
         ActivePicker::CompareOwn { picker, .. } => picker.len(),
         ActivePicker::Versus { picker, .. } => picker.len(),
         ActivePicker::SettingChoice { picker, .. } => picker.len(),
@@ -2532,7 +2527,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::SwitchBranch(s) => s.selected_row(),
         ActivePicker::AgendaClockIn(s) => s.selected_row(),
         ActivePicker::WorkSync(s) => s.selected_row(),
-        ActivePicker::Embedded(s) => s.selected_row(),
+        ActivePicker::Feature { state: s, .. } => s.selected_row(),
         ActivePicker::CompareOwn { picker, .. } => picker.selected_row(),
         ActivePicker::Versus { picker, .. } => picker.selected_row(),
         ActivePicker::SettingChoice { picker, .. } => picker.selected_row(),
@@ -2578,7 +2573,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::SwitchBranch(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::AgendaClockIn(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::WorkSync(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
-        ActivePicker::Embedded(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Feature { state: s, .. } => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::CompareOwn { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Versus { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::SettingChoice { picker, .. } => picker.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5558,8 +5553,6 @@ pub struct App {
     agenda_seen_saved: Option<Instant>,
     /// The agenda's Jira sync bookkeeping -- see `agenda_sync`.
     agenda_sync: AgendaSyncState,
-    /// Microcontroller projects (`SPC m` in a sketch) -- see `embedded`.
-    embedded: EmbeddedState,
     /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
     /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
     /// `Option<VncSession>` like `DockerHost::session`/`git_session`/
@@ -6581,7 +6574,6 @@ impl App {
             agenda_gap_asked: false,
             agenda_seen_saved: None,
             agenda_sync: AgendaSyncState::default(),
-            embedded: EmbeddedState::default(),
             vnc_sessions: HashMap::new(),
             lsp_sessions: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
@@ -7382,7 +7374,7 @@ impl App {
         }
         self.refresh_project_settings(false);
         self.mib_preload();
-        self.refresh_embedded_indicator();
+        self.notify_features(feature::Notice::FocusChanged);
         self.sync_lsp_for_focused_buffer();
     }
 
@@ -7472,11 +7464,13 @@ impl App {
             Ok(config) => config,
             Err(error) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
         };
-        // A project's own `.fenix/tools.json` wins; then, for C/C++ in a
-        // microcontroller project, that platform's server (plain clangd
-        // can't make sense of an Arduino sketch); then `[lsp]`/defaults.
-        let embedded = if matches!(language, fenix_syntax::LanguageId::C | fenix_syntax::LanguageId::Cpp) && !configured.lsp.contains_key(&crate::lsp::language_config_name(language)) {
-            match self.embedded_language_server(&key.root) {
+        // A project's own `.fenix/tools.json` wins; then a feature's
+        // server (for C/C++ in a microcontroller project, that platform's
+        // -- plain clangd can't make sense of an Arduino sketch); then
+        // `[lsp]`/defaults.
+        let embedded = if !configured.lsp.contains_key(&crate::lsp::language_config_name(language)) {
+            let feature_server = self.features.specs().filter_map(|spec| spec.language_server).find_map(|server| server(self, &key.root, language));
+            match feature_server {
                 Some(Ok(spec)) => Some(spec),
                 Some(Err(error)) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
                 None => None,
@@ -10430,7 +10424,7 @@ impl App {
         self.terminal_buffer_labels.remove(&id);
         self.terminal_buffer_cwds.remove(&id);
         self.terminal_buffer_programs.remove(&id);
-        self.embedded_forget_terminal(id);
+        self.notify_features(feature::Notice::TerminalClosed(id));
         if self.terminal_buffer_focused == Some(id) {
             self.terminal_buffer_focused = None;
         }
@@ -12079,7 +12073,7 @@ impl App {
             self.set_error("no project root detected for the focused buffer".to_string());
             return;
         };
-        let mut tasks = self.embedded_tasks(&root);
+        let mut tasks: Vec<fenix_tasks::TaskDef> = self.features.specs().filter_map(|spec| spec.tasks).flat_map(|tasks| tasks(self, &root)).collect();
         tasks.extend(fenix_tasks::discover_tasks(&root));
         let tools = match fenix_project::tools::ProjectTools::read(&root) { Ok(tools) => tools, Err(error) => { self.set_error(error); return; } };
         for (name, spec) in tools.tasks {
@@ -12344,7 +12338,7 @@ impl App {
             session.runner = None;
         }
         if let Some(root) = self.task_session.as_ref().map(|s| s.root.clone()) {
-            self.embedded_task_finished(&root, success == Some(true));
+            self.notify_features(feature::Notice::TaskFinished { root, success: success == Some(true) });
         }
     }
 
@@ -16422,8 +16416,9 @@ impl App {
         if matches!(self.active_picker, Some(ActivePicker::WorkSync(_))) {
             self.agenda_sync_picker_cancel();
         }
-        if matches!(self.active_picker, Some(ActivePicker::Embedded(_))) {
-            self.embedded_picker_cancel();
+        if let Some(ActivePicker::Feature { feature, .. }) = &self.active_picker {
+            let feature = *feature;
+            self.with_feature_id(feature, |feature, _| feature.picker_cancel());
         }
         self.active_picker = None;
         self.main_view = MainView::Editor;
@@ -16668,11 +16663,12 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.agenda_sync_picker_confirm(pick, marked);
             }
-            Some(ActivePicker::Embedded(state)) => {
+            Some(ActivePicker::Feature { feature, state, .. }) => {
+                let feature = *feature;
                 let Some(pick) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
                 self.main_view = MainView::Editor;
-                self.embedded_picker_confirm(pick);
+                self.with_feature_id(feature, |feature, app| feature.picker_confirm(app, &*pick.0));
             }
             None => {}
         }
@@ -18830,7 +18826,6 @@ impl App {
             FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), result) => self.apply_terminal_buffer_spawned(id, result.0),
             FenixUserEvent::JiraActionDone(result) => self.apply_jira_action_done(result),
             FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
-            FenixUserEvent::Embedded(event) => self.apply_embedded_event(event),
             FenixUserEvent::Page(event) => self.apply_page_event(event),
             FenixUserEvent::TclTagsScanned { scan, root, tags } => self.apply_tcl_tags_scanned(scan, root, tags),
             // A new window asked for here is opened by `about_to_wait`:
@@ -19078,11 +19073,6 @@ impl App {
         // A new note's name, a capture, a diagram's name.
         if self.notebook.prompt.is_some() {
             self.notebook_prompt_key(keypress);
-            return;
-        }
-        // `SPC m n`'s sketch-name prompt.
-        if self.embedded.prompt.is_some() {
-            self.embedded_prompt_key(keypress);
             return;
         }
 
@@ -20452,7 +20442,7 @@ impl App {
                 Some(picker @ ActivePicker::Versus { .. }) => ("BESIDE", picker_len(picker)),
                 Some(picker @ ActivePicker::AgendaClockIn(_)) => (if self.agenda_gap_asked { "AWAY" } else { "CLOCK" }, picker_len(picker)),
                 Some(picker @ ActivePicker::WorkSync(_)) => ("JIRA", picker_len(picker)),
-                Some(picker @ ActivePicker::Embedded(_)) => ("EMBEDDED", picker_len(picker)),
+                Some(picker @ ActivePicker::Feature { badge, .. }) => (*badge, picker_len(picker)),
                 None => ("PICKER", 0),
             };
             // Which half of a two-step comparison you're on, spelled
@@ -20472,8 +20462,8 @@ impl App {
                     Some(ctx) => format!("{}   {count} matches ", ctx.label),
                     None => format!("{count} matches "),
                 },
-                Some(ActivePicker::Embedded(_)) => match &self.embedded.picker {
-                    Some(ctx) => format!("{}   {count} matches ", ctx.label),
+                Some(ActivePicker::Feature { feature, .. }) => match self.features.by_id(feature).and_then(|feature| feature.picker_label()) {
+                    Some(label) => format!("{label}   {count} matches "),
                     None => format!("{count} matches "),
                 },
                 Some(ActivePicker::FindFile(_)) => match self.file_listing_note() {
@@ -20559,10 +20549,10 @@ impl App {
         let details = self.editor_status_details();
         // The sketch's board and port -- `refresh_embedded_indicator`
         // keeps this current for whatever buffer is focused.
-        let embedded_indicator = self.embedded.indicator.as_deref().unwrap_or_default();
+        let feature_indicators: String = self.features.iter().filter_map(|feature| feature.modeline_indicator()).collect();
         let git_indicator = self.chrome_git_segment();
         let suffix = format!(
-            "{filename}{modified}{workspace_indicator}{git_indicator}{recording_indicator}{agenda_timer_indicator}{embedded_indicator}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
+            "{filename}{modified}{workspace_indicator}{git_indicator}{recording_indicator}{agenda_timer_indicator}{feature_indicators}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );
@@ -20599,7 +20589,6 @@ impl App {
             .or_else(|| self.git_prompt_text())
             .or_else(|| self.agenda_prompt_text())
             .or_else(|| self.notebook_prompt_text())
-            .or_else(|| self.embedded_prompt_text())
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
             .or_else(|| self.find_file_prompt_text())

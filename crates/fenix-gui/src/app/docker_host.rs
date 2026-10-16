@@ -54,6 +54,10 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
         LeaderEntry::Bind(&['d', 'b'], "build image", "docker.build"),
         LeaderEntry::Bind(&['d', 'q'], "close docker panel", "docker.close"),
     ],
+    local_menu: &[],
+    local_context: None,
+    language_server: None,
+    tasks: None,
 };
 
 /// What Docker's background threads report, as a `FeatureEvent`'s

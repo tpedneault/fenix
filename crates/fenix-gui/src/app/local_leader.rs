@@ -15,9 +15,7 @@ impl App {
         if self.open().kind == BufferKind::Pdf {
             contexts.push(LocalContext::Reader);
         }
-        if fenix_embedded::project_root_of(&self.integration_root()).is_some() {
-            contexts.push(LocalContext::Arduino);
-        }
+        contexts.extend(self.features.specs().filter_map(|spec| spec.local_context).filter_map(|context| context(self)));
         let language = self.open().buffer.path().and_then(fenix_syntax::detect_language_from_path);
         if language == Some(fenix_syntax::LanguageId::Tcl) {
             contexts.push(LocalContext::Tcl);

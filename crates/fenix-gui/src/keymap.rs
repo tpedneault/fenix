@@ -110,20 +110,7 @@ impl LocalContext {
 
     fn bind(self, t: &mut KeyTrie<&'static str>) {
         match self {
-            LocalContext::Arduino => {
-                t.insert(&[KeyPress::char('b')], "build (verify)", "embedded.build");
-                t.insert(&[KeyPress::char('u')], "upload to board", "embedded.upload");
-                t.insert(&[KeyPress::char('m')], "serial monitor", "embedded.monitor");
-                t.insert(&[KeyPress::char('B')], "serial monitor speed", "embedded.baud");
-                t.insert(&[KeyPress::char('p')], "choose port", "embedded.port");
-                t.insert(&[KeyPress::char('s')], "choose board", "embedded.board");
-                t.insert(&[KeyPress::char('o')], "board options", "embedded.board_options");
-                t.insert(&[KeyPress::char('l')], "install library", "embedded.library");
-                t.insert(&[KeyPress::char('c')], "install board package", "embedded.package");
-                t.insert(&[KeyPress::char('d')], "debug", "embedded.debug");
-                t.insert(&[KeyPress::char('n')], "new sketch", "embedded.new_sketch");
-                t.insert(&[KeyPress::char('i')], "project info", "embedded.info");
-            }
+            LocalContext::Arduino => insert_entries(t, &[], crate::app::EMBEDDED_SPEC.local_menu),
             LocalContext::Reader => {
                 t.insert(&[KeyPress::char('n')], "next page (J)", "pdf.next_page");
                 t.insert(&[KeyPress::char('p')], "previous page (K)", "pdf.prev_page");
@@ -198,9 +185,14 @@ pub const WHICH_KEY_SECTIONS: &[&str] = &["View", "Branch & remote", "This chang
 /// Adds a feature's leader groups and bindings (`FeatureSpec::leader`)
 /// under `spc`.
 fn insert_feature_keys(t: &mut KeyTrie<&'static str>, spc: KeyPress, spec: &crate::app::feature::FeatureSpec) {
+    insert_entries(t, &[spc], spec.leader);
+}
+
+/// Adds `entries` (a feature's leader or `SPC m` keys) under `prefix`.
+fn insert_entries(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &[crate::app::feature::LeaderEntry]) {
     use crate::app::feature::LeaderEntry;
-    let seq = |keys: &[char]| std::iter::once(spc).chain(keys.iter().map(|&c| KeyPress::char(c))).collect::<Vec<_>>();
-    for entry in spec.leader {
+    let seq = |keys: &[char]| prefix.iter().copied().chain(keys.iter().map(|&c| KeyPress::char(c))).collect::<Vec<_>>();
+    for entry in entries {
         match entry {
             LeaderEntry::Group(keys, label) => t.label_group(&seq(keys), label),
             LeaderEntry::Bind(keys, label, command) => t.insert(&seq(keys), label, *command),
@@ -232,7 +224,7 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         // Global rather than under `SPC m`: `SPC m` only has the Arduino
         // menu inside a sketch, and your first sketch has to come from
         // somewhere.
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('n')], "new Arduino sketch", "embedded.new_sketch");
+        insert_feature_keys(&mut t, spc, &crate::app::EMBEDDED_SPEC);
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('f')], "find file", "file.find");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('e')], "explore from home", "file.explore");
         t.insert(&[spc, KeyPress::char('f'), KeyPress::char('a')], "find file (all)", "file.find_all");
