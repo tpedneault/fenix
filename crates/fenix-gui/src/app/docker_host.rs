@@ -202,15 +202,21 @@ impl DockerStatsPoller {
     /// is what makes the thread-lifecycle logic itself (spawn, tick,
     /// stop-check, join-on-drop) directly unit-testable with a plain
     /// closure, without needing a real winit `EventLoop` (which nothing
-    /// outside a running GUI can construct headlessly).
-    fn spawn(send: impl Fn(DockerEvent) -> bool + Send + 'static) -> Self {
+    /// outside a running GUI can construct headlessly). `fetch` is the
+    /// stats source (`fenix_docker::container_stats` for real) for the
+    /// same reason: with an engine running, one `docker stats` takes
+    /// seconds, which a test of the thread's lifecycle shouldn't wait on.
+    fn spawn(
+        fetch: impl Fn() -> Vec<fenix_docker::ContainerStat> + Send + 'static,
+        send: impl Fn(DockerEvent) -> bool + Send + 'static,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let handle = std::thread::spawn(move || loop {
             if thread_stop.load(Ordering::Relaxed) {
                 return;
             }
-            let stats = fenix_docker::container_stats();
+            let stats = fetch();
             // `false` here means the receiving end is gone (the whole
             // app is shutting down) -- nothing left to wake, so the
             // thread can just end rather than looping forever sending
@@ -466,10 +472,9 @@ impl DockerHost {
         // test's `event_proxy` stays `None` (see `App::new`'s own doc
         // comment), so a session opened in a test just never ticks,
         // which is fine (nothing there needs a working `docker` either).
-        let stats_poller = app
-            .event_proxy
-            .clone()
-            .map(|proxy| DockerStatsPoller::spawn(proxy_sender(proxy)));
+        let stats_poller = app.event_proxy.clone().map(|proxy| {
+            DockerStatsPoller::spawn(fenix_docker::container_stats, proxy_sender(proxy))
+        });
 
         self.session = Some(DockerSession {
             workspace_index,
@@ -1542,13 +1547,25 @@ mod tests {
         // takes a plain callback (see its own doc comment for why), so
         // this exercises the actual thread-lifecycle logic (spawn, tick,
         // stop-check, join-on-drop) directly with a channel standing in
-        // for "deliver this event somewhere."
+        // for "deliver this event somewhere," and a stand-in stats source
+        // so the timing doesn't depend on whether a Docker engine is
+        // running (a real `docker stats` then takes seconds).
         let (tx, rx) = std::sync::mpsc::channel::<DockerEvent>();
-        let poller = DockerStatsPoller::spawn(move |event| tx.send(event).is_ok());
+        let stat = fenix_docker::ContainerStat {
+            container_id: "abc123".to_string(),
+            cpu_percent: "1%".to_string(),
+            mem_usage: "1MiB".to_string(),
+        };
+        let poller = DockerStatsPoller::spawn(
+            move || vec![stat.clone()],
+            move |event| tx.send(event).is_ok(),
+        );
         let received = rx
             .recv_timeout(Duration::from_secs(3))
             .expect("poller should tick at least once");
-        assert!(matches!(received, DockerEvent::Stats(_)));
+        assert!(
+            matches!(&received, DockerEvent::Stats(stats) if stats.len() == 1 && stats[0].container_id == "abc123")
+        );
 
         let before_drop = Instant::now();
         drop(poller);
