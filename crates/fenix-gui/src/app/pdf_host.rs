@@ -86,6 +86,14 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         settings: &SETTINGS,
         services: &[],
         contributes: &[],
+        // Each open PDF, by its path; reopened in the reader, where it was
+        // left coming from the places file.
+        session_documents: Some(|app| {
+            let mut pdfs: Vec<(BufferId, PathBuf)> = app.features.pdf().docs.iter().map(|(&id, doc)| (id, doc.path.clone())).collect();
+            pdfs.sort_by(|a, b| a.1.cmp(&b.1));
+            pdfs
+        }),
+        session_reopen: Some(|app, path| app.pdf_buffer_for(path)),
     }
 };
 

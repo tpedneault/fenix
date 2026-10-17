@@ -122,6 +122,11 @@ pub(crate) struct FeatureSpec {
     /// What it plugs into contribution points other features define (the
     /// agenda's `agenda_sync`), as `[[contributes.<point>]]` will.
     pub contributes: &'static [Contribution],
+    /// Its documents a session keeps (`session.json`): their buffers and
+    /// files, reopened with `session_reopen`.
+    pub session_documents: Option<fn(&App) -> Vec<(BufferId, PathBuf)>>,
+    /// A document of its, from a session: its file opened again.
+    pub session_reopen: Option<fn(&mut App, &Path) -> BufferId>,
 }
 
 /// One thing a feature plugs into another's contribution point: the

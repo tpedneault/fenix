@@ -92,6 +92,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         settings: &SETTINGS,
         services: &SERVICES,
         contributes: &[],
+        session_documents: None,
+        session_reopen: None,
     }
 };
 
