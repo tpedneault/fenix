@@ -13,6 +13,85 @@ const SEARCH_LIMIT: u32 = 100;
 
 /// The Jira page's commands and the `SPC j` group. The agenda's Jira
 /// side (linking, sync, worklogs) is the agenda's.
+/// Jira's settings: `[jira]` in `settings.toml`. Its server and token
+/// stay core's for now, beside the other tokens (Phase 0 item 6).
+static SETTINGS: [fenix_config::Setting; 6] = {
+    use fenix_config::{Category::Jira, Kind, Setting};
+    [
+        Setting::stored("jira.sync_minutes", Jira, "Sync every", Kind::Minutes, "How often linked agenda tasks are brought up to date, in minutes.").with_default("10"),
+        Setting::stored("jira.projects", Jira, "Projects", Kind::Map { key: "Key", value: "Name", paths: false }, "Jira projects the Jira page lists open issues and the current sprint for."),
+        Setting::stored("jira.users", Jira, "People", Kind::Map { key: "Username", value: "Name", paths: false }, "People the Jira page lists issues assigned to."),
+        Setting::stored("jira.queries", Jira, "Saved searches", Kind::Map { key: "Name", value: "JQL", paths: false }, "Searches saved on the Jira page, by name."),
+        Setting::stored("jira.blocked", Jira, "What Blocked means", Kind::Map { key: "Project", value: "Meaning", paths: false }, "Per project: flag, local, or the status to move to, as ID: Name. Learned the first time you block a task.").checked(|v| match v {
+            fenix_config::Value::Map(entries) => entries.iter().try_for_each(|(_, meaning)| JiraBlocked::parse(meaning).map(|_| ())),
+            _ => Ok(()),
+        }),
+        Setting::stored("jira.priorities", Jira, "Priority names", Kind::Map { key: "Jira priority", value: "Agenda priority", paths: false }, "How a Jira priority maps onto the agenda's."),
+    ]
+};
+
+/// What "Blocked" means for one Jira project (`jira.blocked`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum JiraBlocked {
+    /// Transition to this status (matched by id; `name` is for display).
+    Status { id: String, name: String },
+    /// Set the issue's Flagged (impediment) field; leave the status alone.
+    Flag,
+    /// Don't touch Jira at all.
+    Local,
+}
+
+impl JiraBlocked {
+    /// `flag`, `local`, or a status as `ID: Name`.
+    pub(crate) fn parse(text: &str) -> Result<JiraBlocked, String> {
+        match text.trim() {
+            "flag" => Ok(JiraBlocked::Flag),
+            "local" => Ok(JiraBlocked::Local),
+            other => match other.split_once(':') {
+                Some((id, name)) if !id.trim().is_empty() => Ok(JiraBlocked::Status { id: id.trim().into(), name: name.trim().into() }),
+                _ => Err(format!("\"{other}\": expected flag, local, or a status as ID: Name")),
+            },
+        }
+    }
+
+    /// As `jira.blocked` holds it.
+    pub(crate) fn text(&self) -> String {
+        match self {
+            JiraBlocked::Flag => "flag".into(),
+            JiraBlocked::Local => "local".into(),
+            JiraBlocked::Status { id, name } => format!("{id}: {name}"),
+        }
+    }
+}
+
+impl App {
+    /// What Blocked means in `project`, if it's been chosen.
+    pub(super) fn jira_blocked_for(&self, project: &str) -> Option<JiraBlocked> {
+        self.config.map_value("jira.blocked").iter().find(|(p, _)| p == project).and_then(|(_, meaning)| JiraBlocked::parse(meaning).ok())
+    }
+
+    /// Whether Blocked means the Flagged field in any project.
+    pub(super) fn jira_blocked_flags_anywhere(&self) -> bool {
+        self.config.map_value("jira.blocked").iter().any(|(_, meaning)| JiraBlocked::parse(meaning) == Ok(JiraBlocked::Flag))
+    }
+
+    /// Records (or replaces) `project`'s Blocked meaning.
+    pub(super) fn set_jira_blocked(&mut self, project: &str, blocked: JiraBlocked) {
+        self.jira_edit_map("jira.blocked", |entries| match entries.iter_mut().find(|(p, _)| p == project) {
+            Some(entry) => entry.1 = blocked.text(),
+            None => entries.push((project.to_string(), blocked.text())),
+        });
+    }
+
+    /// Edits one of Jira's lists (`jira.projects`, `.users`, `.queries`,
+    /// `.blocked`) in place, by key.
+    pub(super) fn jira_edit_map(&mut self, key: &str, edit: impl FnOnce(&mut Vec<(String, String)>)) {
+        let mut entries = self.config.map_value(key).to_vec();
+        edit(&mut entries);
+        self.config.set_value(key, (!entries.is_empty()).then_some(fenix_config::Value::Map(entries)));
+    }
+}
+
 pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::FeatureCommand as C;
     use super::feature::LeaderEntry::{Bind, Group};
@@ -78,7 +157,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
                 app.apply_agenda_sync(*event);
             }
         }),
-        settings: &[],
+        settings: &SETTINGS,
         services: &[],
         // Its sync for the agenda.
         contributes: &[super::feature::Contribution { point: super::agenda_host::AGENDA_SYNC, value: &super::agenda_sync::SYNC }],
@@ -104,7 +183,7 @@ impl JiraCtx {
     fn of(app: &App) -> Self {
         JiraCtx {
             in_agenda: app.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect(),
-            people: app.config.jira_users.clone(),
+            people: app.config.map_value("jira.users").to_vec(),
             server: app.config.jira_base_url.clone().unwrap_or_default(),
             today: chrono::Local::now().date_naive(),
         }
@@ -212,7 +291,7 @@ impl App {
     }
 
     fn jira_queries(&self, here: Option<&str>) -> Vec<jira_page::Query> {
-        jira_page::queries(&self.config.jira_projects, &self.config.jira_users, &self.config.jira_queries, here)
+        jira_page::queries(self.config.map_value("jira.projects"), self.config.map_value("jira.users"), self.config.map_value("jira.queries"), here)
     }
 
     /// `SPC j j`: the Jira page, on the searches for the open project.
@@ -282,7 +361,7 @@ impl App {
     /// The projects an issue can be created in, the open one first.
     fn jira_form_projects(&self) -> Vec<String> {
         let mut projects: Vec<String> = self.jira_here().into_iter().collect();
-        for (key, _) in &self.config.jira_projects {
+        for (key, _) in self.config.map_value("jira.projects") {
             if !projects.iter().any(|p| p.eq_ignore_ascii_case(key)) {
                 projects.push(key.clone());
             }
@@ -518,31 +597,35 @@ impl App {
                 }
             }
             A::AddProject { key, name } => {
-                if !self.config.jira_projects.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
-                    self.config.jira_projects.push((key.clone(), name));
-                }
+                self.jira_edit_map("jira.projects", |projects| {
+                    if !projects.iter().any(|(k, _)| k.eq_ignore_ascii_case(&key)) {
+                        projects.push((key.clone(), name));
+                    }
+                });
                 self.set_message(format!("{key}'s open issues and sprint are on the left now"));
                 self.jira_save_config();
             }
             A::AddPerson { id: user, name } => {
-                if !self.config.jira_users.iter().any(|(u, _)| *u == user) {
-                    self.config.jira_users.push((user, name));
-                }
+                self.jira_edit_map("jira.users", |users| {
+                    if !users.iter().any(|(u, _)| *u == user) {
+                        users.push((user, name));
+                    }
+                });
                 self.jira_save_config();
             }
             A::SaveQuery { name, jql } => {
-                match self.config.jira_queries.iter_mut().find(|(n, _)| *n == name) {
+                self.jira_edit_map("jira.queries", |queries| match queries.iter_mut().find(|(n, _)| *n == name) {
                     Some(q) => q.1 = jql,
-                    None => self.config.jira_queries.push((name.clone(), jql)),
-                }
+                    None => queries.push((name.clone(), jql)),
+                });
                 self.set_message(format!("Saved \"{name}\""));
                 self.jira_save_config();
             }
             A::RemoveQuery(q) => {
                 match &q.kind {
-                    QueryKind::Project(key) => self.config.jira_projects.retain(|(k, _)| k != key),
-                    QueryKind::Person(user) => self.config.jira_users.retain(|(u, _)| u != user),
-                    QueryKind::Saved => self.config.jira_queries.retain(|(n, _)| *n != q.name),
+                    QueryKind::Project(key) => self.jira_edit_map("jira.projects", |projects| projects.retain(|(k, _)| k != key)),
+                    QueryKind::Person(user) => self.jira_edit_map("jira.users", |users| users.retain(|(u, _)| u != user)),
+                    QueryKind::Saved => self.jira_edit_map("jira.queries", |queries| queries.retain(|(n, _)| *n != q.name)),
                     QueryKind::Mine | QueryKind::Search => return,
                 }
                 self.jira_save_config();
@@ -602,11 +685,55 @@ impl App {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_blocked_meaning_reads_back_as_it_was_written() {
+        for b in [JiraBlocked::Flag, JiraBlocked::Local, JiraBlocked::Status { id: "10103".into(), name: "On Hold".into() }] {
+            assert_eq!(JiraBlocked::parse(&b.text()), Ok(b));
+        }
+        assert!(JiraBlocked::parse("maybe").is_err());
+    }
+
+    /// Jira's and the agenda's settings, registered from their specs:
+    /// edited in the app, saved, loaded back by key, in order; and a
+    /// Blocked meaning that isn't one is refused.
+    #[test]
+    fn jira_and_agenda_settings_save_and_load_by_key() {
+        super::super::feature::register_settings();
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
+        // Ten, so "project10" sorting before "project2" as text would show.
+        let projects: Vec<(String, String)> = (1..=10).map(|i| (format!("P{i}"), format!("Project {i}"))).collect();
+        app.jira_edit_map("jira.projects", |p| p.extend(projects.clone()));
+        app.jira_edit_map("jira.users", |u| u.push(("jo1111111".into(), "John Doe".into())));
+        app.set_jira_blocked("PROJ", JiraBlocked::Status { id: "10103".into(), name: "On Hold".into() });
+        app.set_jira_blocked("OPS", JiraBlocked::Flag);
+        app.set_jira_blocked("OPS", JiraBlocked::Local);
+        app.config.set_value("jira.priorities", Some(fenix_config::Value::Map(vec![("Major".into(), "High".into())])));
+        app.config.set_value("agenda.categories", Some(fenix_config::Value::List(vec!["Fenix".into(), "Personal".into()])));
+        app.config.set_value("agenda.worklog_round", Some(fenix_config::Value::Int(30)));
+        app.config.save().unwrap();
+
+        app.config = fenix_config::Config::load(dir.path().join("settings.toml")).unwrap();
+        assert_eq!(app.config.map_value("jira.projects"), projects.as_slice());
+        assert_eq!(app.config.map_value("jira.users"), [("jo1111111".to_string(), "John Doe".to_string())]);
+        assert_eq!(app.jira_blocked_for("PROJ"), Some(JiraBlocked::Status { id: "10103".into(), name: "On Hold".into() }));
+        assert_eq!(app.jira_blocked_for("OPS"), Some(JiraBlocked::Local), "setting a project twice replaces its entry");
+        assert_eq!(app.jira_blocked_for("NOPE"), None);
+        assert_eq!(app.agenda_map_priority("Major"), fenix_agenda::Priority::High);
+        assert_eq!(app.config.list_value("agenda.categories"), ["Fenix".to_string(), "Personal".to_string()]);
+        assert_eq!(app.agenda_worklog_round(), 30);
+
+        let blocked = fenix_config::schema::setting("jira.blocked").unwrap();
+        let bad = fenix_config::Value::Map(vec![("X".into(), "maybe".into())]);
+        assert!(blocked.set(&mut app.config, Some(bad)).unwrap_err().contains("expected flag, local"));
+    }
+
     fn app() -> App {
         let mut app = App::with_file(None);
-        app.config.jira_projects = vec![("OPS".into(), "Ops".into())];
-        app.config.jira_users = Vec::new();
-        app.config.jira_queries = Vec::new();
+        app.config.set_value("jira.projects", Some(fenix_config::Value::Map(vec![("OPS".into(), "Ops".into())])));
+        app.config.set_value("jira.users", None);
+        app.config.set_value("jira.queries", None);
         app.config.jira_base_url = None;
         app
     }
@@ -636,7 +763,7 @@ mod tests {
             app.page_key(KeyPress::char(c));
         }
         app.page_key(KeyPress::named(FenixNamedKey::Enter));
-        assert_eq!(app.config.jira_projects, vec![("FEN".to_string(), "Fenix".to_string())]);
+        assert_eq!(app.config.map_value("jira.projects"), [("FEN".to_string(), "Fenix".to_string())]);
         assert!(std::fs::read_to_string(dir.path().join("settings.toml")).unwrap().contains("FEN"));
     }
 

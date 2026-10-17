@@ -27,6 +27,17 @@ pub(crate) enum ClockPick {
 /// How often a running clock's last-seen time is saved.
 const SEEN_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// The agenda's settings: `[agenda]` in `settings.toml`, on the page's
+/// Jira & agenda section.
+static SETTINGS: [fenix_config::Setting; 3] = {
+    use fenix_config::{Category::Jira, Kind, Setting};
+    [
+        Setting::stored("agenda.categories", Jira, "Agenda categories", Kind::List, "Categories offered when you file a task."),
+        Setting::stored("agenda.worklog_round", Jira, "Round worklogs to", Kind::Minutes, "Time logged to Jira is rounded to this many minutes.").with_default("15"),
+        Setting::stored("agenda.idle_minutes", Jira, "Ask after idle", Kind::Minutes, "With the clock running, how long without a key press before Fenix asks what time to keep. 0 never asks.").with_default("60"),
+    ]
+};
+
 /// The agenda's commands and its `SPC a` group.
 pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::FeatureCommand as C;
@@ -91,7 +102,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_title: None,
         page_after_layout: None,
         on_event: None,
-        settings: &[],
+        settings: &SETTINGS,
         services: &[],
         contributes: &[],
     }
@@ -209,7 +220,7 @@ fn agenda_page_context(app: &mut App, id: BufferId, need: super::feature::PageNe
     }
     let (worklogs, sync, round) = (app.agenda_worklog_rows(), app.agenda_sync_label(), app.agenda_worklog_round());
     let page = app.feature_page::<AgendaPage>(id).map(|p| {
-        let ctx = agenda_page::Ctx { store: &app.features.agenda().store, now: chrono::Local::now(), categories: &app.config.agenda_categories, worklogs: &worklogs, round, sync };
+        let ctx = agenda_page::Ctx { store: &app.features.agenda().store, now: chrono::Local::now(), categories: app.config.list_value("agenda.categories"), worklogs: &worklogs, round, sync };
         agenda_page::layout(p, &ctx, cols)
     });
     Box::new(AgendaLayout { page, tick })
@@ -389,7 +400,7 @@ impl App {
     }
 
     pub(super) fn agenda_worklog_round(&self) -> u32 {
-        self.config.agenda_worklog_round.unwrap_or(15)
+        self.config.int_value("agenda.worklog_round").map_or(15, |m| m as u32)
     }
 
     /// The review's rows: the store's batch minus drops, with edits.
@@ -617,7 +628,7 @@ impl App {
         // Not knowing when you were last here (a clock started before
         // Fenix kept track) is no reason to ask: you're here now.
         let last = timer.last_seen.map(|seen| seen.max(timer.started_at));
-        let idle = self.config.agenda_idle_minutes.unwrap_or(60);
+        let idle = self.config.int_value("agenda.idle_minutes").map_or(60, |m| m as u32);
         if let Some(last) = last.filter(|last| idle > 0 && now - *last > chrono::Duration::minutes(i64::from(idle))) {
             self.agenda_ask_about_gap(last);
             return true;
@@ -666,7 +677,7 @@ impl App {
         let Some(state) = self.pages.get_mut(&id) else { return };
         state.stale = true;
         let Some(p) = page_as_mut::<AgendaPage>(&mut state.model) else { return };
-        let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
+        let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: self.config.list_value("agenda.categories"), worklogs: &worklogs, round, sync };
         let action = p.key(key, &ctx);
         self.agenda_page_action(id, action);
     }
@@ -679,10 +690,12 @@ impl App {
 
     /// Adds `name` to the categories, if it isn't one.
     fn agenda_ensure_category(&mut self, name: &str) {
-        if self.config.agenda_categories.iter().any(|c| c.eq_ignore_ascii_case(name)) {
+        let mut categories = self.config.list_value("agenda.categories").to_vec();
+        if categories.iter().any(|c| c.eq_ignore_ascii_case(name)) {
             return;
         }
-        self.config.agenda_categories.push(name.to_string());
+        categories.push(name.to_string());
+        self.config.set_value("agenda.categories", Some(fenix_config::Value::List(categories)));
         if let Err(err) = self.config.save() {
             self.set_error(format!("couldn't save settings.toml: {err}"));
         }
@@ -694,7 +707,7 @@ impl App {
         if let Some(category) = &spec.category {
             self.agenda_ensure_category(category);
         }
-        let category = spec.category.as_ref().and_then(|c| self.config.agenda_categories.iter().find(|x| x.eq_ignore_ascii_case(c)).cloned());
+        let category = spec.category.as_ref().and_then(|c| self.config.list_value("agenda.categories").iter().find(|x| x.eq_ignore_ascii_case(c)).cloned());
         let task = self.features.agenda_mut().store.create_task(spec.title.clone(), description, spec.priority, category);
         if spec.status != Status::Todo {
             self.features.agenda_mut().store.move_to_status(task, spec.status);
@@ -882,7 +895,7 @@ mod tests {
         let mut app = App::with_file(None);
         app.features.agenda_mut().path = dir.path().join("agenda.json");
         app.features.agenda_mut().store = fenix_agenda::AgendaStore::default();
-        app.config.agenda_categories = vec!["ops".into()];
+        app.config.set_value("agenda.categories", Some(fenix_config::Value::List(vec!["ops".into()])));
         app
     }
 

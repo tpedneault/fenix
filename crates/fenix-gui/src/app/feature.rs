@@ -470,7 +470,9 @@ pub(crate) trait Feature: Any {
     }
 }
 
-/// Every built-in feature's spec, in `Features::builtin`'s order.
+/// Every built-in feature's spec, in the order their settings are
+/// registered: within a settings category, earlier first (Jira's before
+/// the agenda's, as the page has always listed them).
 pub(crate) static BUILTIN_SPECS: [&FeatureSpec; 12] = [
     &super::DOCKER_SPEC,
     &super::EMBEDDED_SPEC,
@@ -479,8 +481,8 @@ pub(crate) static BUILTIN_SPECS: [&FeatureSpec; 12] = [
     &super::CCSDS_SPEC,
     &super::NOTEBOOK_SPEC,
     &super::DIAGRAMS_SPEC,
-    &super::AGENDA_SPEC,
     &super::JIRA_SPEC,
+    &super::AGENDA_SPEC,
     &super::REVIEW_SPEC,
     &super::PDF_SPEC,
     &super::VNC_SPEC,
