@@ -6058,12 +6058,8 @@ impl App {
                 app.set_message(format!("Moved Fenix's files to where they live now: your settings are in settings.toml. The old files are in {}", backup.display()));
             }
         }
-        // Linked agenda tasks stay current while Fenix runs, and changes
-        // queued before the last exit go out now.
-        if app.features.agenda().store.tasks.iter().any(|t| t.jira.is_some()) {
-            app.agenda_start_ticker();
-            app.agenda_drain_outbox();
-        }
+        // The agenda's sync runs while Fenix does.
+        app.agenda_sync_start();
         app
     }
 
@@ -15772,7 +15768,7 @@ impl App {
             return;
         }
         match kind {
-            AgendaPromptKind::LinkKey { id } => self.agenda_fetch_issue(value.to_uppercase(), agenda_sync::IssueFetch::LinkKey(id)),
+            AgendaPromptKind::LinkKey { id } => self.agenda_link_key(id, value),
         }
         self.wake_caret();
     }

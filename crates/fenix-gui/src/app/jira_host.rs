@@ -4,6 +4,7 @@
 //! afterwards (a pull, so its task follows) goes through `agenda_sync`.
 
 use super::pages::{PageEvent, PageModel};
+use super::agenda_sync::{AgendaSyncState, SyncPick};
 use super::*;
 use crate::jira_page::{self, Action as JiraAction, Choice, JiraPage, Loaded, QueryKind};
 
@@ -47,8 +48,15 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         completion_at_cursor: None,
         completion_pool_at: None,
         hover_first: None,
-        picker_confirm: None,
-        picker_cancel: None,
+        // The agenda sync's picker (link, import, status, priority,
+        // assignee, what Blocked means).
+        picker_confirm: Some(|app, pick, marked, _query| {
+            if let Some(pick) = pick.downcast_ref::<SyncPick>() {
+                let marked = marked.iter().filter_map(|m| m.0.downcast_ref::<SyncPick>().cloned()).collect();
+                app.agenda_sync_picker_confirm(pick.clone(), marked);
+            }
+        }),
+        picker_cancel: Some(|app| app.agenda_sync_picker_cancel()),
         modeline_clock: None,
         page_action: Some(|app, id, action| {
             if let Ok(action) = action.downcast::<JiraAction>() {
@@ -62,12 +70,18 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_title: None,
         page_after_layout: None,
         on_event: Some(|app, event| {
-            if let Ok(done) = event.downcast::<JiraDone>() {
-                app.apply_jira_action_done(done.0);
+            let event = match event.downcast::<JiraDone>() {
+                Ok(done) => return app.apply_jira_action_done(done.0),
+                Err(event) => event,
+            };
+            if let Ok(event) = event.downcast::<AgendaSyncEvent>() {
+                app.apply_agenda_sync(*event);
             }
         }),
         settings: &[],
         services: &[],
+        // Its sync for the agenda.
+        contributes: &[super::feature::Contribution { point: super::agenda_host::AGENDA_SYNC, value: &super::agenda_sync::SYNC }],
     }
 };
 
@@ -139,7 +153,11 @@ impl super::feature::FeaturePage for JiraPage {
 }
 
 /// The Jira page keeps its state on the page, so its feature holds none.
-pub(crate) struct JiraHost;
+#[derive(Default)]
+pub(crate) struct JiraHost {
+    /// Its agenda sync's bookkeeping (`agenda_sync`).
+    pub(super) sync: AgendaSyncState,
+}
 
 impl super::feature::Feature for JiraHost {
     fn spec(&self) -> &'static super::feature::FeatureSpec {
@@ -153,6 +171,30 @@ impl super::feature::Feature for JiraHost {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
+
+    /// What the open agenda sync pick is for ("WHAT DOES BLOCKED MEAN IN
+    /// PROJ?", "PROJ-12 STATUS") -- the badge alone can't say.
+    fn picker_label(&self) -> Option<&str> {
+        self.sync.picker.as_ref().map(|ctx| ctx.label.as_str())
+    }
+}
+
+impl super::feature::Features {
+    /// Jira's agenda sync bookkeeping. Jira has no instance hooks that run
+    /// code, so it's always in place.
+    pub(super) fn jira_sync(&self) -> &AgendaSyncState {
+        &self.get::<JiraHost>().expect("Jira is always in place").sync
+    }
+
+    pub(super) fn jira_sync_mut(&mut self) -> &mut AgendaSyncState {
+        &mut self.get_mut::<JiraHost>().expect("Jira is always in place").sync
+    }
+}
+
+/// One of the Jira feature's pickers (its agenda sync's).
+pub(super) fn jira_picker<T: std::any::Any>(badge: &'static str, candidates: Vec<fenix_picker::Candidate<T>>) -> ActivePicker {
+    let candidates = candidates.into_iter().map(|c| super::feature::FeaturePick::candidate(c.label, c.payload)).collect();
+    ActivePicker::Feature { feature: SPEC.id, badge, state: fenix_picker::PickerState::new(candidates) }
 }
 
 impl App {
@@ -433,7 +475,7 @@ impl App {
             }
             A::Assign { key, id: user, name } => {
                 let k = key.clone();
-                let me = self.features.agenda().sync.me.clone();
+                let me = self.features.jira_sync().me.clone();
                 self.jira_write(id, key, move |c| {
                     let user = if user.is_empty() { me.map(Ok).unwrap_or_else(|| c.myself())? } else { user };
                     c.update_assignee(&k, &user).map(|_| format!("{k} assigned to {}", if name.is_empty() { user.as_str() } else { name.as_str() }))
