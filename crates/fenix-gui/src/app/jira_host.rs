@@ -182,6 +182,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         contributes: &[super::feature::Contribution { point: super::agenda_host::AGENDA_SYNC, value: &super::agenda_sync::SYNC }],
         session_documents: None,
         session_reopen: None,
+        home: None,
+        home_activate: None,
     }
 };
 

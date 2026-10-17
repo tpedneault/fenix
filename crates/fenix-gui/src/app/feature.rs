@@ -127,6 +127,12 @@ pub(crate) struct FeatureSpec {
     pub session_documents: Option<fn(&App) -> Vec<(BufferId, PathBuf)>>,
     /// A document of its, from a session: its file opened again.
     pub session_reopen: Option<fn(&mut App, &Path) -> BufferId>,
+    /// Its sections of Home: everywhere (`None`), or a project's Home
+    /// (`Some(root)`).
+    pub home: Option<fn(&mut App, Option<&Path>) -> Vec<crate::dashboard::HomeSection>>,
+    /// Enter on one of its Home rows (`HomeEntry::Feature`), by the
+    /// row's key.
+    pub home_activate: Option<fn(&mut App, &str)>,
 }
 
 /// One thing a feature plugs into another's contribution point: the

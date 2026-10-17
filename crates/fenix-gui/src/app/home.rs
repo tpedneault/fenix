@@ -110,7 +110,7 @@ fn home_todo_items(root: &Path, unsaved: &HashMap<PathBuf, String>) -> Vec<dashb
         .unwrap_or_default()
 }
 
-fn format_elapsed(duration: chrono::Duration) -> String {
+pub(super) fn format_elapsed(duration: chrono::Duration) -> String {
     let minutes = duration.num_minutes().max(0);
     format!("{}:{:02}", minutes / 60, minutes % 60)
 }
@@ -132,9 +132,7 @@ impl App {
         self.request_recent_probe();
         let now = chrono::Local::now();
         let (resume, recent) = self.home_recent_files(None);
-        let reading = self.home_reading(None);
-        self.notebook_open_in_background();
-        let notebook = self.home_notebook(None);
+        let sections = self.home_sections(None);
         let probe = self.app_probe();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {
@@ -160,40 +158,6 @@ impl App {
             item.health = self.project_health.get(&item.root).map(|(health, _)| *health);
         }
 
-        // Open tasks the way the agenda's Today puts them: the one on the
-        // clock, then in progress, then what's due within a week, then
-        // what's ready to start. Waiting and blocked ones stay on the page.
-        let live = self.features.agenda().store.active_timer.as_ref().map(|t| (t.task_id, now.signed_duration_since(t.started_at)));
-        let week = now.date_naive() + chrono::Duration::days(7);
-        let store = &self.features.agenda().store;
-        let mut open: Vec<&fenix_agenda::Task> = store
-            .tasks
-            .iter()
-            .filter(|t| !t.archived && t.status != fenix_agenda::Status::Done)
-            .filter(|t| t.status == fenix_agenda::Status::InProgress || (t.status == fenix_agenda::Status::Todo && store.is_ready(t.id)) || live.is_some_and(|(id, _)| id == t.id))
-            .collect();
-        open.sort_by_key(|t| {
-            (
-                live.is_none_or(|(id, _)| id != t.id),
-                t.status != fenix_agenda::Status::InProgress,
-                t.due.filter(|d| *d <= week).is_none(),
-                t.due,
-                std::cmp::Reverse(t.priority),
-                t.order,
-            )
-        });
-        let today: Vec<dashboard::TaskItem> = open
-            .into_iter()
-            .map(|t| dashboard::TaskItem {
-                title: match t.jira_key() {
-                    Some(key) => format!("{key} {}", t.title),
-                    None => t.title.clone(),
-                },
-                live: live.filter(|(id, _)| *id == t.id).map(|(_, d)| format_elapsed(d)),
-                pressing: matches!(t.priority, fenix_agenda::Priority::High | fenix_agenda::Priority::Urgent),
-            })
-            .collect();
-
         let todo_root = self.project_root.clone().or_else(|| self.known_projects.roots().first().cloned());
         let scoped_roots = self.home_projects();
         if with_todos {
@@ -210,24 +174,21 @@ impl App {
         let mut scoped = HashMap::new();
         for root in scoped_roots {
             let (resume, recent) = self.home_recent_files(Some(&root));
-            let reading = self.home_reading(Some(&root));
-            let notebook = self.home_notebook(Some(&root));
+            let sections = self.home_sections(Some(&root));
             let todos = self.home_todos.get(&root).cloned().unwrap_or_default();
             let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
             let data = HomeData {
                 date: format!("{name} · {date}"),
                 resume,
                 recent,
-                reading,
-                notebook,
                 projects: projects.clone(),
-                today: today.clone(),
                 todos,
                 recovery,
+                sections,
             };
             scoped.insert(root, data);
         }
-        let data = HomeData { date, resume, recent, reading, notebook, projects, today, todos, recovery };
+        let data = HomeData { date, resume, recent, projects, todos, recovery, sections };
         if data != self.home_data || scoped != self.home_project_data {
             self.home_data = data;
             self.home_project_data = scoped;
@@ -279,66 +240,18 @@ impl App {
 
     /// Whether recent file `path` is shown: it's still there, as last
     /// looked. Before the first look, every one is.
-    fn recent_shown(&self, path: &Path) -> bool {
+    /// The features' sections of Home (`FeatureSpec::home`), everywhere
+    /// or for project `scope`.
+    fn home_sections(&mut self, scope: Option<&Path>) -> Vec<dashboard::HomeSection> {
+        let hooks: Vec<_> = self.features.specs().filter_map(|spec| spec.home).collect();
+        hooks.into_iter().flat_map(|home| home(self, scope)).collect()
+    }
+
+    pub(super) fn recent_shown(&self, path: &Path) -> bool {
         match self.recent_seen.get(path) {
             Some(seen) => seen.is_file,
             None => self.recent_probed.is_none(),
         }
-    }
-
-    /// PDFs read lately, with where you were in each -- Home's Reading.
-    /// Home's notebook list: today's journal day, the pinned entries,
-    /// then the last touched -- a project's Home, the notes about it.
-    /// Only once the notebook has been opened (it's never read for Home).
-    fn home_notebook(&self, scope: Option<&Path>) -> Vec<dashboard::FileItem> {
-        let Some(nb) = self.features.notebook_state().book.as_ref() else { return Vec::new() };
-        let project = scope.and_then(|r| r.file_name()).map(|n| n.to_string_lossy().to_string());
-        let today = chrono::Local::now().date_naive();
-        let mut out = Vec::new();
-        if project.is_none() {
-            if let Some(day) = nb.day(today) {
-                out.push(dashboard::FileItem { path: day.path.clone(), name: "Today's journal".into(), detail: "today".into(), age: String::new() });
-            }
-        }
-        for e in nb.recent() {
-            if out.len() >= 5 {
-                break;
-            }
-            if e.kind == fenix_notebook::Kind::Day || out.iter().any(|i| i.path == e.path) {
-                continue;
-            }
-            if let Some(p) = &project {
-                if !e.about.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(p)) {
-                    continue;
-                }
-            }
-            let kind = match e.kind {
-                fenix_notebook::Kind::Diagram => "diagram",
-                _ if e.pinned => "pinned",
-                _ => "note",
-            };
-            out.push(dashboard::FileItem { path: e.path.clone(), name: e.display_name(), detail: kind.into(), age: String::new() });
-        }
-        out
-    }
-
-    fn home_reading(&self, scope: Option<&Path>) -> Vec<dashboard::FileItem> {
-        let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
-        self.recent_files
-            .paths()
-            .iter()
-            .filter(|p| Self::looks_like_pdf(p) && self.recent_shown(p) && under(p))
-            .take(3)
-            .map(|path| {
-                let place = self.features.pdf().places.get(path).or_else(|| self.features.pdf().places.get(&fenix_project::plain_path(path.clone())));
-                dashboard::FileItem {
-                    path: path.clone(),
-                    name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
-                    detail: place.map(|p| format!("p. {} / {}", p.page + 1, p.pages)).unwrap_or_default(),
-                    age: String::new(),
-                }
-            })
-            .collect()
     }
 
     /// The resume slot and the recent files, from anywhere or only from
@@ -515,8 +428,11 @@ impl App {
             HomeEntry::Resume(path) | HomeEntry::RecentFile(path) => self.open_file_from_picker(&path),
             HomeEntry::Project(root) => self.switch_to_project(root),
             HomeEntry::NewProject => self.cmd_project_new(),
-            HomeEntry::Agenda => {
-                self.open_agenda_page(Some(crate::agenda_page::Tab::Today));
+            HomeEntry::Feature { feature, key } => {
+                let activate = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.home_activate);
+                if let Some(activate) = activate {
+                    activate(self, &key);
+                }
             }
             HomeEntry::Todo { path, line, col } => {
                 self.open_file_from_picker(&path);
@@ -649,7 +565,9 @@ mod tests {
         std::fs::write(&read, b"%PDF-1.4").unwrap();
         app.recent_files.add(read.clone());
         app.features.pdf_mut().places.insert(read.clone(), crate::reader::SavedPlace { page: 37, frac: 0.0, zoom: crate::reader::Zoom::FitWidth, pages: 212, marks: Default::default() });
-        let reading = app.home_reading(None);
+        // Through the PDF feature's section of Home.
+        let sections = app.home_sections(None);
+        let reading = &sections.iter().find(|s| s.title == "reading").expect("the PDF feature's section").rows;
         assert_eq!(reading.len(), 1);
         assert_eq!((reading[0].name.as_str(), reading[0].detail.as_str()), ("read.pdf", "p. 38 / 212"));
         assert!(app.home_recent_files(None).1.iter().all(|f| f.path != read), "not in Recent as well");
