@@ -476,13 +476,7 @@ pub(crate) fn nats_receive(addr: &str, subject: &str, stop: &AtomicBool, feed: &
 
 impl App {
     fn stream_page(&mut self, id: BufferId) -> Option<&mut StreamPage> {
-        match self.pages.get_mut(&id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
-            Some(PageModel::Stream(p)) => Some(p),
-            _ => None,
-        }
+        self.feature_page_mut::<StreamPage>(id)
     }
 
     /// `SPC k f`: the file in the explorer, or the focused one, as a
@@ -502,7 +496,7 @@ impl App {
         let title = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let page = StreamPage::new(key, title, false);
         let stop = page.stop.clone();
-        let id = self.open_page(PageModel::Stream(Box::new(page)));
+        let id = self.open_page(PageModel::Feature(Box::new(page)));
         self.ccsds_mut().stream_sources.insert(id, StreamSource::File(path.clone(), framing.clone()));
         self.page_spawn(move |send| read_recording(path, framing, set, mission, id, send, stop));
     }
@@ -553,7 +547,7 @@ impl App {
         let mission = self.mission(key.project.as_deref());
         let page = StreamPage::new(key, src.name.clone(), true);
         let stop = page.stop.clone();
-        let id = self.open_page(PageModel::Stream(Box::new(page)));
+        let id = self.open_page(PageModel::Feature(Box::new(page)));
         self.ccsds_mut().stream_sources.insert(id, StreamSource::Live(src.clone()));
         let proxy = self.event_proxy.clone();
         if proxy.is_none() {
@@ -655,7 +649,7 @@ impl App {
                 if let Some(StreamSource::File(path, _)) = self.ccsds().stream_sources.get(&id).cloned() {
                     self.open_hex_view(path);
                     let hex = self.focused_buffer_id();
-                    if let Some(PageModel::Hex(h)) = self.pages.get_mut(&hex).map(|s| &mut s.model) {
+                    if let Some(h) = self.feature_page_mut::<crate::hex_page::HexPage>(hex) {
                         h.goto(offset);
                     }
                 } else {
@@ -855,7 +849,7 @@ mod tests {
         assert!(csv.starts_with("time,raw,value,limits\n2026-09-27 14:32:05.500,3000,\"45.0 degC\""), "{csv}");
 
         // Live: new rows add samples, and a crossing is said in the modeline.
-        let live = app.open_page(PageModel::Stream(Box::new(StreamPage::new(key, "bench".into(), true))));
+        let live = app.open_page(PageModel::Feature(Box::new(StreamPage::new(key, "bench".into(), true))));
         app.stream_follow(live, param);
         let m = app.mission(None);
         let with_raw = |seq: u16, raw: u16| {
