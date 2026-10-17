@@ -245,6 +245,11 @@ pub(crate) trait FeaturePage: Any {
     fn image_marks(&self) -> Vec<(usize, (f32, f32, f32, f32), bool)> {
         Vec::new()
     }
+    /// Whether it shows pictures that are drawn off the UI thread (a
+    /// note's diagrams), so it's laid out again when one arrives.
+    fn shows_pictures(&self) -> bool {
+        false
+    }
     /// A key; what it asks for goes to the feature's `page_action`.
     fn key(&mut self, key: crate::page::Key, ctx: Box<dyn Any>) -> Box<dyn Any>;
     /// It's being closed: stop whatever it started (a stream's reader).

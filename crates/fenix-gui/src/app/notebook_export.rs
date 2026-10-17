@@ -611,7 +611,7 @@ mod tests {
         let file = dir.path().join("README.md");
         std::fs::write(&file, "# Readme\n\n```mermaid\nflowchart LR\n  a --> b\n```\n").unwrap();
         app.open_file_from_picker(&file);
-        app.notebook_place_cursor(4, 0);
+        app.place_cursor(4, 0);
         app.notebook_save_block();
         let Some(NotebookPrompt { kind: NotebookPromptKind::SaveBlock { text }, input }) = app.features.notebook_state().prompt.clone() else { panic!("the name prompt") };
         assert_eq!(text, "flowchart LR\n  a --> b\n");

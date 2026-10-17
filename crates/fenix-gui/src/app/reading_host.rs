@@ -259,7 +259,7 @@ impl App {
             self.reading_to_source_pane(page_id, source);
         }
         if self.focused_buffer_id() == source {
-            self.notebook_place_cursor(line, 0);
+            self.place_cursor(line, 0);
         }
     }
 
@@ -337,7 +337,7 @@ mod tests {
         std::fs::write(&path, "# Title\n\n- [ ] one\n- [ ] two\n").unwrap();
         let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
         let source = app.focused_buffer_id();
-        app.notebook_place_cursor(3, 0);
+        app.place_cursor(3, 0);
         app.open_reading_view(false);
         assert_eq!(app.focused_buffer_id(), source, "typing stays in the source");
         let page = app.find_page(|m| matches!(m, PageModel::Reading(_))).expect("the reading view");
