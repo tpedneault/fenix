@@ -5534,7 +5534,7 @@ pub struct App {
     /// opened -- degrades to the old private-register-only behavior
     /// rather than a hard error, same posture as the optional `rg`/`git`/
     /// `ctags`/`docker` shell-outs.
-    clipboard: Option<arboard::Clipboard>,
+    clipboard: Option<crate::clipboard::Clipboard>,
     /// What `clipboard` was last set to, so `handle_key` can tell whether
     /// Vim's unnamed register changed this keystroke (yank, delete,
     /// change -- anything that writes it) without re-reading the OS
@@ -6325,7 +6325,7 @@ impl App {
             workspace_rename_prompt: None,
             delete_file_confirm: false,
             vim,
-            clipboard: arboard::Clipboard::new().ok(),
+            clipboard: crate::clipboard::Clipboard::new().ok(),
             clipboard_mirror: String::new(),
             leader_matcher: keymap::leader_trie().matcher(),
             local_matcher: None,
@@ -37214,11 +37214,10 @@ configure_board stm32
     ///
     /// Returns the lock guard too (held by the caller for the rest of
     /// its `if let` block): the real OS clipboard is one shared,
-    /// process-wide resource, and Windows' clipboard API isn't safe to
-    /// touch from two threads at once -- with the test harness running
-    /// tests in parallel by default, two clipboard-touching tests
-    /// racing each other reliably crashed the whole test binary
-    /// (`STATUS_HEAP_CORRUPTION`) before this lock serialized them.
+    /// process-wide resource, so a test that sets it and then checks
+    /// what's on it must not have another test's text land in between.
+    /// (Touching it from two threads at once is itself safe -- see
+    /// `crate::clipboard`.)
     static CLIPBOARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn test_set_clipboard(app: &mut App, text: &str) -> Option<std::sync::MutexGuard<'static, ()>> {

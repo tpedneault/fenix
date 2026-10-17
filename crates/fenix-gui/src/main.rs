@@ -20,6 +20,7 @@ mod stream_page;
 mod standards_page;
 mod app;
 mod cli;
+mod clipboard;
 mod commands;
 mod completion;
 mod console;
