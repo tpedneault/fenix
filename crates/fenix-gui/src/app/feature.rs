@@ -97,6 +97,13 @@ pub(crate) struct FeatureSpec {
     /// Carries out what a key on one of its pages (`FeaturePage::key`)
     /// asked for, on page `BufferId`.
     pub page_action: Option<fn(&mut App, BufferId, Box<dyn Any>)>,
+    /// What page `BufferId` reads besides itself to be laid out or take a
+    /// key (a MIB page's set), worked out before core borrows the page and
+    /// handed to `FeaturePage::layout` and `FeaturePage::key`.
+    pub page_context: Option<fn(&mut App, BufferId) -> Box<dyn Any>>,
+    /// Page `BufferId`'s title, when it depends on more than the page (a
+    /// definition's name in the loaded MIB) -- else `FeaturePage::title`.
+    pub page_title: Option<fn(&App, BufferId) -> Option<String>>,
 }
 
 /// A completion in progress: where its prefix starts, the prefix, and
@@ -159,15 +166,47 @@ pub(crate) trait FeaturePage: Any {
     }
     /// Text pasted (Ctrl-V) or typed while `typing`.
     fn paste(&mut self, _text: &str) {}
-    /// The page, laid out for a pane `cols` cells wide.
-    fn layout(&self, cols: usize) -> crate::page::Page;
+    /// Ctrl keys it takes besides the ones every page gets (`CtrlO`,
+    /// `CtrlI`, `CtrlEnter`) -- otherwise they're Vim's.
+    fn claims_ctrl(&self, _key: crate::page::Key) -> bool {
+        false
+    }
+    /// The page, laid out for a pane `cols` cells wide; `ctx` is what its
+    /// feature's `page_context` worked out (`()` without one).
+    fn layout(&self, ctx: &dyn Any, cols: usize) -> crate::page::Page;
     /// A key; what it asks for goes to the feature's `page_action`.
-    fn key(&mut self, key: crate::page::Key) -> Box<dyn Any>;
+    fn key(&mut self, key: crate::page::Key, ctx: &dyn Any) -> Box<dyn Any>;
     /// It's being closed: stop whatever it started (a stream's reader).
     fn close(&self) {}
 }
 
+/// `model` as feature page `T`, if it is one -- for `find_page`.
+pub(super) fn page_as<T: FeaturePage>(model: &super::pages::PageModel) -> Option<&T> {
+    match model {
+        super::pages::PageModel::Feature(p) => (&**p as &dyn Any).downcast_ref(),
+        _ => None,
+    }
+}
+
 impl App {
+    /// What feature page `id` reads besides itself, from its feature's
+    /// `page_context` -- `()` for any other page.
+    pub(super) fn feature_page_context(&mut self, id: BufferId) -> Box<dyn Any> {
+        let feature = match self.pages.get(&id).map(|s| &s.model) {
+            Some(super::pages::PageModel::Feature(p)) => p.feature(),
+            _ => return Box::new(()),
+        };
+        let context = self
+            .features
+            .specs()
+            .find(|spec| spec.id == feature)
+            .and_then(|spec| spec.page_context);
+        match context {
+            Some(context) => context(self, id),
+            None => Box::new(()),
+        }
+    }
+
     /// Page `id` as feature page `T`, if it is one -- for the feature
     /// that owns it.
     pub(super) fn feature_page<T: FeaturePage>(&self, id: BufferId) -> Option<&T> {
