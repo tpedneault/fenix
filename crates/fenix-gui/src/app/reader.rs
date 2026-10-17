@@ -392,7 +392,7 @@ impl App {
     /// calls in place of drawing.
     pub(super) fn pdf_prepare_view(&mut self, key: ViewKey, pane: (f32, f32), cell: (f32, f32)) {
         let dpi = self.frame_scale();
-        let placement = self.config.reader.sidebar.clone();
+        let placement = self.config.text_value("reader.sidebar").map(str::to_string);
         let Some(view) = self.pdf_ensure_view(key) else { return };
         let side_px = if view.sidebar.is_some() { (reader_sidebar::COLS as f32 * cell.0 + text::PAD_LEFT * 2.0).round() } else { 0.0 };
         view.side_px = side_px;
@@ -524,15 +524,15 @@ impl App {
     // -- Settings and remembering -----------------------------------------
 
     pub(super) fn pdf_remembers(&self) -> bool {
-        self.config.reader.remember != Some(false)
+        self.config.bool_value("reader.remember") != Some(false)
     }
 
     fn pdf_default_zoom(&self) -> Zoom {
-        self.config.reader.zoom.as_deref().and_then(reader::parse_zoom).unwrap_or(reader::DEFAULT_ZOOM)
+        self.config.text_value("reader.zoom").and_then(reader::parse_zoom).unwrap_or(reader::DEFAULT_ZOOM)
     }
 
     fn pdf_gap(&self) -> f32 {
-        self.config.reader.page_gap.map(|g| g as f32).unwrap_or(reader::PAGE_GAP)
+        self.config.int_value("reader.page_gap").map(|g| g as f32).unwrap_or(reader::PAGE_GAP)
     }
 
     /// Notes where `doc` is, for the places file.
@@ -570,7 +570,7 @@ impl App {
     /// Whether pages are drawn in the theme's colours
     /// (`reader.colors = "theme"`): the colours white and black become.
     pub(super) fn pdf_recolor(&self) -> Option<([f32; 3], [f32; 3])> {
-        (self.config.reader.colors.as_deref() == Some("theme")).then(|| {
+        (self.config.text_value("reader.colors") == Some("theme")).then(|| {
             let (bg, fg) = (self.theme.bg, glyphon_to_rgba(self.theme.fg));
             ([bg[0], bg[1], bg[2]], [fg[0], fg[1], fg[2]])
         })
@@ -2585,7 +2585,7 @@ mod tests {
     #[test]
     fn with_remember_off_nothing_is_kept() {
         let (_guard, _, mut app) = test_open_pdf("pdf_unused2.pdf");
-        app.config.reader.remember = Some(false);
+        app.config.set_value("reader.remember", Some(fenix_config::Value::Bool(false)));
         let dir = temp_dir("forget");
         let path = pdf_file(&dir, "spec.pdf");
         open_file(&mut app, &path);
@@ -2597,9 +2597,9 @@ mod tests {
     #[test]
     fn the_default_zoom_page_gap_and_sidebar_placement_are_settings() {
         let (_guard, _, mut app) = test_open_pdf("pdf_unused3.pdf");
-        app.config.reader.zoom = Some("page".into());
-        app.config.reader.page_gap = Some(0);
-        app.config.reader.sidebar = Some("over".into());
+        app.config.set_value("reader.zoom", Some(fenix_config::Value::Text("page".into())));
+        app.config.set_value("reader.page_gap", Some(fenix_config::Value::Int(0)));
+        app.config.set_value("reader.sidebar", Some(fenix_config::Value::Text("over".into())));
         let dir = temp_dir("settings");
         let key = open_file(&mut app, &pdf_file(&dir, "a.pdf"));
         assert_eq!(view(&app, key).zoom, Zoom::FitPage);
@@ -2615,13 +2615,13 @@ mod tests {
         assert_eq!(app.pdf_recolor(), None);
         assert_eq!(app.pdf_paper(), PAPER);
         app.pdf_toggle_colors();
-        assert_eq!(app.config.reader.colors.as_deref(), Some("theme"));
+        assert_eq!(app.config.text_value("reader.colors"), Some("theme"));
         assert!(app.pdf_recolor().is_some());
         assert_eq!(app.pdf_paper(), app.theme.bg, "blank pages in the theme's background");
         let chrome = app.pdf_chrome(key, fenix_window::Rect { x: 0.0, y: 0.0, w: PANE.0, h: PANE.1 }, CELL);
         assert!(!chrome.rects.is_empty(), "a darker backdrop, so the pages' edges show");
         app.pdf_toggle_colors();
-        assert_eq!(app.config.reader.colors.as_deref(), Some("paper"));
+        assert_eq!(app.config.text_value("reader.colors"), Some("paper"));
     }
 
     #[test]
