@@ -10,6 +10,7 @@ use std::cell::RefCell;
 
 use super::notebook_host::{NotebookPick, NotebookPrompt, NotebookPromptKind};
 use super::feature::page_as;
+use super::feature::ServiceCall::{Mut, Read};
 use super::pages::{PageEvent, PageModel};
 use super::reading_host::PageTex;
 use super::*;
@@ -187,25 +188,31 @@ pub(super) struct DiagramPre {
 /// What the diagrams feature offers others (the notebook's export): a
 /// diagram's source in, drawn with `diagrams.export_theme` and
 /// `diagrams.background`.
-static SERVICES: [super::feature::Service; 4] = [
+static SERVICES: [super::feature::Service; 6] = [
     // `{source}` -> the source with Fenix's theme written into it, so it
     // renders the same anywhere Mermaid does.
-    super::feature::Service { name: "diagrams.portable", call: |app, payload| Ok(app.diagram_portable(&DiagramCall::from(payload)?.source)) },
+    super::feature::Service { name: "diagrams.portable", call: Read(|app, payload| Ok(app.diagram_portable(&DiagramCall::from(payload)?.source))) },
     // `{source}` -> an SVG.
-    super::feature::Service { name: "diagrams.svg", call: |app, payload| app.diagram_svg(&DiagramCall::from(payload)?.source) },
+    super::feature::Service { name: "diagrams.svg", call: Read(|app, payload| app.diagram_svg(&DiagramCall::from(payload)?.source)) },
+    // `{source}` -> the picture a page shows for it (`ImageKey::Diagram`),
+    // drawn once it's asked for and kept for every page that shows it.
+    super::feature::Service { name: "diagrams.picture", call: Read(|app, payload| Ok(app.diagram_key(&DiagramCall::from(payload)?.source, None).to_string())) },
+    // `{source}` -> what's wrong with it once it's been drawn ("line 3:
+    // ..."), else nothing.
+    super::feature::Service { name: "diagrams.problem", call: Read(|app, payload| Ok(app.diagram_problem(&DiagramCall::from(payload)?.source).unwrap_or_default())) },
     // `{source, format: "svg" | "png", path}` -> the file written (by
     // mermaid-cli under `diagrams.export_with = "mmdc"`); the theme it
     // was drawn with back.
     super::feature::Service {
         name: "diagrams.export",
-        call: |app, payload| {
+        call: Read(|app, payload| {
             let call = DiagramCall::from(payload)?;
             let path = call.path.ok_or("no path")?;
             app.diagram_export_file(&call.source, call.format.as_deref().unwrap_or("svg"), &path)
-        },
+        }),
     },
     // `{source}` -> the picture (PNG, 2x) on the clipboard.
-    super::feature::Service { name: "diagrams.copy_picture", call: |app, payload| app.diagram_copy_picture(&DiagramCall::from(payload)?.source).map(|()| String::new()) },
+    super::feature::Service { name: "diagrams.copy_picture", call: Mut(|app, payload| app.diagram_copy_picture(&DiagramCall::from(payload)?.source).map(|()| String::new())) },
 ];
 
 /// A diagrams service's payload.
@@ -225,7 +232,6 @@ impl DiagramCall {
 }
 
 impl App {
-    /// The themes, as the settings and the editor theme make them.
     /// `diagrams.export_theme`, unless it's "same" (the one it's drawn with).
     fn diagram_export_theme(&self) -> Option<String> {
         self.config.diagrams_export_theme.clone().filter(|t| !t.trim().is_empty() && !t.eq_ignore_ascii_case("same"))
@@ -273,6 +279,7 @@ impl App {
         clipboard.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: px.into() }).map_err(|e| e.to_string())
     }
 
+    /// The themes, as the settings and the editor theme make them.
     pub(super) fn diagram_themes(&self) -> fenix_diagram::Themes {
         let t = self.theme;
         let rgb = |c: glyphon::Color| [c.r(), c.g(), c.b()];
@@ -806,6 +813,10 @@ mod tests {
         let bad = app.call_service("diagrams.svg", &serde_json::json!({ "source": "flowchart TD\n    a -->\n" })).unwrap_err();
         assert!(bad.starts_with("line "), "{bad}");
         assert!(app.call_service("diagrams.svg", &serde_json::json!({ "text": "x" })).unwrap_err().contains("source"));
+        // What a page shows for it: the picture's key, and its problem once drawn.
+        let key: u64 = app.query_service("diagrams.picture", &source).unwrap().parse().unwrap();
+        assert_eq!(key, app.diagram_key(flow, None));
+        assert_eq!(app.query_service("diagrams.problem", &source), Ok(String::new()));
     }
 
     fn preview(app: &App) -> (BufferId, fenix_window::WindowId) {
