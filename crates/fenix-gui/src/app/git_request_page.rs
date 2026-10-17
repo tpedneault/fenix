@@ -9,6 +9,21 @@ use super::*;
 use crate::git_request::{self, Commit, Pushed, RequestAction, RequestPage, Standing};
 use crate::git_status::{overall, Job, RequestLine};
 
+/// What the new-request page's and the status line's forge jobs send back
+/// (as the review feature's page events).
+#[derive(Debug)]
+pub(crate) enum RequestJob {
+    /// The request already open for the new request page's branch.
+    /// With who the token belongs to, for the assignee, and the project's
+    /// default description template on the forge.
+    RequestExisting { buffer: BufferId, result: Result<Option<fenix_forge::MergeRequest>, String>, me: Option<String>, template: Option<String> },
+    /// The new request was opened -- with a word about what didn't go
+    /// on it -- or wasn't.
+    RequestOpened { buffer: BufferId, result: Result<(fenix_forge::MergeRequest, Option<String>), String> },
+    /// The status page's branch's request.
+    GitRequest { buffer: BufferId, result: Result<Option<crate::git_status::RequestLine>, String> },
+}
+
 /// Who a new request asks for a review: the project's own reviewers
 /// (`.fenix/settings.toml`, or the `project.ini` it replaced) when it
 /// names anyone, else yours.
@@ -86,7 +101,7 @@ impl App {
             let result = client.request_for_branch(&branch);
             let me = client.current_user().ok();
             let template = client.default_description().ok().flatten();
-            send(PageEvent::RequestExisting { buffer: id, result, me, template });
+            send(PageEvent::feature(super::review_host::SPEC.id, "RequestExisting", RequestJob::RequestExisting { buffer: id, result, me, template }));
         });
     }
 
@@ -162,7 +177,7 @@ impl App {
                         }
                         Ok((made, warning))
                     })();
-                    send(PageEvent::RequestOpened { buffer: id, result });
+                    send(PageEvent::feature(super::review_host::SPEC.id, "RequestOpened", RequestJob::RequestOpened { buffer: id, result }));
                 });
             }
         }
@@ -199,13 +214,13 @@ impl App {
                     RequestLine { number: r.number, reference: r.reference(), title: r.title, draft: r.draft, checks, approved_by, unresolved }
                 })
             });
-            send(PageEvent::GitRequest { buffer: id, result });
+            send(PageEvent::feature(super::review_host::SPEC.id, "GitRequest", RequestJob::GitRequest { buffer: id, result }));
         });
     }
 
-    pub(super) fn apply_request_event(&mut self, event: PageEvent) {
+    pub(super) fn apply_request_event(&mut self, event: RequestJob) {
         match event {
-            PageEvent::RequestExisting { buffer, result, me, template } => {
+            RequestJob::RequestExisting { buffer, result, me, template } => {
                 let Some(page) = self.request_page(buffer) else { return };
                 if let Some(me) = me {
                     page.assign_to_me(&me);
@@ -221,7 +236,7 @@ impl App {
                     }
                 }
             }
-            PageEvent::RequestOpened { buffer, result } => {
+            RequestJob::RequestOpened { buffer, result } => {
                 let Some(page) = self.request_page(buffer) else { return };
                 page.busy = false;
                 match result {
@@ -242,7 +257,7 @@ impl App {
                     Err(err) => page.message = Some((err, true)),
                 }
             }
-            PageEvent::GitRequest { buffer, result } => {
+            RequestJob::GitRequest { buffer, result } => {
                 if let (Some(PageModel::Git(g)), Ok(line)) = (self.pages.get_mut(&buffer).map(|s| {
                     s.stale = true;
                     &mut s.model
@@ -251,7 +266,6 @@ impl App {
                     g.request = Some(line);
                 }
             }
-            _ => {}
         }
     }
 }

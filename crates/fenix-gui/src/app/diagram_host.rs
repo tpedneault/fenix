@@ -16,6 +16,14 @@ use super::*;
 use crate::diagram_page::{Action as DgAction, DiagramPage, Drawn};
 use crate::page::ImageKey;
 
+/// What drawing a diagram sends back (as the diagrams feature's page
+/// event).
+#[derive(Debug)]
+pub(crate) enum DiagramJob {
+    /// A diagram, drawn (or why it couldn't be).
+    DiagramDrawn { key: u64, result: Result<(crate::diagram_page::Drawn, u32, u32, Vec<u8>), (usize, String)> },
+}
+
 /// The scale diagrams are drawn at, over their natural size: sharp on
 /// high-DPI screens and when zoomed a little.
 const DIAGRAM_SCALE: f32 = 2.0;
@@ -75,7 +83,12 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         page_title: None,
         page_after_layout: Some(|app, id| app.diagram_after_layout(id)),
-        on_event: None,
+        on_event: Some(|app, event| {
+            if let Ok(job) = event.downcast::<DiagramJob>() {
+                let DiagramJob::DiagramDrawn { key, result } = *job;
+                app.apply_diagram_drawn(key, result);
+            }
+        }),
         settings: &SETTINGS,
         services: &SERVICES,
         contributes: &[],
@@ -420,7 +433,7 @@ impl App {
                 let (w, h, rgba) = fenix_diagram::rasterize(&r.svg, DIAGRAM_SCALE, fenix_diagram::Background::Theme).map_err(|e| (0, e))?;
                 Ok((Drawn { size: (r.width, r.height), nodes: r.nodes, theme: r.theme }, w, h, super::reading_host::rgba_to_bgra(rgba)))
             });
-            send(PageEvent::DiagramDrawn { key: h, result });
+            send(PageEvent::feature(SPEC.id, "DiagramDrawn", DiagramJob::DiagramDrawn { key: h, result }));
         });
     }
 

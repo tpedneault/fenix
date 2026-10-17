@@ -13,6 +13,13 @@ use crate::page::ImageKey;
 use crate::reading;
 use fenix_notebook::{Kind as NbKind, Notebook};
 
+/// What reading the notebook sends back (as the notebook's page event).
+#[derive(Debug)]
+pub(crate) enum NotebookJob {
+    /// The notebook, read off the UI thread.
+    NotebookOpened(Box<fenix_notebook::Notebook>),
+}
+
 /// How long typing has to pause before a notebook file is written.
 const AUTOSAVE_AFTER: Duration = Duration::from_millis(1000);
 
@@ -195,7 +202,12 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         page_title: None,
         page_after_layout: None,
-        on_event: None,
+        on_event: Some(|app, event| {
+            if let Ok(job) = event.downcast::<NotebookJob>() {
+                let NotebookJob::NotebookOpened(nb) = *job;
+                app.apply_notebook_opened(*nb);
+            }
+        }),
         settings: &SETTINGS,
         services: &SERVICES,
         contributes: &[],
@@ -402,7 +414,7 @@ impl App {
         self.features.notebook_state_mut().opening = true;
         self.page_spawn(move |send| {
             if let Ok(nb) = Notebook::open(&root) {
-                send(super::pages::PageEvent::NotebookOpened(Box::new(nb)));
+                send(super::pages::PageEvent::feature(SPEC.id, "NotebookOpened", NotebookJob::NotebookOpened(Box::new(nb))));
             }
         });
     }

@@ -11,6 +11,17 @@ use crate::review_page::{FileView, ReviewAction, ReviewData, ReviewPage};
 use crate::review_store::{self, Pending};
 use fenix_forge::{Forge, Verdict};
 
+/// What the review pages' background jobs send back (as the review
+/// feature's page events).
+#[derive(Debug)]
+pub(crate) enum ReviewJob {
+    InboxData { buffer: BufferId, result: Result<Vec<crate::review_inbox::Entry>, String> },
+    ReviewData { buffer: BufferId, result: Result<Box<crate::review_page::ReviewData>, String> },
+    ReviewSince { buffer: BufferId, result: Result<Vec<crate::review_page::FileView>, String> },
+    ReviewDone { buffer: BufferId, label: String, after: super::review_host::After, result: Result<(), String> },
+    ReviewLog { buffer: BufferId, name: String, result: Result<String, String> },
+}
+
 /// Code review on GitHub and GitLab: the reviews (`SPC g M`) and opening
 /// a pull request (`SPC g P`). One feature while both forges share this
 /// code; they become `fenix.github` and `fenix.gitlab` over a `forge`
@@ -59,10 +70,20 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_context: None,
         page_title: None,
         page_after_layout: None,
-        on_event: Some(|app, event| match event.downcast::<ForgeEvent>().map(|e| *e) {
-            Ok(ForgeEvent::List { request_id, result }) => app.apply_forge_list(request_id, result),
-            Ok(ForgeEvent::Detail { request_id, number, result }) => app.apply_forge_detail(request_id, number, *result),
-            Err(_) => {}
+        on_event: Some(|app, event| {
+            let event = match event.downcast::<ReviewJob>() {
+                Ok(job) => return app.apply_review_event(*job),
+                Err(event) => event,
+            };
+            let event = match event.downcast::<super::git_request_page::RequestJob>() {
+                Ok(job) => return app.apply_request_event(*job),
+                Err(event) => event,
+            };
+            match event.downcast::<ForgeEvent>().map(|e| *e) {
+                Ok(ForgeEvent::List { request_id, result }) => app.apply_forge_list(request_id, result),
+                Ok(ForgeEvent::Detail { request_id, number, result }) => app.apply_forge_detail(request_id, number, *result),
+                Err(_) => {}
+            }
         }),
         settings: &[],
         services: &[],
@@ -339,7 +360,7 @@ impl App {
                     })
                     .collect()
             });
-            send(PageEvent::InboxData { buffer: id, result });
+            send(PageEvent::feature(SPEC.id, "InboxData", ReviewJob::InboxData { buffer: id, result }));
         });
     }
 
@@ -396,7 +417,7 @@ impl App {
         };
         self.page_spawn(move |send| {
             let result = read_review(client.as_ref(), &root, number);
-            send(PageEvent::ReviewData { buffer: id, result: result.map(Box::new) });
+            send(PageEvent::feature(SPEC.id, "ReviewData", ReviewJob::ReviewData { buffer: id, result: result.map(Box::new) }));
         });
     }
 
@@ -422,7 +443,7 @@ impl App {
         let label = label.to_string();
         self.page_spawn(move |send| {
             let result = job(client.as_ref());
-            send(PageEvent::ReviewDone { buffer: id, label, after, result });
+            send(PageEvent::feature(SPEC.id, "ReviewDone", ReviewJob::ReviewDone { buffer: id, label, after, result }));
         });
     }
 
@@ -492,7 +513,7 @@ impl App {
                 let Ok(client) = self.forge_client(&root) else { return };
                 self.page_spawn(move |send| {
                     let result = client.job_log(&check);
-                    send(PageEvent::ReviewLog { buffer: id, name: check.name.clone(), result });
+                    send(PageEvent::feature(SPEC.id, "ReviewLog", ReviewJob::ReviewLog { buffer: id, name: check.name.clone(), result }));
                 });
             }
             ReviewAction::Retry(check) => {
@@ -505,7 +526,7 @@ impl App {
                 let paths: Vec<String> = data.files.iter().flat_map(|f| [f.path.clone(), f.old_path.clone()]).collect();
                 self.page_spawn(move |send| {
                     let result = read_since(&root, &reviewed, &head, &paths);
-                    send(PageEvent::ReviewSince { buffer: id, result });
+                    send(PageEvent::feature(SPEC.id, "ReviewSince", ReviewJob::ReviewSince { buffer: id, result }));
                 });
             }
         }
@@ -593,9 +614,9 @@ impl App {
         }
     }
 
-    pub(super) fn apply_review_event(&mut self, event: PageEvent) {
+    pub(super) fn apply_review_event(&mut self, event: ReviewJob) {
         match event {
-            PageEvent::InboxData { buffer, result } => {
+            ReviewJob::InboxData { buffer, result } => {
                 let Some(inbox) = self.inbox(buffer) else { return };
                 match result {
                     Ok(entries) => inbox.set_entries(entries),
@@ -606,7 +627,7 @@ impl App {
                     }
                 }
             }
-            PageEvent::ReviewData { buffer, result } => {
+            ReviewJob::ReviewData { buffer, result } => {
                 let Some(page) = self.review_page(buffer) else { return };
                 match result {
                     Ok(data) => {
@@ -620,7 +641,7 @@ impl App {
                     }
                 }
             }
-            PageEvent::ReviewSince { buffer, result } => {
+            ReviewJob::ReviewSince { buffer, result } => {
                 let Some(page) = self.review_page(buffer) else { return };
                 match result {
                     Ok(files) => {
@@ -634,7 +655,7 @@ impl App {
                     }
                 }
             }
-            PageEvent::ReviewDone { buffer, label, after, result } => {
+            ReviewJob::ReviewDone { buffer, label, after, result } => {
                 let Some(page) = self.review_page(buffer) else { return };
                 page.busy = None;
                 match result {
@@ -662,7 +683,7 @@ impl App {
                     }
                 }
             }
-            PageEvent::ReviewLog { buffer, name, result } => match result {
+            ReviewJob::ReviewLog { buffer, name, result } => match result {
                 Ok(log) => {
                     let root = self.review_page(buffer).map(|r| r.root.clone());
                     let tail: Vec<&str> = log.lines().rev().take(400).collect::<Vec<_>>().into_iter().rev().map(without_timestamp).collect();
@@ -693,7 +714,6 @@ impl App {
                     }
                 }
             },
-            _ => {}
         }
     }
 }

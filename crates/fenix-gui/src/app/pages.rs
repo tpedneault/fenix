@@ -12,15 +12,10 @@ use super::*;
 use crate::git_compare::{self, GitCompare};
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
-use crate::jira_page;
-use crate::mib_page;
-use crate::stream_page;
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::reading_page::ReadingPage;
 use crate::git_status::{self, GitStatus};
-use crate::review_inbox;
-use crate::review_page;
 use crate::page::{Key, Page, Role as PageRole};
 use crate::project_doctor::{self, DoctorPage, Fixing};
 use crate::project_hub::{self, Hub, HubProject};
@@ -143,43 +138,21 @@ pub enum PageEvent {
     ChromeGit(Option<Box<super::git_editor::ChromeGit>>),
     /// A background fetch finished.
     AutoFetched { ok: bool },
-    InboxData { buffer: BufferId, result: Result<Vec<review_inbox::Entry>, String> },
-    ReviewData { buffer: BufferId, result: Result<Box<review_page::ReviewData>, String> },
-    ReviewSince { buffer: BufferId, result: Result<Vec<review_page::FileView>, String> },
-    ReviewDone { buffer: BufferId, label: String, after: super::review_host::After, result: Result<(), String> },
-    ReviewLog { buffer: BufferId, name: String, result: Result<String, String> },
-    /// The request already open for the new request page's branch.
-    /// With who the token belongs to, for the assignee, and the project's
-    /// default description template on the forge.
-    RequestExisting { buffer: BufferId, result: Result<Option<fenix_forge::MergeRequest>, String>, me: Option<String>, template: Option<String> },
-    /// The new request was opened -- with a word about what didn't go
-    /// on it -- or wasn't.
-    RequestOpened { buffer: BufferId, result: Result<(fenix_forge::MergeRequest, Option<String>), String> },
-    /// The status page's branch's request.
-    GitRequest { buffer: BufferId, result: Result<Option<crate::git_status::RequestLine>, String> },
     /// A line for the settings page: a token's test came back.
     SettingsNote { buffer: BufferId, note: (String, bool) },
-    /// A search on the Jira page came back.
-    JiraIssues { buffer: BufferId, jql: String, result: Result<Vec<fenix_jira::IssueSummary>, String> },
-    JiraDetail { buffer: BufferId, key: String, result: Result<fenix_jira::IssueDetail, String> },
-    /// Choices for an issue, fetched: its transitions, or priorities.
-    JiraOffer { buffer: BufferId, title: String, key: String, result: Result<Vec<(String, jira_page::Choice)>, String> },
-    JiraTypes { buffer: BufferId, project: String, types: Result<Vec<fenix_jira::IssueType>, String>, priorities: Vec<String> },
-    JiraFields { buffer: BufferId, type_id: String, result: Result<Vec<fenix_jira::CreateField>, String> },
-    /// A change to an issue went through, or didn't.
-    JiraDone { buffer: BufferId, key: String, result: Result<String, String> },
-    /// A set of MIBs was read.
-    MibLoaded { key: mib_page::MibKey, set: Arc<fenix_mib::MibSet> },
-    /// A stream page's next packets.
-    StreamRows { buffer: BufferId, rows: Vec<stream_page::Row>, lost: Vec<(usize, u8, u64)>, junk: Vec<(usize, usize, String)>, done: bool },
-    StreamInfo { buffer: BufferId, framing: String },
-    StreamStatus { buffer: BufferId, text: String, ok: bool },
     /// A picture a page shows, read: its size and BGRA pixels.
     PageImage { key: crate::page::ImageKey, result: Result<(u32, u32, Vec<u8>), String> },
-    /// The notebook, read off the UI thread.
-    NotebookOpened(Box<fenix_notebook::Notebook>),
-    /// A diagram, drawn (or why it couldn't be).
-    DiagramDrawn { key: u64, result: Result<(crate::diagram_page::Drawn, u32, u32, Vec<u8>), (usize, String)> },
+    /// A feature's page job's news, delivered to that feature
+    /// (`FeatureSpec::on_event`).
+    Feature(super::feature::FeatureEvent),
+}
+
+impl PageEvent {
+    /// `payload`, for feature `feature`'s `on_event`; `label` names it in
+    /// the hang log.
+    pub(crate) fn feature<T: std::any::Any + Send>(feature: &'static str, label: &'static str, payload: T) -> PageEvent {
+        PageEvent::Feature(super::feature::FeatureEvent { feature, label, payload: Box::new(payload) })
+    }
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -625,25 +598,11 @@ impl App {
             PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
             PageEvent::ChromeGit(state) => self.chrome_git = state.map(|s| *s),
             event @ PageEvent::SettingsNote { .. } => self.apply_settings_event(event),
-            event @ (PageEvent::JiraIssues { .. }
-            | PageEvent::JiraDetail { .. }
-            | PageEvent::JiraOffer { .. }
-            | PageEvent::JiraTypes { .. }
-            | PageEvent::JiraFields { .. }
-            | PageEvent::JiraDone { .. }) => self.apply_jira_event(event),
-            PageEvent::MibLoaded { key, set } => {
-                // Through the feature event path, so a set read while the
-                // MIB is busy (inline, with no event loop) still lands.
-                self.deliver_feature_event(super::feature::FeatureEvent { feature: super::mib_host::SPEC.id, label: "MibLoaded", payload: Box::new((key, set)) });
-            }
-            event @ (PageEvent::StreamRows { .. } | PageEvent::StreamInfo { .. } | PageEvent::StreamStatus { .. }) => self.apply_stream_event(event),
             PageEvent::PageImage { key, result } => self.apply_page_image(key, result),
-            PageEvent::DiagramDrawn { key, result } => self.apply_diagram_drawn(key, result),
-            PageEvent::NotebookOpened(nb) => self.apply_notebook_opened(*nb),
-            event @ (PageEvent::RequestExisting { .. } | PageEvent::RequestOpened { .. } | PageEvent::GitRequest { .. }) => self.apply_request_event(event),
-            event @ (PageEvent::InboxData { .. } | PageEvent::ReviewData { .. } | PageEvent::ReviewSince { .. } | PageEvent::ReviewDone { .. } | PageEvent::ReviewLog { .. }) => {
-                self.apply_review_event(event)
-            }
+            // A feature's own: through the feature event path, so one that
+            // lands while its feature is busy (inline, with no event loop)
+            // still gets there.
+            PageEvent::Feature(event) => self.deliver_feature_event(event),
             PageEvent::AutoFetched { ok } => {
                 if ok {
                     self.refresh_git_pages(false);
