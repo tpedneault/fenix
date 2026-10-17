@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn arduino_contributes_its_commands_and_keys_from_its_spec() {
         let registry = CommandRegistry::with_builtins();
-        let ids: Vec<&str> = registry.iter().filter(|c| c.id.starts_with("embedded.")).map(|c| c.id).collect();
+        let ids: Vec<&str> = registry.iter().filter(|c| c.id.starts_with("embedded.")).map(|c| c.id.as_ref()).collect();
         assert_eq!(ids.len(), 12, "{ids:?}");
         assert!(registry.iter().filter(|c| c.id.starts_with("embedded.")).all(|c| !c.external()));
         assert_eq!(keymap::leader_keys().get("embedded.new_sketch").map(String::as_str), Some("SPC f n"));

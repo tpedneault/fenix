@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use super::notebook_capture::CaptureTo;
 use super::*;
-use crate::commands::{CommandRegistry, ExternalError};
+use crate::commands::ExternalError;
 
 /// The agenda's status as the protocol writes it.
 fn task_status(status: fenix_agenda::Status) -> TaskStatus {
@@ -51,23 +51,22 @@ impl App {
                 Ok(json!({}))
             }
             Call::State => Ok(to_value(self.control_state())),
-            Call::Commands => Ok(to_value(control_commands())),
-            Call::RunCommand(params) => {
-                match CommandRegistry::with_builtins().run_external(self, &params.id) {
-                    Ok(()) => {
-                        self.raise_window();
-                        self.wake_caret();
-                        Ok(json!({}))
-                    }
-                    Err(ExternalError::Unknown) => {
-                        Err(RpcError::invalid_params(format!("no command {}", params.id)))
-                    }
-                    Err(ExternalError::NotExternal) => Err(RpcError::invalid_params(format!(
-                        "{} can't be run from outside Fenix: it acts on what's in front of you there",
-                        params.id
-                    ))),
+            Call::Commands => Ok(to_value(control_commands(self))),
+            Call::RunCommand(params) => match self.run_external_command(&params.id) {
+                Ok(()) => {
+                    self.raise_window();
+                    self.wake_caret();
+                    Ok(json!({}))
                 }
-            }
+                Err(ExternalError::Unknown) => Err(RpcError::invalid_params(format!(
+                    "no command {}",
+                    params.id
+                ))),
+                Err(ExternalError::NotExternal) => Err(RpcError::invalid_params(format!(
+                    "{} can't be run from outside Fenix: it acts on what's in front of you there",
+                    params.id
+                ))),
+            },
             Call::NotebookCapture(params) => self.control_capture(&params).map(to_value),
             Call::AgendaTasks(params) => Ok(to_value(self.control_tasks(&params))),
             Call::AgendaClockIn(params) => {
@@ -288,15 +287,16 @@ impl App {
 
 /// `fenix/commands`: every command in the registry, in its order, with
 /// the leader keys that run it and whether it may run from outside.
-pub(crate) fn control_commands() -> CommandsResult {
+pub(crate) fn control_commands(app: &App) -> CommandsResult {
     let keys = crate::keymap::leader_keys();
     CommandsResult {
-        commands: CommandRegistry::with_builtins()
+        commands: app
+            .commands()
             .iter()
             .map(|c| CommandInfo {
                 id: c.id.to_string(),
                 description: c.description.to_string(),
-                keys: keys.get(c.id).cloned(),
+                keys: keys.get(c.id.as_ref()).cloned(),
                 external: c.external(),
             })
             .collect(),
@@ -495,7 +495,7 @@ mod tests {
 
     #[test]
     fn commands_carry_their_keys_and_whether_they_run_from_outside() {
-        let commands = control_commands().commands;
+        let commands = control_commands(&App::with_file(None)).commands;
         let get = |id: &str| {
             commands
                 .iter()
@@ -584,11 +584,11 @@ mod tests {
     /// something else, or nothing, with a page in front, and fails here.
     #[test]
     fn external_commands_dont_assume_a_focused_text_buffer() {
-        let registry = CommandRegistry::with_builtins();
+        let registry = crate::commands::CommandRegistry::with_builtins();
         let external: Vec<&str> = registry
             .iter()
             .filter(|c| c.external())
-            .map(|c| c.id)
+            .map(|c| c.id.as_ref())
             .collect();
         assert!(external.len() > 20, "{external:?}");
         let mut differ = Vec::new();
@@ -876,5 +876,30 @@ mod tests {
         app.status_message = None;
         app.reload_agenda_if_changed();
         assert!(app.status_message.is_none());
+    }
+
+    #[test]
+    fn the_app_owns_one_registry_and_runs_commands_from_it_by_id() {
+        let mut app = App::with_file(None);
+        assert_eq!(
+            app.commands().iter().count(),
+            crate::commands::CommandRegistry::with_builtins()
+                .iter()
+                .count()
+        );
+        assert!(app
+            .commands()
+            .iter()
+            .all(|c| !c.id.is_empty() && !c.description.is_empty()));
+        assert_eq!(app.run_external_command("snippets.open"), Ok(()));
+        assert_eq!(
+            app.run_external_command("file.save"),
+            Err(ExternalError::NotExternal),
+            "acts on what's in front of you"
+        );
+        assert_eq!(
+            app.run_external_command("no.such.command"),
+            Err(ExternalError::Unknown)
+        );
     }
 }

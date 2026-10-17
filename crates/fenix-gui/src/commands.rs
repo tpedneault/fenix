@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use winit::event_loop::ActiveEventLoop;
 
 use crate::app::App;
@@ -9,7 +11,9 @@ pub struct CommandCtx<'a> {
     pub event_loop: &'a ActiveEventLoop,
 }
 
-type CommandFn = fn(&mut CommandCtx);
+/// What a command runs. Boxed, so a command can be registered at run
+/// time with whatever it needs (an extension's, later).
+type CommandFn = Box<dyn Fn(&mut CommandCtx)>;
 
 /// What a command marked external runs: the editor and nothing else.
 /// No event loop, so it can be run from the control channel (which has
@@ -17,7 +21,7 @@ type CommandFn = fn(&mut CommandCtx);
 /// outside Fenix can't know what that is. `control_host`'s
 /// `external_commands_dont_assume_a_focused_text_buffer` holds every
 /// external command to that.
-type ExternalFn = fn(&mut App);
+type ExternalFn = Box<dyn Fn(&mut App)>;
 
 enum Handler {
     Ctx(CommandFn),
@@ -40,8 +44,10 @@ fn cmd_insert_snippet(ctx: &mut CommandCtx) {
 /// key, so the same action can be bound in multiple keymaps (Phase 2) and,
 /// later, exposed to Lua scripting (Phase 6) without a rewrite.
 pub struct Command {
-    pub id: &'static str,
-    pub description: &'static str,
+    /// `agenda.open`. Owned or static, so ids can come from data or an
+    /// extension at run time, not only from this file.
+    pub id: Cow<'static, str>,
+    pub description: Cow<'static, str>,
     run: Handler,
 }
 
@@ -280,22 +286,23 @@ impl CommandRegistry {
         registry
     }
 
-    fn register(&mut self, id: &'static str, description: &'static str, run: CommandFn) {
-        self.commands.push(Command { id, description, run: Handler::Ctx(run) });
+    fn register(&mut self, id: &'static str, description: &'static str, run: impl Fn(&mut CommandCtx) + 'static) {
+        self.commands.push(Command { id: id.into(), description: description.into(), run: Handler::Ctx(Box::new(run)) });
     }
 
     /// Registers a command that also makes sense run from outside Fenix
     /// (`Command::external`). Deliberately a choice per command: the
     /// default, `register`, is not external.
-    fn external(&mut self, id: &'static str, description: &'static str, run: ExternalFn) {
-        self.commands.push(Command { id, description, run: Handler::External(run) });
+    fn external(&mut self, id: &'static str, description: &'static str, run: impl Fn(&mut App) + 'static) {
+        self.commands.push(Command { id: id.into(), description: description.into(), run: Handler::External(Box::new(run)) });
     }
 
     /// Registers a feature's commands (`FeatureSpec::commands`), in order.
     fn feature(&mut self, spec: &crate::app::feature::FeatureSpec) {
         for command in spec.commands {
-            let run = if command.external { Handler::External(command.run) } else { Handler::App(command.run) };
-            self.commands.push(Command { id: command.id, description: command.description, run });
+            let run: ExternalFn = Box::new(command.run);
+            let run = if command.external { Handler::External(run) } else { Handler::App(run) };
+            self.commands.push(Command { id: command.id.into(), description: command.description.into(), run });
         }
     }
 
@@ -307,7 +314,7 @@ impl CommandRegistry {
     /// command with that id is registered.
     pub fn run(&self, app: &mut App, event_loop: &ActiveEventLoop, id: &str) -> bool {
         let Some(cmd) = self.commands.iter().find(|c| c.id == id) else { return false };
-        match cmd.run {
+        match &cmd.run {
             Handler::Ctx(run) => run(&mut CommandCtx { app, event_loop }),
             Handler::External(run) | Handler::App(run) => run(app),
         }
@@ -318,7 +325,7 @@ impl CommandRegistry {
     /// commands allow.
     pub fn run_external(&self, app: &mut App, id: &str) -> Result<(), ExternalError> {
         let cmd = self.commands.iter().find(|c| c.id == id).ok_or(ExternalError::Unknown)?;
-        match cmd.run {
+        match &cmd.run {
             Handler::External(run) => {
                 run(app);
                 Ok(())

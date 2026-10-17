@@ -1165,7 +1165,7 @@ mod tests {
     #[test]
     fn ccsds_contributes_its_commands_and_hex_key_from_its_spec() {
         let registry = CommandRegistry::with_builtins();
-        let ccsds: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("ccsds.")).map(|c| (c.id, c.external())).collect();
+        let ccsds: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("ccsds.")).map(|c| (c.id.as_ref(), c.external())).collect();
         assert_eq!(ccsds.len(), 6, "{ccsds:?}");
         for id in ["ccsds.time", "ccsds.live", "ccsds.standards"] {
             assert!(ccsds.contains(&(id, true)), "{id} stays external");

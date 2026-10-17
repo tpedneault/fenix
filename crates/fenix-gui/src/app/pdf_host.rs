@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn the_reader_contributes_its_commands_and_keys_from_its_spec() {
         let registry = CommandRegistry::with_builtins();
-        let pdf: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("pdf.")).map(|c| (c.id, c.external())).collect();
+        let pdf: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("pdf.")).map(|c| (c.id.as_ref(), c.external())).collect();
         assert_eq!(pdf.len(), 15, "{pdf:?}");
         assert!(pdf.contains(&("pdf.documents", true)) && pdf.contains(&("pdf.search", false)));
         let keys = keymap::leader_keys();
