@@ -70,6 +70,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         page_title: None,
         page_after_layout: Some(|app, id| app.diagram_after_layout(id)),
+        on_event: None,
     }
 };
 

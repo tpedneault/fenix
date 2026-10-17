@@ -43,8 +43,26 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_context: None,
         page_title: None,
         page_after_layout: None,
+        on_event: Some(|app, event| match event.downcast::<VncEvent>().map(|e| *e) {
+            Ok(VncEvent::Connected { name, host, port, result }) => app.apply_vnc_connected(name, host, port, result.0),
+            Ok(VncEvent::Frame(key, frame)) => app.apply_vnc_frame(key, frame),
+            Err(_) => {}
+        }),
     }
 };
+
+/// What VNC's background threads send: a connection made (or not), and
+/// each decoded update.
+pub(crate) enum VncEvent {
+    /// The result of `fenix_vnc::VncClient::connect`, from the one-shot
+    /// thread `open_vnc_session`/`schedule_vnc_reconnect` spawns it on (a
+    /// slow or unreachable VM would otherwise freeze the editor). `name`
+    /// is the VM's configured name; `host`/`port` ride along so a
+    /// reconnect completes even if the settings changed meanwhile.
+    Connected { name: String, host: String, port: u16, result: VncConnectResult },
+    /// One decoded update, from a session's reader thread, for VM `name`.
+    Frame(String, fenix_vnc::VncFrame),
+}
 
 /// VNC's state: the live sessions, which one has the keyboard, those
 /// still connecting, and what drawing them needs. Its code is still `App`

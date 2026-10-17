@@ -66,6 +66,11 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_context: None,
         page_title: None,
         page_after_layout: None,
+        on_event: Some(|app, event| {
+            if let Ok(response) = event.downcast::<fenix_pdf::PdfResponse>() {
+                app.apply_pdf_response(*response);
+            }
+        }),
     }
 };
 
