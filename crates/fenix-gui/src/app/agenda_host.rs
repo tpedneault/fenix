@@ -111,6 +111,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         home_activate: Some(|app, _| {
             app.open_agenda_page(Some(crate::agenda_page::Tab::Today));
         }),
+        doctor: None,
     }
 };
 

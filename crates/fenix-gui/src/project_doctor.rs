@@ -344,3 +344,53 @@ mod tests {
         assert!(page.text.lines().all(|l| l.chars().count() <= 60));
     }
 }
+
+/// What the features' doctor tests need: a probe that "has" some
+/// programs, a folder to write a project into, and a check by label.
+#[cfg(test)]
+pub(crate) mod fake {
+    use fenix_project::doctor::{Check, Probe};
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+
+    /// Programs it "has", and what running each prints.
+    #[derive(Default)]
+    pub(crate) struct FakeProbe {
+        pub(crate) programs: Vec<&'static str>,
+        pub(crate) outputs: HashMap<String, (bool, String)>,
+    }
+
+    impl Probe for FakeProbe {
+        fn locate(&self, program: &str) -> Option<PathBuf> {
+            self.programs.contains(&program).then(|| PathBuf::from(format!("/bin/{program}")))
+        }
+        fn run(&self, program: &Path, args: &[&str], _dir: &Path) -> Option<(bool, String)> {
+            let name = program.file_name()?.to_string_lossy().into_owned();
+            self.outputs.get(&format!("{name} {}", args.join(" "))).cloned().or_else(|| args.first().filter(|a| ["--version", "version"].contains(*a)).map(|_| (true, format!("{name} 1.2.3"))))
+        }
+        fn tool_dirs(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
+    }
+
+    /// A temporary project folder.
+    pub(crate) struct Dir(tempfile::TempDir);
+
+    impl Dir {
+        pub(crate) fn new() -> Self {
+            Dir(tempfile::tempdir().unwrap())
+        }
+        pub(crate) fn path(&self) -> &Path {
+            self.0.path()
+        }
+        pub(crate) fn write(&self, rel: &str, text: &str) {
+            let path = self.0.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+    }
+
+    pub(crate) fn find<'a>(checks: &'a [Check], label: &str) -> &'a Check {
+        checks.iter().find(|c| c.label == label).unwrap_or_else(|| panic!("no {label} check in {:?}", checks.iter().map(|c| &c.label).collect::<Vec<_>>()))
+    }
+}

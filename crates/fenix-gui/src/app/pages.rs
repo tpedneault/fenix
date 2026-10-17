@@ -1109,10 +1109,11 @@ impl App {
         let projects: Vec<(PathBuf, fenix_project::ProjectKind)> =
             hub.projects.iter().filter(|p| p.exists && p.parent.is_none()).map(|p| (p.root.clone(), p.kind)).collect();
         let probe = self.app_probe();
+        let feature_checks = self.doctor_checks();
         self.page_spawn(move |send| {
             let info = |root: PathBuf, kind: fenix_project::ProjectKind| {
                 let git = fenix_project::vcs::git_summary(&root);
-                let checks = doctor::diagnose(&root, kind, &probe, false);
+                let checks = doctor::diagnose_with(&root, kind, &probe, false, &feature_checks);
                 let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
                 send(PageEvent::HubInfo { buffer: id, root, git, health });
             };
@@ -1237,8 +1238,9 @@ impl App {
         state.stale = true;
         let generation = state.generation;
         let probe = self.app_probe();
+        let feature_checks = self.doctor_checks();
         self.page_spawn(move |send| {
-            let checks = doctor::diagnose(&root, kind, &probe, true);
+            let checks = doctor::diagnose_with(&root, kind, &probe, true, &feature_checks);
             send(PageEvent::Checks { buffer: id, generation, checks });
         });
     }

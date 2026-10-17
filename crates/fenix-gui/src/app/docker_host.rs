@@ -77,6 +77,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     session_reopen: None,
     home: None,
     home_activate: None,
+    doctor: None,
 };
 
 /// What Docker's background threads report, as a `FeatureEvent`'s

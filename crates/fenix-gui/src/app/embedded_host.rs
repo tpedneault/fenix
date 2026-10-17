@@ -90,6 +90,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     session_reopen: None,
     home: None,
     home_activate: None,
+    doctor: Some(arduino_doctor),
 };
 
 /// Anything inside an Arduino sketch gets its `SPC m` menu.
@@ -937,9 +938,94 @@ impl App {
     }
 }
 
+/// The doctor's checks for a sketch: the tools, its board and port, and
+/// (on a deep pass) the board's core and whether it's connected.
+fn arduino_doctor(d: &mut fenix_project::doctor::Doctor) {
+    if d.kind() != fenix_project::ProjectKind::Arduino {
+        return;
+    }
+    let root = d.root();
+    let cli = d.program(fenix_project::doctor::Section::Toolchain, "arduino-cli", fenix_project::doctor::Health::Bad, "install Arduino CLI from https://arduino.github.io/arduino-cli");
+    d.program(fenix_project::doctor::Section::Toolchain, "arduino-language-server", fenix_project::doctor::Health::Warn, "no completion -- see the Arduino page of the wiki");
+    d.program(fenix_project::doctor::Section::Toolchain, "clangd", fenix_project::doctor::Health::Warn, "no completion -- use the one from an Arduino IDE 2 install");
+    // A library has no board or port of its own; its examples do.
+    if !fenix_project::is_sketch(root) {
+        return;
+    }
+    let yaml = std::fs::read_to_string(root.join("sketch.yaml")).unwrap_or_default();
+    let value = |key: &str| yaml.lines().find_map(|l| l.trim().strip_prefix(key)?.trim().strip_prefix(':').map(|v| v.trim().to_string())).filter(|v| !v.is_empty());
+    let fqbn = value("default_fqbn");
+    match &fqbn {
+        Some(fqbn) => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Hardware, "board", fenix_project::doctor::Health::Ok, fqbn.clone())),
+        None => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Hardware, "board", fenix_project::doctor::Health::Warn, "none chosen -- builds need one").fix("pick a board", fenix_project::doctor::FixAction::Editor(fenix_project::doctor::EditorFix::PickBoard), false)),
+    }
+    let port = value("default_port");
+    if let (true, Some(cli)) = (d.deep(), &cli) {
+        if let Some(fqbn) = &fqbn {
+            let core: String = fqbn.split(':').take(2).collect::<Vec<_>>().join(":");
+            let installed = d.probe().run(cli, &["core", "list", "--format", "json"], root).and_then(|(_, out)| serde_json::from_str::<serde_json::Value>(&out).ok()).map(|json| {
+                json["platforms"].as_array().into_iter().flatten().find(|p| p["id"] == core.as_str()).and_then(|p| p["installed_version"].as_str().map(str::to_string))
+            });
+            match installed {
+                Some(Some(version)) => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Toolchain, format!("core {core}"), fenix_project::doctor::Health::Ok, version)),
+                Some(None) => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Toolchain, format!("core {core}"), fenix_project::doctor::Health::Bad, "not installed -- builds will fail").run(&format!("arduino-cli core install {core}"), "arduino-cli", &["core", "install", &core], false)),
+                None => {}
+            }
+        }
+    }
+    match &port {
+        None => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Hardware, "port", fenix_project::doctor::Health::Warn, "none chosen -- uploads need one").fix("pick a port", fenix_project::doctor::FixAction::Editor(fenix_project::doctor::EditorFix::PickPort), false)),
+        Some(port) if d.deep() && cli.is_some() => {
+            let connected = d
+                .probe()
+                .run(cli.as_ref().unwrap(), &["board", "list", "--format", "json"], root)
+                .and_then(|(_, out)| serde_json::from_str::<serde_json::Value>(&out).ok())
+                .map(|json| json["detected_ports"].as_array().into_iter().flatten().any(|p| p["port"]["address"] == port.as_str()));
+            match connected {
+                Some(true) => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Hardware, format!("board on {port}"), fenix_project::doctor::Health::Ok, "connected")),
+                Some(false) => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Hardware, format!("board on {port}"), fenix_project::doctor::Health::Warn, "not connected").fix("pick a port", fenix_project::doctor::FixAction::Editor(fenix_project::doctor::EditorFix::PickPort), false)),
+                None => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Hardware, "port", fenix_project::doctor::Health::Ok, port.clone())),
+            }
+        }
+        Some(port) => d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Hardware, "port", fenix_project::doctor::Health::Ok, port.clone())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_doctor::fake::{find, FakeProbe};
+    use fenix_project::doctor::{EditorFix, FixAction, Health};
+
+    #[test]
+    fn a_sketch_reports_its_board_core_and_port() {
+        let dir = crate::project_doctor::fake::Dir::new();
+        dir.write("Lab/Lab.ino", "");
+        dir.write("Lab/sketch.yaml", "default_fqbn: arduino:avr:uno\ndefault_port: COM4\n");
+        let root = dir.path().join("Lab");
+        let mut probe = FakeProbe { programs: vec!["arduino-cli"], ..Default::default() };
+        probe.outputs.insert("arduino-cli core list --format json".into(), (true, r#"{"platforms":[{"id":"esp32:esp32","installed_version":"3.0"}]}"#.into()));
+        probe.outputs.insert("arduino-cli board list --format json".into(), (true, r#"{"detected_ports":[{"port":{"address":"COM1"}}]}"#.into()));
+        let checks = fenix_project::doctor::diagnose_with(&root, fenix_project::ProjectKind::Arduino, &probe, true, &[arduino_doctor]);
+        assert_eq!(find(&checks, "board").detail, "arduino:avr:uno");
+        assert_eq!(find(&checks, "arduino-cli").detail, "1.2.3", "asked with `version`, not `--version`");
+        let core = find(&checks, "core arduino:avr");
+        assert_eq!(core.health, Health::Bad);
+        assert!(matches!(&core.fix.as_ref().unwrap().action, FixAction::Run(step) if step.display() == "arduino-cli core install arduino:avr"));
+        let port = find(&checks, "board on COM4");
+        assert_eq!((port.health, port.detail.as_str()), (Health::Warn, "not connected"));
+        assert!(matches!(port.fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::PickPort)));
+        assert_eq!(find(&checks, "clangd").health, Health::Warn);
+    }
+
+    #[test]
+    fn a_sketch_with_no_board_offers_to_pick_one() {
+        let dir = crate::project_doctor::fake::Dir::new();
+        dir.write("Lab/Lab.ino", "");
+        let checks = fenix_project::doctor::diagnose_with(&dir.path().join("Lab"), fenix_project::ProjectKind::Arduino, &FakeProbe::default(), false, &[arduino_doctor]);
+        assert!(matches!(find(&checks, "board").fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::PickBoard)));
+        assert!(matches!(find(&checks, "port").fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::PickPort)));
+    }
 
     /// An `App` whose tools are stand-in files in `dir`, so nothing here
     /// depends on (or runs) a real arduino-cli.

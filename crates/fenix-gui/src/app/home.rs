@@ -134,9 +134,10 @@ impl App {
         let (resume, recent) = self.home_recent_files(None);
         let sections = self.home_sections(None);
         let probe = self.app_probe();
+        let feature_checks = self.doctor_checks();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {
-                let checks = fenix_project::doctor::diagnose(root, self.project_kind_of(root), &probe, false);
+                let checks = fenix_project::doctor::diagnose_with(root, self.project_kind_of(root), &probe, false, &feature_checks);
                 let health = (fenix_project::doctor::worst(&checks), checks.iter().filter(|c| c.health >= fenix_project::doctor::Health::Warn).count());
                 self.project_health.insert(root.clone(), health);
             }

@@ -55,6 +55,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         session_reopen: None,
         home: None,
         home_activate: None,
+        doctor: None,
     }
 };
 
