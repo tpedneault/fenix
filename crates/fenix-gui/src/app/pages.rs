@@ -12,16 +12,15 @@ use super::*;
 use crate::git_compare::{self, GitCompare};
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
-use crate::git_request::{self, RequestPage};
 use crate::jira_page;
 use crate::mib_page;
 use crate::stream_page;
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::reading_page::ReadingPage;
-use crate::review_inbox::{self, Inbox};
-use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
+use crate::review_inbox;
+use crate::review_page;
 use crate::page::{Key, Page, Role as PageRole};
 use crate::project_doctor::{self, DoctorPage, Fixing};
 use crate::project_hub::{self, Hub, HubProject};
@@ -41,11 +40,8 @@ pub(super) enum PageModel {
     Log(Box<GitLog>),
     Compare(Box<GitCompare>),
     Rebase(Box<RebasePage>),
-    Request(Box<RequestPage>),
     UserSettings(Box<SettingsPage>),
     Snippets(Box<SnippetsPage>),
-    Inbox(Box<Inbox>),
-    Review(Box<ReviewPage>),
     Reading(Box<ReadingPage>),
     /// A page a feature owns -- see `feature::FeaturePage`.
     Feature(Box<dyn super::feature::FeaturePage>),
@@ -81,11 +77,10 @@ impl PageState {
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
             PageModel::Compare(_) => false,
-            PageModel::Request(r) => r.editing.is_some(),
             PageModel::UserSettings(p) => p.typing(),
             PageModel::Snippets(p) => p.typing(),
             PageModel::Feature(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => false,
+            PageModel::Rebase(_) | PageModel::Reading(_) => false,
         }
     }
 
@@ -94,7 +89,6 @@ impl PageState {
         self.typing()
             || match &self.model {
                 PageModel::Wizard(w) => w.claims_space(),
-                PageModel::Request(r) => r.field == git_request::Field::Draft,
                 PageModel::UserSettings(p) => p.claims_space(),
                 PageModel::Feature(p) => p.claims_space(),
                 _ => false,
@@ -112,11 +106,10 @@ impl PageState {
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
             PageModel::Compare(_) => {}
-            PageModel::Request(r) => r.paste(text),
             PageModel::UserSettings(p) => p.paste(text),
             PageModel::Snippets(p) => p.paste(text),
             PageModel::Feature(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => {}
+            PageModel::Rebase(_) | PageModel::Reading(_) => {}
         }
         self.stale = true;
     }
@@ -289,14 +282,11 @@ impl App {
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
             Some(PageModel::Compare(c)) => format!("*compare: {}*", c.target),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
-            Some(PageModel::Request(r)) => format!("*new request: {}*", r.branch),
             Some(PageModel::Snippets(_)) => "*snippets*".to_string(),
             Some(PageModel::UserSettings(p)) => match &p.scope {
                 settings_page::Scope::You => "*settings*".to_string(),
                 settings_page::Scope::Project { name, .. } => format!("*settings: {name}*"),
             },
-            Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
-            Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
             Some(PageModel::Feature(p)) => {
                 let title = self.features.specs().find(|spec| spec.id == p.feature()).and_then(|spec| spec.page_title);
                 title.and_then(|title| title(self, id)).unwrap_or_else(|| p.title())
@@ -436,11 +426,8 @@ impl App {
             PageModel::Log(l) => git_log::layout(l, cols),
             PageModel::Compare(c) => git_compare::layout(c, cols),
             PageModel::Rebase(r) => git_rebase::layout(r, cols),
-            PageModel::Request(r) => git_request::layout(r, cols),
             PageModel::UserSettings(p) => settings_page::layout(p, cols),
             PageModel::Snippets(p) => snippets_page::layout(p, cols),
-            PageModel::Inbox(i) => review_inbox::layout(i, cols),
-            PageModel::Review(r) => review_page::layout(r, cols),
         };
         if let PageModel::Reading(p) = &mut state.model {
             state.page = match reading {
@@ -608,10 +595,6 @@ impl App {
                 let action = r.key(key);
                 self.git_rebase_action(id, action);
             }
-            PageModel::Request(r) => {
-                let action = r.key(key);
-                self.request_action(id, action);
-            }
             PageModel::UserSettings(p) => {
                 let action = p.key(key);
                 self.user_settings_action(id, action);
@@ -619,14 +602,6 @@ impl App {
             PageModel::Snippets(p) => {
                 let action = p.key(key);
                 self.snippets_action(id, action);
-            }
-            PageModel::Inbox(i) => {
-                let action = i.key(key);
-                self.inbox_action(id, action);
-            }
-            PageModel::Review(r) => {
-                let action = r.key(key);
-                self.review_action(id, action);
             }
         }
         self.wake_caret();
