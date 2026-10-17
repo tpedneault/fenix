@@ -752,7 +752,7 @@ mod tests {
     #[test]
     fn the_diagrams_contribute_their_commands_and_mermaid_menu_from_their_spec() {
         let registry = CommandRegistry::with_builtins();
-        let ids: Vec<&str> = registry.iter().filter(|c| c.id.starts_with("diagram.")).map(|c| c.id).collect();
+        let ids: Vec<&str> = registry.iter().filter(|c| c.id.starts_with("diagram.")).map(|c| c.id.as_ref()).collect();
         assert_eq!(ids, ["diagram.preview", "diagram.viewer", "diagram.theme", "diagram.export"]);
         let menu = keymap::local_trie(&[crate::keymap::LocalContext::Mermaid]);
         assert!(matches!(menu.matcher().feed(KeyPress::char('v')), fenix_keymap::Step::Matched(&"diagram.viewer")));

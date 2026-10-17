@@ -1232,7 +1232,7 @@ mod tests {
     #[test]
     fn the_notebook_contributes_its_commands_and_keys_from_its_spec() {
         let registry = CommandRegistry::with_builtins();
-        let notebook: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("notebook.") || c.id == "insert.diagram").map(|c| (c.id, c.external())).collect();
+        let notebook: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("notebook.") || c.id == "insert.diagram").map(|c| (c.id.as_ref(), c.external())).collect();
         // 21 from the spec, plus the reading view's two (core).
         assert_eq!(notebook.len(), 23, "{notebook:?}");
         for id in ["notebook.open", "notebook.search", "notebook.journal"] {

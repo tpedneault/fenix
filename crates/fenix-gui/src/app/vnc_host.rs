@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn vnc_contributes_its_commands_and_keys_from_its_spec() {
         let registry = CommandRegistry::with_builtins();
-        let vnc: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("vnc.")).map(|c| (c.id, c.external())).collect();
+        let vnc: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("vnc.")).map(|c| (c.id.as_ref(), c.external())).collect();
         assert_eq!(vnc, [("vnc.open", true), ("vnc.close", false), ("vnc.screenshot", false)]);
         let keys = keymap::leader_keys();
         assert_eq!(keys.get("vnc.open").map(String::as_str), Some("SPC v v"));

@@ -904,7 +904,7 @@ mod tests {
     #[test]
     fn the_agenda_contributes_its_commands_and_keys_from_its_spec() {
         let registry = CommandRegistry::with_builtins();
-        let agenda: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("agenda.")).map(|c| (c.id, c.external())).collect();
+        let agenda: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("agenda.")).map(|c| (c.id.as_ref(), c.external())).collect();
         assert_eq!(agenda.len(), 12, "{agenda:?}");
         assert!(agenda.contains(&("agenda.toggle_clock", true)) && agenda.contains(&("agenda.from_here", false)));
         let keys = keymap::leader_keys();

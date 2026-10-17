@@ -1838,6 +1838,26 @@ pub enum FenixUserEvent {
     Page(pages::PageEvent),
 }
 
+impl App {
+    /// Runs command `id` (see `CommandRegistry::run`).
+    pub(crate) fn run_command(&mut self, event_loop: &ActiveEventLoop, id: &str) -> bool {
+        let commands = Rc::clone(&self.commands);
+        commands.run(self, event_loop, id)
+    }
+
+    /// Runs command `id` for a caller outside Fenix (see
+    /// `CommandRegistry::run_external`).
+    pub(crate) fn run_external_command(&mut self, id: &str) -> Result<(), crate::commands::ExternalError> {
+        let commands = Rc::clone(&self.commands);
+        commands.run_external(self, id)
+    }
+
+    /// Every command (`Command`), in its order.
+    pub(crate) fn commands(&self) -> &CommandRegistry {
+        &self.commands
+    }
+}
+
 impl FenixUserEvent {
     /// An event for feature `feature` -- see `FeatureSpec::on_event` and
     /// `Feature::on_event`. `label` names it in the hang log.
@@ -5273,6 +5293,9 @@ pub struct App {
     /// The optional parts of Fenix that live behind `feature::Feature`
     /// (Docker so far), each owning its own state.
     features: feature::Features,
+    /// Every command, built once at startup -- shared (`Rc`) so a command
+    /// can run with the app borrowed mutably (`App::run_command`).
+    commands: Rc<CommandRegistry>,
     /// The active build/task runner's single-pane session (`SPC t t`),
     /// if any -- see `TaskSession`'s own doc comment.
     task_session: Option<TaskSession>,
@@ -6229,6 +6252,7 @@ impl App {
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
             features,
+            commands: Rc::new(CommandRegistry::with_builtins()),
             task_session: None,
             project_last_tasks: HashMap::new(),
             debug_session: None,
@@ -17916,7 +17940,7 @@ impl App {
                 self.open_jira_page();
             }
             WorkspaceAction::Docker => {
-                let _ = CommandRegistry::with_builtins().run_external(self, "docker.open");
+                let _ = self.run_external_command("docker.open");
             }
             WorkspaceAction::Vnc(host) => self.open_vnc_session(&host),
             WorkspaceAction::Project(root) => self.open_project_workspace(name, root),
@@ -18587,7 +18611,7 @@ impl App {
                     // Built fresh per chord rather than stored on App: it's
                     // just a few fn-pointer entries, and this sidesteps
                     // borrowing `self` both as receiver and argument.
-                    CommandRegistry::with_builtins().run(self, event_loop, id);
+                    self.run_command(event_loop, id);
                     self.wake_caret();
                     return;
                 }
@@ -18637,7 +18661,7 @@ impl App {
         }
         if let Some(resolved) = self.local_leader_key(keypress) {
             if let Some(id) = resolved {
-                CommandRegistry::with_builtins().run(self, event_loop, id);
+                self.run_command(event_loop, id);
             }
             return;
         }
@@ -18645,7 +18669,7 @@ impl App {
             || (matches!(self.vim.mode(), Mode::Normal | Mode::Visual) && keypress == KeyPress::char(' '))
         {
             if let Step::Matched(&id) = self.leader_matcher.feed(keypress) {
-                CommandRegistry::with_builtins().run(self, event_loop, id);
+                self.run_command(event_loop, id);
             }
             self.wake_caret();
             return;
@@ -19259,34 +19283,34 @@ impl App {
             VimEvent::RequestRestartLsp(name) => { self.restart_project_lsp(&name); }
             VimEvent::RequestUndoRefactor => { self.undo_refactor(); }
             VimEvent::RequestSave => {
-                CommandRegistry::with_builtins().run(self, event_loop, "file.save");
+                self.run_command(event_loop, "file.save");
             }
             VimEvent::RequestSaveAs(path) => {
                 self.save_unnamed_as(&path);
             }
             VimEvent::RequestForceSave => {
-                CommandRegistry::with_builtins().run(self, event_loop, "file.save_force");
+                self.run_command(event_loop, "file.save_force");
             }
             VimEvent::RequestReloadFile => {
-                CommandRegistry::with_builtins().run(self, event_loop, "file.reload");
+                self.run_command(event_loop, "file.reload");
             }
             VimEvent::RequestCloseBuffer => {
-                CommandRegistry::with_builtins().run(self, event_loop, "buffer.kill");
+                self.run_command(event_loop, "buffer.kill");
             }
             VimEvent::RequestForceCloseBuffer => {
-                CommandRegistry::with_builtins().run(self, event_loop, "buffer.kill_force");
+                self.run_command(event_loop, "buffer.kill_force");
             }
             VimEvent::RequestSaveAndCloseBuffer => {
-                CommandRegistry::with_builtins().run(self, event_loop, "buffer.save_and_kill");
+                self.run_command(event_loop, "buffer.save_and_kill");
             }
             VimEvent::RequestQuitAll => {
-                CommandRegistry::with_builtins().run(self, event_loop, "app.quit");
+                self.run_command(event_loop, "app.quit");
             }
             VimEvent::RequestForceQuitAll => {
-                CommandRegistry::with_builtins().run(self, event_loop, "app.quit_force");
+                self.run_command(event_loop, "app.quit_force");
             }
             VimEvent::RequestSaveAllAndQuit => {
-                CommandRegistry::with_builtins().run(self, event_loop, "app.save_all_and_quit");
+                self.run_command(event_loop, "app.save_all_and_quit");
             }
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),

@@ -599,7 +599,7 @@ mod tests {
     #[test]
     fn jira_contributes_its_commands_and_keys_from_its_spec() {
         let registry = CommandRegistry::with_builtins();
-        let jira: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("jira.")).map(|c| (c.id, c.external())).collect();
+        let jira: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("jira.")).map(|c| (c.id.as_ref(), c.external())).collect();
         assert_eq!(jira, [("jira.open", true), ("jira.refresh", false), ("jira.goto_issue", true), ("jira.search", true), ("jira.create_issue", true)]);
         assert_eq!(keymap::leader_keys().get("jira.search").map(String::as_str), Some("SPC j /"));
         assert!(app().features.specs().any(|spec| spec.id == "fenix.jira"));

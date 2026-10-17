@@ -1354,7 +1354,7 @@ mod tests {
     #[test]
     fn the_mib_contributes_its_commands_and_spc_m_keys_from_its_spec() {
         let registry = CommandRegistry::with_builtins();
-        let mib: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("mib.")).map(|c| (c.id, c.external())).collect();
+        let mib: Vec<(&str, bool)> = registry.iter().filter(|c| c.id.starts_with("mib.")).map(|c| (c.id.as_ref(), c.external())).collect();
         assert_eq!(mib.len(), 13, "{mib:?}");
         for id in ["mib.page", "mib.search", "mib.generate"] {
             assert!(mib.contains(&(id, true)), "{id} stays external");
