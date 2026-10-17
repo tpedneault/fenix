@@ -20,7 +20,6 @@ use crate::mib_form::{self, InsertForm};
 use crate::mib_page::{self, MibPage};
 use crate::packet_page::{self, PacketPage};
 use crate::hex_page::{self, HexPage};
-use crate::time_page::{self, TimePage};
 use crate::stream_page::{self, StreamPage};
 use crate::standards_page::{self, StandardsPage};
 use crate::settings_page::{self, SettingsPage};
@@ -62,7 +61,6 @@ pub(super) enum PageModel {
     MibDef(Box<DefPage>),
     MibForm(Box<InsertForm>),
     Packet(Box<PacketPage>),
-    Time(Box<TimePage>),
     Hex(Box<HexPage>),
     Stream(Box<StreamPage>),
     Standards(Box<StandardsPage>),
@@ -70,6 +68,8 @@ pub(super) enum PageModel {
     Backlinks(Box<BacklinksPage>),
     Reading(Box<ReadingPage>),
     Diagram(Box<DiagramPage>),
+    /// A page a feature owns -- see `feature::FeaturePage`.
+    Feature(Box<dyn super::feature::FeaturePage>),
 }
 
 pub(super) struct PageState {
@@ -111,7 +111,6 @@ impl PageState {
             PageModel::Jira(p) => p.typing(),
             PageModel::Mib(p) => p.typing(),
             PageModel::MibForm(p) => p.typing(),
-            PageModel::Time(p) => p.typing(),
             PageModel::Hex(p) => p.typing(),
             PageModel::Stream(p) => p.typing(),
             PageModel::MibDef(p) => p.typing(),
@@ -119,6 +118,7 @@ impl PageState {
             PageModel::Standards(p) => p.typing(),
             PageModel::Notebook(p) => p.typing(),
             PageModel::Diagram(p) => p.typing(),
+            PageModel::Feature(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) | PageModel::Reading(_) => false,
         }
     }
@@ -134,7 +134,7 @@ impl PageState {
                 PageModel::Jira(p) => p.claims_space(),
                 PageModel::Mib(p) => p.claims_space(),
                 PageModel::MibForm(p) => p.claims_space(),
-                PageModel::Time(p) => p.typing(),
+                PageModel::Feature(p) => p.claims_space(),
                 PageModel::Hex(p) => p.typing(),
                 PageModel::Stream(p) => p.typing(),
                 _ => false,
@@ -159,7 +159,6 @@ impl PageState {
             PageModel::Jira(p) => p.paste(text),
             PageModel::Mib(p) => p.paste(text),
             PageModel::MibForm(p) => p.paste(text),
-            PageModel::Time(p) => p.paste(text),
             PageModel::Hex(p) => p.paste(text),
             PageModel::Stream(p) => p.paste(text),
             PageModel::MibDef(p) => p.paste(text),
@@ -167,6 +166,7 @@ impl PageState {
             PageModel::Standards(p) => p.query.paste(text),
             PageModel::Notebook(p) => p.paste(text),
             PageModel::Diagram(p) => p.paste(text),
+            PageModel::Feature(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) | PageModel::Reading(_) => {}
         }
         self.stale = true;
@@ -354,13 +354,13 @@ impl App {
             Some(PageModel::MibDef(p)) => mib_def::title(self.mib().and_then(|m| m.set_ready(&p.key)).as_deref(), p),
             Some(PageModel::MibForm(f)) => mib_form::title(f),
             Some(PageModel::Packet(p)) => packet_page::title(p),
-            Some(PageModel::Time(_)) => "*time*".to_string(),
             Some(PageModel::Hex(p)) => hex_page::title(p),
             Some(PageModel::Stream(p)) => stream_page::title(p),
             Some(PageModel::Standards(_)) => "*standards*".to_string(),
             Some(PageModel::Notebook(_)) => "*notebook*".to_string(),
             Some(PageModel::Backlinks(p)) => format!("*links: {}*", p.name),
             Some(PageModel::Diagram(p)) => format!("*{}: {}*", if p.viewer { "view" } else { "diagram" }, p.title),
+            Some(PageModel::Feature(p)) => p.title(),
             Some(PageModel::Reading(p)) => format!("*reading: {}*", p.path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
         }
     }
@@ -541,12 +541,12 @@ impl App {
             }
             PageModel::MibForm(f) => mib_form::layout(f, form_bytes.as_ref(), cols),
             PageModel::Packet(p) => packet_page::layout(p, cols),
-            PageModel::Time(p) => time_page::layout(p, cols),
             PageModel::Hex(p) => hex_page::layout(p, cols),
             PageModel::Stream(p) => stream_page::layout(p, cols),
             PageModel::Standards(p) => standards_page::layout(p, cols),
             PageModel::Notebook(_) => precomputed.unwrap_or_default(),
             PageModel::Backlinks(p) => backlinks_page::layout(p, cols),
+            PageModel::Feature(p) => p.layout(cols),
             PageModel::Reading(_) | PageModel::Diagram(_) => Page::default(),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
@@ -711,9 +711,13 @@ impl App {
                 let action = p.key(key);
                 self.packet_page_action(id, action);
             }
-            PageModel::Time(p) => {
+            PageModel::Feature(p) => {
+                let feature = p.feature();
                 let action = p.key(key);
-                self.time_page_action(id, action);
+                let run = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.page_action);
+                if let Some(run) = run {
+                    run(self, id, action);
+                }
             }
             PageModel::Hex(p) => {
                 let action = p.key(key);

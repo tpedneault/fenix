@@ -84,6 +84,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         picker_cancel: Some(|app| app.agenda_sync_picker_cancel()),
         modeline_clock: None,
+        page_action: None,
     }
 };
 
