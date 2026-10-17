@@ -313,7 +313,7 @@ impl App {
             }
         }
         for state in self.pages.values_mut() {
-            if matches!(state.model, PageModel::Reading(_) | PageModel::Notebook(_)) {
+            if matches!(state.model, PageModel::Reading(_)) || super::feature::page_as::<crate::notebook_page::NotebookPage>(&state.model).is_some() {
                 state.stale = true;
                 if let PageModel::Reading(p) = &mut state.model {
                     p.seen = None;

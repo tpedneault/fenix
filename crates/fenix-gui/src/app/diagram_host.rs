@@ -212,7 +212,8 @@ impl App {
                     p.seen = None;
                     state.stale = true;
                 }
-                PageModel::Notebook(_) | PageModel::Diagram(_) => state.stale = true,
+                PageModel::Diagram(_) => state.stale = true,
+                model if super::feature::page_as::<crate::notebook_page::NotebookPage>(model).is_some() => state.stale = true,
                 _ => {}
             }
         }

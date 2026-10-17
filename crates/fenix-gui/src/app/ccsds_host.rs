@@ -108,11 +108,11 @@ impl super::feature::FeaturePage for PacketPage {
         PacketPage::paste(self, text);
     }
 
-    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         packet_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
         Box::new(PacketPage::key(self, key))
     }
 }
@@ -139,11 +139,11 @@ impl super::feature::FeaturePage for HexPage {
         HexPage::paste(self, text);
     }
 
-    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         hex_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
         Box::new(HexPage::key(self, key))
     }
 }
@@ -170,11 +170,11 @@ impl super::feature::FeaturePage for StreamPage {
         StreamPage::paste(self, text);
     }
 
-    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         stream_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
         Box::new(StreamPage::key(self, key))
     }
 
@@ -202,11 +202,11 @@ impl super::feature::FeaturePage for StandardsPage {
         self.query.paste(text);
     }
 
-    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         crate::standards_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
         Box::new(StandardsPage::key(self, key))
     }
 }
@@ -233,11 +233,11 @@ impl super::feature::FeaturePage for TimePage {
         TimePage::paste(self, text);
     }
 
-    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         time_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
         Box::new(TimePage::key(self, key))
     }
 }
