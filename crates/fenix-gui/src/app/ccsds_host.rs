@@ -17,6 +17,8 @@ use super::*;
 use crate::mib_page::MibKey;
 use crate::hex_page::{self, HexPage};
 use crate::packet_page::{self, DecodeAs, PacketPage};
+use crate::standards_page::StandardsPage;
+use crate::stream_page::{self, StreamPage};
 use crate::time_page::{self, TimePage};
 
 /// CCSDS's commands and its `SPC f x`. Its `SPC k` keys stay in the
@@ -47,12 +49,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     }),
     picker_cancel: None,
     modeline_clock: Some(|app| app.mission_clock_text()),
-    // The time converter's keys (`SPC k T`).
-    page_action: Some(|app, id, action| {
-        if let Ok(action) = action.downcast::<time_page::Action>() {
-            app.time_page_action(id, *action);
-        }
-    }),
+    // What a key asked for on one of its pages.
+    page_action: Some(|app, id, action| app.ccsds_page_action(id, action)),
 };
 
 /// What CCSDS keeps between calls: each stream page's source, the
@@ -90,8 +88,128 @@ impl super::feature::Feature for CcsdsHost {
     }
 }
 
-/// The time converter (`SPC k T`), CCSDS's first page through the
-/// feature page contribution point.
+/// The packet inspector (`SPC k d`).
+impl super::feature::FeaturePage for PacketPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        packet_page::title(self)
+    }
+
+    fn typing(&self) -> bool {
+        PacketPage::typing(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        PacketPage::paste(self, text);
+    }
+
+    fn layout(&self, cols: usize) -> crate::page::Page {
+        packet_page::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+        Box::new(PacketPage::key(self, key))
+    }
+}
+
+/// The hex view (`SPC f x`).
+impl super::feature::FeaturePage for HexPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        hex_page::title(self)
+    }
+
+    fn typing(&self) -> bool {
+        HexPage::typing(self)
+    }
+
+    fn claims_space(&self) -> bool {
+        HexPage::typing(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        HexPage::paste(self, text);
+    }
+
+    fn layout(&self, cols: usize) -> crate::page::Page {
+        hex_page::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+        Box::new(HexPage::key(self, key))
+    }
+}
+
+/// A recording or a live source (`SPC k f`, `SPC k l`).
+impl super::feature::FeaturePage for StreamPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        stream_page::title(self)
+    }
+
+    fn typing(&self) -> bool {
+        StreamPage::typing(self)
+    }
+
+    fn claims_space(&self) -> bool {
+        StreamPage::typing(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        StreamPage::paste(self, text);
+    }
+
+    fn layout(&self, cols: usize) -> crate::page::Page {
+        stream_page::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+        Box::new(StreamPage::key(self, key))
+    }
+
+    /// Stops the recording's reader or the live source.
+    fn close(&self) {
+        StreamPage::close(self);
+    }
+}
+
+/// The standards library (`SPC k ?`).
+impl super::feature::FeaturePage for StandardsPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        "*standards*".to_string()
+    }
+
+    fn typing(&self) -> bool {
+        StandardsPage::typing(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        self.query.paste(text);
+    }
+
+    fn layout(&self, cols: usize) -> crate::page::Page {
+        crate::standards_page::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+        Box::new(StandardsPage::key(self, key))
+    }
+}
+
+/// The time converter (`SPC k T`).
 impl super::feature::FeaturePage for TimePage {
     fn feature(&self) -> &'static str {
         SPEC.id
@@ -304,13 +422,13 @@ impl App {
         let _ = self.with_mib(|m, a| m.set(a, &key)).flatten();
         let mut page = PacketPage::new(key, bytes, source);
         page.profile = profile;
-        let id = self.open_page(PageModel::Packet(Box::new(page)));
+        let id = self.open_page(PageModel::Feature(Box::new(page)));
         self.packet_redecode(id);
     }
 
     /// Decodes the page's bytes again, as it reads them now.
     pub(super) fn packet_redecode(&mut self, id: BufferId) {
-        let Some(PageModel::Packet(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
+        let Some(p) = self.feature_page::<PacketPage>(id) else { return };
         let (key, bytes, reading, profile) = (p.key.clone(), p.bytes.clone(), p.reading, p.profile.clone());
         let set = self.mib().and_then(|m| m.set_ready(&key));
         let mut mission = self.mission(key.project.as_deref());
@@ -320,23 +438,17 @@ impl App {
             None => {}
         }
         let (root, _) = decode_bytes(&bytes, reading, set.as_deref(), &mission);
-        if let Some(state) = self.pages.get_mut(&id) {
-            state.stale = true;
-            if let PageModel::Packet(p) = &mut state.model {
-                p.root = root;
-                if let Some(problem) = mission.problems.first() {
-                    p.note = Some((format!("{problem} -- using the default"), true));
-                }
+        if let Some(p) = self.feature_page_mut::<PacketPage>(id) {
+            p.root = root;
+            if let Some(problem) = mission.problems.first() {
+                p.note = Some((format!("{problem} -- using the default"), true));
             }
         }
     }
 
     pub(super) fn packet_page_action(&mut self, id: BufferId, action: packet_page::Action) {
         use packet_page::Action as A;
-        let key = match self.pages.get(&id).map(|s| &s.model) {
-            Some(PageModel::Packet(p)) => p.key.clone(),
-            _ => return,
-        };
+        let Some(key) = self.feature_page::<PacketPage>(id).map(|p| p.key.clone()) else { return };
         match action {
             A::None => {}
             A::Close => self.close_page(id),
@@ -359,7 +471,7 @@ impl App {
     /// `t` on a TM parameter: follows it through the recording or live
     /// source open most recently, shown on its Parameter tab.
     pub(crate) fn follow_on_stream(&mut self, def: DefRef) {
-        let stream = self.buffers.mru().iter().copied().find(|b| matches!(self.pages.get(b).map(|s| &s.model), Some(PageModel::Stream(_))));
+        let stream = self.buffers.mru().iter().copied().find(|b| self.feature_page::<StreamPage>(*b).is_some());
         let Some(stream) = stream else {
             self.set_error("no recording or live source open -- SPC k f or SPC k l, then t");
             return;
@@ -453,7 +565,7 @@ impl App {
     /// `SPC k ?`: the standards library.
     pub(crate) fn cmd_ccsds_standards(&mut self) {
         let page = crate::standards_page::StandardsPage::new(self.config.ccsds_library.clone());
-        self.open_page(PageModel::Standards(Box::new(page)));
+        self.open_page(PageModel::Feature(Box::new(page)));
     }
 
     pub(super) fn standards_action(&mut self, id: BufferId, action: crate::standards_page::Action) {
@@ -482,13 +594,13 @@ impl App {
             self.ccsds_mut().standards_search.remove(&key);
             self.pdf_send(fenix_pdf::PdfRequest::Close { key });
         }
-        let Some(PageModel::Standards(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
+        let Some(p) = self.feature_page::<StandardsPage>(id) else { return };
         let files = p.searchable();
         if files.is_empty() {
             self.set_error("no standards to search -- f sets the folder they're in (ccsds.library)");
             return;
         }
-        if let Some(PageModel::Standards(p)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+        if let Some(p) = self.feature_page_mut::<StandardsPage>(id) {
             p.search_started(&query, files.len());
         }
         self.pdf_worker_ready();
@@ -510,11 +622,8 @@ impl App {
         let Some(&(page, standard)) = self.ccsds().standards_search.get(&key) else { return false };
         let query = self.ccsds().standards_query.get(&page).cloned().unwrap_or_default();
         let found = |app: &mut App, hits: Vec<(u32, String)>, done: bool| {
-            if let Some(PageModel::Standards(p)) = app.pages.get_mut(&page).map(|s| &mut s.model) {
+            if let Some(p) = app.feature_page_mut::<StandardsPage>(page) {
                 p.found(standard, hits, done);
-            }
-            if let Some(state) = app.pages.get_mut(&page) {
-                state.stale = true;
             }
         };
         match response {
@@ -782,6 +891,29 @@ impl App {
         Some(text)
     }
 
+    /// What a key on one of CCSDS's pages asked for, by the page's kind.
+    fn ccsds_page_action(&mut self, id: BufferId, action: Box<dyn std::any::Any>) {
+        let action = match action.downcast::<time_page::Action>() {
+            Ok(action) => return self.time_page_action(id, *action),
+            Err(action) => action,
+        };
+        let action = match action.downcast::<packet_page::Action>() {
+            Ok(action) => return self.packet_page_action(id, *action),
+            Err(action) => action,
+        };
+        let action = match action.downcast::<hex_page::Action>() {
+            Ok(action) => return self.hex_page_action(id, *action),
+            Err(action) => action,
+        };
+        let action = match action.downcast::<stream_page::Action>() {
+            Ok(action) => return self.stream_page_action(id, *action),
+            Err(action) => action,
+        };
+        if let Ok(action) = action.downcast::<crate::standards_page::Action>() {
+            self.standards_action(id, *action);
+        }
+    }
+
     pub(super) fn time_page_action(&mut self, id: BufferId, action: time_page::Action) {
         match action {
             time_page::Action::None => {}
@@ -830,21 +962,23 @@ impl App {
     /// so the project (and its MIBs) follow it as they follow a buffer.
     pub(crate) fn page_file(&self) -> Option<PathBuf> {
         let id = self.focused_buffer_id();
-        match self.pages.get(&id).map(|s| &s.model) {
-            Some(PageModel::Hex(p)) => Some(p.path.clone()),
-            Some(PageModel::Stream(_)) => match self.ccsds().stream_sources.get(&id) {
-                Some(super::stream_host::StreamSource::File(path, _)) => Some(path.clone()),
-                _ => None,
-            },
+        if let Some(p) = self.feature_page::<HexPage>(id) {
+            return Some(p.path.clone());
+        }
+        self.feature_page::<StreamPage>(id)?;
+        match self.ccsds().stream_sources.get(&id) {
+            Some(super::stream_host::StreamSource::File(path, _)) => Some(path.clone()),
             _ => None,
         }
     }
 
     /// The project a MIB or mission page was opened in.
     pub(crate) fn page_project(&self) -> Option<PathBuf> {
-        let key = match self.pages.get(&self.focused_buffer_id()).map(|s| &s.model)? {
-            PageModel::Stream(p) => &p.key,
-            PageModel::Packet(p) => &p.key,
+        let id = self.focused_buffer_id();
+        if let Some(key) = self.feature_page::<StreamPage>(id).map(|p| &p.key).or_else(|| self.feature_page::<PacketPage>(id).map(|p| &p.key)) {
+            return key.project.clone();
+        }
+        let key = match self.pages.get(&id).map(|s| &s.model)? {
             PageModel::Mib(p) => &p.key,
             PageModel::MibDef(p) => &p.key,
             PageModel::MibForm(p) => &p.key,
@@ -888,7 +1022,7 @@ impl App {
         }
         self.main_view = MainView::Editor;
         let over = (total > hex_page::LIMIT).then_some(total);
-        self.open_page(PageModel::Hex(Box::new(HexPage::new(path, bytes, over))));
+        self.open_page(PageModel::Feature(Box::new(HexPage::new(path, bytes, over))));
     }
 
     pub(super) fn hex_page_action(&mut self, id: BufferId, action: hex_page::Action) {
@@ -896,7 +1030,7 @@ impl App {
             hex_page::Action::None => {}
             hex_page::Action::Close => self.close_page(id),
             hex_page::Action::Decode(at) => {
-                let Some(PageModel::Hex(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                let Some(p) = self.feature_page::<HexPage>(id) else { return };
                 let rest = &p.bytes[at.min(p.bytes.len())..];
                 let mission = self.mission(None);
                 let len = if rest.starts_with(&fenix_ccsds::coding::ASM) {
@@ -1063,7 +1197,7 @@ mod tests {
         assert!(matches!(app.active_picker, Some(ActivePicker::Feature { feature: "fenix.ccsds", badge: "SOURCE", .. })));
         app.picker_confirm();
         let id = app.focused_buffer_id();
-        assert!(matches!(app.pages.get(&id).map(|s| &s.model), Some(PageModel::Stream(_))));
+        assert!(app.feature_page::<StreamPage>(id).is_some());
         assert!(matches!(app.ccsds().stream_sources.get(&id), Some(super::super::stream_host::StreamSource::Live(_))));
     }
 
@@ -1080,6 +1214,32 @@ mod tests {
         assert_eq!(app.page_title(id), "*time*");
         app.ensure_page_layout(id, app.focused_pane_id(), 80);
         assert!(app.open().buffer.text().contains("UTC"), "laid out by the page");
+        assert!(app.page_key(KeyPress::char('q')));
+        assert!(!app.is_page_buffer(id), "q closed it, through `page_action`");
+    }
+
+    #[test]
+    fn closing_a_stream_page_stops_its_reader_through_the_page_close_hook() {
+        let mut app = App::with_file(None);
+        let page = StreamPage::new(super::super::mib_host::key_here(&app).0, "rec".into(), false);
+        let stop = page.stop.clone();
+        let id = app.open_page(PageModel::Feature(Box::new(page)));
+        assert_eq!(app.page_title(id), stream_page::title(app.feature_page::<StreamPage>(id).unwrap()));
+        app.close_page(id);
+        assert!(stop.load(std::sync::atomic::Ordering::Relaxed), "the reader was told to stop");
+    }
+
+    #[test]
+    fn the_hex_view_is_a_ccsds_page_its_keys_reach_through_the_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frame.bin");
+        std::fs::write(&path, [0x08u8, 0x01, 0xC0, 0x00, 0x00, 0x03, 1, 2, 3, 4]).unwrap();
+        let mut app = App::with_file(None);
+        app.open_hex_view(path.clone());
+        let id = app.focused_buffer_id();
+        assert_eq!(app.feature_page::<HexPage>(id).map(|p| p.path.clone()), Some(path.clone()));
+        assert_eq!(app.page_file(), Some(path), "the project follows the file it shows");
+        assert!(app.feature_page::<StreamPage>(id).is_none(), "typed access sees only its own kind");
         assert!(app.page_key(KeyPress::char('q')));
         assert!(!app.is_page_buffer(id), "q closed it, through `page_action`");
     }

@@ -163,6 +163,32 @@ pub(crate) trait FeaturePage: Any {
     fn layout(&self, cols: usize) -> crate::page::Page;
     /// A key; what it asks for goes to the feature's `page_action`.
     fn key(&mut self, key: crate::page::Key) -> Box<dyn Any>;
+    /// It's being closed: stop whatever it started (a stream's reader).
+    fn close(&self) {}
+}
+
+impl App {
+    /// Page `id` as feature page `T`, if it is one -- for the feature
+    /// that owns it.
+    pub(super) fn feature_page<T: FeaturePage>(&self, id: BufferId) -> Option<&T> {
+        match self.pages.get(&id).map(|s| &s.model) {
+            Some(super::pages::PageModel::Feature(p)) => (&**p as &dyn Any).downcast_ref(),
+            _ => None,
+        }
+    }
+
+    /// The same, to change it; it's laid out again.
+    pub(super) fn feature_page_mut<T: FeaturePage>(&mut self, id: BufferId) -> Option<&mut T> {
+        let state = self.pages.get_mut(&id)?;
+        match &mut state.model {
+            super::pages::PageModel::Feature(p) => {
+                let page = (&mut **p as &mut dyn Any).downcast_mut::<T>()?;
+                state.stale = true;
+                Some(page)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// One row's payload in a feature's picker (`ActivePicker::Feature`):

@@ -18,10 +18,7 @@ use crate::jira_page::{self, JiraPage};
 use crate::mib_def::{self, DefPage};
 use crate::mib_form::{self, InsertForm};
 use crate::mib_page::{self, MibPage};
-use crate::packet_page::{self, PacketPage};
-use crate::hex_page::{self, HexPage};
-use crate::stream_page::{self, StreamPage};
-use crate::standards_page::{self, StandardsPage};
+use crate::stream_page;
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::notebook_page::NotebookPage;
@@ -60,10 +57,6 @@ pub(super) enum PageModel {
     Mib(Box<MibPage>),
     MibDef(Box<DefPage>),
     MibForm(Box<InsertForm>),
-    Packet(Box<PacketPage>),
-    Hex(Box<HexPage>),
-    Stream(Box<StreamPage>),
-    Standards(Box<StandardsPage>),
     Notebook(Box<NotebookPage>),
     Backlinks(Box<BacklinksPage>),
     Reading(Box<ReadingPage>),
@@ -111,11 +104,7 @@ impl PageState {
             PageModel::Jira(p) => p.typing(),
             PageModel::Mib(p) => p.typing(),
             PageModel::MibForm(p) => p.typing(),
-            PageModel::Hex(p) => p.typing(),
-            PageModel::Stream(p) => p.typing(),
             PageModel::MibDef(p) => p.typing(),
-            PageModel::Packet(p) => p.typing(),
-            PageModel::Standards(p) => p.typing(),
             PageModel::Notebook(p) => p.typing(),
             PageModel::Diagram(p) => p.typing(),
             PageModel::Feature(p) => p.typing(),
@@ -135,8 +124,6 @@ impl PageState {
                 PageModel::Mib(p) => p.claims_space(),
                 PageModel::MibForm(p) => p.claims_space(),
                 PageModel::Feature(p) => p.claims_space(),
-                PageModel::Hex(p) => p.typing(),
-                PageModel::Stream(p) => p.typing(),
                 _ => false,
             }
     }
@@ -159,11 +146,7 @@ impl PageState {
             PageModel::Jira(p) => p.paste(text),
             PageModel::Mib(p) => p.paste(text),
             PageModel::MibForm(p) => p.paste(text),
-            PageModel::Hex(p) => p.paste(text),
-            PageModel::Stream(p) => p.paste(text),
             PageModel::MibDef(p) => p.paste(text),
-            PageModel::Packet(p) => p.paste(text),
-            PageModel::Standards(p) => p.query.paste(text),
             PageModel::Notebook(p) => p.paste(text),
             PageModel::Diagram(p) => p.paste(text),
             PageModel::Feature(p) => p.paste(text),
@@ -353,10 +336,6 @@ impl App {
             Some(PageModel::Mib(_)) => "*mib*".to_string(),
             Some(PageModel::MibDef(p)) => mib_def::title(self.mib().and_then(|m| m.set_ready(&p.key)).as_deref(), p),
             Some(PageModel::MibForm(f)) => mib_form::title(f),
-            Some(PageModel::Packet(p)) => packet_page::title(p),
-            Some(PageModel::Hex(p)) => hex_page::title(p),
-            Some(PageModel::Stream(p)) => stream_page::title(p),
-            Some(PageModel::Standards(_)) => "*standards*".to_string(),
             Some(PageModel::Notebook(_)) => "*notebook*".to_string(),
             Some(PageModel::Backlinks(p)) => format!("*links: {}*", p.name),
             Some(PageModel::Diagram(p)) => format!("*{}: {}*", if p.viewer { "view" } else { "diagram" }, p.title),
@@ -396,7 +375,7 @@ impl App {
     /// Closes page `id` and its buffer; panes showing it go back to the
     /// buffer used before.
     pub(super) fn close_page(&mut self, id: BufferId) {
-        if let Some(PageModel::Stream(p)) = self.pages.get(&id).map(|s| &s.model) {
+        if let Some(PageModel::Feature(p)) = self.pages.get(&id).map(|s| &s.model) {
             p.close();
         }
         self.pages.remove(&id);
@@ -540,10 +519,6 @@ impl App {
                 mib_def::layout(p, set.as_deref(), apid_hex, cols)
             }
             PageModel::MibForm(f) => mib_form::layout(f, form_bytes.as_ref(), cols),
-            PageModel::Packet(p) => packet_page::layout(p, cols),
-            PageModel::Hex(p) => hex_page::layout(p, cols),
-            PageModel::Stream(p) => stream_page::layout(p, cols),
-            PageModel::Standards(p) => standards_page::layout(p, cols),
             PageModel::Notebook(_) => precomputed.unwrap_or_default(),
             PageModel::Backlinks(p) => backlinks_page::layout(p, cols),
             PageModel::Feature(p) => p.layout(cols),
@@ -707,10 +682,6 @@ impl App {
                 let action = f.key(key);
                 self.with_mib(|m, a| m.form_action(a, action));
             }
-            PageModel::Packet(p) => {
-                let action = p.key(key);
-                self.packet_page_action(id, action);
-            }
             PageModel::Feature(p) => {
                 let feature = p.feature();
                 let action = p.key(key);
@@ -718,18 +689,6 @@ impl App {
                 if let Some(run) = run {
                     run(self, id, action);
                 }
-            }
-            PageModel::Hex(p) => {
-                let action = p.key(key);
-                self.hex_page_action(id, action);
-            }
-            PageModel::Stream(p) => {
-                let action = p.key(key);
-                self.stream_page_action(id, action);
-            }
-            PageModel::Standards(p) => {
-                let action = p.key(key);
-                self.standards_action(id, action);
             }
             PageModel::Notebook(p) => {
                 let action = p.key(key);
