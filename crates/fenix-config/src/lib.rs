@@ -380,13 +380,6 @@ pub struct Config {
     /// asks what to keep (`[agenda] idle_minutes = 60`) -- unset means
     /// 60, `0` never asks.
     pub agenda_idle_minutes: Option<u32>,
-    /// Where the embedded-development tools live, when they aren't where
-    /// Fenix looks on its own (its tools folder, `PATH`, the usual
-    /// install locations) -- `[embedded]`'s `arduino_cli`, `clangd` and
-    /// `arduino_language_server`. Unset means search.
-    pub embedded_arduino_cli: Option<PathBuf>,
-    pub embedded_clangd: Option<PathBuf>,
-    pub embedded_arduino_language_server: Option<PathBuf>,
     pub git_graph_limit: Option<usize>,
     /// The branch ref-comparison defaults its base to (`SPC g c`), e.g.
     /// `develop` -- unset means `main`. What "how does my branch differ
@@ -584,9 +577,6 @@ impl Config {
             agenda_categories: Vec::new(),
             agenda_worklog_round: None,
             agenda_idle_minutes: None,
-            embedded_arduino_cli: None,
-            embedded_clangd: None,
-            embedded_arduino_language_server: None,
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
@@ -858,6 +848,51 @@ impl Config {
         self.values.get(key)
     }
 
+    /// A registered setting's text (`Kind::Text`, `Kind::Choice`).
+    pub fn text_value(&self, key: &str) -> Option<&str> {
+        match self.value(key) {
+            Some(Value::Text(t)) => Some(t),
+            _ => None,
+        }
+    }
+
+    /// A registered `Kind::Path` setting.
+    pub fn path_value(&self, key: &str) -> Option<PathBuf> {
+        self.text_value(key).map(PathBuf::from)
+    }
+
+    /// A registered `Kind::Bool` setting.
+    pub fn bool_value(&self, key: &str) -> Option<bool> {
+        match self.value(key) {
+            Some(Value::Bool(b)) => Some(*b),
+            _ => None,
+        }
+    }
+
+    /// A registered whole-number setting (`Kind::Int`, `Kind::Minutes`).
+    pub fn int_value(&self, key: &str) -> Option<i64> {
+        match self.value(key) {
+            Some(Value::Int(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    /// A registered `Kind::List` setting; empty when unset.
+    pub fn list_value(&self, key: &str) -> &[String] {
+        match self.value(key) {
+            Some(Value::List(items)) => items,
+            _ => &[],
+        }
+    }
+
+    /// A registered `Kind::Map` setting, in order; empty when unset.
+    pub fn map_value(&self, key: &str) -> &[(String, String)] {
+        match self.value(key) {
+            Some(Value::Map(entries)) => entries,
+            _ => &[],
+        }
+    }
+
     /// Sets a registered setting by key, unchecked -- `Setting::set`
     /// checks it first. For code that edits one directly (tests, a
     /// migration); `None` unsets it.
@@ -866,6 +901,11 @@ impl Config {
             Some(v) => self.values.insert(key.to_string(), v),
             None => self.values.remove(key),
         };
+    }
+
+    /// Sets a registered `Kind::Path` setting by key (`None` unsets it).
+    pub fn set_path_value(&mut self, key: &str, path: Option<&std::path::Path>) {
+        self.set_value(key, path.map(|p| Value::Text(p.display().to_string())));
     }
 
     /// A token: from the environment when it's set there, else from the

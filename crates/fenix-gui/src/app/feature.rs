@@ -781,6 +781,17 @@ mod tests {
         assert!(err.contains("changes the editor"), "{err}");
     }
 
+    /// With the features' settings registered, every category on the
+    /// settings page has something in it.
+    #[test]
+    fn every_settings_category_has_a_setting() {
+        super::register_settings();
+        let all = fenix_config::settings();
+        for c in fenix_config::Category::ALL {
+            assert!(all.iter().any(|s| s.category == c), "{} is empty", c.label());
+        }
+    }
+
     #[test]
     fn every_feature_setting_is_registered_once_and_none_shadows_core() {
         super::register_settings();

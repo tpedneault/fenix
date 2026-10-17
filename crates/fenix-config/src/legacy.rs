@@ -4,7 +4,7 @@
 //! and explorer bookmarks were kept in it too.
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::ini;
 use crate::{names, Config, JiraBlocked, WindowLayout};
@@ -48,9 +48,10 @@ pub(crate) fn load(path: &std::path::Path, into: PathBuf, state_dir: PathBuf) ->
         .unwrap_or_default();
     c.agenda_categories = sections.get("agenda").map(|s| parse_single_list(s, "category")).unwrap_or_default();
     c.agenda_worklog_round = sections.get("agenda").and_then(|s| s.get("worklog_round")).and_then(|v| parse_minutes(v));
-    c.embedded_arduino_cli = embedded.and_then(|s| s.get("arduino_cli")).map(PathBuf::from);
-    c.embedded_clangd = embedded.and_then(|s| s.get("clangd")).map(PathBuf::from);
-    c.embedded_arduino_language_server = embedded.and_then(|s| s.get("arduino_language_server")).map(PathBuf::from);
+    // The Embedded feature's settings, registered by it: kept by key.
+    for name in ["arduino_cli", "clangd", "arduino_language_server"] {
+        c.set_path_value(&format!("embedded.{name}"), embedded.and_then(|s| s.get(name)).map(Path::new));
+    }
     c.mib_telecommand_template = mib.and_then(|s| s.get("telecommand_template")).cloned();
     c.mib_telecommand_argument_template = mib.and_then(|s| s.get("telecommand_argument_template")).cloned();
     c.mib_telecommand_argument_separator = mib.and_then(|s| s.get("telecommand_argument_separator")).cloned();
@@ -264,6 +265,19 @@ mod tests {
         // is what splits the name from the path.
         assert_eq!(config.documents[0].1, PathBuf::from("C:/refs/133x0b2e2.pdf"));
         let _ = std::fs::remove_file(path);
+    }
+
+    /// `[embedded]` comes over by key, as the Embedded feature registers it.
+    #[test]
+    fn embedded_tool_paths_come_over_by_key() {
+        let path = temp_path("embedded");
+        std::fs::write(&path, "[embedded]\narduino_cli = C:\\tools\\arduino-cli.exe\nclangd = C:\\llvm\\clangd.exe\n").unwrap();
+
+        let config = load_ini(&path);
+
+        assert_eq!(config.path_value("embedded.arduino_cli"), Some(PathBuf::from(r"C:\tools\arduino-cli.exe")));
+        assert_eq!(config.path_value("embedded.clangd"), Some(PathBuf::from(r"C:\llvm\clangd.exe")));
+        assert_eq!(config.value("embedded.arduino_language_server"), None);
     }
 
     #[test]
