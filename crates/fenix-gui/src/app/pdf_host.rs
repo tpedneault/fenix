@@ -94,6 +94,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             pdfs
         }),
         session_reopen: Some(|app, path| app.pdf_buffer_for(path)),
+        home: Some(|app, scope| app.pdf_home(scope)),
+        home_activate: None,
     }
 };
 
@@ -165,6 +167,30 @@ impl super::feature::Features {
 
     pub(super) fn pdf_mut(&mut self) -> &mut PdfState {
         &mut self.get_mut::<PdfHost>().expect("the reader has no instance hooks that run code, so it's always in place").state
+    }
+}
+
+impl App {
+    /// Home's Reading: PDFs read lately, with where you were in each.
+    pub(super) fn pdf_home(&mut self, scope: Option<&Path>) -> Vec<crate::dashboard::HomeSection> {
+        let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
+        let rows = self
+            .recent_files
+            .paths()
+            .iter()
+            .filter(|p| Self::looks_like_pdf(p) && self.recent_shown(p) && under(p))
+            .take(3)
+            .map(|path| {
+                let place = self.features.pdf().places.get(path).or_else(|| self.features.pdf().places.get(&fenix_project::plain_path(path.clone())));
+                crate::dashboard::HomeRow {
+                    name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    detail: place.map(|p| format!("p. {} / {}", p.page + 1, p.pages)).unwrap_or_default(),
+                    mark: crate::dashboard::RowMark::None,
+                    entry: crate::dashboard::HomeEntry::RecentFile(path.clone()),
+                }
+            })
+            .collect();
+        vec![crate::dashboard::HomeSection { title: "reading", key: "SPC r f", column: crate::dashboard::HomeColumn::Files, rank: 10, rows, max: None }]
     }
 }
 

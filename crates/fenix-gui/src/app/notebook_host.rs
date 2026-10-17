@@ -213,6 +213,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         contributes: &[],
         session_documents: None,
         session_reopen: None,
+        home: Some(|app, scope| app.notebook_home(scope)),
+        home_activate: None,
     }
 };
 
@@ -1238,6 +1240,46 @@ fn collect_docs(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
             _ => {}
         }
     }
+}
+
+impl App {
+    /// Home's notebook list: today's journal day, the pinned entries,
+    /// then the last touched -- a project's Home, the notes about it.
+    /// Read in the background; listed once it's open.
+    pub(super) fn notebook_home(&mut self, scope: Option<&Path>) -> Vec<crate::dashboard::HomeSection> {
+        self.notebook_open_in_background();
+        let Some(nb) = self.features.notebook_state().book.as_ref() else { return Vec::new() };
+        let project = scope.and_then(|r| r.file_name()).map(|n| n.to_string_lossy().to_string());
+        let today = chrono::Local::now().date_naive();
+        let row = |path: PathBuf, name: String, detail: &str| crate::dashboard::HomeRow { name, detail: detail.into(), mark: crate::dashboard::RowMark::None, entry: crate::dashboard::HomeEntry::RecentFile(path) };
+        let mut out = Vec::new();
+        if project.is_none() {
+            if let Some(day) = nb.day(today) {
+                out.push(row(day.path.clone(), "Today's journal".into(), "today"));
+            }
+        }
+        for e in nb.recent() {
+            if out.len() >= 5 {
+                break;
+            }
+            if e.kind == fenix_notebook::Kind::Day || out.iter().any(|i: &crate::dashboard::HomeRow| i.entry == crate::dashboard::HomeEntry::RecentFile(e.path.clone())) {
+                continue;
+            }
+            if let Some(p) = &project {
+                if !e.about.as_deref().is_some_and(|a| a.eq_ignore_ascii_case(p)) {
+                    continue;
+                }
+            }
+            let kind = match e.kind {
+                fenix_notebook::Kind::Diagram => "diagram",
+                _ if e.pinned => "pinned",
+                _ => "note",
+            };
+            out.push(row(e.path.clone(), e.display_name(), kind));
+        }
+        vec![crate::dashboard::HomeSection { title: "notebook", key: "SPC n n", column: crate::dashboard::HomeColumn::Files, rank: 20, rows: out, max: None }]
+    }
+
 }
 
 #[cfg(test)]

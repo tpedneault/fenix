@@ -107,6 +107,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         contributes: &[],
         session_documents: None,
         session_reopen: None,
+        home: Some(|app, _| app.agenda_home()),
+        home_activate: Some(|app, _| {
+            app.open_agenda_page(Some(crate::agenda_page::Tab::Today));
+        }),
     }
 };
 
@@ -886,6 +890,52 @@ impl App {
                 self.set_message("Copied the week");
             }
         }
+    }
+}
+
+impl App {
+    /// Home's today: open tasks the way the agenda's Today puts them.
+    pub(super) fn agenda_home(&mut self) -> Vec<crate::dashboard::HomeSection> {
+        let now = chrono::Local::now();
+        // Open tasks the way the agenda's Today puts them: the one on the
+        // clock, then in progress, then what's due within a week, then
+        // what's ready to start. Waiting and blocked ones stay on the page.
+        let live = self.features.agenda().store.active_timer.as_ref().map(|t| (t.task_id, now.signed_duration_since(t.started_at)));
+        let week = now.date_naive() + chrono::Duration::days(7);
+        let store = &self.features.agenda().store;
+        let mut open: Vec<&fenix_agenda::Task> = store
+            .tasks
+            .iter()
+            .filter(|t| !t.archived && t.status != fenix_agenda::Status::Done)
+            .filter(|t| t.status == fenix_agenda::Status::InProgress || (t.status == fenix_agenda::Status::Todo && store.is_ready(t.id)) || live.is_some_and(|(id, _)| id == t.id))
+            .collect();
+        open.sort_by_key(|t| {
+            (
+                live.is_none_or(|(id, _)| id != t.id),
+                t.status != fenix_agenda::Status::InProgress,
+                t.due.filter(|d| *d <= week).is_none(),
+                t.due,
+                std::cmp::Reverse(t.priority),
+                t.order,
+            )
+        });
+        let rows = open
+            .into_iter()
+            .map(|t| crate::dashboard::HomeRow {
+                name: match t.jira_key() {
+                    Some(key) => format!("{key} {}", t.title),
+                    None => t.title.clone(),
+                },
+                detail: String::new(),
+                mark: match live.filter(|(id, _)| *id == t.id) {
+                    Some((_, d)) => crate::dashboard::RowMark::Live(super::home::format_elapsed(d)),
+                    None => crate::dashboard::RowMark::Task(matches!(t.priority, fenix_agenda::Priority::High | fenix_agenda::Priority::Urgent)),
+                },
+                entry: crate::dashboard::HomeEntry::Feature { feature: SPEC.id, key: "today".into() },
+            })
+            .collect();
+        vec![crate::dashboard::HomeSection { title: "today", key: "SPC a a", column: crate::dashboard::HomeColumn::Tasks, rank: 10, rows, max: Some(4) }]
+
     }
 }
 

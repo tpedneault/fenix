@@ -110,6 +110,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     contributes: &[],
     session_documents: None,
     session_reopen: None,
+    home: None,
+    home_activate: None,
 };
 
 /// What CCSDS keeps between calls: each stream page's source, the

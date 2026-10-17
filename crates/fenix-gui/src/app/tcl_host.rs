@@ -61,6 +61,8 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     contributes: &[],
     session_documents: None,
     session_reopen: None,
+    home: None,
+    home_activate: None,
 };
 
 /// A Tcl file gets the Tcl `SPC m` menu (which the MIB fills too).

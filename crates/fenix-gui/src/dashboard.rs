@@ -26,14 +26,11 @@ pub struct HomeData {
     pub date: String,
     pub resume: Option<FileItem>,
     pub recent: Vec<FileItem>,
-    /// PDFs read lately; `detail` is where you were ("p. 38 / 212").
-    pub reading: Vec<FileItem>,
-    /// The notebook: pinned entries, today's journal day, the last few
-    /// touched; `detail` is what it is ("note", "diagram", "today").
-    pub notebook: Vec<FileItem>,
     pub projects: Vec<ProjectItem>,
-    pub today: Vec<TaskItem>,
     pub todos: Vec<TodoItem>,
+    /// The features' sections (`FeatureSpec::home`): the PDFs read
+    /// lately, the notebook, the agenda's today.
+    pub sections: Vec<HomeSection>,
     /// Unsaved buffers a previous session left recoverable (`SPC f v`).
     pub recovery: usize,
 }
@@ -58,13 +55,48 @@ pub struct ProjectItem {
     pub health: Option<fenix_project::doctor::Health>,
 }
 
+/// A feature's section of Home: a titled list under the files or beside
+/// the projects, in `rank` order within its column.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TaskItem {
-    pub title: String,
-    /// `Some("0:18")` while its clock runs -- the screen's one live thing.
-    pub live: Option<String>,
-    /// High or urgent priority.
-    pub pressing: bool,
+pub struct HomeSection {
+    pub title: &'static str,
+    /// The key that opens the feature's own page ("SPC a a").
+    pub key: &'static str,
+    pub column: HomeColumn,
+    pub rank: u8,
+    pub rows: Vec<HomeRow>,
+    /// How many rows are shown; the header still counts them all.
+    pub max: Option<usize>,
+}
+
+/// Where a feature's section goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeColumn {
+    /// With the files: after resume, before recent.
+    Files,
+    /// With the work: before the TODOs.
+    Tasks,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct HomeRow {
+    pub name: String,
+    /// At the row's end ("p. 38 / 212", "diagram").
+    pub detail: String,
+    pub mark: RowMark,
+    /// What Enter on it does.
+    pub entry: HomeEntry,
+}
+
+/// How a row is marked at its start.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RowMark {
+    None,
+    /// A task on the clock, and how long it's run ("0:18") -- the
+    /// screen's one live thing, drawn in Ember.
+    Live(String),
+    /// A task: `true` when it's pressing (high or urgent).
+    Task(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -87,7 +119,9 @@ pub enum HomeEntry {
     Project(PathBuf),
     /// The projects column's last row: the new-project wizard.
     NewProject,
-    Agenda,
+    /// A row of a feature's section, handed back to the feature
+    /// (`FeatureSpec::home_activate`) with its key.
+    Feature { feature: &'static str, key: String },
     Todo { path: PathBuf, line: usize, col: usize },
     Recover,
 }
@@ -190,7 +224,6 @@ const MAX_WIDTH: usize = 112;
 const GAP: usize = 4;
 const MAX_PROJECTS: usize = 5;
 const MAX_RECENT: usize = 5;
-const MAX_TASKS: usize = 4;
 const MAX_TODOS: usize = 5;
 
 /// Cuts `s` to `max` chars, ending in "…" when it had to.
@@ -275,12 +308,13 @@ impl Grid {
 #[derive(Clone, Copy)]
 enum Section {
     Resume,
-    Reading,
-    Notebook,
+    /// The features' sections for this column, in rank order.
+    Features(HomeColumn),
     Recent,
     Projects,
-    Today,
     Todos,
+    /// One feature section, by its index in `HomeData::sections`.
+    Feature(usize),
 }
 
 /// Lays Home out for a pane `cols` × `rows` cells in size.
@@ -324,11 +358,28 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
 
     let columns = if width >= 96 { 3 } else if width >= 60 { 2 } else { 1 };
     let col_width = (width - GAP * (columns - 1)) / columns;
+    let files = Section::Features(HomeColumn::Files);
+    let tasks = Section::Features(HomeColumn::Tasks);
     let groups: Vec<Vec<Section>> = match columns {
-        3 => vec![vec![Section::Resume, Section::Reading, Section::Notebook, Section::Recent], vec![Section::Projects], vec![Section::Today, Section::Todos]],
-        2 => vec![vec![Section::Resume, Section::Reading, Section::Notebook, Section::Recent], vec![Section::Projects, Section::Today, Section::Todos]],
-        _ => vec![vec![Section::Resume, Section::Reading, Section::Notebook, Section::Recent, Section::Projects, Section::Today, Section::Todos]],
+        3 => vec![vec![Section::Resume, files, Section::Recent], vec![Section::Projects], vec![tasks, Section::Todos]],
+        2 => vec![vec![Section::Resume, files, Section::Recent], vec![Section::Projects, tasks, Section::Todos]],
+        _ => vec![vec![Section::Resume, files, Section::Recent, Section::Projects, tasks, Section::Todos]],
     };
+    // Each column's features in rank order, where its placeholder was.
+    let mut ranked: Vec<usize> = (0..data.sections.len()).collect();
+    ranked.sort_by_key(|&i| data.sections[i].rank);
+    let groups: Vec<Vec<Section>> = groups
+        .into_iter()
+        .map(|sections| {
+            sections
+                .into_iter()
+                .flat_map(|section| match section {
+                    Section::Features(column) => ranked.iter().filter(|&&i| data.sections[i].column == column).map(|&i| Section::Feature(i)).collect(),
+                    other => vec![other],
+                })
+                .collect()
+        })
+        .collect();
     let body = find + 5;
     let mut content_end = body;
     for (i, sections) in groups.iter().enumerate() {
@@ -346,30 +397,6 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                     g.put(y + 1, x + 2, &fit(&item.detail, col_width - 2), Role::Muted);
                     slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number: None, entry: HomeEntry::Resume(item.path.clone()) });
                     y += 2;
-                }
-                Section::Reading => {
-                    if data.reading.is_empty() {
-                        continue;
-                    }
-                    g.header(y, x, col_width, "reading", Some(data.reading.len()), "SPC r f");
-                    y += 1;
-                    for item in &data.reading {
-                        g.row(y, x + 2, col_width - 2, &item.name, Role::Text, &item.detail, Role::Muted);
-                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::RecentFile(item.path.clone()) });
-                        y += 1;
-                    }
-                }
-                Section::Notebook => {
-                    if data.notebook.is_empty() {
-                        continue;
-                    }
-                    g.header(y, x, col_width, "notebook", Some(data.notebook.len()), "SPC n n");
-                    y += 1;
-                    for item in &data.notebook {
-                        g.row(y, x + 2, col_width - 2, &item.name, Role::Text, &item.detail, Role::Muted);
-                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::RecentFile(item.path.clone()) });
-                        y += 1;
-                    }
                 }
                 Section::Recent => {
                     if data.recent.is_empty() {
@@ -418,29 +445,32 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                     slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::NewProject });
                     y += 1;
                 }
-                Section::Today => {
-                    if data.today.is_empty() {
+                Section::Feature(i) => {
+                    let section = &data.sections[*i];
+                    if section.rows.is_empty() {
                         continue;
                     }
-                    let shown = &data.today[..data.today.len().min(MAX_TASKS)];
-                    g.header(y, x, col_width, "today", Some(data.today.len()), "SPC a a");
+                    let shown = &section.rows[..section.rows.len().min(section.max.unwrap_or(usize::MAX))];
+                    g.header(y, x, col_width, section.title, Some(section.rows.len()), section.key);
                     y += 1;
-                    for task in shown {
-                        match &task.live {
-                            Some(elapsed) => {
+                    for row in shown {
+                        match &row.mark {
+                            RowMark::None => g.row(y, x + 2, col_width - 2, &row.name, Role::Text, &row.detail, Role::Muted),
+                            RowMark::Live(elapsed) => {
                                 g.panel(y, x..x + col_width, Fill::Panel);
                                 g.put(y, x + 2, "▶", Role::Ember);
-                                g.row(y, x + 4, col_width - 6, &task.title, Role::Title, elapsed, Role::Ember);
+                                g.row(y, x + 4, col_width - 6, &row.name, Role::Title, elapsed.as_str(), Role::Ember);
                             }
-                            None => {
-                                g.put(y, x + 2, "○", if task.pressing { Role::Warn } else { Role::Muted });
-                                g.put(y, x + 4, &fit(&task.title, col_width - 4), Role::Text);
+                            RowMark::Task(pressing) => {
+                                g.put(y, x + 2, "○", if *pressing { Role::Warn } else { Role::Muted });
+                                g.put(y, x + 4, &fit(&row.name, col_width - 4), Role::Text);
                             }
                         }
-                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::Agenda });
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: row.entry.clone() });
                         y += 1;
                     }
                 }
+                Section::Features(_) => {}
                 Section::Todos => {
                     if data.todos.is_empty() {
                         continue;
@@ -583,19 +613,30 @@ mod tests {
                 FileItem { path: "/p/a.rs".into(), name: "a.rs".into(), detail: String::new(), age: "2 h".into() },
                 FileItem { path: "/p/b.rs".into(), name: "b.rs".into(), detail: String::new(), age: "1 d".into() },
             ],
-            reading: Vec::new(),
-            notebook: Vec::new(),
             projects: vec![
                 ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()), kind: ProjectKind::Rust, health: Some(fenix_project::doctor::Health::Warn) },
                 ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None, kind: ProjectKind::Tcl, health: None },
             ],
-            today: vec![
-                TaskItem { title: "Pick a dashboard".into(), live: Some("0:18".into()), pressing: false },
-                TaskItem { title: "Review PR".into(), live: None, pressing: true },
-            ],
+            sections: vec![today(vec![("Pick a dashboard", RowMark::Live("0:18".into())), ("Review PR", RowMark::Task(true))])],
             todos: vec![TodoItem { kind: TodoKind::Fix, message: "group id is wrong".into(), file: "pom.xml".into(), path: "/p/pom.xml".into(), line: 5, col: 8 }],
             recovery: 1,
         }
+    }
+
+    fn agenda() -> HomeEntry {
+        HomeEntry::Feature { feature: "fenix.agenda", key: "today".into() }
+    }
+
+    /// The agenda's section, as it gives it.
+    fn today(tasks: Vec<(&str, RowMark)>) -> HomeSection {
+        let rows = tasks.into_iter().map(|(name, mark)| HomeRow { name: name.into(), detail: String::new(), mark, entry: agenda() }).collect();
+        HomeSection { title: "today", key: "SPC a a", column: HomeColumn::Tasks, rank: 10, rows, max: Some(4) }
+    }
+
+    /// A section of files, as the PDF feature and the notebook give theirs.
+    fn files(title: &'static str, key: &'static str, rank: u8, items: Vec<(&str, &str, &str)>) -> HomeSection {
+        let rows = items.into_iter().map(|(path, name, detail)| HomeRow { name: name.into(), detail: detail.into(), mark: RowMark::None, entry: HomeEntry::RecentFile(path.into()) }).collect();
+        HomeSection { title, key, column: HomeColumn::Files, rank, rows, max: None }
     }
 
     fn line_of(view: &HomeView, needle: &str) -> usize {
@@ -604,10 +645,23 @@ mod tests {
 
     #[test]
     fn the_notebook_has_a_section_when_it_has_entries() {
-        let data = HomeData { notebook: vec![FileItem { path: "/nb/journal/2026/2026-09-30.md".into(), name: "Today's journal".into(), detail: "today".into(), age: String::new() }], ..HomeData::default() };
+        let data = HomeData { sections: vec![files("notebook", "SPC n n", 20, vec![("/nb/journal/2026/2026-09-30.md", "Today's journal", "today")])], ..HomeData::default() };
         let view = layout(&data, 140, 45);
         assert!(view.text.contains("notebook") && view.text.contains("Today's journal"), "{}", view.text);
         assert!(!layout(&HomeData::default(), 140, 45).text.contains("notebook"));
+    }
+
+    /// Features' sections in one column go by rank, whatever order they
+    /// came in, and only as many rows as `max` says show.
+    #[test]
+    fn feature_sections_go_by_rank_and_show_at_most_max_rows() {
+        let notebook = files("notebook", "SPC n n", 20, vec![("/nb/a.md", "A note", "note")]);
+        let reading = files("reading", "SPC r f", 10, vec![("/r/spec.pdf", "spec.pdf", "p. 1 / 2")]);
+        let tasks = today((0..6).map(|i| (["one", "two", "three", "four", "five", "six"][i], RowMark::Task(false))).collect());
+        let view = layout(&HomeData { sections: vec![notebook, tasks, reading], ..sample() }, 140, 45);
+        assert!(line_of(&view, "reading") < line_of(&view, "notebook"), "rank, not the order given:\n{}", view.text);
+        assert!(view.text.contains("four") && !view.text.contains("five"), "four of six shown:\n{}", view.text);
+        assert!(view.text.lines().nth(line_of(&view, "today")).unwrap().contains('6'), "the header counts them all");
     }
 
     #[test]
@@ -666,11 +720,7 @@ mod tests {
     fn empty_sections_are_left_out_and_projects_says_how_to_add_one() {
         let data = HomeData { date: "d".into(), ..HomeData::default() };
         assert!(!layout(&data, 140, 45).text.contains("reading"), "no PDFs read, no section");
-        let reading = HomeData {
-            date: "d".into(),
-            reading: vec![FileItem { path: "/r/spec.pdf".into(), name: "spec.pdf".into(), detail: "p. 38 / 212".into(), age: String::new() }],
-            ..HomeData::default()
-        };
+        let reading = HomeData { date: "d".into(), sections: vec![files("reading", "SPC r f", 10, vec![("/r/spec.pdf", "spec.pdf", "p. 38 / 212")])], ..HomeData::default() };
         let view = layout(&reading, 140, 45);
         assert!(view.text.contains("reading") && view.text.contains("spec.pdf") && view.text.contains("p. 38 / 212"), "{}", view.text);
         assert!(view.slots.iter().any(|s| s.entry == HomeEntry::RecentFile("/r/spec.pdf".into())));
@@ -708,7 +758,7 @@ mod tests {
         let project = view.across(resume, true).unwrap();
         assert_eq!(view.slots[project].entry, HomeEntry::Project("/p".into()));
         let today = view.across(project, true).unwrap();
-        assert_eq!(view.slots[today].entry, HomeEntry::Agenda);
+        assert_eq!(view.slots[today].entry, agenda());
         assert_eq!(view.across(today, true), None, "no fourth column");
         let last_recent = view.find(&HomeEntry::RecentFile("/p/b.rs".into())).unwrap();
         assert_eq!(view.slots[view.step(last_recent, true).unwrap()].entry, HomeEntry::Recover);
