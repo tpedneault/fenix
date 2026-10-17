@@ -428,7 +428,7 @@ impl App {
             })
             .collect();
         for row in rows.iter_mut().filter(|r| r.kind == NbKind::Diagram) {
-            row.problem = self.diagram_problem(&row.text);
+            row.problem = self.diagram_problem_of(&row.text);
         }
         if let (true, Some(root)) = (project_files, project_root) {
             let mut files = Vec::new();
@@ -498,6 +498,18 @@ impl App {
         }
     }
 
+    /// The picture a page shows for a diagram's source: the diagrams
+    /// feature's (`diagrams.picture`); none to show without it.
+    fn diagram_picture(&self, source: &str) -> u64 {
+        self.query_service("diagrams.picture", &serde_json::json!({ "source": source })).ok().and_then(|key| key.parse().ok()).unwrap_or(0)
+    }
+
+    /// What's wrong with a diagram, as the diagrams feature drew it
+    /// (`diagrams.problem`).
+    fn diagram_problem_of(&self, source: &str) -> Option<String> {
+        self.query_service("diagrams.problem", &serde_json::json!({ "source": source })).ok().filter(|p| !p.is_empty())
+    }
+
     /// What the reading layout needs, borrowing only what it reads.
     pub(super) fn with_reading_ctx<R>(&self, base: Option<&Path>, f: impl FnOnce(&reading::Ctx) -> R) -> R {
         let nb = self.features.notebook_state().book.as_ref();
@@ -510,8 +522,8 @@ impl App {
         let base_file = base.map(Path::to_path_buf);
         let highlight = |lang: &str, text: &str| highlight_block(lang, text);
         let image_size = |key: &ImageKey| sizes.get(key).copied();
-        let diagram_key = |source: &str| ImageKey::Diagram(self.diagram_key(source, None));
-        let diagram_error = |source: &str| self.diagram_problem(source);
+        let diagram_key = |source: &str| ImageKey::Diagram(self.diagram_picture(source));
+        let diagram_error = |source: &str| self.diagram_problem_of(source);
         let image_path = |src: &str| {
             if src.contains("://") {
                 return None;

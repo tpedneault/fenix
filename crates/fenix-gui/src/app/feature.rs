@@ -126,7 +126,17 @@ pub(crate) struct FeatureSpec {
 /// `call-service` will be. Runs with its feature in place.
 pub(crate) struct Service {
     pub name: &'static str,
-    pub call: fn(&mut App, &str) -> Result<String, String>,
+    pub call: ServiceCall,
+}
+
+/// What a service does to the editor.
+#[derive(Clone, Copy)]
+pub(crate) enum ServiceCall {
+    /// Only reads it, so it can be asked while the editor is lent out
+    /// (laying out a page): `App::query_service`.
+    Read(fn(&App, &str) -> Result<String, String>),
+    /// Changes it (the clipboard, a buffer): `App::call_service` only.
+    Mut(fn(&mut App, &str) -> Result<String, String>),
 }
 
 /// A completion in progress: where its prefix starts, the prefix, and
@@ -659,16 +669,32 @@ impl App {
         name: &str,
         payload: &serde_json::Value,
     ) -> Result<String, String> {
-        let call = self
-            .features
+        match self.service(name)? {
+            ServiceCall::Read(call) => call(self, &payload.to_string()),
+            ServiceCall::Mut(call) => call(self, &payload.to_string()),
+        }
+    }
+
+    /// Calls service `name`, one that only reads the editor, from code
+    /// that has it lent out. `Err` for one that changes it.
+    pub(crate) fn query_service(
+        &self,
+        name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, String> {
+        match self.service(name)? {
+            ServiceCall::Read(call) => call(self, &payload.to_string()),
+            ServiceCall::Mut(_) => Err(format!("{name} changes the editor: call it, don't query it")),
+        }
+    }
+
+    fn service(&self, name: &str) -> Result<ServiceCall, String> {
+        self.features
             .specs()
             .flat_map(|spec| spec.services)
             .find(|service| service.name == name)
-            .map(|service| service.call);
-        match call {
-            Some(call) => call(self, &payload.to_string()),
-            None => Err(format!("nothing offers {name}")),
-        }
+            .map(|service| service.call)
+            .ok_or_else(|| format!("nothing offers {name}"))
     }
 
     /// Runs `f` with the feature whose id is `id`.
@@ -718,6 +744,14 @@ mod tests {
     fn a_service_nobody_offers_is_an_error_not_a_panic() {
         let mut app = super::App::with_file(None);
         assert_eq!(app.call_service("nobody.here", &serde_json::json!({})), Err("nothing offers nobody.here".to_string()));
+        assert_eq!(app.query_service("nobody.here", &serde_json::json!({})), Err("nothing offers nobody.here".to_string()));
+    }
+
+    #[test]
+    fn a_service_that_changes_the_editor_cant_be_queried() {
+        let app = super::App::with_file(None);
+        let err = app.query_service("diagrams.copy_picture", &serde_json::json!({ "source": "flowchart TD\n    a --> b\n" })).unwrap_err();
+        assert!(err.contains("changes the editor"), "{err}");
     }
 
     #[test]
