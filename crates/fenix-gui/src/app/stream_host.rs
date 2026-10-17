@@ -148,7 +148,7 @@ fn samples_of(rows: &[Row], from: usize, set: &MibSet, m: &Mission, def: DefRef)
     samples
 }
 
-/// A source's framing (one of `fenix_config::FRAMINGS`), `None` for
+/// A source's framing (one of `ccsds_host::FRAMINGS`), `None` for
 /// `guess`: `packets`, `frames` (the project's profile, with or without
 /// an FECF), `cltus`, `records` after `header` octets (`records N` as
 /// written by hand).
@@ -505,7 +505,7 @@ impl App {
     pub(crate) fn ccsds_sources(&self) -> Vec<Source> {
         let rows = match self.project_settings.as_ref().and_then(|(_, p)| p.get("ccsds.sources")) {
             Some(fenix_config::Value::Records(r)) => r.clone(),
-            _ => self.config.ccsds_sources.clone(),
+            _ => self.config.records_value("ccsds.sources").to_vec(),
         };
         rows.into_iter()
             .filter(|r| r.len() >= 2)
@@ -991,7 +991,7 @@ mod tests {
         assert!(matches!(framing_of("cltus", 0, &m), Some(Framing::Cltus(_))));
         assert_eq!(framing_of("guess", 0, &m), None);
         // Every choice the settings offer means something here.
-        for f in fenix_config::FRAMINGS {
+        for f in super::ccsds_host::FRAMINGS {
             assert!(framing_of(f, 8, &m).is_some() || *f == "guess", "{f}");
         }
     }

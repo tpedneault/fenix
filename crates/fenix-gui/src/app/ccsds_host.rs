@@ -23,6 +23,52 @@ use crate::time_page::{self, TimePage};
 
 /// CCSDS's commands and its `SPC f x`. Its `SPC k` keys stay in the
 /// keymap: that group is the mission pack's, shared with the MIB.
+/// How a live source's bytes are split into packets: `guess` from the
+/// first octets; `packets` back to back; `frames` as the frame settings
+/// say, or with or without an FECF where one link differs; `cltus`; or
+/// `records`, each packet after a header of `header` octets.
+pub(crate) const FRAMINGS: &[&str] = &["guess", "packets", "frames", "frames fecf", "frames no-fecf", "cltus", "records"];
+
+const SOURCE: &[fenix_config::Field] = &[
+    fenix_config::Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+    fenix_config::Field { name: "address", label: "Address", range: None, default: None, choices: &[] },
+    fenix_config::Field { name: "subject", label: "NATS subject", range: None, default: Some(""), choices: &[] },
+    fenix_config::Field { name: "framing", label: "Framing", range: None, default: Some("guess"), choices: FRAMINGS },
+    fenix_config::Field { name: "header", label: "Record header", range: Some((0, 64)), default: Some("0"), choices: &[] },
+];
+
+/// The mission's settings: `[ccsds]` in `settings.toml`, most of them
+/// per project too (`.fenix/settings.toml`).
+static SETTINGS: [fenix_config::Setting; 24] = {
+    use fenix_config::{Category::Ccsds, Kind, Setting};
+    [
+        Setting::stored("ccsds.pus", Ccsds, "PUS edition", Kind::Choice(&["c", "a", "none"]), "The packet utilization standard the mission's packets follow: ECSS-E-ST-70-41C, 70-41A, or plain space packets.").with_default("c").project(),
+        Setting::stored("ccsds.tm_time", Ccsds, "TM time format", Kind::Text, "The time in a TM secondary header: cuc 4.2 (4 coarse, 2 fine octets), cds 16, add p for a P-field, or none.").with_default("cuc 4.2").project(),
+        Setting::stored("ccsds.epoch", Ccsds, "Epoch", Kind::Text, "What on-board times count from: a date and time, then TAI, UTC or GPS.").with_default("1958-01-01 TAI").project(),
+        Setting::stored("ccsds.time_correlation", Ccsds, "Time correlation", Kind::Text, "An on-board time and the UTC it matched (814B878A.8000 = 2026-09-27 14:32:05.5): on-board times are read from the epoch this implies, everywhere, and the time converter shows them uncorrelated too.").project(),
+        Setting::stored("ccsds.clock", Ccsds, "Mission clock", Kind::Bool, "The modeline shows the time now as the mission writes it on board, beside the clock.").with_default("off").project(),
+        Setting::stored("ccsds.crc", Ccsds, "Packet error control", Kind::Choice(&["ccitt16", "iso", "none"]), "The check at the end of a packet, where the MIB doesn't say: CRC-16-CCITT, the ISO checksum, or none.").with_default("ccitt16").project(),
+        Setting::stored("ccsds.tc_source_id", Ccsds, "TC source ID", Kind::Int { min: 0, max: 65535 }, "The source ID written into telecommand packets Fenix builds.").with_default("0").project(),
+        Setting::stored("ccsds.plf_offset", Ccsds, "Parameter offsets from", Kind::Choice(&["after-headers", "packet-start"]), "Where the MIB's PLF_OFFBY counts from: after the packet's headers (PID_DFHSIZE), or its first octet.").with_default("after-headers").project(),
+        Setting::stored("ccsds.frame_type", Ccsds, "Frames", Kind::Choice(&["tm", "aos", "uslp", "tc"]), "The transfer frames recordings and live sources carry, when they carry frames.").with_default("tm").project(),
+        Setting::stored("ccsds.frame_length", Ccsds, "Frame length", Kind::Int { min: 7, max: 65535 }, "Octets in a transfer frame, without its sync marker or Reed-Solomon check symbols.").with_default("1115").project(),
+        Setting::stored("ccsds.frame_asm", Ccsds, "Sync marker", Kind::Bool, "Frames are preceded by the 1ACFFC1D attached sync marker (CADUs).").with_default("on").project(),
+        Setting::stored("ccsds.frame_randomized", Ccsds, "Randomized", Kind::Bool, "Frames went through the CCSDS pseudo-randomizer.").with_default("off").project(),
+        Setting::stored("ccsds.frame_rs_depth", Ccsds, "Reed-Solomon depth", Kind::Int { min: 0, max: 8 }, "Interleave depth of the (255,223) Reed-Solomon code; 0 when there's none. Code words are corrected.").with_default("0").project(),
+        Setting::stored("ccsds.frame_ocf", Ccsds, "Frames carry an OCF", Kind::Bool, "TM or AOS frames end in an operational control field (the CLCW).").with_default("on").project(),
+        Setting::stored("ccsds.frame_fecf", Ccsds, "Frames carry an FECF", Kind::Bool, "Frames end in a CRC-16 frame error control field.").with_default("off").project(),
+        Setting::stored("ccsds.tc_fecf", Ccsds, "TC frames carry an FECF", Kind::Bool, "Telecommand transfer frames (in CLTUs) end in a CRC-16 frame error control field.").with_default("on").project(),
+        Setting::stored("ccsds.tc_segment_header", Ccsds, "TC segment header", Kind::Bool, "Telecommand transfer frames start their data with a segment header (MAP ID and sequence flags).").with_default("on").project(),
+        Setting::stored("ccsds.tc_randomized", Ccsds, "TC randomized", Kind::Bool, "Telecommand transfer frames went through the CCSDS pseudo-randomizer before their CLTU was coded (optional in 231.0-B).").with_default("off").project(),
+        Setting::stored("ccsds.tc_bch", Ccsds, "CLTU decoding", Kind::Choice(&["correct", "detect"]), "How CLTU code blocks are decoded, as the spacecraft does: correct puts one wrong bit per block right (error-correcting mode), detect turns the block away.").with_default("correct").project(),
+        Setting::stored("ccsds.vc_names", Ccsds, "Virtual channels", Kind::Map { key: "VC", value: "Name", paths: false }, "A name for each virtual channel, shown wherever its frames are.").project(),
+        Setting::stored("ccsds.sources", Ccsds, "Live sources", Kind::Records(SOURCE), "Where live telemetry comes from: tcp://host:port, udp://:port, nats://host:port with a subject, or file://path of a recording being written. Framing, picked: guess, packets, frames (frames fecf or frames no-fecf when a link differs from the frame settings), cltus, or records with the record header's size in octets. Fenix only receives.").project(),
+        Setting::stored("ccsds.checks_off", Ccsds, "Checks turned off", Kind::List, "Standards checks not to run on the MIB: apid, size, overlap, width, identification, pus, checksum, calibration, time.").project(),
+        Setting::stored("ccsds.library", Ccsds, "Standards folder", Kind::Path, "The folder your CCSDS and ECSS standards' PDFs are in; SPC k ? lists them and a field's gd opens its heading."),
+        Setting::stored("ccsds.leap_seconds", Ccsds, "Leap seconds", Kind::Path, "A file of `YYYY-MM-DD N` lines (TAI - UTC from that date) to use instead of the table Fenix has.").with_default("built in"),
+    ]
+};
+
 pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpec {
     id: "fenix.ccsds",
     commands: &[
@@ -55,7 +101,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     page_title: None,
     page_after_layout: None,
     on_event: None,
-    settings: &[],
+    settings: &SETTINGS,
     services: &[],
     contributes: &[],
 };
@@ -286,27 +332,27 @@ impl App {
             }
             None => self.project_settings.as_ref().map(|(_, p)| p),
         };
-        let text = |key: &str, mine: &Option<String>| -> Option<String> {
+        let text = |key: &str| -> Option<String> {
             match ps.and_then(|p| p.get(key)) {
                 Some(fenix_config::Value::Text(t)) => Some(t.clone()),
-                _ => mine.clone(),
+                _ => self.config.text_value(key).map(str::to_string),
             }
         };
-        let int = |key: &str, mine: Option<i64>| -> Option<i64> {
+        let int = |key: &str| -> Option<i64> {
             match ps.and_then(|p| p.get(key)) {
                 Some(fenix_config::Value::Int(n)) => Some(*n),
-                _ => mine,
+                _ => self.config.int_value(key),
             }
         };
-        let flag = |key: &str, mine: Option<bool>, default: bool| -> bool {
+        let flag = |key: &str, default: bool| -> bool {
             match ps.and_then(|p| p.get(key)) {
                 Some(fenix_config::Value::Bool(b)) => *b,
-                _ => mine.unwrap_or(default),
+                _ => self.config.bool_value(key).unwrap_or(default),
             }
         };
         let c = &self.config;
         let mut problems = Vec::new();
-        let leap = match c.ccsds_leap_seconds.as_ref().map(std::fs::read_to_string) {
+        let leap = match c.path_value("ccsds.leap_seconds").map(std::fs::read_to_string) {
             Some(Ok(t)) => LeapTable::parse(&t).unwrap_or_else(|e| {
                 problems.push(format!("ccsds.leap_seconds: {e}"));
                 LeapTable::default()
@@ -317,25 +363,25 @@ impl App {
             }
             None => LeapTable::default(),
         };
-        let pus = match text("ccsds.pus", &c.ccsds_pus).as_deref() {
+        let pus = match text("ccsds.pus").as_deref() {
             Some("a") => PusEdition::A,
             Some("none") => PusEdition::None,
             _ => PusEdition::C,
         };
-        let tm_time = TimeFormat::parse(&text("ccsds.tm_time", &c.ccsds_tm_time).unwrap_or_else(|| "cuc 4.2".into())).unwrap_or_else(|e| {
+        let tm_time = TimeFormat::parse(&text("ccsds.tm_time").unwrap_or_else(|| "cuc 4.2".into())).unwrap_or_else(|e| {
             problems.push(format!("ccsds.tm_time: {e}"));
             TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false }
         });
-        let epoch = match text("ccsds.epoch", &c.ccsds_epoch) {
+        let epoch = match text("ccsds.epoch") {
             Some(e) => Epoch::parse(&e, &leap).unwrap_or_else(|why| {
                 problems.push(format!("ccsds.epoch: {why}"));
                 Epoch::default()
             }),
             None => Epoch::default(),
         };
-        let tm_time_for_correlation = TimeFormat::parse(&text("ccsds.tm_time", &c.ccsds_tm_time).unwrap_or_else(|| "cuc 4.2".into())).unwrap_or(TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false });
+        let tm_time_for_correlation = TimeFormat::parse(&text("ccsds.tm_time").unwrap_or_else(|| "cuc 4.2".into())).unwrap_or(TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false });
         // A correlation says where the on-board clock really counts from.
-        let (epoch, nominal_epoch) = match text("ccsds.time_correlation", &c.ccsds_time_correlation).filter(|t| !t.trim().is_empty()) {
+        let (epoch, nominal_epoch) = match text("ccsds.time_correlation").filter(|t| !t.trim().is_empty()) {
             Some(t) => match fenix_ccsds::time::correlate(&t, tm_time_for_correlation, &leap) {
                 Ok(correlated) => (correlated, Some(epoch)),
                 Err(why) => {
@@ -345,22 +391,22 @@ impl App {
             },
             None => (epoch, None),
         };
-        let pec = Pec::parse(&text("ccsds.crc", &c.ccsds_crc).unwrap_or_default()).unwrap_or(Pec::Ccitt16);
-        let pec = if text("ccsds.crc", &c.ccsds_crc).is_none() { Pec::Ccitt16 } else { pec };
-        let base = OffsetBase::parse(&text("ccsds.plf_offset", &c.ccsds_plf_offset).unwrap_or_default()).unwrap_or_default();
-        let profile = Profile { pus, tm_time, epoch, leap, pec, tc_source_id: int("ccsds.tc_source_id", c.ccsds_tc_source_id).unwrap_or(0).clamp(0, 65535) as u16, ..Default::default() };
+        let pec = Pec::parse(&text("ccsds.crc").unwrap_or_default()).unwrap_or(Pec::Ccitt16);
+        let pec = if text("ccsds.crc").is_none() { Pec::Ccitt16 } else { pec };
+        let base = OffsetBase::parse(&text("ccsds.plf_offset").unwrap_or_default()).unwrap_or_default();
+        let profile = Profile { pus, tm_time, epoch, leap, pec, tc_source_id: int("ccsds.tc_source_id").unwrap_or(0).clamp(0, 65535) as u16, ..Default::default() };
         let vc_names = match ps.and_then(|p| p.get("ccsds.vc_names")) {
             Some(fenix_config::Value::Map(m)) => m.clone(),
-            _ => c.ccsds_vc_names.clone(),
+            _ => c.map_value("ccsds.vc_names").to_vec(),
         };
         let frames = FrameProfile {
-            kind: FrameKind::parse(&text("ccsds.frame_type", &c.ccsds_frame_type).unwrap_or_else(|| "tm".into())).unwrap_or_default(),
-            length: int("ccsds.frame_length", c.ccsds_frame_length).unwrap_or(1115).max(7) as usize,
-            asm: flag("ccsds.frame_asm", c.ccsds_frame_asm, true),
-            randomized: flag("ccsds.frame_randomized", c.ccsds_frame_randomized, false),
-            rs_depth: int("ccsds.frame_rs_depth", c.ccsds_frame_rs_depth).unwrap_or(0).clamp(0, 8) as usize,
-            ocf: flag("ccsds.frame_ocf", c.ccsds_frame_ocf, true),
-            fecf: flag("ccsds.frame_fecf", c.ccsds_frame_fecf, false),
+            kind: FrameKind::parse(&text("ccsds.frame_type").unwrap_or_else(|| "tm".into())).unwrap_or_default(),
+            length: int("ccsds.frame_length").unwrap_or(1115).max(7) as usize,
+            asm: flag("ccsds.frame_asm", true),
+            randomized: flag("ccsds.frame_randomized", false),
+            rs_depth: int("ccsds.frame_rs_depth").unwrap_or(0).clamp(0, 8) as usize,
+            ocf: flag("ccsds.frame_ocf", true),
+            fecf: flag("ccsds.frame_fecf", false),
             vc_names: vc_names.into_iter().filter_map(|(k, v)| Some((k.trim().parse().ok()?, v))).collect(),
             ..Default::default()
         };
@@ -368,16 +414,16 @@ impl App {
             kind: FrameKind::Tc,
             asm: false,
             ocf: false,
-            fecf: flag("ccsds.tc_fecf", c.ccsds_tc_fecf, true),
-            tc_segment_header: flag("ccsds.tc_segment_header", c.ccsds_tc_segment_header, true),
-            randomized: flag("ccsds.tc_randomized", c.ccsds_tc_randomized, false),
-            bch_correct: text("ccsds.tc_bch", &c.ccsds_tc_bch).as_deref() != Some("detect"),
+            fecf: flag("ccsds.tc_fecf", true),
+            tc_segment_header: flag("ccsds.tc_segment_header", true),
+            randomized: flag("ccsds.tc_randomized", false),
+            bch_correct: text("ccsds.tc_bch").as_deref() != Some("detect"),
             vc_names: frames.vc_names.clone(),
             ..Default::default()
         };
         let checks_off = match ps.and_then(|p| p.get("ccsds.checks_off")) {
             Some(fenix_config::Value::List(l)) => l.clone(),
-            _ => c.ccsds_checks_off.clone(),
+            _ => c.list_value("ccsds.checks_off").to_vec(),
         };
         Mission { profile, base, frames, tc, nominal_epoch, checks_off, problems }
     }
@@ -559,7 +605,7 @@ impl App {
             self.set_message(format!("{std}{}", heading.map(|h| format!(" · {h}")).unwrap_or_default()));
             return;
         };
-        let pdfs = self.config.ccsds_library.as_deref().map(pdfs_in).unwrap_or_default();
+        let pdfs = self.config.path_value("ccsds.library").as_deref().map(pdfs_in).unwrap_or_default();
         match file_for(standard, &pdfs).cloned() {
             Some(path) => match heading {
                 Some(h) => self.pdf_open_at_heading(&path, h),
@@ -571,7 +617,7 @@ impl App {
 
     /// `SPC k ?`: the standards library.
     pub(crate) fn cmd_ccsds_standards(&mut self) {
-        let page = crate::standards_page::StandardsPage::new(self.config.ccsds_library.clone());
+        let page = crate::standards_page::StandardsPage::new(self.config.path_value("ccsds.library"));
         self.open_page(PageModel::Feature(Box::new(page)));
     }
 
@@ -880,7 +926,7 @@ impl App {
     pub(crate) fn mission_clock_text(&mut self) -> Option<String> {
         let on = match self.project_settings.as_ref().and_then(|(_, p)| p.get("ccsds.clock")) {
             Some(fenix_config::Value::Bool(b)) => *b,
-            _ => self.config.ccsds_clock.unwrap_or(false),
+            _ => self.config.bool_value("ccsds.clock").unwrap_or(false),
         };
         if !on {
             return None;
@@ -1098,16 +1144,16 @@ mod tests {
         let mut app = App::with_file(None);
         assert!(app.mission(None).nominal_epoch.is_none());
         assert!(app.mission_clock_text().is_none(), "off by default");
-        app.config.ccsds_time_correlation = Some("814B878A.8000 = 2026-09-27 14:31:55.5".into());
+        app.config.set_value("ccsds.time_correlation", Some(fenix_config::Value::Text("814B878A.8000 = 2026-09-27 14:31:55.5".into())));
         let m = app.mission(None);
         assert!(m.nominal_epoch.is_some() && m.problems.is_empty(), "{:?}", m.problems);
         // The example packet's time now reads 10 s earlier.
         let tm = [0x0B, 0xF2, 0xC1, 0x23, 0x00, 0x16, 0x20, 0x03, 0x19, 0x00, 0x42, 0x00, 0x00, 0x81, 0x4B, 0x87, 0x8A, 0x80, 0x00, 0x00, 0x01, 0x01, 0x0B, 0xB8, 0x0A, 0x28, 0x02, 0x60, 0xE5];
         let (root, _) = decode_bytes(&tm, DecodeAs::Packet, None, &m);
         assert_eq!(root.find("time (CUC 4+2)").map(|f| f.value.clone()).as_deref(), Some("2026-09-27 14:31:55.500 UTC"));
-        app.config.ccsds_time_correlation = Some("soon = then".into());
+        app.config.set_value("ccsds.time_correlation", Some(fenix_config::Value::Text("soon = then".into())));
         assert!(app.mission(None).problems.iter().any(|p| p.starts_with("ccsds.time_correlation")));
-        app.config.ccsds_clock = Some(true);
+        app.config.set_value("ccsds.clock", Some(fenix_config::Value::Bool(true)));
         let clock = app.mission_clock_text().unwrap();
         assert!(clock.starts_with("OBT ") && clock.len() == "OBT 814B878A.8000".len(), "{clock}");
     }
@@ -1181,7 +1227,7 @@ mod tests {
         let mut app = App::with_file(None);
         let clock = SPEC.modeline_clock.unwrap();
         assert!(clock(&mut app).is_none(), "off by default");
-        app.config.ccsds_clock = Some(true);
+        app.config.set_value("ccsds.clock", Some(fenix_config::Value::Bool(true)));
         let text = clock(&mut app).expect("on");
         assert!(text.starts_with("OBT "), "{text}");
         assert_eq!(app.ccsds().mission_clock.as_ref().map(|(_, t)| t.as_str()), Some(text.as_str()));
@@ -1193,7 +1239,7 @@ mod tests {
         let recording = dir.path().join("live.bin");
         std::fs::write(&recording, []).unwrap();
         let mut app = App::with_file(None);
-        app.config.ccsds_sources = vec![vec!["sim".to_string(), format!("file://{}", recording.display())]];
+        app.config.set_value("ccsds.sources", Some(fenix_config::Value::Records(vec![vec!["sim".to_string(), format!("file://{}", recording.display())]])));
         app.cmd_ccsds_live();
         assert!(matches!(app.active_picker, Some(ActivePicker::Feature { feature: "fenix.ccsds", badge: "SOURCE", .. })));
         app.picker_confirm();
