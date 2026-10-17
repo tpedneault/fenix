@@ -8,7 +8,6 @@
 
 use std::cell::RefCell;
 
-use super::notebook_host::{NotebookPick, NotebookPrompt, NotebookPromptKind};
 use super::feature::page_as;
 use super::feature::ServiceCall::{Mut, Read};
 use super::pages::{PageEvent, PageModel};
@@ -16,7 +15,6 @@ use super::reading_host::PageTex;
 use super::*;
 use crate::diagram_page::{Action as DgAction, DiagramPage, Drawn};
 use crate::page::ImageKey;
-use fenix_notebook::Kind as NbKind;
 
 /// The scale diagrams are drawn at, over their natural size: sharp on
 /// high-DPI screens and when zoomed a little.
@@ -55,7 +53,13 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         completion_at_cursor: None,
         completion_pool_at: None,
         hover_first: None,
-        picker_confirm: None,
+        // A choice in one of its pickers (a new diagram's type or starter,
+        // a theme).
+        picker_confirm: Some(|app, pick, _marked, _query| {
+            if let Some(pick) = pick.downcast_ref::<DiagramPick>() {
+                app.diagram_picked(pick.clone());
+            }
+        }),
         picker_cancel: None,
         modeline_clock: None,
         page_action: Some(|app, id, action| {
@@ -188,7 +192,25 @@ pub(super) struct DiagramPre {
 /// What the diagrams feature offers others (the notebook's export): a
 /// diagram's source in, drawn with `diagrams.export_theme` and
 /// `diagrams.background`.
-static SERVICES: [super::feature::Service; 6] = [
+static SERVICES: [super::feature::Service; 8] = [
+    // `{}` -> a new diagram: its type, then a starter, then the notebook
+    // (`notebook.new_diagram`) asks its name and keeps it.
+    super::feature::Service {
+        name: "diagrams.new",
+        call: Mut(|app, _| {
+            app.diagram_new();
+            Ok(String::new())
+        }),
+    },
+    // `{path}` -> a theme picked for the diagram in that file.
+    super::feature::Service {
+        name: "diagrams.pick_theme",
+        call: Mut(|app, payload| {
+            let call: PathCall = serde_json::from_str(payload).map_err(|e| format!("a diagrams call: {e}"))?;
+            app.diagram_pick_theme_at(&call.path);
+            Ok(String::new())
+        }),
+    },
     // `{source}` -> the source with Fenix's theme written into it, so it
     // renders the same anywhere Mermaid does.
     super::feature::Service { name: "diagrams.portable", call: Read(|app, payload| Ok(app.diagram_portable(&DiagramCall::from(payload)?.source))) },
@@ -214,6 +236,29 @@ static SERVICES: [super::feature::Service; 6] = [
     // `{source}` -> the picture (PNG, 2x) on the clipboard.
     super::feature::Service { name: "diagrams.copy_picture", call: Mut(|app, payload| app.diagram_copy_picture(&DiagramCall::from(payload)?.source).map(|()| String::new())) },
 ];
+
+/// A choice in one of the diagrams feature's pickers.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DiagramPick {
+    /// A new diagram of `fenix_diagram::KINDS[i]`: its starter next.
+    Kind(usize),
+    /// A new diagram from this text: its name next.
+    Starter(String),
+    /// Write theme `name` into the diagram in `buffer`.
+    Theme { buffer: BufferId, name: String },
+}
+
+/// One of the diagrams feature's pickers.
+fn diagram_picker(title: &'static str, candidates: Vec<fenix_picker::Candidate<DiagramPick>>) -> ActivePicker {
+    let candidates = candidates.into_iter().map(|c| super::feature::FeaturePick::candidate(c.label, c.payload)).collect();
+    ActivePicker::Feature { feature: SPEC.id, badge: title, state: fenix_picker::PickerState::new(candidates) }
+}
+
+/// A diagrams service's payload naming a file.
+#[derive(serde::Deserialize)]
+struct PathCall {
+    path: PathBuf,
+}
 
 /// A diagrams service's payload.
 #[derive(serde::Deserialize)]
@@ -651,25 +696,31 @@ impl App {
     // New diagrams
     // ------------------------------------------------------------------
 
-    /// `SPC n d`: pick a type, a starter, then a name.
-    pub(crate) fn notebook_new_diagram_flow(&mut self) {
-        if self.notebook().is_none() {
-            return;
+    /// A choice in one of its pickers.
+    fn diagram_picked(&mut self, pick: DiagramPick) {
+        match pick {
+            DiagramPick::Kind(i) => self.diagram_kind_picked(i),
+            DiagramPick::Starter(text) => self.diagram_starter_picked(text),
+            DiagramPick::Theme { buffer, name } => self.diagram_set_theme(buffer, &name),
         }
+    }
+
+    /// `diagrams.new` (`SPC n d`): pick a type, a starter, then a name.
+    fn diagram_new(&mut self) {
         let candidates = fenix_diagram::KINDS
             .iter()
             .enumerate()
-            .map(|(i, k)| fenix_picker::Candidate::new(format!("{:<7} {:<19} {}", k.tag, k.header, k.about), NotebookPick::DiagramKind(i)))
+            .map(|(i, k)| fenix_picker::Candidate::new(format!("{:<7} {:<19} {}", k.tag, k.header, k.about), DiagramPick::Kind(i)))
             .collect();
         self.completion = None;
-        self.enter_picker(super::notebook_host::notebook_picker("DIAGRAM", candidates));
+        self.enter_picker(diagram_picker("DIAGRAM", candidates));
     }
 
     pub(super) fn diagram_kind_picked(&mut self, i: usize) {
         let Some(kind) = fenix_diagram::KINDS.get(i) else { return };
-        let mut candidates: Vec<fenix_picker::Candidate<NotebookPick>> = fenix_diagram::starters(kind)
+        let mut candidates: Vec<fenix_picker::Candidate<DiagramPick>> = fenix_diagram::starters(kind)
             .into_iter()
-            .map(|(name, text)| fenix_picker::Candidate::new(format!("{name:<10} {}", text.lines().nth(1).unwrap_or("").trim()), NotebookPick::Starter(text.to_string())))
+            .map(|(name, text)| fenix_picker::Candidate::new(format!("{name:<10} {}", text.lines().nth(1).unwrap_or("").trim()), DiagramPick::Starter(text.to_string())))
             .collect();
         // Yours: Mermaid snippets whose trigger starts with the type.
         let catalog = self.snippet_layers(self.project_root.as_ref().map(|r| r.join(".fenix").join("snippets")).as_deref());
@@ -677,38 +728,17 @@ impl App {
             if s.scopes.iter().any(|x| x == "mermaid" || x == "mmd") {
                 let body = s.template.render(&Default::default(), &fenix_snippets::Context::current(None), "").text;
                 if fenix_diagram::kind(&body).map(|k| k.header) == Some(kind.header) {
-                    candidates.push(fenix_picker::Candidate::new(format!("{:<10} yours ({})", s.name, s.trigger), NotebookPick::Starter(body)));
+                    candidates.push(fenix_picker::Candidate::new(format!("{:<10} yours ({})", s.name, s.trigger), DiagramPick::Starter(body)));
                 }
             }
         }
-        self.enter_picker(super::notebook_host::notebook_picker("STARTER", candidates));
+        self.enter_picker(diagram_picker("STARTER", candidates));
     }
 
-    pub(super) fn diagram_starter_picked(&mut self, text: String) {
-        self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::DiagramName { text }, input: String::new() });
-        self.wake_caret();
-    }
-
-    /// Makes a diagram called `name` holding `text`, opens it and its
-    /// preview.
-    pub(super) fn notebook_create_diagram(&mut self, name: &str, text: &str) {
-        let Some(nb) = self.notebook() else { return };
-        if let Some(existing) = nb.by_name(name) {
-            let id = existing.id.clone();
-            self.set_message(format!("{name} is in the notebook already -- opened it"));
-            self.open_notebook_entry(&id);
-            return;
-        }
-        match nb.create(NbKind::Diagram, name, text) {
-            Ok(id) => {
-                self.open_notebook_entry(&id);
-                // The cursor on the blank line under the header.
-                let line = text.lines().position(|l| l.trim().is_empty()).unwrap_or(1);
-                self.notebook_place_cursor(line, 4);
-                self.refresh_notebook_pages();
-                self.set_message(format!("{name} -- draws as you type; saves itself"));
-            }
-            Err(e) => self.set_error(format!("couldn't make the diagram: {e}")),
+    /// The starter's text to the notebook, which asks its name and keeps it.
+    fn diagram_starter_picked(&mut self, text: String) {
+        if let Err(e) = self.call_service("notebook.new_diagram", &serde_json::json!({ "text": text })) {
+            self.set_error(format!("couldn't make the diagram: {e}"));
         }
     }
 
@@ -734,11 +764,11 @@ impl App {
             .into_iter()
             .map(|n| {
                 let mark = if n == current { "●" } else { " " };
-                fenix_picker::Candidate::new(format!("{mark} {n:<10} {}", about(&n)), NotebookPick::Theme { buffer: source, name: n })
+                fenix_picker::Candidate::new(format!("{mark} {n:<10} {}", about(&n)), DiagramPick::Theme { buffer: source, name: n })
             })
             .collect();
         self.completion = None;
-        self.enter_picker(super::notebook_host::notebook_picker("THEME", candidates));
+        self.enter_picker(diagram_picker("THEME", candidates));
     }
 
     /// `SPC m t` in a diagram.
@@ -777,14 +807,13 @@ impl App {
         self.set_message(format!("theme: {name}"));
     }
 
-    /// A notebook diagram's theme, from the notebook page.
-    pub(super) fn diagram_pick_theme(&mut self, id: Option<String>) {
-        let Some(id) = id else { return };
-        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&id)).map(|e| e.path.clone()) else { return };
-        let buffer = match self.buffers.id_for_path(&path) {
+    /// `diagrams.pick_theme`: a theme for the diagram in `path` (from the
+    /// notebook page).
+    fn diagram_pick_theme_at(&mut self, path: &Path) {
+        let buffer = match self.buffers.id_for_path(path) {
             Some(b) => b,
             None => {
-                let b = self.buffers.open_path(&path);
+                let b = self.buffers.open_path(path);
                 self.note_disk_state(b);
                 b
             }
@@ -795,6 +824,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    use super::super::notebook_host::{NotebookPrompt, NotebookPromptKind};
     use super::*;
 
     /// What the notebook's export gets from the diagrams services.
@@ -817,6 +847,36 @@ mod tests {
         let key: u64 = app.query_service("diagrams.picture", &source).unwrap().parse().unwrap();
         assert_eq!(key, app.diagram_key(flow, None));
         assert_eq!(app.query_service("diagrams.problem", &source), Ok(String::new()));
+    }
+
+    fn pick_first(app: &mut App, badge: &str) {
+        match &app.active_picker {
+            Some(ActivePicker::Feature { feature: "fenix.diagrams", badge: b, .. }) => assert_eq!(*b, badge),
+            _ => panic!("the diagrams feature's {badge} picker"),
+        }
+        app.picker_confirm();
+    }
+
+    /// `SPC n d`: the notebook asks the diagrams feature for a new one;
+    /// its type and starter are the diagrams feature's pickers; the
+    /// notebook asks the name and keeps it.
+    #[test]
+    fn a_new_diagram_goes_from_the_notebook_to_the_diagrams_pickers_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.notebook_new_diagram();
+        pick_first(&mut app, "DIAGRAM");
+        pick_first(&mut app, "STARTER");
+        let Some(NotebookPrompt { kind: NotebookPromptKind::DiagramName { text }, .. }) = app.features.notebook_state().prompt.clone() else { panic!("the name prompt") };
+        assert!(text.starts_with("flowchart"), "{text}");
+        app.features.notebook_state_mut().prompt = None;
+        app.notebook_create_diagram("Fresh", &text);
+        let entry = app.features.notebook_state().book.as_ref().unwrap().by_name("Fresh").cloned().unwrap();
+        // Its theme, from the notebook page, through `diagrams.pick_theme`.
+        app.call_service("diagrams.pick_theme", &serde_json::json!({ "path": entry.path })).unwrap();
+        pick_first(&mut app, "THEME");
+        assert!(app.buffers.get(app.buffers.id_for_path(&entry.path).unwrap()).unwrap().buffer.text().contains("theme:"));
     }
 
     fn preview(app: &App) -> (BufferId, fenix_window::WindowId) {

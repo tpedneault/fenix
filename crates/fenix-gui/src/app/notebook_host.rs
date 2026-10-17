@@ -25,12 +25,6 @@ pub(crate) enum NotebookPick {
     Template { name: String, body: String },
     /// Type `[[name]]` at the cursor.
     InsertLink(String),
-    /// A new diagram of `fenix_diagram::KINDS[i]`: its starter next.
-    DiagramKind(usize),
-    /// A new diagram from this text: its name next.
-    Starter(String),
-    /// Write theme `name` into the diagram in `buffer`.
-    Theme { buffer: BufferId, name: String },
     /// A search hit: an entry, at a line.
     Hit { id: String, line: Option<usize> },
     /// The notebook page, with this filter.
@@ -40,6 +34,23 @@ pub(crate) enum NotebookPick {
     /// A notebook diagram into the buffer: its block, or an SVG and a link.
     InsertDiagram { id: String, svg: bool },
 }
+
+/// What the notebook offers other features.
+static SERVICES: [super::feature::Service; 1] = [
+    // `{text}` -> asks the new diagram's name, then keeps it in the
+    // notebook and opens it (the diagrams feature's new-diagram flow).
+    super::feature::Service {
+        name: "notebook.new_diagram",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            #[derive(serde::Deserialize)]
+            struct NewDiagram {
+                text: String,
+            }
+            let call: NewDiagram = serde_json::from_str(payload).map_err(|e| format!("a notebook call: {e}"))?;
+            app.notebook_name_new_diagram(call.text).map(|()| String::new())
+        }),
+    },
+];
 
 /// What the notebook's modeline prompt is typing.
 #[derive(Debug, Clone, PartialEq)]
@@ -175,7 +186,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_after_layout: None,
         on_event: None,
         settings: &[],
-        services: &[],
+        services: &SERVICES,
     }
 };
 
@@ -625,9 +636,6 @@ impl App {
                 self.wake_caret();
             }
             NotebookPick::InsertLink(name) => self.notebook_insert_text(&format!("[[{name}]]")),
-            NotebookPick::DiagramKind(i) => self.diagram_kind_picked(i),
-            NotebookPick::Starter(text) => self.diagram_starter_picked(text),
-            NotebookPick::Theme { buffer, name } => self.diagram_set_theme(buffer, &name),
             NotebookPick::Hit { id, line } => self.notebook_open_at(&id, line),
             NotebookPick::Filter(filter) => self.notebook_page_filtered(&filter),
             NotebookPick::Export { what, how } => self.export_picked(what, how),
@@ -928,7 +936,7 @@ impl App {
                 }
             }
             NbAction::Export(id) => self.notebook_export(&id),
-            NbAction::Theme(id) => self.diagram_pick_theme(Some(id)),
+            NbAction::Theme(id) => self.notebook_pick_theme(&id),
             NbAction::View(id) => self.open_entry_viewer(&id),
         }
     }
@@ -1100,8 +1108,55 @@ impl App {
 
     /// `SPC n d`.
     pub(crate) fn notebook_new_diagram(&mut self) {
-        self.notebook_new_diagram_flow();
+        if self.notebook().is_none() {
+            return;
+        }
+        if let Err(e) = self.call_service("diagrams.new", &serde_json::json!({})) {
+            self.set_error(format!("no new diagram: {e}"));
+        }
     }
+
+    /// `t` on a diagram on the notebook page: the diagrams feature picks
+    /// its theme.
+    fn notebook_pick_theme(&mut self, id: &str) {
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
+        if let Err(e) = self.call_service("diagrams.pick_theme", &serde_json::json!({ "path": path })) {
+            self.set_error(format!("no theme: {e}"));
+        }
+    }
+
+    /// `notebook.new_diagram`: a diagram holding `text`, once its name
+    /// is typed.
+    fn notebook_name_new_diagram(&mut self, text: String) -> Result<(), String> {
+        self.notebook().ok_or("no notebook")?;
+        self.features.notebook_state_mut().prompt = Some(NotebookPrompt { kind: NotebookPromptKind::DiagramName { text }, input: String::new() });
+        self.wake_caret();
+        Ok(())
+    }
+
+    /// Makes a diagram called `name` holding `text`, opens it and its
+    /// preview.
+    pub(super) fn notebook_create_diagram(&mut self, name: &str, text: &str) {
+        let Some(nb) = self.notebook() else { return };
+        if let Some(existing) = nb.by_name(name) {
+            let id = existing.id.clone();
+            self.set_message(format!("{name} is in the notebook already -- opened it"));
+            self.open_notebook_entry(&id);
+            return;
+        }
+        match nb.create(NbKind::Diagram, name, text) {
+            Ok(id) => {
+                self.open_notebook_entry(&id);
+                // The cursor on the blank line under the header.
+                let line = text.lines().position(|l| l.trim().is_empty()).unwrap_or(1);
+                self.notebook_place_cursor(line, 4);
+                self.refresh_notebook_pages();
+                self.set_message(format!("{name} -- draws as you type; saves itself"));
+            }
+            Err(e) => self.set_error(format!("couldn't make the diagram: {e}")),
+        }
+    }
+
 
     /// `SPC n f`: every entry by name.
     pub(crate) fn notebook_find(&mut self) {
