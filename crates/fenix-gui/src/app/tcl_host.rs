@@ -51,6 +51,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     picker_confirm: None,
     picker_cancel: None,
     modeline_clock: None,
+    page_action: None,
 };
 
 /// A Tcl file gets the Tcl `SPC m` menu (which the MIB fills too).

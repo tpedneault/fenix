@@ -47,6 +47,12 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     }),
     picker_cancel: None,
     modeline_clock: Some(|app| app.mission_clock_text()),
+    // The time converter's keys (`SPC k T`).
+    page_action: Some(|app, id, action| {
+        if let Ok(action) = action.downcast::<time_page::Action>() {
+            app.time_page_action(id, *action);
+        }
+    }),
 };
 
 /// What CCSDS keeps between calls: each stream page's source, the
@@ -81,6 +87,38 @@ impl super::feature::Feature for CcsdsHost {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+}
+
+/// The time converter (`SPC k T`), CCSDS's first page through the
+/// feature page contribution point.
+impl super::feature::FeaturePage for TimePage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        "*time*".to_string()
+    }
+
+    fn typing(&self) -> bool {
+        TimePage::typing(self)
+    }
+
+    fn claims_space(&self) -> bool {
+        TimePage::typing(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        TimePage::paste(self, text);
+    }
+
+    fn layout(&self, cols: usize) -> crate::page::Page {
+        time_page::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+        Box::new(TimePage::key(self, key))
     }
 }
 
@@ -712,7 +750,7 @@ impl App {
         let origin = self.ccsds_origin();
         let mut page = TimePage::new(p, tai);
         page.nominal = mission.nominal_epoch;
-        let id = self.open_page(PageModel::Time(Box::new(page)));
+        let id = self.open_page(PageModel::Feature(Box::new(page)));
         if let Some(o) = origin {
             if let Some(mib) = self.features.get_mut::<super::mib_host::MibHost>() {
                 mib.origins.insert(id, o);
@@ -1027,5 +1065,22 @@ mod tests {
         let id = app.focused_buffer_id();
         assert!(matches!(app.pages.get(&id).map(|s| &s.model), Some(PageModel::Stream(_))));
         assert!(matches!(app.ccsds().stream_sources.get(&id), Some(super::super::stream_host::StreamSource::Live(_))));
+    }
+
+    // The time converter is a feature page: core lays it out and routes
+    // its keys; CCSDS carries out what they ask through its spec.
+
+    #[test]
+    fn the_time_converter_is_a_feature_page_whose_keys_reach_ccsds_through_the_spec() {
+        let mut app = App::with_file(None);
+        app.cmd_ccsds_time();
+        let id = app.focused_buffer_id();
+        let Some(PageModel::Feature(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!("a feature page") };
+        assert_eq!((page.feature(), page.title()), ("fenix.ccsds", "*time*".to_string()));
+        assert_eq!(app.page_title(id), "*time*");
+        app.ensure_page_layout(id, app.focused_pane_id(), 80);
+        assert!(app.open().buffer.text().contains("UTC"), "laid out by the page");
+        assert!(app.page_key(KeyPress::char('q')));
+        assert!(!app.is_page_buffer(id), "q closed it, through `page_action`");
     }
 }

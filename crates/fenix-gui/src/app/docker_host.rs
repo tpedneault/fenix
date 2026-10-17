@@ -65,6 +65,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     picker_confirm: None,
     picker_cancel: None,
     modeline_clock: None,
+    page_action: None,
 };
 
 /// What Docker's background threads report, as a `FeatureEvent`'s

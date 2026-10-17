@@ -94,6 +94,9 @@ pub(crate) struct FeatureSpec {
     /// The modeline's clock text, in place of the wall clock (the
     /// mission clock).
     pub modeline_clock: Option<fn(&mut App) -> Option<String>>,
+    /// Carries out what a key on one of its pages (`FeaturePage::key`)
+    /// asked for, on page `BufferId`.
+    pub page_action: Option<fn(&mut App, BufferId, Box<dyn Any>)>,
 }
 
 /// A completion in progress: where its prefix starts, the prefix, and
@@ -133,6 +136,33 @@ pub(crate) enum Notice {
     TerminalClosed(BufferId),
     /// The periodic housekeeping tick (session checkpoint, disk probe).
     Tick,
+}
+
+/// A page a feature owns (`PageModel::Feature`). Core keeps the buffer,
+/// lays the page out when it changes or its pane does, routes keys to it
+/// and draws it; the page itself only turns keys into actions, which its
+/// feature's `FeatureSpec::page_action` carries out with the feature in
+/// place. The same contract an extension's page will have.
+pub(crate) trait FeaturePage: Any {
+    /// The feature that owns it.
+    fn feature(&self) -> &'static str;
+    /// What it's called in its tab, the modeline and `SPC b b`.
+    fn title(&self) -> String;
+    /// Whether a text field on it has the keyboard -- then every key is
+    /// the page's, Space and Ctrl-V included.
+    fn typing(&self) -> bool {
+        false
+    }
+    /// Whether Space means something on the focused row.
+    fn claims_space(&self) -> bool {
+        false
+    }
+    /// Text pasted (Ctrl-V) or typed while `typing`.
+    fn paste(&mut self, _text: &str) {}
+    /// The page, laid out for a pane `cols` cells wide.
+    fn layout(&self, cols: usize) -> crate::page::Page;
+    /// A key; what it asks for goes to the feature's `page_action`.
+    fn key(&mut self, key: crate::page::Key) -> Box<dyn Any>;
 }
 
 /// One row's payload in a feature's picker (`ActivePicker::Feature`):
