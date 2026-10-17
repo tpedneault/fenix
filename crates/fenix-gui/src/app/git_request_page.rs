@@ -18,13 +18,7 @@ fn default_reviewers(root: &Path, configured: &[String]) -> Vec<String> {
 
 impl App {
     fn request_page(&mut self, id: BufferId) -> Option<&mut RequestPage> {
-        match self.pages.get_mut(&id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
-            Some(PageModel::Request(r)) => Some(r),
-            _ => None,
-        }
+        self.feature_page_mut::<RequestPage>(id)
     }
 
     /// `SPC g P`: a pull request for the focused file's branch.
@@ -42,7 +36,7 @@ impl App {
             self.set_error("not on a branch -- switch to one (SPC g w) to open a pull request from it");
             return;
         };
-        if let Some(id) = self.find_page(|m| matches!(m, PageModel::Request(r) if r.root == root && r.branch == branch)) {
+        if let Some(id) = self.find_page(|m| super::feature::page_as::<RequestPage>(m).is_some_and(|r| r.root == root && r.branch == branch)) {
             self.show_page(id);
             return;
         }
@@ -87,7 +81,7 @@ impl App {
         let stat = fenix_git::shortstat(&root, &base_ref, "HEAD");
         let mut page = RequestPage::new(root.clone(), super::review_host::forge_name(&root), client.project().to_string(), branch.clone(), base, commits, stat, standing, jira);
         page.reviewers = default_reviewers(&root, &self.config.git_reviewers).join(", ");
-        let id = self.open_page(PageModel::Request(Box::new(page)));
+        let id = self.open_page(PageModel::Feature(Box::new(page)));
         self.page_spawn(move |send| {
             let result = client.request_for_branch(&branch);
             let me = client.current_user().ok();
@@ -405,5 +399,29 @@ mod tests {
         assert!(made.draft, "{made:?}");
         assert!(said.as_ref().is_some_and(|(_, error)| !error), "{said:?}");
         assert!(header.contains(&format!("Review  !{} ", made.number)) && header.contains("draft"), "{header}");
+    }
+
+    #[test]
+    fn a_new_request_is_a_review_page_with_draft_on_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let git = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&root).output().unwrap().status.success(), "git {args:?}");
+        git(&["init", "-q", "-b", "main"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "first"]);
+        git(&["checkout", "-q", "-b", "topic"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "the change"]);
+        git(&["remote", "add", "origin", "http://127.0.0.1:1/group/proj.git"]);
+        let mut app = App::with_file(None);
+        app.config.gitlab_base_url = Some("http://127.0.0.1:1".to_string());
+        app.config.gitlab_token = Some("tok".to_string());
+        app.open_new_request_at(root);
+        let id = app.focused_buffer_id();
+        let Some(PageModel::Feature(p)) = app.pages.get(&id).map(|s| &s.model) else { panic!("a feature page") };
+        assert_eq!((p.feature(), p.title()), ("fenix.review", "*new request: topic*".to_string()));
+        if let Some(r) = app.feature_page_mut::<RequestPage>(id) {
+            r.field = git_request::Field::Draft;
+        }
+        let Some(PageModel::Feature(p)) = app.pages.get(&id).map(|s| &s.model) else { unreachable!() };
+        assert!(p.claims_space(), "Space ticks Draft");
     }
 }

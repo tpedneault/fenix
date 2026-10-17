@@ -3,6 +3,7 @@
 //! remembers (`review_store`); reviewing in a worktree of its own; and
 //! the compose buffer for comments, replies and the summary.
 
+use super::feature::page_as;
 use super::pages::{PageEvent, PageModel};
 use super::*;
 use crate::review_inbox::{Entry, Inbox, InboxAction};
@@ -41,7 +42,20 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         picker_confirm: None,
         picker_cancel: None,
         modeline_clock: None,
-        page_action: None,
+        // What a key on the inbox, a review or a new request asked for.
+        page_action: Some(|app, id, action| {
+            let action = match action.downcast::<InboxAction>() {
+                Ok(action) => return app.inbox_action(id, *action),
+                Err(action) => action,
+            };
+            let action = match action.downcast::<ReviewAction>() {
+                Ok(action) => return app.review_action(id, *action),
+                Err(action) => action,
+            };
+            if let Ok(action) = action.downcast::<crate::git_request::RequestAction>() {
+                app.request_action(id, *action);
+            }
+        }),
         page_context: None,
         page_title: None,
         page_after_layout: None,
@@ -85,6 +99,76 @@ impl super::feature::Features {
 
     pub(super) fn review_mut(&mut self) -> &mut ReviewState {
         &mut self.get_mut::<ReviewHost>().expect("review has no instance hooks that run code, so it's always in place").state
+    }
+}
+
+/// The reviews (`SPC g M`): the open requests to look at.
+impl super::feature::FeaturePage for Inbox {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        format!("*reviews: {}*", self.project)
+    }
+
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+        crate::review_inbox::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+        Box::new(Inbox::key(self, key))
+    }
+}
+
+/// One request under review.
+impl super::feature::FeaturePage for ReviewPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        format!("*review: {}*", self.reference())
+    }
+
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+        crate::review_page::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+        Box::new(ReviewPage::key(self, key))
+    }
+}
+
+/// A new pull request for the branch (`SPC g P`).
+impl super::feature::FeaturePage for crate::git_request::RequestPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        format!("*new request: {}*", self.branch)
+    }
+
+    fn typing(&self) -> bool {
+        self.editing.is_some()
+    }
+
+    /// Space ticks Draft.
+    fn claims_space(&self) -> bool {
+        self.field == crate::git_request::Field::Draft
+    }
+
+    fn paste(&mut self, text: &str) {
+        crate::git_request::RequestPage::paste(self, text);
+    }
+
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+        crate::git_request::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+        Box::new(crate::git_request::RequestPage::key(self, key))
     }
 }
 
@@ -170,23 +254,11 @@ fn read_since(root: &Path, reviewed: &str, head: &str, paths: &[String]) -> Resu
 
 impl App {
     fn review_page(&mut self, id: BufferId) -> Option<&mut ReviewPage> {
-        match self.pages.get_mut(&id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
-            Some(PageModel::Review(r)) => Some(r),
-            _ => None,
-        }
+        self.feature_page_mut::<ReviewPage>(id)
     }
 
     fn inbox(&mut self, id: BufferId) -> Option<&mut Inbox> {
-        match self.pages.get_mut(&id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
-            Some(PageModel::Inbox(i)) => Some(i),
-            _ => None,
-        }
+        self.feature_page_mut::<Inbox>(id)
     }
 
     /// The repository the review pages act on: the focused file's.
@@ -219,12 +291,12 @@ impl App {
                 return;
             }
         };
-        let id = match self.find_page(|m| matches!(m, PageModel::Inbox(i) if i.root == root)) {
+        let id = match self.find_page(|m| page_as::<Inbox>(m).is_some_and(|i| i.root == root)) {
             Some(id) => {
                 self.show_page(id);
                 id
             }
-            None => self.open_page(PageModel::Inbox(Box::new(Inbox::new(root.clone(), forge_name(&root), project)))),
+            None => self.open_page(PageModel::Feature(Box::new(Inbox::new(root.clone(), forge_name(&root), project)))),
         };
         self.inbox_refresh(id);
     }
@@ -277,7 +349,7 @@ impl App {
                 return;
             }
         };
-        let id = match self.find_page(|m| matches!(m, PageModel::Review(r) if r.root == root && r.number == number)) {
+        let id = match self.find_page(|m| page_as::<ReviewPage>(m).is_some_and(|r| r.root == root && r.number == number)) {
             Some(id) => {
                 self.show_page(id);
                 id
@@ -286,7 +358,7 @@ impl App {
                 let state = review_store::load(&root, &project, number);
                 let mut page = ReviewPage::new(root, forge, project, number, state);
                 page.in_worktree = in_worktree;
-                self.open_page(PageModel::Review(Box::new(page)))
+                self.open_page(PageModel::Feature(Box::new(page)))
             }
         };
         self.review_refresh(id);
@@ -689,10 +761,7 @@ mod tests {
 
     fn page_mut(app: &mut App) -> &mut ReviewPage {
         let id = app.focused_buffer_id();
-        match app.pages.get_mut(&id).map(|s| &mut s.model) {
-            Some(PageModel::Review(r)) => r,
-            _ => panic!("the review page isn't focused"),
-        }
+        app.feature_page_mut::<ReviewPage>(id).expect("the review page isn't focused")
     }
 
     fn text(app: &mut App) -> String {
@@ -770,10 +839,8 @@ mod tests {
         }
         let inbox = text(&mut app);
         assert!(inbox.contains("Make the timeout configurable"), "{inbox}");
-        let number = match app.pages.get(&app.focused_buffer_id()).map(|s| &s.model) {
-            Some(PageModel::Inbox(i)) => i.entries.as_ref().unwrap().iter().find(|e| e.request.title.contains("timeout")).unwrap().request.number,
-            _ => panic!(),
-        };
+        let i = app.feature_page::<Inbox>(app.focused_buffer_id()).expect("the inbox");
+        let number = i.entries.as_ref().unwrap().iter().find(|e| e.request.title.contains("timeout")).unwrap().request.number;
         app.open_review(root.clone(), number, false);
         let shown = text(&mut app);
         assert!(shown.contains("feature/configurable-timeout → main") && shown.contains("widget.rs"), "{shown}");
