@@ -6,6 +6,18 @@
 use super::*;
 
 /// The reader's commands and its `SPC r` group.
+/// How PDFs are shown: `[reader]` in `settings.toml`.
+static SETTINGS: [fenix_config::Setting; 5] = {
+    use fenix_config::{Category::Reader, Kind, Setting};
+    [
+        Setting::stored("reader.colors", Reader, "Page colours", Kind::Choice(&["paper", "theme"]), "Paper shows pages as printed. Theme draws them in the current theme's colours. SPC r c switches; open PDFs change at once.").with_default("paper"),
+        Setting::stored("reader.zoom", Reader, "Default zoom", Kind::Choice(&["width", "page"]), "How a PDF opens the first time: its pages' width fills the pane, or a whole page fits. After that it opens as you left it.").with_default("width"),
+        Setting::stored("reader.page_gap", Reader, "Page gap", Kind::Int { min: 0, max: 40 }, "Pixels between pages.").with_default("12"),
+        Setting::stored("reader.remember", Reader, "Remember position", Kind::Bool, "Reopen each PDF where you left it, with its zoom and marks.").with_default("on"),
+        Setting::stored("reader.sidebar", Reader, "Sidebar", Kind::Choice(&["auto", "beside", "over"]), "Where o opens the outline: beside the pages, over them, or beside them when the pane is wide enough.").with_default("auto"),
+    ]
+};
+
 pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::FeatureCommand as C;
     use super::feature::LeaderEntry::{Bind, Group};
@@ -71,7 +83,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
                 app.apply_pdf_response(*response);
             }
         }),
-        settings: &[],
+        settings: &SETTINGS,
         services: &[],
         contributes: &[],
     }
