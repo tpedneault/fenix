@@ -1568,7 +1568,7 @@ mod tests {
         app.open_agenda_page(Some(crate::agenda_page::Tab::List));
         app.page_key(KeyPress::char('D'));
         let id = app.focused_buffer_id();
-        let Some(super::pages::PageModel::Agenda(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
+        let Some(page) = app.feature_page::<crate::agenda_page::AgendaPage>(id) else { panic!() };
         assert!(page.note.as_ref().unwrap().0.contains("PROJ-1 in Jira isn't touched"));
         app.page_key(KeyPress::char('D'));
         assert!(app.features.agenda().store.tasks.is_empty());
