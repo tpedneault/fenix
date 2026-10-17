@@ -7,7 +7,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::ini;
-use crate::{names, Config, JiraBlocked, WindowLayout};
+use crate::{names, Config, WindowLayout};
 
 /// Everything `config.ini` at `path` held, as a `Config` whose own path
 /// is `into`, tokens included.
@@ -46,8 +46,10 @@ pub(crate) fn load(path: &std::path::Path, into: PathBuf, state_dir: PathBuf) ->
         .get("explorer")
         .map(|s| parse_pair_list(s, "bookmark").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect())
         .unwrap_or_default();
-    c.agenda_categories = sections.get("agenda").map(|s| parse_single_list(s, "category")).unwrap_or_default();
-    c.agenda_worklog_round = sections.get("agenda").and_then(|s| s.get("worklog_round")).and_then(|v| parse_minutes(v));
+    // The agenda's and Jira's settings, registered by them: kept by key.
+    let categories = sections.get("agenda").map(|s| parse_single_list(s, "category")).unwrap_or_default();
+    c.set_value("agenda.categories", (!categories.is_empty()).then_some(crate::Value::List(categories)));
+    c.set_value("agenda.worklog_round", sections.get("agenda").and_then(|s| s.get("worklog_round")).and_then(|v| parse_minutes(v)).map(|m| crate::Value::Int(m.into())));
     // The Embedded feature's settings, registered by it: kept by key.
     for name in ["arduino_cli", "clangd", "arduino_language_server"] {
         c.set_path_value(&format!("embedded.{name}"), embedded.and_then(|s| s.get(name)).map(Path::new));
@@ -58,11 +60,12 @@ pub(crate) fn load(path: &std::path::Path, into: PathBuf, state_dir: PathBuf) ->
     c.watch_files = editor.and_then(|s| s.get("watch_files")).and_then(|v| v.parse().ok());
     c.jira_base_url = jira.and_then(|s| s.get("base_url")).cloned();
     c.jira_token = jira.and_then(|s| s.get("token")).cloned();
-    c.jira_projects = jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default();
-    c.jira_users = jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default();
-    c.jira_blocked = jira.map(parse_jira_blocked).unwrap_or_default();
-    c.jira_priority_map = jira.map(|s| parse_pair_list(s, "priority")).unwrap_or_default();
-    c.jira_sync_minutes = jira.and_then(|s| s.get("sync_minutes")).and_then(|v| v.trim().parse().ok());
+    let map = |entries: Vec<(String, String)>| (!entries.is_empty()).then_some(crate::Value::Map(entries));
+    c.set_value("jira.projects", map(jira.map(|s| parse_pair_list(s, "project")).unwrap_or_default()));
+    c.set_value("jira.users", map(jira.map(|s| parse_pair_list(s, "user")).unwrap_or_default()));
+    c.set_value("jira.blocked", map(jira.map(parse_jira_blocked).unwrap_or_default()));
+    c.set_value("jira.priorities", map(jira.map(|s| parse_pair_list(s, "priority")).unwrap_or_default()));
+    c.set_value("jira.sync_minutes", jira.and_then(|s| s.get("sync_minutes")).and_then(|v| v.trim().parse::<i64>().ok()).map(crate::Value::Int));
     c.git_graph_limit = git.and_then(|s| s.get("graph_limit")).and_then(|v| v.parse().ok());
     c.git_base_branch = git.and_then(|s| s.get("base_branch")).cloned();
     c.gitlab_base_url = gitlab.and_then(|s| s.get("base_url")).cloned();
@@ -170,18 +173,19 @@ fn parse_windows(section: &std::collections::BTreeMap<String, String>) -> Vec<Wi
 }
 
 /// `[jira]`'s `blockedN = PROJ|ID|NAME`, `PROJ|flag` or `PROJ|local`,
-/// ordinal-ordered. Anything else is skipped.
-fn parse_jira_blocked(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, JiraBlocked)> {
-    let mut entries: Vec<(usize, String, JiraBlocked)> = section
+/// ordinal-ordered, as `jira.blocked` holds them: `flag`, `local` or
+/// `ID: Name`. Anything else is skipped.
+fn parse_jira_blocked(section: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
+    let mut entries: Vec<(usize, String, String)> = section
         .iter()
         .filter_map(|(key, value)| {
             let n = key.strip_prefix("blocked")?.parse::<usize>().ok()?;
             let mut parts = value.splitn(3, '|').map(str::trim);
             let project = parts.next()?.to_string();
             let blocked = match (parts.next()?, parts.next()) {
-                ("flag", None) => JiraBlocked::Flag,
-                ("local", None) => JiraBlocked::Local,
-                (id, Some(name)) if !id.is_empty() => JiraBlocked::Status { id: id.to_string(), name: name.to_string() },
+                ("flag", None) => "flag".to_string(),
+                ("local", None) => "local".to_string(),
+                (id, Some(name)) if !id.is_empty() => format!("{id}: {name}"),
                 _ => return None,
             };
             Some((n, project, blocked))
@@ -384,7 +388,7 @@ mod tests {
 
         let config = load_ini(&path);
 
-        assert_eq!(config.agenda_categories, vec!["Fenix".to_string(), "Personal".to_string(), "Tenth".to_string()]);
+        assert_eq!(config.list_value("agenda.categories"), ["Fenix".to_string(), "Personal".to_string(), "Tenth".to_string()]);
     }
 
     /// `vnc.hosts` as config.ini's `[vnc]` left it.
@@ -458,7 +462,7 @@ blocked2 = OPS|flag
 blocked3 = X|weird
 ").unwrap();
         let config = load_ini(&path);
-        assert_eq!(config.jira_blocked, vec![("OPS".to_string(), JiraBlocked::Flag)]);
+        assert_eq!(config.map_value("jira.blocked"), [("OPS".to_string(), "flag".to_string())]);
         std::fs::remove_file(&path).ok();
     }
 

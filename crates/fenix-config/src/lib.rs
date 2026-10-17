@@ -33,32 +33,6 @@ pub use schema::{setting, settings, Category, Field, Kind, Setting, Value, FRAMI
 pub use project::ProjectSettings;
 pub use secrets::Secret;
 
-/// What "Blocked" means for one Jira project -- see `Config::jira_blocked`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum JiraBlocked {
-    /// Transition to this status (matched by id; `name` is for display).
-    Status { id: String, name: String },
-    /// Set the issue's Flagged (impediment) field; leave the status alone.
-    Flag,
-    /// Don't touch Jira at all.
-    Local,
-}
-
-impl Config {
-    /// The configured Blocked meaning for `project`, if one was chosen.
-    pub fn jira_blocked_for(&self, project: &str) -> Option<&JiraBlocked> {
-        self.jira_blocked.iter().find(|(p, _)| p == project).map(|(_, b)| b)
-    }
-
-    /// Records (or replaces) `project`'s Blocked meaning.
-    pub fn set_jira_blocked(&mut self, project: &str, blocked: JiraBlocked) {
-        match self.jira_blocked.iter_mut().find(|(p, _)| p == project) {
-            Some(entry) => entry.1 = blocked,
-            None => self.jira_blocked.push((project.to_string(), blocked)),
-        }
-    }
-}
-
 /// `[motion]`. Each feature unset follows `level`: `subtle` turns on
 /// the short, informative ones, `full` adds the rest. `editor.animations
 /// = false` still turns every one of them off.
@@ -261,32 +235,6 @@ pub struct Config {
     /// planned).
     pub jira_base_url: Option<String>,
     pub jira_token: Option<String>,
-    /// Tracked projects, `(key, display name)` -- same numbered-key
-    /// `[jira]` list convention `mib_roots` already established, just a
-    /// plain `(String, String)` pair instead of `(String, PathBuf)`.
-    /// Hand-typed by the user (`SPC j p a`), not looked up against a
-    /// live Jira API at add-time.
-    pub jira_projects: Vec<(String, String)>,
-    /// Tracked users, `(id, display name)` -- same shape/convention as
-    /// `jira_projects`, e.g. `("jo1111111", "John Doe")`.
-    pub jira_users: Vec<(String, String)>,
-    /// Searches saved on the Jira page, `(name, JQL)`.
-    pub jira_queries: Vec<(String, String)>,
-    /// What moving a linked agenda task to Blocked means in each Jira
-    /// project, keyed by project key -- `blockedN = PROJ|10103|On Hold`
-    /// (a real status, matched by its id so a rename can't break it),
-    /// `PROJ|flag` (set the board's Flagged field instead) or
-    /// `PROJ|local` (Blocked stays an agenda-only state). Learned the
-    /// first time a task in that project is blocked, since every
-    /// project's workflow names its blocked status differently.
-    pub jira_blocked: Vec<(String, JiraBlocked)>,
-    /// Overrides for how a Jira priority name maps onto the agenda's
-    /// four levels -- `priorityN = Major|High`. Anything not listed
-    /// falls back to a name heuristic (`fenix_agenda::guess_priority`).
-    pub jira_priority_map: Vec<(String, String)>,
-    /// How often linked agenda tasks are refreshed from Jira while Fenix
-    /// runs, in minutes -- unset means 10, `0` turns it off.
-    pub jira_sync_minutes: Option<u32>,
     /// The GitLab instance's own root URL (e.g.
     /// `https://gitlab.mycompany.com` -- the instance, *not* `/api/v4`,
     /// which `fenix-gitlab` appends itself) and a personal access token
@@ -325,24 +273,6 @@ pub struct Config {
     /// still fine; it just has to happen between sessions, the same
     /// deal `mib_roots` has.
     pub explorer_bookmarks: Vec<(String, PathBuf)>,
-    /// User-defined agenda categories (`SPC a`'s task manager), in the
-    /// order they appear in `config.ini`'s `[agenda]` section --
-    /// `category1 = Fenix`, `category2 = Personal`, ... A task's own
-    /// category is stored as a plain string rather than an index into
-    /// this list, so removing one here never orphans or crashes loading
-    /// a task that still names it -- it just becomes an unrecognized
-    /// label. Driven by `self` on save (not re-read fresh like
-    /// `vnc_hosts`), same reasoning as `explorer_bookmarks`: there's a
-    /// real in-app add flow for this list, not just hand-editing.
-    pub agenda_categories: Vec<String>,
-    /// What worklogs are rounded to before they're sent to Jira, in
-    /// minutes (`[agenda] worklog_round = 15`) -- unset means 15, `0`
-    /// or `1` sends exact minutes.
-    pub agenda_worklog_round: Option<u32>,
-    /// How long without a key press, with the clock running, before Fenix
-    /// asks what to keep (`[agenda] idle_minutes = 60`) -- unset means
-    /// 60, `0` never asks.
-    pub agenda_idle_minutes: Option<u32>,
     pub git_graph_limit: Option<usize>,
     /// The branch ref-comparison defaults its base to (`SPC g c`), e.g.
     /// `develop` -- unset means `main`. What "how does my branch differ
@@ -526,9 +456,6 @@ impl Config {
             lsp_servers: Vec::new(),
             mib_roots: Vec::new(),
             explorer_bookmarks: Vec::new(),
-            agenda_categories: Vec::new(),
-            agenda_worklog_round: None,
-            agenda_idle_minutes: None,
             mib_telecommand_template: None,
             mib_telecommand_argument_template: None,
             mib_telecommand_argument_separator: None,
@@ -570,12 +497,6 @@ impl Config {
             watch_files: None,
             jira_base_url: None,
             jira_token: None,
-            jira_projects: Vec::new(),
-            jira_users: Vec::new(),
-            jira_queries: Vec::new(),
-            jira_blocked: Vec::new(),
-            jira_priority_map: Vec::new(),
-            jira_sync_minutes: None,
             git_graph_limit: None,
             git_base_branch: None,
             gitlab_base_url: None,
@@ -979,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn saving_still_persists_an_in_app_change_to_mib_roots_or_jira_lists() {
+    fn saving_still_persists_an_in_app_change_to_mib_roots() {
         // The re-read-from-disk protection is specifically scoped to
         // `vnc_hosts`/`documents`/`workspaces` -- `mib_roots`/
         // `jira_projects`/`jira_users` really do have an in-app add/
@@ -988,13 +909,11 @@ mod tests {
         let path = temp_path("mib_and_jira_still_save_from_self");
         let mut config = Config::load(path.clone()).unwrap();
         config.mib_roots = vec![("MIB-A".to_string(), PathBuf::from("C:/data/mib-a"))];
-        config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string())];
 
         config.save().unwrap();
 
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.mib_roots, config.mib_roots);
-        assert_eq!(reloaded.jira_projects, config.jira_projects);
         let _ = std::fs::remove_file(path);
     }
 
@@ -1134,32 +1053,11 @@ mod tests {
         let mut config = Config::load_or_default(path.clone());
         config.jira_base_url = Some("https://jira.example.com".to_string());
         config.jira_token = Some("secret-token-value".to_string());
-        config.jira_projects = vec![("PROJ".to_string(), "My Project".to_string()), ("OTHER".to_string(), "Other Project".to_string())];
-        config.jira_users = vec![("jo1111111".to_string(), "John Doe".to_string())];
         config.save().unwrap();
 
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.jira_base_url, Some("https://jira.example.com".to_string()));
         assert_eq!(reloaded.jira_token, Some("secret-token-value".to_string()));
-        assert_eq!(
-            reloaded.jira_projects,
-            vec![("PROJ".to_string(), "My Project".to_string()), ("OTHER".to_string(), "Other Project".to_string())]
-        );
-        assert_eq!(reloaded.jira_users, vec![("jo1111111".to_string(), "John Doe".to_string())]);
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn jira_projects_are_ordered_by_numeric_ordinal_not_key_string() {
-        let path = temp_path("jira_ordinal_order");
-        let mut config = Config::load_or_default(path.clone());
-        // 10 project entries so lexical-vs-numeric key ordering actually
-        // differs ("project10" sorts before "project2" as plain strings).
-        config.jira_projects = (1..=10).map(|i| (format!("P{i}"), format!("Project {i}"))).collect();
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.jira_projects, config.jira_projects);
         std::fs::remove_file(&path).ok();
     }
 
@@ -1259,20 +1157,6 @@ mod tests {
     }
 
     #[test]
-    fn agenda_categories_round_trip_through_save_and_load() {
-        // Same "app has its own add flow" shape as `explorer_bookmarks` --
-        // a save has to carry them, not just whatever was on disk.
-        let path = temp_path("agenda_categories_round_trip");
-        let mut config = Config::load_or_default(path.clone());
-        config.agenda_categories = vec!["Fenix".to_string(), "Personal".to_string()];
-
-        config.save().unwrap();
-
-        let reloaded = Config::load(path).unwrap();
-        assert_eq!(reloaded.agenda_categories, config.agenda_categories);
-    }
-
-    #[test]
     fn save_creates_missing_parent_directories() {
         let path = temp_path("creates_parents").parent().unwrap().join("nested-fenix-config-test").join("config.ini");
         let mut config = Config::load_or_default(path.clone());
@@ -1282,29 +1166,14 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
-    #[test]
-    fn jira_blocked_mappings_round_trip_through_save_and_load() {
-        let path = temp_path("jira_blocked");
-        let mut config = Config::load_or_default(path.clone());
-        config.set_jira_blocked("PROJ", JiraBlocked::Status { id: "10103".to_string(), name: "On Hold".to_string() });
-        config.set_jira_blocked("OPS", JiraBlocked::Flag);
-        config.set_jira_blocked("INFRA", JiraBlocked::Local);
-        config.set_jira_blocked("OPS", JiraBlocked::Local);
-        config.jira_priority_map = vec![("Major".to_string(), "High".to_string())];
-        config.agenda_worklog_round = Some(30);
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(
-            reloaded.jira_blocked_for("PROJ"),
-            Some(&JiraBlocked::Status { id: "10103".to_string(), name: "On Hold".to_string() })
-        );
-        assert_eq!(reloaded.jira_blocked_for("OPS"), Some(&JiraBlocked::Local), "setting a project twice replaces its entry");
-        assert_eq!(reloaded.jira_blocked_for("INFRA"), Some(&JiraBlocked::Local));
-        assert_eq!(reloaded.jira_blocked_for("NOPE"), None);
-        assert_eq!(reloaded.jira_priority_map, config.jira_priority_map);
-        assert_eq!(reloaded.agenda_worklog_round, Some(30));
-        std::fs::remove_file(&path).ok();
+    /// Jira's `jira.blocked` (and its users), as fenix-gui registers them:
+    /// for the migration test, which checks they come over by key.
+    fn register_jira() {
+        static JIRA: [Setting; 2] = [
+            Setting::stored("jira.users", schema::Category::Jira, "People", Kind::Map { key: "Username", value: "Name", paths: false }, "People."),
+            Setting::stored("jira.blocked", schema::Category::Jira, "What Blocked means", Kind::Map { key: "Project", value: "Meaning", paths: false }, "Blocked."),
+        ];
+        schema::register(&JIRA);
     }
 
     /// VNC's setting, as fenix-gui registers it at startup: a feature's
@@ -1529,6 +1398,7 @@ name = \"lab\""), "a key no setting here declares stays as it was");
         .unwrap();
         let path = dir.join("settings.toml");
         register_vnc();
+        register_jira();
         let config = Config::migrate_ini(&ini, path.clone(), dir.join("state")).unwrap();
         assert!(config.problems.is_empty(), "{:?}", config.problems);
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1538,7 +1408,7 @@ name = \"lab\""), "a key no setting here declares stays as it was");
         assert_eq!(reloaded.animations, Some(false));
         assert_eq!(reloaded.lsp_servers, [("python".to_string(), r"C:\tools\pyright-langserver.exe --stdio".to_string())]);
         assert_eq!(reloaded.mib_roots, [("missionc".to_string(), PathBuf::from(r"C:\mib\missionc"))]);
-        assert_eq!(reloaded.jira_blocked, [("FNX".to_string(), JiraBlocked::Status { id: "10103".into(), name: "On Hold".into() })]);
+        assert_eq!(reloaded.map_value("jira.blocked"), [("FNX".to_string(), "10103: On Hold".to_string())]);
         assert_eq!(reloaded.git_auto_fetch_minutes, Some(5));
         assert_eq!(reloaded.git_reviewers, ["alex", "sam"]);
         assert!(matches!(reloaded.value("vnc.hosts"), Some(Value::Records(rows)) if rows.len() == 2));

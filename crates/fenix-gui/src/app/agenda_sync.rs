@@ -15,7 +15,7 @@
 use super::*;
 
 use fenix_agenda::{OpKind, RemoteComment, RemoteSnapshot, RemoteUpdate, Status, WorklogRow};
-use fenix_config::JiraBlocked;
+use super::jira_host::JiraBlocked;
 
 /// Jira, as the agenda's sync (`agenda_host::AgendaSync`).
 pub(crate) static SYNC: super::agenda_host::AgendaSync = super::agenda_host::AgendaSync {
@@ -188,7 +188,7 @@ impl App {
     /// Blocked status (or the Flagged field, if that's what Blocked means
     /// there) first, then the status's category.
     pub(super) fn agenda_status_for(&self, project: &str, status_id: &str, category: &str, flagged: bool) -> Status {
-        match self.config.jira_blocked_for(project) {
+        match self.jira_blocked_for(project) {
             Some(JiraBlocked::Status { id, .. }) if id == status_id => Status::Blocked,
             Some(JiraBlocked::Flag) if flagged => Status::Blocked,
             _ => fenix_agenda::jira::status_for_category(category),
@@ -198,7 +198,7 @@ impl App {
     /// `[jira] priorityN = Name|Level` first, then a guess from the name.
     pub(super) fn agenda_map_priority(&self, name: &str) -> fenix_agenda::Priority {
         self.config
-            .jira_priority_map
+            .map_value("jira.priorities")
             .iter()
             .find(|(jira, _)| jira.eq_ignore_ascii_case(name))
             .and_then(|(_, level)| fenix_agenda::Priority::ALL.into_iter().find(|p| p.label().eq_ignore_ascii_case(level)))
@@ -238,7 +238,7 @@ impl App {
     }
 
     fn agenda_flag_field_wanted(&self) -> Option<Option<String>> {
-        let wanted = self.config.jira_blocked.iter().any(|(_, b)| *b == JiraBlocked::Flag);
+        let wanted = self.jira_blocked_flags_anywhere();
         wanted.then(|| self.features.jira_sync().flag_field.clone().flatten())
     }
 
@@ -273,7 +273,7 @@ impl App {
         if self.features.jira_sync().ticker_started {
             return;
         }
-        let minutes = self.config.jira_sync_minutes.unwrap_or(10);
+        let minutes = self.config.int_value("jira.sync_minutes").map_or(10, |m| m as u32);
         let Some(proxy) = self.event_proxy.clone() else { return };
         if minutes == 0 {
             return;
@@ -306,7 +306,7 @@ impl App {
             return;
         }
         let need_me = self.features.jira_sync().me.is_none();
-        let want_flag = self.config.jira_blocked.iter().any(|(_, b)| *b == JiraBlocked::Flag);
+        let want_flag = self.jira_blocked_flags_anywhere();
         let known_flag = self.features.jira_sync().flag_field.clone();
         self.features.jira_sync_mut().pulling = true;
         self.features.jira_sync_mut().last_pull = Some(Instant::now());
@@ -469,7 +469,7 @@ impl App {
             return;
         }
         let project = link.project().to_string();
-        let blocked = self.config.jira_blocked_for(&project).cloned();
+        let blocked = self.jira_blocked_for(&project);
         self.features.agenda_mut().store.move_to_status(id, target);
 
         if prev.0 == Status::Blocked && blocked == Some(JiraBlocked::Flag) && link.base.flagged {
@@ -544,7 +544,7 @@ impl App {
                 return;
             }
         };
-        let blocked = self.config.jira_blocked_for(&project).cloned();
+        let blocked = self.jira_blocked_for(&project);
         match target {
             None => self.agenda_open_transition_picker(id, &key, transitions, None),
             Some(Status::Blocked) => match blocked {
@@ -616,7 +616,7 @@ impl App {
             transitions.into_iter().map(|t| fenix_picker::Candidate::new(transition_label(&t), SyncPick::Transition(t))).collect();
         if revert.is_none() {
             let project = fenix_jira::project_of(key).to_string();
-            let blocked = match self.config.jira_blocked_for(&project) {
+            let blocked = match self.jira_blocked_for(&project) {
                 Some(JiraBlocked::Status { name, .. }) => format!("Blocked  ({name})"),
                 Some(JiraBlocked::Flag) => "Blocked  (flag as impediment)".to_string(),
                 Some(JiraBlocked::Local) => "Blocked  (local only)".to_string(),
@@ -658,13 +658,13 @@ impl App {
             self.set_message("A reassigns a Jira issue -- link this task first with I");
             return;
         };
-        if self.config.jira_users.is_empty() {
+        if self.config.map_value("jira.users").is_empty() {
             self.set_error("no people to assign to -- a on the Jira page (SPC j j) adds one");
             return;
         }
         let candidates = self
             .config
-            .jira_users
+            .map_value("jira.users")
             .iter()
             .map(|(uid, name)| fenix_picker::Candidate::new(format!("{name} ({uid})"), SyncPick::Assignee(uid.clone(), name.clone())))
             .collect();
@@ -703,7 +703,7 @@ impl App {
     }
 
     fn tracked_project_keys(&self) -> Vec<String> {
-        self.config.jira_projects.iter().map(|(key, _)| key.clone()).collect()
+        self.config.map_value("jira.projects").iter().map(|(key, _)| key.clone()).collect()
     }
 
     /// Fetches one issue by key and hands it to `purpose`.
@@ -867,7 +867,7 @@ impl App {
                 return;
             }
         };
-        let current = self.config.jira_blocked_for(&project).cloned();
+        let current = self.jira_blocked_for(&project);
         let mark = |b: &JiraBlocked| if current.as_ref() == Some(b) { "  (current)" } else { "" };
         let mut candidates: Vec<fenix_picker::Candidate<SyncPick>> = statuses
             .into_iter()
@@ -976,7 +976,7 @@ impl App {
             }
             SyncPick::Blocked(blocked, transition) => {
                 let Some(project) = project else { return };
-                self.config.set_jira_blocked(&project, blocked.clone());
+                self.set_jira_blocked(&project, blocked.clone());
                 if let Err(err) = self.config.save() {
                     self.set_error(format!("couldn't save settings.toml: {err}"));
                 }
@@ -1217,8 +1217,8 @@ mod tests {
     #[test]
     fn a_fetched_issue_maps_its_status_priority_and_blocked_status() {
         let mut app = app();
-        app.config.set_jira_blocked("PROJ", JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() });
-        app.config.jira_priority_map = vec![("Major".to_string(), "Urgent".to_string())];
+        app.set_jira_blocked("PROJ", JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() });
+        app.config.set_value("jira.priorities", Some(fenix_config::Value::Map(vec![("Major".to_string(), "Urgent".to_string())])));
 
         let update = app.agenda_remote_update(&detail("PROJ-1", IN_REVIEW));
         assert_eq!(update.status, Status::InProgress);
@@ -1227,7 +1227,7 @@ mod tests {
         let update = app.agenda_remote_update(&detail("PROJ-1", ("9", "On Hold", "indeterminate")));
         assert_eq!(update.status, Status::Blocked, "the project's blocked status beats its category");
 
-        app.config.set_jira_blocked("OPS", JiraBlocked::Flag);
+        app.set_jira_blocked("OPS", JiraBlocked::Flag);
         let mut flagged = detail("OPS-1", IN_REVIEW);
         flagged.flagged = true;
         assert_eq!(app.agenda_remote_update(&flagged).status, Status::Blocked);
@@ -1249,8 +1249,8 @@ mod tests {
     #[test]
     fn blocking_uses_the_projects_mapping_local_or_flag() {
         let mut app = app();
-        app.config.set_jira_blocked("LOC", JiraBlocked::Local);
-        app.config.set_jira_blocked("FLG", JiraBlocked::Flag);
+        app.set_jira_blocked("LOC", JiraBlocked::Local);
+        app.set_jira_blocked("FLG", JiraBlocked::Flag);
         let local = linked(&mut app, "LOC-1", IN_REVIEW);
         let flag = linked(&mut app, "FLG-1", IN_REVIEW);
 
@@ -1348,9 +1348,9 @@ mod tests {
 
         confirm_row(&mut app, "On Hold");
 
-        assert_eq!(app.config.jira_blocked_for("PROJ"), Some(&JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() }));
+        assert_eq!(app.jira_blocked_for("PROJ"), Some(JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() }));
         let reloaded = fenix_config::Config::load(app.config.path().to_path_buf()).unwrap();
-        assert!(reloaded.jira_blocked_for("PROJ").is_some(), "the choice is saved to settings.toml");
+        assert!(reloaded.map_value("jira.blocked").iter().any(|(p, _)| p == "PROJ"), "the choice is saved to settings.toml");
         assert_eq!(app.features.agenda().store.task(id).unwrap().status, Status::Blocked);
         assert!(matches!(&app.features.agenda().store.outbox[0].kind, OpKind::Transition { to_id, .. } if to_id == "9"));
     }
@@ -1358,7 +1358,7 @@ mod tests {
     #[test]
     fn a_blocked_status_that_isnt_reachable_snaps_back_and_offers_the_steps_that_are() {
         let mut app = app();
-        app.config.set_jira_blocked("PROJ", JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() });
+        app.set_jira_blocked("PROJ", JiraBlocked::Status { id: "9".to_string(), name: "On Hold".to_string() });
         let id = linked(&mut app, "PROJ-1", OPEN);
         app.features.agenda_mut().store.move_to_status(id, Status::Blocked);
 
@@ -1388,7 +1388,7 @@ mod tests {
 
         confirm_row(&mut app, "Waiting");
 
-        assert_eq!(app.config.jira_blocked_for("OPS"), Some(&JiraBlocked::Status { id: "8".to_string(), name: "Waiting".to_string() }));
+        assert_eq!(app.jira_blocked_for("OPS"), Some(JiraBlocked::Status { id: "8".to_string(), name: "Waiting".to_string() }));
     }
 
     #[test]

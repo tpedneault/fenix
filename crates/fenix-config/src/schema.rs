@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 
 use toml_edit::{value, Array, ArrayOfTables, InlineTable, Item, Table};
 
-use crate::{Config, JiraBlocked, Secret};
+use crate::{Config, Secret};
 
 /// A setting's value, independent of how it's stored.
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +134,7 @@ impl Category {
 
 type Get = fn(&Config) -> Option<Value>;
 type Set = fn(&mut Config, Option<Value>) -> Result<(), String>;
+type Check = fn(&Value) -> Result<(), String>;
 
 /// Where a setting's value lives.
 #[derive(Clone, Copy)]
@@ -159,6 +160,8 @@ pub struct Setting {
     /// Whether it only takes effect after a restart.
     pub restart: bool,
     access: Access,
+    /// What a value has to be beyond its kind (`checked`).
+    check: Option<Check>,
 }
 
 impl std::fmt::Debug for Setting {
@@ -180,6 +183,9 @@ impl Setting {
     pub fn set(&self, config: &mut Config, value: Option<Value>) -> Result<(), String> {
         if let Some(v) = &value {
             self.kind.check(v)?;
+            if let Some(check) = self.check {
+                check(v)?;
+            }
         }
         match self.access {
             Access::Field(_, set) => set(config, value),
@@ -196,7 +202,15 @@ impl Setting {
     /// A feature's setting, kept by its key: what a feature registers
     /// (`register`).
     pub const fn stored(key: &'static str, category: Category, label: &'static str, kind: Kind, help: &'static str) -> Setting {
-        Setting { key, category, label, help, kind, default: "", project: false, restart: false, access: Access::Stored }
+        Setting { key, category, label, help, kind, default: "", project: false, restart: false, access: Access::Stored, check: None }
+    }
+
+    /// Checks a value beyond its kind (a Jira project's Blocked meaning):
+    /// a value that fails is refused on the page and reported when the
+    /// file is loaded.
+    pub const fn checked(mut self, check: Check) -> Self {
+        self.check = Some(check);
+        self
     }
 
     /// What applies when it isn't set, as the page shows it.
@@ -224,7 +238,7 @@ impl Setting {
 }
 
 fn s(key: &'static str, category: Category, label: &'static str, kind: Kind, help: &'static str, (get, set): (Get, Set)) -> Setting {
-    Setting { key, category, label, help, kind, default: "", project: false, restart: false, access: Access::Field(get, set) }
+    Setting { key, category, label, help, kind, default: "", project: false, restart: false, access: Access::Field(get, set), check: None }
 }
 
 // -- Conversions between a field's type and a `Value` ---------------------
@@ -327,26 +341,6 @@ fn path_map_get(v: &[(String, PathBuf)]) -> Option<Value> {
 }
 fn path_map_set(v: Option<Value>) -> Result<Vec<(String, PathBuf)>, String> {
     map_set(v).map(|m| m.into_iter().map(|(k, p)| (k, PathBuf::from(p))).collect())
-}
-
-/// How a Blocked meaning is written: `flag`, `local`, or `ID: Name`.
-pub fn blocked_text(b: &JiraBlocked) -> String {
-    match b {
-        JiraBlocked::Flag => "flag".into(),
-        JiraBlocked::Local => "local".into(),
-        JiraBlocked::Status { id, name } => format!("{id}: {name}"),
-    }
-}
-
-pub fn blocked_parse(text: &str) -> Result<JiraBlocked, String> {
-    match text.trim() {
-        "flag" => Ok(JiraBlocked::Flag),
-        "local" => Ok(JiraBlocked::Local),
-        other => match other.split_once(':') {
-            Some((id, name)) if !id.trim().is_empty() => Ok(JiraBlocked::Status { id: id.trim().into(), name: name.trim().into() }),
-            _ => Err(format!("\"{other}\": expected flag, local, or a status as ID: Name")),
-        },
-    }
 }
 
 macro_rules! field {
@@ -458,30 +452,6 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         // Jira & agenda
         s("jira.base_url", Jira, "Jira server", Kind::Text, "Your Jira Server or Data Center's address.", field!(jira_base_url, text_get, text_set)),
         s("jira.token", Jira, "Jira token", Kind::Secret(Secret::Jira), "A personal access token for the Jira server.", field!(jira_token, text_get, text_set)),
-        s("jira.sync_minutes", Jira, "Sync every", Kind::Minutes, "How often linked agenda tasks are brought up to date, in minutes.", (|c: &Config| int(&c.jira_sync_minutes), |c: &mut Config, v| {
-            c.jira_sync_minutes = int_set(v)?;
-            Ok(())
-        })).default("10"),
-        s("jira.projects", Jira, "Projects", Kind::Map { key: "Key", value: "Name", paths: false }, "Jira projects the Jira page lists open issues and the current sprint for.", field!(jira_projects, map_get, map_set)),
-        s("jira.users", Jira, "People", Kind::Map { key: "Username", value: "Name", paths: false }, "People the Jira page lists issues assigned to.", field!(jira_users, map_get, map_set)),
-        s("jira.queries", Jira, "Saved searches", Kind::Map { key: "Name", value: "JQL", paths: false }, "Searches saved on the Jira page, by name.", field!(jira_queries, map_get, map_set)),
-        s("jira.blocked", Jira, "What Blocked means", Kind::Map { key: "Project", value: "Meaning", paths: false }, "Per project: flag, local, or the status to move to, as ID: Name. Learned the first time you block a task.", (|c: &Config| (!c.jira_blocked.is_empty()).then(|| Value::Map(c.jira_blocked.iter().map(|(p, b)| (p.clone(), blocked_text(b))).collect())), |c: &mut Config, v| {
-            c.jira_blocked = map_set(v)?.into_iter().map(|(p, t)| blocked_parse(&t).map(|b| (p, b))).collect::<Result<_, _>>()?;
-            Ok(())
-        })),
-        s("jira.priorities", Jira, "Priority names", Kind::Map { key: "Jira priority", value: "Agenda priority", paths: false }, "How a Jira priority maps onto the agenda's.", field!(jira_priority_map, map_get, map_set)),
-        s("agenda.categories", Jira, "Agenda categories", Kind::List, "Categories offered when you file a task.", (|c: &Config| list_get(&c.agenda_categories), |c: &mut Config, v| {
-            c.agenda_categories = list_set(v)?;
-            Ok(())
-        })),
-        s("agenda.worklog_round", Jira, "Round worklogs to", Kind::Minutes, "Time logged to Jira is rounded to this many minutes.", (|c: &Config| int(&c.agenda_worklog_round), |c: &mut Config, v| {
-            c.agenda_worklog_round = int_set(v)?;
-            Ok(())
-        })).default("15"),
-        s("agenda.idle_minutes", Jira, "Ask after idle", Kind::Minutes, "With the clock running, how long without a key press before Fenix asks what time to keep. 0 never asks.", (|c: &Config| int(&c.agenda_idle_minutes), |c: &mut Config, v| {
-            c.agenda_idle_minutes = int_set(v)?;
-            Ok(())
-        })).default("60"),
         // Embedded & MIB
         // SCOS-2000 MIB
         s("mib.roots", Mib, "MIBs", Kind::Map { key: "Name", value: "Folder", paths: true }, "The MIB folders: their .dat tables. A project's own list takes the place of yours in that project; a folder in a project can be relative to it.", field!(mib_roots, path_map_get, path_map_set)).project(),
@@ -861,14 +831,6 @@ mod tests {
         assert!(fetch.kind.parse("five minutes").unwrap_err().contains("minutes"));
         let layout = setting("git.layout").unwrap();
         assert!(layout.kind.parse("tabs").unwrap_err().contains("page, panes"));
-    }
-
-    #[test]
-    fn a_blocked_meaning_reads_back_as_it_was_written() {
-        for b in [JiraBlocked::Flag, JiraBlocked::Local, JiraBlocked::Status { id: "10103".into(), name: "On Hold".into() }] {
-            assert_eq!(blocked_parse(&blocked_text(&b)), Ok(b));
-        }
-        assert!(blocked_parse("maybe").is_err());
     }
 }
 
