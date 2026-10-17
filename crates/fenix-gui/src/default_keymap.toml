@@ -1,0 +1,1121 @@
+# Fenix's own keys, as data: the leader map (`SPC ...`) and core's
+# `SPC m` entries. Features add theirs from their specs; your own
+# `keybindings.toml` will go over these (Phase 1). Keys are written
+# the way the which-key menu writes them: `SPC f s`, `SPC Tab n`.
+#
+# An entry with `command` binds its keys; with `group`, it names a
+# group of keys; with only `section`, it files a key under a section
+# of its group's which-key menu (`WHICH_KEY_SECTIONS`).
+
+[[leader]]
+keys = "SPC"
+group = "leader"
+
+[[leader]]
+keys = "SPC i"
+group = "insert"
+
+[[leader]]
+keys = "SPC i s"
+label = "snippet"
+command = "insert.snippet"
+
+[[leader]]
+keys = "SPC i S"
+label = "manage snippets"
+command = "snippets.open"
+
+[[leader]]
+keys = "SPC i n"
+label = "snippet from the selection"
+command = "snippets.from_selection"
+
+# `SPC SPC` mirrors Doom Emacs's own "hit the leader twice for the
+# single most-used action" convention -- here, the same fuzzy
+# find-file-in-project picker as `SPC p f`.
+[[leader]]
+keys = "SPC SPC"
+label = "find file"
+command = "project.find_file"
+
+[[leader]]
+keys = "SPC f"
+group = "files"
+
+[[leader]]
+keys = "SPC f s"
+label = "save"
+command = "file.save"
+
+[[leader]]
+keys = "SPC f j"
+label = "dired-jump"
+command = "explorer.jump"
+
+[[leader]]
+keys = "SPC f t"
+label = "table view"
+command = "table.toggle"
+
+[[leader]]
+keys = "SPC f f"
+label = "find file"
+command = "file.find"
+
+[[leader]]
+keys = "SPC f e"
+label = "explore from home"
+command = "file.explore"
+
+[[leader]]
+keys = "SPC f a"
+label = "find file (all)"
+command = "file.find_all"
+
+[[leader]]
+keys = "SPC f r"
+label = "recent files"
+command = "file.recent"
+
+[[leader]]
+keys = "SPC f R"
+label = "rename file"
+command = "file.rename"
+
+[[leader]]
+keys = "SPC f D"
+label = "delete file"
+command = "file.delete"
+
+[[leader]]
+keys = "SPC f y"
+label = "yank file path"
+command = "file.yank_path"
+
+# `v` for "revive" -- `r` is recent files and `R` is rename,
+# and this belongs in the same group as both.
+[[leader]]
+keys = "SPC f v"
+label = "recover unsaved work"
+command = "file.recover"
+
+[[leader]]
+keys = "SPC q"
+group = "quit"
+
+[[leader]]
+keys = "SPC q q"
+label = "quit"
+command = "app.quit"
+
+[[leader]]
+keys = "SPC t"
+group = "toggle"
+
+[[leader]]
+keys = "SPC t n"
+label = "line numbers"
+command = "view.cycle_line_numbers"
+
+[[leader]]
+keys = "SPC t p"
+label = "pick theme"
+command = "view.pick_theme"
+
+[[leader]]
+keys = "SPC t ="
+label = "font size +"
+command = "view.increase_font_size"
+
+[[leader]]
+keys = "SPC t -"
+label = "font size -"
+command = "view.decrease_font_size"
+
+[[leader]]
+keys = "SPC t 0"
+label = "font size reset"
+command = "view.reset_font_size"
+
+[[leader]]
+keys = "SPC t f"
+label = "fullscreen"
+command = "view.toggle_fullscreen"
+
+[[leader]]
+keys = "SPC t a"
+label = "motion"
+command = "view.toggle_animations"
+
+[[leader]]
+keys = "SPC t d"
+label = "inline problems"
+command = "view.cycle_diagnostics"
+
+[[leader]]
+keys = "SPC e"
+group = "explorer"
+
+[[leader]]
+keys = "SPC e t"
+label = "toggle sidebar"
+command = "explorer.toggle_sidebar"
+
+[[leader]]
+keys = "SPC e e"
+label = "open explorer here"
+command = "explorer.jump"
+
+[[leader]]
+keys = "SPC e d"
+label = "dual pane"
+command = "explorer.dual_pane"
+
+[[leader]]
+keys = "SPC e k"
+label = "stop the running operation"
+command = "explorer.cancel"
+
+[[leader]]
+keys = "SPC e o"
+label = "open with the system"
+command = "explorer.open_external"
+
+[[leader]]
+keys = "SPC e O"
+label = "show in Explorer"
+command = "explorer.reveal"
+
+[[leader]]
+keys = "SPC e y"
+label = "copy the full path"
+command = "explorer.yank_path"
+
+[[leader]]
+keys = "SPC e T"
+label = "shell here"
+command = "explorer.terminal_here"
+
+[[leader]]
+keys = "SPC e g"
+label = "search here"
+command = "explorer.grep_here"
+
+[[leader]]
+keys = "SPC e G"
+label = "project + Git panel here"
+command = "explorer.git_here"
+
+[[leader]]
+keys = "SPC e w"
+label = "edit names"
+command = "explorer.rename_mode"
+
+[[leader]]
+keys = "SPC e W"
+label = "apply edited names"
+command = "explorer.rename_apply"
+
+[[leader]]
+keys = "SPC e p"
+label = "go to path"
+command = "explorer.go_to_path"
+
+[[leader]]
+keys = "SPC e b"
+label = "places"
+command = "explorer.places"
+
+[[leader]]
+keys = "SPC e r"
+label = "recent directories"
+command = "explorer.recent_dirs"
+
+[[leader]]
+keys = "SPC e m"
+label = "bookmark this directory"
+command = "explorer.bookmark"
+
+[[leader]]
+keys = "SPC p"
+group = "project"
+
+[[leader]]
+keys = "SPC p f"
+label = "find file"
+command = "project.find_file"
+
+[[leader]]
+keys = "SPC p s"
+label = "search"
+command = "project.grep"
+
+[[leader]]
+keys = "SPC p n"
+label = "next match"
+command = "project.quickfix_next"
+
+[[leader]]
+keys = "SPC p N"
+label = "prev match"
+command = "project.quickfix_prev"
+
+# The hub; the quick path-only switcher stays on `P`.
+[[leader]]
+keys = "SPC p p"
+label = "projects"
+command = "project.hub"
+
+[[leader]]
+keys = "SPC p P"
+label = "quick switch"
+command = "project.switch_project"
+
+[[leader]]
+keys = "SPC p h"
+label = "doctor"
+command = "project.doctor"
+
+[[leader]]
+keys = "SPC p ,"
+label = "this project's settings"
+command = "project.settings"
+
+[[leader]]
+keys = "SPC ,"
+label = "settings"
+command = "settings.open"
+
+[[leader]]
+keys = "SPC p c"
+label = "new project"
+command = "project.new"
+
+[[leader]]
+keys = "SPC p a"
+label = "add project"
+command = "project.add"
+
+[[leader]]
+keys = "SPC p d"
+label = "delete project"
+command = "project.delete"
+
+# `SPC t` is already "toggle" (theme/font-size/fullscreen/...),
+# so the build/task runner nests under `SPC p` instead --
+# Doom Emacs' own `SPC p c` ("project compile") convention,
+# generalized to any discovered task rather than just a build.
+# `T`/lowercase mirrors `n`/`N`'s existing next-match/prev-match
+# shift-variant pattern just above, here for run/rerun instead.
+[[leader]]
+keys = "SPC p t"
+label = "run task"
+command = "task.run"
+
+[[leader]]
+keys = "SPC p T"
+label = "rerun last task"
+command = "task.rerun_last"
+
+[[leader]]
+keys = "SPC p k"
+label = "kill running task"
+command = "task.kill"
+
+[[leader]]
+keys = "SPC s"
+group = "search"
+
+[[leader]]
+keys = "SPC s s"
+label = "search buffer"
+command = "search.buffer"
+
+[[leader]]
+keys = "SPC s r"
+label = "replace in buffer"
+command = "search.replace_buffer"
+
+[[leader]]
+keys = "SPC s p"
+label = "replace in project"
+command = "search.replace_project"
+
+# `t`/`T`, lowercase for this buffer and shifted for the whole
+# project -- the same small/large split `SPC p n`/`N` and
+# `SPC p t`/`T` already use one shift key apart.
+[[leader]]
+keys = "SPC s t"
+label = "TODOs in buffer"
+command = "search.todos"
+
+[[leader]]
+keys = "SPC s T"
+label = "TODOs in project"
+command = "search.todos_project"
+
+[[leader]]
+keys = "SPC o"
+group = "open"
+
+[[leader]]
+keys = "SPC o d"
+label = "open home"
+command = "dashboard.open"
+
+[[leader]]
+keys = "SPC o t"
+label = "toggle terminal"
+command = "terminal.toggle"
+
+[[leader]]
+keys = "SPC o T"
+label = "terminal in this pane"
+command = "terminal.open_buffer"
+
+# DAP debugger. `SPC d` is already Docker's own group (Doom
+# Emacs' own convention for debugging), so this nests under
+# `SPC u` instead -- the one letter in "debUg" not already
+# claimed by another top-level group (d=docker, e=explorer,
+# b=buffer, g=git are all taken).
+[[leader]]
+keys = "SPC u"
+group = "debug"
+
+[[leader]]
+keys = "SPC u u"
+label = "start/continue"
+command = "debug.start_or_continue"
+
+[[leader]]
+keys = "SPC u b"
+label = "toggle breakpoint"
+command = "debug.toggle_breakpoint"
+
+[[leader]]
+keys = "SPC u n"
+label = "step over"
+command = "debug.step_over"
+
+[[leader]]
+keys = "SPC u i"
+label = "step into"
+command = "debug.step_into"
+
+[[leader]]
+keys = "SPC u o"
+label = "step out"
+command = "debug.step_out"
+
+[[leader]]
+keys = "SPC u w"
+label = "add watch"
+command = "debug.add_watch"
+
+[[leader]]
+keys = "SPC u q"
+label = "stop"
+command = "debug.stop"
+
+# Tool status listing (Milestone E of the LSP/DAP plan) -- `l`
+# for "lsp", the group the original plan reserved this letter
+# for. Only `m` ("manager") exists for now; the plan's own
+# `SPC l i`/`SPC l r` (per-buffer LSP status/restart) were never
+# wired up, so this group has exactly one entry rather than the
+# three gaps that would come from stubbing them out unbuilt.
+[[leader]]
+keys = "SPC l"
+group = "lsp"
+
+[[leader]]
+keys = "SPC l m"
+label = "tool status"
+command = "tools.status"
+
+# Git. The status page (`g`) is the hub and has its own keys for
+# most of what's done to a repository; these are the ways in,
+# and what's done from the file being edited.
+[[leader]]
+keys = "SPC g"
+group = "git"
+
+[[leader]]
+keys = "SPC g g"
+label = "status page"
+command = "git.open"
+
+[[leader]]
+keys = "SPC g l"
+label = "log"
+command = "git.log"
+
+[[leader]]
+keys = "SPC g h"
+label = "this file's history"
+command = "git.file_history"
+
+[[leader]]
+keys = "SPC g H"
+label = "these lines' history"
+command = "git.line_history"
+
+[[leader]]
+keys = "SPC g G"
+label = "graph view"
+command = "git.history"
+
+[[leader]]
+keys = "SPC g c"
+label = "compare with a branch"
+command = "git.compare"
+
+[[leader]]
+keys = "SPC g v"
+label = "this file beside a branch"
+command = "git.versus"
+
+[[leader]]
+keys = "SPC g z"
+label = "undo / operation log"
+command = "git.operations"
+
+[[leader]]
+keys = "SPC g w"
+label = "switch branch"
+command = "git.switch"
+
+[[leader]]
+keys = "SPC g f"
+label = "fetch"
+command = "git.fetch"
+
+[[leader]]
+keys = "SPC g p"
+label = "pull --rebase"
+command = "git.pull_rebase"
+
+[[leader]]
+keys = "SPC g r"
+label = "rebase onto..."
+command = "git.rebase"
+
+[[leader]]
+keys = "SPC g m"
+label = "merge..."
+command = "git.merge"
+
+# The file being edited: its hunks (`]h`/`[h` move between them)
+# and its blame.
+[[leader]]
+keys = "SPC g a"
+label = "stage hunk"
+command = "git.hunk_stage"
+
+[[leader]]
+keys = "SPC g d"
+label = "discard hunk"
+command = "git.hunk_discard"
+
+[[leader]]
+keys = "SPC g i"
+label = "preview hunk"
+command = "git.hunk_preview"
+
+[[leader]]
+keys = "SPC g B"
+label = "blame"
+command = "git.blame"
+
+[[leader]]
+keys = "SPC g e"
+label = "explain this line"
+command = "git.blame_explain"
+
+# A merge or rebase that stopped: resolving the conflicts, and the
+# two keys that end it. `c`/`a` are one pair for every kind of
+# suspended operation -- from the user's side it's one question
+# ("keep going" / "put it back"), and the banner names which
+# operation is answering.
+[[leader]]
+keys = "SPC g x"
+group = "conflicts"
+
+[[leader]]
+keys = "SPC g x x"
+label = "resolve side by side"
+command = "git.merge_view"
+
+[[leader]]
+keys = "SPC g x j"
+label = "next conflict"
+command = "git.next_conflict"
+
+[[leader]]
+keys = "SPC g x k"
+label = "prev conflict"
+command = "git.prev_conflict"
+
+[[leader]]
+keys = "SPC g x o"
+label = "keep ours"
+command = "git.keep_ours"
+
+[[leader]]
+keys = "SPC g x t"
+label = "keep theirs"
+command = "git.keep_theirs"
+
+[[leader]]
+keys = "SPC g x b"
+label = "keep both"
+command = "git.keep_both"
+
+[[leader]]
+keys = "SPC g x s"
+label = "stage resolved"
+command = "git.stage_resolved"
+
+[[leader]]
+keys = "SPC g x c"
+label = "continue"
+command = "git.continue"
+
+[[leader]]
+keys = "SPC g x a"
+label = "abort"
+command = "git.abort"
+
+# One key closes whichever Git view is in front -- the panels,
+# the graph, a comparison, the conflicts view, the older merge
+# request view -- rather than one each.
+[[leader]]
+keys = "SPC g q"
+label = "close this git view"
+command = "git.close_view"
+
+# SCOS-2000 MIBs: the MIB page, a definition by kind, inserting
+# or editing a telecommand call. The project's MIBs are used.
+[[leader]]
+keys = "SPC k"
+group = "mission"
+
+[[leader]]
+keys = "SPC k k"
+label = "MIB page"
+command = "mib.page"
+
+[[leader]]
+keys = "SPC k /"
+label = "search every kind"
+command = "mib.search"
+
+[[leader]]
+keys = "SPC k t"
+label = "telecommand"
+command = "mib.telecommand"
+
+[[leader]]
+keys = "SPC k p"
+label = "TC parameter"
+command = "mib.tc_parameter"
+
+[[leader]]
+keys = "SPC k m"
+label = "TM packet"
+command = "mib.tm_packet"
+
+[[leader]]
+keys = "SPC k n"
+label = "TM parameter"
+command = "mib.tm_parameter"
+
+[[leader]]
+keys = "SPC k c"
+label = "calibration"
+command = "mib.calibration"
+
+[[leader]]
+keys = "SPC k i"
+label = "insert a telecommand"
+command = "mib.insert"
+
+[[leader]]
+keys = "SPC k e"
+label = "edit the call on this line"
+command = "mib.edit_call"
+
+[[leader]]
+keys = "SPC k r"
+label = "read the MIBs again"
+command = "mib.reload"
+
+[[leader]]
+keys = "SPC k ,"
+label = "this project's MIBs"
+command = "mib.settings"
+
+[[leader]]
+keys = "SPC k d"
+label = "decode the hex here"
+command = "ccsds.decode"
+
+[[leader]]
+keys = "SPC k b"
+label = "copy this call as bytes"
+command = "mib.copy_bytes"
+
+[[leader]]
+keys = "SPC k T"
+label = "time converter"
+command = "ccsds.time"
+
+[[leader]]
+keys = "SPC k f"
+label = "open a recording"
+command = "ccsds.recording"
+
+[[leader]]
+keys = "SPC k l"
+label = "follow a live source"
+command = "ccsds.live"
+
+[[leader]]
+keys = "SPC k g"
+label = "generate from the MIB"
+command = "mib.generate"
+
+[[leader]]
+keys = "SPC k ?"
+label = "the standards library"
+command = "ccsds.standards"
+
+[[leader]]
+keys = "SPC c"
+group = "code"
+
+# `SPC c r` used to be ctags refresh -- moved to `SPC c T`
+# ("Tags") to free `r` up for the far more frequently reached-
+# for LSP rename, mirroring the letter Neovim/most LSP configs
+# already use for it.
+[[leader]]
+keys = "SPC c r"
+label = "rename (LSP)"
+command = "code.lsp_rename"
+
+[[leader]]
+keys = "SPC c a"
+label = "code action"
+command = "code.lsp_code_action"
+
+[[leader]]
+keys = "SPC c f"
+label = "indent region"
+command = "code.format_selection"
+
+[[leader]]
+keys = "SPC c F"
+label = "indent buffer"
+command = "code.format_buffer"
+
+[[leader]]
+keys = "SPC c x"
+label = "toggle checkbox"
+command = "code.toggle_checkbox"
+
+[[leader]]
+keys = "SPC c o"
+label = "outline"
+command = "code.outline"
+
+[[leader]]
+keys = "SPC c u"
+label = "enclosing scope"
+command = "code.scope_parent"
+
+[[leader]]
+keys = "SPC c b"
+label = "breadcrumbs"
+command = "code.breadcrumbs"
+
+# `z`, not `f` -- `SPC c f` is already "indent region"
+# (`code.format_selection`, above); `z` matches real Vim's own
+# `zo`/`zc`/`za` fold mnemonic instead of colliding with it.
+[[leader]]
+keys = "SPC c z"
+label = "toggle fold"
+command = "code.toggle_fold"
+
+# XML. `SPC c o` (outline), `SPC c s` (elements), `SPC c z`
+# (fold) and `SPC c F` (reindent) already cover it through the
+# grammar; these two only make sense for XML.
+[[leader]]
+keys = "SPC c v"
+label = "validate XML"
+command = "code.xml_validate"
+
+[[leader]]
+keys = "SPC c y"
+label = "yank XML path"
+command = "code.xml_path"
+
+# The local leader: what's under it depends on the focused buffer
+# (see `LocalContext`) -- `App::start_local_leader` opens the
+# matching `local_trie`, the way Doom Emacs' `SPC m` does.
+[[leader]]
+keys = "SPC m"
+label = "mode"
+command = "leader.local"
+
+[[leader]]
+keys = "SPC w"
+group = "window"
+
+[[leader]]
+keys = "SPC w v"
+label = "split vertical"
+command = "window.split_vertical"
+
+[[leader]]
+keys = "SPC w s"
+label = "split horizontal"
+command = "window.split_horizontal"
+
+[[leader]]
+keys = "SPC w h"
+label = "focus left"
+command = "window.navigate_left"
+
+[[leader]]
+keys = "SPC w l"
+label = "focus right"
+command = "window.navigate_right"
+
+[[leader]]
+keys = "SPC w k"
+label = "focus up"
+command = "window.navigate_up"
+
+[[leader]]
+keys = "SPC w j"
+label = "focus down"
+command = "window.navigate_down"
+
+[[leader]]
+keys = "SPC w w"
+label = "cycle window"
+command = "window.cycle"
+
+[[leader]]
+keys = "SPC w q"
+label = "close window"
+command = "window.close"
+
+[[leader]]
+keys = "SPC w o"
+label = "only"
+command = "window.only"
+
+[[leader]]
+keys = "SPC w ="
+label = "balance"
+command = "window.balance"
+
+# OS windows ("frames") share this group with splits, one shift
+# key apart: lowercase acts on a split, uppercase on the whole
+# window. `n` is the exception -- there's no lowercase "new
+# window" for it to collide with, and `SPC w n` reads better
+# than `SPC w N` for the one command in the group you reach for
+# first.
+[[leader]]
+keys = "SPC w n"
+label = "new frame"
+command = "frame.new"
+
+[[leader]]
+keys = "SPC w W"
+label = "cycle frame"
+command = "frame.cycle"
+
+[[leader]]
+keys = "SPC w Q"
+label = "close frame"
+command = "frame.close"
+
+[[leader]]
+keys = "SPC w O"
+label = "only frame"
+command = "frame.only"
+
+[[leader]]
+keys = "SPC b"
+group = "buffer"
+
+[[leader]]
+keys = "SPC b b"
+label = "switch buffer"
+command = "buffer.switch"
+
+[[leader]]
+keys = "SPC b n"
+label = "next buffer"
+command = "buffer.next"
+
+[[leader]]
+keys = "SPC b p"
+label = "prev buffer"
+command = "buffer.prev"
+
+[[leader]]
+keys = "SPC b k"
+label = "kill buffer"
+command = "buffer.kill"
+
+[[leader]]
+keys = "SPC b d"
+label = "close tab"
+command = "tab.close"
+
+[[leader]]
+keys = "SPC b o"
+label = "close other tabs"
+command = "tab.close_others"
+
+[[leader]]
+keys = "SPC b u"
+label = "reopen closed tab"
+command = "tab.reopen"
+
+[[leader]]
+keys = "SPC b P"
+label = "keep preview tab"
+command = "tab.keep"
+
+[[leader]]
+keys = "SPC b <"
+label = "move tab left"
+command = "tab.move_left"
+
+[[leader]]
+keys = "SPC b >"
+label = "move tab right"
+command = "tab.move_right"
+
+[[leader]]
+keys = "SPC b X"
+label = "scratch buffer"
+command = "buffer.scratch"
+
+[[leader]]
+keys = "SPC Tab"
+group = "workspace"
+
+[[leader]]
+keys = "SPC Tab n"
+label = "new workspace"
+command = "workspace.new"
+
+[[leader]]
+keys = "SPC Tab ]"
+label = "next workspace"
+command = "workspace.next"
+
+[[leader]]
+keys = "SPC Tab ["
+label = "prev workspace"
+command = "workspace.prev"
+
+[[leader]]
+keys = "SPC Tab d"
+label = "remove workspace"
+command = "workspace.remove"
+
+[[leader]]
+keys = "SPC Tab Tab"
+label = "switch workspace"
+command = "workspace.switch"
+
+[[leader]]
+keys = "SPC Tab f"
+label = "find workspace"
+command = "workspace.find"
+
+[[leader]]
+keys = "SPC Tab r"
+label = "rename workspace"
+command = "workspace.rename"
+
+# The which-key drawer lists git's keys in these sections, in this
+# order -- the review feature's `P`/`M` included.
+
+[[leader]]
+keys = "SPC g g"
+section = "View"
+
+[[leader]]
+keys = "SPC g l"
+section = "View"
+
+[[leader]]
+keys = "SPC g G"
+section = "View"
+
+[[leader]]
+keys = "SPC g h"
+section = "View"
+
+[[leader]]
+keys = "SPC g H"
+section = "View"
+
+[[leader]]
+keys = "SPC g B"
+section = "View"
+
+[[leader]]
+keys = "SPC g e"
+section = "View"
+
+[[leader]]
+keys = "SPC g c"
+section = "View"
+
+[[leader]]
+keys = "SPC g v"
+section = "View"
+
+[[leader]]
+keys = "SPC g w"
+section = "Branch & remote"
+
+[[leader]]
+keys = "SPC g f"
+section = "Branch & remote"
+
+[[leader]]
+keys = "SPC g p"
+section = "Branch & remote"
+
+[[leader]]
+keys = "SPC g r"
+section = "Branch & remote"
+
+[[leader]]
+keys = "SPC g m"
+section = "Branch & remote"
+
+[[leader]]
+keys = "SPC g P"
+section = "Branch & remote"
+
+[[leader]]
+keys = "SPC g M"
+section = "Branch & remote"
+
+[[leader]]
+keys = "SPC g z"
+section = "Branch & remote"
+
+[[leader]]
+keys = "SPC g a"
+section = "This change"
+
+[[leader]]
+keys = "SPC g d"
+section = "This change"
+
+[[leader]]
+keys = "SPC g i"
+section = "This change"
+
+[[leader]]
+keys = "SPC g x"
+section = "This change"
+
+# `SPC m` in a PDF.
+
+[[local.reader]]
+keys = "n"
+label = "next page (J)"
+command = "pdf.next_page"
+
+[[local.reader]]
+keys = "p"
+label = "previous page (K)"
+command = "pdf.prev_page"
+
+[[local.reader]]
+keys = "g"
+label = "go to page ({n}G)"
+command = "pdf.goto_page"
+
+[[local.reader]]
+keys = "["
+label = "first page (gg)"
+command = "pdf.first_page"
+
+[[local.reader]]
+keys = "]"
+label = "last page (G)"
+command = "pdf.last_page"
+
+[[local.reader]]
+keys = "="
+label = "zoom in (+)"
+command = "pdf.zoom_in"
+
+[[local.reader]]
+keys = "-"
+label = "zoom out (-)"
+command = "pdf.zoom_out"
+
+[[local.reader]]
+keys = "w"
+label = "fit width (zw)"
+command = "pdf.fit_width"
+
+[[local.reader]]
+keys = "f"
+label = "fit page (zp)"
+command = "pdf.fit_page"
+
+[[local.reader]]
+keys = "o"
+label = "outline sidebar (o)"
+command = "pdf.toggle_outline"
+
+[[local.reader]]
+keys = "t"
+label = "go to a heading"
+command = "pdf.headings"
+
+[[local.reader]]
+keys = "c"
+label = "paper / theme colours"
+command = "pdf.colors"
+
+[[local.reader]]
+keys = "y"
+label = "copy a link to this page (yp)"
+command = "pdf.copy_link"
+
+[[local.reader]]
+keys = "/"
+label = "search (/)"
+command = "pdf.search"
+
+[[local.reader]]
+keys = "d"
+label = "documents"
+command = "pdf.documents"
+
+# `SPC m` in Markdown and the reading view.
+
+[[local.markdown]]
+keys = "p"
+label = "reading view beside"
+command = "notebook.preview"
+
+[[local.markdown]]
+keys = "r"
+label = "read here (swap)"
+command = "notebook.read"
