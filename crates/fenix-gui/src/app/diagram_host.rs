@@ -72,6 +72,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_after_layout: Some(|app, id| app.diagram_after_layout(id)),
         on_event: None,
         settings: &[],
+        services: &SERVICES,
     }
 };
 
@@ -183,8 +184,95 @@ pub(super) struct DiagramPre {
     rows: usize,
 }
 
+/// What the diagrams feature offers others (the notebook's export): a
+/// diagram's source in, drawn with `diagrams.export_theme` and
+/// `diagrams.background`.
+static SERVICES: [super::feature::Service; 4] = [
+    // `{source}` -> the source with Fenix's theme written into it, so it
+    // renders the same anywhere Mermaid does.
+    super::feature::Service { name: "diagrams.portable", call: |app, payload| Ok(app.diagram_portable(&DiagramCall::from(payload)?.source)) },
+    // `{source}` -> an SVG.
+    super::feature::Service { name: "diagrams.svg", call: |app, payload| app.diagram_svg(&DiagramCall::from(payload)?.source) },
+    // `{source, format: "svg" | "png", path}` -> the file written (by
+    // mermaid-cli under `diagrams.export_with = "mmdc"`); the theme it
+    // was drawn with back.
+    super::feature::Service {
+        name: "diagrams.export",
+        call: |app, payload| {
+            let call = DiagramCall::from(payload)?;
+            let path = call.path.ok_or("no path")?;
+            app.diagram_export_file(&call.source, call.format.as_deref().unwrap_or("svg"), &path)
+        },
+    },
+    // `{source}` -> the picture (PNG, 2x) on the clipboard.
+    super::feature::Service { name: "diagrams.copy_picture", call: |app, payload| app.diagram_copy_picture(&DiagramCall::from(payload)?.source).map(|()| String::new()) },
+];
+
+/// A diagrams service's payload.
+#[derive(serde::Deserialize)]
+struct DiagramCall {
+    source: String,
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    path: Option<PathBuf>,
+}
+
+impl DiagramCall {
+    fn from(payload: &str) -> Result<Self, String> {
+        serde_json::from_str(payload).map_err(|e| format!("a diagrams call: {e}"))
+    }
+}
+
 impl App {
     /// The themes, as the settings and the editor theme make them.
+    /// `diagrams.export_theme`, unless it's "same" (the one it's drawn with).
+    fn diagram_export_theme(&self) -> Option<String> {
+        self.config.diagrams_export_theme.clone().filter(|t| !t.trim().is_empty() && !t.eq_ignore_ascii_case("same"))
+    }
+
+    fn diagram_export_background(&self) -> fenix_diagram::Background {
+        match self.config.diagrams_background.as_deref() {
+            Some("transparent") => fenix_diagram::Background::Transparent,
+            Some("white") => fenix_diagram::Background::White,
+            _ => fenix_diagram::Background::Theme,
+        }
+    }
+
+    fn diagram_portable(&self, source: &str) -> String {
+        fenix_diagram::portable(source, &self.diagram_themes(), self.diagram_export_theme().as_deref())
+    }
+
+    fn diagram_svg(&self, source: &str) -> Result<String, String> {
+        let r = fenix_diagram::render(source, &self.diagram_themes(), self.diagram_export_theme().as_deref()).map_err(|d| format!("line {}: {}", d.line + 1, d.message))?;
+        Ok(fenix_diagram::svg_with(&r.svg, self.diagram_export_background()))
+    }
+
+    fn diagram_export_file(&self, source: &str, format: &str, path: &Path) -> Result<String, String> {
+        if self.config.diagrams_export_with.as_deref() == Some("mmdc") {
+            let bg = match self.diagram_export_background() {
+                fenix_diagram::Background::Transparent => "transparent",
+                _ => "white",
+            };
+            fenix_diagram::export_with_mmdc(&self.diagram_portable(source), path, bg, 2.0)?;
+        } else {
+            let svg = self.diagram_svg(source)?;
+            let bytes = match format {
+                "png" => fenix_diagram::png(&svg, 2.0, fenix_diagram::Background::Theme)?,
+                _ => svg.into_bytes(),
+            };
+            fenix_storage::write(path, &bytes).map_err(|e| e.to_string())?;
+        }
+        Ok(self.diagram_export_theme().unwrap_or_default())
+    }
+
+    fn diagram_copy_picture(&mut self, source: &str) -> Result<(), String> {
+        let svg = self.diagram_svg(source)?;
+        let (w, h, px) = fenix_diagram::rasterize(&svg, 2.0, fenix_diagram::Background::Theme)?;
+        let clipboard = self.clipboard.as_mut().ok_or("no clipboard")?;
+        clipboard.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: px.into() }).map_err(|e| e.to_string())
+    }
+
     pub(super) fn diagram_themes(&self) -> fenix_diagram::Themes {
         let t = self.theme;
         let rgb = |c: glyphon::Color| [c.r(), c.g(), c.b()];
@@ -701,6 +789,24 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the notebook's export gets from the diagrams services.
+    #[test]
+    fn the_diagrams_services_draw_export_and_refuse_a_bad_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        let flow = "flowchart TD\n    a --> b\n";
+        let source = serde_json::json!({ "source": flow });
+        assert!(app.call_service("diagrams.svg", &source).unwrap().starts_with("<svg"));
+        assert!(app.call_service("diagrams.portable", &source).unwrap().starts_with("---\nconfig:\n  theme: base\n"));
+        let png = dir.path().join("flow.png");
+        let call = serde_json::json!({ "source": flow, "format": "png", "path": png });
+        assert_eq!(app.call_service("diagrams.export", &call), Ok(String::new()), "drawn with the theme it's shown in");
+        assert!(std::fs::read(&png).unwrap().starts_with(b"\x89PNG"));
+        let bad = app.call_service("diagrams.svg", &serde_json::json!({ "source": "flowchart TD\n    a -->\n" })).unwrap_err();
+        assert!(bad.starts_with("line "), "{bad}");
+        assert!(app.call_service("diagrams.svg", &serde_json::json!({ "text": "x" })).unwrap_err().contains("source"));
+    }
 
     fn preview(app: &App) -> (BufferId, fenix_window::WindowId) {
         let id = app.find_page(|m| page_as::<DiagramPage>(m).is_some()).expect("the preview");

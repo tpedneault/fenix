@@ -1,10 +1,13 @@
 //! Export: a diagram to the clipboard (PNG, SVG, a Markdown block, its
 //! source) or to a file (SVG, PNG, a `.mmd` in the project); a note to
 //! Markdown that renders anywhere or one self-contained HTML page, as a
-//! file or on the clipboard. Exports use `diagrams.export_theme` and
-//! `diagrams.background`, `diagrams.export_with = "mmdc"` hands files to
-//! mermaid-cli, and every file export is remembered so `E` writes them
-//! all again after an edit.
+//! file or on the clipboard. Every file export is remembered so `E`
+//! writes them all again after an edit.
+//!
+//! The drawing is the diagrams feature's, through its services
+//! (`diagrams.portable`, `.svg`, `.export`, `.copy_picture`), which use
+//! its `diagrams.export_theme`, `diagrams.background` and
+//! `diagrams.export_with` settings.
 
 use super::notebook_host::{NotebookPick, NotebookPrompt, NotebookPromptKind};
 use super::pages::PageModel;
@@ -67,16 +70,9 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 impl App {
-    fn export_theme(&self) -> Option<String> {
-        self.config.diagrams_export_theme.clone().filter(|t| !t.trim().is_empty() && !t.eq_ignore_ascii_case("same"))
-    }
-
-    fn export_background(&self) -> fenix_diagram::Background {
-        match self.config.diagrams_background.as_deref() {
-            Some("transparent") => fenix_diagram::Background::Transparent,
-            Some("white") => fenix_diagram::Background::White,
-            _ => fenix_diagram::Background::Theme,
-        }
+    /// Diagrams service `name` on `source` (`App::call_service`).
+    fn diagrams(&mut self, name: &str, source: &str) -> Result<String, String> {
+        self.call_service(name, &serde_json::json!({ "source": source }))
     }
 
     /// `e` on the notebook page.
@@ -244,33 +240,34 @@ impl App {
         }
     }
 
-    /// The diagram's source, made portable with the export theme.
-    fn diagram_export_source(&self, buffer: BufferId) -> Result<String, String> {
-        let text = self.buffers.get(buffer).map(|ob| ob.buffer.text()).ok_or("the diagram isn't open")?;
-        Ok(fenix_diagram::portable(&text, &self.diagram_themes(), self.export_theme().as_deref()))
+    fn diagram_text(&self, buffer: BufferId) -> Result<String, String> {
+        self.buffers.get(buffer).map(|ob| ob.buffer.text()).ok_or_else(|| "the diagram isn't open".to_string())
     }
 
-    fn diagram_export_svg(&self, buffer: BufferId) -> Result<String, String> {
-        let text = self.buffers.get(buffer).map(|ob| ob.buffer.text()).ok_or("the diagram isn't open")?;
-        let r = fenix_diagram::render(&text, &self.diagram_themes(), self.export_theme().as_deref()).map_err(|d| format!("line {}: {}", d.line + 1, d.message))?;
-        Ok(fenix_diagram::svg_with(&r.svg, self.export_background()))
+    /// The diagram's source, made portable with the export theme.
+    fn diagram_export_source(&mut self, buffer: BufferId) -> Result<String, String> {
+        let text = self.diagram_text(buffer)?;
+        self.diagrams("diagrams.portable", &text)
     }
 
     fn export_clipboard(&mut self, what: &ExportWhat, how: ExportHow) -> Result<&'static str, String> {
-        let (text, html, image, label): (Option<String>, Option<(String, String)>, Option<(u32, u32, Vec<u8>)>, &'static str) = match (what, how) {
+        let (text, html, label): (Option<String>, Option<(String, String)>, &'static str) = match (what, how) {
             (ExportWhat::Diagram(b), ExportHow::ClipPng) => {
-                let svg = self.diagram_export_svg(*b)?;
-                let (w, h, px) = fenix_diagram::rasterize(&svg, 2.0, fenix_diagram::Background::Theme)?;
-                (None, None, Some((w, h, px)), "the picture")
+                let text = self.diagram_text(*b)?;
+                self.diagrams("diagrams.copy_picture", &text)?;
+                return Ok("the picture");
             }
-            (ExportWhat::Diagram(b), ExportHow::ClipSvg) => (Some(self.diagram_export_svg(*b)?), None, None, "the SVG"),
-            (ExportWhat::Diagram(b), ExportHow::ClipMarkdown) => (Some(format!("```mermaid\n{}\n```\n", self.diagram_export_source(*b)?.trim_end())), None, None, "a ```mermaid block"),
-            (ExportWhat::Diagram(b), _) => (self.buffers.get(*b).map(|ob| ob.buffer.text()), None, None, "the source"),
+            (ExportWhat::Diagram(b), ExportHow::ClipSvg) => {
+                let text = self.diagram_text(*b)?;
+                (Some(self.diagrams("diagrams.svg", &text)?), None, "the SVG")
+            }
+            (ExportWhat::Diagram(b), ExportHow::ClipMarkdown) => (Some(format!("```mermaid\n{}\n```\n", self.diagram_export_source(*b)?.trim_end())), None, "a ```mermaid block"),
+            (ExportWhat::Diagram(b), _) => (self.buffers.get(*b).map(|ob| ob.buffer.text()), None, "the source"),
             (ExportWhat::Note(id), ExportHow::ClipHtml) => {
                 let (md, html) = self.note_export(id, None)?;
-                (None, Some((html, md)), None, "the note as rich text")
+                (None, Some((html, md)), "the note as rich text")
             }
-            (ExportWhat::Note(id), _) => (Some(self.note_export(id, None)?.0), None, None, "the note as Markdown"),
+            (ExportWhat::Note(id), _) => (Some(self.note_export(id, None)?.0), None, "the note as Markdown"),
         };
         let clipboard = self.clipboard.as_mut().ok_or("no clipboard")?;
         if let Some(t) = text {
@@ -278,9 +275,6 @@ impl App {
         }
         if let Some((html, alt)) = html {
             clipboard.set_html(html, Some(alt)).map_err(|e| e.to_string())?;
-        }
-        if let Some((w, h, px)) = image {
-            clipboard.set_image(arboard::ImageData { width: w as usize, height: h as usize, bytes: px.into() }).map_err(|e| e.to_string())?;
         }
         Ok(label)
     }
@@ -291,12 +285,29 @@ impl App {
     fn note_export(&mut self, id: &str, files: Option<&Path>) -> Result<(String, String), String> {
         let nb = self.features.notebook_state().book.as_ref().ok_or("no notebook")?;
         let entry = nb.get(id).cloned().ok_or("no such note")?;
-        let themes = self.diagram_themes();
-        let over = self.export_theme();
+        // The diagrams it embeds, made portable by the diagrams feature
+        // first: its service can't be called while the notebook is lent out.
+        let embedded: Vec<String> = fenix_notebook::meta::links(&entry.text)
+            .iter()
+            .filter(|l| l.embed)
+            .filter_map(|l| match nb.resolve(l, Some(&entry.path)) {
+                Target::Entry { id, .. } => nb.get(&id).filter(|e| e.kind == NbKind::Diagram).map(|e| e.text.clone()),
+                _ => None,
+            })
+            .collect();
+        let mut portable = HashMap::new();
+        for text in embedded {
+            if let std::collections::hash_map::Entry::Vacant(slot) = portable.entry(text) {
+                // Without the diagrams feature, a diagram goes as it is.
+                let out = self.diagrams("diagrams.portable", slot.key()).unwrap_or_else(|_| slot.key().clone());
+                slot.insert(out);
+            }
+        }
+        let nb = self.features.notebook_state().book.as_ref().ok_or("no notebook")?;
         let out = |l: &fenix_notebook::Link| -> LinkOut {
             match nb.resolve(l, Some(&entry.path)) {
                 Target::Entry { id, .. } => match nb.get(&id) {
-                    Some(e) if l.embed && e.kind == NbKind::Diagram => LinkOut::Diagram(fenix_diagram::portable(&e.text, &themes, over.as_deref())),
+                    Some(e) if l.embed && e.kind == NbKind::Diagram => LinkOut::Diagram(portable.get(&e.text).cloned().unwrap_or_else(|| e.text.clone())),
                     Some(e) if l.embed => LinkOut::Note(e.text.clone()),
                     _ => LinkOut::Text,
                 },
@@ -308,7 +319,7 @@ impl App {
         // ```mermaid blocks in the note itself, made portable too.
         for (lang, _, src) in fenix_notebook::meta::fenced_blocks(&md.clone()) {
             if lang == "mermaid" {
-                let portable = fenix_diagram::portable(&src, &themes, over.as_deref());
+                let Ok(portable) = self.diagrams("diagrams.portable", &src) else { continue };
                 if portable.trim_end() != src.trim_end() {
                     md = md.replacen(&src, portable.trim_end(), 1);
                 }
@@ -349,9 +360,22 @@ impl App {
                 inline_md = inline_md.replace(&format!("]({src})"), &format!("](data:{mime};base64,{})", base64(&bytes)));
             }
         }
-        let bg = self.export_background();
-        let svg = |src: &str| fenix_diagram::render(src, &themes, over.as_deref()).ok().map(|r| fenix_diagram::svg_with(&r.svg, bg));
-        let html = export::to_html(&inline_md, &entry.display_name(), &export::Palette::light(), &svg);
+        // The page's diagrams, drawn by the diagrams feature: which ones,
+        // then each drawn, then the page with them.
+        let title = entry.display_name();
+        let wanted = std::cell::RefCell::new(Vec::new());
+        export::to_html(&inline_md, &title, &export::Palette::light(), &|src: &str| {
+            wanted.borrow_mut().push(src.to_string());
+            None
+        });
+        let mut drawn = HashMap::new();
+        for src in wanted.into_inner() {
+            if let std::collections::hash_map::Entry::Vacant(slot) = drawn.entry(src) {
+                let svg = self.diagrams("diagrams.svg", slot.key()).ok();
+                slot.insert(svg);
+            }
+        }
+        let html = export::to_html(&inline_md, &title, &export::Palette::light(), &|src: &str| drawn.get(src).cloned().flatten());
         Ok((md, html))
     }
 
@@ -360,27 +384,12 @@ impl App {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("couldn't make {}: {e}", dir.display()))?;
         }
-        let mmdc = self.config.diagrams_export_with.as_deref() == Some("mmdc");
-        let bg = match self.export_background() {
-            fenix_diagram::Background::Transparent => "transparent",
-            _ => "white",
-        };
         let (format, theme) = match (what, how) {
-            (ExportWhat::Diagram(b), ExportHow::FileSvg | ExportHow::FilePng) if mmdc => {
-                let src = self.diagram_export_source(*b)?;
-                fenix_diagram::export_with_mmdc(&src, path, bg, 2.0)?;
-                (how.extension(), self.export_theme().unwrap_or_default())
-            }
-            (ExportWhat::Diagram(b), ExportHow::FileSvg) => {
-                let svg = self.diagram_export_svg(*b)?;
-                fenix_storage::write(path, svg.as_bytes()).map_err(|e| e.to_string())?;
-                ("svg", self.export_theme().unwrap_or_default())
-            }
-            (ExportWhat::Diagram(b), ExportHow::FilePng) => {
-                let svg = self.diagram_export_svg(*b)?;
-                let png = fenix_diagram::png(&svg, 2.0, fenix_diagram::Background::Theme)?;
-                fenix_storage::write(path, &png).map_err(|e| e.to_string())?;
-                ("png", self.export_theme().unwrap_or_default())
+            (ExportWhat::Diagram(b), ExportHow::FileSvg | ExportHow::FilePng) => {
+                let source = self.diagram_text(*b)?;
+                let format = how.extension();
+                let theme = self.call_service("diagrams.export", &serde_json::json!({ "source": source, "format": format, "path": path }))?;
+                (format, theme)
             }
             (ExportWhat::Diagram(b), _) => {
                 let src = self.diagram_export_source(*b)?;
@@ -490,7 +499,7 @@ impl App {
         let Some(e) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).cloned() else { return };
         let target = self.focused_buffer_id();
         if !svg {
-            let src = fenix_diagram::portable(&e.text, &self.diagram_themes(), self.export_theme().as_deref());
+            let src = self.diagrams("diagrams.portable", &e.text).unwrap_or_else(|_| e.text.clone());
             self.notebook_insert_text(&format!("```mermaid\n{}\n```\n", src.trim_end()));
             return;
         }

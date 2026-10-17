@@ -175,6 +175,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_after_layout: None,
         on_event: None,
         settings: &[],
+        services: &[],
     }
 };
 

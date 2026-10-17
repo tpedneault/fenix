@@ -117,6 +117,16 @@ pub(crate) struct FeatureSpec {
     /// (`register_settings`): loaded, checked, saved, on the settings page
     /// and in the docs like core's, and read by key (`Config::value`).
     pub settings: &'static [fenix_config::Setting],
+    /// Named calls it offers other features (`App::call_service`).
+    pub services: &'static [Service],
+}
+
+/// A named call one feature offers others (`diagrams.svg`), so they don't
+/// reach into its code: a JSON payload in, text out, as an extension's
+/// `call-service` will be. Runs with its feature in place.
+pub(crate) struct Service {
+    pub name: &'static str,
+    pub call: fn(&mut App, &str) -> Result<String, String>,
 }
 
 /// A completion in progress: where its prefix starts, the prefix, and
@@ -642,6 +652,25 @@ impl App {
         }
     }
 
+    /// Calls service `name` with `payload`, through the feature offering
+    /// it. `Err` when none does (that feature is off) or the call fails.
+    pub(crate) fn call_service(
+        &mut self,
+        name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String, String> {
+        let call = self
+            .features
+            .specs()
+            .flat_map(|spec| spec.services)
+            .find(|service| service.name == name)
+            .map(|service| service.call);
+        match call {
+            Some(call) => call(self, &payload.to_string()),
+            None => Err(format!("nothing offers {name}")),
+        }
+    }
+
     /// Runs `f` with the feature whose id is `id`.
     pub(crate) fn with_feature_id<R>(
         &mut self,
@@ -671,6 +700,24 @@ mod tests {
     fn print_the_settings_table() {
         super::register_settings();
         print!("{}", fenix_config::schema::markdown_table());
+    }
+
+    #[test]
+    fn every_service_name_is_offered_once_under_its_feature() {
+        let mut seen = std::collections::HashSet::new();
+        for spec in super::BUILTIN_SPECS {
+            for service in spec.services {
+                assert!(seen.insert(service.name), "{} offered twice", service.name);
+                let short = spec.id.strip_prefix("fenix.").unwrap_or(spec.id);
+                assert!(service.name.starts_with(&format!("{short}.")), "{} isn't named under {}", service.name, spec.id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_service_nobody_offers_is_an_error_not_a_panic() {
+        let mut app = super::App::with_file(None);
+        assert_eq!(app.call_service("nobody.here", &serde_json::json!({})), Err("nothing offers nobody.here".to_string()));
     }
 
     #[test]

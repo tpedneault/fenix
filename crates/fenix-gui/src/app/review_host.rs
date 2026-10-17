@@ -65,6 +65,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             Err(_) => {}
         }),
         settings: &[],
+        services: &[],
     }
 };
 
