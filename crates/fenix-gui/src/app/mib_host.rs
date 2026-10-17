@@ -322,7 +322,7 @@ impl PageCtx {
     }
 }
 
-fn page_context(app: &mut App, id: BufferId) -> Box<dyn Any> {
+fn page_context(app: &mut App, id: BufferId, _need: super::feature::PageNeed) -> Box<dyn Any> {
     let mut ctx = PageCtx { apid_hex: apid_hex(app), ..PageCtx::default() };
     let key = app.feature_page::<MibPage>(id).map(|p| p.key.clone()).or_else(|| app.feature_page::<DefPage>(id).map(|p| p.key.clone()));
     if let Some(key) = key {
@@ -379,12 +379,12 @@ impl FeaturePage for MibPage {
         MibPage::paste(self, text);
     }
 
-    fn layout(&self, c: &dyn Any, cols: usize) -> crate::page::Page {
-        mib_page::layout(self, &ctx(c).mib(), cols)
+    fn layout(&self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
+        mib_page::layout(self, &ctx(&*c).mib(), cols)
     }
 
-    fn key(&mut self, key: crate::page::Key, c: &dyn Any) -> Box<dyn Any> {
-        let c = ctx(c);
+    fn key(&mut self, key: crate::page::Key, c: Box<dyn Any>) -> Box<dyn Any> {
+        let c = ctx(&*c);
         let mut m = c.mib();
         m.source = c.source.clone();
         Box::new(MibPage::key(self, key, &m))
@@ -417,13 +417,13 @@ impl FeaturePage for DefPage {
         matches!(key, crate::page::Key::CtrlO | crate::page::Key::CtrlI)
     }
 
-    fn layout(&self, c: &dyn Any, cols: usize) -> crate::page::Page {
-        let c = ctx(c);
+    fn layout(&self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
+        let c = ctx(&*c);
         mib_def::layout(self, c.set.as_deref(), c.apid_hex, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key, c: &dyn Any) -> Box<dyn Any> {
-        Box::new(match &ctx(c).set {
+    fn key(&mut self, key: crate::page::Key, c: Box<dyn Any>) -> Box<dyn Any> {
+        Box::new(match &ctx(&*c).set {
             Some(set) => DefPage::key(self, key, set),
             None if matches!(key, crate::page::Key::Char('q') | crate::page::Key::Escape) => mib_def::Action::Close,
             None => mib_def::Action::None,
@@ -458,11 +458,11 @@ impl FeaturePage for InsertForm {
         key == crate::page::Key::CtrlEnter
     }
 
-    fn layout(&self, c: &dyn Any, cols: usize) -> crate::page::Page {
-        mib_form::layout(self, ctx(c).form_bytes.as_ref(), cols)
+    fn layout(&self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
+        mib_form::layout(self, ctx(&*c).form_bytes.as_ref(), cols)
     }
 
-    fn key(&mut self, key: crate::page::Key, _ctx: &dyn Any) -> Box<dyn Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn Any>) -> Box<dyn Any> {
         Box::new(InsertForm::key(self, key))
     }
 }

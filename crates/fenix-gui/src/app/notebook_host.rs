@@ -154,8 +154,23 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         picker_cancel: None,
         modeline_clock: None,
-        page_action: None,
-        page_context: None,
+        // What a key on the notebook page or the links sidebar asked for.
+        page_action: Some(|app, id, action| {
+            let action = match action.downcast::<NbAction>() {
+                Ok(action) => return app.notebook_action(id, *action),
+                Err(action) => action,
+            };
+            if let Ok(action) = action.downcast::<crate::backlinks_page::Action>() {
+                app.backlinks_action(id, *action);
+            }
+        }),
+        // The notebook page is laid out with the reading layout, which
+        // borrows the app (its pictures, embeds and links): it's laid out
+        // here, and handed over whole.
+        page_context: Some(|app, id, need| match need {
+            super::feature::PageNeed::Layout { cols } => Box::new(app.notebook_page_layout(id, cols)),
+            super::feature::PageNeed::Key => Box::new(()),
+        }),
         page_title: None,
     }
 };
@@ -190,6 +205,53 @@ impl super::feature::Features {
 
     pub(super) fn notebook_state_mut(&mut self) -> &mut NotebookState {
         &mut self.get_mut::<NotebookHost>().expect("the notebook has no instance hooks that run code, so it's always in place").state
+    }
+}
+
+/// The notebook page (`SPC n n`).
+impl super::feature::FeaturePage for NotebookPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        "*notebook*".to_string()
+    }
+
+    fn typing(&self) -> bool {
+        NotebookPage::typing(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        NotebookPage::paste(self, text);
+    }
+
+    /// Laid out already, by `SPEC.page_context`.
+    fn layout(&self, ctx: Box<dyn std::any::Any>, _cols: usize) -> crate::page::Page {
+        ctx.downcast::<Option<crate::page::Page>>().ok().and_then(|page| *page).unwrap_or_default()
+    }
+
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+        Box::new(NotebookPage::key(self, key))
+    }
+}
+
+/// The links sidebar (`SPC n b`).
+impl super::feature::FeaturePage for crate::backlinks_page::BacklinksPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        format!("*links: {}*", self.name)
+    }
+
+    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+        crate::backlinks_page::layout(self, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+        Box::new(crate::backlinks_page::BacklinksPage::key(self, key))
     }
 }
 
@@ -392,18 +454,12 @@ impl App {
     }
 
     fn notebook_page_mut(&mut self, id: BufferId) -> Option<&mut NotebookPage> {
-        match self.pages.get_mut(&id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
-            Some(PageModel::Notebook(p)) => Some(p),
-            _ => None,
-        }
+        self.feature_page_mut::<NotebookPage>(id)
     }
 
     /// Re-reads what every open notebook page shows.
     pub(super) fn refresh_notebook_pages(&mut self) {
-        let Some(id) = self.find_page(|m| matches!(m, PageModel::Notebook(_))) else { return };
+        let Some(id) = self.find_page(|m| super::feature::page_as::<NotebookPage>(m).is_some()) else { return };
         let rows = self.notebook_rows();
         let (tags, searches) = match self.features.notebook_state().book.as_ref() {
             Some(nb) => (nb.tags().into_iter().map(|(t, _)| t).collect(), nb.searches().to_vec()),
@@ -422,7 +478,7 @@ impl App {
         if let Some(nb) = self.features.notebook_state_mut().book.as_mut() {
             let _ = nb.rescan();
         }
-        match self.find_page(|m| matches!(m, PageModel::Notebook(_))) {
+        match self.find_page(|m| super::feature::page_as::<NotebookPage>(m).is_some()) {
             Some(id) => {
                 self.show_page(id);
                 self.refresh_notebook_pages();
@@ -433,7 +489,7 @@ impl App {
                 let tags = nb.tags().into_iter().map(|(t, _)| t).collect();
                 let searches = nb.searches().to_vec();
                 let folder = nb.root().display().to_string();
-                self.open_page(PageModel::Notebook(Box::new(NotebookPage::new(rows, tags, searches, folder))));
+                self.open_page(PageModel::Feature(Box::new(NotebookPage::new(rows, tags, searches, folder))));
             }
         }
     }
@@ -491,7 +547,7 @@ impl App {
 
     /// The notebook page's layout for a pane `cols` wide.
     pub(super) fn notebook_page_layout(&self, id: BufferId, cols: usize) -> Option<crate::page::Page> {
-        let Some(PageModel::Notebook(p)) = self.pages.get(&id).map(|s| &s.model) else { return None };
+        let p = self.feature_page::<NotebookPage>(id)?;
         // The selected entry's links and pictures are relative to its file.
         let base = p.selected().and_then(|r| r.project_file.clone().or_else(|| self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&r.id)).map(|e| e.path.clone())));
         Some(self.with_reading_ctx(base.as_deref(), |ctx| crate::notebook_page::layout(p, cols, ctx)))
@@ -1196,5 +1252,21 @@ mod tests {
         assert_eq!((feature, badge), ("fenix.notebook", "FOUND"));
         assert!(state.selected().is_some_and(|c| c.payload.0.downcast_ref::<NotebookPick>().is_some()));
         assert!(SPEC.picker_confirm.is_some());
+    }
+
+    #[test]
+    fn the_notebook_page_is_laid_out_by_its_context_only_when_a_layout_is_due() {
+        let (_dir, mut app) = app();
+        app.notebook_create_note("Uplink", "# Uplink
+retries
+");
+        app.open_notebook_page();
+        let id = app.focused_buffer_id();
+        assert!(app.feature_page::<NotebookPage>(id).is_some());
+        assert_eq!(app.page_title(id), "*notebook*");
+        let key_ctx = app.feature_page_context(id, super::super::feature::PageNeed::Key);
+        assert!(key_ctx.downcast_ref::<()>().is_some(), "a key doesn't lay the page out");
+        app.ensure_page_layout(id, app.focused_pane_id(), 100);
+        assert!(app.open().buffer.text().contains("Uplink"), "laid out through `page_context`");
     }
 }

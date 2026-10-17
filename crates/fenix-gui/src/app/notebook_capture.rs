@@ -8,7 +8,6 @@
 //! commits.
 
 use super::notebook_host::{NotebookPick, NotebookPrompt, NotebookPromptKind};
-use super::pages::PageModel;
 use super::*;
 use fenix_notebook::query::{self, Query};
 use fenix_notebook::Kind as NbKind;
@@ -177,10 +176,7 @@ impl App {
     pub(super) fn notebook_page_filtered(&mut self, filter: &str) {
         self.open_notebook_page();
         let id = self.focused_buffer_id();
-        if let Some(PageModel::Notebook(p)) = self.pages.get_mut(&id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
+        if let Some(p) = self.feature_page_mut::<crate::notebook_page::NotebookPage>(id) {
             p.filter.clear();
             p.filter.text = filter.to_string();
         }

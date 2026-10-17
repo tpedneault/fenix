@@ -19,8 +19,6 @@ use crate::mib_page;
 use crate::stream_page;
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
-use crate::notebook_page::NotebookPage;
-use crate::backlinks_page::{self, BacklinksPage};
 use crate::reading_page::ReadingPage;
 use crate::diagram_page::DiagramPage;
 use crate::review_inbox::{self, Inbox};
@@ -52,8 +50,6 @@ pub(super) enum PageModel {
     Review(Box<ReviewPage>),
     Agenda(Box<AgendaPage>),
     Jira(Box<JiraPage>),
-    Notebook(Box<NotebookPage>),
-    Backlinks(Box<BacklinksPage>),
     Reading(Box<ReadingPage>),
     Diagram(Box<DiagramPage>),
     /// A page a feature owns -- see `feature::FeaturePage`.
@@ -97,10 +93,9 @@ impl PageState {
             PageModel::Snippets(p) => p.typing(),
             PageModel::Agenda(p) => p.typing(),
             PageModel::Jira(p) => p.typing(),
-            PageModel::Notebook(p) => p.typing(),
             PageModel::Diagram(p) => p.typing(),
             PageModel::Feature(p) => p.typing(),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) | PageModel::Reading(_) => false,
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => false,
         }
     }
 
@@ -134,10 +129,9 @@ impl PageState {
             PageModel::Snippets(p) => p.paste(text),
             PageModel::Agenda(p) => p.paste(text),
             PageModel::Jira(p) => p.paste(text),
-            PageModel::Notebook(p) => p.paste(text),
             PageModel::Diagram(p) => p.paste(text),
             PageModel::Feature(p) => p.paste(text),
-            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Backlinks(_) | PageModel::Reading(_) => {}
+            PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => {}
         }
         self.stale = true;
     }
@@ -320,8 +314,6 @@ impl App {
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
             Some(PageModel::Agenda(_)) => "*agenda*".to_string(),
             Some(PageModel::Jira(_)) => "*jira*".to_string(),
-            Some(PageModel::Notebook(_)) => "*notebook*".to_string(),
-            Some(PageModel::Backlinks(p)) => format!("*links: {}*", p.name),
             Some(PageModel::Diagram(p)) => format!("*{}: {}*", if p.viewer { "view" } else { "diagram" }, p.title),
             Some(PageModel::Feature(p)) => {
                 let title = self.features.specs().find(|spec| spec.id == p.feature()).and_then(|spec| spec.page_title);
@@ -440,14 +432,8 @@ impl App {
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
             .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
         // What a feature's page reads besides itself, before it's borrowed.
-        let feature_ctx = match self.pages.get(&id) {
-            Some(s) if s.stale || s.cols != cols => Some(self.feature_page_context(id)),
-            _ => None,
-        };
-        // Pages drawn with the reading layout borrow the app while they're
-        // laid out, so they're laid out before the page is borrowed.
-        let precomputed = match self.pages.get(&id) {
-            Some(s) if s.stale || s.cols != cols => self.notebook_page_layout(id, cols),
+        let mut feature_ctx = match self.pages.get(&id) {
+            Some(s) if s.stale || s.cols != cols => Some(self.feature_page_context(id, super::feature::PageNeed::Layout { cols })),
             _ => None,
         };
         let reading = self.reading_precompute(id, cols, false);
@@ -486,9 +472,7 @@ impl App {
                 };
                 jira_page::layout(p, &ctx, cols)
             }
-            PageModel::Notebook(_) => precomputed.unwrap_or_default(),
-            PageModel::Backlinks(p) => backlinks_page::layout(p, cols),
-            PageModel::Feature(p) => p.layout(feature_ctx.as_deref().unwrap_or(&()), cols),
+            PageModel::Feature(p) => p.layout(feature_ctx.take().unwrap_or_else(|| Box::new(())), cols),
             PageModel::Reading(_) | PageModel::Diagram(_) => Page::default(),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
@@ -621,25 +605,17 @@ impl App {
         };
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
             .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
-        let feature_ctx = self.feature_page_context(id);
+        let feature_ctx = self.feature_page_context(id, super::feature::PageNeed::Key);
         let Some(state) = self.pages.get_mut(&id) else { return false };
         state.stale = true;
         match &mut state.model {
             PageModel::Feature(p) => {
                 let feature = p.feature();
-                let action = p.key(key, &*feature_ctx);
+                let action = p.key(key, feature_ctx);
                 let run = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.page_action);
                 if let Some(run) = run {
                     run(self, id, action);
                 }
-            }
-            PageModel::Notebook(p) => {
-                let action = p.key(key);
-                self.notebook_action(id, action);
-            }
-            PageModel::Backlinks(p) => {
-                let action = p.key(key);
-                self.backlinks_action(id, action);
             }
             PageModel::Reading(p) => {
                 let action = p.key(key);

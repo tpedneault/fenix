@@ -98,9 +98,10 @@ pub(crate) struct FeatureSpec {
     /// asked for, on page `BufferId`.
     pub page_action: Option<fn(&mut App, BufferId, Box<dyn Any>)>,
     /// What page `BufferId` reads besides itself to be laid out or take a
-    /// key (a MIB page's set), worked out before core borrows the page and
-    /// handed to `FeaturePage::layout` and `FeaturePage::key`.
-    pub page_context: Option<fn(&mut App, BufferId) -> Box<dyn Any>>,
+    /// key (a MIB page's set, a note laid out with its pictures), worked
+    /// out before core borrows the page and handed to
+    /// `FeaturePage::layout` or `FeaturePage::key`.
+    pub page_context: Option<fn(&mut App, BufferId, PageNeed) -> Box<dyn Any>>,
     /// Page `BufferId`'s title, when it depends on more than the page (a
     /// definition's name in the loaded MIB) -- else `FeaturePage::title`.
     pub page_title: Option<fn(&App, BufferId) -> Option<String>>,
@@ -172,12 +173,20 @@ pub(crate) trait FeaturePage: Any {
         false
     }
     /// The page, laid out for a pane `cols` cells wide; `ctx` is what its
-    /// feature's `page_context` worked out (`()` without one).
-    fn layout(&self, ctx: &dyn Any, cols: usize) -> crate::page::Page;
+    /// feature's `page_context` worked out for it (`()` without one).
+    fn layout(&self, ctx: Box<dyn Any>, cols: usize) -> crate::page::Page;
     /// A key; what it asks for goes to the feature's `page_action`.
-    fn key(&mut self, key: crate::page::Key, ctx: &dyn Any) -> Box<dyn Any>;
+    fn key(&mut self, key: crate::page::Key, ctx: Box<dyn Any>) -> Box<dyn Any>;
     /// It's being closed: stop whatever it started (a stream's reader).
     fn close(&self) {}
+}
+
+/// Why core asks a feature for its page's context (`FeatureSpec::
+/// page_context`): to lay it out -- only when that's due -- or for a key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PageNeed {
+    Layout { cols: usize },
+    Key,
 }
 
 /// `model` as feature page `T`, if it is one -- for `find_page`.
@@ -191,7 +200,7 @@ pub(super) fn page_as<T: FeaturePage>(model: &super::pages::PageModel) -> Option
 impl App {
     /// What feature page `id` reads besides itself, from its feature's
     /// `page_context` -- `()` for any other page.
-    pub(super) fn feature_page_context(&mut self, id: BufferId) -> Box<dyn Any> {
+    pub(super) fn feature_page_context(&mut self, id: BufferId, need: PageNeed) -> Box<dyn Any> {
         let feature = match self.pages.get(&id).map(|s| &s.model) {
             Some(super::pages::PageModel::Feature(p)) => p.feature(),
             _ => return Box::new(()),
@@ -202,7 +211,7 @@ impl App {
             .find(|spec| spec.id == feature)
             .and_then(|spec| spec.page_context);
         match context {
-            Some(context) => context(self, id),
+            Some(context) => context(self, id, need),
             None => Box::new(()),
         }
     }

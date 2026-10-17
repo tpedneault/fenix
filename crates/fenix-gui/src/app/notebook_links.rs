@@ -286,15 +286,15 @@ impl App {
         };
         let origin = self.focused_pane_id();
         // One sidebar: it moves to this note.
-        let existing = self.find_page(|m| matches!(m, PageModel::Backlinks(_)));
+        let existing = self.find_page(|m| super::feature::page_as::<BacklinksPage>(m).is_some());
         let page_id = match existing {
             Some(id) => {
-                if let Some(PageModel::Backlinks(p)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
-                    **p = BacklinksPage::new(entry.id.clone(), entry.display_name());
+                if let Some(p) = self.feature_page_mut::<BacklinksPage>(id) {
+                    *p = BacklinksPage::new(entry.id.clone(), entry.display_name());
                 }
                 id
             }
-            None => self.open_page_beside(PageModel::Backlinks(Box::new(BacklinksPage::new(entry.id.clone(), entry.display_name()))), 0.3),
+            None => self.open_page_beside(PageModel::Feature(Box::new(BacklinksPage::new(entry.id.clone(), entry.display_name()))), 0.3),
         };
         self.features.notebook_state_mut().sidebar_origin = Some(origin);
         self.refresh_backlinks();
@@ -316,8 +316,8 @@ impl App {
 
     /// Fills the sidebar's lists for its note, as the notebook now is.
     pub(super) fn refresh_backlinks(&mut self) {
-        let Some(page_id) = self.find_page(|m| matches!(m, PageModel::Backlinks(_))) else { return };
-        let Some(PageModel::Backlinks(p)) = self.pages.get(&page_id).map(|s| &s.model) else { return };
+        let Some(page_id) = self.find_page(|m| super::feature::page_as::<BacklinksPage>(m).is_some()) else { return };
+        let Some(p) = self.feature_page::<BacklinksPage>(page_id) else { return };
         let id = p.id.clone();
         let Some(nb) = self.features.notebook_state().book.as_ref() else { return };
         let Some(entry) = nb.get(&id).cloned() else { return };
@@ -347,10 +347,7 @@ impl App {
                 BlItem { id: String::new(), name: l.label(), kind, line: l.line, context: String::new(), exists }
             })
             .collect();
-        if let Some(PageModel::Backlinks(p)) = self.pages.get_mut(&page_id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
+        if let Some(p) = self.feature_page_mut::<BacklinksPage>(page_id) {
             p.here = here;
             p.mentions = mentions;
             p.outline = outline;
@@ -369,10 +366,7 @@ impl App {
     }
 
     pub(super) fn backlinks_action(&mut self, page_id: BufferId, action: BlAction) {
-        let note_id = match self.pages.get(&page_id).map(|s| &s.model) {
-            Some(PageModel::Backlinks(p)) => p.id.clone(),
-            _ => return,
-        };
+        let Some(note_id) = self.feature_page::<BacklinksPage>(page_id).map(|p| p.id.clone()) else { return };
         match action {
             BlAction::None => {}
             BlAction::Close => {
@@ -497,7 +491,7 @@ mod tests {
         app.open_file_from_picker(&uplink);
         app.notebook_backlinks();
         let page = app.focused_buffer_id();
-        let Some(PageModel::Backlinks(p)) = app.pages.get(&page).map(|s| &s.model) else { panic!("the sidebar") };
+        let Some(p) = app.feature_page::<BacklinksPage>(page) else { panic!("the sidebar") };
         assert_eq!(p.here.len(), 1);
         assert_eq!(p.mentions.len(), 1);
         assert_eq!(p.outline.len(), 2);
