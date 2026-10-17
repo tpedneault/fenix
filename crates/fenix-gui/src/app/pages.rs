@@ -13,7 +13,7 @@ use crate::git_compare::{self, GitCompare};
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
-use crate::jira_page::{self, JiraPage};
+use crate::jira_page;
 use crate::mib_page;
 use crate::stream_page;
 use crate::settings_page::{self, SettingsPage};
@@ -46,7 +46,6 @@ pub(super) enum PageModel {
     Snippets(Box<SnippetsPage>),
     Inbox(Box<Inbox>),
     Review(Box<ReviewPage>),
-    Jira(Box<JiraPage>),
     Reading(Box<ReadingPage>),
     /// A page a feature owns -- see `feature::FeaturePage`.
     Feature(Box<dyn super::feature::FeaturePage>),
@@ -85,7 +84,6 @@ impl PageState {
             PageModel::Request(r) => r.editing.is_some(),
             PageModel::UserSettings(p) => p.typing(),
             PageModel::Snippets(p) => p.typing(),
-            PageModel::Jira(p) => p.typing(),
             PageModel::Feature(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => false,
         }
@@ -98,7 +96,6 @@ impl PageState {
                 PageModel::Wizard(w) => w.claims_space(),
                 PageModel::Request(r) => r.field == git_request::Field::Draft,
                 PageModel::UserSettings(p) => p.claims_space(),
-                PageModel::Jira(p) => p.claims_space(),
                 PageModel::Feature(p) => p.claims_space(),
                 _ => false,
             }
@@ -118,7 +115,6 @@ impl PageState {
             PageModel::Request(r) => r.paste(text),
             PageModel::UserSettings(p) => p.paste(text),
             PageModel::Snippets(p) => p.paste(text),
-            PageModel::Jira(p) => p.paste(text),
             PageModel::Feature(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => {}
         }
@@ -301,7 +297,6 @@ impl App {
             },
             Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
-            Some(PageModel::Jira(_)) => "*jira*".to_string(),
             Some(PageModel::Feature(p)) => {
                 let title = self.features.specs().find(|spec| spec.id == p.feature()).and_then(|spec| spec.page_title);
                 title.and_then(|title| title(self, id)).unwrap_or_else(|| p.title())
@@ -432,16 +427,6 @@ impl App {
             return;
         }
         state.page = match &mut state.model {
-            PageModel::Jira(p) => {
-                let in_agenda: HashSet<String> = self.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
-                let ctx = jira_page::Ctx {
-                    in_agenda: &in_agenda,
-                    people: &self.config.jira_users,
-                    server: self.config.jira_base_url.clone().unwrap_or_default(),
-                    today: chrono::Local::now().date_naive(),
-                };
-                jira_page::layout(p, &ctx, cols)
-            }
             PageModel::Feature(p) => p.layout(feature_ctx.take().unwrap_or_else(|| Box::new(())), cols),
             PageModel::Reading(_) => Page::default(),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
@@ -594,17 +579,6 @@ impl App {
             PageModel::Reading(p) => {
                 let action = p.key(key);
                 self.reading_action(id, action);
-            }
-            PageModel::Jira(p) => {
-                let in_agenda: HashSet<String> = self.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
-                let ctx = jira_page::Ctx {
-                    in_agenda: &in_agenda,
-                    people: &self.config.jira_users,
-                    server: self.config.jira_base_url.clone().unwrap_or_default(),
-                    today: chrono::Local::now().date_naive(),
-                };
-                let action = p.key(key, &ctx);
-                self.jira_page_action(id, action);
             }
             PageModel::Wizard(w) => {
                 let action = w.key(key);
