@@ -111,26 +111,9 @@ impl LocalContext {
     fn bind(self, t: &mut KeyTrie<&'static str>) {
         match self {
             LocalContext::Arduino => insert_entries(t, &[], crate::app::EMBEDDED_SPEC.local_menu),
-            LocalContext::Reader => {
-                t.insert(&[KeyPress::char('n')], "next page (J)", "pdf.next_page");
-                t.insert(&[KeyPress::char('p')], "previous page (K)", "pdf.prev_page");
-                t.insert(&[KeyPress::char('g')], "go to page ({n}G)", "pdf.goto_page");
-                t.insert(&[KeyPress::char('[')], "first page (gg)", "pdf.first_page");
-                t.insert(&[KeyPress::char(']')], "last page (G)", "pdf.last_page");
-                t.insert(&[KeyPress::char('=')], "zoom in (+)", "pdf.zoom_in");
-                t.insert(&[KeyPress::char('-')], "zoom out (-)", "pdf.zoom_out");
-                t.insert(&[KeyPress::char('w')], "fit width (zw)", "pdf.fit_width");
-                t.insert(&[KeyPress::char('f')], "fit page (zp)", "pdf.fit_page");
-                t.insert(&[KeyPress::char('o')], "outline sidebar (o)", "pdf.toggle_outline");
-                t.insert(&[KeyPress::char('t')], "go to a heading", "pdf.headings");
-                t.insert(&[KeyPress::char('c')], "paper / theme colours", "pdf.colors");
-                t.insert(&[KeyPress::char('y')], "copy a link to this page (yp)", "pdf.copy_link");
-                t.insert(&[KeyPress::char('/')], "search (/)", "pdf.search");
-                t.insert(&[KeyPress::char('d')], "documents", "pdf.documents");
-            }
+            LocalContext::Reader => insert_data(t, &[], default_local("reader")),
             LocalContext::Markdown => {
-                t.insert(&[KeyPress::char('p')], "reading view beside", "notebook.preview");
-                t.insert(&[KeyPress::char('r')], "read here (swap)", "notebook.read");
+                insert_data(t, &[], default_local("markdown"));
                 insert_entries(t, &[], crate::app::NOTEBOOK_SPEC.local_menu);
             }
             LocalContext::Mermaid => insert_entries(t, &[], crate::app::DIAGRAMS_SPEC.local_menu),
@@ -189,354 +172,164 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
         let mut t = KeyTrie::new();
+        insert_data(&mut t, &[], &default_keymap().leader);
         let spc = KeyPress::char(' ');
-        t.label_group(&[spc], "leader");
-        t.label_group(&[spc, KeyPress::char('i')], "insert");
-        t.insert(&[spc, KeyPress::char('i'), KeyPress::char('s')], "snippet", "insert.snippet");
-        t.insert(&[spc, KeyPress::char('i'), KeyPress::char('S')], "manage snippets", "snippets.open");
-        t.insert(&[spc, KeyPress::char('i'), KeyPress::char('n')], "snippet from the selection", "snippets.from_selection");
-        // `SPC SPC` mirrors Doom Emacs's own "hit the leader twice for the
-        // single most-used action" convention -- here, the same fuzzy
-        // find-file-in-project picker as `SPC p f`.
-        t.insert(&[spc, spc], "find file", "project.find_file");
-
-        t.label_group(&[spc, KeyPress::char('f')], "files");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('s')], "save", "file.save");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('j')], "dired-jump", "explorer.jump");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('t')], "table view", "table.toggle");
-        insert_feature_keys(&mut t, spc, &crate::app::CCSDS_SPEC);
-        // Global rather than under `SPC m`: `SPC m` only has the Arduino
-        // menu inside a sketch, and your first sketch has to come from
-        // somewhere.
-        insert_feature_keys(&mut t, spc, &crate::app::EMBEDDED_SPEC);
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('f')], "find file", "file.find");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('e')], "explore from home", "file.explore");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('a')], "find file (all)", "file.find_all");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('r')], "recent files", "file.recent");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('R')], "rename file", "file.rename");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('D')], "delete file", "file.delete");
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('y')], "yank file path", "file.yank_path");
-        // `v` for "revive" -- `r` is recent files and `R` is rename,
-        // and this belongs in the same group as both.
-        t.insert(&[spc, KeyPress::char('f'), KeyPress::char('v')], "recover unsaved work", "file.recover");
-
-        t.label_group(&[spc, KeyPress::char('q')], "quit");
-        t.insert(&[spc, KeyPress::char('q'), KeyPress::char('q')], "quit", "app.quit");
-
-        t.label_group(&[spc, KeyPress::char('t')], "toggle");
-        t.insert(
-            &[spc, KeyPress::char('t'), KeyPress::char('n')],
-            "line numbers",
-            "view.cycle_line_numbers",
-        );
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('p')], "pick theme", "view.pick_theme");
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('=')], "font size +", "view.increase_font_size");
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('-')], "font size -", "view.decrease_font_size");
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('0')], "font size reset", "view.reset_font_size");
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('f')], "fullscreen", "view.toggle_fullscreen");
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('a')], "motion", "view.toggle_animations");
-        t.insert(&[spc, KeyPress::char('t'), KeyPress::char('d')], "inline problems", "view.cycle_diagnostics");
-
-        t.label_group(&[spc, KeyPress::char('e')], "explorer");
-        t.insert(
-            &[spc, KeyPress::char('e'), KeyPress::char('t')],
-            "toggle sidebar",
-            "explorer.toggle_sidebar",
-        );
-
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('e')], "open explorer here", "explorer.jump");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('d')], "dual pane", "explorer.dual_pane");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('k')], "stop the running operation", "explorer.cancel");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('o')], "open with the system", "explorer.open_external");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('O')], "show in Explorer", "explorer.reveal");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('y')], "copy the full path", "explorer.yank_path");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('T')], "shell here", "explorer.terminal_here");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('g')], "search here", "explorer.grep_here");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('G')], "project + Git panel here", "explorer.git_here");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('w')], "edit names", "explorer.rename_mode");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('W')], "apply edited names", "explorer.rename_apply");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('p')], "go to path", "explorer.go_to_path");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('b')], "places", "explorer.places");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('r')], "recent directories", "explorer.recent_dirs");
-        t.insert(&[spc, KeyPress::char('e'), KeyPress::char('m')], "bookmark this directory", "explorer.bookmark");
-        t.label_group(&[spc, KeyPress::char('p')], "project");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('f')], "find file", "project.find_file");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('s')], "search", "project.grep");
-        t.insert(
-            &[spc, KeyPress::char('p'), KeyPress::char('n')],
-            "next match",
-            "project.quickfix_next",
-        );
-        t.insert(
-            &[spc, KeyPress::char('p'), KeyPress::char('N')],
-            "prev match",
-            "project.quickfix_prev",
-        );
-        // The hub; the quick path-only switcher stays on `P`.
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('p')], "projects", "project.hub");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('P')], "quick switch", "project.switch_project");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('h')], "doctor", "project.doctor");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char(',')], "this project's settings", "project.settings");
-        t.insert(&[spc, KeyPress::char(',')], "settings", "settings.open");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('c')], "new project", "project.new");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('a')], "add project", "project.add");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('d')], "delete project", "project.delete");
-        // `SPC t` is already "toggle" (theme/font-size/fullscreen/...),
-        // so the build/task runner nests under `SPC p` instead --
-        // Doom Emacs' own `SPC p c` ("project compile") convention,
-        // generalized to any discovered task rather than just a build.
-        // `T`/lowercase mirrors `n`/`N`'s existing next-match/prev-match
-        // shift-variant pattern just above, here for run/rerun instead.
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('t')], "run task", "task.run");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('T')], "rerun last task", "task.rerun_last");
-        t.insert(&[spc, KeyPress::char('p'), KeyPress::char('k')], "kill running task", "task.kill");
-
-        t.label_group(&[spc, KeyPress::char('s')], "search");
-        t.insert(&[spc, KeyPress::char('s'), KeyPress::char('s')], "search buffer", "search.buffer");
-        t.insert(
-            &[spc, KeyPress::char('s'), KeyPress::char('r')],
-            "replace in buffer",
-            "search.replace_buffer",
-        );
-        t.insert(
-            &[spc, KeyPress::char('s'), KeyPress::char('p')],
-            "replace in project",
-            "search.replace_project",
-        );
-        // `t`/`T`, lowercase for this buffer and shifted for the whole
-        // project -- the same small/large split `SPC p n`/`N` and
-        // `SPC p t`/`T` already use one shift key apart.
-        t.insert(&[spc, KeyPress::char('s'), KeyPress::char('t')], "TODOs in buffer", "search.todos");
-        t.insert(&[spc, KeyPress::char('s'), KeyPress::char('T')], "TODOs in project", "search.todos_project");
-
-        t.label_group(&[spc, KeyPress::char('o')], "open");
-        t.insert(&[spc, KeyPress::char('o'), KeyPress::char('d')], "open home", "dashboard.open");
-        t.insert(&[spc, KeyPress::char('o'), KeyPress::char('t')], "toggle terminal", "terminal.toggle");
-        t.insert(&[spc, KeyPress::char('o'), KeyPress::char('T')], "terminal in this pane", "terminal.open_buffer");
-
-        // `SPC d`: Docker's own group, from its `FeatureSpec`.
-        insert_feature_keys(&mut t, spc, &crate::app::DOCKER_SPEC);
-
-        // DAP debugger. `SPC d` is already Docker's own group (Doom
-        // Emacs' own convention for debugging), so this nests under
-        // `SPC u` instead -- the one letter in "debUg" not already
-        // claimed by another top-level group (d=docker, e=explorer,
-        // b=buffer, g=git are all taken).
-        t.label_group(&[spc, KeyPress::char('u')], "debug");
-        t.insert(
-            &[spc, KeyPress::char('u'), KeyPress::char('u')],
-            "start/continue",
-            "debug.start_or_continue",
-        );
-        t.insert(
-            &[spc, KeyPress::char('u'), KeyPress::char('b')],
-            "toggle breakpoint",
-            "debug.toggle_breakpoint",
-        );
-        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('n')], "step over", "debug.step_over");
-        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('i')], "step into", "debug.step_into");
-        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('o')], "step out", "debug.step_out");
-        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('w')], "add watch", "debug.add_watch");
-        t.insert(&[spc, KeyPress::char('u'), KeyPress::char('q')], "stop", "debug.stop");
-
-        // Tool status listing (Milestone E of the LSP/DAP plan) -- `l`
-        // for "lsp", the group the original plan reserved this letter
-        // for. Only `m` ("manager") exists for now; the plan's own
-        // `SPC l i`/`SPC l r` (per-buffer LSP status/restart) were never
-        // wired up, so this group has exactly one entry rather than the
-        // three gaps that would come from stubbing them out unbuilt.
-        t.label_group(&[spc, KeyPress::char('l')], "lsp");
-        t.insert(&[spc, KeyPress::char('l'), KeyPress::char('m')], "tool status", "tools.status");
-
-        // Git. The status page (`g`) is the hub and has its own keys for
-        // most of what's done to a repository; these are the ways in,
-        // and what's done from the file being edited.
-        t.label_group(&[spc, KeyPress::char('g')], "git");
-        // The which-key drawer lists git's keys in these sections, in
-        // this order (`WHICH_KEY_SECTIONS`).
-        for (keys, section) in [("glGhHBecv", "View"), ("wfprmPMz", "Branch & remote"), ("adix", "This change")] {
-            for key in keys.chars() {
-                t.set_section(&[spc, KeyPress::char('g'), KeyPress::char(key)], section);
-            }
+        for spec in LEADER_FEATURES {
+            insert_feature_keys(&mut t, spc, spec);
         }
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('g')], "status page", "git.open");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('l')], "log", "git.log");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('h')], "this file's history", "git.file_history");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('H')], "these lines' history", "git.line_history");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('G')], "graph view", "git.history");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('c')], "compare with a branch", "git.compare");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('v')], "this file beside a branch", "git.versus");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('z')], "undo / operation log", "git.operations");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('w')], "switch branch", "git.switch");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('f')], "fetch", "git.fetch");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('p')], "pull --rebase", "git.pull_rebase");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('r')], "rebase onto...", "git.rebase");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('m')], "merge...", "git.merge");
-        // Opening a pull request and the reviews (`SPC g P`, `SPC g M`):
-        // the review feature's, under core's Git group.
-        insert_feature_keys(&mut t, spc, &crate::app::REVIEW_SPEC);
-        // The file being edited: its hunks (`]h`/`[h` move between them)
-        // and its blame.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('a')], "stage hunk", "git.hunk_stage");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('d')], "discard hunk", "git.hunk_discard");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('i')], "preview hunk", "git.hunk_preview");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('B')], "blame", "git.blame");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('e')], "explain this line", "git.blame_explain");
-        // A merge or rebase that stopped: resolving the conflicts, and the
-        // two keys that end it. `c`/`a` are one pair for every kind of
-        // suspended operation -- from the user's side it's one question
-        // ("keep going" / "put it back"), and the banner names which
-        // operation is answering.
-        t.label_group(&[spc, KeyPress::char('g'), KeyPress::char('x')], "conflicts");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('x')], "resolve side by side", "git.merge_view");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('j')], "next conflict", "git.next_conflict");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('k')], "prev conflict", "git.prev_conflict");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('o')], "keep ours", "git.keep_ours");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('t')], "keep theirs", "git.keep_theirs");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('b')], "keep both", "git.keep_both");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('s')], "stage resolved", "git.stage_resolved");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('c')], "continue", "git.continue");
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('x'), KeyPress::char('a')], "abort", "git.abort");
-        // One key closes whichever Git view is in front -- the panels,
-        // the graph, a comparison, the conflicts view, the older merge
-        // request view -- rather than one each.
-        t.insert(&[spc, KeyPress::char('g'), KeyPress::char('q')], "close this git view", "git.close_view");
-
-        // Jira: the page (searches, issues, a preview), and what you
-        // reach for from a file -- an issue by key, a search, a new one.
-        // Tracking projects and people happens on the page itself.
-        insert_feature_keys(&mut t, spc, &crate::app::JIRA_SPEC);
-
-        // SCOS-2000 MIBs: the MIB page, a definition by kind, inserting
-        // or editing a telecommand call. The project's MIBs are used.
-        t.label_group(&[spc, KeyPress::char('k')], "mission");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('k')], "MIB page", "mib.page");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('/')], "search every kind", "mib.search");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('t')], "telecommand", "mib.telecommand");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('p')], "TC parameter", "mib.tc_parameter");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('m')], "TM packet", "mib.tm_packet");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('n')], "TM parameter", "mib.tm_parameter");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('c')], "calibration", "mib.calibration");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('i')], "insert a telecommand", "mib.insert");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('e')], "edit the call on this line", "mib.edit_call");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('r')], "read the MIBs again", "mib.reload");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char(',')], "this project's MIBs", "mib.settings");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('d')], "decode the hex here", "ccsds.decode");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('b')], "copy this call as bytes", "mib.copy_bytes");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('T')], "time converter", "ccsds.time");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('f')], "open a recording", "ccsds.recording");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('l')], "follow a live source", "ccsds.live");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('g')], "generate from the MIB", "mib.generate");
-        t.insert(&[spc, KeyPress::char('k'), KeyPress::char('?')], "the standards library", "ccsds.standards");
-
-        // The notebook: notes, journal days and diagrams Fenix keeps.
-        insert_feature_keys(&mut t, spc, &crate::app::NOTEBOOK_SPEC);
-
-        // The agenda: the page and its tabs, and what you reach for from
-        // a file -- a new task, a task from here, the clock. A task's own
-        // keys (status, priority, clock, ...) are on the page.
-        insert_feature_keys(&mut t, spc, &crate::app::AGENDA_SPEC);
-
-        // VNC console panes (`fenix-vnc`) -- one connection per
-        // configured `Config.vnc_hosts` entry, each staying live in the
-        // background once opened. Mirrors the docker/jira groups' exact
-        // shape.
-        insert_feature_keys(&mut t, spc, &crate::app::VNC_SPEC);
-
-        // The PDF reader (`SPC r`): its keys are the reader feature's.
-        insert_feature_keys(&mut t, spc, &crate::app::PDF_SPEC);
-
-        t.label_group(&[spc, KeyPress::char('c')], "code");
-        // `SPC c r` used to be ctags refresh -- moved to `SPC c T`
-        // ("Tags") to free `r` up for the far more frequently reached-
-        // for LSP rename, mirroring the letter Neovim/most LSP configs
-        // already use for it.
-        t.insert(
-            &[spc, KeyPress::char('c'), KeyPress::char('r')],
-            "rename (LSP)",
-            "code.lsp_rename",
-        );
-        t.insert(
-            &[spc, KeyPress::char('c'), KeyPress::char('a')],
-            "code action",
-            "code.lsp_code_action",
-        );
-        t.insert(
-            &[spc, KeyPress::char('c'), KeyPress::char('f')],
-            "indent region",
-            "code.format_selection",
-        );
-        t.insert(
-            &[spc, KeyPress::char('c'), KeyPress::char('F')],
-            "indent buffer",
-            "code.format_buffer",
-        );
-        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('x')], "toggle checkbox", "code.toggle_checkbox");
-        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('o')], "outline", "code.outline");
-        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('u')], "enclosing scope", "code.scope_parent");
-        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('b')], "breadcrumbs", "code.breadcrumbs");
-        // `z`, not `f` -- `SPC c f` is already "indent region"
-        // (`code.format_selection`, above); `z` matches real Vim's own
-        // `zo`/`zc`/`za` fold mnemonic instead of colliding with it.
-        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('z')], "toggle fold", "code.toggle_fold");
-        // XML. `SPC c o` (outline), `SPC c s` (elements), `SPC c z`
-        // (fold) and `SPC c F` (reindent) already cover it through the
-        // grammar; these two only make sense for XML.
-        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('v')], "validate XML", "code.xml_validate");
-        t.insert(&[spc, KeyPress::char('c'), KeyPress::char('y')], "yank XML path", "code.xml_path");
-
-        // The local leader: what's under it depends on the focused buffer
-        // (see `LocalContext`) -- `App::start_local_leader` opens the
-        // matching `local_trie`, the way Doom Emacs' `SPC m` does.
-        t.insert(&[spc, KeyPress::char('m')], "mode", "leader.local");
-
-        t.label_group(&[spc, KeyPress::char('w')], "window");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('v')], "split vertical", "window.split_vertical");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('s')], "split horizontal", "window.split_horizontal");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('h')], "focus left", "window.navigate_left");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('l')], "focus right", "window.navigate_right");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('k')], "focus up", "window.navigate_up");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('j')], "focus down", "window.navigate_down");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('w')], "cycle window", "window.cycle");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('q')], "close window", "window.close");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('o')], "only", "window.only");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('=')], "balance", "window.balance");
-        // OS windows ("frames") share this group with splits, one shift
-        // key apart: lowercase acts on a split, uppercase on the whole
-        // window. `n` is the exception -- there's no lowercase "new
-        // window" for it to collide with, and `SPC w n` reads better
-        // than `SPC w N` for the one command in the group you reach for
-        // first.
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('n')], "new frame", "frame.new");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('W')], "cycle frame", "frame.cycle");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('Q')], "close frame", "frame.close");
-        t.insert(&[spc, KeyPress::char('w'), KeyPress::char('O')], "only frame", "frame.only");
-
-        t.label_group(&[spc, KeyPress::char('b')], "buffer");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('b')], "switch buffer", "buffer.switch");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('n')], "next buffer", "buffer.next");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('p')], "prev buffer", "buffer.prev");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('k')], "kill buffer", "buffer.kill");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('d')], "close tab", "tab.close");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('o')], "close other tabs", "tab.close_others");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('u')], "reopen closed tab", "tab.reopen");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('P')], "keep preview tab", "tab.keep");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('<')], "move tab left", "tab.move_left");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('>')], "move tab right", "tab.move_right");
-        t.insert(&[spc, KeyPress::char('b'), KeyPress::char('X')], "scratch buffer", "buffer.scratch");
-
-        let tab = KeyPress::named(FenixNamedKey::Tab);
-        t.label_group(&[spc, tab], "workspace");
-        t.insert(&[spc, tab, KeyPress::char('n')], "new workspace", "workspace.new");
-        t.insert(&[spc, tab, KeyPress::char(']')], "next workspace", "workspace.next");
-        t.insert(&[spc, tab, KeyPress::char('[')], "prev workspace", "workspace.prev");
-        t.insert(&[spc, tab, KeyPress::char('d')], "remove workspace", "workspace.remove");
-        t.insert(&[spc, tab, tab], "switch workspace", "workspace.switch");
-        t.insert(&[spc, tab, KeyPress::char('f')], "find workspace", "workspace.find");
-        t.insert(&[spc, tab, KeyPress::char('r')], "rename workspace", "workspace.rename");
-
+        // A key bound twice silently goes to whichever came last.
+        for conflict in keymap_conflicts() {
+            eprintln!("fenix: keymap: {conflict}");
+        }
         t
     })
+}
+
+/// The features whose keys go under the leader, after core's.
+const LEADER_FEATURES: [&crate::app::feature::FeatureSpec; 9] = [
+    &crate::app::CCSDS_SPEC,
+    // Global rather than under `SPC m`: `SPC m` only has the Arduino
+    // menu inside a sketch, and your first sketch has to come from
+    // somewhere.
+    &crate::app::EMBEDDED_SPEC,
+    &crate::app::DOCKER_SPEC,
+    &crate::app::REVIEW_SPEC,
+    &crate::app::JIRA_SPEC,
+    &crate::app::NOTEBOOK_SPEC,
+    &crate::app::AGENDA_SPEC,
+    &crate::app::VNC_SPEC,
+    &crate::app::PDF_SPEC,
+];
+
+/// Fenix's own keys as data: the leader map and core's `SPC m` entries
+/// (see the file's own comment). Loaded through the same code your own
+/// keymap and an extension's will be.
+const DEFAULT_KEYMAP: &str = include_str!("default_keymap.toml");
+
+/// A keymap file: `[[leader]]` entries, and `[[local.<menu>]]` entries for
+/// a `SPC m` menu (keys after `SPC m`).
+#[derive(serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct KeymapData {
+    #[serde(default)]
+    leader: Vec<KeyEntry>,
+    #[serde(default)]
+    local: std::collections::HashMap<String, Vec<KeyEntry>>,
+}
+
+/// One entry: `keys` bound to `command` (shown as `label`), or naming a
+/// `group`, and/or filed under a which-key `section`.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyEntry {
+    keys: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    group: Option<String>,
+    #[serde(default)]
+    section: Option<String>,
+}
+
+fn default_keymap() -> &'static KeymapData {
+    static DATA: OnceLock<KeymapData> = OnceLock::new();
+    DATA.get_or_init(|| toml::from_str(DEFAULT_KEYMAP).unwrap_or_else(|e| panic!("the built-in keymap doesn't parse: {e}")))
+}
+
+/// Core's entries for `SPC m` menu `name`.
+fn default_local(name: &str) -> &'static [KeyEntry] {
+    default_keymap().local.get(name).map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// Keys as the which-key menu writes them (`SPC f s`, `SPC Tab n`, `x`).
+pub(crate) fn parse_keys(text: &str) -> Result<Vec<KeyPress>, String> {
+    text.split_whitespace()
+        .map(|token| match token {
+            "SPC" => Ok(KeyPress::char(' ')),
+            "Tab" => Ok(KeyPress::named(FenixNamedKey::Tab)),
+            _ => {
+                let mut chars = token.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) => Ok(KeyPress::char(c)),
+                    _ => Err(format!("`{token}` in `{text}` isn't a key")),
+                }
+            }
+        })
+        .collect()
+}
+
+/// Lays `entries` into `t` under `prefix`.
+fn insert_data(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &'static [KeyEntry]) {
+    for entry in entries {
+        let keys = parse_keys(&entry.keys).unwrap_or_else(|e| panic!("the built-in keymap: {e}"));
+        let seq: Vec<KeyPress> = prefix.iter().copied().chain(keys).collect();
+        if let Some(command) = entry.command.as_deref() {
+            t.insert(&seq, entry.label.as_deref().unwrap_or(command), command);
+        }
+        if let Some(group) = entry.group.as_deref() {
+            t.label_group(&seq, group);
+        }
+        if let Some(section) = entry.section.as_deref() {
+            t.set_section(&seq, section);
+        }
+    }
+}
+
+/// Keys bound or named twice -- in the leader map, or in one `SPC m`
+/// menu -- across core's keymap and the features' specs, as
+/// `SPC f s: file.save and file.other`. A later one would silently win.
+pub(crate) fn keymap_conflicts() -> Vec<String> {
+    use crate::app::feature::LeaderEntry;
+    use std::collections::HashMap;
+    fn note(seen: &mut HashMap<String, String>, conflicts: &mut Vec<String>, keys: String, what: String) {
+        if let Some(before) = seen.insert(keys.clone(), what.clone()) {
+            conflicts.push(format!("{keys}: {before} and {what}"));
+        }
+    }
+    fn data(seen: &mut HashMap<String, String>, conflicts: &mut Vec<String>, prefix: &str, entries: &[KeyEntry]) {
+        for e in entries {
+            let keys = format!("{prefix}{}", e.keys);
+            if let Some(command) = &e.command {
+                note(seen, conflicts, keys.clone(), command.clone());
+            }
+            if let Some(group) = &e.group {
+                note(seen, conflicts, keys, format!("group {group}"));
+            }
+        }
+    }
+    fn spec(seen: &mut HashMap<String, String>, conflicts: &mut Vec<String>, prefix: &str, entries: &[LeaderEntry]) {
+        for e in entries {
+            let (keys, what) = match e {
+                LeaderEntry::Bind(keys, _, command) => (keys, command.to_string()),
+                LeaderEntry::Group(keys, label) => (keys, format!("group {label}")),
+            };
+            let keys = keys.iter().map(|&c| describe_keypress(&KeyPress::char(c))).collect::<Vec<_>>().join(" ");
+            note(seen, conflicts, format!("{prefix}{keys}"), what);
+        }
+    }
+    let mut conflicts = Vec::new();
+    let mut leader = HashMap::new();
+    data(&mut leader, &mut conflicts, "", &default_keymap().leader);
+    for s in LEADER_FEATURES {
+        spec(&mut leader, &mut conflicts, "SPC ", s.leader);
+    }
+    let menus: [(&str, &[&[LeaderEntry]], &str); 5] = [
+        ("reader", &[], "reader"),
+        ("markdown", &[crate::app::NOTEBOOK_SPEC.local_menu], "markdown"),
+        ("arduino", &[crate::app::EMBEDDED_SPEC.local_menu], "arduino"),
+        ("tcl", &[crate::app::MIB_SPEC.local_menu, crate::app::TCL_SPEC.local_menu], "tcl"),
+        ("mermaid", &[crate::app::DIAGRAMS_SPEC.local_menu], "mermaid"),
+    ];
+    for (name, specs, data_name) in menus {
+        let mut menu = HashMap::new();
+        data(&mut menu, &mut conflicts, &format!("SPC m ({name}) "), default_local(data_name));
+        for entries in specs {
+            spec(&mut menu, &mut conflicts, &format!("SPC m ({name}) "), entries);
+        }
+    }
+    conflicts
 }
 
 /// The leader sequence that runs each command, as the which-key menu
@@ -1147,5 +940,58 @@ mod tests {
         assert!(matches!(resolve(tab), fenix_keymap::Step::Matched(&"workspace.switch")));
         assert!(matches!(resolve(KeyPress::char('f')), fenix_keymap::Step::Matched(&"workspace.find")));
         assert!(matches!(resolve(KeyPress::char('r')), fenix_keymap::Step::Matched(&"workspace.rename")));
+    }
+
+    // The default keymap is data (`default_keymap.toml`).
+
+    #[test]
+    fn the_default_keymap_has_no_key_bound_twice() {
+        assert_eq!(keymap_conflicts(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn every_key_in_the_default_keymap_parses_and_writes_back_the_same() {
+        let data = default_keymap();
+        let all = data.leader.iter().chain(data.local.values().flatten());
+        for entry in all {
+            let keys = parse_keys(&entry.keys).unwrap_or_else(|e| panic!("{e}"));
+            let written = keys.iter().map(describe_keypress).collect::<Vec<_>>().join(" ");
+            assert_eq!(written, entry.keys);
+        }
+        assert!(parse_keys("SPC ff").is_err() && parse_keys("SPC <nope>").is_err());
+    }
+
+    #[test]
+    fn every_command_the_default_keymap_names_exists() {
+        let registry = crate::commands::CommandRegistry::with_builtins();
+        let data = default_keymap();
+        for command in data.leader.iter().chain(data.local.values().flatten()).filter_map(|e| e.command.as_deref()) {
+            assert!(registry.iter().any(|c| c.id == command), "{command} isn't a command");
+        }
+    }
+
+    #[test]
+    fn a_conflict_between_two_bindings_of_one_key_is_reported() {
+        let text = "[[leader]]
+keys = \"SPC x\"
+command = \"one\"
+
+[[leader]]
+keys = \"SPC x\"
+command = \"two\"
+";
+        let data: KeymapData = toml::from_str(text).unwrap();
+        let mut seen = std::collections::HashMap::new();
+        let mut conflicts = Vec::new();
+        for e in &data.leader {
+            if let Some(before) = seen.insert(e.keys.clone(), e.command.clone()) {
+                conflicts.push((before, e.command.clone()));
+            }
+        }
+        assert_eq!(conflicts.len(), 1);
+        assert!(toml::from_str::<KeymapData>("[[leader]]
+keys = \"SPC x\"
+what = 1
+").is_err(), "an unknown field is refused");
     }
 }
