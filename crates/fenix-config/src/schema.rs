@@ -323,19 +323,6 @@ fn map_set(v: Option<Value>) -> Result<Vec<(String, String)>, String> {
         Some(other) => Err(format!("expected named entries, got {}", other.describe())),
     }
 }
-/// The ICD issues `mib.icd` offers.
-pub const MIB_ICDS: &[&str] = &["7.x", "6.9", "6.x", "5.x", "4.x", "auto"];
-/// The packet identification fields `mib.xtce_fields` names.
-pub const XTCE_FIELDS: &[&str] = &["apid", "service", "subtype", "pi1", "pi2"];
-
-/// An issue as `mib.icd_per_mib` takes one: auto, or 4 to 7 with any
-/// minor part (`7.2`, `6.x`).
-fn icd_issue(text: &str) -> bool {
-    let t = text.trim();
-    let (major, minor) = t.split_once('.').unwrap_or((t, "0"));
-    t == "auto" || (matches!(major, "4" | "5" | "6" | "7") && (minor == "x" || minor.parse::<u32>().is_ok()))
-}
-
 fn path_map_get(v: &[(String, PathBuf)]) -> Option<Value> {
     (!v.is_empty()).then(|| Value::Map(v.iter().map(|(k, p)| (k.clone(), p.display().to_string())).collect()))
 }
@@ -452,47 +439,6 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         // Jira & agenda
         s("jira.base_url", Jira, "Jira server", Kind::Text, "Your Jira Server or Data Center's address.", field!(jira_base_url, text_get, text_set)),
         s("jira.token", Jira, "Jira token", Kind::Secret(Secret::Jira), "A personal access token for the Jira server.", field!(jira_token, text_get, text_set)),
-        // Embedded & MIB
-        // SCOS-2000 MIB
-        s("mib.roots", Mib, "MIBs", Kind::Map { key: "Name", value: "Folder", paths: true }, "The MIB folders: their .dat tables. A project's own list takes the place of yours in that project; a folder in a project can be relative to it.", field!(mib_roots, path_map_get, path_map_set)).project(),
-        s("mib.default", Mib, "Default MIB", Kind::Text, "The MIB whose definition is used when several define the same name.", field!(mib_default, text_get, text_set)).default("the first").project(),
-        s("mib.include_yours", Mib, "Add your MIBs", Kind::Bool, "In a project with MIBs of its own, use yours too.", field!(mib_include_yours, bool_get, bool_set)).default("off").project(),
-        s("mib.telecommand_template", Mib, "Telecommand template", Kind::Text, "How an inserted telecommand is written: {mnemo}, {type}, {stype}, {apid}, {description}, {mib} and {arguments} are filled in.", field!(mib_telecommand_template, text_get, text_set)).default("telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}]").project(),
-        s("mib.telecommand_argument_template", Mib, "Argument template", Kind::Text, "How each argument is written: {name} and {value} are filled in.", field!(mib_telecommand_argument_template, text_get, text_set)).default("{name}={value}").project(),
-        s("mib.telecommand_argument_separator", Mib, "Argument separator", Kind::Text, "What goes between arguments.", field!(mib_telecommand_argument_separator, text_get, text_set)).default("\", \"").project(),
-        s("mib.editor_files", Mib, "Files that know the MIB", Kind::List, "Extensions of the files where K, gd and completion know MIB names (tcl, py). Empty: every file.", (|c: &Config| list_get(&c.mib_editor_files), |c: &mut Config, v| {
-            c.mib_editor_files = list_set(v)?;
-            Ok(())
-        })).default("every file").project(),
-        s("mib.icd", Mib, "ICD issue", Kind::Choice(MIB_ICDS), "The SCOS-2000 Database Import ICD issue the MIBs' .dat tables follow: which tables there are and their columns. Auto works it out from each MIB's files.", field!(mib_icd, text_get, text_set)).default("7.x").project(),
-        s("mib.icd_per_mib", Mib, "ICD issue per MIB", Kind::Map { key: "MIB", value: "Issue", paths: false }, "A MIB that follows another issue than the rest: its name, and 7.x, 6.9, 6.x, 5.x, 4.x or auto.", (|c: &Config| map_get(&c.mib_icd_per_mib), |c: &mut Config, v| {
-            let m = map_set(v)?;
-            if let Some((name, issue)) = m.iter().find(|(_, i)| !icd_issue(i)) {
-                return Err(format!("{name}: \"{issue}\" isn't an issue -- one of {} (7.2 counts as 7.x)", MIB_ICDS.join(", ")));
-            }
-            c.mib_icd_per_mib = m;
-            Ok(())
-        })).project(),
-        s("mib.columns", Mib, "Table columns", Kind::Map { key: "Table", value: "Columns", paths: false }, "A table's columns in file order, separated by commas, in place of the ICD's: for a mission whose tables differ, or a table of its own (xyz reads xyz.dat).", (|c: &Config| map_get(&c.mib_columns), |c: &mut Config, v| {
-            let m = map_set(v)?;
-            if let Some((table, _)) = m.iter().find(|(t, cols)| t.trim().is_empty() || t.contains(['/', '\\', '.']) || cols.trim().is_empty()) {
-                return Err(format!("{table}: a table is a .dat file's name with its columns, like ccf = CCF_CNAME, CCF_DESCR"));
-            }
-            c.mib_columns = m;
-            Ok(())
-        })).project(),
-        s("mib.xtce_fields", Mib, "XTCE identification", Kind::Map { key: "Field", value: "Parameters", paths: false }, "In an XTCE MIB, the parameters whose restriction values identify a packet, and the arguments that say a telecommand's: apid, service, subtype, pi1 or pi2, each with its names separated by commas. A field not given goes by the names: APID, SERVICE, SUBTYPE, SID.", (|c: &Config| map_get(&c.mib_xtce_fields), |c: &mut Config, v| {
-            let m = map_set(v)?;
-            if let Some((field, _)) = m.iter().find(|(f, _)| !XTCE_FIELDS.contains(&f.trim().to_ascii_lowercase().as_str())) {
-                return Err(format!("\"{field}\": one of {}", XTCE_FIELDS.join(", ")));
-            }
-            c.mib_xtce_fields = m;
-            Ok(())
-        })).project(),
-        s("mib.xtce_version", Mib, "XTCE export", Kind::Choice(&["1.2", "1.1"]), "The XTCE version a MIB is exported in (SPC k g): 1.2, or 1.1 for ground systems that read only that.", field!(mib_xtce_version, text_get, text_set)).default("1.2").project(),
-        s("mib.apid_format", Mib, "APIDs in", Kind::Choice(&["hex", "decimal"]), "How APIDs are shown.", field!(mib_apid_format, text_get, text_set)).default("hex"),
-        s("mib.watch", Mib, "Reload on change", Kind::Bool, "Reload a MIB when one of its .dat files changes on disk.", field!(mib_watch, bool_get, bool_set)).default("on"),
-        s("mib.check_scripts", Mib, "Check scripts", Kind::Bool, "Underline telecommand calls in scripts that the MIB disagrees with: unknown mnemonics, missing or out-of-range arguments.", field!(mib_check_scripts, bool_get, bool_set)).default("on").project(),
         // CCSDS & PUS
         s("ccsds.pus", Ccsds, "PUS edition", Kind::Choice(&["c", "a", "none"]), "The packet utilization standard the mission's packets follow: ECSS-E-ST-70-41C, 70-41A, or plain space packets.", field!(ccsds_pus, text_get, text_set)).default("c").project(),
         s("ccsds.tm_time", Ccsds, "TM time format", Kind::Text, "The time in a TM secondary header: cuc 4.2 (4 coarse, 2 fine octets), cds 16, add p for a P-field, or none.", field!(ccsds_tm_time, text_get, text_set)).default("cuc 4.2").project(),

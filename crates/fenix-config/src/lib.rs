@@ -162,38 +162,6 @@ pub struct Config {
     /// protection as `vnc_hosts`/`documents`/`workspaces` (see `save`'s
     /// own doc comment), since nothing in this app writes to it itself.
     pub lsp_servers: Vec<(String, String)>,
-    /// The SCOS-2000 MIBs, `(label, folder)`, in order. A project's own
-    /// `mib.roots` takes their place in that project.
-    pub mib_roots: Vec<(String, PathBuf)>,
-    pub mib_telecommand_template: Option<String>,
-    pub mib_telecommand_argument_template: Option<String>,
-    pub mib_telecommand_argument_separator: Option<String>,
-    /// The MIB whose definition wins a name several define.
-    pub mib_default: Option<String>,
-    /// In a project with its own MIBs, yours are used too.
-    pub mib_include_yours: Option<bool>,
-    /// File extensions where `K`, `gd` and completion know MIB names;
-    /// empty means every file.
-    pub mib_editor_files: Vec<String>,
-    /// "hex" or "decimal".
-    pub mib_apid_format: Option<String>,
-    /// Reload a MIB when one of its files changes.
-    pub mib_watch: Option<bool>,
-    /// Diagnostics for telecommand calls in scripts.
-    pub mib_check_scripts: Option<bool>,
-    /// The Database Import ICD issue the MIBs follow: "7.x", "6.9",
-    /// "6.x", "5.x", "4.x", or "auto" to work it out from each MIB's files.
-    pub mib_icd: Option<String>,
-    /// One MIB's own issue, `(label, issue)`, in place of `mib_icd`.
-    pub mib_icd_per_mib: Vec<(String, String)>,
-    /// A table's columns in file order, `(table, columns)`, in place of
-    /// the ICD's -- or a table of the mission's own.
-    pub mib_columns: Vec<(String, String)>,
-    /// Which parameters identify a packet in an XTCE MIB, `(field,
-    /// names)`: apid, service, subtype, pi1, pi2.
-    pub mib_xtce_fields: Vec<(String, String)>,
-    /// The XTCE version an export is written in: "1.2" or "1.1".
-    pub mib_xtce_version: Option<String>,
     /// The CCSDS and PUS profile: how a mission's packets and frames
     /// are laid out beyond what its MIB says.
     pub ccsds_pus: Option<String>,
@@ -454,22 +422,7 @@ impl Config {
             completion_symbols_file: None,
             snippets_builtin: None,
             lsp_servers: Vec::new(),
-            mib_roots: Vec::new(),
             explorer_bookmarks: Vec::new(),
-            mib_telecommand_template: None,
-            mib_telecommand_argument_template: None,
-            mib_telecommand_argument_separator: None,
-            mib_default: None,
-            mib_include_yours: None,
-            mib_editor_files: Vec::new(),
-            mib_apid_format: None,
-            mib_watch: None,
-            mib_check_scripts: None,
-            mib_icd: None,
-            mib_icd_per_mib: Vec::new(),
-            mib_columns: Vec::new(),
-            mib_xtce_fields: Vec::new(),
-            mib_xtce_version: None,
             ccsds_pus: None,
             ccsds_tm_time: None,
             ccsds_epoch: None,
@@ -900,24 +853,6 @@ mod tests {
     }
 
     #[test]
-    fn saving_still_persists_an_in_app_change_to_mib_roots() {
-        // The re-read-from-disk protection is specifically scoped to
-        // `vnc_hosts`/`documents`/`workspaces` -- `mib_roots`/
-        // `jira_projects`/`jira_users` really do have an in-app add/
-        // delete flow (`SPC m a`/`SPC j p a`/...) and must keep coming
-        // from `self`, or that flow would stop working.
-        let path = temp_path("mib_and_jira_still_save_from_self");
-        let mut config = Config::load(path.clone()).unwrap();
-        config.mib_roots = vec![("MIB-A".to_string(), PathBuf::from("C:/data/mib-a"))];
-
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.mib_roots, config.mib_roots);
-        let _ = std::fs::remove_file(path);
-    }
-
-    #[test]
     fn no_windows_section_means_nothing_recorded_and_no_opt_out() {
         let config = Config::load(temp_path("windows_absent")).unwrap();
         assert!(config.windows.is_empty());
@@ -958,10 +893,6 @@ mod tests {
         assert!(config.tab_width.is_none());
         assert!(config.animations.is_none());
         assert!(config.completion_symbols_file.is_none());
-        assert!(config.mib_roots.is_empty());
-        assert!(config.mib_telecommand_template.is_none());
-        assert!(config.mib_telecommand_argument_template.is_none());
-        assert!(config.mib_telecommand_argument_separator.is_none());
         assert!(config.value("vnc.hosts").is_none(), "a feature's setting, unset");
     }
 
@@ -1012,30 +943,6 @@ mod tests {
     }
 
     #[test]
-    fn mib_roots_and_templates_round_trip_through_save_and_load() {
-        let path = temp_path("mib_round_trip");
-        let mut config = Config::load_or_default(path.clone());
-        config.mib_roots = vec![
-            ("MIB-A".to_string(), PathBuf::from("/data/mib-a")),
-            ("MIB-B".to_string(), PathBuf::from("/data/mib-b")),
-        ];
-        config.mib_telecommand_template = Some("TC {mnemo}".to_string());
-        config.mib_telecommand_argument_template = Some("{name}:{value}".to_string());
-        config.mib_telecommand_argument_separator = Some(";".to_string());
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(
-            reloaded.mib_roots,
-            vec![("MIB-A".to_string(), PathBuf::from("/data/mib-a")), ("MIB-B".to_string(), PathBuf::from("/data/mib-b"))]
-        );
-        assert_eq!(reloaded.mib_telecommand_template, Some("TC {mnemo}".to_string()));
-        assert_eq!(reloaded.mib_telecommand_argument_template, Some("{name}:{value}".to_string()));
-        assert_eq!(reloaded.mib_telecommand_argument_separator, Some(";".to_string()));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
     fn animations_setting_round_trips_through_save_and_load() {
         let path = temp_path("animations_round_trip");
         let mut config = Config::load_or_default(path.clone());
@@ -1058,29 +965,6 @@ mod tests {
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.jira_base_url, Some("https://jira.example.com".to_string()));
         assert_eq!(reloaded.jira_token, Some("secret-token-value".to_string()));
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
-    fn a_whitespace_only_argument_separator_round_trips_through_save_and_load() {
-        // The specific gap `ini::quote_if_needed`/`ini::parse`'s quote
-        // handling exists to close: a separator that's pure whitespace
-        // (a single space, here) previously trimmed away to nothing on
-        // every save/load round trip -- there was no way to configure
-        // one at all.
-        let path = temp_path("whitespace_separator_round_trip");
-        let mut config = Config::load_or_default(path.clone());
-        config.mib_telecommand_argument_separator = Some(" ".to_string());
-        config.save().unwrap();
-
-        let contents = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            contents.contains("telecommand_argument_separator = \" \""),
-            "expected the written value to be quoted, got:\n{contents}"
-        );
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.mib_telecommand_argument_separator, Some(" ".to_string()));
         std::fs::remove_file(&path).ok();
     }
 
@@ -1166,12 +1050,14 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
-    /// Jira's `jira.blocked` (and its users), as fenix-gui registers them:
-    /// for the migration test, which checks they come over by key.
+    /// Jira's `jira.blocked` and users and MIB's roots, as fenix-gui
+    /// registers them: for the migration test, which checks they come over
+    /// by key.
     fn register_jira() {
-        static JIRA: [Setting; 2] = [
+        static JIRA: [Setting; 3] = [
             Setting::stored("jira.users", schema::Category::Jira, "People", Kind::Map { key: "Username", value: "Name", paths: false }, "People."),
             Setting::stored("jira.blocked", schema::Category::Jira, "What Blocked means", Kind::Map { key: "Project", value: "Meaning", paths: false }, "Blocked."),
+            Setting::stored("mib.roots", schema::Category::Mib, "MIBs", Kind::Map { key: "Name", value: "Folder", paths: true }, "MIBs."),
         ];
         schema::register(&JIRA);
     }
@@ -1220,15 +1106,8 @@ mod tests {
             _ => Value::Text(r#"C:\a "b"\c = d"#.into()),
         };
         let settable: Vec<&Setting> = settings().into_iter().filter(|s| !matches!(s.kind, Kind::Secret(_))).collect();
-        // Maps whose values have a form of their own.
-        let sample_for = |s: &Setting| match s.key {
-            "mib.icd_per_mib" => Value::Map(vec![("OPS 1".into(), "6.9".into()), ("SIM".into(), "auto".into())]),
-            "mib.columns" => Value::Map(vec![("ccf".into(), "CCF_CNAME, CCF_DESCR".into()), ("xyz".into(), "XYZ_A".into())]),
-            "mib.xtce_fields" => Value::Map(vec![("apid".into(), "APPLICATION_ID".into()), ("pi1".into(), "SID, STRUCT".into())]),
-            _ => sample(&s.kind),
-        };
         for s in &settable {
-            s.set(&mut config, Some(sample_for(s))).unwrap_or_else(|e| panic!("{}: {e}", s.key));
+            s.set(&mut config, Some(sample(&s.kind))).unwrap_or_else(|e| panic!("{}: {e}", s.key));
         }
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
@@ -1407,7 +1286,7 @@ name = \"lab\""), "a key no setting here declares stays as it was");
         assert_eq!(reloaded.theme.as_deref(), Some("Visual Studio Dark"));
         assert_eq!(reloaded.animations, Some(false));
         assert_eq!(reloaded.lsp_servers, [("python".to_string(), r"C:\tools\pyright-langserver.exe --stdio".to_string())]);
-        assert_eq!(reloaded.mib_roots, [("missionc".to_string(), PathBuf::from(r"C:\mib\missionc"))]);
+        assert_eq!(reloaded.map_value("mib.roots"), [("missionc".to_string(), r"C:\mib\missionc".to_string())]);
         assert_eq!(reloaded.map_value("jira.blocked"), [("FNX".to_string(), "10103: On Hold".to_string())]);
         assert_eq!(reloaded.git_auto_fetch_minutes, Some(5));
         assert_eq!(reloaded.git_reviewers, ["alex", "sam"]);

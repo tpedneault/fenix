@@ -149,7 +149,7 @@ impl App {
             }
             request.pdfs = self.features.pdf().docs.iter().map(|(&id, d)| (id, d.path.clone())).collect();
         }
-        if self.config.mib_watch.unwrap_or(true) {
+        if self.config.bool_value("mib.watch").unwrap_or(true) {
             request.mibs = self.mib().into_iter().flat_map(|mib| mib.sets.iter()).filter(|(_, slot)| !slot.loading && slot.set.is_some()).map(|(key, _)| key.clone()).collect();
         }
         request.project = self.project_root.clone();

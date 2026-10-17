@@ -29,6 +29,70 @@ fn on(app: &mut App, f: fn(&mut MibHost, &mut App)) {
 /// The MIB's commands and its entries in the Tcl `SPC m` menu. Its
 /// `SPC k` keys stay in the keymap for now: that group is the mission
 /// pack's, shared with CCSDS.
+/// The ICD issues `mib.icd` offers.
+const MIB_ICDS: &[&str] = &["7.x", "6.9", "6.x", "5.x", "4.x", "auto"];
+/// The packet identification fields `mib.xtce_fields` names.
+const XTCE_FIELDS: &[&str] = &["apid", "service", "subtype", "pi1", "pi2"];
+
+/// An issue as `mib.icd_per_mib` takes one: auto, or 4 to 7 with any
+/// minor part (`7.2`, `6.x`).
+fn icd_issue(text: &str) -> bool {
+    let t = text.trim();
+    let (major, minor) = t.split_once('.').unwrap_or((t, "0"));
+    t == "auto" || (matches!(major, "4" | "5" | "6" | "7") && (minor == "x" || minor.parse::<u32>().is_ok()))
+}
+
+/// A setting's entries, for its check.
+fn entries(v: &fenix_config::Value) -> &[(String, String)] {
+    match v {
+        fenix_config::Value::Map(m) => m,
+        _ => &[],
+    }
+}
+
+/// MIB's settings: `[mib]` in `settings.toml`, most of them per project
+/// too (`.fenix/settings.toml`).
+static SETTINGS: [fenix_config::Setting; 15] = {
+    use fenix_config::{Category::Mib, Kind, Setting};
+    [
+        Setting::stored("mib.roots", Mib, "MIBs", Kind::Map { key: "Name", value: "Folder", paths: true }, "The MIB folders: their .dat tables. A project's own list takes the place of yours in that project; a folder in a project can be relative to it.").project(),
+        Setting::stored("mib.default", Mib, "Default MIB", Kind::Text, "The MIB whose definition is used when several define the same name.").with_default("the first").project(),
+        Setting::stored("mib.include_yours", Mib, "Add your MIBs", Kind::Bool, "In a project with MIBs of its own, use yours too.").with_default("off").project(),
+        Setting::stored("mib.telecommand_template", Mib, "Telecommand template", Kind::Text, "How an inserted telecommand is written: {mnemo}, {type}, {stype}, {apid}, {description}, {mib} and {arguments} are filled in.").with_default("telecommand_send PUS_T={type} PUS_ST={stype} APID={apid} MNEMO={mnemo} ARGUMENTS=[{arguments}]").project(),
+        Setting::stored("mib.telecommand_argument_template", Mib, "Argument template", Kind::Text, "How each argument is written: {name} and {value} are filled in.").with_default("{name}={value}").project(),
+        Setting::stored("mib.telecommand_argument_separator", Mib, "Argument separator", Kind::Text, "What goes between arguments.").with_default("\", \"").project(),
+        Setting::stored("mib.editor_files", Mib, "Files that know the MIB", Kind::List, "Extensions of the files where K, gd and completion know MIB names (tcl, py). Empty: every file.").with_default("every file").project(),
+        Setting::stored("mib.icd", Mib, "ICD issue", Kind::Choice(MIB_ICDS), "The SCOS-2000 Database Import ICD issue the MIBs' .dat tables follow: which tables there are and their columns. Auto works it out from each MIB's files.").with_default("7.x").project(),
+        Setting::stored("mib.icd_per_mib", Mib, "ICD issue per MIB", Kind::Map { key: "MIB", value: "Issue", paths: false }, "A MIB that follows another issue than the rest: its name, and 7.x, 6.9, 6.x, 5.x, 4.x or auto.")
+            .checked(|v| match entries(v).iter().find(|(_, i)| !icd_issue(i)) {
+                Some((name, issue)) => Err(format!("{name}: \"{issue}\" isn't an issue -- one of {} (7.2 counts as 7.x)", MIB_ICDS.join(", "))),
+                None => Ok(()),
+            })
+            .project(),
+        Setting::stored("mib.columns", Mib, "Table columns", Kind::Map { key: "Table", value: "Columns", paths: false }, "A table's columns in file order, separated by commas, in place of the ICD's: for a mission whose tables differ, or a table of its own (xyz reads xyz.dat).")
+            .checked(|v| match entries(v).iter().find(|(t, cols)| t.trim().is_empty() || t.contains(['/', '\\', '.']) || cols.trim().is_empty()) {
+                Some((table, _)) => Err(format!("{table}: a table is a .dat file's name with its columns, like ccf = CCF_CNAME, CCF_DESCR")),
+                None => Ok(()),
+            })
+            .project(),
+        Setting::stored("mib.xtce_fields", Mib, "XTCE identification", Kind::Map { key: "Field", value: "Parameters", paths: false }, "In an XTCE MIB, the parameters whose restriction values identify a packet, and the arguments that say a telecommand's: apid, service, subtype, pi1 or pi2, each with its names separated by commas. A field not given goes by the names: APID, SERVICE, SUBTYPE, SID.")
+            .checked(|v| match entries(v).iter().find(|(f, _)| !XTCE_FIELDS.contains(&f.trim().to_ascii_lowercase().as_str())) {
+                Some((field, _)) => Err(format!("\"{field}\": one of {}", XTCE_FIELDS.join(", "))),
+                None => Ok(()),
+            })
+            .project(),
+        Setting::stored("mib.xtce_version", Mib, "XTCE export", Kind::Choice(&["1.2", "1.1"]), "The XTCE version a MIB is exported in (SPC k g): 1.2, or 1.1 for ground systems that read only that.").with_default("1.2").project(),
+        Setting::stored("mib.apid_format", Mib, "APIDs in", Kind::Choice(&["hex", "decimal"]), "How APIDs are shown.").with_default("hex"),
+        Setting::stored("mib.watch", Mib, "Reload on change", Kind::Bool, "Reload a MIB when one of its .dat files changes on disk.").with_default("on"),
+        Setting::stored("mib.check_scripts", Mib, "Check scripts", Kind::Bool, "Underline telecommand calls in scripts that the MIB disagrees with: unknown mnemonics, missing or out-of-range arguments.").with_default("on").project(),
+    ]
+};
+
+/// Your MIB folders (`mib.roots`), by name.
+fn your_roots(app: &App) -> Vec<(String, PathBuf)> {
+    app.config.map_value("mib.roots").iter().map(|(name, path)| (name.clone(), PathBuf::from(path))).collect()
+}
+
 pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     id: "fenix.mib",
     commands: &[
@@ -75,7 +139,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     }),
     page_after_layout: None,
     on_event: None,
-    settings: &[],
+    settings: &SETTINGS,
     services: &[],
     contributes: &[],
 };
@@ -164,20 +228,20 @@ pub(super) fn key_here(app: &App) -> (MibKey, String) {
     let own = !roots.is_empty();
     let include = match project_value(app, "mib.include_yours") {
         Some(fenix_config::Value::Bool(b)) => *b,
-        _ => app.config.mib_include_yours.unwrap_or(false),
+        _ => app.config.bool_value("mib.include_yours").unwrap_or(false),
     };
     if !own || include {
-        for (label, path) in &app.config.mib_roots {
-            if !roots.iter().any(|r| &r.path == path) {
-                roots.push(MibRoot { label: label.clone(), path: path.clone() });
+        for (label, path) in your_roots(app) {
+            if !roots.iter().any(|r| r.path == path) {
+                roots.push(MibRoot { label, path });
             }
         }
     }
     let default = match project_value(app, "mib.default") {
         Some(fenix_config::Value::Text(t)) => Some(t.clone()),
-        _ => app.config.mib_default.clone(),
+        _ => app.config.text_value("mib.default").map(str::to_string),
     };
-    let source = match (own, include && !app.config.mib_roots.is_empty()) {
+    let source = match (own, include && !app.config.map_value("mib.roots").is_empty()) {
         (true, false) => format!("from {name}'s settings"),
         (true, true) => format!("from {name}'s settings and yours"),
         (false, _) if roots.is_empty() => String::new(),
@@ -191,18 +255,18 @@ fn project_value<'a>(app: &'a App, key: &str) -> Option<&'a fenix_config::Value>
 }
 
 /// A MIB setting's text: the project's, else yours.
-fn text(app: &App, key: &str, mine: &Option<String>) -> Option<String> {
+fn text(app: &App, key: &str) -> Option<String> {
     match project_value(app, key) {
         Some(fenix_config::Value::Text(t)) => Some(t.clone()),
-        _ => mine.clone(),
+        _ => app.config.text_value(key).map(str::to_string),
     }
 }
 
 /// A MIB setting's entries: the project's, else yours.
-fn map(app: &App, key: &str, mine: &[(String, String)]) -> Vec<(String, String)> {
+fn map(app: &App, key: &str) -> Vec<(String, String)> {
     match project_value(app, key) {
         Some(fenix_config::Value::Map(m)) => m.clone(),
-        _ => mine.to_vec(),
+        _ => app.config.map_value(key).to_vec(),
     }
 }
 
@@ -212,11 +276,11 @@ pub(super) fn read_options(app: &App) -> fenix_mib::ReadOptions {
     use fenix_mib::{schema, Icd, Schema, XtceOptions};
     let issue = |t: &str| if t.trim() == "auto" { None } else { Some(Icd::parse(t).unwrap_or(Icd::LATEST)) };
     let schema = Schema {
-        icd: text(app, "mib.icd", &app.config.mib_icd).map_or(Some(Icd::LATEST), |t| issue(&t)),
-        per_root: map(app, "mib.icd_per_mib", &app.config.mib_icd_per_mib).into_iter().map(|(label, t)| (label, issue(&t))).collect(),
-        columns: map(app, "mib.columns", &app.config.mib_columns).into_iter().map(|(t, c)| (t.trim().to_ascii_lowercase(), schema::parse_columns(&c))).collect(),
+        icd: text(app, "mib.icd").map_or(Some(Icd::LATEST), |t| issue(&t)),
+        per_root: map(app, "mib.icd_per_mib").into_iter().map(|(label, t)| (label, issue(&t))).collect(),
+        columns: map(app, "mib.columns").into_iter().map(|(t, c)| (t.trim().to_ascii_lowercase(), schema::parse_columns(&c))).collect(),
     };
-    let fields = map(app, "mib.xtce_fields", &app.config.mib_xtce_fields);
+    let fields = map(app, "mib.xtce_fields");
     let names = |field: &str| -> Vec<String> {
         fields.iter().filter(|(f, _)| f.trim().eq_ignore_ascii_case(field)).flat_map(|(_, v)| v.split([',', ' ']).map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect::<Vec<_>>()).collect()
     };
@@ -225,20 +289,20 @@ pub(super) fn read_options(app: &App) -> fenix_mib::ReadOptions {
 }
 
 pub(super) fn apid_hex(app: &App) -> bool {
-    app.config.mib_apid_format.as_deref() != Some("decimal")
+    app.config.text_value("mib.apid_format") != Some("decimal")
 }
 
 /// How `key`'s project writes a command: its templates, else yours.
 fn templates(app: &App, key: &MibKey) -> mib_form::Templates {
     let project = key.project.as_deref().map(fenix_config::ProjectSettings::load);
-    let text = |name: &str, mine: &Option<String>, default: &str| match project.as_ref().and_then(|p| p.get(name)) {
+    let text = |name: &str, default: &str| match project.as_ref().and_then(|p| p.get(name)) {
         Some(fenix_config::Value::Text(t)) => t.clone(),
-        _ => mine.clone().unwrap_or_else(|| default.to_string()),
+        _ => app.config.text_value(name).unwrap_or(default).to_string(),
     };
     mib_form::Templates {
-        command: text("mib.telecommand_template", &app.config.mib_telecommand_template, fenix_mib::telecommand::DEFAULT_TEMPLATE),
-        argument: text("mib.telecommand_argument_template", &app.config.mib_telecommand_argument_template, fenix_mib::telecommand::DEFAULT_ARGUMENT_TEMPLATE),
-        separator: text("mib.telecommand_argument_separator", &app.config.mib_telecommand_argument_separator, fenix_mib::telecommand::DEFAULT_ARGUMENT_SEPARATOR),
+        command: text("mib.telecommand_template", fenix_mib::telecommand::DEFAULT_TEMPLATE),
+        argument: text("mib.telecommand_argument_template", fenix_mib::telecommand::DEFAULT_ARGUMENT_TEMPLATE),
+        separator: text("mib.telecommand_argument_separator", fenix_mib::telecommand::DEFAULT_ARGUMENT_SEPARATOR),
     }
 }
 
@@ -487,7 +551,7 @@ fn in_this_file(app: &App) -> bool {
     }
     let exts: Vec<String> = match project_value(app, "mib.editor_files") {
         Some(fenix_config::Value::List(l)) => l.clone(),
-        _ => app.config.mib_editor_files.clone(),
+        _ => app.config.list_value("mib.editor_files").to_vec(),
     };
     if exts.is_empty() {
         return true;
@@ -625,7 +689,7 @@ impl MibHost {
     /// Tests only: the app polls through the disk probe instead.
     #[cfg(test)]
     pub(super) fn poll(&mut self, app: &mut App) {
-        if !app.config.mib_watch.unwrap_or(true) {
+        if !app.config.bool_value("mib.watch").unwrap_or(true) {
             return;
         }
         let stale: Vec<MibKey> = self
@@ -944,7 +1008,7 @@ impl MibHost {
         let Some((key, set)) = self.set_here(app, MibPending::Search) else { return };
         let Some((name, file, _)) = fenix_mib::generate::KINDS.get(kind) else { return };
         let mission = app.mission(key.project.as_deref());
-        let xtce = text(app, "mib.xtce_version", &app.config.mib_xtce_version).and_then(|v| fenix_mib::generate::XtceVersion::parse(&v).ok()).unwrap_or_default();
+        let xtce = text(app, "mib.xtce_version").and_then(|v| fenix_mib::generate::XtceVersion::parse(&v).ok()).unwrap_or_default();
         let Some(generated) = fenix_mib::generate::generate_with(name, &set, &mission.profile, mission.base, xtce) else { return };
         let dir = key.project.clone().unwrap_or_else(|| PathBuf::from(".")).join("generated");
         let path = dir.join(file);
@@ -964,7 +1028,7 @@ impl MibHost {
         let Some(path) = app.buffers.get(id).and_then(|ob| ob.buffer.path()).map(|p| fenix_lsp::normalize(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))) else { return };
         let on = match project_value(app, "mib.check_scripts") {
             Some(fenix_config::Value::Bool(b)) => *b,
-            _ => app.config.mib_check_scripts.unwrap_or(true),
+            _ => app.config.bool_value("mib.check_scripts").unwrap_or(true),
         };
         if !on || !in_this_file(app) {
             self.diagnostics.remove(&path);
@@ -1170,6 +1234,39 @@ fn hover_text(set: &MibSet, def: DefRef, apid_hex: bool) -> String {
 mod tests {
     use super::*;
 
+    /// MIB's settings, registered from its spec: saved and loaded back
+    /// by key -- a whitespace-only separator quoted so it survives -- and
+    /// what isn't an ICD issue, a table or an XTCE field refused.
+    #[test]
+    fn mib_settings_save_load_and_check_by_key() {
+        super::super::feature::register_settings();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let mut config = fenix_config::Config::load_or_default(path.clone());
+        let roots = vec![("MIB-A".to_string(), "C:/data/mib-a".to_string()), ("MIB-B".to_string(), "C:/data/mib-b".to_string())];
+        config.set_value("mib.roots", Some(fenix_config::Value::Map(roots.clone())));
+        config.set_value("mib.telecommand_template", Some(fenix_config::Value::Text("TC {mnemo}".into())));
+        config.set_value("mib.telecommand_argument_separator", Some(fenix_config::Value::Text(" ".into())));
+        config.save().unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains("telecommand_argument_separator = \" \""));
+        let reloaded = fenix_config::Config::load(path).unwrap();
+        assert_eq!(reloaded.map_value("mib.roots"), roots.as_slice());
+        assert_eq!(reloaded.text_value("mib.telecommand_template"), Some("TC {mnemo}"));
+        assert_eq!(reloaded.text_value("mib.telecommand_argument_separator"), Some(" "));
+
+        let mut set = |key: &str, entries: Vec<(&str, &str)>| {
+            let value = fenix_config::Value::Map(entries.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect());
+            fenix_config::schema::setting(key).unwrap().set(&mut config, Some(value))
+        };
+        assert!(set("mib.icd_per_mib", vec![("OPS", "6.9"), ("SIM", "auto")]).is_ok());
+        assert!(set("mib.icd_per_mib", vec![("OPS", "8.1")]).unwrap_err().contains("isn't an issue"));
+        assert!(set("mib.columns", vec![("ccf", "CCF_CNAME, CCF_DESCR")]).is_ok());
+        assert!(set("mib.columns", vec![("ccf.dat", "CCF_CNAME")]).unwrap_err().contains("a table is"));
+        assert!(set("mib.xtce_fields", vec![("pi1", "SID, STRUCT")]).is_ok());
+        assert!(set("mib.xtce_fields", vec![("pi3", "X")]).unwrap_err().contains("one of apid"));
+        assert!(fenix_config::schema::setting("mib.roots").unwrap().project, "a project can set its own MIBs");
+    }
+
     /// A project with a MIB of its own at `ops/`, listed in its settings
     /// with its own templates, and a Tcl script holding `script`.
     struct Project(PathBuf);
@@ -1203,12 +1300,10 @@ mod tests {
         let file = dir.join("checkout.tcl");
         std::fs::write(&file, script).unwrap();
         let mut app = App::with_file(Some(file.display().to_string()));
-        app.config.mib_roots = vec![("MINE".to_string(), dir.join("elsewhere"))];
-        app.config.mib_include_yours = None;
-        app.config.mib_telecommand_template = None;
-        app.config.mib_telecommand_argument_template = None;
-        app.config.mib_telecommand_argument_separator = None;
-        app.config.mib_editor_files = Vec::new();
+        app.config.set_value("mib.roots", Some(fenix_config::Value::Map(vec![("MINE".to_string(), dir.join("elsewhere").display().to_string())])));
+        for key in ["mib.include_yours", "mib.telecommand_template", "mib.telecommand_argument_template", "mib.telecommand_argument_separator", "mib.editor_files"] {
+            app.config.set_value(key, None);
+        }
         app.refresh_project_root();
         (Project(dir), app)
     }
@@ -1238,7 +1333,7 @@ mod tests {
         let (key, source) = key_here(&app);
         assert_eq!(key.roots, vec![MibRoot { label: "OPS".into(), path: p.0.join("ops") }]);
         assert!(source.contains("settings"), "{source}");
-        app.config.mib_include_yours = Some(true);
+        app.config.set_value("mib.include_yours", Some(fenix_config::Value::Bool(true)));
         assert_eq!(key_here(&app).0.roots.len(), 2, "yours added when asked");
     }
 
@@ -1247,8 +1342,8 @@ mod tests {
         let (p, mut app) = project("read-options", "");
         let options = key_here(&app).0.options;
         assert_eq!(options.schema.icd, Some(fenix_mib::Icd::V7), "7.x unless said");
-        app.config.mib_icd = Some("6.9".into());
-        app.config.mib_xtce_fields = vec![("pi1".into(), "SID, STRUCT".into())];
+        app.config.set_value("mib.icd", Some(fenix_config::Value::Text("6.9".into())));
+        app.config.set_value("mib.xtce_fields", Some(fenix_config::Value::Map(vec![("pi1".into(), "SID, STRUCT".into())])));
         let options = key_here(&app).0.options;
         assert_eq!(options.schema.icd, Some(fenix_mib::Icd::V6_9));
         assert_eq!(options.xtce.pi1, vec!["SID".to_string(), "STRUCT".into()]);
@@ -1323,7 +1418,7 @@ mod tests {
         assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*mib: ZTC08101*");
 
         // Only in the files it's asked for.
-        app.config.mib_editor_files = vec!["py".into()];
+        app.config.set_value("mib.editor_files", Some(fenix_config::Value::List(vec!["py".into()])));
         app.open_buffer_in_focused_pane(script);
         set_cursor(&mut app, 12);
         app.lsp_hover = None;
