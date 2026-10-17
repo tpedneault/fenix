@@ -382,17 +382,6 @@ const SOURCE: &[Field] = &[
     Field { name: "header", label: "Record header", range: Some((0, 64)), default: Some("0"), choices: &[] },
 ];
 
-const DIAGRAM_THEME: &[Field] = &[
-    Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
-    Field { name: "base", label: "Starts from", range: None, default: Some("base"), choices: &["base", "default", "neutral", "dark", "forest", "fenix"] },
-    Field { name: "primaryColor", label: "Node fill", range: None, default: Some(""), choices: &[] },
-    Field { name: "primaryBorderColor", label: "Node border", range: None, default: Some(""), choices: &[] },
-    Field { name: "primaryTextColor", label: "Text", range: None, default: Some(""), choices: &[] },
-    Field { name: "lineColor", label: "Lines", range: None, default: Some(""), choices: &[] },
-    Field { name: "secondaryColor", label: "Second fill", range: None, default: Some(""), choices: &[] },
-    Field { name: "background", label: "Background", range: None, default: Some(""), choices: &[] },
-];
-
 static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
     use Category::*;
     vec![
@@ -579,23 +568,6 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("ccsds.library", Ccsds, "Standards folder", Kind::Path, "The folder your CCSDS and ECSS standards' PDFs are in; SPC k ? lists them and a field's gd opens its heading.", field!(ccsds_library, path_get, path_set)),
         s("ccsds.leap_seconds", Ccsds, "Leap seconds", Kind::Path, "A file of `YYYY-MM-DD N` lines (TAI - UTC from that date) to use instead of the table Fenix has.", field!(ccsds_leap_seconds, path_get, path_set)).default("built in"),
         // Notebook
-        s("notebook.folder", Notebook, "Folder", Kind::Path, "Where your notes, journal and diagrams are kept. Point it at a synced folder or an Obsidian vault to use that instead.", field!(notebook_folder, path_get, path_set)).default("Fenix's data folder"),
-        s("notebook.history", Notebook, "Versions kept", Kind::Int { min: 1, max: 500 }, "How many earlier versions of each note and diagram are kept; h on the notebook page lists them.", field!(notebook_history, usize_get, usize_set)).default("50"),
-        s("notebook.journal", Notebook, "Journal", Kind::Bool, "Keep a note per day (SPC n j). Captures go to today's; turned off, they go to the Inbox note.", field!(notebook_journal, bool_get, bool_set)).default("on"),
-        s("notebook.show_project_files", Notebook, "List project files", Kind::Bool, "Also list the project's own .md and .mmd files at the bottom of the notebook page.", field!(notebook_project_files, bool_get, bool_set)).default("off"),
-        s("diagrams.theme", Notebook, "Diagram theme", Kind::Text, "The theme a diagram is drawn in when it doesn't name one: fenix (follows the editor theme), default, neutral, dark, forest, base, or one of yours below.", field!(diagrams_theme, text_get, text_set)).default("fenix"),
-        s("diagrams.export_theme", Notebook, "Export theme", Kind::Text, "The theme exports are drawn in: same (as shown), or a theme's name.", field!(diagrams_export_theme, text_get, text_set)).default("same"),
-        s("diagrams.background", Notebook, "Export background", Kind::Choice(&["theme", "transparent", "white"]), "What's behind an exported diagram.", field!(diagrams_background, text_get, text_set)).default("theme"),
-        s("diagrams.themes", Notebook, "Your themes", Kind::Records(DIAGRAM_THEME), "Themes of your own: Mermaid theme variables over a theme to start from. Colours as #rrggbb; empty ones keep the starting theme's.", (|c: &Config| (!c.diagrams_themes.is_empty()).then(|| Value::Records(c.diagrams_themes.clone())), |c: &mut Config, v| {
-            c.diagrams_themes = match v {
-                None => Vec::new(),
-                Some(Value::Records(rows)) => rows,
-                Some(other) => return Err(format!("expected themes, got {}", other.describe())),
-            };
-            Ok(())
-        })),
-        s("diagrams.export_with", Notebook, "Export with", Kind::Choice(&["fenix", "mmdc"]), "What draws exported files: Fenix, or mermaid-cli (mmdc, when it's installed) for output identical to mermaid.js.", field!(diagrams_export_with, text_get, text_set)).default("fenix"),
-        s("diagrams.font", Notebook, "Diagram font", Kind::Font, "The font diagrams are drawn with.", field!(diagrams_font, text_get, text_set)).default("the renderer's"),
         // Workspaces
         s("documents", Reader, "Documents", Kind::Map { key: "Name", value: "File", paths: true }, "The SPC r f shelf: a name and the file it opens. A project's own shelf is listed first.", field!(documents, path_map_get, path_map_set)).project(),
         s("workspaces", Documents, "Workspace shelf", Kind::Map { key: "Name", value: "Opens", paths: false }, "SPC TAB f: git, jira, docker, vnc:HOST, project:PATH, or nothing.", field!(workspaces, map_get, map_set)),

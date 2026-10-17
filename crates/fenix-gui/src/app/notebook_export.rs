@@ -136,7 +136,7 @@ impl App {
             ExportWhat::Diagram(b) => self.export_records(&what).len().max(usize::from(self.buffers.get(*b).is_none())),
             ExportWhat::Note(_) => self.export_records(&what).len(),
         };
-        let mmdc = self.config.diagrams_export_with.as_deref() == Some("mmdc");
+        let mmdc = self.config.text_value("diagrams.export_with") == Some("mmdc");
         let rows: Vec<(ExportHow, String)> = match &what {
             ExportWhat::Diagram(_) => vec![
                 (ExportHow::ClipPng, "clipboard  PNG picture (2x)".into()),
@@ -551,7 +551,7 @@ mod tests {
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_file(None);
-        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
         app.features.agenda_mut().path = dir.path().join("agenda.json");
         (dir, app)
     }

@@ -76,7 +76,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_title: None,
         page_after_layout: Some(|app, id| app.diagram_after_layout(id)),
         on_event: None,
-        settings: &[],
+        settings: &SETTINGS,
         services: &SERVICES,
         contributes: &[],
     }
@@ -238,6 +238,34 @@ static SERVICES: [super::feature::Service; 8] = [
     super::feature::Service { name: "diagrams.copy_picture", call: Mut(|app, payload| app.diagram_copy_picture(&DiagramCall::from(payload)?.source).map(|()| String::new())) },
 ];
 
+/// A theme of your own's fields in `diagrams.themes`.
+const DIAGRAM_THEME: &[fenix_config::Field] = {
+    use fenix_config::Field;
+    &[
+        Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+        Field { name: "base", label: "Starts from", range: None, default: Some("base"), choices: &["base", "default", "neutral", "dark", "forest", "fenix"] },
+        Field { name: "primaryColor", label: "Node fill", range: None, default: Some(""), choices: &[] },
+        Field { name: "primaryBorderColor", label: "Node border", range: None, default: Some(""), choices: &[] },
+        Field { name: "primaryTextColor", label: "Text", range: None, default: Some(""), choices: &[] },
+        Field { name: "lineColor", label: "Lines", range: None, default: Some(""), choices: &[] },
+        Field { name: "secondaryColor", label: "Second fill", range: None, default: Some(""), choices: &[] },
+        Field { name: "background", label: "Background", range: None, default: Some(""), choices: &[] },
+    ]
+};
+
+/// The diagrams feature's settings: `[diagrams]` in `settings.toml`.
+static SETTINGS: [fenix_config::Setting; 6] = {
+    use fenix_config::{Category::Notebook, Kind, Setting};
+    [
+        Setting::stored("diagrams.theme", Notebook, "Diagram theme", Kind::Text, "The theme a diagram is drawn in when it doesn't name one: fenix (follows the editor theme), default, neutral, dark, forest, base, or one of yours below.").with_default("fenix"),
+        Setting::stored("diagrams.export_theme", Notebook, "Export theme", Kind::Text, "The theme exports are drawn in: same (as shown), or a theme's name.").with_default("same"),
+        Setting::stored("diagrams.background", Notebook, "Export background", Kind::Choice(&["theme", "transparent", "white"]), "What's behind an exported diagram.").with_default("theme"),
+        Setting::stored("diagrams.themes", Notebook, "Your themes", Kind::Records(DIAGRAM_THEME), "Themes of your own: Mermaid theme variables over a theme to start from. Colours as #rrggbb; empty ones keep the starting theme's."),
+        Setting::stored("diagrams.export_with", Notebook, "Export with", Kind::Choice(&["fenix", "mmdc"]), "What draws exported files: Fenix, or mermaid-cli (mmdc, when it's installed) for output identical to mermaid.js.").with_default("fenix"),
+        Setting::stored("diagrams.font", Notebook, "Diagram font", Kind::Font, "The font diagrams are drawn with.").with_default("the renderer's"),
+    ]
+};
+
 /// A choice in one of the diagrams feature's pickers.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DiagramPick {
@@ -280,11 +308,11 @@ impl DiagramCall {
 impl App {
     /// `diagrams.export_theme`, unless it's "same" (the one it's drawn with).
     fn diagram_export_theme(&self) -> Option<String> {
-        self.config.diagrams_export_theme.clone().filter(|t| !t.trim().is_empty() && !t.eq_ignore_ascii_case("same"))
+        self.config.text_value("diagrams.export_theme").filter(|t| !t.trim().is_empty() && !t.eq_ignore_ascii_case("same")).map(str::to_string)
     }
 
     fn diagram_export_background(&self) -> fenix_diagram::Background {
-        match self.config.diagrams_background.as_deref() {
+        match self.config.text_value("diagrams.background") {
             Some("transparent") => fenix_diagram::Background::Transparent,
             Some("white") => fenix_diagram::Background::White,
             _ => fenix_diagram::Background::Theme,
@@ -301,7 +329,7 @@ impl App {
     }
 
     fn diagram_export_file(&self, source: &str, format: &str, path: &Path) -> Result<String, String> {
-        if self.config.diagrams_export_with.as_deref() == Some("mmdc") {
+        if self.config.text_value("diagrams.export_with") == Some("mmdc") {
             let bg = match self.diagram_export_background() {
                 fenix_diagram::Background::Transparent => "transparent",
                 _ => "white",
@@ -341,7 +369,7 @@ impl App {
         };
         let custom = self
             .config
-            .diagrams_themes
+            .records_value("diagrams.themes")
             .iter()
             .filter(|row| !row.first().map(|n| n.trim().is_empty()).unwrap_or(true))
             .map(|row| {
@@ -354,10 +382,10 @@ impl App {
             })
             .collect();
         fenix_diagram::Themes {
-            default: self.config.diagrams_theme.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "fenix".into()),
+            default: self.config.text_value("diagrams.theme").filter(|s| !s.trim().is_empty()).unwrap_or("fenix").to_string(),
             custom,
             editor,
-            font: self.config.diagrams_font.clone().filter(|s| !s.trim().is_empty()),
+            font: self.config.text_value("diagrams.font").filter(|s| !s.trim().is_empty()).map(str::to_string),
         }
     }
 
@@ -370,9 +398,9 @@ impl App {
         source.hash(&mut h);
         over.hash(&mut h);
         self.theme.name.hash(&mut h);
-        self.config.diagrams_theme.hash(&mut h);
-        self.config.diagrams_themes.hash(&mut h);
-        self.config.diagrams_font.hash(&mut h);
+        self.config.text_value("diagrams.theme").hash(&mut h);
+        self.config.records_value("diagrams.themes").hash(&mut h);
+        self.config.text_value("diagrams.font").hash(&mut h);
         let key = h.finish();
         self.features.diagram_state().sources.borrow_mut().entry(key).or_insert_with(|| (source.to_string(), over.map(str::to_string)));
         key
@@ -865,7 +893,7 @@ mod tests {
     fn a_new_diagram_goes_from_the_notebook_to_the_diagrams_pickers_and_back() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_file(None);
-        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
         app.notebook_new_diagram();
         pick_first(&mut app, "DIAGRAM");
         pick_first(&mut app, "STARTER");
@@ -894,7 +922,7 @@ mod tests {
     fn a_new_diagram_draws_beside_its_source_and_keeps_the_last_good_drawing() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_file(None);
-        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
         app.notebook_create_diagram("TC flow", "flowchart TD\n    op[Operator] --> val[Validate]\n");
         let source = app.focused_buffer_id();
         assert!(app.open().buffer.path().unwrap().ends_with("diagrams/tc-flow.mmd"));
@@ -952,7 +980,7 @@ mod tests {
     fn a_diagram_page_is_the_diagrams_with_their_mermaid_menu_and_node_outlines() {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_file(None);
-        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
         app.notebook_create_diagram("Outline", "flowchart TD
     a[One] --> b[Two]
 ");

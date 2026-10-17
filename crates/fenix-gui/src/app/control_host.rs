@@ -546,7 +546,7 @@ mod tests {
             fenix_agenda::Priority::Medium,
             None,
         );
-        app.config.notebook_folder = Some(dir.join("nb"));
+        app.config.set_path_value("notebook.folder", Some(&dir.join("nb")));
         app
     }
 

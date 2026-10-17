@@ -35,6 +35,17 @@ pub(crate) enum NotebookPick {
     InsertDiagram { id: String, svg: bool },
 }
 
+/// The notebook's settings: `[notebook]` in `settings.toml`.
+static SETTINGS: [fenix_config::Setting; 4] = {
+    use fenix_config::{Category::Notebook, Kind, Setting};
+    [
+        Setting::stored("notebook.folder", Notebook, "Folder", Kind::Path, "Where your notes, journal and diagrams are kept. Point it at a synced folder or an Obsidian vault to use that instead.").with_default("Fenix's data folder"),
+        Setting::stored("notebook.history", Notebook, "Versions kept", Kind::Int { min: 1, max: 500 }, "How many earlier versions of each note and diagram are kept; h on the notebook page lists them.").with_default("50"),
+        Setting::stored("notebook.journal", Notebook, "Journal", Kind::Bool, "Keep a note per day (SPC n j). Captures go to today's; turned off, they go to the Inbox note.").with_default("on"),
+        Setting::stored("notebook.show_project_files", Notebook, "List project files", Kind::Bool, "Also list the project's own .md and .mmd files at the bottom of the notebook page.").with_default("off"),
+    ]
+};
+
 /// What the notebook offers other features.
 static SERVICES: [super::feature::Service; 1] = [
     // `{text}` -> asks the new diagram's name, then keeps it in the
@@ -185,7 +196,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_title: None,
         page_after_layout: None,
         on_event: None,
-        settings: &[],
+        settings: &SETTINGS,
         services: &SERVICES,
         contributes: &[],
     }
@@ -347,7 +358,7 @@ pub(super) fn highlight_block(lang: &str, text: &str) -> Vec<Vec<(std::ops::Rang
 impl App {
     /// The notebook's folder: the setting, else Fenix's data folder.
     pub(super) fn notebook_root(&self) -> PathBuf {
-        if let Some(folder) = &self.config.notebook_folder {
+        if let Some(folder) = &self.config.path_value("notebook.folder") {
             return folder.clone();
         }
         fenix_storage::paths::notebook_dir().unwrap_or_else(|| env::temp_dir().join("fenix-notebook"))
@@ -359,7 +370,7 @@ impl App {
             let root = self.notebook_root();
             match Notebook::open(&root) {
                 Ok(mut nb) => {
-                    nb.history_limit = self.config.notebook_history.unwrap_or(50);
+                    nb.history_limit = self.config.int_value("notebook.history").map_or(50, |n| n as usize);
                     self.features.notebook_state_mut().book = Some(nb);
                     self.features.notebook_state_mut().error = None;
                 }
@@ -381,7 +392,7 @@ impl App {
             return;
         }
         // Tests never read the notebook of the Fenix you use.
-        if cfg!(test) && self.config.notebook_folder.is_none() {
+        if cfg!(test) && self.config.value("notebook.folder").is_none() {
             return;
         }
         let root = self.notebook_root();
@@ -400,7 +411,7 @@ impl App {
     pub(super) fn apply_notebook_opened(&mut self, mut nb: Notebook) {
         self.features.notebook_state_mut().opening = false;
         if self.features.notebook_state().book.is_none() {
-            nb.history_limit = self.config.notebook_history.unwrap_or(50);
+            nb.history_limit = self.config.int_value("notebook.history").map_or(50, |n| n as usize);
             self.features.notebook_state_mut().book = Some(nb);
             self.refresh_home_data(false);
         }
@@ -413,7 +424,7 @@ impl App {
 
     /// The rows the notebook page shows.
     fn notebook_rows(&mut self) -> Vec<NbRow> {
-        let project_files = self.config.notebook_project_files.unwrap_or(false);
+        let project_files = self.config.bool_value("notebook.show_project_files").unwrap_or(false);
         let project_root = self.project_root.clone();
         if self.notebook().is_none() {
             return Vec::new();
@@ -1222,7 +1233,7 @@ mod tests {
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_file(None);
-        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
         (dir, app)
     }
 
