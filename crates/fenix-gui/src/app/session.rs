@@ -27,11 +27,18 @@ struct Document {
     #[serde(default)]
     recovery: Option<String>,
     cursor: usize,
-    /// A PDF: reopened in the reader (where it was left comes from the
-    /// places file), never read as text.
+    /// A feature's document (a PDF): reopened by the feature with this id
+    /// (`FeatureSpec::session_reopen`), never read as text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    feature: Option<String>,
+    /// The 1.x way to say a PDF: still written for one, so a 1.x Fenix
+    /// reopens it, and read as `fenix.pdf` from an older session.
     #[serde(default)]
     pdf: bool,
 }
+
+/// The 1.x session field `pdf` names this feature.
+const PDF_FEATURE: &str = "fenix.pdf";
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Pane {
@@ -162,15 +169,17 @@ impl App {
                 conflict: dirty && self.externally_changed.contains(&id),
                 recovery: self.unnamed_snapshots.get(&id).and_then(|p| p.file_name()).and_then(|n| n.to_str()).map(str::to_string),
                 disk: self.disk_state.get(&id).copied().or_else(|| path.as_ref().and_then(|p| DiskFingerprint::of(p))),
-                path: path.clone(), text: (dirty || path.is_none()).then(|| ob.buffer.text()), dirty, cursor: ob.cursor.char_idx, pdf: false,
+                path: path.clone(), text: (dirty || path.is_none()).then(|| ob.buffer.text()), dirty, cursor: ob.cursor.char_idx, feature: None, pdf: false,
             });
         }
-        // Each open PDF, by its path.
-        let mut pdfs: Vec<(BufferId, PathBuf)> = self.features.pdf().docs.iter().map(|(&id, doc)| (id, doc.path.clone())).collect();
-        pdfs.sort_by(|a, b| a.1.cmp(&b.1));
-        for (id, path) in pdfs {
-            ids.insert(id, documents.len());
-            documents.push(Document { path: Some(path), text: None, dirty: false, disk: None, conflict: false, recovery: None, cursor: 0, pdf: true });
+        // The features' documents (PDFs), by their paths.
+        for spec in self.features.specs() {
+            let Some(listed) = spec.session_documents else { continue };
+            for (id, path) in listed(self) {
+                ids.insert(id, documents.len());
+                let pdf = spec.id == PDF_FEATURE;
+                documents.push(Document { path: Some(path), text: None, dirty: false, disk: None, conflict: false, recovery: None, cursor: 0, feature: Some(spec.id.to_string()), pdf });
+            }
         }
         let frames = (0..self.frames.len()).map(|frame| {
             let list = if frame == self.active_frame { &self.workspaces } else { &self.frames[frame].as_ref().unwrap().workspaces };
@@ -299,10 +308,16 @@ impl App {
         let mut warnings = Vec::new();
         let recovery = self.recovery_dir.as_ref().map(|dir| fenix_recovery::list(dir)).unwrap_or_default();
         for mut doc in saved.documents {
-            if doc.pdf {
-                match doc.path.as_ref().filter(|p| p.exists()) {
-                    Some(path) => documents.push(Some(self.pdf_buffer_for(path))),
-                    None => {
+            let feature = doc.feature.clone().or_else(|| doc.pdf.then(|| PDF_FEATURE.to_string()));
+            if let Some(feature) = feature {
+                let reopen = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.session_reopen);
+                match (doc.path.as_ref().filter(|p| p.exists()), reopen) {
+                    (Some(path), Some(reopen)) => documents.push(Some(reopen(self, path))),
+                    (Some(path), None) => {
+                        warnings.push(format!("{}: {feature} isn't on to open it", path.display()));
+                        documents.push(None);
+                    }
+                    (None, _) => {
                         warnings.push(format!("{}: not there any more", doc.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default()));
                         documents.push(None);
                     }
@@ -630,7 +645,7 @@ mod tests {
             version: VERSION,
             documents: vec![Document {
                 path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, cursor: 0, pdf: false,
+                conflict: false, recovery: None, cursor: 0, feature: None, pdf: false,
             }],
             frames: vec![SavedFrame {
                 active: 1,
@@ -681,7 +696,7 @@ mod tests {
             version: VERSION,
             documents: vec![Document {
                 path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, cursor: 0, pdf: false,
+                conflict: false, recovery: None, cursor: 0, feature: None, pdf: false,
             }],
             frames: vec![SavedFrame {
                 active: 0,
@@ -1019,7 +1034,24 @@ mod tests {
         let mut app = App::with_file(None);
         app.open_pdf_path(&path);
         let json = serde_json::to_string(&app.capture_session()).unwrap();
-        assert!(json.contains("kept.pdf") && json.contains("\"pdf\":true"), "{json}");
+        assert!(json.contains("kept.pdf") && json.contains("\"feature\":\"fenix.pdf\"") && json.contains("\"pdf\":true"), "{json}");
         drop(app);
+    }
+
+    /// A session from before features named their documents (1.x: just
+    /// `"pdf": true`) still reopens its PDF in the reader.
+    #[test]
+    fn a_1x_session_pdf_still_reopens_in_the_reader() {
+        let _guard = PDF_WORKER_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.pdf");
+        std::fs::write(&path, b"%PDF-1.4").unwrap();
+        let mut app = App::with_file(None);
+        let mut saved = serde_json::to_value(app.capture_session()).unwrap();
+        let docs = saved["documents"].as_array_mut().unwrap();
+        docs.push(serde_json::json!({ "path": path, "text": null, "dirty": false, "disk": null, "cursor": 0, "pdf": true }));
+        let session: Session = serde_json::from_value(saved).unwrap();
+        app.apply_saved_session(session, true, None);
+        assert!(app.features.pdf().docs.values().any(|d| d.path.file_name() == path.file_name()), "the PDF is open in the reader again");
     }
 }

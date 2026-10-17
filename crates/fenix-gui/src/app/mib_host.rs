@@ -142,6 +142,8 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     settings: &SETTINGS,
     services: &[],
     contributes: &[],
+    session_documents: None,
+    session_reopen: None,
 };
 
 /// A set of MIBs, read or being read.

@@ -73,6 +73,8 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     settings: &[],
     services: &[],
     contributes: &[],
+    session_documents: None,
+    session_reopen: None,
 };
 
 /// What Docker's background threads report, as a `FeatureEvent`'s
