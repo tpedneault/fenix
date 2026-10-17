@@ -50,12 +50,80 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         picker_confirm: None,
         picker_cancel: None,
         modeline_clock: None,
-        page_action: None,
-        page_context: None,
+        page_action: Some(|app, id, action| {
+            if let Ok(action) = action.downcast::<JiraAction>() {
+                app.jira_page_action(id, *action);
+            }
+        }),
+        page_context: Some(|app, _id, need| match need {
+            super::feature::PageNeed::Layout { due: false, .. } => Box::new(()),
+            _ => Box::new(JiraCtx::of(app)),
+        }),
         page_title: None,
         page_after_layout: None,
     }
 };
+
+/// What the Jira page reads besides itself: which issues are in the
+/// agenda, the people to pick from, the server, today.
+struct JiraCtx {
+    in_agenda: HashSet<String>,
+    people: Vec<(String, String)>,
+    server: String,
+    today: chrono::NaiveDate,
+}
+
+impl JiraCtx {
+    fn of(app: &App) -> Self {
+        JiraCtx {
+            in_agenda: app.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect(),
+            people: app.config.jira_users.clone(),
+            server: app.config.jira_base_url.clone().unwrap_or_default(),
+            today: chrono::Local::now().date_naive(),
+        }
+    }
+
+    fn page(&self) -> jira_page::Ctx<'_> {
+        jira_page::Ctx { in_agenda: &self.in_agenda, people: &self.people, server: self.server.clone(), today: self.today }
+    }
+}
+
+/// The Jira page (`SPC j j`).
+impl super::feature::FeaturePage for JiraPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        "*jira*".to_string()
+    }
+
+    fn typing(&self) -> bool {
+        JiraPage::typing(self)
+    }
+
+    fn claims_space(&self) -> bool {
+        JiraPage::claims_space(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        JiraPage::paste(self, text);
+    }
+
+    fn layout(&mut self, ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+        match ctx.downcast::<JiraCtx>() {
+            Ok(ctx) => jira_page::layout(self, &ctx.page(), cols),
+            Err(_) => crate::page::Page::default(),
+        }
+    }
+
+    fn key(&mut self, key: crate::page::Key, ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+        Box::new(match ctx.downcast::<JiraCtx>() {
+            Ok(ctx) => JiraPage::key(self, key, &ctx.page()),
+            Err(_) => JiraAction::None,
+        })
+    }
+}
 
 /// The Jira page keeps its state on the page, so its feature holds none.
 pub(crate) struct JiraHost;
@@ -76,17 +144,11 @@ impl super::feature::Feature for JiraHost {
 
 impl App {
     fn jira_page_mut(&mut self, id: BufferId) -> Option<&mut JiraPage> {
-        match self.pages.get_mut(&id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
-            Some(PageModel::Jira(p)) => Some(p),
-            _ => None,
-        }
+        self.feature_page_mut::<JiraPage>(id)
     }
 
     pub(super) fn jira_page_id(&self) -> Option<BufferId> {
-        self.find_page(|m| matches!(m, PageModel::Jira(_)))
+        self.find_page(|m| super::feature::page_as::<JiraPage>(m).is_some())
     }
 
     /// The open project's Jira key.
@@ -117,7 +179,7 @@ impl App {
             }
             None => {
                 let queries = self.jira_queries(here.as_deref());
-                self.open_page(PageModel::Jira(Box::new(JiraPage::new(queries, here))))
+                self.open_page(PageModel::Feature(Box::new(JiraPage::new(queries, here))))
             }
         };
         let want = self.jira_page_mut(id).and_then(|p| p.wants_fetch());
@@ -530,5 +592,19 @@ mod tests {
         assert_eq!(jira, [("jira.open", true), ("jira.refresh", false), ("jira.goto_issue", true), ("jira.search", true), ("jira.create_issue", true)]);
         assert_eq!(keymap::leader_keys().get("jira.search").map(String::as_str), Some("SPC j /"));
         assert!(app().features.specs().any(|spec| spec.id == "fenix.jira"));
+    }
+
+    #[test]
+    fn the_jira_page_is_jiras_laid_out_and_keyed_with_its_context() {
+        let mut app = app();
+        let id = app.open_jira_page();
+        let Some(PageModel::Feature(p)) = app.pages.get(&id).map(|s| &s.model) else { panic!("a feature page") };
+        assert_eq!((p.feature(), p.title()), ("fenix.jira", "*jira*".to_string()));
+        let idle = app.feature_page_context(id, super::super::feature::PageNeed::Layout { cols: 100, due: false });
+        assert!(idle.downcast_ref::<()>().is_some(), "nothing read when no layout is due");
+        app.ensure_page_layout(id, app.focused_pane_id(), 100);
+        assert!(app.open().buffer.text().contains("OPS"), "laid out with its context: the tracked project");
+        assert!(app.page_key(KeyPress::char('q')));
+        assert!(!app.is_page_buffer(id), "q closed it, through `page_action`");
     }
 }
