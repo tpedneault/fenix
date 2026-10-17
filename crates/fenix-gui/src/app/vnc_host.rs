@@ -48,8 +48,40 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             Ok(VncEvent::Frame(key, frame)) => app.apply_vnc_frame(key, frame),
             Err(_) => {}
         }),
+        settings: &SETTINGS,
     }
 };
+
+/// A host's fields in `vnc.hosts`.
+const HOST: &[fenix_config::Field] = &[
+    fenix_config::Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+    fenix_config::Field { name: "host", label: "Host", range: None, default: None, choices: &[] },
+    fenix_config::Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] },
+];
+
+/// VNC's settings, registered at startup.
+static SETTINGS: [fenix_config::Setting; 1] = [fenix_config::Setting::stored(
+    "vnc.hosts",
+    fenix_config::Category::Vnc,
+    "Hosts",
+    fenix_config::Kind::Records(HOST),
+    "Machines SPC v connects to. No passwords: every host is taken to be on a trusted network.",
+)];
+
+/// The configured hosts (`vnc.hosts`): name, address, port.
+pub(super) fn hosts(config: &fenix_config::Config) -> Vec<(String, String, u16)> {
+    match config.value("vnc.hosts") {
+        Some(fenix_config::Value::Records(rows)) => rows.iter().map(|r| (r[0].clone(), r[1].clone(), r[2].parse().unwrap_or(5900))).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Sets `vnc.hosts` (tests: the settings file is what sets it).
+#[cfg(test)]
+pub(super) fn set_hosts(config: &mut fenix_config::Config, hosts: Vec<(String, String, u16)>) {
+    let rows = hosts.into_iter().map(|(n, h, p)| vec![n, h, p.to_string()]).collect::<Vec<_>>();
+    config.set_value("vnc.hosts", (!rows.is_empty()).then_some(fenix_config::Value::Records(rows)));
+}
 
 /// What VNC's background threads send: a connection made (or not), and
 /// each decoded update.
@@ -71,7 +103,7 @@ pub(crate) enum VncEvent {
 #[derive(Default)]
 pub(crate) struct VncState {
     /// Every currently-open VNC session (`SPC v v`), keyed by the VM's
-    /// configured name (`Config.vnc_hosts`) -- a `HashMap`, not a single
+    /// configured name (`vnc.hosts`) -- a `HashMap`, not a single
     /// `Option<VncSession>` like `DockerHost::session`/`git_session`/
     /// `jira_session`: those are each a singleton tool where a second
     /// concurrent session has no meaning, while several simultaneous,
@@ -145,6 +177,36 @@ pub(super) fn vnc_picker(candidates: Vec<fenix_picker::Candidate<String>>) -> Ac
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `vnc.hosts` is VNC's, registered from its spec: the settings file's
+    /// `[[vnc.hosts]]` loads into it, a bad port is refused, and it saves
+    /// back as it was.
+    #[test]
+    fn vnc_hosts_load_check_and_save_through_the_registered_setting() {
+        super::super::feature::register_settings();
+        let dir = std::env::temp_dir().join(format!("fenix-vnc-hosts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.toml");
+        std::fs::write(&path, "[[vnc.hosts]]
+name = \"build-vm\"
+host = \"10.0.0.5\"
+
+[[vnc.hosts]]
+name = \"test-vm\"
+host = \"10.0.0.6\"
+port = 5901
+").unwrap();
+        let mut config = fenix_config::Config::load(path.clone()).unwrap();
+        let expected = vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)];
+        assert_eq!(hosts(&config), expected);
+        let setting = fenix_config::schema::setting("vnc.hosts").unwrap();
+        let bad = fenix_config::Value::Records(vec![vec!["x".into(), "h".into(), "70000".into()]]);
+        assert!(setting.set(&mut config, Some(bad)).unwrap_err().contains("Port"));
+        config.save().unwrap();
+        assert_eq!(hosts(&fenix_config::Config::load(path).unwrap()), expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // Through its spec, the way `App` reaches VNC now.
 

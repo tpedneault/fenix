@@ -113,6 +113,10 @@ pub(crate) struct FeatureSpec {
     /// `Feature::on_event`, for features whose code is still `App`
     /// methods.
     pub on_event: Option<fn(&mut App, Box<dyn Any + Send>)>,
+    /// Its settings, registered with the schema at startup
+    /// (`register_settings`): loaded, checked, saved, on the settings page
+    /// and in the docs like core's, and read by key (`Config::value`).
+    pub settings: &'static [fenix_config::Setting],
 }
 
 /// A completion in progress: where its prefix starts, the prefix, and
@@ -434,6 +438,33 @@ pub(crate) trait Feature: Any {
     }
 }
 
+/// Every built-in feature's spec, in `Features::builtin`'s order.
+pub(crate) static BUILTIN_SPECS: [&FeatureSpec; 12] = [
+    &super::DOCKER_SPEC,
+    &super::EMBEDDED_SPEC,
+    &super::TCL_SPEC,
+    &super::MIB_SPEC,
+    &super::CCSDS_SPEC,
+    &super::NOTEBOOK_SPEC,
+    &super::DIAGRAMS_SPEC,
+    &super::AGENDA_SPEC,
+    &super::JIRA_SPEC,
+    &super::REVIEW_SPEC,
+    &super::PDF_SPEC,
+    &super::VNC_SPEC,
+];
+
+/// Registers every built-in feature's settings with the schema -- once,
+/// before the settings are first read (`main`, `App::with_file`).
+pub(crate) fn register_settings() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for spec in BUILTIN_SPECS {
+            fenix_config::schema::register(spec.settings);
+        }
+    });
+}
+
 /// The built-in features. A slot is empty only while its feature is
 /// out for a hook (`App::with_feature_at`).
 pub(crate) struct Features {
@@ -619,5 +650,38 @@ impl App {
     ) -> Option<R> {
         let i = self.features.position_of_id(id)?;
         self.with_feature_at(i, f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// docs/CONFIGURATION.md lists every setting, core's and the
+    /// features', and this is what keeps it true. When it fails, paste
+    /// `markdown_table()` over its table (run `cargo test -p fenix-gui
+    /// print_the_settings_table -- --ignored --nocapture`).
+    #[test]
+    fn the_docs_list_every_setting_as_the_schema_declares_it() {
+        super::register_settings();
+        let docs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/CONFIGURATION.md")).unwrap().replace('\r', "");
+        assert!(docs.contains(&fenix_config::schema::markdown_table()), "docs/CONFIGURATION.md's settings table is out of date");
+    }
+
+    #[test]
+    #[ignore]
+    fn print_the_settings_table() {
+        super::register_settings();
+        print!("{}", fenix_config::schema::markdown_table());
+    }
+
+    #[test]
+    fn every_feature_setting_is_registered_once_and_none_shadows_core() {
+        super::register_settings();
+        let all = fenix_config::settings();
+        for spec in super::BUILTIN_SPECS {
+            for s in spec.settings {
+                assert_eq!(all.iter().filter(|t| t.key == s.key).count(), 1, "{}", s.key);
+                assert!(std::ptr::eq(fenix_config::schema::setting(s.key).unwrap(), s), "{} is {}'s, not core's", s.key, spec.id);
+            }
+        }
     }
 }

@@ -66,6 +66,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
                 app.apply_jira_action_done(done.0);
             }
         }),
+        settings: &[],
     }
 };
 

@@ -86,6 +86,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     profile::launch_mark("main");
+    // Every feature's settings are part of the schema before any are read.
+    app::feature::register_settings();
     // This thread is the UI thread: from here on, a freeze on it is
     // written to the hang log.
     if let Some(log) = watchdog::log_path() {

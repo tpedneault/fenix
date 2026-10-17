@@ -71,6 +71,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
                 app.apply_pdf_response(*response);
             }
         }),
+        settings: &[],
     }
 };
 

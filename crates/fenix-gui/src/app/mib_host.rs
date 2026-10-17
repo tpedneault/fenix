@@ -75,6 +75,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     }),
     page_after_layout: None,
     on_event: None,
+    settings: &[],
 };
 
 /// A set of MIBs, read or being read.

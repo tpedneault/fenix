@@ -1036,7 +1036,7 @@ struct VncCursor {
 /// has to do *one* GPU upload per actual rendered frame, however many
 /// rects arrived since the last one -- completely decoupled from
 /// network/decode timing, and never competing with input for the same
-/// queue. Carries the session's own key (`Config.vnc_hosts`'s name)
+/// queue. Carries the session's own key (`vnc.hosts`' name)
 /// since a frame can arrive well after focus moved elsewhere, same
 /// reasoning as `LogLine`'s explicit `BufferId`.
 struct VncReader {
@@ -4541,7 +4541,7 @@ enum WorkspaceAction {
     Git,
     Jira,
     Docker,
-    /// The host name to connect to, one of `config.vnc_hosts`.
+    /// The host name to connect to, one of `vnc.hosts`.
     Vnc(String),
     /// A project root to switch to -- `project:PATH`. Not required to be
     /// in `known_projects` already; opening it via this action adds it,
@@ -6140,6 +6140,7 @@ impl App {
             None => (PathBuf::from("settings.toml"), PathBuf::from("state")),
         };
         let config_existed = config_path.exists();
+        feature::register_settings();
         let config = fenix_config::Config::load_at_or_default(config_path, state_dir);
         // First launch on this machine: write the file straight away, so
         // `settings.toml` is there to find (and hand-edit) from the start.
@@ -9919,7 +9920,7 @@ impl App {
         if self.features.vnc().connecting.contains(name) {
             return; // already dialing this one -- SPC v v pressed twice in a row
         }
-        let Some((_, host, port)) = self.config.vnc_hosts.iter().find(|(n, _, _)| n == name).cloned() else {
+        let Some((_, host, port)) = vnc_host::hosts(&self.config).into_iter().find(|(n, _, _)| n == name) else {
             self.set_error(format!("no VNC host configured named {name}"));
             return;
         };
@@ -10025,7 +10026,7 @@ impl App {
     /// `SPC v v`: a fuzzy picker over every configured VNC host name --
     /// confirming calls `open_vnc_session` (see `vnc_host::SPEC`).
     pub(crate) fn start_vnc_picker(&mut self) {
-        let candidates = self.config.vnc_hosts.iter().map(|(name, _, _)| fenix_picker::Candidate::new(name.clone(), name.clone())).collect();
+        let candidates = vnc_host::hosts(&self.config).into_iter().map(|(name, _, _)| fenix_picker::Candidate::new(name.clone(), name)).collect();
         self.enter_picker(vnc_host::vnc_picker(candidates));
     }
 
@@ -32690,7 +32691,7 @@ configure_board stm32
     #[test]
     fn start_vnc_picker_lists_every_configured_host_by_name() {
         let mut app = App::with_file(None);
-        app.config.vnc_hosts = vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)];
+        vnc_host::set_hosts(&mut app.config, vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)]);
 
         app.start_vnc_picker();
 
@@ -38536,7 +38537,7 @@ FIVE
     fn app_with_vnc_session() -> (App, fenix_vnc::test_server::TestServer) {
         let server = fenix_vnc::test_server::TestServer::start(fenix_vnc::test_server::Traffic::Idle);
         let mut app = App::with_file(None);
-        app.config.vnc_hosts.push(("vm".to_string(), "127.0.0.1".to_string(), server.port()));
+        vnc_host::set_hosts(&mut app.config, vec![("vm".to_string(), "127.0.0.1".to_string(), server.port())]);
         app.open_vnc_session("vm");
         assert_eq!(app.features.vnc().sessions.get("vm").map(|s| s.link), Some(VncLink::Live));
         assert_eq!(app.features.vnc().focused.as_deref(), Some("vm"), "a focused live session captures input");
@@ -38627,7 +38628,7 @@ FIVE
 ");
         let server = fenix_vnc::test_server::TestServer::start(fenix_vnc::test_server::Traffic::Idle);
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
-        app.config.vnc_hosts.push(("vm".to_string(), "127.0.0.1".to_string(), server.port()));
+        vnc_host::set_hosts(&mut app.config, vec![("vm".to_string(), "127.0.0.1".to_string(), server.port())]);
         let file_buffer = app.focused_buffer_id();
         app.split_vertical();
         app.open_vnc_session("vm");

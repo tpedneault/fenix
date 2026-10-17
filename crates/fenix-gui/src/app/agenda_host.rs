@@ -99,6 +99,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
                 app.apply_agenda_sync(*event);
             }
         }),
+        settings: &[],
     }
 };
 

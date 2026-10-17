@@ -2,6 +2,11 @@
 //! goes on the settings page, what kind of value it takes and what it's
 //! for. Loading, checking, saving, the settings page and the settings
 //! table in docs/CONFIGURATION.md all read this list, so they can't disagree.
+//!
+//! Core's settings are built in, each kept in a field of `Config`. A
+//! feature (an extension, later) registers its own at startup
+//! (`register`); those are kept by key (`Config::value`), with the same
+//! keys in `settings.toml`.
 
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -130,6 +135,15 @@ impl Category {
 type Get = fn(&Config) -> Option<Value>;
 type Set = fn(&mut Config, Option<Value>) -> Result<(), String>;
 
+/// Where a setting's value lives.
+#[derive(Clone, Copy)]
+enum Access {
+    /// In a field of `Config` (core's settings).
+    Field(Get, Set),
+    /// By its key, in `Config`'s registered values (a feature's).
+    Stored,
+}
+
 /// One setting.
 pub struct Setting {
     /// Its key in `settings.toml`: `editor.font_size`.
@@ -144,8 +158,7 @@ pub struct Setting {
     pub project: bool,
     /// Whether it only takes effect after a restart.
     pub restart: bool,
-    get: Get,
-    set: Set,
+    access: Access,
 }
 
 impl std::fmt::Debug for Setting {
@@ -157,7 +170,10 @@ impl std::fmt::Debug for Setting {
 impl Setting {
     /// Its value in `config`; `None` when it isn't set.
     pub fn get(&self, config: &Config) -> Option<Value> {
-        (self.get)(config)
+        match self.access {
+            Access::Field(get, _) => get(config),
+            Access::Stored => config.values.get(self.key).cloned(),
+        }
     }
 
     /// Sets it in `config`, after checking it; `None` unsets it.
@@ -165,7 +181,28 @@ impl Setting {
         if let Some(v) = &value {
             self.kind.check(v)?;
         }
-        (self.set)(config, value)
+        match self.access {
+            Access::Field(_, set) => set(config, value),
+            Access::Stored => {
+                match value {
+                    Some(v) => config.values.insert(self.key.to_string(), v),
+                    None => config.values.remove(self.key),
+                };
+                Ok(())
+            }
+        }
+    }
+
+    /// A feature's setting, kept by its key: what a feature registers
+    /// (`register`).
+    pub const fn stored(key: &'static str, category: Category, label: &'static str, kind: Kind, help: &'static str) -> Setting {
+        Setting { key, category, label, help, kind, default: "", project: false, restart: false, access: Access::Stored }
+    }
+
+    /// What applies when it isn't set, as the page shows it.
+    pub const fn with_default(mut self, default: &'static str) -> Self {
+        self.default = default;
+        self
     }
 
     fn project(mut self) -> Self {
@@ -185,7 +222,7 @@ impl Setting {
 }
 
 fn s(key: &'static str, category: Category, label: &'static str, kind: Kind, help: &'static str, (get, set): (Get, Set)) -> Setting {
-    Setting { key, category, label, help, kind, default: "", project: false, restart: false, get, set }
+    Setting { key, category, label, help, kind, default: "", project: false, restart: false, access: Access::Field(get, set) }
 }
 
 // -- Conversions between a field's type and a `Value` ---------------------
@@ -352,12 +389,6 @@ const DIAGRAM_THEME: &[Field] = &[
     Field { name: "lineColor", label: "Lines", range: None, default: Some(""), choices: &[] },
     Field { name: "secondaryColor", label: "Second fill", range: None, default: Some(""), choices: &[] },
     Field { name: "background", label: "Background", range: None, default: Some(""), choices: &[] },
-];
-
-const HOST: &[Field] = &[
-    Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
-    Field { name: "host", label: "Host", range: None, default: None, choices: &[] },
-    Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] },
 ];
 
 static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
@@ -566,15 +597,6 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         })),
         s("diagrams.export_with", Notebook, "Export with", Kind::Choice(&["fenix", "mmdc"]), "What draws exported files: Fenix, or mermaid-cli (mmdc, when it's installed) for output identical to mermaid.js.", field!(diagrams_export_with, text_get, text_set)).default("fenix"),
         s("diagrams.font", Notebook, "Diagram font", Kind::Font, "The font diagrams are drawn with.", field!(diagrams_font, text_get, text_set)).default("the renderer's"),
-        // VNC
-        s("vnc.hosts", Vnc, "Hosts", Kind::Records(HOST), "Machines SPC v connects to. No passwords: every host is taken to be on a trusted network.", (|c: &Config| (!c.vnc_hosts.is_empty()).then(|| Value::Records(c.vnc_hosts.iter().map(|(n, h, p)| vec![n.clone(), h.clone(), p.to_string()]).collect())), |c: &mut Config, v| {
-            c.vnc_hosts = match v {
-                None => Vec::new(),
-                Some(Value::Records(rows)) => rows.into_iter().map(|r| (r[0].clone(), r[1].clone(), r[2].parse().unwrap_or(5900))).collect(),
-                Some(other) => return Err(format!("expected hosts, got {}", other.describe())),
-            };
-            Ok(())
-        })),
         // Workspaces
         s("documents", Reader, "Documents", Kind::Map { key: "Name", value: "File", paths: true }, "The SPC r f shelf: a name and the file it opens. A project's own shelf is listed first.", field!(documents, path_map_get, path_map_set)).project(),
         s("reader.colors", Reader, "Page colours", Kind::Choice(&["paper", "theme"]), "Paper shows pages as printed. Theme draws them in the current theme's colours. SPC r c switches; open PDFs change at once.", sub!(reader.colors, text_get, text_set)).default("paper"),
@@ -590,14 +612,31 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
     ]
 });
 
-/// Every setting, in page order.
-pub fn settings() -> &'static [Setting] {
-    &SETTINGS
+/// Settings features registered (`register`), after core's.
+static REGISTERED: std::sync::RwLock<Vec<&'static Setting>> = std::sync::RwLock::new(Vec::new());
+
+/// Adds a feature's settings to the schema, so they're loaded, checked,
+/// saved, shown on the settings page and documented like core's. Done at
+/// startup, before the settings are read; a key already declared is left
+/// as it was.
+pub fn register(settings: &'static [Setting]) {
+    let mut registered = REGISTERED.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for setting in settings {
+        if !SETTINGS.iter().any(|s| s.key == setting.key) && !registered.iter().any(|s| s.key == setting.key) {
+            registered.push(setting);
+        }
+    }
+}
+
+/// Every setting: core's in page order, then the features'.
+pub fn settings() -> Vec<&'static Setting> {
+    let registered = REGISTERED.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    SETTINGS.iter().chain(registered.iter().copied()).collect()
 }
 
 /// The setting at `key`.
 pub fn setting(key: &str) -> Option<&'static Setting> {
-    settings().iter().find(|s| s.key == key)
+    settings().into_iter().find(|s| s.key == key)
 }
 
 /// Every setting as a Markdown table, by category -- the copy in docs/CONFIGURATION.md,
@@ -857,24 +896,6 @@ mod tests {
         assert!(fetch.kind.parse("five minutes").unwrap_err().contains("minutes"));
         let layout = setting("git.layout").unwrap();
         assert!(layout.kind.parse("tabs").unwrap_err().contains("page, panes"));
-        let hosts = setting("vnc.hosts").unwrap();
-        assert!(hosts.kind.check(&Value::Records(vec![vec!["a".into(), "h".into(), "70000".into()]])).unwrap_err().contains("Port"));
-    }
-
-    /// docs/CONFIGURATION.md lists every setting; this is what keeps it
-    /// true. When it fails, paste `markdown_table()` over its table (run
-    /// `cargo test -p fenix-config print_the_settings_table -- --ignored
-    /// --nocapture`).
-    #[test]
-    fn the_docs_list_every_setting_as_the_schema_declares_it() {
-        let docs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/CONFIGURATION.md")).unwrap().replace('\r', "");
-        assert!(docs.contains(&markdown_table()), "docs/CONFIGURATION.md's settings table is out of date");
-    }
-
-    #[test]
-    #[ignore]
-    fn print_the_settings_table() {
-        print!("{}", markdown_table());
     }
 
     #[test]
@@ -883,5 +904,33 @@ mod tests {
             assert_eq!(blocked_parse(&blocked_text(&b)), Ok(b));
         }
         assert!(blocked_parse("maybe").is_err());
+    }
+}
+
+#[cfg(test)]
+mod registered {
+    use super::*;
+
+    static PORTS: [Setting; 1] = [Setting::stored("test.ports", Category::Vnc, "Ports", Kind::Records(&[Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] }]), "Test ports.")];
+
+    #[test]
+    fn a_registered_setting_is_loaded_checked_saved_and_kept_by_key() {
+        register(&PORTS);
+        register(&PORTS);
+        assert_eq!(settings().iter().filter(|s| s.key == "test.ports").count(), 1, "registered once");
+        let ports = setting("test.ports").unwrap();
+        assert!(ports.set(&mut Config::empty("s.toml".into(), "state".into()), Some(Value::Records(vec![vec!["70000".into()]]))).unwrap_err().contains("Port"));
+        let dir = std::env::temp_dir().join(format!("fenix-config-registered-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.toml");
+        let mut config = Config::load(path.clone()).unwrap();
+        ports.set(&mut config, Some(Value::Records(vec![vec!["5901".into()]]))).unwrap();
+        assert_eq!(config.value("test.ports"), Some(&Value::Records(vec![vec!["5901".into()]])));
+        config.save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[[test.ports]]") && text.contains("port = 5901"), "{text}");
+        let reloaded = Config::load(path).unwrap();
+        assert_eq!(reloaded.value("test.ports"), Some(&Value::Records(vec![vec!["5901".into()]])));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
