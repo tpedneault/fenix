@@ -69,6 +69,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     page_action: None,
     page_context: None,
     page_title: None,
+    page_after_layout: None,
 };
 
 /// Anything inside an Arduino sketch gets its `SPC m` menu.

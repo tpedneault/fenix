@@ -119,7 +119,7 @@ impl App {
     /// `SPC m e` / `e` on a diagram, `SPC n e` anywhere.
     pub(crate) fn diagram_export_here(&mut self) {
         let focused = self.focused_buffer_id();
-        if let Some(PageModel::Diagram(p)) = self.pages.get(&focused).map(|s| &s.model) {
+        if let Some(p) = self.feature_page::<crate::diagram_page::DiagramPage>(focused) {
             if let Some(src) = p.source {
                 return self.export_menu(ExportWhat::Diagram(src));
             }

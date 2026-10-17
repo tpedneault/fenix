@@ -20,7 +20,6 @@ use crate::stream_page;
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
 use crate::reading_page::ReadingPage;
-use crate::diagram_page::DiagramPage;
 use crate::review_inbox::{self, Inbox};
 use crate::review_page::{self, ReviewPage};
 use crate::git_status::{self, GitStatus};
@@ -51,7 +50,6 @@ pub(super) enum PageModel {
     Agenda(Box<AgendaPage>),
     Jira(Box<JiraPage>),
     Reading(Box<ReadingPage>),
-    Diagram(Box<DiagramPage>),
     /// A page a feature owns -- see `feature::FeaturePage`.
     Feature(Box<dyn super::feature::FeaturePage>),
 }
@@ -93,7 +91,6 @@ impl PageState {
             PageModel::Snippets(p) => p.typing(),
             PageModel::Agenda(p) => p.typing(),
             PageModel::Jira(p) => p.typing(),
-            PageModel::Diagram(p) => p.typing(),
             PageModel::Feature(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => false,
         }
@@ -129,7 +126,6 @@ impl PageState {
             PageModel::Snippets(p) => p.paste(text),
             PageModel::Agenda(p) => p.paste(text),
             PageModel::Jira(p) => p.paste(text),
-            PageModel::Diagram(p) => p.paste(text),
             PageModel::Feature(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => {}
         }
@@ -314,7 +310,6 @@ impl App {
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
             Some(PageModel::Agenda(_)) => "*agenda*".to_string(),
             Some(PageModel::Jira(_)) => "*jira*".to_string(),
-            Some(PageModel::Diagram(p)) => format!("*{}: {}*", if p.viewer { "view" } else { "diagram" }, p.title),
             Some(PageModel::Feature(p)) => {
                 let title = self.features.specs().find(|spec| spec.id == p.feature()).and_then(|spec| spec.page_title);
                 title.and_then(|title| title(self, id)).unwrap_or_else(|| p.title())
@@ -432,18 +427,16 @@ impl App {
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
             .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
         // What a feature's page reads besides itself, before it's borrowed.
-        let mut feature_ctx = match self.pages.get(&id) {
-            Some(s) if s.stale || s.cols != cols => Some(self.feature_page_context(id, super::feature::PageNeed::Layout { cols })),
-            _ => None,
-        };
+        let due = self.pages.get(&id).is_some_and(|s| s.stale || s.cols != cols);
+        let mut feature_ctx = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Feature(_)))
+            .then(|| self.feature_page_context(id, super::feature::PageNeed::Layout { cols, due }));
         let reading = self.reading_precompute(id, cols, false);
-        let diagram = self.diagram_precompute(id);
         let Some(state) = self.pages.get_mut(&id) else { return };
         if reading.as_ref().is_some_and(|r| r.changed()) {
             state.stale = true;
         }
-        if let (Some(pre), PageModel::Diagram(p)) = (&diagram, &state.model) {
-            if Self::diagram_changed(p, pre) {
+        if let (Some(ctx), PageModel::Feature(p)) = (&feature_ctx, &state.model) {
+            if p.changed(&**ctx) {
                 state.stale = true;
             }
         }
@@ -456,7 +449,7 @@ impl App {
         if !state.stale && state.cols == cols {
             return;
         }
-        state.page = match &state.model {
+        state.page = match &mut state.model {
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
                 let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
@@ -473,7 +466,7 @@ impl App {
                 jira_page::layout(p, &ctx, cols)
             }
             PageModel::Feature(p) => p.layout(feature_ctx.take().unwrap_or_else(|| Box::new(())), cols),
-            PageModel::Reading(_) | PageModel::Diagram(_) => Page::default(),
+            PageModel::Reading(_) => Page::default(),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
@@ -493,9 +486,6 @@ impl App {
                 None => crate::reading_page::layout(p, cols),
             };
         }
-        if let (PageModel::Diagram(p), Some(pre)) = (&mut state.model, diagram) {
-            state.page = Self::diagram_apply(p, pre, cols);
-        }
         state.cols = cols;
         state.stale = false;
         let text = state.page.text.clone();
@@ -510,7 +500,16 @@ impl App {
         }
         self.home_place_cursor(id, pane, line, col);
         self.request_page_images(id);
-        self.diagram_after_layout(id);
+        let after = match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::Feature(p)) => {
+                let feature = p.feature();
+                self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.page_after_layout)
+            }
+            _ => None,
+        };
+        if let Some(after) = after {
+            after(self, id);
+        }
     }
 
     /// Keys a page claims while it's focused. While a field has the
@@ -620,10 +619,6 @@ impl App {
             PageModel::Reading(p) => {
                 let action = p.key(key);
                 self.reading_action(id, action);
-            }
-            PageModel::Diagram(p) => {
-                let action = p.key(key);
-                self.diagram_action(id, action);
             }
             PageModel::Agenda(p) => {
                 let (worklogs, sync, round) = agenda.unwrap_or_default();
@@ -909,15 +904,11 @@ impl App {
             .filter(|i| i.line + i.rows > first_line && i.line <= first_line + rows)
             .map(|i| (i.line as isize - first_line as isize, i.col, i.rows, i.cols, i.key.clone(), i.view))
             .collect();
-        // A diagram's selected node and the source cursor's, outlined.
-        if let PageModel::Diagram(p) = &state.model {
-            let (w, h) = p.drawn.size;
-            if w > 0.0 && h > 0.0 && !overlay.images.is_empty() {
-                for (i, strong) in [(p.cursor_node, false), (p.selected, true)] {
-                    if let Some(n) = i.and_then(|i| p.drawn.nodes.get(i)) {
-                        overlay.marks.push((0, (n.x / w, n.y / h, n.w / w, n.h / h), strong));
-                    }
-                }
+        // What a feature's page outlines over its picture (a diagram's
+        // selected node and the source cursor's).
+        if let PageModel::Feature(p) = &state.model {
+            if !overlay.images.is_empty() {
+                overlay.marks = p.image_marks();
             }
         }
         (segments, overlay)

@@ -73,6 +73,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
         let p = app.feature_page::<DefPage>(id)?;
         Some(mib_def::title(app.mib().and_then(|m| m.set_ready(&p.key)).as_deref(), p))
     }),
+    page_after_layout: None,
 };
 
 /// A set of MIBs, read or being read.
@@ -322,7 +323,10 @@ impl PageCtx {
     }
 }
 
-fn page_context(app: &mut App, id: BufferId, _need: super::feature::PageNeed) -> Box<dyn Any> {
+fn page_context(app: &mut App, id: BufferId, need: super::feature::PageNeed) -> Box<dyn Any> {
+    if matches!(need, super::feature::PageNeed::Layout { due: false, .. }) {
+        return Box::new(());
+    }
     let mut ctx = PageCtx { apid_hex: apid_hex(app), ..PageCtx::default() };
     let key = app.feature_page::<MibPage>(id).map(|p| p.key.clone()).or_else(|| app.feature_page::<DefPage>(id).map(|p| p.key.clone()));
     if let Some(key) = key {
@@ -379,7 +383,7 @@ impl FeaturePage for MibPage {
         MibPage::paste(self, text);
     }
 
-    fn layout(&self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
         mib_page::layout(self, &ctx(&*c).mib(), cols)
     }
 
@@ -417,7 +421,7 @@ impl FeaturePage for DefPage {
         matches!(key, crate::page::Key::CtrlO | crate::page::Key::CtrlI)
     }
 
-    fn layout(&self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
         let c = ctx(&*c);
         mib_def::layout(self, c.set.as_deref(), c.apid_hex, cols)
     }
@@ -458,7 +462,7 @@ impl FeaturePage for InsertForm {
         key == crate::page::Key::CtrlEnter
     }
 
-    fn layout(&self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, c: Box<dyn Any>, cols: usize) -> crate::page::Page {
         mib_form::layout(self, ctx(&*c).form_bytes.as_ref(), cols)
     }
 

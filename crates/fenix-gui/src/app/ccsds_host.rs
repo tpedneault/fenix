@@ -53,6 +53,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     page_action: Some(|app, id, action| app.ccsds_page_action(id, action)),
     page_context: None,
     page_title: None,
+    page_after_layout: None,
 };
 
 /// What CCSDS keeps between calls: each stream page's source, the
@@ -108,7 +109,7 @@ impl super::feature::FeaturePage for PacketPage {
         PacketPage::paste(self, text);
     }
 
-    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         packet_page::layout(self, cols)
     }
 
@@ -139,7 +140,7 @@ impl super::feature::FeaturePage for HexPage {
         HexPage::paste(self, text);
     }
 
-    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         hex_page::layout(self, cols)
     }
 
@@ -170,7 +171,7 @@ impl super::feature::FeaturePage for StreamPage {
         StreamPage::paste(self, text);
     }
 
-    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         stream_page::layout(self, cols)
     }
 
@@ -202,7 +203,7 @@ impl super::feature::FeaturePage for StandardsPage {
         self.query.paste(text);
     }
 
-    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         crate::standards_page::layout(self, cols)
     }
 
@@ -233,7 +234,7 @@ impl super::feature::FeaturePage for TimePage {
         TimePage::paste(self, text);
     }
 
-    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         time_page::layout(self, cols)
     }
 

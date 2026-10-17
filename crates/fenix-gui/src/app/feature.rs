@@ -105,6 +105,9 @@ pub(crate) struct FeatureSpec {
     /// Page `BufferId`'s title, when it depends on more than the page (a
     /// definition's name in the loaded MIB) -- else `FeaturePage::title`.
     pub page_title: Option<fn(&App, BufferId) -> Option<String>>,
+    /// After page `BufferId` was laid out: what its layout asks of the
+    /// world (a diagram's drawing started, its problem on its file).
+    pub page_after_layout: Option<fn(&mut App, BufferId)>,
 }
 
 /// A completion in progress: where its prefix starts, the prefix, and
@@ -172,9 +175,21 @@ pub(crate) trait FeaturePage: Any {
     fn claims_ctrl(&self, _key: crate::page::Key) -> bool {
         false
     }
+    /// Whether what `page_context` found this frame changes the page, so
+    /// it's laid out again although nothing else did (a drawing came in).
+    fn changed(&self, _ctx: &dyn Any) -> bool {
+        false
+    }
     /// The page, laid out for a pane `cols` cells wide; `ctx` is what its
-    /// feature's `page_context` worked out for it (`()` without one).
-    fn layout(&self, ctx: Box<dyn Any>, cols: usize) -> crate::page::Page;
+    /// feature's `page_context` worked out for it (`()` without one), and
+    /// the page can keep what it brought (a finished drawing).
+    fn layout(&mut self, ctx: Box<dyn Any>, cols: usize) -> crate::page::Page;
+    /// Outlines over the page's first picture, as fractions of it, and
+    /// whether each is strong (a diagram's selected node and the source
+    /// cursor's).
+    fn image_marks(&self) -> Vec<(usize, (f32, f32, f32, f32), bool)> {
+        Vec::new()
+    }
     /// A key; what it asks for goes to the feature's `page_action`.
     fn key(&mut self, key: crate::page::Key, ctx: Box<dyn Any>) -> Box<dyn Any>;
     /// It's being closed: stop whatever it started (a stream's reader).
@@ -182,10 +197,12 @@ pub(crate) trait FeaturePage: Any {
 }
 
 /// Why core asks a feature for its page's context (`FeatureSpec::
-/// page_context`): to lay it out -- only when that's due -- or for a key.
+/// page_context`): every frame the page shows, for its layout -- `due`
+/// when it's laid out again anyway (it changed, or its pane did), else
+/// only `FeaturePage::changed` can ask for it -- or for a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PageNeed {
-    Layout { cols: usize },
+    Layout { cols: usize, due: bool },
     Key,
 }
 
