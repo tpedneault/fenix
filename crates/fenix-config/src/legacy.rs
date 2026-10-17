@@ -71,7 +71,11 @@ pub(crate) fn load(path: &std::path::Path, into: PathBuf, state_dir: PathBuf) ->
     c.git_layout = git.and_then(|s| s.get("layout")).cloned();
     c.git_auto_fetch_minutes = git.and_then(|s| s.get("auto_fetch")).and_then(|v| v.trim().trim_end_matches('m').trim().parse().ok()).filter(|m| *m > 0);
     c.git_reviewers = git.and_then(|s| s.get("reviewers")).map(|v| names(v)).unwrap_or_default();
-    c.vnc_hosts = vnc.map(parse_vnc_hosts).unwrap_or_default();
+    let hosts = vnc.map(parse_vnc_hosts).unwrap_or_default();
+    if !hosts.is_empty() {
+        // VNC's setting, registered by VNC: kept by key.
+        c.set_value("vnc.hosts", Some(crate::Value::Records(hosts.into_iter().map(|(n, h, p)| vec![n, h, p.to_string()]).collect())));
+    }
     c.documents = documents.map(parse_documents).unwrap_or_default();
     c.windows = windows.map(parse_windows).unwrap_or_default();
     c.restore_session = windows.and_then(|s| s.get("restore_session")).and_then(|v| v.parse().ok());
@@ -369,6 +373,14 @@ mod tests {
         assert_eq!(config.agenda_categories, vec!["Fenix".to_string(), "Personal".to_string(), "Tenth".to_string()]);
     }
 
+    /// `vnc.hosts` as config.ini's `[vnc]` left it.
+    fn hosts(config: &Config) -> Vec<(String, String, u16)> {
+        match config.value("vnc.hosts") {
+            Some(crate::Value::Records(rows)) => rows.iter().map(|r| (r[0].clone(), r[1].clone(), r[2].parse().unwrap())).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     #[test]
     fn vnc_hosts_are_ordered_by_numeric_ordinal_not_key_string() {
         let path = temp_path("vnc_ordinal_order");
@@ -377,7 +389,7 @@ mod tests {
         let config = load_ini(&path);
 
         assert_eq!(
-            config.vnc_hosts,
+            hosts(&config),
             vec![
                 ("first".to_string(), "10.0.0.1".to_string(), 5900),
                 ("second".to_string(), "10.0.0.2".to_string(), 5900),
@@ -394,7 +406,7 @@ mod tests {
 
         let config = load_ini(&path);
 
-        assert_eq!(config.vnc_hosts, vec![("good".to_string(), "10.0.0.1".to_string(), 5900), ("also-good".to_string(), "10.0.0.3".to_string(), 5901)]);
+        assert_eq!(hosts(&config), vec![("good".to_string(), "10.0.0.1".to_string(), 5900), ("also-good".to_string(), "10.0.0.3".to_string(), 5901)]);
         std::fs::remove_file(&path).ok();
     }
 
@@ -405,7 +417,7 @@ mod tests {
 
         let config = load_ini(&path);
 
-        assert_eq!(config.vnc_hosts, vec![("good".to_string(), "10.0.0.1".to_string(), 5900)]);
+        assert_eq!(hosts(&config), vec![("good".to_string(), "10.0.0.1".to_string(), 5900)]);
         std::fs::remove_file(&path).ok();
     }
 

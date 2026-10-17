@@ -410,15 +410,9 @@ pub struct Config {
     /// review, prefilled on its page (`SPC g P`). A project's own
     /// `.fenix/project.ini` `[git] reviewers` takes its place.
     pub git_reviewers: Vec<String>,
-    /// Configured VNC hosts, `(name, host, port)` -- same numbered-key
-    /// `[vnc]` list convention `mib_roots`/`jira_projects` already
-    /// established, just a 3-field tuple instead of 2 (`parse_vnc_hosts`
-    /// is its own sibling to `parse_pair_list` rather than reusing it,
-    /// since `parse_pair_list` only splits one `|`). Hand-typed by the
-    /// user (`SPC v v`), e.g. `("build-vm", "10.0.0.5", 5900)`. Same
-    /// re-read-fresh-before-writing protection as `documents` -- see
-    /// its own doc comment.
-    pub vnc_hosts: Vec<(String, String, u16)>,
+    /// Settings features registered (`schema::register`), by key -- see
+    /// `value`.
+    values: std::collections::BTreeMap<String, Value>,
     /// Where each OS window sat when Fenix last exited, in the order
     /// they were open -- restored on the next launch when
     /// `restore_windows` is on. Unlike every other list here this one
@@ -649,7 +643,7 @@ impl Config {
             git_layout: None,
             git_auto_fetch_minutes: None,
             git_reviewers: Vec::new(),
-            vnc_hosts: Vec::new(),
+            values: std::collections::BTreeMap::new(),
             documents: Vec::new(),
             windows: Vec::new(),
             restore_windows: None,
@@ -858,6 +852,22 @@ impl Config {
         self.remember();
     }
 
+    /// A registered setting's value (`schema::register`); `None` when it
+    /// isn't set.
+    pub fn value(&self, key: &str) -> Option<&Value> {
+        self.values.get(key)
+    }
+
+    /// Sets a registered setting by key, unchecked -- `Setting::set`
+    /// checks it first. For code that edits one directly (tests, a
+    /// migration); `None` unsets it.
+    pub fn set_value(&mut self, key: &str, value: Option<Value>) {
+        match value {
+            Some(v) => self.values.insert(key.to_string(), v),
+            None => self.values.remove(key),
+        };
+    }
+
     /// A token: from the environment when it's set there, else from the
     /// file.
     pub fn token(&self, secret: Secret) -> Option<String> {
@@ -1033,7 +1043,7 @@ mod tests {
         assert!(config.mib_telecommand_template.is_none());
         assert!(config.mib_telecommand_argument_template.is_none());
         assert!(config.mib_telecommand_argument_separator.is_none());
-        assert!(config.vnc_hosts.is_empty());
+        assert!(config.value("vnc.hosts").is_none(), "a feature's setting, unset");
     }
 
     #[test]
@@ -1263,21 +1273,6 @@ mod tests {
     }
 
     #[test]
-    fn vnc_hosts_round_trip_through_save_and_load() {
-        let path = temp_path("vnc_round_trip");
-        let mut config = Config::load_or_default(path.clone());
-        config.vnc_hosts = vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)];
-        config.save().unwrap();
-
-        let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(
-            reloaded.vnc_hosts,
-            vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)]
-        );
-        std::fs::remove_file(&path).ok();
-    }
-
-    #[test]
     fn save_creates_missing_parent_directories() {
         let path = temp_path("creates_parents").parent().unwrap().join("nested-fenix-config-test").join("config.ini");
         let mut config = Config::load_or_default(path.clone());
@@ -1312,9 +1307,21 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// VNC's setting, as fenix-gui registers it at startup: a feature's
+    /// setting, kept by key. Registered by every test that counts on it,
+    /// since the tests run in any order.
+    fn register_vnc() {
+        static VNC: [Setting; 1] = [Setting::stored("vnc.hosts", schema::Category::Vnc, "Hosts", Kind::Records(&[
+            schema::Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+            schema::Field { name: "host", label: "Host", range: None, default: None, choices: &[] },
+            schema::Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] },
+        ]), "Hosts.")];
+        schema::register(&VNC);
+    }
 
     #[test]
     fn every_setting_round_trips_through_the_file() {
+        register_vnc();
         let path = temp_path("every");
         let mut config = Config::load(path.clone()).unwrap();
         let sample = |kind: &Kind| match kind {
@@ -1343,7 +1350,7 @@ mod tests {
             ),
             _ => Value::Text(r#"C:\a "b"\c = d"#.into()),
         };
-        let settable: Vec<&Setting> = settings().iter().filter(|s| !matches!(s.kind, Kind::Secret(_))).collect();
+        let settable: Vec<&Setting> = settings().into_iter().filter(|s| !matches!(s.kind, Kind::Secret(_))).collect();
         // Maps whose values have a form of their own.
         let sample_for = |s: &Setting| match s.key {
             "mib.icd_per_mib" => Value::Map(vec![("OPS 1".into(), "6.9".into()), ("SIM".into(), "auto".into())]),
@@ -1397,7 +1404,8 @@ mod tests {
         config.font_size = Some(20.0);
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.vnc_hosts, [("lab".to_string(), "10.1.1.1".to_string(), 5900)]);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("[[vnc.hosts]]
+name = \"lab\""), "a key no setting here declares stays as it was");
         assert_eq!(reloaded.lsp_servers, [("python".to_string(), "pyright-langserver --stdio".to_string())]);
         assert_eq!((reloaded.theme.as_deref(), reloaded.font_size), (Some("Nord"), Some(20.0)));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
@@ -1520,6 +1528,7 @@ mod tests {
         )
         .unwrap();
         let path = dir.join("settings.toml");
+        register_vnc();
         let config = Config::migrate_ini(&ini, path.clone(), dir.join("state")).unwrap();
         assert!(config.problems.is_empty(), "{:?}", config.problems);
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1532,7 +1541,7 @@ mod tests {
         assert_eq!(reloaded.jira_blocked, [("FNX".to_string(), JiraBlocked::Status { id: "10103".into(), name: "On Hold".into() })]);
         assert_eq!(reloaded.git_auto_fetch_minutes, Some(5));
         assert_eq!(reloaded.git_reviewers, ["alex", "sam"]);
-        assert_eq!(reloaded.vnc_hosts.len(), 2);
+        assert!(matches!(reloaded.value("vnc.hosts"), Some(Value::Records(rows)) if rows.len() == 2));
         assert_eq!(reloaded.restore_session, Some(false));
         assert_eq!(reloaded.windows, [WindowLayout { x: -8, y: -8, width: 2560, height: 1369, maximized: true }]);
         assert_eq!(reloaded.explorer_bookmarks, [("src".to_string(), PathBuf::from(r"C:\code\src"))]);

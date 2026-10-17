@@ -64,6 +64,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             Ok(ForgeEvent::Detail { request_id, number, result }) => app.apply_forge_detail(request_id, number, *result),
             Err(_) => {}
         }),
+        settings: &[],
     }
 };
 

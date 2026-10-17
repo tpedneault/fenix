@@ -336,10 +336,10 @@ impl SettingsPage {
 
     fn shown_settings(&self) -> Vec<&'static Setting> {
         match self.search.as_deref().filter(|s| !s.trim().is_empty()) {
-            Some(needle) => settings().iter().filter(|s| self.visible(s) && setting_matches(s, needle)).collect(),
+            Some(needle) => settings().into_iter().filter(|s| self.visible(s) && setting_matches(s, needle)).collect(),
             None => {
                 let Some(Some(category)) = self.sections().get(self.category).copied() else { return Vec::new() };
-                settings().iter().filter(|s| s.category == category && self.visible(s)).collect()
+                settings().into_iter().filter(|s| s.category == category && self.visible(s)).collect()
             }
         }
     }

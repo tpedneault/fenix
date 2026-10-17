@@ -70,6 +70,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     page_title: None,
     page_after_layout: None,
     on_event: None,
+    settings: &[],
 };
 
 /// What Docker's background threads report, as a `FeatureEvent`'s
