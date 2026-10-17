@@ -146,6 +146,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     session_reopen: None,
     home: None,
     home_activate: None,
+    doctor: Some(mib_doctor),
 };
 
 /// A set of MIBs, read or being read.
@@ -1234,9 +1235,205 @@ fn hover_text(set: &MibSet, def: DefRef, apid_hex: bool) -> String {
     lines.join("\n")
 }
 
+/// The doctor's checks for a MIB project: its tables, their problems,
+/// and the mission profile they're read against.
+fn mib_doctor(d: &mut fenix_project::doctor::Doctor) {
+    if d.kind() != fenix_project::ProjectKind::Mib {
+        return;
+    }
+    let root = d.root();
+    let dir = if root.join("mib").is_dir() { root.join("mib") } else { root.to_path_buf() };
+    let label = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let schema = mib_schema(root);
+    let options = fenix_mib::ReadOptions { schema: schema.clone(), ..Default::default() };
+    let set = fenix_mib::MibSet::load_with(vec![fenix_mib::MibRoot { label, path: dir.clone() }], None, options);
+    let info = set.root_info(0);
+    let health = if info.tables == 0 { fenix_project::doctor::Health::Warn } else { fenix_project::doctor::Health::Ok };
+    let (tables, rows) = (info.tables, info.rows);
+    let mut summary = format!("{tables} table{}, {rows} row{}", if tables == 1 { "" } else { "s" }, if rows == 1 { "" } else { "s" });
+    if let Some(v) = &info.version {
+        summary = format!("{v} -- {summary}");
+    }
+    d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "tables", health, summary));
+    if let Some(format) = &info.format {
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "layout", fenix_project::doctor::Health::Info, format!("{format} -- mib.icd in the project's settings (SPC k ,) says which")));
+    }
+    let problems = set.problems();
+    let shown = problems.len().min(20);
+    for p in &problems[..shown] {
+        let file = p.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p.line.map(|l| format!("{file}:{l}")).unwrap_or(file);
+        let health = if p.line.is_none() { fenix_project::doctor::Health::Bad } else { fenix_project::doctor::Health::Warn };
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, name, health, p.message.clone()).at(p.file.clone(), p.line.unwrap_or(1)));
+    }
+    if problems.len() > shown {
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "and more", fenix_project::doctor::Health::Warn, format!("{} more -- ! on the MIB page lists them all", problems.len() - shown)));
+    }
+    let mut unknown: Vec<String> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dat")))
+        .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default())
+        .filter(|t| !schema.knows(t))
+        .collect();
+    unknown.sort();
+    if !unknown.is_empty() {
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "not in the ICD", fenix_project::doctor::Health::Info, format!("{}.dat -- ignored; mib.columns reads a table of the mission's own", unknown.join(".dat, "))));
+    }
+    if info.tables > 0 {
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "browse", fenix_project::doctor::Health::Ok, "this project is its own MIB -- SPC k k lists what's in it"));
+        mission(d, &set);
+    }
+}
+
+/// How the project says its MIB is laid out: `[mib]`'s `icd`,
+/// `icd_per_mib` and `columns` in `.fenix/settings.toml`, as the MIB page
+/// reads them.
+fn mib_schema(root: &Path) -> fenix_mib::Schema {
+    use fenix_mib::{schema, Icd, Schema};
+    let table: toml::Table = std::fs::read_to_string(root.join(".fenix").join("settings.toml")).ok().and_then(|t| t.parse().ok()).unwrap_or_default();
+    let mib = table.get("mib").and_then(|v| v.as_table());
+    let issue = |t: &str| if t.trim() == "auto" { None } else { Some(Icd::parse(t).unwrap_or(Icd::LATEST)) };
+    let pairs = |key: &str| -> Vec<(String, String)> {
+        mib.and_then(|m| m.get(key)).and_then(|v| v.as_table()).into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()
+    };
+    let mut s = Schema::default();
+    if let Some(icd) = mib.and_then(|m| m.get("icd")).and_then(|v| v.as_str()) {
+        s.icd = issue(icd);
+    }
+    s.per_root = pairs("icd_per_mib").into_iter().map(|(l, t)| (l, issue(&t))).collect();
+    s.columns = pairs("columns").into_iter().map(|(t, c)| (t.trim().to_ascii_lowercase(), schema::parse_columns(&c))).collect();
+    s
+}
+
+/// The project's mission profile (`[ccsds]` in `.fenix/settings.toml`,
+/// Fenix's defaults where it says nothing), and whether the MIB agrees
+/// with it and with the standards; its recordings.
+fn mission(d: &mut fenix_project::doctor::Doctor, set: &fenix_mib::MibSet) {
+    use fenix_ccsds::pus::{Pec, Profile, PusEdition};
+    use fenix_ccsds::time::{Epoch, LeapTable, TimeFormat};
+    let root = d.root();
+    let file = root.join(".fenix").join("settings.toml");
+    let table: toml::Table = std::fs::read_to_string(&file).ok().and_then(|t| t.parse().ok()).unwrap_or_default();
+    let ccsds = table.get("ccsds").and_then(|v| v.as_table());
+    let text = |key: &str| ccsds.and_then(|t| t.get(key)).and_then(|v| v.as_str()).map(str::to_string);
+    let mut wrong = Vec::new();
+    let pus = match text("pus").as_deref() {
+        Some("a") => PusEdition::A,
+        Some("none") => PusEdition::None,
+        _ => PusEdition::C,
+    };
+    let tm_time = match text("tm_time").map(|t| TimeFormat::parse(&t)) {
+        Some(Ok(f)) => f,
+        Some(Err(e)) => {
+            wrong.push(format!("tm_time: {e}"));
+            TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false }
+        }
+        None => TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false },
+    };
+    let leap = LeapTable::default();
+    let epoch = match text("epoch").map(|e| Epoch::parse(&e, &leap)) {
+        Some(Ok(e)) => e,
+        Some(Err(e)) => {
+            wrong.push(format!("epoch: {e}"));
+            Epoch::default()
+        }
+        None => Epoch::default(),
+    };
+    let pec = text("crc").and_then(|c| Pec::parse(&c).ok()).unwrap_or(Pec::Ccitt16);
+    let base = text("plf_offset").and_then(|b| fenix_mib::packets::OffsetBase::parse(&b).ok()).unwrap_or_default();
+    let disabled: Vec<String> = ccsds.and_then(|t| t.get("checks_off")).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let profile = Profile { pus, tm_time, epoch, leap, pec, ..Default::default() };
+    let edition = match pus {
+        PusEdition::C => "PUS-C",
+        PusEdition::A => "PUS-A",
+        PusEdition::None => "no PUS",
+    };
+    let said = if ccsds.is_some() { "from .fenix/settings.toml" } else { "Fenix's defaults -- SPC , sets the project's (CCSDS & PUS)" };
+    let summary = format!("{edition} · {} · {said}", tm_time.label());
+    let health = if wrong.is_empty() { fenix_project::doctor::Health::Ok } else { fenix_project::doctor::Health::Bad };
+    let summary = if wrong.is_empty() { summary } else { format!("{} -- {summary}", wrong.join("; ")) };
+    let check = fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "mission profile", health, summary);
+    d.push(if file.is_file() { check.at(file, 1) } else { check });
+    // The MIB read against the profile and the standards: the PUS
+    // headers, checksums and time fields it describes, sizes, overlaps.
+    let problems = fenix_mib::checks::run(set, &fenix_mib::checks::Options { disabled: &disabled, base, profile: &profile });
+    if problems.is_empty() {
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "agrees", fenix_project::doctor::Health::Ok, "the MIB agrees with the profile and the standards"));
+    }
+    let shown = problems.len().min(20);
+    for p in &problems[..shown] {
+        let name = p.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = p.line.map(|l| format!("{name}:{l}")).unwrap_or(name);
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, name, fenix_project::doctor::Health::Warn, p.message.clone()).at(p.file.clone(), p.line.unwrap_or(1)));
+    }
+    if problems.len() > shown {
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "and more", fenix_project::doctor::Health::Warn, format!("{} more against the standards -- ! on the MIB page lists them all", problems.len() - shown)));
+    }
+    let recordings = root.join("recordings");
+    if recordings.is_dir() {
+        let n = std::fs::read_dir(&recordings).into_iter().flatten().flatten().filter(|e| e.path().is_file() && e.path().extension().is_none_or(|x| !x.eq_ignore_ascii_case("md"))).count();
+        let what = if n == 0 { "none yet -- SPC k f opens one".to_string() } else { format!("{n} -- SPC k f opens one") };
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "recordings", fenix_project::doctor::Health::Ok, what));
+    } else {
+        d.push(fenix_project::doctor::Check::new(fenix_project::doctor::Section::Database, "recordings", fenix_project::doctor::Health::Info, "no recordings/ folder for dumps and captures"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project_doctor::fake::{find, FakeProbe};
+    use fenix_project::doctor::Health;
+
+    #[test]
+    fn a_missions_profile_is_checked_against_its_mib_and_its_recordings_counted() {
+        let dir = crate::project_doctor::fake::Dir::new();
+        let ops = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops");
+        for e in std::fs::read_dir(&ops).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            dir.write(&format!("mib/{name}"), &std::fs::read_to_string(e.path()).unwrap());
+        }
+        dir.write(".fenix/settings.toml", "[ccsds]\npus = \"a\"\n");
+        dir.write("recordings/bench.bin", "x");
+        let probe = FakeProbe::default();
+        let checks = fenix_project::doctor::diagnose_with(dir.path(), fenix_project::ProjectKind::Mib, &probe, false, &[mib_doctor]);
+        let profile = find(&checks, "mission profile");
+        assert!(profile.detail.starts_with("PUS-A · CUC 4+2 · from .fenix/settings.toml"), "{}", profile.detail);
+        assert!(checks.iter().any(|c| c.detail.contains("PID_DFHSIZE 13, but the project's PUS-A header with CUC 4+2 is 9 octets")), "{checks:#?}");
+        assert!(find(&checks, "recordings").detail.starts_with("1 --"));
+        // PUS-C, as the MIB describes: the headers agree.
+        dir.write(".fenix/settings.toml", "[ccsds]\npus = \"c\"\n");
+        let checks = fenix_project::doctor::diagnose_with(dir.path(), fenix_project::ProjectKind::Mib, &probe, false, &[mib_doctor]);
+        assert!(!checks.iter().any(|c| c.detail.contains("PID_DFHSIZE")), "{checks:#?}");
+    }
+
+    #[test]
+    fn a_mib_is_counted_and_its_bad_rows_located() {
+        let dir = crate::project_doctor::fake::Dir::new();
+        dir.write("mib/ccf.dat", "TC1\tFirst\n\nTC2\tSecond\n");
+        let too_many = vec!["x"; 30].join("\t");
+        dir.write("mib/pcf.dat", &format!("P1\tok\n{too_many}\n"));
+        dir.write("mib/zzz.dat", "");
+        let probe = FakeProbe::default();
+        let checks = fenix_project::doctor::diagnose_with(dir.path(), fenix_project::ProjectKind::Mib, &probe, false, &[mib_doctor]);
+        assert_eq!(find(&checks, "tables").detail, "2 tables, 4 rows");
+        let bad = find(&checks, "pcf.dat:2");
+        assert_eq!(bad.location, Some((dir.path().join("mib/pcf.dat"), 2)));
+        assert!(find(&checks, "not in the ICD").detail.starts_with("zzz.dat -- ignored"));
+        assert_eq!(find(&checks, "layout").detail.split(" -- ").next(), Some("ICD 7.x"));
+        // The project says how its MIB is laid out: an issue, and a table
+        // of its own.
+        dir.write(".fenix/settings.toml", "[mib]\nicd = \"auto\"\n\n[mib.columns]\nzzz = \"ZZZ_A, ZZZ_B\"\n");
+        dir.write("mib/zzz.dat", "a\tb\n");
+        let checks = fenix_project::doctor::diagnose_with(dir.path(), fenix_project::ProjectKind::Mib, &probe, false, &[mib_doctor]);
+        assert_eq!(find(&checks, "tables").detail, "3 tables, 5 rows");
+        assert!(find(&checks, "layout").detail.contains("detected"));
+        assert!(checks.iter().all(|c| c.label != "not in the ICD"));
+        assert_eq!(find(&checks, "browse").health, Health::Ok);
+    }
 
     /// MIB's settings, registered from its spec: saved and loaded back
     /// by key -- a whitespace-only separator quoted so it survives -- and

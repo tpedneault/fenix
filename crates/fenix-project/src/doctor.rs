@@ -86,20 +86,20 @@ pub struct Check {
 }
 
 impl Check {
-    fn new(section: Section, label: impl Into<String>, health: Health, detail: impl Into<String>) -> Self {
+    pub fn new(section: Section, label: impl Into<String>, health: Health, detail: impl Into<String>) -> Self {
         Check { section, label: label.into(), detail: detail.into(), health, fix: None, location: None }
     }
 
-    fn fix(mut self, label: &str, action: FixAction, safe: bool) -> Self {
+    pub fn fix(mut self, label: &str, action: FixAction, safe: bool) -> Self {
         self.fix = Some(Fix { label: label.to_string(), action, safe });
         self
     }
 
-    fn run(self, label: &str, program: &str, args: &[&str], safe: bool) -> Self {
+    pub fn run(self, label: &str, program: &str, args: &[&str], safe: bool) -> Self {
         self.fix(label, FixAction::Run(Step::new(program, args)), safe)
     }
 
-    fn at(mut self, path: PathBuf, line: usize) -> Self {
+    pub fn at(mut self, path: PathBuf, line: usize) -> Self {
         self.location = Some((path, line));
         self
     }
@@ -184,17 +184,41 @@ fn version_in(text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-struct Doctor<'a> {
+/// One pass of the doctor over a project: what the checks look at, and
+/// what they've found so far. A feature's checks (`diagnose_with`) add
+/// to it.
+pub struct Doctor<'a> {
     root: &'a Path,
     probe: &'a dyn Probe,
     deep: bool,
+    kind: ProjectKind,
     checks: Vec<Check>,
 }
 
-impl Doctor<'_> {
+impl<'a> Doctor<'a> {
+    /// The project's root.
+    pub fn root(&self) -> &'a Path {
+        self.root
+    }
+
+    /// What the checks ask of the world.
+    pub fn probe(&self) -> &'a dyn Probe {
+        self.probe
+    }
+
+    /// Whether this pass runs programs (off the UI thread).
+    pub fn deep(&self) -> bool {
+        self.deep
+    }
+
+    /// What kind of project it is.
+    pub fn kind(&self) -> ProjectKind {
+        self.kind
+    }
+
     /// A program's check: found (with its version on a deep pass) or
     /// `missing` with `hint`.
-    fn program(&mut self, section: Section, program: &str, missing: Health, hint: &str) -> Option<PathBuf> {
+    pub fn program(&mut self, section: Section, program: &str, missing: Health, hint: &str) -> Option<PathBuf> {
         match self.probe.locate(program) {
             Some(path) => {
                 // Nearly everything answers `--version`; Arduino CLI wants
@@ -214,14 +238,24 @@ impl Doctor<'_> {
         }
     }
 
-    fn push(&mut self, check: Check) {
+    pub fn push(&mut self, check: Check) {
         self.checks.push(check);
     }
 }
 
+/// Checks a feature adds for the kinds of project it knows (Fenix's
+/// Arduino, MIB and Tcl features); each looks at `Doctor::kind` itself.
+pub type FeatureCheck = fn(&mut Doctor);
+
 /// Every check `root` (a project of `kind`) needs, in display order.
 pub fn diagnose(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bool) -> Vec<Check> {
-    let mut d = Doctor { root, probe, deep, checks: Vec::new() };
+    diagnose_with(root, kind, probe, deep, &[])
+}
+
+/// `diagnose`, with the checks features add (`features`) after the
+/// language's own and before the project's.
+pub fn diagnose_with(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bool, features: &[FeatureCheck]) -> Vec<Check> {
+    let mut d = Doctor { root, probe, deep, kind, checks: Vec::new() };
     let tools = ProjectTools::read(root);
     match kind {
         ProjectKind::Python => python(&mut d, tools.as_ref().ok()),
@@ -232,11 +266,6 @@ pub fn diagnose(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bool) -
             } else {
                 d.program(Section::Toolchain, "rust-analyzer", Health::Warn, "");
             }
-        }
-        ProjectKind::Arduino => arduino(&mut d),
-        ProjectKind::Mib => mib(&mut d),
-        ProjectKind::Tcl => {
-            d.program(Section::Toolchain, "tclsh", Health::Warn, "install Tcl to run scripts");
         }
         ProjectKind::Cpp => {
             d.program(Section::Toolchain, "cmake", Health::Warn, "install CMake to configure and build");
@@ -250,7 +279,11 @@ pub fn diagnose(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bool) -
             d.program(Section::Toolchain, "node", Health::Bad, "install Node.js");
             d.program(Section::Toolchain, "typescript-language-server", Health::Warn, "npm install -g typescript-language-server typescript");
         }
-        ProjectKind::Monorepo | ProjectKind::Other => {}
+        // Their features' (`features`).
+        ProjectKind::Arduino | ProjectKind::Mib | ProjectKind::Tcl | ProjectKind::Monorepo | ProjectKind::Other => {}
+    }
+    for check in features {
+        check(&mut d);
     }
     project(&mut d, tools);
     d.checks
@@ -315,196 +348,6 @@ fn python(d: &mut Doctor, tools: Option<&ProjectTools>) {
             .any(|p| p.is_dir());
         let check = Check::new(Section::Toolchain, "debugpy", if has_debugpy { Health::Ok } else { Health::Info }, if has_debugpy { "in .venv" } else { "not installed -- needed to debug" });
         d.push(if !has_debugpy && uv_project { check.run("uv add --dev debugpy", "uv", &["add", "--dev", "debugpy"], false) } else { check });
-    }
-}
-
-fn arduino(d: &mut Doctor) {
-    let root = d.root;
-    let cli = d.program(Section::Toolchain, "arduino-cli", Health::Bad, "install Arduino CLI from https://arduino.github.io/arduino-cli");
-    d.program(Section::Toolchain, "arduino-language-server", Health::Warn, "no completion -- see the Arduino page of the wiki");
-    d.program(Section::Toolchain, "clangd", Health::Warn, "no completion -- use the one from an Arduino IDE 2 install");
-    // A library has no board or port of its own; its examples do.
-    if !crate::root::is_sketch(root) {
-        return;
-    }
-    let yaml = std::fs::read_to_string(root.join("sketch.yaml")).unwrap_or_default();
-    let value = |key: &str| yaml.lines().find_map(|l| l.trim().strip_prefix(key)?.trim().strip_prefix(':').map(|v| v.trim().to_string())).filter(|v| !v.is_empty());
-    let fqbn = value("default_fqbn");
-    match &fqbn {
-        Some(fqbn) => d.push(Check::new(Section::Hardware, "board", Health::Ok, fqbn.clone())),
-        None => d.push(Check::new(Section::Hardware, "board", Health::Warn, "none chosen -- builds need one").fix("pick a board", FixAction::Editor(EditorFix::PickBoard), false)),
-    }
-    let port = value("default_port");
-    if let (true, Some(cli)) = (d.deep, &cli) {
-        if let Some(fqbn) = &fqbn {
-            let core: String = fqbn.split(':').take(2).collect::<Vec<_>>().join(":");
-            let installed = d.probe.run(cli, &["core", "list", "--format", "json"], root).and_then(|(_, out)| serde_json::from_str::<serde_json::Value>(&out).ok()).map(|json| {
-                json["platforms"].as_array().into_iter().flatten().find(|p| p["id"] == core.as_str()).and_then(|p| p["installed_version"].as_str().map(str::to_string))
-            });
-            match installed {
-                Some(Some(version)) => d.push(Check::new(Section::Toolchain, format!("core {core}"), Health::Ok, version)),
-                Some(None) => d.push(Check::new(Section::Toolchain, format!("core {core}"), Health::Bad, "not installed -- builds will fail").run(&format!("arduino-cli core install {core}"), "arduino-cli", &["core", "install", &core], false)),
-                None => {}
-            }
-        }
-    }
-    match &port {
-        None => d.push(Check::new(Section::Hardware, "port", Health::Warn, "none chosen -- uploads need one").fix("pick a port", FixAction::Editor(EditorFix::PickPort), false)),
-        Some(port) if d.deep && cli.is_some() => {
-            let connected = d
-                .probe
-                .run(cli.as_ref().unwrap(), &["board", "list", "--format", "json"], root)
-                .and_then(|(_, out)| serde_json::from_str::<serde_json::Value>(&out).ok())
-                .map(|json| json["detected_ports"].as_array().into_iter().flatten().any(|p| p["port"]["address"] == port.as_str()));
-            match connected {
-                Some(true) => d.push(Check::new(Section::Hardware, format!("board on {port}"), Health::Ok, "connected")),
-                Some(false) => d.push(Check::new(Section::Hardware, format!("board on {port}"), Health::Warn, "not connected").fix("pick a port", FixAction::Editor(EditorFix::PickPort), false)),
-                None => d.push(Check::new(Section::Hardware, "port", Health::Ok, port.clone())),
-            }
-        }
-        Some(port) => d.push(Check::new(Section::Hardware, "port", Health::Ok, port.clone())),
-    }
-}
-
-fn mib(d: &mut Doctor) {
-    let root = d.root;
-    let dir = if root.join("mib").is_dir() { root.join("mib") } else { root.to_path_buf() };
-    let label = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let schema = mib_schema(root);
-    let options = fenix_mib::ReadOptions { schema: schema.clone(), ..Default::default() };
-    let set = fenix_mib::MibSet::load_with(vec![fenix_mib::MibRoot { label, path: dir.clone() }], None, options);
-    let info = set.root_info(0);
-    let health = if info.tables == 0 { Health::Warn } else { Health::Ok };
-    let (tables, rows) = (info.tables, info.rows);
-    let mut summary = format!("{tables} table{}, {rows} row{}", if tables == 1 { "" } else { "s" }, if rows == 1 { "" } else { "s" });
-    if let Some(v) = &info.version {
-        summary = format!("{v} -- {summary}");
-    }
-    d.push(Check::new(Section::Database, "tables", health, summary));
-    if let Some(format) = &info.format {
-        d.push(Check::new(Section::Database, "layout", Health::Info, format!("{format} -- mib.icd in the project's settings (SPC k ,) says which")));
-    }
-    let problems = set.problems();
-    let shown = problems.len().min(20);
-    for p in &problems[..shown] {
-        let file = p.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        let name = p.line.map(|l| format!("{file}:{l}")).unwrap_or(file);
-        let health = if p.line.is_none() { Health::Bad } else { Health::Warn };
-        d.push(Check::new(Section::Database, name, health, p.message.clone()).at(p.file.clone(), p.line.unwrap_or(1)));
-    }
-    if problems.len() > shown {
-        d.push(Check::new(Section::Database, "and more", Health::Warn, format!("{} more -- ! on the MIB page lists them all", problems.len() - shown)));
-    }
-    let mut unknown: Vec<String> = std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("dat")))
-        .map(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default())
-        .filter(|t| !schema.knows(t))
-        .collect();
-    unknown.sort();
-    if !unknown.is_empty() {
-        d.push(Check::new(Section::Database, "not in the ICD", Health::Info, format!("{}.dat -- ignored; mib.columns reads a table of the mission's own", unknown.join(".dat, "))));
-    }
-    if info.tables > 0 {
-        d.push(Check::new(Section::Database, "browse", Health::Ok, "this project is its own MIB -- SPC k k lists what's in it"));
-        mission(d, &set);
-    }
-}
-
-/// How the project says its MIB is laid out: `[mib]`'s `icd`,
-/// `icd_per_mib` and `columns` in `.fenix/settings.toml`, as the MIB page
-/// reads them.
-fn mib_schema(root: &Path) -> fenix_mib::Schema {
-    use fenix_mib::{schema, Icd, Schema};
-    let table: toml::Table = std::fs::read_to_string(root.join(".fenix").join("settings.toml")).ok().and_then(|t| t.parse().ok()).unwrap_or_default();
-    let mib = table.get("mib").and_then(|v| v.as_table());
-    let issue = |t: &str| if t.trim() == "auto" { None } else { Some(Icd::parse(t).unwrap_or(Icd::LATEST)) };
-    let pairs = |key: &str| -> Vec<(String, String)> {
-        mib.and_then(|m| m.get(key)).and_then(|v| v.as_table()).into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()
-    };
-    let mut s = Schema::default();
-    if let Some(icd) = mib.and_then(|m| m.get("icd")).and_then(|v| v.as_str()) {
-        s.icd = issue(icd);
-    }
-    s.per_root = pairs("icd_per_mib").into_iter().map(|(l, t)| (l, issue(&t))).collect();
-    s.columns = pairs("columns").into_iter().map(|(t, c)| (t.trim().to_ascii_lowercase(), schema::parse_columns(&c))).collect();
-    s
-}
-
-/// The project's mission profile (`[ccsds]` in `.fenix/settings.toml`,
-/// Fenix's defaults where it says nothing), and whether the MIB agrees
-/// with it and with the standards; its recordings.
-fn mission(d: &mut Doctor, set: &fenix_mib::MibSet) {
-    use fenix_ccsds::pus::{Pec, Profile, PusEdition};
-    use fenix_ccsds::time::{Epoch, LeapTable, TimeFormat};
-    let root = d.root;
-    let file = root.join(".fenix").join("settings.toml");
-    let table: toml::Table = std::fs::read_to_string(&file).ok().and_then(|t| t.parse().ok()).unwrap_or_default();
-    let ccsds = table.get("ccsds").and_then(|v| v.as_table());
-    let text = |key: &str| ccsds.and_then(|t| t.get(key)).and_then(|v| v.as_str()).map(str::to_string);
-    let mut wrong = Vec::new();
-    let pus = match text("pus").as_deref() {
-        Some("a") => PusEdition::A,
-        Some("none") => PusEdition::None,
-        _ => PusEdition::C,
-    };
-    let tm_time = match text("tm_time").map(|t| TimeFormat::parse(&t)) {
-        Some(Ok(f)) => f,
-        Some(Err(e)) => {
-            wrong.push(format!("tm_time: {e}"));
-            TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false }
-        }
-        None => TimeFormat::Cuc { coarse: 4, fine: 2, pfield: false },
-    };
-    let leap = LeapTable::default();
-    let epoch = match text("epoch").map(|e| Epoch::parse(&e, &leap)) {
-        Some(Ok(e)) => e,
-        Some(Err(e)) => {
-            wrong.push(format!("epoch: {e}"));
-            Epoch::default()
-        }
-        None => Epoch::default(),
-    };
-    let pec = text("crc").and_then(|c| Pec::parse(&c).ok()).unwrap_or(Pec::Ccitt16);
-    let base = text("plf_offset").and_then(|b| fenix_mib::packets::OffsetBase::parse(&b).ok()).unwrap_or_default();
-    let disabled: Vec<String> = ccsds.and_then(|t| t.get("checks_off")).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default();
-    let profile = Profile { pus, tm_time, epoch, leap, pec, ..Default::default() };
-    let edition = match pus {
-        PusEdition::C => "PUS-C",
-        PusEdition::A => "PUS-A",
-        PusEdition::None => "no PUS",
-    };
-    let said = if ccsds.is_some() { "from .fenix/settings.toml" } else { "Fenix's defaults -- SPC , sets the project's (CCSDS & PUS)" };
-    let summary = format!("{edition} · {} · {said}", tm_time.label());
-    let health = if wrong.is_empty() { Health::Ok } else { Health::Bad };
-    let summary = if wrong.is_empty() { summary } else { format!("{} -- {summary}", wrong.join("; ")) };
-    let check = Check::new(Section::Database, "mission profile", health, summary);
-    d.push(if file.is_file() { check.at(file, 1) } else { check });
-    // The MIB read against the profile and the standards: the PUS
-    // headers, checksums and time fields it describes, sizes, overlaps.
-    let problems = fenix_mib::checks::run(set, &fenix_mib::checks::Options { disabled: &disabled, base, profile: &profile });
-    if problems.is_empty() {
-        d.push(Check::new(Section::Database, "agrees", Health::Ok, "the MIB agrees with the profile and the standards"));
-    }
-    let shown = problems.len().min(20);
-    for p in &problems[..shown] {
-        let name = p.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-        let name = p.line.map(|l| format!("{name}:{l}")).unwrap_or(name);
-        d.push(Check::new(Section::Database, name, Health::Warn, p.message.clone()).at(p.file.clone(), p.line.unwrap_or(1)));
-    }
-    if problems.len() > shown {
-        d.push(Check::new(Section::Database, "and more", Health::Warn, format!("{} more against the standards -- ! on the MIB page lists them all", problems.len() - shown)));
-    }
-    let recordings = root.join("recordings");
-    if recordings.is_dir() {
-        let n = std::fs::read_dir(&recordings).into_iter().flatten().flatten().filter(|e| e.path().is_file() && e.path().extension().is_none_or(|x| !x.eq_ignore_ascii_case("md"))).count();
-        let what = if n == 0 { "none yet -- SPC k f opens one".to_string() } else { format!("{n} -- SPC k f opens one") };
-        d.push(Check::new(Section::Database, "recordings", Health::Ok, what));
-    } else {
-        d.push(Check::new(Section::Database, "recordings", Health::Info, "no recordings/ folder for dumps and captures"));
     }
 }
 
@@ -645,83 +488,6 @@ mod tests {
         // A quick pass runs nothing.
         let quick = diagnose(dir.path(), ProjectKind::Python, &probe, false);
         assert_eq!(find(&quick, ".venv").detail, "present");
-    }
-
-    #[test]
-    fn a_sketch_reports_its_board_core_and_port() {
-        let dir = TempDir::new("doctor_ino");
-        dir.write("Lab/Lab.ino", "");
-        dir.write("Lab/sketch.yaml", "default_fqbn: arduino:avr:uno\ndefault_port: COM4\n");
-        let root = dir.path().join("Lab");
-        let mut probe = FakeProbe { programs: vec!["arduino-cli"], ..Default::default() };
-        probe.outputs.insert("arduino-cli core list --format json".into(), (true, r#"{"platforms":[{"id":"esp32:esp32","installed_version":"3.0"}]}"#.into()));
-        probe.outputs.insert("arduino-cli board list --format json".into(), (true, r#"{"detected_ports":[{"port":{"address":"COM1"}}]}"#.into()));
-        let checks = diagnose(&root, ProjectKind::Arduino, &probe, true);
-        assert_eq!(find(&checks, "board").detail, "arduino:avr:uno");
-        assert_eq!(find(&checks, "arduino-cli").detail, "1.2.3", "asked with `version`, not `--version`");
-        let core = find(&checks, "core arduino:avr");
-        assert_eq!(core.health, Health::Bad);
-        assert!(matches!(&core.fix.as_ref().unwrap().action, FixAction::Run(step) if step.display() == "arduino-cli core install arduino:avr"));
-        let port = find(&checks, "board on COM4");
-        assert_eq!((port.health, port.detail.as_str()), (Health::Warn, "not connected"));
-        assert!(matches!(port.fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::PickPort)));
-        assert_eq!(find(&checks, "clangd").health, Health::Warn);
-    }
-
-    #[test]
-    fn a_sketch_with_no_board_offers_to_pick_one() {
-        let dir = TempDir::new("doctor_ino_bare");
-        dir.write("Lab/Lab.ino", "");
-        let checks = diagnose(&dir.path().join("Lab"), ProjectKind::Arduino, &FakeProbe::default(), false);
-        assert!(matches!(find(&checks, "board").fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::PickBoard)));
-        assert!(matches!(find(&checks, "port").fix.as_ref().unwrap().action, FixAction::Editor(EditorFix::PickPort)));
-    }
-
-    #[test]
-    fn a_missions_profile_is_checked_against_its_mib_and_its_recordings_counted() {
-        let dir = TempDir::new("doctor_mission");
-        let ops = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dev/ccsds-sim/mission/ops");
-        for e in std::fs::read_dir(&ops).unwrap().flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            dir.write(&format!("mib/{name}"), &std::fs::read_to_string(e.path()).unwrap());
-        }
-        dir.write(".fenix/settings.toml", "[ccsds]\npus = \"a\"\n");
-        dir.write("recordings/bench.bin", "x");
-        let probe = FakeProbe::default();
-        let checks = diagnose(dir.path(), ProjectKind::Mib, &probe, false);
-        let profile = find(&checks, "mission profile");
-        assert!(profile.detail.starts_with("PUS-A · CUC 4+2 · from .fenix/settings.toml"), "{}", profile.detail);
-        assert!(checks.iter().any(|c| c.detail.contains("PID_DFHSIZE 13, but the project's PUS-A header with CUC 4+2 is 9 octets")), "{checks:#?}");
-        assert!(find(&checks, "recordings").detail.starts_with("1 --"));
-        // PUS-C, as the MIB describes: the headers agree.
-        dir.write(".fenix/settings.toml", "[ccsds]\npus = \"c\"\n");
-        let checks = diagnose(dir.path(), ProjectKind::Mib, &probe, false);
-        assert!(!checks.iter().any(|c| c.detail.contains("PID_DFHSIZE")), "{checks:#?}");
-    }
-
-    #[test]
-    fn a_mib_is_counted_and_its_bad_rows_located() {
-        let dir = TempDir::new("doctor_mib");
-        dir.write("mib/ccf.dat", "TC1\tFirst\n\nTC2\tSecond\n");
-        let too_many = vec!["x"; 30].join("\t");
-        dir.write("mib/pcf.dat", &format!("P1\tok\n{too_many}\n"));
-        dir.write("mib/zzz.dat", "");
-        let probe = FakeProbe::default();
-        let checks = diagnose(dir.path(), ProjectKind::Mib, &probe, false);
-        assert_eq!(find(&checks, "tables").detail, "2 tables, 4 rows");
-        let bad = find(&checks, "pcf.dat:2");
-        assert_eq!(bad.location, Some((dir.path().join("mib/pcf.dat"), 2)));
-        assert!(find(&checks, "not in the ICD").detail.starts_with("zzz.dat -- ignored"));
-        assert_eq!(find(&checks, "layout").detail.split(" -- ").next(), Some("ICD 7.x"));
-        // The project says how its MIB is laid out: an issue, and a table
-        // of its own.
-        dir.write(".fenix/settings.toml", "[mib]\nicd = \"auto\"\n\n[mib.columns]\nzzz = \"ZZZ_A, ZZZ_B\"\n");
-        dir.write("mib/zzz.dat", "a\tb\n");
-        let checks = diagnose(dir.path(), ProjectKind::Mib, &probe, false);
-        assert_eq!(find(&checks, "tables").detail, "3 tables, 5 rows");
-        assert!(find(&checks, "layout").detail.contains("detected"));
-        assert!(checks.iter().all(|c| c.label != "not in the ICD"));
-        assert_eq!(find(&checks, "browse").health, Health::Ok);
     }
 
     #[test]

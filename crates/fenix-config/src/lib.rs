@@ -1090,18 +1090,23 @@ mod tests {
 
     #[test]
     fn a_hand_edit_made_while_fenix_runs_survives_fenix_saving_something_else() {
+        // Registered before the load, as fenix-gui does at startup: the
+        // tests run in parallel, and one registered between this load
+        // and its save would have no value loaded to compare with.
+        register_vnc();
         let path = temp_path("hand_edit");
         let mut config = Config::load(path.clone()).unwrap();
         config.theme = Some("Nord".into());
         config.save().unwrap();
         // Edited by hand, after Fenix read it.
-        let text = std::fs::read_to_string(&path).unwrap() + "\n[[vnc.hosts]]\nname = \"lab\"\nhost = \"10.1.1.1\"\n\n[lsp.servers]\npython = \"pyright-langserver --stdio\"\n";
+        let text = std::fs::read_to_string(&path).unwrap() + "\n[[vnc.hosts]]\nname = \"lab\"\nhost = \"10.1.1.1\"\n\n[[nobody.declares]]\nthis = 1\n\n[lsp.servers]\npython = \"pyright-langserver --stdio\"\n";
         std::fs::write(&path, text).unwrap();
         config.font_size = Some(20.0);
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
-        assert!(std::fs::read_to_string(&path).unwrap().contains("[[vnc.hosts]]
-name = \"lab\""), "a key no setting here declares stays as it was");
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("[[vnc.hosts]]\nname = \"lab\""), "a feature's setting Fenix didn't change stays as written:\n{saved}");
+        assert!(saved.contains("[[nobody.declares]]\nthis = 1"), "a key no setting declares stays as it was:\n{saved}");
         assert_eq!(reloaded.lsp_servers, [("python".to_string(), "pyright-langserver --stdio".to_string())]);
         assert_eq!((reloaded.theme.as_deref(), reloaded.font_size), (Some("Nord"), Some(20.0)));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

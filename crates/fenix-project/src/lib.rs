@@ -19,7 +19,7 @@ pub use grep::{files_matching, grep_project, GrepMatch};
 pub use kind::{declared_kind, detect_kind, detect_kind_from_files, main_file, ProjectKind};
 pub use known::{plain_path, read_path_list, KnownProjects};
 pub use recent::RecentFiles;
-pub use root::find_project_root;
+pub use root::{find_project_root, is_sketch};
 
 pub mod template;
 pub mod tools;

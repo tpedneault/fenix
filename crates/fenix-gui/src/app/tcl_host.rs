@@ -63,6 +63,11 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     session_reopen: None,
     home: None,
     home_activate: None,
+    doctor: Some(|d| {
+        if d.kind() == fenix_project::ProjectKind::Tcl {
+            d.program(fenix_project::doctor::Section::Toolchain, "tclsh", fenix_project::doctor::Health::Warn, "install Tcl to run scripts");
+        }
+    }),
 };
 
 /// A Tcl file gets the Tcl `SPC m` menu (which the MIB fills too).

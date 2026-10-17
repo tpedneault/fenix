@@ -133,6 +133,9 @@ pub(crate) struct FeatureSpec {
     /// Enter on one of its Home rows (`HomeEntry::Feature`), by the
     /// row's key.
     pub home_activate: Option<fn(&mut App, &str)>,
+    /// The project doctor's checks for the kinds of project it knows
+    /// (`fenix_project::doctor::diagnose_with`).
+    pub doctor: Option<fenix_project::doctor::FeatureCheck>,
 }
 
 /// One thing a feature plugs into another's contribution point: the
@@ -685,6 +688,12 @@ impl App {
         } else {
             self.features.missed.push((i, Missed::Event(event.payload)));
         }
+    }
+
+    /// The features' doctor checks, for `doctor::diagnose_with` (they're
+    /// plain functions, so a pass off the UI thread can take them along).
+    pub(crate) fn doctor_checks(&self) -> Vec<fenix_project::doctor::FeatureCheck> {
+        self.features.specs().filter_map(|spec| spec.doctor).collect()
     }
 
     /// Calls service `name` with `payload`, through the feature offering

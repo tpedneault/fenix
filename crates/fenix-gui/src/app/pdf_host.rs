@@ -96,6 +96,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         session_reopen: Some(|app, path| app.pdf_buffer_for(path)),
         home: Some(|app, scope| app.pdf_home(scope)),
         home_activate: None,
+        doctor: None,
     }
 };
 
