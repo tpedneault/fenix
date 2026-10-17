@@ -391,6 +391,17 @@ impl MotionState {
 }
 
 impl App {
+    /// Puts the focused buffer's cursor at `line`, `col` (0-based,
+    /// clamped to the buffer).
+    pub(super) fn place_cursor(&mut self, line: usize, col: usize) {
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        let line = line.min(buffer.visual_line_count().saturating_sub(1));
+        let start = buffer.line_start_char(line);
+        cursor.char_idx = start + col.min(buffer.line_len(line));
+        let (_, sticky) = buffer.line_col(cursor);
+        cursor.sticky_col = sticky;
+    }
+
     /// Pixels of rounding on floating boxes: the setting, else the
     /// theme's (TempleOS stays square).
     pub(super) fn corner_radius(&self) -> f32 {

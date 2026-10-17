@@ -54,7 +54,20 @@ static SETTINGS: [fenix_config::Setting; 4] = {
 };
 
 /// What the notebook offers other features.
-static SERVICES: [super::feature::Service; 1] = [
+static SERVICES: [super::feature::Service; 2] = [
+    // `{path}` -> the name the notebook keeps that file under, or nothing
+    // when it isn't one of the notebook's.
+    super::feature::Service {
+        name: "notebook.entry_name",
+        call: super::feature::ServiceCall::Read(|app, payload| {
+            #[derive(serde::Deserialize)]
+            struct EntryName {
+                path: PathBuf,
+            }
+            let call: EntryName = serde_json::from_str(payload).map_err(|e| format!("a notebook call: {e}"))?;
+            Ok(app.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(&call.path)).map(|e| e.name.clone()).unwrap_or_default())
+        }),
+    },
     // `{text}` -> asks the new diagram's name, then keeps it in the
     // notebook and opens it (the diagrams feature's new-diagram flow).
     super::feature::Service {
@@ -256,6 +269,11 @@ impl super::feature::Features {
 impl super::feature::FeaturePage for NotebookPage {
     fn feature(&self) -> &'static str {
         SPEC.id
+    }
+
+    /// Its rows' diagram previews.
+    fn shows_pictures(&self) -> bool {
+        true
     }
 
     fn title(&self) -> String {
@@ -621,16 +639,6 @@ impl App {
         }
     }
 
-    /// Puts the cursor at (line, col) in the focused buffer.
-    pub(super) fn notebook_place_cursor(&mut self, line: usize, col: usize) {
-        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let line = line.min(buffer.visual_line_count().saturating_sub(1));
-        let start = buffer.line_start_char(line);
-        cursor.char_idx = start + col.min(buffer.line_len(line));
-        let (_, sticky) = buffer.line_col(cursor);
-        cursor.sticky_col = sticky;
-    }
-
     // ------------------------------------------------------------------
     // New notes
     // ------------------------------------------------------------------
@@ -778,7 +786,7 @@ impl App {
         match nb.create(NbKind::Note, name, &text) {
             Ok(id) => {
                 self.open_notebook_entry(&id);
-                self.notebook_place_cursor(line, col);
+                self.place_cursor(line, col);
                 self.refresh_notebook_pages();
                 self.set_message(format!("{name} -- in your notebook; it saves itself as you type"));
             }
@@ -826,7 +834,7 @@ impl App {
             Ok((id, made)) => {
                 self.open_notebook_entry(&id);
                 let lines = self.open().buffer.line_count();
-                self.notebook_place_cursor(lines.saturating_sub(1), 0);
+                self.place_cursor(lines.saturating_sub(1), 0);
                 self.refresh_notebook_pages();
                 if made {
                     self.set_message(format!("{} -- a new day in your journal", date.format("%A %-d %B")));
@@ -966,7 +974,7 @@ impl App {
             }
             NbAction::Export(id) => self.notebook_export(&id),
             NbAction::Theme(id) => self.notebook_pick_theme(&id),
-            NbAction::View(id) => self.open_entry_viewer(&id),
+            NbAction::View(id) => self.notebook_view_diagram(&id),
         }
     }
 
@@ -1154,6 +1162,15 @@ impl App {
         }
     }
 
+    /// `v` on a diagram on the notebook page: the diagrams feature's
+    /// viewer for it (`diagrams.view`).
+    fn notebook_view_diagram(&mut self, id: &str) {
+        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
+        if let Err(e) = self.call_service("diagrams.view", &serde_json::json!({ "path": path })) {
+            self.set_error(format!("no viewer: {e}"));
+        }
+    }
+
     /// `notebook.new_diagram`: a diagram holding `text`, once its name
     /// is typed.
     fn notebook_name_new_diagram(&mut self, text: String) -> Result<(), String> {
@@ -1178,7 +1195,7 @@ impl App {
                 self.open_notebook_entry(&id);
                 // The cursor on the blank line under the header.
                 let line = text.lines().position(|l| l.trim().is_empty()).unwrap_or(1);
-                self.notebook_place_cursor(line, 4);
+                self.place_cursor(line, 4);
                 self.refresh_notebook_pages();
                 self.set_message(format!("{name} -- draws as you type; saves itself"));
             }

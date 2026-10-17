@@ -211,7 +211,16 @@ pub(super) struct DiagramPre {
 /// What the diagrams feature offers others (the notebook's export): a
 /// diagram's source in, drawn with `diagrams.export_theme` and
 /// `diagrams.background`.
-static SERVICES: [super::feature::Service; 8] = [
+static SERVICES: [super::feature::Service; 9] = [
+    // `{path}` -> the diagram in that file, in the viewer.
+    super::feature::Service {
+        name: "diagrams.view",
+        call: Mut(|app, payload| {
+            let call: PathCall = serde_json::from_str(payload).map_err(|e| format!("a diagrams call: {e}"))?;
+            app.diagram_view_at(&call.path);
+            Ok(String::new())
+        }),
+    },
     // `{}` -> a new diagram: its type, then a starter, then the notebook
     // (`notebook.new_diagram`) asks its name and keeps it.
     super::feature::Service {
@@ -463,7 +472,7 @@ impl App {
                     p.seen = None;
                     state.stale = true;
                 }
-                model if page_as::<DiagramPage>(model).is_some() || page_as::<crate::notebook_page::NotebookPage>(model).is_some() => state.stale = true,
+                PageModel::Feature(page) if page.shows_pictures() || (&**page as &dyn std::any::Any).is::<DiagramPage>() => state.stale = true,
                 _ => {}
             }
         }
@@ -646,11 +655,13 @@ impl App {
         self.windows_mut().focus(origin);
     }
 
-    /// A diagram's name: the notebook's, else its file's.
+    /// A diagram's name: the notebook's (`notebook.entry_name`), else its
+    /// file's.
     fn diagram_title(&self, source: BufferId) -> String {
         let path = self.buffers.get(source).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf);
-        match path.as_deref().and_then(|p| self.features.notebook_state().book.as_ref().and_then(|nb| nb.by_path(p))) {
-            Some(e) => e.name.clone(),
+        let kept = path.as_ref().and_then(|p| self.query_service("notebook.entry_name", &serde_json::json!({ "path": p })).ok()).filter(|n| !n.is_empty());
+        match kept {
+            Some(name) => name,
             None => path.and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_else(|| "diagram".into()),
         }
     }
@@ -668,13 +679,13 @@ impl App {
         self.open_page(PageModel::Feature(Box::new(page)));
     }
 
-    /// Opens the viewer for a notebook diagram.
-    pub(super) fn open_entry_viewer(&mut self, id: &str) {
-        let Some(path) = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(id)).map(|e| e.path.clone()) else { return };
-        let buffer = match self.buffers.id_for_path(&path) {
+    /// `diagrams.view`: the viewer for the diagram in `path` (a notebook
+    /// diagram, from the notebook page).
+    fn diagram_view_at(&mut self, path: &Path) {
+        let buffer = match self.buffers.id_for_path(path) {
             Some(b) => b,
             None => {
-                let b = self.buffers.open_path(&path);
+                let b = self.buffers.open_path(path);
                 self.note_disk_state(b);
                 b
             }
@@ -712,7 +723,7 @@ impl App {
                     None => self.open_buffer_in_focused_pane(src),
                 }
                 if let DgAction::Line(line) = action {
-                    self.notebook_place_cursor(line, 0);
+                    self.place_cursor(line, 0);
                 }
             }
             DgAction::CycleTheme => {
@@ -924,6 +935,15 @@ mod tests {
         app.call_service("diagrams.pick_theme", &serde_json::json!({ "path": entry.path })).unwrap();
         pick_first(&mut app, "THEME");
         assert!(app.buffers.get(app.buffers.id_for_path(&entry.path).unwrap()).unwrap().buffer.text().contains("theme:"));
+        // Its name, the notebook's (`notebook.entry_name`); a file the
+        // notebook doesn't keep has none.
+        assert_eq!(app.query_service("notebook.entry_name", &serde_json::json!({ "path": entry.path })), Ok("Fresh".to_string()));
+        assert_eq!(app.query_service("notebook.entry_name", &serde_json::json!({ "path": dir.path().join("elsewhere.mmd") })), Ok(String::new()));
+        // `v` on the notebook page: the viewer, through `diagrams.view`,
+        // titled with the notebook's name.
+        app.call_service("diagrams.view", &serde_json::json!({ "path": entry.path })).unwrap();
+        let viewer = app.feature_page::<DiagramPage>(app.focused_buffer_id()).expect("the viewer");
+        assert!(viewer.viewer && viewer.title == "Fresh", "{}", viewer.title);
     }
 
     fn preview(app: &App) -> (BufferId, fenix_window::WindowId) {

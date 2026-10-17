@@ -68,7 +68,7 @@ impl App {
                 } else {
                     self.open_file_as(&path, true);
                     if let Some(line) = fragment.as_deref().and_then(|f| f.strip_prefix('L')).and_then(|l| l.parse::<usize>().ok()) {
-                        self.notebook_place_cursor(line.saturating_sub(1), 0);
+                        self.place_cursor(line.saturating_sub(1), 0);
                     } else if let Some(h) = fragment {
                         self.notebook_goto_heading(&h);
                     }
@@ -93,7 +93,7 @@ impl App {
                 }
                 self.open_file_as(&file, true);
                 if let Some(line) = line {
-                    self.notebook_place_cursor(line.saturating_sub(1), 0);
+                    self.place_cursor(line.saturating_sub(1), 0);
                 }
             }
             Target::Url(url) => {
@@ -133,7 +133,7 @@ impl App {
         let want = title.trim().to_lowercase();
         let want_slug = fenix_notebook::slug(title);
         if let Some(h) = fenix_notebook::meta::headings(&text).into_iter().find(|h| h.title.to_lowercase() == want || fenix_notebook::slug(&h.title) == want_slug) {
-            self.notebook_place_cursor(h.line, 0);
+            self.place_cursor(h.line, 0);
         }
     }
 
@@ -380,12 +380,12 @@ impl App {
             BlAction::Open { id, line } => {
                 self.focus_sidebar_origin(page_id);
                 self.open_notebook_entry(&id);
-                self.notebook_place_cursor(line, 0);
+                self.place_cursor(line, 0);
             }
             BlAction::Line(line) => {
                 self.focus_sidebar_origin(page_id);
                 self.open_notebook_entry(&note_id);
-                self.notebook_place_cursor(line, 0);
+                self.place_cursor(line, 0);
             }
             BlAction::Follow { name: _, line } => {
                 let link = self.features.notebook_state().book.as_ref().and_then(|nb| nb.get(&note_id)).and_then(|e| e.links.iter().find(|l| l.line == line).cloned());
@@ -455,15 +455,15 @@ mod tests {
         let (_dir, mut app) = app();
         app.notebook_create_note("Target", "# Target\n\n## Decision\nhere\n");
         app.notebook_create_note("Source", "see [[Target#Decision]] and [[New one]]\n");
-        app.notebook_place_cursor(0, 6);
+        app.place_cursor(0, 6);
         assert!(app.notebook_follow_link_under_cursor());
         assert!(app.open().buffer.path().unwrap().ends_with("target.md"));
         assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 2);
         app.notebook_create_note("Source", "");
-        app.notebook_place_cursor(0, 30);
+        app.place_cursor(0, 30);
         assert!(app.notebook_follow_link_under_cursor());
         assert!(app.open().buffer.path().unwrap().ends_with("new-one.md"));
-        app.notebook_place_cursor(0, 0);
+        app.place_cursor(0, 0);
         assert!(!app.notebook_follow_link_under_cursor() || app.open().buffer.text().starts_with("# New one"));
     }
 

@@ -155,7 +155,7 @@ impl App {
     pub(super) fn notebook_open_at(&mut self, id: &str, line: Option<usize>) {
         self.open_notebook_entry(id);
         if let Some(l) = line {
-            self.notebook_place_cursor(l, 0);
+            self.place_cursor(l, 0);
         }
     }
 
@@ -358,7 +358,7 @@ mod tests {
     fn a_checkbox_goes_to_the_agenda_once() {
         let (_dir, mut app) = app();
         app.notebook_create_note("Meeting", "# Meeting\n- [ ] Raise FSW-212\n");
-        app.notebook_place_cursor(1, 0);
+        app.place_cursor(1, 0);
         let before = app.features.agenda().store.tasks.len();
         app.notebook_to_agenda();
         assert_eq!(app.features.agenda().store.tasks.len(), before + 1);
