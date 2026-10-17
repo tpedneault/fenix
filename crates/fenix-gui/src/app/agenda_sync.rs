@@ -90,7 +90,7 @@ pub enum IssueFetch {
 }
 
 /// Every background result the agenda's Jira side can come back with --
-/// carried by `FenixUserEvent::AgendaSync`.
+/// sent as the agenda's feature event (`FenixUserEvent::feature`).
 #[derive(Debug)]
 pub enum AgendaSyncEvent {
     Pulled {
@@ -230,7 +230,7 @@ impl App {
             Some(proxy) => {
                 std::thread::spawn(move || {
                     let event = job(&client);
-                    let _ = proxy.send_event(FenixUserEvent::AgendaSync(event));
+                    let _ = proxy.send_event(FenixUserEvent::feature(super::agenda_host::SPEC.id, "AgendaSync", event));
                 });
             }
             None => {
@@ -261,7 +261,7 @@ impl App {
         self.features.agenda_mut().sync.ticker_started = true;
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(u64::from(minutes) * 60));
-            if proxy.send_event(FenixUserEvent::AgendaSync(AgendaSyncEvent::Tick)).is_err() {
+            if proxy.send_event(FenixUserEvent::feature(super::agenda_host::SPEC.id, "AgendaSync", AgendaSyncEvent::Tick)).is_err() {
                 break;
             }
         });

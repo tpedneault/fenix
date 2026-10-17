@@ -1103,7 +1103,7 @@ impl VncReader {
                         | fenix_vnc::VncFrame::Bell
                         | fenix_vnc::VncFrame::Disconnected(_) => {}
                     }
-                    if !send(FenixUserEvent::VncFrame(key.clone(), frame)) {
+                    if !send(FenixUserEvent::feature(vnc_host::SPEC.id, "VncFrame", vnc_host::VncEvent::Frame(key.clone(), frame))) {
                         return;
                     }
                 }
@@ -1756,14 +1756,6 @@ pub enum FenixUserEvent {
     /// and discarded instead of clobbering Main with a stale diff --
     /// see `GitSession::main_request_id`'s own doc comment.
     GitMainReady { request_id: u64, buffer: BufferId, diff: Option<String> },
-    /// A finished merge-request listing from the forge, under the
-    /// `request_id` it was issued with -- same stale-result guard as
-    /// `GitMainReady`, and more load-bearing here: these are network
-    /// calls that routinely answer out of order.
-    ForgeListReady { request_id: u64, result: Result<Vec<fenix_forge::MergeRequest>, String> },
-    /// One merge request's full detail (the request, its approvals, its
-    /// changed files), under its own `request_id`.
-    ForgeDetailReady { request_id: u64, number: u64, result: Box<Result<ForgeDetail, String>> },
     /// A History-view commit's metadata and diff finished fetching --
     /// same request_id-guarded shape as `GitMainReady`, for the other
     /// view. `None` when the commit couldn't be read at all.
@@ -1835,53 +1827,24 @@ pub enum FenixUserEvent {
     /// Terminal` (holding `Box<dyn Child>` et al.) has no `Debug` impl
     /// of its own, and doesn't need one anywhere else.
     TerminalSpawned(TerminalTarget, TerminalSpawnResult),
-    /// A completed write action (create/comment/title/description/log
-    /// time/transition), from a background thread `spawn_jira_action`
-    /// spawned. No request-id -- unlike a read, a write action should
-    /// never be silently discarded just because the user navigated
-    /// elsewhere while it was in flight. `Ok(message)` is a human-
-    /// readable confirmation shown via `set_message`; `Err` via
-    /// `set_error`.
-    JiraActionDone(Result<String, String>),
-    /// Anything the agenda's Jira sync fetched or sent in the background
-    /// -- see `agenda_sync::AgendaSyncEvent`.
-    AgendaSync(AgendaSyncEvent),
     /// A control-channel request (`crate::ipc`): a later `fenix`
     /// launch -- double-clicking a file in Explorer while Fenix is
     /// already running, `fenix x.rs:12` in a terminal -- or another
     /// tool asking to open files or a project, or what's in focus.
     /// Answered on `reply`; the connection's thread is waiting on it.
     Control { call: fenix_control::Call, reply: std::sync::mpsc::Sender<crate::ipc::Reply> },
-    /// The result of `fenix_vnc::VncClient::connect`, from the one-shot
-    /// background thread `open_vnc_session`/`schedule_vnc_reconnect`
-    /// spawns it on -- same "can't afford to block the main thread"
-    /// reasoning as `TerminalSpawned` (a slow/unreachable VM would
-    /// otherwise freeze the whole editor). `name` is the VM's configured
-    /// name (`Config.vnc_hosts`'s own key), not implicitly "whatever's
-    /// focused," since the connect can finish well after the user's
-    /// moved on; `host`/`port` ride along explicitly (not re-derived
-    /// from config on arrival) so a reconnect still completes correctly
-    /// even if the config changed or that entry's since been removed.
-    /// Wrapped (`VncConnectResult`) for the same reason `TerminalSpawned`
-    /// wraps its own result -- `fenix_vnc::VncClient` has no `Debug` impl.
-    VncConnected { name: String, host: String, port: u16, result: VncConnectResult },
-    /// One decoded VNC update, from a session's `VncReader` background
-    /// thread. Carries the VM's name explicitly, same reasoning as
-    /// `VncConnected`/`LogLine`.
-    VncFrame(String, fenix_vnc::VncFrame),
-    /// One reply from the shared PDF worker thread (`PdfState::worker`) --
-    /// see `fenix_pdf::PdfResponse`'s own doc comment for what each
-    /// variant means. Unlike `VncFrame`, this carries the *whole*
-    /// response rather than routing through a separate per-session key
-    /// field: `fenix_pdf::PdfDocKey` already rides along inside every
-    /// `PdfResponse` variant, so there's nothing to add out here.
-    PdfResponse(fenix_pdf::PdfResponse),
     /// A project page's background job reporting in -- see
     /// `pages::PageEvent`.
     Page(pages::PageEvent),
 }
 
 impl FenixUserEvent {
+    /// An event for feature `feature` -- see `FeatureSpec::on_event` and
+    /// `Feature::on_event`. `label` names it in the hang log.
+    pub(crate) fn feature(feature: &'static str, label: &'static str, payload: impl std::any::Any + Send) -> Self {
+        Self::Feature(feature::FeatureEvent { feature, label, payload: Box::new(payload) })
+    }
+
     /// Which event this is, for the hang log (`watchdog`).
     fn label(&self) -> &'static str {
         match self {
@@ -1892,8 +1855,6 @@ impl FenixUserEvent {
             Self::TaskEvent { .. } => "TaskEvent",
             Self::GitStatusReady { .. } => "GitStatusReady",
             Self::GitMainReady { .. } => "GitMainReady",
-            Self::ForgeListReady { .. } => "ForgeListReady",
-            Self::ForgeDetailReady { .. } => "ForgeDetailReady",
             Self::GitHistoryDetailReady { .. } => "GitHistoryDetailReady",
             Self::GitHistoryReady { .. } => "GitHistoryReady",
             Self::GitFetched { .. } => "GitFetched",
@@ -1911,12 +1872,7 @@ impl FenixUserEvent {
             Self::ExplorerJobDone { .. } => "ExplorerJobDone",
             Self::ExplorerMeasured { .. } => "ExplorerMeasured",
             Self::TerminalSpawned { .. } => "TerminalSpawned",
-            Self::JiraActionDone { .. } => "JiraActionDone",
-            Self::AgendaSync { .. } => "AgendaSync",
             Self::Control { .. } => "Control",
-            Self::VncConnected { .. } => "VncConnected",
-            Self::VncFrame { .. } => "VncFrame",
-            Self::PdfResponse { .. } => "PdfResponse",
             Self::Page { .. } => "Page",
         }
     }
@@ -10058,7 +10014,7 @@ impl App {
             Some(proxy) => {
                 std::thread::spawn(move || {
                     let result = fenix_vnc::VncClient::connect(&host, port);
-                    let _ = proxy.send_event(FenixUserEvent::VncConnected { name, host, port, result: VncConnectResult(result) });
+                    let _ = proxy.send_event(FenixUserEvent::feature(vnc_host::SPEC.id, "VncConnected", vnc_host::VncEvent::Connected { name, host, port, result: VncConnectResult(result) }));
                 });
             }
             None => {
@@ -10243,7 +10199,7 @@ impl App {
         std::thread::spawn(move || {
             std::thread::sleep(delay);
             let result = fenix_vnc::VncClient::connect(&host, port);
-            let _ = proxy.send_event(FenixUserEvent::VncConnected { name, host, port, result: VncConnectResult(result) });
+            let _ = proxy.send_event(FenixUserEvent::feature(vnc_host::SPEC.id, "VncConnected", vnc_host::VncEvent::Connected { name, host, port, result: VncConnectResult(result) }));
         });
     }
 
@@ -14264,7 +14220,7 @@ impl App {
             Some(proxy) => {
                 std::thread::spawn(move || {
                     let result = client.list_merge_requests(filter);
-                    let _ = proxy.send_event(FenixUserEvent::ForgeListReady { request_id, result });
+                    let _ = proxy.send_event(FenixUserEvent::feature(review_host::SPEC.id, "ForgeListReady", review_host::ForgeEvent::List { request_id, result }));
                 });
             }
             None => {
@@ -14334,7 +14290,7 @@ impl App {
             Some(proxy) => {
                 std::thread::spawn(move || {
                     let result = Box::new(fetch_forge_detail(client.as_ref(), number));
-                    let _ = proxy.send_event(FenixUserEvent::ForgeDetailReady { request_id, number, result });
+                    let _ = proxy.send_event(FenixUserEvent::feature(review_host::SPEC.id, "ForgeDetailReady", review_host::ForgeEvent::Detail { request_id, number, result }));
                 });
             }
             None => {
@@ -15829,7 +15785,7 @@ impl App {
             Some(proxy) => {
                 std::thread::spawn(move || {
                     let result = action(&client);
-                    let _ = proxy.send_event(FenixUserEvent::JiraActionDone(result));
+                    let _ = proxy.send_event(FenixUserEvent::feature(jira_host::SPEC.id, "JiraActionDone", jira_host::JiraDone(result)));
                 });
             }
             None => {
@@ -18200,8 +18156,6 @@ impl App {
             },
             FenixUserEvent::GitStatusReady(status) => self.apply_git_status(status),
             FenixUserEvent::GitMainReady { request_id, buffer, diff } => self.apply_git_main(request_id, buffer, diff),
-            FenixUserEvent::ForgeListReady { request_id, result } => self.apply_forge_list(request_id, result),
-            FenixUserEvent::ForgeDetailReady { request_id, number, result } => self.apply_forge_detail(request_id, number, *result),
             FenixUserEvent::GitHistoryDetailReady { request_id, buffer, diff } => {
                 self.apply_history_detail(request_id, buffer, diff)
             }
@@ -18231,8 +18185,6 @@ impl App {
             }
             FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, result) => self.apply_terminal_spawned(result.0),
             FenixUserEvent::TerminalSpawned(TerminalTarget::Buffer(id), result) => self.apply_terminal_buffer_spawned(id, result.0),
-            FenixUserEvent::JiraActionDone(result) => self.apply_jira_action_done(result),
-            FenixUserEvent::AgendaSync(event) => self.apply_agenda_sync(event),
             FenixUserEvent::Page(event) => self.apply_page_event(event),
             // A new window asked for here is opened by `about_to_wait`:
             // that needs an `&ActiveEventLoop`, which `handle_user_event`
@@ -18243,9 +18195,6 @@ impl App {
                 // The client may have hung up; nothing to do about it.
                 let _ = reply.send(answer);
             }
-            FenixUserEvent::VncConnected { name, host, port, result } => self.apply_vnc_connected(name, host, port, result.0),
-            FenixUserEvent::VncFrame(key, frame) => self.apply_vnc_frame(key, frame),
-            FenixUserEvent::PdfResponse(response) => self.apply_pdf_response(response),
         }
         if let Some(window) = &self.window {
             window.request_redraw();

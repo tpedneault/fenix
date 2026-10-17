@@ -108,6 +108,11 @@ pub(crate) struct FeatureSpec {
     /// After page `BufferId` was laid out: what its layout asks of the
     /// world (a diagram's drawing started, its problem on its file).
     pub page_after_layout: Option<fn(&mut App, BufferId)>,
+    /// What one of its background threads sent (`FenixUserEvent::
+    /// feature`), handled with the feature in place -- instead of
+    /// `Feature::on_event`, for features whose code is still `App`
+    /// methods.
+    pub on_event: Option<fn(&mut App, Box<dyn Any + Send>)>,
 }
 
 /// A completion in progress: where its prefix starts, the prefix, and
@@ -588,6 +593,14 @@ impl App {
     /// work started from one of its own hooks reports back inline) waits
     /// until it's back.
     pub(crate) fn deliver_feature_event(&mut self, event: FeatureEvent) {
+        let on_event = self
+            .features
+            .specs()
+            .find(|spec| spec.id == event.feature)
+            .and_then(|spec| spec.on_event);
+        if let Some(on_event) = on_event {
+            return on_event(self, event.payload);
+        }
         let Some(i) = self.features.position_of_id(event.feature) else {
             return;
         };

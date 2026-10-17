@@ -74,6 +74,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
         Some(mib_def::title(app.mib().and_then(|m| m.set_ready(&p.key)).as_deref(), p))
     }),
     page_after_layout: None,
+    on_event: None,
 };
 
 /// A set of MIBs, read or being read.

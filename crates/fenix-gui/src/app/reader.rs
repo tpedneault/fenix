@@ -237,7 +237,7 @@ impl App {
         if self.features.pdf().worker.is_none() {
             let worker = match self.event_proxy.clone() {
                 Some(proxy) => fenix_pdf::PdfWorker::spawn(move |response| {
-                    let _ = proxy.send_event(FenixUserEvent::PdfResponse(response));
+                    let _ = proxy.send_event(FenixUserEvent::feature(super::pdf_host::SPEC.id, "PdfResponse", response));
                 }),
                 // No event loop to report to (tests): the worker still
                 // runs, so pdfium stays on its one thread; its replies

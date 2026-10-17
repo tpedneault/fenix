@@ -61,8 +61,19 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         page_title: None,
         page_after_layout: None,
+        on_event: Some(|app, event| {
+            if let Ok(done) = event.downcast::<JiraDone>() {
+                app.apply_jira_action_done(done.0);
+            }
+        }),
     }
 };
+
+/// A finished write (create, comment, title, description, time,
+/// transition) from `spawn_jira_action`'s thread. Never dropped for being
+/// late, unlike a read: `Ok` is a confirmation for the modeline, `Err`
+/// the reason it failed.
+pub(crate) struct JiraDone(pub(crate) Result<String, String>);
 
 /// What the Jira page reads besides itself: which issues are in the
 /// agenda, the people to pick from, the server, today.
@@ -606,5 +617,14 @@ mod tests {
         assert!(app.open().buffer.text().contains("OPS"), "laid out with its context: the tracked project");
         assert!(app.page_key(KeyPress::char('q')));
         assert!(!app.is_page_buffer(id), "q closed it, through `page_action`");
+    }
+
+    #[test]
+    fn a_finished_write_reaches_jira_as_its_feature_event_through_the_spec() {
+        let mut app = app();
+        app.handle_user_event(FenixUserEvent::feature(SPEC.id, "JiraActionDone", JiraDone(Err("network unreachable".to_string()))));
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("network unreachable")));
+        // Another feature's payload, or one Jira doesn't know, is ignored.
+        app.handle_user_event(FenixUserEvent::feature(SPEC.id, "test", 42u8));
     }
 }

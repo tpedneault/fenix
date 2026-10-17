@@ -94,6 +94,11 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_context: Some(agenda_page_context),
         page_title: None,
         page_after_layout: None,
+        on_event: Some(|app, event| {
+            if let Ok(event) = event.downcast::<super::agenda_sync::AgendaSyncEvent>() {
+                app.apply_agenda_sync(*event);
+            }
+        }),
     }
 };
 

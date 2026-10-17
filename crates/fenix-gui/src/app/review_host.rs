@@ -59,6 +59,11 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_context: None,
         page_title: None,
         page_after_layout: None,
+        on_event: Some(|app, event| match event.downcast::<ForgeEvent>().map(|e| *e) {
+            Ok(ForgeEvent::List { request_id, result }) => app.apply_forge_list(request_id, result),
+            Ok(ForgeEvent::Detail { request_id, number, result }) => app.apply_forge_detail(request_id, number, *result),
+            Err(_) => {}
+        }),
     }
 };
 
@@ -170,6 +175,15 @@ impl super::feature::FeaturePage for crate::git_request::RequestPage {
     fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
         Box::new(crate::git_request::RequestPage::key(self, key))
     }
+}
+
+/// What the Merge Requests view's (`git_layout = "panes"`) forge calls
+/// send back, each under the `request_id` it was issued with: network
+/// calls routinely answer out of order, and a stale one is dropped.
+pub(crate) enum ForgeEvent {
+    List { request_id: u64, result: Result<Vec<fenix_forge::MergeRequest>, String> },
+    /// One request's detail: the request, its approvals, its files.
+    Detail { request_id: u64, number: u64, result: Box<Result<ForgeDetail, String>> },
 }
 
 /// What to do once a write to the forge has come back.
