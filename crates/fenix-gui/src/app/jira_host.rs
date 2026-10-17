@@ -8,6 +8,21 @@ use super::agenda_sync::{AgendaSyncState, SyncPick};
 use super::*;
 use crate::jira_page::{self, Action as JiraAction, Choice, JiraPage, Loaded, QueryKind};
 
+/// What the Jira page's background jobs send back (as the Jira feature's
+/// page events).
+#[derive(Debug)]
+pub(crate) enum JiraJob {
+    /// A search on the Jira page came back.
+    Issues { buffer: BufferId, jql: String, result: Result<Vec<fenix_jira::IssueSummary>, String> },
+    Detail { buffer: BufferId, key: String, result: Result<fenix_jira::IssueDetail, String> },
+    /// Choices for an issue, fetched: its transitions, or priorities.
+    Offer { buffer: BufferId, title: String, key: String, result: Result<Vec<(String, jira_page::Choice)>, String> },
+    Types { buffer: BufferId, project: String, types: Result<Vec<fenix_jira::IssueType>, String>, priorities: Vec<String> },
+    Fields { buffer: BufferId, type_id: String, result: Result<Vec<fenix_jira::CreateField>, String> },
+    /// A change to an issue went through, or didn't.
+    Done { buffer: BufferId, key: String, result: Result<String, String> },
+}
+
 /// How many issues a search lists.
 const SEARCH_LIMIT: u32 = 100;
 
@@ -151,6 +166,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         on_event: Some(|app, event| {
             let event = match event.downcast::<JiraDone>() {
                 Ok(done) => return app.apply_jira_action_done(done.0),
+                Err(event) => event,
+            };
+            let event = match event.downcast::<JiraJob>() {
+                Ok(job) => return app.apply_jira_event(*job),
                 Err(event) => event,
             };
             if let Ok(event) = event.downcast::<AgendaSyncEvent>() {
@@ -412,7 +431,7 @@ impl App {
         }
         self.page_spawn(move |send| {
             let result = client.search_issues(&jql, SEARCH_LIMIT);
-            send(PageEvent::JiraIssues { buffer, jql, result });
+            send(PageEvent::feature(SPEC.id, "JiraIssues", JiraJob::Issues { buffer, jql, result }));
         });
     }
 
@@ -420,7 +439,7 @@ impl App {
         let Some(client) = self.jira_client() else { return };
         self.page_spawn(move |send| {
             let result = client.get_issue(&key);
-            send(PageEvent::JiraDetail { buffer, key, result });
+            send(PageEvent::feature(SPEC.id, "JiraDetail", JiraJob::Detail { buffer, key, result }));
         });
     }
 
@@ -430,13 +449,13 @@ impl App {
         let Some(client) = self.jira_client() else { return };
         self.page_spawn(move |send| {
             let result = job(&client);
-            send(PageEvent::JiraDone { buffer, key, result });
+            send(PageEvent::feature(SPEC.id, "JiraDone", JiraJob::Done { buffer, key, result }));
         });
     }
 
-    pub(super) fn apply_jira_event(&mut self, event: PageEvent) {
+    pub(super) fn apply_jira_event(&mut self, event: JiraJob) {
         match event {
-            PageEvent::JiraIssues { buffer, jql, result } => {
+            JiraJob::Issues { buffer, jql, result } => {
                 if let Some(page) = self.jira_page_mut(buffer) {
                     page.results.insert(jql, result.map(Loaded::Issues).unwrap_or_else(Loaded::Failed));
                 }
@@ -449,12 +468,12 @@ impl App {
                     self.jira_fetch_detail(buffer, key);
                 }
             }
-            PageEvent::JiraDetail { buffer, key, result } => {
+            JiraJob::Detail { buffer, key, result } => {
                 if let Some(page) = self.jira_page_mut(buffer) {
                     page.details.insert(key, result);
                 }
             }
-            PageEvent::JiraOffer { buffer, title, key, result } => match result {
+            JiraJob::Offer { buffer, title, key, result } => match result {
                 Ok(items) => {
                     if let Some(page) = self.jira_page_mut(buffer) {
                         page.offer(title, key, items);
@@ -462,16 +481,16 @@ impl App {
                 }
                 Err(err) => self.set_error(format!("{key}: {err}")),
             },
-            PageEvent::JiraTypes { buffer, project, types, priorities } => {
+            JiraJob::Types { buffer, project, types, priorities } => {
                 let Some(action) = self.jira_page_mut(buffer).map(|p| p.types_loaded(&project, types, priorities)) else { return };
                 self.jira_page_action(buffer, action);
             }
-            PageEvent::JiraFields { buffer, type_id, result } => {
+            JiraJob::Fields { buffer, type_id, result } => {
                 if let Some(page) = self.jira_page_mut(buffer) {
                     page.fields_loaded(&type_id, result);
                 }
             }
-            PageEvent::JiraDone { buffer, key, result } => {
+            JiraJob::Done { buffer, key, result } => {
                 match result {
                     Ok(message) => self.set_message(message),
                     Err(err) => self.set_error(format!("{key}: {err}")),
@@ -491,7 +510,6 @@ impl App {
                     self.agenda_sync_now(true);
                 }
             }
-            _ => {}
         }
     }
 
@@ -534,14 +552,14 @@ impl App {
                     let result = client.list_transitions(&key).map(|ts| {
                         ts.into_iter().map(|t| (format!("{}  →  {}", t.name, if t.to_name.is_empty() { t.name.clone() } else { t.to_name.clone() }), Choice::Transition { id: t.id, name: t.name })).collect()
                     });
-                    send(PageEvent::JiraOffer { buffer: id, title: format!("Move {key}"), key, result });
+                    send(PageEvent::feature(SPEC.id, "JiraOffer", JiraJob::Offer { buffer: id, title: format!("Move {key}"), key, result }));
                 });
             }
             A::Priorities(key) => {
                 let Some(client) = self.jira_client() else { return };
                 self.page_spawn(move |send| {
                     let result = client.list_priorities().map(|ps| ps.into_iter().map(|p| (p.name.clone(), Choice::Priority(p.name))).collect());
-                    send(PageEvent::JiraOffer { buffer: id, title: format!("{key} priority"), key, result });
+                    send(PageEvent::feature(SPEC.id, "JiraOffer", JiraJob::Offer { buffer: id, title: format!("{key} priority"), key, result }));
                 });
             }
             A::Transition { key, id: transition, name } => {
@@ -636,14 +654,14 @@ impl App {
                 self.page_spawn(move |send| {
                     let types = client.issue_types(&project);
                     let priorities = client.list_priorities().map(|ps| ps.into_iter().map(|p| p.name).collect()).unwrap_or_default();
-                    send(PageEvent::JiraTypes { buffer: id, project, types, priorities });
+                    send(PageEvent::feature(SPEC.id, "JiraTypes", JiraJob::Types { buffer: id, project, types, priorities }));
                 });
             }
             A::CreateFields { project, type_id } => {
                 let Some(client) = self.jira_client() else { return };
                 self.page_spawn(move |send| {
                     let result = client.create_fields(&project, &type_id);
-                    send(PageEvent::JiraFields { buffer: id, type_id, result });
+                    send(PageEvent::feature(SPEC.id, "JiraFields", JiraJob::Fields { buffer: id, type_id, result }));
                 });
             }
             A::Create(create) => self.jira_create(id, *create),
@@ -658,7 +676,7 @@ impl App {
             self.page_spawn(move |send| {
                 let result = client.create(&issue);
                 let key = result.as_ref().cloned().unwrap_or_default();
-                send(PageEvent::JiraDone { buffer, key, result: result.map(|k| format!("Created {k}")) });
+                send(PageEvent::feature(SPEC.id, "JiraDone", JiraJob::Done { buffer, key, result: result.map(|k| format!("Created {k}")) }));
             });
             return;
         }

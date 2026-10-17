@@ -20,6 +20,16 @@ use super::pages::{PageEvent, PageModel, Sender};
 use super::*;
 use crate::stream_page::{self, Row, Sample, StreamPage};
 
+/// What a stream page's reader sends back (as the CCSDS feature's page
+/// events).
+#[derive(Debug)]
+pub(crate) enum StreamJob {
+    /// A stream page's next packets.
+    Rows { buffer: BufferId, rows: Vec<stream_page::Row>, lost: Vec<(usize, u8, u64)>, junk: Vec<(usize, usize, String)>, done: bool },
+    Info { buffer: BufferId, framing: String },
+    Status { buffer: BufferId, text: String, ok: bool },
+}
+
 /// Most rows a page keeps; a live page drops its oldest past this.
 const MAX_ROWS: usize = 500_000;
 
@@ -244,7 +254,7 @@ impl FrameProfileExt {
 fn send_rows(send: &Sender, buffer: BufferId, items: Vec<Item>, set: Option<&MibSet>, m: &Mission, framing: Option<&Framing>, done: bool) {
     let (rows, lost, junk) = convert(items, set, m, framing);
     if !rows.is_empty() || !lost.is_empty() || !junk.is_empty() || done {
-        send(PageEvent::StreamRows { buffer, rows, lost, junk, done });
+        send(PageEvent::feature(super::ccsds_host::SPEC.id, "StreamRows", StreamJob::Rows { buffer, rows, lost, junk, done }));
     }
 }
 
@@ -261,8 +271,8 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
     let mut file = match std::fs::File::open(&path) {
         Ok(f) => f,
         Err(e) => {
-            send(PageEvent::StreamStatus { buffer, text: format!("couldn't open: {e}"), ok: false });
-            send(PageEvent::StreamRows { buffer, rows: Vec::new(), lost: Vec::new(), junk: Vec::new(), done: true });
+            send(PageEvent::feature(super::ccsds_host::SPEC.id, "StreamStatus", StreamJob::Status { buffer, text: format!("couldn't open: {e}"), ok: false }));
+            send(PageEvent::feature(super::ccsds_host::SPEC.id, "StreamRows", StreamJob::Rows { buffer, rows: Vec::new(), lost: Vec::new(), junk: Vec::new(), done: true }));
             return;
         }
     };
@@ -273,7 +283,7 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
         let mut text = head.clone();
         let _ = (&mut file).take(TEXT_LIMIT).read_to_end(&mut text);
         if let Some(items) = stream::hex_lines(&String::from_utf8_lossy(&text)) {
-            send(PageEvent::StreamInfo { buffer, framing: "hex lines · a text log with a packet in hex on a line".to_string() });
+            send(PageEvent::feature(super::ccsds_host::SPEC.id, "StreamInfo", StreamJob::Info { buffer, framing: "hex lines · a text log with a packet in hex on a line".to_string() }));
             send_rows(&send, buffer, items, set.as_deref(), &m, None, true);
             return;
         }
@@ -282,7 +292,7 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
         Some(f) => (f, "as asked".to_string()),
         None => guessed(&head, &m),
     };
-    send(PageEvent::StreamInfo { buffer, framing: format!("{} · {why}", framing.label()) });
+    send(PageEvent::feature(super::ccsds_host::SPEC.id, "StreamInfo", StreamJob::Info { buffer, framing: format!("{} · {why}", framing.label()) }));
     let mut splitter = Splitter::new(framing.clone());
     let set = set.as_deref();
     let mut items = splitter.feed(&head);
@@ -293,7 +303,7 @@ fn read_recording(path: PathBuf, framing: Option<Framing>, set: Option<Arc<MibSe
         send_rows(&send, buffer, std::mem::take(&mut items), set, &m, Some(&framing), false);
         if stop.load(Ordering::Relaxed) || total >= MAX_ROWS {
             if total >= MAX_ROWS {
-                send(PageEvent::StreamStatus { buffer, text: format!("stopped at {MAX_ROWS} packets"), ok: false });
+                send(PageEvent::feature(super::ccsds_host::SPEC.id, "StreamStatus", StreamJob::Status { buffer, text: format!("stopped at {MAX_ROWS} packets"), ok: false }));
             }
             break;
         }
@@ -326,13 +336,13 @@ pub(crate) struct Source {
 /// Receives from `src` until the page closes, reconnecting as needed.
 fn run_live(src: Source, set: Option<Arc<MibSet>>, m: Mission, buffer: BufferId, send: Sender, stop: Arc<AtomicBool>) {
     let framing = framing_of(&src.framing, src.header, &m);
-    let info = |text: String| send(PageEvent::StreamInfo { buffer, framing: format!("{text} · {}", src.address) });
+    let info = |text: String| send(PageEvent::feature(super::ccsds_host::SPEC.id, "StreamInfo", StreamJob::Info { buffer, framing: format!("{text} · {}", src.address) }));
     match &framing {
         Some(f) => info(f.label()),
         None => info("guessing the framing from the first octets".into()),
     }
     let mut splitter = LiveSplitter::new(framing);
-    let status = |text: String, ok: bool| send(PageEvent::StreamStatus { buffer, text, ok });
+    let status = |text: String, ok: bool| send(PageEvent::feature(super::ccsds_host::SPEC.id, "StreamStatus", StreamJob::Status { buffer, text, ok }));
     if src.framing.trim() == "records" && src.header == 0 {
         status("records framing without a record header size -- guessing instead".into(), false);
     }
@@ -557,9 +567,9 @@ impl App {
         self.page_spawn(move |send| run_live(src, set, mission, id, send, stop));
     }
 
-    pub(super) fn apply_stream_event(&mut self, event: PageEvent) {
+    pub(super) fn apply_stream_event(&mut self, event: StreamJob) {
         match event {
-            PageEvent::StreamRows { buffer, rows, lost, junk, done } => {
+            StreamJob::Rows { buffer, rows, lost, junk, done } => {
                 // What the followed parameter needs, before the page is borrowed.
                 let follow = self.stream_page(buffer).and_then(|p| Some((p.key.clone(), p.param_def?)));
                 let follow = follow.and_then(|(key, def)| Some((self.mib().and_then(|m| m.set_ready(&key))?, self.mission(key.project.as_deref()), def)));
@@ -603,17 +613,16 @@ impl App {
                     None => {}
                 }
             }
-            PageEvent::StreamInfo { buffer, framing } => {
+            StreamJob::Info { buffer, framing } => {
                 if let Some(p) = self.stream_page(buffer) {
                     p.framing = framing;
                 }
             }
-            PageEvent::StreamStatus { buffer, text, ok } => {
+            StreamJob::Status { buffer, text, ok } => {
                 if let Some(p) = self.stream_page(buffer) {
                     p.status = Some((text, ok));
                 }
             }
-            _ => {}
         }
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -748,6 +757,14 @@ impl App {
 mod tests {
     use super::*;
 
+    /// A stream job a reader sent, as the CCSDS feature gets it.
+    fn stream_job(event: &PageEvent) -> Option<&StreamJob> {
+        match event {
+            PageEvent::Feature(f) => f.payload.downcast_ref::<StreamJob>(),
+            _ => None,
+        }
+    }
+
     #[test]
     fn a_nats_subscription_receives_message_payloads() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -860,10 +877,10 @@ mod tests {
             b.extend(crc.to_be_bytes());
             row_of(b, 0, None, Some(&set), &m)
         };
-        app.apply_stream_event(PageEvent::StreamRows { buffer: live, rows: vec![with_raw(1, 2000), with_raw(2, 2100)], lost: Vec::new(), junk: Vec::new(), done: false });
+        app.apply_stream_event(StreamJob::Rows { buffer: live, rows: vec![with_raw(1, 2000), with_raw(2, 2100)], lost: Vec::new(), junk: Vec::new(), done: false });
         assert_eq!(app.stream_page(live).unwrap().param.as_ref().unwrap().1.len(), 2, "samples follow the rows");
         assert!(app.status_message.as_ref().is_none_or(|s| !s.text.starts_with("bench: ")), "within: nothing said");
-        app.apply_stream_event(PageEvent::StreamRows { buffer: live, rows: vec![with_raw(3, 3000)], lost: Vec::new(), junk: Vec::new(), done: false });
+        app.apply_stream_event(StreamJob::Rows { buffer: live, rows: vec![with_raw(3, 3000)], lost: Vec::new(), junk: Vec::new(), done: false });
         let said = app.status_message.as_ref().map(|s| s.text.clone()).unwrap_or_default();
         assert!(said.starts_with("bench: NTH00123") && said.contains("45.0 degC"), "{said}");
         assert_eq!(app.stream_page(live).unwrap().crossings().len(), 1);
@@ -900,12 +917,12 @@ mod tests {
             stop.store(true, Ordering::Relaxed);
             worker.join().unwrap();
             let events = events.lock().unwrap();
-            let rows: Vec<&stream_page::Row> = events.iter().flat_map(|e| if let PageEvent::StreamRows { rows, .. } = e { rows.iter().collect() } else { Vec::new() }).collect();
-            let statuses: Vec<String> = events.iter().filter_map(|e| if let PageEvent::StreamStatus { text, .. } = e { Some(text.clone()) } else { None }).collect();
+            let rows: Vec<&stream_page::Row> = events.iter().flat_map(|e| if let Some(StreamJob::Rows { rows, .. }) = stream_job(e) { rows.iter().collect() } else { Vec::new() }).collect();
+            let statuses: Vec<String> = events.iter().filter_map(|e| if let Some(StreamJob::Status { text, .. }) = stream_job(e) { Some(text.clone()) } else { None }).collect();
             let hk = rows.iter().filter(|r| r.spid.as_deref() == Some("30211")).count();
             let tcs = rows.iter().filter(|r| r.is_tc && r.label.starts_with("ZTC")).count();
             let unknown = rows.iter().filter(|r| !r.idle && !r.is_tc && r.spid.is_none()).count();
-            let problems: Vec<String> = events.iter().flat_map(|e| if let PageEvent::StreamRows { junk, .. } = e { junk.iter().map(|j| j.2.clone()).collect() } else { Vec::new() }).collect();
+            let problems: Vec<String> = events.iter().flat_map(|e| if let Some(StreamJob::Rows { junk, .. }) = stream_job(e) { junk.iter().map(|j| j.2.clone()).collect() } else { Vec::new() }).collect();
             let line = format!("{name}: {} packets, {hk} TCS_HK_FAST, {tcs} telecommands, {unknown} TM not in the MIB, problems {problems:?} · {}", rows.len(), statuses.join(" · "));
             println!("{line}");
             if name.contains("CLTU") {

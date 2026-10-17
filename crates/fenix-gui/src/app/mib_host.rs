@@ -657,7 +657,7 @@ impl MibHost {
             let options = fenix_mib::checks::Options { disabled: &mission.checks_off, base: mission.base, profile: &mission.profile };
             let found = fenix_mib::checks::run(&set, &options);
             set.add_problems(found);
-            send(PageEvent::MibLoaded { key, set: Arc::new(set) });
+            send(PageEvent::feature(SPEC.id, "MibLoaded", (key, Arc::new(set))));
         });
     }
 
@@ -1104,7 +1104,7 @@ impl Feature for MibHost {
         self
     }
 
-    /// A set finished reading (`PageEvent::MibLoaded`, passed on by the
+    /// A set finished reading (its page job, `PageEvent::Feature`, passed on by the
     /// pages).
     fn on_event(&mut self, app: &mut App, payload: Box<dyn Any + Send>) {
         let Ok(loaded) = payload.downcast::<(MibKey, Arc<MibSet>)>() else { return };
