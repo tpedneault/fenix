@@ -41,7 +41,9 @@ pub(crate) fn load(path: &std::path::Path, into: PathBuf, state_dir: PathBuf) ->
     c.animations = editor.and_then(|s| s.get("animations")).and_then(|v| v.parse().ok());
     c.completion_symbols_file = completion.and_then(|s| s.get("symbols_file")).map(PathBuf::from);
     c.lsp_servers = lsp.map(|s| parse_pair_list(s, "server")).unwrap_or_default();
-    c.mib_roots = mib.map(parse_mib_roots).unwrap_or_default();
+    // MIB's settings, registered by it: kept by key.
+    let roots: Vec<(String, String)> = mib.map(parse_mib_roots).unwrap_or_default().into_iter().map(|(name, path)| (name, path.display().to_string())).collect();
+    c.set_value("mib.roots", (!roots.is_empty()).then_some(crate::Value::Map(roots)));
     c.explorer_bookmarks = sections
         .get("explorer")
         .map(|s| parse_pair_list(s, "bookmark").into_iter().map(|(name, path)| (name, PathBuf::from(path))).collect())
@@ -54,9 +56,9 @@ pub(crate) fn load(path: &std::path::Path, into: PathBuf, state_dir: PathBuf) ->
     for name in ["arduino_cli", "clangd", "arduino_language_server"] {
         c.set_path_value(&format!("embedded.{name}"), embedded.and_then(|s| s.get(name)).map(Path::new));
     }
-    c.mib_telecommand_template = mib.and_then(|s| s.get("telecommand_template")).cloned();
-    c.mib_telecommand_argument_template = mib.and_then(|s| s.get("telecommand_argument_template")).cloned();
-    c.mib_telecommand_argument_separator = mib.and_then(|s| s.get("telecommand_argument_separator")).cloned();
+    for name in ["telecommand_template", "telecommand_argument_template", "telecommand_argument_separator"] {
+        c.set_value(&format!("mib.{name}"), mib.and_then(|s| s.get(name)).cloned().map(crate::Value::Text));
+    }
     c.watch_files = editor.and_then(|s| s.get("watch_files")).and_then(|v| v.parse().ok());
     c.jira_base_url = jira.and_then(|s| s.get("base_url")).cloned();
     c.jira_token = jira.and_then(|s| s.get("token")).cloned();
@@ -371,12 +373,8 @@ mod tests {
         let config = load_ini(&path);
 
         assert_eq!(
-            config.mib_roots,
-            vec![
-                ("FIRST".to_string(), PathBuf::from("/a")),
-                ("SECOND".to_string(), PathBuf::from("/b")),
-                ("TENTH".to_string(), PathBuf::from("/j")),
-            ]
+            config.map_value("mib.roots"),
+            [("FIRST".to_string(), "/a".to_string()), ("SECOND".to_string(), "/b".to_string()), ("TENTH".to_string(), "/j".to_string())]
         );
         std::fs::remove_file(&path).ok();
     }
@@ -446,10 +444,7 @@ mod tests {
 
         let config = load_ini(&path);
 
-        assert_eq!(
-            config.mib_roots,
-            vec![("MIB-A".to_string(), PathBuf::from("/data/a")), ("MIB-C".to_string(), PathBuf::from("/data/c"))]
-        );
+        assert_eq!(config.map_value("mib.roots"), [("MIB-A".to_string(), "/data/a".to_string()), ("MIB-C".to_string(), "/data/c".to_string())]);
         std::fs::remove_file(&path).ok();
     }
 
