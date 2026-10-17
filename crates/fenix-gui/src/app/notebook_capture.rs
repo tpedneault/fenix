@@ -34,7 +34,7 @@ impl App {
         if self.notebook().is_none() {
             return;
         }
-        let to = if self.config.notebook_journal.unwrap_or(true) { CaptureTo::Journal } else { CaptureTo::Inbox };
+        let to = if self.config.bool_value("notebook.journal").unwrap_or(true) { CaptureTo::Journal } else { CaptureTo::Inbox };
         // A link back to the line, when there's a file here.
         let link = self.open().buffer.path().map(Path::to_path_buf).filter(|p| !self.features.notebook_state().book.as_ref().is_some_and(|nb| nb.by_path(p).is_some())).map(|path| {
             let (line, _) = self.open().buffer.line_col(&self.cursor());
@@ -334,7 +334,7 @@ mod tests {
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_file(None);
-        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
         // Never the agenda of the Fenix you use.
         app.features.agenda_mut().path = dir.path().join("agenda.json");
         app.features.agenda_mut().store = Default::default();

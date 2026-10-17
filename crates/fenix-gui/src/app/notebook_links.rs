@@ -440,7 +440,7 @@ mod tests {
     fn app() -> (tempfile::TempDir, App) {
         let dir = tempfile::tempdir().unwrap();
         let mut app = App::with_file(None);
-        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
         (dir, app)
     }
 
