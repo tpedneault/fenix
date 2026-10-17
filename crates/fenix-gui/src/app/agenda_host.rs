@@ -4,6 +4,7 @@
 //! side of each change (transitions, the outbox, worklogs) stays in
 //! `agenda_sync`.
 
+use super::feature::{page_as, page_as_mut};
 use super::pages::PageModel;
 use super::*;
 use crate::agenda_page::{self, Action as AgendaAction, AgendaPage, NewTask, Project, Tab};
@@ -84,8 +85,13 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         picker_cancel: Some(|app| app.agenda_sync_picker_cancel()),
         modeline_clock: None,
-        page_action: None,
-        page_context: None,
+        // A key on the agenda page, handled against the store.
+        page_action: Some(|app, id, key| {
+            if let Ok(key) = key.downcast::<crate::page::Key>() {
+                app.agenda_page_key_now(id, *key);
+            }
+        }),
+        page_context: Some(agenda_page_context),
         page_title: None,
         page_after_layout: None,
     }
@@ -123,6 +129,9 @@ pub(crate) struct AgendaState {
     pub(super) seen_saved: Option<Instant>,
     /// The agenda's Jira sync bookkeeping -- see `agenda_sync`.
     pub(super) sync: AgendaSyncState,
+    /// The minute each agenda page was last laid out in, while a clock
+    /// runs.
+    pub(super) page_minutes: HashMap<BufferId, i64>,
 }
 
 impl Default for AgendaState {
@@ -145,6 +154,7 @@ impl Default for AgendaState {
             gap_asked: false,
             seen_saved: None,
             sync: AgendaSyncState::default(),
+            page_minutes: HashMap::new(),
         }
     }
 }
@@ -184,6 +194,68 @@ impl super::feature::Features {
     }
 }
 
+/// What the agenda page shows, laid out here: it reads the store, which
+/// the page can't be handed. A running clock's minute moving on lays it
+/// out again too.
+struct AgendaLayout {
+    page: Option<crate::page::Page>,
+    tick: bool,
+}
+
+fn agenda_page_context(app: &mut App, id: BufferId, need: super::feature::PageNeed) -> Box<dyn std::any::Any> {
+    let super::feature::PageNeed::Layout { cols, due } = need else { return Box::new(()) };
+    let minute = chrono::Local::now().timestamp() / 60;
+    let running = app.features.agenda().store.active_timer.is_some();
+    let tick = running && app.features.agenda_mut().page_minutes.insert(id, minute) != Some(minute);
+    if !due && !tick {
+        return Box::new(AgendaLayout { page: None, tick: false });
+    }
+    let (worklogs, sync, round) = (app.agenda_worklog_rows(), app.agenda_sync_label(), app.agenda_worklog_round());
+    let page = app.feature_page::<AgendaPage>(id).map(|p| {
+        let ctx = agenda_page::Ctx { store: &app.features.agenda().store, now: chrono::Local::now(), categories: &app.config.agenda_categories, worklogs: &worklogs, round, sync };
+        agenda_page::layout(p, &ctx, cols)
+    });
+    Box::new(AgendaLayout { page, tick })
+}
+
+/// The agenda page (`SPC a a`).
+impl super::feature::FeaturePage for AgendaPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        "*agenda*".to_string()
+    }
+
+    fn typing(&self) -> bool {
+        AgendaPage::typing(self)
+    }
+
+    fn claims_space(&self) -> bool {
+        AgendaPage::claims_space(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        AgendaPage::paste(self, text);
+    }
+
+    fn changed(&self, ctx: &dyn std::any::Any) -> bool {
+        ctx.downcast_ref::<AgendaLayout>().is_some_and(|l| l.tick)
+    }
+
+    /// Laid out already, by `agenda_page_context`.
+    fn layout(&mut self, ctx: Box<dyn std::any::Any>, _cols: usize) -> crate::page::Page {
+        ctx.downcast::<AgendaLayout>().ok().and_then(|l| l.page).unwrap_or_default()
+    }
+
+    /// The key itself: the agenda's `page_action` handles it against the
+    /// store.
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+        Box::new(key)
+    }
+}
+
 /// An agenda picker over `candidates`, with the badge `badge`.
 pub(super) fn agenda_picker<T: std::any::Any>(badge: &'static str, candidates: Vec<fenix_picker::Candidate<T>>) -> ActivePicker {
     let candidates = candidates.into_iter().map(|c| super::feature::FeaturePick::candidate(c.label, c.payload)).collect();
@@ -198,17 +270,11 @@ pub(super) struct Capture {
 
 impl App {
     pub(super) fn agenda_page_mut(&mut self, id: BufferId) -> Option<&mut AgendaPage> {
-        match self.pages.get_mut(&id).map(|s| {
-            s.stale = true;
-            &mut s.model
-        }) {
-            Some(PageModel::Agenda(p)) => Some(p),
-            _ => None,
-        }
+        self.feature_page_mut::<AgendaPage>(id)
     }
 
     fn agenda_page_id(&self) -> Option<BufferId> {
-        self.find_page(|m| matches!(m, PageModel::Agenda(_)))
+        self.find_page(|m| page_as::<AgendaPage>(m).is_some())
     }
 
     /// The project the focused file is in, and its Jira key.
@@ -253,7 +319,7 @@ impl App {
                 }
                 id
             }
-            None => self.open_page(PageModel::Agenda(Box::new(AgendaPage::new(tab.unwrap_or(Tab::Today), project)))),
+            None => self.open_page(PageModel::Feature(Box::new(AgendaPage::new(tab.unwrap_or(Tab::Today), project)))),
         };
         self.agenda_worklog_reset();
         id
@@ -262,12 +328,12 @@ impl App {
     /// Every agenda page, laid out again -- after anything changed the
     /// store, from here or from a sync.
     pub(super) fn refresh_agenda_pages(&mut self) {
-        let ids: Vec<BufferId> = self.pages.iter().filter(|(_, s)| matches!(s.model, PageModel::Agenda(_))).map(|(id, _)| *id).collect();
+        let ids: Vec<BufferId> = self.pages.iter().filter(|(_, s)| page_as::<AgendaPage>(&s.model).is_some()).map(|(id, _)| *id).collect();
         for id in ids {
             let store = &self.features.agenda().store;
             if let Some(state) = self.pages.get_mut(&id) {
                 state.stale = true;
-                if let PageModel::Agenda(p) = &mut state.model {
+                if let Some(p) = page_as_mut::<AgendaPage>(&mut state.model) {
                     p.forget_missing(store);
                 }
             }
@@ -458,13 +524,13 @@ impl App {
     }
 
     /// Presses `key` on agenda page `id`, as if typed.
-    fn agenda_page_key_now(&mut self, id: BufferId, key: crate::page::Key) {
+    pub(super) fn agenda_page_key_now(&mut self, id: BufferId, key: crate::page::Key) {
         let worklogs = self.agenda_worklog_rows();
         let sync = self.agenda_sync_label();
         let round = self.agenda_worklog_round();
         let Some(state) = self.pages.get_mut(&id) else { return };
         state.stale = true;
-        let PageModel::Agenda(p) = &mut state.model else { return };
+        let Some(p) = page_as_mut::<AgendaPage>(&mut state.model) else { return };
         let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
         let action = p.key(key, &ctx);
         self.agenda_page_action(id, action);
@@ -852,5 +918,25 @@ mod tests {
         app.picker_confirm();
         assert_eq!(app.features.agenda().store.active_timer.as_ref().map(|t| t.task_id), Some(a));
         assert!(SPEC.picker_confirm.is_some() && SPEC.picker_cancel.is_some());
+    }
+
+    #[test]
+    fn a_running_clock_lays_the_agenda_page_out_again_each_minute_through_its_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        let a = app.features.agenda_mut().store.create_task("Write".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        let id = app.open_agenda_page(None);
+        let need = |due| super::super::feature::PageNeed::Layout { cols: 100, due };
+        let changed = |app: &mut App, due| {
+            let ctx = app.feature_page_context(id, need(due));
+            let Some(PageModel::Feature(p)) = app.pages.get(&id).map(|s| &s.model) else { panic!("a feature page") };
+            p.changed(&*ctx)
+        };
+        assert!(!changed(&mut app, false), "no clock, nothing moves");
+        app.features.agenda_mut().store.clock_in(a);
+        assert!(changed(&mut app, false), "a running clock's minute: laid out again");
+        assert!(!changed(&mut app, false), "once a minute");
+        app.ensure_page_layout(id, app.focused_pane_id(), 100);
+        assert!(app.open().buffer.text().contains("Write"), "laid out by the agenda's context");
     }
 }

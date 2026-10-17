@@ -656,10 +656,9 @@ mod tests {
             }))
         };
         assert_eq!(run(&mut app, "agenda.open").unwrap(), json!({}));
-        assert!(matches!(
-            app.pages.get(&app.focused_buffer_id()).map(|p| &p.model),
-            Some(super::super::pages::PageModel::Agenda(_))
-        ));
+        assert!(app
+            .feature_page::<crate::agenda_page::AgendaPage>(app.focused_buffer_id())
+            .is_some());
         let err = run(&mut app, "file.save").unwrap_err();
         assert_eq!(err.code, fenix_control::protocol::code::INVALID_PARAMS);
         assert!(err.message.contains("outside"), "{}", err.message);

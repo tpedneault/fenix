@@ -214,6 +214,14 @@ pub(super) fn page_as<T: FeaturePage>(model: &super::pages::PageModel) -> Option
     }
 }
 
+/// The same, to change it -- for a feature walking its pages.
+pub(super) fn page_as_mut<T: FeaturePage>(model: &mut super::pages::PageModel) -> Option<&mut T> {
+    match model {
+        super::pages::PageModel::Feature(p) => (&mut **p as &mut dyn Any).downcast_mut(),
+        _ => None,
+    }
+}
+
 impl App {
     /// What feature page `id` reads besides itself, from its feature's
     /// `page_context` -- `()` for any other page.

@@ -13,7 +13,6 @@ use crate::git_compare::{self, GitCompare};
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
-use crate::agenda_page::{self, AgendaPage};
 use crate::jira_page::{self, JiraPage};
 use crate::mib_page;
 use crate::stream_page;
@@ -47,7 +46,6 @@ pub(super) enum PageModel {
     Snippets(Box<SnippetsPage>),
     Inbox(Box<Inbox>),
     Review(Box<ReviewPage>),
-    Agenda(Box<AgendaPage>),
     Jira(Box<JiraPage>),
     Reading(Box<ReadingPage>),
     /// A page a feature owns -- see `feature::FeaturePage`.
@@ -65,15 +63,13 @@ pub(super) struct PageState {
     /// sends (a step since retried, a check since restarted) is dropped.
     generation: u64,
     started: Option<Instant>,
-    /// The minute it was last laid out in, for pages that show a clock.
-    minute: i64,
     /// The selected line when the page was last shown, to tell a move up.
     last_focus: Option<usize>,
 }
 
 impl PageState {
     fn new(model: PageModel) -> Self {
-        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, minute: 0, last_focus: None }
+        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, last_focus: None }
     }
 
     /// Whether a text field on the page has the keyboard -- then every
@@ -89,7 +85,6 @@ impl PageState {
             PageModel::Request(r) => r.editing.is_some(),
             PageModel::UserSettings(p) => p.typing(),
             PageModel::Snippets(p) => p.typing(),
-            PageModel::Agenda(p) => p.typing(),
             PageModel::Jira(p) => p.typing(),
             PageModel::Feature(p) => p.typing(),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => false,
@@ -103,7 +98,6 @@ impl PageState {
                 PageModel::Wizard(w) => w.claims_space(),
                 PageModel::Request(r) => r.field == git_request::Field::Draft,
                 PageModel::UserSettings(p) => p.claims_space(),
-                PageModel::Agenda(p) => p.claims_space(),
                 PageModel::Jira(p) => p.claims_space(),
                 PageModel::Feature(p) => p.claims_space(),
                 _ => false,
@@ -124,7 +118,6 @@ impl PageState {
             PageModel::Request(r) => r.paste(text),
             PageModel::UserSettings(p) => p.paste(text),
             PageModel::Snippets(p) => p.paste(text),
-            PageModel::Agenda(p) => p.paste(text),
             PageModel::Jira(p) => p.paste(text),
             PageModel::Feature(p) => p.paste(text),
             PageModel::Rebase(_) | PageModel::Inbox(_) | PageModel::Review(_) | PageModel::Reading(_) => {}
@@ -308,7 +301,6 @@ impl App {
             },
             Some(PageModel::Inbox(i)) => format!("*reviews: {}*", i.project),
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
-            Some(PageModel::Agenda(_)) => "*agenda*".to_string(),
             Some(PageModel::Jira(_)) => "*jira*".to_string(),
             Some(PageModel::Feature(p)) => {
                 let title = self.features.specs().find(|spec| spec.id == p.feature()).and_then(|spec| spec.page_title);
@@ -422,10 +414,6 @@ impl App {
     }
 
     pub(super) fn ensure_page_layout(&mut self, id: BufferId, pane: fenix_window::WindowId, cols: usize) {
-        // What the agenda page reads besides the store, worked out before
-        // the page is borrowed.
-        let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
-            .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
         // What a feature's page reads besides itself, before it's borrowed.
         let due = self.pages.get(&id).is_some_and(|s| s.stale || s.cols != cols);
         let mut feature_ctx = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Feature(_)))
@@ -440,21 +428,10 @@ impl App {
                 state.stale = true;
             }
         }
-        // A running clock's minutes move on by themselves.
-        let minute = chrono::Local::now().timestamp() / 60;
-        if agenda.is_some() && self.features.agenda().store.active_timer.is_some() && state.minute != minute {
-            state.minute = minute;
-            state.stale = true;
-        }
         if !state.stale && state.cols == cols {
             return;
         }
         state.page = match &mut state.model {
-            PageModel::Agenda(p) => {
-                let (worklogs, sync, round) = agenda.unwrap_or_default();
-                let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
-                agenda_page::layout(p, &ctx, cols)
-            }
             PageModel::Jira(p) => {
                 let in_agenda: HashSet<String> = self.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
                 let ctx = jira_page::Ctx {
@@ -602,8 +579,6 @@ impl App {
             (KeyCode::Named(FenixNamedKey::Delete), _) if typing => Key::Delete,
             _ => return false,
         };
-        let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
-            .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
         let feature_ctx = self.feature_page_context(id, super::feature::PageNeed::Key);
         let Some(state) = self.pages.get_mut(&id) else { return false };
         state.stale = true;
@@ -619,12 +594,6 @@ impl App {
             PageModel::Reading(p) => {
                 let action = p.key(key);
                 self.reading_action(id, action);
-            }
-            PageModel::Agenda(p) => {
-                let (worklogs, sync, round) = agenda.unwrap_or_default();
-                let ctx = agenda_page::Ctx { store: &self.features.agenda().store, now: chrono::Local::now(), categories: &self.config.agenda_categories, worklogs: &worklogs, round, sync };
-                let action = p.key(key, &ctx);
-                self.agenda_page_action(id, action);
             }
             PageModel::Jira(p) => {
                 let in_agenda: HashSet<String> = self.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
