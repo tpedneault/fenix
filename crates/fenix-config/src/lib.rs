@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-pub use schema::{setting, settings, Category, Field, Kind, Setting, Value, FRAMINGS};
+pub use schema::{setting, settings, Category, Field, Kind, Setting, Value};
 pub use project::ProjectSettings;
 pub use secrets::Secret;
 
@@ -162,34 +162,6 @@ pub struct Config {
     /// protection as `vnc_hosts`/`documents`/`workspaces` (see `save`'s
     /// own doc comment), since nothing in this app writes to it itself.
     pub lsp_servers: Vec<(String, String)>,
-    /// The CCSDS and PUS profile: how a mission's packets and frames
-    /// are laid out beyond what its MIB says.
-    pub ccsds_pus: Option<String>,
-    pub ccsds_tm_time: Option<String>,
-    pub ccsds_epoch: Option<String>,
-    pub ccsds_time_correlation: Option<String>,
-    pub ccsds_clock: Option<bool>,
-    pub ccsds_crc: Option<String>,
-    pub ccsds_tc_source_id: Option<i64>,
-    pub ccsds_plf_offset: Option<String>,
-    pub ccsds_frame_type: Option<String>,
-    pub ccsds_frame_length: Option<i64>,
-    pub ccsds_frame_asm: Option<bool>,
-    pub ccsds_frame_randomized: Option<bool>,
-    pub ccsds_frame_rs_depth: Option<i64>,
-    pub ccsds_frame_ocf: Option<bool>,
-    pub ccsds_frame_fecf: Option<bool>,
-    pub ccsds_tc_fecf: Option<bool>,
-    pub ccsds_tc_segment_header: Option<bool>,
-    pub ccsds_tc_randomized: Option<bool>,
-    pub ccsds_tc_bch: Option<String>,
-    pub ccsds_vc_names: Vec<(String, String)>,
-    /// Live sources: name, address, NATS subject, framing.
-    pub ccsds_sources: Vec<Vec<String>>,
-    pub ccsds_library: Option<PathBuf>,
-    pub ccsds_leap_seconds: Option<PathBuf>,
-    /// Standards checks turned off.
-    pub ccsds_checks_off: Vec<String>,
     /// Whether to notice files changing on disk while they're open and
     /// re-read them. Unset means on, which is what anyone expects; the
     /// setting exists for a working copy on a network share, where a
@@ -423,30 +395,6 @@ impl Config {
             snippets_builtin: None,
             lsp_servers: Vec::new(),
             explorer_bookmarks: Vec::new(),
-            ccsds_pus: None,
-            ccsds_tm_time: None,
-            ccsds_epoch: None,
-            ccsds_crc: None,
-            ccsds_tc_source_id: None,
-            ccsds_plf_offset: None,
-            ccsds_frame_type: None,
-            ccsds_frame_length: None,
-            ccsds_frame_asm: None,
-            ccsds_frame_randomized: None,
-            ccsds_frame_rs_depth: None,
-            ccsds_frame_ocf: None,
-            ccsds_frame_fecf: None,
-            ccsds_tc_fecf: None,
-            ccsds_tc_segment_header: None,
-            ccsds_tc_randomized: None,
-            ccsds_tc_bch: None,
-            ccsds_vc_names: Vec::new(),
-            ccsds_sources: Vec::new(),
-            ccsds_library: None,
-            ccsds_leap_seconds: None,
-            ccsds_time_correlation: None,
-            ccsds_clock: None,
-            ccsds_checks_off: Vec::new(),
             watch_files: None,
             jira_base_url: None,
             jira_token: None,
