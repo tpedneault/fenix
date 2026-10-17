@@ -26,6 +26,18 @@ fn on(app: &mut App, f: fn(&mut EmbeddedHost, &mut App)) {
 }
 
 /// Arduino's commands, its `SPC f n`, and its `SPC m` menu.
+/// Where the embedded-development tools live, when they aren't where
+/// Fenix looks on its own (its tools folder, `PATH`, the usual install
+/// locations). Unset means search.
+static SETTINGS: [fenix_config::Setting; 3] = {
+    use fenix_config::{Category::Embedded, Kind::Path, Setting};
+    [
+        Setting::stored("embedded.arduino_cli", Embedded, "arduino-cli", Path, "Where arduino-cli is, when it isn't found by itself.").with_default("found on PATH"),
+        Setting::stored("embedded.clangd", Embedded, "clangd", Path, "Where clangd is, when it isn't found by itself.").with_default("found on PATH"),
+        Setting::stored("embedded.arduino_language_server", Embedded, "Arduino language server", Path, "Where arduino-language-server is, when it isn't found by itself.").with_default("downloaded when needed"),
+    ]
+};
+
 pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     id: "fenix.arduino",
     commands: &[
@@ -71,7 +83,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     page_title: None,
     page_after_layout: None,
     on_event: None,
-    settings: &[],
+    settings: &SETTINGS,
     services: &[],
     contributes: &[],
 };
@@ -193,9 +205,9 @@ fn short_board(board: &str) -> &str {
 /// find them. Also what the project doctor uses to locate them.
 pub(super) fn tools(app: &App) -> fenix_embedded::Tools {
     fenix_embedded::Tools::discover(&fenix_embedded::ToolOverrides {
-        arduino_cli: app.config.embedded_arduino_cli.clone(),
-        clangd: app.config.embedded_clangd.clone(),
-        arduino_language_server: app.config.embedded_arduino_language_server.clone(),
+        arduino_cli: app.config.path_value("embedded.arduino_cli"),
+        clangd: app.config.path_value("embedded.clangd"),
+        arduino_language_server: app.config.path_value("embedded.arduino_language_server"),
     })
 }
 
@@ -936,9 +948,9 @@ mod tests {
             std::fs::write(&path, "").unwrap();
             Some(path)
         };
-        app.config.embedded_arduino_cli = fake("arduino-cli");
-        app.config.embedded_clangd = fake("clangd");
-        app.config.embedded_arduino_language_server = fake("arduino-language-server");
+        app.config.set_path_value("embedded.arduino_cli", fake("arduino-cli").as_deref());
+        app.config.set_path_value("embedded.clangd", fake("clangd").as_deref());
+        app.config.set_path_value("embedded.arduino_language_server", fake("arduino-language-server").as_deref());
         app
     }
 

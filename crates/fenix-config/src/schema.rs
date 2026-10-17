@@ -205,12 +205,14 @@ impl Setting {
         self
     }
 
-    fn project(mut self) -> Self {
+    /// A project can set it too (`.fenix/settings.toml`).
+    pub const fn project(mut self) -> Self {
         self.project = true;
         self
     }
 
-    fn restart(mut self) -> Self {
+    /// It only takes effect after a restart.
+    pub const fn restart(mut self) -> Self {
         self.restart = true;
         self
     }
@@ -492,9 +494,6 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
             Ok(())
         })).default("60"),
         // Embedded & MIB
-        s("embedded.arduino_cli", Embedded, "arduino-cli", Kind::Path, "Where arduino-cli is, when it isn't found by itself.", field!(embedded_arduino_cli, path_get, path_set)).default("found on PATH"),
-        s("embedded.clangd", Embedded, "clangd", Kind::Path, "Where clangd is, when it isn't found by itself.", field!(embedded_clangd, path_get, path_set)).default("found on PATH"),
-        s("embedded.arduino_language_server", Embedded, "Arduino language server", Kind::Path, "Where arduino-language-server is, when it isn't found by itself.", field!(embedded_arduino_language_server, path_get, path_set)).default("downloaded when needed"),
         // SCOS-2000 MIB
         s("mib.roots", Mib, "MIBs", Kind::Map { key: "Name", value: "Folder", paths: true }, "The MIB folders: their .dat tables. A project's own list takes the place of yours in that project; a folder in a project can be relative to it.", field!(mib_roots, path_map_get, path_map_set)).project(),
         s("mib.default", Mib, "Default MIB", Kind::Text, "The MIB whose definition is used when several define the same name.", field!(mib_default, text_get, text_set)).default("the first").project(),
@@ -873,16 +872,15 @@ impl Kind {
 mod tests {
     use super::*;
 
+    /// Every category having a setting is checked where the features'
+    /// are registered too (fenix-gui's `app::feature` tests).
     #[test]
-    fn every_key_is_unique_and_every_category_has_a_setting() {
+    fn every_key_is_unique() {
         let mut keys: Vec<&str> = settings().iter().map(|s| s.key).collect();
         keys.sort();
         let before = keys.len();
         keys.dedup();
         assert_eq!(keys.len(), before, "a key declared twice");
-        for c in Category::ALL {
-            assert!(settings().iter().any(|s| s.category == c), "{} is empty", c.label());
-        }
     }
 
     #[test]
