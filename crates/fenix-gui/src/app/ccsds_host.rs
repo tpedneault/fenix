@@ -57,6 +57,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     on_event: None,
     settings: &[],
     services: &[],
+    contributes: &[],
 };
 
 /// What CCSDS keeps between calls: each stream page's source, the

@@ -77,6 +77,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     on_event: None,
     settings: &[],
     services: &[],
+    contributes: &[],
 };
 
 /// A set of MIBs, read or being read.

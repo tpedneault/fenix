@@ -119,6 +119,18 @@ pub(crate) struct FeatureSpec {
     pub settings: &'static [fenix_config::Setting],
     /// Named calls it offers other features (`App::call_service`).
     pub services: &'static [Service],
+    /// What it plugs into contribution points other features define (the
+    /// agenda's `agenda_sync`), as `[[contributes.<point>]]` will.
+    pub contributes: &'static [Contribution],
+}
+
+/// One thing a feature plugs into another's contribution point: the
+/// point's name, and a value of the type that feature defines for it
+/// (`agenda_host::AgendaSync` for `agenda_sync`), found with
+/// `App::contributions`.
+pub(crate) struct Contribution {
+    pub point: &'static str,
+    pub value: &'static (dyn Any + Send + Sync),
 }
 
 /// A named call one feature offers others (`diagrams.svg`), so they don't
@@ -506,7 +518,7 @@ impl Features {
             Some(Box::new(NotebookHost::default())),
             Some(Box::new(DiagramsHost::default())),
             Some(Box::new(AgendaHost::default())),
-            Some(Box::new(JiraHost)),
+            Some(Box::new(JiraHost::default())),
             Some(Box::new(ReviewHost::default())),
             Some(Box::new(PdfHost::default())),
             Some(Box::new(VncHost::default())),
@@ -695,6 +707,21 @@ impl App {
             .find(|service| service.name == name)
             .map(|service| service.call)
             .ok_or_else(|| format!("nothing offers {name}"))
+    }
+
+    /// What the features plug into contribution point `point`, in
+    /// feature order. The feature defining the point downcasts each to
+    /// its own type.
+    pub(crate) fn contributions(
+        &self,
+        point: &str,
+    ) -> impl Iterator<Item = &'static (dyn Any + Send + Sync)> + '_ {
+        let point = point.to_string();
+        self.features
+            .specs()
+            .flat_map(|spec| spec.contributes)
+            .filter(move |c| c.point == point)
+            .map(|c| c.value)
     }
 
     /// Runs `f` with the feature whose id is `id`.

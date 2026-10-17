@@ -50,6 +50,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         settings: &SETTINGS,
         services: &[],
+        contributes: &[],
     }
 };
 

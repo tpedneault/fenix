@@ -1,18 +1,48 @@
-//! The agenda's Jira side: keeping linked tasks and their issues in step.
+//! Jira's sync for the agenda: what the Jira feature plugs into the
+//! agenda's `agenda_sync` contribution point (`SYNC`), keeping linked
+//! tasks and their issues in step.
 //!
 //! `fenix-agenda` owns the model and the merge rules; this is everything
 //! that needs the network or the UI -- fetching issues and turning them
 //! into `RemoteUpdate`s, sending the outbox one op at a time, resolving a
 //! board move into a real workflow transition, learning what "Blocked"
-//! means in each project, linking/importing issues, and the worklog
-//! review. Every request runs on a background thread and comes back as
-//! one `AgendaSyncEvent`; without an event loop (tests) the same work runs
-//! inline.
+//! means in each project, linking/importing issues, and sending
+//! worklogs. Its bookkeeping is the Jira feature's (`JiraHost`). Every
+//! request runs on a background thread and comes back as one
+//! `AgendaSyncEvent`, the Jira feature's event; without an event loop
+//! (tests) the same work runs inline.
 
 use super::*;
 
 use fenix_agenda::{OpKind, RemoteComment, RemoteSnapshot, RemoteUpdate, Status, WorklogRow};
 use fenix_config::JiraBlocked;
+
+/// Jira, as the agenda's sync (`agenda_host::AgendaSync`).
+pub(crate) static SYNC: super::agenda_host::AgendaSync = super::agenda_host::AgendaSync {
+    start: |app| {
+        // Linked tasks stay current while Fenix runs, and changes queued
+        // before the last exit go out now.
+        if app.features.agenda().store.tasks.iter().any(|t| t.jira.is_some()) {
+            app.agenda_start_ticker();
+            app.agenda_drain_outbox();
+        }
+    },
+    sync: |app, quiet| app.agenda_sync_now(quiet),
+    sync_if_stale: |app| app.agenda_sync_if_stale(),
+    send: |app| app.agenda_drain_outbox(),
+    status: |app| app.jira_sync_label(),
+    busy: |app| app.features.jira_sync().pulling.then(|| "syncing Jira".to_string()),
+    move_linked: |app, task, status| app.jira_move_linked(task, status),
+    pick_status: |app, task| app.agenda_start_linked_status_picker(task),
+    pick_priority: |app, task| app.agenda_start_linked_priority_picker(task),
+    pick_assignee: |app, task| app.agenda_start_assignee_picker(task),
+    link: |app, task| app.agenda_start_link(task),
+    link_key: |app, task, key| app.agenda_fetch_issue(key.to_uppercase(), IssueFetch::LinkKey(task)),
+    retry: |app, task| app.jira_retry(task),
+    import: |app| app.jira_import(),
+    issue_url: |app, task| app.agenda_issue_url(task),
+    send_worklogs: |app| app.agenda_send_worklogs(),
+};
 
 /// Shown on a linked task whose issue a sync couldn't find.
 const NOT_FOUND: &str = "not found in Jira -- deleted, moved, or no longer visible to you";
@@ -21,8 +51,8 @@ const NOT_FOUND: &str = "not found in Jira -- deleted, moved, or no longer visib
 /// start another one.
 const STALE_AFTER: Duration = Duration::from_secs(120);
 
-/// Bookkeeping for the agenda's Jira sync, kept apart from the store
-/// because none of it is worth saving.
+/// Bookkeeping for Jira's agenda sync, kept by the Jira feature
+/// (`Features::jira_sync`) because none of it is worth saving.
 #[derive(Default)]
 pub(super) struct AgendaSyncState {
     /// The op currently being sent -- ops go one at a time, in order, so
@@ -40,10 +70,6 @@ pub(super) struct AgendaSyncState {
     pub(super) flag_field: Option<Option<String>>,
     /// What the open Jira picker (`agenda_host::agenda_picker`) is for.
     pub(super) picker: Option<SyncPickerCtx>,
-    /// Worklog review edits and drops, by (task, day). Reset each time
-    /// the review is opened.
-    pub(super) worklog_edits: HashMap<(TaskId, chrono::NaiveDate), i64>,
-    pub(super) worklog_dropped: HashSet<(TaskId, chrono::NaiveDate)>,
     pub(super) sending_worklogs: bool,
     pub(super) ticker_started: bool,
 }
@@ -89,8 +115,8 @@ pub enum IssueFetch {
     AddFromJira { clock: bool },
 }
 
-/// Every background result the agenda's Jira side can come back with --
-/// sent as the agenda's feature event (`FenixUserEvent::feature`).
+/// Every background result Jira's agenda sync can come back with --
+/// sent as the Jira feature's event (`FenixUserEvent::feature`).
 #[derive(Debug)]
 pub enum AgendaSyncEvent {
     Pulled {
@@ -202,7 +228,7 @@ impl App {
             },
             status: self.agenda_status_for(project, &d.status_id, &d.status_category, d.flagged),
             priority: d.priority.as_deref().map(|p| self.agenda_map_priority(p)).unwrap_or(fenix_agenda::Priority::Medium),
-            mine: self.features.agenda().sync.me.as_ref().map(|me| d.assignee_id.as_deref() == Some(me.as_str())),
+            mine: self.features.jira_sync().me.as_ref().map(|me| d.assignee_id.as_deref() == Some(me.as_str())),
         }
     }
 
@@ -213,7 +239,7 @@ impl App {
 
     fn agenda_flag_field_wanted(&self) -> Option<Option<String>> {
         let wanted = self.config.jira_blocked.iter().any(|(_, b)| *b == JiraBlocked::Flag);
-        wanted.then(|| self.features.agenda().sync.flag_field.clone().flatten())
+        wanted.then(|| self.features.jira_sync().flag_field.clone().flatten())
     }
 
     // -- Background plumbing ----------------------------------------------
@@ -230,7 +256,7 @@ impl App {
             Some(proxy) => {
                 std::thread::spawn(move || {
                     let event = job(&client);
-                    let _ = proxy.send_event(FenixUserEvent::feature(super::agenda_host::SPEC.id, "AgendaSync", event));
+                    let _ = proxy.send_event(FenixUserEvent::feature(super::jira_host::SPEC.id, "AgendaSync", event));
                 });
             }
             None => {
@@ -241,16 +267,10 @@ impl App {
         true
     }
 
-    /// Saves, re-renders, and starts sending whatever the edit queued.
-    pub(super) fn agenda_after_edit(&mut self) {
-        self.agenda_save_and_refresh();
-        self.agenda_drain_outbox();
-    }
-
     /// Starts the periodic sync timer, once, when there's an event loop
     /// to deliver its ticks and it isn't turned off.
     pub(super) fn agenda_start_ticker(&mut self) {
-        if self.features.agenda().sync.ticker_started {
+        if self.features.jira_sync().ticker_started {
             return;
         }
         let minutes = self.config.jira_sync_minutes.unwrap_or(10);
@@ -258,10 +278,10 @@ impl App {
         if minutes == 0 {
             return;
         }
-        self.features.agenda_mut().sync.ticker_started = true;
+        self.features.jira_sync_mut().ticker_started = true;
         std::thread::spawn(move || loop {
             std::thread::sleep(Duration::from_secs(u64::from(minutes) * 60));
-            if proxy.send_event(FenixUserEvent::feature(super::agenda_host::SPEC.id, "AgendaSync", AgendaSyncEvent::Tick)).is_err() {
+            if proxy.send_event(FenixUserEvent::feature(super::jira_host::SPEC.id, "AgendaSync", AgendaSyncEvent::Tick)).is_err() {
                 break;
             }
         });
@@ -269,18 +289,13 @@ impl App {
 
     // -- Pull ---------------------------------------------------------------
 
-    /// `SPC a s`.
-    pub(crate) fn cmd_agenda_sync(&mut self) {
-        self.agenda_sync_now(false);
-    }
-
     /// Refreshes every linked task from Jira in one search, then sends
     /// anything waiting. `quiet` skips the "nothing linked"/"synced"
     /// messages and swallows a failed fetch -- for the timer and for
     /// opening the agenda, where a dropped VPN shouldn't shout.
     pub(super) fn agenda_sync_now(&mut self, quiet: bool) {
         self.agenda_start_ticker();
-        if self.features.agenda().sync.pulling {
+        if self.features.jira_sync().pulling {
             return;
         }
         let keys: Vec<String> = self.features.agenda().store.tasks.iter().filter_map(|t| t.jira_key().map(str::to_string)).collect();
@@ -290,11 +305,11 @@ impl App {
             }
             return;
         }
-        let need_me = self.features.agenda().sync.me.is_none();
+        let need_me = self.features.jira_sync().me.is_none();
         let want_flag = self.config.jira_blocked.iter().any(|(_, b)| *b == JiraBlocked::Flag);
-        let known_flag = self.features.agenda().sync.flag_field.clone();
-        self.features.agenda_mut().sync.pulling = true;
-        self.features.agenda_mut().sync.last_pull = Some(Instant::now());
+        let known_flag = self.features.jira_sync().flag_field.clone();
+        self.features.jira_sync_mut().pulling = true;
+        self.features.jira_sync_mut().last_pull = Some(Instant::now());
         let spawned = self.agenda_spawn(move |client| {
             let me = if need_me { client.myself().ok() } else { None };
             let flag_field = match (&known_flag, want_flag) {
@@ -312,20 +327,20 @@ impl App {
             AgendaSyncEvent::Pulled { keys, quiet, me, flag_field, result: Ok(issues) }
         });
         if !spawned {
-            self.features.agenda_mut().sync.pulling = false;
+            self.features.jira_sync_mut().pulling = false;
         }
     }
 
     /// Opening the agenda refreshes it quietly unless it just did.
     pub(super) fn agenda_sync_if_stale(&mut self) {
-        let fresh = self.features.agenda().sync.last_pull.is_some_and(|at| at.elapsed() < STALE_AFTER);
+        let fresh = self.features.jira_sync().last_pull.is_some_and(|at| at.elapsed() < STALE_AFTER);
         if !fresh && self.features.agenda().store.tasks.iter().any(|t| t.jira.is_some()) {
             self.agenda_sync_now(true);
         }
     }
 
     fn apply_agenda_pulled(&mut self, keys: Vec<String>, quiet: bool, result: Result<Vec<fenix_jira::IssueDetail>, String>) {
-        self.features.agenda_mut().sync.pulling = false;
+        self.features.jira_sync_mut().pulling = false;
         let issues = match result {
             Ok(issues) => issues,
             Err(err) => {
@@ -365,11 +380,11 @@ impl App {
 
     /// Sends the next queued op, if nothing's already in flight.
     pub(super) fn agenda_drain_outbox(&mut self) {
-        if self.features.agenda().sync.in_flight.is_some() {
+        if self.features.jira_sync().in_flight.is_some() {
             return;
         }
         let Some(op) = self.features.agenda().store.next_op().cloned() else {
-            if std::mem::take(&mut self.features.agenda_mut().sync.pull_after_drain) {
+            if std::mem::take(&mut self.features.jira_sync_mut().pull_after_drain) {
                 self.agenda_sync_now(true);
             }
             return;
@@ -378,8 +393,8 @@ impl App {
             self.features.agenda_mut().store.discard_op(op.id);
             return;
         };
-        let known_flag = self.features.agenda().sync.flag_field.clone();
-        self.features.agenda_mut().sync.in_flight = Some(op.id);
+        let known_flag = self.features.jira_sync().flag_field.clone();
+        self.features.jira_sync_mut().in_flight = Some(op.id);
         let spawned = self.agenda_spawn(move |client| {
             let mut fetched_flag = None;
             let result = match &op.kind {
@@ -405,17 +420,17 @@ impl App {
             AgendaSyncEvent::OpDone { op_id: op.id, key, what: op.kind.describe(), flag_field: fetched_flag, result }
         });
         if !spawned {
-            self.features.agenda_mut().sync.in_flight = None;
+            self.features.jira_sync_mut().in_flight = None;
         }
     }
 
     fn apply_agenda_op_done(&mut self, op_id: u64, key: String, what: String, result: Result<(), String>) {
-        self.features.agenda_mut().sync.in_flight = None;
+        self.features.jira_sync_mut().in_flight = None;
         let comment = self.features.agenda().store.outbox.iter().any(|op| op.id == op_id && matches!(op.kind, OpKind::AddComment(_)));
         match result {
             Ok(()) => {
                 self.features.agenda_mut().store.op_succeeded(op_id);
-                self.features.agenda_mut().sync.pull_after_drain |= comment;
+                self.features.jira_sync_mut().pull_after_drain |= comment;
                 self.set_message(format!("{key}: {what}"));
                 self.agenda_save_and_refresh();
                 self.agenda_drain_outbox();
@@ -429,7 +444,7 @@ impl App {
     }
 
     /// `r` on a task: clears a failed push and tries again.
-    pub(super) fn agenda_retry(&mut self, id: TaskId) {
+    fn jira_retry(&mut self, id: TaskId) {
         if self.features.agenda().store.task(id).and_then(|t| t.jira.as_ref()).is_none() {
             return;
         }
@@ -446,14 +461,10 @@ impl App {
     /// change: nothing, a Flagged toggle, or a workflow transition (read
     /// fresh, since which ones exist depends on where the issue is now).
     /// If no transition gets there, the card goes back where it was.
-    pub(super) fn agenda_set_status(&mut self, id: TaskId, target: Status) {
+    fn jira_move_linked(&mut self, id: TaskId, target: Status) {
         let Some(task) = self.features.agenda().store.task(id) else { return };
         let prev = (task.status, task.order);
-        let Some(link) = task.jira.clone() else {
-            self.features.agenda_mut().store.move_to_status(id, target);
-            self.agenda_save_and_refresh();
-            return;
-        };
+        let Some(link) = task.jira.clone() else { return };
         if prev.0 == target {
             return;
         }
@@ -684,7 +695,7 @@ impl App {
     }
 
     /// `SPC a i`: pick any of your open issues to add, several at once.
-    pub(crate) fn cmd_agenda_import(&mut self) {
+    fn jira_import(&mut self) {
         let jql = fenix_jira::build_my_open_issues_jql(&self.tracked_project_keys());
         let flag = self.agenda_flag_field_wanted().flatten();
         self.set_message("Fetching your open Jira issues...");
@@ -830,26 +841,10 @@ impl App {
         Some(format!("{}/browse/{key}", base_url.trim_end_matches('/')))
     }
 
-    /// `y` on a linked task.
-    pub(super) fn agenda_copy_link(&mut self, id: TaskId) {
-        let Some(url) = self.agenda_issue_url(id) else { return };
-        if let Some(clipboard) = &mut self.clipboard {
-            let _ = clipboard.set_text(url.clone());
-        }
-        self.set_message(format!("Copied: {url}"));
-    }
-
     pub(super) fn open_url(&mut self, url: &str) {
         match open_in_browser(url) {
             Ok(()) => self.set_message(format!("Opened {url}")),
             Err(err) => self.set_error(format!("couldn't open a browser: {err}")),
-        }
-    }
-
-    /// `o` on a linked task.
-    pub(super) fn agenda_open_in_browser(&mut self, id: TaskId) {
-        if let Some(url) = self.agenda_issue_url(id) {
-            self.open_url(&url);
         }
     }
 
@@ -899,14 +894,14 @@ impl App {
     // -- The Jira picker ---------------------------------------------------
 
     fn agenda_enter_sync_picker(&mut self, ctx: SyncPickerCtx, candidates: Vec<fenix_picker::Candidate<SyncPick>>) {
-        self.features.agenda_mut().sync.picker = Some(ctx);
-        self.enter_picker(super::agenda_host::agenda_picker("JIRA", candidates));
+        self.features.jira_sync_mut().picker = Some(ctx);
+        self.enter_picker(super::jira_host::jira_picker("JIRA", candidates));
     }
 
     /// `Esc` on the Jira picker: a board move it was finishing goes
     /// back where it came from.
     pub(super) fn agenda_sync_picker_cancel(&mut self) {
-        let Some(ctx) = self.features.agenda_mut().sync.picker.take() else { return };
+        let Some(ctx) = self.features.jira_sync_mut().picker.take() else { return };
         if let (Some(id), Some((status, order))) = (ctx.task, ctx.revert) {
             self.features.agenda_mut().store.restore_status(id, status, order);
             self.agenda_save_and_refresh();
@@ -917,7 +912,7 @@ impl App {
     /// `Enter` on the Jira picker. `marked` is what `Tab` marked (the
     /// import picker's multi-select).
     pub(super) fn agenda_sync_picker_confirm(&mut self, pick: SyncPick, marked: Vec<SyncPick>) {
-        let ctx = self.features.agenda_mut().sync.picker.take();
+        let ctx = self.features.jira_sync_mut().picker.take();
         let task = ctx.as_ref().and_then(|c| c.task);
         let project = ctx.as_ref().and_then(|c| c.project.clone());
         match pick {
@@ -1019,33 +1014,10 @@ impl App {
 
     // -- Worklogs -----------------------------------------------------------
 
-    /// `SPC a w`: the worklog review, fresh, over the Time tab.
-    pub(crate) fn cmd_agenda_worklogs(&mut self) {
-        let id = self.open_agenda_page(Some(crate::agenda_page::Tab::Time));
-        if let Some(page) = self.agenda_page_mut(id) {
-            page.open_worklogs();
-        }
-    }
-
-    pub(super) fn agenda_worklog_round(&self) -> u32 {
-        self.config.agenda_worklog_round.unwrap_or(15)
-    }
-
-    /// The review's rows: the store's batch minus drops, with edits.
-    pub(super) fn agenda_worklog_rows(&self) -> Vec<WorklogRow> {
-        let mut rows = self.features.agenda().store.worklog_batch(self.agenda_worklog_round());
-        rows.retain(|r| !self.features.agenda().sync.worklog_dropped.contains(&(r.task, r.date)));
-        for row in &mut rows {
-            if let Some(&minutes) = self.features.agenda().sync.worklog_edits.get(&(row.task, row.date)) {
-                row.minutes = minutes;
-            }
-        }
-        rows
-    }
     /// `W` on the review: sends every row, one worklog each, filed on the
     /// day the work happened.
     pub(super) fn agenda_send_worklogs(&mut self) {
-        if self.features.agenda().sync.sending_worklogs {
+        if self.features.jira_sync().sending_worklogs {
             return;
         }
         let rows: Vec<WorklogRow> = self.agenda_worklog_rows().into_iter().filter(|r| r.minutes > 0).collect();
@@ -1053,7 +1025,7 @@ impl App {
             self.set_message("Nothing to send");
             return;
         }
-        self.features.agenda_mut().sync.sending_worklogs = true;
+        self.features.jira_sync_mut().sending_worklogs = true;
         self.set_message("Sending worklogs...");
         let spawned = self.agenda_spawn(move |client| {
             let results = rows
@@ -1067,12 +1039,12 @@ impl App {
             AgendaSyncEvent::WorklogsSent { results }
         });
         if !spawned {
-            self.features.agenda_mut().sync.sending_worklogs = false;
+            self.features.jira_sync_mut().sending_worklogs = false;
         }
     }
 
     fn apply_agenda_worklogs_sent(&mut self, results: Vec<WorklogSent>) {
-        self.features.agenda_mut().sync.sending_worklogs = false;
+        self.features.jira_sync_mut().sending_worklogs = false;
         let mut sent = 0;
         let mut minutes = 0;
         let mut failures = Vec::new();
@@ -1080,7 +1052,7 @@ impl App {
             match result {
                 Ok(()) => {
                     self.features.agenda_mut().store.mark_sent(task, &entries);
-                    self.features.agenda_mut().sync.worklog_edits.retain(|(t, _), _| *t != task);
+                    self.features.agenda_mut().worklog_edits.retain(|(t, _), _| *t != task);
                     sent += 1;
                     minutes += row_minutes;
                 }
@@ -1095,22 +1067,38 @@ impl App {
         }
     }
 
+    /// "synced 3m ago", "syncing", or nothing when Jira isn't set up.
+    fn jira_sync_label(&self) -> String {
+        if self.config.jira_base_url.is_none() {
+            return String::new();
+        }
+        if self.features.jira_sync().pulling {
+            return "syncing".to_string();
+        }
+        match self.features.jira_sync().last_pull {
+            Some(at) if at.elapsed().as_secs() < 60 => "synced just now".to_string(),
+            Some(at) => format!("synced {}m ago", at.elapsed().as_secs() / 60),
+            None if self.features.agenda().store.tasks.iter().any(|t| t.jira.is_some()) => "not synced yet".to_string(),
+            None => String::new(),
+        }
+    }
+
     // -- Events -------------------------------------------------------------
 
     pub(super) fn apply_agenda_sync(&mut self, event: AgendaSyncEvent) {
         match event {
             AgendaSyncEvent::Pulled { keys, quiet, me, flag_field, result } => {
                 if me.is_some() {
-                    self.features.agenda_mut().sync.me = me;
+                    self.features.jira_sync_mut().me = me;
                 }
                 if flag_field.is_some() {
-                    self.features.agenda_mut().sync.flag_field = flag_field;
+                    self.features.jira_sync_mut().flag_field = flag_field;
                 }
                 self.apply_agenda_pulled(keys, quiet, result);
             }
             AgendaSyncEvent::OpDone { op_id, key, what, flag_field, result } => {
                 if flag_field.is_some() {
-                    self.features.agenda_mut().sync.flag_field = flag_field;
+                    self.features.jira_sync_mut().flag_field = flag_field;
                 }
                 self.apply_agenda_op_done(op_id, key, what, result);
             }
@@ -1442,7 +1430,7 @@ mod tests {
         let mut app = app();
         let found = linked(&mut app, "PROJ-1", OPEN);
         let gone = linked(&mut app, "PROJ-2", OPEN);
-        app.features.agenda_mut().sync.pulling = true;
+        app.features.jira_sync_mut().pulling = true;
 
         let mut renamed = detail("PROJ-1", IN_REVIEW);
         renamed.summary = "Renamed in Jira".to_string();
@@ -1454,8 +1442,8 @@ mod tests {
             result: Ok(vec![renamed]),
         });
 
-        assert!(!app.features.agenda().sync.pulling);
-        assert_eq!(app.features.agenda().sync.me.as_deref(), Some("me"));
+        assert!(!app.features.jira_sync().pulling);
+        assert_eq!(app.features.jira_sync().me.as_deref(), Some("me"));
         let task = app.features.agenda().store.task(found).unwrap();
         assert_eq!(task.title, "Renamed in Jira");
         assert_eq!(task.status, Status::InProgress);
@@ -1470,7 +1458,7 @@ mod tests {
         app.features.agenda_mut().store.enqueue(id, OpKind::SetSummary("b".to_string()));
         let (first, second) = (app.features.agenda().store.outbox[0].id, app.features.agenda().store.outbox[1].id);
 
-        app.features.agenda_mut().sync.in_flight = Some(first);
+        app.features.jira_sync_mut().in_flight = Some(first);
         app.apply_agenda_sync(AgendaSyncEvent::OpDone {
             op_id: first,
             key: "PROJ-1".to_string(),
@@ -1480,7 +1468,7 @@ mod tests {
         });
         assert_eq!(app.features.agenda().store.outbox.iter().map(|op| op.id).collect::<Vec<_>>(), vec![second]);
 
-        app.features.agenda_mut().sync.in_flight = Some(second);
+        app.features.jira_sync_mut().in_flight = Some(second);
         app.apply_agenda_sync(AgendaSyncEvent::OpDone {
             op_id: second,
             key: "PROJ-1".to_string(),
@@ -1531,16 +1519,16 @@ mod tests {
         let rows = app.agenda_worklog_rows();
         assert_eq!(rows.iter().map(|r| r.minutes).collect::<Vec<_>>(), vec![45, 15]);
 
-        app.features.agenda_mut().sync.worklog_edits.insert((a, rows[0].date), 60);
-        app.features.agenda_mut().sync.worklog_dropped.insert((b, rows[1].date));
+        app.features.agenda_mut().worklog_edits.insert((a, rows[0].date), 60);
+        app.features.agenda_mut().worklog_dropped.insert((b, rows[1].date));
         let rows = app.agenda_worklog_rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].minutes, 60);
 
-        app.features.agenda_mut().sync.sending_worklogs = true;
+        app.features.jira_sync_mut().sending_worklogs = true;
         app.apply_agenda_sync(AgendaSyncEvent::WorklogsSent { results: vec![WorklogSent { task: a, entries: rows[0].entries.clone(), key: "PROJ-1".to_string(), minutes: 60, result: Ok(()) }] });
 
-        assert!(!app.features.agenda().sync.sending_worklogs);
+        assert!(!app.features.jira_sync().sending_worklogs);
         assert!(app.features.agenda().store.task(a).unwrap().time_entries[0].sent);
         assert_eq!(app.features.agenda().store.unsent_time().1, 1, "the dropped row is still unsent, just not in this batch");
     }

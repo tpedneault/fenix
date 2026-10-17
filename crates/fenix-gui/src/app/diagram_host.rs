@@ -78,6 +78,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         on_event: None,
         settings: &[],
         services: &SERVICES,
+        contributes: &[],
     }
 };
 

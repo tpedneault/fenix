@@ -8,7 +8,6 @@ use super::feature::{page_as, page_as_mut};
 use super::pages::PageModel;
 use super::*;
 use crate::agenda_page::{self, Action as AgendaAction, AgendaPage, NewTask, Project, Tab};
-use super::agenda_sync::{AgendaSyncState, SyncPick};
 use fenix_agenda::{CodeRef, OpKind, Status};
 
 /// One row of the clock picker (`SPC a t`), or of the question asked
@@ -75,15 +74,12 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         completion_at_cursor: None,
         completion_pool_at: None,
         hover_first: None,
-        picker_confirm: Some(|app, pick, marked, _query| {
+        picker_confirm: Some(|app, pick, _marked, _query| {
             if let Some(pick) = pick.downcast_ref::<ClockPick>() {
                 app.agenda_clock_pick(pick.clone());
-            } else if let Some(pick) = pick.downcast_ref::<SyncPick>() {
-                let marked = marked.iter().filter_map(|m| m.0.downcast_ref::<SyncPick>().cloned()).collect();
-                app.agenda_sync_picker_confirm(pick.clone(), marked);
             }
         }),
-        picker_cancel: Some(|app| app.agenda_sync_picker_cancel()),
+        picker_cancel: None,
         modeline_clock: None,
         // A key on the agenda page, handled against the store.
         page_action: Some(|app, id, key| {
@@ -94,13 +90,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_context: Some(agenda_page_context),
         page_title: None,
         page_after_layout: None,
-        on_event: Some(|app, event| {
-            if let Ok(event) = event.downcast::<super::agenda_sync::AgendaSyncEvent>() {
-                app.apply_agenda_sync(*event);
-            }
-        }),
+        on_event: None,
         settings: &[],
         services: &[],
+        contributes: &[],
     }
 };
 
@@ -134,8 +127,10 @@ pub(crate) struct AgendaState {
     pub(super) gap_asked: bool,
     /// When the running clock's last-seen time was last saved.
     pub(super) seen_saved: Option<Instant>,
-    /// The agenda's Jira sync bookkeeping -- see `agenda_sync`.
-    pub(super) sync: AgendaSyncState,
+    /// Worklog review edits and drops, by (task, day). Reset each time
+    /// the review is opened.
+    pub(super) worklog_edits: HashMap<(TaskId, chrono::NaiveDate), i64>,
+    pub(super) worklog_dropped: HashSet<(TaskId, chrono::NaiveDate)>,
     /// The minute each agenda page was last laid out in, while a clock
     /// runs.
     pub(super) page_minutes: HashMap<BufferId, i64>,
@@ -160,7 +155,8 @@ impl Default for AgendaState {
             capture: None,
             gap_asked: false,
             seen_saved: None,
-            sync: AgendaSyncState::default(),
+            worklog_edits: HashMap::new(),
+            worklog_dropped: HashSet::new(),
             page_minutes: HashMap::new(),
         }
     }
@@ -182,12 +178,6 @@ impl super::feature::Feature for AgendaHost {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
-    }
-
-    /// What the open Jira pick is for ("WHAT DOES BLOCKED MEAN IN
-    /// PROJ?", "PROJ-12 STATUS") -- the badge alone can't say.
-    fn picker_label(&self) -> Option<&str> {
-        self.state.sync.picker.as_ref().map(|ctx| ctx.label.as_str())
     }
 }
 
@@ -269,6 +259,152 @@ pub(super) fn agenda_picker<T: std::any::Any>(badge: &'static str, candidates: V
     ActivePicker::Feature { feature: SPEC.id, badge, state: fenix_picker::PickerState::new(candidates) }
 }
 
+/// The agenda's `agenda_sync` contribution point: what keeps linked tasks
+/// in step with an issue tracker (Jira's `agenda_sync::SYNC`). The
+/// agenda owns the store, its outbox and the worklog batch; the sync
+/// pulls, sends, and runs the pickers that need the tracker. Without
+/// one the agenda is local.
+pub(crate) const AGENDA_SYNC: &str = "agenda_sync";
+
+/// What a sync plugs into `agenda_sync`.
+pub(crate) struct AgendaSync {
+    /// At startup: whatever should run while Fenix does.
+    pub start: fn(&mut App),
+    /// `SPC a s`: refresh linked tasks and send what's waiting; `quiet`
+    /// keeps a failure from shouting.
+    pub sync: fn(&mut App, bool),
+    /// Opening the agenda: refresh unless it just did.
+    pub sync_if_stale: fn(&mut App),
+    /// Send whatever an edit queued in the outbox.
+    pub send: fn(&mut App),
+    /// "synced 3m ago", for the page.
+    pub status: fn(&App) -> String,
+    /// What it's doing in the background, for the modeline.
+    pub busy: fn(&App) -> Option<String>,
+    /// Move a linked task to a status, through the tracker's workflow.
+    pub move_linked: fn(&mut App, TaskId, Status),
+    /// The pickers a linked task's keys open.
+    pub pick_status: fn(&mut App, TaskId),
+    pub pick_priority: fn(&mut App, TaskId),
+    pub pick_assignee: fn(&mut App, TaskId),
+    /// Link a task (or unlink/open it, when it's linked).
+    pub link: fn(&mut App, TaskId),
+    /// Link a task to the issue with this key.
+    pub link_key: fn(&mut App, TaskId, String),
+    /// Clear a failed send and try again.
+    pub retry: fn(&mut App, TaskId),
+    /// `SPC a i`: pick issues to add.
+    pub import: fn(&mut App),
+    /// A linked task's issue, on the web.
+    pub issue_url: fn(&mut App, TaskId) -> Option<String>,
+    /// Send the worklog review's rows.
+    pub send_worklogs: fn(&mut App),
+}
+
+impl App {
+    /// The agenda's sync, when a feature plugs one in.
+    pub(super) fn agenda_sync(&self) -> Option<&'static AgendaSync> {
+        self.contributions(AGENDA_SYNC).find_map(|c| c.downcast_ref::<AgendaSync>())
+    }
+
+    /// Runs `f` with the agenda's sync, or says there isn't one.
+    fn agenda_with_sync(&mut self, f: impl FnOnce(&mut App, &'static AgendaSync)) {
+        match self.agenda_sync() {
+            Some(sync) => f(self, sync),
+            None => self.set_message("Nothing syncs the agenda -- that needs Jira switched on"),
+        }
+    }
+
+    /// At startup.
+    pub(super) fn agenda_sync_start(&mut self) {
+        if let Some(sync) = self.agenda_sync() {
+            (sync.start)(self);
+        }
+    }
+
+    /// Saves, re-renders, and has the sync send whatever the edit queued.
+    pub(super) fn agenda_after_edit(&mut self) {
+        self.agenda_save_and_refresh();
+        if let Some(sync) = self.agenda_sync() {
+            (sync.send)(self);
+        }
+    }
+
+    /// `SPC a s`.
+    pub(crate) fn cmd_agenda_sync(&mut self) {
+        self.agenda_with_sync(|app, sync| (sync.sync)(app, false));
+    }
+
+    /// `SPC a i`.
+    pub(crate) fn cmd_agenda_import(&mut self) {
+        self.agenda_with_sync(|app, sync| (sync.import)(app));
+    }
+
+    /// Links `task` to the issue `key`.
+    pub(super) fn agenda_link_key(&mut self, task: TaskId, key: String) {
+        self.agenda_with_sync(|app, sync| (sync.link_key)(app, task, key));
+    }
+
+    /// `r` on a task: clears a failed send and tries again.
+    pub(super) fn agenda_retry(&mut self, task: TaskId) {
+        self.agenda_with_sync(|app, sync| (sync.retry)(app, task));
+    }
+
+    /// Moves a task to `target` -- the one path `s`, the board's `H`/`L`
+    /// and the status picker all take. A local task just moves; a linked
+    /// one goes through the sync, which works out the tracker's side.
+    pub(super) fn agenda_set_status(&mut self, id: TaskId, target: Status) {
+        let Some(task) = self.features.agenda().store.task(id) else { return };
+        match (task.jira.is_some(), self.agenda_sync()) {
+            (true, Some(sync)) => (sync.move_linked)(self, id, target),
+            _ => {
+                self.features.agenda_mut().store.move_to_status(id, target);
+                self.agenda_save_and_refresh();
+            }
+        }
+    }
+
+    /// `y` on a linked task.
+    pub(super) fn agenda_copy_link(&mut self, id: TaskId) {
+        let Some(url) = self.agenda_sync().and_then(|sync| (sync.issue_url)(self, id)) else { return };
+        if let Some(clipboard) = &mut self.clipboard {
+            let _ = clipboard.set_text(url.clone());
+        }
+        self.set_message(format!("Copied: {url}"));
+    }
+
+    /// `o` on a linked task.
+    pub(super) fn agenda_open_in_browser(&mut self, id: TaskId) {
+        if let Some(url) = self.agenda_sync().and_then(|sync| (sync.issue_url)(self, id)) {
+            self.open_url(&url);
+        }
+    }
+
+    /// `SPC a w`: the worklog review, fresh, over the Time tab.
+    pub(crate) fn cmd_agenda_worklogs(&mut self) {
+        let id = self.open_agenda_page(Some(crate::agenda_page::Tab::Time));
+        if let Some(page) = self.agenda_page_mut(id) {
+            page.open_worklogs();
+        }
+    }
+
+    pub(super) fn agenda_worklog_round(&self) -> u32 {
+        self.config.agenda_worklog_round.unwrap_or(15)
+    }
+
+    /// The review's rows: the store's batch minus drops, with edits.
+    pub(super) fn agenda_worklog_rows(&self) -> Vec<fenix_agenda::WorklogRow> {
+        let mut rows = self.features.agenda().store.worklog_batch(self.agenda_worklog_round());
+        rows.retain(|r| !self.features.agenda().worklog_dropped.contains(&(r.task, r.date)));
+        for row in &mut rows {
+            if let Some(&minutes) = self.features.agenda().worklog_edits.get(&(row.task, row.date)) {
+                row.minutes = minutes;
+            }
+        }
+        rows
+    }
+}
+
 /// What `SPC a h` captured, waiting for the new-task form to finish.
 pub(super) struct Capture {
     pub(super) code: CodeRef,
@@ -291,26 +427,18 @@ impl App {
         Some(Project { name, jira_key: fenix_project::meta::jira_key(root) })
     }
 
-    /// "synced 3m ago", "syncing", or nothing when Jira isn't set up.
+    /// What the agenda's sync says about itself ("synced 3m ago"), or
+    /// nothing without one.
     pub(super) fn agenda_sync_label(&self) -> String {
-        if self.config.jira_base_url.is_none() {
-            return String::new();
-        }
-        if self.features.agenda().sync.pulling {
-            return "syncing".to_string();
-        }
-        match self.features.agenda().sync.last_pull {
-            Some(at) if at.elapsed().as_secs() < 60 => "synced just now".to_string(),
-            Some(at) => format!("synced {}m ago", at.elapsed().as_secs() / 60),
-            None if self.features.agenda().store.tasks.iter().any(|t| t.jira.is_some()) => "not synced yet".to_string(),
-            None => String::new(),
-        }
+        self.agenda_sync().map(|sync| (sync.status)(self)).unwrap_or_default()
     }
 
     /// `SPC a a` and friends: the agenda page, on `tab` when given, else
     /// where it was left.
     pub(crate) fn open_agenda_page(&mut self, tab: Option<Tab>) -> BufferId {
-        self.agenda_sync_if_stale();
+        if let Some(sync) = self.agenda_sync() {
+            (sync.sync_if_stale)(self);
+        }
         let project = self.agenda_project();
         let id = match self.agenda_page_id() {
             Some(id) => {
@@ -545,8 +673,8 @@ impl App {
 
     /// Starts the worklog review afresh: no edits or drops carried over.
     pub(super) fn agenda_worklog_reset(&mut self) {
-        self.features.agenda_mut().sync.worklog_edits.clear();
-        self.features.agenda_mut().sync.worklog_dropped.clear();
+        self.features.agenda_mut().worklog_edits.clear();
+        self.features.agenda_mut().worklog_dropped.clear();
     }
 
     /// Adds `name` to the categories, if it isn't one.
@@ -584,7 +712,7 @@ impl App {
             page.note = Some((format!("added \"{}\"", spec.title), false));
         }
         if let Some(key) = spec.link {
-            self.agenda_fetch_issue(key.to_uppercase(), agenda_sync::IssueFetch::LinkKey(task));
+            self.agenda_link_key(task, key);
         }
     }
 
@@ -594,12 +722,12 @@ impl App {
             A::None => {}
             A::Close => self.close_page(id),
             A::SetStatus(task, status) => self.agenda_set_status(task, status),
-            A::JiraStatus(task) => self.agenda_start_linked_status_picker(task),
+            A::JiraStatus(task) => self.agenda_with_sync(|app, sync| (sync.pick_status)(app, task)),
             A::SetPriority(task, priority) => {
                 self.features.agenda_mut().store.set_priority(task, priority);
                 self.agenda_save_and_refresh();
             }
-            A::JiraPriority(task) => self.agenda_start_linked_priority_picker(task),
+            A::JiraPriority(task) => self.agenda_with_sync(|app, sync| (sync.pick_priority)(app, task)),
             A::SetCategory(task, category) => {
                 self.features.agenda_mut().store.set_category(task, category);
                 self.agenda_save_and_refresh();
@@ -688,8 +816,8 @@ impl App {
                 self.features.agenda_mut().store.resolve_conflict(task, field, mine);
                 self.agenda_after_edit();
             }
-            A::Link(task) => self.agenda_start_link(task),
-            A::Assign(task) => self.agenda_start_assignee_picker(task),
+            A::Link(task) => self.agenda_with_sync(|app, sync| (sync.link)(app, task)),
+            A::Assign(task) => self.agenda_with_sync(|app, sync| (sync.pick_assignee)(app, task)),
             A::CopyLink(task) => self.agenda_copy_link(task),
             A::Browser(task) => self.agenda_open_in_browser(task),
             A::Retry(task) => self.agenda_retry(task),
@@ -722,11 +850,11 @@ impl App {
             A::Create(spec) => self.agenda_create(id, spec),
             A::Sync => self.cmd_agenda_sync(),
             A::WorklogMinutes(task, date, minutes) => {
-                self.features.agenda_mut().sync.worklog_edits.insert((task, date), minutes);
+                self.features.agenda_mut().worklog_edits.insert((task, date), minutes);
                 self.refresh_agenda_pages();
             }
             A::WorklogDrop(task, date) => {
-                self.features.agenda_mut().sync.worklog_dropped.insert((task, date));
+                self.features.agenda_mut().worklog_dropped.insert((task, date));
                 self.refresh_agenda_pages();
             }
             A::WorklogDismiss(task, date) => {
@@ -735,7 +863,7 @@ impl App {
                 self.agenda_save_and_refresh();
                 self.set_message(format!("{} on {}: dismissed, won't be sent", row.key, row.date));
             }
-            A::SendWorklogs => self.agenda_send_worklogs(),
+            A::SendWorklogs => self.agenda_with_sync(|app, sync| (sync.send_worklogs)(app)),
             A::Copy(text) => {
                 if let Some(clipboard) = &mut self.clipboard {
                     let _ = clipboard.set_text(text);
@@ -914,6 +1042,19 @@ mod tests {
         assert_eq!(keys.get("agenda.worklogs").map(String::as_str), Some("SPC a w"));
     }
 
+    /// The agenda's sync is whatever plugs into `agenda_sync`: Jira's,
+    /// and only Jira's.
+    #[test]
+    fn jira_plugs_its_sync_into_the_agendas_contribution_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = app(&dir);
+        assert_eq!(app.contributions(AGENDA_SYNC).count(), 1);
+        let sync = app.agenda_sync().expect("Jira's sync");
+        assert!(std::ptr::eq(sync, &super::super::agenda_sync::SYNC));
+        assert_eq!(SPEC.contributes.len(), 0, "the agenda defines the point; it doesn't plug into it");
+        assert_eq!((sync.busy)(&app), None, "nothing running yet");
+    }
+
     #[test]
     fn the_clock_picker_is_the_agendas_and_a_pick_reaches_it_through_the_spec() {
         let dir = tempfile::tempdir().unwrap();
@@ -924,7 +1065,10 @@ mod tests {
         assert_eq!((*feature, *badge), ("fenix.agenda", "CLOCK"));
         app.picker_confirm();
         assert_eq!(app.features.agenda().store.active_timer.as_ref().map(|t| t.task_id), Some(a));
-        assert!(SPEC.picker_confirm.is_some() && SPEC.picker_cancel.is_some());
+        assert!(SPEC.picker_confirm.is_some());
+        // The sync's picker (and its cancel, which puts a board move back)
+        // is the Jira feature's, which plugs the sync in.
+        assert!(super::super::jira_host::SPEC.picker_confirm.is_some() && super::super::jira_host::SPEC.picker_cancel.is_some());
     }
 
     #[test]

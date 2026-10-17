@@ -58,6 +58,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     on_event: None,
     settings: &[],
     services: &[],
+    contributes: &[],
 };
 
 /// A Tcl file gets the Tcl `SPC m` menu (which the MIB fills too).
