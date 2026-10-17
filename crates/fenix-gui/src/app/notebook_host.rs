@@ -168,10 +168,11 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         // borrows the app (its pictures, embeds and links): it's laid out
         // here, and handed over whole.
         page_context: Some(|app, id, need| match need {
-            super::feature::PageNeed::Layout { cols } => Box::new(app.notebook_page_layout(id, cols)),
-            super::feature::PageNeed::Key => Box::new(()),
+            super::feature::PageNeed::Layout { cols, due: true } => Box::new(app.notebook_page_layout(id, cols)),
+            _ => Box::new(()),
         }),
         page_title: None,
+        page_after_layout: None,
     }
 };
 
@@ -227,7 +228,7 @@ impl super::feature::FeaturePage for NotebookPage {
     }
 
     /// Laid out already, by `SPEC.page_context`.
-    fn layout(&self, ctx: Box<dyn std::any::Any>, _cols: usize) -> crate::page::Page {
+    fn layout(&mut self, ctx: Box<dyn std::any::Any>, _cols: usize) -> crate::page::Page {
         ctx.downcast::<Option<crate::page::Page>>().ok().and_then(|page| *page).unwrap_or_default()
     }
 
@@ -246,7 +247,7 @@ impl super::feature::FeaturePage for crate::backlinks_page::BacklinksPage {
         format!("*links: {}*", self.name)
     }
 
-    fn layout(&self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+    fn layout(&mut self, _ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
         crate::backlinks_page::layout(self, cols)
     }
 

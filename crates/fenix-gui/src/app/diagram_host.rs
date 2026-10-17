@@ -9,6 +9,7 @@
 use std::cell::RefCell;
 
 use super::notebook_host::{NotebookPick, NotebookPrompt, NotebookPromptKind};
+use super::feature::page_as;
 use super::pages::{PageEvent, PageModel};
 use super::reading_host::PageTex;
 use super::*;
@@ -43,7 +44,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             Bind(&['t'], "set its theme", "diagram.theme"),
             Bind(&['e'], "export", "diagram.export"),
         ],
-        local_context: None,
+        // A Mermaid file, or a diagram page: the Mermaid menu.
+        local_context: Some(|app| {
+            (app.in_mermaid() || app.feature_page::<DiagramPage>(app.focused_buffer_id()).is_some()).then_some(crate::keymap::LocalContext::Mermaid)
+        }),
         language_server: None,
         tasks: None,
         hover_fallback: None,
@@ -53,9 +57,19 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         picker_confirm: None,
         picker_cancel: None,
         modeline_clock: None,
-        page_action: None,
-        page_context: None,
+        page_action: Some(|app, id, action| {
+            if let Ok(action) = action.downcast::<DgAction>() {
+                app.diagram_action(id, *action);
+            }
+        }),
+        // What the page should show now -- worked out every frame, since
+        // a drawing finishing or the source's cursor moving changes it.
+        page_context: Some(|app, id, need| match need {
+            super::feature::PageNeed::Layout { .. } => Box::new(app.diagram_precompute(id)),
+            super::feature::PageNeed::Key => Box::new(()),
+        }),
         page_title: None,
+        page_after_layout: Some(|app, id| app.diagram_after_layout(id)),
     }
 };
 
@@ -93,6 +107,54 @@ impl super::feature::Features {
 
     pub(super) fn diagram_state_mut(&mut self) -> &mut DiagramState {
         &mut self.get_mut::<DiagramsHost>().expect("the diagrams have no instance hooks that run code, so they're always in place").state
+    }
+}
+
+/// A diagram, beside its source or on its own (`SPC m p`, `SPC m v`).
+impl super::feature::FeaturePage for DiagramPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        format!("*{}: {}*", if self.viewer { "view" } else { "diagram" }, self.title)
+    }
+
+    fn typing(&self) -> bool {
+        DiagramPage::typing(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        DiagramPage::paste(self, text);
+    }
+
+    fn changed(&self, ctx: &dyn std::any::Any) -> bool {
+        matches!(ctx.downcast_ref::<Option<DiagramPre>>(), Some(Some(pre)) if App::diagram_changed(self, pre))
+    }
+
+    /// Takes in what `page_context` found -- the drawing, the node under
+    /// the source's cursor -- and lays the page out.
+    fn layout(&mut self, ctx: Box<dyn std::any::Any>, cols: usize) -> crate::page::Page {
+        match ctx.downcast::<Option<DiagramPre>>().ok().and_then(|pre| *pre) {
+            Some(pre) => App::diagram_apply(self, pre, cols),
+            None => crate::page::Page::default(),
+        }
+    }
+
+    fn key(&mut self, key: crate::page::Key, _ctx: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
+        Box::new(DiagramPage::key(self, key))
+    }
+
+    /// The selected node and the source cursor's, outlined.
+    fn image_marks(&self) -> Vec<(usize, (f32, f32, f32, f32), bool)> {
+        let (w, h) = self.drawn.size;
+        if w <= 0.0 || h <= 0.0 {
+            return Vec::new();
+        }
+        [(self.cursor_node, false), (self.selected, true)]
+            .into_iter()
+            .filter_map(|(i, strong)| i.and_then(|i| self.drawn.nodes.get(i)).map(|n| (0, (n.x / w, n.y / h, n.w / w, n.h / h), strong)))
+            .collect()
     }
 }
 
@@ -212,8 +274,7 @@ impl App {
                     p.seen = None;
                     state.stale = true;
                 }
-                PageModel::Diagram(_) => state.stale = true,
-                model if super::feature::page_as::<crate::notebook_page::NotebookPage>(model).is_some() => state.stale = true,
+                model if page_as::<DiagramPage>(model).is_some() || page_as::<crate::notebook_page::NotebookPage>(model).is_some() => state.stale = true,
                 _ => {}
             }
         }
@@ -230,7 +291,7 @@ impl App {
         }
         let mut keep: std::collections::HashSet<ImageKey> = self.pages.values().flat_map(|s| s.page.images.iter().map(|i| i.key.clone())).collect();
         for s in self.pages.values() {
-            if let PageModel::Diagram(p) = &s.model {
+            if let Some(p) = page_as::<DiagramPage>(&s.model) {
                 keep.extend(p.key.clone());
                 keep.extend(p.want.clone());
             }
@@ -257,7 +318,7 @@ impl App {
 
     /// Before a diagram page is borrowed: what it should show now.
     pub(super) fn diagram_precompute(&self, id: BufferId) -> Option<DiagramPre> {
-        let Some(PageModel::Diagram(p)) = self.pages.get(&id).map(|s| &s.model) else { return None };
+        let p = self.feature_page::<DiagramPage>(id)?;
         let rows = self.features.diagram_state().rows.get(&id).copied().unwrap_or(30);
         let ob = p.source.and_then(|s| self.buffers.get(s))?;
         let edits = ob.buffer.edit_count();
@@ -321,7 +382,7 @@ impl App {
     /// After a diagram page's layout: its problem on its file, and the
     /// drawing it wants started.
     pub(super) fn diagram_after_layout(&mut self, id: BufferId) {
-        let Some(PageModel::Diagram(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
+        let Some(p) = self.feature_page::<DiagramPage>(id) else { return };
         let (want, error, source) = (p.want.clone(), p.error.clone(), p.source);
         if let Some(want) = want {
             self.request_diagram_image(want);
@@ -349,7 +410,7 @@ impl App {
     pub(super) fn note_page_rows(&mut self, id: BufferId, rows: usize) {
         if self.features.diagram_state_mut().rows.insert(id, rows) != Some(rows) {
             if let Some(state) = self.pages.get_mut(&id) {
-                if matches!(state.model, PageModel::Diagram(_)) {
+                if page_as::<DiagramPage>(&state.model).is_some() {
                     state.stale = true;
                 }
             }
@@ -364,13 +425,12 @@ impl App {
     /// `SPC m p` in a diagram: its preview beside it (again closes it).
     pub(crate) fn toggle_diagram_preview(&mut self) {
         let source = self.focused_buffer_id();
-        if let Some(PageModel::Diagram(p)) = self.pages.get(&source).map(|s| &s.model) {
+        if self.feature_page::<DiagramPage>(source).is_some() {
             // On the preview: close it.
-            let _ = p;
             self.diagram_action(source, DgAction::Close);
             return;
         }
-        if let Some(id) = self.find_page(|m| matches!(m, PageModel::Diagram(p) if p.source == Some(source) && !p.viewer)) {
+        if let Some(id) = self.find_page(|m| page_as::<DiagramPage>(m).is_some_and(|p| p.source == Some(source) && !p.viewer)) {
             let pane = self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&id));
             self.close_page(id);
             if let Some(p) = pane {
@@ -388,12 +448,12 @@ impl App {
 
     /// Opens the preview of buffer `source` beside it, keeping focus.
     pub(super) fn open_diagram_preview(&mut self, source: BufferId) {
-        if self.find_page(|m| matches!(m, PageModel::Diagram(p) if p.source == Some(source) && !p.viewer)).is_some() {
+        if self.find_page(|m| page_as::<DiagramPage>(m).is_some_and(|p| p.source == Some(source) && !p.viewer)).is_some() {
             return;
         }
         let title = self.diagram_title(source);
         let origin = self.focused_pane_id();
-        self.open_page_beside(PageModel::Diagram(Box::new(DiagramPage::new(Some(source), title, false))), 0.5);
+        self.open_page_beside(PageModel::Feature(Box::new(DiagramPage::new(Some(source), title, false))), 0.5);
         self.windows_mut().focus(origin);
     }
 
@@ -408,15 +468,15 @@ impl App {
 
     /// `v` / `SPC m v`: the diagram on its own, in this pane.
     pub(crate) fn open_diagram_viewer(&mut self) {
-        let source = match self.pages.get(&self.focused_buffer_id()).map(|s| &s.model) {
-            Some(PageModel::Diagram(p)) => p.source,
-            _ => Some(self.focused_buffer_id()),
+        let source = match self.feature_page::<DiagramPage>(self.focused_buffer_id()) {
+            Some(p) => p.source,
+            None => Some(self.focused_buffer_id()),
         };
         let Some(source) = source else { return };
         let title = self.diagram_title(source);
         let mut page = DiagramPage::new(Some(source), title, true);
         page.zoom = 1.0;
-        self.open_page(PageModel::Diagram(Box::new(page)));
+        self.open_page(PageModel::Feature(Box::new(page)));
     }
 
     /// Opens the viewer for a notebook diagram.
@@ -431,11 +491,11 @@ impl App {
             }
         };
         let title = self.diagram_title(buffer);
-        self.open_page(PageModel::Diagram(Box::new(DiagramPage::new(Some(buffer), title, true))));
+        self.open_page(PageModel::Feature(Box::new(DiagramPage::new(Some(buffer), title, true))));
     }
 
     pub(super) fn diagram_action(&mut self, page_id: BufferId, action: DgAction) {
-        let Some(PageModel::Diagram(p)) = self.pages.get(&page_id).map(|s| &s.model) else { return };
+        let Some(p) = self.feature_page::<DiagramPage>(page_id) else { return };
         let (source, viewer) = (p.source, p.viewer);
         match action {
             DgAction::None => {}
@@ -468,10 +528,7 @@ impl App {
             }
             DgAction::CycleTheme => {
                 let names = self.diagram_themes().names();
-                if let Some(PageModel::Diagram(p)) = self.pages.get_mut(&page_id).map(|s| {
-                    s.stale = true;
-                    &mut s.model
-                }) {
+                if let Some(p) = self.feature_page_mut::<DiagramPage>(page_id) {
                     let current = p.theme_over.clone().unwrap_or_else(|| p.drawn.theme.clone());
                     let at = names.iter().position(|n| *n == current).map(|i| (i + 1) % names.len()).unwrap_or(0);
                     p.theme_over = Some(names[at].clone());
@@ -589,9 +646,9 @@ impl App {
 
     /// `SPC m t` in a diagram.
     pub(crate) fn diagram_pick_theme_here(&mut self) {
-        let source = match self.pages.get(&self.focused_buffer_id()).map(|s| &s.model) {
-            Some(PageModel::Diagram(p)) => p.source,
-            _ => self.in_mermaid().then(|| self.focused_buffer_id()),
+        let source = match self.feature_page::<DiagramPage>(self.focused_buffer_id()) {
+            Some(p) => p.source,
+            None => self.in_mermaid().then(|| self.focused_buffer_id()),
         };
         match source {
             Some(s) => self.diagram_pick_theme_for(s),
@@ -610,11 +667,13 @@ impl App {
             ob.buffer.replace_range(&mut scratch, 0, end, &new);
         }
         for state in self.pages.values_mut() {
-            if let PageModel::Diagram(p) = &mut state.model {
-                if p.source == Some(source) {
-                    p.theme_over = None;
-                    p.seen = None;
-                    state.stale = true;
+            if let PageModel::Feature(p) = &mut state.model {
+                if let Some(p) = (&mut **p as &mut dyn std::any::Any).downcast_mut::<DiagramPage>() {
+                    if p.source == Some(source) {
+                        p.theme_over = None;
+                        p.seen = None;
+                        state.stale = true;
+                    }
                 }
             }
         }
@@ -642,16 +701,13 @@ mod tests {
     use super::*;
 
     fn preview(app: &App) -> (BufferId, fenix_window::WindowId) {
-        let id = app.find_page(|m| matches!(m, PageModel::Diagram(_))).expect("the preview");
+        let id = app.find_page(|m| page_as::<DiagramPage>(m).is_some()).expect("the preview");
         let pane = app.windows().windows().into_iter().find(|&p| app.windows().content(p) == Some(&id)).unwrap();
         (id, pane)
     }
 
     fn page(app: &App, id: BufferId) -> &DiagramPage {
-        match app.pages.get(&id).map(|s| &s.model) {
-            Some(PageModel::Diagram(p)) => p,
-            _ => panic!("a diagram page"),
-        }
+        app.feature_page::<DiagramPage>(id).expect("a diagram page")
     }
 
     #[test]
@@ -710,5 +766,28 @@ mod tests {
         let found: Vec<_> = app.features.iter().flat_map(|f| f.diagnostics(&path)).collect();
         assert_eq!(found.len(), 1);
         assert_eq!(app.all_diagnostics(&path).len(), 1);
+    }
+
+    #[test]
+    fn a_diagram_page_is_the_diagrams_with_their_mermaid_menu_and_node_outlines() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.config.notebook_folder = Some(dir.path().join("nb"));
+        app.notebook_create_diagram("Outline", "flowchart TD
+    a[One] --> b[Two]
+");
+        let (id, pane) = preview(&app);
+        app.ensure_page_layout(id, pane, 80);
+        app.ensure_page_layout(id, pane, 80);
+        let Some(PageModel::Feature(p)) = app.pages.get(&id).map(|s| &s.model) else { panic!("a feature page") };
+        assert_eq!(p.feature(), "fenix.diagrams");
+        assert!(app.page_title(id).starts_with("*diagram: "), "{}", app.page_title(id));
+        if let Some(page) = app.feature_page_mut::<DiagramPage>(id) {
+            page.selected = Some(1);
+        }
+        let Some(PageModel::Feature(p)) = app.pages.get(&id).map(|s| &s.model) else { unreachable!() };
+        assert!(p.image_marks().iter().any(|&(_, _, strong)| strong), "the selected node, outlined");
+        app.windows_mut().focus(pane);
+        assert!(app.local_contexts().contains(&crate::keymap::LocalContext::Mermaid), "the Mermaid menu, from the diagrams' spec");
     }
 }

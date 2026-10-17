@@ -21,10 +21,6 @@ impl App {
         if language == Some(fenix_syntax::LanguageId::Markdown) || reading {
             contexts.push(LocalContext::Markdown);
         }
-        let diagram = matches!(self.pages.get(&self.focused_buffer_id()).map(|s| &s.model), Some(super::pages::PageModel::Diagram(_)));
-        if language == Some(fenix_syntax::LanguageId::Mermaid) || diagram {
-            contexts.push(LocalContext::Mermaid);
-        }
         contexts
     }
 
