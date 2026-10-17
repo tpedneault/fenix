@@ -189,15 +189,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.toml");
-        std::fs::write(&path, "[[vnc.hosts]]
-name = \"build-vm\"
-host = \"10.0.0.5\"
-
-[[vnc.hosts]]
-name = \"test-vm\"
-host = \"10.0.0.6\"
-port = 5901
-").unwrap();
+        std::fs::write(&path, "[[vnc.hosts]]\nname = \"build-vm\"\nhost = \"10.0.0.5\"\n\n[[vnc.hosts]]\nname = \"test-vm\"\nhost = \"10.0.0.6\"\nport = 5901\n").unwrap();
         let mut config = fenix_config::Config::load(path.clone()).unwrap();
         let expected = vec![("build-vm".to_string(), "10.0.0.5".to_string(), 5900), ("test-vm".to_string(), "10.0.0.6".to_string(), 5901)];
         assert_eq!(hosts(&config), expected);
