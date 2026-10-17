@@ -15,9 +15,7 @@ use crate::git_rebase::{self, RebasePage};
 use crate::git_request::{self, RequestPage};
 use crate::agenda_page::{self, AgendaPage};
 use crate::jira_page::{self, JiraPage};
-use crate::mib_def::{self, DefPage};
-use crate::mib_form::{self, InsertForm};
-use crate::mib_page::{self, MibPage};
+use crate::mib_page;
 use crate::stream_page;
 use crate::settings_page::{self, SettingsPage};
 use crate::snippets_page::{self, SnippetsPage};
@@ -54,9 +52,6 @@ pub(super) enum PageModel {
     Review(Box<ReviewPage>),
     Agenda(Box<AgendaPage>),
     Jira(Box<JiraPage>),
-    Mib(Box<MibPage>),
-    MibDef(Box<DefPage>),
-    MibForm(Box<InsertForm>),
     Notebook(Box<NotebookPage>),
     Backlinks(Box<BacklinksPage>),
     Reading(Box<ReadingPage>),
@@ -102,9 +97,6 @@ impl PageState {
             PageModel::Snippets(p) => p.typing(),
             PageModel::Agenda(p) => p.typing(),
             PageModel::Jira(p) => p.typing(),
-            PageModel::Mib(p) => p.typing(),
-            PageModel::MibForm(p) => p.typing(),
-            PageModel::MibDef(p) => p.typing(),
             PageModel::Notebook(p) => p.typing(),
             PageModel::Diagram(p) => p.typing(),
             PageModel::Feature(p) => p.typing(),
@@ -121,8 +113,6 @@ impl PageState {
                 PageModel::UserSettings(p) => p.claims_space(),
                 PageModel::Agenda(p) => p.claims_space(),
                 PageModel::Jira(p) => p.claims_space(),
-                PageModel::Mib(p) => p.claims_space(),
-                PageModel::MibForm(p) => p.claims_space(),
                 PageModel::Feature(p) => p.claims_space(),
                 _ => false,
             }
@@ -144,9 +134,6 @@ impl PageState {
             PageModel::Snippets(p) => p.paste(text),
             PageModel::Agenda(p) => p.paste(text),
             PageModel::Jira(p) => p.paste(text),
-            PageModel::Mib(p) => p.paste(text),
-            PageModel::MibForm(p) => p.paste(text),
-            PageModel::MibDef(p) => p.paste(text),
             PageModel::Notebook(p) => p.paste(text),
             PageModel::Diagram(p) => p.paste(text),
             PageModel::Feature(p) => p.paste(text),
@@ -333,13 +320,13 @@ impl App {
             Some(PageModel::Review(r)) => format!("*review: {}*", r.reference()),
             Some(PageModel::Agenda(_)) => "*agenda*".to_string(),
             Some(PageModel::Jira(_)) => "*jira*".to_string(),
-            Some(PageModel::Mib(_)) => "*mib*".to_string(),
-            Some(PageModel::MibDef(p)) => mib_def::title(self.mib().and_then(|m| m.set_ready(&p.key)).as_deref(), p),
-            Some(PageModel::MibForm(f)) => mib_form::title(f),
             Some(PageModel::Notebook(_)) => "*notebook*".to_string(),
             Some(PageModel::Backlinks(p)) => format!("*links: {}*", p.name),
             Some(PageModel::Diagram(p)) => format!("*{}: {}*", if p.viewer { "view" } else { "diagram" }, p.title),
-            Some(PageModel::Feature(p)) => p.title(),
+            Some(PageModel::Feature(p)) => {
+                let title = self.features.specs().find(|spec| spec.id == p.feature()).and_then(|spec| spec.page_title);
+                title.and_then(|title| title(self, id)).unwrap_or_else(|| p.title())
+            }
             Some(PageModel::Reading(p)) => format!("*reading: {}*", p.path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
         }
     }
@@ -452,20 +439,9 @@ impl App {
         // the page is borrowed.
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
             .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
-        // The MIBs a MIB page shows, read (or started) before it's borrowed.
-        let mib_key = match self.pages.get(&id).map(|s| &s.model) {
-            Some(PageModel::Mib(p)) => Some(p.key.clone()),
-            Some(PageModel::MibDef(p)) => Some(p.key.clone()),
-            _ => None,
-        };
-        let mib = mib_key.map(|key| {
-            let (set, loading) = self.with_mib(|m, a| m.page_ctx_set(a, &key)).unwrap_or((None, false));
-            let (here, source) = super::mib_host::key_here(self);
-            (set, loading, if here == key { source } else { String::new() })
-        });
-        let apid_hex = super::mib_host::apid_hex(self);
-        let form_bytes = match self.pages.get(&id).map(|s| &s.model) {
-            Some(PageModel::MibForm(f)) if f.show_bytes => Some(self.mib().map_or_else(|| Err("the MIB isn't read yet".to_string()), |mib| mib.form_bytes(self, f))),
+        // What a feature's page reads besides itself, before it's borrowed.
+        let feature_ctx = match self.pages.get(&id) {
+            Some(s) if s.stale || s.cols != cols => Some(self.feature_page_context(id)),
             _ => None,
         };
         // Pages drawn with the reading layout borrow the app while they're
@@ -510,18 +486,9 @@ impl App {
                 };
                 jira_page::layout(p, &ctx, cols)
             }
-            PageModel::Mib(p) => {
-                let (set, loading, source) = mib.clone().unwrap_or_default();
-                mib_page::layout(p, &mib_page::Ctx { set: set.as_deref(), loading, apid_hex, source }, cols)
-            }
-            PageModel::MibDef(p) => {
-                let set = mib.clone().and_then(|m| m.0);
-                mib_def::layout(p, set.as_deref(), apid_hex, cols)
-            }
-            PageModel::MibForm(f) => mib_form::layout(f, form_bytes.as_ref(), cols),
             PageModel::Notebook(_) => precomputed.unwrap_or_default(),
             PageModel::Backlinks(p) => backlinks_page::layout(p, cols),
-            PageModel::Feature(p) => p.layout(cols),
+            PageModel::Feature(p) => p.layout(feature_ctx.as_deref().unwrap_or(&()), cols),
             PageModel::Reading(_) | PageModel::Diagram(_) => Page::default(),
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
@@ -620,13 +587,12 @@ impl App {
             return true;
         }
         let shift = self.modifiers.shift_key();
-        let is_def = matches!(state.model, PageModel::MibDef(_));
-        let is_form = matches!(state.model, PageModel::MibForm(_));
+        let claims_ctrl = |key: Key| matches!(&state.model, PageModel::Feature(p) if p.claims_ctrl(key));
         let key = match (keypress.code, keypress.mods.ctrl) {
             (KeyCode::Char('c'), true) => Key::CtrlC,
-            (KeyCode::Char('o'), true) if is_def => Key::CtrlO,
-            (KeyCode::Char('i'), true) if is_def => Key::CtrlI,
-            (KeyCode::Named(FenixNamedKey::Enter), true) if is_form => Key::CtrlEnter,
+            (KeyCode::Char('o'), true) if claims_ctrl(Key::CtrlO) => Key::CtrlO,
+            (KeyCode::Char('i'), true) if claims_ctrl(Key::CtrlI) => Key::CtrlI,
+            (KeyCode::Named(FenixNamedKey::Enter), true) if claims_ctrl(Key::CtrlEnter) => Key::CtrlEnter,
             (KeyCode::Char('o'), true) if typing => Key::CtrlO,
             // A field's caret, a word at a time.
             (KeyCode::Named(FenixNamedKey::Left), true) if typing => Key::WordLeft,
@@ -655,36 +621,13 @@ impl App {
         };
         let agenda = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Agenda(_)))
             .then(|| (self.agenda_worklog_rows(), self.agenda_sync_label(), self.agenda_worklog_round()));
-        let mib = match self.pages.get(&id).map(|s| &s.model) {
-            Some(PageModel::Mib(p)) => Some(p.key.clone()),
-            Some(PageModel::MibDef(p)) => Some(p.key.clone()),
-            _ => None,
-        }
-        .map(|key| (self.with_mib(|m, a| m.page_ctx_set(a, &key)).unwrap_or((None, false)), super::mib_host::key_here(self).1));
-        let apid_hex = super::mib_host::apid_hex(self);
+        let feature_ctx = self.feature_page_context(id);
         let Some(state) = self.pages.get_mut(&id) else { return false };
         state.stale = true;
         match &mut state.model {
-            PageModel::Mib(p) => {
-                let ((set, loading), source) = mib.unwrap_or_default();
-                let action = p.key(key, &mib_page::Ctx { set: set.as_deref(), loading, apid_hex, source });
-                self.with_mib(|m, a| m.page_action(a, action));
-            }
-            PageModel::MibDef(p) => {
-                let action = match mib.and_then(|((set, _), _)| set) {
-                    Some(set) => p.key(key, &set),
-                    None if matches!(key, Key::Char('q') | Key::Escape) => mib_def::Action::Close,
-                    None => mib_def::Action::None,
-                };
-                self.with_mib(|m, a| m.def_action(a, action));
-            }
-            PageModel::MibForm(f) => {
-                let action = f.key(key);
-                self.with_mib(|m, a| m.form_action(a, action));
-            }
             PageModel::Feature(p) => {
                 let feature = p.feature();
-                let action = p.key(key);
+                let action = p.key(key, &*feature_ctx);
                 let run = self.features.specs().find(|spec| spec.id == feature).and_then(|spec| spec.page_action);
                 if let Some(run) = run {
                     run(self, id, action);

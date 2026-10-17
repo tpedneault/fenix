@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use fenix_mib::{DefRef, Kind, MibRoot, MibSet};
 
-use super::feature::{Feature, FeatureCommand, FeaturePick, FeatureSpec, LeaderEntry, Notice};
+use super::feature::{page_as, Feature, FeatureCommand, FeaturePage, FeaturePick, FeatureSpec, LeaderEntry, Notice};
 use super::pages::{PageEvent, PageModel};
 use super::*;
 use crate::mib_def::{self, DefPage};
@@ -67,7 +67,12 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     picker_confirm: None,
     picker_cancel: None,
     modeline_clock: None,
-    page_action: None,
+    page_action: Some(page_action),
+    page_context: Some(page_context),
+    page_title: Some(|app, id| {
+        let p = app.feature_page::<DefPage>(id)?;
+        Some(mib_def::title(app.mib().and_then(|m| m.set_ready(&p.key)).as_deref(), p))
+    }),
 };
 
 /// A set of MIBs, read or being read.
@@ -287,14 +292,184 @@ fn copy_literal(app: &mut App, bytes: &[u8], buffer: Option<BufferId>, what: &st
     app.set_message(format!("copied {what}'s packet, {} bytes", bytes.len()));
 }
 
+/// The MIBs page `id` shows, if it's one of the MIB's pages.
+pub(super) fn page_key(app: &App, id: BufferId) -> Option<MibKey> {
+    app.feature_page::<MibPage>(id)
+        .map(|p| p.key.clone())
+        .or_else(|| app.feature_page::<DefPage>(id).map(|p| p.key.clone()))
+        .or_else(|| app.feature_page::<InsertForm>(id).map(|p| p.key.clone()))
+}
+
+/// What a MIB page reads besides itself: the set and whether it's still
+/// being read, where it comes from, how APIDs show, and the form's packet
+/// when it shows its bytes.
+#[derive(Default)]
+pub(super) struct PageCtx {
+    set: Option<Arc<MibSet>>,
+    loading: bool,
+    /// Where the MIBs come from -- only when they're the focused
+    /// project's, for the page's heading.
+    source_here: String,
+    /// The same, always (what a key reads).
+    source: String,
+    apid_hex: bool,
+    form_bytes: Option<Result<Vec<u8>, String>>,
+}
+
+impl PageCtx {
+    fn mib(&self) -> mib_page::Ctx<'_> {
+        mib_page::Ctx { set: self.set.as_deref(), loading: self.loading, apid_hex: self.apid_hex, source: self.source_here.clone() }
+    }
+}
+
+fn page_context(app: &mut App, id: BufferId) -> Box<dyn Any> {
+    let mut ctx = PageCtx { apid_hex: apid_hex(app), ..PageCtx::default() };
+    let key = app.feature_page::<MibPage>(id).map(|p| p.key.clone()).or_else(|| app.feature_page::<DefPage>(id).map(|p| p.key.clone()));
+    if let Some(key) = key {
+        (ctx.set, ctx.loading) = app.with_mib(|m, a| m.page_ctx_set(a, &key)).unwrap_or((None, false));
+        let (here, source) = key_here(app);
+        ctx.source_here = if here == key { source.clone() } else { String::new() };
+        ctx.source = source;
+    }
+    if let Some(f) = app.feature_page::<InsertForm>(id).filter(|f| f.show_bytes) {
+        ctx.form_bytes = Some(app.mib().map_or_else(|| Err("the MIB isn't read yet".to_string()), |mib| mib.form_bytes(app, f)));
+    }
+    Box::new(ctx)
+}
+
+/// What a key on one of the MIB's pages asked for, by the page's kind.
+fn page_action(app: &mut App, _id: BufferId, action: Box<dyn Any>) {
+    let action = match action.downcast::<mib_page::Action>() {
+        Ok(action) => return app.with_mib(|m, a| m.page_action(a, *action)).unwrap_or_default(),
+        Err(action) => action,
+    };
+    let action = match action.downcast::<mib_def::Action>() {
+        Ok(action) => return app.with_mib(|m, a| m.def_action(a, *action)).unwrap_or_default(),
+        Err(action) => action,
+    };
+    if let Ok(action) = action.downcast::<mib_form::Action>() {
+        app.with_mib(|m, a| m.form_action(a, *action));
+    }
+}
+
+fn ctx(ctx: &dyn Any) -> &PageCtx {
+    static NONE: std::sync::LazyLock<PageCtx> = std::sync::LazyLock::new(PageCtx::default);
+    ctx.downcast_ref().unwrap_or(&NONE)
+}
+
+/// The MIB page (`SPC k k`).
+impl FeaturePage for MibPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        "*mib*".to_string()
+    }
+
+    fn typing(&self) -> bool {
+        MibPage::typing(self)
+    }
+
+    fn claims_space(&self) -> bool {
+        MibPage::claims_space(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        MibPage::paste(self, text);
+    }
+
+    fn layout(&self, c: &dyn Any, cols: usize) -> crate::page::Page {
+        mib_page::layout(self, &ctx(c).mib(), cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key, c: &dyn Any) -> Box<dyn Any> {
+        let c = ctx(c);
+        let mut m = c.mib();
+        m.source = c.source.clone();
+        Box::new(MibPage::key(self, key, &m))
+    }
+}
+
+/// A definition (`Enter` on a MIB row, `gd` on a name).
+impl FeaturePage for DefPage {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    /// `*mib*` until the set's read; `SPEC.page_title` names the
+    /// definition once it is.
+    fn title(&self) -> String {
+        "*mib*".to_string()
+    }
+
+    fn typing(&self) -> bool {
+        DefPage::typing(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        DefPage::paste(self, text);
+    }
+
+    /// `Ctrl-o`/`Ctrl-i`: back and forward through the definitions
+    /// followed.
+    fn claims_ctrl(&self, key: crate::page::Key) -> bool {
+        matches!(key, crate::page::Key::CtrlO | crate::page::Key::CtrlI)
+    }
+
+    fn layout(&self, c: &dyn Any, cols: usize) -> crate::page::Page {
+        let c = ctx(c);
+        mib_def::layout(self, c.set.as_deref(), c.apid_hex, cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key, c: &dyn Any) -> Box<dyn Any> {
+        Box::new(match &ctx(c).set {
+            Some(set) => DefPage::key(self, key, set),
+            None if matches!(key, crate::page::Key::Char('q') | crate::page::Key::Escape) => mib_def::Action::Close,
+            None => mib_def::Action::None,
+        })
+    }
+}
+
+/// The insert form (`SPC k i`, `SPC k e`).
+impl FeaturePage for InsertForm {
+    fn feature(&self) -> &'static str {
+        SPEC.id
+    }
+
+    fn title(&self) -> String {
+        mib_form::title(self)
+    }
+
+    fn typing(&self) -> bool {
+        InsertForm::typing(self)
+    }
+
+    fn claims_space(&self) -> bool {
+        InsertForm::claims_space(self)
+    }
+
+    fn paste(&mut self, text: &str) {
+        InsertForm::paste(self, text);
+    }
+
+    /// `Ctrl-Enter`: insert the command.
+    fn claims_ctrl(&self, key: crate::page::Key) -> bool {
+        key == crate::page::Key::CtrlEnter
+    }
+
+    fn layout(&self, c: &dyn Any, cols: usize) -> crate::page::Page {
+        mib_form::layout(self, ctx(c).form_bytes.as_ref(), cols)
+    }
+
+    fn key(&mut self, key: crate::page::Key, _ctx: &dyn Any) -> Box<dyn Any> {
+        Box::new(InsertForm::key(self, key))
+    }
+}
+
 /// The MIBs of the focused MIB page.
 fn focused_key(app: &App) -> MibKey {
-    match app.pages.get(&app.focused_buffer_id()).map(|s| &s.model) {
-        Some(PageModel::Mib(p)) => p.key.clone(),
-        Some(PageModel::MibDef(p)) => p.key.clone(),
-        Some(PageModel::MibForm(p)) => p.key.clone(),
-        _ => key_here(app).0,
-    }
+    page_key(app, app.focused_buffer_id()).unwrap_or_else(|| key_here(app).0)
 }
 
 /// Whether the focused file is one where MIB names mean something.
@@ -316,7 +491,7 @@ fn in_this_file(app: &App) -> bool {
 /// Every MIB page is laid out again.
 fn mark_pages(app: &mut App) {
     for state in app.pages.values_mut() {
-        if matches!(state.model, PageModel::Mib(_) | PageModel::MibDef(_) | PageModel::MibForm(_)) {
+        if matches!(&state.model, PageModel::Feature(p) if p.feature() == SPEC.id) {
             state.stale = true;
         }
     }
@@ -328,16 +503,16 @@ fn mark_pages(app: &mut App) {
 /// `def`'s page: the open definition page goes to it (so `Ctrl-o` comes
 /// back), else a new one opens.
 pub(super) fn open_def(app: &mut App, key: MibKey, def: DefRef) {
-    let existing = app.find_page(|m| matches!(m, PageModel::MibDef(p) if p.key == key));
+    let existing = app.find_page(|m| page_as::<DefPage>(m).is_some_and(|p| p.key == key));
     match existing {
         Some(id) => {
-            if let Some(PageModel::MibDef(page)) = app.pages.get_mut(&id).map(|s| &mut s.model) {
+            if let Some(page) = app.feature_page_mut::<DefPage>(id) {
                 page.go(def);
             }
             app.show_page(id);
         }
         None => {
-            app.open_page(PageModel::MibDef(Box::new(DefPage::new(key, def))));
+            app.open_page(PageModel::Feature(Box::new(DefPage::new(key, def))));
         }
     }
 }
@@ -468,8 +643,8 @@ impl MibHost {
     /// The MIB settings changed: the MIB page follows the project's MIBs.
     pub(super) fn settings_changed(&mut self, app: &mut App) {
         let (key, _) = key_here(app);
-        if let Some(id) = app.find_page(|m| matches!(m, PageModel::Mib(_))) {
-            if let Some(PageModel::Mib(page)) = app.pages.get_mut(&id).map(|s| &mut s.model) {
+        if let Some(id) = app.find_page(|m| page_as::<MibPage>(m).is_some()) {
+            if let Some(page) = app.feature_page_mut::<MibPage>(id) {
                 page.key = key;
             }
         }
@@ -500,15 +675,15 @@ impl MibHost {
     pub(super) fn cmd_page(&mut self, app: &mut App) {
         let (key, _) = key_here(app);
         let _ = self.set(app, &key);
-        match app.find_page(|m| matches!(m, PageModel::Mib(_))) {
+        match app.find_page(|m| page_as::<MibPage>(m).is_some()) {
             Some(id) => {
-                if let Some(PageModel::Mib(page)) = app.pages.get_mut(&id).map(|s| &mut s.model) {
+                if let Some(page) = app.feature_page_mut::<MibPage>(id) {
                     page.key = key;
                 }
                 app.show_page(id);
             }
             None => {
-                app.open_page(PageModel::Mib(Box::new(MibPage::new(key))));
+                app.open_page(PageModel::Feature(Box::new(MibPage::new(key))));
             }
         }
     }
@@ -580,7 +755,7 @@ impl MibHost {
         let mut form = InsertForm::new(&set, key.clone(), tc, templates, None, apid_hex(app));
         form.fill(&args);
         form.replacing = true;
-        let id = app.open_page(PageModel::MibForm(Box::new(form)));
+        let id = app.open_page(PageModel::Feature(Box::new(form)));
         self.origins.insert(id, MibOrigin { buffer, range });
     }
 
@@ -598,7 +773,7 @@ impl MibHost {
         let remembered = self.last.get(&(key.project.clone(), set.get(tc).name.clone()));
         let templates = templates(app, &key);
         let form = InsertForm::new(&set, key, tc, templates, remembered, apid_hex(app));
-        let id = app.open_page(PageModel::MibForm(Box::new(form)));
+        let id = app.open_page(PageModel::Feature(Box::new(form)));
         self.origins.insert(id, MibOrigin { buffer, range: at..at });
     }
 
@@ -647,7 +822,7 @@ impl MibHost {
             mib_form::Action::Open(def) => open_def(app, key, def),
             mib_form::Action::Insert(text) => self.form_insert(app, id, text),
             mib_form::Action::CopyBytes | mib_form::Action::DecodeBytes => {
-                let Some(PageModel::MibForm(f)) = app.pages.get(&id).map(|s| &s.model) else { return };
+                let Some(f) = app.feature_page::<InsertForm>(id) else { return };
                 let name = f.name().to_string();
                 let origin = self.origins.get(&id).map(|o| o.buffer);
                 match self.form_bytes(app, f) {
@@ -693,10 +868,7 @@ impl MibHost {
     /// the file it went into is back in front with the cursor after it.
     fn form_insert(&mut self, app: &mut App, id: BufferId, text: String) {
         let Some(origin) = self.origins.remove(&id) else { return };
-        let (tc, project, values) = match app.pages.get(&id).map(|s| &s.model) {
-            Some(PageModel::MibForm(form)) => (form.name().to_string(), form.key.project.clone(), form.values()),
-            _ => return,
-        };
+        let Some((tc, project, values)) = app.feature_page::<InsertForm>(id).map(|form| (form.name().to_string(), form.key.project.clone(), form.values())) else { return };
         self.last.insert((project, tc.clone()), values);
         let Some(ob) = app.buffers.get_mut(origin.buffer) else {
             app.set_error("the file the form was opened from is closed");
@@ -1199,8 +1371,25 @@ mod tests {
             state.push_char(c);
         }
         app.picker_confirm();
-        assert!(matches!(app.pages.get(&app.focused_buffer_id()).map(|s| &s.model), Some(PageModel::MibDef(_))));
+        assert!(app.feature_page::<DefPage>(app.focused_buffer_id()).is_some());
         assert!(page_text(&mut app).contains("ZTC17001"));
+    }
+
+    #[test]
+    fn a_definition_page_is_named_and_laid_out_from_its_features_context_and_claims_ctrl_o() {
+        let (_p, mut app) = project("def_page", "");
+        let (key, _) = key_here(&app);
+        let set = app.with_mib(|m, a| m.set(a, &key)).flatten().expect("read inline");
+        let tc = set.resolve("ZTC17001").expect("in the sample MIB");
+        open_def(&mut app, key, tc);
+        let id = app.focused_buffer_id();
+        assert_eq!(app.page_title(id), "*mib: ZTC17001*", "named through `page_title` once the set is read");
+        app.ensure_page_layout(id, app.focused_pane_id(), 120);
+        assert!(app.open().buffer.text().contains("ZTC17001"), "laid out with the set from `page_context`");
+        let Some(PageModel::Feature(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!("a feature page") };
+        assert!(page.claims_ctrl(crate::page::Key::CtrlO) && !page.claims_ctrl(crate::page::Key::CtrlEnter));
+        assert!(app.page_key(KeyPress::char('q')));
+        assert!(!app.is_page_buffer(id), "q closed it, through `page_action`");
     }
 
     #[test]

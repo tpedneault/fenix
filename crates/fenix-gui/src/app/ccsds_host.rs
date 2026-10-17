@@ -51,6 +51,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     modeline_clock: Some(|app| app.mission_clock_text()),
     // What a key asked for on one of its pages.
     page_action: Some(|app, id, action| app.ccsds_page_action(id, action)),
+    page_context: None,
+    page_title: None,
 };
 
 /// What CCSDS keeps between calls: each stream page's source, the
@@ -106,11 +108,11 @@ impl super::feature::FeaturePage for PacketPage {
         PacketPage::paste(self, text);
     }
 
-    fn layout(&self, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
         packet_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
         Box::new(PacketPage::key(self, key))
     }
 }
@@ -137,11 +139,11 @@ impl super::feature::FeaturePage for HexPage {
         HexPage::paste(self, text);
     }
 
-    fn layout(&self, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
         hex_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
         Box::new(HexPage::key(self, key))
     }
 }
@@ -168,11 +170,11 @@ impl super::feature::FeaturePage for StreamPage {
         StreamPage::paste(self, text);
     }
 
-    fn layout(&self, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
         stream_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
         Box::new(StreamPage::key(self, key))
     }
 
@@ -200,11 +202,11 @@ impl super::feature::FeaturePage for StandardsPage {
         self.query.paste(text);
     }
 
-    fn layout(&self, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
         crate::standards_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
         Box::new(StandardsPage::key(self, key))
     }
 }
@@ -231,11 +233,11 @@ impl super::feature::FeaturePage for TimePage {
         TimePage::paste(self, text);
     }
 
-    fn layout(&self, cols: usize) -> crate::page::Page {
+    fn layout(&self, _ctx: &dyn std::any::Any, cols: usize) -> crate::page::Page {
         time_page::layout(self, cols)
     }
 
-    fn key(&mut self, key: crate::page::Key) -> Box<dyn std::any::Any> {
+    fn key(&mut self, key: crate::page::Key, _ctx: &dyn std::any::Any) -> Box<dyn std::any::Any> {
         Box::new(TimePage::key(self, key))
     }
 }
@@ -978,13 +980,7 @@ impl App {
         if let Some(key) = self.feature_page::<StreamPage>(id).map(|p| &p.key).or_else(|| self.feature_page::<PacketPage>(id).map(|p| &p.key)) {
             return key.project.clone();
         }
-        let key = match self.pages.get(&id).map(|s| &s.model)? {
-            PageModel::Mib(p) => &p.key,
-            PageModel::MibDef(p) => &p.key,
-            PageModel::MibForm(p) => &p.key,
-            _ => return None,
-        };
-        key.project.clone()
+        super::mib_host::page_key(self, id)?.project
     }
 
     /// The file a mission command acts on: the explorer's selection, the

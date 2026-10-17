@@ -54,6 +54,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         picker_cancel: None,
         modeline_clock: None,
         page_action: None,
+        page_context: None,
+        page_title: None,
     }
 };
 
