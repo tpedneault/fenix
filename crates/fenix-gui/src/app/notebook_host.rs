@@ -131,6 +131,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::LeaderEntry::{Bind, Group};
     super::feature::FeatureSpec {
         id: "fenix.notebook",
+        name: "Notebook",
+        about: "Notes, a daily journal, links and quick captures",
         commands: &[
             C { id: "notebook.open", description: "The notebook: every note, journal day and diagram", external: true, run: |app| app.open_notebook_page() },
             C { id: "notebook.new_note", description: "A new note, from a template", external: true, run: |app| app.notebook_new_note() },

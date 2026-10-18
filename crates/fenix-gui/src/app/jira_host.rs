@@ -112,6 +112,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::LeaderEntry::{Bind, Group};
     super::feature::FeatureSpec {
         id: "fenix.jira",
+        name: "Jira",
+        about: "Your issues, and the agenda kept in step with them",
         commands: &[
             C {
                 id: "jira.open",

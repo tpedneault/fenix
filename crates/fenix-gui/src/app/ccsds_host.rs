@@ -71,6 +71,8 @@ static SETTINGS: [fenix_config::Setting; 24] = {
 
 pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpec {
     id: "fenix.ccsds",
+    name: "CCSDS & PUS",
+    about: "Packets and frames decoded, recordings, live telemetry, the standards",
     commands: &[
         super::feature::FeatureCommand { id: "ccsds.time", description: "Time converter: on-board time codes, UTC, TAI, GPS, CDS", external: true, run: |app| app.cmd_ccsds_time() },
         super::feature::FeatureCommand { id: "ccsds.hex", description: "Show the file as hex (view only)", external: false, run: |app| app.cmd_hex_view() },

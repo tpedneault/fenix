@@ -11,6 +11,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::LeaderEntry::{Bind, Group};
     super::feature::FeatureSpec {
         id: "fenix.vnc",
+        name: "VNC",
+        about: "Remote desktops in a pane",
         commands: &[
             C { id: "vnc.open", description: "Open or switch to a configured VNC session", external: true, run: |app| app.start_vnc_picker() },
             C { id: "vnc.close", description: "Close the focused VNC session", external: false, run: |app| app.vnc_close_focused_session() },

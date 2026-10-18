@@ -286,6 +286,16 @@ keys = "SPC ,"
 label = "settings"
 command = "settings.open"
 
+# Help: what's here, and how to find it.
+[[leader]]
+keys = "SPC h"
+group = "help"
+
+[[leader]]
+keys = "SPC h x"
+label = "extensions"
+command = "extensions.open"
+
 [[leader]]
 keys = "SPC p c"
 label = "new project"

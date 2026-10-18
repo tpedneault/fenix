@@ -18,6 +18,8 @@ use super::*;
 /// Tcl's commands, its `SPC m` entries and its language lookups.
 pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     id: "fenix.tcl",
+    name: "Tcl",
+    about: "Tcl scripts: completion, hover and the language server",
     commands: &[
         FeatureCommand {
             id: "completion.refresh_tags",

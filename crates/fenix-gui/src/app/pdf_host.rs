@@ -23,6 +23,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::LeaderEntry::{Bind, Group};
     super::feature::FeatureSpec {
         id: "fenix.pdf",
+        name: "PDF reader",
+        about: "Read PDFs in a pane, with an outline and marks",
         commands: &[
             C { id: "pdf.next_page", description: "Turn the focused PDF session to the next page", external: false, run: |app| app.pdf_next_page() },
             C { id: "pdf.prev_page", description: "Turn the focused PDF session to the previous page", external: false, run: |app| app.pdf_prev_page() },

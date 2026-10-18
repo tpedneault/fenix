@@ -59,6 +59,10 @@ pub(crate) enum LeaderEntry {
 pub(crate) struct FeatureSpec {
     /// The id it will keep as an extension (`fenix.docker`).
     pub id: &'static str,
+    /// What the Extensions page calls it ("PDF reader").
+    pub name: &'static str,
+    /// What it's for, in a line.
+    pub about: &'static str,
     pub commands: &'static [FeatureCommand],
     pub leader: &'static [LeaderEntry],
     /// Its `SPC m` menu, as the keys after `SPC m`, shown in the buffers
