@@ -302,6 +302,26 @@ label = "extensions"
 command = "extensions.open"
 
 [[leader]]
+keys = "SPC h k"
+label = "describe a key"
+command = "keys.describe_key"
+
+[[leader]]
+keys = "SPC h c"
+label = "describe a command"
+command = "keys.describe_command"
+
+[[leader]]
+keys = "SPC h b"
+label = "the keys bound here"
+command = "keys.bindings"
+
+[[leader]]
+keys = "SPC h e"
+label = "your keybindings"
+command = "keys.edit"
+
+[[leader]]
 keys = "SPC p c"
 label = "new project"
 command = "project.new"

@@ -175,16 +175,140 @@ fn insert_entries(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &
     }
 }
 
+/// The leader map in use: built on first use, and again when your
+/// keybindings change (`reload_leader`). A rebuilt map replaces it; one a
+/// matcher still walks stays alive (they're leaked, and few).
+static LEADER: std::sync::RwLock<Option<&'static KeyTrie<&'static str>>> = std::sync::RwLock::new(None);
+
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
-    static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
-    TRIE.get_or_init(|| {
-        let t = build_leader(&crate::app::feature::enabled);
+    if let Some(t) = *LEADER.read().unwrap_or_else(|p| p.into_inner()) {
+        return t;
+    }
+    static CONFLICTS: std::sync::Once = std::sync::Once::new();
+    CONFLICTS.call_once(|| {
         // A key bound twice silently goes to whichever came last.
         for conflict in keymap_conflicts() {
             eprintln!("fenix: keymap: {conflict}");
         }
-        t
-    })
+    });
+    reload_leader();
+    LEADER.read().unwrap_or_else(|p| p.into_inner()).expect("just built")
+}
+
+/// Builds the leader map again -- Fenix's keys, the switched-on
+/// features', then yours (`keybindings.toml`) -- and puts it in use.
+/// Returns what's wrong with your file (also kept: `user_key_problems`).
+pub fn reload_leader() -> Vec<String> {
+    let mut t = build_leader(&crate::app::feature::enabled);
+    let registry = crate::commands::CommandRegistry::with_builtins();
+    let known = |id: &str| registry.get(id).is_some();
+    let (bound, problems) = match user_keymap_path() {
+        Some(path) => match read_user_keymap(&path) {
+            Ok(Some(user)) => apply_user_keys(&mut t, user, &known),
+            Ok(None) => (Vec::new(), Vec::new()),
+            Err(problem) => (Vec::new(), vec![problem]),
+        },
+        None => (Vec::new(), Vec::new()),
+    };
+    *USER_KEYS.lock().unwrap_or_else(|p| p.into_inner()) = (bound, problems.clone());
+    *LEADER.write().unwrap_or_else(|p| p.into_inner()) = Some(Box::leak(Box::new(t)));
+    problems
+}
+
+/// Your keybindings: `keybindings.toml`, beside `settings.toml`. None
+/// in tests, which mustn't read whoever runs them's file.
+pub fn user_keymap_path() -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    fenix_storage::paths::Roots::current().map(|roots| roots.settings_file().with_file_name("keybindings.toml"))
+}
+
+/// One of your bindings, as the map has it now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserKey {
+    /// `SPC o s`.
+    pub keys: String,
+    /// What it runs; `None` when you unbound it.
+    pub command: Option<String>,
+    /// What Fenix had there, if anything.
+    pub replaced: Option<&'static str>,
+}
+
+/// Your bindings, and what was wrong with the file, from its last read.
+static USER_KEYS: std::sync::Mutex<(Vec<UserKey>, Vec<String>)> = std::sync::Mutex::new((Vec::new(), Vec::new()));
+
+/// Your bindings in use (`SPC h b` marks them).
+pub fn user_keys() -> Vec<UserKey> {
+    USER_KEYS.lock().unwrap_or_else(|p| p.into_inner()).0.clone()
+}
+
+/// What's wrong with `keybindings.toml`, from its last read.
+pub fn user_key_problems() -> Vec<String> {
+    USER_KEYS.lock().unwrap_or_else(|p| p.into_inner()).1.clone()
+}
+
+/// Your file, parsed: `None` when there isn't one. It's kept for good
+/// (the map's labels and commands borrow from it); a few are, one per
+/// reload.
+fn read_user_keymap(path: &std::path::Path) -> Result<Option<&'static KeymapData>, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let data: KeymapData = toml::from_str(&text).map_err(|e| format!("keybindings.toml: {}", e.message()))?;
+    Ok(Some(Box::leak(Box::new(data))))
+}
+
+/// Lays your `[[leader]]` entries over `t`: each binds keys to a command
+/// (shown as its `label`), names a `group`, or (`unbind = true`) takes
+/// Fenix's binding away. What can't be done is said, not done.
+fn apply_user_keys(t: &mut KeyTrie<&'static str>, user: &'static KeymapData, known: &dyn Fn(&str) -> bool) -> (Vec<UserKey>, Vec<String>) {
+    let mut bound = Vec::new();
+    let mut problems = Vec::new();
+    if !user.local.is_empty() {
+        problems.push("[[local.*]] menus aren't yours to change yet -- only [[leader]] keys".to_string());
+    }
+    for entry in &user.leader {
+        let keys = match parse_keys(&entry.keys) {
+            Ok(keys) if keys.first() == Some(&KeyPress::char(' ')) && keys.len() > 1 => keys,
+            Ok(_) => {
+                problems.push(format!("{}: your keys start with SPC, then at least one more", entry.keys));
+                continue;
+            }
+            Err(e) => {
+                problems.push(e);
+                continue;
+            }
+        };
+        let text = keys.iter().map(describe_keypress).collect::<Vec<_>>().join(" ");
+        if entry.unbind {
+            let replaced = t.remove(&keys);
+            if replaced.is_none() {
+                problems.push(format!("{text}: nothing to unbind"));
+            }
+            bound.push(UserKey { keys: text, command: None, replaced });
+            continue;
+        }
+        if let Some(group) = entry.group.as_deref() {
+            t.label_group(&keys, group);
+        }
+        let Some(command) = entry.command.as_deref() else {
+            if entry.group.is_none() {
+                problems.push(format!("{text}: needs a command, a group, or unbind = true"));
+            }
+            continue;
+        };
+        if !known(command) {
+            problems.push(format!("{text}: {command} isn't a command (SPC h c lists them)"));
+            continue;
+        }
+        let replaced = t.get(&keys).copied().filter(|old| *old != command);
+        t.insert(&keys, entry.label.as_deref().unwrap_or(command), command);
+        bound.push(UserKey { keys: text, command: Some(command.to_string()), replaced });
+    }
+    (bound, problems)
 }
 
 /// The leader map with the features `on` says are on: core's keys, less
@@ -247,6 +371,9 @@ struct KeyEntry {
     group: Option<String>,
     #[serde(default)]
     section: Option<String>,
+    /// Yours only (`keybindings.toml`): take Fenix's binding at `keys` away.
+    #[serde(default)]
+    unbind: bool,
 }
 
 fn default_keymap() -> &'static KeymapData {
@@ -732,6 +859,50 @@ mod tests {
         m.feed(KeyPress::char(' '));
         m.feed(KeyPress::char('f'));
         assert!(matches!(m.feed(KeyPress::char('n')), fenix_keymap::Step::Matched(&"embedded.new_sketch")));
+    }
+
+    /// Your keys go over Fenix's: a new binding, one moved to another
+    /// command, one taken away, and what can't be done said.
+    #[test]
+    fn your_keys_go_over_the_defaults() {
+        let mut t = build_leader(&|_| true);
+        let user: &'static KeymapData = Box::leak(Box::new(
+            toml::from_str(
+                r#"
+[[leader]]
+keys = "SPC o s"
+command = "file.save"
+label = "save it"
+
+[[leader]]
+keys = "SPC f s"
+command = "agenda.open"
+
+[[leader]]
+keys = "SPC a k"
+unbind = true
+
+[[leader]]
+keys = "SPC o x"
+command = "no.such"
+
+[[leader]]
+keys = "x y"
+command = "file.save"
+"#,
+            )
+            .unwrap(),
+        ));
+        let known = |id: &str| id == "file.save" || id == "agenda.open";
+        let (bound, problems) = apply_user_keys(&mut t, user, &known);
+        let seq = |text: &str| parse_keys(text).unwrap();
+        assert_eq!(t.get(&seq("SPC o s")), Some(&"file.save"));
+        assert_eq!(t.get(&seq("SPC f s")), Some(&"agenda.open"));
+        assert_eq!(t.get(&seq("SPC a k")), None);
+        assert!(bound.contains(&UserKey { keys: "SPC f s".into(), command: Some("agenda.open".into()), replaced: Some("file.save") }), "{bound:?}");
+        assert!(bound.iter().any(|b| b.keys == "SPC a k" && b.command.is_none() && b.replaced == Some("agenda.board")), "{bound:?}");
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(problems.iter().any(|p| p.contains("no.such isn't a command")) && problems.iter().any(|p| p.contains("start with SPC")));
     }
 
     /// A switched-off feature's keys aren't in the leader map: its own

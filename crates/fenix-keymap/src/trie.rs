@@ -93,6 +93,26 @@ impl<A> KeyTrie<A> {
         Matcher { trie: self, current: None, path: Vec::new() }
     }
 
+    /// The action `seq` reaches exactly, if it's bound.
+    pub fn get(&self, seq: &[KeyPress]) -> Option<&A> {
+        let mut node = &self.root;
+        for key in seq {
+            node = node.children.get(key)?;
+        }
+        node.leaf.as_ref()
+    }
+
+    /// Unbinds `seq` (its action and label; a group under it stays),
+    /// returning what it ran.
+    pub fn remove(&mut self, seq: &[KeyPress]) -> Option<A> {
+        let mut node = &mut self.root;
+        for key in seq {
+            node = node.children.get_mut(key)?;
+        }
+        node.label = None;
+        node.leaf.take()
+    }
+
     /// Every sequence that reaches an action, with the action: what a
     /// list of commands needs to say which keys run each. A sequence
     /// that runs through another action's key isn't listed, since the
@@ -371,5 +391,22 @@ mod tests {
             Step::Matched(&"edit.redo") => {}
             _ => panic!("expected Matched"),
         }
+    }
+}
+
+#[cfg(test)]
+mod get_remove {
+    use super::*;
+
+    #[test]
+    fn a_binding_is_found_and_taken_out() {
+        let mut t = KeyTrie::new();
+        let seq = [KeyPress::char(' '), KeyPress::char('f'), KeyPress::char('s')];
+        t.insert(&seq, "save", "file.save");
+        assert_eq!(t.get(&seq), Some(&"file.save"));
+        assert_eq!(t.get(&seq[..2]), None, "a group runs nothing");
+        assert_eq!(t.remove(&seq), Some("file.save"));
+        assert_eq!(t.get(&seq), None);
+        assert!(t.bindings().is_empty());
     }
 }
