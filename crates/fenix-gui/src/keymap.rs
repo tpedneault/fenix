@@ -110,16 +110,16 @@ impl LocalContext {
 
     fn bind(self, t: &mut KeyTrie<&'static str>) {
         match self {
-            LocalContext::Arduino => insert_entries(t, &[], crate::app::EMBEDDED_SPEC.local_menu),
+            LocalContext::Arduino => insert_spec_menu(t, &crate::app::EMBEDDED_SPEC),
             LocalContext::Reader => insert_data(t, &[], default_local("reader")),
             LocalContext::Markdown => {
                 insert_data(t, &[], default_local("markdown"));
-                insert_entries(t, &[], crate::app::NOTEBOOK_SPEC.local_menu);
+                insert_spec_menu(t, &crate::app::NOTEBOOK_SPEC);
             }
-            LocalContext::Mermaid => insert_entries(t, &[], crate::app::DIAGRAMS_SPEC.local_menu),
+            LocalContext::Mermaid => insert_spec_menu(t, &crate::app::DIAGRAMS_SPEC),
             LocalContext::Tcl => {
-                insert_entries(t, &[], crate::app::MIB_SPEC.local_menu);
-                insert_entries(t, &[], crate::app::TCL_SPEC.local_menu);
+                insert_spec_menu(t, &crate::app::MIB_SPEC);
+                insert_spec_menu(t, &crate::app::TCL_SPEC);
             }
         }
     }
@@ -156,6 +156,13 @@ fn insert_feature_keys(t: &mut KeyTrie<&'static str>, spc: KeyPress, spec: &crat
     insert_entries(t, &[spc], spec.leader);
 }
 
+/// A feature's `SPC m` entries, when it's switched on.
+fn insert_spec_menu(t: &mut KeyTrie<&'static str>, spec: &crate::app::feature::FeatureSpec) {
+    if crate::app::feature::enabled(spec.id) {
+        insert_entries(t, &[], spec.local_menu);
+    }
+}
+
 /// Adds `entries` (a feature's leader or `SPC m` keys) under `prefix`.
 fn insert_entries(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &[crate::app::feature::LeaderEntry]) {
     use crate::app::feature::LeaderEntry;
@@ -171,18 +178,27 @@ fn insert_entries(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     static TRIE: OnceLock<KeyTrie<&'static str>> = OnceLock::new();
     TRIE.get_or_init(|| {
-        let mut t = KeyTrie::new();
-        insert_data(&mut t, &[], &default_keymap().leader);
-        let spc = KeyPress::char(' ');
-        for spec in LEADER_FEATURES {
-            insert_feature_keys(&mut t, spc, spec);
-        }
+        let t = build_leader(&crate::app::feature::enabled);
         // A key bound twice silently goes to whichever came last.
         for conflict in keymap_conflicts() {
             eprintln!("fenix: keymap: {conflict}");
         }
         t
     })
+}
+
+/// The leader map with the features `on` says are on: core's keys, less
+/// those bound to a switched-off feature's commands (and groups and
+/// sections left with nothing under them), then the features' own.
+fn build_leader(on: &dyn Fn(&str) -> bool) -> KeyTrie<&'static str> {
+    let off = crate::app::feature::commands_switched_off(on);
+    let mut t = KeyTrie::new();
+    insert_data_without(&mut t, &[], &default_keymap().leader, &off, on);
+    let spc = KeyPress::char(' ');
+    for spec in LEADER_FEATURES.iter().filter(|spec| on(spec.id)) {
+        insert_feature_keys(&mut t, spc, spec);
+    }
+    t
 }
 
 /// The features whose keys go under the leader, after core's.
@@ -262,9 +278,25 @@ pub(crate) fn parse_keys(text: &str) -> Result<Vec<KeyPress>, String> {
 
 /// Lays `entries` into `t` under `prefix`.
 fn insert_data(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &'static [KeyEntry]) {
-    for entry in entries {
+    insert_data_without(t, prefix, entries, &[], &|_| true);
+}
+
+/// `insert_data`, leaving out the bindings to `off` commands, and a group
+/// or section that then has nothing under it.
+fn insert_data_without(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &'static [KeyEntry], off: &[&str], on: &dyn Fn(&str) -> bool) {
+    let keys_of = |entry: &KeyEntry| -> Vec<KeyPress> {
         let keys = parse_keys(&entry.keys).unwrap_or_else(|e| panic!("the built-in keymap: {e}"));
-        let seq: Vec<KeyPress> = prefix.iter().copied().chain(keys).collect();
+        prefix.iter().copied().chain(keys).collect()
+    };
+    let bound: Vec<Vec<KeyPress>> = entries.iter().filter(|e| e.command.as_deref().is_some_and(|c| !off.contains(&c))).map(keys_of).collect();
+    for entry in entries {
+        if entry.command.as_deref().is_some_and(|c| off.contains(&c)) {
+            continue;
+        }
+        if entry.command.is_none() && !off.is_empty() && !bound.iter().any(|b| b.starts_with(&keys_of(entry))) && !feature_keys_under(&keys_of(entry), on) {
+            continue;
+        }
+        let seq = keys_of(entry);
         if let Some(command) = entry.command.as_deref() {
             t.insert(&seq, entry.label.as_deref().unwrap_or(command), command);
         }
@@ -275,6 +307,18 @@ fn insert_data(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &'st
             t.set_section(&seq, section);
         }
     }
+}
+
+/// Whether a switched-on feature binds something under `seq` (a group
+/// core names that a feature fills, like the review feature's keys in
+/// `SPC g`).
+fn feature_keys_under(seq: &[KeyPress], on: &dyn Fn(&str) -> bool) -> bool {
+    use crate::app::feature::LeaderEntry;
+    let spc = KeyPress::char(' ');
+    LEADER_FEATURES.iter().filter(|spec| on(spec.id)).flat_map(|spec| spec.leader).any(|entry| match entry {
+        LeaderEntry::Bind(keys, ..) => std::iter::once(spc).chain(keys.iter().map(|&c| KeyPress::char(c))).collect::<Vec<_>>().starts_with(seq),
+        LeaderEntry::Group(..) => false,
+    })
 }
 
 /// Keys bound or named twice -- in the leader map, or in one `SPC m`
@@ -688,6 +732,25 @@ mod tests {
         m.feed(KeyPress::char(' '));
         m.feed(KeyPress::char('f'));
         assert!(matches!(m.feed(KeyPress::char('n')), fenix_keymap::Step::Matched(&"embedded.new_sketch")));
+    }
+
+    /// A switched-off feature's keys aren't in the leader map: its own
+    /// (`SPC j`), core's bindings to its commands (`SPC k` for MIB and
+    /// CCSDS), and the groups that leaves empty.
+    #[test]
+    fn a_switched_off_feature_has_no_keys() {
+        let all = build_leader(&|_| true);
+        let bindings = |t: &KeyTrie<&'static str>| t.bindings().into_iter().map(|(_, id)| *id).collect::<Vec<&'static str>>();
+        assert!(bindings(&all).contains(&"jira.open") && bindings(&all).contains(&"mib.page"));
+        let some = build_leader(&|id| id != "fenix.jira" && id != "fenix.mib" && id != "fenix.ccsds");
+        let ids = bindings(&some);
+        assert!(!ids.iter().any(|id| id.starts_with("jira.") || id.starts_with("mib.") || id.starts_with("ccsds.")), "{ids:?}");
+        assert!(ids.contains(&"agenda.open") && ids.contains(&"file.save"), "the rest are all there");
+        let mut m = some.matcher();
+        m.feed(KeyPress::char(' '));
+        let hints: Vec<String> = m.pending_hints().into_iter().map(|h| describe_keypress(&h.key)).collect();
+        assert!(!hints.contains(&"j".to_string()) && !hints.contains(&"k".to_string()), "no empty jira or mission group: {hints:?}");
+        assert!(hints.contains(&"a".to_string()) && hints.contains(&"f".to_string()));
     }
 
     #[test]

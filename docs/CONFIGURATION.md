@@ -273,6 +273,10 @@ when it's out of date).
 | `session.restore_windows` | true / false | on | Put Fenix's windows back where they were, on the monitors they were on. *Needs a restart.* |
 | `session.restore_session` | true / false | on | Reopen the workspaces and files you had open. *Needs a restart.* |
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
+| **Extensions** | | | |
+| `extensions.disabled` | a list | none | Built-in extensions that are switched off, by id (fenix.jira, fenix.pdf): their commands, keys, settings and pages aren't there. The Extensions page (SPC h x) switches them. *Needs a restart.* |
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1844 filtered out; finished in 0.00s
 
 **Shelves, not autostart.** VNC hosts, documents and the workspace
 shelf make things selectable (`SPC v v`, `SPC r f`, `SPC TAB f`); none of

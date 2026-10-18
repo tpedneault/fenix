@@ -88,10 +88,11 @@ pub enum Category {
     Notebook,
     Documents,
     Session,
+    Extensions,
 }
 
 impl Category {
-    pub const ALL: [Category; 16] = [
+    pub const ALL: [Category; 17] = [
         Category::Editor,
         Category::Appearance,
         Category::Motion,
@@ -108,6 +109,7 @@ impl Category {
         Category::Notebook,
         Category::Documents,
         Category::Session,
+        Category::Extensions,
     ];
 
     pub fn label(self) -> &'static str {
@@ -128,6 +130,7 @@ impl Category {
             Category::Notebook => "Notebook & diagrams",
             Category::Documents => "Workspaces",
             Category::Session => "Windows & session",
+            Category::Extensions => "Extensions",
         }
     }
 }
@@ -429,6 +432,8 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("session.restore_windows", Session, "Reopen windows", Kind::Bool, "Put Fenix's windows back where they were, on the monitors they were on.", field!(restore_windows, bool_get, bool_set)).default("on").restart(),
         s("session.restore_session", Session, "Reopen workspaces", Kind::Bool, "Reopen the workspaces and files you had open.", field!(restore_session, bool_get, bool_set)).default("on").restart(),
         s("session.workspace_per_project", Session, "A workspace per project", Kind::Bool, "Opening a project gives it a workspace of its own.", field!(workspace_per_project, bool_get, bool_set)).default("on"),
+        // Extensions
+        s("extensions.disabled", Extensions, "Switched off", Kind::List, "Built-in extensions that are switched off, by id (fenix.jira, fenix.pdf): their commands, keys, settings and pages aren't there. The Extensions page (SPC h x) switches them.", field!(extensions_disabled, list_get, list_set)).default("none").restart(),
     ]
 });
 

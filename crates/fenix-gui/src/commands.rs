@@ -71,11 +71,19 @@ pub enum ExternalError {
 
 pub struct CommandRegistry {
     commands: Vec<Command>,
+    /// The features switched off, whose commands aren't registered.
+    off: Vec<&'static str>,
 }
 
 impl CommandRegistry {
     pub fn with_builtins() -> Self {
-        let mut registry = Self { commands: Vec::new() };
+        Self::with_builtins_where(&crate::app::feature::enabled)
+    }
+
+    /// Core's commands and those of the features `on` says are on.
+    pub fn with_builtins_where(on: &dyn Fn(&str) -> bool) -> Self {
+        let off = crate::app::feature::BUILTIN_SPECS.iter().filter(|spec| !on(spec.id)).map(|spec| spec.id).collect();
+        let mut registry = Self { commands: Vec::new(), off };
         registry.external("snippets.open", "Every snippet: make, edit, copy, delete and try them", |app| app.open_snippets_page(None));
         registry.register("snippets.from_selection", "Make a snippet from the last Visual selection", cmd_snippets_from_selection);
         registry.register("insert.snippet", "Choose a snippet for the current document", cmd_insert_snippet);
@@ -299,6 +307,9 @@ impl CommandRegistry {
 
     /// Registers a feature's commands (`FeatureSpec::commands`), in order.
     fn feature(&mut self, spec: &crate::app::feature::FeatureSpec) {
+        if self.off.contains(&spec.id) {
+            return;
+        }
         for command in spec.commands {
             let run: ExternalFn = Box::new(command.run);
             let run = if command.external { Handler::External(run) } else { Handler::App(run) };
