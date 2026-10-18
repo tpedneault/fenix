@@ -286,6 +286,11 @@ keys = "SPC ,"
 label = "settings"
 command = "settings.open"
 
+[[leader]]
+keys = "SPC :"
+label = "run a command"
+command = "commands.palette"
+
 # Help: what's here, and how to find it.
 [[leader]]
 keys = "SPC h"

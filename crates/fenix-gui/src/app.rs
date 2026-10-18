@@ -1842,13 +1842,45 @@ pub enum FenixUserEvent {
 impl App {
     /// Runs command `id` (see `CommandRegistry::run`).
     pub(crate) fn run_command(&mut self, event_loop: &ActiveEventLoop, id: &str) -> bool {
+        self.note_command_run(id);
         let commands = Rc::clone(&self.commands);
         commands.run(self, event_loop, id)
+    }
+
+    /// Remembers `id` as the command run last, for the palette's order.
+    fn note_command_run(&mut self, id: &str) {
+        if id == "commands.palette" || self.commands.get(id).is_none() {
+            return;
+        }
+        self.recent_commands.retain(|c| c != id);
+        self.recent_commands.insert(0, id.to_string());
+        self.recent_commands.truncate(RECENT_COMMANDS);
+    }
+
+    /// `SPC :` / Alt-x: every command -- what it does, its id, its key,
+    /// and the extension it's from -- the ones run lately first.
+    pub(crate) fn open_command_palette(&mut self) {
+        let keys = crate::keymap::leader_keys();
+        let names: HashMap<&str, &str> = self.features.all_specs().map(|(spec, _)| (spec.id, spec.name)).collect();
+        let rank = |id: &str| self.recent_commands.iter().position(|c| c == id).unwrap_or(usize::MAX);
+        let mut commands: Vec<&crate::commands::Command> = self.commands.iter().filter(|c| c.id != "commands.palette").collect();
+        commands.sort_by_key(|c| rank(&c.id));
+        let candidates = commands
+            .into_iter()
+            .map(|c| {
+                let key = keys.get(c.id.as_ref()).map(|k| format!("  {k}")).unwrap_or_default();
+                let from = c.source.and_then(|id| names.get(id)).map(|name| format!("  · {name}")).unwrap_or_default();
+                fenix_picker::Candidate::new(format!("{}  {}{key}{from}", c.description, c.id), c.id.to_string())
+            })
+            .collect();
+        self.completion = None;
+        self.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::new(candidates)));
     }
 
     /// Runs command `id` for a caller outside Fenix (see
     /// `CommandRegistry::run_external`).
     pub(crate) fn run_external_command(&mut self, id: &str) -> Result<(), crate::commands::ExternalError> {
+        self.note_command_run(id);
         let commands = Rc::clone(&self.commands);
         commands.run_external(self, id)
     }
@@ -2067,8 +2099,14 @@ enum ReplaceWizardStage {
 /// `App` only ever has one active at a time -- an enum, not three
 /// separate `Option` fields, the same reasoning `ExplorerPrompt` already
 /// uses for "one thing, a few kinds."
+/// How many commands the palette remembers as run lately.
+const RECENT_COMMANDS: usize = 30;
+
 enum ActivePicker {
     FindFile(fenix_picker::PickerState<PathBuf>),
+    /// `SPC :` / Alt-x, the command palette: every command, payload its
+    /// id -- confirming runs it (`queued_command`).
+    Commands(fenix_picker::PickerState<String>),
     Grep(fenix_picker::PickerState<fenix_project::GrepMatch>),
     /// `SPC s t`: the TODO-style comments in the focused buffer, payload
     /// the keyword's char offset -- confirming jumps there, the same as
@@ -2193,6 +2231,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Places(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
+        ActivePicker::Commands(s) => s.push_char(c),
         ActivePicker::Snippet(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
@@ -2227,6 +2266,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Places(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
+        ActivePicker::Commands(s) => s.backspace(),
         ActivePicker::Snippet(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
@@ -2261,6 +2301,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Places(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
+        ActivePicker::Commands(s) => s.move_selection(delta),
         ActivePicker::Snippet(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
@@ -2298,6 +2339,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Places(s) => s.toggle_mark(),
         ActivePicker::DeleteProject(s) => s.toggle_mark(),
         ActivePicker::Theme(s) => s.toggle_mark(),
+        ActivePicker::Commands(s) => s.toggle_mark(),
         ActivePicker::Snippet(s) => s.toggle_mark(),
         ActivePicker::Symbol(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
@@ -2332,6 +2374,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Places(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
+        ActivePicker::Commands(s) => s.query(),
         ActivePicker::Snippet(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
@@ -2366,6 +2409,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Places(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
+        ActivePicker::Commands(s) => s.len(),
         ActivePicker::Snippet(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
@@ -2400,6 +2444,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Places(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
+        ActivePicker::Commands(s) => s.selected_row(),
         ActivePicker::Snippet(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
@@ -2438,6 +2483,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Places(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Commands(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Snippet(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5297,6 +5343,11 @@ pub struct App {
     /// Every command, built once at startup -- shared (`Rc`) so a command
     /// can run with the app borrowed mutably (`App::run_command`).
     commands: Rc<CommandRegistry>,
+    /// The commands run lately, newest first (the palette's order).
+    recent_commands: Vec<String>,
+    /// A command the palette chose, run by `handle_key` (which has the
+    /// event loop) once the picker has let go.
+    queued_command: Option<String>,
     /// The active build/task runner's single-pane session (`SPC t t`),
     /// if any -- see `TaskSession`'s own doc comment.
     task_session: Option<TaskSession>,
@@ -6251,6 +6302,8 @@ impl App {
             code_folds: HashMap::new(),
             features,
             commands: Rc::new(CommandRegistry::with_builtins()),
+            recent_commands: Vec::new(),
+            queued_command: None,
             task_session: None,
             project_last_tasks: HashMap::new(),
             debug_session: None,
@@ -15866,6 +15919,13 @@ impl App {
     /// currently empty -- nothing to confirm.
     fn picker_confirm(&mut self) {
         match &self.active_picker {
+            Some(ActivePicker::Commands(state)) => {
+                let Some(id) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
+                // Run by `handle_key`, which has the event loop a command
+                // may need.
+                self.queued_command = Some(id);
+            }
             Some(ActivePicker::FindFile(state)) => {
                 let Some(path) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
@@ -18501,6 +18561,10 @@ impl App {
         }
         if self.active_picker.is_some() {
             self.picker_key(keypress);
+            if let Some(id) = self.queued_command.take() {
+                self.run_command(event_loop, &id);
+                self.wake_caret();
+            }
             return;
         }
         // `SPC s r`/`SPC s p`'s pattern/replacement text entry -- same
@@ -18511,6 +18575,13 @@ impl App {
         }
         // The new-project wizard's page: ahead of the leader, so a space
         // typed into one of its fields is a space.
+        // Alt-x: the command palette, from anywhere -- a page or Insert
+        // too -- but not from inside a picker or prompt (`SPC :` in Normal).
+        if keypress.mods.alt && !keypress.mods.ctrl && keypress.code == KeyCode::Char('x') {
+            self.run_command(event_loop, "commands.palette");
+            self.wake_caret();
+            return;
+        }
         if self.main_view == MainView::Editor && !self.sidebar_focused && self.page_key(keypress) {
             self.wake_caret();
             return;
@@ -19794,6 +19865,7 @@ impl App {
                 Some(picker @ ActivePicker::Places(_)) => ("PLACES", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
+                Some(picker @ ActivePicker::Commands(_)) => ("COMMAND", picker_len(picker)),
                 Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
                 Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
@@ -31942,6 +32014,25 @@ configure_board stm32
 
         assert_eq!(app.main_view, MainView::Explorer, "a file open shouldn't leave the picker");
         assert_eq!(app.explorer_purpose, ExplorerPurpose::PickProjectDir);
+    }
+
+    /// The palette lists every command but itself, with its key and the
+    /// extension it's from, the ones run lately first; confirming queues
+    /// the command for `handle_key`.
+    #[test]
+    fn the_palette_lists_every_command_recent_first() {
+        let mut app = App::with_file(None);
+        app.note_command_run("agenda.open");
+        app.note_command_run("file.save");
+        app.open_command_palette();
+        let Some(ActivePicker::Commands(state)) = &app.active_picker else { panic!("the palette") };
+        assert_eq!(state.len(), app.commands().iter().count() - 1, "every command but the palette");
+        let rows: Vec<String> = state.visible_rows(0, 3).map(|(_, c)| c.label.clone()).collect();
+        assert!(rows[0].contains("file.save") && rows[0].contains("SPC f s"), "{rows:?}");
+        assert!(rows[1].contains("agenda.open") && rows[1].contains("· Agenda"), "{rows:?}");
+        app.picker_confirm();
+        assert_eq!(app.queued_command.as_deref(), Some("file.save"));
+        assert!(app.active_picker.is_none());
     }
 
     #[test]
