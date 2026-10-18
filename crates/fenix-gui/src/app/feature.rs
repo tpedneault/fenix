@@ -537,12 +537,29 @@ pub(crate) fn register_settings() {
 /// decides which keys, commands and settings there are). Tests switch
 /// nothing off this way; they build `Features::builtin_without`.
 pub(crate) fn switched_off() -> &'static [String] {
-    static OFF: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    OFF.get_or_init(|| {
+    &startup().0
+}
+
+/// Whether this is a fresh install's first run: nothing of Fenix's yet --
+/// no `settings.toml`, and no 1.x `config.ini` about to move into one.
+/// It starts with the core alone, and the welcome.
+pub(crate) fn first_run() -> bool {
+    startup().1
+}
+
+/// What's switched off for this run, and whether it's a first run.
+fn startup() -> &'static (Vec<String>, bool) {
+    static STARTUP: std::sync::OnceLock<(Vec<String>, bool)> = std::sync::OnceLock::new();
+    STARTUP.get_or_init(|| {
         if cfg!(test) {
-            return Vec::new();
+            return (Vec::new(), false);
         }
-        fenix_storage::paths::Roots::current().map(|roots| fenix_config::disabled_extensions_in(&roots.settings_file())).unwrap_or_default()
+        let Some(settings) = fenix_storage::paths::Roots::current().map(|roots| roots.settings_file()) else { return (Vec::new(), false) };
+        let legacy = fenix_storage::paths::legacy_dir().is_some_and(|dir| dir.join("config.ini").exists());
+        if !settings.exists() && !legacy {
+            return (BUILTIN_SPECS.iter().map(|spec| spec.id.to_string()).collect(), true);
+        }
+        (fenix_config::disabled_extensions_in(&settings), false)
     })
 }
 
