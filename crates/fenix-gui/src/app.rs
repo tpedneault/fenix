@@ -6341,6 +6341,8 @@ impl App {
         }
         // The agenda's sync runs while Fenix does.
         app.agenda_sync_start();
+        // A fresh install is welcomed; an upgrade told once where things went.
+        app.extensions_at_startup();
         // Your keybindings, read with the leader map: what's wrong is said.
         let problems = keymap::user_key_problems();
         if !problems.is_empty() {

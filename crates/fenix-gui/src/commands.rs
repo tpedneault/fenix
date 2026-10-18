@@ -197,6 +197,7 @@ impl CommandRegistry {
         registry.external("keys.edit", "Your keybindings (keybindings.toml): saving puts them in use", |app| app.edit_keybindings());
         registry.register("commands.palette", "Every command, by name: run one (SPC :, Alt-x)", |ctx| ctx.app.open_command_palette());
         registry.external("extensions.open", "The built-in extensions: switch them on or off", |app| app.open_extensions_page());
+        registry.external("extensions.welcome", "The welcome: packs of extensions to switch on together", |app| app.open_welcome_page());
         registry.external("settings.open", "Every setting, on one page: search, change, reset", |app| app.open_settings_page(crate::settings_page::Scope::You, None));
         registry.register("git.log", "Show the history, with a menu on every commit", |ctx| ctx.app.open_git_log(crate::git_log::Scope::Branch));
         registry.register("git.close_view", "Close the Git view in front: the panel, graph, comparison, conflicts or merge requests", cmd_git_close_view);

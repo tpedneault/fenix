@@ -302,6 +302,11 @@ label = "extensions"
 command = "extensions.open"
 
 [[leader]]
+keys = "SPC h w"
+label = "welcome: packs"
+command = "extensions.welcome"
+
+[[leader]]
 keys = "SPC h k"
 label = "describe a key"
 command = "keys.describe_key"

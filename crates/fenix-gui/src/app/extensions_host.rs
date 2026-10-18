@@ -19,19 +19,49 @@ impl App {
 
     /// `SPC h x`.
     pub(crate) fn open_extensions_page(&mut self) {
-        let existing = self.find_page(|m| matches!(m, PageModel::Extensions(_)));
-        match existing {
+        self.open_extensions(false);
+    }
+
+    /// `SPC h w`, and a fresh install's first screen: the page with packs.
+    pub(crate) fn open_welcome_page(&mut self) {
+        self.open_extensions(true);
+    }
+
+    fn open_extensions(&mut self, welcome: bool) {
+        let rows = self.extension_rows();
+        let page = if welcome { ExtensionsPage::welcome(rows) } else { ExtensionsPage::new(rows) };
+        match self.find_page(|m| matches!(m, PageModel::Extensions(_))) {
             Some(id) => {
-                let rows = self.extension_rows();
-                if let Some(PageModel::Extensions(page)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
-                    page.rows = rows;
+                if let Some(state) = self.pages.get_mut(&id) {
+                    state.model = PageModel::Extensions(Box::new(page));
+                    state.stale = true;
                 }
                 self.show_page(id);
             }
             None => {
-                let page = ExtensionsPage::new(self.extension_rows());
                 self.open_page(PageModel::Extensions(Box::new(page)));
             }
+        }
+    }
+
+    /// At start-up: a fresh install keeps to the core (written, so it
+    /// stays so until you pick) and is welcomed; an upgrade from 1.x keeps
+    /// everything it had on, and says once where to switch things.
+    pub(super) fn extensions_at_startup(&mut self) {
+        let marker = fenix_storage::paths::state_file("extensions-introduced");
+        let introduced = marker.as_ref().is_some_and(|m| m.exists());
+        if let Some(marker) = &marker {
+            let _ = marker.parent().map(std::fs::create_dir_all);
+            let _ = std::fs::write(marker, "");
+        }
+        if super::feature::first_run() {
+            let all = super::feature::switched_off().to_vec();
+            if let Err(e) = self.set_setting("extensions.disabled", Some(fenix_config::Value::List(all))) {
+                self.set_error(e);
+            }
+            self.open_welcome_page();
+        } else if !introduced {
+            self.set_message("Fenix 2: what's beyond the core is an extension now -- yours are all on. SPC h x switches them");
         }
     }
 
@@ -39,20 +69,22 @@ impl App {
         match action {
             Action::None => {}
             Action::Close => self.close_page(id),
-            Action::Switch(extension, on) => {
-                let mut off: Vec<String> = self.config.extensions_disabled.iter().filter(|x| x.as_str() != extension).cloned().collect();
+            Action::Switch(extensions, on) => {
+                let mut off: Vec<String> = self.config.extensions_disabled.iter().filter(|x| !extensions.contains(&x.as_str())).cloned().collect();
                 if !on {
-                    off.push(extension.to_string());
+                    off.extend(extensions.iter().map(|id| id.to_string()));
                 }
                 let value = (!off.is_empty()).then_some(fenix_config::Value::List(off));
                 match self.set_setting("extensions.disabled", value) {
                     Ok(()) => {
-                        let name = self.features.all_specs().find(|(s, _)| s.id == extension).map_or(extension, |(s, _)| s.name);
-                        let running = self.features.is_on(extension);
+                        let names: Vec<&str> = extensions.iter().map(|id| self.features.all_specs().find(|(s, _)| s.id == *id).map_or(*id, |(s, _)| s.name)).collect();
+                        let name = names.join(", ");
+                        let running = extensions.iter().all(|id| self.features.is_on(id));
                         self.set_message(match (on, running) {
-                            (true, true) | (false, false) => format!("{name} stays {} -- as it is now", if on { "on" } else { "off" }),
-                            (true, false) => format!("{name} switches on when Fenix next starts"),
-                            (false, true) => format!("{name} switches off when Fenix next starts"),
+                            (true, true) => format!("{name}: on, as now"),
+                            (false, false) => format!("{name}: off, as now"),
+                            (true, false) => format!("{name}: on when Fenix next starts"),
+                            (false, true) => format!("{name}: off when Fenix next starts"),
                         });
                     }
                     Err(e) => self.set_error(e),
@@ -86,14 +118,20 @@ mod tests {
         let Some(PageModel::Extensions(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!("the Extensions page") };
         assert_eq!(page.rows.len(), super::super::feature::BUILTIN_SPECS.len());
         assert!(page.rows.iter().all(|r| r.on && r.running));
-        app.extensions_action(id, Action::Switch("fenix.jira", false));
+        app.extensions_action(id, Action::Switch(vec!["fenix.jira"], false));
         assert_eq!(app.config.extensions_disabled, ["fenix.jira"]);
         assert!(app.features.is_on("fenix.jira"), "still on in this run");
         let saved = std::fs::read_to_string(dir.path().join("settings.toml")).unwrap();
         assert!(saved.contains("[extensions]") && saved.contains("fenix.jira"), "{saved}");
         let Some(PageModel::Extensions(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
         assert!(page.rows.iter().any(|r| r.id == "fenix.jira" && !r.on && r.running));
-        app.extensions_action(id, Action::Switch("fenix.jira", true));
+        app.extensions_action(id, Action::Switch(vec!["fenix.jira"], true));
         assert!(app.config.extensions_disabled.is_empty());
+        // A pack, from the welcome: all of it at once.
+        app.open_welcome_page();
+        app.extensions_action(id, Action::Switch(vec!["fenix.mib", "fenix.ccsds", "fenix.tcl"], false));
+        assert_eq!(app.config.extensions_disabled, ["fenix.mib", "fenix.ccsds", "fenix.tcl"]);
+        let Some(PageModel::Extensions(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
+        assert!(!page.packs.is_empty(), "the welcome has its packs");
     }
 }
