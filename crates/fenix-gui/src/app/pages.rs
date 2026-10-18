@@ -447,7 +447,7 @@ impl App {
             self.page_g_pending = false;
             return false;
         };
-        if state.typing() || !self.vim.is_idle() || self.leader_matcher.is_pending() || keypress.mods != Mods::default() {
+        if state.typing() || !self.vim.is_idle() || self.leader_matcher.is_pending() || self.local_matcher.is_some() || keypress.mods != Mods::default() {
             self.page_g_pending = false;
             return self.page_key_now(keypress);
         }
@@ -477,8 +477,9 @@ impl App {
     fn page_key_now(&mut self, keypress: KeyPress) -> bool {
         let id = self.focused_buffer_id();
         let Some(state) = self.pages.get(&id) else { return false };
-        // A leader sequence under way is the leader's, not the page's.
-        if !self.vim.is_idle() || self.leader_matcher.is_pending() {
+        // A leader sequence under way is the leader's, not the page's --
+        // an open `SPC m` menu included, so its next key reaches it.
+        if !self.vim.is_idle() || self.leader_matcher.is_pending() || self.local_matcher.is_some() {
             return false;
         }
         let typing = state.typing();
