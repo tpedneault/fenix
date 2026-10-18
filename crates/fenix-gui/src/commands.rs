@@ -48,6 +48,8 @@ pub struct Command {
     /// extension at run time, not only from this file.
     pub id: Cow<'static, str>,
     pub description: Cow<'static, str>,
+    /// The extension it comes from (`fenix.jira`); `None` for core's.
+    pub source: Option<&'static str>,
     run: Handler,
 }
 
@@ -188,6 +190,7 @@ impl CommandRegistry {
         registry.register("git.versus", "Set this file beside its version on a branch, lined up", cmd_git_versus);
         registry.register("git.compare", "Compare HEAD (or the working tree) with a branch: files, commits, diffs", |ctx| ctx.app.start_compare_picker());
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", |ctx| ctx.app.open_git_operations());
+        registry.register("commands.palette", "Every command, by name: run one (SPC :, Alt-x)", |ctx| ctx.app.open_command_palette());
         registry.external("extensions.open", "The built-in extensions: switch them on or off", |app| app.open_extensions_page());
         registry.external("settings.open", "Every setting, on one page: search, change, reset", |app| app.open_settings_page(crate::settings_page::Scope::You, None));
         registry.register("git.log", "Show the history, with a menu on every commit", |ctx| ctx.app.open_git_log(crate::git_log::Scope::Branch));
@@ -296,14 +299,14 @@ impl CommandRegistry {
     }
 
     fn register(&mut self, id: &'static str, description: &'static str, run: impl Fn(&mut CommandCtx) + 'static) {
-        self.commands.push(Command { id: id.into(), description: description.into(), run: Handler::Ctx(Box::new(run)) });
+        self.commands.push(Command { id: id.into(), description: description.into(), source: None, run: Handler::Ctx(Box::new(run)) });
     }
 
     /// Registers a command that also makes sense run from outside Fenix
     /// (`Command::external`). Deliberately a choice per command: the
     /// default, `register`, is not external.
     fn external(&mut self, id: &'static str, description: &'static str, run: impl Fn(&mut App) + 'static) {
-        self.commands.push(Command { id: id.into(), description: description.into(), run: Handler::External(Box::new(run)) });
+        self.commands.push(Command { id: id.into(), description: description.into(), source: None, run: Handler::External(Box::new(run)) });
     }
 
     /// Registers a feature's commands (`FeatureSpec::commands`), in order.
@@ -314,12 +317,17 @@ impl CommandRegistry {
         for command in spec.commands {
             let run: ExternalFn = Box::new(command.run);
             let run = if command.external { Handler::External(run) } else { Handler::App(run) };
-            self.commands.push(Command { id: command.id.into(), description: command.description.into(), run });
+            self.commands.push(Command { id: command.id.into(), description: command.description.into(), source: Some(spec.id), run });
         }
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &Command> {
         self.commands.iter()
+    }
+
+    /// The command with this id.
+    pub fn get(&self, id: &str) -> Option<&Command> {
+        self.commands.iter().find(|c| c.id == id)
     }
 
     /// Runs the command named `id` against `app`. Returns `false` if no
