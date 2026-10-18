@@ -370,11 +370,15 @@ impl App {
         match action {
             BlAction::None => {}
             BlAction::Close => {
-                self.close_page(page_id);
+                // Find the pane first: closing the page repoints it elsewhere.
                 let pane = self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&page_id));
+                self.close_page(page_id);
                 if let Some(p) = pane {
                     self.windows_mut().focus(p);
                     self.close_window();
+                }
+                if let Some(origin) = self.features.notebook_state().sidebar_origin.filter(|p| self.windows().windows().contains(p)) {
+                    self.windows_mut().focus(origin);
                 }
             }
             BlAction::Open { id, line } => {
@@ -498,5 +502,26 @@ mod tests {
         let other = p.mentions[0].id.clone();
         app.backlinks_action(page, BlAction::Link { id: other.clone(), line: 0 });
         assert_eq!(app.features.notebook_state().book.as_ref().unwrap().get(&other).unwrap().text, "the [[Uplink|uplink]] is slow\n");
+    }
+
+    #[test]
+    fn q_closes_the_sidebar_and_its_pane() {
+        let (_dir, mut app) = app();
+        app.notebook_create_note("Uplink", "# Uplink\n");
+        app.notebook_create_note("Log", "see [[Uplink]]\n");
+        let uplink = app.features.notebook_state().book.as_ref().unwrap().by_name("Uplink").unwrap().path.clone();
+        app.open_file_from_picker(&uplink);
+        let note_pane = app.focused_pane_id();
+        let windows = app.windows().window_count();
+        app.notebook_backlinks();
+        let page = app.focused_buffer_id();
+        assert!(app.feature_page::<BacklinksPage>(page).is_some());
+        assert_eq!(app.windows().window_count(), windows + 1);
+        app.page_key(KeyPress::char('q'));
+        assert_eq!(app.windows().window_count(), windows);
+        assert!(app.feature_page::<BacklinksPage>(page).is_none());
+        assert!(app.windows().windows().into_iter().all(|p| app.windows().content(p) != Some(&page)));
+        assert_eq!(app.focused_pane_id(), note_pane);
+        assert!(app.open().buffer.path().unwrap().ends_with("uplink.md"));
     }
 }
