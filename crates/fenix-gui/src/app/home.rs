@@ -262,7 +262,9 @@ impl App {
         // roots normalized, so both are compared normalized.
         let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
         // PDFs have their own section, `home_reading`.
-        let mut recent_files = self.recent_files.paths().iter().filter(|p| self.recent_shown(p) && under(p) && !Self::looks_like_pdf(p));
+        // The files a feature lists in its own section (PDFs, while the
+        // PDF feature is on) aren't in Recent too.
+        let mut recent_files = self.recent_files.paths().iter().filter(|p| self.recent_shown(p) && under(p) && self.opener_for(p).is_none());
         let project_of = |path: &Path| self.recent_seen.get(path).and_then(|seen| seen.project.clone());
         let modified = |path: &Path| self.recent_seen.get(path).and_then(|seen| seen.modified);
         let resume = recent_files.next().map(|path| {

@@ -136,6 +136,15 @@ pub(crate) struct FeatureSpec {
     /// The project doctor's checks for the kinds of project it knows
     /// (`fenix_project::doctor::diagnose_with`).
     pub doctor: Option<fenix_project::doctor::FeatureCheck>,
+    /// The files it opens itself rather than as text (`*.pdf`).
+    pub opener: Option<FileOpener>,
+}
+
+/// A feature's claim on a kind of file: which it opens, and how.
+pub(crate) struct FileOpener {
+    pub claims: fn(&Path) -> bool,
+    /// Opens it; `true` for the pane's preview tab (a jump).
+    pub open: fn(&mut App, &Path, bool),
 }
 
 /// One thing a feature plugs into another's contribution point: the
@@ -533,6 +542,12 @@ pub(crate) fn switched_off() -> &'static [String] {
     })
 }
 
+/// Whether a switched-on feature opens `path` itself (`FeatureSpec::
+/// opener`) -- for start-up, before there's an `App` to ask.
+pub(crate) fn claims_file(path: &Path) -> bool {
+    BUILTIN_SPECS.iter().filter(|spec| enabled(spec.id)).filter_map(|spec| spec.opener.as_ref()).any(|o| (o.claims)(path))
+}
+
 /// Whether built-in extension `id` is on for this run.
 pub(crate) fn enabled(id: &str) -> bool {
     !switched_off().iter().any(|off| off == id)
@@ -758,6 +773,11 @@ impl App {
         }
     }
 
+    /// How a switched-on feature opens `path`, when one claims it.
+    pub(crate) fn opener_for(&self, path: &Path) -> Option<fn(&mut App, &Path, bool)> {
+        self.features.specs().filter_map(|spec| spec.opener.as_ref()).find(|o| (o.claims)(path)).map(|o| o.open)
+    }
+
     /// The features' doctor checks, for `doctor::diagnose_with` (they're
     /// plain functions, so a pass off the UI thread can take them along).
     pub(crate) fn doctor_checks(&self) -> Vec<fenix_project::doctor::FeatureCheck> {
@@ -888,6 +908,18 @@ mod tests {
         assert!(app.agenda_sync().is_none(), "Jira's sync isn't plugged in");
         assert!(app.call_service("diagrams.svg", &serde_json::json!({ "source": "flowchart TD\n a --> b\n" })).is_ok(), "the others still answer");
         app.deliver_feature_event(super::FeatureEvent { feature: "fenix.jira", label: "test", payload: Box::new(()) });
+    }
+
+    /// A PDF is the PDF feature's to open -- unless it's switched off,
+    /// when it's a file like any other.
+    #[test]
+    fn a_feature_opens_the_files_it_claims_while_it_is_on() {
+        let mut app = super::App::with_file(None);
+        let pdf = std::path::Path::new("spec.pdf");
+        assert!(app.opener_for(pdf).is_some() && super::claims_file(pdf));
+        assert!(app.opener_for(std::path::Path::new("notes.md")).is_none());
+        app.features = super::Features::builtin_without(&["fenix.pdf"]);
+        assert!(app.opener_for(pdf).is_none());
     }
 
     #[test]

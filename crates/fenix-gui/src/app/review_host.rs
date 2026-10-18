@@ -93,6 +93,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         home: None,
         home_activate: None,
         doctor: None,
+        opener: None,
     }
 };
 
