@@ -193,6 +193,7 @@ impl CommandRegistry {
         registry.register("keys.describe_key", "Say what a key runs: type it after this", |ctx| ctx.app.describe_key_start());
         registry.register("keys.describe_command", "Say what a command does, which keys run it and where it's from", |ctx| ctx.app.describe_command_picker());
         registry.register("keys.bindings", "The keys bound here, yours marked; Enter runs one", |ctx| ctx.app.open_bindings_picker());
+        registry.register("keys.conflicts", "Where keys disagree: Fenix's own, and yours over Fenix's", |ctx| ctx.app.open_key_conflicts());
         registry.external("keys.edit", "Your keybindings (keybindings.toml): saving puts them in use", |app| app.edit_keybindings());
         registry.register("commands.palette", "Every command, by name: run one (SPC :, Alt-x)", |ctx| ctx.app.open_command_palette());
         registry.external("extensions.open", "The built-in extensions: switch them on or off", |app| app.open_extensions_page());

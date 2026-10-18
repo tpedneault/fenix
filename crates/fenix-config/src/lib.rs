@@ -29,6 +29,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+pub mod keybindings;
 pub use schema::{setting, settings, Category, Field, Kind, Setting, Value};
 pub use project::ProjectSettings;
 pub use secrets::Secret;

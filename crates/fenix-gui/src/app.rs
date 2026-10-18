@@ -1996,6 +1996,95 @@ impl App {
             .collect();
         self.completion = None;
         self.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::new(candidates)));
+        self.set_message("Enter runs it -- Tab gives it keys");
+    }
+
+    /// Tab in the palette: the next keys typed are `command`'s.
+    fn bind_keys_start(&mut self, command: String) {
+        self.set_message(format!("Keys for {command}: type them (SPC ...), Enter binds, Esc stops"));
+        self.binding_keys = Some((command, Vec::new()));
+    }
+
+    /// A key while the palette waits for keys to bind.
+    fn bind_keys_feed(&mut self, key: KeyPress) {
+        let Some((command, mut keys)) = self.binding_keys.take() else { return };
+        if key == KeyPress::named(FenixNamedKey::Escape) {
+            self.set_message("");
+            return;
+        }
+        if key == KeyPress::named(FenixNamedKey::Enter) {
+            return self.bind_keys_finish(&command, &keys);
+        }
+        if key == KeyPress::named(FenixNamedKey::Backspace) {
+            keys.pop();
+        } else {
+            keys.push(key);
+        }
+        let text = keys.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
+        self.set_message(format!("Keys for {command}: {text} -- Enter binds, Esc stops"));
+        self.binding_keys = Some((command, keys));
+    }
+
+    /// Binds `keys` to `command` in your keybindings file and puts it in
+    /// use -- unless the keys would hide something: a group (`SPC f`),
+    /// or keys under another binding, which it would always run first.
+    fn bind_keys_finish(&mut self, command: &str, keys: &[KeyPress]) {
+        let text = keys.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
+        if keys.first() != Some(&KeyPress::char(' ')) || keys.len() < 2 {
+            self.set_error(format!("{text}: your keys start with SPC, then at least one more"));
+            return;
+        }
+        let trie = keymap::leader_trie();
+        if let Some((n, under)) = (1..keys.len()).find_map(|n| trie.get(&keys[..n]).map(|c| (n, *c))) {
+            let prefix = keys[..n].iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
+            self.set_error(format!("{prefix} runs {under}, so {text} could never be reached -- pick other keys"));
+            return;
+        }
+        if trie.bindings().iter().any(|(seq, _)| seq.len() > keys.len() && seq.starts_with(keys)) {
+            self.set_error(format!("{text} is a group -- binding it would hide what's under it; add a key"));
+            return;
+        }
+        let Some(path) = keymap::user_keymap_path() else {
+            self.set_error("no settings folder to keep keybindings.toml in");
+            return;
+        };
+        let was = trie.get(keys).copied().filter(|old| *old != command);
+        if let Err(e) = fenix_config::keybindings::write_binding(&path, &text, command) {
+            self.set_error(format!("couldn't write {}: {e}", path.display()));
+            return;
+        }
+        let problems = keymap::reload_leader();
+        self.leader_matcher = keymap::leader_trie().matcher();
+        if !problems.is_empty() {
+            self.set_error(format!("keybindings.toml: {}", problems.join("; ")));
+            return;
+        }
+        self.set_message(match was {
+            Some(old) => format!("{text} runs {command} now (it ran {old}) -- in keybindings.toml"),
+            None => format!("{text} runs {command} now -- in keybindings.toml"),
+        });
+    }
+
+    /// `SPC h K`: where keys disagree -- Fenix's own clashes, where yours
+    /// replace or take away Fenix's, and what's wrong with your file.
+    /// Enter opens your file.
+    pub(crate) fn open_key_conflicts(&mut self) {
+        let mut rows: Vec<String> = keymap::keymap_conflicts().into_iter().map(|c| format!("Fenix: {c}")).collect();
+        for key in keymap::user_keys() {
+            match (&key.command, key.replaced) {
+                (Some(command), Some(old)) => rows.push(format!("{}: yours runs {command}, over Fenix's {old}", key.keys)),
+                (None, Some(old)) => rows.push(format!("{}: you took away Fenix's {old}", key.keys)),
+                _ => {}
+            }
+        }
+        rows.extend(keymap::user_key_problems().into_iter().map(|p| format!("keybindings.toml: {p}")));
+        if rows.is_empty() {
+            self.set_message("No conflicts: your keys and Fenix's agree");
+            return;
+        }
+        let candidates = rows.into_iter().map(|row| fenix_picker::Candidate::new(row, "keys.edit".to_string())).collect();
+        self.completion = None;
+        self.enter_picker(ActivePicker::Bindings(fenix_picker::PickerState::new(candidates)));
     }
 
     /// Runs command `id` for a caller outside Fenix (see
@@ -5485,6 +5574,9 @@ pub struct App {
     palette_describes: bool,
     /// `SPC h k`: the keys typed so far, to say what they run.
     describing_keys: Option<Vec<KeyPress>>,
+    /// Tab in the palette: the command being given keys, and the keys
+    /// typed so far.
+    binding_keys: Option<(String, Vec<KeyPress>)>,
     /// The active build/task runner's single-pane session (`SPC t t`),
     /// if any -- see `TaskSession`'s own doc comment.
     task_session: Option<TaskSession>,
@@ -6448,6 +6540,7 @@ impl App {
             queued_command: None,
             palette_describes: false,
             describing_keys: None,
+            binding_keys: None,
             task_session: None,
             project_last_tasks: HashMap::new(),
             debug_session: None,
@@ -16698,6 +16791,16 @@ impl App {
     /// the explorer's, so unrecognized keys just don't do anything
     /// rather than falling through to something else).
     fn picker_key(&mut self, key: KeyPress) {
+        // Tab in the palette: give the command under the cursor keys.
+        if key == KeyPress::named(FenixNamedKey::Tab) && !self.palette_describes {
+            if let Some(ActivePicker::Commands(state)) = &self.active_picker {
+                if let Some(id) = state.selected().map(|c| c.payload.clone()) {
+                    self.active_picker = None;
+                    self.bind_keys_start(id);
+                }
+                return;
+            }
+        }
         if key == KeyPress::char('v').with_ctrl() {
             let pasted = self.clipboard_text();
             if let (Some(picker), Some(text)) = (&mut self.active_picker, pasted) {
@@ -18713,6 +18816,11 @@ impl App {
         // (`main_view == Explorer`), routed the same way `SPC f j` is.
         if self.pending_grep_query.is_some() {
             self.grep_query_key(keypress);
+            return;
+        }
+        if self.binding_keys.is_some() {
+            self.bind_keys_feed(keypress);
+            self.wake_caret();
             return;
         }
         if self.describing_keys.is_some() {
@@ -32181,6 +32289,30 @@ configure_board stm32
     /// The palette lists every command but itself, with its key and the
     /// extension it's from, the ones run lately first; confirming queues
     /// the command for `handle_key`.
+    /// Tab in the palette gives a command keys -- refused when they'd hide
+    /// a group or sit under another binding (tests have no keybindings
+    /// file to write, so a good binding stops there).
+    #[test]
+    fn keys_from_the_palette_that_would_hide_something_are_refused() {
+        let mut app = App::with_file(None);
+        let bind = |app: &mut App, keys: &str| {
+            app.bind_keys_start("agenda.open".into());
+            for c in keys.chars() {
+                app.bind_keys_feed(KeyPress::char(c));
+            }
+            app.bind_keys_feed(KeyPress::named(FenixNamedKey::Enter));
+            app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+        };
+        assert!(bind(&mut app, " f").contains("is a group"));
+        assert!(bind(&mut app, " fsx").contains("SPC f s runs file.save"));
+        assert!(bind(&mut app, "x").contains("start with SPC"));
+        assert!(bind(&mut app, " oz").contains("no settings folder"), "the keys are fine; only the file is missing in tests");
+        assert!(app.binding_keys.is_none());
+        app.open_command_palette();
+        app.picker_key(KeyPress::named(FenixNamedKey::Tab));
+        assert!(app.active_picker.is_none() && app.binding_keys.is_some(), "Tab in the palette starts it");
+    }
+
     /// `SPC h k` then keys: what they run, once they run something.
     #[test]
     fn describe_key_says_what_the_keys_run() {
