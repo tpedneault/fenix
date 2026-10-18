@@ -229,6 +229,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         home: Some(|app, scope| app.notebook_home(scope)),
         home_activate: None,
         doctor: None,
+        opener: None,
     }
 };
 

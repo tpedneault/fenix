@@ -147,6 +147,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     home: None,
     home_activate: None,
     doctor: Some(mib_doctor),
+    opener: None,
 };
 
 /// A set of MIBs, read or being read.

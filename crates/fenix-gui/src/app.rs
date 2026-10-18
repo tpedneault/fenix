@@ -6027,14 +6027,14 @@ impl App {
         // always go through `new`, so this still fires for actual use.
         if let Some(path) = &file_arg {
             let path = Path::new(path);
-            if Self::looks_like_pdf(path) {
+            if let Some(open) = app.opener_for(path) {
                 // `with_file` can't open a PDF (that needs `self`'s event
                 // proxy for the worker), so it opened the dashboard; the
                 // PDF gets a tab next to it now. A dashboard that isn't
                 // the workspace's Home would only linger in the buffer
                 // list, so it goes.
                 let placeholder = app.focused_buffer_id();
-                app.open_pdf_path(path);
+                open(&mut app, path, false);
                 if app.session.pending.is_none() && !app.is_a_workspace_home(placeholder) {
                     app.buffers.close(placeholder);
                     app.drop_buffer_from_every_strip(placeholder);
@@ -6098,7 +6098,7 @@ impl App {
             // `event_proxy`), which doesn't exist yet at this point --
             // `new` recognizes this same placeholder right after
             // construction and swaps it for the real PDF pane.
-            Some(path) if !Self::looks_like_pdf(Path::new(path)) => buffers.open_path(Path::new(path)),
+            Some(path) if !feature::claims_file(Path::new(path)) => buffers.open_path(Path::new(path)),
             _ => {
                 // Laid out on its first frame, at its pane's real size.
                 buffers.open_dashboard("")
@@ -8269,7 +8269,7 @@ impl App {
             return Some(found);
         }
         // `[[` in Markdown: the notebook's names.
-        if let Some(links) = self.notebook_link_completion() {
+        if let Some(links) = self.features.is_on(NOTEBOOK_SPEC.id).then(|| self.notebook_link_completion()).flatten() {
             return Some(links);
         }
         let cursor = self.cursor();
@@ -8315,7 +8315,7 @@ impl App {
         for snippet in catalog.available(&self.snippet_scope()) {
             candidates.push(fenix_picker::Candidate::new(snippet.trigger.clone(), completion::Item::snippet(snippet)));
         }
-        let mib_items = self.with_mib(|mib, app| mib.completion_tail(app)).unwrap_or_default();
+        let mib_items = if self.features.is_on(MIB_SPEC.id) { self.with_mib(|mib, app| mib.completion_tail(app)).unwrap_or_default() } else { Vec::new() };
         for item in mib_items {
             if seen.insert(item.label.clone()) {
                 candidates.push(item);
@@ -10002,8 +10002,8 @@ impl App {
             self.set_error(format!("{} no longer exists -- check its entry in SPC , (PDF reader)", path.display()));
             return;
         }
-        if Self::looks_like_pdf(path) {
-            self.open_pdf_path(path);
+        if let Some(open) = self.opener_for(path) {
+            open(self, path, false);
             return;
         }
         if Self::looks_binary(path) {
@@ -16081,8 +16081,8 @@ impl App {
     }
 
     fn open_file_as(&mut self, path: &Path, preview: bool) {
-        if Self::looks_like_pdf(path) {
-            self.open_pdf_path_as(path, preview);
+        if let Some(open) = self.opener_for(path) {
+            open(self, path, preview);
             return;
         }
         if Self::looks_binary(path) {
@@ -16714,9 +16714,9 @@ impl App {
             return;
         }
 
-        if Self::looks_like_pdf(&path) {
+        if let Some(open) = self.opener_for(&path) {
             let was_full_buffer = self.main_view == MainView::Explorer;
-            self.open_pdf_path(&path);
+            open(self, &path, false);
             if was_full_buffer {
                 self.explorer = None;
             } else {
