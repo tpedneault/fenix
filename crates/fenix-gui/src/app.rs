@@ -23898,12 +23898,39 @@ impl App {
         surfaces.flush(gpu);
 
         _profile.mark("text and geometry preparation complete");
-        let Some(surface) = &gpu.surface else { return };
+        let Some(surface) = &gpu.surface else {
+            // Only ever on loan to the launch splash, which hands it back
+            // before the first frame. Gone otherwise, the window would
+            // never be drawn again, so it gets a new one.
+            if gpu.surface_missing() {
+                if let Some(context) = &self.gpu_context {
+                    eprintln!("fenix: the window had no surface to draw into; making it a new one");
+                    context.recreate_surface(gpu, Arc::clone(window));
+                    window.request_redraw();
+                }
+            }
+            return;
+        };
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                surface.configure(&gpu.device, &gpu.config);
+            status @ (wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost) => {
+                // Usually the window changed size since the surface was
+                // configured; a run of these means it's stuck, and the
+                // window would go on showing its last picture -- see
+                // `SurfaceHealth`.
+                let response = gpu.health.failed();
+                let status = if matches!(status, wgpu::CurrentSurfaceTexture::Lost) { "lost" } else { "out of date" };
+                if response.report {
+                    eprintln!("fenix: the window's surface is still {status} after {} tries; making it a new one", gpu.health.failures());
+                }
+                match (response.recovery, &self.gpu_context) {
+                    (crate::gpu::Recovery::Recreate, Some(context)) => context.recreate_surface(gpu, Arc::clone(window)),
+                    _ => gpu.reconfigure(window.inner_size()),
+                }
+                if response.retry {
+                    window.request_redraw();
+                }
                 return;
             }
             status @ (wgpu::CurrentSurfaceTexture::Timeout
@@ -24087,6 +24114,9 @@ impl App {
         window.pre_present_notify();
         gpu.queue.present(frame);
         _profile.mark("present complete");
+        if gpu.health.presented() {
+            eprintln!("fenix: the window's surface is drawing again");
+        }
         static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
         FIRST_FRAME.call_once(|| crate::profile::launch_mark("first frame"));
         text.trim();
@@ -24117,6 +24147,7 @@ impl App {
     pub(crate) fn end_splash(&mut self, window: WindowId, splash: Option<crate::splash::SplashReturn>) {
         let active = self.window.as_ref().is_some_and(|w| w.id() == window);
         let frame = if active { None } else { (0..self.frames.len()).find(|&f| self.frame_window(f).is_some_and(|w| w.id() == window)) };
+        let window = if active { self.window.clone() } else { frame.and_then(|f| self.frame_window(f).cloned()) };
         let gpu = match frame {
             None => self.gpu.as_mut(),
             Some(f) => self.frames[f].as_mut().and_then(|state| state.gpu.as_mut()),
@@ -24136,18 +24167,10 @@ impl App {
                     still: back.still,
                 });
             }
+            // The splash's thread failed, and its surface went with it.
             None if gpu.surface.is_none() => {
-                let window = if active { self.window.clone() } else { frame.and_then(|f| self.frame_window(f).cloned()) };
                 if let (Some(context), Some(window)) = (&self.gpu_context, window) {
-                    let fresh = context.attach(window);
-                    match frame {
-                        None => self.gpu = Some(fresh),
-                        Some(f) => {
-                            if let Some(state) = self.frames[f].as_mut() {
-                                state.gpu = Some(fresh);
-                            }
-                        }
-                    }
+                    context.recreate_surface(gpu, window);
                 }
             }
             None => {}

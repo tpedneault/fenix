@@ -36,6 +36,11 @@ pub struct GpuState {
     /// `None` only while the launch splash is drawing on it from its own
     /// thread (`take_surface`/`restore_surface`).
     pub surface: Option<wgpu::Surface<'static>>,
+    /// The surface is out on loan to the launch splash -- the one time
+    /// `surface` is meant to be `None`.
+    lent: bool,
+    /// How getting a frame to draw into has been going lately.
+    pub health: SurfaceHealth,
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub config: wgpu::SurfaceConfiguration,
@@ -118,7 +123,16 @@ impl GpuContext {
         let queue = Arc::new(queue);
         let context =
             Self { instance, adapter, device: Arc::clone(&device), queue: Arc::clone(&queue), format: config.format };
-        let state = GpuState { surface: Some(surface), device, queue, config, size, pending_resize: None };
+        let state = GpuState {
+            surface: Some(surface),
+            lent: false,
+            health: SurfaceHealth::default(),
+            device,
+            queue,
+            config,
+            size,
+            pending_resize: None,
+        };
         (context, state)
     }
 
@@ -131,10 +145,6 @@ impl GpuContext {
     /// on why an `*Srgb` render target is wrong for every pipeline in
     /// this codebase, and `GpuContext::format`'s doc comment for why
     /// every frame has to agree on one.
-    // Nothing opens a second frame yet -- the caller arrives with the
-    // `frame.new` command. Without this, the whole context reads as dead
-    // code, since `attach` is the only thing that consumes its fields.
-    #[allow(dead_code)]
     pub fn attach(&self, window: Arc<Window>) -> GpuState {
         let size = window.inner_size();
         let surface = self.instance.create_surface(window).expect("create surface");
@@ -150,6 +160,8 @@ impl GpuContext {
 
         GpuState {
             surface: Some(surface),
+            lent: false,
+            health: SurfaceHealth::default(),
             device: Arc::clone(&self.device),
             queue: Arc::clone(&self.queue),
             config,
@@ -157,17 +169,60 @@ impl GpuContext {
             pending_resize: None,
         }
     }
+
+    /// Replaces `gpu`'s surface with a new one for `window`, at the
+    /// window's current size -- for a surface that has stopped giving
+    /// out frames however it's configured, or one that never came back
+    /// from the launch splash. The old one goes first: a window takes
+    /// only one swapchain at a time.
+    pub fn recreate_surface(&self, gpu: &mut GpuState, window: Arc<Window>) {
+        gpu.surface = None;
+        let fresh = self.attach(window);
+        gpu.surface = fresh.surface;
+        gpu.config = fresh.config;
+        gpu.size = fresh.size;
+        gpu.pending_resize = None;
+        gpu.lent = false;
+    }
+
+    /// The adapter in use, and the graphics API it's driven through.
+    pub fn adapter_info(&self) -> wgpu::AdapterInfo {
+        self.adapter.get_info()
+    }
 }
 
 impl GpuState {
     /// Lends the surface to the splash thread; `restore_surface` takes it
     /// back, with the size the splash last drew at.
     pub fn take_surface(&mut self) -> Option<wgpu::Surface<'static>> {
+        self.lent = self.surface.is_some();
         self.surface.take()
     }
 
     pub fn restore_surface(&mut self, surface: wgpu::Surface<'static>) {
         self.surface = Some(surface);
+        self.lent = false;
+    }
+
+    /// Whether the surface is gone without being on loan to the splash:
+    /// nothing would ever be drawn into the window again.
+    pub fn surface_missing(&self) -> bool {
+        self.surface.is_none() && !self.lent
+    }
+
+    /// Configures the surface again, at `size` when it's a real one --
+    /// the window's size now rather than the one on record, which is
+    /// what an out-of-date surface has usually fallen behind.
+    pub fn reconfigure(&mut self, size: PhysicalSize<u32>) {
+        if size.width > 0 && size.height > 0 {
+            self.size = size;
+            self.config.width = size.width;
+            self.config.height = size.height;
+        }
+        self.pending_resize = None;
+        if let Some(surface) = &self.surface {
+            surface.configure(&self.device, &self.config);
+        }
     }
 
     /// Whether a frame can be copied out (see `GpuContext::new`).
@@ -198,5 +253,119 @@ impl GpuState {
                 surface.configure(&self.device, &self.config);
             }
         }
+    }
+}
+
+/// What to do about a surface that didn't give out a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Recovery {
+    /// Configure it again, at the window's current size.
+    Reconfigure,
+    /// Configuring hasn't helped: make a new surface for the window.
+    Recreate,
+}
+
+/// The run of frames a surface has failed to give out (`Outdated` or
+/// `Lost`), and what to do about each. One failure is routine -- the
+/// window changed size since the surface was configured -- and
+/// configuring it again is the cure. A run of them is not: left alone,
+/// the window goes on showing whatever was presented last (the launch
+/// splash, when it starts with the first frame) while the editor works
+/// on unseen behind it. So the surface is made afresh, and the trouble
+/// is reported rather than retried in silence.
+#[derive(Debug, Default)]
+pub struct SurfaceHealth {
+    failures: u32,
+    reported: bool,
+}
+
+/// The surface is made afresh at the third failure in a row, and every
+/// `RECREATE_EVERY` after that.
+const RECREATE_AT: u32 = 3;
+const RECREATE_EVERY: u32 = 30;
+/// Failures past this many in a row wait for the next event to be tried
+/// again, so a surface that won't recover can't keep the loop spinning.
+const RETRY_UP_TO: u32 = 6;
+
+/// What `SurfaceHealth::failed` decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FailureResponse {
+    pub recovery: Recovery,
+    /// Ask for another frame straight away.
+    pub retry: bool,
+    /// Worth a line on stderr: the run just got long enough to matter.
+    pub report: bool,
+}
+
+impl SurfaceHealth {
+    /// Another frame couldn't be had.
+    pub fn failed(&mut self) -> FailureResponse {
+        self.failures = self.failures.saturating_add(1);
+        let n = self.failures;
+        let recreate = n >= RECREATE_AT && (n - RECREATE_AT).is_multiple_of(RECREATE_EVERY);
+        let report = n == RECREATE_AT && !self.reported;
+        self.reported |= report;
+        FailureResponse {
+            recovery: if recreate { Recovery::Recreate } else { Recovery::Reconfigure },
+            retry: n <= RETRY_UP_TO,
+            report,
+        }
+    }
+
+    /// A frame was presented. True when that ends a run that was reported.
+    pub fn presented(&mut self) -> bool {
+        let recovered = self.reported;
+        *self = SurfaceHealth::default();
+        recovered
+    }
+
+    pub fn failures(&self) -> u32 {
+        self.failures
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_single_failure_is_reconfigured_and_retried_quietly() {
+        let mut health = SurfaceHealth::default();
+        assert_eq!(health.failed(), FailureResponse { recovery: Recovery::Reconfigure, retry: true, report: false });
+        assert!(!health.presented());
+        assert_eq!(health.failures(), 0);
+    }
+
+    #[test]
+    fn a_run_of_failures_recreates_the_surface_and_says_so_once() {
+        let mut health = SurfaceHealth::default();
+        let responses: Vec<FailureResponse> = (0..RECREATE_AT + RECREATE_EVERY).map(|_| health.failed()).collect();
+        let recreated: Vec<u32> = (1..)
+            .zip(&responses)
+            .filter(|(_, response)| response.recovery == Recovery::Recreate)
+            .map(|(n, _)| n)
+            .collect();
+        assert_eq!(recreated, vec![RECREATE_AT, RECREATE_AT + RECREATE_EVERY]);
+        let reported: Vec<u32> = (1..).zip(&responses).filter(|(_, response)| response.report).map(|(n, _)| n).collect();
+        assert_eq!(reported, vec![RECREATE_AT]);
+    }
+
+    #[test]
+    fn retries_stop_after_a_while_so_the_loop_can_go_idle() {
+        let mut health = SurfaceHealth::default();
+        let retried = (0..50).map(|_| health.failed()).take_while(|response| response.retry).count();
+        assert_eq!(retried, RETRY_UP_TO as usize);
+        assert!(!health.failed().retry);
+    }
+
+    #[test]
+    fn drawing_again_ends_the_run_and_says_so_only_if_it_was_reported() {
+        let mut health = SurfaceHealth::default();
+        for _ in 0..RECREATE_AT {
+            health.failed();
+        }
+        assert!(health.presented());
+        assert!(!health.presented());
+        assert!(!health.failed().report);
     }
 }

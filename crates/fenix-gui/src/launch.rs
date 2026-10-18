@@ -86,6 +86,10 @@ impl Launcher {
         crate::profile::launch_mark("window");
         let (gpu_context, mut gpu) = pollster::block_on(GpuContext::new(Arc::clone(&window)));
         crate::profile::launch_mark("gpu");
+        if std::env::var_os("FENIX_PROFILE").is_some() {
+            let adapter = gpu_context.adapter_info();
+            eprintln!("fenix-profile launch/adapter: {} via {:?}", adapter.name, adapter.backend);
+        }
 
         let splash = if splash_on {
             let fg = [look.fg.r(), look.fg.g(), look.fg.b(), look.fg.a()].map(|c| c as f32 / 255.0);
@@ -128,10 +132,13 @@ impl Launcher {
         for event in queued {
             app.user_event(event_loop, event);
         }
-        match splash {
-            Some(splash) => app.end_splash(window_id, splash.finish()),
-            None => app.end_splash(window_id, None),
-        }
+        let back = splash.map(SplashHandle::finish);
+        crate::profile::launch_mark(match &back {
+            Some(Some(_)) => "splash handed back",
+            Some(None) => "splash thread failed",
+            None => "no splash to end",
+        });
+        app.end_splash(window_id, back.flatten());
         window.set_visible(true);
         window.request_redraw();
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
