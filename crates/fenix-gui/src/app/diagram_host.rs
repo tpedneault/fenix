@@ -1036,4 +1036,29 @@ mod tests {
         app.windows_mut().focus(pane);
         assert!(app.local_contexts().contains(&crate::keymap::LocalContext::Mermaid), "the Mermaid menu, from the diagrams' spec");
     }
+
+    /// `SPC m v` from a focused preview: the page leaves the menu's key
+    /// to the menu, which opens the viewer.
+    #[test]
+    fn the_mermaid_menu_gets_its_key_from_a_focused_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
+        app.notebook_create_diagram("Menu", "flowchart TD
+    a --> b
+");
+        let (id, pane) = preview(&app);
+        app.windows_mut().focus(pane);
+        assert_eq!(app.focused_buffer_id(), id);
+        app.start_local_leader();
+        assert!(app.local_matcher.is_some());
+        // The order the window dispatches in: the page first, then the menu.
+        assert!(!app.page_key(KeyPress::char('v')), "the page leaves the menu's key alone");
+        assert_eq!(app.local_leader_key(KeyPress::char('v')), Some(Some("diagram.viewer")));
+        assert!(app.local_matcher.is_none());
+        app.open_diagram_viewer();
+        assert!(page(&app, app.focused_buffer_id()).viewer, "the viewer opens");
+        // With the menu closed, the page has its keys back.
+        assert!(app.page_key(KeyPress::char('j')));
+    }
 }
