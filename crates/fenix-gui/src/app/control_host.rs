@@ -16,6 +16,11 @@ use super::notebook_capture::CaptureTo;
 use super::*;
 use crate::commands::ExternalError;
 
+/// What a method of a switched-off extension answers.
+fn switched_off(what: &str) -> RpcError {
+    RpcError::invalid_params(format!("{what} is switched off (extensions.disabled)"))
+}
+
 /// The agenda's status as the protocol writes it.
 fn task_status(status: fenix_agenda::Status) -> TaskStatus {
     match status {
@@ -67,6 +72,8 @@ impl App {
                     params.id
                 ))),
             },
+            Call::NotebookCapture(_) if !self.features.is_on("fenix.notebook") => Err(switched_off("the notebook")),
+            Call::AgendaTasks(_) | Call::AgendaClockIn(_) | Call::AgendaClockOut if !self.features.is_on("fenix.agenda") => Err(switched_off("the agenda")),
             Call::NotebookCapture(params) => self.control_capture(&params).map(to_value),
             Call::AgendaTasks(params) => Ok(to_value(self.control_tasks(&params))),
             Call::AgendaClockIn(params) => {

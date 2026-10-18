@@ -256,6 +256,9 @@ pub struct Config {
     /// Whether opening a project from the hub gives it a workspace of
     /// its own (and returns to it next time). `None` means on.
     pub workspace_per_project: Option<bool>,
+    /// Built-in extensions switched off, by id (`fenix.jira`). Read at
+    /// startup (`disabled_extensions_in`), so a change takes a restart.
+    pub extensions_disabled: Vec<String>,
     /// Named workspace launchers, `(display name, action)`, in the
     /// order they appear in `config.ini`'s `[workspaces]` section --
     /// what `SPC TAB f` picks from. `action` is one of `git`, `jira`,
@@ -321,6 +324,16 @@ impl std::fmt::Display for Problem {
 }
 
 /// Walks `key`'s dotted path in `doc`.
+/// `extensions.disabled` in the settings file at `path`, read on its own:
+/// what's switched off has to be known before any extension's settings
+/// are registered and the file is read properly. Empty when the file or
+/// the key isn't there.
+pub fn disabled_extensions_in(path: &std::path::Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else { return Vec::new() };
+    lookup(&doc, "extensions.disabled").and_then(|item| item.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+}
+
 pub(crate) fn lookup<'a>(doc: &'a toml_edit::DocumentMut, key: &str) -> Option<&'a toml_edit::Item> {
     let mut item = doc.as_item();
     for part in key.split('.') {
@@ -413,6 +426,7 @@ impl Config {
             restore_windows: None,
             restore_session: None,
             workspace_per_project: None,
+            extensions_disabled: Vec::new(),
             workspaces: Vec::new(),
         }
     }
@@ -1020,6 +1034,17 @@ mod tests {
             schema::Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] },
         ]), "Hosts.")];
         schema::register(&VNC);
+    }
+
+    #[test]
+    fn what_is_switched_off_is_read_before_anything_else() {
+        let path = temp_path("disabled");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[editor]\ntheme = \"Nord\"\n\n[extensions]\ndisabled = [\"fenix.jira\", \"fenix.pdf\"]\n").unwrap();
+        assert_eq!(disabled_extensions_in(&path), ["fenix.jira", "fenix.pdf"]);
+        assert_eq!(Config::load(path.clone()).unwrap().extensions_disabled, ["fenix.jira", "fenix.pdf"]);
+        assert!(disabled_extensions_in(&path.with_file_name("none.toml")).is_empty());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

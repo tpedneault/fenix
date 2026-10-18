@@ -507,15 +507,41 @@ pub(crate) static BUILTIN_SPECS: [&FeatureSpec; 12] = [
     &super::VNC_SPEC,
 ];
 
-/// Registers every built-in feature's settings with the schema -- once,
-/// before the settings are first read (`main`, `App::with_file`).
+/// Registers the switched-on features' settings with the schema --
+/// once, before the settings are first read (`main`, `App::with_file`).
+/// A switched-off one's stay in the file untouched.
 pub(crate) fn register_settings() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        for spec in BUILTIN_SPECS {
+        for spec in BUILTIN_SPECS.iter().filter(|spec| enabled(spec.id)) {
             fenix_config::schema::register(spec.settings);
         }
     });
+}
+
+/// The built-in extensions switched off for this run: `extensions.
+/// disabled`, read once from the settings file before anything else (it
+/// decides which keys, commands and settings there are). Tests switch
+/// nothing off this way; they build `Features::builtin_without`.
+pub(crate) fn switched_off() -> &'static [String] {
+    static OFF: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    OFF.get_or_init(|| {
+        if cfg!(test) {
+            return Vec::new();
+        }
+        fenix_storage::paths::Roots::current().map(|roots| fenix_config::disabled_extensions_in(&roots.settings_file())).unwrap_or_default()
+    })
+}
+
+/// Whether built-in extension `id` is on for this run.
+pub(crate) fn enabled(id: &str) -> bool {
+    !switched_off().iter().any(|off| off == id)
+}
+
+/// The commands of the built-in extensions switched off for this run (so
+/// core's keymap leaves their keys out), as `on` decides.
+pub(crate) fn commands_switched_off(on: &dyn Fn(&str) -> bool) -> Vec<&'static str> {
+    BUILTIN_SPECS.iter().filter(|spec| !on(spec.id)).flat_map(|spec| spec.commands.iter().map(|c| c.id)).collect()
 }
 
 /// The built-in features. A slot is empty only while its feature is
@@ -524,6 +550,11 @@ pub(crate) struct Features {
     slots: Vec<Option<Box<dyn Feature>>>,
     /// Each slot's spec, there even while the feature is out.
     specs: Vec<&'static FeatureSpec>,
+    /// Whether each is switched on (`extensions.disabled`). One that's
+    /// off keeps its state, so code reaching it by type still finds it,
+    /// but contributes nothing: it's left out of `specs()` and of every
+    /// hook.
+    on: Vec<bool>,
     /// Notices and events a feature missed while it was out, by slot.
     missed: Vec<(usize, Missed)>,
 }
@@ -544,35 +575,61 @@ impl Features {
             Some(Box::new(PdfHost::default())),
             Some(Box::new(VncHost::default())),
         ];
-        let specs = slots
+        let specs: Vec<&'static FeatureSpec> = slots
             .iter()
             .map(|slot| slot.as_deref().expect("all in place").spec())
             .collect();
+        let on = specs.iter().map(|spec| enabled(spec.id)).collect();
         Self {
             slots,
             specs,
+            on,
             missed: Vec::new(),
         }
     }
 
-    /// Every feature's spec, whether or not it's in place.
+    /// The built-in features with `off` switched off -- for tests, which
+    /// can't change what this process switched off at startup.
+    #[cfg(test)]
+    pub(crate) fn builtin_without(off: &[&str]) -> Self {
+        let mut features = Self::builtin();
+        for (spec, on) in features.specs.iter().zip(features.on.iter_mut()) {
+            *on = !off.contains(&spec.id);
+        }
+        features
+    }
+
+    /// The spec of every feature that's switched on, whether or not it's
+    /// in place.
     pub(crate) fn specs(&self) -> impl Iterator<Item = &'static FeatureSpec> + '_ {
-        self.specs.iter().copied()
+        self.specs.iter().zip(&self.on).filter(|(_, on)| **on).map(|(spec, _)| *spec)
+    }
+
+    /// Every built-in feature's spec and whether it's on (the Extensions
+    /// page).
+    pub(crate) fn all_specs(&self) -> impl Iterator<Item = (&'static FeatureSpec, bool)> + '_ {
+        self.specs.iter().copied().zip(self.on.iter().copied())
+    }
+
+    /// Whether the feature with this id is switched on.
+    pub(crate) fn is_on(&self, id: &str) -> bool {
+        self.all_specs().any(|(spec, on)| on && spec.id == id)
     }
 
     pub(crate) fn len(&self) -> usize {
         self.slots.len()
     }
 
-    /// Every feature that's in place.
+    /// Every feature that's in place and switched on.
     pub(crate) fn iter(&self) -> impl Iterator<Item = &dyn Feature> {
-        self.slots.iter().filter_map(|slot| slot.as_deref())
+        self.slots.iter().zip(&self.on).filter(|(_, on)| **on).filter_map(|(slot, _)| slot.as_deref())
     }
 
-    /// Typed access, for the core code that still reaches a feature
-    /// directly (the MIB's pages and dependents). `None` while it's out.
+    /// Typed access, for the code that reaches a feature directly (its
+    /// own, mostly). Found whether or not it's switched on; `None` while
+    /// it's out.
     pub(crate) fn get<T: Feature>(&self) -> Option<&T> {
-        self.iter().find_map(|f| f.as_any().downcast_ref::<T>())
+        self.slots.iter().filter_map(|slot| slot.as_deref()).find_map(|f| f.as_any().downcast_ref::<T>())
     }
 
     pub(crate) fn get_mut<T: Feature>(&mut self) -> Option<&mut T> {
@@ -593,8 +650,9 @@ impl Features {
         self.iter().find(|f| f.spec().id == id)
     }
 
+    /// Feature `id`'s slot, when it's switched on.
     fn position_of_id(&self, id: &str) -> Option<usize> {
-        self.specs.iter().position(|spec| spec.id == id)
+        self.specs.iter().zip(&self.on).position(|(spec, on)| *on && spec.id == id)
     }
 }
 
@@ -648,13 +706,15 @@ impl App {
         &mut self,
         mut f: impl FnMut(&mut dyn Feature, &mut App) -> bool,
     ) -> bool {
-        (0..self.features.len()).any(|i| self.with_feature_at(i, &mut f).unwrap_or(false))
+        (0..self.features.len()).any(|i| self.features.on[i] && self.with_feature_at(i, &mut f).unwrap_or(false))
     }
 
     /// Runs `f` on every feature.
     pub(crate) fn each_feature(&mut self, mut f: impl FnMut(&mut dyn Feature, &mut App)) {
         for i in 0..self.features.len() {
-            self.with_feature_at(i, &mut f);
+            if self.features.on[i] {
+                self.with_feature_at(i, &mut f);
+            }
         }
     }
 
@@ -662,6 +722,9 @@ impl App {
     /// as soon as it's back.
     pub(crate) fn notify_features(&mut self, notice: Notice) {
         for i in 0..self.features.len() {
+            if !self.features.on[i] {
+                continue;
+            }
             if self.features.slots[i].is_some() {
                 self.with_feature_at(i, |feature, app| feature.notice(app, &notice));
             } else {
@@ -810,6 +873,23 @@ mod tests {
 
     /// With the features' settings registered, every category on the
     /// settings page has something in it.
+    /// A switched-off feature keeps its state (reached by type) but is
+    /// left out of everything that goes by spec, and its events are
+    /// dropped.
+    #[test]
+    fn a_switched_off_feature_contributes_nothing() {
+        let mut app = super::App::with_file(None);
+        app.features = super::Features::builtin_without(&["fenix.jira", "fenix.pdf"]);
+        assert!(!app.features.specs().any(|s| s.id == "fenix.jira" || s.id == "fenix.pdf"));
+        assert!(!app.features.is_on("fenix.jira") && app.features.is_on("fenix.agenda"));
+        assert_eq!(app.features.all_specs().count(), super::BUILTIN_SPECS.len(), "the Extensions page still lists it");
+        assert!(app.features.get::<super::super::jira_host::JiraHost>().is_some(), "its state is still there");
+        assert!(app.features.iter().all(|f| f.spec().id != "fenix.jira"));
+        assert!(app.agenda_sync().is_none(), "Jira's sync isn't plugged in");
+        assert!(app.call_service("diagrams.svg", &serde_json::json!({ "source": "flowchart TD\n a --> b\n" })).is_ok(), "the others still answer");
+        app.deliver_feature_event(super::FeatureEvent { feature: "fenix.jira", label: "test", payload: Box::new(()) });
+    }
+
     #[test]
     fn every_settings_category_has_a_setting() {
         super::register_settings();
