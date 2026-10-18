@@ -322,6 +322,11 @@ label = "your keybindings"
 command = "keys.edit"
 
 [[leader]]
+keys = "SPC h K"
+label = "key conflicts"
+command = "keys.conflicts"
+
+[[leader]]
 keys = "SPC p c"
 label = "new project"
 command = "project.new"
