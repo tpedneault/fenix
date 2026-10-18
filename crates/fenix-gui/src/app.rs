@@ -1857,9 +1857,130 @@ impl App {
         self.recent_commands.truncate(RECENT_COMMANDS);
     }
 
+    /// `SPC h c`: the palette, saying what a command is instead of
+    /// running it.
+    pub(crate) fn describe_command_picker(&mut self) {
+        self.open_command_palette();
+        self.palette_describes = true;
+    }
+
+    /// What command `id` is: what it does, the keys that run it, where
+    /// it's from.
+    fn describe_command(&self, id: &str) -> String {
+        let Some(command) = self.commands().get(id) else { return format!("{id} isn't a command") };
+        let mut keys: Vec<String> = keymap::leader_trie().bindings().into_iter().filter(|(_, c)| **c == id).map(|(seq, _)| seq.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ")).collect();
+        keys.sort();
+        let keys = if keys.is_empty() { "no key".to_string() } else { keys.join(", ") };
+        let from = command.source.and_then(|s| self.features.all_specs().find(|(spec, _)| spec.id == s)).map_or("core", |(spec, _)| spec.name);
+        format!("{id}: {} -- {keys} -- {from}", command.description)
+    }
+
+    /// `SPC h k`: the next keys typed are described, not run.
+    pub(crate) fn describe_key_start(&mut self) {
+        self.describing_keys = Some(Vec::new());
+        self.set_message("Describe key: type it (SPC ...), Esc to stop");
+    }
+
+    /// A key while `SPC h k` waits: once the keys run something (or
+    /// can't), says what.
+    fn describe_key_feed(&mut self, key: KeyPress) {
+        let Some(mut keys) = self.describing_keys.take() else { return };
+        if key == KeyPress::named(FenixNamedKey::Escape) {
+            self.set_message("");
+            return;
+        }
+        keys.push(key);
+        let text = keys.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
+        if keys[0] != KeyPress::char(' ') {
+            self.set_message(format!("{text} -- SPC h k describes leader keys (SPC ...); the palette (SPC :) lists the rest"));
+            return;
+        }
+        let local = keys.get(1) == Some(&KeyPress::char('m'));
+        let contexts = if local { self.local_contexts() } else { Vec::new() };
+        let trie = if local { keymap::local_trie(&contexts) } else { keymap::leader_trie() };
+        let fed: &[KeyPress] = if local { &keys[2..] } else { &keys };
+        let mut matcher = trie.matcher();
+        let mut step = None;
+        for k in fed {
+            step = Some(matcher.feed(*k));
+        }
+        match step {
+            Some(fenix_keymap::Step::Matched(id)) => {
+                let what = self.describe_command(id);
+                let yours = keymap::user_keys().iter().any(|u| u.keys == text);
+                self.set_message(format!("{text} runs {what}{}", if yours { " -- yours" } else { "" }));
+            }
+            Some(fenix_keymap::Step::NoMatch) => self.set_message(format!("{text} isn't bound")),
+            Some(fenix_keymap::Step::Pending(_)) | None => {
+                self.set_message(format!("Describe key: {text} ..."));
+                self.describing_keys = Some(keys);
+            }
+        }
+    }
+
+    /// `SPC h b`: the keys bound here, the leader's then this buffer's
+    /// `SPC m` -- yours marked -- and Enter runs one.
+    pub(crate) fn open_bindings_picker(&mut self) {
+        let yours: HashMap<String, Option<&'static str>> = keymap::user_keys().into_iter().filter(|u| u.command.is_some()).map(|u| (u.keys, u.replaced)).collect();
+        let describe = |id: &str| self.commands().get(id).map(|c| c.description.to_string()).unwrap_or_default();
+        let text = |seq: &[KeyPress]| seq.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
+        let mut rows: Vec<(String, String)> = keymap::leader_trie().bindings().into_iter().map(|(seq, id)| (text(&seq), id.to_string())).collect();
+        let contexts = self.local_contexts();
+        if !contexts.is_empty() {
+            rows.extend(keymap::local_trie(&contexts).bindings().into_iter().map(|(seq, id)| (format!("SPC m {}", text(&seq)), id.to_string())));
+        }
+        rows.sort();
+        let candidates = rows
+            .into_iter()
+            .map(|(keys, id)| {
+                let mark = match yours.get(&keys) {
+                    Some(Some(was)) => format!("  (yours, was {was})"),
+                    Some(None) => "  (yours)".to_string(),
+                    None => String::new(),
+                };
+                fenix_picker::Candidate::new(format!("{keys:<14} {}  {id}{mark}", describe(&id)), id)
+            })
+            .collect();
+        self.completion = None;
+        self.enter_picker(ActivePicker::Bindings(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// `SPC h e`: your keybindings file, started with an example when
+    /// there isn't one; saving it puts it in use.
+    pub(crate) fn edit_keybindings(&mut self) {
+        let Some(path) = keymap::user_keymap_path() else {
+            self.set_error("no settings folder to keep keybindings.toml in");
+            return;
+        };
+        if !path.exists() {
+            let start = "# Your keys, over Fenix's. Save this file and they're in use.\n# SPC h b lists what's bound, SPC h c every command.\n#\n# [[leader]]\n# keys = \"SPC o s\"\n# command = \"file.save\"\n# label = \"save\"\n#\n# [[leader]]\n# keys = \"SPC a k\"\n# unbind = true\n";
+            if let Err(e) = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, start)) {
+                self.set_error(format!("couldn't start {}: {e}", path.display()));
+                return;
+            }
+        }
+        self.open_file_from_picker(&path);
+    }
+
+    /// After a save: your keybindings file, saved, is put in use.
+    fn reload_keybindings_if_saved(&mut self) {
+        let Some(path) = keymap::user_keymap_path() else { return };
+        if self.open().buffer.path() != Some(path.as_path()) {
+            return;
+        }
+        let problems = keymap::reload_leader();
+        self.leader_matcher = keymap::leader_trie().matcher();
+        if problems.is_empty() {
+            self.set_message(format!("Your keybindings are in use: {}", keymap::user_keys().len()));
+        } else {
+            self.set_error(format!("keybindings.toml: {}", problems.join("; ")));
+        }
+    }
+
     /// `SPC :` / Alt-x: every command -- what it does, its id, its key,
     /// and the extension it's from -- the ones run lately first.
     pub(crate) fn open_command_palette(&mut self) {
+        self.palette_describes = false;
         let keys = crate::keymap::leader_keys();
         let names: HashMap<&str, &str> = self.features.all_specs().map(|(spec, _)| (spec.id, spec.name)).collect();
         let rank = |id: &str| self.recent_commands.iter().position(|c| c == id).unwrap_or(usize::MAX);
@@ -2105,8 +2226,12 @@ const RECENT_COMMANDS: usize = 30;
 enum ActivePicker {
     FindFile(fenix_picker::PickerState<PathBuf>),
     /// `SPC :` / Alt-x, the command palette: every command, payload its
-    /// id -- confirming runs it (`queued_command`).
+    /// id -- confirming runs it (`queued_command`), or, from `SPC h c`
+    /// (`palette_describes`), says what it is.
     Commands(fenix_picker::PickerState<String>),
+    /// `SPC h b`: the keys bound here -- the leader's and this buffer's
+    /// `SPC m` -- payload the command, which confirming runs.
+    Bindings(fenix_picker::PickerState<String>),
     Grep(fenix_picker::PickerState<fenix_project::GrepMatch>),
     /// `SPC s t`: the TODO-style comments in the focused buffer, payload
     /// the keyword's char offset -- confirming jumps there, the same as
@@ -2232,6 +2357,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::DeleteProject(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Commands(s) => s.push_char(c),
+        ActivePicker::Bindings(s) => s.push_char(c),
         ActivePicker::Snippet(s) => s.push_char(c),
         ActivePicker::Symbol(s) => s.push_char(c),
         ActivePicker::Document(s) => s.push_char(c),
@@ -2267,6 +2393,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::DeleteProject(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Commands(s) => s.backspace(),
+        ActivePicker::Bindings(s) => s.backspace(),
         ActivePicker::Snippet(s) => s.backspace(),
         ActivePicker::Symbol(s) => s.backspace(),
         ActivePicker::Document(s) => s.backspace(),
@@ -2302,6 +2429,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Commands(s) => s.move_selection(delta),
+        ActivePicker::Bindings(s) => s.move_selection(delta),
         ActivePicker::Snippet(s) => s.move_selection(delta),
         ActivePicker::Symbol(s) => s.move_selection(delta),
         ActivePicker::Document(s) => s.move_selection(delta),
@@ -2340,6 +2468,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::DeleteProject(s) => s.toggle_mark(),
         ActivePicker::Theme(s) => s.toggle_mark(),
         ActivePicker::Commands(s) => s.toggle_mark(),
+        ActivePicker::Bindings(s) => s.toggle_mark(),
         ActivePicker::Snippet(s) => s.toggle_mark(),
         ActivePicker::Symbol(s) => s.toggle_mark(),
         ActivePicker::Document(s) => s.toggle_mark(),
@@ -2375,6 +2504,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::DeleteProject(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Commands(s) => s.query(),
+        ActivePicker::Bindings(s) => s.query(),
         ActivePicker::Snippet(s) => s.query(),
         ActivePicker::Symbol(s) => s.query(),
         ActivePicker::Document(s) => s.query(),
@@ -2410,6 +2540,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::DeleteProject(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Commands(s) => s.len(),
+        ActivePicker::Bindings(s) => s.len(),
         ActivePicker::Snippet(s) => s.len(),
         ActivePicker::Symbol(s) => s.len(),
         ActivePicker::Document(s) => s.len(),
@@ -2445,6 +2576,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::DeleteProject(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Commands(s) => s.selected_row(),
+        ActivePicker::Bindings(s) => s.selected_row(),
         ActivePicker::Snippet(s) => s.selected_row(),
         ActivePicker::Symbol(s) => s.selected_row(),
         ActivePicker::Document(s) => s.selected_row(),
@@ -2484,6 +2616,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Commands(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Bindings(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Snippet(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Symbol(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Document(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -5348,6 +5481,10 @@ pub struct App {
     /// A command the palette chose, run by `handle_key` (which has the
     /// event loop) once the picker has let go.
     queued_command: Option<String>,
+    /// The palette is describing commands (`SPC h c`), not running them.
+    palette_describes: bool,
+    /// `SPC h k`: the keys typed so far, to say what they run.
+    describing_keys: Option<Vec<KeyPress>>,
     /// The active build/task runner's single-pane session (`SPC t t`),
     /// if any -- see `TaskSession`'s own doc comment.
     task_session: Option<TaskSession>,
@@ -6112,6 +6249,11 @@ impl App {
         }
         // The agenda's sync runs while Fenix does.
         app.agenda_sync_start();
+        // Your keybindings, read with the leader map: what's wrong is said.
+        let problems = keymap::user_key_problems();
+        if !problems.is_empty() {
+            app.set_error(format!("keybindings.toml: {}", problems.join("; ")));
+        }
         app
     }
 
@@ -6304,6 +6446,8 @@ impl App {
             commands: Rc::new(CommandRegistry::with_builtins()),
             recent_commands: Vec::new(),
             queued_command: None,
+            palette_describes: false,
+            describing_keys: None,
             task_session: None,
             project_last_tasks: HashMap::new(),
             debug_session: None,
@@ -8677,11 +8821,13 @@ impl App {
     }
     pub(crate) fn save(&mut self) {
         self.save_inner(false);
+        self.reload_keybindings_if_saved();
     }
 
     /// `:w!` -- write even though the file changed underneath us.
     pub(crate) fn save_force(&mut self) {
         self.save_inner(true);
+        self.reload_keybindings_if_saved();
     }
 
     /// Writes the focused buffer, refusing by default if the file has
@@ -15922,8 +16068,18 @@ impl App {
             Some(ActivePicker::Commands(state)) => {
                 let Some(id) = state.selected().map(|c| c.payload.clone()) else { return };
                 self.active_picker = None;
+                if std::mem::take(&mut self.palette_describes) {
+                    let text = self.describe_command(&id);
+                    self.set_message(text);
+                    return;
+                }
                 // Run by `handle_key`, which has the event loop a command
                 // may need.
+                self.queued_command = Some(id);
+            }
+            Some(ActivePicker::Bindings(state)) => {
+                let Some(id) = state.selected().map(|c| c.payload.clone()) else { return };
+                self.active_picker = None;
                 self.queued_command = Some(id);
             }
             Some(ActivePicker::FindFile(state)) => {
@@ -18559,6 +18715,11 @@ impl App {
             self.grep_query_key(keypress);
             return;
         }
+        if self.describing_keys.is_some() {
+            self.describe_key_feed(keypress);
+            self.wake_caret();
+            return;
+        }
         if self.active_picker.is_some() {
             self.picker_key(keypress);
             if let Some(id) = self.queued_command.take() {
@@ -19865,7 +20026,8 @@ impl App {
                 Some(picker @ ActivePicker::Places(_)) => ("PLACES", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
-                Some(picker @ ActivePicker::Commands(_)) => ("COMMAND", picker_len(picker)),
+                Some(picker @ ActivePicker::Commands(_)) => (if self.palette_describes { "DESCRIBE" } else { "COMMAND" }, picker_len(picker)),
+                Some(picker @ ActivePicker::Bindings(_)) => ("KEYS", picker_len(picker)),
                 Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
                 Some(picker @ ActivePicker::PdfHeading(_)) => ("HEADING", picker_len(picker)),
                 Some(picker @ ActivePicker::Snippet(_)) => ("SNIPPET", picker_len(picker)),
@@ -32019,6 +32181,32 @@ configure_board stm32
     /// The palette lists every command but itself, with its key and the
     /// extension it's from, the ones run lately first; confirming queues
     /// the command for `handle_key`.
+    /// `SPC h k` then keys: what they run, once they run something.
+    #[test]
+    fn describe_key_says_what_the_keys_run() {
+        let mut app = App::with_file(None);
+        app.describe_key_start();
+        for c in [' ', 'f'] {
+            app.describe_key_feed(KeyPress::char(c));
+        }
+        assert!(app.describing_keys.is_some(), "still waiting after SPC f");
+        app.describe_key_feed(KeyPress::char('s'));
+        assert!(app.describing_keys.is_none());
+        let said = app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default();
+        assert!(said.starts_with("SPC f s runs file.save: Save the current file") && said.ends_with("core"), "{said}");
+    }
+
+    /// `SPC h c` describes; `SPC h b` lists the keys, Enter runs one.
+    #[test]
+    fn describe_command_and_the_bindings_list() {
+        let mut app = App::with_file(None);
+        assert!(app.describe_command("agenda.open").contains("SPC a a") && app.describe_command("agenda.open").ends_with("Agenda"));
+        app.open_bindings_picker();
+        let Some(ActivePicker::Bindings(state)) = &app.active_picker else { panic!("the bindings") };
+        let rows: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.label.clone()).collect();
+        assert!(rows.iter().any(|r| r.starts_with("SPC f s") && r.contains("file.save")), "{rows:?}");
+    }
+
     #[test]
     fn the_palette_lists_every_command_recent_first() {
         let mut app = App::with_file(None);

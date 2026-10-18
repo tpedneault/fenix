@@ -190,6 +190,10 @@ impl CommandRegistry {
         registry.register("git.versus", "Set this file beside its version on a branch, lined up", cmd_git_versus);
         registry.register("git.compare", "Compare HEAD (or the working tree) with a branch: files, commits, diffs", |ctx| ctx.app.start_compare_picker());
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", |ctx| ctx.app.open_git_operations());
+        registry.register("keys.describe_key", "Say what a key runs: type it after this", |ctx| ctx.app.describe_key_start());
+        registry.register("keys.describe_command", "Say what a command does, which keys run it and where it's from", |ctx| ctx.app.describe_command_picker());
+        registry.register("keys.bindings", "The keys bound here, yours marked; Enter runs one", |ctx| ctx.app.open_bindings_picker());
+        registry.external("keys.edit", "Your keybindings (keybindings.toml): saving puts them in use", |app| app.edit_keybindings());
         registry.register("commands.palette", "Every command, by name: run one (SPC :, Alt-x)", |ctx| ctx.app.open_command_palette());
         registry.external("extensions.open", "The built-in extensions: switch them on or off", |app| app.open_extensions_page());
         registry.external("settings.open", "Every setting, on one page: search, change, reset", |app| app.open_settings_page(crate::settings_page::Scope::You, None));
