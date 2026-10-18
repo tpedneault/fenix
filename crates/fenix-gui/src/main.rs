@@ -25,6 +25,7 @@ mod commands;
 mod completion;
 mod console;
 mod dashboard;
+mod extensions_page;
 mod page;
 mod project_doctor;
 mod project_hub;

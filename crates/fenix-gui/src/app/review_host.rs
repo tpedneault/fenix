@@ -31,6 +31,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::LeaderEntry::Bind;
     super::feature::FeatureSpec {
         id: "fenix.review",
+        name: "Review",
+        about: "GitHub pull requests and GitLab merge requests",
         commands: &[
             C { id: "git.pull_request", description: "Open a pull (merge) request for this branch, prefilled from its commits", external: false, run: |app| app.open_new_request() },
             C { id: "git.merge_requests", description: "Open the Merge Requests view (GitLab)", external: false, run: |app| app.open_reviews() },

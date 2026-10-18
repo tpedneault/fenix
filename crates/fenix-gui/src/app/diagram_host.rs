@@ -38,6 +38,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::LeaderEntry::Bind;
     super::feature::FeatureSpec {
         id: "fenix.diagrams",
+        name: "Diagrams",
+        about: "Mermaid diagrams, drawn as you type, and exported",
         commands: &[
             C { id: "diagram.preview", description: "The diagram drawn beside its source (again closes it)", external: false, run: |app| app.toggle_diagram_preview() },
             C { id: "diagram.viewer", description: "The diagram on its own: zoom, pan, walk its nodes", external: false, run: |app| app.open_diagram_viewer() },

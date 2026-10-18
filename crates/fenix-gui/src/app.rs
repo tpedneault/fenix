@@ -49,6 +49,7 @@ mod disk_probe;
 mod notebook_host;
 pub(crate) use notebook_host::SPEC as NOTEBOOK_SPEC;
 mod notebook_links;
+mod extensions_host;
 mod notebook_capture;
 mod notebook_export;
 mod reading_host;

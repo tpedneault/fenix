@@ -40,6 +40,8 @@ static SETTINGS: [fenix_config::Setting; 3] = {
 
 pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     id: "fenix.arduino",
+    name: "Arduino",
+    about: "Build, upload and monitor sketches; boards and ports",
     commands: &[
         FeatureCommand { id: "embedded.build", description: "Compile the sketch for its board", external: false, run: |app| on(app, EmbeddedHost::build) },
         FeatureCommand { id: "embedded.upload", description: "Compile and flash the sketch to the board", external: false, run: |app| on(app, EmbeddedHost::upload_command) },

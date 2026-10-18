@@ -38,6 +38,7 @@ pub(super) enum PageModel {
     UserSettings(Box<SettingsPage>),
     Snippets(Box<SnippetsPage>),
     Reading(Box<ReadingPage>),
+    Extensions(Box<crate::extensions_page::ExtensionsPage>),
     /// A page a feature owns -- see `feature::FeaturePage`.
     Feature(Box<dyn super::feature::FeaturePage>),
 }
@@ -68,7 +69,7 @@ impl PageState {
         match &self.model {
             PageModel::Wizard(w) => w.editing.is_some(),
             PageModel::Hub(h) => h.filtering || h.editing_group.is_some(),
-            PageModel::Doctor(_) => false,
+            PageModel::Doctor(_) | PageModel::Extensions(_) => false,
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
             PageModel::Compare(_) => false,
@@ -97,7 +98,7 @@ impl PageState {
                 let target = if let Some(group) = &mut h.editing_group { group } else { &mut h.filter };
                 target.extend(text.chars().filter(|c| !c.is_control()));
             }
-            PageModel::Doctor(_) => {}
+            PageModel::Doctor(_) | PageModel::Extensions(_) => {}
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
             PageModel::Compare(_) => {}
@@ -251,6 +252,7 @@ impl App {
             Some(PageModel::Wizard(_)) | None => "*new project*".to_string(),
             Some(PageModel::Hub(_)) => "*projects*".to_string(),
             Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
+            Some(PageModel::Extensions(_)) => "*extensions*".to_string(),
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
             Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
             Some(PageModel::Compare(c)) => format!("*compare: {}*", c.target),
@@ -395,6 +397,7 @@ impl App {
             PageModel::Wizard(w) => project_wizard::layout(w, cols),
             PageModel::Hub(h) => project_hub::layout(h, cols),
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
+            PageModel::Extensions(e) => crate::extensions_page::layout(e, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
             PageModel::Compare(c) => git_compare::layout(c, cols),
@@ -552,6 +555,10 @@ impl App {
             PageModel::Doctor(d) => {
                 let action = d.key(key);
                 self.doctor_action(id, action);
+            }
+            PageModel::Extensions(e) => {
+                let action = e.key(key);
+                self.extensions_action(id, action);
             }
             PageModel::Git(g) => {
                 let action = g.key(key);

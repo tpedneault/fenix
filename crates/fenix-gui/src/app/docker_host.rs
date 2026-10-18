@@ -19,6 +19,8 @@ const DOCKER_LOG_TAIL_LINES: usize = 500;
 /// Docker's commands and leader keys.
 pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     id: "fenix.docker",
+    name: "Docker",
+    about: "Containers, images and compose projects, and logs",
     commands: &[
         FeatureCommand {
             id: "docker.open",

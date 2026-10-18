@@ -44,6 +44,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
     use super::feature::LeaderEntry::{Bind, Group};
     super::feature::FeatureSpec {
         id: "fenix.agenda",
+        name: "Agenda",
+        about: "Tasks on a board, and a clock for your time",
         commands: &[
             C { id: "agenda.open", description: "Open the agenda page where it was left", external: true, run: |app| app.cmd_agenda_open() },
             C { id: "agenda.board", description: "Open the agenda on its board", external: true, run: |app| app.cmd_agenda_board() },

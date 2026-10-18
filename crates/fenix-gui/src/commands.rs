@@ -188,6 +188,7 @@ impl CommandRegistry {
         registry.register("git.versus", "Set this file beside its version on a branch, lined up", cmd_git_versus);
         registry.register("git.compare", "Compare HEAD (or the working tree) with a branch: files, commits, diffs", |ctx| ctx.app.start_compare_picker());
         registry.register("git.operations", "Show the Git operation log, to undo what Fenix ran", |ctx| ctx.app.open_git_operations());
+        registry.external("extensions.open", "The built-in extensions: switch them on or off", |app| app.open_extensions_page());
         registry.external("settings.open", "Every setting, on one page: search, change, reset", |app| app.open_settings_page(crate::settings_page::Scope::You, None));
         registry.register("git.log", "Show the history, with a menu on every commit", |ctx| ctx.app.open_git_log(crate::git_log::Scope::Branch));
         registry.register("git.close_view", "Close the Git view in front: the panel, graph, comparison, conflicts or merge requests", cmd_git_close_view);

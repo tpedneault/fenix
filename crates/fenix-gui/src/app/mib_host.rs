@@ -95,6 +95,8 @@ fn your_roots(app: &App) -> Vec<(String, PathBuf)> {
 
 pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     id: "fenix.mib",
+    name: "SCOS-2000 MIB",
+    about: "Browse MIBs; telecommands and parameters in your scripts",
     commands: &[
         FeatureCommand { id: "mib.page", description: "The MIB page: telecommands, TC and TM parameters, TM packets, calibrations", external: true, run: |app| on(app, MibHost::cmd_page) },
         FeatureCommand { id: "mib.search", description: "Search every kind of MIB definition", external: true, run: |app| on(app, MibHost::cmd_search) },
