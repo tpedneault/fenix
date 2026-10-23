@@ -108,7 +108,6 @@ use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
 
-use agenda_sync::AgendaSyncEvent;
 use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
@@ -1742,18 +1741,6 @@ enum GitPromptKind {
 
 struct GitPrompt {
     kind: GitPromptKind,
-    input: String,
-}
-
-/// What the agenda's modeline prompt is typing: the parts of linking a
-/// task to Jira that still take a line of text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AgendaPromptKind {
-    /// `I` -> "Type an issue key...": link to any issue by key.
-    LinkKey { id: TaskId },
-}
-struct AgendaPrompt {
-    kind: AgendaPromptKind,
     input: String,
 }
 
@@ -13969,7 +13956,10 @@ impl App {
         self.refresh_python_environments();
         self.refresh_git_pages(true);
         self.reload_settings_if_changed();
-        self.reload_agenda_if_changed();
+        let ticks: Vec<_> = self.features.specs().filter_map(|spec| spec.on_tick).collect();
+        for tick in ticks {
+            tick(self);
+        }
         self.notify_features(feature::Notice::Tick);
         self.pdf_save_places();
         // The files themselves -- open buffers, PDFs, the MIBs, the

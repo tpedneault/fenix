@@ -15,6 +15,7 @@
 use super::*;
 
 use fenix_agenda::{OpKind, RemoteComment, RemoteSnapshot, RemoteUpdate, Status, WorklogRow};
+use super::agenda_host::{AgendaPrompt, AgendaPromptKind};
 use super::jira_host::JiraBlocked;
 
 /// Jira, as the agenda's sync (`agenda_host::AgendaSync`).

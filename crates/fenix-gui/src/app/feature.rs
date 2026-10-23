@@ -166,6 +166,9 @@ pub(crate) struct FeatureSpec {
     /// Ahead of every key: `true` when it took this one for itself (the
     /// agenda asking about a gap with the clock running).
     pub before_key: Option<fn(&mut App) -> bool>,
+    /// What it does on the housekeeping tick, in place (the agenda
+    /// reading its file again when something else changed it).
+    pub on_tick: Option<fn(&mut App)>,
 }
 
 /// How a feature resolves the reading view's `[[links]]` (the notebook's

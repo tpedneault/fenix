@@ -127,6 +127,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         links: None,
         on_start: Some(|app| app.agenda_sync_start()),
         before_key: Some(|app| app.agenda_note_activity()),
+        on_tick: Some(|app| app.reload_agenda_if_changed()),
     }
 };
 
@@ -193,6 +194,18 @@ impl Default for AgendaState {
             page_minutes: HashMap::new(),
         }
     }
+}
+
+/// What the agenda's modeline prompt is typing: the parts of linking a
+/// task to Jira that still take a line of text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AgendaPromptKind {
+    /// `I` -> "Type an issue key...": link to any issue by key.
+    LinkKey { id: TaskId },
+}
+pub(super) struct AgendaPrompt {
+    pub(super) kind: AgendaPromptKind,
+    pub(super) input: String,
 }
 
 #[derive(Default)]

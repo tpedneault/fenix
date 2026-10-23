@@ -107,6 +107,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         links: None,
         on_start: None,
         before_key: None,
+        on_tick: None,
     }
 };
 

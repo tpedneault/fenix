@@ -6,6 +6,7 @@
 use super::pages::{PageEvent, PageModel};
 use super::agenda_sync::{AgendaSyncState, SyncPick};
 use super::*;
+use super::agenda_sync::AgendaSyncEvent;
 use crate::jira_page::{self, Action as JiraAction, Choice, JiraPage, Loaded, QueryKind};
 
 /// What the Jira page's background jobs send back (as the Jira feature's
@@ -197,6 +198,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         links: None,
         on_start: None,
         before_key: None,
+        on_tick: None,
     }
 };
 

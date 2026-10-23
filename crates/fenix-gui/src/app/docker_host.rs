@@ -87,6 +87,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     links: None,
     on_start: None,
     before_key: None,
+    on_tick: None,
 };
 
 /// What Docker's background threads report, as a `FeatureEvent`'s
