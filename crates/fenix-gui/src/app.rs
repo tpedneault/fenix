@@ -57,7 +57,9 @@ mod diagram_host;
 pub(crate) use diagram_host::SPEC as DIAGRAMS_SPEC;
 mod control_host;
 pub(crate) mod feature;
+#[cfg(feature = "docker")]
 mod docker_host;
+#[cfg(feature = "docker")]
 pub(crate) use docker_host::SPEC as DOCKER_SPEC;
 use tool_sessions::{LspKey, LspServer};
 
@@ -96,6 +98,7 @@ use crate::commands::CommandRegistry;
 use crate::completion;
 use crate::dashboard;
 use crate::diff_view;
+#[cfg(feature = "docker")]
 use crate::docker_panel;
 use crate::forge_panel;
 use crate::git_panel;
@@ -25120,6 +25123,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "docker")]
     use super::docker_host::DockerPaneRole;
 
     /// The layout the git dashboard's accordion asks for has to be the
@@ -28190,6 +28194,7 @@ configure_board stm32
         assert_eq!(app.focused_buffer_id(), origin);
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn jump_back_is_a_noop_while_a_docker_panel_session_is_open() {
         let mut app = App::with_file(None);
@@ -28341,6 +28346,7 @@ configure_board stm32
         assert!(!app.marks.contains_key(&'a'));
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn jump_to_mark_is_a_noop_while_a_docker_panel_session_is_open() {
         let mut app = App::with_file(None);
@@ -32073,6 +32079,7 @@ configure_board stm32
         assert_eq!(app.open().buffer.path(), Some(origin.as_path()));
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn quickfix_next_is_a_noop_while_a_docker_panel_session_is_open() {
         let dir = TempDir::new("quickfix_docker_guard");
@@ -32465,6 +32472,7 @@ configure_board stm32
         }
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn picker_switch_buffer_never_marks_a_docker_buffer_dirty() {
         let mut app = App::with_file(None);
@@ -33048,6 +33056,7 @@ configure_board stm32
         assert!(everything.contains(&"other.rs"));
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn gutter_chars_is_zero_for_a_docker_buffer() {
         let mut app = App::with_file(None);
@@ -33190,6 +33199,7 @@ configure_board stm32
         assert_eq!(app.gutter_chars(app.open()), 0);
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn docker_buffer_modeline_falls_back_to_a_docker_marker() {
         let mut app = App::with_file(None);
@@ -33213,6 +33223,7 @@ configure_board stm32
         assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "[No Name]");
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn buffer_display_name_matches_each_special_kinds_modeline_placeholder() {
         let mut app = App::with_file(None);
@@ -33669,6 +33680,7 @@ configure_board stm32
         assert!(!app.lsp_sessions.keys().any(|key| key.is_primary_for(fenix_syntax::LanguageId::Batch)));
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn open_file_from_picker_does_not_hijack_a_focused_tracked_session_pane() {
         // Reproduces the reported bug ("switch away from a VNC pane
@@ -33708,6 +33720,7 @@ configure_board stm32
         assert_eq!(app.docker_focused_role(), Some(DockerPaneRole::Containers));
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn switch_focused_to_buffer_does_not_hijack_a_focused_tracked_session_pane() {
         let mut app = App::with_file(None);
@@ -37229,6 +37242,7 @@ configure_board stm32
         assert!(!app.quit_confirm);
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn arm_quit_confirm_if_dirty_ignores_non_tracked_buffer_kinds() {
         // A Jira/Docker/Git/Dashboard buffer's `dirty` flag gets set by
@@ -37981,6 +37995,7 @@ configure_board stm32
         assert!(!is_readonly_buffer_kind(BufferKind::SearchReplace));
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn an_edit_attempt_on_a_docker_buffer_is_silently_reverted() {
         let mut app = App::with_file(None);
@@ -38005,6 +38020,7 @@ configure_board stm32
         assert_eq!(app.open().buffer.text(), text_before);
     }
 
+    #[cfg(feature = "docker")]
     #[test]
     fn navigation_on_a_readonly_buffer_is_unaffected() {
         let mut app = App::with_file(None);

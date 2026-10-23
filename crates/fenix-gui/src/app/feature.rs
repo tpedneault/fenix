@@ -25,6 +25,7 @@ use std::any::Any;
 use super::agenda_host::AgendaHost;
 use super::ccsds_host::CcsdsHost;
 use super::diagram_host::DiagramsHost;
+#[cfg(feature = "docker")]
 use super::docker_host::DockerHost;
 use super::embedded_host::EmbeddedHost;
 use super::jira_host::JiraHost;
@@ -504,8 +505,10 @@ pub(crate) trait Feature: Any {
 
 /// Every built-in feature's spec, in the order their settings are
 /// registered: within a settings category, earlier first (Jira's before
-/// the agenda's, as the page has always listed them).
-pub(crate) static BUILTIN_SPECS: [&FeatureSpec; 12] = [
+/// the agenda's, as the page has always listed them). Only the ones this
+/// build has (each is a Cargo feature).
+pub(crate) static BUILTIN_SPECS: &[&FeatureSpec] = &[
+    #[cfg(feature = "docker")]
     &super::DOCKER_SPEC,
     &super::EMBEDDED_SPEC,
     &super::TCL_SPEC,
@@ -598,6 +601,7 @@ pub(crate) struct Features {
 impl Features {
     pub(crate) fn builtin() -> Self {
         let slots: Vec<Option<Box<dyn Feature>>> = vec![
+            #[cfg(feature = "docker")]
             Some(Box::new(DockerHost::default())),
             Some(Box::new(EmbeddedHost::default())),
             Some(Box::new(TclHost::default())),

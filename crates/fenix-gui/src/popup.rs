@@ -28,7 +28,9 @@ pub enum PopupId {
     /// Containers/Images/Volumes pane, anchored `TopRight` like
     /// `WhichKey`). Never coexists with `WhichKey`/`Completion` either --
     /// it only shows while one of the feature's panes has focus, where
-    /// neither of those other two popups can appear.
+    /// neither of those other two popups can appear. Never made when
+    /// no extension in the build has a popup (the core alone).
+    #[allow(dead_code)]
     Feature(&'static str),
     /// The Git panel's own contextual "view command options" popup
     /// (`x` on a Files/Branches/Commits/Stash pane) -- same shape and

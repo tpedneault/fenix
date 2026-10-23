@@ -60,9 +60,16 @@ impl ExtensionsPage {
         ExtensionsPage { rows, packs: Vec::new(), focus: 0 }
     }
 
-    /// The welcome: the page with `PACKS` on top.
+    /// The welcome: the page with `PACKS` on top -- the ones with
+    /// anything in this build.
     pub fn welcome(rows: Vec<Row>) -> Self {
-        ExtensionsPage { rows, packs: PACKS.to_vec(), focus: 0 }
+        let packs = PACKS.iter().filter(|pack| pack.ids.iter().any(|id| rows.iter().any(|r| r.id == *id))).copied().collect();
+        ExtensionsPage { rows, packs, focus: 0 }
+    }
+
+    /// The extensions of `pack` this build has.
+    fn built<'a>(&'a self, pack: &'a Pack) -> impl Iterator<Item = &'static str> + 'a {
+        pack.ids.iter().copied().filter(|id| self.rows.iter().any(|r| r.id == *id))
     }
 
     /// Whether a switch is waiting for a restart.
@@ -72,7 +79,7 @@ impl ExtensionsPage {
 
     /// Whether every extension in `pack` is on from the next start.
     pub fn pack_on(&self, pack: &Pack) -> bool {
-        pack.ids.iter().all(|id| self.rows.iter().any(|r| r.id == *id && r.on))
+        self.built(pack).all(|id| self.rows.iter().any(|r| r.id == id && r.on))
     }
 
     pub fn key(&mut self, key: Key) -> Action {
@@ -99,7 +106,7 @@ impl ExtensionsPage {
             Key::Enter => match self.focus.checked_sub(self.packs.len()) {
                 None => {
                     let pack = self.packs[self.focus];
-                    Action::Switch(pack.ids.to_vec(), !self.pack_on(&pack))
+                    Action::Switch(self.built(&pack).collect(), !self.pack_on(&pack))
                 }
                 Some(i) => match self.rows.get(i) {
                     Some(row) => Action::Switch(vec![row.id], !row.on),
@@ -223,5 +230,19 @@ mod tests {
         assert_eq!(p.key(Key::Enter), Action::Switch(vec!["fenix.notebook", "fenix.diagrams", "fenix.agenda"], false), "all on: off again");
         p.focus = PACKS.len();
         assert!(matches!(p.key(Key::Enter), Action::Switch(ids, _) if ids.len() == 1), "below the packs, one at a time");
+    }
+
+    /// A build without some extensions offers only what it has: a pack
+    /// with nothing built isn't shown, and one with part of it switches
+    /// that part.
+    #[test]
+    fn packs_keep_to_the_extensions_built() {
+        let row = |id| Row { id, name: id, about: "", running: false, on: false };
+        let mut p = ExtensionsPage::welcome(vec![row("fenix.arduino"), row("fenix.vnc"), row("fenix.pdf")]);
+        assert_eq!(p.packs.iter().map(|pack| pack.name).collect::<Vec<_>>(), ["Lab", "Reading"]);
+        assert_eq!(p.key(Key::Enter), Action::Switch(vec!["fenix.arduino", "fenix.vnc"], true), "no Docker in this build");
+        p.rows[0].on = true;
+        p.rows[1].on = true;
+        assert!(p.pack_on(&p.packs[0]), "on, as far as this build goes");
     }
 }

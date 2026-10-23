@@ -326,12 +326,13 @@ fn build_leader(on: &dyn Fn(&str) -> bool) -> KeyTrie<&'static str> {
 }
 
 /// The features whose keys go under the leader, after core's.
-const LEADER_FEATURES: [&crate::app::feature::FeatureSpec; 9] = [
+const LEADER_FEATURES: &[&crate::app::feature::FeatureSpec] = &[
     &crate::app::CCSDS_SPEC,
     // Global rather than under `SPC m`: `SPC m` only has the Arduino
     // menu inside a sketch, and your first sketch has to come from
     // somewhere.
     &crate::app::EMBEDDED_SPEC,
+    #[cfg(feature = "docker")]
     &crate::app::DOCKER_SPEC,
     &crate::app::REVIEW_SPEC,
     &crate::app::JIRA_SPEC,

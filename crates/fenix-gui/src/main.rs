@@ -32,6 +32,7 @@ mod project_hub;
 mod project_settings;
 mod project_wizard;
 mod diff_view;
+#[cfg(feature = "docker")]
 mod docker_panel;
 mod forge_panel;
 mod git_panel;
