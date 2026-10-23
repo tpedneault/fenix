@@ -119,6 +119,7 @@ impl LocalContext {
 /// The features whose `SPC m` menu goes in each context, after core's
 /// own entries (`[[local.<name>]]`), in order.
 const LOCAL_MENUS: &[(LocalContext, &crate::app::feature::FeatureSpec)] = &[
+    #[cfg(feature = "embedded")]
     (LocalContext::Arduino, &crate::app::EMBEDDED_SPEC),
     (LocalContext::Markdown, &crate::app::NOTEBOOK_SPEC),
     #[cfg(feature = "diagrams")]
@@ -334,6 +335,7 @@ const LEADER_FEATURES: &[&crate::app::feature::FeatureSpec] = &[
     // Global rather than under `SPC m`: `SPC m` only has the Arduino
     // menu inside a sketch, and your first sketch has to come from
     // somewhere.
+    #[cfg(feature = "embedded")]
     &crate::app::EMBEDDED_SPEC,
     #[cfg(feature = "docker")]
     &crate::app::DOCKER_SPEC,

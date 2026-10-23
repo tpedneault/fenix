@@ -227,6 +227,7 @@ impl CommandRegistry {
         registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
         registry.feature(&crate::app::JIRA_SPEC);
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
+        #[cfg(feature = "embedded")]
         registry.feature(&crate::app::EMBEDDED_SPEC);
         registry.feature(&crate::app::NOTEBOOK_SPEC);
         #[cfg(feature = "diagrams")]

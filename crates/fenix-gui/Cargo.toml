@@ -15,10 +15,11 @@ path = "src/main.rs"
 # default, the core alone with `--no-default-features` (CI builds both, so
 # the core can't come to depend on an extension).
 [features]
-default = ["docker", "tcl", "diagrams"]
+default = ["docker", "tcl", "diagrams", "embedded"]
 docker = ["dep:fenix-docker"]
 diagrams = ["dep:fenix-diagram"]
 tcl = []
+embedded = ["dep:fenix-embedded"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -58,7 +59,7 @@ fenix-brand = { path = "../fenix-brand" }
 fenix-snippets = { path = "../fenix-snippets" }
 fenix-table = { path = "../fenix-table" }
 fenix-tasks = { path = "../fenix-tasks" }
-fenix-embedded = { path = "../fenix-embedded" }
+fenix-embedded = { path = "../fenix-embedded", optional = true }
 fenix-terminal = { path = "../fenix-terminal" }
 fenix-vim = { path = "../fenix-vim" }
 fenix-vnc = { path = "../fenix-vnc" }

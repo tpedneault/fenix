@@ -28,6 +28,7 @@ use super::ccsds_host::CcsdsHost;
 use super::diagram_host::DiagramsHost;
 #[cfg(feature = "docker")]
 use super::docker_host::DockerHost;
+#[cfg(feature = "embedded")]
 use super::embedded_host::EmbeddedHost;
 use super::jira_host::JiraHost;
 use super::mib_host::MibHost;
@@ -207,8 +208,10 @@ pub(crate) type LanguageServerFn = fn(
 /// Something that happened that features may want to follow up on. One
 /// that arrives while a feature is out (inside one of its own hooks) is
 /// kept and delivered when the feature is put back, so a feature hears
-/// about what its own hooks caused.
+/// about what its own hooks caused. Only features read what one carries,
+/// so it goes unread in a build without the ones that do.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub(crate) enum Notice {
     /// The focused buffer changed.
     FocusChanged,
@@ -517,6 +520,7 @@ pub(crate) trait Feature: Any {
 pub(crate) static BUILTIN_SPECS: &[&FeatureSpec] = &[
     #[cfg(feature = "docker")]
     &super::DOCKER_SPEC,
+    #[cfg(feature = "embedded")]
     &super::EMBEDDED_SPEC,
     #[cfg(feature = "tcl")]
     &super::TCL_SPEC,
@@ -612,6 +616,7 @@ impl Features {
         let slots: Vec<Option<Box<dyn Feature>>> = vec![
             #[cfg(feature = "docker")]
             Some(Box::new(DockerHost::default())),
+            #[cfg(feature = "embedded")]
             Some(Box::new(EmbeddedHost::default())),
             #[cfg(feature = "tcl")]
             Some(Box::new(TclHost::default())),

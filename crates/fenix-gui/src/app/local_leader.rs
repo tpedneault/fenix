@@ -90,6 +90,7 @@ mod tests {
         labels
     }
 
+    #[cfg(feature = "embedded")]
     #[test]
     fn a_sketch_gets_the_arduino_menu() {
         let dir = temp("sketch");
@@ -144,6 +145,7 @@ mod tests {
         assert_eq!(app.local_leader_key(KeyPress::char('z')), None, "closed menus consume nothing");
     }
 
+    #[cfg(feature = "embedded")]
     #[test]
     fn a_bound_key_resolves_its_command_and_closes_the_menu() {
         let dir = temp("bound");

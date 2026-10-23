@@ -86,7 +86,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     page_after_layout: None,
     on_event: None,
     settings: &SETTINGS,
-    services: &[],
+    services: &SERVICES,
     contributes: &[],
     session_documents: None,
     session_reopen: None,
@@ -203,6 +203,46 @@ impl EmbeddedEvent {
         FenixUserEvent::Feature(FeatureEvent { feature: SPEC.id, label: "Embedded", payload: Box::new(self) })
     }
 }
+
+/// What the Arduino feature offers others (the project doctor).
+static SERVICES: [super::feature::Service; 2] = [
+    // `null` -> where it finds the programs it knows, `{program: path or
+    // null}`; one it leaves out (`clangd`, when it found none of its own)
+    // is looked for on PATH.
+    super::feature::Service {
+        name: "arduino.tools",
+        call: super::feature::ServiceCall::Read(|app, _| {
+            let tools = tools(app);
+            let mut found = serde_json::Map::new();
+            found.insert("arduino-cli".into(), serde_json::json!(tools.arduino_cli));
+            found.insert("arduino-language-server".into(), serde_json::json!(tools.arduino_language_server));
+            if let Some(clangd) = tools.clangd {
+                found.insert("clangd".into(), serde_json::json!(clangd));
+            }
+            Ok(serde_json::Value::Object(found).to_string())
+        }),
+    },
+    // `{root, pick: "port" | "board"}` -> the picker for the sketch at
+    // `root`, which then writes the choice to it.
+    super::feature::Service {
+        name: "arduino.doctor_fix",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            #[derive(serde::Deserialize)]
+            struct Fix {
+                root: PathBuf,
+                pick: String,
+            }
+            let fix: Fix = serde_json::from_str(payload).map_err(|e| format!("an Arduino call: {e}"))?;
+            let project = project_at(app, &fix.root).ok_or("not an Arduino sketch Fenix can drive -- is arduino-cli installed?")?;
+            match fix.pick.as_str() {
+                "port" => app.with_feature::<EmbeddedHost, _>(|host, app| host.doctor_pick_port(app, project)),
+                "board" => app.with_feature::<EmbeddedHost, _>(|host, app| host.doctor_pick_board(app, project)),
+                other => return Err(format!("nothing to pick called {other}")),
+            };
+            Ok(String::new())
+        }),
+    },
+];
 
 /// `arduino:avr:nano:cpu=atmega328old` -> `nano`.
 fn short_board(board: &str) -> &str {
@@ -999,6 +1039,19 @@ mod tests {
     use super::*;
     use crate::project_doctor::fake::{find, FakeProbe};
     use fenix_project::doctor::{EditorFix, FixAction, Health};
+
+    /// The project doctor reaches Arduino through its services: where its
+    /// tools are, and the pickers that fix a sketch's board or port.
+    #[test]
+    fn the_doctor_reaches_arduino_through_its_services() {
+        let mut app = App::with_file(None);
+        let found: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&app.query_service("arduino.tools", &serde_json::Value::Null).unwrap()).unwrap();
+        assert!(found.contains_key("arduino-cli") && found.contains_key("arduino-language-server"), "{found:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let fix = |app: &mut App, pick: &str| app.call_service("arduino.doctor_fix", &serde_json::json!({ "root": dir.path(), "pick": pick }));
+        assert!(fix(&mut app, "port").unwrap_err().contains("not an Arduino sketch"), "a folder that isn't a sketch");
+        assert!(app.call_service("arduino.doctor_fix", &serde_json::json!({ "pick": "port" })).is_err(), "no root");
+    }
 
     #[test]
     fn a_sketch_reports_its_board_core_and_port() {
