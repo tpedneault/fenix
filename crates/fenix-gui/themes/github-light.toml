@@ -1,4 +1,8 @@
 # GitHub's light default, from its Primer palette.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
 name = "GitHub Light"
 tabs = "underline"
 
@@ -47,7 +51,7 @@ folder = "#0969da"
 file = "#1f2328"
 
 [git]
-modified = "#986600"
+modified = "#9a6700"
 staged = "#1a7f37"
 untracked = "#0969da"
 ignored = "#59636e"

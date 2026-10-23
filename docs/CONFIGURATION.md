@@ -186,7 +186,8 @@ conflicted = "#f7768e"
 
 Colours are `#rrggbb`; a surface drawn over another (a highlight) can be
 see-through, as `#rrggbbaa` or `{ color, alpha }`; text can't. The
-shipped themes keep text at 4.5:1 against every surface it's drawn on,
+shipped themes keep body text, comments and line numbers at 4.5:1 against every surface
+they're drawn on (accents 3:1 on a light theme),
 comments quieter than code, and operators distinct from both -- worth
 keeping in yours.
 

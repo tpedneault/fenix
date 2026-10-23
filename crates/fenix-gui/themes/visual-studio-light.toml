@@ -1,5 +1,9 @@
 # Visual Studio's Light theme (and VS Code's Light+): its per-token defaults, its filled
 # tabs, Consolas.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
 name = "Visual Studio Light"
 tabs = "block"
 font_family = "Consolas"
@@ -19,15 +23,15 @@ search_match = { color = "#f8c9ab", alpha = 0.6 }
 fg = "#000000"
 fg_modeline = "#000000"
 caret_text = "#000000"
-gutter_fg = "#22738d"
+gutter_fg = "#1c738e"
 
 [modes]
-normal = "#0078c8"
-insert = "#368432"
+normal = "#0078ca"
+insert = "#32852f"
 visual = "#c42b1c"
 replace = "#895503"
 command = "#0070c1"
-explorer = "#0078c8"
+explorer = "#0078ca"
 picker = "#af00db"
 text_dark = "#ffffff"
 
@@ -36,21 +40,21 @@ keyword = "#0000ff"
 string = "#a31515"
 comment = "#007d00"
 function = "#74531f"
-type = "#22748c"
-number = "#087a50"
-constant = "#006dbb"
+type = "#10819f"
+number = "#098658"
+constant = "#0070c1"
 variable = "#001080"
 operator = "#383838"
 punctuation = "#3b3b3b"
-attribute = "#d70000"
+attribute = "#e50000"
 
 [explorer]
-folder = "#876531"
+folder = "#99702c"
 file = "#000000"
 
 [git]
 modified = "#895503"
-staged = "#31792e"
-untracked = "#006eb8"
-ignored = "#646b75"
+staged = "#358731"
+untracked = "#007acc"
+ignored = "#6e7681"
 conflicted = "#ad0707"

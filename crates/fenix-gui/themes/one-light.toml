@@ -1,4 +1,8 @@
 # Atom's One Light.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
 name = "One Light"
 tabs = "underline"
 
@@ -16,39 +20,39 @@ search_match = { color = "#c18401", alpha = 0.2 }
 [text]
 fg = "#383a42"
 fg_modeline = "#383a42"
-caret_text = "#2d50ff"
-gutter_fg = "#66676e"
+caret_text = "#4158e7"
+gutter_fg = "#67686e"
 
 [modes]
-normal = "#2968f0"
-insert = "#3f7f3e"
+normal = "#346be3"
+insert = "#308231"
 visual = "#a626a4"
-replace = "#986801"
-command = "#0179ad"
-explorer = "#2968f0"
+replace = "#a06500"
+command = "#0079b1"
+explorer = "#346be3"
 picker = "#a626a4"
 text_dark = "#fafafa"
 
 [syntax]
 keyword = "#a626a4"
-string = "#3a7439"
-comment = "#66676e"
-function = "#155aef"
-type = "#8b5f01"
-number = "#8c6001"
-constant = "#8c6001"
+string = "#398a39"
+comment = "#67686e"
+function = "#3c73ed"
+type = "#a96d00"
+number = "#986801"
+constant = "#986801"
 variable = "#383a42"
-operator = "#016f9e"
-punctuation = "#016f9e"
-attribute = "#8b5f01"
+operator = "#0081b9"
+punctuation = "#0081b9"
+attribute = "#a96d00"
 
 [explorer]
-folder = "#155aef"
+folder = "#3c73ed"
 file = "#383a42"
 
 [git]
-modified = "#8b5f01"
-staged = "#3a7439"
-untracked = "#155aef"
-ignored = "#66676e"
-conflicted = "#c52b1d"
+modified = "#a96d00"
+staged = "#398a39"
+untracked = "#3c73ed"
+ignored = "#79797f"
+conflicted = "#d6493e"

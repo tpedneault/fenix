@@ -1,4 +1,8 @@
 # Gruvbox's light mode, morhetz's palette: its faded accents, which read on cream.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
 name = "Gruvbox Light"
 tabs = "underline"
 
@@ -17,38 +21,38 @@ search_match = { color = "#b57614", alpha = 0.2 }
 fg = "#3c3836"
 fg_modeline = "#3c3836"
 caret_text = "#3c3836"
-gutter_fg = "#685d54"
+gutter_fg = "#6a5d52"
 
 [modes]
 normal = "#076678"
-insert = "#746f0d"
+insert = "#746f03"
 visual = "#9d0006"
 replace = "#af3a03"
 command = "#8f3f71"
-explorer = "#407755"
+explorer = "#3e7754"
 picker = "#8f3f71"
 text_dark = "#fbf1c7"
 
 [syntax]
 keyword = "#9d0006"
-string = "#66610c"
-comment = "#685d54"
+string = "#79740e"
+comment = "#6a5d52"
 function = "#076678"
-type = "#84560f"
+type = "#a26400"
 number = "#8f3f71"
-constant = "#aa3803"
+constant = "#af3a03"
 variable = "#3c3836"
-operator = "#38694b"
-punctuation = "#38694b"
-attribute = "#84560f"
+operator = "#427b58"
+punctuation = "#427b58"
+attribute = "#a26400"
 
 [explorer]
 folder = "#076678"
 file = "#3c3836"
 
 [git]
-modified = "#aa3803"
-staged = "#66610c"
+modified = "#af3a03"
+staged = "#79740e"
 untracked = "#076678"
-ignored = "#685d54"
+ignored = "#7c6f64"
 conflicted = "#9d0006"
