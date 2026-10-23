@@ -89,7 +89,6 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use fenix_agenda::TaskId;
 use fenix_buffers::{BufferId, BufferKind, BufferList, OpenBuffer};
 use fenix_explorer::{ExplorerAction, ExplorerState};
 use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey as FenixNamedKey, Step};

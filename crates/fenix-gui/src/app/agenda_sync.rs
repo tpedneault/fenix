@@ -13,6 +13,7 @@
 //! (tests) the same work runs inline.
 
 use super::*;
+use fenix_agenda::TaskId;
 
 use fenix_agenda::{OpKind, RemoteComment, RemoteSnapshot, RemoteUpdate, Status, WorklogRow};
 use super::agenda_host::{AgendaPrompt, AgendaPromptKind};

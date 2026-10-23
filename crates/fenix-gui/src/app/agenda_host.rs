@@ -7,6 +7,7 @@
 use super::feature::{page_as, page_as_mut};
 use super::pages::PageModel;
 use super::*;
+use fenix_agenda::TaskId;
 use crate::agenda_page::{self, Action as AgendaAction, AgendaPage, NewTask, Project, Tab};
 use fenix_agenda::{CodeRef, OpKind, Status};
 

@@ -6,6 +6,7 @@
 use super::pages::{PageEvent, PageModel};
 use super::agenda_sync::{AgendaSyncState, SyncPick};
 use super::*;
+use fenix_agenda::TaskId;
 use super::agenda_sync::AgendaSyncEvent;
 use crate::jira_page::{self, Action as JiraAction, Choice, JiraPage, Loaded, QueryKind};
 
