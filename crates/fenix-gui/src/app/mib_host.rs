@@ -158,6 +158,8 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     before_key: None,
     on_tick: None,
     compose: None,
+    pane_keys: None,
+    close_view: None,
 };
 
 /// A set of MIBs, read or being read.

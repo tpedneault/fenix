@@ -130,6 +130,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         before_key: Some(|app| app.agenda_note_activity()),
         on_tick: Some(|app| app.reload_agenda_if_changed()),
         compose: Some(compose),
+        pane_keys: None,
+        close_view: None,
     }
 };
 
