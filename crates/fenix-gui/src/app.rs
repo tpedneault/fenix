@@ -55,7 +55,9 @@ mod extensions_host;
 mod notebook_capture;
 mod notebook_export;
 mod reading_host;
+#[cfg(feature = "diagrams")]
 mod diagram_host;
+#[cfg(feature = "diagrams")]
 pub(crate) use diagram_host::SPEC as DIAGRAMS_SPEC;
 mod control_host;
 pub(crate) mod feature;

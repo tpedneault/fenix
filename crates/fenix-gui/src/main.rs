@@ -50,6 +50,7 @@ mod notebook_page;
 mod backlinks_page;
 mod reading;
 mod reading_page;
+#[cfg(feature = "diagrams")]
 mod diagram_page;
 mod graph_view;
 mod gpu;

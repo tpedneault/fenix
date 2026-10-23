@@ -15,8 +15,9 @@ path = "src/main.rs"
 # default, the core alone with `--no-default-features` (CI builds both, so
 # the core can't come to depend on an extension).
 [features]
-default = ["docker", "tcl"]
+default = ["docker", "tcl", "diagrams"]
 docker = ["dep:fenix-docker"]
+diagrams = ["dep:fenix-diagram"]
 tcl = []
 
 [dependencies]
@@ -46,7 +47,7 @@ fenix-jira = { path = "../fenix-jira" }
 fenix-keymap = { path = "../fenix-keymap" }
 fenix-lsp = { path = "../fenix-lsp" }
 fenix-mib = { path = "../fenix-mib" }
-fenix-diagram = { path = "../fenix-diagram" }
+fenix-diagram = { path = "../fenix-diagram", optional = true }
 fenix-notebook = { path = "../fenix-notebook" }
 fenix-pdf = { path = "../fenix-pdf" }
 fenix-picker = { path = "../fenix-picker" }

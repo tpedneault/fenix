@@ -150,6 +150,14 @@ impl super::feature::FeaturePage for DiagramPage {
         format!("*{}: {}*", if self.viewer { "view" } else { "diagram" }, self.title)
     }
 
+    fn fills_pane(&self) -> bool {
+        true
+    }
+
+    fn shows_pictures(&self) -> bool {
+        true
+    }
+
     fn typing(&self) -> bool {
         DiagramPage::typing(self)
     }
@@ -198,8 +206,6 @@ pub(super) struct DiagramState {
     pub(super) pending: std::collections::HashSet<u64>,
     /// Problems, by file, for the editor's diagnostics.
     pub(super) diagnostics: HashMap<PathBuf, Vec<lsp_types::Diagnostic>>,
-    /// Each page pane's height in rows, for pages that fill it.
-    pub(super) rows: HashMap<BufferId, usize>,
 }
 
 /// What laying a diagram page out found, before it's borrowed.
@@ -214,7 +220,7 @@ pub(super) struct DiagramPre {
 /// What the diagrams feature offers others (the notebook's export): a
 /// diagram's source in, drawn with `diagrams.export_theme` and
 /// `diagrams.background`.
-static SERVICES: [super::feature::Service; 9] = [
+static SERVICES: [super::feature::Service; 11] = [
     // `{path}` -> the diagram in that file, in the viewer.
     super::feature::Service {
         name: "diagrams.view",
@@ -250,6 +256,26 @@ static SERVICES: [super::feature::Service; 9] = [
     // `{source}` -> the picture a page shows for it (`ImageKey::Diagram`),
     // drawn once it's asked for and kept for every page that shows it.
     super::feature::Service { name: "diagrams.picture", call: Read(|app, payload| Ok(app.diagram_key(&DiagramCall::from(payload)?.source, None).to_string())) },
+    // `{key}`, a picture `diagrams.picture` gave -> drawn (once), and
+    // every page showing it laid out again when it's in.
+    super::feature::Service {
+        name: "diagrams.draw",
+        call: Mut(|app, payload| {
+            let call: KeyCall = serde_json::from_str(payload).map_err(|e| format!("a diagrams call: {e}"))?;
+            app.request_diagram_image(ImageKey::Diagram(call.key));
+            Ok(String::new())
+        }),
+    },
+    // `{path}`, an open Mermaid file -> its preview beside it.
+    super::feature::Service {
+        name: "diagrams.preview",
+        call: Mut(|app, payload| {
+            let call: PathCall = serde_json::from_str(payload).map_err(|e| format!("a diagrams call: {e}"))?;
+            let source = app.buffers.id_for_path(&call.path).ok_or("that diagram isn't open")?;
+            app.open_diagram_preview(source);
+            Ok(String::new())
+        }),
+    },
     // `{source}` -> what's wrong with it once it's been drawn ("line 3:
     // ..."), else nothing.
     super::feature::Service { name: "diagrams.problem", call: Read(|app, payload| Ok(app.diagram_problem(&DiagramCall::from(payload)?.source).unwrap_or_default())) },
@@ -317,6 +343,12 @@ fn diagram_picker(title: &'static str, candidates: Vec<fenix_picker::Candidate<D
 #[derive(serde::Deserialize)]
 struct PathCall {
     path: PathBuf,
+}
+
+/// A diagrams service's payload naming a picture.
+#[derive(serde::Deserialize)]
+struct KeyCall {
+    key: u64,
 }
 
 /// A diagrams service's payload.
@@ -469,19 +501,7 @@ impl App {
         };
         self.features.diagram_state_mut().results.insert(h, stored);
         self.evict_pictures();
-        for state in self.pages.values_mut() {
-            match &mut state.model {
-                PageModel::Reading(p) => {
-                    p.seen = None;
-                    state.stale = true;
-                }
-                PageModel::Feature(page) if page.shows_pictures() || (&**page as &dyn std::any::Any).is::<DiagramPage>() => state.stale = true,
-                _ => {}
-            }
-        }
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
+        self.page_pictures_arrived();
     }
 
     /// Keeps the pictures pages still show; lets go of the rest once
@@ -520,7 +540,7 @@ impl App {
     /// Before a diagram page is borrowed: what it should show now.
     pub(super) fn diagram_precompute(&self, id: BufferId) -> Option<DiagramPre> {
         let p = self.feature_page::<DiagramPage>(id)?;
-        let rows = self.features.diagram_state().rows.get(&id).copied().unwrap_or(30);
+        let rows = self.page_rows(id).unwrap_or(30);
         let ob = p.source.and_then(|s| self.buffers.get(s))?;
         let edits = ob.buffer.edit_count();
         let (want, seen) = if p.seen != Some(edits) || p.want.is_none() {
@@ -602,18 +622,6 @@ impl App {
             }
             None => {
                 self.features.diagram_state_mut().diagnostics.remove(&path);
-            }
-        }
-    }
-
-    /// Records how tall a page's pane is; a page that fills it is laid
-    /// out again when that changes.
-    pub(super) fn note_page_rows(&mut self, id: BufferId, rows: usize) {
-        if self.features.diagram_state_mut().rows.insert(id, rows) != Some(rows) {
-            if let Some(state) = self.pages.get_mut(&id) {
-                if page_as::<DiagramPage>(&state.model).is_some() {
-                    state.stale = true;
-                }
             }
         }
     }
@@ -993,6 +1001,35 @@ mod tests {
         // A theme written into the source.
         app.diagram_set_theme(source, "forest");
         assert!(app.buffers.get(source).unwrap().buffer.text().starts_with("---\nconfig:\n  theme: forest\n---\n"));
+    }
+
+    /// What the core asks of the diagrams without naming them: the page
+    /// is laid out again when its pane's height changes, and a preview
+    /// or a picture is asked for through a service.
+    #[test]
+    fn the_core_reaches_the_diagrams_through_its_page_and_services() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.config.set_path_value("notebook.folder", Some(&dir.path().join("nb")));
+        app.notebook_create_diagram("TC flow", "flowchart TD\n    op[Operator] --> val[Validate]\n");
+        let (id, pane) = preview(&app);
+        app.ensure_page_layout(id, pane, 80);
+        app.note_page_rows(id, 40);
+        assert!(app.pages[&id].stale, "a new height: laid out again");
+        assert_eq!(app.page_rows(id), Some(40));
+        app.ensure_page_layout(id, pane, 80);
+        app.note_page_rows(id, 40);
+        assert!(!app.pages[&id].stale, "the same height: left as it is");
+
+        let other = dir.path().join("other.mmd");
+        std::fs::write(&other, "flowchart LR\n    a --> b\n").unwrap();
+        app.open_file_from_picker(&other);
+        let source = app.focused_buffer_id();
+        assert_eq!(app.call_service("diagrams.preview", &serde_json::json!({ "path": other })), Ok(String::new()));
+        assert!(app.find_page(|m| page_as::<DiagramPage>(m).is_some_and(|p| p.source == Some(source))).is_some(), "its preview is open");
+        assert!(app.call_service("diagrams.preview", &serde_json::json!({ "path": dir.path().join("none.mmd") })).is_err());
+        assert_eq!(app.call_service("diagrams.draw", &serde_json::json!({ "key": 7 })), Ok(String::new()), "a picture it doesn't know: nothing to draw");
+        assert!(app.call_service("diagrams.draw", &serde_json::json!({ "path": "x" })).is_err());
     }
 
     // Through its spec and hooks, the way `App` reaches the diagrams now.
