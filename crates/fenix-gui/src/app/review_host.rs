@@ -103,6 +103,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         on_start: None,
         before_key: None,
         on_tick: None,
+        compose: Some(compose),
     }
 };
 
@@ -480,12 +481,12 @@ impl App {
             ReviewAction::Save => self.save_review(id),
             ReviewAction::Comment { pending, index } => {
                 let seed = pending.body.clone();
-                self.open_compose_seeded(ComposePurpose::ReviewPending { page: id, pending: Box::new(pending), index }, &seed);
+                self.open_compose_seeded(review_purpose(ReviewCompose::Pending { page: id, pending: Box::new(pending), index }), &seed);
             }
-            ReviewAction::Reply(thread) => self.open_compose(ComposePurpose::ReviewReply { page: id, thread }),
+            ReviewAction::Reply(thread) => self.open_compose(review_purpose(ReviewCompose::ThreadReply { page: id, thread })),
             ReviewAction::Summary => {
                 let seed = page.summary.clone();
-                self.open_compose_seeded(ComposePurpose::ReviewSummary { page: id }, &seed);
+                self.open_compose_seeded(review_purpose(ReviewCompose::Summary { page: id }), &seed);
             }
             ReviewAction::Resolve { thread, resolved } => {
                 let label = if resolved { "resolve the thread" } else { "reopen the thread" };
@@ -600,10 +601,10 @@ impl App {
     }
 
     /// The compose buffer's text, sent where it was written for.
-    pub(super) fn review_compose(&mut self, purpose: ComposePurpose, body: String) {
+    pub(super) fn review_compose(&mut self, purpose: ReviewCompose, body: String) {
         self.close_compose();
         match purpose {
-            ComposePurpose::ReviewPending { page, pending, index } => {
+            ReviewCompose::Pending { page, pending, index } => {
                 let Some(r) = self.review_page(page) else { return };
                 let pending = Pending { body, ..*pending };
                 match index {
@@ -614,12 +615,12 @@ impl App {
                 self.save_review(page);
                 self.show_page(page);
             }
-            ComposePurpose::ReviewReply { page, thread } => {
+            ReviewCompose::ThreadReply { page, thread } => {
                 self.show_page(page);
                 let Some(number) = self.review_page(page).map(|r| r.number) else { return };
                 self.review_write(page, "reply", After::Refresh, move |c| c.reply(number, &thread, &body));
             }
-            ComposePurpose::ReviewSummary { page } => {
+            ReviewCompose::Summary { page } => {
                 if let Some(r) = self.review_page(page) {
                     r.summary = body;
                 }
@@ -747,6 +748,84 @@ fn without_timestamp(line: &str) -> &str {
 
 fn count_locations(n: usize) -> String {
     if n == 1 { "1 file location".to_string() } else { format!("{n} file locations") }
+}
+
+/// What the review writes in the compose pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewCompose {
+    /// Another note on a thread, in the Merge Requests view.
+    Reply { number: u64, discussion: String },
+    /// A new thread on a diff line, in the Merge Requests view. The
+    /// position is boxed: it's much larger than the rest.
+    NewComment { number: u64, position: Box<fenix_forge::Position> },
+    /// A comment for the review on page `page`, held until it's
+    /// submitted -- a new one, or pending comment `index` edited.
+    Pending { page: BufferId, pending: Box<Pending>, index: Option<usize> },
+    /// A reply to a review thread, sent straight away.
+    ThreadReply { page: BufferId, thread: String },
+    /// The summary a review is submitted with.
+    Summary { page: BufferId },
+    /// The description of the request on new request page `page`.
+    RequestDescription { page: BufferId },
+}
+
+/// The compose pane for `data`, titled for it.
+pub(super) fn review_purpose(data: ReviewCompose) -> ComposePurpose {
+    let (what, verb) = match &data {
+        ReviewCompose::Reply { number, .. } => (format!("Reply to !{number}"), "send"),
+        ReviewCompose::NewComment { number, position } => {
+            let line = position.new_line.or(position.old_line).map(|l| l.to_string()).unwrap_or_default();
+            (format!("Comment on !{number} {}:{line}", position.new_path), "send")
+        }
+        ReviewCompose::Pending { pending, .. } => (format!("Comment on {}:{} (held for your review)", pending.path, pending.line().unwrap_or(0)), "keep"),
+        ReviewCompose::ThreadReply { .. } => ("Reply".to_string(), "send"),
+        ReviewCompose::Summary { .. } => ("Review summary".to_string(), "keep"),
+        ReviewCompose::RequestDescription { .. } => ("Description".to_string(), "keep"),
+    };
+    ComposePurpose::Feature { feature: SPEC.id, data: ComposeData::new(data), what, verb, allow_empty: false }
+}
+
+/// The compose pane's text, sent where it was written for.
+fn compose(app: &mut App, data: &ComposeData, body: String) {
+    let Some(purpose) = data.get::<ReviewCompose>().cloned() else { return };
+    match purpose {
+        ReviewCompose::RequestDescription { page } => app.request_description(page, body),
+        ReviewCompose::Pending { .. } | ReviewCompose::ThreadReply { .. } | ReviewCompose::Summary { .. } => app.review_compose(purpose, body),
+        ReviewCompose::Reply { .. } | ReviewCompose::NewComment { .. } => {
+        let repo_root = match app.features.review().session.as_ref() {
+                Some(session) => session.repo_root.clone(),
+                None => {
+                    app.set_error("the Merge Requests view was closed -- nothing to send this to".to_string());
+                    return;
+                }
+            };
+            let client = match app.forge_client(&repo_root) {
+                Ok(client) => client,
+                Err(err) => {
+                    app.set_error(err);
+                    return;
+                }
+            };
+            let (number, result) = match &purpose {
+                ReviewCompose::Reply { number, discussion } => (*number, fenix_forge::Forge::reply(client.as_ref(), *number, discussion, &body)),
+                ReviewCompose::NewComment { number, position } => {
+                    (*number, fenix_forge::Forge::comment_on_line(client.as_ref(), *number, position, &body))
+                }
+                _ => return,
+            };
+            match result {
+                Ok(()) => {
+                    // Only torn down on success: a failed send leaves the
+                    // draft in the buffer, which is the difference between
+                    // retrying and retyping.
+                    app.close_compose();
+                    app.set_message(format!("posted to !{number}"));
+                    app.forge_select(number);
+                }
+                Err(err) => app.set_error(format!("couldn't post that: {err} -- the draft is still here")),
+            }
+        }
+    }
 }
 
 #[cfg(test)]

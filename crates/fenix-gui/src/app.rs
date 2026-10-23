@@ -496,12 +496,6 @@ fn join_names(names: &[String]) -> String {
 /// submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ComposePurpose {
-    /// Another note on an existing review thread.
-    Reply { number: u64, discussion: String },
-    /// A new thread anchored to a diff line. The position is boxed
-    /// because it's much larger than the other variant and this enum is
-    /// carried around by value.
-    NewComment { number: u64, position: Box<fenix_forge::Position> },
     /// A commit message. The one use of this buffer that has nothing to
     /// do with a forge -- and the reason the plan called for a compose
     /// buffer in the first place: a commit message is the most ordinary
@@ -514,21 +508,42 @@ enum ComposePurpose {
     GitCommit { repo_root: PathBuf, compose: crate::git_status::Compose },
     /// A reword's new message, for the rebase page `page`.
     RebaseMessage { page: BufferId, hash: String },
-    /// A comment for the review on page `page`, held until it's
-    /// submitted -- a new one, or pending comment `index` edited.
-    ReviewPending { page: BufferId, pending: Box<crate::review_store::Pending>, index: Option<usize> },
-    /// A reply to a review thread, sent straight away.
-    ReviewReply { page: BufferId, thread: String },
-    /// The summary a review is submitted with.
-    ReviewSummary { page: BufferId },
-    /// The description of the request on new request page `page`.
-    RequestDescription { page: BufferId },
-    /// A feature's text (an agenda task's description, a Jira comment),
-    /// handed to its service `service` as `{kind, arg, body}`. `what` and
-    /// `verb` title the pane; `allow_empty` for a description, which may
-    /// be cleared.
-    Feature { service: &'static str, kind: &'static str, arg: String, what: String, verb: &'static str, allow_empty: bool },
+    /// A feature's text (an agenda task's description, a review reply),
+    /// handed back to its `FeatureSpec::compose` with `data`, its own
+    /// value. `what` and `verb` title the pane; `allow_empty` for a
+    /// description, which may be cleared.
+    Feature { feature: &'static str, data: ComposeData, what: String, verb: &'static str, allow_empty: bool },
 }
+
+/// What a feature's compose pane carries back to it: a value of its own
+/// type, read back with `get`.
+#[derive(Clone)]
+pub(crate) struct ComposeData(std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl ComposeData {
+    pub(crate) fn new<T: std::any::Any + Send + Sync>(value: T) -> Self {
+        ComposeData(std::sync::Arc::new(value))
+    }
+
+    pub(crate) fn get<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl std::fmt::Debug for ComposeData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ComposeData(..)")
+    }
+}
+
+// The same pane's purpose is the same value.
+impl PartialEq for ComposeData {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ComposeData {}
 
 /// Opens `url` in the default browser.
 fn open_in_browser(url: &str) -> std::io::Result<()> {
@@ -553,25 +568,12 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
     command.spawn().map(|_| ())
 }
 
-/// What `ComposePurpose::Feature` hands its service.
-#[derive(serde::Deserialize)]
-pub(crate) struct ComposeCall {
-    pub kind: String,
-    pub arg: String,
-    pub body: String,
-}
-
 impl ComposePurpose {
     /// The pane title, which is also where the keys are documented --
     /// a compose buffer is the one surface here you type prose into, so
     /// "how do I send this" has to be visible without pressing anything.
     fn title(&self) -> String {
         let (what, verb) = match self {
-            ComposePurpose::Reply { number, .. } => (format!("Reply to !{number}"), "send"),
-            ComposePurpose::NewComment { number, position } => {
-                let line = position.new_line.or(position.old_line).map(|l| l.to_string()).unwrap_or_default();
-                (format!("Comment on !{number} {}:{line}", position.new_path), "send")
-            }
             ComposePurpose::CommitMessage { .. } => ("Commit message".to_string(), "commit"),
             ComposePurpose::GitCommit { compose, .. } => match compose {
                 crate::git_status::Compose::New(_) => ("Commit message".to_string(), "commit"),
@@ -579,10 +581,6 @@ impl ComposePurpose {
                 crate::git_status::Compose::Reword(_) => ("Reword the last commit".to_string(), "reword"),
             },
             ComposePurpose::RebaseMessage { hash, .. } => (format!("New message for {}", &hash[..7.min(hash.len())]), "keep"),
-            ComposePurpose::ReviewPending { pending, .. } => (format!("Comment on {}:{} (held for your review)", pending.path, pending.line().unwrap_or(0)), "keep"),
-            ComposePurpose::ReviewReply { .. } => ("Reply".to_string(), "send"),
-            ComposePurpose::ReviewSummary { .. } => ("Review summary".to_string(), "keep"),
-            ComposePurpose::RequestDescription { .. } => ("Description".to_string(), "keep"),
             ComposePurpose::Feature { what, verb, .. } => (what.clone(), *verb),
         };
         format!("{what}  --  Esc then Enter to {verb}, q to cancel")
@@ -14362,7 +14360,7 @@ impl App {
             self.set_message("put the cursor on a review comment to reply to it");
             return;
         };
-        self.open_compose(ComposePurpose::Reply { number, discussion });
+        self.open_compose(review_host::review_purpose(review_host::ReviewCompose::Reply { number, discussion }));
     }
 
     /// `R` in the review pane: resolve the thread under the cursor, or
@@ -14439,7 +14437,7 @@ impl App {
                 return;
             }
         };
-        self.open_compose(ComposePurpose::NewComment { number, position: Box::new(position) });
+        self.open_compose(review_host::review_purpose(review_host::ReviewCompose::NewComment { number, position: Box::new(position) }));
     }
 
     /// `A`: approve the selected merge request, or withdraw an approval
@@ -14819,14 +14817,15 @@ impl App {
 
         // A feature's text (the agenda's, Jira's) -- no forge involved. A
         // description may legitimately be cleared.
-        if let ComposePurpose::Feature { service, kind, arg, allow_empty, .. } = &purpose {
+        if let ComposePurpose::Feature { feature, data, allow_empty, .. } = &purpose {
             if body.is_empty() && !allow_empty {
                 self.set_error("nothing written yet -- q discards this instead".to_string());
                 return;
             }
-            self.close_compose();
-            if let Err(e) = self.call_service(service, &serde_json::json!({ "kind": kind, "arg": arg, "body": body })) {
-                self.set_error(e);
+            let compose = self.features.specs().find(|spec| spec.id == *feature).and_then(|spec| spec.compose);
+            match compose {
+                Some(compose) => compose(self, data, body),
+                None => self.set_error(format!("{feature} isn't on -- nothing to send this to")),
             }
             self.wake_caret();
             return;
@@ -14841,16 +14840,6 @@ impl App {
         // A commit message goes to `git`, not to a forge -- so it needs
         // none of the client below, and works with no Merge Requests
         // view open at all.
-        if matches!(purpose, ComposePurpose::ReviewPending { .. } | ComposePurpose::ReviewReply { .. } | ComposePurpose::ReviewSummary { .. }) {
-            self.review_compose(purpose, body);
-            self.wake_caret();
-            return;
-        }
-        if let ComposePurpose::RequestDescription { page } = &purpose {
-            self.request_description(*page, body);
-            self.wake_caret();
-            return;
-        }
         if let ComposePurpose::RebaseMessage { page, hash } = &purpose {
             self.git_rebase_message(*page, hash.clone(), body);
             self.wake_caret();
@@ -14875,49 +14864,7 @@ impl App {
                 Err(err) => self.set_error(format!("commit failed: {err} -- the message is still here")),
             }
             self.wake_caret();
-            return;
         }
-
-        let repo_root = match self.features.review().session.as_ref() {
-            Some(session) => session.repo_root.clone(),
-            None => {
-                self.set_error("the Merge Requests view was closed -- nothing to send this to".to_string());
-                return;
-            }
-        };
-        let client = match self.forge_client(&repo_root) {
-            Ok(client) => client,
-            Err(err) => {
-                self.set_error(err);
-                return;
-            }
-        };
-        let (number, result) = match &purpose {
-            ComposePurpose::Reply { number, discussion } => (*number, fenix_forge::Forge::reply(client.as_ref(), *number, discussion, &body)),
-            ComposePurpose::NewComment { number, position } => {
-                (*number, fenix_forge::Forge::comment_on_line(client.as_ref(), *number, position, &body))
-            }
-            ComposePurpose::CommitMessage { .. }
-            | ComposePurpose::GitCommit { .. }
-            | ComposePurpose::RebaseMessage { .. }
-            | ComposePurpose::ReviewPending { .. }
-            | ComposePurpose::ReviewReply { .. }
-            | ComposePurpose::ReviewSummary { .. }
-            | ComposePurpose::RequestDescription { .. }
-            | ComposePurpose::Feature { .. } => unreachable!("handled above"),
-        };
-        match result {
-            Ok(()) => {
-                // Only torn down on success: a failed send leaves the
-                // draft in the buffer, which is the difference between
-                // retrying and retyping.
-                self.close_compose();
-                self.set_message(format!("posted to !{number}"));
-                self.forge_select(number);
-            }
-            Err(err) => self.set_error(format!("couldn't post that: {err} -- the draft is still here")),
-        }
-        self.wake_caret();
     }
 
     // -- Merge view (`SPC g x`) --------------------------------------------
@@ -34301,6 +34248,12 @@ configure_board stm32
         fenix_forge::DiffRefs { base_sha: "b1".to_string(), head_sha: "h1".to_string(), start_sha: "s1".to_string() }
     }
 
+    /// The review's own value in the open compose pane.
+    fn review_compose_of(app: &App) -> review_host::ReviewCompose {
+        let Some(ComposePurpose::Feature { data, .. }) = app.compose.as_ref().map(|c| &c.purpose) else { panic!("a feature's compose pane") };
+        data.get::<review_host::ReviewCompose>().cloned().expect("the review's")
+    }
+
     /// A merge request with one changed file and one thread on the line
     /// it adds, loaded into the view.
     fn reviewing(name: &str) -> (TempDir, App) {
@@ -34408,7 +34361,7 @@ configure_board stm32
         app.forge_reply_at_cursor();
 
         let compose = app.compose.as_ref().expect("a compose buffer opened");
-        assert_eq!(compose.purpose, ComposePurpose::Reply { number: 42, discussion: "thread-1".to_string() });
+        assert_eq!(review_compose_of(&app), review_host::ReviewCompose::Reply { number: 42, discussion: "thread-1".to_string() });
         // The keys are in the pane title, because a buffer you type
         // prose into has to say how to send it without pressing
         // anything first.
@@ -34424,10 +34377,7 @@ configure_board stm32
 
         app.forge_reply_at_cursor();
 
-        assert_eq!(
-            app.compose.as_ref().unwrap().purpose,
-            ComposePurpose::Reply { number: 42, discussion: "thread-1".to_string() }
-        );
+        assert_eq!(review_compose_of(&app), review_host::ReviewCompose::Reply { number: 42, discussion: "thread-1".to_string() });
     }
 
     #[test]
@@ -34448,7 +34398,7 @@ configure_board stm32
 
         app.forge_comment_at_cursor();
 
-        let ComposePurpose::NewComment { number, position } = app.compose.as_ref().unwrap().purpose.clone() else {
+        let review_host::ReviewCompose::NewComment { number, position } = review_compose_of(&app) else {
             panic!("expected a new-comment compose");
         };
         assert_eq!(number, 42);
@@ -34469,7 +34419,7 @@ configure_board stm32
 
         app.forge_comment_at_cursor();
 
-        let ComposePurpose::NewComment { position, .. } = app.compose.as_ref().unwrap().purpose.clone() else {
+        let review_host::ReviewCompose::NewComment { position, .. } = review_compose_of(&app) else {
             panic!("expected a new-comment compose");
         };
         assert_eq!(position.old_line, Some(1));
@@ -34483,7 +34433,7 @@ configure_board stm32
 
         app.forge_comment_at_cursor();
 
-        let ComposePurpose::NewComment { position, .. } = app.compose.as_ref().unwrap().purpose.clone() else {
+        let review_host::ReviewCompose::NewComment { position, .. } = review_compose_of(&app) else {
             panic!("expected a new-comment compose");
         };
         assert_eq!(position.old_line, Some(2));
@@ -34567,7 +34517,7 @@ configure_board stm32
         app.forge_comment_at_cursor();
 
         assert!(!app.windows().windows().contains(&first), "the first pane is gone");
-        assert!(matches!(app.compose.as_ref().unwrap().purpose, ComposePurpose::NewComment { .. }));
+        assert!(matches!(review_compose_of(&app), review_host::ReviewCompose::NewComment { .. }));
     }
 
     #[test]

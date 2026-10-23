@@ -123,6 +123,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
     on_start: None,
     before_key: None,
     on_tick: None,
+    compose: None,
 };
 
 /// What CCSDS keeps between calls: each stream page's source, the

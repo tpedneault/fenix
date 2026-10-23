@@ -171,6 +171,9 @@ pub(crate) struct FeatureSpec {
     /// What it does on the housekeeping tick, in place (the agenda
     /// reading its file again when something else changed it).
     pub on_tick: Option<fn(&mut App)>,
+    /// What its compose pane wrote (`ComposePurpose::Feature`), with the
+    /// value it opened the pane with.
+    pub compose: Option<fn(&mut App, &ComposeData, String)>,
 }
 
 /// How a feature resolves the reading view's `[[links]]` (the notebook's
