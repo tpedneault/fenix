@@ -160,6 +160,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     compose: None,
     pane_keys: None,
     close_view: None,
+    git_status: None,
 };
 
 /// A set of MIBs, read or being read.

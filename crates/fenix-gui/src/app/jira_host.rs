@@ -203,6 +203,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         compose: Some(compose),
         pane_keys: None,
         close_view: None,
+        git_status: None,
     }
 };
 

@@ -33509,6 +33509,8 @@ configure_board stm32
     }
 
     /// The review's own value in the open compose pane.
+    use review_host::ForgeDetail;
+
     fn review_compose_of(app: &App) -> review_host::ReviewCompose {
         let Some(ComposePurpose::Feature { data, .. }) = app.compose.as_ref().map(|c| &c.purpose) else { panic!("a feature's compose pane") };
         data.get::<review_host::ReviewCompose>().cloned().expect("the review's")

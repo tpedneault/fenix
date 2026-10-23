@@ -89,7 +89,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             }
         }),
         settings: &[],
-        services: &[],
+        services: &SERVICES,
         contributes: &[],
         session_documents: None,
         session_reopen: None,
@@ -113,6 +113,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             app.forge_close();
             true
         }),
+        git_status: Some(|app, id| app.git_page_request(id)),
     }
 };
 
@@ -881,13 +882,13 @@ fn compose(app: &mut App, data: &ComposeData, body: String) {
 /// from another.
 #[derive(Debug, Clone)]
 pub(crate) struct ForgeDetail {
-    request: fenix_forge::MergeRequest,
-    approvals: Option<fenix_forge::Approvals>,
-    files: Vec<fenix_forge::ChangedFile>,
-    discussions: Vec<fenix_forge::Discussion>,
+    pub(super) request: fenix_forge::MergeRequest,
+    pub(super) approvals: Option<fenix_forge::Approvals>,
+    pub(super) files: Vec<fenix_forge::ChangedFile>,
+    pub(super) discussions: Vec<fenix_forge::Discussion>,
     /// A failure fetching the *files* specifically. The request itself
     /// having arrived is worth showing even when its diff didn't.
-    error: Option<String>,
+    pub(super) error: Option<String>,
 }
 
 /// The Merge Requests view (`SPC g M`): the project's open merge
@@ -900,32 +901,32 @@ pub(crate) struct ForgeDetail {
 /// else's VPN, and arriving out of order is normal rather than
 /// theoretical.
 pub(crate) struct ForgeSession {
-    workspace_index: usize,
-    list_pane: fenix_window::WindowId,
-    detail_pane: fenix_window::WindowId,
-    review_pane: fenix_window::WindowId,
-    list_buffer: BufferId,
-    detail_buffer: BufferId,
-    review_buffer: BufferId,
-    repo_root: PathBuf,
+    pub(super) workspace_index: usize,
+    pub(super) list_pane: fenix_window::WindowId,
+    pub(super) detail_pane: fenix_window::WindowId,
+    pub(super) review_pane: fenix_window::WindowId,
+    pub(super) list_buffer: BufferId,
+    pub(super) detail_buffer: BufferId,
+    pub(super) review_buffer: BufferId,
+    pub(super) repo_root: PathBuf,
     /// `group/project`, inferred from the repo's own `origin` remote.
-    project: String,
-    filter: fenix_forge::MrFilter,
-    requests: Vec<fenix_forge::MergeRequest>,
+    pub(super) project: String,
+    pub(super) filter: fenix_forge::MrFilter,
+    pub(super) requests: Vec<fenix_forge::MergeRequest>,
     /// Which request the detail pane is showing.
-    selected: Option<u64>,
-    detail: Option<ForgeDetail>,
+    pub(super) selected: Option<u64>,
+    pub(super) detail: Option<ForgeDetail>,
     /// A failure listing merge requests, rendered into the list pane --
     /// an empty list beside an error that has scrolled past reads as
     /// "there are none", a different answer entirely.
-    list_error: Option<String>,
-    list_request_id: u64,
-    detail_request_id: u64,
+    pub(super) list_error: Option<String>,
+    pub(super) list_request_id: u64,
+    pub(super) detail_request_id: u64,
     /// Armed by `m` until the next keypress confirms -- merging is the
     /// one action here that can't be taken back, so it doesn't happen
     /// on a single keystroke. Mirrors `GitConfirmAction`'s own
     /// arm-then-confirm shape.
-    merge_armed: bool,
+    pub(super) merge_armed: bool,
 }
 
 /// The three forge calls one merge request's detail pane needs.
@@ -1598,6 +1599,36 @@ fn forge_pane_key(app: &mut App, keypress: KeyPress) -> bool {
 
     false
 }
+
+/// What the review offers others (the Git status page).
+static SERVICES: [super::feature::Service; 2] = [
+    // `{root, number}` -> request `number` of the repository at `root` in
+    // its review page, or with no number, a new one for its branch.
+    super::feature::Service {
+        name: "review.request",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            #[derive(serde::Deserialize)]
+            struct Request {
+                root: PathBuf,
+                number: Option<u64>,
+            }
+            let call: Request = serde_json::from_str(payload).map_err(|e| format!("a review call: {e}"))?;
+            match call.number {
+                Some(number) => app.open_review(call.root, number, false),
+                None => app.open_new_request_at(call.root),
+            }
+            Ok(String::new())
+        }),
+    },
+    // `null` -> the requests waiting on you.
+    super::feature::Service {
+        name: "review.inbox",
+        call: super::feature::ServiceCall::Mut(|app, _| {
+            app.open_reviews();
+            Ok(String::new())
+        }),
+    },
+];
 
 #[cfg(test)]
 mod tests {

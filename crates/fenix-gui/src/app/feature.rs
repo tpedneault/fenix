@@ -180,6 +180,9 @@ pub(crate) struct FeatureSpec {
     /// Closes its view in workspace `workspace` (`SPC g q`): `true` when
     /// it had one there.
     pub close_view: Option<fn(&mut App, usize) -> bool>,
+    /// The Git status page `id` was refreshed: what it adds to the page
+    /// (the review: the branch's pull request, in the header).
+    pub git_status: Option<fn(&mut App, BufferId)>,
 }
 
 /// How a feature resolves the reading view's `[[links]]` (the notebook's
@@ -984,6 +987,14 @@ impl App {
     pub(crate) fn page_project(&self) -> Option<PathBuf> {
         let id = self.focused_buffer_id();
         self.features.iter().find_map(|f| f.page_project(self, id))
+    }
+
+    /// The Git status page `id` was refreshed: each feature adds to it.
+    pub(crate) fn git_status_refreshed(&mut self, id: BufferId) {
+        let hooks: Vec<_> = self.features.specs().filter_map(|spec| spec.git_status).collect();
+        for hook in hooks {
+            hook(self, id);
+        }
     }
 
     /// `SPC g q` in workspace `here`: a feature's view there closed.
