@@ -115,15 +115,8 @@ impl App {
 
     /// Opens a MIB definition's page by name, searching every kind.
     fn notebook_open_mib(&mut self, name: &str) {
-        let (key, _) = super::mib_host::key_here(self);
-        let Some(set) = self.with_mib(|m, a| m.set(a, &key)).flatten() else {
-            self.set_error("no MIB here -- mib.roots names the folders");
-            return;
-        };
-        let found = (0..set.roots().len()).find_map(|root| fenix_mib::Kind::ALL.iter().find_map(|&k| set.find(k, root, name)));
-        match found {
-            Some(def) => super::mib_host::open_def(self, key, def),
-            None => self.set_error(format!("{name} isn't in the MIB")),
+        if let Err(e) = self.call_service("mib.open", &serde_json::json!({ "name": name })) {
+            self.set_error(e);
         }
     }
 

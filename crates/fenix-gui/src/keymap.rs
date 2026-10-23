@@ -124,6 +124,7 @@ const LOCAL_MENUS: &[(LocalContext, &crate::app::feature::FeatureSpec)] = &[
     (LocalContext::Markdown, &crate::app::NOTEBOOK_SPEC),
     #[cfg(feature = "diagrams")]
     (LocalContext::Mermaid, &crate::app::DIAGRAMS_SPEC),
+    #[cfg(feature = "mission")]
     (LocalContext::Tcl, &crate::app::MIB_SPEC),
     #[cfg(feature = "tcl")]
     (LocalContext::Tcl, &crate::app::TCL_SPEC),
@@ -331,6 +332,7 @@ fn build_leader(on: &dyn Fn(&str) -> bool) -> KeyTrie<&'static str> {
 
 /// The features whose keys go under the leader, after core's.
 const LEADER_FEATURES: &[&crate::app::feature::FeatureSpec] = &[
+    #[cfg(feature = "mission")]
     &crate::app::CCSDS_SPEC,
     // Global rather than under `SPC m`: `SPC m` only has the Arduino
     // menu inside a sketch, and your first sketch has to come from

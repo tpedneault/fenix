@@ -142,7 +142,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     page_after_layout: None,
     on_event: None,
     settings: &SETTINGS,
-    services: &[],
+    services: &SERVICES,
     contributes: &[],
     session_documents: None,
     session_reopen: None,
@@ -214,6 +214,27 @@ pub(crate) struct MibHost {
 /// relative to it), else the project itself when it's a MIB, else yours
 /// -- with yours added to the project's when it says so. And where they
 /// come from, for the page to say.
+/// What the MIB offers others (the notebook's `mib:` links).
+static SERVICES: [super::feature::Service; 1] = [
+    // `{name}` -> that definition's page, whatever its kind, from the
+    // MIB here.
+    super::feature::Service {
+        name: "mib.open",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            #[derive(serde::Deserialize)]
+            struct Open {
+                name: String,
+            }
+            let call: Open = serde_json::from_str(payload).map_err(|e| format!("a MIB call: {e}"))?;
+            let (key, _) = key_here(app);
+            let set = app.with_mib(|m, a| m.set(a, &key)).flatten().ok_or("no MIB here -- mib.roots names the folders")?;
+            let def = (0..set.roots().len()).find_map(|root| Kind::ALL.iter().find_map(|&k| set.find(k, root, &call.name))).ok_or_else(|| format!("{} isn't in the MIB", call.name))?;
+            open_def(app, key, def);
+            Ok(String::new())
+        }),
+    },
+];
+
 pub(super) fn key_here(app: &App) -> (MibKey, String) {
     let project = app.project_root.clone();
     let name = project.as_ref().and_then(|r| r.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -1120,11 +1141,49 @@ impl Feature for MibHost {
         self.apply_loaded(app, key, set);
     }
 
+    fn completion_tail_items(&mut self, app: &mut App) -> Vec<fenix_picker::Candidate<crate::completion::Item>> {
+        self.completion_tail(app)
+    }
+
+    fn page_project(&self, app: &App, page: BufferId) -> Option<PathBuf> {
+        page_key(app, page)?.project
+    }
+
+    fn disk_probe(&self, app: &App) -> Option<super::feature::DiskProbeJob> {
+        if !app.config.bool_value("mib.watch").unwrap_or(true) {
+            return None;
+        }
+        let keys: Vec<MibKey> = self.sets.iter().filter(|(_, slot)| !slot.loading && slot.set.is_some()).map(|(key, _)| key.clone()).collect();
+        Some(Box::new(move || {
+            // A MIB on a volume that isn't answering keeps what was read.
+            let stamps: Vec<(MibKey, fenix_mib::Stamp)> = keys
+                .into_iter()
+                .filter(|key| key.roots.iter().all(|root| super::disk_probe::stat(&root.path).is_some()))
+                .map(|key| {
+                    let stamp = fenix_mib::Stamp::of(&key.roots);
+                    (key, stamp)
+                })
+                .collect();
+            Box::new(stamps) as Box<dyn Any + Send>
+        }))
+    }
+
+    fn disk_probed(&mut self, app: &mut App, found: Box<dyn Any + Send>) {
+        let Ok(stamps) = found.downcast::<Vec<(MibKey, fenix_mib::Stamp)>>() else { return };
+        for (key, stamp) in *stamps {
+            let stale = self.sets.get(&key).is_some_and(|slot| !slot.loading && slot.set.as_ref().is_some_and(|set| *set.stamp() != stamp));
+            if stale {
+                self.load(app, key);
+            }
+        }
+    }
+
     fn notice(&mut self, app: &mut App, notice: &Notice) {
         match notice {
             Notice::FocusChanged => self.preload(app),
             Notice::Tick => self.check_scripts(app),
-            Notice::TaskFinished { .. } | Notice::TerminalClosed(_) => {}
+            Notice::SettingChanged(key) if matches!(key.as_str(), "mib.roots" | "mib.default" | "mib.include_yours" | "mib.apid_format") => self.settings_changed(app),
+            Notice::TaskFinished { .. } | Notice::TerminalClosed(_) | Notice::SettingChanged(_) => {}
         }
     }
 
@@ -1539,6 +1598,23 @@ mod tests {
         assert!(source.contains("settings"), "{source}");
         app.config.set_value("mib.include_yours", Some(fenix_config::Value::Bool(true)));
         assert_eq!(key_here(&app).0.roots.len(), 2, "yours added when asked");
+    }
+
+    /// The disk probe looks at a read MIB's files for the MIB, through
+    /// its `disk_probe` hook, and a changed one is read again.
+    #[test]
+    fn a_mib_changed_on_disk_is_read_again_through_the_disk_probe() {
+        let (p, mut app) = project("watch", "");
+        let key = key_here(&app).0;
+        let set = app.with_mib(|m, a| m.set(a, &key)).flatten().expect("read");
+        assert!(set.resolve("ZTC99901").is_none());
+        let ccf = p.0.join("ops").join("ccf.dat");
+        let mut text = std::fs::read_to_string(&ccf).unwrap();
+        text.push_str("ZTC99901\tA new one\t\t\tN\t\t17\t1\t1008\t0\n");
+        std::fs::write(&ccf, text).unwrap();
+        app.start_disk_probe();
+        let set = app.with_mib(|m, a| m.set(a, &key)).flatten().expect("read again");
+        assert!(set.resolve("ZTC99901").is_some(), "the new telecommand is there");
     }
 
     #[test]

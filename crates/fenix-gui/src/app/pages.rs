@@ -290,9 +290,8 @@ impl App {
         }
     }
 
-    /// The height of page `id`'s pane in rows, once it's been drawn. For
-    /// a page that fills its pane; unused when none in the build does.
-    #[allow(dead_code)]
+    /// The height of page `id`'s pane in rows, once it's been drawn, for
+    /// a page that fills its pane.
     pub(super) fn page_rows(&self, id: BufferId) -> Option<usize> {
         self.pages.get(&id).and_then(|state| state.rows)
     }

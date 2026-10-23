@@ -52,8 +52,6 @@ impl Clipboard {
         self.0.set_html(html, alt_text)
     }
 
-    /// A picture (a diagram's); unused when nothing in the build copies one.
-    #[allow(dead_code)]
     pub fn set_image(&mut self, image: arboard::ImageData) -> Result<(), arboard::Error> {
         let _lock = lock();
         self.0.set_image(image)

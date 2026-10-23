@@ -17,7 +17,7 @@
 //! the same as "gone".
 
 use super::*;
-use crate::mib_page::MibKey;
+use super::feature::DiskProbeJob;
 
 /// A stat slower than this marks its volume as not answering.
 const SLOW_STAT: Duration = Duration::from_secs(2);
@@ -75,7 +75,8 @@ pub(super) fn stat(path: &Path) -> Option<std::io::Result<std::fs::Metadata>> {
 pub(super) struct ProbeRequest {
     buffers: Vec<(BufferId, PathBuf)>,
     pdfs: Vec<(BufferId, PathBuf)>,
-    mibs: Vec<MibKey>,
+    /// Each feature's own work (`Feature::disk_probe`), by its id.
+    features: Vec<(&'static str, DiskProbeJob)>,
     project: Option<PathBuf>,
 }
 
@@ -85,14 +86,14 @@ pub(super) struct ProbeRequest {
 pub(crate) struct ProbeResult {
     buffers: HashMap<BufferId, Option<DiskFingerprint>>,
     pdfs: HashMap<BufferId, Option<std::time::SystemTime>>,
-    mibs: Vec<(MibKey, fenix_mib::Stamp)>,
+    features: Vec<(&'static str, Box<dyn std::any::Any + Send>)>,
     project: Option<(PathBuf, fenix_config::ProjectSettings)>,
 }
 
 // By hand: the project's settings have no `Debug` of their own.
 impl std::fmt::Debug for ProbeResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProbeResult").field("buffers", &self.buffers.len()).field("pdfs", &self.pdfs.len()).field("mibs", &self.mibs.len()).finish()
+        f.debug_struct("ProbeResult").field("buffers", &self.buffers.len()).field("pdfs", &self.pdfs.len()).field("features", &self.features.len()).finish()
     }
 }
 
@@ -109,12 +110,8 @@ fn run(request: ProbeRequest) -> ProbeResult {
             result.pdfs.insert(id, meta.ok().and_then(|m| m.modified().ok()));
         }
     }
-    for key in request.mibs {
-        // A MIB on a volume that isn't answering keeps what was read.
-        if key.roots.iter().all(|root| stat(&root.path).is_some()) {
-            let stamp = fenix_mib::Stamp::of(&key.roots);
-            result.mibs.push((key, stamp));
-        }
+    for (id, job) in request.features {
+        result.features.push((id, job()));
     }
     if let Some(root) = request.project {
         if stat(&root).is_some() {
@@ -149,9 +146,7 @@ impl App {
             }
             request.pdfs = self.features.pdf().docs.iter().map(|(&id, d)| (id, d.path.clone())).collect();
         }
-        if self.config.bool_value("mib.watch").unwrap_or(true) {
-            request.mibs = self.mib().into_iter().flat_map(|mib| mib.sets.iter()).filter(|(_, slot)| !slot.loading && slot.set.is_some()).map(|(key, _)| key.clone()).collect();
-        }
+        request.features = self.features.iter().filter_map(|f| f.disk_probe(self).map(|job| (f.spec().id, job))).collect();
         request.project = self.project_root.clone();
         self.disk_probe_out = Some(Instant::now());
         self.disk_probe_basis = self.disk_state.clone();
@@ -178,11 +173,8 @@ impl App {
         if let Some((root, settings)) = result.project {
             self.apply_project_settings(root, settings);
         }
-        for (key, stamp) in result.mibs {
-            let stale = self.mib().and_then(|mib| mib.sets.get(&key)).is_some_and(|slot| !slot.loading && slot.set.as_ref().is_some_and(|set| *set.stamp() != stamp));
-            if stale {
-                self.with_mib(|mib, app| mib.load(app, key));
-            }
+        for (id, found) in result.features {
+            self.with_feature_id(id, |feature, app| feature.disk_probed(app, found));
         }
         if !self.config.watch_files.unwrap_or(true) {
             return;

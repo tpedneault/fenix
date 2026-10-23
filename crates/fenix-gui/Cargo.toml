@@ -15,10 +15,11 @@ path = "src/main.rs"
 # default, the core alone with `--no-default-features` (CI builds both, so
 # the core can't come to depend on an extension).
 [features]
-default = ["docker", "tcl", "diagrams", "embedded"]
+default = ["docker", "tcl", "diagrams", "embedded", "mission"]
 docker = ["dep:fenix-docker"]
 diagrams = ["dep:fenix-diagram"]
 tcl = []
+mission = ["dep:fenix-ccsds", "dep:fenix-mib"]
 embedded = ["dep:fenix-embedded"]
 
 [dependencies]
@@ -29,7 +30,7 @@ chrono = "0.4"
 dirs = "6"
 fenix-agenda = { path = "../fenix-agenda" }
 fenix-buffers = { path = "../fenix-buffers" }
-fenix-ccsds = { path = "../fenix-ccsds" }
+fenix-ccsds = { path = "../fenix-ccsds", optional = true }
 fenix-completion = { path = "../fenix-completion" }
 fenix-config = { path = "../fenix-config" }
 fenix-control = { path = "../fenix-control" }
@@ -47,7 +48,7 @@ fenix-github = { path = "../fenix-github" }
 fenix-jira = { path = "../fenix-jira" }
 fenix-keymap = { path = "../fenix-keymap" }
 fenix-lsp = { path = "../fenix-lsp" }
-fenix-mib = { path = "../fenix-mib" }
+fenix-mib = { path = "../fenix-mib", optional = true }
 fenix-diagram = { path = "../fenix-diagram", optional = true }
 fenix-notebook = { path = "../fenix-notebook" }
 fenix-pdf = { path = "../fenix-pdf" }

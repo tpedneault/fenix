@@ -57,8 +57,9 @@ try {
     Invoke-Gate 'clippy' 'cargo' ($clippyArgs + @('--', '-D', 'warnings'))
     if ($Suite -eq 'Workspace') {
         # The core alone, every built-in extension's Cargo feature off: it
-        # mustn't come to depend on one.
-        Invoke-Gate 'core' 'cargo' @('clippy', '--locked', '-p', 'fenix-gui', '--no-default-features', '--', '-D', 'warnings')
+        # mustn't come to depend on one. What only extensions use (the
+        # host's API, helpers they share) is dead code here, and allowed.
+        Invoke-Gate 'core' 'cargo' @('clippy', '--locked', '-p', 'fenix-gui', '--no-default-features', '--', '-D', 'warnings', '-A', 'dead_code')
     }
     if ($Suite -eq 'Workspace') {
         Invoke-Gate 'build' 'cargo' @('build', '--locked', '-p', 'fenix-gui')
