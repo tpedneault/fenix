@@ -1,0 +1,54 @@
+name = "Orbit Dark"
+tabs = "underline"
+
+[surfaces]
+bg = "#1a1b26"
+sidebar_bg = "#1a1b26"
+bg_modeline = "#24283b"
+divider = "#565f89"
+caret = "#e0af68"
+hl_line = "#222534"
+selection = { color = "#7aa2f7", alpha = 0.12 }
+bracket_match = { color = "#2ac3de", alpha = 0.12 }
+search_match = { color = "#e0af68", alpha = 0.12 }
+
+[text]
+fg = "#c0caf5"
+fg_modeline = "#c0caf5"
+caret_text = "#e0af68"
+gutter_fg = "#929bb9"
+
+[modes]
+normal = "#e0af68"
+insert = "#7dcfff"
+visual = "#f7768e"
+replace = "#ff9e64"
+command = "#7aa2f7"
+explorer = "#7aa2f7"
+picker = "#bb9af7"
+text_dark = "#1a1b26"
+text_light = "#1a1b26"
+
+[syntax]
+keyword = "#bb9af7"
+string = "#9ece6a"
+comment = "#929bb9"
+function = "#7aa2f7"
+type = "#2ac3de"
+number = "#ff9e64"
+constant = "#ff9e64"
+variable = "#c0caf5"
+operator = "#89ddff"
+punctuation = "#89ddff"
+attribute = "#e0af68"
+
+[explorer]
+folder = "#7aa2f7"
+file = "#c0caf5"
+
+[git]
+modified = "#ff9e64"
+staged = "#9ece6a"
+untracked = "#7aa2f7"
+ignored = "#929bb9"
+conflicted = "#f7768e"

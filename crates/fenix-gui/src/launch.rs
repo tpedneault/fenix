@@ -67,7 +67,7 @@ impl Launcher {
             Some(roots) => fenix_config::Config::load_at_or_default(roots.settings_file(), roots.local.join("state")),
             None => fenix_config::Config::empty("settings.toml".into(), "state".into()),
         };
-        let look = config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
+        let look = theme::named_or_default(config.theme.as_deref());
         // The splash is how a slow start shows it's alive, so only its
         // own setting hides it; with animations off it just holds still.
         let splash_on = config.motion.splash != Some(false);

@@ -6303,6 +6303,10 @@ impl App {
         if !problems.is_empty() {
             app.set_error(format!("keybindings.toml: {}", problems.join("; ")));
         }
+        // Your themes, likewise.
+        if !theme::problems().is_empty() {
+            app.set_error(theme::problems().join("; "));
+        }
         app
     }
 
@@ -6388,7 +6392,7 @@ impl App {
                 eprintln!("fenix: couldn't create settings.toml ({err})");
             }
         }
-        let theme = config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
+        let theme = theme::named_or_default(config.theme.as_deref());
         let mut vim = VimState::new();
         vim.set_indent_width(config.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH));
         vim.set_iskeyword_extra(
@@ -17503,7 +17507,7 @@ impl App {
     /// them one at a time.
     pub(crate) fn picker_pick_theme(&mut self) {
         let candidates =
-            theme::ALL.iter().map(|t| fenix_picker::Candidate::new(t.name.to_string(), *t)).collect();
+            theme::all().iter().map(|t| fenix_picker::Candidate::new(t.name.to_string(), *t)).collect();
         self.enter_picker(ActivePicker::Theme(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -25844,7 +25848,7 @@ index 0000000..1111111 100644
 
     #[test]
     fn split_line_by_highlights_covers_a_middle_span() {
-        let theme = &theme::ORBIT_DARK;
+        let theme = theme::default_theme();
         let spans = split_line_by_highlights("let x = 1;", 0, 10, &[(4..5, theme.syntax_variable)], theme.fg);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "let x = 1;");
@@ -25855,7 +25859,7 @@ index 0000000..1111111 100644
 
     #[test]
     fn split_line_by_highlights_clips_ranges_extending_past_the_line() {
-        let theme = &theme::ORBIT_DARK;
+        let theme = theme::default_theme();
         // A highlight spanning into the next line should only color this
         // line's portion of it.
         let spans = split_line_by_highlights("abc", 10, 13, &[(8..15, theme.syntax_string)], theme.fg);
@@ -25864,14 +25868,14 @@ index 0000000..1111111 100644
 
     #[test]
     fn split_line_by_highlights_ignores_ranges_outside_the_line() {
-        let theme = &theme::ORBIT_DARK;
+        let theme = theme::default_theme();
         let spans = split_line_by_highlights("abc", 10, 13, &[(0..5, theme.syntax_string)], theme.fg);
         assert_eq!(spans, vec![("abc".to_string(), theme.fg)]);
     }
 
     #[test]
     fn remap_highlights_for_display_lands_on_the_tab_expanded_offsets() {
-        let color = theme::ORBIT_DARK.syntax_variable;
+        let color = theme::default_theme().syntax_variable;
         let buffer = Buffer::from_text("a\tbb");
         let (display, col_map) = tabstops::expand_line("a\tbb", &TabStops::Fixed(4));
         assert_eq!(display, "a   bb");
@@ -31401,7 +31405,7 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.picker_pick_theme();
         match &app.active_picker {
-            Some(ActivePicker::Theme(state)) => assert_eq!(state.len(), theme::ALL.len()),
+            Some(ActivePicker::Theme(state)) => assert_eq!(state.len(), theme::all().len()),
             other => panic!("expected an open Theme picker, got is_some={}", other.is_some()),
         }
         assert_eq!(app.main_view, MainView::Picker);
@@ -31412,7 +31416,7 @@ configure_board stm32
         let dir = TempDir::new("picker_confirm_theme");
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
-        app.theme = &theme::ORBIT_DARK;
+        app.theme = theme::default_theme();
 
         app.picker_pick_theme();
         for ch in "Nord".chars() {

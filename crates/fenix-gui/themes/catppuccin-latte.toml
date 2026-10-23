@@ -1,0 +1,60 @@
+# Catppuccin Latte, the light flavour. Catppuccin's accents are pastels
+# meant to sit on a dark base; on Latte's near-white page most of them fall
+# short of the 4.5:1 this file's contrast tests ask of every text color, so
+# each text accent is darkened toward black -- same hue -- only as far as it
+# takes to pass, and the mode badges likewise so `base` lettering reads on
+# them. The caret rect itself stays Catppuccin's own rosewater.
+name = "Catppuccin Latte"
+tabs = "underline"
+
+[surfaces]
+bg = "#eff1f5"
+sidebar_bg = "#e6e9ef"
+bg_modeline = "#e6e9ef"
+divider = "#acb0be"
+caret = "#dc8a78"
+hl_line = "#d9dce4"
+selection = { color = "#7c7f93", alpha = 0.25 }
+bracket_match = { color = "#fe640b", alpha = 0.15 }
+search_match = { color = "#04a5e5", alpha = 0.18 }
+
+[text]
+fg = "#4c4f69"
+fg_modeline = "#4c4f69"
+caret_text = "#865449"
+gutter_fg = "#5e606c"
+
+[modes]
+normal = "#1d63ee"
+insert = "#327d22"
+visual = "#8839ef"
+replace = "#d20f39"
+command = "#bc4a08"
+explorer = "#187788"
+picker = "#a1518c"
+text_dark = "#eff1f5"
+text_light = "#eff1f5"
+
+[syntax]
+keyword = "#7d34dc"
+string = "#2c6e1e"
+comment = "#5d5f6e"
+function = "#1a58d3"
+type = "#865511"
+number = "#a54107"
+constant = "#a54107"
+variable = "#4c4f69"
+operator = "#036890"
+punctuation = "#036890"
+attribute = "#116b70"
+
+[explorer]
+folder = "#1a58d3"
+file = "#4c4f69"
+
+[git]
+modified = "#865511"
+staged = "#2c6e1e"
+untracked = "#156977"
+ignored = "#5e606c"
+conflicted = "#c10e34"

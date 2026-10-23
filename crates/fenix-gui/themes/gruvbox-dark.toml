@@ -1,0 +1,56 @@
+# Adapted for Fenix: subdued surfaces, readable secondary text, and
+# coordinated syntax, Git, and mode accents.
+name = "Gruvbox Dark"
+tabs = "underline"
+
+[surfaces]
+bg = "#1d2021"
+sidebar_bg = "#1d2021"
+bg_modeline = "#282828"
+divider = "#665c54"
+caret = "#fabd2f"
+hl_line = "#282828"
+selection = { color = "#83a598", alpha = 0.12 }
+bracket_match = { color = "#8ec07c", alpha = 0.12 }
+search_match = { color = "#fabd2f", alpha = 0.12 }
+
+[text]
+fg = "#ebdbb2"
+fg_modeline = "#ebdbb2"
+caret_text = "#fabd2f"
+gutter_fg = "#a89984"
+
+[modes]
+normal = "#fabd2f"
+insert = "#83a598"
+visual = "#fb4934"
+replace = "#fe8019"
+command = "#83a598"
+explorer = "#8ec07c"
+picker = "#d3869b"
+text_dark = "#1d2021"
+text_light = "#1d2021"
+
+[syntax]
+keyword = "#fb7965"
+string = "#b8bb26"
+comment = "#a89984"
+function = "#83a598"
+type = "#fabd2f"
+number = "#d3869b"
+constant = "#fe8019"
+variable = "#ebdbb2"
+operator = "#8ec07c"
+punctuation = "#8ec07c"
+attribute = "#fabd2f"
+
+[explorer]
+folder = "#83a598"
+file = "#ebdbb2"
+
+[git]
+modified = "#fe8019"
+staged = "#b8bb26"
+untracked = "#83a598"
+ignored = "#a89984"
+conflicted = "#fb7965"

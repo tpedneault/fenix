@@ -576,10 +576,10 @@ d = zed
     fn every_theme_has_tabs_in_its_own_look_unless_turned_off() {
         use crate::theme::TabStyle;
         let mut app = App::with_file(None);
-        app.theme = &crate::theme::NORD;
+        app.theme = crate::theme::by_name("Nord").unwrap();
         assert_eq!(app.tab_style(), Some(TabStyle::Underline));
         assert!(app.pane_has_breadcrumb(app.focused_pane_id()));
-        app.theme = &crate::theme::VISUAL_STUDIO_DARK;
+        app.theme = crate::theme::by_name("Visual Studio Dark").unwrap();
         assert_eq!(app.tab_style(), Some(TabStyle::Block));
         app.config.polish.tabs = Some("underline".into());
         assert_eq!(app.tab_style(), Some(TabStyle::Underline));
