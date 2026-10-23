@@ -39,12 +39,33 @@ pub const PACKS: &[Pack] = &[
     Pack { name: "Reading", about: "The PDF reader", ids: &["fenix.pdf"] },
 ];
 
+/// An extension you installed (`fenix --install-extension`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub about: String,
+    /// Its data is in use this run.
+    pub running: bool,
+    /// On from the next start (`extensions.toml`).
+    pub on: bool,
+    /// What's wrong with it, when its manifest can't be read.
+    pub broken: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
     Close,
     /// Switch these extensions on (`true`) or off from the next start.
     Switch(Vec<&'static str>, bool),
+    /// Switch an installed extension on or off from the next start.
+    SwitchInstalled(String, bool),
+    /// Remove an installed extension.
+    Uninstall(String),
+    /// Say this on the page.
+    Say(String),
 }
 
 pub struct ExtensionsPage {
@@ -55,18 +76,22 @@ pub struct ExtensionsPage {
     pub focus: usize,
     /// This run is safe mode: nothing's running whatever the rows say.
     pub safe_mode: bool,
+    /// The extensions you installed, below the built-in ones.
+    pub installed: Vec<InstalledRow>,
+    /// The installed row `x` was pressed on once; a second `x` removes it.
+    pub armed: Option<usize>,
 }
 
 impl ExtensionsPage {
     pub fn new(rows: Vec<Row>) -> Self {
-        ExtensionsPage { rows, packs: Vec::new(), focus: 0, safe_mode: false }
+        ExtensionsPage { rows, packs: Vec::new(), focus: 0, safe_mode: false, installed: Vec::new(), armed: None }
     }
 
     /// The welcome: the page with `PACKS` on top -- the ones with
     /// anything in this build.
     pub fn welcome(rows: Vec<Row>) -> Self {
         let packs = PACKS.iter().filter(|pack| pack.ids.iter().any(|id| rows.iter().any(|r| r.id == *id))).copied().collect();
-        ExtensionsPage { rows, packs, focus: 0, safe_mode: false }
+        ExtensionsPage { rows, packs, focus: 0, safe_mode: false, installed: Vec::new(), armed: None }
     }
 
     /// The extensions of `pack` this build has.
@@ -76,7 +101,12 @@ impl ExtensionsPage {
 
     /// Whether a switch is waiting for a restart.
     pub fn pending(&self) -> usize {
-        self.rows.iter().filter(|r| r.on != r.running).count()
+        self.rows.iter().filter(|r| r.on != r.running).count() + self.installed.iter().filter(|r| r.on != r.running).count()
+    }
+
+    /// The installed row under the cursor, if it's on one.
+    fn installed_at_focus(&self) -> Option<usize> {
+        self.focus.checked_sub(self.packs.len() + self.rows.len()).filter(|i| *i < self.installed.len())
     }
 
     /// Whether every extension in `pack` is on from the next start.
@@ -85,7 +115,19 @@ impl ExtensionsPage {
     }
 
     pub fn key(&mut self, key: Key) -> Action {
-        let count = self.packs.len() + self.rows.len();
+        let count = self.packs.len() + self.rows.len() + self.installed.len();
+        // Removing takes a second `x` on the same row; anything else
+        // backs out.
+        let armed = self.armed.take();
+        if key == Key::Char('x') {
+            let Some(i) = self.installed_at_focus() else { return Action::None };
+            let row = &self.installed[i];
+            if armed == Some(i) {
+                return Action::Uninstall(row.id.clone());
+            }
+            self.armed = Some(i);
+            return Action::Say(format!("x again removes {} -- anything else keeps it", row.name));
+        }
         match key {
             Key::Char('q') | Key::Escape => Action::Close,
             Key::Char('j') | Key::Down | Key::Tab => {
@@ -112,7 +154,11 @@ impl ExtensionsPage {
                 }
                 Some(i) => match self.rows.get(i) {
                     Some(row) => Action::Switch(vec![row.id], !row.on),
-                    None => Action::None,
+                    None => match self.installed.get(i - self.rows.len()) {
+                        Some(row) if row.broken.is_none() => Action::SwitchInstalled(row.id.clone(), !row.on),
+                        Some(row) => Action::Say(format!("{} can't be read -- x x removes it", row.name)),
+                        None => Action::None,
+                    },
                 },
             },
             _ => Action::None,
@@ -177,7 +223,43 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         g.put(y, about_x, row.id, Role::Muted);
         y += 1;
     }
-    g.keys(left, width, &[("Enter", "switch on / off"), ("j k", "move"), ("q", "close")]);
+    // Yours, installed: their data (themes, snippets, templates) read
+    // beside yours.
+    if !welcome {
+        y += 1;
+        g.heading(y, left, width, "Installed");
+        y += 1;
+        if page.installed.is_empty() {
+            g.put(y, left + 2, &fit("None yet -- fenix --install-extension <file.fenixext> installs one (see Configuration).", width.saturating_sub(4)), Role::Muted);
+        }
+        let first = page.packs.len() + page.rows.len();
+        for (i, row) in page.installed.iter().enumerate() {
+            if first + i == page.focus {
+                g.focus(y, left..left + width);
+            }
+            g.put(y, left + 2, if row.on { "●" } else { "○" }, if row.on { Role::Good } else { Role::Muted });
+            g.put(y, left + 4, &fit(&row.name, name_width), if row.on { Role::Text } else { Role::Muted });
+            let state = if page.armed == Some(i) {
+                "x again removes it"
+            } else {
+                match (row.running, row.on) {
+                    (true, true) => "on",
+                    (false, false) => "off",
+                    (true, false) => "off after a restart",
+                    (false, true) => "on after a restart",
+                }
+            };
+            let state_x = (left + width).saturating_sub(state.chars().count());
+            let about = row.broken.as_deref().unwrap_or(&row.about);
+            g.put(y, about_x, &fit(about, state_x.saturating_sub(about_x + 2)), if row.broken.is_some() { Role::Warn } else { Role::Muted });
+            g.put(y, state_x, state, if row.on == row.running && page.armed != Some(i) { Role::Muted } else { Role::Warn });
+            y += 1;
+            g.put(y, about_x, &format!("{} {}", row.id, row.version), Role::Muted);
+            y += 1;
+        }
+    }
+    let keys: &[(&str, &str)] = if page.installed.is_empty() { &[("Enter", "switch on / off"), ("j k", "move"), ("q", "close")] } else { &[("Enter", "switch on / off"), ("x x", "remove installed"), ("j k", "move"), ("q", "close")] };
+    g.keys(left, width, keys);
     g.finish()
 }
 
@@ -199,6 +281,38 @@ mod tests {
         p.key(Key::Char('j'));
         assert_eq!(p.key(Key::Enter), Action::Switch(vec!["fenix.pdf"], true));
         assert_eq!(p.key(Key::Char('q')), Action::Close);
+    }
+
+    fn installed(id: &str, on: bool, broken: Option<&str>) -> InstalledRow {
+        InstalledRow { id: id.into(), name: id.into(), version: "1.0.0".into(), about: "Themes".into(), running: on, on, broken: broken.map(str::to_string) }
+    }
+
+    /// Installed extensions sit below the built-in ones: Enter switches
+    /// one, `x` twice removes it, and anything between backs out.
+    #[test]
+    fn installed_extensions_switch_and_are_removed_with_a_second_x() {
+        let mut p = page();
+        p.installed = vec![installed("acme.dusk", true, None), installed("acme.broken", true, Some("extension.toml: no version"))];
+        let text = layout(&p, 160).all_text();
+        assert!(text.contains("INSTALLED") && text.contains("acme.dusk 1.0.0") && text.contains("no version"), "{text}");
+        p.focus = 2;
+        assert_eq!(p.key(Key::Enter), Action::SwitchInstalled("acme.dusk".into(), false));
+        assert!(matches!(p.key(Key::Char('x')), Action::Say(s) if s.starts_with("x again removes acme.dusk")));
+        assert!(layout(&p, 160).all_text().contains("x again removes it"));
+        assert_eq!(p.key(Key::Char('x')), Action::Uninstall("acme.dusk".into()));
+        p.key(Key::Char('x'));
+        p.key(Key::Char('j'));
+        assert_eq!(p.armed, None, "moving away backs out");
+        assert_eq!(p.focus, 3);
+        assert!(matches!(p.key(Key::Enter), Action::Say(s) if s.contains("can't be read")));
+        p.focus = 0;
+        assert_eq!(p.key(Key::Char('x')), Action::None, "x does nothing on a built-in one");
+    }
+
+    #[test]
+    fn with_nothing_installed_the_page_says_how() {
+        let text = layout(&page(), 160).all_text();
+        assert!(text.contains("None yet -- fenix --install-extension"), "{text}");
     }
 
     #[test]

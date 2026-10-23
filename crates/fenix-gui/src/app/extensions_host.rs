@@ -31,6 +31,7 @@ impl App {
         let rows = self.extension_rows();
         let mut page = if welcome { ExtensionsPage::welcome(rows) } else { ExtensionsPage::new(rows) };
         page.safe_mode = crate::installed::safe_mode();
+        page.installed = crate::installed::rows();
         match self.find_page(|m| matches!(m, PageModel::Extensions(_))) {
             Some(id) => {
                 if let Some(state) = self.pages.get_mut(&id) {
@@ -42,6 +43,19 @@ impl App {
             None => {
                 self.open_page(PageModel::Extensions(Box::new(page)));
             }
+        }
+    }
+
+    /// Page `id`'s installed rows read again, after one was switched or
+    /// removed.
+    fn refresh_extensions_page(&mut self, id: BufferId) {
+        let rows = crate::installed::rows();
+        if let Some(state) = self.pages.get_mut(&id) {
+            if let PageModel::Extensions(page) = &mut state.model {
+                page.installed = rows;
+                page.focus = page.focus.min((page.packs.len() + page.rows.len() + page.installed.len()).saturating_sub(1));
+            }
+            state.stale = true;
         }
     }
 
@@ -74,6 +88,23 @@ impl App {
         match action {
             Action::None => {}
             Action::Close => self.close_page(id),
+            Action::Say(text) => self.set_message(text),
+            Action::SwitchInstalled(ext, on) => {
+                match crate::installed::store().map(|store| store.set_enabled(&ext, on)) {
+                    Some(Ok(())) => self.set_message(format!("{ext}: {} from the next start", if on { "on" } else { "off" })),
+                    Some(Err(e)) => self.set_error(e),
+                    None => self.set_error("no folder to keep extensions in"),
+                }
+                self.refresh_extensions_page(id);
+            }
+            Action::Uninstall(ext) => {
+                match crate::installed::store().map(|store| store.uninstall(&ext)) {
+                    Some(Ok(())) => self.set_message(format!("Removed {ext} -- what it brought stays until Fenix next starts")),
+                    Some(Err(e)) => self.set_error(e),
+                    None => self.set_error("no folder to keep extensions in"),
+                }
+                self.refresh_extensions_page(id);
+            }
             Action::Switch(extensions, on) => {
                 let mut off: Vec<String> = self.config.extensions_disabled.iter().filter(|x| !extensions.contains(&x.as_str())).cloned().collect();
                 if !on {

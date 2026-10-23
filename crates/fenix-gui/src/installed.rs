@@ -45,6 +45,45 @@ pub fn data_dirs(kind: &str) -> Vec<PathBuf> {
     fenix_extensions::Store::current().map(|store| store.data_dirs(kind)).unwrap_or_default()
 }
 
+/// This machine's store of installed extensions; none in tests.
+pub fn store() -> Option<fenix_extensions::Store> {
+    if cfg!(test) {
+        return None;
+    }
+    fenix_extensions::Store::current()
+}
+
+/// The installed extensions that were switched on when Fenix started --
+/// whose data is in use this run (none in safe mode).
+fn running() -> &'static [String] {
+    static RUNNING: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    RUNNING.get_or_init(|| {
+        if safe_mode() {
+            return Vec::new();
+        }
+        store().and_then(|s| s.installed().ok()).unwrap_or_default().into_iter().filter(|e| e.enabled).map(|e| e.id).collect()
+    })
+}
+
+/// The Extensions page's rows for what's installed.
+pub fn rows() -> Vec<crate::extensions_page::InstalledRow> {
+    let running = running();
+    store()
+        .and_then(|s| s.installed().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| crate::extensions_page::InstalledRow {
+            name: e.name(),
+            about: e.manifest.as_ref().map(|m| m.extension.description.clone()).unwrap_or_default(),
+            broken: e.manifest.as_ref().err().cloned(),
+            running: running.contains(&e.id),
+            on: e.enabled,
+            version: e.version,
+            id: e.id,
+        })
+        .collect()
+}
+
 /// The flags, as typed.
 pub const INSTALL_FLAG: &str = "--install-extension";
 pub const UNINSTALL_FLAG: &str = "--uninstall-extension";
