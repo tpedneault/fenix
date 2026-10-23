@@ -8,6 +8,10 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+minisign-verify = "0.2"
+sha2 = "0.10"
+serde_json = "1"
+ureq = { version = "2", features = ["tls", "native-certs"] }
 fenix-storage = { path = "../fenix-storage" }
 semver = "1"
 serde = { version = "1", features = ["derive"] }
@@ -16,3 +20,4 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2-zli
 
 [dev-dependencies]
 tempfile = "3"
+minisign = "0.7"

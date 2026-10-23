@@ -9,6 +9,7 @@
 
 pub mod manifest;
 pub mod package;
+pub mod registry;
 pub mod store;
 
 pub use manifest::{Manifest, Runtime};

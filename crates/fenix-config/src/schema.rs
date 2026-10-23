@@ -434,6 +434,8 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         s("session.workspace_per_project", Session, "A workspace per project", Kind::Bool, "Opening a project gives it a workspace of its own.", field!(workspace_per_project, bool_get, bool_set)).default("on"),
         // Extensions
         s("extensions.disabled", Extensions, "Switched off", Kind::List, "Built-in extensions that are switched off, by id (fenix.jira, fenix.pdf): their commands, keys, settings and pages aren't there. The Extensions page (SPC h x) switches them.", field!(extensions_disabled, list_get, list_set)).default("none").restart(),
+        Setting::stored("extensions.store", Category::Extensions, "The store", Kind::Bool, "Whether Fenix may look up and download extensions from the registry. Off on a machine that installs only from files (fenix --install-extension x.fenixext).").with_default("on"),
+        Setting::stored("extensions.registry", Category::Extensions, "Registry", Kind::Text, "Where the registry's index.json is: Fenix's own, or a mirror of it. The index must be signed with Fenix's registry key either way.").with_default("https://raw.githubusercontent.com/tpedneault/fenix-extensions/registry/index.json"),
     ]
 });
 
