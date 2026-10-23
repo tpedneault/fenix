@@ -105,7 +105,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         page_after_layout: None,
         on_event: None,
         settings: &SETTINGS,
-        services: &[],
+        services: &SERVICES,
         contributes: &[],
         session_documents: None,
         session_reopen: None,
@@ -116,9 +116,17 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         doctor: None,
         opener: None,
         lsp_first: None,
-        prompt_key: None,
+        prompt_key: Some(|app, key| {
+            if app.features.agenda().prompt.is_none() {
+                return false;
+            }
+            app.agenda_prompt_key(key);
+            true
+        }),
         wake: None,
         links: None,
+        on_start: Some(|app| app.agenda_sync_start()),
+        before_key: Some(|app| app.agenda_note_activity()),
     }
 };
 
@@ -195,6 +203,39 @@ pub(crate) struct AgendaHost {
 impl super::feature::Feature for AgendaHost {
     fn spec(&self) -> &'static super::feature::FeatureSpec {
         &SPEC
+    }
+
+    fn prompt_text(&self) -> Option<String> {
+        let prompt = self.state.prompt.as_ref()?;
+        Some(match &prompt.kind {
+            AgendaPromptKind::LinkKey { .. } => format!("Link to issue (e.g. PROJ-123): {}", prompt.input),
+        })
+    }
+
+    /// The running clock -- easy to forget once you've gone and started
+    /// the work the task is about, which is exactly when it needs to
+    /// stay visible.
+    fn modeline_indicator(&self, _app: &App) -> Option<String> {
+        let timer = self.state.store.active_timer.as_ref()?;
+        let title = self.state.store.task(timer.task_id).map(|t| t.title.as_str()).unwrap_or("?");
+        let elapsed = agenda_page::format_minutes((chrono::Local::now() - timer.started_at).num_minutes());
+        Some(format!("   \u{23f1} {title} {elapsed}"))
+    }
+
+    fn busy(&self, app: &App) -> Option<String> {
+        app.agenda_sync().and_then(|sync| (sync.busy)(app))
+    }
+
+    fn project_work(&self, _app: &App, jira: &str) -> Vec<String> {
+        let prefix = format!("{jira}-");
+        self.state
+            .store
+            .tasks
+            .iter()
+            .filter(|t| !t.archived && t.status != fenix_agenda::Status::Done)
+            .filter(|t| t.jira_key().is_some_and(|k| k.starts_with(&prefix)))
+            .map(|t| format!("{} {}", t.jira_key().unwrap_or_default(), t.title))
+            .collect()
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -776,7 +817,7 @@ impl App {
             }
             A::EditDescription(task) => {
                 let seed = self.features.agenda().store.task(task).map(|t| t.description.clone()).unwrap_or_default();
-                self.open_compose_seeded(ComposePurpose::TaskDescription { task }, &seed);
+                self.open_compose_seeded(task_compose("description", task), &seed);
             }
             A::AddNote(task, text) => {
                 self.features.agenda_mut().store.add_note(task, text);
@@ -790,7 +831,7 @@ impl App {
                 self.features.agenda_mut().store.remove_note(task, i);
                 self.agenda_save_and_refresh();
             }
-            A::Comment(task) => self.open_compose_seeded(ComposePurpose::TaskComment { task }, ""),
+            A::Comment(task) => self.open_compose_seeded(task_compose("comment", task), ""),
             A::PostNote(task, i) => {
                 let Some(t) = self.features.agenda().store.task(task) else { return };
                 let (Some(key), Some(note)) = (t.jira_key().map(str::to_string), t.notes.get(i).map(|n| n.text.clone())) else { return };
@@ -946,6 +987,246 @@ impl App {
 
     }
 }
+
+impl App {
+    /// Persists `agenda_store` to `agenda_path` -- mirrors `Config::save`'s
+    /// own error handling (surfaced, never a panic: a personal task list
+    /// is a convenience, not something worth crashing the editor over).
+    pub(super) fn save_agenda(&mut self) {
+        if let Err(err) = fenix_agenda::save(&self.features.agenda().path, &self.features.agenda().store) {
+            self.set_error(format!("couldn't save agenda.json: {err}"));
+        }
+        // Fenix's own write isn't a change to read back.
+        self.features.agenda_mut().stamp = std::fs::metadata(&self.features.agenda().path).and_then(|m| m.modified()).ok();
+    }
+
+    /// Takes in `agenda.json` written by someone else since Fenix last
+    /// read or wrote it, on the disk poll's tick, so Fenix's next save
+    /// doesn't put back what the other writer changed. Fenix saves after
+    /// every change of its own, so there's nothing unsaved here to lose.
+    /// A file that's gone or unreadable is left alone, and the agenda in
+    /// memory kept: reading it as empty would wipe it at the next save.
+    pub(super) fn reload_agenda_if_changed(&mut self) {
+        let stamp = std::fs::metadata(&self.features.agenda().path).and_then(|m| m.modified()).ok();
+        if stamp.is_none() || stamp == self.features.agenda().stamp {
+            return;
+        }
+        self.features.agenda_mut().stamp = stamp;
+        match fenix_agenda::reload(&self.features.agenda().path) {
+            Ok(Some(store)) => {
+                self.features.agenda_mut().store = store;
+                self.refresh_agenda_pages();
+            }
+            Ok(None) => {}
+            Err(err) => self.set_error(format!("agenda.json changed on disk but can't be read ({err}) -- keeping the agenda as it was")),
+        }
+    }
+
+    pub(super) fn agenda_save_and_refresh(&mut self) {
+        self.save_agenda();
+        self.refresh_agenda_pages();
+    }
+
+    pub(super) fn agenda_clock_toggle(&mut self, id: TaskId) {
+        let already_running_here = matches!(&self.features.agenda().store.active_timer, Some(t) if t.task_id == id);
+        if already_running_here {
+            self.features.agenda_mut().store.clock_out();
+        } else {
+            self.features.agenda_mut().store.clock_in(id);
+        }
+        self.agenda_save_and_refresh();
+    }
+
+    /// `SPC a a`: the agenda page, where it was left.
+    pub(crate) fn cmd_agenda_open(&mut self) {
+        self.open_agenda_page(None);
+    }
+
+    pub(crate) fn cmd_agenda_list(&mut self) {
+        self.open_agenda_page(Some(agenda_page::Tab::List));
+    }
+
+    pub(crate) fn cmd_agenda_board(&mut self) {
+        self.open_agenda_page(Some(agenda_page::Tab::Board));
+    }
+
+    pub(crate) fn cmd_agenda_report(&mut self) {
+        self.open_agenda_page(Some(agenda_page::Tab::Time));
+    }
+
+    /// Mirrors `jira_prompt_key`'s text-accumulation shape exactly.
+    pub(super) fn agenda_prompt_key(&mut self, keypress: KeyPress) {
+        if keypress == KeyPress::char('v').with_ctrl() {
+            let pasted = self.clipboard_text();
+            if let (Some(prompt), Some(text)) = (&mut self.features.agenda_mut().prompt, pasted) {
+                prompt.input.push_str(&text);
+            }
+            self.wake_caret();
+            return;
+        }
+        let Some(prompt) = &mut self.features.agenda_mut().prompt else { return };
+        match keypress.code {
+            KeyCode::Named(FenixNamedKey::Escape) => self.features.agenda_mut().prompt = None,
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                let AgendaPrompt { kind, input } = self.features.agenda_mut().prompt.take().unwrap();
+                self.agenda_prompt_advance(kind, input);
+            }
+            KeyCode::Named(FenixNamedKey::Backspace) => {
+                prompt.input.pop();
+            }
+            KeyCode::Char(c) => prompt.input.push(c),
+            _ => {}
+        }
+        self.wake_caret();
+    }
+
+    /// `Enter` on `agenda_prompt`: blank input does nothing.
+    pub(super) fn agenda_prompt_advance(&mut self, kind: AgendaPromptKind, input: String) {
+        let value = input.trim().to_string();
+        if value.is_empty() {
+            return;
+        }
+        match kind {
+            AgendaPromptKind::LinkKey { id } => self.agenda_link_key(id, value),
+        }
+        self.wake_caret();
+    }
+}
+
+/// A task's description or Jira comment, written in the compose pane and
+/// handed back to `agenda.compose`.
+pub(super) fn task_compose(kind: &'static str, task: TaskId) -> ComposePurpose {
+    let (what, verb, allow_empty) = match kind {
+        "description" => ("Description", "save", true),
+        _ => ("Jira comment", "post", false),
+    };
+    ComposePurpose::Feature { service: "agenda.compose", kind, arg: task.0.to_string(), what: what.to_string(), verb, allow_empty }
+}
+
+/// The agenda's status as the protocol writes it.
+fn task_status(status: fenix_agenda::Status) -> fenix_control::protocol::TaskStatus {
+    match status {
+        fenix_agenda::Status::Todo => fenix_control::protocol::TaskStatus::Todo,
+        fenix_agenda::Status::InProgress => fenix_control::protocol::TaskStatus::InProgress,
+        fenix_agenda::Status::Blocked => fenix_control::protocol::TaskStatus::Blocked,
+        fenix_agenda::Status::Done => fenix_control::protocol::TaskStatus::Done,
+    }
+}
+
+/// `fenix/agenda.tasks`: the tasks not archived, in board order
+/// (by status, then as arranged within it), only those in
+/// `params.status` when given.
+fn control_tasks(store: &fenix_agenda::AgendaStore, params: &fenix_control::protocol::TasksParams) -> fenix_control::protocol::TasksResult {
+    let mut tasks: Vec<&fenix_agenda::Task> = store
+        .tasks
+        .iter()
+        .filter(|t| !t.archived)
+        .filter(|t| {
+            params
+                .status
+                .as_ref()
+                .is_none_or(|wanted| wanted.contains(&task_status(t.status)))
+        })
+        .collect();
+    tasks.sort_by_key(|t| {
+        (
+            fenix_agenda::Status::ALL
+                .iter()
+                .position(|s| *s == t.status),
+            t.order,
+        )
+    });
+    fenix_control::protocol::TasksResult {
+        tasks: tasks
+            .into_iter()
+            .map(|t| fenix_control::protocol::AgendaTask {
+                id: t.id.0,
+                title: t.title.clone(),
+                status: task_status(t.status),
+                jira_key: t.jira_key().map(str::to_string),
+                elapsed_minutes: store.elapsed_on(t.id).num_minutes(),
+            })
+            .collect(),
+    }
+}
+
+/// What the agenda offers others (the compose pane, the control channel).
+static SERVICES: [super::feature::Service; 5] = [
+    // `{kind: "description" | "comment", arg: task id, body}` -> kept on
+    // the task, and on a linked one queued for Jira (`task_compose`).
+    super::feature::Service {
+        name: "agenda.compose",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            let call: super::ComposeCall = serde_json::from_str(payload).map_err(|e| format!("an agenda call: {e}"))?;
+            let task = TaskId(call.arg.parse().map_err(|_| format!("no agenda task {}", call.arg))?);
+            let body = call.body;
+            match call.kind.as_str() {
+                "description" => {
+                    if app.features.agenda().store.task(task).is_some_and(|t| t.description != body) {
+                        app.features.agenda_mut().store.set_description(task, body.clone());
+                        app.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::SetDescription(body));
+                        app.agenda_after_edit();
+                    }
+                }
+                "comment" => {
+                    app.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::AddComment(body));
+                    app.agenda_after_edit();
+                }
+                other => return Err(format!("nothing to write on a task called {other}")),
+            }
+            Ok(String::new())
+        }),
+    },
+    // `fenix/agenda.tasks`'s params -> its result: the tasks not
+    // archived, in board order, only those in `status` when given.
+    super::feature::Service {
+        name: "agenda.tasks",
+        call: super::feature::ServiceCall::Read(|app, payload| {
+            let params: fenix_control::protocol::TasksParams = serde_json::from_str(payload).map_err(|e| format!("an agenda call: {e}"))?;
+            serde_json::to_string(&control_tasks(&app.features.agenda().store, &params)).map_err(|e| e.to_string())
+        }),
+    },
+    // `{task_id}` -> the clock started on it.
+    super::feature::Service {
+        name: "agenda.clock_in",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            #[derive(serde::Deserialize)]
+            struct ClockIn {
+                task_id: u32,
+            }
+            let call: ClockIn = serde_json::from_str(payload).map_err(|e| format!("an agenda call: {e}"))?;
+            let id = TaskId(call.task_id);
+            if !app.features.agenda().store.task(id).is_some_and(|t| !t.archived) {
+                return Err(format!("no agenda task {}", call.task_id));
+            }
+            app.agenda_clock_pick(ClockPick::Start(id));
+            Ok(String::new())
+        }),
+    },
+    // `null` -> the clock stopped, if it's running.
+    super::feature::Service {
+        name: "agenda.clock_out",
+        call: super::feature::ServiceCall::Mut(|app, _| {
+            if app.features.agenda().store.active_timer.is_some() {
+                app.agenda_clock_pick(ClockPick::Stop);
+            }
+            Ok(String::new())
+        }),
+    },
+    // `null` -> the running clock as `fenix/state` reports it, or `null`.
+    super::feature::Service {
+        name: "agenda.timer",
+        call: super::feature::ServiceCall::Read(|app, _| {
+            let store = &app.features.agenda().store;
+            let timer = store.active_timer.as_ref().map(|timer| fenix_control::protocol::AgendaTimer {
+                task_id: timer.task_id.0,
+                title: store.task(timer.task_id).map(|t| t.title.clone()).unwrap_or_default(),
+                since: timer.started_at.to_rfc3339(),
+            });
+            serde_json::to_string(&timer).map_err(|e| e.to_string())
+        }),
+    },
+];
 
 #[cfg(test)]
 mod tests {

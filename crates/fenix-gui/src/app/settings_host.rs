@@ -19,6 +19,17 @@ pub(super) fn base_branch_in(root: &Path, fallback: Option<String>) -> Option<St
     }
 }
 
+/// The contribution point for a feature's secret check (`t` on a
+/// token's row): a `SecretCheck`.
+pub(crate) const SECRET_CHECKS: &str = "settings.secret_check";
+
+/// How a feature checks its secret works, off the UI thread: the server
+/// and token in, who they sign in as out.
+pub(crate) struct SecretCheck {
+    pub secret: fenix_config::Secret,
+    pub check: fn(String, String) -> Result<String, String>,
+}
+
 impl App {
     fn settings_page(&mut self, id: BufferId) -> Option<&mut SettingsPage> {
         match self.pages.get_mut(&id).map(|s| {
@@ -460,11 +471,16 @@ impl App {
         if let Some(page) = self.settings_page(id) {
             page.note = Some((format!("asking {server}…"), false));
         }
+        let checks: Vec<&'static SecretCheck> = self.contributions(SECRET_CHECKS).filter_map(|c| c.downcast_ref::<SecretCheck>()).collect();
         self.page_spawn(move |send| {
             let result = match secret {
                 Secret::GitLab => fenix_forge::Forge::current_user(&fenix_gitlab::GitLab::new(server.clone(), token, "")),
                 Secret::GitHub => fenix_forge::Forge::current_user(&fenix_github::GitHub::new(token, "", "")),
-                Secret::Jira => fenix_jira::JiraClient::new(server.clone(), token).myself(),
+                // A feature's own secret, checked its way.
+                other => match checks.iter().find(|check| check.secret == other) {
+                    Some(check) => (check.check)(server.clone(), token),
+                    None => Err("nothing in this build checks it".to_string()),
+                },
             };
             let note = match result {
                 Ok(user) => (format!("works -- signs in to {server} as {user}"), false),

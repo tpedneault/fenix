@@ -6,8 +6,8 @@
 
 use fenix_control::protocol::OpenProjectParams;
 use fenix_control::{
-    AgendaTask, AgendaTimer, Call, CaptureParams, CaptureResult, CaptureTarget, CommandInfo,
-    CommandsResult, RpcError, StateResult, TaskStatus, TasksParams, TasksResult,
+    Call, CaptureParams, CaptureResult, CaptureTarget, CommandInfo, CommandsResult, RpcError,
+    StateResult,
 };
 use fenix_tasks::PathPosition;
 use serde_json::{json, Value};
@@ -18,16 +18,6 @@ use crate::commands::ExternalError;
 /// What a method of a switched-off extension answers.
 fn switched_off(what: &str) -> RpcError {
     RpcError::invalid_params(format!("{what} is switched off (extensions.disabled)"))
-}
-
-/// The agenda's status as the protocol writes it.
-fn task_status(status: fenix_agenda::Status) -> TaskStatus {
-    match status {
-        fenix_agenda::Status::Todo => TaskStatus::Todo,
-        fenix_agenda::Status::InProgress => TaskStatus::InProgress,
-        fenix_agenda::Status::Blocked => TaskStatus::Blocked,
-        fenix_agenda::Status::Done => TaskStatus::Done,
-    }
 }
 
 fn to_value(value: impl serde::Serialize) -> Value {
@@ -74,30 +64,18 @@ impl App {
             Call::NotebookCapture(_) if !self.features.is_on("fenix.notebook") => Err(switched_off("the notebook")),
             Call::AgendaTasks(_) | Call::AgendaClockIn(_) | Call::AgendaClockOut if !self.features.is_on("fenix.agenda") => Err(switched_off("the agenda")),
             Call::NotebookCapture(params) => self.control_capture(&params).map(to_value),
-            Call::AgendaTasks(params) => Ok(to_value(self.control_tasks(&params))),
-            Call::AgendaClockIn(params) => {
-                let id = TaskId(params.task_id);
-                if !self
-                    .features
-                    .agenda()
-                    .store
-                    .task(id)
-                    .is_some_and(|t| !t.archived)
-                {
-                    return Err(RpcError::invalid_params(format!(
-                        "no agenda task {}",
-                        params.task_id
-                    )));
-                }
-                self.agenda_clock_pick(super::agenda_host::ClockPick::Start(id));
-                Ok(json!({}))
-            }
-            Call::AgendaClockOut => {
-                if self.features.agenda().store.active_timer.is_some() {
-                    self.agenda_clock_pick(super::agenda_host::ClockPick::Stop);
-                }
-                Ok(json!({}))
-            }
+            Call::AgendaTasks(params) => self
+                .query_service("agenda.tasks", &to_value(&params))
+                .and_then(|tasks| serde_json::from_str(&tasks).map_err(|e| e.to_string()))
+                .map_err(RpcError::internal),
+            Call::AgendaClockIn(params) => self
+                .call_service("agenda.clock_in", &json!({ "task_id": params.task_id }))
+                .map(|_| json!({}))
+                .map_err(RpcError::invalid_params),
+            Call::AgendaClockOut => self
+                .call_service("agenda.clock_out", &Value::Null)
+                .map(|_| json!({}))
+                .map_err(RpcError::internal),
         }
     }
 
@@ -113,44 +91,6 @@ impl App {
             .call_service("notebook.capture", &json!({ "to": to, "text": params.text }))
             .map_err(RpcError::internal)?;
         Ok(CaptureResult { entry })
-    }
-
-    /// `fenix/agenda.tasks`: the tasks not archived, in board order
-    /// (by status, then as arranged within it), only those in
-    /// `params.status` when given.
-    fn control_tasks(&self, params: &TasksParams) -> TasksResult {
-        let store = &self.features.agenda().store;
-        let mut tasks: Vec<&fenix_agenda::Task> = store
-            .tasks
-            .iter()
-            .filter(|t| !t.archived)
-            .filter(|t| {
-                params
-                    .status
-                    .as_ref()
-                    .is_none_or(|wanted| wanted.contains(&task_status(t.status)))
-            })
-            .collect();
-        tasks.sort_by_key(|t| {
-            (
-                fenix_agenda::Status::ALL
-                    .iter()
-                    .position(|s| *s == t.status),
-                t.order,
-            )
-        });
-        TasksResult {
-            tasks: tasks
-                .into_iter()
-                .map(|t| AgendaTask {
-                    id: t.id.0,
-                    title: t.title.clone(),
-                    status: task_status(t.status),
-                    jira_key: t.jira_key().map(str::to_string),
-                    elapsed_minutes: store.elapsed_on(t.id).num_minutes(),
-                })
-                .collect(),
-        }
     }
 
     /// Opens each file the way picking it in `SPC f f` does, moving the
@@ -209,22 +149,9 @@ impl App {
         let mut state = StateResult {
             project: self.project_root.as_deref().map(plain),
             agenda_timer: self
-                .features
-                .agenda()
-                .store
-                .active_timer
-                .as_ref()
-                .map(|timer| AgendaTimer {
-                    task_id: timer.task_id.0,
-                    title: self
-                        .features
-                        .agenda()
-                        .store
-                        .task(timer.task_id)
-                        .map(|t| t.title.clone())
-                        .unwrap_or_default(),
-                    since: timer.started_at.to_rfc3339(),
-                }),
+                .query_service("agenda.timer", &Value::Null)
+                .ok()
+                .and_then(|timer| serde_json::from_str(&timer).ok()),
             ..StateResult::default()
         };
         if self.main_view == MainView::Editor {
@@ -309,7 +236,7 @@ pub(crate) fn control_commands(app: &App) -> CommandsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fenix_control::{OpenParams, OpenPath};
+    use fenix_control::{AgendaTask, OpenParams, OpenPath, TaskStatus, TasksParams, TasksResult};
 
     struct TempDir(tempfile::TempDir);
     impl TempDir {

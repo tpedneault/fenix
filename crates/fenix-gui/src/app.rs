@@ -108,7 +108,6 @@ use winit::window::{CursorGrabMode, Icon, Window, WindowId};
 
 use fenix_core::{Buffer, Cursor};
 
-use crate::agenda_page;
 use agenda_sync::AgendaSyncEvent;
 use crate::commands::CommandRegistry;
 use crate::completion;
@@ -521,17 +520,42 @@ enum ComposePurpose {
     ReviewSummary { page: BufferId },
     /// The description of the request on new request page `page`.
     RequestDescription { page: BufferId },
-    /// An agenda task's description (`E`), seeded with the current one --
-    /// saved locally and, on a linked task, sent to Jira.
-    TaskDescription { task: TaskId },
-    /// A Jira comment on a linked agenda task (`C`), queued like any other
-    /// change to it.
-    TaskComment { task: TaskId },
-    /// The Jira page's `E`: an issue's description, seeded with the
-    /// current one.
-    IssueDescription { key: String },
-    /// The Jira page's `C`: a new comment on an issue.
-    IssueComment { key: String },
+    /// A feature's text (an agenda task's description, a Jira comment),
+    /// handed to its service `service` as `{kind, arg, body}`. `what` and
+    /// `verb` title the pane; `allow_empty` for a description, which may
+    /// be cleared.
+    Feature { service: &'static str, kind: &'static str, arg: String, what: String, verb: &'static str, allow_empty: bool },
+}
+
+/// Opens `url` in the default browser.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = std::process::Command::new("rundll32");
+        c.args(["url.dll,FileProtocolHandler", url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = std::process::Command::new("open");
+        c.arg(url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(url);
+        c
+    };
+    command.spawn().map(|_| ())
+}
+
+/// What `ComposePurpose::Feature` hands its service.
+#[derive(serde::Deserialize)]
+pub(crate) struct ComposeCall {
+    pub kind: String,
+    pub arg: String,
+    pub body: String,
 }
 
 impl ComposePurpose {
@@ -556,10 +580,7 @@ impl ComposePurpose {
             ComposePurpose::ReviewReply { .. } => ("Reply".to_string(), "send"),
             ComposePurpose::ReviewSummary { .. } => ("Review summary".to_string(), "keep"),
             ComposePurpose::RequestDescription { .. } => ("Description".to_string(), "keep"),
-            ComposePurpose::TaskDescription { .. } => ("Description".to_string(), "save"),
-            ComposePurpose::TaskComment { .. } => ("Jira comment".to_string(), "post"),
-            ComposePurpose::IssueDescription { key } => (format!("{key} description"), "save"),
-            ComposePurpose::IssueComment { key } => (format!("Comment on {key}"), "post"),
+            ComposePurpose::Feature { what, verb, .. } => (what.clone(), *verb),
         };
         format!("{what}  --  Esc then Enter to {verb}, q to cancel")
     }
@@ -6358,8 +6379,11 @@ impl App {
                 app.set_message(format!("Moved Fenix's files to where they live now: your settings are in settings.toml. The old files are in {}", backup.display()));
             }
         }
-        // The agenda's sync runs while Fenix does.
-        app.agenda_sync_start();
+        // What features start with Fenix (the agenda's sync).
+        let starts: Vec<_> = app.features.specs().filter_map(|spec| spec.on_start).collect();
+        for start in starts {
+            start(&mut app);
+        }
         // A fresh install is welcomed; an upgrade told once where things went.
         app.extensions_at_startup();
         // Your keybindings, read with the leader map: what's wrong is said.
@@ -14799,59 +14823,25 @@ impl App {
         let body = body.trim().to_string();
         let purpose = compose.purpose.clone();
 
-        // The agenda and the Jira panel -- no forge involved. A
-        // description may legitimately be cleared, so only these two
-        // accept an empty buffer.
-        match &purpose {
-            ComposePurpose::TaskDescription { task } => {
-                let task = *task;
-                self.close_compose();
-                if self.features.agenda().store.task(task).is_some_and(|t| t.description != body) {
-                    self.features.agenda_mut().store.set_description(task, body.clone());
-                    self.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::SetDescription(body));
-                    self.agenda_after_edit();
-                }
-                self.wake_caret();
+        // A feature's text (the agenda's, Jira's) -- no forge involved. A
+        // description may legitimately be cleared.
+        if let ComposePurpose::Feature { service, kind, arg, allow_empty, .. } = &purpose {
+            if body.is_empty() && !allow_empty {
+                self.set_error("nothing written yet -- q discards this instead".to_string());
                 return;
             }
-            ComposePurpose::IssueDescription { key } => {
-                let key = key.clone();
-                self.close_compose();
-                self.spawn_jira_action(move |client| {
-                    client.update_description(&key, &body)?;
-                    Ok(format!("Description updated for {key}"))
-                });
-                self.wake_caret();
-                return;
+            self.close_compose();
+            if let Err(e) = self.call_service(service, &serde_json::json!({ "kind": kind, "arg": arg, "body": body })) {
+                self.set_error(e);
             }
-            _ => {}
+            self.wake_caret();
+            return;
         }
         if body.is_empty() {
             // Posting an empty comment is never what was meant, and the
             // forge would either reject it or publish a blank note.
             self.set_error("nothing written yet -- q discards this instead".to_string());
             return;
-        }
-        match &purpose {
-            ComposePurpose::TaskComment { task } => {
-                let task = *task;
-                self.close_compose();
-                self.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::AddComment(body));
-                self.agenda_after_edit();
-                self.wake_caret();
-                return;
-            }
-            ComposePurpose::IssueComment { key } => {
-                let key = key.clone();
-                self.close_compose();
-                self.spawn_jira_action(move |client| {
-                    client.add_comment(&key, &body)?;
-                    Ok(format!("Comment added to {key}"))
-                });
-                self.wake_caret();
-                return;
-            }
-            _ => {}
         }
 
         // A commit message goes to `git`, not to a forge -- so it needs
@@ -14920,10 +14910,7 @@ impl App {
             | ComposePurpose::ReviewReply { .. }
             | ComposePurpose::ReviewSummary { .. }
             | ComposePurpose::RequestDescription { .. }
-            | ComposePurpose::TaskDescription { .. }
-            | ComposePurpose::TaskComment { .. }
-            | ComposePurpose::IssueDescription { .. }
-            | ComposePurpose::IssueComment { .. } => unreachable!("handled above"),
+            | ComposePurpose::Feature { .. } => unreachable!("handled above"),
         };
         match result {
             Ok(()) => {
@@ -15963,175 +15950,11 @@ impl App {
         self.git_refresh_session();
     }
 
-    /// Persists `agenda_store` to `agenda_path` -- mirrors `Config::save`'s
-    /// own error handling (surfaced, never a panic: a personal task list
-    /// is a convenience, not something worth crashing the editor over).
-    fn save_agenda(&mut self) {
-        if let Err(err) = fenix_agenda::save(&self.features.agenda().path, &self.features.agenda().store) {
-            self.set_error(format!("couldn't save agenda.json: {err}"));
-        }
-        // Fenix's own write isn't a change to read back.
-        self.features.agenda_mut().stamp = std::fs::metadata(&self.features.agenda().path).and_then(|m| m.modified()).ok();
-    }
-
-    /// Takes in `agenda.json` written by someone else since Fenix last
-    /// read or wrote it, on the disk poll's tick, so Fenix's next save
-    /// doesn't put back what the other writer changed. Fenix saves after
-    /// every change of its own, so there's nothing unsaved here to lose.
-    /// A file that's gone or unreadable is left alone, and the agenda in
-    /// memory kept: reading it as empty would wipe it at the next save.
-    pub(super) fn reload_agenda_if_changed(&mut self) {
-        let stamp = std::fs::metadata(&self.features.agenda().path).and_then(|m| m.modified()).ok();
-        if stamp.is_none() || stamp == self.features.agenda().stamp {
-            return;
-        }
-        self.features.agenda_mut().stamp = stamp;
-        match fenix_agenda::reload(&self.features.agenda().path) {
-            Ok(Some(store)) => {
-                self.features.agenda_mut().store = store;
-                self.refresh_agenda_pages();
-            }
-            Ok(None) => {}
-            Err(err) => self.set_error(format!("agenda.json changed on disk but can't be read ({err}) -- keeping the agenda as it was")),
-        }
-    }
-
-    fn agenda_save_and_refresh(&mut self) {
-        self.save_agenda();
-        self.refresh_agenda_pages();
-    }
-
-    fn agenda_clock_toggle(&mut self, id: TaskId) {
-        let already_running_here = matches!(&self.features.agenda().store.active_timer, Some(t) if t.task_id == id);
-        if already_running_here {
-            self.features.agenda_mut().store.clock_out();
-        } else {
-            self.features.agenda_mut().store.clock_in(id);
-        }
-        self.agenda_save_and_refresh();
-    }
-
-    /// `SPC a a`: the agenda page, where it was left.
-    pub(crate) fn cmd_agenda_open(&mut self) {
-        self.open_agenda_page(None);
-    }
-
-    pub(crate) fn cmd_agenda_list(&mut self) {
-        self.open_agenda_page(Some(agenda_page::Tab::List));
-    }
-
-    pub(crate) fn cmd_agenda_board(&mut self) {
-        self.open_agenda_page(Some(agenda_page::Tab::Board));
-    }
-
-    pub(crate) fn cmd_agenda_report(&mut self) {
-        self.open_agenda_page(Some(agenda_page::Tab::Time));
-    }
-
-    /// What to show in place of the modeline while `agenda_prompt` is
-    /// active -- mirrors `jira_prompt_text`.
-    fn agenda_prompt_text(&self) -> Option<String> {
-        let prompt = self.features.agenda().prompt.as_ref()?;
-        Some(match &prompt.kind {
-            AgendaPromptKind::LinkKey { .. } => format!("Link to issue (e.g. PROJ-123): {}", prompt.input),
-        })
-    }
-
-    /// Mirrors `jira_prompt_key`'s text-accumulation shape exactly.
-    fn agenda_prompt_key(&mut self, keypress: KeyPress) {
-        if keypress == KeyPress::char('v').with_ctrl() {
-            let pasted = self.clipboard_text();
-            if let (Some(prompt), Some(text)) = (&mut self.features.agenda_mut().prompt, pasted) {
-                prompt.input.push_str(&text);
-            }
-            self.wake_caret();
-            return;
-        }
-        let Some(prompt) = &mut self.features.agenda_mut().prompt else { return };
-        match keypress.code {
-            KeyCode::Named(FenixNamedKey::Escape) => self.features.agenda_mut().prompt = None,
-            KeyCode::Named(FenixNamedKey::Enter) => {
-                let AgendaPrompt { kind, input } = self.features.agenda_mut().prompt.take().unwrap();
-                self.agenda_prompt_advance(kind, input);
-            }
-            KeyCode::Named(FenixNamedKey::Backspace) => {
-                prompt.input.pop();
-            }
-            KeyCode::Char(c) => prompt.input.push(c),
-            _ => {}
-        }
-        self.wake_caret();
-    }
-
-    /// `Enter` on `agenda_prompt`: blank input does nothing.
-    fn agenda_prompt_advance(&mut self, kind: AgendaPromptKind, input: String) {
-        let value = input.trim().to_string();
-        if value.is_empty() {
-            return;
-        }
-        match kind {
-            AgendaPromptKind::LinkKey { id } => self.agenda_link_key(id, value),
-        }
-        self.wake_caret();
-    }
-    /// A ready-to-use `fenix_jira::JiraClient` built from `Config`'s
-    /// `[jira]` settings, or `None` (with a surfaced error) when either
-    /// `base_url` or `token` isn't configured yet.
-    fn jira_client(&mut self) -> Option<fenix_jira::JiraClient> {
-        let base_url = self.config.jira_base_url.clone();
-        let token = self.config.token(fenix_config::Secret::Jira);
-        match (base_url, token) {
-            (Some(base_url), Some(token)) => Some(fenix_jira::JiraClient::new(base_url, token)),
-            _ => {
-                self.set_error("Jira isn't set up yet -- set its server and token in SPC , (Jira & agenda)");
-                None
-            }
-        }
-    }
-
-    /// The shared shape every new Jira write action (create, comment,
-    /// title, description, log time, transition) needs: build a
-    /// `JiraClient` from `Config` (via `jira_client`, which already
-    /// surfaces its own error and returns `None` when unconfigured -- so
-    /// this is a safe no-op-without-credentials early return, same
-    /// posture `jira_sync_issues` already has), run `action` on a
-    /// background thread (or synchronously when `event_proxy` is `None`,
-    /// for tests -- mirrors `jira_sync_issues`'s own `Some`/`None`
-    /// branching exactly), and report the result via `FenixUserEvent::
-    /// JiraActionDone`/`apply_jira_action_done`.
-    fn spawn_jira_action<F>(&mut self, action: F)
-    where
-        F: FnOnce(&fenix_jira::JiraClient) -> Result<String, String> + Send + 'static,
-    {
-        let Some(client) = self.jira_client() else { return };
-        match self.event_proxy.clone() {
-            Some(proxy) => {
-                std::thread::spawn(move || {
-                    let result = action(&client);
-                    let _ = proxy.send_event(FenixUserEvent::feature(jira_host::SPEC.id, "JiraActionDone", jira_host::JiraDone(result)));
-                });
-            }
-            None => {
-                let result = action(&client);
-                self.apply_jira_action_done(result);
-            }
-        }
-    }
-
-    /// `FenixUserEvent::JiraActionDone` handling: on success, shows the
-    /// action's own human-readable confirmation and refreshes the panel
-    /// (`jira_refresh` -- picks up whatever changed, e.g. a new comment
-    /// or an updated status); on failure, surfaces the error. No
-    /// staleness guard, unlike `apply_jira_issues`/`apply_jira_detail` --
-    /// a write action should never be silently discarded just because
-    /// the user navigated elsewhere while it was in flight.
-    fn apply_jira_action_done(&mut self, result: Result<String, String>) {
-        match result {
-            Ok(message) => {
-                self.set_message(message);
-                self.jira_refresh();
-            }
-            Err(err) => self.set_error(err),
+    /// Opens `url` in the default browser, saying so.
+    pub(super) fn open_url(&mut self, url: &str) {
+        match open_in_browser(url) {
+            Ok(()) => self.set_message(format!("Opened {url}")),
+            Err(err) => self.set_error(format!("couldn't open a browser: {err}")),
         }
     }
 
@@ -18282,7 +18105,7 @@ impl App {
         match parse_workspace_action(action) {
             WorkspaceAction::Git => self.open_git(),
             WorkspaceAction::Jira => {
-                self.open_jira_page();
+                let _ = self.run_external_command("jira.open");
             }
             WorkspaceAction::Docker => {
                 let _ = self.run_external_command("docker.open");
@@ -18617,8 +18440,10 @@ impl App {
         }
 
         let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
-        // Back after a while with the clock running: that's asked first.
-        if self.agenda_note_activity() {
+        // A feature's first (back after a while with the clock running:
+        // that's asked first).
+        let firsts: Vec<_> = self.features.specs().filter_map(|spec| spec.before_key).collect();
+        if firsts.into_iter().any(|first| first(self)) {
             return;
         }
         self.dispatch_keypress(keypress, event_loop);
@@ -18787,11 +18612,6 @@ impl App {
         }
         if self.git_prompt.is_some() {
             self.git_prompt_key(keypress);
-            return;
-        }
-        // Linking an agenda task to an issue by key -- mirrors `jira_prompt`.
-        if self.features.agenda().prompt.is_some() {
-            self.agenda_prompt_key(keypress);
             return;
         }
         // A feature's own prompt (a new note's name, a capture).
@@ -20235,14 +20055,7 @@ impl App {
         // and started editing the code the task is about, which is
         // exactly when this needs to stay visible rather than only
         // showing while the agenda buffer itself is focused.
-        let agenda_timer_indicator = match &self.features.agenda().store.active_timer {
-            Some(timer) => {
-                let title = self.features.agenda().store.task(timer.task_id).map(|t| t.title.as_str()).unwrap_or("?");
-                let elapsed = agenda_page::format_minutes((chrono::Local::now() - timer.started_at).num_minutes());
-                format!("   \u{23f1} {title} {elapsed}")
-            }
-            None => String::new(),
-        };
+
         // A PDF pane has no text and no cursor, so "Ln 1, Col 1" is
         // both wrong and useless there -- it shows where in the
         // *document* the reader is instead, which is the one thing a
@@ -20275,10 +20088,10 @@ impl App {
         let details = self.editor_status_details();
         // The sketch's board and port -- `refresh_embedded_indicator`
         // keeps this current for whatever buffer is focused.
-        let feature_indicators: String = self.features.iter().filter_map(|feature| feature.modeline_indicator()).collect();
+        let feature_indicators: String = self.features.iter().filter_map(|feature| feature.modeline_indicator(self)).collect();
         let git_indicator = self.chrome_git_segment();
         let suffix = format!(
-            "{filename}{modified}{workspace_indicator}{git_indicator}{recording_indicator}{agenda_timer_indicator}{feature_indicators}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
+            "{filename}{modified}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );
@@ -20313,7 +20126,6 @@ impl App {
             .or_else(|| self.features.iter().find_map(|feature| feature.prompt_text()))
             .or_else(|| self.git_confirm_text())
             .or_else(|| self.git_prompt_text())
-            .or_else(|| self.agenda_prompt_text())
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
             .or_else(|| self.find_file_prompt_text())

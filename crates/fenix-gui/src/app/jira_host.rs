@@ -179,9 +179,12 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             }
         }),
         settings: &SETTINGS,
-        services: &[],
+        services: &SERVICES,
         // Its sync for the agenda.
-        contributes: &[super::feature::Contribution { point: super::agenda_host::AGENDA_SYNC, value: &super::agenda_sync::SYNC }],
+        contributes: &[
+            super::feature::Contribution { point: super::agenda_host::AGENDA_SYNC, value: &super::agenda_sync::SYNC },
+            super::feature::Contribution { point: super::settings_host::SECRET_CHECKS, value: &SECRET_CHECK },
+        ],
         session_documents: None,
         session_reopen: None,
         home: None,
@@ -192,6 +195,8 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         prompt_key: None,
         wake: None,
         links: None,
+        on_start: None,
+        before_key: None,
     }
 };
 
@@ -610,9 +615,9 @@ impl App {
             }
             A::EditDescription(key) => {
                 let seed = self.jira_page_mut(id).and_then(|p| p.details.get(&key).and_then(|d| d.as_ref().ok()).and_then(|d| d.description.clone())).unwrap_or_default();
-                self.open_compose_seeded(ComposePurpose::IssueDescription { key }, &seed);
+                self.open_compose_seeded(issue_compose("description", key), &seed);
             }
-            A::Comment(key) => self.open_compose_seeded(ComposePurpose::IssueComment { key }, ""),
+            A::Comment(key) => self.open_compose_seeded(issue_compose("comment", key), ""),
             A::AddToAgenda { key, clock } => self.jira_add_to_agenda(key, clock),
             A::CopyLink(key) => {
                 let Some(url) = self.jira_issue_url(&key) else { return };
@@ -710,6 +715,110 @@ impl App {
         let _ = buffer;
     }
 }
+
+impl App {
+    /// A ready-to-use `fenix_jira::JiraClient` built from `Config`'s
+    /// `[jira]` settings, or `None` (with a surfaced error) when either
+    /// `base_url` or `token` isn't configured yet.
+    pub(super) fn jira_client(&mut self) -> Option<fenix_jira::JiraClient> {
+        let base_url = self.config.jira_base_url.clone();
+        let token = self.config.token(fenix_config::Secret::Jira);
+        match (base_url, token) {
+            (Some(base_url), Some(token)) => Some(fenix_jira::JiraClient::new(base_url, token)),
+            _ => {
+                self.set_error("Jira isn't set up yet -- set its server and token in SPC , (Jira & agenda)");
+                None
+            }
+        }
+    }
+
+    /// The shared shape every new Jira write action (create, comment,
+    /// title, description, log time, transition) needs: build a
+    /// `JiraClient` from `Config` (via `jira_client`, which already
+    /// surfaces its own error and returns `None` when unconfigured -- so
+    /// this is a safe no-op-without-credentials early return, same
+    /// posture `jira_sync_issues` already has), run `action` on a
+    /// background thread (or synchronously when `event_proxy` is `None`,
+    /// for tests -- mirrors `jira_sync_issues`'s own `Some`/`None`
+    /// branching exactly), and report the result via `FenixUserEvent::
+    /// JiraActionDone`/`apply_jira_action_done`.
+    pub(super) fn spawn_jira_action<F>(&mut self, action: F)
+    where
+        F: FnOnce(&fenix_jira::JiraClient) -> Result<String, String> + Send + 'static,
+    {
+        let Some(client) = self.jira_client() else { return };
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                std::thread::spawn(move || {
+                    let result = action(&client);
+                    let _ = proxy.send_event(FenixUserEvent::feature(jira_host::SPEC.id, "JiraActionDone", jira_host::JiraDone(result)));
+                });
+            }
+            None => {
+                let result = action(&client);
+                self.apply_jira_action_done(result);
+            }
+        }
+    }
+
+    /// `FenixUserEvent::JiraActionDone` handling: on success, shows the
+    /// action's own human-readable confirmation and refreshes the panel
+    /// (`jira_refresh` -- picks up whatever changed, e.g. a new comment
+    /// or an updated status); on failure, surfaces the error. No
+    /// staleness guard, unlike `apply_jira_issues`/`apply_jira_detail` --
+    /// a write action should never be silently discarded just because
+    /// the user navigated elsewhere while it was in flight.
+    pub(super) fn apply_jira_action_done(&mut self, result: Result<String, String>) {
+        match result {
+            Ok(message) => {
+                self.set_message(message);
+                self.jira_refresh();
+            }
+            Err(err) => self.set_error(err),
+        }
+    }
+}
+
+/// An issue's description or a new comment on it, written in the compose
+/// pane and handed back to `jira.compose`.
+pub(super) fn issue_compose(kind: &'static str, key: String) -> ComposePurpose {
+    let (what, verb, allow_empty) = match kind {
+        "description" => (format!("{key} description"), "save", true),
+        _ => (format!("Comment on {key}"), "post", false),
+    };
+    ComposePurpose::Feature { service: "jira.compose", kind, arg: key, what, verb, allow_empty }
+}
+
+/// The Jira token's check on the settings page: who it signs in as.
+static SECRET_CHECK: super::settings_host::SecretCheck = super::settings_host::SecretCheck {
+    secret: fenix_config::Secret::Jira,
+    check: |server, token| fenix_jira::JiraClient::new(server, token).myself(),
+};
+
+/// What Jira offers others.
+static SERVICES: [super::feature::Service; 1] = [
+    // `{kind: "description" | "comment", arg: issue key, body}` -> sent
+    // to Jira (the compose pane's `issue_compose`).
+    super::feature::Service {
+        name: "jira.compose",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            let call: super::ComposeCall = serde_json::from_str(payload).map_err(|e| format!("a Jira call: {e}"))?;
+            let (key, body) = (call.arg, call.body);
+            match call.kind.as_str() {
+                "description" => app.spawn_jira_action(move |client| {
+                    client.update_description(&key, &body)?;
+                    Ok(format!("Description updated for {key}"))
+                }),
+                "comment" => app.spawn_jira_action(move |client| {
+                    client.add_comment(&key, &body)?;
+                    Ok(format!("Comment added to {key}"))
+                }),
+                other => return Err(format!("nothing to write to Jira called {other}")),
+            }
+            Ok(String::new())
+        }),
+    },
+];
 
 #[cfg(test)]
 mod tests {

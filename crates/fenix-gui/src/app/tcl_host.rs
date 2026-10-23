@@ -75,6 +75,8 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     prompt_key: None,
     wake: None,
     links: None,
+    on_start: None,
+    before_key: None,
 };
 
 /// A Tcl file gets the Tcl `SPC m` menu (which the MIB fills too).

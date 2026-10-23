@@ -146,29 +146,6 @@ pub struct WorklogSent {
     result: Result<(), String>,
 }
 
-/// Opens `url` in the default browser.
-fn open_in_browser(url: &str) -> std::io::Result<()> {
-    #[cfg(windows)]
-    let mut command = {
-        let mut c = std::process::Command::new("rundll32");
-        c.args(["url.dll,FileProtocolHandler", url]);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut c = std::process::Command::new("open");
-        c.arg(url);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(url);
-        c
-    };
-    command.spawn().map(|_| ())
-}
-
 fn transition_label(t: &fenix_jira::Transition) -> String {
     if t.to_name.is_empty() || t.to_name == t.name {
         t.name.clone()
@@ -841,13 +818,6 @@ impl App {
         Some(format!("{}/browse/{key}", base_url.trim_end_matches('/')))
     }
 
-    pub(super) fn open_url(&mut self, url: &str) {
-        match open_in_browser(url) {
-            Ok(()) => self.set_message(format!("Opened {url}")),
-            Err(err) => self.set_error(format!("couldn't open a browser: {err}")),
-        }
-    }
-
     // -- Blocked, per project -----------------------------------------------
 
     /// `b` on a project's search on the Jira page: choose (or change) what
@@ -1485,7 +1455,7 @@ mod tests {
     fn editing_a_linked_tasks_description_queues_it_for_jira() {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", OPEN);
-        app.open_compose_seeded(ComposePurpose::TaskDescription { task: id }, "from Jira");
+        app.open_compose_seeded(super::agenda_host::task_compose("description", id), "from Jira");
         app.test_set_cursor(Cursor::at_start());
         app.test_insert_str("Updated: ");
 
@@ -1500,7 +1470,7 @@ mod tests {
     fn a_comment_on_a_linked_task_is_queued_not_lost() {
         let mut app = app();
         let id = linked(&mut app, "PROJ-1", OPEN);
-        app.open_compose_seeded(ComposePurpose::TaskComment { task: id }, "");
+        app.open_compose_seeded(super::agenda_host::task_compose("comment", id), "");
         app.test_set_cursor(Cursor::at_start());
         app.test_insert_str("On it");
 

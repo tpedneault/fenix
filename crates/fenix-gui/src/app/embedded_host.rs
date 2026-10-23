@@ -98,6 +98,8 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     prompt_key: None,
     wake: None,
     links: None,
+    on_start: None,
+    before_key: None,
 };
 
 /// Anything inside an Arduino sketch gets its `SPC m` menu.
@@ -916,8 +918,8 @@ impl Feature for EmbeddedHost {
         self.sketch_prompt_text()
     }
 
-    fn modeline_indicator(&self) -> Option<&str> {
-        self.indicator.as_deref()
+    fn modeline_indicator(&self, _app: &App) -> Option<String> {
+        self.indicator.clone()
     }
 
     fn notice(&mut self, app: &mut App, notice: &Notice) {
@@ -1367,7 +1369,7 @@ mod tests {
         let mut app = app_in(&dir);
         app.test_open_path(&ino);
         app.notify_features(Notice::FocusChanged);
-        let indicator = app.features.iter().find_map(|feature| feature.modeline_indicator()).map(str::to_string);
+        let indicator = app.features.iter().find_map(|feature| feature.modeline_indicator(&app));
         assert!(indicator.as_deref().is_some_and(|i| i.contains("uno") && i.contains("no port")), "{indicator:?}");
     }
 
@@ -1415,7 +1417,7 @@ mod tests {
         app.embedded_mut().prompt = Some(EmbeddedPrompt { parent: dir.clone(), input: "Lab3".to_string() });
         assert!(app.feature_claims(|feature, app| feature.capture_key(app, KeyPress::named(FenixNamedKey::Enter))));
         assert_eq!(app.open().buffer.path(), Some(dir.join("Lab3").join("Lab3.ino").as_path()));
-        let indicator = app.features.iter().find_map(|feature| feature.modeline_indicator()).map(str::to_string);
+        let indicator = app.features.iter().find_map(|feature| feature.modeline_indicator(&app));
         assert!(indicator.as_deref().is_some_and(|i| i.contains("uno")), "{indicator:?}");
     }
 
