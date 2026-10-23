@@ -33516,6 +33516,27 @@ configure_board stm32
         data.get::<review_host::ReviewCompose>().cloned().expect("the review's")
     }
 
+    /// What the core asks the Merge Requests view without naming it:
+    /// whether its panes have focus, its `x` menu, its keys, and closing
+    /// it with `SPC g q`.
+    #[test]
+    fn the_core_reaches_the_merge_requests_view_through_its_hooks() {
+        let (_dir, mut app) = reviewing("review_hooks");
+        let list = app.features.review().session.as_ref().unwrap().list_pane;
+        app.windows_mut().focus(list);
+        assert!(app.features.iter().any(|feature| feature.holds_focused_pane(&app)));
+        let menu = app.features.iter().find_map(|feature| feature.menu_bindings(&app)).expect("its x menu");
+        assert!(menu.contains(&("m", "merge (press twice)")) && !menu.iter().any(|(k, _)| *k == "C"), "the review pane's keys only there: {menu:?}");
+        let filter = app.features.review().session.as_ref().unwrap().filter;
+        let keys = REVIEW_SPEC.pane_keys.expect("its pane keys");
+        assert!(keys(&mut app, KeyPress::char('f')), "f is its");
+        assert_ne!(app.features.review().session.as_ref().unwrap().filter, filter, "f cycled the filter");
+        let here = app.workspaces.active_index();
+        assert!(app.close_feature_view(here));
+        assert!(app.features.review().session.is_none(), "closed");
+        assert!(!keys(&mut app, KeyPress::char('f')), "no view: not its key");
+    }
+
     /// A merge request with one changed file and one thread on the line
     /// it adds, loaded into the view.
     fn reviewing(name: &str) -> (TempDir, App) {
