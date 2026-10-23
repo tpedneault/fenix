@@ -1349,10 +1349,12 @@ Everything Fenix does, by area. For the keys, see
   `Visual Studio Light` and `TempleOS`. Each is a `.toml` file
   (`crates/fenix-gui/themes/`), the same format as your own in `themes\`
   beside `settings.toml` (see [configuration](CONFIGURATION.md#your-own-themes)).
-  Every theme keeps text at 4.5:1 on each surface it's drawn on, so a
-  palette's accents are darkened (on a light page) or lightened (on a
-  dark one) from the original only as far as that takes -- most light
-  themes' accents, and the dimmest comment colours. Two more rules hold across all of
+  What's read word by word -- body text, identifiers, comments, line
+  numbers -- keeps 4.5:1 on each surface it's drawn on. Accents do too
+  on a dark page; on a light one they keep 3:1, so a light palette's
+  colours stay vivid, and its keywords, strings, functions and types
+  stay clearly apart from its body text. A palette's colour is moved
+  from the original only as far as that takes, in lightness alone. Two more rules hold across all of
   them, and are pinned by tests: comments sit closer to the background
   than body text does, so they read as quieter rather than as more
   code; and operators and punctuation share an accent that is neither

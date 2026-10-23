@@ -1,4 +1,8 @@
 # Rosé Pine's light variant.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
 name = "Rosé Pine Dawn"
 tabs = "underline"
 
@@ -17,38 +21,38 @@ search_match = { color = "#ea9d34", alpha = 0.15 }
 fg = "#575279"
 fg_modeline = "#575279"
 caret_text = "#575279"
-gutter_fg = "#6a6579"
+gutter_fg = "#6b6677"
 
 [modes]
-normal = "#c1423c"
-insert = "#45767f"
-visual = "#7d639a"
-replace = "#9c6110"
+normal = "#a85755"
+insert = "#387781"
+visual = "#7b6593"
+replace = "#a55d00"
 command = "#286983"
-explorer = "#45767f"
-picker = "#ab526c"
+explorer = "#387781"
+picker = "#a5566d"
 text_dark = "#faf4ed"
 
 [syntax]
-keyword = "#286983"
-string = "#945c0f"
-comment = "#6a6579"
-function = "#b63e38"
-type = "#406f77"
-number = "#765e91"
-constant = "#945c0f"
+keyword = "#846e9c"
+string = "#af6600"
+comment = "#6b6677"
+function = "#b1605d"
+type = "#42808b"
+number = "#af5f76"
+constant = "#af6600"
 variable = "#575279"
-operator = "#696581"
-punctuation = "#696581"
-attribute = "#765e91"
+operator = "#787492"
+punctuation = "#787492"
+attribute = "#286983"
 
 [explorer]
-folder = "#406f77"
+folder = "#42808b"
 file = "#575279"
 
 [git]
-modified = "#945c0f"
-staged = "#406f77"
+modified = "#af6600"
+staged = "#42808b"
 untracked = "#286983"
-ignored = "#6a6579"
-conflicted = "#a04d65"
+ignored = "#7a7586"
+conflicted = "#af5f76"

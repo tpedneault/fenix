@@ -1,9 +1,8 @@
-# Catppuccin Latte, the light flavour. Catppuccin's accents are pastels
-# meant to sit on a dark base; on Latte's near-white page most of them fall
-# short of the 4.5:1 this file's contrast tests ask of every text color, so
-# each text accent is darkened toward black -- same hue -- only as far as it
-# takes to pass, and the mode badges likewise so `base` lettering reads on
-# them. The caret rect itself stays Catppuccin's own rosewater.
+# Catppuccin Latte, the light flavour.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
 name = "Catppuccin Latte"
 tabs = "underline"
 
@@ -13,7 +12,7 @@ sidebar_bg = "#e6e9ef"
 bg_modeline = "#e6e9ef"
 divider = "#acb0be"
 caret = "#dc8a78"
-hl_line = "#d9dce4"
+hl_line = "#dce0e8"
 selection = { color = "#7c7f93", alpha = 0.25 }
 bracket_match = { color = "#fe640b", alpha = 0.15 }
 search_match = { color = "#04a5e5", alpha = 0.18 }
@@ -21,40 +20,39 @@ search_match = { color = "#04a5e5", alpha = 0.18 }
 [text]
 fg = "#4c4f69"
 fg_modeline = "#4c4f69"
-caret_text = "#865449"
-gutter_fg = "#5e606c"
+caret_text = "#984c3d"
+gutter_fg = "#5e6176"
 
 [modes]
-normal = "#1d63ee"
-insert = "#327d22"
+normal = "#1961f0"
+insert = "#157e00"
 visual = "#8839ef"
 replace = "#d20f39"
-command = "#bc4a08"
-explorer = "#187788"
-picker = "#a1518c"
+command = "#cb3100"
+explorer = "#00778d"
+picker = "#b04095"
 text_dark = "#eff1f5"
-text_light = "#eff1f5"
 
 [syntax]
-keyword = "#7d34dc"
-string = "#2c6e1e"
-comment = "#5d5f6e"
-function = "#1a58d3"
-type = "#865511"
-number = "#a54107"
-constant = "#a54107"
+keyword = "#8839ef"
+string = "#157e00"
+comment = "#5e6174"
+function = "#1961f0"
+type = "#a55800"
+number = "#cc3300"
+constant = "#cc3300"
 variable = "#4c4f69"
-operator = "#036890"
-punctuation = "#036890"
-attribute = "#116b70"
+operator = "#0072af"
+punctuation = "#0072af"
+attribute = "#007980"
 
 [explorer]
-folder = "#1a58d3"
+folder = "#1961f0"
 file = "#4c4f69"
 
 [git]
-modified = "#865511"
-staged = "#2c6e1e"
-untracked = "#156977"
-ignored = "#5e606c"
-conflicted = "#c10e34"
+modified = "#a55800"
+staged = "#157e00"
+untracked = "#007980"
+ignored = "#686b7e"
+conflicted = "#d20f39"

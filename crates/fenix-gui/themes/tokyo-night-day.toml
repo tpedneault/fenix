@@ -1,4 +1,8 @@
 # Tokyo Night's light variant, enkia's palette.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
 name = "Tokyo Night Day"
 tabs = "underline"
 
@@ -11,44 +15,44 @@ caret = "#3760bf"
 hl_line = "#d6d8e2"
 selection = { color = "#2e7de9", alpha = 0.15 }
 bracket_match = { color = "#007197", alpha = 0.12 }
-search_match = { color = "#8c6c3e", alpha = 0.17 }
+search_match = { color = "#8c6c3e", alpha = 0.18 }
 
 [text]
-fg = "#2d4e9d"
-fg_modeline = "#3257ae"
-caret_text = "#3257ae"
-gutter_fg = "#495892"
+fg = "#254ba8"
+fg_modeline = "#2e56b4"
+caret_text = "#2e56b4"
+gutter_fg = "#495894"
 
 [modes]
-normal = "#155fc5"
-insert = "#506a34"
-visual = "#802dee"
-replace = "#9a5000"
-command = "#7a5e36"
-explorer = "#006b8f"
-picker = "#802dee"
+normal = "#0660c9"
+insert = "#4f6c30"
+visual = "#8138d6"
+replace = "#9f4c00"
+command = "#7d5e30"
+explorer = "#006b91"
+picker = "#8138d6"
 text_dark = "#e1e2e7"
 
 [syntax]
-keyword = "#7418ec"
-string = "#4a6230"
-comment = "#495892"
-function = "#1358b6"
-type = "#006283"
-number = "#8c4900"
-constant = "#8c4900"
-variable = "#3257ae"
-operator = "#00647b"
-punctuation = "#00647b"
-attribute = "#705632"
+keyword = "#8942df"
+string = "#577337"
+comment = "#495894"
+function = "#007197"
+type = "#856638"
+number = "#a95400"
+constant = "#a95400"
+variable = "#2e56b4"
+operator = "#1568d2"
+punctuation = "#1568d2"
+attribute = "#d5004d"
 
 [explorer]
-folder = "#1358b6"
-file = "#3257ae"
+folder = "#007197"
+file = "#2e56b4"
 
 [git]
-modified = "#705632"
-staged = "#4a6230"
-untracked = "#1358b6"
-ignored = "#495892"
-conflicted = "#a53232"
+modified = "#856638"
+staged = "#577337"
+untracked = "#1568d2"
+ignored = "#5868a5"
+conflicted = "#bf3c3d"

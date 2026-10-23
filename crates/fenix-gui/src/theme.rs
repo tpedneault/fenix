@@ -601,48 +601,92 @@ mod tests {
         (a.max(b) + 0.05) / (a.min(b) + 0.05)
     }
 
+    /// Whether `theme` is a light one: its page brighter than mid-grey.
+    fn is_light(theme: &Theme) -> bool {
+        bg_luminance(theme) > 0.5
+    }
+
+    /// What's read word by word -- body text, identifiers, comments, line
+    /// numbers -- keeps 4.5:1 on every surface it's drawn on, in every
+    /// theme. Accents (syntax colours, folders, Git) do too on a dark
+    /// page; on a light one 3:1, the bar for text that's also told apart
+    /// by its colour, so a light palette's accents stay vivid instead of
+    /// all darkening to the same near-black. Through a highlight,
+    /// everything keeps 3:1 and body text 4.5:1.
     #[test]
-    fn dark_themes_keep_text_readable_on_editor_and_popup_surfaces() {
+    fn every_theme_keeps_text_readable_on_editor_and_popup_surfaces() {
         for theme in all().iter().filter(|theme| theme.name != "TempleOS") {
-            let colors = [
-                theme.fg,
-                theme.gutter_fg,
+            let reading = [theme.fg, theme.gutter_fg, theme.syntax_comment, theme.syntax_variable, theme.icon_file, theme.caret_text];
+            let accents = [
                 theme.syntax_keyword,
                 theme.syntax_string,
-                theme.syntax_comment,
                 theme.syntax_function,
                 theme.syntax_type,
                 theme.syntax_number,
                 theme.syntax_constant,
-                theme.syntax_variable,
                 theme.syntax_operator,
                 theme.syntax_punctuation,
                 theme.syntax_attribute,
                 theme.icon_folder,
-                theme.icon_file,
                 theme.git_modified,
                 theme.git_staged,
                 theme.git_untracked,
                 theme.git_ignored,
                 theme.git_conflicted,
-                theme.caret_text,
             ];
+            let accent_need = if is_light(theme) { 3.0 } else { 4.5 };
             let line = composite(theme.hl_line, theme.bg);
             for surface in [theme.bg, line, theme.bg_modeline, theme.sidebar_bg] {
-                for color in colors {
-                    let ratio = contrast(color, surface);
-                    assert!(ratio >= 4.5, "{}: {color:?} on {surface:?}: {ratio:.2}:1", theme.name);
+                for (colors, need) in [(&reading[..], 4.5), (&accents[..], accent_need)] {
+                    for &color in colors {
+                        let ratio = contrast(color, surface);
+                        assert!(ratio >= need, "{}: {color:?} on {surface:?}: {ratio:.2}:1, wants {need}", theme.name);
+                    }
                 }
             }
             for overlay in [theme.selection, theme.bracket_match, theme.search_match] {
                 let surface = composite(overlay, line);
                 assert!(contrast(theme.fg, surface) >= 4.5, "{}: highlighted body text", theme.name);
-                for color in colors {
-                    assert!(contrast(color, surface) >= 3.0, "{}: highlighted {color:?}", theme.name);
+                for color in reading.iter().chain(&accents) {
+                    assert!(contrast(*color, surface) >= 3.0, "{}: highlighted {color:?}", theme.name);
                 }
             }
             assert!(contrast(theme.fg_modeline, theme.bg_modeline) >= 4.5);
         }
+    }
+
+    /// A light theme's main accents -- keywords, strings, functions, types
+    /// -- stand apart from its body text (OKLab distance), so code reads in
+    /// colour rather than as shades of the same ink.
+    #[test]
+    fn light_themes_keep_their_main_accents_apart_from_body_text() {
+        for theme in all().iter().filter(|theme| is_light(theme) && theme.name != "TempleOS") {
+            for (role, color) in [("keyword", theme.syntax_keyword), ("string", theme.syntax_string), ("function", theme.syntax_function), ("type", theme.syntax_type)] {
+                let apart = oklab_distance(color, theme.fg);
+                assert!(apart >= 0.10, "{}: {role} is {apart:.3} from body text", theme.name);
+            }
+        }
+    }
+
+    fn oklab(c: glyphon::Color) -> [f32; 3] {
+        let lin = |v: u8| {
+            let v = v as f32 / 255.0;
+            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+        };
+        let (r, g, b) = (lin(c.r()), lin(c.g()), lin(c.b()));
+        let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+        let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+        let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+        [
+            0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s,
+            1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s,
+            0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s,
+        ]
+    }
+
+    fn oklab_distance(a: glyphon::Color, b: glyphon::Color) -> f32 {
+        let (a, b) = (oklab(a), oklab(b));
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
     }
 
     #[test]
