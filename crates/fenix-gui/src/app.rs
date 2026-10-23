@@ -16,11 +16,13 @@ mod agenda_host;
 pub(crate) use agenda_host::SPEC as AGENDA_SPEC;
 mod jira_host;
 pub(crate) use jira_host::SPEC as JIRA_SPEC;
+#[cfg(feature = "embedded")]
 mod embedded_host;
 #[cfg(feature = "tcl")]
 mod tcl_host;
 #[cfg(feature = "tcl")]
 pub(crate) use tcl_host::SPEC as TCL_SPEC;
+#[cfg(feature = "embedded")]
 pub(crate) use embedded_host::SPEC as EMBEDDED_SPEC;
 mod local_leader;
 mod xml;

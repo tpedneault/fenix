@@ -203,19 +203,19 @@ fn run_command(mut command: std::process::Command, buffer: BufferId, generation:
 }
 
 /// What the doctor asks of the world, answered the way the rest of
-/// Fenix would: Arduino's tools through the Arduino integration's own
-/// search, everything else on PATH.
+/// Fenix would: the tools a feature finds its own way (Arduino's, by
+/// `arduino.tools`) where it says, everything else on PATH.
 pub(super) struct AppProbe {
-    tools: fenix_embedded::Tools,
+    /// Program -> where the feature that knows it found it (`None`: it
+    /// looked, and it isn't there).
+    known: HashMap<String, Option<PathBuf>>,
 }
 
 impl Probe for AppProbe {
     fn locate(&self, program: &str) -> Option<PathBuf> {
-        match program {
-            "arduino-cli" => self.tools.arduino_cli.clone(),
-            "clangd" => self.tools.clangd.clone().or_else(|| doctor::which(program)),
-            "arduino-language-server" => self.tools.arduino_language_server.clone(),
-            _ => doctor::which(program),
+        match self.known.get(program) {
+            Some(found) => found.clone(),
+            None => doctor::which(program),
         }
     }
 
@@ -239,7 +239,8 @@ fn age_since(then: i64) -> String {
 
 impl App {
     pub(super) fn app_probe(&self) -> AppProbe {
-        AppProbe { tools: super::embedded_host::tools(self) }
+        let known = self.query_service("arduino.tools", &serde_json::Value::Null).ok().and_then(|found| serde_json::from_str(&found).ok()).unwrap_or_default();
+        AppProbe { known }
     }
 
     /// Where a program a page runs is -- `AppProbe::locate`, for a command
@@ -1301,15 +1302,9 @@ impl App {
                         }
                     }
                     EditorFix::PickPort | EditorFix::PickBoard => {
-                        let Some(project) = super::embedded_host::project_at(self, &root) else {
-                            self.set_error("not an Arduino sketch Fenix can drive -- is arduino-cli installed?");
-                            return;
-                        };
-                        use super::embedded_host::EmbeddedHost;
-                        if fix == EditorFix::PickPort {
-                            self.with_feature::<EmbeddedHost, _>(|host, app| host.doctor_pick_port(app, project));
-                        } else {
-                            self.with_feature::<EmbeddedHost, _>(|host, app| host.doctor_pick_board(app, project));
+                        let pick = if fix == EditorFix::PickPort { "port" } else { "board" };
+                        if let Err(e) = self.call_service("arduino.doctor_fix", &serde_json::json!({ "root": root, "pick": pick })) {
+                            self.set_error(e);
                         }
                         // The picker has the keyboard now; r checks again
                         // once it's done.
