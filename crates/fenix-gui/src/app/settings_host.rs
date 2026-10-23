@@ -75,7 +75,7 @@ impl App {
         let secrets = Secret::ALL.into_iter().map(|s| (s, self.secret_state(s))).collect();
         let mut snap = Snapshot {
             secrets,
-            themes: theme::ALL.iter().map(|t| t.name.to_string()).collect(),
+            themes: theme::all().iter().map(|t| t.name.to_string()).collect(),
             fonts: self.text.as_ref().map(|t| t.monospace_families()).unwrap_or_default(),
             project: self.settings_project(),
             ..Default::default()
@@ -307,7 +307,7 @@ impl App {
         match key {
             "editor.theme" => {
                 let old = self.theme;
-                self.theme = self.config.theme.as_deref().and_then(theme::by_name).unwrap_or(&theme::ORBIT_DARK);
+                self.theme = theme::named_or_default(self.config.theme.as_deref());
                 self.fade_theme_from(old);
             }
             "editor.font_size" | "editor.font_family" => {

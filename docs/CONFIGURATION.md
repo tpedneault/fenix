@@ -16,6 +16,7 @@ with the reason -- and a change applies at once and is saved at once.
 |---|---|---|
 | Your settings, `settings.toml` | `%AppData%\fenix` | `~/.config/fenix` |
 | Your snippets (a folder per language) and project templates | `%AppData%\fenix\snippets`, `\templates` | `~/.config/fenix/...` |
+| Your themes, a `.toml` each | `%AppData%\fenix\themes` | `~/.config/fenix/themes` |
 | Your data: the agenda | `%AppData%\fenix\data` | `~/.local/share/fenix` |
 | This machine's state: session, window placement, recent files, known projects, bookmarks | `%LocalAppData%\fenix\state` | `~/.local/state/fenix/state` |
 | Unsaved buffers, downloaded tools, backups | `%LocalAppData%\fenix\recovery`, `\tools`, `\backup` | `~/.local/state/fenix/...` |
@@ -114,6 +115,80 @@ A project from before `.fenix/settings.toml` kept these in
 -- kind, Jira key, reviewers and serial monitor speed into
 `settings.toml`, its old `[tasks]` and `[launch]` into `tools.json` --
 and is deleted, so the change shows in `git status` for review.
+
+## Your own themes
+
+A theme is a `.toml` file in `themes\` beside `settings.toml`, in the
+same format as the ones Fenix ships (`crates/fenix-gui/themes/`) -- the
+quickest start is a copy of one of those. Themes are read when Fenix
+starts; yours appear in `SPC t p` and the `editor.theme` setting after
+the shipped ones, and one with the same `name` as a shipped theme takes
+its place. A file that can't be read is named on the status line at
+start-up, with the key that's wrong, and left out.
+
+```toml
+name = "My Theme"
+tabs = "underline"        # or "block" (Visual Studio's filled tabs)
+# font_family = "Consolas"
+# border = "#0000aa"      # a frame around the window
+
+[surfaces]
+bg = "#1a1b26"
+# sidebar_bg = "#1a1b26"  # the explorer's; bg when left out
+bg_modeline = "#24283b"
+divider = "#565f89"
+caret = "#e0af68"
+hl_line = "#222534"
+selection = { color = "#7aa2f7", alpha = 0.12 }
+bracket_match = { color = "#2ac3de", alpha = 0.12 }
+search_match = "#e0af681f"  # #rrggbbaa works too
+
+[text]
+fg = "#c0caf5"
+# fg_modeline, caret_text: fg and the caret's colour when left out
+gutter_fg = "#929bb9"
+
+[modes]      # the modeline badge for each mode, and its lettering
+normal = "#e0af68"
+insert = "#7dcfff"
+visual = "#f7768e"
+replace = "#ff9e64"
+command = "#7aa2f7"
+explorer = "#7aa2f7"
+picker = "#bb9af7"
+text_dark = "#1a1b26"
+# text_light: the Visual badge's lettering; text_dark when left out
+
+[syntax]
+keyword = "#bb9af7"
+string = "#9ece6a"
+comment = "#929bb9"
+function = "#7aa2f7"
+type = "#2ac3de"
+number = "#ff9e64"
+constant = "#ff9e64"
+variable = "#c0caf5"
+operator = "#89ddff"
+punctuation = "#89ddff"
+attribute = "#e0af68"
+
+[explorer]
+folder = "#7aa2f7"
+file = "#c0caf5"
+
+[git]
+modified = "#ff9e64"
+staged = "#9ece6a"
+untracked = "#7aa2f7"
+ignored = "#929bb9"
+conflicted = "#f7768e"
+```
+
+Colours are `#rrggbb`; a surface drawn over another (a highlight) can be
+see-through, as `#rrggbbaa` or `{ color, alpha }`; text can't. The
+shipped themes keep text at 4.5:1 against every surface it's drawn on,
+comments quieter than code, and operators distinct from both -- worth
+keeping in yours.
 
 ## Every setting
 

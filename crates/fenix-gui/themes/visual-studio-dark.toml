@@ -1,0 +1,76 @@
+# The modern Visual Studio dark theme's own palette (VS 2022+/VS Code
+# Dark+ converged on the same per-token defaults) -- near-black editor
+# canvas, dark neutral chrome (not VS's eye-catching status-bar blue:
+# every text color here also has to pass this file's own contrast tests
+# against `bg_modeline`, which a bright saturated blue can't do for a
+# muted color like `gutter_fg`, so the chrome stays a dark neutral gray
+# the same way every other dark theme's own `bg_modeline` already is),
+# and real VS syntax colors rather than an approximation. Its tabs are
+# VS's own filled blocks (`TabStyle::Block`); every other theme draws the
+# flat underline. `font_family: Some("Consolas")` points at the
+# system font Windows ships by default rather than an embedded one, per
+# explicit direction -- `cosmic-text`'s existing fontdb substitution
+# already covers a machine without it, the same fallback every other
+# `Some(family)` theme already relies on.
+name = "Visual Studio Dark"
+tabs = "block"
+font_family = "Consolas"
+
+[surfaces]
+bg = "#1e1e1e"
+# VS's own real "tool window" background -- one shade lighter than
+# the editor canvas, confirmed against Microsoft's Color Value
+# Reference for VS 2022 (the Dark theme's "Body background" for
+# properties/tool-window content is `#FF252526`).
+sidebar_bg = "#252526"
+bg_modeline = "#2d2d30"
+# The real VS "Divider lines" value (`#FF2D2D30`, Microsoft's own
+# Color Value Reference) -- `#3F3F46` (an earlier attempt here) is
+# actually that same doc's *button border* color, a different token.
+divider = "#2d2d30"
+caret = "#4fc1ff"
+hl_line = "#2a2d2e"
+selection = { color = "#264f78", alpha = 0.55 }
+bracket_match = { color = "#4ec9b0", alpha = 0.12 }
+search_match = { color = "#d7ba7b", alpha = 0.12 }
+
+[text]
+fg = "#d4d4d4"
+fg_modeline = "#ffffff"
+caret_text = "#4fc1ff"
+gutter_fg = "#9c9c9c"
+
+[modes]
+normal = "#569cd6"
+insert = "#4ec9b0"
+visual = "#c42b1c"
+replace = "#d7ba7b"
+command = "#4fc1ff"
+explorer = "#569cd6"
+picker = "#c586c0"
+text_dark = "#1e1e1e"
+text_light = "#ffffff"
+
+[syntax]
+keyword = "#569cd6"
+string = "#ce9178"
+comment = "#74ac64"
+function = "#dcdcaa"
+type = "#4ec9b0"
+number = "#b5cea8"
+constant = "#4fc1ff"
+variable = "#9cdcfe"
+operator = "#c0c0c0"
+punctuation = "#b8b8b8"
+attribute = "#9cdcfe"
+
+[explorer]
+folder = "#dcb67a"
+file = "#d4d4d4"
+
+[git]
+modified = "#e2c08d"
+staged = "#89d185"
+untracked = "#6fc3df"
+ignored = "#999999"
+conflicted = "#f46a6a"

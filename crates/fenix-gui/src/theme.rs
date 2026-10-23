@@ -252,783 +252,314 @@ impl Theme {
     }
 }
 
-const fn rgba(hex: u32) -> [f32; 4] {
-    let r = ((hex >> 16) & 0xff) as f32 / 255.0;
-    let g = ((hex >> 8) & 0xff) as f32 / 255.0;
-    let b = (hex & 0xff) as f32 / 255.0;
-    [r, g, b, 1.0]
-}
-
-const fn rgba_alpha(hex: u32, alpha: f32) -> [f32; 4] {
-    let r = ((hex >> 16) & 0xff) as f32 / 255.0;
-    let g = ((hex >> 8) & 0xff) as f32 / 255.0;
-    let b = (hex & 0xff) as f32 / 255.0;
-    [r, g, b, alpha]
-}
-
-const fn text_color(hex: u32) -> glyphon::Color {
-    let r = ((hex >> 16) & 0xff) as u8;
-    let g = ((hex >> 8) & 0xff) as u8;
-    let b = (hex & 0xff) as u8;
-    glyphon::Color::rgb(r, g, b)
-}
-
-pub const ORBIT_DARK: Theme = Theme {
-    name: "Orbit Dark",
-    font_family: None,
-    border: None,
-    divider: rgba(0x565f89),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x1a1b26),
-    sidebar_bg: rgba(0x1a1b26),
-    bg_modeline: rgba(0x24283b),
-    fg: text_color(0xc0caf5),
-    fg_modeline: text_color(0xc0caf5),
-    caret: rgba(0xe0af68),
-    caret_text: text_color(0xe0af68),
-    hl_line: rgba(0x222534),
-    selection: rgba_alpha(0x7aa2f7, 0.12),
-    bracket_match: rgba_alpha(0x2ac3de, 0.12),
-    search_match: rgba_alpha(0xe0af68, 0.12),
-
-    mode_normal: rgba(0xe0af68),
-    mode_insert: rgba(0x7dcfff),
-    mode_visual: rgba(0xf7768e),
-    mode_replace: rgba(0xff9e64),
-    mode_command: rgba(0x7aa2f7),
-    mode_explorer: rgba(0x7aa2f7),
-    mode_picker: rgba(0xbb9af7),
-    mode_text_dark: text_color(0x1a1b26),
-    mode_text_light: text_color(0x1a1b26),
-
-    gutter_fg: text_color(0x929bb9),
-
-    syntax_keyword: text_color(0xbb9af7),
-    syntax_string: text_color(0x9ece6a),
-    syntax_comment: text_color(0x929bb9),
-    syntax_function: text_color(0x7aa2f7),
-    syntax_type: text_color(0x2ac3de),
-    syntax_number: text_color(0xff9e64),
-    syntax_constant: text_color(0xff9e64),
-    syntax_variable: text_color(0xc0caf5),
-    syntax_operator: text_color(0x89ddff),
-    syntax_punctuation: text_color(0x89ddff),
-    syntax_attribute: text_color(0xe0af68),
-
-    icon_folder: text_color(0x7aa2f7),
-    icon_file: text_color(0xc0caf5),
-    git_modified: text_color(0xff9e64),
-    git_staged: text_color(0x9ece6a),
-    git_untracked: text_color(0x7aa2f7),
-    git_ignored: text_color(0x929bb9),
-    git_conflicted: text_color(0xf7768e),
-};
-
-/// A recreation of TempleOS's look, built entirely from the standard
-/// 16-color CGA/EGA palette (the same fixed, well-established set
-/// TempleOS itself is restricted to). TempleOS's actual desktop/DolDoc
-/// look (confirmed against real screenshots, not the classic-Borland-
-/// IDE "blue screen" look this theme originally, incorrectly, assumed)
-/// is a **white** page background with black body text, a solid blue
-/// window-chrome/status-bar color, and red/purple/green accent text for
-/// headings, links, and directives -- much closer to a print/document
-/// editor than a dark-background terminal IDE.
-///
-/// The colors only: it uses the same monospace font as every other
-/// theme. A font of your own, the TempleOS bitmap font included, can be
-/// set with `editor.font_family`.
-///
-/// One remaining disclosed simplification: TempleOS's own HolyC IDE
-/// colors identifiers quasi-randomly per token, which isn't replicated
-/// here -- `syntax_color` resolves a fixed color per capture name
-/// everywhere in Fenix, same as every other theme, so identifiers get
-/// one consistent accent rather than a per-token one.
-pub const TEMPLEOS: Theme = Theme {
-    name: "TempleOS",
-    font_family: None,
-    border: Some(rgba(0x0000aa)),
-    divider: rgba(0x0000aa),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0xffffff),
-    sidebar_bg: rgba(0xffffff),
-    bg_modeline: rgba(0x0000aa),
-    fg: text_color(0x000000),
-    fg_modeline: text_color(0xffffff),
-    // Light Blue, not the fixed palette's own Yellow -- the caret used
-    // to be `0xffff55`, but as a solid block caret (Normal/Visual/
-    // Replace/Command mode's shape, see `caret_is_block`) sitting on
-    // every current line, bright yellow read as harsh/hard to read in
-    // practice, not just a stylistic quibble. Reuses the same accent
-    // `hl_line`/`mode_command` already use elsewhere in this theme, so
-    // it stays inside the fixed 16-color CGA/EGA set this theme is
-    // built from rather than introducing a new hue.
-    caret: rgba(0x5555ff),
-    // Deliberately NOT the same hex as `caret` above, despite this
-    // field's own doc comment generally expecting "same hue as caret" --
-    // `caret_text` is never actually rendered over the same background
-    // `caret` is. Every real use (the completion popup's Keyword rows,
-    // the which-key key column, the focused-pane title) draws it as text
-    // over `bg_modeline`, never as a block over `bg`/`hl_line`. Most
-    // themes' `bg`/`bg_modeline` are close enough in shade that one hue
-    // reads fine against both, so sharing a hex was harmless there --
-    // but TempleOS pairs a stark white `bg` with a solid dark-blue
-    // `bg_modeline`, so the two roles need genuinely different colors.
-    // Light Blue on `bg_modeline`'s dark blue (`0x0000aa`) is barely
-    // readable (~2.6:1 contrast) -- restoring the original Yellow here
-    // (high contrast against dark blue, and never rendered as a block
-    // caret, so the harshness complaint that moved `caret` off it
-    // doesn't apply to this field).
-    caret_text: text_color(0xffff55),
-    // 0.15 alpha (this field's original value) was too faint to actually
-    // read against a pure-white `bg`: blue's channels are far enough from
-    // white's that the hue itself isn't the problem (unlike the old
-    // `selection` yellow, see that field's doc comment), but at 15% the
-    // blended result -- roughly (229, 229, 255) -- is close enough to
-    // (255, 255, 255) that it disappeared in practice, not just "subtle."
-    // Bumped to a level that's clearly visible while staying weaker than
-    // `selection`'s own 0.45, matching this field's own doc comment
-    // (hl_line doesn't need as much contrast as selection since the caret
-    // already marks the current line too).
-    hl_line: rgba_alpha(0x5555ff, 0.25),
-    // Blue, not yellow: yellow's R/G channels already match the white
-    // `bg`, so blending only ever moves the B channel -- no alpha gets it
-    // past a barely-there pale tint. Blue's channels are all far from
-    // white's, so the same "moderate alpha overlay" approach every other
-    // theme/highlight here uses actually produces visible contrast.
-    selection: rgba_alpha(0x0000aa, 0.45),
-    bracket_match: rgba_alpha(0x00aa00, 0.35),
-    search_match: rgba_alpha(0xff55ff, 0.35),
-
-    mode_normal: rgba(0x55ff55),
-    mode_insert: rgba(0x55ffff),
-    mode_visual: rgba(0xff5555),
-    mode_replace: rgba(0xaa5500),
-    mode_command: rgba(0x5555ff),
-    mode_explorer: rgba(0x00aaaa),
-    mode_picker: rgba(0xff55ff),
-    mode_text_dark: text_color(0x000000),
-    mode_text_light: text_color(0xffffff),
-
-    gutter_fg: text_color(0x555555),
-
-    // Dark/saturated (not the pastel "Light*") variants throughout --
-    // body text sits on the white page background now, where the pastel
-    // half of the 16-color set reads as barely-there instead of a
-    // bright accent.
-    syntax_keyword: text_color(0x0000aa),
-    syntax_string: text_color(0x00aa00),
-    syntax_comment: text_color(0xaaaaaa),
-    syntax_function: text_color(0xaa00aa),
-    syntax_type: text_color(0x00aaaa),
-    syntax_number: text_color(0xaa0000),
-    syntax_constant: text_color(0xaa5500),
-    // Light Blue rather than the body text's own black. Tcl -- the
-    // language this theme is most often read in here, and one that
-    // will never have an LSP -- is written almost entirely in `$name`
-    // substitutions, `set` targets and proc parameters, all of which
-    // are `variable` captures; leaving them at `fg` meant those query
-    // rules produced no visible result at all and a script rendered as
-    // a wall of black. It's also closer to real TempleOS, whose own
-    // HolyC IDE colors identifiers rather than leaving them as body
-    // text (see this theme's doc comment).
-    syntax_variable: text_color(0x5555ff),
-    syntax_operator: text_color(0xaa5500),
-    syntax_punctuation: text_color(0xaa5500),
-    syntax_attribute: text_color(0x00aaaa),
-
-    icon_folder: text_color(0x0000aa),
-    icon_file: text_color(0x000000),
-    git_modified: text_color(0xaa5500),
-    git_staged: text_color(0x00aa00),
-    git_untracked: text_color(0x00aaaa),
-    git_ignored: text_color(0xaaaaaa),
-    git_conflicted: text_color(0xaa0000),
-};
-
-/// Adapted for Fenix: subdued surfaces, readable secondary text, and
-/// coordinated syntax, Git, and mode accents.
-pub const GRUVBOX_DARK: Theme = Theme {
-    name: "Gruvbox Dark",
-    font_family: None,
-    border: None,
-    divider: rgba(0x665c54),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x1d2021),
-    sidebar_bg: rgba(0x1d2021),
-    bg_modeline: rgba(0x282828),
-    fg: text_color(0xebdbb2),
-    fg_modeline: text_color(0xebdbb2),
-    caret: rgba(0xfabd2f),
-    caret_text: text_color(0xfabd2f),
-    hl_line: rgba(0x282828),
-    selection: rgba_alpha(0x83a598, 0.12),
-    bracket_match: rgba_alpha(0x8ec07c, 0.12),
-    search_match: rgba_alpha(0xfabd2f, 0.12),
-
-    mode_normal: rgba(0xfabd2f),
-    mode_insert: rgba(0x83a598),
-    mode_visual: rgba(0xfb4934),
-    mode_replace: rgba(0xfe8019),
-    mode_command: rgba(0x83a598),
-    mode_explorer: rgba(0x8ec07c),
-    mode_picker: rgba(0xd3869b),
-    mode_text_dark: text_color(0x1d2021),
-    mode_text_light: text_color(0x1d2021),
-
-    gutter_fg: text_color(0xa89984),
-
-    syntax_keyword: text_color(0xfb7965),
-    syntax_string: text_color(0xb8bb26),
-    syntax_comment: text_color(0xa89984),
-    syntax_function: text_color(0x83a598),
-    syntax_type: text_color(0xfabd2f),
-    syntax_number: text_color(0xd3869b),
-    syntax_constant: text_color(0xfe8019),
-    syntax_variable: text_color(0xebdbb2),
-    syntax_operator: text_color(0x8ec07c),
-    syntax_punctuation: text_color(0x8ec07c),
-    syntax_attribute: text_color(0xfabd2f),
-
-    icon_folder: text_color(0x83a598),
-    icon_file: text_color(0xebdbb2),
-    git_modified: text_color(0xfe8019),
-    git_staged: text_color(0xb8bb26),
-    git_untracked: text_color(0x83a598),
-    git_ignored: text_color(0xa89984),
-    git_conflicted: text_color(0xfb7965),
-};
-
-/// Adapted for Fenix: subdued surfaces, readable secondary text, and
-/// coordinated syntax, Git, and mode accents.
-pub const NORD: Theme = Theme {
-    name: "Nord",
-    font_family: None,
-    border: None,
-    divider: rgba(0x4c566a),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x2e3440),
-    sidebar_bg: rgba(0x2e3440),
-    bg_modeline: rgba(0x343b49),
-    fg: text_color(0xd8dee9),
-    fg_modeline: text_color(0xeceff4),
-    caret: rgba(0x88c0d0),
-    caret_text: text_color(0x88c0d0),
-    hl_line: rgba(0x343b49),
-    selection: rgba_alpha(0x91b1d1, 0.12),
-    bracket_match: rgba_alpha(0xa3be8c, 0.12),
-    search_match: rgba_alpha(0xebcb8b, 0.12),
-
-    mode_normal: rgba(0xa3be8c),
-    mode_insert: rgba(0x88c0d0),
-    mode_visual: rgba(0xdf929c),
-    mode_replace: rgba(0xe09780),
-    mode_command: rgba(0x91b1d1),
-    mode_explorer: rgba(0x91b1d1),
-    mode_picker: rgba(0xc49ebd),
-    mode_text_dark: text_color(0x202530),
-    mode_text_light: text_color(0x202530),
-
-    gutter_fg: text_color(0x9aa6bc),
-
-    syntax_keyword: text_color(0x91b1d1),
-    syntax_string: text_color(0xa3be8c),
-    syntax_comment: text_color(0x9aa6bc),
-    syntax_function: text_color(0x88c0d0),
-    syntax_type: text_color(0x8fbcbb),
-    syntax_number: text_color(0xc49ebd),
-    syntax_constant: text_color(0xe09780),
-    syntax_variable: text_color(0xd8dee9),
-    syntax_operator: text_color(0x91b1d1),
-    syntax_punctuation: text_color(0x91b1d1),
-    syntax_attribute: text_color(0xe09780),
-
-    icon_folder: text_color(0x91b1d1),
-    icon_file: text_color(0xd8dee9),
-    git_modified: text_color(0xe09780),
-    git_staged: text_color(0xa3be8c),
-    git_untracked: text_color(0x91b1d1),
-    git_ignored: text_color(0x9aa6bc),
-    git_conflicted: text_color(0xdf929c),
-};
-
-/// Adapted for Fenix: subdued surfaces, readable secondary text, and
-/// coordinated syntax, Git, and mode accents.
-pub const DRACULA: Theme = Theme {
-    name: "Dracula",
-    font_family: None,
-    border: None,
-    divider: rgba(0x6272a4),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x282a36),
-    sidebar_bg: rgba(0x282a36),
-    bg_modeline: rgba(0x303341),
-    fg: text_color(0xf8f8f2),
-    fg_modeline: text_color(0xf8f8f2),
-    caret: rgba(0xff79c6),
-    caret_text: text_color(0xff79c6),
-    hl_line: rgba(0x303341),
-    selection: rgba_alpha(0xbd93f9, 0.12),
-    bracket_match: rgba_alpha(0x50fa7b, 0.12),
-    search_match: rgba_alpha(0xf1fa8c, 0.12),
-
-    mode_normal: rgba(0x50fa7b),
-    mode_insert: rgba(0x8be9fd),
-    mode_visual: rgba(0xff7979),
-    mode_replace: rgba(0xffb86c),
-    mode_command: rgba(0xbd93f9),
-    mode_explorer: rgba(0xbd93f9),
-    mode_picker: rgba(0xff79c6),
-    mode_text_dark: text_color(0x282a36),
-    mode_text_light: text_color(0x282a36),
-
-    gutter_fg: text_color(0x9badd4),
-
-    syntax_keyword: text_color(0xff79c6),
-    syntax_string: text_color(0xf1fa8c),
-    syntax_comment: text_color(0x9badd4),
-    syntax_function: text_color(0x50fa7b),
-    syntax_type: text_color(0x8be9fd),
-    syntax_number: text_color(0xbd93f9),
-    syntax_constant: text_color(0xbd93f9),
-    syntax_variable: text_color(0xf8f8f2),
-    syntax_operator: text_color(0xff79c6),
-    syntax_punctuation: text_color(0xff79c6),
-    syntax_attribute: text_color(0x50fa7b),
-
-    icon_folder: text_color(0xbd93f9),
-    icon_file: text_color(0xf8f8f2),
-    git_modified: text_color(0xffb86c),
-    git_staged: text_color(0x50fa7b),
-    git_untracked: text_color(0x8be9fd),
-    git_ignored: text_color(0x9badd4),
-    git_conflicted: text_color(0xff7979),
-};
-
-/// Adapted for Fenix: subdued surfaces, readable secondary text, and
-/// coordinated syntax, Git, and mode accents.
-pub const SOLARIZED_DARK: Theme = Theme {
-    name: "Solarized Dark",
-    font_family: None,
-    border: None,
-    divider: rgba(0x586e75),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x002b36),
-    sidebar_bg: rgba(0x002b36),
-    bg_modeline: rgba(0x073642),
-    fg: text_color(0xb5c3be),
-    fg_modeline: text_color(0xc4cfca),
-    caret: rgba(0xd8ad44),
-    caret_text: text_color(0xd8ad44),
-    hl_line: rgba(0x073642),
-    selection: rgba_alpha(0x55a8df, 0.12),
-    bracket_match: rgba_alpha(0xa6b64c, 0.12),
-    search_match: rgba_alpha(0xd8ad44, 0.12),
-
-    mode_normal: rgba(0xd8ad44),
-    mode_insert: rgba(0x52b7ad),
-    mode_visual: rgba(0xed7770),
-    mode_replace: rgba(0xe58d5b),
-    mode_command: rgba(0x55a8df),
-    mode_explorer: rgba(0xa29bdf),
-    mode_picker: rgba(0xdf82b1),
-    mode_text_dark: text_color(0x00212b),
-    mode_text_light: text_color(0x00212b),
-
-    gutter_fg: text_color(0x92a4a5),
-
-    syntax_keyword: text_color(0xa6b64c),
-    syntax_string: text_color(0x52b7ad),
-    syntax_comment: text_color(0x92a4a5),
-    syntax_function: text_color(0x55a8df),
-    syntax_type: text_color(0xd8ad44),
-    syntax_number: text_color(0xa29bdf),
-    syntax_constant: text_color(0xdf82b1),
-    syntax_variable: text_color(0xb5c3be),
-    syntax_operator: text_color(0xa6b64c),
-    syntax_punctuation: text_color(0xa6b64c),
-    syntax_attribute: text_color(0xe58d5b),
-
-    icon_folder: text_color(0x55a8df),
-    icon_file: text_color(0xb5c3be),
-    git_modified: text_color(0xe58d5b),
-    git_staged: text_color(0xa6b64c),
-    git_untracked: text_color(0x55a8df),
-    git_ignored: text_color(0x92a4a5),
-    git_conflicted: text_color(0xed7770),
-};
-
-/// Adapted for Fenix: subdued surfaces, readable secondary text, and
-/// coordinated syntax, Git, and mode accents.
-pub const ONE_DARK: Theme = Theme {
-    name: "One Dark",
-    font_family: None,
-    border: None,
-    divider: rgba(0x5c6370),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x282c34),
-    sidebar_bg: rgba(0x282c34),
-    bg_modeline: rgba(0x21252b),
-    fg: text_color(0xc1c8d4),
-    fg_modeline: text_color(0xc1c8d4),
-    caret: rgba(0xe5c07b),
-    caret_text: text_color(0xe5c07b),
-    hl_line: rgba(0x30353f),
-    selection: rgba_alpha(0x61afef, 0.12),
-    bracket_match: rgba_alpha(0x98c379, 0.12),
-    search_match: rgba_alpha(0xe5c07b, 0.12),
-
-    mode_normal: rgba(0x98c379),
-    mode_insert: rgba(0x56b6c2),
-    mode_visual: rgba(0xe06c75),
-    mode_replace: rgba(0xe5c07b),
-    mode_command: rgba(0x61afef),
-    mode_explorer: rgba(0xc678dd),
-    mode_picker: rgba(0x56b6c2),
-    mode_text_dark: text_color(0x21252b),
-    mode_text_light: text_color(0x21252b),
-
-    gutter_fg: text_color(0x9aa2b1),
-
-    syntax_keyword: text_color(0xd19be2),
-    syntax_string: text_color(0x98c379),
-    syntax_comment: text_color(0x9aa2b1),
-    syntax_function: text_color(0x61afef),
-    syntax_type: text_color(0xe5c07b),
-    syntax_number: text_color(0x56b6c2),
-    syntax_constant: text_color(0xed929b),
-    syntax_variable: text_color(0xc1c8d4),
-    syntax_operator: text_color(0x56b6c2),
-    syntax_punctuation: text_color(0x56b6c2),
-    syntax_attribute: text_color(0xe5c07b),
-
-    icon_folder: text_color(0x61afef),
-    icon_file: text_color(0xc1c8d4),
-    git_modified: text_color(0xe5c07b),
-    git_staged: text_color(0x98c379),
-    git_untracked: text_color(0x61afef),
-    git_ignored: text_color(0x9aa2b1),
-    git_conflicted: text_color(0xed929b),
-};
-
-/// The modern Visual Studio dark theme's own palette (VS 2022+/VS Code
-/// Dark+ converged on the same per-token defaults) -- near-black editor
-/// canvas, dark neutral chrome (not VS's eye-catching status-bar blue:
-/// every text color here also has to pass this file's own contrast tests
-/// against `bg_modeline`, which a bright saturated blue can't do for a
-/// muted color like `gutter_fg`, so the chrome stays a dark neutral gray
-/// the same way every other dark theme's own `bg_modeline` already is),
-/// and real VS syntax colors rather than an approximation. Its tabs are
-/// VS's own filled blocks (`TabStyle::Block`); every other theme draws the
-/// flat underline. `font_family: Some("Consolas")` points at the
-/// system font Windows ships by default rather than an embedded one, per
-/// explicit direction -- `cosmic-text`'s existing fontdb substitution
-/// already covers a machine without it, the same fallback every other
-/// `Some(family)` theme already relies on.
-pub const VISUAL_STUDIO_DARK: Theme = Theme {
-    name: "Visual Studio Dark",
-    font_family: Some("Consolas"),
-    border: None,
-    // The real VS "Divider lines" value (`#FF2D2D30`, Microsoft's own
-    // Color Value Reference) -- `#3F3F46` (an earlier attempt here) is
-    // actually that same doc's *button border* color, a different token.
-    divider: rgba(0x2d2d30),
-    tabs: TabStyle::Block,
-
-    bg: rgba(0x1e1e1e),
-    // VS's own real "tool window" background -- one shade lighter than
-    // the editor canvas, confirmed against Microsoft's Color Value
-    // Reference for VS 2022 (the Dark theme's "Body background" for
-    // properties/tool-window content is `#FF252526`).
-    sidebar_bg: rgba(0x252526),
-    bg_modeline: rgba(0x2d2d30),
-    fg: text_color(0xd4d4d4),
-    fg_modeline: text_color(0xffffff),
-    caret: rgba(0x4fc1ff),
-    caret_text: text_color(0x4fc1ff),
-    hl_line: rgba(0x2a2d2e),
-    selection: rgba_alpha(0x264f78, 0.55),
-    bracket_match: rgba_alpha(0x4ec9b0, 0.12),
-    search_match: rgba_alpha(0xd7ba7b, 0.12),
-
-    mode_normal: rgba(0x569cd6),
-    mode_insert: rgba(0x4ec9b0),
-    mode_visual: rgba(0xc42b1c),
-    mode_replace: rgba(0xd7ba7b),
-    mode_command: rgba(0x4fc1ff),
-    mode_explorer: rgba(0x569cd6),
-    mode_picker: rgba(0xc586c0),
-    mode_text_dark: text_color(0x1e1e1e),
-    mode_text_light: text_color(0xffffff),
-
-    gutter_fg: text_color(0x9c9c9c),
-
-    syntax_keyword: text_color(0x569cd6),
-    syntax_string: text_color(0xce9178),
-    syntax_comment: text_color(0x74ac64),
-    syntax_function: text_color(0xdcdcaa),
-    syntax_type: text_color(0x4ec9b0),
-    syntax_number: text_color(0xb5cea8),
-    syntax_constant: text_color(0x4fc1ff),
-    syntax_variable: text_color(0x9cdcfe),
-    syntax_operator: text_color(0xc0c0c0),
-    syntax_punctuation: text_color(0xb8b8b8),
-    syntax_attribute: text_color(0x9cdcfe),
-
-    icon_folder: text_color(0xdcb67a),
-    icon_file: text_color(0xd4d4d4),
-    git_modified: text_color(0xe2c08d),
-    git_staged: text_color(0x89d185),
-    git_untracked: text_color(0x6fc3df),
-    git_ignored: text_color(0x999999),
-    git_conflicted: text_color(0xf46a6a),
-};
-
-/// Catppuccin Latte, the light flavour. Catppuccin's accents are pastels
-/// meant to sit on a dark base; on Latte's near-white page most of them fall
-/// short of the 4.5:1 this file's contrast tests ask of every text color, so
-/// each text accent is darkened toward black -- same hue -- only as far as it
-/// takes to pass, and the mode badges likewise so `base` lettering reads on
-/// them. The caret rect itself stays Catppuccin's own rosewater.
-pub const CATPPUCCIN_LATTE: Theme = Theme {
-    name: "Catppuccin Latte",
-    font_family: None,
-    border: None,
-    divider: rgba(0xacb0be),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0xeff1f5),
-    sidebar_bg: rgba(0xe6e9ef),
-    bg_modeline: rgba(0xe6e9ef),
-    fg: text_color(0x4c4f69),
-    fg_modeline: text_color(0x4c4f69),
-    caret: rgba(0xdc8a78),
-    caret_text: text_color(0x865449),
-    hl_line: rgba(0xd9dce4),
-    selection: rgba_alpha(0x7c7f93, 0.25),
-    bracket_match: rgba_alpha(0xfe640b, 0.15),
-    search_match: rgba_alpha(0x04a5e5, 0.18),
-
-    mode_normal: rgba(0x1d63ee),
-    mode_insert: rgba(0x327d22),
-    mode_visual: rgba(0x8839ef),
-    mode_replace: rgba(0xd20f39),
-    mode_command: rgba(0xbc4a08),
-    mode_explorer: rgba(0x187788),
-    mode_picker: rgba(0xa1518c),
-    mode_text_dark: text_color(0xeff1f5),
-    mode_text_light: text_color(0xeff1f5),
-
-    gutter_fg: text_color(0x5e606c),
-
-    syntax_keyword: text_color(0x7d34dc),
-    syntax_string: text_color(0x2c6e1e),
-    syntax_comment: text_color(0x5d5f6e),
-    syntax_function: text_color(0x1a58d3),
-    syntax_type: text_color(0x865511),
-    syntax_number: text_color(0xa54107),
-    syntax_constant: text_color(0xa54107),
-    syntax_variable: text_color(0x4c4f69),
-    syntax_operator: text_color(0x036890),
-    syntax_punctuation: text_color(0x036890),
-    syntax_attribute: text_color(0x116b70),
-
-    icon_folder: text_color(0x1a58d3),
-    icon_file: text_color(0x4c4f69),
-    git_modified: text_color(0x865511),
-    git_staged: text_color(0x2c6e1e),
-    git_untracked: text_color(0x156977),
-    git_ignored: text_color(0x5e606c),
-    git_conflicted: text_color(0xc10e34),
-};
-
-/// Catppuccin Frappé, the lightest of the three dark flavours.
-pub const CATPPUCCIN_FRAPPE: Theme = Theme {
-    name: "Catppuccin Frappé",
-    font_family: None,
-    border: None,
-    divider: rgba(0x51576d),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x303446),
-    sidebar_bg: rgba(0x292c3c),
-    bg_modeline: rgba(0x292c3c),
-    fg: text_color(0xc6d0f5),
-    fg_modeline: text_color(0xc6d0f5),
-    caret: rgba(0xf2d5cf),
-    caret_text: text_color(0xf2d5cf),
-    hl_line: rgba(0x3b3f52),
-    selection: rgba_alpha(0x949cbb, 0.25),
-    bracket_match: rgba_alpha(0xef9f76, 0.15),
-    search_match: rgba_alpha(0x99d1db, 0.18),
-
-    mode_normal: rgba(0x8caaee),
-    mode_insert: rgba(0xa6d189),
-    mode_visual: rgba(0xca9ee6),
-    mode_replace: rgba(0xe78284),
-    mode_command: rgba(0xef9f76),
-    mode_explorer: rgba(0x85c1dc),
-    mode_picker: rgba(0xf4b8e4),
-    mode_text_dark: text_color(0x232634),
-    mode_text_light: text_color(0x232634),
-
-    gutter_fg: text_color(0xa6abc0),
-
-    syntax_keyword: text_color(0xca9ee6),
-    syntax_string: text_color(0xa6d189),
-    syntax_comment: text_color(0xa3aac5),
-    syntax_function: text_color(0x8caaee),
-    syntax_type: text_color(0xe5c890),
-    syntax_number: text_color(0xef9f76),
-    syntax_constant: text_color(0xef9f76),
-    syntax_variable: text_color(0xc6d0f5),
-    syntax_operator: text_color(0x99d1db),
-    syntax_punctuation: text_color(0x99d1db),
-    syntax_attribute: text_color(0x81c8be),
-
-    icon_folder: text_color(0x8caaee),
-    icon_file: text_color(0xc6d0f5),
-    git_modified: text_color(0xe5c890),
-    git_staged: text_color(0xa6d189),
-    git_untracked: text_color(0x85c1dc),
-    git_ignored: text_color(0xa6abc0),
-    git_conflicted: text_color(0xea9395),
-};
-
-/// Catppuccin Macchiato.
-pub const CATPPUCCIN_MACCHIATO: Theme = Theme {
-    name: "Catppuccin Macchiato",
-    font_family: None,
-    border: None,
-    divider: rgba(0x494d64),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x24273a),
-    sidebar_bg: rgba(0x1e2030),
-    bg_modeline: rgba(0x1e2030),
-    fg: text_color(0xcad3f5),
-    fg_modeline: text_color(0xcad3f5),
-    caret: rgba(0xf4dbd6),
-    caret_text: text_color(0xf4dbd6),
-    hl_line: rgba(0x303347),
-    selection: rgba_alpha(0x939ab7, 0.25),
-    bracket_match: rgba_alpha(0xf5a97f, 0.15),
-    search_match: rgba_alpha(0x91d7e3, 0.18),
-
-    mode_normal: rgba(0x8aadf4),
-    mode_insert: rgba(0xa6da95),
-    mode_visual: rgba(0xc6a0f6),
-    mode_replace: rgba(0xed8796),
-    mode_command: rgba(0xf5a97f),
-    mode_explorer: rgba(0x7dc4e4),
-    mode_picker: rgba(0xf5bde6),
-    mode_text_dark: text_color(0x181926),
-    mode_text_light: text_color(0x181926),
-
-    gutter_fg: text_color(0x979db3),
-
-    syntax_keyword: text_color(0xc6a0f6),
-    syntax_string: text_color(0xa6da95),
-    syntax_comment: text_color(0x969db9),
-    syntax_function: text_color(0x8aadf4),
-    syntax_type: text_color(0xeed49f),
-    syntax_number: text_color(0xf5a97f),
-    syntax_constant: text_color(0xf5a97f),
-    syntax_variable: text_color(0xcad3f5),
-    syntax_operator: text_color(0x91d7e3),
-    syntax_punctuation: text_color(0x91d7e3),
-    syntax_attribute: text_color(0x8bd5ca),
-
-    icon_folder: text_color(0x8aadf4),
-    icon_file: text_color(0xcad3f5),
-    git_modified: text_color(0xeed49f),
-    git_staged: text_color(0xa6da95),
-    git_untracked: text_color(0x7dc4e4),
-    git_ignored: text_color(0x979db3),
-    git_conflicted: text_color(0xed8796),
-};
-
-/// Catppuccin Mocha, the darkest flavour.
-pub const CATPPUCCIN_MOCHA: Theme = Theme {
-    name: "Catppuccin Mocha",
-    font_family: None,
-    border: None,
-    divider: rgba(0x45475a),
-    tabs: TabStyle::Underline,
-
-    bg: rgba(0x1e1e2e),
-    sidebar_bg: rgba(0x181825),
-    bg_modeline: rgba(0x181825),
-    fg: text_color(0xcdd6f4),
-    fg_modeline: text_color(0xcdd6f4),
-    caret: rgba(0xf5e0dc),
-    caret_text: text_color(0xf5e0dc),
-    hl_line: rgba(0x2a2b3c),
-    selection: rgba_alpha(0x9399b2, 0.25),
-    bracket_match: rgba_alpha(0xfab387, 0.15),
-    search_match: rgba_alpha(0x89dceb, 0.18),
-
-    mode_normal: rgba(0x89b4fa),
-    mode_insert: rgba(0xa6e3a1),
-    mode_visual: rgba(0xcba6f7),
-    mode_replace: rgba(0xf38ba8),
-    mode_command: rgba(0xfab387),
-    mode_explorer: rgba(0x74c7ec),
-    mode_picker: rgba(0xf5c2e7),
-    mode_text_dark: text_color(0x11111b),
-    mode_text_light: text_color(0x11111b),
-
-    gutter_fg: text_color(0x9195aa),
-
-    syntax_keyword: text_color(0xcba6f7),
-    syntax_string: text_color(0xa6e3a1),
-    syntax_comment: text_color(0x9399b2),
-    syntax_function: text_color(0x89b4fa),
-    syntax_type: text_color(0xf9e2af),
-    syntax_number: text_color(0xfab387),
-    syntax_constant: text_color(0xfab387),
-    syntax_variable: text_color(0xcdd6f4),
-    syntax_operator: text_color(0x89dceb),
-    syntax_punctuation: text_color(0x89dceb),
-    syntax_attribute: text_color(0x94e2d5),
-
-    icon_folder: text_color(0x89b4fa),
-    icon_file: text_color(0xcdd6f4),
-    git_modified: text_color(0xf9e2af),
-    git_staged: text_color(0xa6e3a1),
-    git_untracked: text_color(0x74c7ec),
-    git_ignored: text_color(0x9195aa),
-    git_conflicted: text_color(0xf38ba8),
-};
-/// Every theme Fenix ships. `by_name` works off this.
-pub const ALL: &[&Theme] = &[
-    &ORBIT_DARK,
-    &TEMPLEOS,
-    &GRUVBOX_DARK,
-    &NORD,
-    &DRACULA,
-    &SOLARIZED_DARK,
-    &ONE_DARK,
-    &VISUAL_STUDIO_DARK,
-    &CATPPUCCIN_LATTE,
-    &CATPPUCCIN_FRAPPE,
-    &CATPPUCCIN_MACCHIATO,
-    &CATPPUCCIN_MOCHA,
+/// The themes Fenix ships, as data -- the same format your own are
+/// written in (`themes/` in the settings folder), in cycling order.
+const BUILT_IN: &[(&str, &str)] = &[
+    ("orbit-dark.toml", include_str!("../themes/orbit-dark.toml")),
+    ("templeos.toml", include_str!("../themes/templeos.toml")),
+    ("gruvbox-dark.toml", include_str!("../themes/gruvbox-dark.toml")),
+    ("nord.toml", include_str!("../themes/nord.toml")),
+    ("dracula.toml", include_str!("../themes/dracula.toml")),
+    ("solarized-dark.toml", include_str!("../themes/solarized-dark.toml")),
+    ("one-dark.toml", include_str!("../themes/one-dark.toml")),
+    ("visual-studio-dark.toml", include_str!("../themes/visual-studio-dark.toml")),
+    ("catppuccin-latte.toml", include_str!("../themes/catppuccin-latte.toml")),
+    ("catppuccin-frappe.toml", include_str!("../themes/catppuccin-frappe.toml")),
+    ("catppuccin-macchiato.toml", include_str!("../themes/catppuccin-macchiato.toml")),
+    ("catppuccin-mocha.toml", include_str!("../themes/catppuccin-mocha.toml")),
 ];
 
-/// Case-insensitive lookup by `Theme::name` -- used for persistence
-/// (the saved file just holds a name) and is the reason `name` exists
-/// as a field at all rather than relying on pointer identity, which
-/// Rust doesn't guarantee is stable across separate `&SOME_CONST`
-/// expressions.
+/// The theme used when none is set, or the one set isn't there.
+pub const DEFAULT: &str = "Orbit Dark";
+
+/// A color as a theme file writes it: `"#rrggbb"`, `"#rrggbbaa"`, or
+/// `{ color = "#rrggbb", alpha = 0.12 }` for an overlay.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum ColorSpec {
+    Hex(String),
+    Alpha { color: String, alpha: f32 },
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeFile {
+    name: String,
+    #[serde(default)]
+    tabs: Option<String>,
+    #[serde(default)]
+    font_family: Option<String>,
+    #[serde(default)]
+    border: Option<ColorSpec>,
+    surfaces: Surfaces,
+    text: Text,
+    modes: Modes,
+    syntax: Syntax,
+    explorer: Explorer,
+    git: Git,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Surfaces {
+    bg: ColorSpec,
+    /// The explorer sidebar's; the editor's `bg` when left out.
+    #[serde(default)]
+    sidebar_bg: Option<ColorSpec>,
+    bg_modeline: ColorSpec,
+    divider: ColorSpec,
+    caret: ColorSpec,
+    hl_line: ColorSpec,
+    selection: ColorSpec,
+    bracket_match: ColorSpec,
+    search_match: ColorSpec,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Text {
+    fg: ColorSpec,
+    /// The modeline's text; `fg` when left out.
+    #[serde(default)]
+    fg_modeline: Option<ColorSpec>,
+    /// The caret's color as text (the which-key keys); the caret's own
+    /// when left out.
+    #[serde(default)]
+    caret_text: Option<ColorSpec>,
+    gutter_fg: ColorSpec,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Modes {
+    normal: ColorSpec,
+    insert: ColorSpec,
+    visual: ColorSpec,
+    replace: ColorSpec,
+    command: ColorSpec,
+    explorer: ColorSpec,
+    picker: ColorSpec,
+    text_dark: ColorSpec,
+    /// The Visual badge's lettering; `text_dark` when left out.
+    #[serde(default)]
+    text_light: Option<ColorSpec>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Syntax {
+    keyword: ColorSpec,
+    string: ColorSpec,
+    comment: ColorSpec,
+    function: ColorSpec,
+    #[serde(rename = "type")]
+    ty: ColorSpec,
+    number: ColorSpec,
+    constant: ColorSpec,
+    variable: ColorSpec,
+    operator: ColorSpec,
+    punctuation: ColorSpec,
+    attribute: ColorSpec,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Explorer {
+    folder: ColorSpec,
+    file: ColorSpec,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Git {
+    modified: ColorSpec,
+    staged: ColorSpec,
+    untracked: ColorSpec,
+    ignored: ColorSpec,
+    conflicted: ColorSpec,
+}
+
+impl ColorSpec {
+    /// As a fill: red, green, blue and alpha, each 0..=1.
+    fn rgba(&self, key: &str) -> Result<[f32; 4], String> {
+        let (hex, alpha) = match self {
+            ColorSpec::Hex(hex) => (hex.as_str(), None),
+            ColorSpec::Alpha { color, alpha } => (color.as_str(), Some(*alpha)),
+        };
+        let digits = hex.strip_prefix('#').filter(|d| (d.len() == 6 || d.len() == 8) && d.chars().all(|c| c.is_ascii_hexdigit()));
+        let Some(digits) = digits else { return Err(format!("{key}: {hex} isn't a color -- write #rrggbb")) };
+        let byte = |i: usize| u8::from_str_radix(&digits[i..i + 2], 16).expect("checked hex") as f32 / 255.0;
+        let alpha = match (alpha, digits.len()) {
+            (Some(a), 6) if (0.0..=1.0).contains(&a) => a,
+            (Some(_), 6) => return Err(format!("{key}: alpha is from 0 to 1")),
+            (Some(_), _) => return Err(format!("{key}: an alpha of its own, or #rrggbbaa -- not both")),
+            (None, 8) => byte(6),
+            (None, _) => 1.0,
+        };
+        Ok([byte(0), byte(2), byte(4), alpha])
+    }
+
+    /// As text: opaque.
+    fn text(&self, key: &str) -> Result<glyphon::Color, String> {
+        let rgba = self.rgba(key)?;
+        if rgba[3] < 1.0 {
+            return Err(format!("{key}: text can't be see-through -- write #rrggbb"));
+        }
+        Ok(opaque(rgba))
+    }
+}
+
+/// A fill's color as text.
+fn opaque([r, g, b, _]: [f32; 4]) -> glyphon::Color {
+    let byte = |v: f32| (v * 255.0).round() as u8;
+    glyphon::Color::rgb(byte(r), byte(g), byte(b))
+}
+
+/// Kept for the life of the editor, like the themes that were consts.
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// A theme file read: the theme, or what's wrong with it.
+pub fn parse(text: &str) -> Result<Theme, String> {
+    let f: ThemeFile = toml::from_str(text).map_err(|e| e.message().to_string())?;
+    if f.name.trim().is_empty() {
+        return Err("name: a theme needs one".into());
+    }
+    let tabs = match f.tabs.as_deref().unwrap_or("underline") {
+        "underline" => TabStyle::Underline,
+        "block" => TabStyle::Block,
+        other => return Err(format!("tabs: {other} -- underline or block")),
+    };
+    let s = &f.surfaces;
+    let bg = s.bg.rgba("surfaces.bg")?;
+    let caret = s.caret.rgba("surfaces.caret")?;
+    let fg = f.text.fg.text("text.fg")?;
+    let m = &f.modes;
+    let text_dark = m.text_dark.text("modes.text_dark")?;
+    Ok(Theme {
+        name: leak(f.name.trim().to_string()),
+        font_family: f.font_family.filter(|s| !s.trim().is_empty()).map(leak),
+        border: f.border.as_ref().map(|c| c.rgba("border")).transpose()?,
+        divider: s.divider.rgba("surfaces.divider")?,
+        tabs,
+        bg,
+        sidebar_bg: s.sidebar_bg.as_ref().map(|c| c.rgba("surfaces.sidebar_bg")).transpose()?.unwrap_or(bg),
+        bg_modeline: s.bg_modeline.rgba("surfaces.bg_modeline")?,
+        fg,
+        fg_modeline: f.text.fg_modeline.as_ref().map(|c| c.text("text.fg_modeline")).transpose()?.unwrap_or(fg),
+        caret,
+        caret_text: f.text.caret_text.as_ref().map(|c| c.text("text.caret_text")).transpose()?.unwrap_or(opaque(caret)),
+        hl_line: s.hl_line.rgba("surfaces.hl_line")?,
+        selection: s.selection.rgba("surfaces.selection")?,
+        bracket_match: s.bracket_match.rgba("surfaces.bracket_match")?,
+        search_match: s.search_match.rgba("surfaces.search_match")?,
+        mode_normal: m.normal.rgba("modes.normal")?,
+        mode_insert: m.insert.rgba("modes.insert")?,
+        mode_visual: m.visual.rgba("modes.visual")?,
+        mode_replace: m.replace.rgba("modes.replace")?,
+        mode_command: m.command.rgba("modes.command")?,
+        mode_explorer: m.explorer.rgba("modes.explorer")?,
+        mode_picker: m.picker.rgba("modes.picker")?,
+        mode_text_dark: text_dark,
+        mode_text_light: m.text_light.as_ref().map(|c| c.text("modes.text_light")).transpose()?.unwrap_or(text_dark),
+        gutter_fg: f.text.gutter_fg.text("text.gutter_fg")?,
+        syntax_keyword: f.syntax.keyword.text("syntax.keyword")?,
+        syntax_string: f.syntax.string.text("syntax.string")?,
+        syntax_comment: f.syntax.comment.text("syntax.comment")?,
+        syntax_function: f.syntax.function.text("syntax.function")?,
+        syntax_type: f.syntax.ty.text("syntax.type")?,
+        syntax_number: f.syntax.number.text("syntax.number")?,
+        syntax_constant: f.syntax.constant.text("syntax.constant")?,
+        syntax_variable: f.syntax.variable.text("syntax.variable")?,
+        syntax_operator: f.syntax.operator.text("syntax.operator")?,
+        syntax_punctuation: f.syntax.punctuation.text("syntax.punctuation")?,
+        syntax_attribute: f.syntax.attribute.text("syntax.attribute")?,
+        icon_folder: f.explorer.folder.text("explorer.folder")?,
+        icon_file: f.explorer.file.text("explorer.file")?,
+        git_modified: f.git.modified.text("git.modified")?,
+        git_staged: f.git.staged.text("git.staged")?,
+        git_untracked: f.git.untracked.text("git.untracked")?,
+        git_ignored: f.git.ignored.text("git.ignored")?,
+        git_conflicted: f.git.conflicted.text("git.conflicted")?,
+    })
+}
+
+/// The themes there are, and what was wrong reading any of yours.
+struct Library {
+    themes: Vec<&'static Theme>,
+    problems: Vec<String>,
+}
+
+fn library() -> &'static Library {
+    static LIBRARY: std::sync::OnceLock<Library> = std::sync::OnceLock::new();
+    LIBRARY.get_or_init(|| {
+        let mut lib = Library { themes: Vec::new(), problems: Vec::new() };
+        for (file, text) in BUILT_IN {
+            match parse(text) {
+                Ok(theme) => lib.themes.push(Box::leak(Box::new(theme))),
+                // A shipped theme that doesn't read is a bug the tests
+                // catch; a release just goes without it.
+                Err(e) => lib.problems.push(format!("built-in {file}: {e}")),
+            }
+        }
+        // Yours, from `themes/` in the settings folder: one with the same
+        // name as a shipped one takes its place. Tests use the shipped
+        // ones only.
+        let dir = if cfg!(test) { None } else { fenix_storage::paths::themes_dir() };
+        for (file, result) in dir.map(|d| read_dir_themes(&d)).unwrap_or_default() {
+            match result {
+                Ok(theme) => match lib.themes.iter().position(|t| t.name.eq_ignore_ascii_case(theme.name)) {
+                    Some(i) => lib.themes[i] = Box::leak(Box::new(theme)),
+                    None => lib.themes.push(Box::leak(Box::new(theme))),
+                },
+                Err(e) => lib.problems.push(format!("themes/{file}: {e}")),
+            }
+        }
+        lib
+    })
+}
+
+/// Every `.toml` in `dir`, by file name, read.
+fn read_dir_themes(dir: &std::path::Path) -> Vec<(String, Result<Theme, String>)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut files: Vec<std::path::PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml"))).collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| {
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let result = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|text| parse(&text));
+            (file, result)
+        })
+        .collect()
+}
+
+/// Every theme there is: the shipped ones, then yours. `by_name` and the
+/// theme picker work off this.
+pub fn all() -> &'static [&'static Theme] {
+    &library().themes
+}
+
+/// What's wrong with your theme files, if anything, to be said once.
+pub fn problems() -> &'static [String] {
+    &library().problems
+}
+
+/// Case-insensitive lookup by `Theme::name` -- the saved setting just
+/// holds a name.
 pub fn by_name(name: &str) -> Option<&'static Theme> {
-    ALL.iter().find(|t| t.name.eq_ignore_ascii_case(name)).copied()
+    all().iter().find(|t| t.name.eq_ignore_ascii_case(name)).copied()
+}
+
+/// `DEFAULT`, the theme there always is.
+pub fn default_theme() -> &'static Theme {
+    by_name(DEFAULT).expect("Orbit Dark ships with Fenix")
+}
+
+/// The theme `name` names, else the default.
+pub fn named_or_default(name: Option<&str>) -> &'static Theme {
+    name.and_then(by_name).unwrap_or_else(default_theme)
 }
 
 #[cfg(test)]
@@ -1055,7 +586,7 @@ mod tests {
 
     #[test]
     fn dark_themes_keep_text_readable_on_editor_and_popup_surfaces() {
-        for theme in ALL.iter().filter(|theme| theme.name != "TempleOS") {
+        for theme in all().iter().filter(|theme| theme.name != "TempleOS") {
             let colors = [
                 theme.fg,
                 theme.gutter_fg,
@@ -1099,7 +630,7 @@ mod tests {
 
     #[test]
     fn dark_theme_mode_badges_have_readable_labels() {
-        for theme in ALL.iter().filter(|theme| theme.name != "TempleOS") {
+        for theme in all().iter().filter(|theme| theme.name != "TempleOS") {
             for bg in [
                 theme.mode_normal,
                 theme.mode_insert,
@@ -1142,7 +673,7 @@ mod tests {
     /// is noise.
     #[test]
     fn every_theme_dims_its_comments_below_its_body_text() {
-        for theme in ALL {
+        for theme in all() {
             let (bg, fg, comment) = (bg_luminance(theme), luminance(theme.fg), luminance(theme.syntax_comment));
             assert!(
                 (comment - bg).abs() < (fg - bg).abs(),
@@ -1160,7 +691,7 @@ mod tests {
     /// symbol is neither ordinary text nor a comment.
     #[test]
     fn every_theme_makes_its_symbols_stand_out_from_text_and_comments() {
-        for theme in ALL {
+        for theme in all() {
             for (role, color) in [("operator", theme.syntax_operator), ("punctuation", theme.syntax_punctuation)] {
                 assert_ne!(rgb_of(color), rgb_of(theme.fg), "{}: {role} is the same color as body text", theme.name);
                 assert_ne!(rgb_of(color), rgb_of(theme.syntax_comment), "{}: {role} is as dim as a comment", theme.name);
@@ -1173,22 +704,26 @@ mod tests {
     }
     use super::*;
 
+    fn named(name: &str) -> &'static Theme {
+        by_name(name).unwrap_or_else(|| panic!("{name} ships"))
+    }
+
     #[test]
     fn exact_top_level_names_resolve_directly() {
-        assert_eq!(ORBIT_DARK.syntax_color("keyword"), ORBIT_DARK.syntax_keyword);
-        assert_eq!(ORBIT_DARK.syntax_color("string"), ORBIT_DARK.syntax_string);
+        assert_eq!(named("Orbit Dark").syntax_color("keyword"), named("Orbit Dark").syntax_keyword);
+        assert_eq!(named("Orbit Dark").syntax_color("string"), named("Orbit Dark").syntax_string);
     }
 
     #[test]
     fn dotted_sub_captures_fall_back_to_their_top_level_color() {
-        assert_eq!(ORBIT_DARK.syntax_color("function.method"), ORBIT_DARK.syntax_function);
-        assert_eq!(ORBIT_DARK.syntax_color("constant.builtin"), ORBIT_DARK.syntax_constant);
-        assert_eq!(ORBIT_DARK.syntax_color("punctuation.bracket"), ORBIT_DARK.syntax_punctuation);
+        assert_eq!(named("Orbit Dark").syntax_color("function.method"), named("Orbit Dark").syntax_function);
+        assert_eq!(named("Orbit Dark").syntax_color("constant.builtin"), named("Orbit Dark").syntax_constant);
+        assert_eq!(named("Orbit Dark").syntax_color("punctuation.bracket"), named("Orbit Dark").syntax_punctuation);
     }
 
     #[test]
     fn the_newer_grammars_capture_names_get_real_colors() {
-        let t = &ORBIT_DARK;
+        let t = named("Orbit Dark");
         assert_eq!(t.syntax_color("field"), t.syntax_variable);
         assert_eq!(t.syntax_color("parameter"), t.syntax_variable);
         assert_eq!(t.syntax_color("method.call"), t.syntax_function);
@@ -1200,7 +735,7 @@ mod tests {
 
     #[test]
     fn unrecognized_capture_falls_back_to_plain_fg() {
-        assert_eq!(ORBIT_DARK.syntax_color("some.unknown.capture"), ORBIT_DARK.fg);
+        assert_eq!(named("Orbit Dark").syntax_color("some.unknown.capture"), named("Orbit Dark").fg);
     }
 
     #[test]
@@ -1208,15 +743,15 @@ mod tests {
         // All six share the same "text" top-level segment -- proves
         // they're actually distinguished by their exact name, not all
         // silently landing on one fallback color together.
-        assert_eq!(ORBIT_DARK.syntax_color("text.title"), ORBIT_DARK.syntax_function);
-        assert_eq!(ORBIT_DARK.syntax_color("text.strong"), ORBIT_DARK.syntax_keyword);
-        assert_eq!(ORBIT_DARK.syntax_color("text.emphasis"), ORBIT_DARK.syntax_type);
-        assert_eq!(ORBIT_DARK.syntax_color("text.literal"), ORBIT_DARK.syntax_string);
-        assert_eq!(ORBIT_DARK.syntax_color("text.uri"), ORBIT_DARK.syntax_constant);
-        assert_eq!(ORBIT_DARK.syntax_color("text.reference"), ORBIT_DARK.syntax_constant);
+        assert_eq!(named("Orbit Dark").syntax_color("text.title"), named("Orbit Dark").syntax_function);
+        assert_eq!(named("Orbit Dark").syntax_color("text.strong"), named("Orbit Dark").syntax_keyword);
+        assert_eq!(named("Orbit Dark").syntax_color("text.emphasis"), named("Orbit Dark").syntax_type);
+        assert_eq!(named("Orbit Dark").syntax_color("text.literal"), named("Orbit Dark").syntax_string);
+        assert_eq!(named("Orbit Dark").syntax_color("text.uri"), named("Orbit Dark").syntax_constant);
+        assert_eq!(named("Orbit Dark").syntax_color("text.reference"), named("Orbit Dark").syntax_constant);
 
         let distinct: std::collections::HashSet<_> = ["text.title", "text.strong", "text.emphasis", "text.literal", "text.uri"]
-            .map(|name| format!("{:?}", ORBIT_DARK.syntax_color(name)))
+            .map(|name| format!("{:?}", named("Orbit Dark").syntax_color(name)))
             .into_iter()
             .collect();
         assert_eq!(distinct.len(), 5, "each of these should read as visibly different from the others");
@@ -1229,41 +764,41 @@ mod tests {
         // isn't one of the five specific ones above should fall all
         // the way through to plain `fg`, not silently match one of
         // them by accident.
-        assert_eq!(ORBIT_DARK.syntax_color("text.something_else"), ORBIT_DARK.fg);
+        assert_eq!(named("Orbit Dark").syntax_color("text.something_else"), named("Orbit Dark").fg);
     }
 
     #[test]
     fn tcls_bare_control_flow_and_spell_captures_resolve() {
-        assert_eq!(ORBIT_DARK.syntax_color("repeat"), ORBIT_DARK.syntax_keyword);
-        assert_eq!(ORBIT_DARK.syntax_color("conditional"), ORBIT_DARK.syntax_keyword);
-        assert_eq!(ORBIT_DARK.syntax_color("spell"), ORBIT_DARK.syntax_comment);
+        assert_eq!(named("Orbit Dark").syntax_color("repeat"), named("Orbit Dark").syntax_keyword);
+        assert_eq!(named("Orbit Dark").syntax_color("conditional"), named("Orbit Dark").syntax_keyword);
+        assert_eq!(named("Orbit Dark").syntax_color("spell"), named("Orbit Dark").syntax_comment);
     }
 
     #[test]
     fn git_status_color_covers_every_status() {
         use fenix_explorer::GitStatus;
-        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Modified), ORBIT_DARK.git_modified);
-        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Staged), ORBIT_DARK.git_staged);
-        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Untracked), ORBIT_DARK.git_untracked);
-        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Ignored), ORBIT_DARK.git_ignored);
-        assert_eq!(ORBIT_DARK.git_status_color(GitStatus::Conflicted), ORBIT_DARK.git_conflicted);
+        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Modified), named("Orbit Dark").git_modified);
+        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Staged), named("Orbit Dark").git_staged);
+        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Untracked), named("Orbit Dark").git_untracked);
+        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Ignored), named("Orbit Dark").git_ignored);
+        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Conflicted), named("Orbit Dark").git_conflicted);
     }
 
     #[test]
     fn templeos_syntax_and_git_colors_resolve_the_same_generic_way() {
-        // TEMPLEOS is a plain data value like ORBIT_DARK -- no special
+        // named("TempleOS") is a plain data value like named("Orbit Dark") -- no special
         // casing anywhere in `syntax_color`/`git_status_color`, so this
         // is really a check that the const itself is well-formed.
-        assert_eq!(TEMPLEOS.syntax_color("keyword"), TEMPLEOS.syntax_keyword);
-        assert_eq!(TEMPLEOS.syntax_color("function.method"), TEMPLEOS.syntax_function);
-        assert_eq!(TEMPLEOS.syntax_color("some.unknown.capture"), TEMPLEOS.fg);
+        assert_eq!(named("TempleOS").syntax_color("keyword"), named("TempleOS").syntax_keyword);
+        assert_eq!(named("TempleOS").syntax_color("function.method"), named("TempleOS").syntax_function);
+        assert_eq!(named("TempleOS").syntax_color("some.unknown.capture"), named("TempleOS").fg);
         use fenix_explorer::GitStatus;
-        assert_eq!(TEMPLEOS.git_status_color(GitStatus::Staged), TEMPLEOS.git_staged);
+        assert_eq!(named("TempleOS").git_status_color(GitStatus::Staged), named("TempleOS").git_staged);
     }
 
     #[test]
     fn all_contains_every_shipped_theme_by_name_in_cycling_order() {
-        let names: Vec<&str> = ALL.iter().map(|t| t.name).collect();
+        let names: Vec<&str> = all().iter().map(|t| t.name).collect();
         assert_eq!(
             names,
             vec![
@@ -1291,16 +826,16 @@ mod tests {
         // color` are called.
         use fenix_explorer::GitStatus;
         for theme in [
-            &GRUVBOX_DARK,
-            &NORD,
-            &DRACULA,
-            &SOLARIZED_DARK,
-            &ONE_DARK,
-            &VISUAL_STUDIO_DARK,
-            &CATPPUCCIN_LATTE,
-            &CATPPUCCIN_FRAPPE,
-            &CATPPUCCIN_MACCHIATO,
-            &CATPPUCCIN_MOCHA,
+            named("Gruvbox Dark"),
+            named("Nord"),
+            named("Dracula"),
+            named("Solarized Dark"),
+            named("One Dark"),
+            named("Visual Studio Dark"),
+            named("Catppuccin Latte"),
+            named("Catppuccin Frappé"),
+            named("Catppuccin Macchiato"),
+            named("Catppuccin Mocha"),
         ] {
             assert_eq!(theme.syntax_color("keyword"), theme.syntax_keyword, "{}", theme.name);
             assert_eq!(theme.syntax_color("function.method"), theme.syntax_function, "{}", theme.name);
@@ -1327,6 +862,50 @@ mod tests {
         ] {
             assert_eq!(by_name(&name.to_lowercase()).map(|t| t.name), Some(name));
         }
+    }
+
+    /// Every shipped theme reads: none is left out for being wrong.
+    #[test]
+    fn every_shipped_theme_file_reads() {
+        assert!(problems().is_empty(), "{:?}", problems());
+        assert_eq!(all().len(), BUILT_IN.len());
+        assert_eq!(default_theme().name, DEFAULT);
+    }
+
+    /// A theme of yours: what it can leave out is filled in, what's wrong
+    /// with it is said, by key.
+    #[test]
+    fn a_theme_file_fills_its_defaults_and_says_what_is_wrong() {
+        let mine = BUILT_IN[0].1.replace("name = \"Orbit Dark\"", "name = \"Mine\"").replace("sidebar_bg = \"#1a1b26\"\n", "").replace("fg_modeline = \"#c0caf5\"\n", "").replace("caret_text = \"#e0af68\"\n", "");
+        let theme = parse(&mine).expect("reads");
+        assert_eq!(theme.name, "Mine");
+        assert_eq!(theme.sidebar_bg, theme.bg, "the sidebar is the editor's background");
+        assert_eq!(theme.fg_modeline, theme.fg);
+        assert_eq!(theme.caret_text, opaque(theme.caret));
+        assert_eq!(theme.tabs, TabStyle::Underline);
+
+        let alpha = mine.replace("hl_line = \"#222534\"", "hl_line = \"#22253480\"");
+        assert!((parse(&alpha).unwrap().hl_line[3] - 128.0 / 255.0).abs() < 1e-6, "#rrggbbaa");
+        let bad = mine.replace("keyword = \"#bb9af7\"", "keyword = \"purple\"");
+        assert_eq!(parse(&bad).err().as_deref(), Some("syntax.keyword: purple isn't a color -- write #rrggbb"));
+        let see_through = mine.replace("keyword = \"#bb9af7\"", "keyword = { color = \"#bb9af7\", alpha = 0.5 }");
+        assert!(parse(&see_through).err().unwrap().starts_with("syntax.keyword: text can't be see-through"));
+        let tabs = mine.replace("tabs = \"underline\"", "tabs = \"round\"");
+        assert!(parse(&tabs).err().unwrap().contains("underline or block"));
+        assert!(parse(&mine.replace("[git]", "[gits]")).is_err(), "an unknown section is an error, not ignored");
+    }
+
+    /// Yours are read from a folder, sorted; a broken one is said, not
+    /// fatal.
+    #[test]
+    fn your_themes_are_read_from_their_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("b.toml"), BUILT_IN[0].1.replace("Orbit Dark", "Mine")).unwrap();
+        std::fs::write(dir.path().join("a.toml"), "name = \"Broken\"").unwrap();
+        std::fs::write(dir.path().join("notes.txt"), "not a theme").unwrap();
+        let read = read_dir_themes(dir.path());
+        assert_eq!(read.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(), ["a.toml", "b.toml"]);
+        assert!(read[0].1.is_err() && read[1].1.as_ref().is_ok_and(|t| t.name == "Mine"));
     }
 
     #[test]

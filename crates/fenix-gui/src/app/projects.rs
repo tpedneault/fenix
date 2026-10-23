@@ -62,10 +62,10 @@ mod tests {
 
     #[test]
     fn the_modeline_segment_is_the_tag_then_the_name() {
-        let spans = modeline_project_spans(ProjectKind::Arduino, "blink-lab", &theme::VISUAL_STUDIO_DARK);
+        let spans = modeline_project_spans(ProjectKind::Arduino, "blink-lab", theme::by_name("Visual Studio Dark").unwrap());
         let text: String = spans.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(text, "INO blink-lab · ");
-        assert_eq!(spans[0].1, rgba_to_glyphon(theme::VISUAL_STUDIO_DARK.mode_insert));
+        assert_eq!(spans[0].1, rgba_to_glyphon(theme::by_name("Visual Studio Dark").unwrap().mode_insert));
     }
 
     #[test]

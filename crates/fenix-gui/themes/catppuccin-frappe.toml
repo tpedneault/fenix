@@ -1,0 +1,55 @@
+# Catppuccin Frappé, the lightest of the three dark flavours.
+name = "Catppuccin Frappé"
+tabs = "underline"
+
+[surfaces]
+bg = "#303446"
+sidebar_bg = "#292c3c"
+bg_modeline = "#292c3c"
+divider = "#51576d"
+caret = "#f2d5cf"
+hl_line = "#3b3f52"
+selection = { color = "#949cbb", alpha = 0.25 }
+bracket_match = { color = "#ef9f76", alpha = 0.15 }
+search_match = { color = "#99d1db", alpha = 0.18 }
+
+[text]
+fg = "#c6d0f5"
+fg_modeline = "#c6d0f5"
+caret_text = "#f2d5cf"
+gutter_fg = "#a6abc0"
+
+[modes]
+normal = "#8caaee"
+insert = "#a6d189"
+visual = "#ca9ee6"
+replace = "#e78284"
+command = "#ef9f76"
+explorer = "#85c1dc"
+picker = "#f4b8e4"
+text_dark = "#232634"
+text_light = "#232634"
+
+[syntax]
+keyword = "#ca9ee6"
+string = "#a6d189"
+comment = "#a3aac5"
+function = "#8caaee"
+type = "#e5c890"
+number = "#ef9f76"
+constant = "#ef9f76"
+variable = "#c6d0f5"
+operator = "#99d1db"
+punctuation = "#99d1db"
+attribute = "#81c8be"
+
+[explorer]
+folder = "#8caaee"
+file = "#c6d0f5"
+
+[git]
+modified = "#e5c890"
+staged = "#a6d189"
+untracked = "#85c1dc"
+ignored = "#a6abc0"
+conflicted = "#ea9395"
