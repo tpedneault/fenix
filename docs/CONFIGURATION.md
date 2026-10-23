@@ -229,6 +229,12 @@ needs its dependencies installed first. It's used from the next start.
 A package is checked before anything is written: its manifest, the Fenix
 it's for, and that none of its files would land outside its own folder.
 
+When an extension seems to be the trouble, `fenix --disable-extensions`
+starts in safe mode: the core alone, with every built-in extension off and
+nothing read from an installed one, for that run only -- your settings,
+themes and snippets are read as always and left as they are. It opens a
+window of its own rather than handing over to a Fenix already running.
+
 ## Every setting
 
 The table is generated from the settings' own declarations (a test fails
