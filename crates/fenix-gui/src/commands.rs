@@ -229,6 +229,7 @@ impl CommandRegistry {
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
         registry.feature(&crate::app::EMBEDDED_SPEC);
         registry.feature(&crate::app::NOTEBOOK_SPEC);
+        #[cfg(feature = "diagrams")]
         registry.feature(&crate::app::DIAGRAMS_SPEC);
         registry.register("notebook.preview", "The reading view, beside the Markdown (again closes it)", |ctx| ctx.app.open_reading_view(false));
         registry.register("notebook.read", "Read this Markdown rendered, in its place (again goes back)", |ctx| ctx.app.open_reading_view(true));

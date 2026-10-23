@@ -56,11 +56,13 @@ pub(super) struct PageState {
     started: Option<Instant>,
     /// The selected line when the page was last shown, to tell a move up.
     last_focus: Option<usize>,
+    /// The height of the pane it was last drawn in, in rows.
+    rows: Option<usize>,
 }
 
 impl PageState {
     fn new(model: PageModel) -> Self {
-        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, last_focus: None }
+        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, last_focus: None, rows: None }
     }
 
     /// Whether a text field on the page has the keyboard -- then every
@@ -272,6 +274,26 @@ impl App {
 
     pub(super) fn is_page_buffer(&self, id: BufferId) -> bool {
         self.pages.contains_key(&id)
+    }
+
+    /// Records how tall a page's pane is; a page that fills it
+    /// (`FeaturePage::fills_pane`) is laid out again when that changes.
+    pub(super) fn note_page_rows(&mut self, id: BufferId, rows: usize) {
+        let Some(state) = self.pages.get_mut(&id) else { return };
+        if state.rows.replace(rows) != Some(rows) {
+            if let PageModel::Feature(page) = &state.model {
+                if page.fills_pane() {
+                    state.stale = true;
+                }
+            }
+        }
+    }
+
+    /// The height of page `id`'s pane in rows, once it's been drawn. For
+    /// a page that fills its pane; unused when none in the build does.
+    #[allow(dead_code)]
+    pub(super) fn page_rows(&self, id: BufferId) -> Option<usize> {
+        self.pages.get(&id).and_then(|state| state.rows)
     }
 
     /// The open page of one kind, if there is one -- the wizard, the hub

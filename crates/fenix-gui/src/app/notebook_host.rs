@@ -638,7 +638,8 @@ impl App {
         };
         self.open_file_from_picker(&path);
         if path.extension().is_some_and(|e| e == "mmd" || e == "mermaid") {
-            self.open_diagram_preview(self.focused_buffer_id());
+            // Its preview, when the diagrams feature is there to draw it.
+            let _ = self.call_service("diagrams.preview", &serde_json::json!({ "path": path }));
         }
     }
 

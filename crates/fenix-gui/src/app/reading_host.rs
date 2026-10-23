@@ -291,7 +291,10 @@ impl App {
                     let key2 = key.clone();
                     self.page_spawn(move |send| send(PageEvent::PageImage { key: key2, result: decode_picture(&path) }));
                 }
-                ImageKey::Diagram(_) => self.request_diagram_image(key.clone()),
+                // Drawn by the diagrams feature; without it, none to show.
+                ImageKey::Diagram(h) => {
+                    let _ = self.call_service("diagrams.draw", &serde_json::json!({ "key": h }));
+                }
             }
         }
     }
@@ -312,12 +315,20 @@ impl App {
                 self.page_images.textures.insert(key, PageTex { w: 0, h: 0, bgra: None, texture: None });
             }
         }
+        self.page_pictures_arrived();
+    }
+
+    /// Pictures came in (a file read, a diagram drawn): every page that
+    /// shows them (`FeaturePage::shows_pictures`) is laid out again.
+    pub(super) fn page_pictures_arrived(&mut self) {
         for state in self.pages.values_mut() {
-            if matches!(state.model, PageModel::Reading(_)) || super::feature::page_as::<crate::notebook_page::NotebookPage>(&state.model).is_some() {
-                state.stale = true;
-                if let PageModel::Reading(p) = &mut state.model {
+            match &mut state.model {
+                PageModel::Reading(p) => {
                     p.seen = None;
+                    state.stale = true;
                 }
+                PageModel::Feature(page) if page.shows_pictures() => state.stale = true,
+                _ => {}
             }
         }
         if let Some(window) = &self.window {

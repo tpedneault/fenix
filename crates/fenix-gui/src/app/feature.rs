@@ -24,6 +24,7 @@ use std::any::Any;
 
 use super::agenda_host::AgendaHost;
 use super::ccsds_host::CcsdsHost;
+#[cfg(feature = "diagrams")]
 use super::diagram_host::DiagramsHost;
 #[cfg(feature = "docker")]
 use super::docker_host::DockerHost;
@@ -232,6 +233,11 @@ pub(crate) trait FeaturePage: Any {
     /// Whether a text field on it has the keyboard -- then every key is
     /// the page's, Space and Ctrl-V included.
     fn typing(&self) -> bool {
+        false
+    }
+    /// Whether it's laid out to its pane's height (`App::page_rows`), so
+    /// laid out again when that changes.
+    fn fills_pane(&self) -> bool {
         false
     }
     /// Whether Space means something on the focused row.
@@ -517,6 +523,7 @@ pub(crate) static BUILTIN_SPECS: &[&FeatureSpec] = &[
     &super::MIB_SPEC,
     &super::CCSDS_SPEC,
     &super::NOTEBOOK_SPEC,
+    #[cfg(feature = "diagrams")]
     &super::DIAGRAMS_SPEC,
     &super::JIRA_SPEC,
     &super::AGENDA_SPEC,
@@ -611,6 +618,7 @@ impl Features {
             Some(Box::new(MibHost::default())),
             Some(Box::new(CcsdsHost::default())),
             Some(Box::new(NotebookHost::default())),
+            #[cfg(feature = "diagrams")]
             Some(Box::new(DiagramsHost::default())),
             Some(Box::new(AgendaHost::default())),
             Some(Box::new(JiraHost::default())),
