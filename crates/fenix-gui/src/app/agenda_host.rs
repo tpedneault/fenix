@@ -115,6 +115,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         doctor: None,
         opener: None,
+        lsp_first: None,
+        prompt_key: None,
+        wake: None,
+        links: None,
     }
 };
 

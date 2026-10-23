@@ -94,6 +94,10 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     home_activate: None,
     doctor: Some(arduino_doctor),
     opener: None,
+    lsp_first: None,
+    prompt_key: None,
+    wake: None,
+    links: None,
 };
 
 /// Anything inside an Arduino sketch gets its `SPC m` menu.

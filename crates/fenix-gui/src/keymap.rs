@@ -121,6 +121,7 @@ impl LocalContext {
 const LOCAL_MENUS: &[(LocalContext, &crate::app::feature::FeatureSpec)] = &[
     #[cfg(feature = "embedded")]
     (LocalContext::Arduino, &crate::app::EMBEDDED_SPEC),
+    #[cfg(feature = "notebook")]
     (LocalContext::Markdown, &crate::app::NOTEBOOK_SPEC),
     #[cfg(feature = "diagrams")]
     (LocalContext::Mermaid, &crate::app::DIAGRAMS_SPEC),
@@ -343,6 +344,7 @@ const LEADER_FEATURES: &[&crate::app::feature::FeatureSpec] = &[
     &crate::app::DOCKER_SPEC,
     &crate::app::REVIEW_SPEC,
     &crate::app::JIRA_SPEC,
+    #[cfg(feature = "notebook")]
     &crate::app::NOTEBOOK_SPEC,
     &crate::app::AGENDA_SPEC,
     &crate::app::VNC_SPEC,

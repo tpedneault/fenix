@@ -11,11 +11,6 @@ use crate::backlinks_page::{Action as BlAction, BacklinksPage, Item as BlItem};
 use fenix_notebook::{Link, Target};
 
 impl App {
-    /// Whether the focused buffer is Markdown.
-    pub(super) fn in_markdown(&self) -> bool {
-        self.focused_language() == Some(fenix_syntax::LanguageId::Markdown)
-    }
-
     /// The `[[link]]` (or `[text](file.md)`) the cursor is on.
     pub(super) fn notebook_link_under_cursor(&self) -> Option<Link> {
         if !self.in_markdown() {
@@ -294,17 +289,6 @@ impl App {
         if existing.is_some() {
             self.show_page(page_id);
         }
-    }
-
-    /// Opens `model` in a new pane to the right, `share` of the width.
-    pub(super) fn open_page_beside(&mut self, model: PageModel, share: f32) -> BufferId {
-        self.split_vertical();
-        let id = self.open_page(model);
-        let pane = self.focused_pane_id();
-        self.workspaces.active_pane_tabs_mut().insert(pane, vec![id]);
-        // The split starts even; this side (the right) gets `share`.
-        self.windows_mut().set_split_near(pane, 1.0 - share);
-        id
     }
 
     /// Fills the sidebar's lists for its note, as the notebook now is.

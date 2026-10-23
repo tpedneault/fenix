@@ -47,7 +47,7 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
     language_server: None,
     tasks: None,
     hover_fallback: Some(builtin_hover),
-    completion_at_cursor: Some(option_completion),
+    completion_at_cursor: Some(|app| option_completion(app)),
     completion_pool_at: Some(subcommand_candidates),
     hover_first: None,
     picker_confirm: None,
@@ -71,6 +71,10 @@ pub(crate) static SPEC: FeatureSpec = FeatureSpec {
         }
     }),
     opener: None,
+    lsp_first: None,
+    prompt_key: None,
+    wake: None,
+    links: None,
 };
 
 /// A Tcl file gets the Tcl `SPC m` menu (which the MIB fills too).
@@ -619,13 +623,13 @@ mod tests {
     #[test]
     fn options_and_subcommands_come_from_the_spec() {
         let dir = tempfile::tempdir().unwrap();
-        let app = app_with(&dir, "a.tcl", "lsort -\n");
+        let mut app = app_with(&dir, "a.tcl", "lsort -\n");
         let (start, prefix, candidates) =
-            SPEC.completion_at_cursor.unwrap()(&app).expect("lsort takes options");
+            SPEC.completion_at_cursor.unwrap()(&mut app).expect("lsort takes options");
         assert_eq!((start, prefix.as_str()), (6, "-"));
         assert!(candidates.iter().any(|c| c.label == "-unique"));
 
-        let app = app_with(&dir, "b.tcl", "string \n");
+        let mut app = app_with(&dir, "b.tcl", "string \n");
         let pool = app.completion_pool_at(7);
         assert!(
             pool.iter().any(|c| c.label == "compare"),
@@ -633,7 +637,7 @@ mod tests {
             pool.iter().map(|c| &c.label).collect::<Vec<_>>()
         );
         assert!(
-            SPEC.completion_at_cursor.unwrap()(&app).is_none(),
+            SPEC.completion_at_cursor.unwrap()(&mut app).is_none(),
             "no dash-word at the cursor"
         );
     }

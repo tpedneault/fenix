@@ -105,6 +105,86 @@ pub(super) struct PageImages {
 }
 
 impl App {
+    /// Whether the focused buffer is Markdown.
+    pub(super) fn in_markdown(&self) -> bool {
+        self.focused_language() == Some(fenix_syntax::LanguageId::Markdown)
+    }
+
+    /// Opens `model` in a new pane to the right, `share` of the width.
+    pub(super) fn open_page_beside(&mut self, model: PageModel, share: f32) -> BufferId {
+        self.split_vertical();
+        let id = self.open_page(model);
+        let pane = self.focused_pane_id();
+        self.workspaces.active_pane_tabs_mut().insert(pane, vec![id]);
+        // The split starts even; this side (the right) gets `share`.
+        self.windows_mut().set_split_near(pane, 1.0 - share);
+        id
+    }
+
+    /// The picture a page shows for a diagram's source: the diagrams
+    /// feature's (`diagrams.picture`); none to show without it.
+    fn diagram_picture(&self, source: &str) -> u64 {
+        self.query_service("diagrams.picture", &serde_json::json!({ "source": source })).ok().and_then(|key| key.parse().ok()).unwrap_or(0)
+    }
+
+    /// What's wrong with a diagram, as the diagrams feature drew it
+    /// (`diagrams.problem`).
+    pub(super) fn diagram_problem_of(&self, source: &str) -> Option<String> {
+        self.query_service("diagrams.problem", &serde_json::json!({ "source": source })).ok().filter(|p| !p.is_empty())
+    }
+
+    /// What the reading layout needs, borrowing only what it reads.
+    pub(super) fn with_reading_ctx<R>(&self, base: Option<&Path>, f: impl FnOnce(&reading::Ctx) -> R) -> R {
+        let links = self.features.specs().find_map(|spec| spec.links);
+        let sizes = &self.page_images.image_sizes;
+        let (cw, lh) = match &self.text {
+            Some(t) => (t.char_width(), t.line_height()),
+            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
+        };
+        let base_dir = base.and_then(Path::parent).map(Path::to_path_buf).or_else(|| links.and_then(|l| (l.root)(self)));
+        let base_file = base.map(Path::to_path_buf);
+        let highlight = |lang: &str, text: &str| highlight_block(lang, text);
+        let image_size = |key: &ImageKey| sizes.get(key).copied();
+        let diagram_key = |source: &str| ImageKey::Diagram(self.diagram_picture(source));
+        let diagram_error = |source: &str| self.diagram_problem_of(source);
+        let image_path = |src: &str| {
+            if src.contains("://") {
+                return None;
+            }
+            let decoded = src.replace("%20", " ");
+            let p = PathBuf::from(&decoded);
+            let path = if p.is_absolute() { p } else { base_dir.clone().unwrap_or_default().join(p) };
+            path.exists().then_some(path)
+        };
+        // `[[links]]` are a feature's (the notebook's): without one, an
+        // embed shows as missing and a link as a link.
+        let embed = |link: &fenix_notebook::Link| match links {
+            Some(l) => (l.embed)(self, link, base_file.as_deref()),
+            None => reading::Embedded::Missing(link.target.clone()),
+        };
+        let link_exists = |link: &fenix_notebook::Link| links.is_none_or(|l| (l.exists)(self, link, base_file.as_deref()));
+        let ctx = reading::Ctx {
+            highlight: &highlight,
+            image_size: &image_size,
+            diagram_key: &diagram_key,
+            diagram_error: &diagram_error,
+            image_path: &image_path,
+            embed: &embed,
+            link_exists: &link_exists,
+            cell: (cw, lh),
+        };
+        f(&ctx)
+    }
+
+    /// Follows a `[[link]]` from the reading view, through the feature
+    /// that resolves them; nothing to follow without one.
+    fn follow_wiki_link(&mut self, link: fenix_notebook::Link, from: Option<PathBuf>) {
+        let links = self.features.specs().find_map(|spec| spec.links);
+        if let Some(links) = links {
+            (links.follow)(self, link, from);
+        }
+    }
+
     /// `SPC m r` (`replace`) / `SPC m p`: the focused Markdown buffer
     /// rendered, in its place or beside it.
     pub(crate) fn open_reading_view(&mut self, replace: bool) {
@@ -226,7 +306,7 @@ impl App {
             }
             ReadAction::Target(RAction::Link(fenix_notebook::blocks::LinkTo::Wiki(link))) => {
                 self.reading_to_source_pane(page_id, source);
-                self.notebook_follow(link, path);
+                self.follow_wiki_link(link, path);
             }
             ReadAction::Target(RAction::Image(file)) => {
                 if let Err(e) = fenix_fs::open_with_default(&file) {
@@ -269,7 +349,7 @@ impl App {
             Some(link) => {
                 let path = self.buffers.get(source).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf);
                 self.reading_to_source_pane(page_id, source);
-                self.notebook_follow(link, path);
+                self.follow_wiki_link(link, path);
             }
             None => self.reading_edit(page_id, source, line),
         }
@@ -335,6 +415,73 @@ impl App {
             window.request_redraw();
         }
     }
+}
+
+/// A capture name from `fenix-syntax` as one the page roles can hold.
+fn static_capture(name: &str) -> &'static str {
+    match name.split('.').next().unwrap_or(name) {
+        "keyword" | "repeat" | "conditional" | "storageclass" | "include" | "tag" => "keyword",
+        "string" | "escape" => "string",
+        "comment" | "spell" => "comment",
+        "function" | "method" => "function",
+        "type" | "namespace" | "module" => "type",
+        "number" | "float" => "number",
+        "constant" | "boolean" => "constant",
+        "variable" | "property" | "label" | "field" | "parameter" => "variable",
+        "operator" => "operator",
+        "punctuation" => "punctuation",
+        "attribute" | "constructor" | "preproc" | "embedded" => "attribute",
+        _ => "text",
+    }
+}
+
+/// The grammar a fenced block's info word names.
+fn language_for_fence(lang: &str) -> Option<fenix_syntax::LanguageId> {
+    let ext = match lang {
+        "rust" => "rs",
+        "python" | "py3" => "py",
+        "bash" | "shell" | "sh" | "zsh" | "console" => "sh",
+        "javascript" | "node" => "js",
+        "typescript" => "ts",
+        "c++" | "cxx" | "cc" => "cpp",
+        "yml" => "yaml",
+        "csharp" | "c#" => "cs",
+        "golang" => "go",
+        "markdown" => "md",
+        "arduino" => "ino",
+        other => other,
+    };
+    fenix_syntax::detect_language(ext)
+}
+
+/// A code block's colours, per line: (columns, capture).
+pub(super) fn highlight_block(lang: &str, text: &str) -> Vec<Vec<(std::ops::Range<usize>, &'static str)>> {
+    let Some(language) = language_for_fence(lang) else { return Vec::new() };
+    let state = fenix_syntax::SyntaxState::new(language, text);
+    let spans = state.highlights_in_range(text, 0..text.len());
+    let mut starts = vec![0usize];
+    for (i, b) in text.bytes().enumerate() {
+        if b == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    let mut out: Vec<Vec<(std::ops::Range<usize>, &'static str)>> = vec![Vec::new(); starts.len()];
+    for (range, name) in spans {
+        let line = match starts.binary_search(&range.start) {
+            Ok(i) => i,
+            Err(i) => i - 1,
+        };
+        let line_start = starts[line];
+        let line_end = starts.get(line + 1).map(|e| e - 1).unwrap_or(text.len());
+        let end = range.end.min(line_end);
+        if end <= range.start {
+            continue;
+        }
+        let a = text[line_start..range.start].chars().count();
+        let b = a + text[range.start..end].chars().count();
+        out[line].push((a..b, static_capture(name)));
+    }
+    out
 }
 
 #[cfg(test)]

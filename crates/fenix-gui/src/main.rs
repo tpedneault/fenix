@@ -55,7 +55,9 @@ mod review_page;
 mod review_store;
 mod settings_page;
 mod snippets_page;
+#[cfg(feature = "notebook")]
 mod notebook_page;
+#[cfg(feature = "notebook")]
 mod backlinks_page;
 mod reading;
 mod reading_page;
