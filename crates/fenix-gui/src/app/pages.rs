@@ -913,7 +913,7 @@ impl App {
             self.close_page(id);
         }
         let user_dir = fenix_project::template::user_templates_dir();
-        let (templates, errors) = fenix_project::template::available_templates(user_dir.as_deref(), self.project_root.as_deref());
+        let (templates, errors) = fenix_project::template::available_templates_with(&crate::installed::data_dirs("templates"), user_dir.as_deref(), self.project_root.as_deref());
         let probe = self.app_probe();
         let mut found = BTreeMap::new();
         for program in templates.iter().flat_map(fenix_project::template::programs_needed).chain(["git".to_string()]) {

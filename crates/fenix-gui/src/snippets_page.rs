@@ -345,7 +345,7 @@ pub fn layout(page: &SnippetsPage, cols: usize) -> Page {
                     (true, _) => Role::Muted,
                     (_, Source::Project) => Role::Good,
                     (_, Source::User) => Role::Accent,
-                    (_, Source::BuiltIn) => Role::Muted,
+                    (_, Source::BuiltIn | Source::Extension) => Role::Muted,
                 };
                 g.put(y, (left + list_w).saturating_sub(tag.chars().count()), tag, role);
                 if selected == Some(i) {

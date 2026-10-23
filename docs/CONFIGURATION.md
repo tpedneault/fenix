@@ -20,6 +20,7 @@ with the reason -- and a change applies at once and is saved at once.
 | Your data: the agenda | `%AppData%\fenix\data` | `~/.local/share/fenix` |
 | This machine's state: session, window placement, recent files, known projects, bookmarks | `%LocalAppData%\fenix\state` | `~/.local/state/fenix/state` |
 | Unsaved buffers, downloaded tools, backups | `%LocalAppData%\fenix\recovery`, `\tools`, `\backup` | `~/.local/state/fenix/...` |
+| Extensions you've installed, and `extensions.toml` | `%LocalAppData%\fenix\extensions` | `~/.local/state/fenix/extensions` |
 
 What you chose roams with your Windows profile; what Fenix noticed about
 this machine, and what it downloaded, doesn't. Since the agenda roams,
@@ -190,6 +191,43 @@ shipped themes keep body text, comments and line numbers at 4.5:1 against every 
 they're drawn on (accents 3:1 on a light theme),
 comments quieter than code, and operators distinct from both -- worth
 keeping in yours.
+
+## Extensions you install
+
+An extension is a `.fenixext` file -- a zip with an `extension.toml` at
+its root -- or, while you make one, the folder it's made from. For now
+Fenix installs extensions of data: themes, snippets and project
+templates, in `themes/`, `snippets/` and `templates/` folders laid out
+like your own. They're read beside the built-in ones and below yours:
+your theme, snippet or template of the same name wins.
+
+```toml
+[extension]
+id = "acme.dusk"            # publisher.name: lowercase, digits, - and _
+name = "Dusk"
+version = "1.0.0"
+description = "A theme for late evenings"
+runtime = "none"            # data only
+
+[engine]
+fenix = ">=2.0, <3"
+
+[dependencies]              # other extensions it needs, by id
+# "acme.base" = "^1"
+```
+
+From a terminal (the window doesn't open):
+
+```text
+fenix --install-extension dusk-1.0.0.fenixext   # or the folder
+fenix --list-extensions
+fenix --uninstall-extension acme.dusk
+```
+
+An install replaces any other version of the same extension, and
+needs its dependencies installed first. It's used from the next start.
+A package is checked before anything is written: its manifest, the Fenix
+it's for, and that none of its files would land outside its own folder.
 
 ## Every setting
 

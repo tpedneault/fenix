@@ -42,6 +42,8 @@ fenix-core = { path = "../fenix-core" }
 fenix-dap = { path = "../fenix-dap" }
 fenix-docker = { path = "../fenix-docker", optional = true }
 fenix-explorer = { path = "../fenix-explorer" }
+fenix-extensions = { path = "../fenix-extensions" }
+semver = "1"
 fenix-format = { path = "../fenix-format" }
 fenix-fs = { path = "../fenix-fs" }
 fenix-diff = { path = "../fenix-diff" }
