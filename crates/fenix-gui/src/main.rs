@@ -7,7 +7,9 @@
 // trade that directness for a type alias or a struct used once.
 #![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::large_enum_variant)]
 
+#[cfg(feature = "agenda")]
 mod agenda_page;
+#[cfg(feature = "jira")]
 mod jira_page;
 #[cfg(feature = "mission")]
 mod mib_def;

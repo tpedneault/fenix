@@ -225,6 +225,7 @@ impl CommandRegistry {
         registry.register("git.merge_view", "Open the Merge view (resolve conflicts side by side)", cmd_git_merge_view);
         registry.register("git.merge_close", "Close the Merge view", cmd_git_merge_close);
         registry.register("git.stage_resolved", "Stage the selected conflicted file as resolved", cmd_git_stage_resolved);
+        #[cfg(feature = "jira")]
         registry.feature(&crate::app::JIRA_SPEC);
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
         #[cfg(feature = "embedded")]
@@ -235,6 +236,7 @@ impl CommandRegistry {
         registry.feature(&crate::app::DIAGRAMS_SPEC);
         registry.register("notebook.preview", "The reading view, beside the Markdown (again closes it)", |ctx| ctx.app.open_reading_view(false));
         registry.register("notebook.read", "Read this Markdown rendered, in its place (again goes back)", |ctx| ctx.app.open_reading_view(true));
+        #[cfg(feature = "agenda")]
         registry.feature(&crate::app::AGENDA_SPEC);
         registry.register("window.split_vertical", "Split the focused window side by side", cmd_split_vertical);
         registry.register("window.split_horizontal", "Split the focused window stacked", cmd_split_horizontal);

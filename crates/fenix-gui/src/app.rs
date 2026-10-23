@@ -11,10 +11,15 @@ mod pdf_host;
 mod vnc_host;
 pub(crate) use vnc_host::SPEC as VNC_SPEC;
 pub(crate) use pdf_host::SPEC as PDF_SPEC;
+#[cfg(feature = "jira")]
 mod agenda_sync;
+#[cfg(feature = "agenda")]
 mod agenda_host;
+#[cfg(feature = "agenda")]
 pub(crate) use agenda_host::SPEC as AGENDA_SPEC;
+#[cfg(feature = "jira")]
 mod jira_host;
+#[cfg(feature = "jira")]
 pub(crate) use jira_host::SPEC as JIRA_SPEC;
 #[cfg(feature = "embedded")]
 mod embedded_host;
