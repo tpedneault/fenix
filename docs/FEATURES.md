@@ -1338,12 +1338,21 @@ Everything Fenix does, by area. For the keys, see
 
 ## Themes, terminals and tables
 
-- **Themes**: `Orbit Dark`, `TempleOS`, `Gruvbox Dark`, `Nord`, `Dracula`,
-  `Solarized Dark`, `One Dark`, `Visual Studio Dark`, and Catppuccin's
-  four flavours -- `Catppuccin Latte` (light), `Catppuccin Frappé`,
-  `Catppuccin Macchiato` and `Catppuccin Mocha` -- jumped to directly by
-  name with a fuzzy picker (`SPC t p`), persisted. Latte's accents are
-  darkened from Catppuccin's own so text keeps 4.5:1 on its light page. Two rules hold across all of
+- **Themes**, 29 of them, jumped to directly by name with a fuzzy picker
+  (`SPC t p`), persisted. Dark: `Orbit Dark` (Tokyo Night's colours),
+  `Tokyo Night Storm`, `Gruvbox Dark`, `Nord`, `Dracula`, `Solarized
+  Dark`, `One Dark`, `Monokai`, `GitHub Dark`, `Visual Studio Dark`,
+  `Kanagawa`, `Rosé Pine`, `Everforest Dark`, `Ayu Mirage`, `Night Owl`,
+  `Material Palenight`, `Zenburn`, and Catppuccin's `Frappé`, `Macchiato`
+  and `Mocha`. Light: `Catppuccin Latte`, `GitHub Light`, `One Light`,
+  `Solarized Light`, `Gruvbox Light`, `Rosé Pine Dawn`, `Tokyo Night Day`,
+  `Visual Studio Light` and `TempleOS`. Each is a `.toml` file
+  (`crates/fenix-gui/themes/`), the same format as your own in `themes\`
+  beside `settings.toml` (see [configuration](CONFIGURATION.md#your-own-themes)).
+  Every theme keeps text at 4.5:1 on each surface it's drawn on, so a
+  palette's accents are darkened (on a light page) or lightened (on a
+  dark one) from the original only as far as that takes -- most light
+  themes' accents, and the dimmest comment colours. Two more rules hold across all of
   them, and are pinned by tests: comments sit closer to the background
   than body text does, so they read as quieter rather than as more
   code; and operators and punctuation share an accent that is neither

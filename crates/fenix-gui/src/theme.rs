@@ -267,6 +267,23 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("catppuccin-frappe.toml", include_str!("../themes/catppuccin-frappe.toml")),
     ("catppuccin-macchiato.toml", include_str!("../themes/catppuccin-macchiato.toml")),
     ("catppuccin-mocha.toml", include_str!("../themes/catppuccin-mocha.toml")),
+    ("monokai.toml", include_str!("../themes/monokai.toml")),
+    ("github-dark.toml", include_str!("../themes/github-dark.toml")),
+    ("tokyo-night-storm.toml", include_str!("../themes/tokyo-night-storm.toml")),
+    ("kanagawa.toml", include_str!("../themes/kanagawa.toml")),
+    ("rose-pine.toml", include_str!("../themes/rose-pine.toml")),
+    ("everforest-dark.toml", include_str!("../themes/everforest-dark.toml")),
+    ("ayu-mirage.toml", include_str!("../themes/ayu-mirage.toml")),
+    ("night-owl.toml", include_str!("../themes/night-owl.toml")),
+    ("material-palenight.toml", include_str!("../themes/material-palenight.toml")),
+    ("zenburn.toml", include_str!("../themes/zenburn.toml")),
+    ("github-light.toml", include_str!("../themes/github-light.toml")),
+    ("one-light.toml", include_str!("../themes/one-light.toml")),
+    ("solarized-light.toml", include_str!("../themes/solarized-light.toml")),
+    ("gruvbox-light.toml", include_str!("../themes/gruvbox-light.toml")),
+    ("rose-pine-dawn.toml", include_str!("../themes/rose-pine-dawn.toml")),
+    ("tokyo-night-day.toml", include_str!("../themes/tokyo-night-day.toml")),
+    ("visual-studio-light.toml", include_str!("../themes/visual-studio-light.toml")),
 ];
 
 /// The theme used when none is set, or the one set isn't there.
@@ -813,7 +830,24 @@ mod tests {
                 "Catppuccin Latte",
                 "Catppuccin Frappé",
                 "Catppuccin Macchiato",
-                "Catppuccin Mocha"
+                "Catppuccin Mocha",
+                "Monokai",
+                "GitHub Dark",
+                "Tokyo Night Storm",
+                "Kanagawa",
+                "Rosé Pine",
+                "Everforest Dark",
+                "Ayu Mirage",
+                "Night Owl",
+                "Material Palenight",
+                "Zenburn",
+                "GitHub Light",
+                "One Light",
+                "Solarized Light",
+                "Gruvbox Light",
+                "Rosé Pine Dawn",
+                "Tokyo Night Day",
+                "Visual Studio Light"
             ]
         );
     }
@@ -825,18 +859,7 @@ mod tests {
         // no special-casing needed anywhere `syntax_color`/`git_status_
         // color` are called.
         use fenix_explorer::GitStatus;
-        for theme in [
-            named("Gruvbox Dark"),
-            named("Nord"),
-            named("Dracula"),
-            named("Solarized Dark"),
-            named("One Dark"),
-            named("Visual Studio Dark"),
-            named("Catppuccin Latte"),
-            named("Catppuccin Frappé"),
-            named("Catppuccin Macchiato"),
-            named("Catppuccin Mocha"),
-        ] {
+        for theme in all().iter().copied() {
             assert_eq!(theme.syntax_color("keyword"), theme.syntax_keyword, "{}", theme.name);
             assert_eq!(theme.syntax_color("function.method"), theme.syntax_function, "{}", theme.name);
             assert_eq!(theme.syntax_color("some.unknown.capture"), theme.fg, "{}", theme.name);
@@ -848,18 +871,7 @@ mod tests {
 
     #[test]
     fn by_name_resolves_every_new_theme_case_insensitively() {
-        for name in [
-            "Gruvbox Dark",
-            "Nord",
-            "Dracula",
-            "Solarized Dark",
-            "One Dark",
-            "Visual Studio Dark",
-            "Catppuccin Latte",
-            "Catppuccin Frappé",
-            "Catppuccin Macchiato",
-            "Catppuccin Mocha",
-        ] {
+        for name in all().iter().map(|t| t.name) {
             assert_eq!(by_name(&name.to_lowercase()).map(|t| t.name), Some(name));
         }
     }

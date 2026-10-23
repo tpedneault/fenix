@@ -1,0 +1,56 @@
+# Visual Studio's Light theme (and VS Code's Light+): its per-token defaults, its filled
+# tabs, Consolas.
+name = "Visual Studio Light"
+tabs = "block"
+font_family = "Consolas"
+
+[surfaces]
+bg = "#ffffff"
+sidebar_bg = "#f5f5f5"
+bg_modeline = "#eeeef2"
+divider = "#cccedb"
+caret = "#000000"
+hl_line = "#f0f0f0"
+selection = { color = "#add6ff", alpha = 0.8 }
+bracket_match = { color = "#0070c1", alpha = 0.12 }
+search_match = { color = "#f8c9ab", alpha = 0.6 }
+
+[text]
+fg = "#000000"
+fg_modeline = "#000000"
+caret_text = "#000000"
+gutter_fg = "#22738d"
+
+[modes]
+normal = "#0078c8"
+insert = "#368432"
+visual = "#c42b1c"
+replace = "#895503"
+command = "#0070c1"
+explorer = "#0078c8"
+picker = "#af00db"
+text_dark = "#ffffff"
+
+[syntax]
+keyword = "#0000ff"
+string = "#a31515"
+comment = "#007d00"
+function = "#74531f"
+type = "#22748c"
+number = "#087a50"
+constant = "#006dbb"
+variable = "#001080"
+operator = "#383838"
+punctuation = "#3b3b3b"
+attribute = "#d70000"
+
+[explorer]
+folder = "#876531"
+file = "#000000"
+
+[git]
+modified = "#895503"
+staged = "#31792e"
+untracked = "#006eb8"
+ignored = "#646b75"
+conflicted = "#ad0707"
