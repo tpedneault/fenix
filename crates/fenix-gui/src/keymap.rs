@@ -318,10 +318,14 @@ fn apply_user_keys(t: &mut KeyTrie<&'static str>, user: &'static KeymapData, kno
 }
 
 /// The leader map with the features `on` says are on: core's keys, less
-/// those bound to a switched-off feature's commands (and groups and
-/// sections left with nothing under them), then the features' own.
+/// those bound to a switched-off feature's commands or to a command this
+/// build doesn't have (an extension built without, `--no-default-
+/// features`) -- and groups and sections left with nothing under them --
+/// then the features' own.
 fn build_leader(on: &dyn Fn(&str) -> bool) -> KeyTrie<&'static str> {
-    let off = crate::app::feature::commands_switched_off(on);
+    let mut off = crate::app::feature::commands_switched_off(on);
+    let registry = crate::commands::CommandRegistry::with_builtins_where(on);
+    off.extend(default_keymap().leader.iter().filter_map(|e| e.command.as_deref()).filter(|c| registry.get(c).is_none()));
     let mut t = KeyTrie::new();
     insert_data_without(&mut t, &[], &default_keymap().leader, &off, on);
     let spc = KeyPress::char(' ');
@@ -343,9 +347,11 @@ const LEADER_FEATURES: &[&crate::app::feature::FeatureSpec] = &[
     #[cfg(feature = "docker")]
     &crate::app::DOCKER_SPEC,
     &crate::app::REVIEW_SPEC,
+    #[cfg(feature = "jira")]
     &crate::app::JIRA_SPEC,
     #[cfg(feature = "notebook")]
     &crate::app::NOTEBOOK_SPEC,
+    #[cfg(feature = "agenda")]
     &crate::app::AGENDA_SPEC,
     &crate::app::VNC_SPEC,
     &crate::app::PDF_SPEC,

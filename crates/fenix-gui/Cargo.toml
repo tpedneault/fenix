@@ -15,13 +15,15 @@ path = "src/main.rs"
 # default, the core alone with `--no-default-features` (CI builds both, so
 # the core can't come to depend on an extension).
 [features]
-default = ["docker", "tcl", "diagrams", "embedded", "mission", "notebook"]
+default = ["docker", "tcl", "diagrams", "embedded", "mission", "notebook", "agenda", "jira"]
 docker = ["dep:fenix-docker"]
 diagrams = ["notebook", "dep:fenix-diagram"]
 tcl = []
 mission = ["dep:fenix-ccsds", "dep:fenix-mib"]
 embedded = ["dep:fenix-embedded"]
+agenda = ["dep:fenix-agenda"]
 notebook = []
+jira = ["agenda", "dep:fenix-jira"]
 
 [dependencies]
 anyhow = "1.0.104"
@@ -29,7 +31,7 @@ arboard = "3"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 chrono = "0.4"
 dirs = "6"
-fenix-agenda = { path = "../fenix-agenda" }
+fenix-agenda = { path = "../fenix-agenda", optional = true }
 fenix-buffers = { path = "../fenix-buffers" }
 fenix-ccsds = { path = "../fenix-ccsds", optional = true }
 fenix-completion = { path = "../fenix-completion" }
@@ -46,7 +48,7 @@ fenix-forge = { path = "../fenix-forge" }
 fenix-git = { path = "../fenix-git" }
 fenix-gitlab = { path = "../fenix-gitlab" }
 fenix-github = { path = "../fenix-github" }
-fenix-jira = { path = "../fenix-jira" }
+fenix-jira = { path = "../fenix-jira", optional = true }
 fenix-keymap = { path = "../fenix-keymap" }
 fenix-lsp = { path = "../fenix-lsp" }
 fenix-mib = { path = "../fenix-mib", optional = true }

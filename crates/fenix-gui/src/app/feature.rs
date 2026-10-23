@@ -22,6 +22,7 @@
 
 use std::any::Any;
 
+#[cfg(feature = "agenda")]
 use super::agenda_host::AgendaHost;
 #[cfg(feature = "mission")]
 use super::ccsds_host::CcsdsHost;
@@ -31,6 +32,7 @@ use super::diagram_host::DiagramsHost;
 use super::docker_host::DockerHost;
 #[cfg(feature = "embedded")]
 use super::embedded_host::EmbeddedHost;
+#[cfg(feature = "jira")]
 use super::jira_host::JiraHost;
 #[cfg(feature = "mission")]
 use super::mib_host::MibHost;
@@ -605,7 +607,9 @@ pub(crate) static BUILTIN_SPECS: &[&FeatureSpec] = &[
     &super::NOTEBOOK_SPEC,
     #[cfg(feature = "diagrams")]
     &super::DIAGRAMS_SPEC,
+    #[cfg(feature = "jira")]
     &super::JIRA_SPEC,
+    #[cfg(feature = "agenda")]
     &super::AGENDA_SPEC,
     &super::REVIEW_SPEC,
     &super::PDF_SPEC,
@@ -704,7 +708,9 @@ impl Features {
             Some(Box::new(NotebookHost::default())),
             #[cfg(feature = "diagrams")]
             Some(Box::new(DiagramsHost::default())),
+            #[cfg(feature = "agenda")]
             Some(Box::new(AgendaHost::default())),
+            #[cfg(feature = "jira")]
             Some(Box::new(JiraHost::default())),
             Some(Box::new(ReviewHost::default())),
             Some(Box::new(PdfHost::default())),
