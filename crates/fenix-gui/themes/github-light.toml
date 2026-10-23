@@ -1,0 +1,54 @@
+# GitHub's light default, from its Primer palette.
+name = "GitHub Light"
+tabs = "underline"
+
+[surfaces]
+bg = "#ffffff"
+sidebar_bg = "#f6f8fa"
+bg_modeline = "#f6f8fa"
+divider = "#d0d7de"
+caret = "#0969da"
+hl_line = "#f6f8fa"
+selection = { color = "#0969da", alpha = 0.15 }
+bracket_match = { color = "#1a7f37", alpha = 0.12 }
+search_match = { color = "#bf8700", alpha = 0.2 }
+
+[text]
+fg = "#1f2328"
+fg_modeline = "#1f2328"
+caret_text = "#0969da"
+gutter_fg = "#59636e"
+
+[modes]
+normal = "#0969da"
+insert = "#1a7f37"
+visual = "#8250df"
+replace = "#9a6700"
+command = "#bc4c00"
+explorer = "#0969da"
+picker = "#8250df"
+text_dark = "#ffffff"
+
+[syntax]
+keyword = "#cf222e"
+string = "#0a3069"
+comment = "#59636e"
+function = "#8250df"
+type = "#0550ae"
+number = "#0550ae"
+constant = "#0550ae"
+variable = "#953800"
+operator = "#cf222e"
+punctuation = "#424a53"
+attribute = "#116329"
+
+[explorer]
+folder = "#0969da"
+file = "#1f2328"
+
+[git]
+modified = "#986600"
+staged = "#1a7f37"
+untracked = "#0969da"
+ignored = "#59636e"
+conflicted = "#cf222e"

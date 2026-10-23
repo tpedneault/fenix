@@ -1,0 +1,54 @@
+# Atom's One Light.
+name = "One Light"
+tabs = "underline"
+
+[surfaces]
+bg = "#fafafa"
+sidebar_bg = "#fafafa"
+bg_modeline = "#eaeaeb"
+divider = "#d4d4d4"
+caret = "#526fff"
+hl_line = "#f0f0f1"
+selection = { color = "#4078f2", alpha = 0.15 }
+bracket_match = { color = "#50a14f", alpha = 0.15 }
+search_match = { color = "#c18401", alpha = 0.2 }
+
+[text]
+fg = "#383a42"
+fg_modeline = "#383a42"
+caret_text = "#2d50ff"
+gutter_fg = "#66676e"
+
+[modes]
+normal = "#2968f0"
+insert = "#3f7f3e"
+visual = "#a626a4"
+replace = "#986801"
+command = "#0179ad"
+explorer = "#2968f0"
+picker = "#a626a4"
+text_dark = "#fafafa"
+
+[syntax]
+keyword = "#a626a4"
+string = "#3a7439"
+comment = "#66676e"
+function = "#155aef"
+type = "#8b5f01"
+number = "#8c6001"
+constant = "#8c6001"
+variable = "#383a42"
+operator = "#016f9e"
+punctuation = "#016f9e"
+attribute = "#8b5f01"
+
+[explorer]
+folder = "#155aef"
+file = "#383a42"
+
+[git]
+modified = "#8b5f01"
+staged = "#3a7439"
+untracked = "#155aef"
+ignored = "#66676e"
+conflicted = "#c52b1d"

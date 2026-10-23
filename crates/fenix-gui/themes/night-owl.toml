@@ -1,0 +1,54 @@
+# Night Owl, Sarah Drasner's theme for night owls.
+name = "Night Owl"
+tabs = "underline"
+
+[surfaces]
+bg = "#011627"
+sidebar_bg = "#011627"
+bg_modeline = "#01111d"
+divider = "#122d42"
+caret = "#80a4c2"
+hl_line = "#0b2942"
+selection = { color = "#1d3b53", alpha = 0.8 }
+bracket_match = { color = "#7fdbca", alpha = 0.12 }
+search_match = { color = "#ecc48d", alpha = 0.15 }
+
+[text]
+fg = "#d6deeb"
+fg_modeline = "#d6deeb"
+caret_text = "#80a4c2"
+gutter_fg = "#7e9494"
+
+[modes]
+normal = "#82aaff"
+insert = "#addb67"
+visual = "#c792ea"
+replace = "#f78c6c"
+command = "#7fdbca"
+explorer = "#82aaff"
+picker = "#c792ea"
+text_dark = "#011627"
+
+[syntax]
+keyword = "#c792ea"
+string = "#ecc48d"
+comment = "#7e9494"
+function = "#82aaff"
+type = "#ffcb8b"
+number = "#f78c6c"
+constant = "#82aaff"
+variable = "#d6deeb"
+operator = "#7fdbca"
+punctuation = "#7fdbca"
+attribute = "#addb67"
+
+[explorer]
+folder = "#82aaff"
+file = "#d6deeb"
+
+[git]
+modified = "#ffcb8b"
+staged = "#addb67"
+untracked = "#82aaff"
+ignored = "#7e9494"
+conflicted = "#f05f5c"

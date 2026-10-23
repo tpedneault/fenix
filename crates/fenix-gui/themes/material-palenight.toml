@@ -1,0 +1,54 @@
+# Material Theme's Palenight.
+name = "Material Palenight"
+tabs = "underline"
+
+[surfaces]
+bg = "#292d3e"
+sidebar_bg = "#232635"
+bg_modeline = "#1b1e2b"
+divider = "#3a3f58"
+caret = "#ffcc00"
+hl_line = "#2f3344"
+selection = { color = "#717cb4", alpha = 0.17 }
+bracket_match = { color = "#89ddff", alpha = 0.08 }
+search_match = { color = "#ffcb6b", alpha = 0.08 }
+
+[text]
+fg = "#a6accd"
+fg_modeline = "#a6accd"
+caret_text = "#ffcc00"
+gutter_fg = "#979cb7"
+
+[modes]
+normal = "#c3e88d"
+insert = "#89ddff"
+visual = "#f07178"
+replace = "#f78c6c"
+command = "#82aaff"
+explorer = "#89ddff"
+picker = "#c792ea"
+text_dark = "#292d3e"
+
+[syntax]
+keyword = "#c792ea"
+string = "#c3e88d"
+comment = "#979cb7"
+function = "#82aaff"
+type = "#ffcb6b"
+number = "#f78c6c"
+constant = "#f78c6c"
+variable = "#a6accd"
+operator = "#89ddff"
+punctuation = "#89ddff"
+attribute = "#ffcb6b"
+
+[explorer]
+folder = "#82aaff"
+file = "#a6accd"
+
+[git]
+modified = "#ffcb6b"
+staged = "#c3e88d"
+untracked = "#82aaff"
+ignored = "#979cb7"
+conflicted = "#f1787f"

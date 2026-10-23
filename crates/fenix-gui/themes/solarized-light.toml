@@ -1,0 +1,55 @@
+# Solarized's light mode, Ethan Schoonover's palette. Its body text (base00) is
+# darkened toward base01, as far as 7:1 needs.
+name = "Solarized Light"
+tabs = "underline"
+
+[surfaces]
+bg = "#fdf6e3"
+sidebar_bg = "#fdf6e3"
+bg_modeline = "#eee8d5"
+divider = "#93a1a1"
+caret = "#586e75"
+hl_line = "#eee8d5"
+selection = { color = "#268bd2", alpha = 0.13 }
+bracket_match = { color = "#2aa198", alpha = 0.14 }
+search_match = { color = "#b58900", alpha = 0.15 }
+
+[text]
+fg = "#4d6267"
+fg_modeline = "#546a70"
+caret_text = "#546a70"
+gutter_fg = "#5c6969"
+
+[modes]
+normal = "#2073ae"
+insert = "#687700"
+visual = "#cc2d7a"
+replace = "#c14715"
+command = "#6167c0"
+explorer = "#207c75"
+picker = "#6167c0"
+text_dark = "#fdf6e3"
+
+[syntax]
+keyword = "#5e6d00"
+string = "#1e726c"
+comment = "#5c6969"
+function = "#1d6ba2"
+type = "#816100"
+number = "#bd2971"
+constant = "#b34213"
+variable = "#546a70"
+operator = "#565cbb"
+punctuation = "#565cbb"
+attribute = "#816100"
+
+[explorer]
+folder = "#1d6ba2"
+file = "#546a70"
+
+[git]
+modified = "#816100"
+staged = "#5e6d00"
+untracked = "#1d6ba2"
+ignored = "#5c6969"
+conflicted = "#c72421"

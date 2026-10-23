@@ -1,0 +1,54 @@
+# Tokyo Night's light variant, enkia's palette.
+name = "Tokyo Night Day"
+tabs = "underline"
+
+[surfaces]
+bg = "#e1e2e7"
+sidebar_bg = "#e1e2e7"
+bg_modeline = "#d0d5e3"
+divider = "#a8aecb"
+caret = "#3760bf"
+hl_line = "#d6d8e2"
+selection = { color = "#2e7de9", alpha = 0.15 }
+bracket_match = { color = "#007197", alpha = 0.12 }
+search_match = { color = "#8c6c3e", alpha = 0.17 }
+
+[text]
+fg = "#2d4e9d"
+fg_modeline = "#3257ae"
+caret_text = "#3257ae"
+gutter_fg = "#495892"
+
+[modes]
+normal = "#155fc5"
+insert = "#506a34"
+visual = "#802dee"
+replace = "#9a5000"
+command = "#7a5e36"
+explorer = "#006b8f"
+picker = "#802dee"
+text_dark = "#e1e2e7"
+
+[syntax]
+keyword = "#7418ec"
+string = "#4a6230"
+comment = "#495892"
+function = "#1358b6"
+type = "#006283"
+number = "#8c4900"
+constant = "#8c4900"
+variable = "#3257ae"
+operator = "#00647b"
+punctuation = "#00647b"
+attribute = "#705632"
+
+[explorer]
+folder = "#1358b6"
+file = "#3257ae"
+
+[git]
+modified = "#705632"
+staged = "#4a6230"
+untracked = "#1358b6"
+ignored = "#495892"
+conflicted = "#a53232"

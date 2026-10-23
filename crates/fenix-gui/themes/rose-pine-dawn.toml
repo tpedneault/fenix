@@ -1,0 +1,54 @@
+# Rosé Pine's light variant.
+name = "Rosé Pine Dawn"
+tabs = "underline"
+
+[surfaces]
+bg = "#faf4ed"
+sidebar_bg = "#fffaf3"
+bg_modeline = "#f2e9e1"
+divider = "#dfdad9"
+caret = "#575279"
+hl_line = "#f4ede8"
+selection = { color = "#9893a5", alpha = 0.25 }
+bracket_match = { color = "#56949f", alpha = 0.12 }
+search_match = { color = "#ea9d34", alpha = 0.15 }
+
+[text]
+fg = "#575279"
+fg_modeline = "#575279"
+caret_text = "#575279"
+gutter_fg = "#6a6579"
+
+[modes]
+normal = "#c1423c"
+insert = "#45767f"
+visual = "#7d639a"
+replace = "#9c6110"
+command = "#286983"
+explorer = "#45767f"
+picker = "#ab526c"
+text_dark = "#faf4ed"
+
+[syntax]
+keyword = "#286983"
+string = "#945c0f"
+comment = "#6a6579"
+function = "#b63e38"
+type = "#406f77"
+number = "#765e91"
+constant = "#945c0f"
+variable = "#575279"
+operator = "#696581"
+punctuation = "#696581"
+attribute = "#765e91"
+
+[explorer]
+folder = "#406f77"
+file = "#575279"
+
+[git]
+modified = "#945c0f"
+staged = "#406f77"
+untracked = "#286983"
+ignored = "#6a6579"
+conflicted = "#a04d65"
