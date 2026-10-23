@@ -90,7 +90,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         }),
         settings: &[],
         services: &SERVICES,
-        contributes: &[],
+        contributes: &[
+            super::feature::Contribution { point: super::settings_host::SECRET_CHECKS, value: &GITLAB_CHECK },
+            super::feature::Contribution { point: super::settings_host::SECRET_CHECKS, value: &GITHUB_CHECK },
+        ],
         session_documents: None,
         session_reopen: None,
         home: None,
@@ -1600,6 +1603,20 @@ fn forge_pane_key(app: &mut App, keypress: KeyPress) -> bool {
     false
 }
 
+/// The GitLab token's check on the settings page: who it signs in as.
+static GITLAB_CHECK: super::settings_host::SecretCheck = super::settings_host::SecretCheck {
+    secret: fenix_config::Secret::GitLab,
+    check: |server, token| Forge::current_user(&fenix_gitlab::GitLab::new(server, token, "")),
+    elsewhere: None,
+};
+
+/// The GitHub token's check, and `gh`'s token when there's none of yours.
+static GITHUB_CHECK: super::settings_host::SecretCheck = super::settings_host::SecretCheck {
+    secret: fenix_config::Secret::GitHub,
+    check: |_, token| Forge::current_user(&fenix_github::GitHub::new(token, "", "")),
+    elsewhere: Some((fenix_github::gh_token, "from the gh CLI")),
+};
+
 /// What the review offers others (the Git status page).
 static SERVICES: [super::feature::Service; 2] = [
     // `{root, number}` -> request `number` of the repository at `root` in
@@ -1633,6 +1650,17 @@ static SERVICES: [super::feature::Service; 2] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The settings page checks GitLab's and GitHub's tokens through the
+    /// review's contributions; GitHub's falls back to `gh`'s token.
+    #[test]
+    fn the_forge_tokens_are_checked_through_the_reviews_contributions() {
+        let app = App::with_file(None);
+        let checks: Vec<&super::super::settings_host::SecretCheck> = app.contributions(super::super::settings_host::SECRET_CHECKS).filter_map(|c| c.downcast_ref()).collect();
+        let github = checks.iter().find(|c| c.secret == fenix_config::Secret::GitHub).expect("GitHub's");
+        assert_eq!(github.elsewhere.map(|(_, from)| from), Some("from the gh CLI"));
+        assert!(checks.iter().any(|c| c.secret == fenix_config::Secret::GitLab && c.elsewhere.is_none()));
+    }
     use crate::review_page::Row;
 
     /// The sandbox repository, cloned fresh (`FENIX_GITHUB_SANDBOX`,

@@ -39,11 +39,14 @@ mod git_compare_page;
 mod side_by_side;
 mod git_log_page;
 mod git_rebase_page;
+#[cfg(feature = "review")]
 mod git_request_page;
 mod migrate;
 mod settings_host;
 mod snippets_host;
+#[cfg(feature = "review")]
 mod review_host;
+#[cfg(feature = "review")]
 pub(crate) use review_host::SPEC as REVIEW_SPEC;
 mod motion_host;
 mod polish;

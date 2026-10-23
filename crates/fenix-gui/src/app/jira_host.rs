@@ -790,6 +790,7 @@ impl App {
 static SECRET_CHECK: super::settings_host::SecretCheck = super::settings_host::SecretCheck {
     secret: fenix_config::Secret::Jira,
     check: |server, token| fenix_jira::JiraClient::new(server, token).myself(),
+    elsewhere: None,
 };
 
 /// What Jira writes in the compose pane.

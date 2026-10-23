@@ -346,6 +346,7 @@ const LEADER_FEATURES: &[&crate::app::feature::FeatureSpec] = &[
     &crate::app::EMBEDDED_SPEC,
     #[cfg(feature = "docker")]
     &crate::app::DOCKER_SPEC,
+    #[cfg(feature = "review")]
     &crate::app::REVIEW_SPEC,
     #[cfg(feature = "jira")]
     &crate::app::JIRA_SPEC,
