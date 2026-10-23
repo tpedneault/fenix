@@ -171,6 +171,7 @@ impl CommandRegistry {
         registry.external("explorer.places", "Bookmarks, drives, recent directories", |app| app.picker_places());
         registry.external("explorer.recent_dirs", "Directories you have been to", |app| app.picker_recent_dirs());
         registry.register("explorer.bookmark", "Bookmark the directory you are in", cmd_explorer_bookmark);
+        #[cfg(feature = "docker")]
         registry.feature(&crate::app::DOCKER_SPEC);
         registry.register("debug.start_or_continue", "Start a debug session, or continue one that's stopped", cmd_debug_start_or_continue);
         registry.register("debug.toggle_breakpoint", "Toggle a breakpoint on the focused buffer's current line", cmd_debug_toggle_breakpoint);

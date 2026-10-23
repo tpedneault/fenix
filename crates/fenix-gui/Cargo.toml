@@ -11,6 +11,13 @@ publish.workspace = true
 name = "fenix"
 path = "src/main.rs"
 
+# The built-in extensions, each one Cargo feature: all of them by
+# default, the core alone with `--no-default-features` (CI builds both, so
+# the core can't come to depend on an extension).
+[features]
+default = ["docker"]
+docker = ["dep:fenix-docker"]
+
 [dependencies]
 anyhow = "1.0.104"
 arboard = "3"
@@ -25,7 +32,7 @@ fenix-config = { path = "../fenix-config" }
 fenix-control = { path = "../fenix-control" }
 fenix-core = { path = "../fenix-core" }
 fenix-dap = { path = "../fenix-dap" }
-fenix-docker = { path = "../fenix-docker" }
+fenix-docker = { path = "../fenix-docker", optional = true }
 fenix-explorer = { path = "../fenix-explorer" }
 fenix-format = { path = "../fenix-format" }
 fenix-fs = { path = "../fenix-fs" }

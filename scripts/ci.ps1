@@ -56,6 +56,11 @@ try {
     }
     Invoke-Gate 'clippy' 'cargo' ($clippyArgs + @('--', '-D', 'warnings'))
     if ($Suite -eq 'Workspace') {
+        # The core alone, every built-in extension's Cargo feature off: it
+        # mustn't come to depend on one.
+        Invoke-Gate 'core' 'cargo' @('clippy', '--locked', '-p', 'fenix-gui', '--no-default-features', '--', '-D', 'warnings')
+    }
+    if ($Suite -eq 'Workspace') {
         Invoke-Gate 'build' 'cargo' @('build', '--locked', '-p', 'fenix-gui')
     }
     Write-Host "All $Suite gates passed. Logs: $logRoot"
