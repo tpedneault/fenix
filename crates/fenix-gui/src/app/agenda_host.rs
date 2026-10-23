@@ -1260,6 +1260,24 @@ mod tests {
         }
     }
 
+    /// What the core asks the agenda without naming it: its running clock
+    /// is a feature's modeline indicator, its start-up, tick and first-key
+    /// work come from its spec, and Jira checks its own token.
+    #[test]
+    fn the_core_reaches_the_agenda_through_its_hooks() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(&dir);
+        let indicators = |app: &App| app.features.iter().filter_map(|f| f.modeline_indicator(app)).collect::<String>();
+        assert!(!indicators(&app).contains('\u{23f1}'), "no clock running");
+        let id = app.features.agenda_mut().store.create_task("Write the report".into(), String::new(), fenix_agenda::Priority::Medium, None);
+        app.agenda_clock_pick(ClockPick::Start(id));
+        assert!(indicators(&app).contains("\u{23f1} Write the report"), "{}", indicators(&app));
+        assert!(SPEC.on_start.is_some() && SPEC.on_tick.is_some() && SPEC.before_key.is_some() && SPEC.prompt_key.is_some());
+        assert!(!SPEC.prompt_key.unwrap()(&mut app, KeyPress::char('x')), "no prompt open: not its key");
+        let checks: Vec<_> = app.contributions(super::super::settings_host::SECRET_CHECKS).filter_map(|c| c.downcast_ref::<super::super::settings_host::SecretCheck>()).map(|c| c.secret).collect();
+        assert_eq!(checks, [fenix_config::Secret::Jira]);
+    }
+
     fn enter(app: &mut App) {
         assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
     }
