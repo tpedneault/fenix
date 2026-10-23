@@ -73,6 +73,11 @@ impl Roots {
         self.settings.join("themes")
     }
 
+    /// The extensions installed on this machine.
+    pub fn extensions(&self) -> PathBuf {
+        self.local.join("extensions")
+    }
+
     pub fn state(&self, name: &str) -> PathBuf {
         self.local.join("state").join(name)
     }
@@ -118,6 +123,11 @@ pub fn templates_dir() -> Option<PathBuf> {
 /// Your themes, one `.toml` each.
 pub fn themes_dir() -> Option<PathBuf> {
     Roots::current().map(|r| r.themes())
+}
+
+/// The extensions installed on this machine, and `extensions.toml`.
+pub fn extensions_dir() -> Option<PathBuf> {
+    Roots::current().map(|r| r.extensions())
 }
 
 /// A file of your own data, like `agenda.json`.
