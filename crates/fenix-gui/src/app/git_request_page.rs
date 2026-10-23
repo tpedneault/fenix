@@ -112,7 +112,7 @@ impl App {
             RequestAction::Close => self.close_page(id),
             RequestAction::EditDescription => {
                 let seed = self.request_page(id).map(|r| r.description.clone()).unwrap_or_default();
-                self.open_compose_seeded(ComposePurpose::RequestDescription { page: id }, &seed);
+                self.open_compose_seeded(super::review_host::review_purpose(super::review_host::ReviewCompose::RequestDescription { page: id }), &seed);
             }
             RequestAction::Browser(url) => self.open_url(&url),
             // The base as the forge names it; the remote's copy when

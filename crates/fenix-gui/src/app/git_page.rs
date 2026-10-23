@@ -316,7 +316,19 @@ impl App {
             None => self.open_page(PageModel::Git(Box::new(GitStatus::new(root)))),
         };
         self.git_page_refresh(id);
-        self.git_page_request(id);
+        self.git_status_refreshed(id);
+    }
+
+    /// Pull requests are the review's: asked through its services, or a
+    /// word that there's nothing here to open one with.
+    fn review_call(&mut self, service: &str, payload: serde_json::Value) {
+        if !self.features.is_on("fenix.review") {
+            self.set_error("pull requests come with the Review extension");
+            return;
+        }
+        if let Err(e) = self.call_service(service, &payload) {
+            self.set_error(e);
+        }
     }
 
     /// `SPC g z`: the status page, open on its operation log.
@@ -403,7 +415,7 @@ impl App {
             Action::None => {}
             Action::Refresh => {
                 self.git_page_refresh(id);
-                self.git_page_request(id);
+                self.git_status_refreshed(id);
             }
             Action::LoadDiff { section, path } => {
                 self.page_spawn(move |send| {
@@ -459,11 +471,14 @@ impl App {
                 }
                 self.open_project(path, None, false);
             }
-            Action::PullRequest => match self.git_page(id).and_then(|g| g.request.clone()) {
-                Some(Some(line)) => self.open_review(root, line.number, false),
-                _ => self.open_new_request_at(root),
-            },
-            Action::Reviews => self.open_reviews(),
+            Action::PullRequest => {
+                let number = match self.git_page(id).and_then(|g| g.request.clone()) {
+                    Some(Some(line)) => Some(line.number),
+                    _ => None,
+                };
+                self.review_call("review.request", serde_json::json!({ "root": root, "number": number }));
+            }
+            Action::Reviews => self.review_call("review.inbox", serde_json::Value::Null),
             Action::ShowOutput => {
                 let Some(g) = self.git_page(id) else { return };
                 let text = if g.output.is_empty() { "(nothing has run yet)".to_string() } else { g.output.join("\n") };
@@ -561,7 +576,7 @@ impl App {
                 let pushed = !failed && label.starts_with("push ");
                 self.git_refresh_all_views();
                 if pushed {
-                    self.git_page_request(buffer);
+                    self.git_status_refreshed(buffer);
                 }
                 if let Some(path) = opened {
                     self.open_project(path, None, false);

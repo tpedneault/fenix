@@ -118,7 +118,6 @@ use crate::dashboard;
 use crate::diff_view;
 #[cfg(feature = "docker")]
 use crate::docker_panel;
-use crate::forge_panel;
 use crate::git_panel;
 use crate::gpu::{GpuContext, GpuState};
 use crate::graph_view;
@@ -496,12 +495,6 @@ fn join_names(names: &[String]) -> String {
 /// submitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ComposePurpose {
-    /// Another note on an existing review thread.
-    Reply { number: u64, discussion: String },
-    /// A new thread anchored to a diff line. The position is boxed
-    /// because it's much larger than the other variant and this enum is
-    /// carried around by value.
-    NewComment { number: u64, position: Box<fenix_forge::Position> },
     /// A commit message. The one use of this buffer that has nothing to
     /// do with a forge -- and the reason the plan called for a compose
     /// buffer in the first place: a commit message is the most ordinary
@@ -514,21 +507,42 @@ enum ComposePurpose {
     GitCommit { repo_root: PathBuf, compose: crate::git_status::Compose },
     /// A reword's new message, for the rebase page `page`.
     RebaseMessage { page: BufferId, hash: String },
-    /// A comment for the review on page `page`, held until it's
-    /// submitted -- a new one, or pending comment `index` edited.
-    ReviewPending { page: BufferId, pending: Box<crate::review_store::Pending>, index: Option<usize> },
-    /// A reply to a review thread, sent straight away.
-    ReviewReply { page: BufferId, thread: String },
-    /// The summary a review is submitted with.
-    ReviewSummary { page: BufferId },
-    /// The description of the request on new request page `page`.
-    RequestDescription { page: BufferId },
-    /// A feature's text (an agenda task's description, a Jira comment),
-    /// handed to its service `service` as `{kind, arg, body}`. `what` and
-    /// `verb` title the pane; `allow_empty` for a description, which may
-    /// be cleared.
-    Feature { service: &'static str, kind: &'static str, arg: String, what: String, verb: &'static str, allow_empty: bool },
+    /// A feature's text (an agenda task's description, a review reply),
+    /// handed back to its `FeatureSpec::compose` with `data`, its own
+    /// value. `what` and `verb` title the pane; `allow_empty` for a
+    /// description, which may be cleared.
+    Feature { feature: &'static str, data: ComposeData, what: String, verb: &'static str, allow_empty: bool },
 }
+
+/// What a feature's compose pane carries back to it: a value of its own
+/// type, read back with `get`.
+#[derive(Clone)]
+pub(crate) struct ComposeData(std::sync::Arc<dyn std::any::Any + Send + Sync>);
+
+impl ComposeData {
+    pub(crate) fn new<T: std::any::Any + Send + Sync>(value: T) -> Self {
+        ComposeData(std::sync::Arc::new(value))
+    }
+
+    pub(crate) fn get<T: std::any::Any>(&self) -> Option<&T> {
+        self.0.downcast_ref()
+    }
+}
+
+impl std::fmt::Debug for ComposeData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ComposeData(..)")
+    }
+}
+
+// The same pane's purpose is the same value.
+impl PartialEq for ComposeData {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ComposeData {}
 
 /// Opens `url` in the default browser.
 fn open_in_browser(url: &str) -> std::io::Result<()> {
@@ -553,25 +567,12 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
     command.spawn().map(|_| ())
 }
 
-/// What `ComposePurpose::Feature` hands its service.
-#[derive(serde::Deserialize)]
-pub(crate) struct ComposeCall {
-    pub kind: String,
-    pub arg: String,
-    pub body: String,
-}
-
 impl ComposePurpose {
     /// The pane title, which is also where the keys are documented --
     /// a compose buffer is the one surface here you type prose into, so
     /// "how do I send this" has to be visible without pressing anything.
     fn title(&self) -> String {
         let (what, verb) = match self {
-            ComposePurpose::Reply { number, .. } => (format!("Reply to !{number}"), "send"),
-            ComposePurpose::NewComment { number, position } => {
-                let line = position.new_line.or(position.old_line).map(|l| l.to_string()).unwrap_or_default();
-                (format!("Comment on !{number} {}:{line}", position.new_path), "send")
-            }
             ComposePurpose::CommitMessage { .. } => ("Commit message".to_string(), "commit"),
             ComposePurpose::GitCommit { compose, .. } => match compose {
                 crate::git_status::Compose::New(_) => ("Commit message".to_string(), "commit"),
@@ -579,10 +580,6 @@ impl ComposePurpose {
                 crate::git_status::Compose::Reword(_) => ("Reword the last commit".to_string(), "reword"),
             },
             ComposePurpose::RebaseMessage { hash, .. } => (format!("New message for {}", &hash[..7.min(hash.len())]), "keep"),
-            ComposePurpose::ReviewPending { pending, .. } => (format!("Comment on {}:{} (held for your review)", pending.path, pending.line().unwrap_or(0)), "keep"),
-            ComposePurpose::ReviewReply { .. } => ("Reply".to_string(), "send"),
-            ComposePurpose::ReviewSummary { .. } => ("Review summary".to_string(), "keep"),
-            ComposePurpose::RequestDescription { .. } => ("Description".to_string(), "keep"),
             ComposePurpose::Feature { what, verb, .. } => (what.clone(), *verb),
         };
         format!("{what}  --  Esc then Enter to {verb}, q to cancel")
@@ -603,60 +600,6 @@ struct ComposeSession {
     /// The pane focus returns to once this closes, so sending a reply
     /// puts you back where you were reading.
     returning_to: fenix_window::WindowId,
-}
-
-/// Everything one forge round-trip fetched for a merge request's
-/// detail pane. Bundled because all three come from the same click and
-/// are shown together -- and because a partial arrival would leave the
-/// pane claiming an approval count from one request beside a file list
-/// from another.
-#[derive(Debug, Clone)]
-pub(crate) struct ForgeDetail {
-    request: fenix_forge::MergeRequest,
-    approvals: Option<fenix_forge::Approvals>,
-    files: Vec<fenix_forge::ChangedFile>,
-    discussions: Vec<fenix_forge::Discussion>,
-    /// A failure fetching the *files* specifically. The request itself
-    /// having arrived is worth showing even when its diff didn't.
-    error: Option<String>,
-}
-
-/// The Merge Requests view (`SPC g M`): the project's open merge
-/// requests on the left, the selected one in full on the right.
-///
-/// Same shape as every other session here -- fixed pane/buffer ids,
-/// cached domain data, a `request_id` guard so a slow answer can't
-/// overwrite a newer one. The guard matters more here than anywhere
-/// else in the Git views: these are network round-trips over someone
-/// else's VPN, and arriving out of order is normal rather than
-/// theoretical.
-struct ForgeSession {
-    workspace_index: usize,
-    list_pane: fenix_window::WindowId,
-    detail_pane: fenix_window::WindowId,
-    review_pane: fenix_window::WindowId,
-    list_buffer: BufferId,
-    detail_buffer: BufferId,
-    review_buffer: BufferId,
-    repo_root: PathBuf,
-    /// `group/project`, inferred from the repo's own `origin` remote.
-    project: String,
-    filter: fenix_forge::MrFilter,
-    requests: Vec<fenix_forge::MergeRequest>,
-    /// Which request the detail pane is showing.
-    selected: Option<u64>,
-    detail: Option<ForgeDetail>,
-    /// A failure listing merge requests, rendered into the list pane --
-    /// an empty list beside an error that has scrolled past reads as
-    /// "there are none", a different answer entirely.
-    list_error: Option<String>,
-    list_request_id: u64,
-    detail_request_id: u64,
-    /// Armed by `m` until the next keypress confirms -- merging is the
-    /// one action here that can't be taken back, so it doesn't happen
-    /// on a single keystroke. Mirrors `GitConfirmAction`'s own
-    /// arm-then-confirm shape.
-    merge_armed: bool,
 }
 
 /// The Merge view (`SPC g x`): the conflicted files on the left, the
@@ -3796,31 +3739,6 @@ fn forge_thread_annotations(discussions: &[fenix_forge::Discussion]) -> Vec<diff
         })
         .filter(|t| !t.notes.is_empty())
         .collect()
-}
-
-/// The three forge calls one merge request's detail pane needs.
-///
-/// Run together on the worker thread rather than as three separate
-/// events, so the pane can never show one request's approval count
-/// beside another's file list. The request itself is the only one that
-/// has to succeed: an instance without approval rules answers 404 on
-/// `/approvals`, and a diff that's too large to return shouldn't take
-/// the description and branch names down with it.
-/// A forge client, GitHub's or GitLab's.
-pub(crate) type ForgeClient = Box<dyn fenix_forge::Forge + Send + Sync>;
-
-fn fetch_forge_detail(client: &dyn fenix_forge::Forge, number: u64) -> Result<ForgeDetail, String> {
-    let request = client.merge_request(number)?;
-    let approvals = client.approvals(number).ok();
-    let (files, error) = match client.changed_files(number) {
-        Ok(files) => (files, None),
-        Err(err) => (Vec::new(), Some(err)),
-    };
-    // Threads are a bonus on top of the diff, not a precondition for
-    // it: an instance that refuses this endpoint should still show the
-    // changes.
-    let discussions = client.discussions(number).unwrap_or_default();
-    Ok(ForgeDetail { request, approvals, files, discussions, error })
 }
 
 /// The actual four `git` shell-outs `git_refresh_session` needs -- called
@@ -7301,7 +7219,6 @@ impl App {
                 .as_ref()
                 .is_some_and(|s| focused == s.graph_pane || focused == s.refs_pane || focused == s.detail_pane)
             || self.merge_session.as_ref().is_some_and(|s| focused == s.files_pane || focused == s.merge_pane)
-            || self.features.review().session.as_ref().is_some_and(|s| focused == s.list_pane || focused == s.detail_pane || focused == s.review_pane)
             || self.compose.as_ref().is_some_and(|c| focused == c.pane)
     }
 
@@ -14180,580 +14097,6 @@ impl App {
         self.refresh_git_pages(false);
     }
 
-    // -- Merge Requests view (`SPC g M`) -------------------------------
-
-    /// A GitLab client for `repo_root`, or the reason there isn't one.
-    ///
-    /// Three things have to line up, and each failure says which:
-    /// `[gitlab] base_url`/`token` in `config.ini`, and an `origin`
-    /// remote whose URL names a project. Nothing is configured per
-    /// repo -- the checkout already knows which project it came from.
-    fn forge_client(&self, repo_root: &Path) -> Result<ForgeClient, String> {
-        let Some(url) = fenix_git::remote_url(repo_root, "origin") else {
-            return Err("this repo has no `origin` remote to work out the project from".to_string());
-        };
-        // GitHub by its host; anything else is taken to be GitLab, which
-        // is routinely self-hosted under any name.
-        if fenix_github::repository(&url).is_some() {
-            let token = self.config.token(fenix_config::Secret::GitHub).or_else(fenix_github::gh_token).ok_or_else(|| {
-                "sign the GitHub CLI in (gh auth login), or set the GitHub token in SPC , (Forges)".to_string()
-            })?;
-            return fenix_github::GitHub::from_remote(token, &url)
-                .map(|c| Box::new(c) as ForgeClient)
-                .ok_or_else(|| format!("couldn't read owner/repo out of origin's URL ({url})"));
-        }
-        let Some(base_url) = self.config.gitlab_base_url.clone().filter(|u| !u.trim().is_empty()) else {
-            return Err("set the GitLab server in SPC , (Forges) first".to_string());
-        };
-        let Some(token) = self.config.token(fenix_config::Secret::GitLab) else {
-            return Err("set the GitLab token in SPC , (Forges) first -- a personal access token with the api scope".to_string());
-        };
-        fenix_gitlab::GitLab::from_remote(base_url, token, &url)
-            .map(|c| Box::new(c) as ForgeClient)
-            .ok_or_else(|| format!("couldn't read a GitLab project path out of origin's URL ({url})"))
-    }
-
-    /// `SPC g M`: opens (or refocuses and refreshes) the Merge Requests
-    /// view.
-    pub(crate) fn open_forge_view(&mut self) {
-        if let Some(session) = &self.features.review().session {
-            let (workspace_index, list_pane) = (session.workspace_index, session.list_pane);
-            self.workspaces.switch_to_index(workspace_index);
-            self.windows_mut().focus(list_pane);
-            self.forge_refresh_list();
-            self.wake_caret();
-            return;
-        }
-        let repo_root = self.compare_repo_root();
-        // Checked before a workspace is opened: a view that can only
-        // ever show one error message isn't worth two panes.
-        let project = match self.forge_client(&repo_root) {
-            Ok(client) => fenix_forge::Forge::project(client.as_ref()).to_string(),
-            Err(err) => {
-                self.set_error(err);
-                return;
-            }
-        };
-
-        let list_buffer = self.buffers.open_git("");
-        let detail_buffer = self.buffers.open_git("");
-        let empty = diff_view::render(&[], &HashSet::new());
-        let review_buffer = self.buffers.open_diff(&empty.text);
-        self.diff_lines.insert(review_buffer, empty.lines);
-
-        let cursor = Cursor::at_start();
-        self.workspaces.new_workspace(list_buffer, cursor);
-        let workspace_index = self.workspaces.active_index();
-        let list_pane = self.focused_pane_id();
-        let detail_pane = self.windows_mut().split(SplitKind::Vertical, detail_buffer);
-        self.workspaces.active_pane_states_mut().insert(detail_pane, PaneState::seeded_at(cursor));
-        // The right half stacks: what the request *is* on top, the diff
-        // being reviewed below. The diff takes most of the height --
-        // the description is read once, the changes are read for as
-        // long as the review takes.
-        let review_pane = self.windows_mut().split(SplitKind::Horizontal, review_buffer);
-        self.workspaces.active_pane_states_mut().insert(review_pane, PaneState::seeded_at(cursor));
-        self.windows_mut().resize_focused(-0.15);
-        // An even split. `resize_focused`'s delta grows the *first*
-        // child, so the `0.3` this used to pass gave the list 80% and
-        // squeezed the detail -- the pane with all the reading in it --
-        // into 20%. Left at the default rather than corrected to a
-        // negative delta, because 50/50 is what's wanted here.
-        self.windows_mut().focus(list_pane);
-
-        self.pane_titles.insert(list_pane, "1. Merge Requests".to_string());
-        self.pane_titles.insert(detail_pane, "2. Detail".to_string());
-        self.pane_titles.insert(review_pane, "3. Review".to_string());
-
-        self.features.review_mut().session = Some(ForgeSession {
-            workspace_index,
-            list_pane,
-            detail_pane,
-            review_pane,
-            list_buffer,
-            detail_buffer,
-            review_buffer,
-            repo_root,
-            project,
-            filter: fenix_forge::MrFilter::AllOpen,
-            requests: Vec::new(),
-            selected: None,
-            detail: None,
-            list_error: None,
-            list_request_id: 0,
-            detail_request_id: 0,
-            merge_armed: false,
-        });
-        self.forge_render();
-        self.forge_refresh_list();
-        self.wake_caret();
-    }
-
-    /// Re-renders both panes from what's already cached -- no network.
-    fn forge_render(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        // Wrapped to the panes they're going into, not to a fixed
-        // width: this view is an even split, so each pane is about half
-        // as wide as the fixed default assumes.
-        let (list_cols, detail_cols) = (self.pane_cols(session.list_pane), self.pane_cols(session.detail_pane));
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let list = forge_panel::render_list(&session.project, session.filter, &session.requests, session.list_error.as_deref(), list_cols);
-        let detail = match &session.detail {
-            Some(detail) => forge_panel::render_detail(
-                Some(&detail.request),
-                detail.approvals.as_ref(),
-                &detail.files,
-                &detail.discussions,
-                detail.error.as_deref(),
-                detail_cols,
-            ),
-            None => forge_panel::render_detail(None, None, &[], &[], None, detail_cols),
-        };
-        let (list_buffer, detail_buffer) = (session.list_buffer, session.detail_buffer);
-        self.set_git_buffer_preserving_line(list_buffer, list);
-        self.set_git_buffer_preserving_line(detail_buffer, detail);
-        self.forge_render_review();
-    }
-
-    /// Renders the selected merge request's whole diff into the review
-    /// pane, with its threads drawn in under the lines they hang on.
-    ///
-    /// The diff is reassembled from the forge's per-file hunks (see
-    /// `ChangedFile::unified_diff`) and handed to the same parser and
-    /// the same viewer every other diff in Fenix goes through -- so
-    /// folding, hunk navigation and "open the real file here" work
-    /// without this view knowing anything about them.
-    fn forge_render_review(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let (review_buffer, repo_root) = (session.review_buffer, session.repo_root.clone());
-        let Some(detail) = session.detail.as_ref() else {
-            self.set_diff_buffer(review_buffer, None, DiffSource::ReadOnly, &repo_root);
-            return;
-        };
-        let diff: String = detail.files.iter().map(|f| f.unified_diff()).collect();
-        let threads = forge_thread_annotations(&detail.discussions);
-        let header = vec![(
-            format!("{} {}  --  r reply, R resolve, C comment on this line", detail.request.reference(), detail.request.title),
-            diff_view::DiffStyle::Title,
-        )];
-        self.set_diff_buffer_with_header(review_buffer, &header, Some(&diff), DiffSource::ReadOnly, &repo_root);
-        if let Some(model) = self.diff_models.get_mut(&review_buffer) {
-            model.threads = threads;
-        }
-        self.rerender_diff_buffer(review_buffer);
-    }
-
-    /// The review thread under the cursor, if the cursor is on one.
-    fn forge_thread_at_cursor(&self) -> Option<String> {
-        let session = self.features.review().session.as_ref()?;
-        if self.focused_pane_id() != session.review_pane {
-            return None;
-        }
-        let line = self.open().buffer.line_col(&self.cursor()).0;
-        self.diff_lines.get(&session.review_buffer)?.get(line)?.as_ref()?.thread.clone()
-    }
-
-    /// `r` in the review pane: open a compose buffer to reply to the
-    /// thread under the cursor.
-    pub(crate) fn forge_reply_at_cursor(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let Some(number) = session.selected else { return };
-        let Some(discussion) = self.forge_thread_at_cursor() else {
-            self.set_message("put the cursor on a review comment to reply to it");
-            return;
-        };
-        self.open_compose(ComposePurpose::Reply { number, discussion });
-    }
-
-    /// `R` in the review pane: resolve the thread under the cursor, or
-    /// reopen it if it's already resolved.
-    pub(crate) fn forge_resolve_at_cursor(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let Some(number) = session.selected else { return };
-        let Some(discussion) = self.forge_thread_at_cursor() else {
-            self.set_message("put the cursor on a review comment to resolve it");
-            return;
-        };
-        let was_resolved = session
-            .detail
-            .as_ref()
-            .and_then(|d| d.discussions.iter().find(|t| t.id == discussion))
-            .map(|t| t.resolved)
-            .unwrap_or(false);
-        let repo_root = session.repo_root.clone();
-        let client = match self.forge_client(&repo_root) {
-            Ok(client) => client,
-            Err(err) => {
-                self.set_error(err);
-                return;
-            }
-        };
-        match fenix_forge::Forge::resolve(client.as_ref(), number, &discussion, !was_resolved) {
-            Ok(()) => {
-                self.set_message(if was_resolved { "thread reopened" } else { "thread resolved" });
-                self.forge_select(number);
-            }
-            Err(err) => self.set_error(format!("couldn't resolve that thread: {err}")),
-        }
-        self.wake_caret();
-    }
-
-    /// `C` in the review pane: start a new thread on the diff line
-    /// under the cursor.
-    pub(crate) fn forge_comment_at_cursor(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        if self.focused_pane_id() != session.review_pane {
-            self.set_message("comment from the Review pane (3)");
-            return;
-        }
-        let Some(number) = session.selected else { return };
-        let Some(detail) = session.detail.as_ref() else { return };
-        let refs = detail.request.diff_refs.clone();
-        if refs.head_sha.is_empty() {
-            // Without the three SHAs a comment either lands on the
-            // wrong line or is rejected; saying so beats posting it and
-            // finding out on the forge.
-            self.set_error("this merge request has no diff version to anchor a comment to yet".to_string());
-            return;
-        }
-        let Some((_, anchor)) = self.diff_anchor_at_cursor() else {
-            self.set_message("put the cursor on a line of the diff".to_string());
-            return;
-        };
-        let Some(model) = self.diff_models.get(&session.review_buffer) else { return };
-        let Some(file) = model.files.get(anchor.file) else { return };
-        let (old_path, new_path) = (file.old_path.clone(), file.new_path.clone());
-        // All three cases, because the forge distinguishes them: an
-        // added line exists only on the new side, a removed line only
-        // on the old, and an unchanged line on both -- and a context
-        // position that names only one side is rejected outright (see
-        // `Position::on_context_line`). Most of a diff is context, so
-        // collapsing this into "new side where there is one" made most
-        // of the lines you'd want to comment on refuse the comment.
-        let position = match (anchor.old_line, anchor.new_line) {
-            (Some(old), Some(new)) => fenix_forge::Position::on_context_line(&refs, &old_path, &new_path, old, new),
-            (None, Some(new)) => fenix_forge::Position::on_new_line(&refs, &old_path, &new_path, new),
-            (Some(old), None) => fenix_forge::Position::on_old_line(&refs, &old_path, &new_path, old),
-            (None, None) => {
-                self.set_message("put the cursor on a line of the diff, not on a header");
-                return;
-            }
-        };
-        self.open_compose(ComposePurpose::NewComment { number, position: Box::new(position) });
-    }
-
-    /// `A`: approve the selected merge request, or withdraw an approval
-    /// already given.
-    pub(crate) fn forge_toggle_approval(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let Some(number) = session.selected else {
-            self.set_message("no merge request selected");
-            return;
-        };
-        let (repo_root, detail) = (session.repo_root.clone(), session.detail.clone());
-        let approved = detail.as_ref().and_then(|d| d.approvals.as_ref()).map(|a| a.approved).unwrap_or(false);
-        let sha = detail.as_ref().map(|d| d.request.sha.clone()).filter(|s| !s.is_empty());
-        let client = match self.forge_client(&repo_root) {
-            Ok(client) => client,
-            Err(err) => {
-                self.set_error(err);
-                return;
-            }
-        };
-        let result = if approved {
-            fenix_forge::Forge::unapprove(client.as_ref(), number)
-        } else {
-            fenix_forge::Forge::approve(client.as_ref(), number, sha.as_deref())
-        };
-        match result {
-            Ok(()) => {
-                self.set_message(if approved { format!("approval withdrawn from !{number}") } else { format!("approved !{number}") });
-                self.forge_select(number);
-            }
-            Err(err) => self.set_error(format!("couldn't change the approval: {err}")),
-        }
-        self.wake_caret();
-    }
-
-    /// Backs out of an armed merge. Called from the key handler for
-    /// every key in this view that isn't a second `m`, so an arm left
-    /// hanging can't fire later on a keystroke meant for something
-    /// else.
-    fn forge_disarm_merge(&mut self) {
-        if let Some(session) = self.features.review_mut().session.as_mut() {
-            session.merge_armed = false;
-        }
-    }
-
-    /// `m`: arm the merge; a second `m` performs it.
-    ///
-    /// The one action in this view that can't be taken back, so it
-    /// doesn't happen on a single keystroke -- the same arm-then-confirm
-    /// the Git panel's destructive actions already use.
-    pub(crate) fn forge_merge_request(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let Some(number) = session.selected else {
-            self.set_message("no merge request selected");
-            return;
-        };
-        if !session.merge_armed {
-            if let Some(session) = self.features.review_mut().session.as_mut() {
-                session.merge_armed = true;
-            }
-            self.set_message(format!("merge !{number}? press m again to confirm, any other key cancels"));
-            self.wake_caret();
-            return;
-        }
-        let (repo_root, detail) = (session.repo_root.clone(), session.detail.clone());
-        if let Some(session) = self.features.review_mut().session.as_mut() {
-            session.merge_armed = false;
-        }
-        let client = match self.forge_client(&repo_root) {
-            Ok(client) => client,
-            Err(err) => {
-                self.set_error(err);
-                return;
-            }
-        };
-        let options = fenix_forge::MergeOptions {
-            squash: false,
-            remove_source_branch: false,
-            // Sent so the forge refuses rather than merging something
-            // that moved between reading the diff and pressing the key.
-            sha: detail.as_ref().map(|d| d.request.sha.clone()).filter(|s| !s.is_empty()),
-            ..Default::default()
-        };
-        match fenix_forge::Forge::merge(client.as_ref(), number, &options) {
-            Ok(()) => {
-                self.set_message(format!("merged !{number}"));
-                self.forge_refresh_list();
-            }
-            // The forge's own words: "unresolved discussions", "pipeline
-            // must succeed", "branch cannot be merged" are all far more
-            // useful than anything this could say instead.
-            Err(err) => self.set_error(format!("couldn't merge !{number}: {err}")),
-        }
-        self.wake_caret();
-    }
-
-    /// Fetches the merge request list for the current filter.
-    fn forge_refresh_list(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let (repo_root, filter) = (session.repo_root.clone(), session.filter);
-        let client = match self.forge_client(&repo_root) {
-            Ok(client) => client,
-            Err(err) => {
-                if let Some(session) = self.features.review_mut().session.as_mut() {
-                    session.list_error = Some(err.clone());
-                    session.requests.clear();
-                }
-                self.set_error(err);
-                self.forge_render();
-                return;
-            }
-        };
-        let Some(session) = self.features.review_mut().session.as_mut() else { return };
-        session.list_request_id += 1;
-        let request_id = session.list_request_id;
-        self.set_message(format!("loading merge requests ({})...", filter.label()));
-
-        match self.event_proxy.clone() {
-            Some(proxy) => {
-                std::thread::spawn(move || {
-                    let result = client.list_merge_requests(filter);
-                    let _ = proxy.send_event(FenixUserEvent::feature(review_host::SPEC.id, "ForgeListReady", review_host::ForgeEvent::List { request_id, result }));
-                });
-            }
-            None => {
-                let result = client.list_merge_requests(filter);
-                self.apply_forge_list(request_id, result);
-            }
-        }
-    }
-
-    fn apply_forge_list(&mut self, request_id: u64, result: Result<Vec<fenix_forge::MergeRequest>, String>) {
-        let Some(session) = self.features.review_mut().session.as_mut() else { return };
-        // A slower earlier request answering after a newer one would
-        // otherwise put the previous filter's list back on screen.
-        if request_id != session.list_request_id {
-            return;
-        }
-        match result {
-            Ok(requests) => {
-                let count = requests.len();
-                let filter = session.filter;
-                session.requests = requests;
-                session.list_error = None;
-                // Keep the current selection if it survived the new
-                // filter; otherwise show the first, so the detail pane
-                // is never left describing something the list no longer
-                // contains.
-                let keep = session.selected.filter(|n| session.requests.iter().any(|r| r.number == *n));
-                let next = keep.or_else(|| session.requests.first().map(|r| r.number));
-                self.set_message(format!("{count} merge request(s) ({})", filter.label()));
-                self.forge_render();
-                if let Some(number) = next {
-                    self.forge_select(number);
-                } else if let Some(session) = self.features.review_mut().session.as_mut() {
-                    session.selected = None;
-                    session.detail = None;
-                    self.forge_render();
-                }
-            }
-            Err(err) => {
-                session.requests.clear();
-                session.list_error = Some(err.clone());
-                session.selected = None;
-                session.detail = None;
-                self.set_error(err);
-                self.forge_render();
-            }
-        }
-    }
-
-    /// Loads one merge request's detail into the right pane.
-    fn forge_select(&mut self, number: u64) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let repo_root = session.repo_root.clone();
-        let client = match self.forge_client(&repo_root) {
-            Ok(client) => client,
-            Err(err) => {
-                self.set_error(err);
-                return;
-            }
-        };
-        let Some(session) = self.features.review_mut().session.as_mut() else { return };
-        session.selected = Some(number);
-        session.detail_request_id += 1;
-        let request_id = session.detail_request_id;
-
-        match self.event_proxy.clone() {
-            Some(proxy) => {
-                std::thread::spawn(move || {
-                    let result = Box::new(fetch_forge_detail(client.as_ref(), number));
-                    let _ = proxy.send_event(FenixUserEvent::feature(review_host::SPEC.id, "ForgeDetailReady", review_host::ForgeEvent::Detail { request_id, number, result }));
-                });
-            }
-            None => {
-                let result = fetch_forge_detail(client.as_ref(), number);
-                self.apply_forge_detail(request_id, number, result);
-            }
-        }
-    }
-
-    fn apply_forge_detail(&mut self, request_id: u64, number: u64, result: Result<ForgeDetail, String>) {
-        let Some(session) = self.features.review_mut().session.as_mut() else { return };
-        if request_id != session.detail_request_id {
-            return;
-        }
-        match result {
-            Ok(detail) => session.detail = Some(detail),
-            Err(err) => {
-                session.detail = None;
-                self.set_error(format!("couldn't load !{number}: {err}"));
-            }
-        }
-        self.forge_render();
-        self.wake_caret();
-    }
-
-    /// The merge request number under the cursor in the list pane.
-    fn forge_number_at_cursor(&self) -> Option<u64> {
-        let session = self.features.review().session.as_ref()?;
-        if self.focused_pane_id() != session.list_pane {
-            return None;
-        }
-        match self.git_entry_at_cursor()? {
-            git_panel::GitEntry::Commit(number) => number.parse().ok(),
-            _ => None,
-        }
-    }
-
-    /// `Enter` in the list pane: show that merge request.
-    pub(crate) fn forge_open_at_cursor(&mut self) {
-        let Some(number) = self.forge_number_at_cursor() else {
-            self.set_message("put the cursor on a merge request");
-            return;
-        };
-        self.forge_select(number);
-        self.wake_caret();
-    }
-
-    /// `f`: cycle the list filter (all open / mine / assigned to me).
-    pub(crate) fn forge_cycle_filter(&mut self) {
-        let Some(session) = self.features.review_mut().session.as_mut() else { return };
-        session.filter = session.filter.next();
-        self.forge_render();
-        self.forge_refresh_list();
-        self.wake_caret();
-    }
-
-    /// `c`: fetch the selected merge request's head into a local branch
-    /// and check it out.
-    ///
-    /// Fetched from the *project's* own published ref rather than from
-    /// the source branch, so a request opened from a fork needs no
-    /// extra remote -- and lands on `mr-42` rather than the source
-    /// branch's name, which may not exist locally, may point somewhere
-    /// else, or may collide with an unrelated branch.
-    pub(crate) fn forge_checkout_selected(&mut self) {
-        let Some(session) = self.features.review().session.as_ref() else { return };
-        let (repo_root, selected) = (session.repo_root.clone(), session.selected);
-        let Some(number) = self.forge_number_at_cursor().or(selected) else {
-            self.set_message("no merge request selected");
-            return;
-        };
-        let client = match self.forge_client(&repo_root) {
-            Ok(client) => client,
-            Err(err) => {
-                self.set_error(err);
-                return;
-            }
-        };
-        let branch = format!("mr-{number}");
-        let refspec = fenix_forge::Forge::checkout_refspec(client.as_ref(), number);
-        if let Err(err) = fenix_git::fetch_refspec(&repo_root, "origin", &refspec) {
-            self.set_error(format!("couldn't fetch !{number}: {err}"));
-            return;
-        }
-        match fenix_git::checkout_branch(&repo_root, &branch) {
-            Ok(_) => self.set_message(format!("checked out !{number} as {branch}")),
-            Err(err) => self.set_error(format!("fetched !{number}, but couldn't check out {branch}: {err}")),
-        }
-        // The checkout rewrote the working tree, so every other Git
-        // view -- and every open file -- has to catch up.
-        self.git_refresh_all_views();
-        self.wake_caret();
-    }
-
-    fn forge_pane_by_number(&self, n: u32) -> Option<fenix_window::WindowId> {
-        let session = self.features.review().session.as_ref()?;
-        match n {
-            1 => Some(session.list_pane),
-            2 => Some(session.detail_pane),
-            3 => Some(session.review_pane),
-            _ => None,
-        }
-    }
-
-    /// `SPC g q` (in its workspace): closes the Merge Requests view.
-    pub(crate) fn forge_close(&mut self) {
-        let Some(session) = self.features.review_mut().session.take() else { return };
-        for id in [session.list_buffer, session.detail_buffer, session.review_buffer] {
-            self.buffers.close(id);
-            self.git_lines.remove(&id);
-            self.diff_lines.remove(&id);
-            self.diff_models.remove(&id);
-        }
-        for pane in [session.list_pane, session.detail_pane, session.review_pane] {
-            self.pane_titles.remove(&pane);
-        }
-        self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
-        self.refresh_project_root();
-        self.wake_caret();
-    }
-
     // -- Compose buffer ----------------------------------------------
 
     /// Opens a compose buffer in a strip under the current pane.
@@ -14819,14 +14162,15 @@ impl App {
 
         // A feature's text (the agenda's, Jira's) -- no forge involved. A
         // description may legitimately be cleared.
-        if let ComposePurpose::Feature { service, kind, arg, allow_empty, .. } = &purpose {
+        if let ComposePurpose::Feature { feature, data, allow_empty, .. } = &purpose {
             if body.is_empty() && !allow_empty {
                 self.set_error("nothing written yet -- q discards this instead".to_string());
                 return;
             }
-            self.close_compose();
-            if let Err(e) = self.call_service(service, &serde_json::json!({ "kind": kind, "arg": arg, "body": body })) {
-                self.set_error(e);
+            let compose = self.features.specs().find(|spec| spec.id == *feature).and_then(|spec| spec.compose);
+            match compose {
+                Some(compose) => compose(self, data, body),
+                None => self.set_error(format!("{feature} isn't on -- nothing to send this to")),
             }
             self.wake_caret();
             return;
@@ -14841,16 +14185,6 @@ impl App {
         // A commit message goes to `git`, not to a forge -- so it needs
         // none of the client below, and works with no Merge Requests
         // view open at all.
-        if matches!(purpose, ComposePurpose::ReviewPending { .. } | ComposePurpose::ReviewReply { .. } | ComposePurpose::ReviewSummary { .. }) {
-            self.review_compose(purpose, body);
-            self.wake_caret();
-            return;
-        }
-        if let ComposePurpose::RequestDescription { page } = &purpose {
-            self.request_description(*page, body);
-            self.wake_caret();
-            return;
-        }
         if let ComposePurpose::RebaseMessage { page, hash } = &purpose {
             self.git_rebase_message(*page, hash.clone(), body);
             self.wake_caret();
@@ -14875,49 +14209,7 @@ impl App {
                 Err(err) => self.set_error(format!("commit failed: {err} -- the message is still here")),
             }
             self.wake_caret();
-            return;
         }
-
-        let repo_root = match self.features.review().session.as_ref() {
-            Some(session) => session.repo_root.clone(),
-            None => {
-                self.set_error("the Merge Requests view was closed -- nothing to send this to".to_string());
-                return;
-            }
-        };
-        let client = match self.forge_client(&repo_root) {
-            Ok(client) => client,
-            Err(err) => {
-                self.set_error(err);
-                return;
-            }
-        };
-        let (number, result) = match &purpose {
-            ComposePurpose::Reply { number, discussion } => (*number, fenix_forge::Forge::reply(client.as_ref(), *number, discussion, &body)),
-            ComposePurpose::NewComment { number, position } => {
-                (*number, fenix_forge::Forge::comment_on_line(client.as_ref(), *number, position, &body))
-            }
-            ComposePurpose::CommitMessage { .. }
-            | ComposePurpose::GitCommit { .. }
-            | ComposePurpose::RebaseMessage { .. }
-            | ComposePurpose::ReviewPending { .. }
-            | ComposePurpose::ReviewReply { .. }
-            | ComposePurpose::ReviewSummary { .. }
-            | ComposePurpose::RequestDescription { .. }
-            | ComposePurpose::Feature { .. } => unreachable!("handled above"),
-        };
-        match result {
-            Ok(()) => {
-                // Only torn down on success: a failed send leaves the
-                // draft in the buffer, which is the difference between
-                // retrying and retyping.
-                self.close_compose();
-                self.set_message(format!("posted to !{number}"));
-                self.forge_select(number);
-            }
-            Err(err) => self.set_error(format!("couldn't post that: {err} -- the draft is still here")),
-        }
-        self.wake_caret();
     }
 
     // -- Merge view (`SPC g x`) --------------------------------------------
@@ -15775,8 +15067,7 @@ impl App {
             self.history_close();
         } else if self.merge_session.as_ref().is_some_and(|s| s.workspace_index == here) {
             self.merge_close();
-        } else if self.features.review().session.as_ref().is_some_and(|s| s.workspace_index == here) {
-            self.forge_close();
+        } else if self.close_feature_view(here) {
         } else if self.git_session.as_ref().is_some_and(|s| panes.contains(&s.status_pane)) {
             self.git_session_close();
         } else if self.is_page_buffer(self.focused_buffer_id()) {
@@ -19129,70 +18420,10 @@ impl App {
                 _ => {}
             }
         }
-        // The Merge Requests view's own keys.
-        if let Some((on_list, on_detail, on_review)) = self.features.review().session.as_ref().map(|s| {
-            let focused = self.focused_pane_id();
-            (focused == s.list_pane, focused == s.detail_pane, focused == s.review_pane)
-        }) {
-            if (on_list || on_detail || on_review) && keypress.mods == Mods::default() {
-                // Any key that isn't a second `m` cancels an armed
-                // merge -- the same "arm, then anything else backs out"
-                // the Git panel's destructive actions already use.
-                if keypress.code != KeyCode::Char('m') {
-                    self.forge_disarm_merge();
-                }
-                match keypress.code {
-                    KeyCode::Char('r') if on_review => {
-                        self.forge_reply_at_cursor();
-                        return;
-                    }
-                    KeyCode::Char('R') if on_review => {
-                        self.forge_resolve_at_cursor();
-                        return;
-                    }
-                    KeyCode::Char('C') if on_review => {
-                        self.forge_comment_at_cursor();
-                        return;
-                    }
-                    KeyCode::Char('A') => {
-                        self.forge_toggle_approval();
-                        return;
-                    }
-                    KeyCode::Char('m') => {
-                        self.forge_merge_request();
-                        return;
-                    }
-                    KeyCode::Named(fenix_keymap::NamedKey::Enter) if on_list => {
-                        self.forge_open_at_cursor();
-                        return;
-                    }
-                    KeyCode::Char('f') => {
-                        self.forge_cycle_filter();
-                        return;
-                    }
-                    KeyCode::Char('c') => {
-                        self.forge_checkout_selected();
-                        return;
-                    }
-                    KeyCode::Char('u') => {
-                        self.forge_refresh_list();
-                        return;
-                    }
-                    KeyCode::Char('x') => {
-                        self.git_menu_open = true;
-                        self.wake_caret();
-                        return;
-                    }
-                    KeyCode::Char(c) if c.is_ascii_digit() => {
-                        if let Some(pane) = self.forge_pane_by_number(c.to_digit(10).unwrap_or(0)) {
-                            self.windows_mut().focus(pane);
-                            self.wake_caret();
-                        }
-                        return;
-                    }
-                    _ => {}
-                }
-            }
+        // A feature's own panes' keys (the Merge Requests view's).
+        let pane_keys: Vec<_> = self.features.specs().filter_map(|spec| spec.pane_keys).collect();
+        if pane_keys.into_iter().any(|keys| keys(self, keypress)) {
+            return;
         }
 
         // The Merge view's own keys. `o`/`t` mean the same thing in both
@@ -20909,32 +20140,8 @@ impl App {
                 return self.git_menu_popup_at(bindings, window_width, modeline_top);
             }
         }
-        if let Some(session) = &self.features.review().session {
-            let focused = self.focused_pane_id();
-            if focused == session.list_pane || focused == session.detail_pane || focused == session.review_pane {
-                let mut bindings: Vec<(&str, &str)> = vec![
-                    ("1/2/3", "go to pane"),
-                    ("Enter", "show this one"),
-                    ("f", "cycle filter"),
-                    ("c", "check it out locally"),
-                    ("u", "refresh"),
-                    ("A", "approve / withdraw"),
-                    ("m", "merge (press twice)"),
-                ];
-                if focused == session.review_pane {
-                    // Only offered where they mean something: these act
-                    // on a diff line or a thread, and neither exists in
-                    // the other two panes.
-                    bindings.extend([
-                        ("C", "comment on this line"),
-                        ("r", "reply to this thread"),
-                        ("R", "resolve / reopen"),
-                        ("Tab", "fold this file"),
-                        ("]/[", "next/prev hunk"),
-                    ]);
-                }
-                return self.git_menu_popup_at(&bindings, window_width, modeline_top);
-            }
+        if let Some(bindings) = self.features.iter().find_map(|feature| feature.menu_bindings(self)) {
+            return self.git_menu_popup_at(&bindings, window_width, modeline_top);
         }
         if let Some(session) = &self.merge_session {
             let focused = self.focused_pane_id();
@@ -34301,6 +33508,35 @@ configure_board stm32
         fenix_forge::DiffRefs { base_sha: "b1".to_string(), head_sha: "h1".to_string(), start_sha: "s1".to_string() }
     }
 
+    /// The review's own value in the open compose pane.
+    use review_host::ForgeDetail;
+
+    fn review_compose_of(app: &App) -> review_host::ReviewCompose {
+        let Some(ComposePurpose::Feature { data, .. }) = app.compose.as_ref().map(|c| &c.purpose) else { panic!("a feature's compose pane") };
+        data.get::<review_host::ReviewCompose>().cloned().expect("the review's")
+    }
+
+    /// What the core asks the Merge Requests view without naming it:
+    /// whether its panes have focus, its `x` menu, its keys, and closing
+    /// it with `SPC g q`.
+    #[test]
+    fn the_core_reaches_the_merge_requests_view_through_its_hooks() {
+        let (_dir, mut app) = reviewing("review_hooks");
+        let list = app.features.review().session.as_ref().unwrap().list_pane;
+        app.windows_mut().focus(list);
+        assert!(app.features.iter().any(|feature| feature.holds_focused_pane(&app)));
+        let menu = app.features.iter().find_map(|feature| feature.menu_bindings(&app)).expect("its x menu");
+        assert!(menu.contains(&("m", "merge (press twice)")) && !menu.iter().any(|(k, _)| *k == "C"), "the review pane's keys only there: {menu:?}");
+        let filter = app.features.review().session.as_ref().unwrap().filter;
+        let keys = REVIEW_SPEC.pane_keys.expect("its pane keys");
+        assert!(keys(&mut app, KeyPress::char('f')), "f is its");
+        assert_ne!(app.features.review().session.as_ref().unwrap().filter, filter, "f cycled the filter");
+        let here = app.workspaces.active_index();
+        assert!(app.close_feature_view(here));
+        assert!(app.features.review().session.is_none(), "closed");
+        assert!(!keys(&mut app, KeyPress::char('f')), "no view: not its key");
+    }
+
     /// A merge request with one changed file and one thread on the line
     /// it adds, loaded into the view.
     fn reviewing(name: &str) -> (TempDir, App) {
@@ -34408,7 +33644,7 @@ configure_board stm32
         app.forge_reply_at_cursor();
 
         let compose = app.compose.as_ref().expect("a compose buffer opened");
-        assert_eq!(compose.purpose, ComposePurpose::Reply { number: 42, discussion: "thread-1".to_string() });
+        assert_eq!(review_compose_of(&app), review_host::ReviewCompose::Reply { number: 42, discussion: "thread-1".to_string() });
         // The keys are in the pane title, because a buffer you type
         // prose into has to say how to send it without pressing
         // anything first.
@@ -34424,10 +33660,7 @@ configure_board stm32
 
         app.forge_reply_at_cursor();
 
-        assert_eq!(
-            app.compose.as_ref().unwrap().purpose,
-            ComposePurpose::Reply { number: 42, discussion: "thread-1".to_string() }
-        );
+        assert_eq!(review_compose_of(&app), review_host::ReviewCompose::Reply { number: 42, discussion: "thread-1".to_string() });
     }
 
     #[test]
@@ -34448,7 +33681,7 @@ configure_board stm32
 
         app.forge_comment_at_cursor();
 
-        let ComposePurpose::NewComment { number, position } = app.compose.as_ref().unwrap().purpose.clone() else {
+        let review_host::ReviewCompose::NewComment { number, position } = review_compose_of(&app) else {
             panic!("expected a new-comment compose");
         };
         assert_eq!(number, 42);
@@ -34469,7 +33702,7 @@ configure_board stm32
 
         app.forge_comment_at_cursor();
 
-        let ComposePurpose::NewComment { position, .. } = app.compose.as_ref().unwrap().purpose.clone() else {
+        let review_host::ReviewCompose::NewComment { position, .. } = review_compose_of(&app) else {
             panic!("expected a new-comment compose");
         };
         assert_eq!(position.old_line, Some(1));
@@ -34483,7 +33716,7 @@ configure_board stm32
 
         app.forge_comment_at_cursor();
 
-        let ComposePurpose::NewComment { position, .. } = app.compose.as_ref().unwrap().purpose.clone() else {
+        let review_host::ReviewCompose::NewComment { position, .. } = review_compose_of(&app) else {
             panic!("expected a new-comment compose");
         };
         assert_eq!(position.old_line, Some(2));
@@ -34567,7 +33800,7 @@ configure_board stm32
         app.forge_comment_at_cursor();
 
         assert!(!app.windows().windows().contains(&first), "the first pane is gone");
-        assert!(matches!(app.compose.as_ref().unwrap().purpose, ComposePurpose::NewComment { .. }));
+        assert!(matches!(review_compose_of(&app), review_host::ReviewCompose::NewComment { .. }));
     }
 
     #[test]

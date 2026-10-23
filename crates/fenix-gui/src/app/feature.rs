@@ -171,6 +171,18 @@ pub(crate) struct FeatureSpec {
     /// What it does on the housekeeping tick, in place (the agenda
     /// reading its file again when something else changed it).
     pub on_tick: Option<fn(&mut App)>,
+    /// What its compose pane wrote (`ComposePurpose::Feature`), with the
+    /// value it opened the pane with.
+    pub compose: Option<fn(&mut App, &ComposeData, String)>,
+    /// A key while one of its own panes has focus, ahead of the core's
+    /// pane keys: `true` when it took it (the Merge Requests view).
+    pub pane_keys: Option<fn(&mut App, KeyPress) -> bool>,
+    /// Closes its view in workspace `workspace` (`SPC g q`): `true` when
+    /// it had one there.
+    pub close_view: Option<fn(&mut App, usize) -> bool>,
+    /// The Git status page `id` was refreshed: what it adds to the page
+    /// (the review: the branch's pull request, in the header).
+    pub git_status: Option<fn(&mut App, BufferId)>,
 }
 
 /// How a feature resolves the reading view's `[[links]]` (the notebook's
@@ -479,6 +491,10 @@ pub(crate) trait Feature: Any {
     /// Extra modeline text after the file name (Arduino's board and
     /// port, the agenda's running clock).
     fn modeline_indicator(&self, _app: &App) -> Option<String> {
+        None
+    }
+    /// The `x` menu for its focused pane: what the keys there do.
+    fn menu_bindings(&self, _app: &App) -> Option<Vec<(&'static str, &'static str)>> {
         None
     }
     /// What it's busy with, for the modeline's activity (the agenda's
@@ -971,6 +987,20 @@ impl App {
     pub(crate) fn page_project(&self) -> Option<PathBuf> {
         let id = self.focused_buffer_id();
         self.features.iter().find_map(|f| f.page_project(self, id))
+    }
+
+    /// The Git status page `id` was refreshed: each feature adds to it.
+    pub(crate) fn git_status_refreshed(&mut self, id: BufferId) {
+        let hooks: Vec<_> = self.features.specs().filter_map(|spec| spec.git_status).collect();
+        for hook in hooks {
+            hook(self, id);
+        }
+    }
+
+    /// `SPC g q` in workspace `here`: a feature's view there closed.
+    pub(crate) fn close_feature_view(&mut self, here: usize) -> bool {
+        let closes: Vec<_> = self.features.specs().filter_map(|spec| spec.close_view).collect();
+        closes.into_iter().any(|close| close(self, here))
     }
 
     pub(crate) fn with_feature_id<R>(

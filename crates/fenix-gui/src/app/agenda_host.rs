@@ -129,6 +129,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         on_start: Some(|app| app.agenda_sync_start()),
         before_key: Some(|app| app.agenda_note_activity()),
         on_tick: Some(|app| app.reload_agenda_if_changed()),
+        compose: Some(compose),
+        pane_keys: None,
+        close_view: None,
+        git_status: None,
     }
 };
 
@@ -1107,14 +1111,42 @@ impl App {
     }
 }
 
+/// What the agenda writes in the compose pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TaskCompose {
+    /// A task's description, saved and, on a linked task, sent to Jira.
+    Description(TaskId),
+    /// A Jira comment on a linked task, queued like any other change.
+    Comment(TaskId),
+}
+
 /// A task's description or Jira comment, written in the compose pane and
-/// handed back to `agenda.compose`.
+/// handed back to `compose`.
 pub(super) fn task_compose(kind: &'static str, task: TaskId) -> ComposePurpose {
-    let (what, verb, allow_empty) = match kind {
-        "description" => ("Description", "save", true),
-        _ => ("Jira comment", "post", false),
+    let (data, what, verb, allow_empty) = match kind {
+        "description" => (TaskCompose::Description(task), "Description", "save", true),
+        _ => (TaskCompose::Comment(task), "Jira comment", "post", false),
     };
-    ComposePurpose::Feature { service: "agenda.compose", kind, arg: task.0.to_string(), what: what.to_string(), verb, allow_empty }
+    ComposePurpose::Feature { feature: SPEC.id, data: ComposeData::new(data), what: what.to_string(), verb, allow_empty }
+}
+
+/// The compose pane's text, kept on its task.
+fn compose(app: &mut App, data: &ComposeData, body: String) {
+    let Some(&data) = data.get::<TaskCompose>() else { return };
+    app.close_compose();
+    match data {
+        TaskCompose::Description(task) => {
+            if app.features.agenda().store.task(task).is_some_and(|t| t.description != body) {
+                app.features.agenda_mut().store.set_description(task, body.clone());
+                app.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::SetDescription(body));
+                app.agenda_after_edit();
+            }
+        }
+        TaskCompose::Comment(task) => {
+            app.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::AddComment(body));
+            app.agenda_after_edit();
+        }
+    }
 }
 
 /// The agenda's status as the protocol writes it.
@@ -1164,33 +1196,8 @@ fn control_tasks(store: &fenix_agenda::AgendaStore, params: &fenix_control::prot
     }
 }
 
-/// What the agenda offers others (the compose pane, the control channel).
-static SERVICES: [super::feature::Service; 5] = [
-    // `{kind: "description" | "comment", arg: task id, body}` -> kept on
-    // the task, and on a linked one queued for Jira (`task_compose`).
-    super::feature::Service {
-        name: "agenda.compose",
-        call: super::feature::ServiceCall::Mut(|app, payload| {
-            let call: super::ComposeCall = serde_json::from_str(payload).map_err(|e| format!("an agenda call: {e}"))?;
-            let task = TaskId(call.arg.parse().map_err(|_| format!("no agenda task {}", call.arg))?);
-            let body = call.body;
-            match call.kind.as_str() {
-                "description" => {
-                    if app.features.agenda().store.task(task).is_some_and(|t| t.description != body) {
-                        app.features.agenda_mut().store.set_description(task, body.clone());
-                        app.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::SetDescription(body));
-                        app.agenda_after_edit();
-                    }
-                }
-                "comment" => {
-                    app.features.agenda_mut().store.enqueue(task, fenix_agenda::OpKind::AddComment(body));
-                    app.agenda_after_edit();
-                }
-                other => return Err(format!("nothing to write on a task called {other}")),
-            }
-            Ok(String::new())
-        }),
-    },
+/// What the agenda offers others (the control channel).
+static SERVICES: [super::feature::Service; 4] = [
     // `fenix/agenda.tasks`'s params -> its result: the tasks not
     // archived, in board order, only those in `status` when given.
     super::feature::Service {

@@ -181,7 +181,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
             }
         }),
         settings: &SETTINGS,
-        services: &SERVICES,
+        services: &[],
         // Its sync for the agenda.
         contributes: &[
             super::feature::Contribution { point: super::agenda_host::AGENDA_SYNC, value: &super::agenda_sync::SYNC },
@@ -200,6 +200,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         on_start: None,
         before_key: None,
         on_tick: None,
+        compose: Some(compose),
+        pane_keys: None,
+        close_view: None,
+        git_status: None,
     }
 };
 
@@ -782,46 +786,47 @@ impl App {
     }
 }
 
-/// An issue's description or a new comment on it, written in the compose
-/// pane and handed back to `jira.compose`.
-pub(super) fn issue_compose(kind: &'static str, key: String) -> ComposePurpose {
-    let (what, verb, allow_empty) = match kind {
-        "description" => (format!("{key} description"), "save", true),
-        _ => (format!("Comment on {key}"), "post", false),
-    };
-    ComposePurpose::Feature { service: "jira.compose", kind, arg: key, what, verb, allow_empty }
-}
-
 /// The Jira token's check on the settings page: who it signs in as.
 static SECRET_CHECK: super::settings_host::SecretCheck = super::settings_host::SecretCheck {
     secret: fenix_config::Secret::Jira,
     check: |server, token| fenix_jira::JiraClient::new(server, token).myself(),
 };
 
-/// What Jira offers others.
-static SERVICES: [super::feature::Service; 1] = [
-    // `{kind: "description" | "comment", arg: issue key, body}` -> sent
-    // to Jira (the compose pane's `issue_compose`).
-    super::feature::Service {
-        name: "jira.compose",
-        call: super::feature::ServiceCall::Mut(|app, payload| {
-            let call: super::ComposeCall = serde_json::from_str(payload).map_err(|e| format!("a Jira call: {e}"))?;
-            let (key, body) = (call.arg, call.body);
-            match call.kind.as_str() {
-                "description" => app.spawn_jira_action(move |client| {
-                    client.update_description(&key, &body)?;
-                    Ok(format!("Description updated for {key}"))
-                }),
-                "comment" => app.spawn_jira_action(move |client| {
-                    client.add_comment(&key, &body)?;
-                    Ok(format!("Comment added to {key}"))
-                }),
-                other => return Err(format!("nothing to write to Jira called {other}")),
-            }
-            Ok(String::new())
+/// What Jira writes in the compose pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum IssueCompose {
+    /// The Jira page's `E`: an issue's description.
+    Description(String),
+    /// The Jira page's `C`: a new comment on an issue.
+    Comment(String),
+}
+
+/// An issue's description or a new comment on it, written in the compose
+/// pane and handed back to `compose`.
+pub(super) fn issue_compose(kind: &'static str, key: String) -> ComposePurpose {
+    let (what, verb, allow_empty) = match kind {
+        "description" => (format!("{key} description"), "save", true),
+        _ => (format!("Comment on {key}"), "post", false),
+    };
+    let data = if kind == "description" { IssueCompose::Description(key) } else { IssueCompose::Comment(key) };
+    ComposePurpose::Feature { feature: SPEC.id, data: ComposeData::new(data), what, verb, allow_empty }
+}
+
+/// The compose pane's text, sent to Jira.
+fn compose(app: &mut App, data: &ComposeData, body: String) {
+    let Some(data) = data.get::<IssueCompose>().cloned() else { return };
+    app.close_compose();
+    match data {
+        IssueCompose::Description(key) => app.spawn_jira_action(move |client| {
+            client.update_description(&key, &body)?;
+            Ok(format!("Description updated for {key}"))
         }),
-    },
-];
+        IssueCompose::Comment(key) => app.spawn_jira_action(move |client| {
+            client.add_comment(&key, &body)?;
+            Ok(format!("Comment added to {key}"))
+        }),
+    }
+}
 
 #[cfg(test)]
 mod tests {
