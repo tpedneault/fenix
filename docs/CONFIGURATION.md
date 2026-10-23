@@ -196,10 +196,11 @@ keeping in yours.
 
 An extension is a `.fenixext` file -- a zip with an `extension.toml` at
 its root -- or, while you make one, the folder it's made from. For now
-Fenix installs extensions of data: themes, snippets and project
-templates, in `themes/`, `snippets/` and `templates/` folders laid out
-like your own. They're read beside the built-in ones and below yours:
-your theme, snippet or template of the same name wins.
+Fenix installs extensions of data: themes, snippets, project templates
+and keys, in `themes/`, `snippets/`, `templates/` and `keymaps/` folders
+laid out like your own (a keymap is a `.toml` of `[[leader]]` entries,
+as in `keybindings.toml`). They're read beside the built-in ones and
+below yours: your theme, snippet, template or key of the same name wins.
 
 ```toml
 [extension]

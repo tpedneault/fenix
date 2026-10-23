@@ -208,13 +208,32 @@ pub fn reload_leader() -> Vec<String> {
     let mut t = build_leader(&crate::app::feature::enabled);
     let registry = crate::commands::CommandRegistry::with_builtins();
     let known = |id: &str| registry.get(id).is_some();
-    let (bound, problems) = match user_keymap_path() {
+    // The installed extensions' keymaps, then yours over them.
+    let mut problems = Vec::new();
+    for path in extension_keymaps() {
+        match read_user_keymap(&path) {
+            Ok(Some(keys)) => {
+                let (_, wrong) = apply_user_keys(&mut t, keys, &known);
+                problems.extend(wrong.into_iter().map(|w| format!("{}: {w}", path.display())));
+            }
+            Ok(None) => {}
+            Err(problem) => problems.push(format!("{}: {problem}", path.display())),
+        }
+    }
+    let bound = match user_keymap_path() {
         Some(path) => match read_user_keymap(&path) {
-            Ok(Some(user)) => apply_user_keys(&mut t, user, &known),
-            Ok(None) => (Vec::new(), Vec::new()),
-            Err(problem) => (Vec::new(), vec![problem]),
+            Ok(Some(user)) => {
+                let (bound, wrong) = apply_user_keys(&mut t, user, &known);
+                problems.extend(wrong);
+                bound
+            }
+            Ok(None) => Vec::new(),
+            Err(problem) => {
+                problems.push(problem);
+                Vec::new()
+            }
         },
-        None => (Vec::new(), Vec::new()),
+        None => Vec::new(),
     };
     *USER_KEYS.lock().unwrap_or_else(|p| p.into_inner()) = (bound, problems.clone());
     *LEADER.write().unwrap_or_else(|p| p.into_inner()) = Some(Box::leak(Box::new(t)));
@@ -223,6 +242,18 @@ pub fn reload_leader() -> Vec<String> {
 
 /// Your keybindings: `keybindings.toml`, beside `settings.toml`. None
 /// in tests, which mustn't read whoever runs them's file.
+/// The installed extensions' keymap files (`keymaps/*.toml`), sorted.
+fn extension_keymaps() -> Vec<std::path::PathBuf> {
+    let mut files: Vec<std::path::PathBuf> = crate::installed::data_dirs("keymaps")
+        .into_iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flat_map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml")))
+        .collect();
+    files.sort();
+    files
+}
+
 pub fn user_keymap_path() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
@@ -876,6 +907,23 @@ mod tests {
         m.feed(KeyPress::char(' '));
         m.feed(KeyPress::char('f'));
         assert!(matches!(m.feed(KeyPress::char('n')), fenix_keymap::Step::Matched(&"embedded.new_sketch")));
+    }
+
+    /// An installed extension's keymap goes over Fenix's, and yours over
+    /// it -- `reload_leader`'s order -- with only yours counted as yours.
+    #[test]
+    fn an_extensions_keys_sit_between_fenixs_and_yours() {
+        let mut t = build_leader(&|_| true);
+        let leak = |text: &str| -> &'static KeymapData { Box::leak(Box::new(toml::from_str(text).unwrap())) };
+        let known = |id: &str| id == "file.save" || id == "agenda.open";
+        let extension = leak("[[leader]]\nkeys = \"SPC o z\"\ncommand = \"file.save\"\n\n[[leader]]\nkeys = \"SPC o y\"\ncommand = \"agenda.open\"\n");
+        apply_user_keys(&mut t, extension, &known);
+        let yours = leak("[[leader]]\nkeys = \"SPC o z\"\ncommand = \"agenda.open\"\n");
+        let (bound, _) = apply_user_keys(&mut t, yours, &known);
+        let seq = |text: &str| parse_keys(text).unwrap();
+        assert_eq!(t.get(&seq("SPC o y")), Some(&"agenda.open"), "the extension's");
+        assert_eq!(t.get(&seq("SPC o z")), Some(&"agenda.open"), "yours over the extension's");
+        assert_eq!(bound.iter().map(|b| b.keys.as_str()).collect::<Vec<_>>(), ["SPC o z"]);
     }
 
     /// Your keys go over Fenix's: a new binding, one moved to another
