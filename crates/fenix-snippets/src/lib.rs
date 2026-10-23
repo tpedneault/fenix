@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Source {
     BuiltIn,
+    /// An installed extension's.
+    Extension,
     User,
     Project,
 }
@@ -21,6 +23,7 @@ impl Source {
     pub fn label(self) -> &'static str {
         match self {
             Source::BuiltIn => "built-in",
+            Source::Extension => "an extension's",
             Source::User => "yours",
             Source::Project => "project",
         }
@@ -151,7 +154,16 @@ impl Catalog {
     /// user's in `user`, the project's in `project`. Each folder holds a
     /// folder per language (`tcl/proc.snippet`), and loose files too.
     pub fn layers(builtin: bool, user: Option<&Path>, project: Option<&Path>) -> Self {
+        Self::layers_with(builtin, &[], user, project)
+    }
+
+    /// `layers`, with the installed extensions' snippet folders between
+    /// the built-in ones and yours.
+    pub fn layers_with(builtin: bool, extensions: &[std::path::PathBuf], user: Option<&Path>, project: Option<&Path>) -> Self {
         let mut catalog = if builtin { Self::bundled() } else { Self::default() };
+        for dir in extensions {
+            catalog.read_layer(dir, Source::Extension);
+        }
         if let Some(dir) = user {
             catalog.read_layer(dir, Source::User);
         }

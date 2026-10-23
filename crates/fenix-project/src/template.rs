@@ -98,6 +98,8 @@ use crate::tools::{CommandSpec, ProjectTools};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Origin {
     BuiltIn,
+    /// An installed extension's, from its `templates/` folder.
+    Extension(PathBuf),
     User(PathBuf),
     Project(PathBuf),
 }
@@ -106,7 +108,7 @@ impl Origin {
     pub fn describe(&self) -> String {
         match self {
             Origin::BuiltIn => "built-in".to_string(),
-            Origin::User(path) | Origin::Project(path) => path.display().to_string(),
+            Origin::Extension(path) | Origin::User(path) | Origin::Project(path) => path.display().to_string(),
         }
     }
 }
@@ -1222,6 +1224,12 @@ pub fn load_templates_in(dir: &Path, origin: impl Fn(PathBuf) -> Origin) -> Vec<
 /// current project's own `.fenix/templates/`. Broken templates come back
 /// as messages, not a failure of the whole list.
 pub fn available_templates(user_dir: Option<&Path>, project_root: Option<&Path>) -> (Vec<Template>, Vec<String>) {
+    available_templates_with(&[], user_dir, project_root)
+}
+
+/// `available_templates`, with the installed extensions' template folders
+/// between the built-in ones and yours.
+pub fn available_templates_with(extension_dirs: &[PathBuf], user_dir: Option<&Path>, project_root: Option<&Path>) -> (Vec<Template>, Vec<String>) {
     let mut templates = builtin_templates();
     let mut errors = Vec::new();
     let mut add = |result: Result<Template, String>, templates: &mut Vec<Template>| match result {
@@ -1231,6 +1239,11 @@ pub fn available_templates(user_dir: Option<&Path>, project_root: Option<&Path>)
         }
         Err(e) => errors.push(e),
     };
+    for dir in extension_dirs {
+        for result in load_templates_in(dir, Origin::Extension) {
+            add(result, &mut templates);
+        }
+    }
     if let Some(dir) = user_dir {
         for result in load_templates_in(dir, Origin::User) {
             add(result, &mut templates);
@@ -1520,5 +1533,22 @@ tm_time = \"cuc 4.2\""), "{profile}");
         assert!(matches!(empty[0].origin, Origin::User(_)));
         assert_eq!(errors.len(), 1);
         assert!(errors[0].starts_with("broken:"));
+    }
+
+    /// An installed extension's template sits between the built-in ones
+    /// and yours: it shadows a built-in one, and yours shadows it.
+    #[test]
+    fn an_extensions_template_sits_between_the_builtin_ones_and_yours() {
+        let ext = TempDir::new("template_ext");
+        ext.write("empty/template.toml", "[template]\nname = \"Acme empty\"\nkind = \"other\"\n");
+        ext.write("acme/template.toml", "[template]\nname = \"Acme\"\nkind = \"other\"\n");
+        let (templates, _) = available_templates_with(&[ext.path().to_path_buf()], None, None);
+        let found = |id: &str| templates.iter().find(|t| t.id == id).map(|t| (t.name.clone(), matches!(t.origin, Origin::Extension(_))));
+        assert_eq!(found("empty"), Some(("Acme empty".to_string(), true)));
+        assert_eq!(found("acme"), Some(("Acme".to_string(), true)));
+        let user = TempDir::new("template_ext_user");
+        user.write("empty/template.toml", "[template]\nname = \"Mine\"\nkind = \"other\"\n");
+        let (templates, _) = available_templates_with(&[ext.path().to_path_buf()], Some(user.path()), None);
+        assert_eq!(templates.iter().find(|t| t.id == "empty").map(|t| t.name.as_str()), Some("Mine"));
     }
 }

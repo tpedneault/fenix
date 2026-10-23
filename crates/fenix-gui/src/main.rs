@@ -35,6 +35,7 @@ mod clipboard;
 mod commands;
 mod completion;
 mod console;
+mod installed;
 mod dashboard;
 mod extensions_page;
 mod page;
@@ -104,6 +105,34 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if console::requested(&args) {
         console::open();
+    }
+
+    // `--install-extension` and friends change what's installed and
+    // exit: no window, no hand-off to a running Fenix.
+    match installed::request(&args) {
+        Ok(Some(request)) => {
+            console::open();
+            let Some(store) = fenix_extensions::Store::current() else {
+                eprintln!("fenix: no folder to keep extensions in");
+                std::process::exit(1);
+            };
+            match installed::run(&request, &store) {
+                Ok(said) => {
+                    println!("{said}");
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("fenix: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            console::open();
+            eprintln!("fenix: {e}");
+            std::process::exit(2);
+        }
     }
 
     profile::launch_mark("main");

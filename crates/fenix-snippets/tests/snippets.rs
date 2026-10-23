@@ -303,3 +303,19 @@ fn a_selection_becomes_a_snippet_that_inserts_it_as_it_was() {
     assert_eq!(fenix_snippets::folder_for(&["*".to_string()]), "all");
     assert_eq!(fenix_snippets::folder_for(&["tcl".to_string(), "c".to_string()]), "tcl");
 }
+
+/// An installed extension's snippets sit between the built-in ones and
+/// yours.
+#[test]
+fn an_extensions_snippets_sit_between_the_builtin_ones_and_yours() {
+    use fenix_snippets::{Catalog, Source};
+    let ext = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(ext.path().join("tcl")).unwrap();
+    std::fs::write(ext.path().join("tcl").join("acme.snippet"), "# key: acmeproc\n# --\nproc acme {} {}\n").unwrap();
+    let catalog = Catalog::layers_with(true, &[ext.path().to_path_buf()], None, None);
+    assert_eq!(catalog.matching("acmeproc", "tcl").map(|s| s.source), Some(Source::Extension));
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(user.path().join("acme.snippet"), "# key: acmeproc\n# scope: tcl\n# --\nmine\n").unwrap();
+    let catalog = Catalog::layers_with(true, &[ext.path().to_path_buf()], Some(user.path()), None);
+    assert_eq!(catalog.matching("acmeproc", "tcl").map(|s| s.source), Some(Source::User), "yours wins");
+}

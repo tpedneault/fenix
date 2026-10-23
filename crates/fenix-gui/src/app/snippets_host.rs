@@ -29,7 +29,7 @@ impl App {
     /// Every layer: the built-in snippets (unless they're turned off),
     /// yours, and the focused project's.
     pub(super) fn snippet_layers(&self, project: Option<&Path>) -> Catalog {
-        Catalog::layers(self.config.snippets_builtin.unwrap_or(true), Some(&self.snippets_dir), project)
+        Catalog::layers_with(self.config.snippets_builtin.unwrap_or(true), &crate::installed::data_dirs("snippets"), Some(&self.snippets_dir), project)
     }
 
     /// The page's rows, from `catalog`, previewed for the file at `path`.

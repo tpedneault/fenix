@@ -520,17 +520,23 @@ fn library() -> &'static Library {
                 Err(e) => lib.problems.push(format!("built-in {file}: {e}")),
             }
         }
-        // Yours, from `themes/` in the settings folder: one with the same
-        // name as a shipped one takes its place. Tests use the shipped
-        // ones only.
-        let dir = if cfg!(test) { None } else { fenix_storage::paths::themes_dir() };
-        for (file, result) in dir.map(|d| read_dir_themes(&d)).unwrap_or_default() {
-            match result {
-                Ok(theme) => match lib.themes.iter().position(|t| t.name.eq_ignore_ascii_case(theme.name)) {
-                    Some(i) => lib.themes[i] = Box::leak(Box::new(theme)),
-                    None => lib.themes.push(Box::leak(Box::new(theme))),
-                },
-                Err(e) => lib.problems.push(format!("themes/{file}: {e}")),
+        // The installed extensions' (`installed::data_dirs`), then yours,
+        // from `themes/` in the settings folder: one with the same name as
+        // a theme before it takes its place. Tests use the shipped ones
+        // only.
+        let mut dirs: Vec<(String, std::path::PathBuf)> = crate::installed::data_dirs("themes").into_iter().map(|d| (format!("{}/", d.display()), d)).collect();
+        if !cfg!(test) {
+            dirs.extend(fenix_storage::paths::themes_dir().map(|d| ("themes/".to_string(), d)));
+        }
+        for (shown, dir) in dirs {
+            for (file, result) in read_dir_themes(&dir) {
+                match result {
+                    Ok(theme) => match lib.themes.iter().position(|t| t.name.eq_ignore_ascii_case(theme.name)) {
+                        Some(i) => lib.themes[i] = Box::leak(Box::new(theme)),
+                        None => lib.themes.push(Box::leak(Box::new(theme))),
+                    },
+                    Err(e) => lib.problems.push(format!("{shown}{file}: {e}")),
+                }
             }
         }
         lib
