@@ -161,6 +161,14 @@ pub(crate) struct FeatureSpec {
     pub wake: Option<fn(&mut App, Instant) -> Option<Instant>>,
     /// What `[[links]]` in Markdown point to, for the reading view.
     pub links: Option<&'static LinkResolver>,
+    /// What it starts once the editor is up (the agenda's sync).
+    pub on_start: Option<fn(&mut App)>,
+    /// Ahead of every key: `true` when it took this one for itself (the
+    /// agenda asking about a gap with the clock running).
+    pub before_key: Option<fn(&mut App) -> bool>,
+    /// What it does on the housekeeping tick, in place (the agenda
+    /// reading its file again when something else changed it).
+    pub on_tick: Option<fn(&mut App)>,
 }
 
 /// How a feature resolves the reading view's `[[links]]` (the notebook's
@@ -466,9 +474,20 @@ pub(crate) trait Feature: Any {
     fn prompt_text(&self) -> Option<String> {
         None
     }
-    /// Extra modeline text after the file name (Arduino's board and port).
-    fn modeline_indicator(&self) -> Option<&str> {
+    /// Extra modeline text after the file name (Arduino's board and
+    /// port, the agenda's running clock).
+    fn modeline_indicator(&self, _app: &App) -> Option<String> {
         None
+    }
+    /// What it's busy with, for the modeline's activity (the agenda's
+    /// sync).
+    fn busy(&self, _app: &App) -> Option<String> {
+        None
+    }
+    /// Open work it knows for a project whose Jira key is `jira`, a line
+    /// each, for the project hub.
+    fn project_work(&self, _app: &App, _jira: &str) -> Vec<String> {
+        Vec::new()
     }
     /// A `Notice`.
     fn notice(&mut self, _app: &mut App, _notice: &Notice) {}

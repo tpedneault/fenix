@@ -617,9 +617,7 @@ impl App {
         if self.task_session.as_ref().is_some_and(|s| s.runner.is_some()) {
             jobs.push("running task".to_string());
         }
-        if let Some(busy) = self.agenda_sync().and_then(|sync| (sync.busy)(self)) {
-            jobs.push(busy);
-        }
+        jobs.extend(self.features.iter().filter_map(|feature| feature.busy(self)));
         for session in self.lsp_sessions.values() {
             if session.capabilities.is_none() {
                 jobs.push(format!("starting {}", session.name));

@@ -104,6 +104,9 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         prompt_key: None,
         wake: None,
         links: None,
+        on_start: None,
+        before_key: None,
+        on_tick: None,
     }
 };
 

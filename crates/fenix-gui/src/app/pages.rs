@@ -1058,8 +1058,6 @@ impl App {
     /// What the hub shows for each known project, before git and the
     /// doctor have reported in.
     fn hub_projects(&self) -> Vec<HubProject> {
-        let open_work: Vec<&fenix_agenda::Task> =
-            self.features.agenda().store.tasks.iter().filter(|t| !t.archived && t.status != fenix_agenda::Status::Done && t.jira_key().is_some()).collect();
         self.known_projects
             .roots()
             .iter()
@@ -1070,8 +1068,7 @@ impl App {
                 p.branch = fenix_project::vcs::git_branch(root);
                 p.jira = fenix_project::meta::jira_key(root);
                 if let Some(key) = &p.jira {
-                    let prefix = format!("{key}-");
-                    p.work = open_work.iter().filter(|t| t.jira_key().is_some_and(|k| k.starts_with(&prefix))).map(|t| format!("{} {}", t.jira_key().unwrap_or_default(), t.title)).collect();
+                    p.work = self.features.iter().flat_map(|feature| feature.project_work(self, key)).collect();
                 }
                 let mut tasks: Vec<String> = fenix_project::tools::ProjectTools::read(root).map(|t| t.tasks.into_keys().collect()).unwrap_or_default();
                 for task in fenix_tasks::discover_tasks(root) {

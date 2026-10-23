@@ -257,6 +257,9 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         prompt_key: Some(|app, key| app.notebook_prompt_key(key)),
         wake: Some(|app, now| app.notebook_autosave(now)),
         links: Some(&LINKS),
+        on_start: None,
+        before_key: None,
+        on_tick: None,
     }
 };
 
