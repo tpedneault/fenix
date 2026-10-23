@@ -33,6 +33,7 @@ use super::mib_host::MibHost;
 use super::notebook_host::NotebookHost;
 use super::pdf_host::PdfHost;
 use super::review_host::ReviewHost;
+#[cfg(feature = "tcl")]
 use super::tcl_host::TclHost;
 use super::vnc_host::VncHost;
 use super::*;
@@ -511,6 +512,7 @@ pub(crate) static BUILTIN_SPECS: &[&FeatureSpec] = &[
     #[cfg(feature = "docker")]
     &super::DOCKER_SPEC,
     &super::EMBEDDED_SPEC,
+    #[cfg(feature = "tcl")]
     &super::TCL_SPEC,
     &super::MIB_SPEC,
     &super::CCSDS_SPEC,
@@ -604,6 +606,7 @@ impl Features {
             #[cfg(feature = "docker")]
             Some(Box::new(DockerHost::default())),
             Some(Box::new(EmbeddedHost::default())),
+            #[cfg(feature = "tcl")]
             Some(Box::new(TclHost::default())),
             Some(Box::new(MibHost::default())),
             Some(Box::new(CcsdsHost::default())),

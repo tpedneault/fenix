@@ -17,7 +17,9 @@ pub(crate) use agenda_host::SPEC as AGENDA_SPEC;
 mod jira_host;
 pub(crate) use jira_host::SPEC as JIRA_SPEC;
 mod embedded_host;
+#[cfg(feature = "tcl")]
 mod tcl_host;
+#[cfg(feature = "tcl")]
 pub(crate) use tcl_host::SPEC as TCL_SPEC;
 pub(crate) use embedded_host::SPEC as EMBEDDED_SPEC;
 mod local_leader;
@@ -8535,15 +8537,6 @@ impl App {
             self.request_lsp_completion(prefix_start, None);
         }
         self.completion_scroll = 0;
-    }
-
-    /// The text of the focused buffer's line up to char offset `at` --
-    /// what `tcl::command_words_before` reads the enclosing command's
-    /// leading words from.
-    fn line_before(&self, at: usize) -> String {
-        let buffer = &self.open().buffer;
-        let (line, _) = buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 });
-        (buffer.line_start_char(line)..at).filter_map(|i| buffer.char_at(i)).collect()
     }
 
     /// What the popup would complete at the cursor right now: the
@@ -27948,6 +27941,7 @@ configure_board stm32
         assert!(labels.contains(&"my_custom_proc".to_string()), "expected a ctags-sourced proc, got {labels:?}");
     }
 
+    #[cfg(feature = "tcl")]
     #[test]
     fn a_tcl_tags_scan_landing_refreshes_the_completion_pool() {
         // Hand-built results, standing in for what the background thread
@@ -27965,6 +27959,7 @@ configure_board stm32
         assert!(labels.contains(&"landed_proc".to_string()), "expected the scanned proc, got {labels:?}");
     }
 
+    #[cfg(feature = "tcl")]
     #[test]
     fn a_superseded_tcl_tags_scan_is_dropped() {
         let root = PathBuf::from("/project");

@@ -506,6 +506,17 @@ impl Feature for TclHost {
     }
 }
 
+impl App {
+    /// The text of the focused buffer's line up to char offset `at` --
+    /// what `tcl::command_words_before` reads the enclosing command's
+    /// leading words from.
+    pub(super) fn line_before(&self, at: usize) -> String {
+        let buffer = &self.open().buffer;
+        let (line, _) = buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 });
+        (buffer.line_start_char(line)..at).filter_map(|i| buffer.char_at(i)).collect()
+    }
+}
+
 /// Test-only ways in, under the names the tests have always used.
 #[cfg(test)]
 impl App {

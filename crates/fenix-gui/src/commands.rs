@@ -269,6 +269,7 @@ impl CommandRegistry {
         registry.external("workspace.switch", "Switch to an open workspace by name", |app| app.picker_switch_workspace());
         registry.external("workspace.find", "Open a configured workspace by name, creating it if it isn't already open", |app| app.start_workspace_launcher_picker());
         registry.register("workspace.rename", "Rename the active workspace", cmd_rename_workspace);
+        #[cfg(feature = "tcl")]
         registry.feature(&crate::app::TCL_SPEC);
         registry.register(
             "code.lsp_rename",
