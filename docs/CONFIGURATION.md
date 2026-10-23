@@ -221,9 +221,18 @@ From a terminal (the window doesn't open):
 
 ```text
 fenix --install-extension dusk-1.0.0.fenixext   # or the folder
+fenix --install-extension acme.dusk             # from the registry
 fenix --list-extensions
 fenix --uninstall-extension acme.dusk
 ```
+
+By id, an extension comes from the registry: `index.json` on the
+`registry` branch of `tpedneault/fenix-extensions` (or the mirror
+`extensions.registry` names), with the extensions it needs installed
+first. The index must be signed with the registry key built into Fenix,
+and each package must match the SHA-256 the index gives it; anything
+else is refused before it's written. `extensions.store = false` keeps a
+machine to files.
 
 An install replaces any other version of the same extension, and
 needs its dependencies installed first. It's used from the next start.
@@ -396,6 +405,8 @@ when it's out of date).
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
 | **Extensions** | | | |
 | `extensions.disabled` | a list | none | Built-in extensions that are switched off, by id (fenix.jira, fenix.pdf): their commands, keys, settings and pages aren't there. The Extensions page (SPC h x) switches them. *Needs a restart.* |
+| `extensions.store` | true / false | on | Whether Fenix may look up and download extensions from the registry. Off on a machine that installs only from files (fenix --install-extension x.fenixext). |
+| `extensions.registry` | text | https://raw.githubusercontent.com/tpedneault/fenix-extensions/registry/index.json | Where the registry's index.json is: Fenix's own, or a mirror of it. The index must be signed with Fenix's registry key either way. |
 .
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1844 filtered out; finished in 0.00s
 

@@ -84,6 +84,26 @@ pub fn rows() -> Vec<crate::extensions_page::InstalledRow> {
         .collect()
 }
 
+/// The registry's public key (minisign, base64), built in: an index not
+/// signed with its secret half is refused. Empty until the key is made;
+/// then only installing from a file works.
+pub const REGISTRY_KEY: &str = "";
+
+/// Your settings, read on their own (the command line runs before the
+/// editor's are).
+fn settings() -> Option<fenix_config::Config> {
+    fenix_config::Config::load(fenix_storage::paths::settings_file()?).ok()
+}
+
+/// The registry your settings name, unless they switch the store off.
+fn registry(config: Option<&fenix_config::Config>) -> Result<fenix_extensions::registry::Registry<'static>, String> {
+    if config.and_then(|c| c.bool_value("extensions.store")) == Some(false) {
+        return Err("the store is switched off here (extensions.store) -- install from a file instead".into());
+    }
+    let url = config.and_then(|c| c.text_value("extensions.registry")).filter(|u| !u.trim().is_empty()).unwrap_or(fenix_extensions::registry::DEFAULT_URL);
+    Ok(fenix_extensions::registry::Registry { url: url.to_string(), public_key: REGISTRY_KEY })
+}
+
 /// The flags, as typed.
 pub const INSTALL_FLAG: &str = "--install-extension";
 pub const UNINSTALL_FLAG: &str = "--uninstall-extension";
@@ -108,7 +128,7 @@ pub fn request(args: &[String]) -> Result<Option<Request>, String> {
         };
         let mut value = |what: &str| inline.clone().or_else(|| args.next().cloned()).ok_or_else(|| format!("{flag} needs {what}"));
         match flag {
-            INSTALL_FLAG => return Ok(Some(Request::Install(PathBuf::from(value("a .fenixext file or an extension's folder")?)))),
+            INSTALL_FLAG => return Ok(Some(Request::Install(PathBuf::from(value("a .fenixext file, an extension's folder, or an id from the registry")?)))),
             UNINSTALL_FLAG => return Ok(Some(Request::Uninstall(value("an extension's id")?))),
             LIST_FLAG => return Ok(Some(Request::List)),
             _ => {}
@@ -120,6 +140,14 @@ pub fn request(args: &[String]) -> Result<Option<Request>, String> {
 /// Carries out `request` on `store`: what to print, and whether it went.
 pub fn run(request: &Request, store: &fenix_extensions::Store) -> Result<String, String> {
     match request {
+        // An id, not a file there: from the registry.
+        Request::Install(path) if !path.exists() && path.to_str().is_some_and(fenix_extensions::manifest::valid_id) => {
+            let config = settings();
+            let registry = registry(config.as_ref())?;
+            let id = path.to_str().expect("checked");
+            let done = registry.install(id, store, &fenix_extensions::registry::Http, &release())?;
+            Ok(done.iter().map(|e| format!("Installed {} {} ({}) from the registry.", e.name(), e.version, e.id)).collect::<Vec<_>>().join("\n") + " It's used from the next start.")
+        }
         Request::Install(path) => {
             let installed = store.install(path, &release())?;
             Ok(format!("Installed {} {} ({}). It's used from the next start.", installed.name(), installed.version, installed.id))
@@ -164,6 +192,21 @@ mod tests {
         assert_eq!(request(&args(&["--list-extensions"])), Ok(Some(Request::List)));
         assert_eq!(request(&args(&["a.rs"])), Ok(None));
         assert!(request(&args(&["--install-extension"])).unwrap_err().contains("needs a .fenixext"));
+    }
+
+    #[test]
+    fn the_registrys_default_is_the_settings_default() {
+        assert_eq!(fenix_config::setting("extensions.registry").map(|s| s.default), Some(fenix_extensions::registry::DEFAULT_URL));
+    }
+
+    #[test]
+    fn with_the_store_off_nothing_is_looked_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[extensions]\nstore = false\n").unwrap();
+        let config = fenix_config::Config::load(path).unwrap();
+        assert!(registry(Some(&config)).err().unwrap().contains("extensions.store"));
+        assert_eq!(registry(None).ok().map(|r| r.url), Some(fenix_extensions::registry::DEFAULT_URL.to_string()));
     }
 
     #[test]
