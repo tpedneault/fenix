@@ -135,6 +135,9 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Safe mode is settled before anything reads what's switched on.
+    installed::set_safe_mode(installed::wants_safe_mode(&args));
+
     profile::launch_mark("main");
     // Every feature's settings are part of the schema before any are read.
     app::feature::register_settings();
@@ -163,7 +166,9 @@ fn main() -> anyhow::Result<()> {
     // `FENIX_STANDALONE=1` opts out, for a test instance (usually with
     // its own `FENIX_HOME`, which has its own endpoint anyway) beside a
     // Fenix someone is using.
-    let standalone = std::env::var_os("FENIX_STANDALONE").is_some_and(|v| !v.is_empty() && v != "0");
+    // Safe mode opens a window of its own: a Fenix already running has
+    // its extensions, and handing it the files would keep them.
+    let standalone = std::env::var_os("FENIX_STANDALONE").is_some_and(|v| !v.is_empty() && v != "0") || installed::safe_mode();
     let role = if standalone { ipc::Role::Standalone } else { ipc::negotiate(&invocation) };
     match role {
         ipc::Role::HandedOff => return Ok(()),

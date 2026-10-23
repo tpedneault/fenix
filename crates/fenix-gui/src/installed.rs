@@ -14,10 +14,32 @@ fn release() -> semver::Version {
     semver::Version::parse(RELEASE).expect("a version")
 }
 
+/// `fenix --disable-extensions`: safe mode, the core alone for this run.
+pub const SAFE_MODE_FLAG: &str = "--disable-extensions";
+
+static SAFE_MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Whether this command line asks for safe mode.
+pub fn wants_safe_mode(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == SAFE_MODE_FLAG)
+}
+
+/// Settles safe mode for this run -- in `main`, before anything asks.
+pub fn set_safe_mode(on: bool) {
+    let _ = SAFE_MODE.set(on);
+}
+
+/// Whether this run is in safe mode: no built-in extension switched on
+/// and nothing read from an installed one. Your own settings, themes and
+/// snippets still are.
+pub fn safe_mode() -> bool {
+    SAFE_MODE.get().copied().unwrap_or(false)
+}
+
 /// The switched-on installed extensions' data folders of kind `kind`
-/// (`themes`, `snippets`, `templates`). None in tests.
+/// (`themes`, `snippets`, `templates`). None in tests, or in safe mode.
 pub fn data_dirs(kind: &str) -> Vec<PathBuf> {
-    if cfg!(test) {
+    if cfg!(test) || safe_mode() {
         return Vec::new();
     }
     fenix_extensions::Store::current().map(|store| store.data_dirs(kind)).unwrap_or_default()
@@ -103,6 +125,12 @@ mod tests {
         assert_eq!(request(&args(&["--list-extensions"])), Ok(Some(Request::List)));
         assert_eq!(request(&args(&["a.rs"])), Ok(None));
         assert!(request(&args(&["--install-extension"])).unwrap_err().contains("needs a .fenixext"));
+    }
+
+    #[test]
+    fn safe_mode_is_asked_for_by_its_flag() {
+        assert!(wants_safe_mode(&args(&["--disable-extensions", "a.rs"])));
+        assert!(!wants_safe_mode(&args(&["a.rs", "--console"])));
     }
 
     #[test]

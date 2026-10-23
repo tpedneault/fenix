@@ -53,18 +53,20 @@ pub struct ExtensionsPage {
     pub packs: Vec<Pack>,
     /// The cursor, over the packs then the rows.
     pub focus: usize,
+    /// This run is safe mode: nothing's running whatever the rows say.
+    pub safe_mode: bool,
 }
 
 impl ExtensionsPage {
     pub fn new(rows: Vec<Row>) -> Self {
-        ExtensionsPage { rows, packs: Vec::new(), focus: 0 }
+        ExtensionsPage { rows, packs: Vec::new(), focus: 0, safe_mode: false }
     }
 
     /// The welcome: the page with `PACKS` on top -- the ones with
     /// anything in this build.
     pub fn welcome(rows: Vec<Row>) -> Self {
         let packs = PACKS.iter().filter(|pack| pack.ids.iter().any(|id| rows.iter().any(|r| r.id == *id))).copied().collect();
-        ExtensionsPage { rows, packs, focus: 0 }
+        ExtensionsPage { rows, packs, focus: 0, safe_mode: false }
     }
 
     /// The extensions of `pack` this build has.
@@ -130,11 +132,12 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
     g.rule(2, left..left + width);
     let pending = page.pending();
     let note = match (welcome, pending) {
+        _ if page.safe_mode => "Safe mode: none of these runs this time. What's below is what your settings switch on when Fenix next starts without --disable-extensions.".to_string(),
         (true, 0) => "The core is yours already: editing, files, projects, Git, language servers, debugging, the terminal. Add what else you'll use.".to_string(),
         (false, 0) => "Enter switches one on or off. What's off has no commands, keys, settings or pages.".to_string(),
         (_, n) => format!("{n} change{} -- restart Fenix to apply", if n == 1 { "" } else { "s" }),
     };
-    g.put(3, left + 2, &fit(&note, width.saturating_sub(4)), if pending == 0 { Role::Muted } else { Role::Warn });
+    g.put(3, left + 2, &fit(&note, width.saturating_sub(4)), if pending == 0 || page.safe_mode { Role::Muted } else { Role::Warn });
     let name_width = 16;
     let about_x = left + 5 + name_width;
     let mut y = 5;
@@ -196,6 +199,15 @@ mod tests {
         p.key(Key::Char('j'));
         assert_eq!(p.key(Key::Enter), Action::Switch(vec!["fenix.pdf"], true));
         assert_eq!(p.key(Key::Char('q')), Action::Close);
+    }
+
+    #[test]
+    fn safe_mode_says_nothing_runs_rather_than_changes_waiting() {
+        let mut p = page();
+        p.rows[0].running = false;
+        p.safe_mode = true;
+        let text = layout(&p, 160).all_text();
+        assert!(text.contains("Safe mode: none of these runs") && !text.contains("restart Fenix to apply"), "{text}");
     }
 
     #[test]

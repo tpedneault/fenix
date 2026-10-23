@@ -668,6 +668,11 @@ fn startup() -> &'static (Vec<String>, bool) {
         if cfg!(test) {
             return (Vec::new(), false);
         }
+        // Safe mode: every built-in extension off for this run, whatever
+        // your settings say (they're left as they are).
+        if crate::installed::safe_mode() {
+            return (BUILTIN_SPECS.iter().map(|spec| spec.id.to_string()).collect(), false);
+        }
         let Some(settings) = fenix_storage::paths::Roots::current().map(|roots| roots.settings_file()) else { return (Vec::new(), false) };
         let legacy = fenix_storage::paths::legacy_dir().is_some_and(|dir| dir.join("config.ini").exists());
         if !settings.exists() && !legacy {

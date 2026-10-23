@@ -29,7 +29,8 @@ impl App {
 
     fn open_extensions(&mut self, welcome: bool) {
         let rows = self.extension_rows();
-        let page = if welcome { ExtensionsPage::welcome(rows) } else { ExtensionsPage::new(rows) };
+        let mut page = if welcome { ExtensionsPage::welcome(rows) } else { ExtensionsPage::new(rows) };
+        page.safe_mode = crate::installed::safe_mode();
         match self.find_page(|m| matches!(m, PageModel::Extensions(_))) {
             Some(id) => {
                 if let Some(state) = self.pages.get_mut(&id) {
@@ -48,6 +49,10 @@ impl App {
     /// stays so until you pick) and is welcomed; an upgrade from 1.x keeps
     /// everything it had on, and says once where to switch things.
     pub(super) fn extensions_at_startup(&mut self) {
+        if crate::installed::safe_mode() {
+            self.set_message("Safe mode (--disable-extensions): the core alone this run -- no built-in or installed extensions");
+            return;
+        }
         let marker = fenix_storage::paths::state_file("extensions-introduced");
         let introduced = marker.as_ref().is_some_and(|m| m.exists());
         if let Some(marker) = &marker {
