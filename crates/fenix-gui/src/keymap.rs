@@ -109,21 +109,23 @@ impl LocalContext {
     }
 
     fn bind(self, t: &mut KeyTrie<&'static str>) {
-        match self {
-            LocalContext::Arduino => insert_spec_menu(t, &crate::app::EMBEDDED_SPEC),
-            LocalContext::Reader => insert_data(t, &[], default_local("reader")),
-            LocalContext::Markdown => {
-                insert_data(t, &[], default_local("markdown"));
-                insert_spec_menu(t, &crate::app::NOTEBOOK_SPEC);
-            }
-            LocalContext::Mermaid => insert_spec_menu(t, &crate::app::DIAGRAMS_SPEC),
-            LocalContext::Tcl => {
-                insert_spec_menu(t, &crate::app::MIB_SPEC);
-                insert_spec_menu(t, &crate::app::TCL_SPEC);
-            }
+        insert_data(t, &[], default_local(self.name()));
+        for (_, spec) in LOCAL_MENUS.iter().filter(|(context, _)| *context == self) {
+            insert_spec_menu(t, spec);
         }
     }
 }
+
+/// The features whose `SPC m` menu goes in each context, after core's
+/// own entries (`[[local.<name>]]`), in order.
+const LOCAL_MENUS: &[(LocalContext, &crate::app::feature::FeatureSpec)] = &[
+    (LocalContext::Arduino, &crate::app::EMBEDDED_SPEC),
+    (LocalContext::Markdown, &crate::app::NOTEBOOK_SPEC),
+    (LocalContext::Mermaid, &crate::app::DIAGRAMS_SPEC),
+    (LocalContext::Tcl, &crate::app::MIB_SPEC),
+    #[cfg(feature = "tcl")]
+    (LocalContext::Tcl, &crate::app::TCL_SPEC),
+];
 
 /// The `SPC m` menu for `contexts` (most specific first): each context's
 /// bindings, with a more specific context winning a key both bind. Built
@@ -487,18 +489,18 @@ pub(crate) fn keymap_conflicts() -> Vec<String> {
     for s in LEADER_FEATURES {
         spec(&mut leader, &mut conflicts, "SPC ", s.leader);
     }
-    let menus: [(&str, &[&[LeaderEntry]], &str); 5] = [
-        ("reader", &[], "reader"),
-        ("markdown", &[crate::app::NOTEBOOK_SPEC.local_menu], "markdown"),
-        ("arduino", &[crate::app::EMBEDDED_SPEC.local_menu], "arduino"),
-        ("tcl", &[crate::app::MIB_SPEC.local_menu, crate::app::TCL_SPEC.local_menu], "tcl"),
-        ("mermaid", &[crate::app::DIAGRAMS_SPEC.local_menu], "mermaid"),
+    let menus = [
+        ("reader", LocalContext::Reader),
+        ("markdown", LocalContext::Markdown),
+        ("arduino", LocalContext::Arduino),
+        ("tcl", LocalContext::Tcl),
+        ("mermaid", LocalContext::Mermaid),
     ];
-    for (name, specs, data_name) in menus {
+    for (name, context) in menus {
         let mut menu = HashMap::new();
-        data(&mut menu, &mut conflicts, &format!("SPC m ({name}) "), default_local(data_name));
-        for entries in specs {
-            spec(&mut menu, &mut conflicts, &format!("SPC m ({name}) "), entries);
+        data(&mut menu, &mut conflicts, &format!("SPC m ({name}) "), default_local(context.name()));
+        for (_, s) in LOCAL_MENUS.iter().filter(|(c, _)| *c == context) {
+            spec(&mut menu, &mut conflicts, &format!("SPC m ({name}) "), s.local_menu);
         }
     }
     conflicts
