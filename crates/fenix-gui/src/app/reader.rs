@@ -604,6 +604,7 @@ impl App {
     /// A reply from the worker. Anything for a document or view since
     /// closed, or for a render or search since superseded, is dropped.
     pub(super) fn apply_pdf_response(&mut self, response: fenix_pdf::PdfResponse) {
+        #[cfg(feature = "mission")]
         if self.standards_search_reply(&response) {
             return;
         }

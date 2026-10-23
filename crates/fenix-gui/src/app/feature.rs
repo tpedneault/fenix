@@ -23,6 +23,7 @@
 use std::any::Any;
 
 use super::agenda_host::AgendaHost;
+#[cfg(feature = "mission")]
 use super::ccsds_host::CcsdsHost;
 #[cfg(feature = "diagrams")]
 use super::diagram_host::DiagramsHost;
@@ -31,6 +32,7 @@ use super::docker_host::DockerHost;
 #[cfg(feature = "embedded")]
 use super::embedded_host::EmbeddedHost;
 use super::jira_host::JiraHost;
+#[cfg(feature = "mission")]
 use super::mib_host::MibHost;
 use super::notebook_host::NotebookHost;
 use super::pdf_host::PdfHost;
@@ -208,10 +210,8 @@ pub(crate) type LanguageServerFn = fn(
 /// Something that happened that features may want to follow up on. One
 /// that arrives while a feature is out (inside one of its own hooks) is
 /// kept and delivered when the feature is put back, so a feature hears
-/// about what its own hooks caused. Only features read what one carries,
-/// so it goes unread in a build without the ones that do.
+/// about what its own hooks caused.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) enum Notice {
     /// The focused buffer changed.
     FocusChanged,
@@ -221,7 +221,13 @@ pub(crate) enum Notice {
     TerminalClosed(BufferId),
     /// The periodic housekeeping tick (session checkpoint, disk probe).
     Tick,
+    /// One of your settings changed (`App::apply_setting`), by key.
+    SettingChanged(String),
 }
+
+/// Work a feature hands the disk probe (`Feature::disk_probe`): run on the
+/// probe's thread, its answer back to `Feature::disk_probed`.
+pub(crate) type DiskProbeJob = Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>;
 
 /// A page a feature owns (`PageModel::Feature`). Core keeps the buffer,
 /// lays the page out when it changes or its pane does, routes keys to it
@@ -468,6 +474,31 @@ pub(crate) trait Feature: Any {
     ) -> Vec<fenix_picker::Candidate<completion::Item>> {
         Vec::new()
     }
+    /// Candidates it adds at the end of that pool, after the buffer's
+    /// words and the snippets (the MIB's names).
+    fn completion_tail_items(
+        &mut self,
+        _app: &mut App,
+    ) -> Vec<fenix_picker::Candidate<completion::Item>> {
+        Vec::new()
+    }
+    /// The file its page `page` shows, so the project follows a page as
+    /// it follows a buffer.
+    fn page_file(&self, _app: &App, _page: BufferId) -> Option<PathBuf> {
+        None
+    }
+    /// The project its page `page` was opened in, for a page with no
+    /// file of its own.
+    fn page_project(&self, _app: &App, _page: BufferId) -> Option<PathBuf> {
+        None
+    }
+    /// What it wants looked at on disk, by the disk probe, off the UI
+    /// thread (`stat` keeps away from a volume that isn't answering).
+    fn disk_probe(&self, _app: &App) -> Option<DiskProbeJob> {
+        None
+    }
+    /// What its `disk_probe` work found.
+    fn disk_probed(&mut self, _app: &mut App, _found: Box<dyn Any + Send>) {}
     /// For a buffer in its language: the names a generic `function`
     /// capture may be colored as, when the grammar can't tell a call
     /// from any other word in command position.
@@ -524,7 +555,9 @@ pub(crate) static BUILTIN_SPECS: &[&FeatureSpec] = &[
     &super::EMBEDDED_SPEC,
     #[cfg(feature = "tcl")]
     &super::TCL_SPEC,
+    #[cfg(feature = "mission")]
     &super::MIB_SPEC,
+    #[cfg(feature = "mission")]
     &super::CCSDS_SPEC,
     &super::NOTEBOOK_SPEC,
     #[cfg(feature = "diagrams")]
@@ -620,7 +653,9 @@ impl Features {
             Some(Box::new(EmbeddedHost::default())),
             #[cfg(feature = "tcl")]
             Some(Box::new(TclHost::default())),
+            #[cfg(feature = "mission")]
             Some(Box::new(MibHost::default())),
+            #[cfg(feature = "mission")]
             Some(Box::new(CcsdsHost::default())),
             Some(Box::new(NotebookHost::default())),
             #[cfg(feature = "diagrams")]
@@ -876,6 +911,18 @@ impl App {
     }
 
     /// Runs `f` with the feature whose id is `id`.
+    /// The file the focused page shows, as the feature that owns it says.
+    pub(crate) fn page_file(&self) -> Option<PathBuf> {
+        let id = self.focused_buffer_id();
+        self.features.iter().find_map(|f| f.page_file(self, id))
+    }
+
+    /// The project the focused page was opened in, as its feature says.
+    pub(crate) fn page_project(&self) -> Option<PathBuf> {
+        let id = self.focused_buffer_id();
+        self.features.iter().find_map(|f| f.page_project(self, id))
+    }
+
     pub(crate) fn with_feature_id<R>(
         &mut self,
         id: &str,

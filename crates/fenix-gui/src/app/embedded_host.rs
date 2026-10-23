@@ -922,7 +922,7 @@ impl Feature for EmbeddedHost {
             Notice::TaskFinished { root, success } => self.after_task_finished(app, root, *success),
             // Forget a closed terminal if it was a monitor.
             Notice::TerminalClosed(buffer) => self.monitors.retain(|_, m| m.buffer != *buffer),
-            Notice::Tick => {}
+            Notice::Tick | Notice::SettingChanged(_) => {}
         }
     }
 

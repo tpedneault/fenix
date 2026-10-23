@@ -43,10 +43,15 @@ pub(crate) use review_host::SPEC as REVIEW_SPEC;
 mod motion_host;
 mod polish;
 mod which_key;
+#[cfg(feature = "mission")]
 mod mib_host;
+#[cfg(feature = "mission")]
 pub(crate) use mib_host::SPEC as MIB_SPEC;
+#[cfg(feature = "mission")]
 mod ccsds_host;
+#[cfg(feature = "mission")]
 pub(crate) use ccsds_host::SPEC as CCSDS_SPEC;
+#[cfg(feature = "mission")]
 mod stream_host;
 mod file_index;
 mod disk_probe;
@@ -8608,8 +8613,9 @@ impl App {
         for snippet in catalog.available(&self.snippet_scope()) {
             candidates.push(fenix_picker::Candidate::new(snippet.trigger.clone(), completion::Item::snippet(snippet)));
         }
-        let mib_items = if self.features.is_on(MIB_SPEC.id) { self.with_mib(|mib, app| mib.completion_tail(app)).unwrap_or_default() } else { Vec::new() };
-        for item in mib_items {
+        let mut tail = Vec::new();
+        self.each_feature(|feature, app| tail.extend(feature.completion_tail_items(app)));
+        for item in tail {
             if seen.insert(item.label.clone()) {
                 candidates.push(item);
             }
@@ -10302,8 +10308,7 @@ impl App {
             return;
         }
         if Self::looks_binary(path) {
-            self.open_hex_view(path.to_path_buf());
-            return;
+            return self.open_binary(path);
         }
         let id = self.buffers.open_path(path);
         self.note_disk_state(id);
@@ -16388,6 +16393,26 @@ impl App {
 
     /// Where a jump lands (`gd`, a search result, a symbol, `Ctrl-O`):
     /// the pane's preview tab, which the next jump reuses.
+    /// Whether `path` isn't text: a NUL, or bytes that aren't UTF-8, in
+    /// its first 8 KiB.
+    pub(crate) fn looks_binary(path: &Path) -> bool {
+        use std::io::Read;
+        let Ok(f) = std::fs::File::open(path) else { return false };
+        let mut head = Vec::new();
+        if f.take(8192).read_to_end(&mut head).is_err() {
+            return false;
+        }
+        head.contains(&0) || std::str::from_utf8(&head).is_err_and(|e| e.error_len().is_some())
+    }
+
+    /// A file that isn't text, in the hex view (`ccsds.hex`) -- or not
+    /// opened, when nothing here shows bytes.
+    fn open_binary(&mut self, path: &Path) {
+        if self.call_service("ccsds.hex", &serde_json::json!({ "path": path })).is_err() {
+            self.set_error(format!("{} isn't text -- the hex view comes with the CCSDS extension", path.display()));
+        }
+    }
+
     fn open_file_as_preview(&mut self, path: &Path) {
         self.open_file_as(path, true);
     }
@@ -16398,8 +16423,7 @@ impl App {
             return;
         }
         if Self::looks_binary(path) {
-            self.open_hex_view(path.to_path_buf());
-            return;
+            return self.open_binary(path);
         }
         let id = self.buffers.open_path(path);
         self.note_disk_state(id);

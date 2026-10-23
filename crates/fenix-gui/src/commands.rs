@@ -300,7 +300,9 @@ impl CommandRegistry {
         registry.register("code.toggle_fold", "Collapse or expand the current code scope", |ctx| ctx.app.toggle_code_fold());
         registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
         registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
+        #[cfg(feature = "mission")]
         registry.feature(&crate::app::MIB_SPEC);
+        #[cfg(feature = "mission")]
         registry.feature(&crate::app::CCSDS_SPEC);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);

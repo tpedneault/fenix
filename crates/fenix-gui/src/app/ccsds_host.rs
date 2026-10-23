@@ -108,7 +108,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = super::feature::FeatureSpe
         }
     }),
     settings: &SETTINGS,
-    services: &[],
+    services: &SERVICES,
     contributes: &[],
     session_documents: None,
     session_reopen: None,
@@ -139,7 +139,43 @@ pub(crate) struct CcsdsHost {
     pub(super) standards_query: HashMap<BufferId, String>,
 }
 
+/// What CCSDS offers others (the core's binary files).
+static SERVICES: [super::feature::Service; 1] = [
+    // `{path}` -> the file in the hex view.
+    super::feature::Service {
+        name: "ccsds.hex",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            #[derive(serde::Deserialize)]
+            struct Hex {
+                path: PathBuf,
+            }
+            let call: Hex = serde_json::from_str(payload).map_err(|e| format!("a CCSDS call: {e}"))?;
+            app.open_hex_view(call.path);
+            Ok(String::new())
+        }),
+    },
+];
+
 impl super::feature::Feature for CcsdsHost {
+    /// The file a hex view or a recording shows, so the project (and its
+    /// MIBs) follow it as they follow a buffer.
+    fn page_file(&self, app: &App, page: BufferId) -> Option<PathBuf> {
+        if let Some(p) = app.feature_page::<HexPage>(page) {
+            return Some(p.path.clone());
+        }
+        app.feature_page::<StreamPage>(page)?;
+        match self.stream_sources.get(&page) {
+            Some(super::stream_host::StreamSource::File(path, _)) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    /// The project a mission page was opened in.
+    fn page_project(&self, app: &App, page: BufferId) -> Option<PathBuf> {
+        let key = app.feature_page::<StreamPage>(page).map(|p| &p.key).or_else(|| app.feature_page::<PacketPage>(page).map(|p| &p.key))?;
+        key.project.clone()
+    }
+
     fn spec(&self) -> &'static super::feature::FeatureSpec {
         &SPEC
     }
@@ -1010,42 +1046,6 @@ impl App {
         }
     }
 
-    /// `SPC f x`: the focused file (or the explorer's) as hex.
-    /// A file no text buffer can hold: NULs, or bytes that aren't UTF-8,
-    /// in its first 8 KB. Opening one shows it in the hex view.
-    pub(crate) fn looks_binary(path: &Path) -> bool {
-        use std::io::Read;
-        let Ok(f) = std::fs::File::open(path) else { return false };
-        let mut head = Vec::new();
-        if f.take(8192).read_to_end(&mut head).is_err() {
-            return false;
-        }
-        head.contains(&0) || std::str::from_utf8(&head).is_err_and(|e| e.error_len().is_some())
-    }
-
-    /// The file the focused page shows -- a hex view's, a recording's --
-    /// so the project (and its MIBs) follow it as they follow a buffer.
-    pub(crate) fn page_file(&self) -> Option<PathBuf> {
-        let id = self.focused_buffer_id();
-        if let Some(p) = self.feature_page::<HexPage>(id) {
-            return Some(p.path.clone());
-        }
-        self.feature_page::<StreamPage>(id)?;
-        match self.ccsds().stream_sources.get(&id) {
-            Some(super::stream_host::StreamSource::File(path, _)) => Some(path.clone()),
-            _ => None,
-        }
-    }
-
-    /// The project a MIB or mission page was opened in.
-    pub(crate) fn page_project(&self) -> Option<PathBuf> {
-        let id = self.focused_buffer_id();
-        if let Some(key) = self.feature_page::<StreamPage>(id).map(|p| &p.key).or_else(|| self.feature_page::<PacketPage>(id).map(|p| &p.key)) {
-            return key.project.clone();
-        }
-        super::mib_host::page_key(self, id)?.project
-    }
-
     /// The file a mission command acts on: the explorer's selection, the
     /// file a hex view shows, or the open buffer's.
     pub(crate) fn ccsds_file_here(&mut self) -> Option<PathBuf> {
@@ -1301,5 +1301,24 @@ mod tests {
         assert!(app.feature_page::<StreamPage>(id).is_none(), "typed access sees only its own kind");
         assert!(app.page_key(KeyPress::char('q')));
         assert!(!app.is_page_buffer(id), "q closed it, through `page_action`");
+    }
+
+    /// A file that isn't text opens in the hex view through `ccsds.hex`;
+    /// with CCSDS off, it isn't opened as text either.
+    #[test]
+    fn a_binary_file_reaches_the_hex_view_through_its_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dump.bin");
+        std::fs::write(&path, [0u8, 1, 2, 0xFF]).unwrap();
+        let mut app = App::with_file(None);
+        app.open_file_from_picker(&path);
+        assert_eq!(app.feature_page::<HexPage>(app.focused_buffer_id()).map(|p| p.path.clone()), Some(path.clone()));
+
+        let mut app = App::with_file(None);
+        app.features = super::super::feature::Features::builtin_without(&["fenix.ccsds"]);
+        let before = app.focused_buffer_id();
+        app.open_file_from_picker(&path);
+        assert_eq!(app.focused_buffer_id(), before, "not opened as text");
+        assert!(app.status_message.as_ref().is_some_and(|m| m.text.contains("isn't text")));
     }
 }

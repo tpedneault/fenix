@@ -9,14 +9,23 @@
 
 mod agenda_page;
 mod jira_page;
+#[cfg(feature = "mission")]
 mod mib_def;
+#[cfg(feature = "mission")]
 mod mib_form;
+#[cfg(feature = "mission")]
 mod mib_page;
+#[cfg(feature = "mission")]
 mod mib_check;
+#[cfg(feature = "mission")]
 mod packet_page;
+#[cfg(feature = "mission")]
 mod hex_page;
+#[cfg(feature = "mission")]
 mod time_page;
+#[cfg(feature = "mission")]
 mod stream_page;
+#[cfg(feature = "mission")]
 mod standards_page;
 mod app;
 mod cli;

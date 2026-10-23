@@ -307,9 +307,9 @@ impl App {
                 let chars = self.effective_iskeyword();
                 self.vim.set_iskeyword_extra(chars);
             }
-            "mib.roots" | "mib.default" | "mib.include_yours" | "mib.apid_format" => self.with_mib(|m, a| m.settings_changed(a)).unwrap_or_default(),
             _ => {}
         }
+        self.notify_features(super::feature::Notice::SettingChanged(key.to_string()));
         if let Some(window) = &self.window {
             window.request_redraw();
         }
