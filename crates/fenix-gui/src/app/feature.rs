@@ -34,6 +34,7 @@ use super::embedded_host::EmbeddedHost;
 use super::jira_host::JiraHost;
 #[cfg(feature = "mission")]
 use super::mib_host::MibHost;
+#[cfg(feature = "notebook")]
 use super::notebook_host::NotebookHost;
 use super::pdf_host::PdfHost;
 use super::review_host::ReviewHost;
@@ -88,7 +89,7 @@ pub(crate) struct FeatureSpec {
     pub hover_fallback: Option<fn(&App) -> Option<String>>,
     /// A completion that takes over at the cursor before any other
     /// (Tcl's `-option` after a command that takes them).
-    pub completion_at_cursor: Option<fn(&App) -> Option<CompletionAt>>,
+    pub completion_at_cursor: Option<fn(&mut App) -> Option<CompletionAt>>,
     /// The only valid candidates for a word starting at char offset
     /// `at`, replacing the general pool (an ensemble's subcommands).
     pub completion_pool_at:
@@ -148,6 +149,28 @@ pub(crate) struct FeatureSpec {
     pub doctor: Option<fenix_project::doctor::FeatureCheck>,
     /// The files it opens itself rather than as text (`*.pdf`).
     pub opener: Option<FileOpener>,
+    /// `gd`, `K` or `gf`, ahead of the language server and the core:
+    /// `true` when it took it (a note's link followed, a diagram block
+    /// shown).
+    pub lsp_first: Option<fn(&mut App, fenix_vim::LspRequestKind) -> bool>,
+    /// A key while one of its prompts is open, ahead of the core's
+    /// prompts: `true` when it took it.
+    pub prompt_key: Option<fn(&mut App, KeyPress) -> bool>,
+    /// Does what's due now (a note written a moment after typing stops)
+    /// and says when the event loop should wake for it next.
+    pub wake: Option<fn(&mut App, Instant) -> Option<Instant>>,
+    /// What `[[links]]` in Markdown point to, for the reading view.
+    pub links: Option<&'static LinkResolver>,
+}
+
+/// How a feature resolves the reading view's `[[links]]` (the notebook's
+/// notes): what an embed shows, whether a link goes anywhere, following
+/// one, and what a page with no file of its own is relative to.
+pub(crate) struct LinkResolver {
+    pub embed: fn(&App, &fenix_notebook::Link, Option<&Path>) -> crate::reading::Embedded,
+    pub exists: fn(&App, &fenix_notebook::Link, Option<&Path>) -> bool,
+    pub follow: fn(&mut App, fenix_notebook::Link, Option<PathBuf>),
+    pub root: fn(&App) -> Option<PathBuf>,
 }
 
 /// A feature's claim on a kind of file: which it opens, and how.
@@ -559,6 +582,7 @@ pub(crate) static BUILTIN_SPECS: &[&FeatureSpec] = &[
     &super::MIB_SPEC,
     #[cfg(feature = "mission")]
     &super::CCSDS_SPEC,
+    #[cfg(feature = "notebook")]
     &super::NOTEBOOK_SPEC,
     #[cfg(feature = "diagrams")]
     &super::DIAGRAMS_SPEC,
@@ -657,6 +681,7 @@ impl Features {
             Some(Box::new(MibHost::default())),
             #[cfg(feature = "mission")]
             Some(Box::new(CcsdsHost::default())),
+            #[cfg(feature = "notebook")]
             Some(Box::new(NotebookHost::default())),
             #[cfg(feature = "diagrams")]
             Some(Box::new(DiagramsHost::default())),

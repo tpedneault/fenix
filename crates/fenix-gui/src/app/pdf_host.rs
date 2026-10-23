@@ -101,6 +101,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         doctor: None,
         // A `.pdf` opens in the reader.
         opener: Some(super::feature::FileOpener { claims: App::looks_like_pdf, open: |app, path, preview| app.open_pdf_path_as(path, preview) }),
+        lsp_first: None,
+        prompt_key: None,
+        wake: None,
+        links: None,
     }
 };
 

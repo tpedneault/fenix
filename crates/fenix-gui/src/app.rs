@@ -55,11 +55,16 @@ pub(crate) use ccsds_host::SPEC as CCSDS_SPEC;
 mod stream_host;
 mod file_index;
 mod disk_probe;
+#[cfg(feature = "notebook")]
 mod notebook_host;
+#[cfg(feature = "notebook")]
 pub(crate) use notebook_host::SPEC as NOTEBOOK_SPEC;
+#[cfg(feature = "notebook")]
 mod notebook_links;
 mod extensions_host;
+#[cfg(feature = "notebook")]
 mod notebook_capture;
+#[cfg(feature = "notebook")]
 mod notebook_export;
 mod reading_host;
 #[cfg(feature = "diagrams")]
@@ -8563,12 +8568,9 @@ impl App {
     /// while `force_open_completion` (`Ctrl-Space`) falls back to the
     /// whole pool on an empty prefix.
     fn completion_at_cursor(&mut self) -> Option<(usize, String, Vec<fenix_picker::Candidate<completion::Item>>)> {
-        if let Some(found) = self.features.specs().filter_map(|spec| spec.completion_at_cursor).find_map(|at_cursor| at_cursor(self)) {
+        let at_cursor: Vec<_> = self.features.specs().filter_map(|spec| spec.completion_at_cursor).collect();
+        if let Some(found) = at_cursor.into_iter().find_map(|at_cursor| at_cursor(self)) {
             return Some(found);
-        }
-        // `[[` in Markdown: the notebook's names.
-        if let Some(links) = self.features.is_on(NOTEBOOK_SPEC.id).then(|| self.notebook_link_completion()).flatten() {
-            return Some(links);
         }
         let cursor = self.cursor();
         match completion::prefix_at_cursor(&self.open().buffer, &cursor) {
@@ -18792,9 +18794,9 @@ impl App {
             self.agenda_prompt_key(keypress);
             return;
         }
-        // A new note's name, a capture, a diagram's name.
-        if self.features.notebook_state().prompt.is_some() {
-            self.notebook_prompt_key(keypress);
+        // A feature's own prompt (a new note's name, a capture).
+        let prompt_keys: Vec<_> = self.features.specs().filter_map(|spec| spec.prompt_key).collect();
+        if prompt_keys.into_iter().any(|key| key(self, keypress)) {
             return;
         }
 
@@ -19731,25 +19733,18 @@ impl App {
             VimEvent::MacroPlay { register, count } => {
                 self.play_macro(register, count, event_loop);
             }
-            VimEvent::RequestLsp(kind) => match kind {
-                fenix_vim::LspRequestKind::GoToDefinition => {
-                    if !self.notebook_follow_link_under_cursor() {
-                        self.request_goto_definition();
+            VimEvent::RequestLsp(kind) => {
+                // A feature first: a note's link, a ```mermaid block.
+                let first: Vec<_> = self.features.specs().filter_map(|spec| spec.lsp_first).collect();
+                if !first.into_iter().any(|claim| claim(self, kind)) {
+                    match kind {
+                        fenix_vim::LspRequestKind::GoToDefinition => self.request_goto_definition(),
+                        fenix_vim::LspRequestKind::References => self.request_references(),
+                        fenix_vim::LspRequestKind::Hover => self.request_hover(),
+                        fenix_vim::LspRequestKind::FileUnderCursor => self.follow_link_under_cursor(),
                     }
                 }
-                fenix_vim::LspRequestKind::References => self.request_references(),
-                fenix_vim::LspRequestKind::Hover => {
-                    // `K` in a ```mermaid block: it, drawn, beside.
-                    if !self.mermaid_block_hover() {
-                        self.request_hover();
-                    }
-                }
-                fenix_vim::LspRequestKind::FileUnderCursor => {
-                    if !self.notebook_follow_link_under_cursor() {
-                        self.follow_link_under_cursor();
-                    }
-                }
-            },
+            }
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Todo, forward, count } => self.jump_to_todo(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Hunk, forward, count } => self.jump_to_hunk(forward, count),
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::Diagnostic, forward, count } => self.jump_to_diagnostic(forward, count),
@@ -20319,7 +20314,6 @@ impl App {
             .or_else(|| self.git_confirm_text())
             .or_else(|| self.git_prompt_text())
             .or_else(|| self.agenda_prompt_text())
-            .or_else(|| self.notebook_prompt_text())
             .or_else(|| self.replace_wizard_text())
             .or_else(|| self.project_replace_confirm_text())
             .or_else(|| self.find_file_prompt_text())
@@ -24866,11 +24860,10 @@ impl ApplicationHandler<FenixUserEvent> for App {
             .filter(|r| !r.done)
             .map(|r| r.started + SLOW_LISTING_AFTER)
             .fold(wait_until, |acc, deadline| acc.min(deadline));
-        // Notebook files write themselves a moment after typing stops.
-        let wait_until = match self.notebook_autosave(now) {
-            Some(at) => wait_until.min(at),
-            None => wait_until,
-        };
+        // What features have due (notebook files write themselves a
+        // moment after typing stops).
+        let wakes: Vec<_> = self.features.specs().filter_map(|spec| spec.wake).collect();
+        let wait_until = wakes.into_iter().filter_map(|wake| wake(self, now)).fold(wait_until, Instant::min);
         event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wait_until));
     }
 }

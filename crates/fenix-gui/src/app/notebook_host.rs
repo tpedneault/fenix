@@ -9,7 +9,6 @@
 use super::pages::PageModel;
 use super::*;
 use crate::notebook_page::{Action as NbAction, NotebookPage, Row as NbRow};
-use crate::page::ImageKey;
 use crate::reading;
 use fenix_notebook::{Kind as NbKind, Notebook};
 
@@ -54,7 +53,7 @@ static SETTINGS: [fenix_config::Setting; 4] = {
 };
 
 /// What the notebook offers other features.
-static SERVICES: [super::feature::Service; 2] = [
+static SERVICES: [super::feature::Service; 3] = [
     // `{path}` -> the name the notebook keeps that file under, or nothing
     // when it isn't one of the notebook's.
     super::feature::Service {
@@ -79,6 +78,28 @@ static SERVICES: [super::feature::Service; 2] = [
             }
             let call: NewDiagram = serde_json::from_str(payload).map_err(|e| format!("a notebook call: {e}"))?;
             app.notebook_name_new_diagram(call.text).map(|()| String::new())
+        }),
+    },
+    // `{to: "inbox" | "journal", text}` -> the line filed there as `SPC n
+    // c` files it (no link back, the focus left where it is); the entry's
+    // path back (the control channel's `fenix/notebook.capture`).
+    super::feature::Service {
+        name: "notebook.capture",
+        call: super::feature::ServiceCall::Mut(|app, payload| {
+            #[derive(serde::Deserialize)]
+            struct Capture {
+                to: String,
+                text: String,
+            }
+            let call: Capture = serde_json::from_str(payload).map_err(|e| format!("a notebook call: {e}"))?;
+            let to = match call.to.as_str() {
+                "inbox" => super::notebook_capture::CaptureTo::Inbox,
+                "journal" => super::notebook_capture::CaptureTo::Journal,
+                other => return Err(format!("nowhere to capture to called {other}")),
+            };
+            let path = app.notebook_capture_into(to, false, None, &call.text)?;
+            app.set_message(format!("captured to {}", to.label()));
+            Ok(fenix_lsp::normalize(path).to_string_lossy().into_owned())
         }),
     },
 ];
@@ -188,7 +209,7 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         language_server: None,
         tasks: None,
         hover_fallback: None,
-        completion_at_cursor: None,
+        completion_at_cursor: Some(|app| app.notebook_link_completion()),
         completion_pool_at: None,
         hover_first: None,
         picker_confirm: Some(|app, pick, _marked, query| {
@@ -232,6 +253,10 @@ pub(crate) static SPEC: super::feature::FeatureSpec = {
         home_activate: None,
         doctor: None,
         opener: None,
+        lsp_first: Some(lsp_first),
+        prompt_key: Some(|app, key| app.notebook_prompt_key(key)),
+        wake: Some(|app, now| app.notebook_autosave(now)),
+        links: Some(&LINKS),
     }
 };
 
@@ -247,6 +272,10 @@ pub(crate) struct NotebookHost {
 impl super::feature::Feature for NotebookHost {
     fn spec(&self) -> &'static super::feature::FeatureSpec {
         &SPEC
+    }
+
+    fn prompt_text(&self) -> Option<String> {
+        App::notebook_prompt_text_of(&self.state)
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -320,77 +349,42 @@ impl super::feature::FeaturePage for crate::backlinks_page::BacklinksPage {
     }
 }
 
+/// `gd` and `gf` on a note's link follow it; `K` in a ```mermaid block
+/// shows it drawn, beside.
+fn lsp_first(app: &mut App, kind: fenix_vim::LspRequestKind) -> bool {
+    use fenix_vim::LspRequestKind as K;
+    match kind {
+        K::GoToDefinition | K::FileUnderCursor => app.notebook_follow_link_under_cursor(),
+        K::Hover => app.mermaid_block_hover(),
+        K::References => false,
+    }
+}
+
+/// The reading view's `[[links]]`, as the notebook resolves them.
+static LINKS: super::feature::LinkResolver = super::feature::LinkResolver {
+    embed: |app, link, from| match app.features.notebook_state().book.as_ref() {
+        Some(nb) => match nb.resolve(link, from) {
+            fenix_notebook::Target::Entry { id, .. } => match nb.get(&id) {
+                Some(e) if e.kind == NbKind::Diagram => reading::Embedded::Diagram { name: e.name.clone(), source: e.text.clone() },
+                Some(e) => reading::Embedded::Note { name: e.display_name(), text: e.text.clone() },
+                None => reading::Embedded::Missing(link.target.clone()),
+            },
+            _ => reading::Embedded::Missing(link.target.clone()),
+        },
+        None => reading::Embedded::Missing(link.target.clone()),
+    },
+    exists: |app, link, from| match app.features.notebook_state().book.as_ref() {
+        Some(nb) => !matches!(nb.resolve(link, from), fenix_notebook::Target::Missing(_)),
+        None => true,
+    },
+    follow: |app, link, from| app.notebook_follow(link, from),
+    root: |app| app.features.notebook_state().book.as_ref().map(|nb| nb.root().to_path_buf()),
+};
+
 /// A notebook picker over `candidates`, titled `title`.
 pub(super) fn notebook_picker(title: &'static str, candidates: Vec<fenix_picker::Candidate<NotebookPick>>) -> ActivePicker {
     let candidates = candidates.into_iter().map(|c| super::feature::FeaturePick::candidate(c.label, c.payload)).collect();
     ActivePicker::Feature { feature: SPEC.id, badge: title, state: fenix_picker::PickerState::new(candidates) }
-}
-
-/// A capture name from `fenix-syntax` as one the page roles can hold.
-pub(super) fn static_capture(name: &str) -> &'static str {
-    match name.split('.').next().unwrap_or(name) {
-        "keyword" | "repeat" | "conditional" | "storageclass" | "include" | "tag" => "keyword",
-        "string" | "escape" => "string",
-        "comment" | "spell" => "comment",
-        "function" | "method" => "function",
-        "type" | "namespace" | "module" => "type",
-        "number" | "float" => "number",
-        "constant" | "boolean" => "constant",
-        "variable" | "property" | "label" | "field" | "parameter" => "variable",
-        "operator" => "operator",
-        "punctuation" => "punctuation",
-        "attribute" | "constructor" | "preproc" | "embedded" => "attribute",
-        _ => "text",
-    }
-}
-
-/// The grammar a fenced block's info word names.
-pub(super) fn language_for_fence(lang: &str) -> Option<fenix_syntax::LanguageId> {
-    let ext = match lang {
-        "rust" => "rs",
-        "python" | "py3" => "py",
-        "bash" | "shell" | "sh" | "zsh" | "console" => "sh",
-        "javascript" | "node" => "js",
-        "typescript" => "ts",
-        "c++" | "cxx" | "cc" => "cpp",
-        "yml" => "yaml",
-        "csharp" | "c#" => "cs",
-        "golang" => "go",
-        "markdown" => "md",
-        "arduino" => "ino",
-        other => other,
-    };
-    fenix_syntax::detect_language(ext)
-}
-
-/// A code block's colours, per line: (columns, capture).
-pub(super) fn highlight_block(lang: &str, text: &str) -> Vec<Vec<(std::ops::Range<usize>, &'static str)>> {
-    let Some(language) = language_for_fence(lang) else { return Vec::new() };
-    let state = fenix_syntax::SyntaxState::new(language, text);
-    let spans = state.highlights_in_range(text, 0..text.len());
-    let mut starts = vec![0usize];
-    for (i, b) in text.bytes().enumerate() {
-        if b == b'\n' {
-            starts.push(i + 1);
-        }
-    }
-    let mut out: Vec<Vec<(std::ops::Range<usize>, &'static str)>> = vec![Vec::new(); starts.len()];
-    for (range, name) in spans {
-        let line = match starts.binary_search(&range.start) {
-            Ok(i) => i,
-            Err(i) => i - 1,
-        };
-        let line_start = starts[line];
-        let line_end = starts.get(line + 1).map(|e| e - 1).unwrap_or(text.len());
-        let end = range.end.min(line_end);
-        if end <= range.start {
-            continue;
-        }
-        let a = text[line_start..range.start].chars().count();
-        let b = a + text[range.start..end].chars().count();
-        out[line].push((a..b, static_capture(name)));
-    }
-    out
 }
 
 impl App {
@@ -559,69 +553,6 @@ impl App {
         }
     }
 
-    /// The picture a page shows for a diagram's source: the diagrams
-    /// feature's (`diagrams.picture`); none to show without it.
-    fn diagram_picture(&self, source: &str) -> u64 {
-        self.query_service("diagrams.picture", &serde_json::json!({ "source": source })).ok().and_then(|key| key.parse().ok()).unwrap_or(0)
-    }
-
-    /// What's wrong with a diagram, as the diagrams feature drew it
-    /// (`diagrams.problem`).
-    fn diagram_problem_of(&self, source: &str) -> Option<String> {
-        self.query_service("diagrams.problem", &serde_json::json!({ "source": source })).ok().filter(|p| !p.is_empty())
-    }
-
-    /// What the reading layout needs, borrowing only what it reads.
-    pub(super) fn with_reading_ctx<R>(&self, base: Option<&Path>, f: impl FnOnce(&reading::Ctx) -> R) -> R {
-        let nb = self.features.notebook_state().book.as_ref();
-        let sizes = &self.page_images.image_sizes;
-        let (cw, lh) = match &self.text {
-            Some(t) => (t.char_width(), t.line_height()),
-            None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
-        };
-        let base_dir = base.and_then(Path::parent).map(Path::to_path_buf).or_else(|| nb.map(|n| n.root().to_path_buf()));
-        let base_file = base.map(Path::to_path_buf);
-        let highlight = |lang: &str, text: &str| highlight_block(lang, text);
-        let image_size = |key: &ImageKey| sizes.get(key).copied();
-        let diagram_key = |source: &str| ImageKey::Diagram(self.diagram_picture(source));
-        let diagram_error = |source: &str| self.diagram_problem_of(source);
-        let image_path = |src: &str| {
-            if src.contains("://") {
-                return None;
-            }
-            let decoded = src.replace("%20", " ");
-            let p = PathBuf::from(&decoded);
-            let path = if p.is_absolute() { p } else { base_dir.clone().unwrap_or_default().join(p) };
-            path.exists().then_some(path)
-        };
-        let embed = |link: &fenix_notebook::Link| match nb {
-            Some(nb) => match nb.resolve(link, base_file.as_deref()) {
-                fenix_notebook::Target::Entry { id, .. } => match nb.get(&id) {
-                    Some(e) if e.kind == NbKind::Diagram => reading::Embedded::Diagram { name: e.name.clone(), source: e.text.clone() },
-                    Some(e) => reading::Embedded::Note { name: e.display_name(), text: e.text.clone() },
-                    None => reading::Embedded::Missing(link.target.clone()),
-                },
-                _ => reading::Embedded::Missing(link.target.clone()),
-            },
-            None => reading::Embedded::Missing(link.target.clone()),
-        };
-        let link_exists = |link: &fenix_notebook::Link| match nb {
-            Some(nb) => !matches!(nb.resolve(link, base_file.as_deref()), fenix_notebook::Target::Missing(_)),
-            None => true,
-        };
-        let ctx = reading::Ctx {
-            highlight: &highlight,
-            image_size: &image_size,
-            diagram_key: &diagram_key,
-            diagram_error: &diagram_error,
-            image_path: &image_path,
-            embed: &embed,
-            link_exists: &link_exists,
-            cell: (cw, lh),
-        };
-        f(&ctx)
-    }
-
     /// The notebook page's layout for a pane `cols` wide.
     pub(super) fn notebook_page_layout(&self, id: BufferId, cols: usize) -> Option<crate::page::Page> {
         let p = self.feature_page::<NotebookPage>(id)?;
@@ -684,8 +615,8 @@ impl App {
         }
     }
 
-    pub(super) fn notebook_prompt_text(&self) -> Option<String> {
-        let p = self.features.notebook_state().prompt.as_ref()?;
+    pub(super) fn notebook_prompt_text_of(state: &NotebookState) -> Option<String> {
+        let p = state.prompt.as_ref()?;
         Some(match &p.kind {
             NotebookPromptKind::NoteName { template, .. } => format!("New note ({template}) -- name: {}▏", p.input),
             NotebookPromptKind::DiagramName { .. } => format!("New diagram -- name: {}▏", p.input),
@@ -701,7 +632,16 @@ impl App {
         })
     }
 
-    pub(super) fn notebook_prompt_key(&mut self, keypress: KeyPress) {
+    /// A key for the notebook's prompt: `false` when there's none open.
+    pub(super) fn notebook_prompt_key(&mut self, keypress: KeyPress) -> bool {
+        if self.features.notebook_state().prompt.is_none() {
+            return false;
+        }
+        self.notebook_prompt_key_in(keypress);
+        true
+    }
+
+    fn notebook_prompt_key_in(&mut self, keypress: KeyPress) {
         if keypress == KeyPress::char('v').with_ctrl() {
             if let (Some(text), true) = (self.clipboard_text(), self.features.notebook_state().prompt.is_some()) {
                 let text: String = text.chars().filter(|c| !c.is_control()).collect();
@@ -1380,13 +1320,37 @@ mod tests {
 
     #[test]
     fn code_blocks_are_highlighted_per_line() {
-        let spans = highlight_block("rust", "fn main() {\n    let x = 1;\n}");
+        let spans = super::super::reading_host::highlight_block("rust", "fn main() {\n    let x = 1;\n}");
         assert!(spans[0].iter().any(|(r, n)| *r == (0..2) && *n == "keyword"));
         assert!(spans[1].iter().any(|(r, n)| *r == (4..7) && *n == "keyword"));
-        assert!(highlight_block("nope", "x").is_empty());
+        assert!(super::super::reading_host::highlight_block("nope", "x").is_empty());
     }
 
     // Through its spec, the way `App` reaches the notebook now.
+
+    /// What the core asks the notebook without naming it: `[[` in
+    /// Markdown completes its notes, the reading view's links resolve
+    /// through it, and its prompt takes keys only while it's open.
+    #[test]
+    fn the_core_reaches_the_notebook_through_its_spec() {
+        let (_dir, mut app) = app();
+        app.notebook_create_note("Ground station", "Antenna notes\n");
+        app.notebook_create_note("Today", "See [[");
+        let text = app.open().buffer.text();
+        let line = text.lines().position(|l| l.ends_with("See [[")).expect("the note's line");
+        app.place_cursor(line, "See [[".len());
+        let (_, prefix, candidates) = app.completion_at_cursor().expect("the notebook's names after [[");
+        assert_eq!(prefix, "");
+        assert!(candidates.iter().any(|c| c.label.contains("Ground station")), "{:?}", candidates.iter().map(|c| &c.label).collect::<Vec<_>>());
+
+        let links = SPEC.links.expect("it resolves links");
+        let from = app.open().buffer.path().map(Path::to_path_buf);
+        let found = fenix_notebook::meta::links_in_line("![[Ground station]]", 0).remove(0);
+        assert!(matches!((links.embed)(&app, &found, from.as_deref()), reading::Embedded::Note { .. }));
+        let missing = fenix_notebook::meta::links_in_line("[[Nowhere]]", 0).remove(0);
+        assert!(!(links.exists)(&app, &missing, from.as_deref()));
+        assert!(!SPEC.prompt_key.unwrap()(&mut app, KeyPress::char('x')), "no prompt open: not its key");
+    }
 
     #[test]
     fn the_notebook_contributes_its_commands_and_keys_from_its_spec() {

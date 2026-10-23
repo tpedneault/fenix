@@ -15,12 +15,13 @@ path = "src/main.rs"
 # default, the core alone with `--no-default-features` (CI builds both, so
 # the core can't come to depend on an extension).
 [features]
-default = ["docker", "tcl", "diagrams", "embedded", "mission"]
+default = ["docker", "tcl", "diagrams", "embedded", "mission", "notebook"]
 docker = ["dep:fenix-docker"]
-diagrams = ["dep:fenix-diagram"]
+diagrams = ["notebook", "dep:fenix-diagram"]
 tcl = []
 mission = ["dep:fenix-ccsds", "dep:fenix-mib"]
 embedded = ["dep:fenix-embedded"]
+notebook = []
 
 [dependencies]
 anyhow = "1.0.104"

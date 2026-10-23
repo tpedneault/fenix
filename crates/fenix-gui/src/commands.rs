@@ -229,6 +229,7 @@ impl CommandRegistry {
         registry.register("leader.local", "Open SPC m, the menu for the focused buffer's project and language", cmd_leader_local);
         #[cfg(feature = "embedded")]
         registry.feature(&crate::app::EMBEDDED_SPEC);
+        #[cfg(feature = "notebook")]
         registry.feature(&crate::app::NOTEBOOK_SPEC);
         #[cfg(feature = "diagrams")]
         registry.feature(&crate::app::DIAGRAMS_SPEC);

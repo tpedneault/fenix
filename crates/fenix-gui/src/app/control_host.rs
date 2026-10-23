@@ -12,7 +12,6 @@ use fenix_control::{
 use fenix_tasks::PathPosition;
 use serde_json::{json, Value};
 
-use super::notebook_capture::CaptureTo;
 use super::*;
 use crate::commands::ExternalError;
 
@@ -107,16 +106,13 @@ impl App {
     /// without taking the focus from whatever the user is in.
     fn control_capture(&mut self, params: &CaptureParams) -> Result<CaptureResult, RpcError> {
         let to = match params.target {
-            CaptureTarget::Inbox => CaptureTo::Inbox,
-            CaptureTarget::Journal => CaptureTo::Journal,
+            CaptureTarget::Inbox => "inbox",
+            CaptureTarget::Journal => "journal",
         };
-        let path = self
-            .notebook_capture_into(to, false, None, &params.text)
+        let entry = self
+            .call_service("notebook.capture", &json!({ "to": to, "text": params.text }))
             .map_err(RpcError::internal)?;
-        self.set_message(format!("captured to {}", to.label()));
-        Ok(CaptureResult {
-            entry: fenix_lsp::normalize(path).to_string_lossy().into_owned(),
-        })
+        Ok(CaptureResult { entry })
     }
 
     /// `fenix/agenda.tasks`: the tasks not archived, in board order
