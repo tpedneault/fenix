@@ -24,10 +24,12 @@ pub(super) fn base_branch_in(root: &Path, fallback: Option<String>) -> Option<St
 pub(crate) const SECRET_CHECKS: &str = "settings.secret_check";
 
 /// How a feature checks its secret works, off the UI thread: the server
-/// and token in, who they sign in as out.
+/// and token in, who they sign in as out. `elsewhere`: a token it finds
+/// without one in your settings, and where from (GitHub's `gh`).
 pub(crate) struct SecretCheck {
     pub secret: fenix_config::Secret,
     pub check: fn(String, String) -> Result<String, String>,
+    pub elsewhere: Option<(fn() -> Option<String>, &'static str)>,
 }
 
 impl App {
@@ -55,8 +57,10 @@ impl App {
         if self.config.token(secret).is_some() {
             return SecretState { set: true, source: "settings.toml".to_string() };
         }
-        if secret == Secret::GitHub && fenix_github::gh_token().is_some() {
-            return SecretState { set: true, source: "from the gh CLI".to_string() };
+        if let Some((found, from)) = self.secret_check(secret).and_then(|check| check.elsewhere) {
+            if found().is_some() {
+                return SecretState { set: true, source: from.to_string() };
+            }
         }
         SecretState { set: false, source: String::new() }
     }
@@ -445,12 +449,15 @@ impl App {
         base_branch_in(root, self.config.git_base_branch.clone())
     }
 
+    /// The feature's check for `secret`, if one makes it.
+    fn secret_check(&self, secret: Secret) -> Option<&'static SecretCheck> {
+        self.contributions(SECRET_CHECKS).filter_map(|c| c.downcast_ref::<SecretCheck>()).find(|check| check.secret == secret)
+    }
+
     /// Checks a token against its server, off the UI thread.
     fn test_secret(&mut self, id: BufferId, secret: Secret) {
-        let token = match secret {
-            Secret::GitHub => self.config.token(secret).or_else(fenix_github::gh_token),
-            _ => self.config.token(secret),
-        };
+        let elsewhere = self.secret_check(secret).and_then(|check| check.elsewhere);
+        let token = self.config.token(secret).or_else(|| elsewhere.and_then(|(found, _)| found()));
         let Some(token) = token else {
             if let Some(page) = self.settings_page(id) {
                 page.note = Some(("no token to test -- Enter sets one".into(), true));
@@ -471,16 +478,12 @@ impl App {
         if let Some(page) = self.settings_page(id) {
             page.note = Some((format!("asking {server}…"), false));
         }
-        let checks: Vec<&'static SecretCheck> = self.contributions(SECRET_CHECKS).filter_map(|c| c.downcast_ref::<SecretCheck>()).collect();
+        // A feature's secret, checked its way.
+        let check = self.secret_check(secret).map(|check| check.check);
         self.page_spawn(move |send| {
-            let result = match secret {
-                Secret::GitLab => fenix_forge::Forge::current_user(&fenix_gitlab::GitLab::new(server.clone(), token, "")),
-                Secret::GitHub => fenix_forge::Forge::current_user(&fenix_github::GitHub::new(token, "", "")),
-                // A feature's own secret, checked its way.
-                other => match checks.iter().find(|check| check.secret == other) {
-                    Some(check) => (check.check)(server.clone(), token),
-                    None => Err("nothing in this build checks it".to_string()),
-                },
+            let result = match check {
+                Some(check) => check(server.clone(), token),
+                None => Err("nothing in this build checks it".to_string()),
             };
             let note = match result {
                 Ok(user) => (format!("works -- signs in to {server} as {user}"), false),

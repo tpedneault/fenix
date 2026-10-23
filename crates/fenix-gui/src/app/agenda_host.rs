@@ -1282,7 +1282,7 @@ mod tests {
         assert!(SPEC.on_start.is_some() && SPEC.on_tick.is_some() && SPEC.before_key.is_some() && SPEC.prompt_key.is_some());
         assert!(!SPEC.prompt_key.unwrap()(&mut app, KeyPress::char('x')), "no prompt open: not its key");
         let checks: Vec<_> = app.contributions(super::super::settings_host::SECRET_CHECKS).filter_map(|c| c.downcast_ref::<super::super::settings_host::SecretCheck>()).map(|c| c.secret).collect();
-        assert_eq!(checks, [fenix_config::Secret::Jira]);
+        assert!(checks.contains(&fenix_config::Secret::Jira), "{checks:?}");
     }
 
     fn enter(app: &mut App) {

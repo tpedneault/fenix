@@ -15,7 +15,7 @@ path = "src/main.rs"
 # default, the core alone with `--no-default-features` (CI builds both, so
 # the core can't come to depend on an extension).
 [features]
-default = ["docker", "tcl", "diagrams", "embedded", "mission", "notebook", "agenda", "jira"]
+default = ["docker", "tcl", "diagrams", "embedded", "mission", "notebook", "agenda", "jira", "review"]
 docker = ["dep:fenix-docker"]
 diagrams = ["notebook", "dep:fenix-diagram"]
 tcl = []
@@ -23,6 +23,7 @@ mission = ["dep:fenix-ccsds", "dep:fenix-mib"]
 embedded = ["dep:fenix-embedded"]
 agenda = ["dep:fenix-agenda"]
 notebook = []
+review = ["dep:fenix-github", "dep:fenix-gitlab"]
 jira = ["agenda", "dep:fenix-jira"]
 
 [dependencies]
@@ -46,8 +47,8 @@ fenix-fs = { path = "../fenix-fs" }
 fenix-diff = { path = "../fenix-diff" }
 fenix-forge = { path = "../fenix-forge" }
 fenix-git = { path = "../fenix-git" }
-fenix-gitlab = { path = "../fenix-gitlab" }
-fenix-github = { path = "../fenix-github" }
+fenix-gitlab = { path = "../fenix-gitlab", optional = true }
+fenix-github = { path = "../fenix-github", optional = true }
 fenix-jira = { path = "../fenix-jira", optional = true }
 fenix-keymap = { path = "../fenix-keymap" }
 fenix-lsp = { path = "../fenix-lsp" }

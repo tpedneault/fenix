@@ -45,6 +45,7 @@ mod project_wizard;
 mod diff_view;
 #[cfg(feature = "docker")]
 mod docker_panel;
+#[cfg(feature = "review")]
 mod forge_panel;
 mod git_panel;
 mod git_compare;
@@ -52,8 +53,11 @@ mod git_log;
 mod git_rebase;
 mod git_request;
 mod git_status;
+#[cfg(feature = "review")]
 mod review_inbox;
+#[cfg(feature = "review")]
 mod review_page;
+#[cfg(feature = "review")]
 mod review_store;
 mod settings_page;
 mod snippets_page;

@@ -39,6 +39,7 @@ use super::mib_host::MibHost;
 #[cfg(feature = "notebook")]
 use super::notebook_host::NotebookHost;
 use super::pdf_host::PdfHost;
+#[cfg(feature = "review")]
 use super::review_host::ReviewHost;
 #[cfg(feature = "tcl")]
 use super::tcl_host::TclHost;
@@ -627,6 +628,7 @@ pub(crate) static BUILTIN_SPECS: &[&FeatureSpec] = &[
     &super::JIRA_SPEC,
     #[cfg(feature = "agenda")]
     &super::AGENDA_SPEC,
+    #[cfg(feature = "review")]
     &super::REVIEW_SPEC,
     &super::PDF_SPEC,
     &super::VNC_SPEC,
@@ -728,6 +730,7 @@ impl Features {
             Some(Box::new(AgendaHost::default())),
             #[cfg(feature = "jira")]
             Some(Box::new(JiraHost::default())),
+            #[cfg(feature = "review")]
             Some(Box::new(ReviewHost::default())),
             Some(Box::new(PdfHost::default())),
             Some(Box::new(VncHost::default())),
