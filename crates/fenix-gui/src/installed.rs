@@ -84,10 +84,11 @@ pub fn rows() -> Vec<crate::extensions_page::InstalledRow> {
         .collect()
 }
 
-/// The registry's public key (minisign, base64), built in: an index not
-/// signed with its secret half is refused. Empty until the key is made;
-/// then only installing from a file works.
-pub const REGISTRY_KEY: &str = "";
+/// The registry's public key (minisign, base64; key id 20C95551642957AA),
+/// built in: an index not signed with its secret half is refused. The
+/// secret half is `MINISIGN_SECRET_KEY` in tpedneault/fenix-extensions'
+/// Actions secrets.
+pub const REGISTRY_KEY: &str = "RWSqVylkUVXJIH6oGO82ACjpSnK7iZGhkVnxqp3yL6yc4j+kra8fR0tI";
 
 /// Your settings, read on their own (the command line runs before the
 /// editor's are).
@@ -192,6 +193,11 @@ mod tests {
         assert_eq!(request(&args(&["--list-extensions"])), Ok(Some(Request::List)));
         assert_eq!(request(&args(&["a.rs"])), Ok(None));
         assert!(request(&args(&["--install-extension"])).unwrap_err().contains("needs a .fenixext"));
+    }
+
+    #[test]
+    fn the_built_in_registry_key_is_a_minisign_key() {
+        assert!(minisign_verify::PublicKey::from_base64(REGISTRY_KEY).is_ok());
     }
 
     #[test]
