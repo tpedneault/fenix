@@ -1,10 +1,19 @@
 //! The host half of the Extensions page (`extensions_page`): its rows
-//! from the built-in features, and a switch written to
-//! `extensions.disabled`.
+//! from the built-in features, a switch written to `extensions.disabled`,
+//! and the registry read and installed from off the UI thread.
 
 use super::pages::PageModel;
 use super::*;
-use crate::extensions_page::{Action, ExtensionsPage, Row};
+use crate::extensions_page::{Action, ExtensionsPage, Registry, Row};
+
+/// What comes back from the registry, off the UI thread.
+#[derive(Debug)]
+pub(crate) enum RegistryEvent {
+    /// The index, its signature checked.
+    Read(Result<fenix_extensions::registry::Index, String>),
+    /// An install (or update) from it, done: what to say.
+    Installed(Result<String, String>),
+}
 
 impl App {
     /// The built-in extensions as the page lists them: on now, and on
@@ -32,6 +41,14 @@ impl App {
         let mut page = if welcome { ExtensionsPage::welcome(rows) } else { ExtensionsPage::new(rows) };
         page.safe_mode = crate::installed::safe_mode();
         page.installed = crate::installed::rows();
+        page.release = crate::installed::release();
+        if !welcome {
+            page.registry = match crate::installed::registry(Some(&self.config)) {
+                Ok(_) => Registry::Looking,
+                Err(e) => Registry::Off(e),
+            };
+        }
+        let look = matches!(page.registry, Registry::Looking) && !welcome;
         match self.find_page(|m| matches!(m, PageModel::Extensions(_))) {
             Some(id) => {
                 if let Some(state) = self.pages.get_mut(&id) {
@@ -44,6 +61,76 @@ impl App {
                 self.open_page(PageModel::Extensions(Box::new(page)));
             }
         }
+        if look {
+            self.read_registry();
+        }
+    }
+
+    /// Changes the Extensions page, if it's open, and lays it out again.
+    fn with_extensions_page(&mut self, change: impl FnOnce(&mut ExtensionsPage)) {
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::Extensions(_))) else { return };
+        if let Some(state) = self.pages.get_mut(&id) {
+            if let PageModel::Extensions(page) = &mut state.model {
+                change(page);
+                page.focus = page.focus.min(page.count().saturating_sub(1));
+            }
+            state.stale = true;
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Reads the registry's index on another thread; the page shows it
+    /// when it lands. Not with no event loop (tests): nothing is fetched.
+    fn read_registry(&mut self) {
+        let registry = match crate::installed::registry(Some(&self.config)) {
+            Ok(registry) => registry,
+            Err(e) => return self.with_extensions_page(|p| p.registry = Registry::Off(e)),
+        };
+        let Some(proxy) = self.event_proxy.clone() else { return };
+        let _ = std::thread::Builder::new().name("fenix-registry".into()).spawn(move || {
+            let result = registry.index(&fenix_extensions::registry::Http);
+            let _ = proxy.send_event(FenixUserEvent::Registry(RegistryEvent::Read(result)));
+        });
+    }
+
+    /// Installs `ext` from the registry on another thread, one at a time.
+    fn install_from_registry(&mut self, ext: String) {
+        let Some(store) = crate::installed::store() else { return self.set_error("no folder to keep extensions in") };
+        let registry = match crate::installed::registry(Some(&self.config)) {
+            Ok(registry) => registry,
+            Err(e) => return self.set_error(e),
+        };
+        let Some(proxy) = self.event_proxy.clone() else { return };
+        self.set_message(format!("Installing {ext} from the registry…"));
+        self.with_extensions_page(|p| p.installing = Some(ext.clone()));
+        let _ = std::thread::Builder::new().name("fenix-registry-install".into()).spawn(move || {
+            let result = crate::installed::install_from(&registry, &ext, &store);
+            let _ = proxy.send_event(FenixUserEvent::Registry(RegistryEvent::Installed(result)));
+        });
+    }
+
+    pub(super) fn apply_registry_event(&mut self, event: RegistryEvent) {
+        match event {
+            RegistryEvent::Read(result) => self.with_extensions_page(|p| {
+                p.registry = match result {
+                    Ok(index) => Registry::Read(index),
+                    Err(e) => Registry::Failed(e),
+                }
+            }),
+            RegistryEvent::Installed(result) => {
+                match result {
+                    Ok(said) => self.set_message(said.replace('\n', " ")),
+                    Err(e) => self.set_error(e),
+                }
+                let rows = crate::installed::rows();
+                self.with_extensions_page(|p| {
+                    p.installing = None;
+                    p.installed = rows;
+                });
+            }
+        }
     }
 
     /// Page `id`'s installed rows read again, after one was switched or
@@ -53,7 +140,7 @@ impl App {
         if let Some(state) = self.pages.get_mut(&id) {
             if let PageModel::Extensions(page) = &mut state.model {
                 page.installed = rows;
-                page.focus = page.focus.min((page.packs.len() + page.rows.len() + page.installed.len()).saturating_sub(1));
+                page.focus = page.focus.min(page.count().saturating_sub(1));
             }
             state.stale = true;
         }
@@ -89,6 +176,12 @@ impl App {
             Action::None => {}
             Action::Close => self.close_page(id),
             Action::Say(text) => self.set_message(text),
+            Action::Install(ext) => self.install_from_registry(ext),
+            Action::Refresh => {
+                self.set_message("Looking at the registry again…");
+                self.with_extensions_page(|p| p.registry = Registry::Looking);
+                self.read_registry();
+            }
             Action::SwitchInstalled(ext, on) => {
                 match crate::installed::store().map(|store| store.set_enabled(&ext, on)) {
                     Some(Ok(())) => self.set_message(format!("{ext}: {} from the next start", if on { "on" } else { "off" })),
@@ -169,5 +262,33 @@ mod tests {
         assert_eq!(app.config.extensions_disabled, ["fenix.mib", "fenix.ccsds", "fenix.tcl"]);
         let Some(PageModel::Extensions(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
         assert!(!page.packs.is_empty(), "the welcome has its packs");
+    }
+
+    fn registry_of(app: &App) -> &Registry {
+        let id = app.find_page(|m| matches!(m, PageModel::Extensions(_))).expect("the page");
+        let Some(PageModel::Extensions(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
+        &page.registry
+    }
+
+    /// The page looks at the registry when it opens -- unless the store
+    /// is switched off -- and shows the index, or why there isn't one,
+    /// when it lands.
+    #[test]
+    fn the_registry_is_looked_at_unless_the_store_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
+        app.open_extensions_page();
+        assert!(matches!(registry_of(&app), Registry::Looking));
+        let index = serde_json::from_str(r#"{"format": 1, "extensions": []}"#).unwrap();
+        app.apply_registry_event(RegistryEvent::Read(Ok(index)));
+        assert!(matches!(registry_of(&app), Registry::Read(_)));
+        app.apply_registry_event(RegistryEvent::Read(Err("offline".into())));
+        assert!(matches!(registry_of(&app), Registry::Failed(e) if e == "offline"));
+        app.set_setting("extensions.store", Some(fenix_config::Value::Bool(false))).unwrap();
+        app.open_extensions_page();
+        assert!(matches!(registry_of(&app), Registry::Off(e) if e.contains("extensions.store")));
+        app.open_welcome_page();
+        assert!(matches!(registry_of(&app), Registry::Looking), "the welcome doesn't look");
     }
 }

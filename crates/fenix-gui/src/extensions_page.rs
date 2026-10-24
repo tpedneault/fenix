@@ -6,6 +6,12 @@
 //! The welcome (`SPC h w`, and a fresh install's first screen) is the
 //! same page with packs on top: a few extensions that go together,
 //! switched at once.
+//!
+//! Below the built-in ones: what you installed, then what the registry
+//! has that you haven't -- Enter installs one, `u` updates one that has a
+//! newer version.
+
+use fenix_extensions::registry::Index;
 
 use crate::page::{fit, frame, Grid, Key, Page, Role};
 
@@ -54,6 +60,28 @@ pub struct InstalledRow {
     pub broken: Option<String>,
 }
 
+/// What the page knows of the registry.
+#[derive(Debug, Clone, Default)]
+pub enum Registry {
+    /// Not looked at: the store is off, or there's no registry here.
+    Off(String),
+    /// Being read.
+    #[default]
+    Looking,
+    /// It couldn't be read, or wasn't trusted.
+    Failed(String),
+    Read(Index),
+}
+
+/// An extension the registry has, in a version this Fenix can install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvailableRow {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub about: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     None,
@@ -64,6 +92,11 @@ pub enum Action {
     SwitchInstalled(String, bool),
     /// Remove an installed extension.
     Uninstall(String),
+    /// Install this extension from the registry, or update it to its
+    /// newest version there.
+    Install(String),
+    /// Read the registry again.
+    Refresh,
     /// Say this on the page.
     Say(String),
 }
@@ -80,18 +113,26 @@ pub struct ExtensionsPage {
     pub installed: Vec<InstalledRow>,
     /// The installed row `x` was pressed on once; a second `x` removes it.
     pub armed: Option<usize>,
+    /// The registry, below what's installed (not on the welcome).
+    pub registry: Registry,
+    /// The Fenix release, for which of the registry's versions fit.
+    pub release: semver::Version,
+    /// The extension being installed, one at a time.
+    pub installing: Option<String>,
 }
 
 impl ExtensionsPage {
     pub fn new(rows: Vec<Row>) -> Self {
-        ExtensionsPage { rows, packs: Vec::new(), focus: 0, safe_mode: false, installed: Vec::new(), armed: None }
+        ExtensionsPage { rows, packs: Vec::new(), focus: 0, safe_mode: false, installed: Vec::new(), armed: None, registry: Registry::default(), release: semver::Version::new(2, 0, 0), installing: None }
     }
 
     /// The welcome: the page with `PACKS` on top -- the ones with
     /// anything in this build.
     pub fn welcome(rows: Vec<Row>) -> Self {
         let packs = PACKS.iter().filter(|pack| pack.ids.iter().any(|id| rows.iter().any(|r| r.id == *id))).copied().collect();
-        ExtensionsPage { rows, packs, focus: 0, safe_mode: false, installed: Vec::new(), armed: None }
+        let mut page = ExtensionsPage::new(rows);
+        page.packs = packs;
+        page
     }
 
     /// The extensions of `pack` this build has.
@@ -109,13 +150,48 @@ impl ExtensionsPage {
         self.focus.checked_sub(self.packs.len() + self.rows.len()).filter(|i| *i < self.installed.len())
     }
 
+    /// What the registry has that isn't installed, for this Fenix; none
+    /// on the welcome.
+    pub fn available(&self) -> Vec<AvailableRow> {
+        let Registry::Read(index) = &self.registry else { return Vec::new() };
+        if !self.packs.is_empty() {
+            return Vec::new();
+        }
+        index
+            .extensions
+            .iter()
+            .filter(|l| !self.installed.iter().any(|r| r.id == l.id))
+            .filter_map(|l| l.latest_for(&self.release).map(|r| AvailableRow { id: l.id.clone(), name: l.name.clone(), version: r.version.clone(), about: l.description.clone() }))
+            .collect()
+    }
+
+    /// The newer version the registry has of installed row `row`, if any.
+    pub fn update_of(&self, row: &InstalledRow) -> Option<String> {
+        let Registry::Read(index) = &self.registry else { return None };
+        let have = [(row.id.clone(), row.version.clone())];
+        fenix_extensions::registry::updates(index, &have, &self.release).into_iter().next().map(|u| u.latest)
+    }
+
+    /// Every row the cursor goes over.
+    pub fn count(&self) -> usize {
+        self.packs.len() + self.rows.len() + self.installed.len() + self.available().len()
+    }
+
+    /// One install at a time; then `id`.
+    fn install(&self, id: &str) -> Action {
+        match &self.installing {
+            Some(busy) => Action::Say(format!("{busy} is still being installed -- one at a time")),
+            None => Action::Install(id.to_string()),
+        }
+    }
+
     /// Whether every extension in `pack` is on from the next start.
     pub fn pack_on(&self, pack: &Pack) -> bool {
         self.built(pack).all(|id| self.rows.iter().any(|r| r.id == id && r.on))
     }
 
     pub fn key(&mut self, key: Key) -> Action {
-        let count = self.packs.len() + self.rows.len() + self.installed.len();
+        let count = self.count();
         // Removing takes a second `x` on the same row; anything else
         // backs out.
         let armed = self.armed.take();
@@ -130,6 +206,14 @@ impl ExtensionsPage {
         }
         match key {
             Key::Char('q') | Key::Escape => Action::Close,
+            Key::Char('r') if self.packs.is_empty() => Action::Refresh,
+            Key::Char('u') => match self.installed_at_focus().map(|i| &self.installed[i]) {
+                Some(row) => match self.update_of(row) {
+                    Some(_) => self.install(&row.id),
+                    None => Action::Say(format!("{} is the newest the registry has for this Fenix", row.name)),
+                },
+                None => Action::None,
+            },
             Key::Char('j') | Key::Down | Key::Tab => {
                 self.focus = (self.focus + 1).min(count.saturating_sub(1));
                 Action::None
@@ -157,7 +241,10 @@ impl ExtensionsPage {
                     None => match self.installed.get(i - self.rows.len()) {
                         Some(row) if row.broken.is_none() => Action::SwitchInstalled(row.id.clone(), !row.on),
                         Some(row) => Action::Say(format!("{} can't be read -- x x removes it", row.name)),
-                        None => Action::None,
+                        None => match self.available().get(i - self.rows.len() - self.installed.len()) {
+                            Some(row) => self.install(&row.id),
+                            None => Action::None,
+                        },
                     },
                 },
             },
@@ -230,7 +317,8 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         g.heading(y, left, width, "Installed");
         y += 1;
         if page.installed.is_empty() {
-            g.put(y, left + 2, &fit("None yet -- fenix --install-extension <file.fenixext> installs one (see Configuration).", width.saturating_sub(4)), Role::Muted);
+            g.put(y, left + 2, &fit("None yet -- install one from Available below, or with fenix --install-extension <file.fenixext>.", width.saturating_sub(4)), Role::Muted);
+            y += 1;
         }
         let first = page.packs.len() + page.rows.len();
         for (i, row) in page.installed.iter().enumerate() {
@@ -239,8 +327,11 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
             }
             g.put(y, left + 2, if row.on { "●" } else { "○" }, if row.on { Role::Good } else { Role::Muted });
             g.put(y, left + 4, &fit(&row.name, name_width), if row.on { Role::Text } else { Role::Muted });
+            let update = page.update_of(row);
             let state = if page.armed == Some(i) {
                 "x again removes it"
+            } else if page.installing.as_deref() == Some(row.id.as_str()) {
+                "updating…"
             } else {
                 match (row.running, row.on) {
                     (true, true) => "on",
@@ -254,12 +345,55 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
             g.put(y, about_x, &fit(about, state_x.saturating_sub(about_x + 2)), if row.broken.is_some() { Role::Warn } else { Role::Muted });
             g.put(y, state_x, state, if row.on == row.running && page.armed != Some(i) { Role::Muted } else { Role::Warn });
             y += 1;
+            let end = g.put(y, about_x, &format!("{} {}", row.id, row.version), Role::Muted);
+            if let Some(latest) = &update {
+                g.put(y, end + 2, &format!("· {latest} available -- u updates"), Role::Good);
+            }
+            y += 1;
+        }
+        // The registry's, not installed.
+        y += 1;
+        g.heading(y, left, width, "Available");
+        y += 1;
+        let available = page.available();
+        let say = match &page.registry {
+            Registry::Off(why) => Some((why.clone(), Role::Muted)),
+            Registry::Looking => Some(("Looking at the registry…".to_string(), Role::Muted)),
+            Registry::Failed(why) => Some((format!("The registry couldn't be read: {why} -- r tries again"), Role::Warn)),
+            Registry::Read(_) if available.is_empty() => Some(("Nothing more for this Fenix -- you have everything the registry has.".to_string(), Role::Muted)),
+            Registry::Read(_) => None,
+        };
+        if let Some((text, role)) = say {
+            g.put(y, left + 2, &fit(&text, width.saturating_sub(4)), role);
+        }
+        let first = page.packs.len() + page.rows.len() + page.installed.len();
+        for (i, row) in available.iter().enumerate() {
+            if first + i == page.focus {
+                g.focus(y, left..left + width);
+            }
+            g.put(y, left + 2, "+", Role::Muted);
+            g.put(y, left + 4, &fit(&row.name, name_width), Role::Text);
+            let state = if page.installing.as_deref() == Some(row.id.as_str()) { "installing…" } else { "Enter installs" };
+            let state_x = (left + width).saturating_sub(state.chars().count());
+            g.put(y, about_x, &fit(&row.about, state_x.saturating_sub(about_x + 2)), Role::Muted);
+            g.put(y, state_x, state, if page.installing.as_deref() == Some(row.id.as_str()) { Role::Warn } else { Role::Muted });
+            y += 1;
             g.put(y, about_x, &format!("{} {}", row.id, row.version), Role::Muted);
             y += 1;
         }
     }
-    let keys: &[(&str, &str)] = if page.installed.is_empty() { &[("Enter", "switch on / off"), ("j k", "move"), ("q", "close")] } else { &[("Enter", "switch on / off"), ("x x", "remove installed"), ("j k", "move"), ("q", "close")] };
-    g.keys(left, width, keys);
+    let mut keys = vec![("Enter", if welcome { "switch on / off" } else { "switch / install" })];
+    if page.installed.iter().any(|r| page.update_of(r).is_some()) {
+        keys.push(("u", "update"));
+    }
+    if !page.installed.is_empty() {
+        keys.push(("x x", "remove installed"));
+    }
+    if !welcome {
+        keys.push(("r", "registry again"));
+    }
+    keys.extend([("j k", "move"), ("q", "close")]);
+    g.keys(left, width, &keys);
     g.finish()
 }
 
@@ -309,10 +443,56 @@ mod tests {
         assert_eq!(p.key(Key::Char('x')), Action::None, "x does nothing on a built-in one");
     }
 
+    fn index(json_versions: &[(&str, &str)]) -> Index {
+        let listings: Vec<String> = json_versions
+            .iter()
+            .map(|(id, version)| format!(r#"{{"id": "{id}", "name": "{id}", "description": "Themes", "versions": [{{"version": "{version}", "fenix": ">=2.0, <3", "runtime": "none", "url": "u", "sha256": "", "size": 1}}]}}"#))
+            .collect();
+        serde_json::from_str(&format!(r#"{{"format": 1, "extensions": [{}]}}"#, listings.join(","))).unwrap()
+    }
+
+    /// What the registry has and you don't is listed below what you
+    /// have: Enter installs it, `u` updates an installed one with a newer
+    /// version there, one at a time.
+    #[test]
+    fn the_registry_offers_what_isnt_installed_and_newer_versions() {
+        let mut p = page();
+        assert!(layout(&p, 160).all_text().contains("Looking at the registry"));
+        p.installed = vec![installed("acme.dusk", true, None)];
+        p.registry = Registry::Read(index(&[("acme.dusk", "1.2.0"), ("acme.dawn", "1.0.0")]));
+        assert_eq!(p.available().iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["acme.dawn"]);
+        let text = layout(&p, 160).all_text();
+        assert!(text.contains("AVAILABLE") && text.contains("acme.dawn 1.0.0") && text.contains("1.2.0 available -- u updates"), "{text}");
+        p.focus = 2;
+        assert_eq!(p.key(Key::Char('u')), Action::Install("acme.dusk".into()));
+        p.key(Key::Char('j'));
+        assert_eq!(p.focus, 3, "onto the available one");
+        assert_eq!(p.key(Key::Enter), Action::Install("acme.dawn".into()));
+        p.installing = Some("acme.dawn".into());
+        assert!(layout(&p, 160).all_text().contains("installing…"));
+        assert!(matches!(p.key(Key::Enter), Action::Say(s) if s.contains("one at a time")));
+        p.installed[0].version = "1.2.0".into();
+        p.focus = 2;
+        assert!(matches!(p.key(Key::Char('u')), Action::Say(s) if s.contains("the newest")));
+        assert_eq!(p.key(Key::Char('r')), Action::Refresh);
+        p.registry = Registry::Failed("offline".into());
+        assert!(layout(&p, 160).all_text().contains("couldn't be read: offline -- r tries again"));
+        assert!(p.available().is_empty());
+    }
+
+    /// The welcome is for the built-in ones: no registry on it.
+    #[test]
+    fn the_welcome_offers_no_registry() {
+        let mut p = ExtensionsPage::welcome(vec![Row { id: "fenix.pdf", name: "PDF", about: "", running: false, on: false }]);
+        p.registry = Registry::Read(index(&[("acme.dawn", "1.0.0")]));
+        assert!(p.available().is_empty());
+        assert!(!layout(&p, 160).all_text().contains("AVAILABLE"));
+    }
+
     #[test]
     fn with_nothing_installed_the_page_says_how() {
         let text = layout(&page(), 160).all_text();
-        assert!(text.contains("None yet -- fenix --install-extension"), "{text}");
+        assert!(text.contains("None yet -- install one from Available below"), "{text}");
     }
 
     #[test]
