@@ -127,6 +127,13 @@ pub fn resolve_server_command(language: LanguageId, configured: &[(String, Strin
             return Some((program, args));
         }
     }
+    // Then a language file's (`languages::servers`), then the built-in one.
+    if let Some((_, command_line)) = crate::languages::servers().iter().find(|(l, _)| *l == name) {
+        let mut parts = command_line.split_whitespace();
+        if let Some(program) = parts.next() {
+            return Some((program.to_string(), parts.map(str::to_string).collect()));
+        }
+    }
     default_server_command(language)
 }
 

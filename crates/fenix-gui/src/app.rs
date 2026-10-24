@@ -6307,9 +6307,12 @@ impl App {
         if !problems.is_empty() {
             app.set_error(format!("keybindings.toml: {}", problems.join("; ")));
         }
-        // Your themes, likewise.
+        // Your themes and language files, likewise.
         if !theme::problems().is_empty() {
             app.set_error(theme::problems().join("; "));
+        }
+        if !crate::languages::problems().is_empty() {
+            app.set_error(crate::languages::problems().join("; "));
         }
         app
     }

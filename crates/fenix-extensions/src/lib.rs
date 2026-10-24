@@ -19,4 +19,4 @@ pub use store::{Installed, Store};
 /// The data folders an extension can carry, each read the way Fenix
 /// reads yours of the same name (`keymaps/*.toml` like your
 /// `keybindings.toml`).
-pub const DATA_DIRS: &[&str] = &["themes", "snippets", "templates", "keymaps"];
+pub const DATA_DIRS: &[&str] = &["themes", "snippets", "templates", "keymaps", "languages"];

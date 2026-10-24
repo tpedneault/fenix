@@ -36,6 +36,7 @@ mod commands;
 mod completion;
 mod console;
 mod installed;
+mod languages;
 mod dashboard;
 mod extensions_page;
 mod page;
@@ -137,6 +138,8 @@ fn main() -> anyhow::Result<()> {
 
     // Safe mode is settled before anything reads what's switched on.
     installed::set_safe_mode(installed::wants_safe_mode(&args));
+    // The language files' file types, before a file is opened.
+    languages::init();
 
     profile::launch_mark("main");
     // Every feature's settings are part of the schema before any are read.
