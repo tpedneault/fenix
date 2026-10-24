@@ -69,6 +69,46 @@ pub enum LanguageId {
 const TCL_HIGHLIGHTS_QUERY: &str = include_str!("../queries/tcl/highlights.scm");
 
 impl LanguageId {
+    /// Every language there's a grammar for.
+    pub const ALL: [LanguageId; 25] = [
+        LanguageId::Rust,
+        LanguageId::Toml,
+        LanguageId::Markdown,
+        LanguageId::Json,
+        LanguageId::Yaml,
+        LanguageId::Python,
+        LanguageId::JavaScript,
+        LanguageId::TypeScript,
+        LanguageId::Tsx,
+        LanguageId::C,
+        LanguageId::Cpp,
+        LanguageId::Bash,
+        LanguageId::Tcl,
+        LanguageId::Dockerfile,
+        LanguageId::Batch,
+        LanguageId::Xml,
+        LanguageId::Dtd,
+        LanguageId::Go,
+        LanguageId::Java,
+        LanguageId::CSharp,
+        LanguageId::Html,
+        LanguageId::Css,
+        LanguageId::Sql,
+        LanguageId::Lua,
+        LanguageId::Mermaid,
+    ];
+
+    /// The name settings and language files call it by: `rust`, `cpp`,
+    /// `csharp`, `javascript`.
+    pub fn name(self) -> String {
+        format!("{self:?}").to_lowercase()
+    }
+
+    /// The language called `name` (any case), if there's a grammar for it.
+    pub fn from_name(name: &str) -> Option<LanguageId> {
+        LanguageId::ALL.into_iter().find(|l| l.name().eq_ignore_ascii_case(name.trim()))
+    }
+
     pub(crate) fn language(self) -> Language {
         match self {
             LanguageId::Rust => tree_sitter_rust::LANGUAGE.into(),
@@ -137,11 +177,33 @@ fn cpp_highlights_query() -> &'static str {
     QUERY.get_or_init(|| format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY))
 }
 
+/// More file types for the languages here, from language files (an
+/// installed extension's or yours): looked at before the built-in ones,
+/// so one can also move a file type to another language.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileTypes {
+    /// By extension, lowercase, no dot.
+    pub extensions: std::collections::HashMap<String, LanguageId>,
+    /// By whole file name, lowercase (`jenkinsfile`).
+    pub filenames: std::collections::HashMap<String, LanguageId>,
+}
+
+static FILE_TYPES: std::sync::OnceLock<FileTypes> = std::sync::OnceLock::new();
+
+/// Settles the language files' file types for this run, before any file
+/// is opened. Once: a second call changes nothing.
+pub fn set_file_types(types: FileTypes) {
+    let _ = FILE_TYPES.set(types);
+}
+
 /// Detects a language from a file extension (no leading dot, e.g. `"rs"`).
 /// Extension-only -- no shebang or content sniffing. Returns `None` for
 /// anything not in the registry, which callers treat as "no highlighting
 /// for this file," not an error.
 pub fn detect_language(extension: &str) -> Option<LanguageId> {
+    if let Some(language) = FILE_TYPES.get().and_then(|t| t.extensions.get(&extension.to_ascii_lowercase())) {
+        return Some(*language);
+    }
     match extension {
         "rs" => Some(LanguageId::Rust),
         "toml" => Some(LanguageId::Toml),
@@ -194,6 +256,9 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
 pub fn detect_language_from_path(path: &std::path::Path) -> Option<LanguageId> {
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         let lower = name.to_ascii_lowercase();
+        if let Some(language) = FILE_TYPES.get().and_then(|t| t.filenames.get(&lower)) {
+            return Some(*language);
+        }
         if lower == "dockerfile"
             || lower.starts_with("dockerfile.")
             || lower == "containerfile"
@@ -225,6 +290,15 @@ mod tests {
         ] {
             assert_eq!(detect_language(ext), Some(lang), "{ext}");
         }
+    }
+
+    #[test]
+    fn every_language_is_found_by_its_name() {
+        for language in LanguageId::ALL {
+            assert_eq!(LanguageId::from_name(&language.name()), Some(language));
+        }
+        assert_eq!(LanguageId::from_name("CSharp"), Some(LanguageId::CSharp));
+        assert_eq!(LanguageId::from_name("cobol"), None);
     }
 
     #[test]

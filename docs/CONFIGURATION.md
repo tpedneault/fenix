@@ -17,6 +17,7 @@ with the reason -- and a change applies at once and is saved at once.
 | Your settings, `settings.toml` | `%AppData%\fenix` | `~/.config/fenix` |
 | Your snippets (a folder per language) and project templates | `%AppData%\fenix\snippets`, `\templates` | `~/.config/fenix/...` |
 | Your themes, a `.toml` each | `%AppData%\fenix\themes` | `~/.config/fenix/themes` |
+| Your language files, a `.toml` each | `%AppData%\fenix\languages` | `~/.config/fenix/languages` |
 | Your data: the agenda | `%AppData%\fenix\data` | `~/.local/share/fenix` |
 | This machine's state: session, window placement, recent files, known projects, bookmarks | `%LocalAppData%\fenix\state` | `~/.local/state/fenix/state` |
 | Unsaved buffers, downloaded tools, backups | `%LocalAppData%\fenix\recovery`, `\tools`, `\backup` | `~/.local/state/fenix/...` |
@@ -192,13 +193,32 @@ they're drawn on (accents 3:1 on a light theme),
 comments quieter than code, and operators distinct from both -- worth
 keeping in yours.
 
+## Language files
+
+A `.toml` in `languages/` gives a language Fenix highlights more file
+types, and can name the language server to run for it:
+
+```toml
+language = "sql"              # rust, python, cpp, csharp, javascript, ...
+extensions = ["pks", "pkb"]   # with or without the dot
+filenames = ["schema.ddl"]    # whole names, like Dockerfile
+server = "sqls"               # the command line that starts it
+```
+
+A file type in a language file wins over the built-in one, so a file can
+also move `.inc` from one language to another. An installed extension's
+language files are read first, then yours, and yours win. Your
+`lsp.servers` setting wins over any language file. A language Fenix
+has no grammar for needs code, which extensions can't carry yet. Fenix
+reads language files when it starts.
+
 ## Extensions you install
 
 An extension is a `.fenixext` file -- a zip with an `extension.toml` at
 its root -- or, while you make one, the folder it's made from. For now
-Fenix installs extensions of data: themes, snippets, project templates
-and keys, in `themes/`, `snippets/`, `templates/` and `keymaps/` folders
-laid out like your own (a keymap is a `.toml` of `[[leader]]` entries,
+Fenix installs extensions of data: themes, snippets, project templates,
+keys and language files, in `themes/`, `snippets/`, `templates/`,
+`keymaps/` and `languages/` folders laid out like your own (a keymap is a `.toml` of `[[leader]]` entries,
 as in `keybindings.toml`). They're read beside the built-in ones and
 below yours: your theme, snippet, template or key of the same name wins.
 

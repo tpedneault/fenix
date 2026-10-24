@@ -73,6 +73,10 @@ impl Roots {
         self.settings.join("themes")
     }
 
+    pub fn languages(&self) -> PathBuf {
+        self.settings.join("languages")
+    }
+
     /// The extensions installed on this machine.
     pub fn extensions(&self) -> PathBuf {
         self.local.join("extensions")
@@ -123,6 +127,11 @@ pub fn templates_dir() -> Option<PathBuf> {
 /// Your themes, one `.toml` each.
 pub fn themes_dir() -> Option<PathBuf> {
     Roots::current().map(|r| r.themes())
+}
+
+/// Your language files, one `.toml` each.
+pub fn languages_dir() -> Option<PathBuf> {
+    Roots::current().map(|r| r.languages())
 }
 
 /// The extensions installed on this machine, and `extensions.toml`.
