@@ -234,6 +234,13 @@ and each package must match the SHA-256 the index gives it; anything
 else is refused before it's written. `extensions.store = false` keeps a
 machine to files.
 
+The Extensions page (`SPC h x`) does the same from inside Fenix. Under
+the built-in extensions are the ones you installed: Enter switches one
+on or off, `x x` removes it, and `u` updates it when the registry has a
+newer version. Below them, under Available, is what the registry has
+that you haven't installed, in a version for this Fenix: Enter installs
+it. `r` reads the registry again.
+
 An install replaces any other version of the same extension, and
 needs its dependencies installed first. It's used from the next start.
 A package is checked before anything is written: its manifest, the Fenix

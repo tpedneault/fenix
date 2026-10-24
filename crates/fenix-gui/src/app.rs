@@ -1768,6 +1768,9 @@ pub enum FenixUserEvent {
     DiskProbed(Box<disk_probe::ProbeResult>),
     /// What Home's recent files looked like, looked at off the UI thread.
     RecentProbed(HashMap<PathBuf, home::RecentSeen>),
+    /// The extension registry read, or an install from it done, for the
+    /// Extensions page (`extensions_host`).
+    Registry(extensions_host::RegistryEvent),
     /// A root's files, listed for the find-file picker (`file_index`).
     FilesListed { root: PathBuf, include_ignored: bool, files: Vec<fenix_picker::Candidate<PathBuf>> },
     /// Home's TODO column for a project root, swept off the UI thread.
@@ -2103,6 +2106,7 @@ impl FenixUserEvent {
             Self::ExplorerListed { .. } => "ExplorerListed",
             Self::DiskProbed { .. } => "DiskProbed",
             Self::RecentProbed { .. } => "RecentProbed",
+            Self::Registry { .. } => "Registry",
             Self::FilesListed { .. } => "FilesListed",
             Self::HomeTodos { .. } => "HomeTodos",
             Self::ExplorerGitStatus { .. } => "ExplorerGitStatus",
@@ -17651,6 +17655,7 @@ impl App {
             FenixUserEvent::FilesListed { root, include_ignored, files } => self.apply_files_listed(root, include_ignored, files),
             FenixUserEvent::DiskProbed(result) => self.apply_disk_probe(*result),
             FenixUserEvent::RecentProbed(seen) => self.apply_recent_probed(seen),
+            FenixUserEvent::Registry(event) => self.apply_registry_event(event),
             FenixUserEvent::HomeTodos { root, items } => self.apply_home_todos(root, items),
             FenixUserEvent::ExplorerGitStatus { target, request, statuses } => self.apply_explorer_git_status(target, request, statuses),
             FenixUserEvent::ExplorerShares { host, result } => self.apply_explorer_shares(host, result),

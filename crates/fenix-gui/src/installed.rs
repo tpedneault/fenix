@@ -10,7 +10,7 @@ use std::path::PathBuf;
 /// this says so rather than the workspace's version.
 pub const RELEASE: &str = "2.0.0";
 
-fn release() -> semver::Version {
+pub fn release() -> semver::Version {
     semver::Version::parse(RELEASE).expect("a version")
 }
 
@@ -97,12 +97,18 @@ fn settings() -> Option<fenix_config::Config> {
 }
 
 /// The registry your settings name, unless they switch the store off.
-fn registry(config: Option<&fenix_config::Config>) -> Result<fenix_extensions::registry::Registry<'static>, String> {
+pub fn registry(config: Option<&fenix_config::Config>) -> Result<fenix_extensions::registry::Registry<'static>, String> {
     if config.and_then(|c| c.bool_value("extensions.store")) == Some(false) {
         return Err("the store is switched off here (extensions.store) -- install from a file instead".into());
     }
     let url = config.and_then(|c| c.text_value("extensions.registry")).filter(|u| !u.trim().is_empty()).unwrap_or(fenix_extensions::registry::DEFAULT_URL);
     Ok(fenix_extensions::registry::Registry { url: url.to_string(), public_key: REGISTRY_KEY })
+}
+
+/// Installs `id` from `registry` into `store`: what to say.
+pub fn install_from(registry: &fenix_extensions::registry::Registry, id: &str, store: &fenix_extensions::Store) -> Result<String, String> {
+    let done = registry.install(id, store, &fenix_extensions::registry::Http, &release())?;
+    Ok(done.iter().map(|e| format!("Installed {} {} ({}) from the registry.", e.name(), e.version, e.id)).collect::<Vec<_>>().join("\n") + " It's used from the next start.")
 }
 
 /// The flags, as typed.
@@ -146,8 +152,7 @@ pub fn run(request: &Request, store: &fenix_extensions::Store) -> Result<String,
             let config = settings();
             let registry = registry(config.as_ref())?;
             let id = path.to_str().expect("checked");
-            let done = registry.install(id, store, &fenix_extensions::registry::Http, &release())?;
-            Ok(done.iter().map(|e| format!("Installed {} {} ({}) from the registry.", e.name(), e.version, e.id)).collect::<Vec<_>>().join("\n") + " It's used from the next start.")
+            install_from(&registry, id, store)
         }
         Request::Install(path) => {
             let installed = store.install(path, &release())?;
