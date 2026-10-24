@@ -22,6 +22,7 @@ with the reason -- and a change applies at once and is saved at once.
 | This machine's state: session, window placement, recent files, known projects, bookmarks | `%LocalAppData%\fenix\state` | `~/.local/state/fenix/state` |
 | Unsaved buffers, downloaded tools, backups | `%LocalAppData%\fenix\recovery`, `\tools`, `\backup` | `~/.local/state/fenix/...` |
 | Extensions you've installed, and `extensions.toml` | `%LocalAppData%\fenix\extensions` | `~/.local/state/fenix/extensions` |
+| Extensions an administrator installed for everyone, and `policy.toml` | `%ProgramData%\Fenix\extensions` | `/etc/fenix/extensions` |
 
 What you chose roams with your Windows profile; what Fenix noticed about
 this machine, and what it downloaded, doesn't. Since the agenda roams,
@@ -265,6 +266,36 @@ An install replaces any other version of the same extension, and
 needs its dependencies installed first. It's used from the next start.
 A package is checked before anything is written: its manifest, the Fenix
 it's for, and that none of its files would land outside its own folder.
+
+### For everyone on a machine
+
+An administrator can install extensions for everyone on a machine by
+adding `--machine` to the extension flags:
+
+```text
+fenix --install-extension dusk-1.0.0.fenixext --machine
+fenix --list-extensions --machine
+fenix --uninstall-extension acme.dusk --machine
+```
+
+They go in the machine's folder (`%ProgramData%\Fenix\extensions`,
+`/Library/Application Support/Fenix/extensions` on macOS,
+`/etc/fenix/extensions` on Linux; `FENIX_MANAGED_EXTENSIONS` names
+another, and under `FENIX_HOME` it's `managed` in that folder). Create
+the folder as an administrator, so that others can only read it.
+
+A managed extension is pinned: it's used in place of anyone's own copy
+of the same extension. Only the administrator switches, updates or
+removes it, and the Extensions page says so. Nothing updates by itself.
+
+A `policy.toml` in the same folder decides for everyone:
+
+```toml
+store = false                                # no registry here: files only
+# registry = "https://mirror.example/index.json"   # or everyone uses this mirror
+```
+
+A `policy.toml` that can't be read keeps the store switched off.
 
 When an extension seems to be the trouble, `fenix --disable-extensions`
 starts in safe mode: the core alone, with every built-in extension off and

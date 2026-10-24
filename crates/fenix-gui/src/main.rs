@@ -113,11 +113,15 @@ fn main() -> anyhow::Result<()> {
     match installed::request(&args) {
         Ok(Some(request)) => {
             console::open();
-            let Some(store) = fenix_extensions::Store::current() else {
+            // `--machine`: the machine's store, for everyone here.
+            let machine = installed::wants_machine(&args);
+            let store = if machine { fenix_extensions::Store::managed() } else { fenix_extensions::Store::current() };
+            let Some(store) = store else {
                 eprintln!("fenix: no folder to keep extensions in");
                 std::process::exit(1);
             };
-            match installed::run(&request, &store) {
+            let managed = if machine { None } else { fenix_extensions::Store::managed() };
+            match installed::run(&request, &store, managed.as_ref()) {
                 Ok(said) => {
                     println!("{said}");
                     std::process::exit(0);
