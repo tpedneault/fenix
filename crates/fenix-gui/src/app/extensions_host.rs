@@ -4,7 +4,7 @@
 
 use super::pages::PageModel;
 use super::*;
-use crate::extensions_page::{Action, ExtensionsPage, Registry, Row};
+use crate::extensions_page::{Action, ExtensionsPage, Registry, Row, Target};
 
 /// What comes back from the registry, off the UI thread.
 #[derive(Debug)]
@@ -111,6 +111,30 @@ impl App {
         });
     }
 
+    /// `d`: an extension's details page, in the reading view in the
+    /// Extensions page's place; `q` comes back.
+    fn open_extension_details(&mut self, page_id: BufferId, target: Target) {
+        let text = match &target {
+            Target::BuiltIn(ext) => self.extension_rows().into_iter().find(|r| r.id == *ext).map(|r| crate::extensions_page::builtin_details(&r)),
+            Target::Installed(ext) => crate::installed::find(ext).map(|(e, managed)| {
+                let read = |name: &str| std::fs::read_to_string(e.dir.join(name)).ok();
+                crate::extensions_page::installed_details(&e, managed, read("README.md").as_deref(), read("CHANGELOG.md").as_deref())
+            }),
+            Target::Available(ext) => match self.pages.get(&page_id).map(|s| &s.model) {
+                Some(PageModel::Extensions(page)) => match &page.registry {
+                    Registry::Read(index) => index.extensions.iter().find(|l| l.id == *ext).map(|l| crate::extensions_page::available_details(l, &page.release)),
+                    _ => None,
+                },
+                _ => None,
+            },
+        };
+        let Some(text) = text else { return self.set_error("that extension isn't there any more") };
+        let source = self.buffers.open_text_view_like(&text, Path::new("details.md"));
+        let mut page = crate::reading_page::ReadingPage::new(source, None, true);
+        page.back = Some(page_id);
+        self.open_page(PageModel::Reading(Box::new(page)));
+    }
+
     pub(super) fn apply_registry_event(&mut self, event: RegistryEvent) {
         match event {
             RegistryEvent::Read(result) => self.with_extensions_page(|p| {
@@ -177,6 +201,7 @@ impl App {
             Action::Close => self.close_page(id),
             Action::Say(text) => self.set_message(text),
             Action::Install(ext) => self.install_from_registry(ext),
+            Action::Details(target) => self.open_extension_details(id, target),
             Action::Refresh => {
                 self.set_message("Looking at the registry again…");
                 self.with_extensions_page(|p| p.registry = Registry::Looking);
@@ -268,6 +293,26 @@ mod tests {
         let id = app.find_page(|m| matches!(m, PageModel::Extensions(_))).expect("the page");
         let Some(PageModel::Extensions(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
         &page.registry
+    }
+
+    /// `d` opens a details page in the Extensions page's place; `q`
+    /// closes it, its text with it, and goes back.
+    #[test]
+    fn details_open_in_the_reading_view_and_come_back() {
+        let mut app = App::with_file(None);
+        app.open_extensions_page();
+        let id = app.focused_buffer_id();
+        let buffers = app.buffers.len();
+        app.extensions_action(id, Action::Details(Target::BuiltIn("fenix.jira")));
+        let details = app.focused_buffer_id();
+        let Some(PageModel::Reading(p)) = app.pages.get(&details).map(|s| &s.model) else { panic!("the reading view") };
+        assert_eq!(p.back, Some(id));
+        assert_eq!(app.page_title(details), "*details*");
+        let text = app.buffers.get(p.source).unwrap().buffer.text();
+        assert!(text.starts_with("# Jira"), "{text}");
+        app.reading_action(details, crate::reading_page::Action::Close);
+        assert_eq!(app.focused_buffer_id(), id, "back on the Extensions page");
+        assert_eq!(app.buffers.len(), buffers, "the details' text is gone with it");
     }
 
     /// The page looks at the registry when it opens -- unless the store

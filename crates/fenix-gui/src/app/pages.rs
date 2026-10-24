@@ -71,7 +71,8 @@ impl PageState {
         match &self.model {
             PageModel::Wizard(w) => w.editing.is_some(),
             PageModel::Hub(h) => h.filtering || h.editing_group.is_some(),
-            PageModel::Doctor(_) | PageModel::Extensions(_) => false,
+            PageModel::Doctor(_) => false,
+            PageModel::Extensions(e) => e.typing(),
             PageModel::Git(g) => g.typing(),
             PageModel::Log(l) => l.typing(),
             PageModel::Compare(_) => false,
@@ -100,7 +101,8 @@ impl PageState {
                 let target = if let Some(group) = &mut h.editing_group { group } else { &mut h.filter };
                 target.extend(text.chars().filter(|c| !c.is_control()));
             }
-            PageModel::Doctor(_) | PageModel::Extensions(_) => {}
+            PageModel::Doctor(_) => {}
+            PageModel::Extensions(e) => e.paste(text),
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
             PageModel::Compare(_) => {}
@@ -269,6 +271,7 @@ impl App {
                 let title = self.features.specs().find(|spec| spec.id == p.feature()).and_then(|spec| spec.page_title);
                 title.and_then(|title| title(self, id)).unwrap_or_else(|| p.title())
             }
+            Some(PageModel::Reading(p)) if p.back.is_some() => "*details*".to_string(),
             Some(PageModel::Reading(p)) => format!("*reading: {}*", p.path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
         }
     }

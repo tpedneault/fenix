@@ -90,6 +90,12 @@ fn everything(machine: Option<&Store>, yours: Option<&Store>) -> Vec<(Installed,
     all
 }
 
+/// Installed extension `id` as Fenix uses it -- the machine's when it has
+/// one -- and whether it's the machine's.
+pub fn find(id: &str) -> Option<(Installed, bool)> {
+    everything(machine().as_ref(), store().as_ref()).into_iter().find(|(e, _)| e.id == id)
+}
+
 /// Where the switched-on ones in `all` keep data of kind `kind`.
 fn dirs_of(all: &[(Installed, bool)], kind: &str) -> Vec<PathBuf> {
     all.iter().filter(|(e, _)| e.enabled && e.manifest.is_ok()).map(|(e, _)| e.dir.join(kind)).filter(|d| d.is_dir()).collect()
