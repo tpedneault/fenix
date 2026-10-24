@@ -34,11 +34,14 @@ pub struct ReadingPage {
     pub line: usize,
     /// The selected target, by index into `rendered.targets`.
     pub target: Option<usize>,
+    /// A page Fenix wrote (an extension's details): its source goes with
+    /// it, and closing it goes back to this page.
+    pub back: Option<fenix_buffers::BufferId>,
 }
 
 impl ReadingPage {
     pub fn new(source: fenix_buffers::BufferId, path: Option<PathBuf>, replaces: bool) -> Self {
-        ReadingPage { source, path, replaces, rendered: Rendered::default(), seen: None, followed: None, line: 0, target: None }
+        ReadingPage { source, path, replaces, rendered: Rendered::default(), seen: None, followed: None, line: 0, target: None, back: None }
     }
 
     fn lines(&self) -> usize {

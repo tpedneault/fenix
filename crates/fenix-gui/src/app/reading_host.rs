@@ -273,9 +273,18 @@ impl App {
 
     pub(super) fn reading_action(&mut self, page_id: BufferId, action: ReadAction) {
         let Some(PageModel::Reading(p)) = self.pages.get(&page_id).map(|s| &s.model) else { return };
-        let (source, path, replaces) = (p.source, p.path.clone(), p.replaces);
+        let (source, path, replaces, back) = (p.source, p.path.clone(), p.replaces, p.back);
         match action {
             ReadAction::None => {}
+            // A page Fenix wrote: gone with its source, back where it came from.
+            ReadAction::Close if back.is_some() => {
+                self.close_page(page_id);
+                self.buffers.close(source);
+                if let Some(back) = back.filter(|b| self.pages.contains_key(b)) {
+                    self.open_buffer_in_focused_pane(back);
+                }
+            }
+            ReadAction::Edit(_) if back.is_some() => self.set_message("Fenix wrote this page -- there's nothing to edit"),
             ReadAction::Close => {
                 if replaces {
                     self.close_page(page_id);

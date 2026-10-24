@@ -256,11 +256,18 @@ else is refused before it's written. `extensions.store = false` keeps a
 machine to files.
 
 The Extensions page (`SPC h x`) does the same from inside Fenix. Under
-the built-in extensions are the ones you installed: Enter switches one
-on or off, `x x` removes it, and `u` updates it when the registry has a
-newer version. Below them, under Available, is what the registry has
-that you haven't installed, in a version for this Fenix: Enter installs
-it. `r` reads the registry again.
+the built-in extensions come Updates (the installed ones the registry
+has a newer version of, which `u` updates), the rest of Installed, and
+Available: what the registry has that you haven't installed, in a
+version for this Fenix. Enter switches an installed one on or off, or
+installs an available one, and `x x` removes an installed one. `/`
+searches them all by name, id and description, and `r` reads the
+registry again.
+
+`d` opens an extension's details in the reading view: its version, the
+Fenix it's for, what it needs, the permissions it asks for (none, for an
+extension of data), and, once it's installed, its README and changelog.
+`q` goes back.
 
 An install replaces any other version of the same extension, and
 needs its dependencies installed first. It's used from the next start.
