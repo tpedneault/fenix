@@ -938,6 +938,7 @@ dependencies = [
  "glyphon",
  "image",
  "lsp-types",
+ "minisign-verify",
  "pollster",
  "pulldown-cmark",
  "semver",
