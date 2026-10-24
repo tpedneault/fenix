@@ -14,7 +14,7 @@ pub mod store;
 
 pub use manifest::{Manifest, Runtime};
 pub use package::Package;
-pub use store::{Installed, Store};
+pub use store::{Installed, Policy, Store};
 
 /// The data folders an extension can carry, each read the way Fenix
 /// reads yours of the same name (`keymaps/*.toml` like your

@@ -58,6 +58,8 @@ pub struct InstalledRow {
     pub on: bool,
     /// What's wrong with it, when its manifest can't be read.
     pub broken: Option<String>,
+    /// The machine's, which only its administrator changes.
+    pub managed: bool,
 }
 
 /// What the page knows of the registry.
@@ -168,6 +170,9 @@ impl ExtensionsPage {
     /// The newer version the registry has of installed row `row`, if any.
     pub fn update_of(&self, row: &InstalledRow) -> Option<String> {
         let Registry::Read(index) = &self.registry else { return None };
+        if row.managed {
+            return None;
+        }
         let have = [(row.id.clone(), row.version.clone())];
         fenix_extensions::registry::updates(index, &have, &self.release).into_iter().next().map(|u| u.latest)
     }
@@ -195,6 +200,12 @@ impl ExtensionsPage {
         // Removing takes a second `x` on the same row; anything else
         // backs out.
         let armed = self.armed.take();
+        // The machine's is its administrator's to change.
+        if let Some(row) = self.installed_at_focus().map(|i| &self.installed[i]).filter(|r| r.managed) {
+            if matches!(key, Key::Enter | Key::Char('x') | Key::Char('u')) {
+                return Action::Say(format!("{} is managed on this machine -- its administrator switches, updates and removes it", row.name));
+            }
+        }
         if key == Key::Char('x') {
             let Some(i) = self.installed_at_focus() else { return Action::None };
             let row = &self.installed[i];
@@ -332,6 +343,8 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
                 "x again removes it"
             } else if page.installing.as_deref() == Some(row.id.as_str()) {
                 "updating…"
+            } else if row.managed {
+                if row.on { "managed" } else { "managed, off" }
             } else {
                 match (row.running, row.on) {
                     (true, true) => "on",
@@ -386,7 +399,7 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
     if page.installed.iter().any(|r| page.update_of(r).is_some()) {
         keys.push(("u", "update"));
     }
-    if !page.installed.is_empty() {
+    if page.installed.iter().any(|r| !r.managed) {
         keys.push(("x x", "remove installed"));
     }
     if !welcome {
@@ -418,7 +431,7 @@ mod tests {
     }
 
     fn installed(id: &str, on: bool, broken: Option<&str>) -> InstalledRow {
-        InstalledRow { id: id.into(), name: id.into(), version: "1.0.0".into(), about: "Themes".into(), running: on, on, broken: broken.map(str::to_string) }
+        InstalledRow { id: id.into(), name: id.into(), version: "1.0.0".into(), about: "Themes".into(), running: on, on, broken: broken.map(str::to_string), managed: false }
     }
 
     /// Installed extensions sit below the built-in ones: Enter switches
@@ -478,6 +491,21 @@ mod tests {
         p.registry = Registry::Failed("offline".into());
         assert!(layout(&p, 160).all_text().contains("couldn't be read: offline -- r tries again"));
         assert!(p.available().is_empty());
+    }
+
+    /// The machine's extension is said to be its administrator's: no
+    /// switch, update or removal from here.
+    #[test]
+    fn a_managed_extension_is_left_to_the_administrator() {
+        let mut p = page();
+        p.installed = vec![InstalledRow { managed: true, ..installed("acme.dusk", true, None) }];
+        p.registry = Registry::Read(index(&[("acme.dusk", "1.2.0")]));
+        p.focus = 2;
+        for key in [Key::Enter, Key::Char('x'), Key::Char('u')] {
+            assert!(matches!(p.key(key), Action::Say(s) if s.contains("managed on this machine")));
+        }
+        let text = layout(&p, 160).all_text();
+        assert!(text.contains("managed") && !text.contains("u updates") && !text.contains("remove installed"), "{text}");
     }
 
     /// The welcome is for the built-in ones: no registry on it.

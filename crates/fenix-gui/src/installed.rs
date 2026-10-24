@@ -2,8 +2,17 @@
 //! data the switched-on ones carry (themes, snippets, templates), read
 //! beside yours, and `fenix --install-extension` and friends, which change
 //! what's installed without opening a window.
+//!
+//! Two stores: yours, and the machine's (`managed`), which an
+//! administrator fills for everyone with `--machine`. A managed extension
+//! is pinned: it takes the place of yours with the same id, and only the
+//! administrator switches, updates or removes it. The machine's
+//! `policy.toml` can switch the store off, or name the registry, for
+//! everyone.
 
 use std::path::PathBuf;
+
+use fenix_extensions::{Installed, Policy, Store};
 
 /// The Fenix release this is, for an extension's `engine.fenix` range.
 /// `release/2.0` is 2.0 before its version bump (held until release), so
@@ -37,20 +46,53 @@ pub fn safe_mode() -> bool {
 }
 
 /// The switched-on installed extensions' data folders of kind `kind`
-/// (`themes`, `snippets`, `templates`). None in tests, or in safe mode.
+/// (`themes`, `snippets`, `templates`), the managed ones' first. None in
+/// tests, or in safe mode.
 pub fn data_dirs(kind: &str) -> Vec<PathBuf> {
     if cfg!(test) || safe_mode() {
         return Vec::new();
     }
-    fenix_extensions::Store::current().map(|store| store.data_dirs(kind)).unwrap_or_default()
+    dirs_of(&everything(machine().as_ref(), store().as_ref()), kind)
 }
 
-/// This machine's store of installed extensions; none in tests.
-pub fn store() -> Option<fenix_extensions::Store> {
+/// Your store of installed extensions; none in tests.
+pub fn store() -> Option<Store> {
     if cfg!(test) {
         return None;
     }
-    fenix_extensions::Store::current()
+    Store::current()
+}
+
+/// The machine's store, which an administrator fills; none in tests.
+pub fn machine() -> Option<Store> {
+    if cfg!(test) {
+        return None;
+    }
+    Store::managed()
+}
+
+/// `--machine`: the extension flags work on the machine's store.
+pub const MACHINE_FLAG: &str = "--machine";
+
+pub fn wants_machine(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == MACHINE_FLAG)
+}
+
+/// The managed extensions, then yours that none of them replaces:
+/// `(extension, managed)`.
+fn everything(machine: Option<&Store>, yours: Option<&Store>) -> Vec<(Installed, bool)> {
+    let mut all: Vec<(Installed, bool)> = machine.and_then(|m| m.installed().ok()).unwrap_or_default().into_iter().map(|e| (e, true)).collect();
+    for e in yours.and_then(|s| s.installed().ok()).unwrap_or_default() {
+        if !all.iter().any(|(m, _)| m.id == e.id) {
+            all.push((e, false));
+        }
+    }
+    all
+}
+
+/// Where the switched-on ones in `all` keep data of kind `kind`.
+fn dirs_of(all: &[(Installed, bool)], kind: &str) -> Vec<PathBuf> {
+    all.iter().filter(|(e, _)| e.enabled && e.manifest.is_ok()).map(|(e, _)| e.dir.join(kind)).filter(|d| d.is_dir()).collect()
 }
 
 /// The installed extensions that were switched on when Fenix started --
@@ -61,18 +103,17 @@ fn running() -> &'static [String] {
         if safe_mode() {
             return Vec::new();
         }
-        store().and_then(|s| s.installed().ok()).unwrap_or_default().into_iter().filter(|e| e.enabled).map(|e| e.id).collect()
+        everything(machine().as_ref(), store().as_ref()).into_iter().filter(|(e, _)| e.enabled).map(|(e, _)| e.id).collect()
     })
 }
 
 /// The Extensions page's rows for what's installed.
 pub fn rows() -> Vec<crate::extensions_page::InstalledRow> {
     let running = running();
-    store()
-        .and_then(|s| s.installed().ok())
-        .unwrap_or_default()
+    everything(machine().as_ref(), store().as_ref())
         .into_iter()
-        .map(|e| crate::extensions_page::InstalledRow {
+        .map(|(e, managed)| crate::extensions_page::InstalledRow {
+            managed,
             name: e.name(),
             about: e.manifest.as_ref().map(|m| m.extension.description.clone()).unwrap_or_default(),
             broken: e.manifest.as_ref().err().cloned(),
@@ -96,13 +137,26 @@ fn settings() -> Option<fenix_config::Config> {
     fenix_config::Config::load(fenix_storage::paths::settings_file()?).ok()
 }
 
-/// The registry your settings name, unless they switch the store off.
+/// The registry this machine's policy and your settings name, unless one
+/// of them switches the store off. A policy that can't be read keeps the
+/// store shut rather than guess.
 pub fn registry(config: Option<&fenix_config::Config>) -> Result<fenix_extensions::registry::Registry<'static>, String> {
+    let policy = machine().map(|m| m.policy()).transpose()?.unwrap_or_default();
+    registry_with(config, &policy)
+}
+
+fn registry_with(config: Option<&fenix_config::Config>, policy: &Policy) -> Result<fenix_extensions::registry::Registry<'static>, String> {
+    if policy.store == Some(false) {
+        return Err("the store is switched off on this machine by its administrator -- install from a file instead".into());
+    }
     if config.and_then(|c| c.bool_value("extensions.store")) == Some(false) {
         return Err("the store is switched off here (extensions.store) -- install from a file instead".into());
     }
-    let url = config.and_then(|c| c.text_value("extensions.registry")).filter(|u| !u.trim().is_empty()).unwrap_or(fenix_extensions::registry::DEFAULT_URL);
-    Ok(fenix_extensions::registry::Registry { url: url.to_string(), public_key: REGISTRY_KEY })
+    let url = match policy.registry.as_deref().filter(|u| !u.trim().is_empty()) {
+        Some(url) => url.to_string(),
+        None => config.and_then(|c| c.text_value("extensions.registry")).filter(|u| !u.trim().is_empty()).unwrap_or(fenix_extensions::registry::DEFAULT_URL).to_string(),
+    };
+    Ok(fenix_extensions::registry::Registry { url, public_key: REGISTRY_KEY })
 }
 
 /// Installs `id` from `registry` into `store`: what to say.
@@ -144,38 +198,51 @@ pub fn request(args: &[String]) -> Result<Option<Request>, String> {
     Ok(None)
 }
 
+/// Refuses `id` when the machine has it: it's the administrator's.
+fn not_managed(id: &str, managed: Option<&Store>) -> Result<(), String> {
+    match managed.and_then(|m| m.installed().ok()).unwrap_or_default().into_iter().find(|e| e.id == id) {
+        Some(e) => Err(format!("{id} {} is managed on this machine -- its administrator installs, updates and removes it", e.version)),
+        None => Ok(()),
+    }
+}
+
 /// Carries out `request` on `store`: what to print, and whether it went.
-pub fn run(request: &Request, store: &fenix_extensions::Store) -> Result<String, String> {
+/// `managed` is the machine's store when `store` is yours.
+pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<String, String> {
     match request {
         // An id, not a file there: from the registry.
         Request::Install(path) if !path.exists() && path.to_str().is_some_and(fenix_extensions::manifest::valid_id) => {
+            let id = path.to_str().expect("checked");
+            not_managed(id, managed)?;
             let config = settings();
             let registry = registry(config.as_ref())?;
-            let id = path.to_str().expect("checked");
             install_from(&registry, id, store)
         }
         Request::Install(path) => {
+            not_managed(&fenix_extensions::Package::open(path)?.manifest.extension.id, managed)?;
             let installed = store.install(path, &release())?;
             Ok(format!("Installed {} {} ({}). It's used from the next start.", installed.name(), installed.version, installed.id))
         }
         Request::Uninstall(id) => {
+            not_managed(id, managed)?;
             store.uninstall(id)?;
             Ok(format!("Removed {id}. It's gone from the next start."))
         }
         Request::List => {
-            let installed = store.installed()?;
-            if installed.is_empty() {
+            let all = everything(managed, Some(store));
+            if all.is_empty() {
                 return Ok(format!("No extensions installed (in {}).", store.root().display()));
             }
-            Ok(installed
+            Ok(all
                 .iter()
-                .map(|e| {
+                .map(|(e, by_machine)| {
                     let state = match (&e.manifest, e.enabled) {
                         (Err(err), _) => format!("broken: {err}"),
                         (Ok(_), true) => "on".to_string(),
                         (Ok(_), false) => "off".to_string(),
                     };
-                    format!("{}  {}  {}  ({state})", e.id, e.version, e.name())
+                    let managed = if *by_machine { ", managed" } else { "" };
+                    format!("{}  {}  {}  ({state}{managed})", e.id, e.version, e.name())
                 })
                 .collect::<Vec<_>>()
                 .join("\n"))
@@ -235,13 +302,59 @@ mod tests {
     fn installing_listing_and_removing_say_what_happened() {
         let dir = tempfile::tempdir().unwrap();
         let store = fenix_extensions::Store::new(dir.path().join("extensions"));
-        assert!(run(&Request::List, &store).unwrap().starts_with("No extensions installed"));
-        let pack = dir.path().join("acme");
+        assert!(run(&Request::List, &store, None).unwrap().starts_with("No extensions installed"));
+        let pack = extension(dir.path(), "acme.dusk", "1.0.0");
+        assert_eq!(run(&Request::Install(pack), &store, None).unwrap(), "Installed Dusk 1.0.0 (acme.dusk). It's used from the next start.");
+        assert_eq!(run(&Request::List, &store, None).unwrap(), "acme.dusk  1.0.0  Dusk  (on)");
+        assert!(run(&Request::Uninstall("acme.dusk".into()), &store, None).unwrap().starts_with("Removed acme.dusk"));
+        assert!(run(&Request::Uninstall("acme.dusk".into()), &store, None).unwrap_err().contains("isn't installed"));
+    }
+
+    /// An extension's folder, `id` at `version`, carrying a theme folder.
+    fn extension(dir: &std::path::Path, id: &str, version: &str) -> PathBuf {
+        let pack = dir.join(format!("{id}-{version}"));
         std::fs::create_dir_all(pack.join("themes")).unwrap();
-        std::fs::write(pack.join("extension.toml"), "[extension]\nid = \"acme.dusk\"\nname = \"Dusk\"\nversion = \"1.0.0\"\nruntime = \"none\"\n\n[engine]\nfenix = \">=2.0, <3\"\n").unwrap();
-        assert_eq!(run(&Request::Install(pack), &store).unwrap(), "Installed Dusk 1.0.0 (acme.dusk). It's used from the next start.");
-        assert_eq!(run(&Request::List, &store).unwrap(), "acme.dusk  1.0.0  Dusk  (on)");
-        assert!(run(&Request::Uninstall("acme.dusk".into()), &store).unwrap().starts_with("Removed acme.dusk"));
-        assert!(run(&Request::Uninstall("acme.dusk".into()), &store).unwrap_err().contains("isn't installed"));
+        std::fs::write(pack.join("themes").join("dusk.toml"), "").unwrap();
+        std::fs::write(pack.join("extension.toml"), format!("[extension]\nid = \"{id}\"\nname = \"Dusk\"\nversion = \"{version}\"\nruntime = \"none\"\n\n[engine]\nfenix = \">=2.0, <3\"\n")).unwrap();
+        pack
+    }
+
+    /// What the machine has is the administrator's: it replaces yours of
+    /// the same id, and you can't install, update or remove it.
+    #[test]
+    fn a_managed_extension_is_pinned_and_replaces_yours() {
+        let dir = tempfile::tempdir().unwrap();
+        let (yours, machine) = (Store::new(dir.path().join("yours")), Store::new(dir.path().join("machine")));
+        run(&Request::Install(extension(dir.path(), "acme.dusk", "1.0.0")), &yours, None).unwrap();
+        run(&Request::Install(extension(dir.path(), "acme.dawn", "1.0.0")), &yours, None).unwrap();
+        // The administrator, with --machine.
+        run(&Request::Install(extension(dir.path(), "acme.dusk", "0.9.0")), &machine, None).unwrap();
+        let all = everything(Some(&machine), Some(&yours));
+        assert_eq!(all.iter().map(|(e, m)| (e.id.as_str(), e.version.as_str(), *m)).collect::<Vec<_>>(), [("acme.dusk", "0.9.0", true), ("acme.dawn", "1.0.0", false)]);
+        assert_eq!(dirs_of(&all, "themes"), [machine.root().join("acme.dusk").join("0.9.0").join("themes"), yours.root().join("acme.dawn").join("1.0.0").join("themes")]);
+        let pinned = run(&Request::Install(extension(dir.path(), "acme.dusk", "2.0.0")), &yours, Some(&machine)).unwrap_err();
+        assert!(pinned.contains("acme.dusk 0.9.0 is managed on this machine"), "{pinned}");
+        assert!(run(&Request::Install("acme.dusk".into()), &yours, Some(&machine)).unwrap_err().contains("managed"), "not from the registry either");
+        assert!(run(&Request::Uninstall("acme.dusk".into()), &yours, Some(&machine)).unwrap_err().contains("managed"));
+        assert_eq!(run(&Request::List, &yours, Some(&machine)).unwrap(), "acme.dusk  0.9.0  Dusk  (on, managed)\nacme.dawn  1.0.0  Dusk  (on)");
+    }
+
+    #[test]
+    fn the_machines_policy_wins_over_your_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[extensions]\nregistry = \"https://yours.test/index.json\"\n").unwrap();
+        let config = fenix_config::Config::load(path).unwrap();
+        let off = Policy { store: Some(false), registry: None };
+        assert!(registry_with(Some(&config), &off).err().unwrap().contains("by its administrator"));
+        let mirror = Policy { store: None, registry: Some("https://mirror.test/index.json".into()) };
+        assert_eq!(registry_with(Some(&config), &mirror).ok().map(|r| r.url).as_deref(), Some("https://mirror.test/index.json"));
+        assert_eq!(registry_with(Some(&config), &Policy::default()).ok().map(|r| r.url).as_deref(), Some("https://yours.test/index.json"));
+    }
+
+    #[test]
+    fn machine_is_asked_for_by_its_flag() {
+        assert!(wants_machine(&args(&["--install-extension", "x.fenixext", "--machine"])));
+        assert!(!wants_machine(&args(&["--install-extension", "x.fenixext"])));
     }
 }

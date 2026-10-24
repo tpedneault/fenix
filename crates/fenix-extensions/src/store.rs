@@ -33,6 +33,18 @@ struct State {
     extensions: BTreeMap<String, Entry>,
 }
 
+/// What an administrator decides for everyone on a machine, in
+/// `policy.toml` beside the managed extensions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    /// `false`: no one here looks up or downloads from a registry.
+    pub store: Option<bool>,
+    /// The registry everyone here uses (a mirror), whatever their
+    /// `extensions.registry` says.
+    pub registry: Option<String>,
+}
+
 /// An installed extension.
 #[derive(Debug, Clone)]
 pub struct Installed {
@@ -64,6 +76,22 @@ impl Store {
     /// `<local>/extensions` for this machine (`FENIX_HOME` when set).
     pub fn current() -> Option<Store> {
         fenix_storage::paths::extensions_dir().map(Store::new)
+    }
+
+    /// The machine-wide store an administrator fills, for everyone here
+    /// (`fenix_storage::paths::managed_extensions_dir`).
+    pub fn managed() -> Option<Store> {
+        fenix_storage::paths::managed_extensions_dir().map(Store::new)
+    }
+
+    /// This store's `policy.toml`; none when there isn't one.
+    pub fn policy(&self) -> Result<Policy, String> {
+        let path = self.root.join("policy.toml");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {}", path.display(), e.message())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Policy::default()),
+            Err(e) => Err(format!("{}: {e}", path.display())),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -197,6 +225,17 @@ mod tests {
         let manifest = sample(id, version, "none") + extra;
         zip_of(&path, &[("extension.toml", &manifest), ("themes/dusk.toml", version)]);
         path
+    }
+
+    #[test]
+    fn a_policy_is_read_when_there_is_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        assert_eq!(store.policy().unwrap(), Policy::default());
+        std::fs::write(dir.path().join("policy.toml"), "store = false\nregistry = \"https://mirror.test/index.json\"\n").unwrap();
+        assert_eq!(store.policy().unwrap(), Policy { store: Some(false), registry: Some("https://mirror.test/index.json".into()) });
+        std::fs::write(dir.path().join("policy.toml"), "stores = false\n").unwrap();
+        assert!(store.policy().unwrap_err().contains("policy.toml"));
     }
 
     #[test]

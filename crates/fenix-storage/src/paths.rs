@@ -134,6 +134,28 @@ pub fn languages_dir() -> Option<PathBuf> {
     Roots::current().map(|r| r.languages())
 }
 
+/// The extensions an administrator installed for everyone on this machine,
+/// and its `policy.toml`: `FENIX_MANAGED_EXTENSIONS` when that's set;
+/// `<FENIX_HOME>/managed` under `FENIX_HOME`, so a portable or test run
+/// keeps to its folder; else `%ProgramData%\Fenix\extensions` on Windows,
+/// `/Library/Application Support/Fenix/extensions` on macOS and
+/// `/etc/fenix/extensions` elsewhere.
+pub fn managed_extensions_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("FENIX_MANAGED_EXTENSIONS").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(dir));
+    }
+    if let Some(home) = std::env::var_os("FENIX_HOME").filter(|v| !v.is_empty()) {
+        return Some(Path::new(&home).join("managed"));
+    }
+    if cfg!(windows) {
+        std::env::var_os("ProgramData").filter(|v| !v.is_empty()).map(|d| Path::new(&d).join("Fenix").join("extensions"))
+    } else if cfg!(target_os = "macos") {
+        Some(PathBuf::from("/Library/Application Support/Fenix/extensions"))
+    } else {
+        Some(PathBuf::from("/etc/fenix/extensions"))
+    }
+}
+
 /// The extensions installed on this machine, and `extensions.toml`.
 pub fn extensions_dir() -> Option<PathBuf> {
     Roots::current().map(|r| r.extensions())
