@@ -1,0 +1,67 @@
+[package]
+name = "fenix-wasm"
+description = "The WASM extension host: wasmtime, set up the way Fenix runs extensions."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+default = ["cranelift"]
+# Compiles an extension on this machine -- to native code, or to Pulley
+# bytecode. Without it, only precompiled extensions load.
+cranelift = ["wasmtime/cranelift"]
+# Runs Pulley bytecode on this machine (`Backend::Pulley`).
+pulley = ["wasmtime/pulley"]
+# Compiles with Winch, the baseline compiler (`Backend::Winch`).
+winch = ["wasmtime/winch"]
+
+[dependencies]
+wasmtime = { version = "50", default-features = false, features = ["runtime", "std", "component-model", "parallel-compilation"] }
+# WASI for guests built for wasm32-wasip2, with nothing granted.
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
+# An extension's stdout and stderr, as WASI wants a stream.
+async-trait = "0.1"
+bytes = "1"
+tokio = { version = "1", default-features = false }
+# The compile cache's key.
+sha2 = "0.10"
+# What an extension may do; its HTTP, with Fenix's own client.
+fenix-extensions = { path = "../fenix-extensions" }
+# The models a layer draws, read on the worker.
+fenix-model = { path = "../fenix-model" }
+ureq = "2"
+# TLS of its own on sockets and for `http-send` (what ureq uses: ring).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-native-certs = "0.7"
+rustls-pemfile = "2"
+webpki-roots = "0.26"
+# Where a redirect goes.
+url = "2"
+# Decoration rules, checked.
+regex = "1"
+# A language server's settings and a launch's attributes, checked.
+serde_json = "1"
+# The machine's time zone, which WASI doesn't have (`utc-offset`).
+chrono = "0.4"
+# The size of a picture an extension shows, read on its worker.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+
+[dev-dependencies]
+# The spike's guests are written as text.
+wasmtime = { version = "50", default-features = false, features = ["wat"] }
+wat = "1"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+# Named pipes (`ipc-connect`); where a file opened is (`read_held`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Pipes", "Win32_Storage_FileSystem"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Where a file opened is (`read_held`: `F_GETPATH`).
+libc = "0.2"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

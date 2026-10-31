@@ -1,0 +1,56 @@
+# Adapted for Fenix: subdued surfaces, readable secondary text, and
+# coordinated syntax, Git, and mode accents.
+name = "Nord"
+tabs = "underline"
+
+[surfaces]
+bg = "#2e3440"
+sidebar_bg = "#2e3440"
+bg_modeline = "#343b49"
+divider = "#4c566a"
+caret = "#88c0d0"
+hl_line = "#343b49"
+selection = { color = "#91b1d1", alpha = 0.12 }
+bracket_match = { color = "#a3be8c", alpha = 0.12 }
+search_match = { color = "#ebcb8b", alpha = 0.12 }
+
+[text]
+fg = "#d8dee9"
+fg_modeline = "#eceff4"
+caret_text = "#88c0d0"
+gutter_fg = "#9aa6bc"
+
+[modes]
+normal = "#a3be8c"
+insert = "#88c0d0"
+visual = "#df929c"
+replace = "#e09780"
+command = "#91b1d1"
+explorer = "#91b1d1"
+picker = "#c49ebd"
+text_dark = "#202530"
+text_light = "#202530"
+
+[syntax]
+keyword = "#91b1d1"
+string = "#a3be8c"
+comment = "#9aa6bc"
+function = "#88c0d0"
+type = "#8fbcbb"
+number = "#c49ebd"
+constant = "#e09780"
+variable = "#d8dee9"
+operator = "#91b1d1"
+punctuation = "#91b1d1"
+attribute = "#e09780"
+
+[explorer]
+folder = "#91b1d1"
+file = "#d8dee9"
+
+[git]
+modified = "#e09780"
+staged = "#a3be8c"
+untracked = "#91b1d1"
+ignored = "#9aa6bc"
+conflicted = "#df929c"

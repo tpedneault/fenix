@@ -1,0 +1,61 @@
+# A throwaway GitLab CE instance for testing Fenix's GitLab integration
+# against a real server rather than a stub.
+#
+# Everything in this directory is development scaffolding. It is never
+# shipped, never talked to by Fenix outside of a developer's own machine,
+# and every credential in it is deliberately fixed and public: a
+# container reachable only on localhost, holding one seeded project full
+# of nonsense, is not a secret worth protecting -- and a fixed token is
+# what makes `seed.sh` reproducible.
+#
+#   docker compose -f dev/gitlab/docker-compose.yml up -d
+#   ./dev/gitlab/wait-ready.sh      # first boot takes several minutes
+#   ./dev/gitlab/seed.sh            # project + branch + MR + a thread
+#
+# Then in config.ini:
+#
+#   [gitlab]
+#   base_url = http://localhost:8929
+#   token = fenix-dev-token-0123456789
+#
+# Ports: 8929 for HTTP (matching `external_url`, so the URLs GitLab
+# generates are reachable) and 2224 for SSH, both well clear of
+# anything Fenix or a normal dev machine already uses.
+
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    container_name: fenix-gitlab
+    restart: unless-stopped
+    hostname: localhost
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'http://localhost:8929'
+        gitlab_rails['gitlab_shell_ssh_port'] = 2224
+        # A test instance has no mail to send and no metrics worth
+        # collecting. Turning these off is most of the difference
+        # between a container that boots in four minutes and one that
+        # boots in ten. (No `grafana` key: it was removed from Omnibus
+        # in GitLab 16.3, and setting it now aborts the reconfigure with
+        # "Reading unsupported config value grafana" -- a crash loop,
+        # not a warning.)
+        gitlab_rails['smtp_enable'] = false
+        prometheus_monitoring['enable'] = false
+        alertmanager['enable'] = false
+        gitlab_rails['gitlab_default_can_create_group'] = true
+        # Seeding pushes over HTTP from the host; without this GitLab
+        # rejects the very first push as too large on some setups.
+        nginx['client_max_body_size'] = '256m'
+    ports:
+      - '8929:8929'
+      - '2224:22'
+    shm_size: '256m'
+    volumes:
+      - gitlab-config:/etc/gitlab
+      - gitlab-logs:/var/log/gitlab
+      - gitlab-data:/var/opt/gitlab
+
+volumes:
+  gitlab-config:
+  gitlab-logs:
+  gitlab-data:

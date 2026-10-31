@@ -1,0 +1,28 @@
+mod bracket;
+mod charclass;
+mod indent;
+mod keymaps;
+mod keynotation;
+mod mode;
+mod motion;
+mod operator;
+mod search;
+mod state;
+mod substitute;
+mod tag;
+mod textobject;
+
+#[cfg(test)]
+mod test_util;
+
+pub use bracket::find_match as find_matching_bracket;
+pub use charclass::DEFAULT_ISKEYWORD_EXTRA;
+pub use indent::{toggle_checkbox, DEFAULT_INDENT_WIDTH};
+pub use keymaps::{InsertEntry, ScrollTarget, VimAction};
+pub use mode::{Mode, VisualKind};
+pub use motion::Motion;
+pub use operator::Operator;
+pub use state::{BracketTarget, LspRequestKind, TabMove, VimEvent, VimState};
+pub use search::all_matches_in_range;
+pub use substitute::{replace_in_text, SubstitutePreview};
+pub use textobject::TextObject;

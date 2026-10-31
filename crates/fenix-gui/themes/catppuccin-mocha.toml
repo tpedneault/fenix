@@ -1,0 +1,55 @@
+# Catppuccin Mocha, the darkest flavour.
+name = "Catppuccin Mocha"
+tabs = "underline"
+
+[surfaces]
+bg = "#1e1e2e"
+sidebar_bg = "#181825"
+bg_modeline = "#181825"
+divider = "#45475a"
+caret = "#f5e0dc"
+hl_line = "#2a2b3c"
+selection = { color = "#9399b2", alpha = 0.25 }
+bracket_match = { color = "#fab387", alpha = 0.15 }
+search_match = { color = "#89dceb", alpha = 0.18 }
+
+[text]
+fg = "#cdd6f4"
+fg_modeline = "#cdd6f4"
+caret_text = "#f5e0dc"
+gutter_fg = "#9195aa"
+
+[modes]
+normal = "#89b4fa"
+insert = "#a6e3a1"
+visual = "#cba6f7"
+replace = "#f38ba8"
+command = "#fab387"
+explorer = "#74c7ec"
+picker = "#f5c2e7"
+text_dark = "#11111b"
+text_light = "#11111b"
+
+[syntax]
+keyword = "#cba6f7"
+string = "#a6e3a1"
+comment = "#9399b2"
+function = "#89b4fa"
+type = "#f9e2af"
+number = "#fab387"
+constant = "#fab387"
+variable = "#cdd6f4"
+operator = "#89dceb"
+punctuation = "#89dceb"
+attribute = "#94e2d5"
+
+[explorer]
+folder = "#89b4fa"
+file = "#cdd6f4"
+
+[git]
+modified = "#f9e2af"
+staged = "#a6e3a1"
+untracked = "#74c7ec"
+ignored = "#9195aa"
+conflicted = "#f38ba8"

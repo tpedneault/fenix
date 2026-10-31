@@ -1,0 +1,28 @@
+[extension]
+id = "{{publisher}}.{{name_kebab}}"
+name = "{{name}}"
+version = "0.1.0"
+description = "{{description}}"
+runtime = "wasm"
+
+[engine]
+fenix = ">=1.0, <2"
+api = "1.0"
+
+# Nothing loads until one of its commands runs.
+[activation]
+commands = ["{{name_kebab}}.*"]
+
+# What it may do beyond its own folder; nothing, unless it says.
+[permissions]
+# process = ["git"]
+# network = ["api.example.com"]
+# filesystem = "project-read"
+
+[[contributes.commands]]
+id = "{{name_kebab}}.hello"
+title = "{{name}}: say hello"
+
+[[contributes.commands]]
+id = "{{name_kebab}}.open"
+title = "{{name}}: open its page"

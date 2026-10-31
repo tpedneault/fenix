@@ -1,0 +1,20 @@
+[package]
+name = "counter"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "fenix-wasm's test extension written with fenix-extension-api; tests/guests/build.ps1 builds it to counter.wasm."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fenix-extension-api = { path = "../../../../fenix-extension-api" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+# Built on its own, for wasm32-wasip2, not with Fenix.
+[workspace]

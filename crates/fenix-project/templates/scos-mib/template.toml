@@ -1,0 +1,243 @@
+[template]
+name = "SCOS-2000 MIB"
+kind = "mib"
+group = "Mission"
+open = ["vdf.dat"]
+description = "An ICD 7.2 MIB database and nothing else: its tab-separated .dat tables, registered for SPC m lookups."
+
+[[ask]]
+key = "label"
+label = "Label"
+default = "{{name}}"
+hint = "how SPC m t / SPC m k name this database"
+
+[[ask]]
+key = "icd"
+label = "ICD"
+choices = ["7.2"]
+default = "7.2"
+hint = "the Database Import ICD version Fenix reads"
+
+[[ask]]
+key = "tables"
+label = "Tables"
+many = ["telecommands", "telemetry", "calibrations", "monitoring", "sequences"]
+default = ["telecommands", "telemetry", "calibrations"]
+
+[[ask]]
+key = "register"
+label = "Register"
+default = true
+hint = "add it as a [mib] root in config.ini"
+
+[[ask]]
+key = "pus"
+label = "PUS"
+choices = ["c", "a", "none"]
+default = "c"
+hint = "ECSS-E-ST-70-41C (c), 70-41A (a), or plain space packets"
+
+[[ask]]
+key = "tm_time"
+label = "TM time"
+default = "cuc 4.2"
+hint = "the time in a TM secondary header: cuc 4.2, cds 16, add p for a P-field"
+
+[[ask]]
+key = "recordings"
+label = "Recordings"
+default = true
+hint = "a recordings/ folder for dumps and captures (SPC k f opens one)"
+
+[[file]]
+path = ".fenix/settings.toml"
+content = """
+# How this mission's packets are laid out: SPC , -> CCSDS & PUS changes
+# it, and the doctor checks the MIB agrees.
+[ccsds]
+pus = "{{pus}}"
+tm_time = "{{tm_time}}"
+epoch = "1958-01-01 TAI"
+crc = "ccitt16"
+"""
+
+[[file]]
+path = "recordings/README.md"
+content = """
+# Recordings
+
+Telemetry dumps and captures of {{name}}. `SPC k f` opens one as a list
+of packets, and `SPC k l` follows a live source named in the project's
+settings (`ccsds.sources`).
+"""
+when = "recordings"
+
+[[file]]
+path = "vdf.dat"
+content = "{{label}}\t{{name}}\n"
+
+[[hook]]
+kind = "mib-root"
+path = "."
+label = "{{label}}"
+when = "register"
+
+[[file]]
+path = "ccf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "cdf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "cpc.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "cca.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "ccs.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "paf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "pas.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "prf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "prv.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "tcp.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "pcdf.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "pcpc.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "dst.dat"
+content = ""
+when = "tables == telecommands"
+
+[[file]]
+path = "pid.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "pic.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "tpcf.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "pcf.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "plf.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "vpd.dat"
+content = ""
+when = "tables == telemetry"
+
+[[file]]
+path = "caf.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "cap.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "txf.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "txp.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "mcf.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "lgf.dat"
+content = ""
+when = "tables == calibrations"
+
+[[file]]
+path = "ocf.dat"
+content = ""
+when = "tables == monitoring"
+
+[[file]]
+path = "ocp.dat"
+content = ""
+when = "tables == monitoring"
+
+[[file]]
+path = "cur.dat"
+content = ""
+when = "tables == monitoring"
+
+[[file]]
+path = "csf.dat"
+content = ""
+when = "tables == sequences"
+
+[[file]]
+path = "csp.dat"
+content = ""
+when = "tables == sequences"
+
+[[file]]
+path = "css.dat"
+content = ""
+when = "tables == sequences"
+
+[[file]]
+path = "sdf.dat"
+content = ""
+when = "tables == sequences"

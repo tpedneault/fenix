@@ -1,0 +1,2017 @@
+//! The host half of the project pages -- the new-project wizard (`SPC p
+//! c`), the hub (`SPC p p`), the doctor (`SPC p h`) and the settings page
+//! (`SPC p ,`). Each is a `BufferKind::Page` buffer whose text is laid out
+//! by its own pure module (`project_wizard`, `project_hub`, ...); this
+//! file owns the buffers, routes keys to them, draws their colours and
+//! does everything that touches the world: running commands and checks
+//! off the UI thread, writing settings, and opening projects -- each in a
+//! workspace of its own (see `open_project`).
+
+use super::projects::kind_color;
+use super::*;
+use crate::git_compare::{self, GitCompare};
+use crate::git_log::{self, GitLog};
+use crate::git_rebase::{self, RebasePage};
+use crate::settings_page::{self, SettingsPage};
+use crate::snippets_page::{self, SnippetsPage};
+use crate::reading_page::ReadingPage;
+use crate::git_status::{self, GitStatus};
+use crate::page::{Key, Page, Role as PageRole};
+use crate::project_doctor::{self, DoctorPage, Fixing};
+use crate::project_hub::{self, Hub, HubProject};
+use crate::project_settings::{self, Settings};
+use crate::project_wizard::{self, RunWork, Status, Wizard};
+use fenix_project::doctor::{self, Check, EditorFix, FixAction, Health, Probe};
+use fenix_project::vcs::GitSummary;
+use std::collections::BTreeMap;
+use std::io::BufRead;
+use std::sync::{Arc, Mutex};
+
+/// A page role's colour in `theme`.
+pub(super) fn role_color(theme: &Theme, role: PageRole) -> glyphon::Color {
+    match role {
+        PageRole::Title | PageRole::Text => theme.fg,
+        PageRole::Muted => theme.gutter_fg,
+        PageRole::Accent => rgba_to_glyphon(theme.caret),
+        PageRole::Good => theme.git_staged,
+        PageRole::Warn => theme.git_modified,
+        PageRole::Bad => theme.git_conflicted,
+        PageRole::Kind(kind) => kind_color(kind, theme),
+        PageRole::Syntax(name) => theme.syntax_color(name),
+        PageRole::Rgb(r, g, b) => glyphon::Color::rgb(r, g, b),
+        PageRole::Git(status) => theme.git_status_color(status),
+    }
+}
+
+/// A background (an extension's: a canvas's cells, a buffer's tint) in
+/// `theme`: its own tints as they are, the status colours faded.
+pub(super) fn shade_color(theme: &Theme, shade: crate::page::Shade) -> [f32; 4] {
+    use crate::page::Shade;
+    let faded = |c: [f32; 4]| [c[0], c[1], c[2], 0.28];
+    match shade {
+        Shade::Panel => if theme.sidebar_bg != theme.bg { theme.sidebar_bg } else { theme.bg_modeline },
+        Shade::Focus => theme.hl_line,
+        Shade::Selection => theme.selection,
+        Shade::Accent => faded(theme.caret),
+        Shade::Good => faded(glyphon_to_rgba(theme.git_staged)),
+        Shade::Warn => faded(glyphon_to_rgba(theme.git_modified)),
+        Shade::Bad => faded(glyphon_to_rgba(theme.git_conflicted)),
+        Shade::Rgb(r, g, b) => [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0],
+    }
+}
+
+pub(super) enum PageModel {
+    Wizard(Wizard),
+    Hub(Hub),
+    Doctor(DoctorPage),
+    Git(Box<GitStatus>),
+    Log(Box<GitLog>),
+    Compare(Box<GitCompare>),
+    Rebase(Box<RebasePage>),
+    UserSettings(Box<SettingsPage>),
+    Snippets(Box<SnippetsPage>),
+    Reading(Box<ReadingPage>),
+    Extensions(Box<crate::extensions_page::ExtensionsPage>),
+    /// `SPC h l`: what the code extensions said (`wasm_host`).
+    ExtensionOutput(Box<crate::extension_output::OutputPage>),
+    /// A code extension's page, laid out by it (`wasm_host`, `code_page`).
+    Code(Box<crate::code_page::CodePage>),
+    /// `SPC h T`, the tutorial (`tutorial_host`).
+    Tutorial(Box<crate::tutorial::TutorialPage>),
+    /// A file listing: a pane's (`SPC f j`) or the directory picker's.
+    /// The listing itself is the target's (`App::explorer_state`).
+    Explorer(ExplorerTarget, Box<crate::explorer_page::View>),
+    /// The explorer's preview of its selected row (`p`).
+    Preview(Box<crate::preview_page::PreviewPage>),
+    /// `SPC /`, `SPC s p`, `SPC s r`: searching and replacing.
+    Search(Box<crate::search_page::SearchPage>),
+    /// `SPC a a`: a coding agent's thread (`agents`).
+    Agent(Box<crate::agent_page::AgentPage>),
+    /// `SPC a r`: what an agent's thread changed (`agents`).
+    AgentReview(Box<crate::agent_review::ReviewPage>),
+}
+
+pub(super) struct PageState {
+    pub(super) model: PageModel,
+    pub(super) page: Page,
+    /// The pane width `page` was laid out for, and whether the model has
+    /// changed since.
+    cols: usize,
+    pub(super) stale: bool,
+    /// Bumped for every background job started, so what a superseded job
+    /// sends (a step since retried, a check since restarted) is dropped.
+    generation: u64,
+    started: Option<Instant>,
+    /// The selected line when the page was last shown, to tell a move up.
+    last_focus: Option<usize>,
+    /// The height of the pane it was last drawn in, in rows.
+    rows: Option<usize>,
+    /// The height it was last laid out for.
+    laid_rows: Option<usize>,
+}
+
+impl PageState {
+    fn new(model: PageModel) -> Self {
+        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, last_focus: None, rows: None, laid_rows: None }
+    }
+
+    /// Whether a text field on the page has the keyboard -- then every
+    /// key is the page's, Space and Ctrl-V included.
+    fn typing(&self) -> bool {
+        match &self.model {
+            PageModel::Wizard(w) => w.editing.is_some(),
+            PageModel::Hub(h) => h.filtering || h.editing_group.is_some(),
+            PageModel::Explorer(_, v) => v.edit.is_some(),
+            PageModel::Doctor(_) | PageModel::ExtensionOutput(_) | PageModel::Tutorial(_) | PageModel::Preview(_) => false,
+            PageModel::Search(p) => p.typing(),
+            PageModel::Agent(p) => p.typing(),
+            PageModel::AgentReview(_) => false,
+            PageModel::Code(c) => c.typing(),
+            PageModel::Extensions(e) => e.typing(),
+            PageModel::Git(g) => g.typing(),
+            PageModel::Log(l) => l.typing(),
+            PageModel::Compare(_) => false,
+            PageModel::UserSettings(p) => p.typing(),
+            PageModel::Snippets(p) => p.typing(),
+            PageModel::Rebase(_) | PageModel::Reading(_) => false,
+        }
+    }
+
+    /// Whether Space means something on the focused row.
+    fn claims_space(&self) -> bool {
+        self.typing()
+            || match &self.model {
+                PageModel::Wizard(w) => w.claims_space(),
+                PageModel::UserSettings(p) => p.claims_space(),
+                PageModel::Code(c) => c.claims_space(),
+                _ => false,
+            }
+    }
+
+    fn type_text(&mut self, text: &str) {
+        match &mut self.model {
+            PageModel::Wizard(w) => w.type_text(text),
+            PageModel::Hub(h) => {
+                let target = if let Some(group) = &mut h.editing_group { group } else { &mut h.filter };
+                target.extend(text.chars().filter(|c| !c.is_control()));
+            }
+            PageModel::Doctor(_) | PageModel::ExtensionOutput(_) | PageModel::Code(_) | PageModel::Tutorial(_) | PageModel::Explorer(..) | PageModel::Preview(_) => {}
+            PageModel::Search(p) => {
+                p.paste(text);
+            }
+            PageModel::Agent(p) => p.filter.paste(text),
+            PageModel::AgentReview(_) => {}
+            PageModel::Extensions(e) => e.paste(text),
+            PageModel::Git(g) => g.type_text(text),
+            PageModel::Log(l) => l.type_text(text),
+            PageModel::Compare(_) => {}
+            PageModel::UserSettings(p) => p.paste(text),
+            PageModel::Snippets(p) => p.paste(text),
+            PageModel::Rebase(_) | PageModel::Reading(_) => {}
+        }
+        self.stale = true;
+    }
+}
+
+/// What a background job sends back to its page.
+#[derive(Debug)]
+pub enum PageEvent {
+    Output { buffer: BufferId, generation: u64, line: String },
+    Finished { buffer: BufferId, generation: u64, result: Result<(), String> },
+    Checks { buffer: BufferId, generation: u64, checks: Vec<Check> },
+    HubInfo { buffer: BufferId, root: PathBuf, git: Option<GitSummary>, health: (Health, usize) },
+    Subprojects { buffer: BufferId, root: PathBuf, found: Vec<(PathBuf, fenix_project::ProjectKind)> },
+    GitSnapshot { buffer: BufferId, snapshot: Box<git_status::Snapshot> },
+    GitDiff { buffer: BufferId, section: git_status::Section, path: String, diff: git_status::DiffState },
+    GitDone { buffer: BufferId, label: String, result: Result<String, String> },
+    /// A question for the page to ask -- an undo's preview.
+    GitConfirm { buffer: BufferId, confirm: Result<git_status::Confirm, String> },
+    /// A file's blame, read off the UI thread.
+    Blame { path: PathBuf, edits: u64, result: Result<Vec<fenix_git::BlameLine>, String> },
+    GitLogData { buffer: BufferId, data: Box<git_log::LogData> },
+    GitLogFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
+    GitLogDiff { buffer: BufferId, hash: String, path: String, diff: git_status::DiffState },
+    CompareData { buffer: BufferId, data: Box<git_compare::CompareData> },
+    CompareFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
+    CompareDiff { buffer: BufferId, key: git_compare::DiffKey, diff: git_status::DiffState },
+    /// The Compare page's fetch finished: the remote, or why not.
+    CompareFetched { buffer: BufferId, result: Result<String, String> },
+    /// Where the focused file's repository stands, for the modeline.
+    /// `None`: the focused file isn't in a repository.
+    ChromeGit(Option<Box<super::git_editor::ChromeGit>>),
+    /// A background fetch finished.
+    AutoFetched { ok: bool },
+    /// A picture a page shows, read: its size and BGRA pixels.
+    PageImage { key: crate::page::ImageKey, result: Result<(u32, u32, Vec<u8>), String> },
+    /// Files the Search page's search found, as it goes.
+    SearchFound { buffer: BufferId, generation: u64, files: Vec<fenix_project::search::FileResult> },
+    /// The Search page's search finished.
+    SearchDone { buffer: BufferId, generation: u64, result: Result<fenix_project::search::Summary, String> },
+}
+
+pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
+
+/// Sends every line `stream` prints. Progress bars rewrite a line with
+/// `\r`; only the last state of each is worth a line in the log.
+fn forward_lines(stream: impl std::io::Read, buffer: BufferId, generation: u64, send: &Sender) {
+    for line in std::io::BufReader::new(stream).lines().map_while(Result::ok) {
+        let line = line.rsplit('\r').find(|part| !part.trim().is_empty()).unwrap_or_default().trim_end().to_string();
+        if !line.is_empty() {
+            send(PageEvent::Output { buffer, generation, line });
+        }
+    }
+}
+
+/// Runs `command` to completion, sending each line it prints (both
+/// streams) and then how it ended.
+fn run_command(mut command: std::process::Command, buffer: BufferId, generation: u64, send: Sender) {
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            send(PageEvent::Finished { buffer, generation, result: Err(format!("couldn't start: {e}")) });
+            return;
+        }
+    };
+    let stderr = child.stderr.take().map(|stream| {
+        let send = send.clone();
+        std::thread::spawn(move || forward_lines(stream, buffer, generation, &send))
+    });
+    if let Some(stdout) = child.stdout.take() {
+        forward_lines(stdout, buffer, generation, &send);
+    }
+    if let Some(thread) = stderr {
+        let _ = thread.join();
+    }
+    let result = match child.wait() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(match status.code() {
+            Some(code) => format!("exited with code {code}"),
+            None => "was stopped".to_string(),
+        }),
+        Err(e) => Err(e.to_string()),
+    };
+    send(PageEvent::Finished { buffer, generation, result });
+}
+
+/// What the doctor asks of the world, answered the way the rest of
+/// Fenix would: the tools an extension found its own way
+/// (`find-program`) where it found them, everything else on PATH.
+pub(super) struct AppProbe {
+    /// Program -> where the feature that knows it found it (`None`: it
+    /// looked, and it isn't there).
+    known: HashMap<String, Option<PathBuf>>,
+}
+
+impl Probe for AppProbe {
+    fn locate(&self, program: &str) -> Option<PathBuf> {
+        match self.known.get(program) {
+            Some(found) => found.clone(),
+            None => doctor::which(program),
+        }
+    }
+
+    fn run(&self, program: &Path, args: &[&str], dir: &Path) -> Option<(bool, String)> {
+        doctor::run_program(program, args, dir)
+    }
+}
+
+/// Rich-text spans with each run of icon glyphs (`icon::is_icon`) cut
+/// out into a span of its own, flagged to be drawn in the icon font.
+pub(super) fn split_icons(spans: Vec<(String, glyphon::Color)>) -> RowSpans {
+    let mut out = Vec::with_capacity(spans.len());
+    for (text, color) in spans {
+        if !text.chars().any(crate::icon::is_icon) {
+            out.push((text, color, false));
+            continue;
+        }
+        let mut run = String::new();
+        let mut icons = false;
+        for c in text.chars() {
+            let icon = crate::icon::is_icon(c);
+            if icon != icons && !run.is_empty() {
+                out.push((std::mem::take(&mut run), color, icons));
+            }
+            icons = icon;
+            run.push(c);
+        }
+        if !run.is_empty() {
+            out.push((run, color, icons));
+        }
+    }
+    out
+}
+
+/// A laid-out page as rich-text rows, each cell its span's colour --
+/// for a page drawn outside any buffer (the sidebar).
+pub(super) fn page_rich_spans(page: &Page, theme: &Theme) -> RowSpans {
+    let mut plain = Vec::new();
+    let lines: Vec<&str> = page.text.split('\n').collect();
+    for (n, line) in lines.iter().enumerate() {
+        let chars: Vec<char> = line.chars().collect();
+        let mut spans: Vec<&crate::page::Span> = page.spans.iter().filter(|s| s.line == n).collect();
+        spans.sort_by_key(|s| s.cols.start);
+        let mut at = 0;
+        for span in spans {
+            let (from, to) = (span.cols.start.max(at).min(chars.len()), span.cols.end.min(chars.len()));
+            if from >= to {
+                continue;
+            }
+            if from > at {
+                plain.push((chars[at..from].iter().collect::<String>(), theme.fg));
+            }
+            plain.push((chars[from..to].iter().collect::<String>(), role_color(theme, span.role)));
+            at = to;
+        }
+        if at < chars.len() {
+            plain.push((chars[at..].iter().collect::<String>(), theme.fg));
+        }
+        if n + 1 < lines.len() {
+            plain.push(("\n".to_string(), theme.fg));
+        }
+    }
+    split_icons(plain)
+}
+
+/// "5 min", "3 h", "2 d" since Unix time `then`.
+fn age_since(then: i64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(then);
+    let mins = (now - then).max(0) / 60;
+    match mins {
+        0 => "now".to_string(),
+        1..=59 => format!("{mins} min"),
+        60..=1439 => format!("{} h", mins / 60),
+        1440..=20159 => format!("{} d", mins / 1440),
+        _ => format!("{} w", mins / 10080),
+    }
+}
+
+impl App {
+    pub(super) fn app_probe(&self) -> AppProbe {
+        // Where the code extensions found theirs (Arduino's tools).
+        let known = self.wasm.found.iter().map(|(name, path)| (name.clone(), Some(path.clone()))).collect();
+        AppProbe { known }
+    }
+
+    /// Where a program a page runs is -- `AppProbe::locate`, for a command
+    /// about to be spawned.
+    fn locate_program(&self, program: &str) -> Option<PathBuf> {
+        self.app_probe().locate(program)
+    }
+
+    /// What a page is called in its tab, the modeline and `SPC b b`.
+    pub(super) fn page_title(&self, id: BufferId) -> String {
+        match self.pages.get(&id).map(|s| &s.model) {
+            Some(PageModel::Wizard(_)) | None => "*new project*".to_string(),
+            Some(PageModel::Hub(_)) => "*projects*".to_string(),
+            Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
+            Some(PageModel::Extensions(_)) => "*extensions*".to_string(),
+            Some(PageModel::ExtensionOutput(_)) => "*extensions' output*".to_string(),
+            Some(PageModel::Code(p)) => format!("*{}*", p.name()),
+            Some(PageModel::Explorer(ExplorerTarget::Overlay, _)) => "*pick a folder*".to_string(),
+            Some(PageModel::Search(p)) => {
+                let verb = if p.replace_open { "replace" } else { "search" };
+                if p.query.text.is_empty() { format!("*{verb}*") } else { format!("*{verb}: {}*", crate::page::fit(&p.query.text, 24)) }
+            }
+            Some(PageModel::Preview(p)) => match p.path.as_deref().and_then(|p| p.file_name()) {
+                Some(name) => format!("*preview: {}*", name.to_string_lossy()),
+                None => "*preview*".to_string(),
+            },
+            Some(PageModel::Explorer(target, _)) => match self.explorer_state(*target) {
+                // The folder's name, as a file's tab is its name.
+                Some(state) => format!("{}/", state.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(&state.cwd))),
+                None => "*files*".to_string(),
+            },
+            Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
+            Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
+            Some(PageModel::Compare(c)) => format!("*compare: {}*", c.target),
+            Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
+            Some(PageModel::Snippets(_)) => "*snippets*".to_string(),
+            Some(PageModel::Tutorial(_)) => "*tutorial*".to_string(),
+            Some(PageModel::AgentReview(_)) => "*agent changes*".to_string(),
+            Some(PageModel::Agent(p)) => match self.agents.hub.view(&p.thread) {
+                Some(view) => format!("*agent: {}*", crate::page::fit(&view.thread.display_title(), 32)),
+                None => "*agent*".to_string(),
+            },
+            Some(PageModel::UserSettings(p)) => match &p.scope {
+                settings_page::Scope::You => "*settings*".to_string(),
+                settings_page::Scope::Project { name, .. } => format!("*settings: {name}*"),
+            },
+            Some(PageModel::Reading(p)) if p.back.is_some() => "*details*".to_string(),
+            Some(PageModel::Reading(p)) => format!("*reading: {}*", p.path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+        }
+    }
+
+    pub(super) fn is_page_buffer(&self, id: BufferId) -> bool {
+        self.pages.contains_key(&id)
+    }
+
+    /// Records how tall a page's pane is.
+    pub(super) fn note_page_rows(&mut self, id: BufferId, rows: usize) {
+        if let Some(state) = self.pages.get_mut(&id) {
+            state.rows = Some(rows);
+            // The Extensions page lays out only the rows that fit.
+            if let PageModel::Extensions(e) = &mut state.model {
+                if e.rows != rows {
+                    e.rows = rows;
+                    state.stale = true;
+                }
+            }
+        }
+    }
+
+    /// The open page of one kind, if there is one -- the wizard, the hub
+    /// and the settings page each exist at most once.
+    pub(super) fn find_page(&self, is: impl Fn(&PageModel) -> bool) -> Option<BufferId> {
+        self.pages.iter().find(|(_, s)| is(&s.model)).map(|(id, _)| *id)
+    }
+
+    /// A page for `model`, not shown anywhere yet (a session puts it back
+    /// in its panes).
+    pub(super) fn add_page(&mut self, model: PageModel) -> BufferId {
+        let buffer = self.buffers.open_page("");
+        self.pages.insert(buffer, PageState::new(model));
+        buffer
+    }
+
+    /// Opens a page whose model needs its own buffer's id, in the focused
+    /// pane.
+    pub(super) fn open_page_with(&mut self, model: impl FnOnce(BufferId) -> PageModel) -> BufferId {
+        let buffer = self.buffers.open_page("");
+        self.pages.insert(buffer, PageState::new(model(buffer)));
+        self.show_page(buffer);
+        buffer
+    }
+
+    /// Marks page `id` to be laid out again before it's next drawn.
+    pub(super) fn restale_page(&mut self, id: BufferId) {
+        if let Some(state) = self.pages.get_mut(&id) {
+            state.stale = true;
+        }
+    }
+
+    /// Opens `model` as a page in the focused pane.
+    pub(super) fn open_page(&mut self, model: PageModel) -> BufferId {
+        let buffer = self.buffers.open_page("");
+        self.pages.insert(buffer, PageState::new(model));
+        self.show_page(buffer);
+        buffer
+    }
+
+    pub(super) fn show_page(&mut self, buffer: BufferId) {
+        self.open_buffer_in_focused_pane(buffer);
+        self.main_view = MainView::Editor;
+        self.refresh_project_root();
+        if let Some(state) = self.pages.get_mut(&buffer) {
+            state.stale = true;
+        }
+        self.wake_caret();
+    }
+
+    /// Closes page `id` and its buffer, as you close it (`q`); panes
+    /// showing it go back to the buffer used before. An extension's page's
+    /// extension is told (`page-closed`).
+    pub(super) fn close_page(&mut self, id: BufferId) {
+        self.code_page_closed(id);
+        self.close_page_quietly(id);
+    }
+
+    /// `close_page`, with nothing told: an extension closing a page of its
+    /// own, or one it couldn't open again.
+    pub(super) fn close_page_quietly(&mut self, id: BufferId) {
+        self.forget_explorer_page(id);
+        self.pages.remove(&id);
+        self.buffers.close(id);
+        let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
+        self.repoint_panes_back(id, fallback);
+        self.refresh_project_root();
+    }
+
+    /// Runs `job` off the UI thread, handing it a way to send events back
+    /// -- or, with no event loop (tests), runs it here and applies what
+    /// it sent.
+    pub(super) fn page_spawn(&mut self, job: impl FnOnce(Sender) + Send + 'static) {
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                let proxy = Mutex::new(proxy);
+                let send: Sender = Arc::new(move |event| {
+                    if let Ok(proxy) = proxy.lock() {
+                        let _ = proxy.send_event(FenixUserEvent::Page(event));
+                    }
+                });
+                std::thread::spawn(move || job(send));
+            }
+            None => {
+                let events = Arc::new(Mutex::new(Vec::new()));
+                let sink = events.clone();
+                job(Arc::new(move |event| sink.lock().unwrap().push(event)));
+                let events = std::mem::take(&mut *events.lock().unwrap());
+                for event in events {
+                    self.apply_page_event(event);
+                }
+            }
+        }
+    }
+
+    /// Starts `step` for page `buffer` in `dir`; its output and end come
+    /// back as page events under a new generation.
+    fn page_run(&mut self, buffer: BufferId, step: fenix_project::template::Step, dir: &Path) {
+        let Some(state) = self.pages.get_mut(&buffer) else { return };
+        state.generation += 1;
+        state.started = Some(Instant::now());
+        let generation = state.generation;
+        let mut step = step;
+        if let Some(located) = self.locate_program(&step.spec.executable) {
+            step.spec.executable = located.display().to_string();
+        }
+        match step.command(dir) {
+            Ok(command) => self.page_spawn(move |send| run_command(command, buffer, generation, send)),
+            Err(e) => self.apply_page_event(PageEvent::Finished { buffer, generation, result: Err(e.to_string()) }),
+        }
+    }
+
+    /// Lays page `id` out for a pane `cols` cells wide, if it changed or
+    /// the pane did, and puts the cursor on its focused row.
+    /// A page's selection moved up into its first screenful: the page
+    /// shows from its top -- its title, tabs and whatever is above the
+    /// rows -- not just from the selected line. Only on a move, so the
+    /// wheel keeps where it put the page.
+    pub(super) fn page_scroll_to_top(&mut self, id: BufferId, pane: fenix_window::WindowId, visible: usize) {
+        let Some(state) = self.pages.get_mut(&id) else { return };
+        let focus = state.page.focus.as_ref().map(|(line, _)| *line);
+        let was = std::mem::replace(&mut state.last_focus, focus);
+        if let (Some(before), Some(now)) = (was, focus) {
+            if now < before && now + 2 <= visible {
+                let ps = self.pane_state_mut(pane);
+                ps.scroll_line = 0;
+                ps.rendered_scroll = 0.0;
+            }
+        }
+    }
+
+    pub(super) fn ensure_page_layout(&mut self, id: BufferId, pane: fenix_window::WindowId, cols: usize) {
+        // A code extension's page: asked for at this width, if it isn't
+        // shown at it already; the last one stays meanwhile.
+        // A canvas is laid out to the pane's width, as Fenix's own pages are.
+        if let Some(PageModel::Code(c)) = self.pages.get(&id).map(|s| &s.model).filter(|m| !matches!(m, PageModel::Code(c) if c.surface.is_some())) {
+            let width = if c.shown.as_ref().is_some_and(|p| p.canvas.is_some()) { cols as u32 } else { crate::code_page::content_width(cols) };
+            let height = self.pages.get(&id).and_then(|s| s.rows).unwrap_or(0) as u32;
+            self.code_page_drawn(id, width, height);
+        }
+        // An explorer is laid out for the pane's height too, and says
+        // when a read is taking its time.
+        if let Some(PageModel::Explorer(target, view)) = self.pages.get(&id).map(|s| &s.model) {
+            let waiting = self.explorer_waiting_on(*target).map(Path::to_path_buf);
+            let rows = self.pages.get(&id).and_then(|s| s.rows);
+            if view.waiting_on != waiting || view.height != rows {
+                if let Some(PageModel::Explorer(_, view)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                    view.waiting_on = waiting;
+                }
+                self.restale_page(id);
+            }
+        }
+        let reading = self.reading_precompute(id, cols, false);
+        if reading.as_ref().is_some_and(|r| r.laid_out()) {
+            self.reading_ask(id);
+        }
+        let Some(state) = self.pages.get_mut(&id) else { return };
+        if reading.as_ref().is_some_and(|r| r.changed()) {
+            state.stale = true;
+        }
+        // A preview is laid out for the pane's height too.
+        let height_matters = matches!(state.model, PageModel::Preview(_) | PageModel::Search(_));
+        if !state.stale && state.cols == cols && !(height_matters && state.laid_rows != state.rows) {
+            return;
+        }
+        let rows = state.rows;
+        state.page = match &mut state.model {
+            PageModel::Reading(_) => Page::default(),
+            PageModel::Explorer(target, view) => {
+                let listing = match target {
+                    ExplorerTarget::Buffer(b) => self.dired_states.get(b),
+                    ExplorerTarget::Sidebar => self.sidebar.as_ref(),
+                    ExplorerTarget::Overlay => self.explorer.as_ref(),
+                };
+                crate::explorer_page::layout(listing, view, cols, rows)
+            }
+            PageModel::Preview(p) => crate::preview_page::layout(p, cols, rows),
+            PageModel::Search(p) => crate::search_page::layout(p, cols, rows),
+            PageModel::Wizard(w) => project_wizard::layout(w, cols),
+            PageModel::Hub(h) => project_hub::layout(h, cols),
+            PageModel::Doctor(d) => project_doctor::layout(d, cols),
+            PageModel::Extensions(e) => crate::extensions_page::layout(e, cols),
+            PageModel::ExtensionOutput(o) => crate::extension_output::layout(o, cols),
+            PageModel::Code(c) => crate::code_page::layout(c, cols),
+            PageModel::Git(g) => git_status::layout(g, cols),
+            PageModel::Log(l) => git_log::layout(l, cols),
+            PageModel::Compare(c) => git_compare::layout(c, cols),
+            PageModel::Rebase(r) => git_rebase::layout(r, cols),
+            PageModel::UserSettings(p) => settings_page::layout(p, cols),
+            PageModel::Snippets(p) => snippets_page::layout(p, cols),
+            PageModel::Tutorial(p) => crate::tutorial::layout(p, cols),
+            PageModel::Agent(p) => self.agents.layout(p, cols),
+            PageModel::AgentReview(p) => crate::agent_review::layout(p, &self.agents.hub.view(&p.thread).map(|v| v.thread.display_title()).unwrap_or_default(), cols),
+        };
+        if let PageModel::Reading(p) = &mut state.model {
+            state.page = match reading {
+                Some(pre) => Self::reading_apply(p, pre, cols),
+                None => crate::reading_page::layout(p, cols),
+            };
+        }
+        state.cols = cols;
+        state.laid_rows = rows;
+        state.stale = false;
+        let text = state.page.text.clone();
+        let (mut line, mut col) = state.page.cursor();
+        // An agent's thread following the newest card keeps its end in
+        // view, not its top: a long answer is read as it's written, and
+        // what came before scrolls away.
+        let following = matches!(&state.model, PageModel::Agent(p) if p.follow);
+        if following {
+            (line, col) = (text.lines().count().saturating_sub(1), 0);
+        }
+        let Some(ob) = self.buffers.get_mut(id) else { return };
+        if ob.buffer.text() != text {
+            let end = ob.buffer.len_chars();
+            let mut scratch = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch, 0, end, &text);
+            ob.buffer.mark_saved();
+            ob.buffer.drain_edits();
+        }
+        self.home_place_cursor(id, pane, line, col);
+        if let (true, Some(rows)) = (following, rows) {
+            self.page_scroll_to_end(pane, line, rows);
+        }
+        self.request_page_images(id);
+    }
+
+    /// Scrolls `pane` so its line `last` is its bottom row, focused or not
+    /// -- only the focused pane follows its cursor otherwise, and the
+    /// thread is written while you're in the prompt under it. Done as the
+    /// page is laid out again, so the wheel can still scroll back between.
+    fn page_scroll_to_end(&mut self, pane: fenix_window::WindowId, last: usize, rows: usize) {
+        let top = (last + 1).saturating_sub(rows.max(1));
+        self.workspaces.active_scroll_anims_mut().remove(&pane);
+        let ps = self.pane_state_mut(pane);
+        ps.scroll_line = top;
+        ps.rendered_scroll = top as f32;
+    }
+
+    /// Keys a page claims while it's focused. While a field has the
+    /// keyboard that's every key; otherwise the leader and `:` still reach
+    /// Vim, so `SPC w` and friends work from a page.
+    /// A key for the focused page. `g` waits for its second key: `gt`,
+    /// `gT`, `gh` and `g<Tab>` are the tab keys, as in a text buffer;
+    /// anything else reaches the page as the two keys it was, so a
+    /// page's own `gg` still works.
+    pub(super) fn page_key(&mut self, keypress: KeyPress) -> bool {
+        let id = self.focused_buffer_id();
+        let Some(state) = self.pages.get(&id) else {
+            self.page_g_pending = false;
+            return false;
+        };
+        if state.typing() || !self.vim.is_idle() || self.leader_matcher.is_pending() || self.local_matcher.is_some() || keypress.mods != Mods::default() {
+            self.page_g_pending = false;
+            return self.page_key_now(keypress);
+        }
+        if std::mem::take(&mut self.page_g_pending) {
+            let mv = match keypress.code {
+                KeyCode::Char('t') => Some(fenix_vim::TabMove::Next),
+                KeyCode::Char('T') => Some(fenix_vim::TabMove::Prev(1)),
+                KeyCode::Char('h') => Some(fenix_vim::TabMove::Home),
+                KeyCode::Named(FenixNamedKey::Tab) => Some(fenix_vim::TabMove::Last),
+                _ => None,
+            };
+            if let Some(mv) = mv {
+                self.move_tab(mv);
+                return true;
+            }
+            // Not a tab key: the page gets both, `gg` included.
+            self.page_key_now(KeyPress::char('g'));
+            return self.page_key_now(keypress);
+        }
+        if keypress == KeyPress::char('g') {
+            self.page_g_pending = true;
+            return true;
+        }
+        self.page_key_now(keypress)
+    }
+
+    fn page_key_now(&mut self, keypress: KeyPress) -> bool {
+        let id = self.focused_buffer_id();
+        let Some(state) = self.pages.get(&id) else { return false };
+        // A leader sequence under way is the leader's, not the page's --
+        // an open `SPC m` menu included, so its next key reaches it.
+        if !self.vim.is_idle() || self.leader_matcher.is_pending() || self.local_matcher.is_some() {
+            return false;
+        }
+        // A code extension's surface: its keys, as a page's are.
+        if self.code_surface(id).is_some() {
+            return self.code_surface_page_key(id, keypress);
+        }
+        if let PageModel::Explorer(target, _) = &state.model {
+            let target = *target;
+            return self.explorer_page_key(target, keypress);
+        }
+        // The Search page's toggles (Alt-c, Alt-w, ...) and a paste.
+        let is_search = matches!(state.model, PageModel::Search(_));
+        if is_search && self.search_page_special_key(id, keypress) {
+            return true;
+        }
+        let Some(state) = self.pages.get(&id) else { return false };
+        let typing = state.typing();
+        let claims_space = state.claims_space();
+        if keypress == KeyPress::char('v').with_ctrl() && typing {
+            if let Some(text) = self.clipboard_text() {
+                if matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Code(_))) {
+                    self.code_page_paste(id, text);
+                } else if let Some(state) = self.pages.get_mut(&id) {
+                    state.type_text(&text);
+                }
+            }
+            return true;
+        }
+        let shift = self.modifiers.shift_key();
+        // A code page that takes more keys: those `page-key` doesn't.
+        if matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Code(c)) if c.more_keys()) {
+            if let Some(press) = crate::code_page::key_press(keypress, shift, typing) {
+                self.code_page_key_press(id, press);
+                self.wake_caret();
+                return true;
+            }
+        }
+        let key = match (keypress.code, keypress.mods.ctrl) {
+            (KeyCode::Char('c'), true) => Key::CtrlC,
+            (KeyCode::Char('o'), true) if typing => Key::CtrlO,
+            // A field's caret, a word at a time.
+            (KeyCode::Named(FenixNamedKey::Left), true) if typing => Key::WordLeft,
+            (KeyCode::Named(FenixNamedKey::Right), true) if typing => Key::WordRight,
+            (KeyCode::Named(FenixNamedKey::Backspace), true) if typing => Key::DeleteWordBack,
+            (KeyCode::Char('w'), true) if typing => Key::DeleteWordBack,
+            (_, true) => return false,
+            (KeyCode::Char(' '), false) if claims_space => Key::Space,
+            (KeyCode::Char(':'), false) if typing => Key::Char(':'),
+            // The leader and the command line, while nothing's typed.
+            (KeyCode::Char(' ' | ':'), false) => return false,
+            (KeyCode::Char(c), false) => Key::Char(c),
+            (KeyCode::Named(FenixNamedKey::Enter), _) => Key::Enter,
+            (KeyCode::Named(FenixNamedKey::Tab), _) if shift => Key::BackTab,
+            (KeyCode::Named(FenixNamedKey::Tab), _) => Key::Tab,
+            (KeyCode::Named(FenixNamedKey::Escape), _) => Key::Escape,
+            (KeyCode::Named(FenixNamedKey::Backspace), _) => Key::Backspace,
+            (KeyCode::Named(FenixNamedKey::Up), _) => Key::Up,
+            (KeyCode::Named(FenixNamedKey::Down), _) => Key::Down,
+            (KeyCode::Named(FenixNamedKey::Left), _) => Key::Left,
+            (KeyCode::Named(FenixNamedKey::Right), _) => Key::Right,
+            (KeyCode::Named(FenixNamedKey::Home), _) if typing => Key::Home,
+            (KeyCode::Named(FenixNamedKey::End), _) if typing => Key::End,
+            (KeyCode::Named(FenixNamedKey::Delete), _) if typing => Key::Delete,
+            _ => return false,
+        };
+        let Some(state) = self.pages.get_mut(&id) else { return false };
+        state.stale = true;
+        match &mut state.model {
+            PageModel::Reading(p) => {
+                let action = p.key(key);
+                self.reading_action(id, action);
+            }
+            PageModel::Wizard(w) => {
+                let action = w.key(key);
+                self.wizard_action(id, action);
+            }
+            PageModel::Hub(h) => {
+                let action = h.key(key);
+                self.hub_action(id, action);
+            }
+            PageModel::Doctor(d) => {
+                let action = d.key(key);
+                self.doctor_action(id, action);
+            }
+            PageModel::Extensions(e) => {
+                let action = e.key(key);
+                self.extensions_action(id, action);
+            }
+            PageModel::ExtensionOutput(o) => {
+                if o.key(key) == crate::extension_output::Action::Close {
+                    self.close_page(id);
+                }
+            }
+            PageModel::Code(c) => match c.key(key) {
+                crate::code_page::Action::Close => self.close_page(id),
+                crate::code_page::Action::Key(key) => self.code_page_key(id, key),
+                crate::code_page::Action::None => {}
+            },
+            PageModel::Git(g) => {
+                let action = g.key(key);
+                self.git_page_action(id, action);
+            }
+            PageModel::Log(l) => {
+                let action = l.key(key);
+                self.git_log_action(id, action);
+            }
+            PageModel::Compare(c) => {
+                let action = c.key(key);
+                self.git_compare_action(id, action);
+            }
+            PageModel::Rebase(r) => {
+                let action = r.key(key);
+                self.git_rebase_action(id, action);
+            }
+            PageModel::UserSettings(p) => {
+                let action = p.key(key);
+                self.user_settings_action(id, action);
+            }
+            PageModel::Snippets(p) => {
+                let action = p.key(key);
+                self.snippets_action(id, action);
+            }
+            PageModel::Tutorial(p) => {
+                let action = p.key(key);
+                self.tutorial_action(id, action);
+            }
+            PageModel::Agent(_) => self.agents_page_key(id, key),
+            PageModel::AgentReview(_) => self.agents_review_key(id, key),
+            PageModel::Explorer(..) => {}
+            PageModel::Preview(p) => match p.key(key) {
+                crate::preview_page::Action::None => {}
+                crate::preview_page::Action::Close => self.close_explorer_preview(),
+                crate::preview_page::Action::Open => self.explorer_open_preview_tab(),
+            },
+            PageModel::Search(p) => {
+                let action = p.key(key);
+                self.search_action(id, action);
+            }
+        }
+        self.wake_caret();
+        true
+    }
+
+    /// A background job's news for its page.
+    pub(super) fn apply_page_event(&mut self, event: PageEvent) {
+        match event {
+            PageEvent::GitDone { buffer, .. } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Log(_))) => self.apply_git_log_event(event),
+            PageEvent::GitDone { buffer, label, result } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Rebase(_))) => {
+                self.apply_git_rebase_done(buffer, label, result)
+            }
+            event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. } | PageEvent::GitConfirm { .. }) => {
+                self.apply_git_page_event(event)
+            }
+            event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
+            event @ (PageEvent::CompareData { .. } | PageEvent::CompareFiles { .. } | PageEvent::CompareDiff { .. } | PageEvent::CompareFetched { .. }) => {
+                self.apply_git_compare_event(event)
+            }
+            PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
+            PageEvent::ChromeGit(state) => self.chrome_git = state.map(|s| *s),
+            PageEvent::PageImage { key, result } => self.apply_page_image(key, result),
+            PageEvent::SearchFound { buffer, generation, files } => self.apply_search_found(buffer, generation, files),
+            PageEvent::SearchDone { buffer, generation, result } => self.apply_search_done(buffer, generation, result),
+            PageEvent::AutoFetched { ok } => {
+                if ok {
+                    self.refresh_git_pages(false);
+                }
+            }
+            PageEvent::Output { buffer, generation, line } => {
+                let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
+                state.stale = true;
+                match &mut state.model {
+                    PageModel::Wizard(w) => {
+                        if let Some(run) = w.run.as_mut() {
+                            if let Some(i) = run.running() {
+                                run.push_output(i, line);
+                            }
+                        }
+                    }
+                    PageModel::Doctor(d) => d.push_output(line),
+                    _ => {}
+                }
+            }
+            PageEvent::Finished { buffer, generation, result } => {
+                let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
+                state.stale = true;
+                let elapsed = state.started.map(|t| t.elapsed()).unwrap_or_default();
+                match &mut state.model {
+                    PageModel::Wizard(w) => {
+                        let Some(run) = w.run.as_mut() else { return };
+                        let Some(i) = run.running() else { return };
+                        let ok = result.is_ok();
+                        run.steps[i].status = match result {
+                            Ok(()) => Status::Done(elapsed),
+                            Err(e) => Status::Failed(e),
+                        };
+                        if ok {
+                            self.wizard_run_next(buffer);
+                        }
+                    }
+                    PageModel::Doctor(d) => {
+                        let ok = result.is_ok();
+                        let label = d.fixing.as_ref().and_then(|f| d.check(f.check)).and_then(|c| c.fix.as_ref()).map(|f| f.label.clone());
+                        if let Some(label) = label {
+                            d.last_fix = Some((label, result.clone()));
+                        }
+                        if let Some(fixing) = d.fixing.as_mut() {
+                            fixing.result = Some(result);
+                        }
+                        if ok {
+                            // The next queued fix, else look again.
+                            let next = (!d.queue.is_empty()).then(|| d.queue.remove(0));
+                            match next {
+                                Some(i) => self.doctor_fix(buffer, i),
+                                None => self.doctor_check(buffer),
+                            }
+                        } else {
+                            d.queue.clear();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            PageEvent::Checks { buffer, generation, checks } => {
+                let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
+                state.stale = true;
+                if let PageModel::Doctor(d) = &mut state.model {
+                    let root = d.root.clone();
+                    // The code extensions' checks, from what they last said.
+                    let mut checks = checks;
+                    checks.extend(self.wasm.doctor_checks(&root));
+                    let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
+                    d.set_checks(checks);
+                    d.fixing = None;
+                    self.project_health.insert(root.clone(), health);
+                    for state in self.pages.values_mut() {
+                        if let PageModel::Hub(hub) = &mut state.model {
+                            if let Some(p) = hub.projects.iter_mut().find(|p| p.root == root) {
+                                p.health = Some(health);
+                                state.stale = true;
+                            }
+                        }
+                    }
+                }
+            }
+            PageEvent::Subprojects { buffer, root, found } => {
+                let Some(state) = self.pages.get_mut(&buffer) else { return };
+                state.stale = true;
+                if let PageModel::Hub(h) = &mut state.model {
+                    h.set_subprojects(&root, found);
+                    for p in h.projects.iter_mut().filter(|p| p.parent.is_some() && p.health.is_none()) {
+                        p.health = self.project_health.get(&p.root).copied();
+                    }
+                }
+            }
+            PageEvent::HubInfo { buffer, root, git, health } => {
+                self.project_health.insert(root.clone(), health);
+                let Some(state) = self.pages.get_mut(&buffer) else { return };
+                state.stale = true;
+                if let PageModel::Hub(h) = &mut state.model {
+                    if let Some(p) = h.projects.iter_mut().find(|p| p.root == root) {
+                        p.last_commit_age = git.as_ref().and_then(|g| g.last_commit.as_ref()).map(|(_, t)| age_since(*t));
+                        p.git = git;
+                        p.health = Some(health);
+                    }
+                }
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The page's colours for the visible lines, in the shape syntax
+    /// highlighting hands the renderer.
+    pub(super) fn page_highlights(&self, id: BufferId, first_line: usize, rows: usize) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        let (Some(state), Some(ob)) = (self.pages.get(&id), self.buffers.get(id)) else { return Vec::new() };
+        let theme = self.theme;
+        let color = |role: PageRole| role_color(theme, role);
+        let last = first_line + rows;
+        let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = state
+            .page
+            .spans
+            .iter()
+            .filter(|s| s.line >= first_line && s.line <= last && s.line < ob.buffer.line_count())
+            .map(|s| {
+                let start = ob.buffer.line_start_char(s.line);
+                let len = ob.buffer.line_len(s.line);
+                let a = ob.buffer.char_to_byte(start + s.cols.start.min(len));
+                let b = ob.buffer.char_to_byte(start + s.cols.end.min(len));
+                (a..b, color(s.role))
+            })
+            .filter(|(r, _)| r.start < r.end)
+            .collect();
+        ranges.sort_by_key(|(r, _)| r.start);
+        // A character is one colour: a range that overlaps the one before
+        // it is cut to start after it (the renderer would draw it twice).
+        let mut end = 0;
+        ranges.retain_mut(|(r, _)| {
+            r.start = r.start.max(end);
+            end = end.max(r.end);
+            r.start < r.end
+        });
+        ranges
+    }
+
+    /// The page's backgrounds -- the focused rows' tint and rail, a field
+    /// being typed into, a canvas's own -- and its hairlines and
+    /// underlines, in Home's shapes, in cells: a wide character takes two.
+    pub(super) fn page_backgrounds(&self, id: BufferId, first_line: usize, rows: usize) -> (home::BgSegments, home::HomeOverlay) {
+        let Some(state) = self.pages.get(&id) else { return Default::default() };
+        let theme = self.theme;
+        let visible = |line: usize| (line >= first_line && line <= first_line + rows).then(|| line - first_line);
+        // Columns (characters) as cells, line by line.
+        let lines: HashMap<usize, Option<Vec<usize>>> = (first_line..=first_line + rows).map(|l| (l, state.page.cells(l))).collect();
+        let cells = |line: usize, cols: &std::ops::Range<usize>| {
+            let map = lines.get(&line).and_then(|m| m.as_deref());
+            (crate::page::cell_of(map, cols.start), crate::page::cell_of(map, cols.end))
+        };
+        let mut segments = Vec::new();
+        let mut overlay = home::HomeOverlay::default();
+        let panel = if theme.sidebar_bg != theme.bg { theme.sidebar_bg } else { theme.bg_modeline };
+        for (line, cols, shade) in &state.page.backgrounds {
+            if let Some(row) = visible(*line) {
+                let (a, b) = cells(*line, cols);
+                segments.push((row, a, b, shade_color(theme, *shade)));
+            }
+        }
+        for (line, cols) in &state.page.focuses {
+            if let Some(row) = visible(*line) {
+                let (a, b) = cells(*line, cols);
+                segments.push((row, a, b, theme.hl_line));
+            }
+        }
+        if let Some((line, cols)) = &state.page.focus {
+            if let Some(row) = visible(*line) {
+                let (a, b) = cells(*line, cols);
+                segments.push((row, a, b, theme.hl_line));
+                overlay.rail = Some((row, a, 1));
+            }
+        }
+        for (line, cols) in &state.page.panels {
+            if let Some(row) = visible(*line) {
+                let (a, b) = cells(*line, cols);
+                segments.push((row, a, b, panel));
+            }
+        }
+        overlay.rules = state.page.rules.iter().filter_map(|(line, cols)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); (row, a, b) })).collect();
+        overlay.underlines = state
+            .page
+            .underlines
+            .iter()
+            .filter_map(|(line, cols, role)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); (row, a, b, glyphon_to_rgba(role_color(theme, *role))) }))
+            .collect();
+        overlay.vertical_rules = state
+            .page
+            .vertical_rules
+            .iter()
+            .filter(|(_, lines)| lines.end > first_line && lines.start <= first_line + rows)
+            .map(|(col, lines)| (*col, lines.start as isize - first_line as isize, lines.len()))
+            .collect();
+        overlay.rule_color = home::home_rule(theme);
+        overlay.images = state
+            .page
+            .images
+            .iter()
+            .filter(|i| i.line + i.rows > first_line && i.line <= first_line + rows)
+            .map(|i| {
+                let map = state.page.cells(i.line);
+                let (a, b) = (crate::page::cell_of(map.as_deref(), i.col), crate::page::cell_of(map.as_deref(), i.col + i.cols));
+                (i.line as isize - first_line as isize, a, i.rows, b - a, i.key.clone(), i.view)
+            })
+            .collect();
+        // What an extension's page outlines over its picture (a diagram's
+        // selected node and the source cursor's).
+        if let PageModel::Code(p) = &state.model {
+            if !overlay.images.is_empty() {
+                overlay.marks = p.image_marks();
+            }
+        }
+        (segments, overlay)
+    }
+
+    // --------------------------------------------------------------
+    // Opening projects: a workspace each
+    // --------------------------------------------------------------
+
+    /// The file to land on in a project: the one you had open most
+    /// recently there, else its main file, else its README.
+    fn project_entry_file(&self, root: &Path) -> Option<PathBuf> {
+        self.recent_files
+            .paths()
+            .iter()
+            .find(|p| p.starts_with(root) && p.is_file())
+            .cloned()
+            .or_else(|| fenix_project::main_file(root, self.project_kind_of(root)))
+            .or_else(|| Some(root.join("README.md")).filter(|p| p.is_file()))
+    }
+
+    /// Opens project `root` -- on `file` if given, else where you last
+    /// were in it -- in a workspace of its own: the one it already has,
+    /// or the current one if that isn't anyone's and holds nothing but
+    /// Home or a page, or a new one named after it. With
+    /// `workspace_per_project = false` it's the old behaviour: the file,
+    /// or a find-file picker in the root.
+    pub(super) fn open_project(&mut self, root: PathBuf, file: Option<PathBuf>, register: bool) {
+        let root = std::fs::canonicalize(&root).map(fenix_lsp::normalize).unwrap_or(root);
+        if register {
+            self.known_projects.add(root.clone());
+            if let Err(err) = self.known_projects.save() {
+                eprintln!("fenix: couldn't save project history: {err}");
+            }
+        }
+        let file = file.or_else(|| self.project_entry_file(&root));
+        if self.config.workspace_per_project != Some(false) {
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+            if let Some(i) = self.workspaces.workspaces.iter().position(|w| w.project.as_deref() == Some(root.as_path())) {
+                self.workspaces.switch_to_index(i);
+                if let Some(file) = &file {
+                    self.open_file_from_picker(file);
+                }
+                self.main_view = MainView::Editor;
+                self.refresh_project_root();
+                self.wake_caret();
+                return;
+            }
+            let reusable = {
+                let ws = &self.workspaces.workspaces[self.workspaces.active_index()];
+                let panes = ws.windows.windows();
+                ws.project.is_none()
+                    && panes.len() == 1
+                    && ws.windows.content(panes[0]).and_then(|id| self.buffers.get(*id)).is_none_or(|ob| {
+                        matches!(ob.kind, BufferKind::Dashboard | BufferKind::Page) || (ob.kind == BufferKind::Text && ob.buffer.path().is_none() && ob.buffer.len_chars() == 0)
+                    })
+            };
+            if !reusable {
+                let content = match &file {
+                    Some(file) => self.buffers.open_path(file),
+                    None => self.new_home_buffer(),
+                };
+                let cursor = self.buffers.get(content).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+                self.workspaces.new_workspace(content, cursor);
+            }
+            self.workspaces.rename_active(name);
+            let active = self.workspaces.active_index();
+            self.workspaces.workspaces[active].project = Some(root.clone());
+            self.refresh_home_data(true);
+        }
+        match file {
+            Some(file) => self.open_file_from_picker(&file),
+            None => self.switch_to_project(root),
+        }
+        self.wake_caret();
+    }
+
+    // --------------------------------------------------------------
+    // The wizard
+    // --------------------------------------------------------------
+
+    /// `SPC p c`: the new-project wizard, in the focused pane. A second
+    /// press brings back the one already open, answers and all.
+    pub(crate) fn cmd_project_new(&mut self) {
+        self.project_new_with("");
+    }
+
+    /// `:project-new [template] [name] [key=value ...]`.
+    pub(super) fn project_new_with(&mut self, args: &str) {
+        if let Some(id) = self.find_page(|m| matches!(m, PageModel::Wizard(_))) {
+            if args.is_empty() {
+                self.show_page(id);
+                return;
+            }
+            self.close_page(id);
+        }
+        let user_dir = fenix_project::template::user_templates_dir();
+        let (templates, errors) = fenix_project::template::available_templates_with(&crate::installed::data_dirs("templates"), user_dir.as_deref(), self.project_root.as_deref());
+        let probe = self.app_probe();
+        let mut found = BTreeMap::new();
+        for program in templates.iter().flat_map(fenix_project::template::programs_needed).chain(["git".to_string()]) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = found.entry(program) {
+                let located = probe.locate(entry.key()).is_some();
+                entry.insert(located);
+            }
+        }
+        // New projects land beside the current one, else in the home
+        // folder.
+        let parent = self.project_root.as_deref().and_then(Path::parent).map(Path::to_path_buf).or_else(dirs::home_dir).unwrap_or_default();
+        let mut wizard = Wizard::new(templates, errors, found, &parent);
+        if let Err(e) = wizard.preset(args) {
+            self.set_error(e);
+            return;
+        }
+        self.open_page(PageModel::Wizard(wizard));
+    }
+
+    fn wizard_action(&mut self, id: BufferId, action: project_wizard::Action) {
+        use project_wizard::Action;
+        match action {
+            Action::None => {}
+            Action::Close => {
+                let running = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Wizard(w)) if w.run.as_ref().is_some_and(|r| r.running().is_some()));
+                if running {
+                    self.set_error("a command is still running -- C-c stops after it");
+                } else {
+                    self.close_page(id);
+                }
+            }
+            Action::Create => self.wizard_run_next(id),
+            Action::Retry | Action::Skip => {
+                if let Some(PageModel::Wizard(w)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                    if let Some(run) = w.run.as_mut() {
+                        if let Some(i) = run.failed() {
+                            run.steps[i].output.clear();
+                            run.steps[i].status = if action == Action::Retry { Status::Pending } else { Status::Skipped };
+                        }
+                    }
+                }
+                self.wizard_run_next(id);
+            }
+            Action::Finish => self.wizard_finish(id),
+            Action::BrowseParent => {
+                let Some(PageModel::Wizard(w)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                // Start where it points now, or the nearest folder of it
+                // that exists.
+                let start = Path::new(w.parent.trim()).ancestors().find(|p| p.is_dir()).map(Path::to_path_buf).or_else(dirs::home_dir).unwrap_or_default();
+                self.open_folder_picker(&start, ExplorerPurpose::PickWizardParent);
+            }
+        }
+    }
+
+    /// `S` in the explorer the wizard opened: that folder becomes where
+    /// the project is created, and the wizard comes back.
+    pub(super) fn wizard_parent_picked(&mut self, dir: &Path) {
+        self.close_folder_picker();
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::Wizard(_))) else { return };
+        if let Some(PageModel::Wizard(w)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+            w.set_parent(dir);
+        }
+        self.show_page(id);
+    }
+
+    /// Starts the next pending step, if the run should go on: writing the
+    /// files happens here and now, a command on its own thread. Once
+    /// nothing's left and nothing failed, finishes.
+    fn wizard_run_next(&mut self, id: BufferId) {
+        let Some(state) = self.pages.get_mut(&id) else { return };
+        state.stale = true;
+        let PageModel::Wizard(w) = &mut state.model else { return };
+        let Some(plan) = w.plan.clone() else { return };
+        let Some(run) = w.run.as_mut() else { return };
+        let Some(i) = run.next_pending() else {
+            if run.finished() && !run.cancel_requested && run.failed().is_none() {
+                self.wizard_finish(id);
+            }
+            return;
+        };
+        run.steps[i].status = Status::Running;
+        match run.steps[i].work.clone() {
+            work @ (RunWork::WriteFiles | RunWork::WriteAfterFiles) => {
+                state.generation += 1;
+                state.started = Some(Instant::now());
+                let generation = state.generation;
+                let result = if matches!(work, RunWork::WriteFiles) { plan.write_files() } else { plan.write_after_files() }.map(|_| ());
+                self.apply_page_event(PageEvent::Finished { buffer: id, generation, result });
+            }
+            RunWork::Command(step) => self.page_run(id, step, &plan.dir),
+        }
+    }
+
+    /// The run is over (or `o` on a failure): the template's editor-side
+    /// hooks, then the project opened -- in its own workspace -- on its
+    /// main file, and the wizard closed.
+    fn wizard_finish(&mut self, id: BufferId) {
+        let Some(state) = self.pages.remove(&id) else { return };
+        let PageModel::Wizard(wizard) = state.model else { return };
+        let Some(plan) = wizard.plan else {
+            self.close_page(id);
+            return;
+        };
+        let dir = std::fs::canonicalize(&plan.dir).map(fenix_lsp::normalize).unwrap_or_else(|_| plan.dir.clone());
+        self.project_kinds.borrow_mut().clear();
+        for hook in &plan.hooks {
+            match hook {
+                fenix_project::template::Hook::MibRoot { path, label } => {
+                    let mut settings = fenix_config::ProjectSettings::load(&dir);
+                    let mut roots = match settings.get("mib.roots") {
+                        Some(fenix_config::Value::Map(m)) => m.clone(),
+                        _ => Vec::new(),
+                    };
+                    roots.push((label.clone(), path.clone()));
+                    let saved = settings.set("mib.roots", Some(fenix_config::Value::Map(roots))).map_err(std::io::Error::other).and_then(|()| settings.save());
+                    if let Err(e) = saved {
+                        self.set_error(format!("couldn't list the MIB in .fenix/settings.toml: {e}"));
+                    }
+                }
+            }
+        }
+        let steps = wizard.run.as_ref().map(|r| r.steps.len()).unwrap_or(0);
+        self.open_project(dir.clone(), plan.file_to_open(), wizard.register);
+        self.close_page(id);
+        self.refresh_home_data(false);
+        self.set_message(format!("created {} -- {steps} step{}", dir.display(), if steps == 1 { "" } else { "s" }));
+    }
+
+    // --------------------------------------------------------------
+    // The hub
+    // --------------------------------------------------------------
+
+    /// What the hub shows for each known project, before git and the
+    /// doctor have reported in.
+    fn hub_projects(&self) -> Vec<HubProject> {
+        self.known_projects
+            .roots()
+            .iter()
+            .map(|root| {
+                let mut p = HubProject::new(root.clone(), self.project_kind_of(root));
+                p.pinned = self.project_meta.is_pinned(root);
+                p.group = self.project_meta.group(root).map(str::to_string);
+                p.branch = fenix_project::vcs::git_branch(root);
+                p.jira = fenix_project::meta::jira_key(root);
+                let mut tasks: Vec<String> = fenix_project::tools::ProjectTools::read(root).map(|t| t.tasks.into_keys().collect()).unwrap_or_default();
+                for task in fenix_tasks::discover_tasks(root) {
+                    if !tasks.contains(&task.name) {
+                        tasks.push(task.name);
+                    }
+                }
+                p.tasks = tasks;
+                p.health = self.project_health.get(root).copied();
+                p
+            })
+            .collect()
+    }
+
+    /// `SPC p p`: the hub. A second press brings back the open one,
+    /// refreshed.
+    pub(crate) fn cmd_project_hub(&mut self) {
+        let id = match self.find_page(|m| matches!(m, PageModel::Hub(_))) {
+            Some(id) => {
+                self.show_page(id);
+                self.hub_reload(id);
+                id
+            }
+            None => {
+                let hub = Hub::new(self.hub_projects());
+                self.open_page(PageModel::Hub(hub))
+            }
+        };
+        self.hub_fetch(id);
+    }
+
+    /// Rebuilds the hub's rows from the project list, keeping what git
+    /// and the doctor already said and the selection where it was.
+    fn hub_reload(&mut self, id: BufferId) {
+        let fresh = self.hub_projects();
+        let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
+        let selected = hub.selected().map(|p| p.root.clone());
+        let old = std::mem::take(&mut hub.projects);
+        hub.projects = fresh
+            .into_iter()
+            .map(|mut p| {
+                if let Some(o) = old.iter().find(|o| o.root == p.root) {
+                    p.git = o.git.clone();
+                    p.last_commit_age = o.last_commit_age.clone();
+                    p.health = p.health.or(o.health);
+                }
+                p
+            })
+            .collect();
+        // Subprojects of projects still listed, until the next scan.
+        let listed: Vec<PathBuf> = hub.projects.iter().map(|p| p.root.clone()).collect();
+        hub.projects.extend(old.into_iter().filter(|o| o.parent.as_ref().is_some_and(|parent| listed.contains(parent)) && !listed.contains(&o.root)));
+        if let Some(root) = selected {
+            hub.focus_root(&root);
+        }
+        if let Some(state) = self.pages.get_mut(&id) {
+            state.stale = true;
+        }
+    }
+
+    /// Git summaries and the doctor's quick pass for every project, off
+    /// the UI thread, one project at a time.
+    fn hub_fetch(&mut self, id: BufferId) {
+        let Some(PageModel::Hub(hub)) = self.pages.get(&id).map(|s| &s.model) else { return };
+        let projects: Vec<(PathBuf, fenix_project::ProjectKind)> =
+            hub.projects.iter().filter(|p| p.exists && p.parent.is_none()).map(|p| (p.root.clone(), p.kind)).collect();
+        let probe = self.app_probe();
+        self.page_spawn(move |send| {
+            let info = |root: PathBuf, kind: fenix_project::ProjectKind| {
+                let git = fenix_project::vcs::git_summary(&root);
+                let checks = doctor::diagnose_with(&root, kind, &probe, false, &[]);
+                let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
+                send(PageEvent::HubInfo { buffer: id, root, git, health });
+            };
+            // Every project's own row first, then what's inside each.
+            let mut found_all = Vec::new();
+            for (root, kind) in &projects {
+                let found = fenix_project::workspace::subprojects(root);
+                send(PageEvent::Subprojects { buffer: id, root: root.clone(), found: found.clone() });
+                info(root.clone(), *kind);
+                found_all.extend(found);
+            }
+            for (root, kind) in found_all {
+                info(root, kind);
+            }
+        });
+    }
+
+    fn hub_action(&mut self, id: BufferId, action: project_hub::Action) {
+        use project_hub::Action;
+        match action {
+            Action::None => {}
+            Action::Close => self.close_page(id),
+            // Opened while the hub still holds its pane, so a workspace
+            // holding nothing but the hub is reused, not left behind.
+            Action::Open(root) => {
+                let subproject = matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Hub(h)) if h.projects.iter().any(|p| p.root == root && p.parent.is_some()));
+                self.open_project(root, None, !subproject);
+                self.close_page(id);
+            }
+            Action::Add(path) => {
+                self.register_project_dir(&path);
+                self.hub_reload(id);
+                let root = std::fs::canonicalize(&path).map(fenix_lsp::normalize).unwrap_or(path);
+                if let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                    hub.focus_root(&root);
+                }
+                self.hub_fetch(id);
+            }
+            Action::Browse => {
+                self.close_page(id);
+                self.picker_add_project_prompt();
+            }
+            Action::New => {
+                self.close_page(id);
+                self.cmd_project_new();
+            }
+            Action::Doctor(root) => self.open_doctor(root),
+            Action::Settings(root) => {
+                let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+                self.open_settings_page(crate::settings_page::Scope::Project { root, name }, None);
+            }
+            Action::TogglePin(root) => {
+                let pinned = !self.project_meta.is_pinned(&root);
+                self.project_meta.set_pinned(&root, pinned);
+                self.save_project_meta();
+                self.hub_reload(id);
+                if let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                    hub.focus_root(&root);
+                }
+            }
+            Action::SetGroup(root, group) => {
+                self.project_meta.set_group(&root, &group);
+                self.save_project_meta();
+                self.hub_reload(id);
+                if let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                    hub.focus_root(&root);
+                }
+            }
+            Action::Remove(root) => {
+                self.known_projects.remove(&root);
+                if let Err(err) = self.known_projects.save() {
+                    eprintln!("fenix: couldn't save project history: {err}");
+                }
+                self.project_meta.forget(&root);
+                self.save_project_meta();
+                self.hub_reload(id);
+                self.set_message(format!("removed {} from your projects -- the folder is untouched", root.display()));
+            }
+        }
+    }
+
+    fn save_project_meta(&mut self) {
+        if let Err(err) = self.project_meta.save() {
+            self.set_error(format!("couldn't save project pins and groups: {err}"));
+        }
+    }
+
+    // --------------------------------------------------------------
+    // The doctor
+    // --------------------------------------------------------------
+
+    /// `SPC p h`: the doctor for the focused buffer's project.
+    pub(crate) fn cmd_project_doctor(&mut self) {
+        match self.project_root.clone() {
+            Some(root) => self.open_doctor(root),
+            None => self.set_error("not in a project -- SPC p p, then h on one"),
+        }
+    }
+
+    pub(super) fn open_doctor(&mut self, root: PathBuf) {
+        let existing = self.pages.iter().find(|(_, s)| matches!(&s.model, PageModel::Doctor(d) if d.root == root)).map(|(id, _)| *id);
+        let id = match existing {
+            Some(id) => {
+                self.show_page(id);
+                id
+            }
+            None => {
+                let kind = self.project_kind_of(&root);
+                self.open_page(PageModel::Doctor(DoctorPage::new(root, kind)))
+            }
+        };
+        self.doctor_check(id);
+    }
+
+    /// Runs the deep check for doctor page `id` off the UI thread.
+    pub(super) fn doctor_check(&mut self, id: BufferId) {
+        let Some(state) = self.pages.get_mut(&id) else { return };
+        let PageModel::Doctor(d) = &mut state.model else { return };
+        let (root, kind) = (d.root.clone(), d.kind);
+        d.checks = None;
+        state.generation += 1;
+        state.stale = true;
+        let generation = state.generation;
+        let probe = self.app_probe();
+        self.page_spawn(move |send| {
+            let checks = doctor::diagnose_with(&root, kind, &probe, true, &[]);
+            send(PageEvent::Checks { buffer: id, generation, checks });
+        });
+    }
+
+    /// Runs check `i`'s fix.
+    fn doctor_fix(&mut self, id: BufferId, i: usize) {
+        let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
+        let Some(fix) = d.check(i).and_then(|c| c.fix.clone()) else { return };
+        let root = d.root.clone();
+        match fix.action {
+            FixAction::Run(step) => {
+                d.fixing = Some(Fixing { check: i, output: Vec::new(), result: None });
+                self.page_run(id, step, &root);
+            }
+            FixAction::Editor(fix) => {
+                match fix {
+                    EditorFix::UseLanguageServer { language, executable, args } => {
+                        let result = fenix_project::tools::ProjectTools::read(&root).and_then(|mut tools| {
+                            tools.lsp.insert(language, fenix_project::tools::CommandSpec::new(executable.display().to_string(), args));
+                            tools.write(&root)
+                        });
+                        if let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                            d.last_fix = Some(("use it for this project".to_string(), result.clone()));
+                        }
+                        match result {
+                            Ok(()) => self.set_message("written to .fenix/tools.json -- :lsp-restart to start it"),
+                            Err(e) => self.set_error(e),
+                        }
+                    }
+                    EditorFix::RunCommand(command) => {
+                        self.run_command_for_extension(&command);
+                        // It may have opened a picker; r checks again.
+                        return;
+                    }
+                }
+                self.doctor_check(id);
+            }
+        }
+    }
+
+    fn doctor_action(&mut self, id: BufferId, action: project_doctor::Action) {
+        use project_doctor::Action;
+        match action {
+            Action::None => {}
+            Action::Close => self.close_page(id),
+            Action::Recheck => self.doctor_check(id),
+            Action::Fix(i) => self.doctor_fix(id, i),
+            Action::FixAllSafe => {
+                let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
+                let mut queue = d.safe_fixes();
+                if queue.is_empty() {
+                    return;
+                }
+                let first = queue.remove(0);
+                d.queue = queue;
+                self.doctor_fix(id, first);
+            }
+            Action::Open(path, line) => {
+                self.open_file_from_picker(&path);
+                self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col: 1, text: String::new() });
+            }
+            Action::CopyReport => {
+                let Some(PageModel::Doctor(d)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                let report = d.report();
+                match self.clipboard.as_mut().map(|c| c.set_text(report)) {
+                    Some(Ok(())) => self.set_message("copied the doctor's report"),
+                    _ => self.set_error("couldn't reach the clipboard"),
+                }
+            }
+        }
+    }
+
+    // --------------------------------------------------------------
+    // Settings
+    // --------------------------------------------------------------
+
+    /// `SPC p ,`: the focused buffer's project's settings.
+    /// `SPC p ,`: the focused project's settings page, which leads to
+    /// its own page (kind, group, tasks, launch) too.
+    pub(crate) fn cmd_project_settings(&mut self) {
+        match self.project_root.clone() {
+            Some(_) => self.open_project_settings_page(),
+            None => self.set_error("not in a project -- SPC p p, then , on one"),
+        }
+    }
+
+    /// The project's own section of the settings page, read for `root`.
+    pub(super) fn project_page_model(&self, root: &Path) -> Settings {
+        let mut settings = Settings::new(root.to_path_buf(), fenix_project::detect_kind_from_files(root));
+        settings.declared = fenix_project::declared_kind(root);
+        settings.pinned = self.project_meta.is_pinned(root);
+        settings.group = self.project_meta.group(root).unwrap_or_default().to_string();
+        settings.jira = fenix_project::meta::jira_key(root).unwrap_or_default();
+        settings
+    }
+
+    /// What the settings page's project section asked for, for the
+    /// project at `root`.
+    pub(super) fn project_page_action(&mut self, root: PathBuf, action: project_settings::Action) {
+        use project_settings::Action;
+        match action {
+            Action::None | Action::Close => {}
+            Action::SaveTools(tools) => match tools.write(&root) {
+                Ok(()) => self.set_message("saved .fenix/tools.json"),
+                Err(e) => self.set_error(e),
+            },
+            Action::SetKind(kind) => {
+                match fenix_project::meta::set_kind(&root, kind) {
+                    Ok(()) => self.set_message("saved .fenix/settings.toml"),
+                    Err(e) => self.set_error(e.to_string()),
+                }
+                self.project_kinds.borrow_mut().clear();
+            }
+            Action::SetJira(key) => {
+                if let Err(e) = fenix_project::meta::set_jira_key(&root, Some(key.as_str())) {
+                    self.set_error(e.to_string());
+                }
+            }
+            Action::SetGroup(group) => {
+                self.project_meta.set_group(&root, &group);
+                self.save_project_meta();
+            }
+            Action::SetPinned(pinned) => {
+                self.project_meta.set_pinned(&root, pinned);
+                self.save_project_meta();
+            }
+            Action::RunTask(name) => self.run_task(fenix_tasks::TaskDef { name, command: String::new(), args: Vec::new() }, root),
+            Action::Browse { start, folder } => self.settings_browse(start.or(Some(root)), folder),
+            Action::OpenRaw => {
+                let path = root.join(".fenix").join("tools.json");
+                if !path.exists() {
+                    let _ = std::fs::create_dir_all(root.join(".fenix"));
+                    let _ = std::fs::write(&path, "{}\n");
+                }
+                self.open_file_from_picker(&path);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh folder under the temp dir, removed when dropped.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(name: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("fenix-pages-{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Scratch(fenix_lsp::normalize(std::fs::canonicalize(&dir).unwrap()))
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn press(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            let key = match c {
+                '\n' => KeyPress::named(FenixNamedKey::Enter),
+                '\u{1b}' => KeyPress::named(FenixNamedKey::Escape),
+                '\t' => KeyPress::named(FenixNamedKey::Tab),
+                c => KeyPress::char(c),
+            };
+            assert!(app.page_key(key), "the page claims {c:?}");
+        }
+    }
+
+    fn page_text(app: &mut App) -> String {
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.ensure_page_layout(id, pane, 120);
+        app.open().buffer.text()
+    }
+
+    /// An app whose known projects are exactly `roots`.
+    fn app_with(roots: &[&Path]) -> App {
+        let mut app = App::with_file(None);
+        for root in app.known_projects.roots().to_vec() {
+            app.known_projects.remove(&root);
+        }
+        for root in roots.iter().rev() {
+            app.known_projects.add(root.to_path_buf());
+        }
+        app
+    }
+
+    /// The wizard open on `template`, pointed at `parent`, not registering.
+    fn wizard_app(template: &str, parent: &Path, git: bool) -> App {
+        let mut app = App::with_file(None);
+        app.cmd_project_new();
+        let id = app.focused_buffer_id();
+        let Some(PageModel::Wizard(w)) = app.pages.get_mut(&id).map(|s| &mut s.model) else { panic!("no wizard") };
+        w.parent = parent.display().to_string();
+        (w.register, w.git_init, w.git_commit) = (false, git, false);
+        let i = w.templates.iter().position(|t| t.id == template).unwrap();
+        w.focus = w.fields().iter().position(|f| *f == project_wizard::Field::Template(i)).unwrap();
+        app
+    }
+
+    fn wizard(app: &App) -> &Wizard {
+        match app.pages.values().map(|s| &s.model).find(|m| matches!(m, PageModel::Wizard(_))) {
+            Some(PageModel::Wizard(w)) => w,
+            _ => panic!("no wizard"),
+        }
+    }
+
+    #[test]
+    fn a_page_shows_from_its_top_when_its_selection_moves_back_up() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(crate::settings_page::Scope::You, None);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.ensure_page_layout(id, pane, 160);
+        app.page_scroll_to_top(id, pane, 40);
+        // Down the list, scrolled down by hand; then back up.
+        for _ in 0..5 {
+            app.page_key(KeyPress::char('j'));
+        }
+        app.ensure_page_layout(id, pane, 160);
+        app.page_scroll_to_top(id, pane, 40);
+        app.pane_state_mut(pane).scroll_line = 3;
+        app.page_scroll_to_top(id, pane, 40);
+        assert_eq!(app.pane_state(pane).scroll_line, 3, "no move: the page stays where it was put");
+        app.page_key(KeyPress::char('k'));
+        app.ensure_page_layout(id, pane, 160);
+        app.page_scroll_to_top(id, pane, 40);
+        assert_eq!(app.pane_state(pane).scroll_line, 0, "back up in the first screenful: the top");
+    }
+
+    #[test]
+    fn spc_p_c_opens_the_wizard_as_a_page_and_lays_it_out() {
+        let mut app = App::with_file(None);
+        app.cmd_project_new();
+        assert_eq!(app.open().kind, BufferKind::Page);
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*new project*");
+        let id = app.focused_buffer_id();
+        let text = page_text(&mut app);
+        assert!(text.contains("New project") && text.contains("Python · uv"), "{text}");
+        assert!(!app.page_highlights(id, 0, 40).is_empty());
+        assert!(!app.page_key(KeyPress::char(' ')), "the leader still works from the page");
+        app.leader_matcher.feed(KeyPress::char(' '));
+        assert!(!app.page_key(KeyPress::char('G')), "a pending leader sequence gets its keys");
+        app.leader_matcher.cancel();
+        app.cmd_project_new();
+        assert_eq!(app.focused_buffer_id(), id, "a second SPC p c brings back the same wizard");
+    }
+
+    #[test]
+    fn a_space_typed_into_a_field_is_a_space_not_the_leader() {
+        let dir = Scratch::new("space");
+        let mut app = wizard_app("empty", &dir.0, false);
+        press(&mut app, "\n");
+        assert!(app.page_key(KeyPress::char(' ')));
+        assert_eq!(wizard(&app).editing.as_deref(), Some(" "));
+    }
+
+    #[test]
+    fn creating_a_project_writes_it_runs_git_and_opens_it_in_its_own_workspace() {
+        let dir = Scratch::new("create");
+        let mut app = wizard_app("empty", &dir.0, true);
+        press(&mut app, "\nfresh\nG\n");
+        assert_eq!(wizard(&app).step, project_wizard::Step::Review);
+        press(&mut app, "\n");
+        let project = dir.0.join("fresh");
+        assert_eq!(std::fs::read_to_string(project.join("README.md")).unwrap(), "# fresh\n");
+        assert!(project.join(".git").is_dir(), "git init ran");
+        assert!(app.pages.is_empty(), "the wizard closed itself");
+        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("README.md")), "and opened the README");
+        assert_eq!(app.workspaces.active_name(), "fresh");
+        assert_eq!(app.workspaces.workspaces[app.workspaces.active_index()].project.as_deref(), Some(project.as_path()));
+        assert_eq!(app.workspaces.len(), 1, "Home's workspace was reused, not left behind empty");
+    }
+
+    #[test]
+    fn a_failing_step_stops_the_run_and_skip_goes_on() {
+        let dir = Scratch::new("fail");
+        let mut app = wizard_app("empty", &dir.0, false);
+        press(&mut app, "\nfresh\nG\n");
+        let id = app.focused_buffer_id();
+        if let Some(PageModel::Wizard(w)) = app.pages.get_mut(&id).map(|s| &mut s.model) {
+            w.plan.as_mut().unwrap().steps.push(fenix_project::template::Step::new("definitely-not-a-program-xyz", &[]));
+        }
+        press(&mut app, "\n");
+        let run = wizard(&app).run.as_ref().unwrap();
+        assert!(matches!(run.steps.last().unwrap().status, Status::Failed(_)));
+        assert!(dir.0.join("fresh/README.md").is_file(), "what was done stays");
+        assert!(page_text(&mut app).contains("r retry"));
+        press(&mut app, "s");
+        assert!(app.pages.is_empty(), "skipping the last step finishes");
+    }
+
+    #[test]
+    fn b_browses_for_the_folder_and_s_brings_it_back() {
+        let dir = Scratch::new("browse");
+        std::fs::create_dir_all(dir.0.join("inner")).unwrap();
+        let mut app = wizard_app("empty", &dir.0, false);
+        press(&mut app, "\nfresh\n");
+        press(&mut app, "b");
+        assert!(app.picking_folder());
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickWizardParent);
+        assert_eq!(app.explorer.as_ref().unwrap().cwd, dir.0);
+        app.wizard_parent_picked(&dir.0.join("inner"));
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.open().kind, BufferKind::Page, "back on the wizard");
+        assert_eq!(wizard(&app).target(), dir.0.join("inner").join("fresh"));
+    }
+
+    #[test]
+    fn project_new_with_arguments_goes_straight_to_review() {
+        let name = format!("fenix-preset-{}", std::process::id());
+        let mut app = App::with_file(None);
+        app.project_new_with(&format!("empty {name}"));
+        let w = wizard(&app);
+        assert_eq!(w.step, project_wizard::Step::Review);
+        assert!(!w.target().exists(), "reviewing writes nothing");
+        app.project_new_with("nope");
+        assert!(app.modeline_pieces().1.contains("no template called nope"));
+    }
+
+    #[test]
+    fn the_hub_lists_known_projects_and_opens_one_in_its_own_workspace() {
+        let a = Scratch::new("hub-a");
+        let b = Scratch::new("hub-b");
+        std::fs::write(a.0.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::write(a.0.join("README.md"), "# a").unwrap();
+        std::fs::write(b.0.join("pyproject.toml"), "").unwrap();
+        let mut app = app_with(&[&a.0, &b.0]);
+        app.cmd_project_hub();
+        let hub_id = app.focused_buffer_id();
+        let text = page_text(&mut app);
+        let a_name = a.0.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(text.contains(&a_name) && text.contains("RS") && text.contains("PY"), "{text}");
+        assert!(text.contains("no problems found") || text.contains("problem"), "the quick pass reported in:\n{text}");
+        // Open the first (a).
+        press(&mut app, "\n");
+        assert!(!app.pages.contains_key(&hub_id), "the hub closes behind it");
+        app.cmd_project_hub();
+        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*projects*");
+        press(&mut app, "q");
+        assert_eq!(app.workspaces.active_name(), a_name);
+        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("README.md")));
+        // Back to b: a new workspace; back to a: its own again.
+        app.cmd_project_hub();
+        press(&mut app, "j\n");
+        assert_eq!(app.workspaces.len(), 2);
+        app.cmd_project_hub();
+        let a_row = app.pages.values().find_map(|s| match &s.model {
+            PageModel::Hub(h) => h.rows().iter().position(|(_, i)| h.projects[*i].root == a.0),
+            _ => None,
+        });
+        for _ in 0..a_row.unwrap() {
+            press(&mut app, "j");
+        }
+        press(&mut app, "\n");
+        assert_eq!(app.workspaces.len(), 2, "no third workspace: a already had one");
+        assert_eq!(app.workspaces.active_name(), a_name);
+    }
+
+    #[test]
+    fn opening_from_a_hub_in_its_own_workspace_reuses_that_workspace() {
+        let a = Scratch::new("hub-reuse");
+        std::fs::write(a.0.join("README.md"), "# a").unwrap();
+        let mut app = app_with(&[&a.0]);
+        // A second, empty workspace holding only the hub.
+        let home = app.focused_buffer_id();
+        app.workspaces.new_workspace(home, Cursor::at_start());
+        app.cmd_project_hub();
+        let before = app.workspaces.len();
+        press(&mut app, "
+");
+        assert_eq!(app.workspaces.len(), before, "the hub's workspace became the project's");
+        assert!(app.workspaces.workspaces.iter().all(|w| w.windows.windows().iter().all(|p| w.windows.content(*p).is_some_and(|id| app.buffers.get(*id).is_some()))));
+    }
+
+    #[test]
+    fn a_registered_monorepo_shows_its_subprojects_which_open_without_being_registered() {
+        let mono = Scratch::new("hub-mono");
+        std::fs::create_dir_all(mono.0.join(".git")).unwrap();
+        std::fs::write(mono.0.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(mono.0.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::create_dir_all(mono.0.join("crates/core/src")).unwrap();
+        std::fs::write(mono.0.join("crates/core/Cargo.toml"), "[package]\nname = \"core\"\n").unwrap();
+        std::fs::write(mono.0.join("crates/core/src/lib.rs"), "").unwrap();
+        let mut app = app_with(&[&mono.0]);
+        app.cmd_project_hub();
+        let text = page_text(&mut app);
+        assert!(text.contains("crates/core"), "the subproject is listed:\n{text}");
+        press(&mut app, "j\n");
+        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("lib.rs")), "its main file");
+        assert_eq!(app.workspaces.active_name(), "core");
+        assert_eq!(app.known_projects.roots(), std::slice::from_ref(&mono.0), "not added to the list");
+        // Its language server runs for the whole Cargo workspace.
+        let lib = mono.0.join("crates/core/src/lib.rs");
+        assert_eq!(tool_sessions::lsp_root_for_path(&lib), mono.0);
+        assert_eq!(tool_sessions::root_for_path(&lib), mono.0.join("crates/core"), "tasks and the modeline stay the member's");
+    }
+
+    #[test]
+    fn hub_pins_and_groups_are_kept_and_remove_needs_two_presses() {
+        let a = Scratch::new("pin-a");
+        let b = Scratch::new("pin-b");
+        let mut app = app_with(&[&a.0, &b.0]);
+        app.project_meta = fenix_project::meta::ProjectMeta::load_or_default(a.0.join("meta.json"));
+        app.cmd_project_hub();
+        press(&mut app, "jP");
+        assert!(app.project_meta.is_pinned(&b.0));
+        assert!(page_text(&mut app).contains("PINNED"));
+        press(&mut app, "g");
+        for c in "Labs\n".chars() {
+            press(&mut app, &c.to_string());
+        }
+        assert_eq!(app.project_meta.group(&b.0), Some("Labs"));
+        assert!(fenix_project::meta::ProjectMeta::load_or_default(a.0.join("meta.json")).is_pinned(&b.0), "saved to disk");
+        press(&mut app, "d");
+        assert!(app.known_projects.roots().contains(&b.0), "one d only asks");
+        press(&mut app, "d");
+        assert!(!app.known_projects.roots().contains(&b.0));
+        assert!(b.0.is_dir(), "the folder itself is untouched");
+    }
+
+    #[test]
+    fn the_doctor_checks_the_focused_project_and_runs_a_safe_fix() {
+        let dir = Scratch::new("doctor");
+        std::fs::write(dir.0.join("Cargo.toml"), "[package]").unwrap();
+        let mut app = App::with_file(None);
+        app.open_doctor(dir.0.clone());
+        let text = page_text(&mut app);
+        assert!(text.contains("TOOLCHAIN") && text.contains("cargo"), "{text}");
+        assert!(text.contains("not a repository") && text.contains("git init"), "{text}");
+        // Focus the git row and fix it.
+        let id = app.focused_buffer_id();
+        let row = match &app.pages[&id].model {
+            PageModel::Doctor(d) => d.order().iter().position(|&i| d.check(i).unwrap().label == "git").unwrap(),
+            _ => unreachable!(),
+        };
+        if let PageModel::Doctor(d) = &mut app.pages.get_mut(&id).unwrap().model {
+            d.focus = row;
+        }
+        press(&mut app, "f");
+        assert!(dir.0.join(".git").is_dir(), "git init ran");
+        let text = page_text(&mut app);
+        assert!(!text.contains("not a repository"), "it checked again afterwards:\n{text}");
+        assert!(matches!(app.project_health.get(&dir.0), Some((_, _))), "the result feeds the hub's dot");
+    }
+
+    #[test]
+    fn settings_edits_write_tools_json_and_the_projects_settings() {
+        let dir = Scratch::new("settings");
+        std::fs::write(dir.0.join("pyproject.toml"), "").unwrap();
+        let mut app = App::with_file(None);
+        app.project_meta = fenix_project::meta::ProjectMeta::load_or_default(dir.0.join("meta.json"));
+        // SPC p , on the project, then its own section at the top.
+        app.open_settings_page(crate::settings_page::Scope::Project { root: dir.0.clone(), name: "settings".into() }, None);
+        press(&mut app, "\tk\n");
+        let text = page_text(&mut app);
+        assert!(text.contains("detect: Python") && text.contains("TASKS · 0"), "{text}");
+        // Kind -> declared Python, then Jira.
+        press(&mut app, "l");
+        assert!(std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap().contains("kind = \"python\""));
+        press(&mut app, "jjj\nfnx\n");
+        assert_eq!(fenix_project::meta::jira_key(&dir.0).as_deref(), Some("FNX"));
+        // Add a task.
+        press(&mut app, "ja");
+        for c in "test = uv run pytest -q\n".chars() {
+            let key = if c == ' ' { KeyPress::char(' ') } else if c == '\n' { KeyPress::named(FenixNamedKey::Enter) } else { KeyPress::char(c) };
+            assert!(app.page_key(key));
+        }
+        let tools = fenix_project::tools::ProjectTools::read(&dir.0).unwrap();
+        assert_eq!(tools.tasks["test"].args, ["run", "pytest", "-q"]);
+    }
+
+    #[test]
+    fn a_sketch_with_no_history_opens_on_its_ino() {
+        let dir = Scratch::new("entry");
+        let sketch = dir.0.join("Blinky");
+        std::fs::create_dir_all(&sketch).unwrap();
+        std::fs::write(sketch.join("Blinky.ino"), "void setup() {}").unwrap();
+        let mut app = App::with_file(None);
+        app.open_project(sketch.clone(), None, false);
+        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("Blinky.ino")), "not a find-file picker");
+        assert_eq!(app.main_view, MainView::Editor);
+    }
+
+    #[test]
+    fn with_workspace_per_project_off_opening_stays_in_the_current_workspace() {
+        let dir = Scratch::new("no-ws");
+        std::fs::write(dir.0.join("README.md"), "# s").unwrap();
+        let mut app = App::with_file(None);
+        app.config.workspace_per_project = Some(false);
+        let before = app.workspaces.active_name().to_string();
+        app.open_project(dir.0.clone(), None, false);
+        assert_eq!(app.workspaces.active_name(), before);
+        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("README.md")));
+    }
+}

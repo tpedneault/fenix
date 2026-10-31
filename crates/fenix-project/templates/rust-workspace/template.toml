@@ -1,0 +1,37 @@
+[template]
+name = "Rust · Cargo workspace"
+kind = "rust"
+group = "Systems"
+description = "A Cargo workspace for several crates under crates/, with one to start -- rust-analyzer runs once for all of them, and cargo adds new crates made inside it."
+needs = ["cargo"]
+open = ["crates/{{first}}/src/lib.rs", "crates/{{first}}/src/main.rs"]
+
+[[ask]]
+key = "first"
+label = "First crate"
+default = "{{name_kebab}}-core"
+
+[[ask]]
+key = "first_kind"
+label = "It's a"
+choices = ["lib", "bin"]
+default = "lib"
+
+[[run]]
+exec = "cargo"
+args = ["new", "crates/{{first}}", "--{{first_kind}}", "--vcs", "none"]
+
+[[task]]
+name = "build"
+exec = "cargo"
+args = ["build", "--workspace"]
+
+[[task]]
+name = "test"
+exec = "cargo"
+args = ["test", "--workspace"]
+
+[[task]]
+name = "clippy"
+exec = "cargo"
+args = ["clippy", "--workspace", "--all-targets"]

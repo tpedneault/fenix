@@ -1,0 +1,551 @@
+//! Home, the start-up dashboard (see `dashboard.rs` for its layout):
+//! gathering what it shows, laying it out for each pane that shows it,
+//! the keys that move around it, and what the renderer draws on top of
+//! its text -- the panels, the focus rail and the logo.
+
+use super::*;
+use crate::dashboard::{self, Fill, HomeData, HomeEntry, Role};
+
+/// The focus rail's width: the same 2 px rail the modeline uses.
+pub(super) const RAIL_PX: f32 = 2.0;
+
+/// The logo lockup drawn on Home: the image, what it was drawn for (so
+/// it's redrawn when the size or text colour changes), and its GPU copy.
+pub(super) struct HomeLogo {
+    pub(super) key: (u32, [u8; 3]),
+    pub(super) image: fenix_brand::Image,
+    pub(super) texture: Option<crate::surface::Surface>,
+}
+
+/// Where Home's extra drawing goes in one pane, in that pane's rows and
+/// cells -- carried on `PaneRender`.
+#[derive(Default)]
+pub(super) struct HomeOverlay {
+    /// (row, first cell, row count) for the selected slot's focus rail.
+    pub(super) rail: Option<(usize, usize, usize)>,
+    /// (row, cell, rows tall) for the logo lockup.
+    pub(super) logo: Option<(usize, usize, usize)>,
+    /// (row, first cell, end cell) for each visible rule.
+    pub(super) rules: Vec<(usize, usize, usize)>,
+    pub(super) rule_color: [f32; 4],
+    /// Pictures a page shows: (first row, which may be above the pane
+    /// when it's partly scrolled off; cell; rows; cells; which picture).
+    pub(super) images: Vec<(isize, usize, usize, usize, crate::page::ImageKey, Option<(f32, f32, f32)>)>,
+    /// Boxes outlined on a picture: (which of `images`, the box as
+    /// fractions of the picture, whether it's the selected one).
+    pub(super) marks: Vec<(usize, (f32, f32, f32, f32), bool)>,
+    /// (row, first cell, end cell, colour) underlined: what a filter
+    /// matched, an extension's.
+    pub(super) underlines: Vec<(usize, usize, usize, [f32; 4])>,
+    /// Hairlines down the page: (cell, first row, which may be above the
+    /// pane; rows).
+    pub(super) vertical_rules: Vec<(usize, isize, usize)>,
+}
+
+/// (row, first cell, end cell, colour) -- the shape `PaneRender`'s
+/// `colored_bg_segments` takes.
+pub(super) type BgSegments = Vec<(usize, usize, usize, [f32; 4])>;
+
+/// "now", "5 min", "3 h", "2 d", "6 w".
+fn age(modified: Option<std::time::SystemTime>) -> String {
+    let Some(elapsed) = modified.and_then(|m| m.elapsed().ok()) else { return String::new() };
+    let mins = elapsed.as_secs() / 60;
+    match mins {
+        0 => "now".to_string(),
+        1..=59 => format!("{mins} min"),
+        60..=1439 => format!("{} h", mins / 60),
+        1440..=20159 => format!("{} d", mins / 1440),
+        _ => format!("{} w", mins / 10080),
+    }
+}
+
+use fenix_project::vcs::git_branch;
+
+/// What Home knows of one recent file, looked at off the UI thread
+/// (`probe_recent`): whether it's still there, when it last changed, and
+/// the project it's in with that project's branch.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RecentSeen {
+    is_file: bool,
+    modified: Option<std::time::SystemTime>,
+    project: Option<(String, Option<String>)>,
+}
+
+/// How long what Home saw of the recent files is used before they're
+/// looked at again.
+const RECENT_FRESH_FOR: Duration = Duration::from_secs(30);
+
+/// Each of `paths`, looked at -- except those on a volume that isn't
+/// answering (see `disk_probe::stat`), which are left out.
+fn probe_recent(paths: Vec<PathBuf>) -> HashMap<PathBuf, RecentSeen> {
+    let _profile = crate::profile::Scope::new("probe recent files");
+    let mut seen = HashMap::new();
+    for path in paths {
+        let Some(meta) = super::disk_probe::stat(&path) else { continue };
+        let meta = meta.ok().filter(|m| m.is_file());
+        let project = meta.as_ref().and_then(|_| {
+            let root = fenix_project::find_project_root(&path)?;
+            let name = root.file_name()?.to_string_lossy().into_owned();
+            Some((name, git_branch(&root)))
+        });
+        let entry = RecentSeen { is_file: meta.is_some(), modified: meta.and_then(|m| m.modified().ok()), project };
+        seen.insert(path, entry);
+    }
+    seen
+}
+
+/// The TODO column for `root`, grouped by kind -- what a Home sweep
+/// hands back.
+fn home_todo_items(root: &Path, unsaved: &HashMap<PathBuf, String>) -> Vec<dashboard::TodoItem> {
+    super::todos::collect_todos(root, unsaved)
+        .map(|(found, _)| {
+            let mut items: Vec<dashboard::TodoItem> = found
+                .into_iter()
+                .map(|(kind, m)| dashboard::TodoItem {
+                    kind,
+                    message: m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string(),
+                    file: m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                    path: m.path,
+                    line: m.line,
+                    col: m.col,
+                })
+                .collect();
+            items.sort_by_key(|t| t.kind);
+            items
+        })
+        .unwrap_or_default()
+}
+
+impl App {
+    /// Opens a Home buffer (empty until a pane first lays it out at its
+    /// real size) -- the one way every path that needs one gets it.
+    pub(super) fn new_home_buffer(&mut self) -> BufferId {
+        self.refresh_home_data(true);
+        self.buffers.open_dashboard("")
+    }
+
+    /// Re-gathers everything Home shows. The project TODO sweep reads
+    /// files, so it only runs when `with_todos` (Home opening, a session
+    /// restored), and on another thread: Home shows the last sweep's
+    /// TODOs until the new one lands (`apply_home_todos`). The minute
+    /// tick keeps the last sweep.
+    pub(super) fn refresh_home_data(&mut self, with_todos: bool) {
+        self.request_recent_probe();
+        let now = chrono::Local::now();
+        let (resume, recent) = self.home_recent_files(None);
+        let sections = self.home_sections(None);
+        let probe = self.app_probe();
+        for root in self.known_projects.roots().iter().take(5) {
+            if !self.project_health.contains_key(root) && root.is_dir() {
+                let mut checks = fenix_project::doctor::diagnose_with(root, self.project_kind_of(root), &probe, false, &[]);
+                checks.extend(self.wasm.doctor_checks(root));
+                let health = (fenix_project::doctor::worst(&checks), checks.iter().filter(|c| c.health >= fenix_project::doctor::Health::Warn).count());
+                self.project_health.insert(root.clone(), health);
+            }
+        }
+        let mut projects: Vec<dashboard::ProjectItem> = self
+            .known_projects
+            .roots()
+            .iter()
+            .take(5)
+            .map(|root| dashboard::ProjectItem {
+                root: root.clone(),
+                name: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string()),
+                branch: git_branch(root),
+                kind: self.project_kind_of(root),
+                health: None,
+            })
+            .collect();
+        for item in &mut projects {
+            item.health = self.project_health.get(&item.root).map(|(health, _)| *health);
+        }
+
+        let todo_root = self.project_root.clone().or_else(|| self.known_projects.roots().first().cloned());
+        let scoped_roots = self.home_projects();
+        if with_todos {
+            for root in todo_root.iter().chain(&scoped_roots) {
+                self.request_home_todos(root);
+            }
+        }
+        let todos = todo_root.and_then(|root| self.home_todos.get(&root).cloned()).unwrap_or_default();
+
+        let date = now.format("%A %-d %B · %H:%M").to_string();
+        let recovery = self.unclaimed_snapshot_names().len();
+        // A project workspace's Home: the same page, narrowed to the
+        // project's own files and TODOs, and named after it.
+        let mut scoped = HashMap::new();
+        for root in scoped_roots {
+            let (resume, recent) = self.home_recent_files(Some(&root));
+            let sections = self.home_sections(Some(&root));
+            let todos = self.home_todos.get(&root).cloned().unwrap_or_default();
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+            let data = HomeData {
+                date: format!("{name} · {date}"),
+                resume,
+                recent,
+                projects: projects.clone(),
+                todos,
+                recovery,
+                sections,
+            };
+            scoped.insert(root, data);
+        }
+        let data = HomeData { date, resume, recent, projects, todos, recovery, sections };
+        if data != self.home_data || scoped != self.home_project_data {
+            self.home_data = data;
+            self.home_project_data = scoped;
+            // Every Home re-lays itself out on its next frame.
+            self.home_views.values_mut().for_each(|view| view.size = (0, 0));
+        }
+    }
+
+    /// What Home `id` shows: its project's page for a project
+    /// workspace's Home, the everything page otherwise.
+    pub(super) fn home_data_for(&self, id: BufferId) -> &HomeData {
+        self.home_project_of(id).and_then(|root| self.home_project_data.get(&root)).unwrap_or(&self.home_data)
+    }
+
+    /// Looks at the recent files again, on another thread, when what
+    /// Home saw of them is getting old. Checking them on the UI thread
+    /// froze the window for as long as a share took to answer -- twenty
+    /// seconds a file for one whose server was gone.
+    fn request_recent_probe(&mut self) {
+        let fresh = self.recent_probed.is_some_and(|at| at.elapsed() < RECENT_FRESH_FOR);
+        let out = self.recent_probe_out.is_some_and(|at| at.elapsed() < Duration::from_secs(300));
+        let paths: Vec<PathBuf> = self.recent_files.paths().to_vec();
+        match self.event_proxy.clone() {
+            Some(_) if fresh || out => {}
+            Some(proxy) => {
+                self.recent_probe_out = Some(Instant::now());
+                let _ = std::thread::Builder::new().name("fenix-recent-files".into()).spawn(move || {
+                    let _ = proxy.send_event(FenixUserEvent::RecentProbed(probe_recent(paths)));
+                });
+            }
+            // No event loop (every test): looked at every time, inline.
+            None => {
+                self.recent_seen = probe_recent(paths);
+                self.recent_probed = Some(Instant::now());
+            }
+        }
+    }
+
+    /// What the recent files looked like landed: Home is laid out again.
+    pub(super) fn apply_recent_probed(&mut self, seen: HashMap<PathBuf, RecentSeen>) {
+        self.recent_seen = seen;
+        self.recent_probed = Some(Instant::now());
+        self.recent_probe_out = None;
+        self.refresh_home_data(false);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Whether recent file `path` is shown: it's still there, as last
+    /// looked. Before the first look, every one is.
+    /// The extensions' sections of Home, everywhere or for project
+    /// `scope`.
+    fn home_sections(&mut self, scope: Option<&Path>) -> Vec<dashboard::HomeSection> {
+        let _ = scope;
+        self.code_home_sections()
+    }
+
+    pub(super) fn recent_shown(&self, path: &Path) -> bool {
+        match self.recent_seen.get(path) {
+            Some(seen) => seen.is_file,
+            None => self.recent_probed.is_none(),
+        }
+    }
+
+    /// The resume slot and the recent files, from anywhere or only from
+    /// under `scope`.
+    fn home_recent_files(&self, scope: Option<&Path>) -> (Option<dashboard::FileItem>, Vec<dashboard::FileItem>) {
+        // Recent files are stored canonical (with Windows' `\\?\` prefix), project
+        // roots normalized, so both are compared normalized.
+        let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
+        // The files an extension opens itself (PDFs, with the PDF reader)
+        // are in its own section, not in Recent too.
+        let mut recent_files = self.recent_files.paths().iter().filter(|p| self.recent_shown(p) && under(p) && self.opener_for(p).is_none());
+        let project_of = |path: &Path| self.recent_seen.get(path).and_then(|seen| seen.project.clone());
+        let modified = |path: &Path| self.recent_seen.get(path).and_then(|seen| seen.modified);
+        let resume = recent_files.next().map(|path| {
+            let detail = match project_of(path) {
+                Some((name, Some(branch))) => format!("{name} · {branch}"),
+                Some((name, None)) => name,
+                None => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            };
+            dashboard::FileItem {
+                path: path.clone(),
+                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                detail,
+                age: age(modified(path)),
+            }
+        });
+        let recent = recent_files
+            .take(5)
+            .map(|path| dashboard::FileItem {
+                path: path.clone(),
+                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                detail: String::new(),
+                age: age(modified(path)),
+            })
+            .collect();
+        (resume, recent)
+    }
+
+    /// Sweeps `root` for Home's TODO column on another thread, unless a
+    /// sweep of it is already under way. With no event loop (tests) it
+    /// sweeps inline.
+    fn request_home_todos(&mut self, root: &Path) {
+        if !self.home_todos_pending.insert(root.to_path_buf()) {
+            return;
+        }
+        let unsaved = self.unsaved_texts_under(root);
+        let root = root.to_path_buf();
+        match self.event_proxy.clone() {
+            Some(proxy) => {
+                let _ = std::thread::Builder::new().name("fenix-home-todos".into()).spawn(move || {
+                    let items = home_todo_items(&root, &unsaved);
+                    let _ = proxy.send_event(FenixUserEvent::HomeTodos { root, items });
+                });
+            }
+            None => {
+                let items = home_todo_items(&root, &unsaved);
+                self.home_todos_pending.remove(&root);
+                self.home_todos.insert(root, items);
+            }
+        }
+    }
+
+    /// A sweep landed: Home shows it.
+    pub(super) fn apply_home_todos(&mut self, root: PathBuf, items: Vec<dashboard::TodoItem>) {
+        self.home_todos_pending.remove(&root);
+        if self.home_todos.get(&root) == Some(&items) {
+            return;
+        }
+        self.home_todos.insert(root, items);
+        self.refresh_home_data(false);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// The minute tick: the clock and a running timer move on even when
+    /// nothing else happens.
+    pub(super) fn tick_home(&mut self) {
+        if self.home_views.is_empty() {
+            return;
+        }
+        let minute = chrono::Local::now().format("%H:%M").to_string();
+        if !self.home_data.date.ends_with(&minute) {
+            self.refresh_home_data(false);
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Lays buffer `id`'s Home out for a pane `cols` × `rows` cells in
+    /// size, unless it already is. The text is rewritten in place and the
+    /// cursor put back on whatever it had selected.
+    pub(super) fn ensure_home_layout(&mut self, id: BufferId, pane: fenix_window::WindowId, cols: usize, rows: usize) {
+        if self.home_views.get(&id).is_some_and(|view| view.size == (cols, rows)) {
+            return;
+        }
+        let selected = self.home_selected_slot(id, pane).and_then(|i| self.home_views.get(&id).map(|v| v.slots[i].entry.clone()));
+        let view = dashboard::layout(self.home_data_for(id), cols, rows);
+        let Some(ob) = self.buffers.get_mut(id) else { return };
+        if ob.buffer.text() != view.text {
+            let end = ob.buffer.len_chars();
+            let mut scratch = Cursor::at_start();
+            ob.buffer.replace_range(&mut scratch, 0, end, &view.text);
+            ob.buffer.mark_saved();
+            ob.buffer.drain_edits();
+        }
+        let target = selected.and_then(|entry| view.find(&entry)).or_else(|| view.find(&HomeEntry::Find)).map(|i| view.slots[i].cursor());
+        self.home_views.insert(id, view);
+        if let Some((line, col)) = target {
+            self.home_place_cursor(id, pane, line, col);
+        }
+    }
+
+    pub(super) fn home_place_cursor(&mut self, id: BufferId, pane: fenix_window::WindowId, line: usize, col: usize) {
+        let Some(ob) = self.buffers.get(id) else { return };
+        let line = line.min(ob.buffer.line_count().saturating_sub(1));
+        let char_idx = ob.buffer.line_start_char(line) + col.min(ob.buffer.line_len(line));
+        if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
+            state.cursor = Cursor { char_idx, sticky_col: col };
+        }
+    }
+
+    /// The slot the cursor in `pane` has selected on Home buffer `id`.
+    pub(super) fn home_selected_slot(&self, id: BufferId, pane: fenix_window::WindowId) -> Option<usize> {
+        let view = self.home_views.get(&id)?;
+        let ob = self.buffers.get(id)?;
+        let cursor = self.workspaces.active_pane_states().get(&pane)?.cursor;
+        let (line, col) = ob.buffer.line_col(&cursor);
+        view.slot_at(line, col)
+    }
+
+    /// Keys Home claims when its pane is focused and Vim has nothing
+    /// pending: `j`/`k` and `h`/`l` (and the arrows) move between slots,
+    /// `Enter` activates one, `1`–`9` activate by number. Everything else
+    /// (the leader, `:`, `/`) reaches Vim as usual.
+    pub(super) fn home_key(&mut self, key: KeyPress) -> bool {
+        let id = self.focused_buffer_id();
+        if self.open().kind != BufferKind::Dashboard || !self.vim.is_idle() || key.mods != Mods::default() {
+            return false;
+        }
+        let pane = self.focused_pane_id();
+        let Some(view) = self.home_views.get(&id) else { return false };
+        let current = self.home_selected_slot(id, pane).or_else(|| view.find(&HomeEntry::Find));
+        let target = match key.code {
+            KeyCode::Named(FenixNamedKey::Enter) => {
+                if let Some(i) = current {
+                    let entry = view.slots[i].entry.clone();
+                    self.activate_home_entry(entry);
+                }
+                return true;
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                if let Some(entry) = view.numbered(c as u8 - b'0').map(|i| view.slots[i].entry.clone()) {
+                    self.activate_home_entry(entry);
+                }
+                return true;
+            }
+            KeyCode::Char('j') | KeyCode::Named(FenixNamedKey::Down) => current.and_then(|i| view.step(i, true)),
+            KeyCode::Char('k') | KeyCode::Named(FenixNamedKey::Up) => current.and_then(|i| view.step(i, false)),
+            KeyCode::Char('l') | KeyCode::Named(FenixNamedKey::Right) => current.and_then(|i| view.across(i, true)),
+            KeyCode::Char('h') | KeyCode::Named(FenixNamedKey::Left) => current.and_then(|i| view.across(i, false)),
+            _ => return false,
+        };
+        if let Some((line, col)) = target.map(|i| view.slots[i].cursor()) {
+            self.home_place_cursor(id, pane, line, col);
+        }
+        self.wake_caret();
+        true
+    }
+
+    pub(super) fn activate_home_entry(&mut self, entry: HomeEntry) {
+        match entry {
+            HomeEntry::Find => self.picker_find_file(),
+            HomeEntry::Resume(path) | HomeEntry::RecentFile(path) => self.open_file_from_picker(&path),
+            HomeEntry::Project(root) => self.switch_to_project(root),
+            HomeEntry::NewProject => self.cmd_project_new(),
+            HomeEntry::Code { ext, value } => self.code_deliver(&ext, fenix_wasm::host::Notice::HomePicked(value)),
+            HomeEntry::Todo { path, line, col } => {
+                self.open_file_from_picker(&path);
+                self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col, text: String::new() });
+            }
+            HomeEntry::Recover => self.picker_recovery(),
+        }
+    }
+
+    /// Home's colours for the visible lines, in the same shape syntax
+    /// highlighting hands the renderer.
+    pub(super) fn home_highlights(&self, id: BufferId, first_line: usize, rows: usize) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        let (Some(view), Some(ob)) = (self.home_views.get(&id), self.buffers.get(id)) else { return Vec::new() };
+        let theme = self.theme;
+        let color = |role: Role| match role {
+            Role::Title => theme.fg,
+            Role::Text => theme.fg,
+            Role::Muted => theme.gutter_fg,
+            Role::Focus => rgba_to_glyphon(theme.caret),
+            Role::Ember => glyphon::Color::rgb(fenix_brand::EMBER[0], fenix_brand::EMBER[1], fenix_brand::EMBER[2]),
+            Role::Warn => theme.git_modified,
+            Role::Todo(kind) => theme.todo_color(kind),
+            Role::Kind(kind) => super::projects::kind_color(kind, theme),
+            Role::Health(health) => match health {
+                fenix_project::doctor::Health::Ok => theme.git_staged,
+                fenix_project::doctor::Health::Info => theme.gutter_fg,
+                fenix_project::doctor::Health::Warn => theme.git_modified,
+                fenix_project::doctor::Health::Bad => theme.git_conflicted,
+            },
+        };
+        let last = first_line + rows;
+        let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = view
+            .spans
+            .iter()
+            .filter(|s| s.line >= first_line && s.line <= last && s.line < ob.buffer.line_count())
+            .map(|s| {
+                let start = ob.buffer.line_start_char(s.line);
+                let len = ob.buffer.line_len(s.line);
+                let a = ob.buffer.char_to_byte(start + s.cols.start.min(len));
+                let b = ob.buffer.char_to_byte(start + s.cols.end.min(len));
+                (a..b, color(s.role))
+            })
+            .filter(|(r, _)| r.start < r.end)
+            .collect();
+        ranges.sort_by_key(|(r, _)| r.start);
+        ranges
+    }
+
+    /// Home's backgrounds for a pane whose first visible line is
+    /// `first_line`: panels and keycaps, the selected slot's tint, and
+    /// where the focus rail and logo go.
+    pub(super) fn home_backgrounds(&self, id: BufferId, pane: fenix_window::WindowId, first_line: usize, rows: usize) -> (BgSegments, HomeOverlay) {
+        let Some(view) = self.home_views.get(&id) else { return (Vec::new(), HomeOverlay::default()) };
+        let theme = self.theme;
+        let panel = if theme.sidebar_bg != theme.bg { theme.sidebar_bg } else { theme.bg_modeline };
+        let key = if theme.bg_modeline != panel { theme.bg_modeline } else { home_rule(theme) };
+        let visible = |line: usize| (line >= first_line && line <= first_line + rows).then(|| line - first_line);
+        let mut segments = Vec::new();
+        let selected = self.home_selected_slot(id, pane);
+        let mut overlay = HomeOverlay::default();
+        if let Some(slot) = selected.map(|i| &view.slots[i]) {
+            // The find field keeps its panel; everything else takes the
+            // editor's current-line tint.
+            if slot.entry != HomeEntry::Find {
+                for line in slot.line..slot.line + slot.height {
+                    if let Some(row) = visible(line) {
+                        segments.push((row, slot.cols.start, slot.cols.end, theme.hl_line));
+                    }
+                }
+            }
+            overlay.rail = visible(slot.line).map(|row| (row, slot.cols.start, slot.height));
+        }
+        for p in &view.panels {
+            if let Some(row) = visible(p.line) {
+                let fill = match p.fill {
+                    Fill::Panel => panel,
+                    Fill::Key => key,
+                };
+                segments.push((row, p.cols.start, p.cols.end, fill));
+            }
+        }
+        // Keycaps sit on top of their panel.
+        segments.sort_by_key(|s| (s.3 == key) as u8);
+        overlay.logo = view.logo.and_then(|logo| visible(logo.line).map(|row| (row, logo.col, logo.lines)));
+        overlay.rules = view.rules.iter().filter_map(|r| visible(r.line).map(|row| (row, r.cols.start, r.cols.end))).collect();
+        overlay.rule_color = home_rule(theme);
+        (segments, overlay)
+    }
+}
+
+/// The rule colour: the theme's divider, unless it's the same as the
+/// background (or the panels) and so wouldn't show -- then a quarter of
+/// the text colour mixed into the background. (A lighter mix read as
+/// near-black once drawn as thin line glyphs.)
+pub(super) fn home_rule(theme: &Theme) -> [f32; 4] {
+    if theme.divider != theme.bg && theme.divider != theme.bg_modeline {
+        return theme.divider;
+    }
+    let fg = glyphon_to_rgba(theme.fg);
+    let mix = |a: f32, b: f32| a * 0.75 + b * 0.25;
+    [mix(theme.bg[0], fg[0]), mix(theme.bg[1], fg[1]), mix(theme.bg[2], fg[2]), 1.0]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ages_read_the_way_the_design_writes_them() {
+        let ago = |secs: u64| Some(std::time::SystemTime::now() - std::time::Duration::from_secs(secs));
+        assert_eq!(age(ago(5)), "now");
+        assert_eq!(age(ago(5 * 60)), "5 min");
+        assert_eq!(age(ago(3 * 3600)), "3 h");
+        assert_eq!(age(ago(2 * 86400)), "2 d");
+        assert_eq!(age(None), "");
+    }
+
+}

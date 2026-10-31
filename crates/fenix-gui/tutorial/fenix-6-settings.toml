@@ -1,0 +1,36 @@
+id = "fenix.settings"
+track = "Fenix"
+order = 6
+title = "Settings and extensions"
+about = "Every setting on one page, and what's beyond the core."
+text = """
+SPC , is every setting on one page: / searches them, and Enter, h or l
+change one. SPC h x is the extensions, a tab each for what's Installed,
+the Updates, what the registry has to Browse, and Bundles that go
+together; Tab moves along, or 1 to 4.
+"""
+
+[[step]]
+say = "SPC , opens the settings."
+hint = "Space, then a comma."
+page = "settings"
+
+[[step]]
+say = "q closes them."
+hint = "q, on the page (Esc first if you're typing a search)."
+closed = "settings"
+
+[[step]]
+say = "SPC h x opens the extensions."
+hint = "Space, h (help), x."
+page = "extensions"
+
+[[step]]
+say = "Go to the Browse tab, what the registry has."
+hint = "Tab moves to the next tab; 3 goes straight there."
+page = "extensions/browse"
+
+[[step]]
+say = "q closes the page."
+hint = "q, on the page."
+closed = "extensions"

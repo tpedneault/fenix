@@ -1,0 +1,55 @@
+# Catppuccin Macchiato.
+name = "Catppuccin Macchiato"
+tabs = "underline"
+
+[surfaces]
+bg = "#24273a"
+sidebar_bg = "#1e2030"
+bg_modeline = "#1e2030"
+divider = "#494d64"
+caret = "#f4dbd6"
+hl_line = "#303347"
+selection = { color = "#939ab7", alpha = 0.25 }
+bracket_match = { color = "#f5a97f", alpha = 0.15 }
+search_match = { color = "#91d7e3", alpha = 0.18 }
+
+[text]
+fg = "#cad3f5"
+fg_modeline = "#cad3f5"
+caret_text = "#f4dbd6"
+gutter_fg = "#979db3"
+
+[modes]
+normal = "#8aadf4"
+insert = "#a6da95"
+visual = "#c6a0f6"
+replace = "#ed8796"
+command = "#f5a97f"
+explorer = "#7dc4e4"
+picker = "#f5bde6"
+text_dark = "#181926"
+text_light = "#181926"
+
+[syntax]
+keyword = "#c6a0f6"
+string = "#a6da95"
+comment = "#969db9"
+function = "#8aadf4"
+type = "#eed49f"
+number = "#f5a97f"
+constant = "#f5a97f"
+variable = "#cad3f5"
+operator = "#91d7e3"
+punctuation = "#91d7e3"
+attribute = "#8bd5ca"
+
+[explorer]
+folder = "#8aadf4"
+file = "#cad3f5"
+
+[git]
+modified = "#eed49f"
+staged = "#a6da95"
+untracked = "#7dc4e4"
+ignored = "#979db3"
+conflicted = "#ed8796"

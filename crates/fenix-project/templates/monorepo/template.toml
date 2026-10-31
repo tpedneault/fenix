@@ -1,0 +1,43 @@
+[template]
+name = "Monorepo"
+kind = "monorepo"
+group = "Start from"
+description = "A repository for many projects: one git, and Cargo, uv and npm workspaces that projects created inside join on their own."
+open = ["README.md"]
+
+[[ask]]
+key = "workspaces"
+label = "Workspaces"
+many = ["cargo", "uv", "npm"]
+default = ["cargo", "uv"]
+hint = "crates/, python/ and packages/, each a workspace its tools know"
+
+[[file]]
+path = "Cargo.toml"
+content = "[workspace]\nresolver = \"3\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nedition = \"2024\"\n"
+when = "workspaces == cargo"
+
+[[file]]
+path = "crates/.gitkeep"
+content = ""
+when = "workspaces == cargo"
+
+[[file]]
+path = "pyproject.toml"
+content = "[tool.uv.workspace]\nmembers = [\"python/*\"]\n"
+when = "workspaces == uv"
+
+[[file]]
+path = "python/.gitkeep"
+content = ""
+when = "workspaces == uv"
+
+[[file]]
+path = "package.json"
+content = "{\n  \"name\": \"{{name_kebab}}\",\n  \"private\": true,\n  \"workspaces\": [\"packages/*\"]\n}\n"
+when = "workspaces == npm"
+
+[[file]]
+path = "packages/.gitkeep"
+content = ""
+when = "workspaces == npm"

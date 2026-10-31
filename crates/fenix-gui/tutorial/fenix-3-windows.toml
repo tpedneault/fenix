@@ -1,0 +1,40 @@
+id = "fenix.windows"
+track = "Fenix"
+order = 3
+title = "Windows and splits"
+about = "Splitting the frame into windows, moving between them, closing them."
+text = """
+A window shows a buffer. SPC w v splits the one you're in side by side,
+SPC w s one above the other; SPC w h, j, k and l move between them,
+SPC w q closes one and SPC w o every one but the one you're in.
+"""
+
+[[step]]
+say = "SPC w v splits this window in two, side by side."
+hint = "Space, w (window), v."
+windows = "+1"
+
+[[step]]
+say = "SPC w h moves to the window on the left."
+hint = "h, j, k and l after SPC w, as they move the cursor."
+moved = true
+
+[[step]]
+say = "SPC w s splits it again, one above the other."
+hint = "Space, w, s."
+windows = "+1"
+
+[[step]]
+say = "SPC w q closes the window you're in."
+hint = "Space, w, q. The buffer stays open; only the window goes."
+windows = "-1"
+
+[[step]]
+say = "SPC w o closes every window but this one -- this page's too."
+hint = "Space, w, o."
+windows = "1"
+
+[[step]]
+say = "SPC h T brings the tutorial back."
+hint = "Space, h (help), capital T."
+page = "tutorial"

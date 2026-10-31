@@ -1,0 +1,224 @@
+//! Per-language default server commands and naming for `fenix-gui`'s LSP
+//! integration -- mirrors `docker_panel.rs`/`git_panel.rs`'s role (pure
+//! logic/rendering helpers used by `app.rs`, no session or threading
+//! state of its own; that lives in `App` alongside every other session
+//! kind).
+
+use fenix_syntax::LanguageId;
+
+/// The client capabilities this app advertises in every `initialize`
+/// request -- deliberately conservative for v1 (just enough to receive
+/// diagnostics; hover/completion/rename/etc. are each added alongside
+/// the request/rendering code that actually uses them, not speculatively
+/// declared ahead of time). `dynamic_registration: Some(false)`
+/// throughout: this client's capabilities are fixed at connect time,
+/// there's no support (yet) for a server registering/unregistering one
+/// mid-session.
+pub fn client_capabilities() -> lsp_types::ClientCapabilities {
+    lsp_types::ClientCapabilities {
+        workspace: Some(lsp_types::WorkspaceClientCapabilities {
+            apply_edit: Some(false),
+            // Its settings, asked for: an extension's for it, else
+            // `.fenix/lsp/<server>.json`, else nothing.
+            configuration: Some(true),
+            did_change_configuration: Some(lsp_types::DynamicRegistrationClientCapabilities { dynamic_registration: Some(false) }),
+            // `workspace/diagnostic/refresh`: asked again for what it says.
+            diagnostic: Some(lsp_types::DiagnosticWorkspaceClientCapabilities { refresh_support: Some(true) }),
+            workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                document_changes: Some(true),
+                resource_operations: Some(vec![]),
+                failure_handling: Some(lsp_types::FailureHandlingKind::Transactional),
+                normalizes_line_endings: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        text_document: Some(lsp_types::TextDocumentClientCapabilities {
+            completion: Some(lsp_types::CompletionClientCapabilities {
+                dynamic_registration: Some(false),
+                completion_item: Some(lsp_types::CompletionItemCapability {
+                    snippet_support: Some(false),
+                    documentation_format: Some(vec![lsp_types::MarkupKind::PlainText]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            synchronization: Some(lsp_types::TextDocumentSyncClientCapabilities {
+                dynamic_registration: Some(false),
+                will_save: Some(false),
+                will_save_wait_until: Some(false),
+                did_save: Some(true),
+            }),
+            code_action: Some(lsp_types::CodeActionClientCapabilities {
+                dynamic_registration: Some(false),
+                disabled_support: Some(true),
+                code_action_literal_support: Some(lsp_types::CodeActionLiteralSupport {
+                    code_action_kind: lsp_types::CodeActionKindLiteralSupport {
+                        value_set: vec!["quickfix".into(), "refactor".into(), "source".into()],
+                    },
+                }),
+                ..Default::default()
+            }),
+            publish_diagnostics: Some(lsp_types::PublishDiagnosticsClientCapabilities { ..Default::default() }),
+            // Asked for, from a server that answers that way.
+            diagnostic: Some(lsp_types::DiagnosticClientCapabilities { dynamic_registration: Some(false), related_document_support: Some(true) }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// The obvious, common-case server for a language, so the vast majority
+/// of setups need zero `[lsp]` configuration -- just the binary already
+/// on `PATH`. Checked only when nothing in `Config::lsp_servers` names
+/// this language; see `resolve_server_command`.
+pub fn default_server_command(language: LanguageId) -> Option<(String, Vec<String>)> {
+    match language {
+        LanguageId::Python => Some(("pyright-langserver".to_string(), vec!["--stdio".to_string()])),
+        // No `--stdio`/equivalent flag needed -- rust-analyzer speaks
+        // LSP over stdio by default with no arguments at all.
+        LanguageId::Rust => Some(("rust-analyzer".to_string(), Vec::new())),
+        // Same for clangd: stdio is its default transport. Works with
+        // zero project-specific setup, degrading to header-only
+        // diagnostics until a `compile_commands.json` exists nearby
+        // (clangd discovers one on its own, walking up from each
+        // opened file -- nothing this app needs to point it at).
+        LanguageId::C | LanguageId::Cpp => Some(("clangd".to_string(), Vec::new())),
+        LanguageId::Bash => Some(("bash-language-server".to_string(), vec!["start".to_string()])),
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
+            Some(("typescript-language-server".to_string(), vec!["--stdio".to_string()]))
+        }
+        // gopls and lua-language-server speak LSP over stdio with no
+        // arguments, as rust-analyzer does.
+        LanguageId::Go => Some(("gopls".to_string(), Vec::new())),
+        LanguageId::Lua => Some(("lua-language-server".to_string(), Vec::new())),
+        _ => None,
+    }
+}
+
+/// `fenix_syntax::LanguageId`'s own config-file name -- the `LANGUAGE`
+/// half of `[lsp]`'s `serverN = LANGUAGE|COMMAND_LINE`. A small
+/// standalone match rather than a `Debug`/`Display` impl on `LanguageId`
+/// itself (which `fenix-syntax` has no reason to know is used for
+/// this) -- covers every language an LSP server plausibly exists for;
+/// anything else falls back to its `Debug` name lowercased, fine as a
+/// *label* (nothing ever parses it back into a `LanguageId`) even
+/// though it isn't hand-picked for every variant.
+pub fn language_config_name(language: LanguageId) -> String {
+    match language {
+        LanguageId::Python => "python".to_string(),
+        LanguageId::Rust => "rust".to_string(),
+        LanguageId::C => "c".to_string(),
+        LanguageId::Cpp => "cpp".to_string(),
+        LanguageId::Bash => "bash".to_string(),
+        LanguageId::JavaScript => "javascript".to_string(),
+        LanguageId::TypeScript => "typescript".to_string(),
+        LanguageId::Tsx => "tsx".to_string(),
+        LanguageId::CSharp => "csharp".to_string(),
+        other => other.name(),
+    }
+}
+
+/// Resolves the command to launch for `language`'s server: a `[lsp]`
+/// override if `configured` (`Config::lsp_servers`, verbatim) names this
+/// language, else `default_server_command`. Splits the configured
+/// command line into program + args on whitespace (no shell-quoting
+/// support -- see `Config::lsp_servers`'s own doc comment for why
+/// that's an acceptable limitation).
+pub fn resolve_server_command(language: LanguageId, configured: &[(String, String)]) -> Option<(String, Vec<String>)> {
+    let name = language_config_name(language);
+    for (configured_language, command_line) in configured {
+        if *configured_language == name {
+            let mut parts = command_line.split_whitespace();
+            let program = parts.next()?.to_string();
+            let args = parts.map(str::to_string).collect();
+            return Some((program, args));
+        }
+    }
+    // Then a language file's (`languages::servers`), then the built-in one.
+    if let Some((_, command_line)) = crate::languages::servers().iter().find(|(l, _)| *l == name) {
+        let mut parts = command_line.split_whitespace();
+        if let Some(program) = parts.next() {
+            return Some((program.to_string(), parts.map(str::to_string).collect()));
+        }
+    }
+    default_server_command(language)
+}
+
+/// Flattens an LSP `HoverContents` (a single markup/plain string, a
+/// bare string, or an array of either) into one block of plain text for
+/// the hover popup to render -- markdown syntax is left as-is rather
+/// than actually rendered (no markdown-to-styled-text pipeline for a
+/// popup this small), which is legible enough for the short
+/// signatures/docstrings servers typically send.
+pub fn hover_contents_text(contents: lsp_types::HoverContents) -> String {
+    match contents {
+        lsp_types::HoverContents::Scalar(marked) => marked_string_text(marked),
+        lsp_types::HoverContents::Array(items) => items.into_iter().map(marked_string_text).collect::<Vec<_>>().join("\n\n"),
+        lsp_types::HoverContents::Markup(content) => content.value,
+    }
+}
+
+fn marked_string_text(marked: lsp_types::MarkedString) -> String {
+    match marked {
+        lsp_types::MarkedString::String(s) => s,
+        lsp_types::MarkedString::LanguageString(ls) => ls.value,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn python_has_a_built_in_default_command() {
+        assert_eq!(default_server_command(LanguageId::Python), Some(("pyright-langserver".to_string(), vec!["--stdio".to_string()])));
+    }
+
+    #[test]
+    fn rust_has_a_built_in_default_command_with_no_arguments() {
+        assert_eq!(default_server_command(LanguageId::Rust), Some(("rust-analyzer".to_string(), Vec::new())));
+    }
+
+    #[test]
+    fn c_and_cpp_both_default_to_clangd() {
+        assert_eq!(default_server_command(LanguageId::C), Some(("clangd".to_string(), Vec::new())));
+        assert_eq!(default_server_command(LanguageId::Cpp), Some(("clangd".to_string(), Vec::new())));
+    }
+
+    #[test]
+    fn bash_has_a_built_in_default_command() {
+        assert_eq!(default_server_command(LanguageId::Bash), Some(("bash-language-server".to_string(), vec!["start".to_string()])));
+    }
+
+    #[test]
+    fn javascript_typescript_and_tsx_all_default_to_typescript_language_server() {
+        let expected = Some(("typescript-language-server".to_string(), vec!["--stdio".to_string()]));
+        assert_eq!(default_server_command(LanguageId::JavaScript), expected);
+        assert_eq!(default_server_command(LanguageId::TypeScript), expected);
+        assert_eq!(default_server_command(LanguageId::Tsx), expected);
+    }
+
+    #[test]
+    fn a_language_with_no_built_in_default_resolves_to_none_absent_config() {
+        assert_eq!(resolve_server_command(LanguageId::Tcl, &[]), None);
+    }
+
+    #[test]
+    fn a_configured_override_wins_over_the_built_in_default() {
+        let configured = vec![("python".to_string(), "custom-pyright --flag".to_string())];
+        assert_eq!(resolve_server_command(LanguageId::Python, &configured), Some(("custom-pyright".to_string(), vec!["--flag".to_string()])));
+    }
+
+    #[test]
+    fn config_for_a_different_language_does_not_affect_this_ones_resolution() {
+        let configured = vec![("rust".to_string(), "rust-analyzer".to_string())];
+        assert_eq!(resolve_server_command(LanguageId::Python, &configured), default_server_command(LanguageId::Python));
+    }
+
+    #[test]
+    fn a_configured_command_with_no_arguments_still_resolves() {
+        let configured = vec![("python".to_string(), "my-pyright".to_string())];
+        assert_eq!(resolve_server_command(LanguageId::Python, &configured), Some(("my-pyright".to_string(), Vec::new())));
+    }
+}

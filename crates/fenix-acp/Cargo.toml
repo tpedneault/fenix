@@ -1,0 +1,19 @@
+[package]
+name = "fenix-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+fenix-rpc = { path = "../fenix-rpc" }
+fenix-tasks = { path = "../fenix-tasks" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+fenix-storage = { path = "../fenix-storage" }
+
+[dev-dependencies]

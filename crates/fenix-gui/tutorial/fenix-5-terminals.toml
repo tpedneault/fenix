@@ -1,0 +1,36 @@
+id = "fenix.terminals"
+track = "Fenix"
+order = 5
+title = "Terminals"
+about = "A shell in the panel under the windows, or in a window of its own."
+text = '''
+SPC o t opens the terminal panel under the windows, and again hides it.
+SPC o T opens a shell in the window you're in, as a buffer of its own.
+While a terminal has the keyboard every key is the shell's: Ctrl-\ gives
+it back to Fenix.
+'''
+
+[[step]]
+say = "SPC o t opens the terminal panel."
+hint = "Space, o (open), t."
+terminal = "panel"
+
+[[step]]
+say = 'Ctrl-\ gives the keyboard back to Fenix, the panel still open.'
+hint = "Hold Ctrl and press the backslash key."
+terminal = "unfocused"
+
+[[step]]
+say = "SPC o t again hides the panel."
+hint = "Space, o, t."
+terminal = "closed"
+
+[[step]]
+say = "SPC o T opens a shell in this window instead."
+hint = "Space, o, capital T."
+terminal = "pane"
+
+[[step]]
+say = 'Ctrl-\ again, to get out of it. SPC b k closes it when you are done.'
+hint = "Ctrl and backslash."
+terminal = "unfocused"

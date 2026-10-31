@@ -1,0 +1,58 @@
+# Gruvbox's light mode, morhetz's palette: its faded accents, which read on cream.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
+name = "Gruvbox Light"
+tabs = "underline"
+
+[surfaces]
+bg = "#fbf1c7"
+sidebar_bg = "#f2e5bc"
+bg_modeline = "#ebdbb2"
+divider = "#bdae93"
+caret = "#3c3836"
+hl_line = "#f2e5bc"
+selection = { color = "#076678", alpha = 0.15 }
+bracket_match = { color = "#427b58", alpha = 0.15 }
+search_match = { color = "#b57614", alpha = 0.2 }
+
+[text]
+fg = "#3c3836"
+fg_modeline = "#3c3836"
+caret_text = "#3c3836"
+gutter_fg = "#6a5d52"
+
+[modes]
+normal = "#076678"
+insert = "#746f03"
+visual = "#9d0006"
+replace = "#af3a03"
+command = "#8f3f71"
+explorer = "#3e7754"
+picker = "#8f3f71"
+text_dark = "#fbf1c7"
+
+[syntax]
+keyword = "#9d0006"
+string = "#79740e"
+comment = "#6a5d52"
+function = "#076678"
+type = "#a26400"
+number = "#8f3f71"
+constant = "#af3a03"
+variable = "#3c3836"
+operator = "#427b58"
+punctuation = "#427b58"
+attribute = "#a26400"
+
+[explorer]
+folder = "#076678"
+file = "#3c3836"
+
+[git]
+modified = "#af3a03"
+staged = "#79740e"
+untracked = "#076678"
+ignored = "#7c6f64"
+conflicted = "#9d0006"

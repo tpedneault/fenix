@@ -1,0 +1,13 @@
+[package]
+name = "fenix-vim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+fenix-core = { path = "../fenix-core" }
+fenix-keymap = { path = "../fenix-keymap" }
+regex = "1.13.1"

@@ -1,0 +1,54 @@
+# Ayu's Mirage variant, between its dark and light.
+name = "Ayu Mirage"
+tabs = "underline"
+
+[surfaces]
+bg = "#1f2430"
+sidebar_bg = "#1c212b"
+bg_modeline = "#1c212b"
+divider = "#171b24"
+caret = "#ffcc66"
+hl_line = "#242936"
+selection = { color = "#409fff", alpha = 0.24 }
+bracket_match = { color = "#95e6cb", alpha = 0.12 }
+search_match = { color = "#ffcc66", alpha = 0.15 }
+
+[text]
+fg = "#cccac2"
+fg_modeline = "#cccac2"
+caret_text = "#ffcc66"
+gutter_fg = "#8992a1"
+
+[modes]
+normal = "#ffcc66"
+insert = "#87d96c"
+visual = "#f27983"
+replace = "#ffad66"
+command = "#73d0ff"
+explorer = "#95e6cb"
+picker = "#dfbfff"
+text_dark = "#1f2430"
+
+[syntax]
+keyword = "#ffad66"
+string = "#d5ff80"
+comment = "#8992a1"
+function = "#ffd173"
+type = "#73d0ff"
+number = "#dfbfff"
+constant = "#dfbfff"
+variable = "#cccac2"
+operator = "#f29e74"
+punctuation = "#a9b2c3"
+attribute = "#ffdfb3"
+
+[explorer]
+folder = "#73d0ff"
+file = "#cccac2"
+
+[git]
+modified = "#80bfff"
+staged = "#87d96c"
+untracked = "#73d0ff"
+ignored = "#8992a1"
+conflicted = "#f27983"

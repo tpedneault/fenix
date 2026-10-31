@@ -1,0 +1,413 @@
+use tree_sitter::Language;
+
+/// Which tree-sitter grammar a buffer is highlighted with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LanguageId {
+    Rust,
+    Toml,
+    /// Block-level grammar only (headers, code fences, lists, block
+    /// quotes...) -- `tree-sitter-md` actually ships *two* grammars,
+    /// block and inline, for full Markdown highlighting (the inline one
+    /// covers `**bold**`, `` `code spans` ``, links, etc. within
+    /// paragraph text). Running both together is an injection-like setup
+    /// this crate deliberately doesn't do for v1 (see the injections cut
+    /// in the syntax-highlighting plan) -- block-level highlighting only.
+    Markdown,
+    Json,
+    Yaml,
+    Python,
+    JavaScript,
+    TypeScript,
+    /// `.tsx` -- a distinct grammar from plain TypeScript (JSX syntax),
+    /// sharing the same highlights query.
+    Tsx,
+    C,
+    /// A distinct grammar from `C` (`tree-sitter-cpp`) -- C++'s own
+    /// syntax (classes, templates, namespaces, `//` isn't special to
+    /// this decision but the grammar itself is) isn't a strict superset
+    /// tree-sitter-c's grammar can parse correctly. `.h` stays mapped to
+    /// `C` regardless (see `detect_language`'s own comment) -- there's
+    /// no extension-only way to tell a C header from a C++ one.
+    Cpp,
+    Bash,
+    Tcl,
+    /// Covers both `Dockerfile` and Podman's `Containerfile` (the same
+    /// format, different conventional name) -- see `detect_language_
+    /// from_path`, since neither is reliably named with an extension.
+    Dockerfile,
+    /// Windows Batch/CMD scripts (`.bat`/`.cmd`).
+    Batch,
+    /// XML and the many formats that are XML under another extension
+    /// (`.svg`, `.xsd`, `.xslt`, MSBuild project files, `.plist`,
+    /// `.xaml`, ...) -- see `detect_language` for the full list.
+    Xml,
+    /// A standalone Document Type Definition (`.dtd`/`.ent`). A
+    /// separate grammar from `Xml` in the same crate: an internal
+    /// `<!DOCTYPE [...]>` subset is already covered by the XML grammar
+    /// itself.
+    Dtd,
+    Go,
+    Java,
+    CSharp,
+    /// The markup only: a `<script>` or `<style>` block's contents aren't
+    /// highlighted as JavaScript or CSS (no injections, as for Markdown).
+    Html,
+    Css,
+    Sql,
+    Lua,
+    /// Mermaid diagrams (`.mmd`), `tree-sitter-mermaid`'s tolerant
+    /// grammar -- half-typed diagrams still highlight.
+    Mermaid,
+    /// A grammar an extension brings, compiled to WebAssembly: the
+    /// `n`th of `set_grammars`'.
+    Grammar(u16),
+}
+
+/// `tree-sitter-tcl`'s Rust bindings only expose `LANGUAGE`/`NODE_TYPES` --
+/// its `HIGHLIGHTS_QUERY` constant is commented out upstream (as of the
+/// pinned commit; see `Cargo.toml`'s `rev`), unlike every other grammar
+/// here. Vendored directly from the same repo (MIT-licensed) instead of
+/// left unavailable -- Tcl is a genuinely well-used language, not worth
+/// leaving without highlighting over a bindings gap in one specific crate.
+const TCL_HIGHLIGHTS_QUERY: &str = include_str!("../queries/tcl/highlights.scm");
+
+impl LanguageId {
+    /// Every language there's a grammar for.
+    pub const ALL: [LanguageId; 25] = [
+        LanguageId::Rust,
+        LanguageId::Toml,
+        LanguageId::Markdown,
+        LanguageId::Json,
+        LanguageId::Yaml,
+        LanguageId::Python,
+        LanguageId::JavaScript,
+        LanguageId::TypeScript,
+        LanguageId::Tsx,
+        LanguageId::C,
+        LanguageId::Cpp,
+        LanguageId::Bash,
+        LanguageId::Tcl,
+        LanguageId::Dockerfile,
+        LanguageId::Batch,
+        LanguageId::Xml,
+        LanguageId::Dtd,
+        LanguageId::Go,
+        LanguageId::Java,
+        LanguageId::CSharp,
+        LanguageId::Html,
+        LanguageId::Css,
+        LanguageId::Sql,
+        LanguageId::Lua,
+        LanguageId::Mermaid,
+    ];
+
+    /// Every language there's a grammar for: Fenix's, then the
+    /// extensions'.
+    pub fn all() -> Vec<LanguageId> {
+        LanguageId::ALL.into_iter().chain((0..crate::grammar::count()).map(|i| LanguageId::Grammar(i as u16))).collect()
+    }
+
+    /// The name settings and language files call it by: `rust`, `cpp`,
+    /// `csharp`, `javascript`; a grammar's as its language file names it.
+    pub fn name(self) -> String {
+        match self {
+            LanguageId::Grammar(i) => crate::grammar::grammar(i).map(|g| g.name.clone()).unwrap_or_default(),
+            _ => format!("{self:?}").to_lowercase(),
+        }
+    }
+
+    /// The language called `name` (any case), if there's a grammar for it.
+    pub fn from_name(name: &str) -> Option<LanguageId> {
+        LanguageId::ALL.into_iter().find(|l| l.name().eq_ignore_ascii_case(name.trim())).or_else(|| crate::grammar::find(name).map(LanguageId::Grammar))
+    }
+
+    /// Whether it's a grammar an extension brought.
+    pub fn is_grammar(self) -> bool {
+        matches!(self, LanguageId::Grammar(_))
+    }
+
+    /// Its tree-sitter language: none for a grammar that doesn't load.
+    pub(crate) fn language(self) -> Option<Language> {
+        Some(match self {
+            LanguageId::Rust => tree_sitter_rust::LANGUAGE.into(),
+            LanguageId::Toml => tree_sitter_toml_ng::LANGUAGE.into(),
+            LanguageId::Markdown => tree_sitter_md::LANGUAGE.into(),
+            LanguageId::Json => tree_sitter_json::LANGUAGE.into(),
+            LanguageId::Yaml => tree_sitter_yaml::LANGUAGE.into(),
+            LanguageId::Python => tree_sitter_python::LANGUAGE.into(),
+            LanguageId::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            LanguageId::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            LanguageId::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+            LanguageId::C => tree_sitter_c::LANGUAGE.into(),
+            LanguageId::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            LanguageId::Bash => tree_sitter_bash::LANGUAGE.into(),
+            LanguageId::Tcl => tree_sitter_tcl::LANGUAGE.into(),
+            LanguageId::Dockerfile => tree_sitter_containerfile::LANGUAGE.into(),
+            LanguageId::Batch => tree_sitter_batch::LANGUAGE.into(),
+            LanguageId::Xml => tree_sitter_xml::LANGUAGE_XML.into(),
+            LanguageId::Dtd => tree_sitter_xml::LANGUAGE_DTD.into(),
+            LanguageId::Go => tree_sitter_go::LANGUAGE.into(),
+            LanguageId::Java => tree_sitter_java::LANGUAGE.into(),
+            LanguageId::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            LanguageId::Html => tree_sitter_html::LANGUAGE.into(),
+            LanguageId::Css => tree_sitter_css::LANGUAGE.into(),
+            LanguageId::Sql => tree_sitter_sequel::LANGUAGE.into(),
+            LanguageId::Lua => tree_sitter_lua::LANGUAGE.into(),
+            LanguageId::Mermaid => tree_sitter_mermaid::LANGUAGE.into(),
+            LanguageId::Grammar(i) => return crate::grammar::language(i),
+        })
+    }
+
+    pub(crate) fn highlights_query(self) -> &'static str {
+        match self {
+            LanguageId::Rust => tree_sitter_rust::HIGHLIGHTS_QUERY,
+            LanguageId::Toml => tree_sitter_toml_ng::HIGHLIGHTS_QUERY,
+            LanguageId::Markdown => tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+            LanguageId::Json => tree_sitter_json::HIGHLIGHTS_QUERY,
+            LanguageId::Yaml => tree_sitter_yaml::HIGHLIGHTS_QUERY,
+            LanguageId::Python => tree_sitter_python::HIGHLIGHTS_QUERY,
+            LanguageId::JavaScript => tree_sitter_javascript::HIGHLIGHT_QUERY,
+            LanguageId::TypeScript | LanguageId::Tsx => tree_sitter_typescript::HIGHLIGHTS_QUERY,
+            LanguageId::C => tree_sitter_c::HIGHLIGHT_QUERY,
+            LanguageId::Cpp => cpp_highlights_query(),
+            LanguageId::Bash => tree_sitter_bash::HIGHLIGHT_QUERY,
+            LanguageId::Tcl => TCL_HIGHLIGHTS_QUERY,
+            LanguageId::Dockerfile => tree_sitter_containerfile::HIGHLIGHTS_QUERY,
+            LanguageId::Batch => tree_sitter_batch::HIGHLIGHTS_QUERY,
+            LanguageId::Xml => tree_sitter_xml::XML_HIGHLIGHT_QUERY,
+            LanguageId::Dtd => tree_sitter_xml::DTD_HIGHLIGHT_QUERY,
+            LanguageId::Go => tree_sitter_go::HIGHLIGHTS_QUERY,
+            LanguageId::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
+            LanguageId::CSharp => tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+            LanguageId::Html => tree_sitter_html::HIGHLIGHTS_QUERY,
+            LanguageId::Css => tree_sitter_css::HIGHLIGHTS_QUERY,
+            LanguageId::Sql => tree_sitter_sequel::HIGHLIGHTS_QUERY,
+            LanguageId::Lua => tree_sitter_lua::HIGHLIGHTS_QUERY,
+            LanguageId::Mermaid => tree_sitter_mermaid::HIGHLIGHTS_QUERY,
+            LanguageId::Grammar(i) => crate::grammar::grammar(i).map(|g| g.highlights.as_str()).unwrap_or(""),
+        }
+    }
+}
+
+/// tree-sitter-cpp's query only holds the C++ additions and inherits the
+/// rest from C (`; inherits: c`), so on its own `void`, numbers, strings and
+/// comments stay uncoloured. Layer C underneath, once.
+fn cpp_highlights_query() -> &'static str {
+    static QUERY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    QUERY.get_or_init(|| format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY))
+}
+
+/// More file types for the languages here, from language files (an
+/// installed extension's or yours): looked at before the built-in ones,
+/// so one can also move a file type to another language.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileTypes {
+    /// By extension, lowercase, no dot.
+    pub extensions: std::collections::HashMap<String, LanguageId>,
+    /// By whole file name, lowercase (`jenkinsfile`).
+    pub filenames: std::collections::HashMap<String, LanguageId>,
+    /// By a pattern of the name, lowercase (`.env.*`: `*` any run of
+    /// characters, `?` one), in the order read: a later one wins.
+    pub patterns: Vec<(String, LanguageId)>,
+}
+
+/// Whether `name` is `pattern`: `*` any run of characters, `?` one.
+fn name_matches(pattern: &[char], name: &[char]) -> bool {
+    match pattern.first() {
+        None => name.is_empty(),
+        Some('*') => (0..=name.len()).any(|i| name_matches(&pattern[1..], &name[i..])),
+        Some('?') => !name.is_empty() && name_matches(&pattern[1..], &name[1..]),
+        Some(c) => name.first() == Some(c) && name_matches(&pattern[1..], &name[1..]),
+    }
+}
+
+static FILE_TYPES: std::sync::OnceLock<FileTypes> = std::sync::OnceLock::new();
+
+/// Settles the language files' file types for this run, before any file
+/// is opened. Once: a second call changes nothing.
+pub fn set_file_types(types: FileTypes) {
+    let _ = FILE_TYPES.set(types);
+}
+
+/// Detects a language from a file extension (no leading dot, e.g. `"rs"`).
+/// Extension-only -- no shebang or content sniffing. Returns `None` for
+/// anything not in the registry, which callers treat as "no highlighting
+/// for this file," not an error.
+pub fn detect_language(extension: &str) -> Option<LanguageId> {
+    if let Some(language) = FILE_TYPES.get().and_then(|t| t.extensions.get(&extension.to_ascii_lowercase())) {
+        return Some(*language);
+    }
+    match extension {
+        "rs" => Some(LanguageId::Rust),
+        "toml" => Some(LanguageId::Toml),
+        "md" | "markdown" => Some(LanguageId::Markdown),
+        "json" => Some(LanguageId::Json),
+        "yaml" | "yml" => Some(LanguageId::Yaml),
+        "py" | "pyi" => Some(LanguageId::Python),
+        "js" | "mjs" | "cjs" | "jsx" => Some(LanguageId::JavaScript),
+        "ts" | "mts" | "cts" => Some(LanguageId::TypeScript),
+        "tsx" => Some(LanguageId::Tsx),
+        "c" | "h" => Some(LanguageId::C),
+        // `.ino`/`.pde` are Arduino sketches: C++ with a few prototypes
+        // the Arduino builder adds for you.
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl" | "ino" | "pde" => Some(LanguageId::Cpp),
+        "sh" | "bash" => Some(LanguageId::Bash),
+        "tcl" | "tm" => Some(LanguageId::Tcl),
+        "dockerfile" => Some(LanguageId::Dockerfile),
+        "bat" | "cmd" => Some(LanguageId::Batch),
+        // XML under its own name and under the extensions of the formats
+        // built on it: schemas and transforms, SVG, MSBuild/.NET project
+        // and resource files, Apple property lists, WiX, Qt Designer,
+        // feeds, GPS/map data, localization, Android/Maven configs.
+        "xml" | "xsd" | "xsl" | "xslt" | "xsl-fo" | "fo" | "rng" | "wsdl" | "svg" | "xhtml" | "xul" | "csproj" | "vbproj"
+        | "fsproj" | "vcxproj" | "filters" | "proj" | "props" | "targets" | "wixproj" | "wxs" | "wxi" | "nuspec" | "resx"
+        | "xaml" | "axaml" | "config" | "manifest" | "plist" | "ui" | "qrc" | "rss" | "atom" | "kml" | "gpx" | "tcx"
+        | "gml" | "graphml" | "xliff" | "xlf" | "tmx" | "dita" | "ditamap" | "xmi" | "bpmn" | "dae" | "fxml" | "mxml"
+        | "jrxml" | "urdf" | "launch" | "storyboard" | "xib" => Some(LanguageId::Xml),
+        "dtd" | "ent" => Some(LanguageId::Dtd),
+        "go" => Some(LanguageId::Go),
+        "java" => Some(LanguageId::Java),
+        "cs" | "csx" => Some(LanguageId::CSharp),
+        "html" | "htm" => Some(LanguageId::Html),
+        "css" => Some(LanguageId::Css),
+        "sql" => Some(LanguageId::Sql),
+        "lua" => Some(LanguageId::Lua),
+        "mmd" | "mermaid" => Some(LanguageId::Mermaid),
+        _ => None,
+    }
+}
+
+/// Detects a language from a file's full name, not just its extension --
+/// needed for `Dockerfile`/`Containerfile`, which are conventionally
+/// named with no extension at all (or a per-stage suffix like
+/// `Dockerfile.prod`, still no real extension `Path::extension` would
+/// find). Checked first; anything that doesn't match one of those bare-
+/// name conventions falls back to `detect_language` on the extension,
+/// covering every other language exactly as before. Case-insensitive
+/// (`dockerfile`/`DOCKERFILE` are both common on case-insensitive
+/// filesystems).
+pub fn detect_language_from_path(path: &std::path::Path) -> Option<LanguageId> {
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let lower = name.to_ascii_lowercase();
+        if let Some(types) = FILE_TYPES.get() {
+            if let Some(language) = types.filenames.get(&lower) {
+                return Some(*language);
+            }
+            let chars: Vec<char> = lower.chars().collect();
+            if let Some((_, language)) = types.patterns.iter().rev().find(|(p, _)| name_matches(&p.chars().collect::<Vec<_>>(), &chars)) {
+                return Some(*language);
+            }
+        }
+        if lower == "dockerfile"
+            || lower.starts_with("dockerfile.")
+            || lower == "containerfile"
+            || lower.starts_with("containerfile.")
+        {
+            return Some(LanguageId::Dockerfile);
+        }
+    }
+    path.extension().and_then(|e| e.to_str()).and_then(detect_language)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_the_newer_languages_by_extension() {
+        for (ext, lang) in [
+            ("go", LanguageId::Go),
+            ("java", LanguageId::Java),
+            ("cs", LanguageId::CSharp),
+            ("html", LanguageId::Html),
+            ("htm", LanguageId::Html),
+            ("css", LanguageId::Css),
+            ("sql", LanguageId::Sql),
+            ("lua", LanguageId::Lua),
+            ("mmd", LanguageId::Mermaid),
+            ("mermaid", LanguageId::Mermaid),
+        ] {
+            assert_eq!(detect_language(ext), Some(lang), "{ext}");
+        }
+    }
+
+    #[test]
+    fn a_name_is_matched_by_its_pattern() {
+        let m = |p: &str, n: &str| name_matches(&p.chars().collect::<Vec<_>>(), &n.chars().collect::<Vec<_>>());
+        assert!(m(".env.*", ".env.local") && m(".env.*", ".env.") && m("*.conf?", "a.confx"));
+        assert!(!m(".env.*", ".env") && !m(".env.*", "x.env.local") && !m("*.conf?", "a.conf"));
+    }
+
+    #[test]
+    fn every_language_is_found_by_its_name() {
+        for language in LanguageId::ALL {
+            assert_eq!(LanguageId::from_name(&language.name()), Some(language));
+        }
+        assert_eq!(LanguageId::from_name("CSharp"), Some(LanguageId::CSharp));
+        assert_eq!(LanguageId::from_name("cobol"), None);
+    }
+
+    #[test]
+    fn detects_rust_by_extension() {
+        assert_eq!(detect_language("rs"), Some(LanguageId::Rust));
+    }
+
+    #[test]
+    fn unknown_extension_has_no_language() {
+        assert_eq!(detect_language("xyz"), None);
+        assert_eq!(detect_language(""), None);
+    }
+
+    #[test]
+    fn detects_every_registered_language_by_its_common_extension() {
+        assert_eq!(detect_language("toml"), Some(LanguageId::Toml));
+        assert_eq!(detect_language("md"), Some(LanguageId::Markdown));
+        assert_eq!(detect_language("json"), Some(LanguageId::Json));
+        assert_eq!(detect_language("yaml"), Some(LanguageId::Yaml));
+        assert_eq!(detect_language("yml"), Some(LanguageId::Yaml));
+        assert_eq!(detect_language("py"), Some(LanguageId::Python));
+        assert_eq!(detect_language("js"), Some(LanguageId::JavaScript));
+        assert_eq!(detect_language("ts"), Some(LanguageId::TypeScript));
+        assert_eq!(detect_language("tsx"), Some(LanguageId::Tsx));
+        assert_eq!(detect_language("c"), Some(LanguageId::C));
+        assert_eq!(detect_language("h"), Some(LanguageId::C));
+        assert_eq!(detect_language("cpp"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("cc"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("cxx"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("hpp"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("ino"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("pde"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("hxx"), Some(LanguageId::Cpp));
+        assert_eq!(detect_language("sh"), Some(LanguageId::Bash));
+        assert_eq!(detect_language("tcl"), Some(LanguageId::Tcl));
+        assert_eq!(detect_language("tm"), Some(LanguageId::Tcl));
+        assert_eq!(detect_language("dockerfile"), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language("bat"), Some(LanguageId::Batch));
+        assert_eq!(detect_language("cmd"), Some(LanguageId::Batch));
+        assert_eq!(detect_language("xml"), Some(LanguageId::Xml));
+        assert_eq!(detect_language("svg"), Some(LanguageId::Xml));
+        assert_eq!(detect_language("csproj"), Some(LanguageId::Xml));
+        assert_eq!(detect_language("xsd"), Some(LanguageId::Xml));
+        assert_eq!(detect_language("dtd"), Some(LanguageId::Dtd));
+    }
+
+    #[test]
+    fn detects_dockerfile_and_containerfile_by_bare_filename() {
+        assert_eq!(detect_language_from_path(std::path::Path::new("Dockerfile")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("dockerfile")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("DOCKERFILE")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("Dockerfile.dev")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("Containerfile")), Some(LanguageId::Dockerfile));
+        assert_eq!(
+            detect_language_from_path(std::path::Path::new("/some/dir/Dockerfile.prod")),
+            Some(LanguageId::Dockerfile)
+        );
+    }
+
+    #[test]
+    fn detect_language_from_path_falls_back_to_extension() {
+        assert_eq!(detect_language_from_path(std::path::Path::new("main.rs")), Some(LanguageId::Rust));
+        assert_eq!(detect_language_from_path(std::path::Path::new("script.bat")), Some(LanguageId::Batch));
+        assert_eq!(detect_language_from_path(std::path::Path::new("no_extension_or_match")), None);
+    }
+}

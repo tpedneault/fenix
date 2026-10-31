@@ -1,0 +1,59 @@
+id = "editing.search"
+track = "Editing"
+order = 5
+title = "Search and substitute"
+about = "Finding text, going from match to match, and replacing it."
+text = """
+/ searches forward and ? back: type the pattern and Enter. n goes to the
+next match, N the one before, and * searches for the word under the cursor.
+:s/old/new/ replaces on the cursor's line; g after it, every match on the
+line; :%s does every line.
+
+apples and pears
+the needle is in this haystack
+cat dog cat dog cat
+color colour color
+The end.
+"""
+
+[[step]]
+say = "Type /needle and Enter: the cursor goes to the needle."
+hint = "/ opens the search at the bottom; type needle, then Enter."
+cursor = [7, 5]
+
+[[step]]
+say = "On line 8, :s/cat/bird/g and Enter: every cat on the line becomes a bird."
+hint = "j to line 8, then type :s/cat/bird/g and Enter. Without the g, only the first one."
+text = """
+/ searches forward and ? back: type the pattern and Enter. n goes to the
+next match, N the one before, and * searches for the word under the cursor.
+:s/old/new/ replaces on the cursor's line; g after it, every match on the
+line; :%s does every line.
+
+apples and pears
+the needle is in this haystack
+bird dog bird dog bird
+color colour color
+The end.
+"""
+
+[[step]]
+say = "/dog finds the first dog on line 8, and n goes on to the next: put the cursor on the second dog."
+hint = "From the start of line 8, /dog and Enter, then n."
+cursor = [8, 15]
+
+[[step]]
+say = ":%s/color/colour/g and Enter changes every line at once: make line 9 all colour."
+hint = "The % means every line; the g every match on each."
+text = """
+/ searches forward and ? back: type the pattern and Enter. n goes to the
+next match, N the one before, and * searches for the word under the cursor.
+:s/old/new/ replaces on the cursor's line; g after it, every match on the
+line; :%s does every line.
+
+apples and pears
+the needle is in this haystack
+bird dog bird dog bird
+colour colour colour
+The end.
+"""

@@ -1,0 +1,27 @@
+[package]
+name = "fenix-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+fenix-storage = { path = "../fenix-storage" }
+dirs = "6"
+fenix-picker = { path = "../fenix-picker" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+grep-searcher = "0.1.17"
+grep-regex = "0.1.14"
+grep-matcher = "0.1.9"
+ignore = "0.4.34"
+regex = "1.13.1"
+
+[dev-dependencies]
+tempfile = "3"
+# The extension template writes a manifest that has to read.
+fenix-extensions = { path = "../fenix-extensions" }

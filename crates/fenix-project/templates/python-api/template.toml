@@ -1,0 +1,62 @@
+[template]
+name = "Python · web API"
+kind = "python"
+group = "Python"
+description = "A FastAPI service: a health check and an example resource, tests against it, and a dev server that reloads as you edit."
+needs = ["uv"]
+open = ["src/{{name_snake}}/main.py"]
+
+[[ask]]
+key = "python"
+label = "Python"
+choices = ["3.13", "3.12", "3.11"]
+default = "3.12"
+hint = "uv downloads it if it isn't installed"
+
+[[ask]]
+key = "docker"
+label = "Dockerfile"
+default = false
+hint = "a uv-based image that runs it on port 8000"
+
+[[run]]
+exec = "uv"
+args = ["init", "--app", "--package", "--python", "{{python}}", "--name", "{{name_kebab}}", "--vcs", "none", "--no-readme"]
+
+[[run]]
+exec = "uv"
+args = ["add", "fastapi[standard]"]
+
+[[run]]
+exec = "uv"
+args = ["add", "--dev", "pytest", "ruff"]
+
+[[task]]
+name = "dev"
+exec = "uv"
+args = ["run", "fastapi", "dev", "src/{{name_snake}}/main.py"]
+
+[[task]]
+name = "serve"
+exec = "uv"
+args = ["run", "fastapi", "run", "src/{{name_snake}}/main.py"]
+
+[[task]]
+name = "test"
+exec = "uv"
+args = ["run", "pytest"]
+
+[[task]]
+name = "lint"
+exec = "uv"
+args = ["run", "ruff", "check"]
+
+[[file]]
+path = "Dockerfile"
+from = "Dockerfile"
+when = "docker"
+
+[[file]]
+path = ".dockerignore"
+from = "dockerignore"
+when = "docker"

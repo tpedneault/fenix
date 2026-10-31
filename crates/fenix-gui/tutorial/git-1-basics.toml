@@ -1,0 +1,63 @@
+id = "git.basics"
+track = "Git"
+order = 1
+title = "Git: stage, commit, log"
+about = "The Git status page, a change staged and committed, the log and the branches -- in a repository made for this lesson, not yours."
+text = """
+Notes -- this lesson's own repository, made fresh each time it starts.
+
+SPC g g is the Git status page: s stages, S unstages, d discards,
+c commits, P pushes, p pulls, b branches, l logs, ? lists them all.
+In a file, ]c and [c go to the next or previous change, SPC g a stages it.
+This line is new since the last commit: stage it, then commit it.
+"""
+
+[repo]
+file = "notes.txt"
+committed = """
+Notes -- this lesson's own repository, made fresh each time it starts.
+
+SPC g g is the Git status page: s stages, S unstages, d discards,
+c commits, P pushes, p pulls, b branches, l logs, ? lists them all.
+In a file, ]c and [c go to the next or previous change, SPC g a stages it.
+"""
+
+[[step]]
+say = "SPC g g: the Git status page, for the repository you're in -- this lesson's."
+hint = "Space, g (git), g."
+page = "git"
+
+[[step]]
+say = "notes.txt is under Unstaged: j or k to it, s stages it -- it moves to Staged."
+hint = "Put the cursor on the notes.txt row, then s. S would unstage it again."
+page = "git/staged"
+
+[[step]]
+say = "c opens the commit menu: what to do below, its flags above."
+hint = "c, on the page."
+page = "git/menu/commit"
+
+[[step]]
+say = "c again writes the message: i, type one, then Esc and Enter commits it."
+hint = "In the message: i to type, Esc, then Enter. q there drops it instead."
+page = "git/clean"
+
+[[step]]
+say = "SPC g l: the log -- your commit on top of the one before."
+hint = "Space, g, l."
+page = "git-log"
+
+[[step]]
+say = "q closes the log."
+hint = "q, on the log."
+closed = "git-log"
+
+[[step]]
+say = "Back on the Git page (SPC g g), b opens the branch menu: switch, make one, rename, delete."
+hint = "SPC g g if the page isn't in front, then b."
+page = "git/menu/branch"
+
+[[step]]
+say = "Esc puts the menu away, and q closes the page. P pushes, once there's a remote to push to."
+hint = "Esc, then q."
+closed = "git"

@@ -1,0 +1,58 @@
+# Atom's One Light.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
+name = "One Light"
+tabs = "underline"
+
+[surfaces]
+bg = "#fafafa"
+sidebar_bg = "#fafafa"
+bg_modeline = "#eaeaeb"
+divider = "#d4d4d4"
+caret = "#526fff"
+hl_line = "#f0f0f1"
+selection = { color = "#4078f2", alpha = 0.15 }
+bracket_match = { color = "#50a14f", alpha = 0.15 }
+search_match = { color = "#c18401", alpha = 0.2 }
+
+[text]
+fg = "#383a42"
+fg_modeline = "#383a42"
+caret_text = "#4158e7"
+gutter_fg = "#67686e"
+
+[modes]
+normal = "#346be3"
+insert = "#308231"
+visual = "#a626a4"
+replace = "#a06500"
+command = "#0079b1"
+explorer = "#346be3"
+picker = "#a626a4"
+text_dark = "#fafafa"
+
+[syntax]
+keyword = "#a626a4"
+string = "#398a39"
+comment = "#67686e"
+function = "#3c73ed"
+type = "#a96d00"
+number = "#986801"
+constant = "#986801"
+variable = "#383a42"
+operator = "#0081b9"
+punctuation = "#0081b9"
+attribute = "#a96d00"
+
+[explorer]
+folder = "#3c73ed"
+file = "#383a42"
+
+[git]
+modified = "#a96d00"
+staged = "#398a39"
+untracked = "#3c73ed"
+ignored = "#79797f"
+conflicted = "#d6493e"

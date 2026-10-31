@@ -1,0 +1,1609 @@
+// Fenix's extension API, 1.0. An extension is a component of the
+// `extension` world: Fenix calls its exports, and it calls Fenix through
+// `host`, each call checked against the permissions its manifest asks
+// for (`[permissions]`).
+//
+// Nothing here blocks for long. A call that takes time -- a process, an
+// HTTP request, a timer, a picker, a prompt, another extension's service
+// -- returns an id at once, and its result comes later, as an `event`
+// given to `handle`. Every call into the extension has a deadline: 5
+// seconds, or what its manifest's `limits.call_ms` says, up to a minute;
+// laying out a page, a second.
+//
+// Files: the extension's own folder is `/data`, always. With
+// `filesystem = "project-read"` (or `-write`) the open project is
+// `/project`: the one you're in. When you move to another, Fenix starts
+// the extension again there, its pages saved and put back
+// (`page-state`, `page-restore`). Its tools folder is `/tools`, when its
+// manifest names a program there (`permissions.process`, `/tools/*`): a
+// folder of Fenix's tools folder for it, never synced, for the servers
+// and adapters it downloads and runs. Nothing else is there.
+//
+// What Fenix reads or writes for it there stays there: a link it made
+// that leads out (WASI lets it, with `..`) isn't followed.
+//
+// Sockets go to the hosts and ports its manifest names
+// (`permissions.sockets`), and local ones -- a Unix socket, a named pipe
+// -- to the names it lists (`permissions.ipc`). A surface is a page of
+// pixels it streams, with the keyboard and the pointer sent back to it
+// (`surface-input`).
+//
+// Within 1.x nothing here changes or goes away: a minor version only
+// adds, and an extension built for 1.0 runs on any 1.x. What 1.x adds
+// for an extension to hear of is a new export, which Fenix calls only
+// when the extension has it -- never a new case of `event`, since a
+// guest's `handle` takes the `event` it was built with
+// (docs/adr/0001-wasm-runtime.md).
+package fenix:extension@1.0.0;
+
+interface types {
+    enum level { debug, info, warn, error }
+
+    /// How a run of text on a page is coloured: the theme's roles, or a
+    /// syntax capture's colour (`keyword`, `text.title`).
+    variant role { title, text, muted, accent, good, warn, bad, syntax(string) }
+
+    /// A run of text in one colour.
+    record span {
+        text: string,
+        role: role,
+    }
+
+    /// One line of a page: its runs, left to right, or a hairline.
+    record line {
+        spans: list<span>,
+        /// Drawn as a rule across the page; `spans` is ignored.
+        rule: bool,
+    }
+
+    /// A key and what it does, for the line of keys at a page's foot.
+    record key-hint {
+        keys: string,
+        what: string,
+    }
+
+    /// A box drawn over a page beside one of its lines: a menu, a
+    /// question. Keys still go to the page while it's open.
+    record popup {
+        /// The page line it's about: it opens under it, or over it when
+        /// there's no room below.
+        line: u32,
+        /// Its rows, each a run of spans.
+        rows: list<list<span>>,
+    }
+
+    /// Cells of a page's line: columns `start` up to `end`.
+    record cells {
+        line: u32,
+        start: u32,
+        end: u32,
+    }
+
+    /// Cells in one colour.
+    record cell-span {
+        cells: cells,
+        role: role,
+    }
+
+    /// A picture over a canvas: an image from `image-load` or
+    /// `image-file`, drawn over cells the canvas leaves blank, `rows`
+    /// lines tall from `cells`.
+    record picture {
+        cells: cells,
+        rows: u32,
+        image: u32,
+        /// Zoomed and panned: (zoom, 1 fits; the centre shown, as
+        /// fractions of the picture). None fits it, no bigger than it is.
+        view: option<tuple<f32, f32, f32>>,
+        /// Boxes outlined over it -- a diagram's nodes: each a rectangle
+        /// in fractions of the picture (x, y, width, height), the
+        /// selected one drawn bright.
+        marks: list<mark>,
+    }
+
+    /// A box outlined over a picture.
+    record mark {
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        selected: bool,
+    }
+
+    /// An RGB colour.
+    type rgb = tuple<u8, u8, u8>;
+
+    /// The editor theme's colours, for drawing in it (`theme-colors`).
+    record editor-theme {
+        /// The theme's name.
+        name: string,
+        background: rgb,
+        text: rgb,
+        /// The modeline's and popups' background.
+        panel: rgb,
+        /// The caret's colour.
+        accent: rgb,
+        /// Quieter text: line numbers.
+        muted: rgb,
+        /// The current line's tint.
+        tint: rgb,
+        warn: rgb,
+        dark: bool,
+    }
+
+    /// A change to a buffer's text: from (line, column) up to (line,
+    /// column), both from 0 and in characters, replaced with `text`.
+    record text-edit {
+        start: tuple<u32, u32>,
+        end: tuple<u32, u32>,
+        text: string,
+    }
+
+    /// A popup over a canvas, beside line `line`, its text lined up
+    /// with column `column`.
+    record canvas-popup {
+        line: u32,
+        column: u32,
+        rows: list<list<span>>,
+    }
+
+    /// A page laid out by the extension cell by cell, as Fenix lays out
+    /// its own: drawn as it is, with no title, frame or key line of
+    /// Fenix's around it.
+    record canvas {
+        /// Its lines, a newline between them.
+        text: string,
+        /// Coloured cells; the rest are plain text.
+        spans: list<cell-span>,
+        /// Hairlines, drawn over blank cells.
+        rules: list<cells>,
+        /// The focused row: tinted, and kept in view.
+        focus: option<cells>,
+        /// Cells tinted as a panel: a field being typed in.
+        panels: list<cells>,
+        pictures: list<picture>,
+        popup: option<canvas-popup>,
+    }
+
+    /// A page, as the extension lays it out for a width.
+    record page {
+        lines: list<line>,
+        /// The line the cursor is on: tinted, and kept in view.
+        focus: option<u32>,
+        keys: list<key-hint>,
+        popup: option<popup>,
+        /// Laid out cell by cell instead: `lines`, `focus`, `keys` and
+        /// `popup` are then ignored.
+        canvas: option<canvas>,
+        /// Typing in a field: Space, `q` and Esc are the page's keys, and
+        /// a paste comes to `page-paste`.
+        typing: bool,
+        /// Space means something on the focused row (it ticks it): it's
+        /// the page's key, `char(' ')`, not the leader.
+        space: bool,
+        /// A canvas's cells in styles of their own: bold, a background.
+        styles: list<cell-style>,
+        /// Hairlines down a canvas.
+        vertical-rules: list<vertical-rule>,
+        /// Focused rows besides `canvas.focus`: tinted, and not kept in
+        /// view.
+        focuses: list<cells>,
+        /// It takes the keys Fenix doesn't give `page-key` --
+        /// PageUp, PageDown, Shift with the movement keys, Ctrl and Alt
+        /// with letters -- at `page-key-press`, all but those Fenix's own
+        /// bindings have and the leader.
+        more-keys: bool,
+        /// Clicks and the wheel on it come to `page-mouse`; the wheel no
+        /// longer scrolls it.
+        mouse: bool,
+        /// Cells of a canvas whose text is drawn in a colour of its own,
+        /// over the colour its spans give it.
+        colors: list<cell-color>,
+    }
+
+    /// A key pressed on one of its pages. Space is the leader, as
+    /// everywhere, so it isn't one of these.
+    variant key {
+        up, down, left, right,
+        enter, tab, back-tab, escape, backspace, delete, home, end,
+        /// Ctrl+Left, Ctrl+Right, Ctrl+Backspace: a word at a time.
+        word-left, word-right, delete-word-back,
+        %char(char),
+    }
+
+    /// A program to run.
+    record command {
+        /// A name its manifest lists (`permissions.process`); or a path
+        /// it lists by way of a setting (`${setting:key}`) or under its
+        /// own folders (`/data/...`, `/tools/...`).
+        program: string,
+        /// `${tools}` in them is its tools folder, as a full path: a
+        /// script a program there runs (`node ${tools}/x/server.js`).
+        /// `${data}` is its own folder, `/data`, as a full path: a
+        /// server's workspace folder.
+        args: list<string>,
+        /// Under `/project`, `/data` or `/tools`; the project when there's
+        /// none.
+        cwd: option<string>,
+        /// `${tools}` and `${data}` in a value are as in `args`.
+        env: list<tuple<string, string>>,
+    }
+
+    /// An HTTP request (`http`), and how it's made.
+    record http-request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+        options: http-options,
+    }
+
+    record picker-item {
+        label: string,
+        detail: string,
+        /// What comes back when it's picked.
+        value: string,
+    }
+
+    /// How a doctor check came out, least to most serious.
+    enum health { ok, info, warn, bad }
+
+    /// Where on the project doctor's page a check goes.
+    enum section { toolchain, hardware, database, project }
+
+    /// One line of the project doctor (`doctor-set`).
+    record check {
+        section: section,
+        label: string,
+        health: health,
+        detail: string,
+        /// What its fix row says ("pick a port"), and the command of its
+        /// own that does it.
+        fix: option<tuple<string, string>>,
+    }
+
+    /// A task it offers in the task picker (`tasks-set`).
+    record task {
+        name: string,
+        cmd: command,
+    }
+
+    /// Where a layer sits in the frame's order: behind the text, over it
+    /// (under Fenix's popups), or over the popups too.
+    enum layer-level { below-text, above-text, above-popups }
+
+    /// What an item is placed by. Its origin: the window's top left; the
+    /// modeline's top left (its top edge is a floor); a pane's text area's
+    /// top left (by `layout`'s id); a cell of a pane's buffer (pane, line,
+    /// column, 0-based), which scrolls with it and hides when off screen;
+    /// the caret's cell.
+    variant anchor {
+        window,
+        modeline,
+        pane(u64),
+        text(tuple<u64, u32, u32>),
+        caret,
+    }
+
+    /// A place, in cells from its anchor's origin (fractions allowed):
+    /// where an item's foot -- its bottom left -- goes.
+    record place {
+        anchor: anchor,
+        x: f32,
+        y: f32,
+    }
+
+    /// How a glide gets there: at one speed, or starting and stopping
+    /// gently (`smooth`), slowing to a stop (`out`), speeding up from rest
+    /// (`in`), or overshooting a little and settling (`spring`).
+    enum ease { linear, smooth, out, in, spring }
+
+    /// A glide Fenix animates: from the item's `at` to `to`, over `millis`.
+    record glide {
+        to: place,
+        millis: u32,
+        ease: ease,
+        /// How high, in lines, the path bows up halfway (a hop, a throw);
+        /// 0 goes straight.
+        arc: f32,
+    }
+
+    /// How a model is drawn: smooth, or at a few pixels a line and scaled
+    /// up nearest-pixel, to sit with pixel art.
+    enum style { smooth, pixel }
+
+    /// A 3D model, posed: what an item shows in place of a sheet's frame.
+    record pose {
+        /// From `model-load`.
+        model: u32,
+        /// The clip it plays, by name (`walk`); "" stands it at rest.
+        /// Changing it blends from the last clip over a moment.
+        clip: string,
+        /// Played once and held on its last frame, rather than round.
+        once: bool,
+        /// How fast it plays: 1 at the clip's own pace.
+        speed: f32,
+        /// Turned about its up axis, in degrees: 0 faces you, 90 faces
+        /// right. Fenix turns it there smoothly.
+        yaw: f32,
+        style: style,
+        /// The optional parts it wears (a node `opt:hat` is `hat`).
+        parts: list<string>,
+        /// Its colours multiplied: (1, 1, 1) leaves them.
+        tint: tuple<f32, f32, f32>,
+        /// Lit from within, 0 to 1: fire, a glow.
+        glow: f32,
+    }
+
+    /// A model, loaded: its clips and how long each lasts, in seconds,
+    /// and how wide it is for each line tall.
+    record model-info {
+        id: u32,
+        clips: list<tuple<string, f32>>,
+        aspect: f32,
+    }
+
+    /// One thing a layer draws: a frame of a sprite sheet, or a model.
+    record item {
+        /// Its own id, kept from one `layer-set` to the next.
+        id: u32,
+        sheet: u32,
+        /// The sheet's frames it shows, in turn, `fps` a second.
+        frames: list<u32>,
+        /// A model's: how many times a second its pose is drawn again (0,
+        /// every frame).
+        fps: u8,
+        /// A sheet's foot is its bottom left; a model's, the middle of
+        /// where it stands.
+        at: place,
+        /// How tall, in lines; a sheet is drawn at a whole number of its
+        /// pixels.
+        size: f32,
+        glide: option<glide>,
+        /// Mirrored, left for right.
+        flip: bool,
+        opacity: f32,
+        /// A click on it is its (`layer-clicked`); else clicks go through.
+        clickable: bool,
+        /// Faded while it's over the caret's line.
+        keep-clear: bool,
+        /// A model, posed: shown in place of `sheet` and `frames`.
+        pose: option<pose>,
+    }
+
+    /// A pane, in window cells.
+    record pane-box {
+        id: u64,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        focused: bool,
+    }
+
+    /// Where things are on screen, in cells (`layout`).
+    record layout {
+        columns: u32,
+        rows: u32,
+        /// The modeline's row.
+        modeline: u32,
+        panes: list<pane-box>,
+        /// The caret's cell, when it's in a buffer.
+        caret: option<tuple<u32, u32>>,
+    }
+
+    /// An image it loaded, for its canvases' pictures: its id, and its
+    /// size in pixels.
+    record image-info {
+        id: u32,
+        width: u32,
+        height: u32,
+    }
+
+    /// The project a file is in.
+    record project-info {
+        /// Its folder's name.
+        name: string,
+        /// Its folder, as a full path.
+        root: string,
+        /// What its `.fenix/project.toml` says of it (`jira`).
+        meta: list<tuple<string, string>>,
+    }
+
+    /// Where you are in the editor (`editor-here`).
+    record here {
+        /// The file, as a full path; none in a buffer that isn't one.
+        path: option<string>,
+        /// The first line of `text`, from 1.
+        line: u32,
+        /// What's selected, else the cursor's line.
+        text: string,
+        /// The file's extension (`rs`), or "".
+        language: string,
+        project: option<project-info>,
+    }
+
+    /// How a row on Home is marked.
+    variant home-mark {
+        none,
+        /// Running, for so long (`1h 05`).
+        live(string),
+        /// A task: urgent or not.
+        task(bool),
+    }
+
+    /// A row of its section on Home: picking it gives back `value`
+    /// (`home-picked`).
+    record home-row {
+        name: string,
+        detail: string,
+        mark: home-mark,
+        value: string,
+    }
+
+    /// Its section on Home.
+    record home-section {
+        title: string,
+        /// The key that opens what it's about (`SPC a a`).
+        key: string,
+        rows: list<home-row>,
+        /// The most rows shown.
+        most: u32,
+    }
+
+    /// A line a process wrote.
+    record process-output {
+        process: u64,
+        stderr: bool,
+        line: string,
+    }
+
+    /// A datagram that came to one of its UDP sockets (`udp-bind`): who
+    /// sent it, as `host:port`, and what it holds.
+    record datagram {
+        socket: u64,
+        %from: string,
+        data: list<u8>,
+    }
+
+    /// A key on a surface: a character, as typed (Shift is in it), or a
+    /// key with a name.
+    variant surface-key {
+        %char(char),
+        named(named-key),
+    }
+
+    enum named-key {
+        escape, enter, tab, backspace, delete,
+        left, right, up, down, home, end, page-up, page-down,
+        caps-lock,
+    }
+
+    /// The keys held with a key, a click or the wheel.
+    record modifiers {
+        ctrl: bool,
+        alt: bool,
+        /// The Windows key, or Command.
+        meta: bool,
+    }
+
+    /// A key pressed (`down`) or let go on a surface. One that doesn't
+    /// capture the keyboard hears presses only.
+    record key-event {
+        key: surface-key,
+        down: bool,
+        mods: modifiers,
+    }
+
+    /// The pointer on a surface, in its pixels, and the buttons held: 1
+    /// the left, 2 the middle, 4 the right. Told when a button goes down
+    /// or up, and when it moves while one is held -- or always, on a
+    /// surface that captures the keyboard.
+    record pointer-event {
+        x: s32,
+        y: s32,
+        buttons: u8,
+        mods: modifiers,
+    }
+
+    /// The wheel turned over a surface, in lines: up is more than 0.
+    record wheel-event {
+        x: s32,
+        y: s32,
+        lines: s32,
+        mods: modifiers,
+    }
+
+    /// What reaches a surface (`surface-input`).
+    variant surface-input {
+        key(key-event),
+        pointer(pointer-event),
+        wheel(wheel-event),
+        /// It has the keyboard now (true), or gave it back (Ctrl+\, or
+        /// another pane focused).
+        capture(bool),
+    }
+
+    /// How a surface's pixels fit its pane.
+    enum surface-scale {
+        /// Stretched to fill it, as a remote desktop is (it's asked to be
+        /// the pane's size).
+        stretch,
+        /// As big as fits, its shape kept, at the top left.
+        fit,
+        /// A pixel for a pixel, at the top left; what doesn't fit is cut.
+        none,
+    }
+
+    record surface-options {
+        /// It takes every key, pressed and let go, while it's focused, as
+        /// a remote desktop does: Ctrl+\ gives them back, a click takes
+        /// them again. Otherwise it has a page's keys: Space is the
+        /// leader, `q` closes it, and every other key is its.
+        capture: bool,
+        scale: surface-scale,
+        /// Opened in a new pane beside the focused one, this fraction of
+        /// it, the focus staying; none opens it in the focused pane.
+        beside: option<f32>,
+    }
+
+    /// A surface's pane, in pixels, and how dense the display is (2 on
+    /// a screen twice as dense as most).
+    record surface-size {
+        surface: u64,
+        width: u32,
+        height: u32,
+        scale: f32,
+    }
+
+    /// The pointer's picture over a surface -- a remote desktop's own --
+    /// in BGRA, drawn where the pointer is, `hot` its point.
+    record cursor-image {
+        width: u32,
+        height: u32,
+        hot-x: u32,
+        hot-y: u32,
+        bgra: list<u8>,
+    }
+
+    /// A box tinted over a surface, in its pixels, in a theme role's
+    /// colour: a selection, a search's matches.
+    record surface-mark {
+        x: s32,
+        y: s32,
+        width: u32,
+        height: u32,
+        role: role,
+    }
+
+    /// Where the cursor and the selection were, with `editor-here`'s
+    /// `here` (`editor-cursor`): places are (line, column), from 0 and in
+    /// characters, as `text-edit`'s.
+    record cursor-info {
+        /// The cursor's place.
+        at: tuple<u32, u32>,
+        /// What's selected, from a place up to another (not in it), as
+        /// `text-edit`'s range is: none when nothing is.
+        selection: option<tuple<tuple<u32, u32>, tuple<u32, u32>>>,
+        /// `here`'s `text` is the selection; else it's the cursor's line.
+        selected: bool,
+    }
+
+    /// A page that has the focus (`focus-moved`).
+    record focused-page {
+        /// Its kind: its own (`page-open`'s) for one of its pages; another
+        /// extension's as `<id>/<kind>`; Fenix's by name (`git`,
+        /// `settings`, `home`).
+        kind: string,
+        /// Its id, when it's one of its own pages or surfaces.
+        mine: option<u64>,
+    }
+
+    /// What has the focus (`focus-moved`).
+    variant focus {
+        /// Nothing of the editor's: the explorer, a picker.
+        none,
+        /// A file: its full path with `editor = "read"`; else its path
+        /// under `/project`, when it reads the project and it's there;
+        /// else none.
+        file(option<string>),
+        /// Text that's no file: one of its scratch buffers (its id), or
+        /// any other (none) -- a terminal, a view.
+        text(option<u64>),
+        page(focused-page),
+    }
+
+    /// A buffer whose text changed (`buffer-changed`).
+    variant changed {
+        /// A file's, by its full path.
+        file(string),
+        /// One of its scratch buffers.
+        scratch(u64),
+    }
+
+    /// A file in a folder (`folder-list`): its name, and its size in
+    /// bytes.
+    record folder-entry {
+        name: string,
+        size: u64,
+    }
+
+    /// A background: one of the theme's tints, or a colour of its own.
+    variant shade {
+        /// The modeline's and popups': a field.
+        panel,
+        /// The focused row's.
+        focus,
+        /// A selection's.
+        selection,
+        accent,
+        good,
+        warn,
+        bad,
+        rgb(rgb),
+    }
+
+    /// Cells of a canvas marked besides their colour (`page.styles`).
+    record cell-style {
+        cells: cells,
+        /// Its background, else the page's.
+        background: option<shade>,
+        /// Underlined, in a role's colour.
+        underline: option<role>,
+    }
+
+    /// A hairline down a canvas, over blank cells: a divider, a
+    /// scrollbar. Its column is in cells, a wide character two -- not in
+    /// characters, as `cells` are, since it crosses lines that differ --
+    /// from line `top` up to `bottom` (not in it).
+    record vertical-rule {
+        column: u32,
+        top: u32,
+        bottom: u32,
+    }
+
+    /// The keys held with a key or a click, Shift among them.
+    record key-mods {
+        shift: bool,
+        ctrl: bool,
+        alt: bool,
+        /// The Windows key, or Command.
+        meta: bool,
+    }
+
+    /// A key on a page that takes more keys (`page.more-keys`): a
+    /// character as typed (Shift is in it, and in `mods`), or a key with a
+    /// name.
+    record key-press {
+        key: surface-key,
+        mods: key-mods,
+    }
+
+    enum mouse-button { left, middle, right }
+
+    /// A button pressed: `clicks` is 2 for a double click, 3 a triple.
+    record mouse-press {
+        button: mouse-button,
+        clicks: u8,
+    }
+
+    variant mouse-action {
+        press(mouse-press),
+        release(mouse-button),
+        /// Moved to another cell with a button held.
+        drag(mouse-button),
+        /// The wheel turned, in lines: up is more than 0.
+        wheel(s32),
+    }
+
+    /// The mouse on a page (`page-mouse`), at a cell: its line, its
+    /// column in characters as `cells` count them (past the end of the
+    /// line, a blank cell a character), and the cell itself, a wide
+    /// character two.
+    record mouse-event {
+        line: u32,
+        column: u32,
+        cell: u32,
+        action: mouse-action,
+        mods: key-mods,
+    }
+
+    /// A buffer of text: a file's, by path, or one of its scratch
+    /// buffers.
+    variant text-buffer {
+        file(string),
+        scratch(u64),
+    }
+
+    /// Text drawn in a buffer's line that isn't in it: an inlay.
+    record virtual-text {
+        text: string,
+        role: role,
+        /// Drawn after the character at the decoration's `start`, staying
+        /// with it as you type there; else before it, staying with the one
+        /// after.
+        after: bool,
+    }
+
+    /// How a decoration looks.
+    variant decoration-look {
+        /// Text drawn at `start`, taking room in the line: what follows
+        /// moves along.
+        text(virtual-text),
+        /// A small block of a colour before `start`, taking room as text
+        /// does: a colour's swatch.
+        swatch(rgb),
+        /// The text from `start` to `end`, on `start`'s line, drawn as
+        /// this (`••••`) -- but as it is while the cursor is on its line.
+        hide(string),
+        /// The text from `start` to `end`, its background tinted.
+        tint(shade),
+        /// The text from `start` to `end`, underlined in a role's colour.
+        underline(role),
+    }
+
+    /// A decoration of a buffer's text (`decorations-set`): from (line,
+    /// column) up to another, as `text-edit`'s range is.
+    record decoration {
+        start: tuple<u32, u32>,
+        end: tuple<u32, u32>,
+        look: decoration-look,
+        /// A click on it comes back to it with this id
+        /// (`decoration-clicked`): a swatch that opens a picker.
+        id: option<u32>,
+    }
+
+    /// How serious a problem is (`diagnostics-set`).
+    enum severity { error, warning, info, hint }
+
+    /// A problem in a file, as a linter finds it (`diagnostics-set`): from
+    /// (line, column) up to another, as `text-edit`'s range is.
+    record problem {
+        start: tuple<u32, u32>,
+        end: tuple<u32, u32>,
+        severity: severity,
+        message: string,
+        /// What found it (`ruff`); else it's the extension's.
+        source: option<string>,
+        /// Its rule (`E501`).
+        code: option<string>,
+        /// Its fixes: offered in the code action list (`SPC c a`) on its
+        /// lines, beside the language servers' actions, while the file is
+        /// as it was then.
+        fixes: list<quick-fix>,
+    }
+
+    /// A client certificate and its key, PEM, for a server that asks for
+    /// one.
+    record client-cert {
+        cert: string,
+        key: string,
+    }
+
+    /// How an HTTP request is made.
+    record http-options {
+        /// The most it may take, in milliseconds: all of it, or, when it's
+        /// streamed, the wait for its answer and each wait for more. None:
+        /// 30 seconds, and a stream may wait for more as long as it likes.
+        timeout: option<u32>,
+        /// Redirects followed (up to 10); else a 3xx is the answer.
+        follow-redirects: bool,
+        /// A server whose certificate doesn't check out reached all the
+        /// same: one of yours, self-signed.
+        accept-invalid-certs: bool,
+        client-cert: option<client-cert>,
+        /// An HTTP proxy, `http://host:port`, its host one it may reach;
+        /// none goes direct, as `http` does.
+        proxy: option<string>,
+        /// Its body given as it comes (`http-part`'s `chunk`), not at its
+        /// end: server-sent events, a big body.
+        %stream: bool,
+    }
+
+    /// How long each part of a request took, in microseconds -- the last
+    /// connection's, after redirects. None for what didn't happen: TLS on
+    /// http.
+    record http-timing {
+        /// Finding the host's address.
+        dns: option<u64>,
+        /// Connecting to it, on https; on http it's in `first-byte`.
+        connect: option<u64>,
+        tls: option<u64>,
+        /// The wait for the answer's first byte, once connected.
+        first-byte: u64,
+        /// All of it, from the start up to its body's end (a stream's
+        /// answer: up to its headers).
+        total: u64,
+    }
+
+    /// The answer to an HTTP request (`http`, `http-download`).
+    record http-response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        /// Empty when it's streamed.
+        body: list<u8>,
+        /// Where it ended up, after redirects.
+        url: string,
+        timing: http-timing,
+    }
+
+    /// What comes of `http` (`http-event`), in order.
+    variant http-part {
+        /// The answer, or why there's none. Streamed, its body follows.
+        response(result<http-response, string>),
+        /// Streamed: more of the body, as it came.
+        chunk(list<u8>),
+        /// Streamed: the body's end, or why it broke off.
+        end(option<string>),
+    }
+
+    /// TLS on a socket (`socket-connect-tls`, `socket-start-tls`). The
+    /// server's certificate is checked against the system's.
+    record tls-options {
+        /// The name its certificate is for, and that's sent (SNI); none:
+        /// the host it connected to.
+        server-name: option<string>,
+        /// Certificates taken as they are, PEM, whoever signed them: a
+        /// server's own, self-signed.
+        pinned: list<string>,
+        /// Any certificate taken: nothing is checked.
+        accept-invalid: bool,
+        client-cert: option<client-cert>,
+    }
+
+    /// The machine Fenix runs on (`platform`), as Rust names it: what picks
+    /// a release's file to download.
+    record platform-info {
+        /// `windows`, `linux`, `macos`.
+        os: string,
+        /// `x86_64`, `aarch64`.
+        arch: string,
+        /// The C library Fenix was built with: `gnu`, `musl`, `msvc`; ""
+        /// on macOS.
+        env: string,
+    }
+
+    /// Decorations Fenix gives every buffer on a file of `files`, from
+    /// before it's first drawn and as it's edited (`decoration-rules-set`):
+    /// where `pattern` matches a line, group `group` of the match (0 the
+    /// whole of it) looks like `look`.
+    record decoration-rule {
+        /// By name (`.env`, `.env.*`, `*.secret`), as `contributes.opens`.
+        files: list<string>,
+        /// A regular expression (Rust's `regex`), tried on each line.
+        pattern: string,
+        group: u32,
+        look: decoration-look,
+    }
+
+    /// Lines a pane shows of a buffer (`view-changed`): from line `first`
+    /// to line `last`, both from 0 and both shown (folded lines between
+    /// them aren't).
+    record text-view {
+        buffer: text-buffer,
+        /// The pane, as `layout` has it.
+        pane: u64,
+        first: u32,
+        last: u32,
+    }
+
+    /// Cells of a canvas whose text is drawn in a colour of its own, over
+    /// the colour its spans give it.
+    record cell-color {
+        cells: cells,
+        color: rgb,
+    }
+
+    /// A fix for a problem it found (`problem`): what the code action
+    /// list (`SPC c a`) calls it, and its edits to the problem's file, as
+    /// the text was when it gave the problem.
+    record quick-fix {
+        title: string,
+        edits: list<text-edit>,
+    }
+
+    /// Whether a launch starts the program or attaches to one.
+    enum launch-request { launch, attach }
+
+    /// A launch configuration it offers at run time (`launches-set`),
+    /// beside its launch files: one per CMake target, per Cargo binary.
+    /// Its strings are filled in as a launch file's are -- `${file}`,
+    /// `${project}`, `${pickProcess}`, its variables (`launch-variable-set`).
+    record launch-config {
+        name: string,
+        /// Fenix's names for the languages it's for (`cpp`).
+        languages: list<string>,
+        request: launch-request,
+        /// The program; none sends none (`${file}` is the file you're in).
+        program: option<string>,
+        args: list<string>,
+        /// Where it runs; the project when it's none.
+        cwd: option<string>,
+        env: list<tuple<string, string>>,
+        /// The rest of what the adapter takes, as a JSON object (`{}`).
+        attributes: string,
+        /// A task run first, by its name in the task picker: the session
+        /// starts once it succeeds.
+        pre-launch-task: option<string>,
+    }
+
+    /// A debug session (`debug-changed`).
+    record debug-session {
+        /// Fenix's id for it, the same in what's told of it after.
+        id: u64,
+        /// What it debugs: the program, or its launch's name.
+        name: string,
+        /// Fenix's name for its language (`python`).
+        language: string,
+        /// The session it was started from, for one an adapter asked for
+        /// (js-debug runs each program in one of its own).
+        parent: option<u64>,
+    }
+
+    /// What became of a debug session (`debug-changed`).
+    variant debug-state {
+        started(debug-session),
+        /// Stopped where it was -- a breakpoint, a step: its id, and why
+        /// (`breakpoint`, `step`).
+        paused(tuple<u64, string>),
+        /// Running again.
+        resumed(u64),
+        /// Over: its program ended, or the session was stopped.
+        ended(u64),
+    }
+
+    /// What Fenix tells an extension, given to `handle`.
+    variant event {
+        /// A timer went off.
+        timer(u64),
+        /// A picker closed: what was picked, or nothing.
+        picked(tuple<u64, option<string>>),
+        /// A prompt closed: what was typed, or nothing.
+        prompted(tuple<u64, option<string>>),
+        process-output(process-output),
+        /// A process ended: its exit code, when it had one.
+        process-exit(tuple<u64, option<s32>>),
+        http-response(tuple<u64, result<http-response, string>>),
+        service-reply(tuple<u64, result<string, string>>),
+        /// One of its settings changed, by key.
+        setting-changed(string),
+        /// One of its pages came into view (true) or went out of every
+        /// pane (false): a hidden page needn't be kept up to date.
+        page-shown(tuple<u64, bool>),
+        /// A task from `run-task` ended: whether it succeeded.
+        task-finished(tuple<u64, bool>),
+        /// One of its terminals was closed (its pane, or its buffer).
+        terminal-closed(u64),
+        /// The file you're in changed: its path under `/project`, or none
+        /// (a page, a file elsewhere).
+        focus-changed(option<string>),
+        /// Where things are on screen, when it changes (with `draw`).
+        layout(layout),
+        /// One of its `clickable` items was clicked: layer, item.
+        layer-clicked(tuple<u64, u32>),
+        /// An item's glide ended: layer, item.
+        arrived(tuple<u64, u32>),
+        // What you're doing, for an extension that asks
+        // (`contributes.events`).
+        /// A file was saved: its name.
+        saved(string),
+        /// The focused file's problems changed: errors, warnings.
+        diagnostics(tuple<u32, u32>),
+        /// A task ended: whether it succeeded.
+        task-ended(bool),
+        /// You're typing (at most twice a second).
+        typing,
+        /// A key was pressed anywhere: the first in 30 seconds
+        /// (`contributes.events` `active`).
+        active,
+        /// A picker that marks several closed: what was marked (or the
+        /// one row picked), or nothing.
+        picked-many(tuple<u64, option<list<string>>>),
+        /// A compose pane closed: what was written, or nothing.
+        composed(tuple<u64, option<string>>),
+        /// A row of its section on Home was picked: its value.
+        home-picked(string),
+        /// The editor theme changed (`theme-colors` has the new one).
+        theme-changed,
+        /// One of its TCP sockets connected (`socket-connect`), or why it
+        /// couldn't.
+        socket-connected(tuple<u64, result<_, string>>),
+        /// What came on one of its TCP sockets, in order.
+        socket-data(tuple<u64, list<u8>>),
+        datagram(datagram),
+        /// One of its sockets closed: by the other end (none), or why.
+        socket-closed(tuple<u64, option<string>>),
+        /// One of its surfaces' panes changed size: and when it first has
+        /// one.
+        surface-resized(surface-size),
+        /// What a program from `spawn-raw` wrote to its stdout.
+        process-bytes(tuple<u64, list<u8>>),
+        /// A file it opens itself (`contributes.opens`) was opened: its
+        /// full path, which it may read (`file-read`).
+        opened(string),
+    }
+
+    /// A coding agent's turn that ended (`agent-turn-ended`).
+    record agent-turn {
+        /// The agent's id: `claude`, `codex`, `devin`, `gemini`, one of
+        /// yours (`agents.servers`), or one an extension brings.
+        agent: string,
+        /// Fenix's id for the thread, the same for each of its turns.
+        thread: string,
+        /// The thread's title.
+        title: string,
+        /// The project the thread works in: its full path.
+        root: string,
+        /// Why it ended: `end_turn`, `cancelled`, `max_tokens`,
+        /// `max_turn_requests`, `refusal`, or `error`.
+        stop-reason: string,
+        /// What the agent said in the turn, as text.
+        text: string,
+    }
+}
+
+interface host {
+    use types.{level, command, http-request, picker-item, check, task, layer-level, item, model-info, here, home-section, image-info, text-edit, editor-theme, rgb, surface-options, cursor-image, surface-mark, cursor-info, folder-entry, text-buffer, decoration, problem, tls-options, decoration-rule, platform-info, launch-config};
+
+    /// Kept for its output page (`SPC h l`).
+    log: func(level: level, message: string);
+    /// Said in Fenix's message line.
+    notify: func(level: level, message: string);
+
+    /// Runs a Fenix command, by id, as if picked from the palette.
+    run-command: func(id: string);
+    /// Opens a file, `/project/...`, at a line: one in its own folders, or
+    /// a full path Fenix gave it. With `editor = "read"`, any other full
+    /// path too, but sealed: opened for you, as text, and what's in it
+    /// doesn't reach the extensions (`buffer-text`).
+    open-file: func(path: string, line: option<u32>);
+    /// A picker; `picked` brings the choice.
+    show-picker: func(title: string, items: list<picker-item>) -> u64;
+    /// A picker where Tab marks rows; `picked-many` brings the marked.
+    show-picker-many: func(title: string, items: list<picker-item>) -> u64;
+    /// A line to type in; `prompted` brings it.
+    prompt: func(label: string, initial: string) -> u64;
+    /// A pane to write text in, called `title`, seeded with `initial`:
+    /// Esc then Enter does `verb` (`post`), `q` drops it; `composed`
+    /// brings it. Empty text is refused unless `allow-empty`.
+    compose: func(title: string, verb: string, initial: string, allow-empty: bool) -> u64;
+    /// Where you are: the file, the selection or line, its project (with
+    /// `editor = "read"` in its permissions).
+    editor-here: func() -> option<here>;
+    /// Its section on Home, or none.
+    home-set: func(section: option<home-section>);
+
+    /// Opens one of its pages: `kind` says which, for `page-render` and
+    /// session restore.
+    page-open: func(kind: string, title: string) -> u64;
+    /// The same, in a new pane beside the focused one, `width` of it (a
+    /// fraction) -- a preview, a sidebar. The focus stays where it was.
+    page-open-beside: func(kind: string, title: string, width: f32) -> u64;
+    /// Its page has changed: Fenix asks for it again.
+    page-refresh: func(page: u64);
+    page-close: func(page: u64);
+
+    /// Opens `text` read-only in a buffer of its own, called `title`,
+    /// highlighted as `language` (`json`, `yaml`, `log`) when given.
+    open-text: func(title: string, text: string, language: option<string>);
+    /// Opens an http(s) URL in the system's browser.
+    open-url: func(url: string) -> result<_, string>;
+    /// Puts `text` on the clipboard.
+    clipboard-set: func(text: string);
+    /// Puts a picture (PNG) on the clipboard.
+    clipboard-set-image: func(png: list<u8>) -> result<_, string>;
+    /// The clipboard's picture, as a PNG, when it holds one.
+    clipboard-image: func() -> option<list<u8>>;
+
+    // The buffers you edit, with `editor = "write"` in its permissions
+    // (`read` is enough to read them).
+
+    /// The text of the buffer open on file `path` (under `/project` or one
+    /// of its folders, a full path Fenix gave it, or any full path you have
+    /// open -- not one sealed, `open-file`), as it is now, saved or not;
+    /// none when no buffer has it.
+    buffer-text: func(path: string) -> option<string>;
+    /// `edits` made to the buffer on `path` -- opened if it isn't and it
+    /// may reach it -- as one change you can undo. Lines and columns are as
+    /// the text was before any of them.
+    buffer-edit: func(path: string, edits: list<text-edit>) -> result<_, string>;
+    /// `text` typed where your cursor is, in the file you're in.
+    buffer-insert: func(text: string) -> result<_, string>;
+    /// The buffer on `path` saved, if it has changes.
+    buffer-save: func(path: string) -> result<_, string>;
+    /// Its item in the modeline while it runs (`docker · 4 running`);
+    /// none takes it away.
+    status-set: func(text: option<string>);
+
+    /// One of its own settings (`<name>.something`), as text.
+    setting: func(key: string) -> option<string>;
+    /// The editor theme's colours.
+    theme-colors: func() -> editor-theme;
+    /// One of its own settings changed and saved: as text, the way
+    /// `setting` gives it; none clears it.
+    setting-set: func(key: string, value: option<string>) -> result<_, string>;
+    /// A secret its manifest asks for (`permissions.secrets`): by key, or
+    /// one a pattern there matches (`http.secret.*`). Kept in the
+    /// system's keychain where there's one.
+    secret: func(key: string) -> option<string>;
+
+    /// Where program `name` (one its manifest names) is on this machine:
+    /// in Fenix's tools folder, on `PATH`, or at one of `hints` (paths,
+    /// `%VAR%` and `$VAR` filled in). A hint `${setting:key}` is
+    /// the path one of its settings holds -- an interpreter you chose --
+    /// and is looked at first. A hint `./gradlew` or `/project/gradlew`
+    /// is under its project, and is looked at before `PATH`. On
+    /// Windows `name.exe`, then `name.cmd` and `name.bat` are
+    /// looked for: `gradlew.bat`, `mvnw.cmd`. The path it gives may be run.
+    find-program: func(name: string, hints: list<string>) -> option<string>;
+    /// Opens the new-project wizard as `:project-new` does: a template, a
+    /// name, `key=value` answers, as far as they go.
+    new-project: func(args: string);
+
+    /// Starts a program its manifest names (`permissions.process`); its
+    /// output and end come as events.
+    spawn: func(cmd: command) -> result<u64, string>;
+    write-stdin: func(process: u64, data: list<u8>) -> result<_, string>;
+    kill: func(process: u64);
+    /// Runs a program in a terminal (a serial monitor, a shell): in the
+    /// focused pane, or in a new one under it when `below`. Its id is
+    /// for `terminal-stop` and `terminal-restart`, and `terminal-closed`.
+    run-in-terminal: func(cmd: command, title: string, below: bool) -> result<u64, string>;
+    /// Stops what runs in terminal `terminal`, keeping its pane and what
+    /// it printed.
+    terminal-stop: func(terminal: u64);
+    /// Starts it again, with `cmd` in place of what ran before when given,
+    /// and a new title when given.
+    terminal-restart: func(terminal: u64, cmd: option<command>, title: option<string>) -> result<_, string>;
+
+    /// Runs a program as a task, in Fenix's task output pane: its errors
+    /// go into the quickfix list. `task-finished` says how it went. One
+    /// task runs at a time; a new one ends the last.
+    run-task: func(name: string, cmd: command) -> result<u64, string>;
+
+    /// How far this machine's time zone is from UTC at instant `at`
+    /// (seconds since 1970, UTC), in seconds east: WASI has no time zone
+    /// of its own.
+    utc-offset: func(at: s64) -> s32;
+
+    /// Goes off after `millis`, once or every time.
+    set-timer: func(millis: u32, repeat: bool) -> u64;
+    cancel-timer: func(timer: u64);
+
+    /// Asks another extension's, or Fenix's, service; `service-reply`
+    /// brings the answer.
+    call-service: func(name: string, payload: string) -> u64;
+    /// The answer to service call `call`, which `serve` said would come
+    /// later.
+    service-answer: func(call: u64, answer: result<string, string>);
+
+    /// A picture it made (PNG, JPEG, GIF, WebP; at most 16 MiB), as an
+    /// image for its canvases.
+    image-load: func(bytes: list<u8>) -> result<image-info, string>;
+    /// A picture file, the same kinds, under `/data` or `/project`, or
+    /// by a full path Fenix gave it (`editor-here`, `opened`).
+    image-file: func(path: string) -> result<image-info, string>;
+    image-free: func(image: u32);
+
+    /// One JSON-RPC message from its language server `server`
+    /// (`contributes.language-servers`) to Fenix: a response, a
+    /// notification (`textDocument/publishDiagnostics`), a request.
+    lsp-send: func(server: u64, message: string);
+
+    // What it says about its project, `/project`: Fenix keeps the last of
+    // each and uses it there, so nothing waits on the extension.
+
+    /// The language server for these languages (`c`, `cpp`) in its
+    /// project, in place of Fenix's own; none goes back to Fenix's.
+    /// Servers already running there start again.
+    language-server-set: func(languages: list<string>, cmd: option<command>) -> result<_, string>;
+    /// Its project's language servers, started again (a board changed).
+    language-server-restart: func();
+    /// Its checks on the project doctor's page, and in its health.
+    doctor-set: func(checks: list<check>);
+    /// The tasks it offers in the task picker (`SPC t t`), each run with
+    /// its command's `env` and `cwd`. An env file is the extension's
+    /// to read (`/project/.env`) into `env`.
+    tasks-set: func(tasks: list<task>) -> result<_, string>;
+
+    // Drawing over the editor, with `draw = "over"` in its permissions.
+
+    /// A PNG in its own folder (`sprites/cat.png`), cut into frames of
+    /// `frame-width` x `frame-height` pixels, left to right, top to bottom.
+    sheet-load: func(path: string, frame-width: u32, frame-height: u32) -> result<u32, string>;
+    /// A 3D model in its own folder (`models/cat.glb`): a binary glTF,
+    /// its textures inside it, at most 4 MiB.
+    model-load: func(path: string) -> result<model-info, string>;
+    /// A layer at `level`; its items are drawn until it's closed.
+    layer-open: func(level: layer-level) -> result<u64, string>;
+    /// Everything layer `layer` draws, in place of what it drew. An item
+    /// given again as it was keeps its glide and its frames going.
+    layer-set: func(layer: u64, items: list<item>);
+    layer-close: func(layer: u64);
+
+    // Sockets, to the hosts and ports its manifest names
+    // (`permissions.sockets`): `host:port`, `*:5900-5999`, `udp://:5000`,
+    // `${setting:key}` for the addresses a setting of its holds.
+
+    /// A TCP connection to `host`:`port`: `socket-connected` says when it's
+    /// made or why it couldn't be, what comes is `socket-data`, and its end
+    /// `socket-closed`.
+    socket-connect: func(host: string, port: u16) -> result<u64, string>;
+    /// Bytes for one of its sockets, sent in order while it carries on: a
+    /// write that fails closes the socket (`socket-closed`).
+    socket-write: func(socket: u64, data: list<u8>) -> result<_, string>;
+    /// A UDP socket on this machine's `port`, which an entry with no host
+    /// lets it take (`:5000`, `udp://:5000`): what comes to it is
+    /// `datagram`. Port 0 takes any free one, for sending: then only
+    /// datagrams from hosts it may reach come.
+    udp-bind: func(port: u16) -> result<u64, string>;
+    /// A datagram from its UDP socket `socket` to `host`:`port`.
+    udp-send: func(socket: u64, host: string, port: u16, data: list<u8>) -> result<_, string>;
+    /// Closes one of its sockets: nothing more comes from it.
+    socket-close: func(socket: u64);
+
+    // Surfaces: panes of pixels it streams. A surface is one of its pages
+    // in all else -- its tab and title, `page-close`, `page-retitle`,
+    // `page-state` and `page-restore`, `page-shown`.
+
+    /// Opens a surface, `kind` and `title` as `page-open`'s. Its pane's size
+    /// comes as `surface-resized`; keys, the pointer and the wheel come to
+    /// `surface-input`.
+    surface-open: func(kind: string, title: string, options: surface-options) -> result<u64, string>;
+    /// Its pixels made `width` x `height` (at most 4096 x 4096), black.
+    surface-resize: func(surface: u64, width: u32, height: u32) -> result<_, string>;
+    /// A rectangle of its pixels, (x, y) and `width` x `height`: BGRA, row
+    /// after row. Shown at the next `surface-present`.
+    surface-write: func(surface: u64, x: u32, y: u32, width: u32, height: u32, bgra: list<u8>) -> result<_, string>;
+    /// A rectangle in one colour.
+    surface-fill: func(surface: u64, x: u32, y: u32, width: u32, height: u32, color: rgb) -> result<_, string>;
+    /// A rectangle moved within it, from (x, y) to (to-x, to-y): a scroll,
+    /// or RFB's CopyRect.
+    surface-copy: func(surface: u64, x: u32, y: u32, width: u32, height: u32, to-x: u32, to-y: u32) -> result<_, string>;
+    /// What it wrote since the last, shown at once, as one frame: until
+    /// then its pane shows the last whole.
+    surface-present: func(surface: u64);
+    /// The pointer's picture over it, drawn where the pointer is; none
+    /// draws nothing there.
+    surface-cursor: func(surface: u64, cursor: option<cursor-image>);
+    /// Boxes tinted over it, in place of the last: a selection, matches.
+    surface-marks: func(surface: u64, marks: list<surface-mark>);
+    /// One of its pages, or surfaces, called something else.
+    page-retitle: func(page: u64, title: string);
+
+    /// Starts a program as `spawn` does, but its stdout comes as bytes
+    /// (`process-bytes`), not lines: a companion that sends pictures back.
+    /// Its stderr still comes a line at a time.
+    spawn-raw: func(cmd: command) -> result<u64, string>;
+    /// The clipboard's text (`permissions.clipboard`).
+    clipboard-text: func() -> option<string>;
+    /// A file's bytes, at most 64 MiB: under `/data`, `/project` or one of
+    /// its folders, or a full path Fenix gave it (`editor-here`, `opened`,
+    /// `explorer-selected`, a forge's repository).
+    file-read: func(path: string) -> result<list<u8>, string>;
+    /// What's selected in the explorer, as a full path, if anything (with
+    /// `editor = "read"`).
+    explorer-selected: func() -> option<string>;
+    /// Fenix's Git pages read again: it changed a repository (a pull
+    /// request opened, a branch checked out).
+    git-refresh: func();
+
+    /// One of its pages, or surfaces, brought to the pane you're in: shown
+    /// there, and gone from any other pane of the window that showed it
+    /// (a surface is drawn in one pane at a time). Nothing when it's no
+    /// page of its any more.
+    page-focus: func(page: u64);
+
+    /// Where the cursor and the selection were when its command was
+    /// picked, with `editor-here` (`editor = "read"`); none in what isn't
+    /// a buffer of text.
+    editor-cursor: func() -> option<cursor-info>;
+
+    /// A scratch buffer of its own, in the focused pane: text you edit,
+    /// called `title`, highlighted as `language` when given. It's never
+    /// saved, nor kept with the session. Your edits come to
+    /// `buffer-changed`, its closing to `scratch-closed`.
+    scratch-open: func(title: string, text: string, language: option<string>) -> u64;
+    /// One of its scratch buffers' text, as it is now; none once it's
+    /// closed.
+    scratch-text: func(scratch: u64) -> option<string>;
+    /// One of its scratch buffers' text replaced with `text`, as one
+    /// change you can undo. It isn't told back (`buffer-changed`).
+    scratch-set: func(scratch: u64, text: string) -> result<_, string>;
+    /// One of its scratch buffers closed; it isn't told back.
+    scratch-close: func(scratch: u64);
+
+    /// The files in folder `path` (a full path) it may read: in a folder
+    /// Fenix gave it, all of them; in the folder of a file Fenix gave it
+    /// (`opened`), those it opens itself too (`contributes.opens`), which
+    /// it may then read as one given -- the next picture in a folder.
+    /// Sorted by name; folders aren't listed.
+    folder-list: func(path: string) -> result<list<folder-entry>, string>;
+
+    /// A sound played, once, while it carries on: a WAV file in its own
+    /// folder (`sounds/chime.wav`) or under `/data`, at most 8 MiB (with
+    /// `sound = true` in its permissions).
+    play-sound: func(path: string) -> result<_, string>;
+
+    /// Its decorations of a buffer, in place of those it set before (an
+    /// empty list takes them away): drawn with its text -- inlays,
+    /// swatches, hidden text, tints, underlines -- and moved with it as
+    /// it's edited, until it sets them again. A file's (the buffer open on
+    /// it, as `buffer-text` reaches it) needs `editor = "read"`; one of its
+    /// scratch buffers', nothing. At most 10,000. A click on one with an
+    /// `id` comes back to it (`decoration-clicked`).
+    decorations-set: func(buffer: text-buffer, decorations: list<decoration>) -> result<_, string>;
+    /// The buffer on `path`'s last change undone, or done again: yours or
+    /// one it made (`buffer-edit`), as `u` and Ctrl+R do -- one history
+    /// for the file, whether its page or its text was edited (with
+    /// `editor = "write"`).
+    buffer-undo: func(path: string) -> result<_, string>;
+    buffer-redo: func(path: string) -> result<_, string>;
+    /// Eight colours from the editor theme, distinct from each other and
+    /// readable on its background: for series in a chart, groups, matches.
+    theme-palette: func() -> list<rgb>;
+
+    // What a language pack needs.
+
+    /// The debug adapter for these languages in its project (`SPC u u`),
+    /// in place of Fenix's own; none goes back to Fenix's. The project's
+    /// own (`.fenix/tools.json`'s `dap`) still wins.
+    debug-adapter-set: func(languages: list<string>, cmd: option<command>) -> result<_, string>;
+    /// The formatter for these languages in its project, before a
+    /// language server's: `SPC c F` -- and saving, with
+    /// `editor.format_on_save` -- runs it with the buffer's text on its
+    /// stdin and takes what it writes to stdout as the new text, when it
+    /// ends well within 3 seconds. `${file}` in its args is the file's full
+    /// path (`--stdin-filepath ${file}`). None takes it away. When
+    /// `keep-output`, what it wrote is taken even when it exits with a
+    /// failure, if it wrote anything: ktlint, which fails when it found
+    /// what it can't fix.
+    formatter-set: func(languages: list<string>, cmd: option<command>, keep-output: bool) -> result<_, string>;
+    /// Its problems in the file on `path`, in place of those it gave
+    /// before (an empty list takes them away): shown with the language
+    /// servers' -- a linter's, without being a language server. A file
+    /// under `/project` or one of its folders, one Fenix gave it, or, with
+    /// `editor = "read"`, any full path. At most 10,000. Their fixes are
+    /// offered in the code action list (`SPC c a`).
+    diagnostics-set: func(path: string, problems: list<problem>) -> result<_, string>;
+    /// The stdin of a program it started (`spawn`) closed, so the program
+    /// reads it to its end -- a formatter, `jq`.
+    close-stdin: func(process: u64);
+    /// `scratch-open`, in a pane beside the focused one, `width` of it (a
+    /// fraction): the same pane each time while it's there. The focus
+    /// stays where it was.
+    scratch-open-beside: func(title: string, text: string, language: option<string>, width: f32) -> u64;
+    /// `open-text`, in that pane beside.
+    open-text-beside: func(title: string, text: string, language: option<string>, width: f32);
+    /// An HTTP request to a host its manifest names, its body written to
+    /// file `path` under `/tools` or `/data`, in a folder that's there (up
+    /// to 2 GiB, while it carries on), rather than given to it: `http-response` says how it went, its
+    /// body empty. With `sha256` (hex), a body that isn't that is an error
+    /// and no file. A server's release, a debug adapter's.
+    http-download: func(req: http-request, path: string, sha256: option<string>) -> result<u64, string>;
+    /// A file under `/tools` made one that runs, on Linux and macOS (on
+    /// Windows any file does): a program it unpacked there.
+    set-executable: func(path: string) -> result<_, string>;
+
+    /// An HTTP request to a host its manifest names
+    /// (`permissions.network`), made as its `options` say. Its answer --
+    /// with where it ended up and how long each part took -- comes to
+    /// `handle` as `http-response`; streamed (`options.stream`), it comes
+    /// to `http-event` instead, in parts, its body as it comes.
+    http: func(req: http-request) -> result<u64, string>;
+    /// Request `request` from `http` given up: nothing more comes of
+    /// it. A stream it no longer wants.
+    http-cancel: func(request: u64);
+    /// `socket-connect` with TLS: `socket-connected` once the handshake's
+    /// done, or why it couldn't be; what comes and goes after is the
+    /// plain text.
+    socket-connect-tls: func(host: string, port: u16, tls: tls-options) -> result<u64, string>;
+    /// TLS from here on, on its TCP socket `socket`, connected: what it
+    /// wrote before goes as it was, what it writes after goes once the
+    /// handshake's done. `socket-connected` says when it is, or
+    /// `socket-closed` why it couldn't be. PostgreSQL's and MySQL's
+    /// STARTTLS: their answer read, then this.
+    socket-start-tls: func(socket: u64, tls: tls-options) -> result<_, string>;
+    /// A local socket a program on this machine listens on, by a name its
+    /// manifest lists (`permissions.ipc`: `discord-ipc-*`,
+    /// `${setting:key}`): on Windows the named pipe `\\.\pipe\<name>`; on
+    /// Linux and macOS the Unix socket at that path, or of that name in
+    /// `$XDG_RUNTIME_DIR`, `$TMPDIR` or `/tmp`. It's a socket as a TCP
+    /// one is: `socket-connected`, `socket-data`, `socket-closed`,
+    /// `socket-write`, `socket-close`.
+    ipc-connect: func(name: string) -> result<u64, string>;
+    /// `debug-adapter-set` for an adapter that speaks over a socket, not
+    /// its stdin and stdout (js-debug, CodeLLDB's `--port`): Fenix starts
+    /// `cmd` and connects to it at 127.0.0.1:`port` -- 0 lets Fenix pick a
+    /// free one, which `${port}` in its args is. Without a command, it
+    /// connects to an adapter already running there, a port its manifest
+    /// lets it reach (`permissions.sockets`, `localhost:4711`).
+    debug-adapter-connect: func(languages: list<string>, cmd: option<command>, port: u16) -> result<_, string>;
+    /// Its rules for decorating files, in place of those it gave before
+    /// (an empty list takes them away), with `editor = "read"`: Fenix
+    /// applies them to a file's buffer before it's first drawn, and again
+    /// as it's edited, without asking it -- values masked in `.env` files
+    /// from the start. At most 64 rules, on files up to 4 MiB.
+    decoration-rules-set: func(rules: list<decoration-rule>) -> result<_, string>;
+    /// The file its page `page` shows now -- one it may read -- or none:
+    /// what `SPC f o` and an editor's `buffer-changed` go by, after it
+    /// went to the next picture in a folder.
+    page-file: func(page: u64, path: option<string>) -> result<_, string>;
+    /// The machine Fenix runs on.
+    platform: func() -> platform-info;
+
+    /// A buffer highlighted as `language` from now on -- one of Fenix's
+    /// (`json`) or one an extension's grammar brings (`kotlin`) -- or, with
+    /// none, as its file's name says again. A file's needs `editor =
+    /// "read"`, as `decorations-set`; one of its scratch buffers', nothing.
+    /// Only its highlighting, folds and scopes change: a language server
+    /// goes by the file's name.
+    buffer-language-set: func(buffer: text-buffer, language: option<string>) -> result<_, string>;
+    /// `run-task`, but beside the task pane rather than in it: several run
+    /// at once, at most 4 of its own. Its output goes to a buffer of its
+    /// own, `*<name>*`, which `task-show` brings up; its errors don't go
+    /// into the quickfix list. `task-finished` says how it went.
+    run-task-background: func(name: string, cmd: command) -> result<u64, string>;
+    /// Its task `task`, from `run-task-background`, stopped: `task-finished`
+    /// says it failed.
+    task-cancel: func(task: u64);
+    /// Its task `task`'s output, in the focused pane.
+    task-show: func(task: u64) -> result<_, string>;
+    /// A language server in its project called `name`, beside the others
+    /// for these languages -- Fenix's own, the project's, another
+    /// extension's -- not in place of them (`language-server-set`):
+    /// basedpyright and ruff, typescript-language-server and ESLint. Their
+    /// completions, problems and code actions are merged. Set again by
+    /// name, it starts again with `cmd`; none takes it away.
+    language-server-add: func(name: string, languages: list<string>, cmd: option<command>) -> result<_, string>;
+
+    /// Fenix's own process id (WASI has none to give): what Discord's
+    /// `SET_ACTIVITY` takes.
+    process-id: func() -> u32;
+    /// The settings its project's language server `name` is given when it
+    /// asks (`workspace/configuration`): a JSON object, each section it
+    /// asks for (`eslint`, `tailwindCSS.lint`) taken from it; none takes
+    /// them away. `name` is a server it added (`language-server-add`), or
+    /// a language, for that language's server (`typescript`). Over what
+    /// the project's `.fenix/lsp/<name>.json` says. Servers running are
+    /// told (`workspace/didChangeConfiguration`).
+    language-server-settings: func(name: string, settings: option<string>) -> result<_, string>;
+    /// The launch configurations it offers in its project, in place of
+    /// those it gave before: `SPC u u` offers them beside its launch files.
+    /// At most 256.
+    launches-set: func(launches: list<launch-config>) -> result<_, string>;
+    /// `${name}` in its launches and launch files, filled in from
+    /// `choices` -- with one, its value; with several, the one picked in a
+    /// picker as the session starts (a CMake target, a process). An empty
+    /// list takes it away. A name is letters, digits, `_`, `-` and `.`,
+    /// and none of Fenix's own (`file`, `project`, `pickProcess`).
+    launch-variable-set: func(name: string, choices: list<picker-item>) -> result<_, string>;
+
+    /// Secret `key` kept, in the system's keychain where there's one --
+    /// a password asked for once -- or, with none, taken away. Held to
+    /// `permissions.secrets` as `secret` is; Fenix's own tokens
+    /// (`gitlab.token`) can't be written. `secret` gives it from then on.
+    secret-set: func(key: string, value: option<string>) -> result<_, string>;
+    /// `prompt`, its text shown as dots as it's typed: a password. What's
+    /// typed isn't kept or logged by Fenix; `prompted` brings it.
+    prompt-secret: func(label: string) -> u64;
+    /// A TCP port on this machine's loopback, 127.0.0.1, listened on: one
+    /// its manifest lets it take (`permissions.listen`), or 0 for any free
+    /// one. Its id and the port it got come back: an OAuth redirect's
+    /// `http://127.0.0.1:<port>/`. Each connection made to it comes to
+    /// `socket-accepted`, a socket as a TCP one is from then on
+    /// (`socket-data`, `socket-write`, `socket-closed`); `socket-close`
+    /// on the listener stops it.
+    tcp-listen: func(port: u16) -> result<tuple<u64, u16>, string>;
+    /// One of Fenix's environment variables, one its manifest names
+    /// (`permissions.env`: `JAVA_HOME`, `JAVA_*`, `${setting:key}`): a
+    /// `.http` file's `$processEnv`. None when it isn't set, or isn't one
+    /// it may read.
+    env-var: func(name: string) -> option<string>;
+
+    /// A coding agent its manifest names (`contributes.agents`), as the
+    /// command line that starts it: an ACP server on stdio, often one in
+    /// its tools folder. It's offered beside Fenix's own on the agents
+    /// page (`SPC a`) while the extension runs; none takes it away.
+    agent-provide: func(id: string, cmd: option<command>) -> result<_, string>;
+}
+
+/// An extension: what Fenix calls in it.
+world extension {
+    use types.{event, page, key, surface-input, changed, focus, key-press, mouse-event, http-part, text-view, text-buffer, debug-state, agent-turn};
+    import host;
+
+    /// Once, when Fenix loads it: set up, or say why it can't.
+    export activate: func() -> result<_, string>;
+
+    /// Run one of the commands its manifest contributes, by id.
+    export run-command: func(id: string) -> result<_, string>;
+
+    /// Something it asked for has come, or something changed.
+    export handle: func(event: event);
+
+    /// Its page `page`, laid out `width` cells wide for a pane `height`
+    /// lines tall: again when the pane's size changes -- a table fitted to
+    /// it, a header or a key strip at its foot.
+    export page-render: func(page: u64, width: u32, height: u32) -> page;
+    /// A key on its page `page`; Fenix asks for the page again after.
+    export page-key: func(page: u64, key: key);
+    /// A key on its page `page` that `page-key` doesn't take, when the
+    /// page takes more keys (`page.more-keys`). Fenix asks for the page
+    /// again after.
+    export page-key-press: func(page: u64, key: key-press);
+    /// A click, a drag or the wheel on its page `page`, when the page
+    /// asks (`page.mouse`). Fenix asks for the page again after.
+    export page-mouse: func(page: u64, event: mouse-event);
+    /// Text pasted on its page `page` while it's typing.
+    export page-paste: func(page: u64, text: string);
+    /// What it needs to open page `page` again next time (session
+    /// restore), if anything.
+    export page-state: func(page: u64) -> option<string>;
+    /// Opens a page of `kind` again from `state`, as page `page`; false
+    /// when it can't.
+    export page-restore: func(page: u64, kind: string, state: string) -> bool;
+    /// You closed one of its pages or surfaces -- its tab, `q`, the
+    /// buffer -- so what it kept for it can go. Not for one it closed
+    /// itself (`page-close`), nor when Fenix quits.
+    export page-closed: func(page: u64);
+
+    /// One JSON-RPC message for its language server `server`, as Fenix
+    /// talks to any language server: `initialize` first (its project in
+    /// `rootUri`), then documents opened and changed, and requests --
+    /// hover, completion, definition -- whose answers Fenix merges with
+    /// the other servers'. Each project is a server of its own.
+    export lsp-message: func(server: u64, message: string);
+
+    /// Answers one of the services its manifest offers, as call `call`:
+    /// now, or none, and later through `service-answer`.
+    export serve: func(call: u64, name: string, payload: string) -> option<result<string, string>>;
+
+    /// A key, the pointer or the wheel on its surface `surface`.
+    export surface-input: func(surface: u64, input: surface-input);
+
+    /// A buffer's text changed: told once it's been still for 300 ms. One
+    /// of its scratch buffers', always; a file's, when it asks
+    /// (`contributes.events` `changed`, with `editor = "read"`).
+    export buffer-changed: func(what: changed);
+    /// You closed one of its scratch buffers.
+    export scratch-closed: func(scratch: u64);
+    /// Something else has the focus: a file, a page, nothing (when it
+    /// asks, `contributes.events` `focus`). Told once as it starts, and
+    /// as it changes.
+    export focus-moved: func(focus: focus);
+
+    /// What came of its streamed request `request` (`http`): its answer,
+    /// its body in parts, and then its end.
+    export http-event: func(request: u64, part: http-part);
+    /// A file was saved, when it asks (`contributes.events` `saved`): its
+    /// full path with `editor = "read"`, else its path under `/project`;
+    /// told after `saved`, which gives only its name. A file it may not
+    /// know of isn't told here.
+    export file-saved: func(path: string);
+
+    /// The lines each pane shows of a buffer it may know of, when they
+    /// change (when it asks, `contributes.events` `view`): its scratch
+    /// buffers', and with `editor = "read"` files'. Told once they've been
+    /// still for 100 ms -- what to decorate in a long file, without `draw`.
+    export view-changed: func(views: list<text-view>);
+    /// A click on one of its decorations that has an id
+    /// (`decorations-set`).
+    export decoration-clicked: func(buffer: text-buffer, id: u32);
+
+    /// A task started in the task pane, by name (when it asks,
+    /// `contributes.events` `tasks`): `task-ended` comes when it's done.
+    export task-started: func(name: string);
+    /// A debug session started, paused, ran again or ended (when it asks,
+    /// `contributes.events` `debug`) -- each child session an adapter
+    /// asked for too.
+    export debug-changed: func(state: debug-state);
+
+    /// A connection was made to one of its ports (`tcp-listen`): the
+    /// listener, the new socket's id, and who connected, `host:port`.
+    export socket-accepted: func(listener: u64, socket: u64, peer: string);
+
+    /// A coding agent's turn ended, in any of your threads (when it
+    /// asks, `contributes.events` `agents`, which needs `permissions.agents`).
+    export agent-turn-ended: func(turn: agent-turn);
+}

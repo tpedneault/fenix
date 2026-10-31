@@ -1,0 +1,87 @@
+[template]
+name = "Python · uv"
+kind = "python"
+group = "Python"
+description = "A uv-managed project: pyproject.toml, a locked .venv, and test and lint tasks wired up."
+needs = ["uv"]
+open = ["src/{{name_snake}}/__init__.py"]
+
+[[ask]]
+key = "layout"
+label = "Layout"
+choices = ["app", "lib"]
+default = "app"
+hint = "app: a command, run with uv run <name>  ·  lib: a package to import"
+
+[[ask]]
+key = "python"
+label = "Python"
+choices = ["3.13", "3.12", "3.11", "3.10"]
+default = "3.12"
+hint = "uv downloads it if it isn't installed"
+
+[[ask]]
+key = "deps"
+label = "Dependencies"
+default = ""
+hint = "space-separated, e.g. requests rich"
+
+[[ask]]
+key = "dev"
+label = "Dev tools"
+many = ["pytest", "ruff", "mypy"]
+default = ["pytest", "ruff"]
+
+[[ask]]
+key = "pyright"
+label = "Install pyright"
+default = false
+hint = "uv tool install pyright -- the Python language server Fenix starts"
+
+[[run]]
+exec = "uv"
+args = ["init", "--{{layout}}", "--package", "--python", "{{python}}", "--name", "{{name_kebab}}", "--vcs", "none", "--no-readme"]
+
+[[run]]
+exec = "uv"
+args = ["add", "{{deps...}}"]
+when = "deps"
+
+[[run]]
+exec = "uv"
+args = ["add", "--dev", "{{dev...}}"]
+when = "dev"
+
+[[run]]
+exec = "uv"
+args = ["tool", "install", "pyright"]
+when = "pyright"
+
+[[task]]
+name = "run"
+exec = "uv"
+args = ["run", "{{name_kebab}}"]
+when = "layout == app"
+
+[[task]]
+name = "test"
+exec = "uv"
+args = ["run", "pytest"]
+when = "dev == pytest"
+
+[[task]]
+name = "lint"
+exec = "uv"
+args = ["run", "ruff", "check"]
+when = "dev == ruff"
+
+[[task]]
+name = "typecheck"
+exec = "uv"
+args = ["run", "mypy", "."]
+when = "dev == mypy"
+
+[[file]]
+path = "tests/test_smoke.py"
+from = "tests/test_smoke.py"
+when = "dev == pytest"

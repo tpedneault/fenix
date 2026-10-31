@@ -1,0 +1,73 @@
+[template]
+name = "Arduino sketch"
+kind = "arduino"
+group = "Embedded"
+description = "A sketch folder with its board and port saved in sketch.yaml, ready for SPC m b to build and SPC m u to upload."
+needs = ["arduino-cli"]
+name_rule = "sketch"
+open = ["{{name}}.ino"]
+
+[[ask]]
+key = "board"
+label = "Board"
+choices = ["arduino:avr:uno", "arduino:avr:nano", "arduino:avr:mega", "arduino:avr:leonardo", "arduino:renesas_uno:unor4wifi", "esp32:esp32:esp32"]
+default = "arduino:avr:uno"
+hint = "SPC m s changes it later; SPC m c installs its board package"
+
+[[ask]]
+key = "port"
+label = "Port"
+default = ""
+hint = "e.g. COM4 -- blank to choose later with SPC m p"
+
+[[ask]]
+key = "baud"
+label = "Baud"
+choices = ["9600", "115200"]
+default = "9600"
+
+[[ask]]
+key = "start"
+label = "Start from"
+choices = ["blink", "serial echo", "empty"]
+default = "blink"
+
+[[ask]]
+key = "libraries"
+label = "Libraries"
+default = ""
+hint = "comma-separated, e.g. Servo, Adafruit NeoPixel"
+
+[[file]]
+path = "{{name}}.ino"
+from = "blink.ino"
+when = "start == blink"
+
+[[file]]
+path = "{{name}}.ino"
+from = "echo.ino"
+when = "start == serial echo"
+
+[[file]]
+path = "{{name}}.ino"
+from = "empty.ino"
+when = "start == empty"
+
+[[file]]
+path = "sketch.yaml"
+content = "default_fqbn: {{board}}\ndefault_port: {{port}}\n"
+when = "port"
+
+[[file]]
+path = "sketch.yaml"
+content = "default_fqbn: {{board}}\n"
+when = "!port"
+
+[[file]]
+path = ".fenix/project.ini"
+content = "[monitor]\nbaudrate = {{baud}}\n"
+
+[[run]]
+exec = "arduino-cli"
+args = ["lib", "install", "{{libraries...}}"]
+when = "libraries"

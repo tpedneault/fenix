@@ -1,0 +1,41 @@
+id = "fenix.pages"
+track = "Fenix"
+order = 4
+title = "Pages: Git, projects, tasks"
+about = "Fenix's own pages: j and k move on them, Enter acts, q closes one."
+text = """
+A page is a buffer Fenix lays out itself: the projects (SPC p p), Git's
+status (SPC g g), the settings. j and k move on one, Enter acts on what's
+under the cursor, and q closes it. SPC p t picks a task of the project's
+to run.
+"""
+
+[[step]]
+say = "SPC p p: every project Fenix knows, how each is doing, and Enter opens one."
+hint = "Space, p (project), p."
+page = "projects"
+
+[[step]]
+say = "q closes it."
+hint = "q, on the page."
+closed = "projects"
+
+[[step]]
+say = "SPC g g: the Git status page for the repository you're in."
+hint = "Only in a Git repository: if you aren't in one, s on the tutorial page skips this."
+page = "git"
+
+[[step]]
+say = "q closes it too."
+hint = "q, on the page."
+closed = "git"
+
+[[step]]
+say = "SPC p t: the project's tasks, to run one."
+hint = "It takes a project with tasks (Cargo, npm, a Makefile, ...): s on the tutorial page skips this when there's none."
+picker = "tasks"
+
+[[step]]
+say = "Esc, or Enter to run the one picked."
+hint = "Esc."
+picker = "none"

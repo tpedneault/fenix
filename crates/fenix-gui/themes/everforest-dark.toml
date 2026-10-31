@@ -1,0 +1,54 @@
+# Everforest, sainnhe's palette, its medium dark background.
+name = "Everforest Dark"
+tabs = "underline"
+
+[surfaces]
+bg = "#2d353b"
+sidebar_bg = "#232a2e"
+bg_modeline = "#343f44"
+divider = "#475258"
+caret = "#d3c6aa"
+hl_line = "#343f44"
+selection = { color = "#7fbbb3", alpha = 0.18 }
+bracket_match = { color = "#a7c080", alpha = 0.15 }
+search_match = { color = "#dbbc7f", alpha = 0.16 }
+
+[text]
+fg = "#d3c6aa"
+fg_modeline = "#d3c6aa"
+caret_text = "#d3c6aa"
+gutter_fg = "#a2aca5"
+
+[modes]
+normal = "#a7c080"
+insert = "#7fbbb3"
+visual = "#e78183"
+replace = "#e69875"
+command = "#d699b6"
+explorer = "#83c092"
+picker = "#d699b6"
+text_dark = "#2d353b"
+
+[syntax]
+keyword = "#ea9193"
+string = "#83c092"
+comment = "#a2aca5"
+function = "#a7c080"
+type = "#dbbc7f"
+number = "#d699b6"
+constant = "#d699b6"
+variable = "#d3c6aa"
+operator = "#e69875"
+punctuation = "#e69875"
+attribute = "#dbbc7f"
+
+[explorer]
+folder = "#7fbbb3"
+file = "#d3c6aa"
+
+[git]
+modified = "#dbbc7f"
+staged = "#a7c080"
+untracked = "#7fbbb3"
+ignored = "#a2aca5"
+conflicted = "#ea9193"
