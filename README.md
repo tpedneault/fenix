@@ -63,9 +63,19 @@ See [Features](docs/FEATURES.md) for the full tour.
 alone without administrator rights, or for everyone on the machine; puts
 Fenix in the Start menu and on `PATH`; can add "Open with Fenix" to
 Explorer; and upgrades an older install in place. A portable zip is
-published beside it.
+published beside it. Or, with [Scoop](https://scoop.sh):
 
-**Linux:** download the `.tar.gz`, unpack it, and run `fenix`.
+```powershell
+scoop bucket add fenix https://github.com/tpedneault/scoop-fenix
+scoop install fenix
+```
+
+**Linux:** download the `.deb` or `.rpm` from
+[Releases](https://github.com/tpedneault/fenix/releases/latest) and install
+it (`sudo apt install ./fenix_<version>_amd64.deb`, or
+`sudo dnf install ./fenix-<version>-1.x86_64.rpm`): Fenix in your
+applications menu, `fenix` on `PATH`. Or unpack the `.tar.gz` and run
+`fenix`. Any distribution with glibc 2.35 or newer.
 
 **From source**, with a recent stable [Rust](https://rustup.rs) toolchain:
 
