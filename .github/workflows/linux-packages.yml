@@ -1,0 +1,99 @@
+name: Linux packages
+
+# The .deb and .rpm for a release that's already out (the release workflow
+# builds them for every new tag): built from its Linux archive, installed in
+# a clean Ubuntu and Fedora to check them, then attached to the release when
+# `upload` is set.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'The release, vX.Y.Z'
+        required: true
+      upload:
+        description: 'Attach the packages to the release'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag }}
+
+jobs:
+  build:
+    name: Build the packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: The release's Linux archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*-x86_64-unknown-linux-gnu.tar.gz*'
+          sha256sum -c ./*.tar.gz.sha256
+          tar -xzf ./*.tar.gz
+      - name: What the binaries link against
+        run: |
+          readelf -d fenix-*-x86_64-unknown-linux-gnu/fenix | grep NEEDED
+          readelf -d fenix-*-x86_64-unknown-linux-gnu/fenix-pdfium | grep NEEDED
+      - name: Build
+        run: packaging/linux/build-packages.sh "${TAG#v}" fenix-"${TAG#v}"-x86_64-unknown-linux-gnu dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: dist
+
+  test:
+    name: Install on ${{ matrix.image }}
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            install: apt-get update -qq && apt-get install -y -qq ./dist/*.deb
+          - image: debian:12
+            install: apt-get update -qq && apt-get install -y -qq ./dist/*.deb
+          - image: fedora:41
+            install: dnf install -y -q ./dist/*.rpm
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Install
+        run: ${{ matrix.install }}
+      - name: Check it
+        run: |
+          test -x /usr/bin/fenix && test -x /usr/bin/fenix-pdfium
+          test -f /usr/share/applications/fenix.desktop
+          test -f /usr/share/icons/hicolor/256x256/apps/fenix.png
+          if ldd /usr/bin/fenix | grep 'not found'; then exit 1; fi
+          ldd /usr/bin/fenix
+
+  upload:
+    name: Attach to the release
+    needs: test
+    if: inputs.upload
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/*.deb dist/*.deb.sha256 dist/*.rpm dist/*.rpm.sha256 --repo "$GITHUB_REPOSITORY" --clobber

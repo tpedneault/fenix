@@ -2,7 +2,8 @@ name: Release
 
 # Pushing a tag vX.Y.Z builds Fenix for Windows and Linux and publishes
 # a GitHub release with the binaries -- for Windows a zip and an
-# installer (packaging/windows/fenix.iss) -- and that version's
+# installer (packaging/windows/fenix.iss), for Linux an archive, a .deb
+# and an .rpm (packaging/linux) -- and that version's
 # CHANGELOG.md entry. The release stays a draft until every build has uploaded, so
 # a failed build never leaves a half-published release behind.
 
@@ -126,10 +127,16 @@ jobs:
           if (-not (Test-Path $setup)) { throw "no $setup" }
           "$((Get-FileHash $setup -Algorithm SHA256).Hash.ToLower())  $setup`n" | Out-File -Encoding ascii -NoNewline "$setup.sha256"
           "SETUP=$setup" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      # The .deb and .rpm, beside the archive: packaging/linux, with nfpm.
+      - name: Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          packaging/linux/build-packages.sh "${TAG#v}" "fenix-${TAG#v}-${{ matrix.target }}" dist
+          echo "PACKAGES=$(ls dist/*.deb dist/*.rpm dist/*.sha256 | tr '\n' ' ')" >> "$GITHUB_ENV"
       - name: Upload to the draft
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" ${SETUP:+"$SETUP" "$SETUP.sha256"} --clobber
+        run: gh release upload "$TAG" "$ARCHIVE" "$ARCHIVE.sha256" ${SETUP:+"$SETUP" "$SETUP.sha256"} $PACKAGES --clobber
 
   publish:
     name: Publish the release
