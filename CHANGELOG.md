@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Linux packages with each release, a `.deb` and an `.rpm` beside the
+  archive: Fenix in your applications menu and `fenix` on `PATH`.
+- A [Scoop](https://scoop.sh) bucket, `tpedneault/scoop-fenix`:
+  `scoop bucket add fenix https://github.com/tpedneault/scoop-fenix`, then
+  `scoop install fenix`.
+
 ## [1.0.0] - 2026-10-31
 
 The first release: a keyboard-first, GPU-rendered editor with Vim's
