@@ -7,7 +7,7 @@
 <meta name="description" content="Fenix is a keyboard-first editor written from scratch in Rust: Vim's editing grammar, a SPC leader for everything else, Git, a debugger, coding agents and sandboxed extensions.">
 <meta property="og:title" content="Fenix: the keyboard-first editor">
 <meta property="og:description" content="Vim's grammar. A leader key for everything else. Git, a debugger, coding agents and sandboxed extensions in one GPU-rendered window.">
-<meta property="og:image" content="fenix-lockup.png">
+<meta property="og:image" content="https://tpedneault.github.io/fenix/screens/editor-which-key.png">
 <meta name="theme-color" content="#111215">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -60,149 +60,12 @@ Download for Windows</a>
 </div>
 </section>
 
-<!-- The editor, drawn -->
-<section aria-label="The Fenix window" style="max-width: 1200px; margin: 0 auto; padding: 24px 24px 96px">
-<div style="background: #17181C; border: 1px solid #2A2B31; border-radius: 14px; overflow: hidden; box-shadow: 0 40px 120px rgba(0,0,0,0.55)">
-<div style="display: flex; align-items: center; gap: 2px; background: #131417; border-bottom: 1px solid #24252B; padding: 0 12px; font-family: 'Martian Mono', monospace; font-size: 12px; overflow-x: auto">
-<span style="padding: 11px 14px; color: #8E909A">Home</span>
-<span style="padding: 11px 14px; color: #EDEDF0; border-bottom: 2px solid #FF6A3D">telemetry.rs</span>
-<span style="padding: 11px 14px; color: #8E909A">frames.rs</span>
-<span style="padding: 11px 14px; color: #8E909A">Git</span>
-<span style="padding: 11px 14px; color: #8E909A">Agent · Claude Code</span>
-</div>
-<div style="display: flex; flex-wrap: wrap; min-height: 420px">
-<div style="flex: 999 1 560px; min-width: 0; position: relative; padding: 18px 0; font-family: 'Martian Mono', monospace; font-size: 13px; line-height: 1.85; overflow-x: auto">
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">36</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #6F717B">/// A frame off the wire, checked before anything reads it.</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">37</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #FF8A62">pub fn decode(raw: &amp;[u8]) -&gt; Result&lt;Frame, FrameError&gt; {</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">38</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #D2D3D8">    if raw.len() &lt; HEADER_LEN {</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">39</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #D2D3D8">        return Err(FrameError::Short(raw.len()));</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">40</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #D2D3D8">    }</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">41</span>
-<span style="color: #8E909A; flex: none">● </span>
-<span style="color: #FFB547">    let header = Header::parse(&amp;raw[..HEADER_LEN])?;</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">42</span>
-<span style="color: #8E909A; flex: none">▸ </span>
-<span style="color: #D2D3D8">    let body = check_crc(raw)?;</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">43</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #D2D3D8">    let apid = header.apid();</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">44</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #8FB8DE">    Ok(Frame { header, apid, body: body.to_vec() })</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">45</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #D2D3D8">}</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">46</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #D2D3D8"></span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">47</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #6F717B">#[cfg(test)]</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">48</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #FF8A62">mod tests {</span>
-</div>
-
-<div style="display: flex; white-space: pre">
-<span style="width: 52px; text-align: right; padding-right: 18px; color: #5A5C66; flex: none">49</span>
-<span style="color: #8E909A; flex: none">  </span>
-<span style="color: #A9D18E">    // a corrupted frame is refused, never half-read</span>
-</div>
-
-<div style="position: absolute; right: 24px; bottom: 20px; width: min(420px, calc(100% - 48px)); background: #1F2025; border: 1px solid #34353C; border-radius: 10px; padding: 14px 16px; box-shadow: 0 18px 48px rgba(0,0,0,0.5)">
-<div style="display: flex; justify-content: space-between; color: #8E909A; font-size: 11px; margin-bottom: 8px"><span>SPC g</span><span>git</span></div>
-<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 2px 18px; font-size: 12px; line-height: 1.9">
-
-<div style="display: flex; gap: 10px; white-space: nowrap"><span style="color: #FFB547; width: 14px">g</span><span style="color: #D2D3D8">status</span></div>
-
-<div style="display: flex; gap: 10px; white-space: nowrap"><span style="color: #FFB547; width: 14px">l</span><span style="color: #D2D3D8">log</span></div>
-
-<div style="display: flex; gap: 10px; white-space: nowrap"><span style="color: #FFB547; width: 14px">G</span><span style="color: #D2D3D8">graph</span></div>
-
-<div style="display: flex; gap: 10px; white-space: nowrap"><span style="color: #FFB547; width: 14px">c</span><span style="color: #D2D3D8">compare</span></div>
-
-<div style="display: flex; gap: 10px; white-space: nowrap"><span style="color: #FFB547; width: 14px">v</span><span style="color: #D2D3D8">side by side</span></div>
-
-<div style="display: flex; gap: 10px; white-space: nowrap"><span style="color: #FFB547; width: 14px">B</span><span style="color: #D2D3D8">blame</span></div>
-
-<div style="display: flex; gap: 10px; white-space: nowrap"><span style="color: #FFB547; width: 14px">w</span><span style="color: #D2D3D8">switch branch</span></div>
-
-<div style="display: flex; gap: 10px; white-space: nowrap"><span style="color: #FFB547; width: 14px">p</span><span style="color: #D2D3D8">pull</span></div>
-
-</div>
-</div>
-</div>
-<div style="flex: 1 1 300px; min-width: 0; border-left: 1px solid #24252B; background: #141518; padding: 18px 20px; font-size: 13px">
-<div style="font-family: 'Martian Mono', monospace; font-size: 11px; color: #8E909A; margin-bottom: 14px; display: flex; justify-content: space-between"><span>AGENT · CLAUDE CODE</span><span style="color: #7CC79A">● working</span></div>
-<div style="background: #1D1E22; border-radius: 8px; padding: 12px 14px; color: #D2D3D8; margin-bottom: 12px">Add a CRC check to the frame decoder, and a test for a corrupted frame.</div>
-<div style="color: #B4B6BE; margin-bottom: 12px">Reading <span style="font-family: 'Martian Mono', monospace; color: #EDEDF0">frames.rs</span>, then running the tests.</div>
-<div style="font-family: 'Martian Mono', monospace; font-size: 12px; background: #101113; border: 1px solid #24252B; border-radius: 8px; padding: 10px 12px; color: #8E909A; margin-bottom: 12px">$ cargo test frames<br><span style="color: #7CC79A">test result: ok. 14 passed</span></div>
-<div style="border: 1px solid #34353C; border-radius: 8px; overflow: hidden">
-<div style="display: flex; justify-content: space-between; padding: 8px 12px; background: #1D1E22; font-size: 12px"><span style="font-family: 'Martian Mono', monospace">frames.rs  +12 −2</span><span style="color: #FFB547">review</span></div>
-<div style="font-family: 'Martian Mono', monospace; font-size: 12px; line-height: 1.7; padding: 8px 12px">
-<div style="color: #E5847A">- let body = &amp;raw[6..];</div>
-<div style="color: #7CC79A">+ let body = check_crc(raw)?;</div>
-</div>
-<div style="display: flex; gap: 8px; padding: 0 12px 12px">
-<span style="font-family: 'Martian Mono', monospace; font-size: 11px; background: #2A2B31; padding: 4px 8px; border-radius: 5px">a accept</span>
-<span style="font-family: 'Martian Mono', monospace; font-size: 11px; background: #2A2B31; padding: 4px 8px; border-radius: 5px">x reject</span>
-</div>
-</div>
-</div>
-</div>
-<div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; background: #131417; border-top: 1px solid #24252B; padding: 6px 14px; font-family: 'Martian Mono', monospace; font-size: 11px; color: #8E909A">
-<span><span style="background: #FF6A3D; color: #160B07; padding: 1px 7px; border-radius: 3px; font-weight: 600">NORMAL</span>  telemetry.rs  ~/mission/ground</span>
-<span>rust-analyzer ✓  ⎇ main +3  ln 42, col 17</span>
-</div>
-</div>
+<!-- The editor -->
+<section aria-label="Fenix" style="max-width: 1200px; margin: 0 auto; padding: 24px 24px 96px">
+<figure style="margin: 0">
+<img src="screens/editor-which-key.png" width="1586" height="962" alt="Fenix editing a Rust file, with the SPC g menu open: the Git commands grouped under View, Branch and remote, and This change" style="display: block; width: 100%; height: auto; border: 1px solid #2A2B31; border-radius: 14px; box-shadow: 0 40px 120px rgba(0,0,0,0.55)">
+<figcaption style="font-family: 'Martian Mono', monospace; font-size: 13px; color: #8E909A; margin-top: 16px">SPC g: everything Git, a key away. The changed lines are marked in the gutter.</figcaption>
+</figure>
 </section>
 
 <!-- A few keys -->
@@ -287,6 +150,25 @@ Download for Windows</a>
 <p style="margin: 0; color: #B4B6BE; font-size: 16px">Staged, atomic saves, recovery for unsaved buffers after a crash, and your windows, splits and cursors back as you left them.</p>
 </div>
 
+</div>
+</section>
+
+<!-- Screens -->
+<section aria-labelledby="screens-h" style="max-width: 1200px; margin: 0 auto; padding: 72px 24px 24px">
+<h2 id="screens-h" style="font-family: 'Martian Mono', monospace; font-size: 13px; font-weight: 500; color: #8E909A; letter-spacing: 0.08em; margin: 0 0 28px">LOOK CLOSER</h2>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 28px">
+<figure style="margin: 0; grid-column: 1 / -1">
+<img src="screens/git-status.png" width="1586" height="962" loading="lazy" alt="Fenix's Git status page: the untracked and unstaged files, and a hunk of a Rust file unfolded with its added and removed lines" style="display: block; width: 100%; height: auto; border: 1px solid #2A2B31; border-radius: 12px">
+<figcaption style="color: #B4B6BE; font-size: 15px; margin-top: 12px"><span style="font-family: 'Martian Mono', monospace; color: #FFB547">SPC g g</span>  The Git page: unfold a file to its hunks, then stage, discard or commit with a key.</figcaption>
+</figure>
+<figure style="margin: 0">
+<img src="screens/home.png" width="1586" height="962" loading="lazy" alt="Fenix's Home page: the command bar, the file to resume, recent files and projects" style="display: block; width: 100%; height: auto; border: 1px solid #2A2B31; border-radius: 12px">
+<figcaption style="color: #B4B6BE; font-size: 15px; margin-top: 12px"><span style="font-family: 'Martian Mono', monospace; color: #FFB547">gh</span>  Home: pick up where you left off, in any project.</figcaption>
+</figure>
+<figure style="margin: 0">
+<img src="screens/store-bundles.png" width="1586" height="962" loading="lazy" alt="Fenix's Extensions page on the Bundles tab: Personal, Mission, Review, Jira, Lab, Reading and Kotlin, each with what it installs" style="display: block; width: 100%; height: auto; border: 1px solid #2A2B31; border-radius: 12px">
+<figcaption style="color: #B4B6BE; font-size: 15px; margin-top: 12px"><span style="font-family: 'Martian Mono', monospace; color: #FFB547">SPC h x</span>  The store: extensions and bundles from a signed registry.</figcaption>
+</figure>
 </div>
 </section>
 
