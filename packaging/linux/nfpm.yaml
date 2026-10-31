@@ -42,13 +42,14 @@ contents:
   - src: ${SRC}/THIRD-PARTY.md
     dst: /usr/share/doc/fenix/THIRD-PARTY.md
 
-# What the binary links against is the C library alone; the windowing and
+# What the binary links against is the C library and libgcc_s; the windowing and
 # GPU libraries are loaded at run time, so they're recommended, not
 # required (a headless `fenix --mcp` needs none of them).
 overrides:
   deb:
     depends:
       - libc6 (>= 2.35)
+      - libgcc-s1
     recommends:
       - libvulkan1 | libegl1
       - libxkbcommon0
@@ -58,6 +59,7 @@ overrides:
   rpm:
     depends:
       - glibc >= 2.35
+      - libgcc
     recommends:
       - vulkan-loader
       - libxkbcommon
