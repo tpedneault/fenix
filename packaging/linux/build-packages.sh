@@ -17,8 +17,11 @@ curl -fsSL -o "$tool/nfpm.tar.gz" "https://github.com/goreleaser/nfpm/releases/d
 echo "$nfpm_sha256  $tool/nfpm.tar.gz" | sha256sum -c -
 tar -xzf "$tool/nfpm.tar.gz" -C "$tool" nfpm
 
+# nfpm reads ${VERSION} itself, but not ${SRC} in a file's path: both are
+# filled in here.
+sed -e "s|\${SRC}|$src|g" -e "s|\${VERSION}|$version|g" packaging/linux/nfpm.yaml > "$tool/nfpm.yaml"
 for packager in deb rpm; do
-  VERSION=$version SRC=$src "$tool/nfpm" package --config packaging/linux/nfpm.yaml --packager "$packager" --target "$out/"
+  "$tool/nfpm" package --config "$tool/nfpm.yaml" --packager "$packager" --target "$out/"
 done
 cd "$out"
 for package in *.deb *.rpm; do
