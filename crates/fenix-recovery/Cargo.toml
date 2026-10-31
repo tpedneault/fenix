@@ -1,0 +1,12 @@
+[package]
+name = "fenix-recovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+fenix-storage = { path = "../fenix-storage" }
+dirs = "6"

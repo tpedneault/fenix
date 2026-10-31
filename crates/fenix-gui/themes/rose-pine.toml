@@ -1,0 +1,54 @@
+# Rosé Pine, the main variant.
+name = "Rosé Pine"
+tabs = "underline"
+
+[surfaces]
+bg = "#191724"
+sidebar_bg = "#191724"
+bg_modeline = "#1f1d2e"
+divider = "#403d52"
+caret = "#e0def4"
+hl_line = "#21202e"
+selection = { color = "#6e6a86", alpha = 0.3 }
+bracket_match = { color = "#9ccfd8", alpha = 0.12 }
+search_match = { color = "#f6c177", alpha = 0.15 }
+
+[text]
+fg = "#e0def4"
+fg_modeline = "#e0def4"
+caret_text = "#e0def4"
+gutter_fg = "#8b88a1"
+
+[modes]
+normal = "#ebbcba"
+insert = "#9ccfd8"
+visual = "#c4a7e7"
+replace = "#f6c177"
+command = "#3c8dae"
+explorer = "#9ccfd8"
+picker = "#eb6f92"
+text_dark = "#191724"
+
+[syntax]
+keyword = "#3e93b5"
+string = "#f6c177"
+comment = "#8b88a1"
+function = "#ebbcba"
+type = "#9ccfd8"
+number = "#c4a7e7"
+constant = "#f6c177"
+variable = "#e0def4"
+operator = "#908caa"
+punctuation = "#908caa"
+attribute = "#c4a7e7"
+
+[explorer]
+folder = "#9ccfd8"
+file = "#e0def4"
+
+[git]
+modified = "#f6c177"
+staged = "#9ccfd8"
+untracked = "#3e93b5"
+ignored = "#8b88a1"
+conflicted = "#eb6f92"

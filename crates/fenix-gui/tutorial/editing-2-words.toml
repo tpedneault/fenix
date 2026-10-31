@@ -1,0 +1,106 @@
+id = "editing.words"
+track = "Editing"
+order = 2
+title = "Words, lines and counts"
+about = "Moving by words and lines, deleting them, and a count to do it again."
+text = """
+w jumps to the start of the next word, b back to the last, e to a word's end.
+0 goes to the start of the line, $ to its end.
+
+Delete the doubled word: this is is a sentence.
+Keep this part. Remove this part.
+Delete this whole line.
+Join this line
+with this one.
+one
+two
+three
+The end.
+"""
+
+[[step]]
+say = "Put the cursor on the word end, at the end of line 2: $ and then b, or w until you're there."
+hint = "$ goes to the end of the line (the full stop); b goes back to the start of the word before it."
+cursor = [2, 43]
+
+[[step]]
+say = "dw deletes from the cursor to the next word: delete the extra is on line 4."
+hint = "Put the cursor on the i of either is, then dw."
+text = """
+w jumps to the start of the next word, b back to the last, e to a word's end.
+0 goes to the start of the line, $ to its end.
+
+Delete the doubled word: this is a sentence.
+Keep this part. Remove this part.
+Delete this whole line.
+Join this line
+with this one.
+one
+two
+three
+The end.
+"""
+
+[[step]]
+say = "D (or d$) deletes to the end of the line: make line 5 just Keep this part."
+hint = "Put the cursor on the R of Remove, then D."
+text = """
+w jumps to the start of the next word, b back to the last, e to a word's end.
+0 goes to the start of the line, $ to its end.
+
+Delete the doubled word: this is a sentence.
+Keep this part.
+Delete this whole line.
+Join this line
+with this one.
+one
+two
+three
+The end.
+"""
+
+[[step]]
+say = "dd deletes a whole line: delete line 6."
+hint = "Anywhere on the line, dd."
+text = """
+w jumps to the start of the next word, b back to the last, e to a word's end.
+0 goes to the start of the line, $ to its end.
+
+Delete the doubled word: this is a sentence.
+Keep this part.
+Join this line
+with this one.
+one
+two
+three
+The end.
+"""
+
+[[step]]
+say = "J joins the next line onto this one: make Join this line and with this one. a single line."
+hint = "On Join this line, J."
+text = """
+w jumps to the start of the next word, b back to the last, e to a word's end.
+0 goes to the start of the line, $ to its end.
+
+Delete the doubled word: this is a sentence.
+Keep this part.
+Join this line with this one.
+one
+two
+three
+The end.
+"""
+
+[[step]]
+say = "A count before a key does it that many times: 3dd deletes three lines. Delete one, two and three."
+hint = "Cursor on one, 3dd. 3j moves three lines down the same way."
+text = """
+w jumps to the start of the next word, b back to the last, e to a word's end.
+0 goes to the start of the line, $ to its end.
+
+Delete the doubled word: this is a sentence.
+Keep this part.
+Join this line with this one.
+The end.
+"""

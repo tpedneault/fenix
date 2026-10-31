@@ -1,0 +1,9 @@
+# Check every text file out with LF, whatever the platform or Git's
+# core.autocrlf setting. Project templates, snippets and shaders are
+# compiled into the binary, so a CRLF checkout would change what Fenix
+# writes into new projects.
+* text=auto eol=lf
+
+*.ico binary
+*.png binary
+*.ttf binary

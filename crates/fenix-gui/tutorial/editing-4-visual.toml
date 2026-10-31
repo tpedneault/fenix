@@ -1,0 +1,80 @@
+id = "editing.visual"
+track = "Editing"
+order = 4
+title = "Visual mode"
+about = "Select first, then act: characters, lines and blocks."
+text = """
+v starts selecting characters, V whole lines, Ctrl-v a block. Move to grow
+the selection, then act on it: d deletes it, c changes it, y yanks it,
+U makes it upper case, u lower, ~ swaps.
+
+make this line loud
+Delete these two lines
+with V, j and d.
+one
+two
+three
+The end.
+"""
+
+[[step]]
+say = "V selects the whole line, U makes it upper case: make line 5 loud."
+hint = "On line 5, V, then U."
+text = """
+v starts selecting characters, V whole lines, Ctrl-v a block. Move to grow
+the selection, then act on it: d deletes it, c changes it, y yanks it,
+U makes it upper case, u lower, ~ swaps.
+
+MAKE THIS LINE LOUD
+Delete these two lines
+with V, j and d.
+one
+two
+three
+The end.
+"""
+
+[[step]]
+say = "Select lines 6 and 7 together and delete them."
+hint = "On line 6: V, j to take the next line too, d."
+text = """
+v starts selecting characters, V whole lines, Ctrl-v a block. Move to grow
+the selection, then act on it: d deletes it, c changes it, y yanks it,
+U makes it upper case, u lower, ~ swaps.
+
+MAKE THIS LINE LOUD
+one
+two
+three
+The end.
+"""
+
+[[step]]
+say = "Ctrl-v selects a block: on the o of one, Ctrl-v, j j down to three, I, type a dash and a space, Esc -- it goes in on every line."
+hint = "Capital I inserts at the block's left edge; the other lines fill in when you press Esc."
+text = """
+v starts selecting characters, V whole lines, Ctrl-v a block. Move to grow
+the selection, then act on it: d deletes it, c changes it, y yanks it,
+U makes it upper case, u lower, ~ swaps.
+
+MAKE THIS LINE LOUD
+- one
+- two
+- three
+The end.
+"""
+
+[[step]]
+say = "v then e selects to the end of a word, and c changes the selection: make two say deux."
+hint = "Cursor on the t of two, v, e, c, deux, Esc."
+text = """
+v starts selecting characters, V whole lines, Ctrl-v a block. Move to grow
+the selection, then act on it: d deletes it, c changes it, y yanks it,
+U makes it upper case, u lower, ~ swaps.
+
+MAKE THIS LINE LOUD
+- one
+- deux
+- three
+The end.
+"""

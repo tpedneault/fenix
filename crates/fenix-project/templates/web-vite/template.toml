@@ -1,0 +1,44 @@
+[template]
+name = "Web app · Vite"
+kind = "node"
+group = "Web"
+name_rule = "npm"
+description = "A Vite front end in TypeScript, scaffolded by create-vite, with dev, build and preview tasks."
+needs = ["npm"]
+open = ["src/App.tsx", "src/App.vue", "src/App.svelte", "src/app.tsx", "src/main.ts", "src/main.tsx"]
+
+[[ask]]
+key = "framework"
+label = "Framework"
+choices = ["react-ts", "vue-ts", "svelte-ts", "preact-ts", "solid-ts", "lit-ts", "vanilla-ts"]
+default = "react-ts"
+
+[[ask]]
+key = "install"
+label = "Install"
+default = true
+hint = "npm install once it's scaffolded"
+
+[[run]]
+exec = "npm"
+args = ["create", "--yes", "vite@latest", ".", "--", "--template", "{{framework}}"]
+
+[[run]]
+exec = "npm"
+args = ["install"]
+when = "install"
+
+[[task]]
+name = "dev"
+exec = "npm"
+args = ["run", "dev"]
+
+[[task]]
+name = "build"
+exec = "npm"
+args = ["run", "build"]
+
+[[task]]
+name = "preview"
+exec = "npm"
+args = ["run", "preview"]

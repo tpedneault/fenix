@@ -1,0 +1,54 @@
+# Kanagawa, rebelot's palette, its Wave theme -- after Hokusai's Great Wave.
+name = "Kanagawa"
+tabs = "underline"
+
+[surfaces]
+bg = "#1f1f28"
+sidebar_bg = "#16161d"
+bg_modeline = "#16161d"
+divider = "#54546d"
+caret = "#c8c093"
+hl_line = "#2a2a37"
+selection = { color = "#2d4f67", alpha = 0.6 }
+bracket_match = { color = "#7aa89f", alpha = 0.15 }
+search_match = { color = "#e6c384", alpha = 0.15 }
+
+[text]
+fg = "#dcd7ba"
+fg_modeline = "#dcd7ba"
+caret_text = "#c8c093"
+gutter_fg = "#95948c"
+
+[modes]
+normal = "#7e9cd8"
+insert = "#98bb6c"
+visual = "#957fb8"
+replace = "#ffa066"
+command = "#e6c384"
+explorer = "#7aa89f"
+picker = "#d27e99"
+text_dark = "#16161d"
+
+[syntax]
+keyword = "#9f8bbe"
+string = "#98bb6c"
+comment = "#95948c"
+function = "#7e9cd8"
+type = "#7aa89f"
+number = "#d27e99"
+constant = "#ffa066"
+variable = "#dcd7ba"
+operator = "#c0a36e"
+punctuation = "#9cabca"
+attribute = "#e6c384"
+
+[explorer]
+folder = "#7e9cd8"
+file = "#dcd7ba"
+
+[git]
+modified = "#dca561"
+staged = "#809c74"
+untracked = "#7fb4ca"
+ignored = "#95948c"
+conflicted = "#e56e7b"

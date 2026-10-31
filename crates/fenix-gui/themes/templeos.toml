@@ -1,0 +1,125 @@
+# A recreation of TempleOS's look, built entirely from the standard
+# 16-color CGA/EGA palette (the same fixed, well-established set
+# TempleOS itself is restricted to). TempleOS's actual desktop/DolDoc
+# look (confirmed against real screenshots, not the classic-Borland-
+# IDE "blue screen" look this theme originally, incorrectly, assumed)
+# is a **white** page background with black body text, a solid blue
+# window-chrome/status-bar color, and red/purple/green accent text for
+# headings, links, and directives -- much closer to a print/document
+# editor than a dark-background terminal IDE.
+#
+# The colors only: it uses the same monospace font as every other
+# theme. A font of your own, the TempleOS bitmap font included, can be
+# set with `editor.font_family`.
+#
+# One remaining disclosed simplification: TempleOS's own HolyC IDE
+# colors identifiers quasi-randomly per token, which isn't replicated
+# here -- `syntax_color` resolves a fixed color per capture name
+# everywhere in Fenix, same as every other theme, so identifiers get
+# one consistent accent rather than a per-token one.
+name = "TempleOS"
+tabs = "underline"
+border = "#0000aa"
+
+[surfaces]
+bg = "#ffffff"
+sidebar_bg = "#ffffff"
+bg_modeline = "#0000aa"
+divider = "#0000aa"
+# Light Blue, not the fixed palette's own Yellow -- the caret used
+# to be `0xffff55`, but as a solid block caret (Normal/Visual/
+# Replace/Command mode's shape, see `caret_is_block`) sitting on
+# every current line, bright yellow read as harsh/hard to read in
+# practice, not just a stylistic quibble. Reuses the same accent
+# `hl_line`/`mode_command` already use elsewhere in this theme, so
+# it stays inside the fixed 16-color CGA/EGA set this theme is
+# built from rather than introducing a new hue.
+caret = "#5555ff"
+# 0.15 alpha (this field's original value) was too faint to actually
+# read against a pure-white `bg`: blue's channels are far enough from
+# white's that the hue itself isn't the problem (unlike the old
+# `selection` yellow, see that field's doc comment), but at 15% the
+# blended result -- roughly (229, 229, 255) -- is close enough to
+# (255, 255, 255) that it disappeared in practice, not just "subtle."
+# Bumped to a level that's clearly visible while staying weaker than
+# `selection`'s own 0.45, matching this field's own doc comment
+# (hl_line doesn't need as much contrast as selection since the caret
+# already marks the current line too).
+hl_line = { color = "#5555ff", alpha = 0.25 }
+# Blue, not yellow: yellow's R/G channels already match the white
+# `bg`, so blending only ever moves the B channel -- no alpha gets it
+# past a barely-there pale tint. Blue's channels are all far from
+# white's, so the same "moderate alpha overlay" approach every other
+# theme/highlight here uses actually produces visible contrast.
+selection = { color = "#0000aa", alpha = 0.45 }
+bracket_match = { color = "#00aa00", alpha = 0.35 }
+search_match = { color = "#ff55ff", alpha = 0.35 }
+
+[text]
+fg = "#000000"
+fg_modeline = "#ffffff"
+# Deliberately NOT the same hex as `caret` above, despite this
+# field's own doc comment generally expecting "same hue as caret" --
+# `caret_text` is never actually rendered over the same background
+# `caret` is. Every real use (the completion popup's Keyword rows,
+# the which-key key column, the focused-pane title) draws it as text
+# over `bg_modeline`, never as a block over `bg`/`hl_line`. Most
+# themes' `bg`/`bg_modeline` are close enough in shade that one hue
+# reads fine against both, so sharing a hex was harmless there --
+# but TempleOS pairs a stark white `bg` with a solid dark-blue
+# `bg_modeline`, so the two roles need genuinely different colors.
+# Light Blue on `bg_modeline`'s dark blue (`0x0000aa`) is barely
+# readable (~2.6:1 contrast) -- restoring the original Yellow here
+# (high contrast against dark blue, and never rendered as a block
+# caret, so the harshness complaint that moved `caret` off it
+# doesn't apply to this field).
+caret_text = "#ffff55"
+gutter_fg = "#555555"
+
+[modes]
+normal = "#55ff55"
+insert = "#55ffff"
+visual = "#ff5555"
+replace = "#aa5500"
+command = "#5555ff"
+explorer = "#00aaaa"
+picker = "#ff55ff"
+text_dark = "#000000"
+text_light = "#ffffff"
+
+[syntax]
+# Dark/saturated (not the pastel "Light*") variants throughout --
+# body text sits on the white page background now, where the pastel
+# half of the 16-color set reads as barely-there instead of a
+# bright accent.
+keyword = "#0000aa"
+string = "#00aa00"
+comment = "#aaaaaa"
+function = "#aa00aa"
+type = "#00aaaa"
+number = "#aa0000"
+constant = "#aa5500"
+# Light Blue rather than the body text's own black. Tcl -- the
+# language this theme is most often read in here, and one that
+# will never have an LSP -- is written almost entirely in `$name`
+# substitutions, `set` targets and proc parameters, all of which
+# are `variable` captures; leaving them at `fg` meant those query
+# rules produced no visible result at all and a script rendered as
+# a wall of black. It's also closer to real TempleOS, whose own
+# HolyC IDE colors identifiers rather than leaving them as body
+# text (see this theme's doc comment).
+variable = "#5555ff"
+operator = "#aa5500"
+punctuation = "#aa5500"
+attribute = "#00aaaa"
+
+[explorer]
+folder = "#0000aa"
+file = "#000000"
+
+[git]
+modified = "#aa5500"
+staged = "#00aa00"
+untracked = "#00aaaa"
+ignored = "#aaaaaa"
+conflicted = "#aa0000"

@@ -1,0 +1,56 @@
+# Adapted for Fenix: subdued surfaces, readable secondary text, and
+# coordinated syntax, Git, and mode accents.
+name = "Dracula"
+tabs = "underline"
+
+[surfaces]
+bg = "#282a36"
+sidebar_bg = "#282a36"
+bg_modeline = "#303341"
+divider = "#6272a4"
+caret = "#ff79c6"
+hl_line = "#303341"
+selection = { color = "#bd93f9", alpha = 0.12 }
+bracket_match = { color = "#50fa7b", alpha = 0.12 }
+search_match = { color = "#f1fa8c", alpha = 0.12 }
+
+[text]
+fg = "#f8f8f2"
+fg_modeline = "#f8f8f2"
+caret_text = "#ff79c6"
+gutter_fg = "#9badd4"
+
+[modes]
+normal = "#50fa7b"
+insert = "#8be9fd"
+visual = "#ff7979"
+replace = "#ffb86c"
+command = "#bd93f9"
+explorer = "#bd93f9"
+picker = "#ff79c6"
+text_dark = "#282a36"
+text_light = "#282a36"
+
+[syntax]
+keyword = "#ff79c6"
+string = "#f1fa8c"
+comment = "#9badd4"
+function = "#50fa7b"
+type = "#8be9fd"
+number = "#bd93f9"
+constant = "#bd93f9"
+variable = "#f8f8f2"
+operator = "#ff79c6"
+punctuation = "#ff79c6"
+attribute = "#50fa7b"
+
+[explorer]
+folder = "#bd93f9"
+file = "#f8f8f2"
+
+[git]
+modified = "#ffb86c"
+staged = "#50fa7b"
+untracked = "#8be9fd"
+ignored = "#9badd4"
+conflicted = "#ff7979"

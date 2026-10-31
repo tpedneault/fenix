@@ -1,0 +1,72 @@
+id = "editing.macros"
+track = "Editing"
+order = 6
+title = "Registers and macros"
+about = "Named registers to keep text in, a macro to do the same keys again, and the dot."
+text = """
+"a before y, d or p uses register a, not the one every yank and delete
+shares. qa records the keys you press into register a and q stops; @a
+plays them back, and 3@a three times. A dot repeats the last change.
+
+Copy me with "ayy.
+Paste it under here with "ap:
+- item
+- item
+- item
+- item
+TODO TODO TODO
+"""
+
+[[step]]
+say = 'On line 5, "ayy yanks the line into register a; then on line 6, "ap puts it under.'
+hint = 'The double quote, a, then yy -- and the same with p.'
+text = """
+"a before y, d or p uses register a, not the one every yank and delete
+shares. qa records the keys you press into register a and q stops; @a
+plays them back, and 3@a three times. A dot repeats the last change.
+
+Copy me with "ayy.
+Paste it under here with "ap:
+Copy me with "ayy.
+- item
+- item
+- item
+- item
+TODO TODO TODO
+"""
+
+[[step]]
+say = "Record a macro: on the first - item, qa, then A, type a space and done, Esc, j, and q. 3@a then does the other three."
+hint = "qa starts recording (the modeline says so) and q stops; the j leaves the cursor on the next item, ready for the next go."
+text = """
+"a before y, d or p uses register a, not the one every yank and delete
+shares. qa records the keys you press into register a and q stops; @a
+plays them back, and 3@a three times. A dot repeats the last change.
+
+Copy me with "ayy.
+Paste it under here with "ap:
+Copy me with "ayy.
+- item done
+- item done
+- item done
+- item done
+TODO TODO TODO
+"""
+
+[[step]]
+say = "The dot repeats your last change: on the first TODO, cw, DONE, Esc; then w and a dot for each of the others."
+hint = "cw changes to the end of the word. w moves to the next TODO, and . changes it the same way."
+text = """
+"a before y, d or p uses register a, not the one every yank and delete
+shares. qa records the keys you press into register a and q stops; @a
+plays them back, and 3@a three times. A dot repeats the last change.
+
+Copy me with "ayy.
+Paste it under here with "ap:
+Copy me with "ayy.
+- item done
+- item done
+- item done
+- item done
+DONE DONE DONE
+"""

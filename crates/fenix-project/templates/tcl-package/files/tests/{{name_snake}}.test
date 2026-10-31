@@ -1,0 +1,15 @@
+package require tcltest 2
+namespace import ::tcltest::*
+
+lappend auto_path [file dirname [file dirname [file normalize [info script]]]]
+package require {{name_snake}}
+
+test greet-1 {greets the world by default} -body {
+    {{name_snake}}::greet
+} -result {Hello, world!}
+
+test greet-2 {greets who it's told to} -body {
+    {{name_snake}}::greet Ada
+} -result {Hello, Ada!}
+
+cleanupTests

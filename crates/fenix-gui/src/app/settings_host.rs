@@ -1,0 +1,727 @@
+//! The host half of the settings page (`settings_page`): reading the
+//! settings into what the page shows, applying a change -- at once, to
+//! the running editor, and to `settings.toml` -- and the file itself:
+//! opening it at a setting's line, and taking in edits made to it by
+//! hand while Fenix runs.
+
+use super::pages::PageModel;
+use super::*;
+use crate::settings_page::{Action as SettingsAction, Scope, SecretState, SettingsPage, Snapshot};
+use fenix_config::{Kind, Secret};
+
+/// `root`'s base branch: its project's `git.base_branch`, else
+/// `fallback` (yours). Reads the project's settings -- off the UI thread
+/// when called from one of the git pages' background reads.
+pub(super) fn base_branch_in(root: &Path, fallback: Option<String>) -> Option<String> {
+    match fenix_config::ProjectSettings::load(root).get("git.base_branch") {
+        Some(fenix_config::Value::Text(t)) => Some(t.clone()),
+        _ => fallback,
+    }
+}
+
+impl App {
+    fn settings_page(&mut self, id: BufferId) -> Option<&mut SettingsPage> {
+        match self.pages.get_mut(&id).map(|s| {
+            s.stale = true;
+            &mut s.model
+        }) {
+            Some(PageModel::UserSettings(p)) => Some(p),
+            _ => None,
+        }
+    }
+
+    /// The project the focused file is in, to offer its own settings.
+    /// `settings.this_project`: the settings page on the project's own
+    /// (`.fenix/settings.toml`), yours outside one.
+    pub(crate) fn cmd_settings_this_project(&mut self) {
+        let scope = match self.settings_project() {
+            Some((root, name)) => crate::settings_page::Scope::Project { root, name },
+            None => crate::settings_page::Scope::You,
+        };
+        self.open_settings_page(scope, None);
+    }
+
+    pub(super) fn settings_project(&self) -> Option<(PathBuf, String)> {
+        let root = self.project_root.clone()?;
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+        Some((root, name))
+    }
+
+    fn secret_state(&self, secret: Secret) -> SecretState {
+        if secret.from_env().is_some() {
+            return SecretState { set: true, source: secret.env() };
+        }
+        if self.config.token(secret).is_some() {
+            return SecretState { set: true, source: "settings.toml".to_string() };
+        }
+        let keychain = self.wasm.keychain();
+        if keychain.get(secret.key()).is_some() {
+            return SecretState { set: true, source: keychain.name().unwrap_or_default().to_string() };
+        }
+        SecretState { set: false, source: String::new() }
+    }
+
+    /// A token or an extension's secret: from the environment, else the
+    /// file (where there's no keychain), else the keychain.
+    pub(super) fn secret_value(&self, secret: Secret) -> Option<String> {
+        self.config.token(secret).or_else(|| self.wasm.keychain().get(secret.key()))
+    }
+
+    /// What the page shows for `scope`.
+    pub(super) fn settings_snapshot(&self, scope: &Scope) -> Snapshot {
+        let mine: HashMap<&'static str, fenix_config::Value> = fenix_config::settings()
+            .iter()
+            .filter(|s| !matches!(s.kind, Kind::Secret(_)))
+            .filter_map(|s| s.get(&self.config).map(|v| (s.key, v)))
+            .collect();
+        // Fenix's tokens, and the extensions' `secret` settings.
+        let named = fenix_config::settings().into_iter().filter_map(|s| match s.kind {
+            Kind::Secret(secret @ Secret::Named(_)) => Some(secret),
+            _ => None,
+        });
+        let secrets = Secret::ALL.into_iter().chain(named).map(|s| (s, self.secret_state(s))).collect();
+        let mut snap = Snapshot {
+            secrets,
+            themes: theme::all().iter().map(|t| t.name.to_string()).collect(),
+            fonts: self.text.as_ref().map(|t| t.monospace_families()).unwrap_or_default(),
+            project: self.settings_project(),
+            ..Default::default()
+        };
+        match scope {
+            Scope::You => {
+                snap.here = mine;
+                snap.problems = self.config.problems.clone();
+                snap.file = self.config.path().to_path_buf();
+            }
+            Scope::Project { root, .. } => {
+                let project = fenix_config::ProjectSettings::load(root);
+                snap.here = project.values();
+                snap.problems = project.problems.clone();
+                snap.file = project.path().to_path_buf();
+                snap.inherited = mine;
+            }
+        }
+        snap
+    }
+
+    /// `SPC p ,`: the focused project's settings -- the settings page in
+    /// its scope, or yours when no project is open.
+    pub(crate) fn open_project_settings_page(&mut self) {
+        let scope = match self.settings_project() {
+            Some((root, name)) => Scope::Project { root, name },
+            None => {
+                self.set_message("no project open -- showing your settings");
+                Scope::You
+            }
+        };
+        self.open_settings_page(scope, None);
+    }
+
+    /// `SPC ,` (your settings) and `SPC p ,` (the project's): the
+    /// settings page, on `key` when there's one to show.
+    pub(crate) fn open_settings_page(&mut self, scope: Scope, key: Option<&str>) {
+        let snap = self.settings_snapshot(&scope);
+        let project_page = match &scope {
+            Scope::Project { root, .. } => Some(self.project_page_model(root)),
+            Scope::You => None,
+        };
+        let id = match self.find_page(|m| matches!(m, PageModel::UserSettings(_))) {
+            Some(id) => {
+                self.show_page(id);
+                if let Some(page) = self.settings_page(id) {
+                    if page.scope != scope {
+                        page.set_scope(scope);
+                    }
+                    page.project_page = project_page;
+                    page.refresh(snap);
+                }
+                id
+            }
+            None => {
+                let mut page = SettingsPage::new(scope, snap);
+                page.project_page = project_page;
+                self.open_page(PageModel::UserSettings(Box::new(page)))
+            }
+        };
+        if let (Some(key), Some(page)) = (key, self.settings_page(id)) {
+            page.show(key);
+        }
+    }
+
+    /// Every open settings page, read again.
+    pub(super) fn refresh_settings_pages(&mut self) {
+        let ids: Vec<BufferId> = self.pages.iter().filter(|(_, s)| matches!(s.model, PageModel::UserSettings(_))).map(|(id, _)| *id).collect();
+        for id in ids {
+            let Some(scope) = self.settings_page(id).map(|p| p.scope.clone()) else { continue };
+            let snap = self.settings_snapshot(&scope);
+            if let Some(page) = self.settings_page(id) {
+                page.refresh(snap);
+            }
+        }
+    }
+
+    pub(super) fn user_settings_action(&mut self, id: BufferId, action: SettingsAction) {
+        match action {
+            SettingsAction::None => {}
+            SettingsAction::Close => self.close_page(id),
+            SettingsAction::SwitchScope(scope) => {
+                let snap = self.settings_snapshot(&scope);
+                let project_page = match &scope {
+                    Scope::Project { root, .. } => Some(self.project_page_model(root)),
+                    Scope::You => None,
+                };
+                if let Some(page) = self.settings_page(id) {
+                    page.set_scope(scope);
+                    page.project_page = project_page;
+                    page.note = None;
+                    page.refresh(snap);
+                }
+            }
+            SettingsAction::Set { key, value } => {
+                let scope = self.settings_page(id).map(|p| p.scope.clone()).unwrap_or(Scope::You);
+                let result = match &scope {
+                    Scope::You => self.set_setting(key, value),
+                    Scope::Project { root, .. } => {
+                        let mut project = fenix_config::ProjectSettings::load(root);
+                        let result = project.set(key, value).and_then(|_| project.save().map_err(|e| format!("couldn't save {}: {e}", project.path().display())));
+                        if result.is_ok() && self.project_root.as_deref() == Some(root.as_path()) {
+                            self.refresh_project_settings(true);
+                            self.apply_setting(key);
+                        }
+                        result
+                    }
+                };
+                let restart = fenix_config::setting(key).is_some_and(|s| s.restart);
+                if let Some(page) = self.settings_page(id) {
+                    match result {
+                        Ok(()) => {
+                            page.refused = None;
+                            page.note = restart.then(|| ("saved -- it takes effect when Fenix restarts".to_string(), false));
+                        }
+                        Err(why) => page.refused = Some((key, why)),
+                    }
+                }
+                self.refresh_settings_pages();
+            }
+            SettingsAction::SetSecret { secret, token } => {
+                // In the keychain where there's one, out of the file;
+                // else a setting like any other, kept in the file.
+                let key = fenix_config::settings().iter().find(|s| s.kind == Kind::Secret(secret)).map(|s| s.key);
+                let keychain = self.wasm.keychain().name().map(str::to_string);
+                let result = match (key, &keychain) {
+                    (Some(key), Some(_)) => self.wasm.keychain().set(key, token.as_deref()).and_then(|()| {
+                        // What the file had goes; either way its readers read it anew.
+                        if fenix_config::setting(key).and_then(|s| s.get(&self.config)).is_some() {
+                            self.set_setting(key, None)
+                        } else {
+                            self.code_setting_changed(key);
+                            Ok(())
+                        }
+                    }),
+                    (Some(key), None) => self.set_setting(key, token.clone().map(fenix_config::Value::Text)),
+                    (None, _) => Err("no such token".to_string()),
+                };
+                let note = match (&result, &token, &keychain) {
+                    (Ok(()), Some(_), _) if secret.from_env().is_some() => (format!("saved -- but {} is set, and it's the one used", secret.env()), true),
+                    (Ok(()), Some(_), Some(name)) => (format!("kept in {name}"), false),
+                    (Ok(()), Some(_), None) => ("saved in settings.toml -- there's no keychain here".to_string(), false),
+                    (Ok(()), None, Some(name)) => (format!("removed from {name}"), false),
+                    (Ok(()), None, None) => ("removed from settings.toml".to_string(), false),
+                    (Err(e), _, _) => (e.clone(), true),
+                };
+                if let Some(page) = self.settings_page(id) {
+                    page.note = Some(note);
+                }
+                self.refresh_settings_pages();
+            }
+            SettingsAction::TestSecret(secret) => self.test_secret(id, secret),
+            SettingsAction::Project(action) => {
+                let Some(Scope::Project { root, .. }) = self.settings_page(id).map(|p| p.scope.clone()) else { return };
+                self.project_page_action(root, action);
+            }
+            SettingsAction::Browse { start, folder } => self.settings_browse(start, folder),
+            SettingsAction::Choose { key, choices, current } => {
+                if choices.is_empty() {
+                    self.set_message("nothing to choose from");
+                    return;
+                }
+                let at = current.and_then(|c| choices.iter().position(|x| *x == c)).unwrap_or(0);
+                let candidates = choices.into_iter().map(|c| fenix_picker::Candidate::new(c.clone(), c)).collect();
+                let mut picker = fenix_picker::PickerState::new(candidates);
+                picker.move_selection(at as isize);
+                self.enter_picker(ActivePicker::SettingChoice { key, picker });
+            }
+            SettingsAction::OpenFile(key) => {
+                let path = match self.settings_page(id).map(|p| p.snap.file.clone()) {
+                    Some(path) => path,
+                    None => return,
+                };
+                if !path.exists() {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    let _ = std::fs::write(&path, "");
+                }
+                let line = key.and_then(|k| line_of_key(&std::fs::read_to_string(&path).unwrap_or_default(), k));
+                self.open_file_from_picker(&path);
+                if let Some(line) = line {
+                    self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col: 1, text: String::new() });
+                }
+            }
+        }
+    }
+
+    /// The explorer, to pick a path for the settings page: from where
+    /// the field points now, or the nearest folder of it that exists;
+    /// else the project, else home.
+    pub(super) fn settings_browse(&mut self, start: Option<PathBuf>, folder: bool) {
+        let start = start
+            .and_then(|p| p.ancestors().find(|a| a.is_dir()).map(Path::to_path_buf))
+            .or_else(|| self.project_root.clone())
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
+        self.open_folder_picker(&start, ExplorerPurpose::PickSettingPath { folder });
+    }
+
+    /// The path picked in the explorer the settings page opened: back to
+    /// the page, which puts it where it was wanted.
+    pub(super) fn settings_path_picked(&mut self, path: &Path) {
+        self.close_folder_picker();
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::UserSettings(_))) else { return };
+        self.show_page(id);
+        let path = fenix_project::plain_path(path.to_path_buf());
+        let Some(action) = self.settings_page(id).map(|p| p.browsed(&path)) else { return };
+        self.user_settings_action(id, action);
+    }
+
+    /// The value picked from the list a settings row opened: back to the
+    /// page, which sets it in the scope it's showing.
+    pub(super) fn setting_chosen(&mut self, key: &'static str, value: &str) {
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::UserSettings(_))) else { return };
+        self.show_page(id);
+        let Some(action) = self.settings_page(id).map(|p| p.chose(key, value)) else { return };
+        self.user_settings_action(id, action);
+    }
+
+    /// Sets one of your settings: checked, applied to the running editor
+    /// and saved.
+    pub(crate) fn set_setting(&mut self, key: &str, value: Option<fenix_config::Value>) -> Result<(), String> {
+        let setting = fenix_config::setting(key).ok_or_else(|| format!("no setting called {key}"))?;
+        setting.set(&mut self.config, value)?;
+        self.apply_setting(key);
+        self.config.save().map_err(|e| format!("couldn't save settings.toml: {e}"))
+    }
+
+    /// Makes the running editor use `key`'s value now. Most settings are
+    /// read where they're used, so only these need telling.
+    pub(super) fn apply_setting(&mut self, key: &str) {
+        match key {
+            "editor.theme" => {
+                let old = self.theme;
+                self.theme = theme::named_or_default(self.config.theme.as_deref());
+                self.fade_theme_from(old);
+            }
+            "editor.font_size" | "editor.font_family" => {
+                self.apply_font_size();
+                self.resync_terminal_cols();
+            }
+            "editor.indent_width" => {
+                let width = self.effective_indent_width();
+                self.vim.set_indent_width(width);
+            }
+            "editor.iskeyword_extra" => {
+                let chars = self.effective_iskeyword();
+                self.vim.set_iskeyword_extra(chars);
+            }
+            "explorer.width" => self.sidebar_width = self.config.explorer_width.map_or(text::SIDEBAR_WIDTH, |w| w as f32),
+            "explorer.hide" | "explorer.compact" | "explorer.show_hidden" => self.reconfigure_explorers(),
+            "search.smart_case" => self.vim.set_smart_case(self.config.search_smart_case != Some(false)),
+            _ => {}
+        }
+        self.code_setting_changed(key);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Every setting's value now: core's, and the extensions' (kept by
+    /// key).
+    fn setting_values(&self) -> Vec<(&'static str, Option<fenix_config::Value>)> {
+        fenix_config::schema::settings().into_iter().map(|s| (s.key, s.get(&self.config).or_else(|| self.config.value(s.key).cloned()))).collect()
+    }
+
+    /// Takes in `settings.toml` edited outside the settings page, on the
+    /// disk poll's tick: its settings are used at once, and a mistake in
+    /// it is named without losing the values that were in use.
+    pub(super) fn reload_settings_if_changed(&mut self) {
+        let stamp = std::fs::metadata(self.config.path()).and_then(|m| m.modified()).ok();
+        if stamp == self.settings_stamp {
+            return;
+        }
+        let first = self.settings_stamp.is_none();
+        self.settings_stamp = stamp;
+        if first || stamp.is_none() {
+            return;
+        }
+        let before = self.config.problems.len();
+        let was = self.setting_values();
+        self.config.reload();
+        // What the edit changed is applied, and the extensions that read
+        // it read it anew.
+        for ((key, old), (_, new)) in was.into_iter().zip(self.setting_values()) {
+            if old != new {
+                self.apply_setting(key);
+            }
+        }
+        self.refresh_settings_pages();
+        match self.config.problems.first() {
+            Some(problem) => self.set_error(format!("{problem} -- still using what was there before; SPC , shows it")),
+            None if before > 0 => self.set_message("settings.toml read again -- it's fine now"),
+            None => {}
+        }
+    }
+
+    /// Keeps the focused project's own settings at hand: read again when
+    /// the project changes, and on the disk poll's tick (`poll`), when
+    /// its file may have been edited. What they change is applied.
+    pub(super) fn refresh_project_settings(&mut self, poll: bool) {
+        let root = self.project_root.clone();
+        let same = self.project_settings.as_ref().map(|(r, _)| r) == root.as_ref();
+        if same && !poll {
+            return;
+        }
+        // A project from before `.fenix/settings.toml` moves over the
+        // first time it's opened.
+        if !same {
+            if let Some(r) = &root {
+                match fenix_project::meta::migrate_project_ini(r) {
+                    Some(Ok(moved)) => self.set_message(format!(
+                        "moved .fenix/project.ini into .fenix/settings.toml{} -- review it in git",
+                        if moved.is_empty() { String::new() } else { format!(" ({})", moved.join(", ")) }
+                    )),
+                    Some(Err(why)) => self.set_error(format!("couldn't move .fenix/project.ini: {why}")),
+                    None => {}
+                }
+            }
+        }
+        let before = self.project_settings.as_ref().map(|(_, p)| p.values());
+        self.project_settings = root.map(|r| {
+            let settings = fenix_config::ProjectSettings::load(&r);
+            (r, settings)
+        });
+        let after = self.project_settings.as_ref().map(|(_, p)| p.values());
+        if before != after || !same {
+            for key in ["editor.indent_width", "editor.iskeyword_extra"] {
+                self.apply_setting(key);
+            }
+        }
+    }
+
+    /// The project's settings as the disk probe read them, applied when
+    /// they changed -- and only if it's still the focused project.
+    pub(super) fn apply_project_settings(&mut self, root: PathBuf, settings: fenix_config::ProjectSettings) {
+        if self.project_root.as_ref() != Some(&root) {
+            return;
+        }
+        let before = self.project_settings.as_ref().map(|(_, p)| p.values());
+        let same = self.project_settings.as_ref().is_some_and(|(r, _)| *r == root);
+        self.project_settings = Some((root, settings));
+        let after = self.project_settings.as_ref().map(|(_, p)| p.values());
+        if before != after || !same {
+            for key in ["editor.indent_width", "editor.iskeyword_extra"] {
+                self.apply_setting(key);
+            }
+        }
+    }
+
+    /// The focused project's own value for `key`, if it sets one.
+    fn project_value(&self, key: &str) -> Option<&fenix_config::Value> {
+        self.project_settings.as_ref().and_then(|(_, p)| p.get(key))
+    }
+
+    /// Spaces an indent is: the project's, else yours, else 4.
+    pub(super) fn effective_indent_width(&self) -> usize {
+        match self.project_value("editor.indent_width") {
+            Some(fenix_config::Value::Int(n)) => *n as usize,
+            _ => self.config.indent_width.unwrap_or(fenix_vim::DEFAULT_INDENT_WIDTH),
+        }
+    }
+
+    /// Columns a tab takes: the project's, else yours, else 8.
+    pub(super) fn effective_tab_width(&self) -> usize {
+        match self.project_value("editor.tab_width") {
+            Some(fenix_config::Value::Int(n)) => *n as usize,
+            _ => self.config.tab_width.unwrap_or(DEFAULT_TAB_WIDTH),
+        }
+    }
+
+    fn effective_iskeyword(&self) -> Vec<char> {
+        let text = match self.project_value("editor.iskeyword_extra") {
+            Some(fenix_config::Value::Text(t)) => Some(t.clone()),
+            _ => self.config.iskeyword_extra.clone(),
+        };
+        text.map(|s| s.chars().collect()).unwrap_or_else(|| fenix_vim::DEFAULT_ISKEYWORD_EXTRA.to_vec())
+    }
+
+    /// The base branch for the repository at `root`: its project's, else
+    /// yours.
+    pub(super) fn base_branch_for(&self, root: &Path) -> Option<String> {
+        base_branch_in(root, self.config.git_base_branch.clone())
+    }
+
+    /// `t` on a token's row: what uses the token says when it doesn't
+    /// work -- an extension's (GitHub's and GitLab's, the review's) --
+    /// so Fenix itself has nothing to test it with.
+    fn test_secret(&mut self, id: BufferId, secret: Secret) {
+        let note = match self.secret_value(secret) {
+            None => "no token to test -- Enter sets one".to_string(),
+            Some(_) => format!("Fenix doesn't test the {secret:?} token itself -- the extension that uses it says if it's refused"),
+        };
+        if let Some(page) = self.settings_page(id) {
+            page.note = Some((note, true));
+        }
+    }
+}
+
+/// The line `key` is set on in `text`, 1-based: its own line, or its
+/// table's header for a table.
+fn line_of_key(text: &str, key: &str) -> Option<usize> {
+    let (table, name) = key.rsplit_once('.').unwrap_or(("", key));
+    let mut in_table = table.is_empty();
+    for (i, line) in text.lines().enumerate() {
+        let t = line.trim();
+        if t == format!("[{key}]") || t == format!("[[{key}]]") {
+            return Some(i + 1);
+        }
+        if t.starts_with('[') {
+            in_table = t.trim_matches(['[', ']']) == table;
+            continue;
+        }
+        if in_table && t.split('=').next().map(str::trim) == Some(name) {
+            return Some(i + 1);
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::page::Key;
+
+    /// docs/CONFIGURATION.md lists every setting as the schema declares
+    /// it, and this is what keeps it true. When it fails, paste
+    /// `markdown_table()` over its table (run `cargo test -p fenix-gui
+    /// print_the_settings_table -- --ignored --nocapture`).
+    #[test]
+    fn the_docs_list_every_setting_as_the_schema_declares_it() {
+        let docs = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/CONFIGURATION.md")).unwrap().replace('\r', "");
+        assert!(docs.contains(&fenix_config::schema::markdown_table()), "docs/CONFIGURATION.md's settings table is out of date");
+    }
+
+    #[test]
+    #[ignore]
+    fn print_the_settings_table() {
+        print!("{}", fenix_config::schema::markdown_table());
+    }
+
+    #[test]
+    fn every_settings_category_has_a_setting() {
+        let all = fenix_config::settings();
+        for c in fenix_config::Category::ALL {
+            assert!(all.iter().any(|s| s.category == c), "{} is empty", c.label());
+        }
+    }
+
+    fn press(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            assert!(app.page_key(if c == ' ' { KeyPress::char(' ') } else { KeyPress::char(c) }), "{c}");
+        }
+    }
+
+    fn page(app: &mut App) -> &mut SettingsPage {
+        let id = app.focused_buffer_id();
+        app.settings_page(id).expect("the settings page")
+    }
+
+    #[test]
+    fn a_setting_changed_on_the_page_applies_at_once_and_is_saved() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(Scope::You, Some("editor.theme"));
+        let before = app.theme.name;
+        press(&mut app, "l");
+        assert_ne!(app.theme.name, before, "the theme changed straight away");
+        let saved = std::fs::read_to_string(app.config.path()).unwrap();
+        assert!(saved.contains(&format!("theme = \"{}\"", app.theme.name)), "{saved}");
+
+        page(&mut app).show("editor.indent_width");
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        let _ = Key::Enter;
+        for c in "3".chars() {
+            app.page_key(KeyPress::char(c));
+        }
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(app.config.indent_width, Some(3));
+        assert_eq!(app.vim.indent_width(), 3, "vim uses it now");
+        press(&mut app, "r");
+        assert_eq!(app.config.indent_width, None);
+        assert!(!std::fs::read_to_string(app.config.path()).unwrap().contains("indent_width"));
+    }
+
+    #[test]
+    fn a_field_takes_the_caret_keys_and_ctrl_o_browses_for_its_path() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(Scope::You, Some("completion.symbols_file"));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert!(page(&mut app).typing());
+        for c in "/tmp/words.txt".chars() {
+            app.page_key(KeyPress::char(c));
+        }
+        // Ctrl-← twice lands on "words", Home and End still reach the page.
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Left).with_ctrl()));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Left).with_ctrl()));
+        app.page_key(KeyPress::char('x'));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Home)));
+        app.page_key(KeyPress::char('~'));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::End)));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Left)));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Delete)));
+        let text = crate::settings_page::layout(page(&mut app), 160).text;
+        assert!(text.contains("~/tmp/xwords.tx▏"), "{text}");
+        assert!(app.page_key(KeyPress::char('o').with_ctrl()));
+        assert!(app.picking_folder(), "Ctrl-O opens the explorer to pick it");
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickSettingPath { folder: false });
+    }
+
+    #[test]
+    fn a_font_is_picked_from_a_list_and_saved() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(Scope::You, Some("editor.font_family"));
+        page(&mut app).snap.fonts = vec!["Consolas".into(), "Fira Code".into(), "JetBrains Mono".into()];
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(app.main_view, MainView::Picker);
+        let Some(ActivePicker::SettingChoice { picker, .. }) = &mut app.active_picker else { panic!("a list of fonts") };
+        assert_eq!(picker.len(), 3);
+        for c in "jet".chars() {
+            picker.push_char(c);
+        }
+        app.picker_confirm();
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.config.font_family.as_deref(), Some("JetBrains Mono"));
+        assert!(std::fs::read_to_string(app.config.path()).unwrap().contains("JetBrains Mono"));
+        assert!(page(&mut app).selected().is_some(), "back on the settings page");
+    }
+
+    #[test]
+    fn a_token_typed_on_the_page_is_kept_in_settings_toml() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(Scope::You, Some("gitlab.token"));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        for c in "glpat-123".chars() {
+            app.page_key(KeyPress::char(c));
+        }
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(app.config.gitlab_token.as_deref(), Some("glpat-123"));
+        assert!(std::fs::read_to_string(app.config.path()).unwrap().contains("token = \"glpat-123\""));
+        assert_eq!(page(&mut app).snap.secrets[&Secret::GitLab].source, "settings.toml");
+        assert!(app.page_key(KeyPress::char('x')), "cleared");
+        assert_eq!(app.config.gitlab_token, None);
+        assert!(!std::fs::read_to_string(app.config.path()).unwrap().contains("glpat"));
+    }
+
+    /// with a keychain, a token typed on the page is kept there,
+    /// not in the file; so is an extension's `secret` setting, masked.
+    #[test]
+    fn a_token_typed_on_the_page_is_kept_in_the_keychain() {
+        let mut app = App::with_file(None);
+        let keychain = std::sync::Arc::new(fenix_config::keychain::Keychain::with(fenix_config::keychain::Memory::default()));
+        app.wasm.keychain = Some(keychain.clone());
+        app.open_settings_page(Scope::You, Some("gitlab.token"));
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        for c in "glpat-456".chars() {
+            app.page_key(KeyPress::char(c));
+        }
+        assert!(app.page_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(keychain.get("gitlab.token").as_deref(), Some("glpat-456"));
+        assert_eq!(app.config.gitlab_token, None);
+        assert!(!std::fs::read_to_string(app.config.path()).unwrap_or_default().contains("glpat"));
+        assert_eq!(page(&mut app).snap.secrets[&Secret::GitLab].source, "the test keychain");
+        assert_eq!(app.secret_value(Secret::GitLab).as_deref(), Some("glpat-456"));
+        assert!(app.page_key(KeyPress::char('x')), "cleared");
+        assert_eq!(keychain.get("gitlab.token"), None);
+        let ext = crate::app::wasm_host::tests::hello("[[contributes.settings]]\nkey = \"hello.password\"\nkind = \"secret\"\n");
+        let settings = crate::installed::settings_of(&ext);
+        assert_eq!(settings[0].kind, Kind::Secret(Secret::Named("hello.password")));
+    }
+
+    #[test]
+    fn a_hand_edit_to_the_file_is_taken_in_and_a_mistake_named() {
+        let mut app = App::with_file(None);
+        app.config.save().unwrap();
+        app.reload_settings_if_changed();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(app.config.path(), "[editor]\nindent_width = 6\n").unwrap();
+        app.reload_settings_if_changed();
+        assert_eq!(app.config.indent_width, Some(6));
+        assert_eq!(app.vim.indent_width(), 6);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(app.config.path(), "[editor\nindent_width = 9\n").unwrap();
+        app.reload_settings_if_changed();
+        assert_eq!(app.config.indent_width, Some(6), "the last good value stays");
+        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error && m.text.contains("settings.toml:1")), "{:?}", app.status_message.as_ref().map(|m| &m.text));
+    }
+
+    #[test]
+    fn a_projects_own_settings_apply_to_its_files_and_are_set_from_its_scope() {
+        let root = std::env::temp_dir().join(format!("fenix-settings-project-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".fenix")).unwrap();
+        std::fs::write(root.join(".fenix").join("settings.toml"), "[editor]
+indent_width = 2
+[git]
+base_branch = \"develop\"
+").unwrap();
+        std::fs::write(root.join("main.py"), "x = 1
+").unwrap();
+        let root = fenix_lsp::normalize(std::fs::canonicalize(&root).unwrap());
+        let mut app = App::with_file(Some(root.join("main.py").to_string_lossy().into_owned()));
+        app.refresh_project_root();
+        assert_eq!(app.vim.indent_width(), 2, "the project's, not the default 4");
+        assert_eq!(app.base_branch_for(&root).as_deref(), Some("develop"));
+
+        app.open_project_settings_page();
+        assert!(matches!(page(&mut app).scope, Scope::Project { .. }));
+        page(&mut app).show("editor.tab_width");
+        assert!(app.page_key(KeyPress::char('l')), "one more than yours");
+        // Back in the project's file, it's in force.
+        assert!(app.page_key(KeyPress::char('q')));
+        app.refresh_project_root();
+        assert_eq!(app.effective_tab_width(), 9);
+        let text = std::fs::read_to_string(root.join(".fenix").join("settings.toml")).unwrap();
+        assert!(text.contains("tab_width = 9") && text.contains("indent_width = 2"), "{text}");
+        assert_eq!(app.config.tab_width, None, "yours is untouched");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn b_browses_for_a_path_in_the_explorer_and_the_pick_is_saved() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(Scope::You, Some("completion.symbols_file"));
+        press(&mut app, "b");
+        assert!(app.picking_folder());
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::PickSettingPath { folder: false });
+
+        app.settings_path_picked(Path::new(r"\\?\C:\words.txt"));
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.explorer_purpose, ExplorerPurpose::Browse);
+        assert_eq!(app.config.completion_symbols_file, Some(PathBuf::from(r"C:\words.txt")), "saved, without the verbatim prefix");
+    }
+
+    #[test]
+    fn e_opens_the_file_at_the_settings_line() {
+        assert_eq!(line_of_key("# hi\n[editor]\ntheme = \"Nord\"\nfont_size = 16\n", "editor.font_size"), Some(4));
+        assert_eq!(line_of_key("[git]\nlayout = \"page\"\n[[vnc.hosts]]\nname = \"a\"\n", "vnc.hosts"), Some(3));
+        assert_eq!(line_of_key("[editor]\ntheme = \"Nord\"\n", "git.layout"), None);
+    }
+}

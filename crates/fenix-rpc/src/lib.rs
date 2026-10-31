@@ -1,0 +1,549 @@
+//! `Content-Length`-framed message transport, shared by `fenix-lsp` and
+//! (later) `fenix-dap` -- both protocols frame every message the same
+//! way over a child process's stdio: a `Content-Length: N\r\n` header,
+//! a blank line, then exactly `N` bytes of UTF-8 JSON with no trailing
+//! newline of its own. Deliberately generic over plain `BufRead`/`Write`
+//! rather than tied to a specific process-spawning mechanism, and
+//! deliberately ignorant of JSON itself (hands back/takes raw bytes) --
+//! LSP and DAP each have their own message shapes (`fenix-lsp` depends
+//! on the `lsp-types` crate for its; DAP's are chosen when that crate is
+//! built), and this crate has no business knowing either.
+//!
+//! The Agent Client Protocol (`fenix-acp`) and MCP's stdio transport
+//! (`fenix --mcp`) frame differently -- one JSON object per line, no
+//! header -- so `read_line_message_limited`/`write_line_message` sit
+//! beside the `Content-Length` pair, on the same plain `BufRead`/`Write`.
+
+use std::io::{self, BufRead, Read, Write};
+
+/// On Windows, `std::process::Command::new` only launches a bare program
+/// name via `CreateProcess`'s own loader, which -- unlike a real shell --
+/// never consults `PATHEXT`. A server/adapter installed as an npm-style
+/// `.cmd` shim (`typescript-language-server`, `bash-language-server`,
+/// ... -- extremely common for JS-ecosystem tooling) fails to spawn at
+/// all with a bare "program not found" this way, even though a terminal
+/// launches the exact same bare name fine. Fixed by searching `PATH` the
+/// same way `cmd.exe` would -- every directory, every extension
+/// `PATHEXT` lists (falling back to the common default if unset) -- and
+/// handing `Command` the resolved full path instead, which Rust's own
+/// Windows `Command` implementation already knows how to run correctly,
+/// `.cmd`/`.bat` script included (internally via `cmd.exe /c`,
+/// transparent to the caller). Shared by `fenix-lsp` and `fenix-dap`
+/// (both spawn a child process by a possibly-bare command name the same
+/// way) rather than duplicated -- this bug class has nothing to do with
+/// LSP or DAP specifically, it's purely a Windows process-spawning gap.
+///
+/// A command that's already a specific path (has an extension, or
+/// contains a path separator) is returned unchanged -- nothing to
+/// resolve, and forcing it through this search would only risk *not*
+/// finding the exact file the caller named. A no-op on every other
+/// platform: Unix has no such gap, since a script's shebang line makes
+/// it directly executable with no shell involved either way.
+#[cfg(windows)]
+pub fn resolve_command(command: &str) -> String {
+    if std::path::Path::new(command).extension().is_some() || command.contains(['/', '\\']) {
+        return command.to_string();
+    }
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let extensions: Vec<&str> = pathext.split(';').filter(|e| !e.is_empty()).collect();
+    let Some(path_var) = std::env::var_os("PATH") else { return command.to_string() };
+    for dir in std::env::split_paths(&path_var) {
+        for ext in &extensions {
+            let candidate = dir.join(format!("{command}{ext}"));
+            if candidate.is_file() {
+                return candidate.to_string_lossy().into_owned();
+            }
+        }
+    }
+    command.to_string() // not found anywhere -- let Command::new's own error surface as usual
+}
+
+#[cfg(not(windows))]
+pub fn resolve_command(command: &str) -> String {
+    command.to_string()
+}
+
+/// Strips Windows' `\\?\` "verbatim" prefix, if present -- `std::fs::
+/// canonicalize` always adds it (`C:\Users\...` canonicalizes to
+/// `\\?\C:\Users\...`), but it's a Windows API implementation detail
+/// (opts out of the usual 260-character path length limit and any
+/// further normalization) that has no place in a URI, a DAP `Source`
+/// path, or whatever path representation the rest of an app compares/
+/// hashes against -- a server/adapter would never send it back, so a
+/// caller that canonicalizes a path on one side of a comparison and not
+/// the other (or takes this prefix along unstripped into a message a
+/// protocol peer has to match against its own idea of "this file") gets
+/// two representations of the same file that don't match. Confirmed
+/// live on both sides this crate serves: `fenix-lsp`'s `path_to_uri`
+/// (a malformed `file:////?/C:/...` URI broke diagnostics path-
+/// matching) and `fenix-dap`'s own breakpoint `Source.path` (`debugpy`
+/// silently never matched a breakpoint registered under the verbatim-
+/// prefixed form against the plain-form path it reports for a running
+/// frame -- the breakpoint looked "verified" in the `setBreakpoints`
+/// response but was never actually hit). A no-op on every other
+/// platform (and on a Windows path that was never canonicalized in the
+/// first place).
+pub fn normalize(path: std::path::PathBuf) -> std::path::PathBuf {
+    match path.to_str() {
+        Some(s) => match s.strip_prefix(r"\\?\") {
+            Some(stripped) => std::path::PathBuf::from(stripped),
+            None => path,
+        },
+        None => path,
+    }
+}
+
+/// Reads one framed message from `reader`, returning its raw body bytes
+/// (not parsed -- see this module's own doc comment for why).
+///
+/// `Ok(None)` means a clean close: the far end's process exited (or its
+/// pipe was dropped) before sending another message, with zero bytes of
+/// a new header read yet -- the ordinary, expected way a connection
+/// ends. Any *other* truncation (EOF partway through a header line, or
+/// partway through the body) is `Err`, not `Ok(None)`: that's a
+/// genuinely malformed or killed-mid-message connection, which a caller
+/// should treat as a real error rather than silently as "nothing more
+/// to read."
+pub fn read_message<R: BufRead>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
+    let mut content_length: Option<usize> = None;
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line)?;
+        if bytes_read == 0 {
+            return if content_length.is_none() {
+                Ok(None)
+            } else {
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-header"))
+            };
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            // The blank line separating headers from the body -- but
+            // only once at least one Content-Length has actually been
+            // seen; a stray blank line before any header is malformed,
+            // not a (nonsensical) zero-length message.
+            if content_length.is_some() {
+                break;
+            }
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "message body started before any Content-Length header"));
+        }
+        if let Some(value) = line.strip_prefix("Content-Length:") {
+            let value = value.trim();
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("malformed Content-Length header: {value:?}")))?;
+            content_length = Some(parsed);
+        }
+        // Any other header (e.g. `Content-Type`, which both LSP and DAP
+        // technically allow) is read and silently ignored -- neither
+        // protocol requires a client to act on one.
+    }
+    let content_length = content_length.expect("loop only breaks once content_length is Some");
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body)?;
+    Ok(Some(body))
+}
+
+/// The most header lines `read_message_limited` reads before giving up
+/// on a message. LSP and DAP send one or two; sixteen leaves room for
+/// any well-meaning peer while stopping one that never sends the blank
+/// line.
+pub const MAX_HEADER_LINES: usize = 16;
+
+/// `read_message` for a peer Fenix doesn't trust: anything that isn't a
+/// child process Fenix spawned itself, such as a client of the control
+/// endpoint. `read_message` allocates whatever `Content-Length` says and
+/// reads a header line for as long as the peer keeps it going, so a
+/// hostile or broken peer could make it allocate gigabytes or read
+/// forever; this one refuses, as `InvalidData`, a body longer than
+/// `max_body`, a header line longer than `max_header_line` bytes (its
+/// line ending included), and more than [`MAX_HEADER_LINES`] header
+/// lines -- each checked before anything is allocated for it.
+///
+/// Otherwise it behaves exactly like `read_message`: `Ok(None)` on a
+/// clean close before a new message, `Err` on a truncated one.
+pub fn read_message_limited<R: BufRead>(reader: &mut R, max_body: usize, max_header_line: usize) -> io::Result<Option<Vec<u8>>> {
+    let invalid = |message: String| io::Error::new(io::ErrorKind::InvalidData, message);
+    let mut content_length: Option<usize> = None;
+    let mut lines = 0;
+    loop {
+        if lines == MAX_HEADER_LINES {
+            return Err(invalid(format!("more than {MAX_HEADER_LINES} header lines")));
+        }
+        lines += 1;
+        let mut line = Vec::new();
+        // One byte past the limit, so a line exactly at the limit is
+        // told apart from a longer one.
+        (&mut *reader).take(max_header_line as u64 + 1).read_until(b'\n', &mut line)?;
+        if line.is_empty() {
+            return if lines == 1 {
+                Ok(None)
+            } else {
+                Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-header"))
+            };
+        }
+        if line.len() > max_header_line {
+            return Err(invalid(format!("a header line longer than {max_header_line} bytes")));
+        }
+        if line.last() != Some(&b'\n') {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-header"));
+        }
+        let line = std::str::from_utf8(&line).map_err(|_| invalid("a header line that isn't UTF-8".to_string()))?;
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            match content_length {
+                Some(_) => break,
+                None => return Err(invalid("message body started before any Content-Length header".to_string())),
+            }
+        }
+        if let Some(value) = line.strip_prefix("Content-Length:") {
+            let value = value.trim();
+            let parsed = value.parse::<usize>().map_err(|_| invalid(format!("malformed Content-Length header: {value:?}")))?;
+            if parsed > max_body {
+                return Err(invalid(format!("a {parsed}-byte message, over the {max_body}-byte limit")));
+            }
+            content_length = Some(parsed);
+        }
+    }
+    let content_length = content_length.expect("loop only breaks once content_length is Some");
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body)?;
+    Ok(Some(body))
+}
+
+/// Writes one framed message: the `Content-Length` header block, then
+/// `body` verbatim. `body` must already be well-formed JSON bytes --
+/// this function only frames it, it never parses or validates it.
+pub fn write_message<W: Write>(writer: &mut W, body: &[u8]) -> io::Result<()> {
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len())?;
+    writer.write_all(body)?;
+    writer.flush()
+}
+
+/// Reads one newline-delimited message: the framing ACP and MCP's stdio
+/// transport use, one UTF-8 JSON object per line, no header. The line's
+/// ending (`\n`, or `\r\n`) is not part of what's returned. Blank lines
+/// between messages are skipped -- harmless, and some peers send one
+/// after a message.
+///
+/// Bounded like `read_message_limited`, since the peer decides how long a
+/// line is: a line longer than `max_line` bytes is `InvalidData`, and
+/// nothing past the limit is kept in memory. `Ok(None)` on a clean close
+/// between messages; `Err` (`UnexpectedEof`) on a close partway through
+/// a line, as for a truncated `Content-Length` message.
+pub fn read_line_message_limited<R: BufRead>(reader: &mut R, max_line: usize) -> io::Result<Option<Vec<u8>>> {
+    loop {
+        let mut line = Vec::new();
+        // One byte past the limit (plus the line ending), so a line
+        // exactly at the limit is told apart from a longer one.
+        (&mut *reader).take(max_line as u64 + 2).read_until(b'\n', &mut line)?;
+        if line.is_empty() {
+            return Ok(None);
+        }
+        if line.last() != Some(&b'\n') {
+            if line.len() as u64 > max_line as u64 + 1 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a message longer than {max_line} bytes")));
+            }
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed mid-message"));
+        }
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        if line.len() > max_line {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("a message longer than {max_line} bytes")));
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        return Ok(Some(line));
+    }
+}
+
+/// Writes one newline-delimited message: `body`, then `\n`. `body` must
+/// be JSON with no newline of its own -- `serde_json::to_vec` never
+/// writes one -- so a message is always exactly one line.
+pub fn write_line_message<W: Write>(writer: &mut W, body: &[u8]) -> io::Result<()> {
+    debug_assert!(!body.contains(&b'\n'), "a newline-delimited message can't contain a newline");
+    writer.write_all(body)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn all(input: &[u8], max: usize) -> Vec<io::Result<Option<Vec<u8>>>> {
+        let mut reader = Cursor::new(input.to_vec());
+        let mut out = Vec::new();
+        loop {
+            let next = read_line_message_limited(&mut reader, max);
+            let stop = !matches!(next, Ok(Some(_)));
+            out.push(next);
+            if stop {
+                return out;
+            }
+        }
+    }
+
+    #[test]
+    fn messages_are_read_a_line_at_a_time_without_their_line_ending() {
+        let got = all(b"{\"a\":1}\n{\"b\":2}\r\n", 64);
+        assert_eq!(got[0].as_ref().unwrap().as_deref(), Some(&b"{\"a\":1}"[..]));
+        assert_eq!(got[1].as_ref().unwrap().as_deref(), Some(&b"{\"b\":2}"[..]));
+        assert!(matches!(got[2], Ok(None)));
+    }
+
+    #[test]
+    fn blank_lines_between_messages_are_skipped() {
+        let got = all(b"\n\r\n{}\n\n", 64);
+        assert_eq!(got[0].as_ref().unwrap().as_deref(), Some(&b"{}"[..]));
+        assert!(matches!(got[1], Ok(None)));
+    }
+
+    #[test]
+    fn a_close_partway_through_a_line_is_an_error() {
+        let got = all(b"{\"a\":", 64);
+        assert_eq!(got[0].as_ref().unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn a_line_over_the_limit_is_refused_and_one_at_it_is_not() {
+        let at = all(b"12345678\n", 8);
+        assert_eq!(at[0].as_ref().unwrap().as_deref(), Some(&b"12345678"[..]));
+        let at_crlf = all(b"12345678\r\n", 8);
+        assert_eq!(at_crlf[0].as_ref().unwrap().as_deref(), Some(&b"12345678"[..]));
+        let over = all(b"123456789\n", 8);
+        assert_eq!(over[0].as_ref().unwrap_err().kind(), io::ErrorKind::InvalidData);
+        let endless = all(&[b'x'; 100], 8);
+        assert_eq!(endless[0].as_ref().unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_are_handed_back_for_the_caller_to_refuse() {
+        let got = all(b"\xff\xfe\n", 8);
+        assert_eq!(got[0].as_ref().unwrap().as_deref(), Some(&b"\xff\xfe"[..]));
+    }
+
+    #[test]
+    fn a_written_message_reads_back() {
+        let mut out = Vec::new();
+        write_line_message(&mut out, b"{\"x\":[1,2]}").unwrap();
+        write_line_message(&mut out, b"{}").unwrap();
+        assert_eq!(out, b"{\"x\":[1,2]}\n{}\n");
+        let got = all(&out, 64);
+        assert_eq!(got[0].as_ref().unwrap().as_deref(), Some(&b"{\"x\":[1,2]}"[..]));
+        assert_eq!(got[1].as_ref().unwrap().as_deref(), Some(&b"{}"[..]));
+    }
+}
+
+#[cfg(all(test, windows))]
+mod resolve_command_tests {
+    use super::resolve_command;
+
+    #[test]
+    fn a_command_that_already_names_an_extension_is_returned_unchanged() {
+        assert_eq!(resolve_command("pyright-langserver.exe"), "pyright-langserver.exe");
+        assert_eq!(resolve_command("some-tool.cmd"), "some-tool.cmd");
+    }
+
+    #[test]
+    fn a_command_that_is_already_a_path_is_returned_unchanged() {
+        assert_eq!(resolve_command("C:\\tools\\clangd"), "C:\\tools\\clangd");
+        assert_eq!(resolve_command("./bin/clangd"), "./bin/clangd");
+    }
+
+    #[test]
+    fn a_bare_name_found_nowhere_on_path_falls_back_to_itself() {
+        assert_eq!(resolve_command("definitely-not-a-real-lsp-server-binary-xyz"), "definitely-not-a-real-lsp-server-binary-xyz");
+    }
+}
+
+#[cfg(test)]
+mod normalize_tests {
+    use super::normalize;
+    use std::path::PathBuf;
+
+    #[test]
+    fn strips_windows_verbatim_prefix() {
+        assert_eq!(normalize(PathBuf::from(r"\\?\C:\Users\thoma\file.py")), PathBuf::from(r"C:\Users\thoma\file.py"));
+    }
+
+    #[test]
+    fn is_a_no_op_on_a_path_with_no_verbatim_prefix() {
+        assert_eq!(normalize(PathBuf::from(r"C:\Users\thoma\file.py")), PathBuf::from(r"C:\Users\thoma\file.py"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn reads_a_single_well_formed_message() {
+        let raw = b"Content-Length: 13\r\n\r\n{\"foo\":\"bar\"}";
+        let mut cursor = Cursor::new(&raw[..]);
+        let msg = read_message(&mut cursor).unwrap();
+        assert_eq!(msg, Some(b"{\"foo\":\"bar\"}".to_vec()));
+    }
+
+    #[test]
+    fn reads_two_consecutive_messages_off_the_same_stream() {
+        let raw = b"Content-Length: 4\r\n\r\ntrue\
+                    Content-Length: 5\r\n\r\nfalse";
+        let mut cursor = Cursor::new(&raw[..]);
+        assert_eq!(read_message(&mut cursor).unwrap(), Some(b"true".to_vec()));
+        assert_eq!(read_message(&mut cursor).unwrap(), Some(b"false".to_vec()));
+        assert_eq!(read_message(&mut cursor).unwrap(), None);
+    }
+
+    #[test]
+    fn ignores_headers_other_than_content_length() {
+        let raw = b"Content-Type: application/vscode-jsonrpc; charset=utf-8\r\nContent-Length: 2\r\n\r\n{}";
+        let mut cursor = Cursor::new(&raw[..]);
+        assert_eq!(read_message(&mut cursor).unwrap(), Some(b"{}".to_vec()));
+    }
+
+    #[test]
+    fn tolerates_extra_whitespace_around_the_length_value() {
+        let raw = b"Content-Length:    2   \r\n\r\n{}";
+        let mut cursor = Cursor::new(&raw[..]);
+        assert_eq!(read_message(&mut cursor).unwrap(), Some(b"{}".to_vec()));
+    }
+
+    #[test]
+    fn a_clean_close_before_any_header_bytes_is_a_normal_none() {
+        let mut cursor = Cursor::new(&b""[..]);
+        assert_eq!(read_message(&mut cursor).unwrap(), None);
+    }
+
+    #[test]
+    fn eof_partway_through_the_header_block_is_an_error_not_none() {
+        // A Content-Length line with no trailing blank-line terminator
+        // before the stream just stops.
+        let raw = b"Content-Length: 2\r\n";
+        let mut cursor = Cursor::new(&raw[..]);
+        let err = read_message(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn truncated_body_is_an_error() {
+        let raw = b"Content-Length: 10\r\n\r\n{}"; // header promises 10 bytes, only 2 follow
+        let mut cursor = Cursor::new(&raw[..]);
+        let err = read_message(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn missing_content_length_header_is_an_error() {
+        let raw = b"Content-Type: text/plain\r\n\r\n{}";
+        let mut cursor = Cursor::new(&raw[..]);
+        let err = read_message(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn malformed_content_length_value_is_an_error() {
+        let raw = b"Content-Length: not-a-number\r\n\r\n{}";
+        let mut cursor = Cursor::new(&raw[..]);
+        let err = read_message(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn write_message_frames_exactly_per_the_spec() {
+        let mut buf = Vec::new();
+        write_message(&mut buf, b"{\"a\":1}").unwrap();
+        assert_eq!(buf, b"Content-Length: 7\r\n\r\n{\"a\":1}".to_vec());
+    }
+
+    #[test]
+    fn write_then_read_round_trips_the_same_body() {
+        let mut buf = Vec::new();
+        let body = br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        write_message(&mut buf, body).unwrap();
+        let mut cursor = Cursor::new(buf.as_slice());
+        assert_eq!(read_message(&mut cursor).unwrap(), Some(body.to_vec()));
+    }
+
+    #[test]
+    fn an_empty_body_round_trips_correctly() {
+        let mut buf = Vec::new();
+        write_message(&mut buf, b"").unwrap();
+        let mut cursor = Cursor::new(buf.as_slice());
+        assert_eq!(read_message(&mut cursor).unwrap(), Some(Vec::new()));
+    }
+}
+
+#[cfg(test)]
+mod limited_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn read(raw: &[u8]) -> io::Result<Option<Vec<u8>>> {
+        read_message_limited(&mut Cursor::new(raw), 16, 32)
+    }
+
+    #[test]
+    fn reads_what_read_message_reads() {
+        let raw = b"Content-Type: x\r\nContent-Length: 2\r\n\r\n{}Content-Length: 4\r\n\r\ntrue";
+        let mut cursor = Cursor::new(&raw[..]);
+        assert_eq!(read_message_limited(&mut cursor, 16, 32).unwrap(), Some(b"{}".to_vec()));
+        assert_eq!(read_message_limited(&mut cursor, 16, 32).unwrap(), Some(b"true".to_vec()));
+        assert_eq!(read_message_limited(&mut cursor, 16, 32).unwrap(), None);
+    }
+
+    #[test]
+    fn a_body_at_the_limit_is_read() {
+        let mut raw = b"Content-Length: 16\r\n\r\n".to_vec();
+        raw.extend_from_slice(&[b'x'; 16]);
+        assert_eq!(read(&raw).unwrap(), Some(vec![b'x'; 16]));
+    }
+
+    #[test]
+    fn a_body_over_the_limit_is_refused_before_it_is_read() {
+        // The body isn't there at all: refusing must not wait for it.
+        let err = read(b"Content-Length: 17\r\n\r\n").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = read(b"Content-Length: 18446744073709551615\r\n\r\n").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_header_line_over_the_limit_is_refused() {
+        // 32 bytes including CRLF is allowed; 33 isn't.
+        let at_limit = format!("X-Pad: {}\r\nContent-Length: 0\r\n\r\n", "a".repeat(32 - 9));
+        assert_eq!(read(at_limit.as_bytes()).unwrap(), Some(Vec::new()));
+        let over = format!("X-Pad: {}\r\nContent-Length: 0\r\n\r\n", "a".repeat(32 - 8));
+        assert_eq!(read(over.as_bytes()).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn an_endless_header_line_is_refused_without_reading_it_all() {
+        let endless = io::repeat(b'a');
+        let err = read_message_limited(&mut io::BufReader::new(endless), 16, 32).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn too_many_header_lines_are_refused() {
+        let ok = format!("{}Content-Length: 0\r\n\r\n", "X: y\r\n".repeat(MAX_HEADER_LINES - 2));
+        assert_eq!(read(ok.as_bytes()).unwrap(), Some(Vec::new()));
+        let endless = "X: y\r\n".repeat(MAX_HEADER_LINES + 4);
+        assert_eq!(read(endless.as_bytes()).unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn truncation_and_malformed_headers_are_errors() {
+        assert_eq!(read(b"Content-Length: 2\r\n").unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"Content-Len").unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"Content-Length: 4\r\n\r\n{}").unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+        assert_eq!(read(b"\r\n").unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(read(b"Content-Length: x\r\n\r\n").unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(read(b"X: \xff\r\n").unwrap_err().kind(), io::ErrorKind::InvalidData);
+    }
+}

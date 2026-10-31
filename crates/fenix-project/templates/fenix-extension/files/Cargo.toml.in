@@ -1,0 +1,18 @@
+[package]
+name = "{{name_snake}}"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fenix-extension-api = { git = "https://github.com/tpedneault/fenix", tag = "v1.0.0" }
+# Or a checkout of Fenix, while you work on both:
+# fenix-extension-api = { path = "../fenix/crates/fenix-extension-api" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

@@ -1,0 +1,40 @@
+[template]
+name = "Fenix extension · Rust"
+kind = "rust"
+group = "Fenix"
+description = "An extension for Fenix that runs code: a command and a page, written with fenix-extension-api and built for WebAssembly (wasm32-wasip2)."
+needs = ["cargo"]
+open = ["src/lib.rs"]
+
+[[ask]]
+key = "publisher"
+label = "Publisher"
+default = "me"
+hint = "the first half of its id, publisher.name: lowercase letters, digits, - and _"
+
+[[ask]]
+key = "description"
+label = "What it does"
+default = "What {{name}} adds to Fenix"
+
+# Not Cargo.toml in the template's own folder: cargo reads every
+# Cargo.toml in Fenix's repository when it's a git dependency, and
+# `{{name_snake}}` isn't a name.
+[[file]]
+path = "Cargo.toml"
+from = "Cargo.toml.in"
+
+[[task]]
+name = "build"
+exec = "cargo"
+args = ["build", "--release", "--target", "wasm32-wasip2"]
+
+[[task]]
+name = "package"
+exec = "pwsh"
+args = ["-NoProfile", "-File", "package.ps1"]
+
+[[task]]
+name = "install"
+exec = "pwsh"
+args = ["-NoProfile", "-File", "package.ps1", "-Install"]

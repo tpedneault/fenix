@@ -1,0 +1,55 @@
+# Zenburn, Jani Nurminen's low-contrast classic -- here, as much contrast as
+# reading needs and no more.
+name = "Zenburn"
+tabs = "underline"
+
+[surfaces]
+bg = "#3f3f3f"
+sidebar_bg = "#383838"
+bg_modeline = "#2b2b2b"
+divider = "#5f5f5f"
+caret = "#8faf9f"
+hl_line = "#4a4a4a"
+selection = { color = "#2f2f2f", alpha = 0.7 }
+bracket_match = { color = "#7f9f7f", alpha = 0.2 }
+search_match = { color = "#f0dfaf", alpha = 0.14 }
+
+[text]
+fg = "#dcdccc"
+fg_modeline = "#dcdccc"
+caret_text = "#a8c1b4"
+gutter_fg = "#acc1ac"
+
+[modes]
+normal = "#7f9f7f"
+insert = "#8cd0d3"
+visual = "#cc9393"
+replace = "#dfaf8f"
+command = "#f0dfaf"
+explorer = "#7cb8bb"
+picker = "#dc8cc3"
+text_dark = "#2b2b2b"
+
+[syntax]
+keyword = "#f0dfaf"
+string = "#dab1b1"
+comment = "#acc1ac"
+function = "#efef8f"
+type = "#92c4c7"
+number = "#8cd0d3"
+constant = "#bfebbf"
+variable = "#dcdccc"
+operator = "#f0efd0"
+punctuation = "#b1bebe"
+attribute = "#e0b293"
+
+[explorer]
+folder = "#8cd0d3"
+file = "#dcdccc"
+
+[git]
+modified = "#e0b293"
+staged = "#acc1ac"
+untracked = "#8cd0d3"
+ignored = "#acc1ac"
+conflicted = "#dab1b1"

@@ -1,0 +1,56 @@
+# Adapted for Fenix: subdued surfaces, readable secondary text, and
+# coordinated syntax, Git, and mode accents.
+name = "Solarized Dark"
+tabs = "underline"
+
+[surfaces]
+bg = "#002b36"
+sidebar_bg = "#002b36"
+bg_modeline = "#073642"
+divider = "#586e75"
+caret = "#d8ad44"
+hl_line = "#073642"
+selection = { color = "#55a8df", alpha = 0.12 }
+bracket_match = { color = "#a6b64c", alpha = 0.12 }
+search_match = { color = "#d8ad44", alpha = 0.12 }
+
+[text]
+fg = "#b5c3be"
+fg_modeline = "#c4cfca"
+caret_text = "#d8ad44"
+gutter_fg = "#92a4a5"
+
+[modes]
+normal = "#d8ad44"
+insert = "#52b7ad"
+visual = "#ed7770"
+replace = "#e58d5b"
+command = "#55a8df"
+explorer = "#a29bdf"
+picker = "#df82b1"
+text_dark = "#00212b"
+text_light = "#00212b"
+
+[syntax]
+keyword = "#a6b64c"
+string = "#52b7ad"
+comment = "#92a4a5"
+function = "#55a8df"
+type = "#d8ad44"
+number = "#a29bdf"
+constant = "#df82b1"
+variable = "#b5c3be"
+operator = "#a6b64c"
+punctuation = "#a6b64c"
+attribute = "#e58d5b"
+
+[explorer]
+folder = "#55a8df"
+file = "#b5c3be"
+
+[git]
+modified = "#e58d5b"
+staged = "#a6b64c"
+untracked = "#55a8df"
+ignored = "#92a4a5"
+conflicted = "#ed7770"

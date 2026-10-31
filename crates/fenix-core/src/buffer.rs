@@ -1,0 +1,1210 @@
+use std::fs::File;
+use std::io::{self, BufReader};
+use std::path::{Path, PathBuf};
+
+use ropey::{Rope, RopeSlice};
+
+use crate::Cursor;
+
+/// A single low-level text mutation, in char offsets against the buffer's
+/// *current* (post-edit) state, plus the text that was there before.
+/// Unlike `Edit`, this is logged for *every* rope mutation (including each
+/// char typed, not just coalesced runs) -- consumers that need to track
+/// the buffer incrementally (e.g. `fenix-syntax`'s tree-sitter integration)
+/// drain these via `Buffer::drain_edits` rather than reconstructing them
+/// from the coalescing-oriented undo stack, which isn't precise enough for
+/// that use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditDelta {
+    pub start_char: usize,
+    pub new_end_char: usize,
+    pub removed: String,
+}
+
+/// How many edits `take_changes` keeps before giving up on them.
+const MAX_LOGGED_CHANGES: usize = 2048;
+
+/// A single undoable change: replaces `removed` with `inserted` at `at`.
+/// Applying it forward performs the edit; applying its inverse reverses it.
+struct Edit {
+    at: usize,
+    removed: String,
+    inserted: String,
+    cursor_before: Cursor,
+    cursor_after: Cursor,
+}
+
+#[derive(PartialEq)]
+enum PendingKind {
+    Insert,
+    DeleteBackward,
+    DeleteForward,
+}
+
+/// One undo step: the edits it made, in the order they were applied.
+/// Usually just one, but `begin_undo_group`/`end_undo_group` fold every
+/// edit a single command makes (a visual `r`, a block delete, a comment
+/// toggle across lines, ...) into one step, so `u` reverts the whole
+/// command rather than one character or line of it.
+type UndoStep = Vec<Edit>;
+
+/// An open `begin_undo_group`.
+struct UndoGroup {
+    /// Nesting depth; only the outermost `end_undo_group` merges.
+    depth: usize,
+    /// Index into `undo_stack` of the group's first step.
+    start: usize,
+    /// A typing run that was already pending when the group opened
+    /// belongs to whatever came before, not to this group -- when it's
+    /// flushed mid-group, `start` moves past it.
+    pending_at_open: bool,
+}
+
+/// An in-progress run of same-kind, contiguous edits (e.g. a typed word, or
+/// a run of backspaces) not yet committed to the undo stack, so that undo
+/// removes a whole run at once instead of one character at a time.
+struct Pending {
+    kind: PendingKind,
+    at: usize,
+    removed: String,
+    inserted: String,
+    cursor_before: Cursor,
+    cursor_after: Cursor,
+}
+
+/// A rope-backed text buffer.
+///
+/// Editing and movement methods take a `&mut Cursor` argument instead of
+/// owning a cursor internally, so multiple cursors can later be driven over
+/// the same buffer without changing this API.
+pub struct Buffer {
+    rope: Rope,
+    path: Option<PathBuf>,
+    dirty: bool,
+    undo_stack: Vec<UndoStep>,
+    redo_stack: Vec<UndoStep>,
+    pending: Option<Pending>,
+    undo_group: Option<UndoGroup>,
+    pending_syntax_edits: Vec<EditDelta>,
+    /// The same edits again, for whoever wants to show what changed
+    /// (`take_changes`) -- kept apart from `pending_syntax_edits` so the
+    /// two readers never take each other's. Capped: a change too big to
+    /// show clears it and sets `changes_overflowed`.
+    change_log: Vec<EditDelta>,
+    changes_overflowed: bool,
+    /// The same edits a third time, for what's anchored in the text and
+    /// moves with it (an extension's decorations): kept only once someone
+    /// asks (`track_anchors`), so a buffer nothing is anchored in keeps
+    /// nothing.
+    anchor_edits: Option<Vec<EditDelta>>,
+    /// Monotonically increasing on every real content mutation (insert,
+    /// delete, undo, redo) -- unlike `dirty` (which only ever flips
+    /// false-to-true once, until the next save), this changes on *every*
+    /// edit, so a caller can detect "did anything change since I last
+    /// checked" by comparing two snapshots of this value, without
+    /// consuming anything (unlike `drain_edits`, whose queue is reserved
+    /// for `fenix-syntax`'s incremental reparse). Used by `fenix-vim` to
+    /// know when to clear `hlsearch`'s persistent match highlighting.
+    edit_count: u64,
+}
+
+impl Buffer {
+    pub fn empty() -> Self {
+        Self {
+            rope: Rope::new(),
+            path: None,
+            dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending: None,
+            undo_group: None,
+            pending_syntax_edits: Vec::new(),
+            change_log: Vec::new(),
+            changes_overflowed: false,
+            anchor_edits: None,
+            edit_count: 0,
+        }
+    }
+
+    /// Seeds a buffer with `text` directly (no path, no undo history --
+    /// unlike `empty()` followed by `insert_str`, this doesn't push an
+    /// `Edit`, so there's nothing for a stray `u` to undo). For content
+    /// that's generated rather than typed or read from disk, e.g. the
+    /// startup dashboard (`fenix-buffers::BufferList::open_dashboard`).
+    /// Named `from_text`, not `from_str`, to avoid colliding with the
+    /// `std::str::FromStr` trait method's naming convention.
+    pub fn from_text(text: &str) -> Self {
+        Self {
+            rope: Rope::from_str(text),
+            path: None,
+            dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending: None,
+            undo_group: None,
+            pending_syntax_edits: Vec::new(),
+            change_log: Vec::new(),
+            changes_overflowed: false,
+            anchor_edits: None,
+            edit_count: 0,
+        }
+    }
+
+    /// A buffer on file `path` holding `text`, as if it had been read from
+    /// there -- text read elsewhere, as it was checked (an extension's
+    /// `open-file`), so it isn't read again.
+    pub fn from_text_at(path: impl AsRef<Path>, text: &str) -> Self {
+        Self { path: Some(path.as_ref().to_path_buf()), ..Self::from_text(text) }
+    }
+
+    pub fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref();
+        let rope = Rope::from_reader(BufReader::new(File::open(path)?))?;
+        Ok(Self {
+            rope,
+            path: Some(path.to_path_buf()),
+            dirty: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pending: None,
+            undo_group: None,
+            pending_syntax_edits: Vec::new(),
+            change_log: Vec::new(),
+            changes_overflowed: false,
+            anchor_edits: None,
+            edit_count: 0,
+        })
+    }
+
+    pub fn save(&mut self) -> io::Result<()> {
+        let path = self
+            .path
+            .clone()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "buffer has no path"))?;
+        self.save_as(path)
+    }
+
+    pub fn save_as(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
+        self.flush_pending();
+        let path = path.as_ref();
+        fenix_storage::atomic_write(path, |writer| self.rope.write_to(writer))?;
+        self.path = Some(path.to_path_buf());
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Name an unnamed document without overwriting a concurrently created file.
+    pub fn save_new(&mut self, path: &Path) -> io::Result<()> {
+        self.flush_pending();
+        fenix_storage::atomic_write_new(path, |writer| self.rope.write_to(writer))?;
+        self.path = Some(path.to_path_buf());
+        self.dirty = false;
+        Ok(())
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Declares the buffer's contents to *differ* from what's on disk,
+    /// without editing anything -- the inverse of `mark_saved`.
+    ///
+    /// For text that was put into the buffer from somewhere other than
+    /// its file: a recovered crash snapshot (see `fenix-recovery`),
+    /// which exists nowhere on disk. Letting `:qa` past it would lose
+    /// the same work a second time.
+    pub fn mark_unsaved(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Declares the buffer's contents to match what's on disk without
+    /// writing anything -- for when the *file* changed and the buffer
+    /// was re-read from it, rather than the other way round (a git
+    /// checkout/rebase rewriting an open file; see `fenix-gui`'s
+    /// `App::reload_buffers_changed_on_disk`). Replacing the text marks
+    /// the buffer dirty like any other edit would, which would then
+    /// misreport a freshly-reloaded file as having unsaved work.
+    pub fn mark_saved(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Monotonic edit counter -- see the `edit_count` field's own doc
+    /// comment. Callers detect "did an edit happen" by snapshotting this
+    /// before and comparing after, not by consuming anything.
+    pub fn edit_count(&self) -> u64 {
+        self.edit_count
+    }
+
+    /// Byte offset of the `char_idx`-th char -- needed by consumers that
+    /// work in bytes (e.g. tree-sitter, via `fenix-syntax`), since `Buffer`
+    /// itself is entirely char-indexed.
+    ///
+    /// Like every position accessor here, an offset past the end is
+    /// clamped to it rather than panicking: positions are held all over
+    /// the editor (pane cursors, marks, the jumplist, a Visual anchor, a
+    /// completion's start), and when the text changes underneath one --
+    /// a file rewritten on disk by another program, say -- a stale
+    /// position should land at the end of the buffer, not take down the
+    /// whole editor and whatever unsaved work is in it.
+    pub fn char_to_byte(&self, char_idx: usize) -> usize {
+        self.rope.char_to_byte(char_idx.min(self.rope.len_chars()))
+    }
+
+    pub fn byte_to_char(&self, byte_idx: usize) -> usize {
+        self.rope.byte_to_char(byte_idx.min(self.rope.len_bytes()))
+    }
+
+    /// Records a low-level mutation for any consumer tracking the buffer
+    /// incrementally. Called at every rope-mutating site, unlike the
+    /// undo stack which coalesces contiguous edits into runs -- see
+    /// `EditDelta`'s doc comment for why the distinction matters.
+    fn log_edit(&mut self, start_char: usize, removed: String, new_end_char: usize) {
+        if self.change_log.len() < MAX_LOGGED_CHANGES {
+            self.change_log.push(EditDelta { start_char, new_end_char, removed: removed.clone() });
+        } else {
+            self.change_log.clear();
+            self.changes_overflowed = true;
+        }
+        if let Some(anchors) = &mut self.anchor_edits {
+            anchors.push(EditDelta { start_char, new_end_char, removed: removed.clone() });
+        }
+        self.pending_syntax_edits.push(EditDelta { start_char, new_end_char, removed });
+    }
+
+    /// From now on, keeps every edit for `take_anchor_edits` as well.
+    pub fn track_anchors(&mut self) {
+        self.anchor_edits.get_or_insert_with(Vec::new);
+    }
+
+    /// Every edit since the last call (or `track_anchors`), in order:
+    /// what something anchored in the text moves by.
+    pub fn take_anchor_edits(&mut self) -> Vec<EditDelta> {
+        self.anchor_edits.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
+    /// Every edit since the last call, in order -- `None` when there were
+    /// too many to be worth showing one by one.
+    pub fn take_changes(&mut self) -> Option<Vec<EditDelta>> {
+        let changes = std::mem::take(&mut self.change_log);
+        if std::mem::take(&mut self.changes_overflowed) {
+            return None;
+        }
+        Some(changes)
+    }
+
+    /// Drains and returns every low-level edit recorded since the last
+    /// call, in the order they happened.
+    pub fn drain_edits(&mut self) -> Vec<EditDelta> {
+        std::mem::take(&mut self.pending_syntax_edits)
+    }
+
+    pub fn len_chars(&self) -> usize {
+        self.rope.len_chars()
+    }
+
+    /// The underlying rope, for a caller that needs ropey's own richer
+    /// position/line arithmetic directly (e.g. `fenix-lsp`'s char-offset
+    /// <-> UTF-16 `Position` conversion) rather than one of this type's
+    /// own narrower accessors (`line_col`, `text`, ...).
+    pub fn rope(&self) -> &Rope {
+        &self.rope
+    }
+
+    pub fn text(&self) -> String {
+        self.rope.to_string()
+    }
+
+    /// The concatenated content of lines `[first_line, first_line + max_lines)`,
+    /// for windowed rendering of large files instead of laying out the whole
+    /// buffer every frame.
+    pub fn visible_text(&self, first_line: usize, max_lines: usize) -> String {
+        if first_line >= self.rope.len_lines() {
+            return String::new();
+        }
+        let last_line = (first_line + max_lines).min(self.rope.len_lines());
+        let start = self.rope.line_to_char(first_line);
+        let end = self.rope.line_to_char(last_line);
+        self.rope.slice(start..end).to_string()
+    }
+
+    /// The text in `[start, end)`, without modifying the buffer. Used by
+    /// Vim's yank, which reads a range without deleting it.
+    pub fn text_range(&self, start: usize, end: usize) -> String {
+        let end = end.min(self.rope.len_chars());
+        if start >= end {
+            return String::new();
+        }
+        self.rope.slice(start..end).to_string()
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.rope.len_lines()
+    }
+
+    /// Like `line_count`, but corrected for ropey's phantom trailing line: a
+    /// rope ending in `\n` reports one more line than a reader would
+    /// actually see (an empty "line" past the final newline). Used wherever
+    /// that count needs to match what's visually on screen -- `gg`/`G`
+    /// motions and the line-number gutter both care about the real last
+    /// line, not ropey's internal one.
+    pub fn visual_line_count(&self) -> usize {
+        let n = self.rope.len_lines();
+        if n > 1 && self.line_len(n - 1) == 0 { n - 1 } else { n }
+    }
+
+    pub fn line(&self, line_idx: usize) -> RopeSlice<'_> {
+        self.rope.line(line_idx)
+    }
+
+    /// (line, column) for a cursor, both zero-based, in chars.
+    /// A cursor past the end reads as the end (see `char_to_byte`).
+    pub fn line_col(&self, cursor: &Cursor) -> (usize, usize) {
+        let char_idx = cursor.char_idx.min(self.rope.len_chars());
+        let line = self.rope.char_to_line(char_idx);
+        let col = char_idx - self.rope.line_to_char(line);
+        (line, col)
+    }
+
+    /// The char offset where `line` begins; a line past the end begins
+    /// at the end of the buffer.
+    pub fn line_start_char(&self, line: usize) -> usize {
+        self.rope.line_to_char(line.min(self.rope.len_lines()))
+    }
+
+    /// The character at `idx`, or `None` past the end of the buffer.
+    pub fn char_at(&self, idx: usize) -> Option<char> {
+        if idx >= self.rope.len_chars() {
+            None
+        } else {
+            Some(self.rope.char(idx))
+        }
+    }
+
+    /// Length of a line's content in chars, excluding its line terminator.
+    pub fn line_len(&self, line_idx: usize) -> usize {
+        if line_idx >= self.rope.len_lines() {
+            return 0;
+        }
+        let line = self.rope.line(line_idx);
+        let mut len = line.len_chars();
+        if len > 0 && line.char(len - 1) == '\n' {
+            len -= 1;
+            if len > 0 && line.char(len - 1) == '\r' {
+                len -= 1;
+            }
+        }
+        len
+    }
+
+    pub fn insert_char(&mut self, cursor: &mut Cursor, ch: char) {
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let at = cursor.char_idx;
+
+        self.rope.insert_char(at, ch);
+        cursor.char_idx += 1;
+        self.dirty = true;
+        self.edit_count += 1;
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+        self.log_edit(at, String::new(), at + 1);
+
+        match &mut self.pending {
+            Some(p) if p.kind == PendingKind::Insert && p.at + p.inserted.chars().count() == at => {
+                p.inserted.push(ch);
+                p.cursor_after = *cursor;
+            }
+            _ => {
+                self.flush_pending();
+                self.pending = Some(Pending {
+                    kind: PendingKind::Insert,
+                    at,
+                    removed: String::new(),
+                    inserted: ch.to_string(),
+                    cursor_before,
+                    cursor_after: *cursor,
+                });
+            }
+        }
+    }
+
+    pub fn delete_backward(&mut self, cursor: &mut Cursor) {
+        if cursor.char_idx == 0 {
+            return;
+        }
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let removed_at = cursor.char_idx - 1;
+        let removed_char = self.rope.char(removed_at);
+
+        self.rope.remove(removed_at..cursor.char_idx);
+        cursor.char_idx = removed_at;
+        self.dirty = true;
+        self.edit_count += 1;
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+        self.log_edit(removed_at, removed_char.to_string(), removed_at);
+
+        match &mut self.pending {
+            Some(p) if p.kind == PendingKind::DeleteBackward && p.at == removed_at + 1 => {
+                p.removed.insert(0, removed_char);
+                p.at = removed_at;
+                p.cursor_after = *cursor;
+            }
+            _ => {
+                self.flush_pending();
+                self.pending = Some(Pending {
+                    kind: PendingKind::DeleteBackward,
+                    at: removed_at,
+                    removed: removed_char.to_string(),
+                    inserted: String::new(),
+                    cursor_before,
+                    cursor_after: *cursor,
+                });
+            }
+        }
+    }
+
+    pub fn delete_forward(&mut self, cursor: &mut Cursor) {
+        if cursor.char_idx >= self.rope.len_chars() {
+            return;
+        }
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let at = cursor.char_idx;
+        let removed_char = self.rope.char(at);
+
+        self.rope.remove(at..at + 1);
+        self.dirty = true;
+        self.edit_count += 1;
+        self.log_edit(at, removed_char.to_string(), at);
+
+        match &mut self.pending {
+            Some(p) if p.kind == PendingKind::DeleteForward && p.at == at => {
+                p.removed.push(removed_char);
+                p.cursor_after = *cursor;
+            }
+            _ => {
+                self.flush_pending();
+                self.pending = Some(Pending {
+                    kind: PendingKind::DeleteForward,
+                    at,
+                    removed: removed_char.to_string(),
+                    inserted: String::new(),
+                    cursor_before,
+                    cursor_after: *cursor,
+                });
+            }
+        }
+    }
+
+    /// Removes `start..end` as a single atomic edit (one undo step, not
+    /// coalesced char-by-char), returning the removed text. Used by Vim
+    /// operators (`dw`, `diw`, `dd`, ...) and as the yank source for `y`.
+    pub fn delete_range(&mut self, cursor: &mut Cursor, start: usize, end: usize) -> String {
+        if start >= end {
+            return String::new();
+        }
+        self.flush_pending();
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let removed = self.rope.slice(start..end).to_string();
+
+        self.rope.remove(start..end);
+        cursor.char_idx = start;
+        self.dirty = true;
+        self.edit_count += 1;
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+        self.log_edit(start, removed.clone(), start);
+
+        self.push_undo(Edit {
+            at: start,
+            removed: removed.clone(),
+            inserted: String::new(),
+            cursor_before,
+            cursor_after: *cursor,
+        });
+        removed
+    }
+
+    /// Inserts `text` at the cursor as a single atomic edit (one undo step).
+    /// Used for paste (`p`/`P`).
+    pub fn insert_str(&mut self, cursor: &mut Cursor, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.flush_pending();
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let at = cursor.char_idx;
+
+        self.rope.insert(at, text);
+        cursor.char_idx = at + text.chars().count();
+        self.dirty = true;
+        self.edit_count += 1;
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+        self.log_edit(at, String::new(), cursor.char_idx);
+
+        self.push_undo(Edit {
+            at,
+            removed: String::new(),
+            inserted: text.to_string(),
+            cursor_before,
+            cursor_after: *cursor,
+        });
+    }
+
+    /// Replaces `start..end` with `text` as a single atomic edit (one
+    /// undo step, not a delete followed by a separate insert) --
+    /// combines what `delete_range`/`insert_str` each do individually
+    /// into one `Edit` carrying both a `removed` and an `inserted`
+    /// string, since chaining those two would split what should be one
+    /// undo-able change (e.g. Vim's `:s` substitute) into two, requiring
+    /// two presses of `u` to fully revert. Returns the removed text.
+    pub fn replace_range(&mut self, cursor: &mut Cursor, start: usize, end: usize, text: &str) -> String {
+        self.flush_pending();
+        self.redo_stack.clear();
+        let cursor_before = *cursor;
+        let removed = self.rope.slice(start..end).to_string();
+
+        if start < end {
+            self.rope.remove(start..end);
+        }
+        if !text.is_empty() {
+            self.rope.insert(start, text);
+        }
+        cursor.char_idx = start + text.chars().count();
+        self.dirty = true;
+        self.edit_count += 1;
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+        self.log_edit(start, removed.clone(), cursor.char_idx);
+
+        self.push_undo(Edit {
+            at: start,
+            removed: removed.clone(),
+            inserted: text.to_string(),
+            cursor_before,
+            cursor_after: *cursor,
+        });
+        removed
+    }
+
+    /// Commits the in-progress coalesced edit run (if any) to the undo
+    /// stack, ending it as an undo boundary. Movement calls this so undo
+    /// removes one "run" of typing/deleting at a time, not one char.
+    fn flush_pending(&mut self) {
+        if let Some(p) = self.pending.take() {
+            self.push_undo(Edit {
+                at: p.at,
+                removed: p.removed,
+                inserted: p.inserted,
+                cursor_before: p.cursor_before,
+                cursor_after: p.cursor_after,
+            });
+            if let Some(group) = self.undo_group.as_mut().filter(|g| g.pending_at_open) {
+                group.pending_at_open = false;
+                group.start = self.undo_stack.len();
+            }
+        }
+    }
+
+    fn push_undo(&mut self, edit: Edit) {
+        self.undo_stack.push(vec![edit]);
+    }
+
+    /// Starts folding every edit made until the matching `end_undo_group`
+    /// into a single undo step. Nests: only the outermost pair counts.
+    /// A typing run still pending (not yet an undo step) is left out of
+    /// the group, so it keeps coalescing with the keys that come after.
+    pub fn begin_undo_group(&mut self) {
+        match self.undo_group.as_mut() {
+            Some(group) => group.depth += 1,
+            None => {
+                self.undo_group = Some(UndoGroup {
+                    depth: 1,
+                    start: self.undo_stack.len(),
+                    pending_at_open: self.pending.is_some(),
+                });
+            }
+        }
+    }
+
+    /// Closes a `begin_undo_group`, merging the steps pushed since into
+    /// one. Unmatched calls are ignored.
+    pub fn end_undo_group(&mut self) {
+        let Some(group) = self.undo_group.as_mut() else { return };
+        group.depth -= 1;
+        if group.depth > 0 {
+            return;
+        }
+        let start = group.start;
+        self.undo_group = None;
+        if self.undo_stack.len() > start + 1 {
+            let merged: UndoStep = self.undo_stack.drain(start..).flatten().collect();
+            self.undo_stack.push(merged);
+        }
+    }
+
+    /// Keeps undo/redo steps out of an open group: undoing pops steps
+    /// that may predate it, and redoing pushes steps that are already
+    /// whole -- neither is something the group should fold together.
+    fn reset_undo_group_start(&mut self) {
+        let len = self.undo_stack.len();
+        if let Some(group) = self.undo_group.as_mut() {
+            group.start = len;
+            group.pending_at_open = false;
+        }
+    }
+
+    fn apply_forward(&mut self, edit: &Edit) {
+        if !edit.removed.is_empty() {
+            let end = edit.at + edit.removed.chars().count();
+            self.rope.remove(edit.at..end);
+        }
+        if !edit.inserted.is_empty() {
+            self.rope.insert(edit.at, &edit.inserted);
+        }
+        self.log_edit(edit.at, edit.removed.clone(), edit.at + edit.inserted.chars().count());
+    }
+
+    fn apply_inverse(&mut self, edit: &Edit) {
+        if !edit.inserted.is_empty() {
+            let end = edit.at + edit.inserted.chars().count();
+            self.rope.remove(edit.at..end);
+        }
+        if !edit.removed.is_empty() {
+            self.rope.insert(edit.at, &edit.removed);
+        }
+        self.log_edit(edit.at, edit.inserted.clone(), edit.at + edit.removed.chars().count());
+    }
+
+    /// Undoes the most recent edit run, restoring the cursor to where it was
+    /// before that run started. Returns `false` if there was nothing to undo.
+    pub fn undo(&mut self, cursor: &mut Cursor) -> bool {
+        self.flush_pending();
+        let Some(step) = self.undo_stack.pop() else { return false };
+        for edit in step.iter().rev() {
+            self.apply_inverse(edit);
+        }
+        if let Some(first) = step.first() {
+            *cursor = first.cursor_before;
+        }
+        self.dirty = true;
+        self.edit_count += 1;
+        self.redo_stack.push(step);
+        self.reset_undo_group_start();
+        true
+    }
+
+    /// Reapplies the most recently undone edit run. Returns `false` if there
+    /// was nothing to redo.
+    pub fn redo(&mut self, cursor: &mut Cursor) -> bool {
+        self.flush_pending();
+        let Some(step) = self.redo_stack.pop() else { return false };
+        for edit in &step {
+            self.apply_forward(edit);
+        }
+        if let Some(last) = step.last() {
+            *cursor = last.cursor_after;
+        }
+        self.dirty = true;
+        self.edit_count += 1;
+        self.undo_stack.push(step);
+        self.reset_undo_group_start();
+        true
+    }
+
+    pub fn move_left(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
+        if cursor.char_idx > 0 {
+            cursor.char_idx -= 1;
+        }
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+    }
+
+    pub fn move_right(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
+        if cursor.char_idx < self.rope.len_chars() {
+            cursor.char_idx += 1;
+        }
+        let (_, col) = self.line_col(cursor);
+        cursor.sticky_col = col;
+    }
+
+    pub fn move_home(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
+        let (line, _) = self.line_col(cursor);
+        cursor.char_idx = self.rope.line_to_char(line);
+        cursor.sticky_col = 0;
+    }
+
+    pub fn move_end(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
+        let (line, _) = self.line_col(cursor);
+        let len = self.line_len(line);
+        cursor.char_idx = self.rope.line_to_char(line) + len;
+        cursor.sticky_col = len;
+    }
+
+    pub fn move_up(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
+        self.move_vertical(cursor, -1);
+    }
+
+    pub fn move_down(&mut self, cursor: &mut Cursor) {
+        self.flush_pending();
+        self.move_vertical(cursor, 1);
+    }
+
+    pub fn move_page(&mut self, cursor: &mut Cursor, lines: usize, down: bool) {
+        self.flush_pending();
+        let delta = if down { lines as isize } else { -(lines as isize) };
+        self.move_vertical(cursor, delta);
+    }
+
+    fn move_vertical(&self, cursor: &mut Cursor, delta: isize) {
+        let (line, _) = self.line_col(cursor);
+        let last_line = self.rope.len_lines().saturating_sub(1);
+        let target_line = (line as isize + delta).clamp(0, last_line as isize) as usize;
+        let target_len = self.line_len(target_line);
+        let col = cursor.sticky_col.min(target_len);
+        cursor.char_idx = self.rope.line_to_char(target_line) + col;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positions_past_the_end_clamp_instead_of_panicking() {
+        let mut b = Buffer::empty();
+        let mut c = Cursor::at_start();
+        b.insert_str(&mut c, "ab
+cd");
+        let stale = Cursor { char_idx: 20_442, sticky_col: 0 };
+        assert_eq!(b.line_col(&stale), (1, 2));
+        assert_eq!(b.line_start_char(99), b.len_chars());
+        assert_eq!(b.line_len(99), 0);
+        assert_eq!(b.char_to_byte(99), 5);
+        assert_eq!(b.byte_to_char(99), 5);
+        assert_eq!(b.text_range(50, 60), "");
+    }
+
+    fn buffer_with(text: &str) -> Buffer {
+        Buffer::from_text(text)
+    }
+
+    #[test]
+    fn failed_save_retains_unsaved_text_and_original_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.txt");
+        std::fs::write(&source, "original").unwrap();
+        let mut buffer = Buffer::from_path(&source).unwrap();
+        buffer.insert_str(&mut Cursor::at_start(), "unsaved ");
+        let destination = dir.path().join("missing").join("file.txt");
+        assert!(buffer.save_as(&destination).is_err());
+        assert!(buffer.is_dirty());
+        assert_eq!(buffer.path(), Some(source.as_path()));
+        assert_eq!(buffer.text(), "unsaved original");
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), "original");
+        buffer.save().unwrap();
+        assert!(!buffer.is_dirty());
+        assert_eq!(std::fs::read_to_string(source).unwrap(), "unsaved original");
+    }
+
+    #[test]
+    fn from_text_seeds_the_text_with_no_path_and_no_undo_history() {
+        let buffer = Buffer::from_text("hello\nworld\n");
+        assert_eq!(buffer.text(), "hello\nworld\n");
+        assert_eq!(buffer.path(), None);
+        assert!(!buffer.is_dirty());
+        // No Edit was ever pushed, so undo is a no-op -- the seeded text
+        // isn't itself something a stray `u` can strip away.
+        let mut cursor = Cursor::at_start();
+        let mut buffer = buffer;
+        buffer.undo(&mut cursor);
+        assert_eq!(buffer.text(), "hello\nworld\n");
+    }
+
+    #[test]
+    fn insert_and_delete_char() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'h');
+        buf.insert_char(&mut cur, 'i');
+        assert_eq!(buf.text(), "hi");
+        assert_eq!(cur.char_idx, 2);
+
+        buf.delete_backward(&mut cur);
+        assert_eq!(buf.text(), "h");
+        assert_eq!(cur.char_idx, 1);
+    }
+
+    #[test]
+    fn delete_forward_leaves_cursor_in_place() {
+        let mut buf = buffer_with("abc");
+        let mut cur = Cursor { char_idx: 1, sticky_col: 1 };
+        buf.delete_forward(&mut cur);
+        assert_eq!(buf.text(), "ac");
+        assert_eq!(cur.char_idx, 1);
+    }
+
+    #[test]
+    fn horizontal_movement_clamps_at_buffer_edges() {
+        let mut buf = buffer_with("ab");
+        let mut cur = Cursor::at_start();
+        buf.move_left(&mut cur);
+        assert_eq!(cur.char_idx, 0);
+
+        buf.move_right(&mut cur);
+        buf.move_right(&mut cur);
+        buf.move_right(&mut cur);
+        assert_eq!(cur.char_idx, 2);
+    }
+
+    #[test]
+    fn home_and_end_use_line_content_length_excluding_newline() {
+        let mut buf = buffer_with("hello\nworld\n");
+        let mut cur = Cursor { char_idx: 8, sticky_col: 2 };
+        buf.move_home(&mut cur);
+        assert_eq!(buf.line_col(&cur), (1, 0));
+
+        buf.move_end(&mut cur);
+        assert_eq!(buf.line_col(&cur), (1, 5));
+    }
+
+    #[test]
+    fn vertical_movement_uses_sticky_column_through_short_lines() {
+        let mut buf = buffer_with("longline\nhi\nlongline");
+        let mut cur = Cursor::at_start();
+        buf.move_end(&mut cur);
+        assert_eq!(buf.line_col(&cur), (0, 8));
+
+        buf.move_down(&mut cur);
+        assert_eq!(buf.line_col(&cur), (1, 2)); // clamped to "hi"'s length
+
+        buf.move_down(&mut cur);
+        assert_eq!(buf.line_col(&cur), (2, 8)); // sticky column restored
+    }
+
+    #[test]
+    fn page_movement_clamps_to_last_line() {
+        let mut buf = buffer_with("a\nb\nc");
+        let mut cur = Cursor::at_start();
+        buf.move_page(&mut cur, 100, true);
+        assert_eq!(buf.line_col(&cur), (2, 0));
+    }
+
+    #[test]
+    fn visible_text_windows_a_line_range() {
+        let buf = buffer_with("one\ntwo\nthree\nfour\nfive\n");
+        assert_eq!(buf.visible_text(1, 2), "two\nthree\n");
+        assert_eq!(buf.visible_text(4, 10), "five\n");
+        assert_eq!(buf.visible_text(10, 2), "");
+    }
+
+    #[test]
+    fn char_at_and_line_start_char() {
+        let buf = buffer_with("ab\ncd\n");
+        assert_eq!(buf.char_at(0), Some('a'));
+        assert_eq!(buf.char_at(3), Some('c'));
+        assert_eq!(buf.char_at(100), None);
+        assert_eq!(buf.line_start_char(0), 0);
+        assert_eq!(buf.line_start_char(1), 3);
+    }
+
+    #[test]
+    fn delete_range_removes_atomically_and_is_one_undo_step() {
+        let mut buf = buffer_with("hello world");
+        let mut cur = Cursor { char_idx: 11, sticky_col: 11 };
+        let removed = buf.delete_range(&mut cur, 5, 11);
+        assert_eq!(removed, " world");
+        assert_eq!(buf.text(), "hello");
+        assert_eq!(cur.char_idx, 5);
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "hello world");
+        assert_eq!(cur.char_idx, 11);
+        assert!(!buf.undo(&mut cur)); // one step, not six
+    }
+
+    #[test]
+    fn an_undo_group_undoes_and_redoes_as_one_step() {
+        let mut buf = buffer_with("aaa
+bbb");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        buf.insert_str(&mut cur, "x"); // before the group: its own step
+        buf.begin_undo_group();
+        buf.replace_range(&mut cur, 1, 2, "#");
+        buf.replace_range(&mut cur, 2, 3, "#");
+        buf.delete_range(&mut cur, 5, 6);
+        buf.end_undo_group();
+        assert_eq!(buf.text(), "x##a
+bb");
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "xaaa
+bbb");
+        assert_eq!(cur.char_idx, 1); // where the group started
+        assert!(buf.redo(&mut cur));
+        assert_eq!(buf.text(), "x##a
+bb");
+        assert!(buf.undo(&mut cur));
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "aaa
+bbb");
+        assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn a_typing_run_pending_when_a_group_opens_stays_its_own_step() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        buf.insert_char(&mut cur, 'a');
+        buf.insert_char(&mut cur, 'b');
+        buf.begin_undo_group();
+        buf.insert_str(&mut cur, "XY"); // flushes "ab" first
+        buf.end_undo_group();
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "ab");
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn redoing_inside_a_group_keeps_each_step_separate() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        buf.insert_str(&mut cur, "a");
+        buf.insert_str(&mut cur, "b");
+        buf.undo(&mut cur);
+        buf.undo(&mut cur);
+        buf.begin_undo_group();
+        buf.redo(&mut cur);
+        buf.redo(&mut cur);
+        buf.end_undo_group();
+        assert_eq!(buf.text(), "ab");
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "a");
+    }
+
+    #[test]
+    fn insert_str_inserts_atomically_and_is_one_undo_step() {
+        let mut buf = buffer_with("hello");
+        let mut cur = Cursor { char_idx: 5, sticky_col: 5 };
+        buf.insert_str(&mut cur, " world");
+        assert_eq!(buf.text(), "hello world");
+        assert_eq!(cur.char_idx, 11);
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "hello");
+        assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn replace_range_swaps_text_in_and_positions_the_cursor_after_it() {
+        let mut buf = buffer_with("hello world");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let removed = buf.replace_range(&mut cur, 0, 5, "goodbye");
+        assert_eq!(removed, "hello");
+        assert_eq!(buf.text(), "goodbye world");
+        assert_eq!(cur.char_idx, 7);
+    }
+
+    #[test]
+    fn replace_range_is_a_single_undo_step() {
+        let mut buf = buffer_with("hello world");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        buf.replace_range(&mut cur, 0, 5, "goodbye");
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "hello world"); // fully restored in one `u`
+        assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn replace_range_with_empty_text_behaves_like_a_pure_delete() {
+        let mut buf = buffer_with("hello world");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let removed = buf.replace_range(&mut cur, 5, 11, "");
+        assert_eq!(removed, " world");
+        assert_eq!(buf.text(), "hello");
+        assert_eq!(cur.char_idx, 5);
+    }
+
+    #[test]
+    fn replace_range_with_an_empty_span_behaves_like_a_pure_insert() {
+        let mut buf = buffer_with("hello");
+        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let removed = buf.replace_range(&mut cur, 5, 5, " world");
+        assert_eq!(removed, "");
+        assert_eq!(buf.text(), "hello world");
+        assert_eq!(cur.char_idx, 11);
+    }
+
+    #[test]
+    fn delete_range_and_insert_str_are_no_ops_on_empty_input() {
+        let mut buf = buffer_with("abc");
+        let mut cur = Cursor { char_idx: 1, sticky_col: 1 };
+        assert_eq!(buf.delete_range(&mut cur, 2, 2), "");
+        assert_eq!(buf.text(), "abc");
+        buf.insert_str(&mut cur, "");
+        assert_eq!(buf.text(), "abc");
+    }
+
+    #[test]
+    fn undo_removes_a_whole_coalesced_typing_run() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        for ch in "hello".chars() {
+            buf.insert_char(&mut cur, ch);
+        }
+        assert_eq!(buf.text(), "hello");
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "");
+        assert_eq!(cur.char_idx, 0);
+        assert!(!buf.undo(&mut cur));
+    }
+
+    #[test]
+    fn redo_reapplies_an_undone_run() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        for ch in "hi".chars() {
+            buf.insert_char(&mut cur, ch);
+        }
+        buf.undo(&mut cur);
+        assert_eq!(buf.text(), "");
+
+        assert!(buf.redo(&mut cur));
+        assert_eq!(buf.text(), "hi");
+        assert_eq!(cur.char_idx, 2);
+        assert!(!buf.redo(&mut cur));
+    }
+
+    #[test]
+    fn editing_after_undo_clears_the_redo_stack() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'a');
+        buf.undo(&mut cur);
+        buf.insert_char(&mut cur, 'b');
+        assert!(!buf.redo(&mut cur));
+        assert_eq!(buf.text(), "b");
+    }
+
+    #[test]
+    fn cursor_movement_ends_the_coalescing_run() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'a');
+        buf.insert_char(&mut cur, 'b');
+        buf.move_left(&mut cur); // boundary: commits "ab" as its own run
+        buf.insert_char(&mut cur, 'c'); // starts a new run at position 1
+
+        buf.undo(&mut cur); // undoes only "c"
+        assert_eq!(buf.text(), "ab");
+
+        buf.undo(&mut cur); // undoes "ab"
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn backspace_run_coalesces_into_one_undo_step() {
+        let mut buf = buffer_with("hello");
+        let mut cur = Cursor { char_idx: 5, sticky_col: 5 };
+        for _ in 0..5 {
+            buf.delete_backward(&mut cur);
+        }
+        assert_eq!(buf.text(), "");
+
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "hello");
+        assert_eq!(cur.char_idx, 5);
+    }
+
+    #[test]
+    fn visual_line_count_excludes_ropeys_phantom_trailing_line() {
+        assert_eq!(buffer_with("a\nb\nc\n").visual_line_count(), 3);
+        assert_eq!(buffer_with("a\nb\nc").visual_line_count(), 3);
+        assert_eq!(buffer_with("").visual_line_count(), 1);
+        assert_eq!(buffer_with("\n").visual_line_count(), 1);
+    }
+
+    #[test]
+    fn char_to_byte_and_back_round_trip_multi_byte_text() {
+        let buf = buffer_with("café");
+        assert_eq!(buf.char_to_byte(4), 5); // 'é' is 2 bytes
+        assert_eq!(buf.byte_to_char(5), 4);
+    }
+
+    /// Anchor edits are kept only once asked for, apart from the syntax
+    /// log's, undo included.
+    #[test]
+    fn anchor_edits_are_kept_once_asked_for() {
+        let mut b = Buffer::from_text("abc");
+        let mut c = Cursor::at_start();
+        b.insert_str(&mut c, "x");
+        assert!(b.take_anchor_edits().is_empty(), "not tracked yet");
+        b.track_anchors();
+        b.insert_str(&mut c, "y");
+        b.drain_edits();
+        b.undo(&mut c);
+        let edits = b.take_anchor_edits();
+        assert_eq!(edits.len(), 2, "{edits:?}");
+        assert_eq!(edits[0], EditDelta { start_char: 1, new_end_char: 2, removed: String::new() });
+        assert!(b.take_anchor_edits().is_empty());
+    }
+
+    #[test]
+    fn drain_edits_logs_every_char_typed_not_just_coalesced_runs() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'h');
+        buf.insert_char(&mut cur, 'i');
+        let edits = buf.drain_edits();
+        assert_eq!(
+            edits,
+            vec![
+                EditDelta { start_char: 0, new_end_char: 1, removed: String::new() },
+                EditDelta { start_char: 1, new_end_char: 2, removed: String::new() },
+            ]
+        );
+        // Drained -- a second call sees nothing new until another edit happens.
+        assert!(buf.drain_edits().is_empty());
+    }
+
+    #[test]
+    fn drain_edits_logs_deletes_with_the_removed_text() {
+        let mut buf = buffer_with("abc");
+        let mut cur = Cursor { char_idx: 3, sticky_col: 3 };
+        buf.delete_backward(&mut cur);
+        let edits = buf.drain_edits();
+        assert_eq!(edits, vec![EditDelta { start_char: 2, new_end_char: 2, removed: "c".to_string() }]);
+    }
+
+    #[test]
+    fn drain_edits_logs_undo_and_redo_as_their_own_mutations() {
+        let mut buf = buffer_with("");
+        let mut cur = Cursor::at_start();
+        buf.insert_char(&mut cur, 'x');
+        buf.drain_edits(); // discard the initial insert's log entry
+
+        buf.undo(&mut cur);
+        let undo_edits = buf.drain_edits();
+        assert_eq!(undo_edits, vec![EditDelta { start_char: 0, new_end_char: 0, removed: "x".to_string() }]);
+
+        buf.redo(&mut cur);
+        let redo_edits = buf.drain_edits();
+        assert_eq!(redo_edits, vec![EditDelta { start_char: 0, new_end_char: 1, removed: String::new() }]);
+    }
+}

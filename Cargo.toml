@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/fenix-acp", "crates/fenix-brand", "crates/fenix-snippets", "crates/fenix-storage", "crates/fenix-buffers", "crates/fenix-completion", "crates/fenix-config", "crates/fenix-control", "crates/fenix-core", "crates/fenix-dap", "crates/fenix-diff", "crates/fenix-explorer", "crates/fenix-extension-api", "crates/fenix-extensions", "crates/fenix-format", "crates/fenix-fs", "crates/fenix-git", "crates/fenix-gui", "crates/fenix-keymap", "crates/fenix-lsp", "crates/fenix-model", "crates/fenix-pdf", "crates/fenix-pdfium", "crates/fenix-picker", "crates/fenix-project", "crates/fenix-recovery", "crates/fenix-rpc", "crates/fenix-syntax", "crates/fenix-table", "crates/fenix-tasks", "crates/fenix-terminal", "crates/fenix-vim", "crates/fenix-wasm", "crates/fenix-window"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tpedneault/fenix"
+authors = ["Thomas Pedneault <thomas@pedneault.dev>"]
+# The crates are Fenix's own building blocks, not libraries on crates.io.
+publish = false
+
+[profile.release]
+lto = true
+codegen-units = 1

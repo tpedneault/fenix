@@ -1,0 +1,40 @@
+[package]
+name = "fenix-syntax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `wasm`: the grammars extensions bring, compiled to WebAssembly (0.8.5). It
+# runs them on the wasmtime its store is written for (36, a long-term
+# release), not fenix-wasm's: the store is C against wasmtime's C API at that
+# version. 0.27 (wasmtime 48) doesn't resolve with tree-sitter-mermaid 0.1
+# and tree-sitter-sequel's pins.
+tree-sitter = { version = "0.26.13", features = ["wasm"] }
+tree-sitter-rust = "0.24"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-md = "0.5"
+tree-sitter-json = "0.24"
+tree-sitter-yaml = "0.7"
+tree-sitter-python = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-bash = "0.25"
+tree-sitter-tcl = { git = "https://github.com/tree-sitter-grammars/tree-sitter-tcl", rev = "850a72ab6436e06645b33b11cfa60cbdb04b1f01" }
+tree-sitter-containerfile = "0.9"
+tree-sitter-batch = "0.11"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-xml = "0.7"
+roxmltree = "0.20"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-html = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-sequel = "0.3"
+tree-sitter-lua = "0.5"
+tree-sitter-mermaid = "0.1"

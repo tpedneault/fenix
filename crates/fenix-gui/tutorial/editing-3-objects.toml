@@ -1,0 +1,110 @@
+id = "editing.objects"
+track = "Editing"
+order = 3
+title = "Operators and text objects"
+about = "d, c and y with a text object: the word, the quotes, the brackets, the paragraph."
+text = """
+An operator -- d deletes, c changes, y yanks (copies) -- takes a motion
+or a text object: iw is the word under the cursor, i" inside quotes,
+i( inside brackets, ip a paragraph; a instead of i takes the quotes,
+brackets or blank line too.
+
+let greeting = "hello there";
+call(first, second, third);
+My favourite fruit is banana.
+
+This paragraph goes,
+both of its lines.
+
+Copy me.
+"""
+
+[[step]]
+say = "ci\" changes what's inside the quotes: on line 6, make the greeting goodbye."
+hint = 'Cursor anywhere between the quotes, ci", type goodbye, Esc.'
+text = """
+An operator -- d deletes, c changes, y yanks (copies) -- takes a motion
+or a text object: iw is the word under the cursor, i" inside quotes,
+i( inside brackets, ip a paragraph; a instead of i takes the quotes,
+brackets or blank line too.
+
+let greeting = "goodbye";
+call(first, second, third);
+My favourite fruit is banana.
+
+This paragraph goes,
+both of its lines.
+
+Copy me.
+"""
+
+[[step]]
+say = "di( deletes inside the brackets: empty the call on line 7."
+hint = "Cursor between the brackets, di( -- or dib, the same."
+text = """
+An operator -- d deletes, c changes, y yanks (copies) -- takes a motion
+or a text object: iw is the word under the cursor, i" inside quotes,
+i( inside brackets, ip a paragraph; a instead of i takes the quotes,
+brackets or blank line too.
+
+let greeting = "goodbye";
+call();
+My favourite fruit is banana.
+
+This paragraph goes,
+both of its lines.
+
+Copy me.
+"""
+
+[[step]]
+say = "ciw changes the word under the cursor: make the fruit a cherry."
+hint = "Cursor anywhere on banana, ciw, cherry, Esc."
+text = """
+An operator -- d deletes, c changes, y yanks (copies) -- takes a motion
+or a text object: iw is the word under the cursor, i" inside quotes,
+i( inside brackets, ip a paragraph; a instead of i takes the quotes,
+brackets or blank line too.
+
+let greeting = "goodbye";
+call();
+My favourite fruit is cherry.
+
+This paragraph goes,
+both of its lines.
+
+Copy me.
+"""
+
+[[step]]
+say = "dap deletes a paragraph and the blank line after it: delete the two lines that say so."
+hint = "Cursor on either line, dap. (dip leaves the blank line.)"
+text = """
+An operator -- d deletes, c changes, y yanks (copies) -- takes a motion
+or a text object: iw is the word under the cursor, i" inside quotes,
+i( inside brackets, ip a paragraph; a instead of i takes the quotes,
+brackets or blank line too.
+
+let greeting = "goodbye";
+call();
+My favourite fruit is cherry.
+
+Copy me.
+"""
+
+[[step]]
+say = "yy yanks a line and p puts it under the cursor: make Copy me. the last two lines."
+hint = "On Copy me., yy then p."
+text = """
+An operator -- d deletes, c changes, y yanks (copies) -- takes a motion
+or a text object: iw is the word under the cursor, i" inside quotes,
+i( inside brackets, ip a paragraph; a instead of i takes the quotes,
+brackets or blank line too.
+
+let greeting = "goodbye";
+call();
+My favourite fruit is cherry.
+
+Copy me.
+Copy me.
+"""

@@ -1,0 +1,60 @@
+# Visual Studio's Light theme (and VS Code's Light+): its per-token defaults, its filled
+# tabs, Consolas.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
+name = "Visual Studio Light"
+tabs = "block"
+font_family = "Consolas"
+
+[surfaces]
+bg = "#ffffff"
+sidebar_bg = "#f5f5f5"
+bg_modeline = "#eeeef2"
+divider = "#cccedb"
+caret = "#000000"
+hl_line = "#f0f0f0"
+selection = { color = "#add6ff", alpha = 0.8 }
+bracket_match = { color = "#0070c1", alpha = 0.12 }
+search_match = { color = "#f8c9ab", alpha = 0.6 }
+
+[text]
+fg = "#000000"
+fg_modeline = "#000000"
+caret_text = "#000000"
+gutter_fg = "#1c738e"
+
+[modes]
+normal = "#0078ca"
+insert = "#32852f"
+visual = "#c42b1c"
+replace = "#895503"
+command = "#0070c1"
+explorer = "#0078ca"
+picker = "#af00db"
+text_dark = "#ffffff"
+
+[syntax]
+keyword = "#0000ff"
+string = "#a31515"
+comment = "#007d00"
+function = "#74531f"
+type = "#10819f"
+number = "#098658"
+constant = "#0070c1"
+variable = "#001080"
+operator = "#383838"
+punctuation = "#3b3b3b"
+attribute = "#e50000"
+
+[explorer]
+folder = "#99702c"
+file = "#000000"
+
+[git]
+modified = "#895503"
+staged = "#358731"
+untracked = "#007acc"
+ignored = "#6e7681"
+conflicted = "#ad0707"

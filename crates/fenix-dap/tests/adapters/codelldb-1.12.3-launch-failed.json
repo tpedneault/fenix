@@ -1,0 +1,1 @@
+{"seq":5,"type":"response","request_seq":2,"success":false,"command":"","message":"error: Error reading commands from file lldb_commands - file not found.\n","show_user":true}

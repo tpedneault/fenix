@@ -1,0 +1,83 @@
+# A lesson of the tutorial (`SPC h T`). See `src/tutorial.rs` for the
+# format; every step's result is reached in `app/tutorial_host.rs`'s tests.
+id = "editing.modes"
+track = "Editing"
+order = 1
+title = "Modes and moving"
+about = "Normal mode moves and acts, Insert mode types, Esc goes back."
+text = """
+Fenix edits the way Vim does. In Normal mode keys move and act;
+in Insert mode they type. Esc always goes back to Normal.
+
+h moves left, l right, j down, k up.
+
+Find the X on the line below and put the cursor on it:
+        X marks the spot.
+
+Fenix is an edtor.
+This line has an extra letter: Fennix.
+"""
+
+[[step]]
+say = "Put the cursor on the X in line 7: j moves down a line, l right a character (k up, h left)."
+hint = "j six times, then l until you're on the X -- or any other way there."
+cursor = [7, 9]
+
+[[step]]
+say = "i switches to Insert mode, where keys type: press it, and the modeline says INSERT."
+hint = "Plain i, in Normal mode."
+mode = "insert"
+
+[[step]]
+say = "Esc goes back to Normal. Line 9 is missing a letter: put the cursor on the t of edtor, i, type an i, Esc -- so it says Fenix is an editor."
+hint = "In Insert mode what you type goes in before the cursor. Esc first if the modeline still says INSERT."
+text = """
+Fenix edits the way Vim does. In Normal mode keys move and act;
+in Insert mode they type. Esc always goes back to Normal.
+
+h moves left, l right, j down, k up.
+
+Find the X on the line below and put the cursor on it:
+        X marks the spot.
+
+Fenix is an editor.
+This line has an extra letter: Fennix.
+"""
+
+[[step]]
+say = "x deletes the character under the cursor: make line 10 say Fenix, not Fennix."
+hint = "Put the cursor on one of the two n's and press x."
+text = """
+Fenix edits the way Vim does. In Normal mode keys move and act;
+in Insert mode they type. Esc always goes back to Normal.
+
+h moves left, l right, j down, k up.
+
+Find the X on the line below and put the cursor on it:
+        X marks the spot.
+
+Fenix is an editor.
+This line has an extra letter: Fenix.
+"""
+
+[[step]]
+say = "o opens a new line under the cursor in Insert mode: add a last line that says I can do this. -- then Esc."
+hint = "On line 10, o, type the line, Esc."
+text = """
+Fenix edits the way Vim does. In Normal mode keys move and act;
+in Insert mode they type. Esc always goes back to Normal.
+
+h moves left, l right, j down, k up.
+
+Find the X on the line below and put the cursor on it:
+        X marks the spot.
+
+Fenix is an editor.
+This line has an extra letter: Fenix.
+I can do this.
+"""
+
+[[step]]
+say = "gg goes to the first line and G to the last: put the cursor at the start of line 1."
+hint = "g twice."
+cursor = [1, 1]

@@ -1,0 +1,59 @@
+# Solarized's light mode, Ethan Schoonover's palette. Its body text (base00) is
+# darkened toward base01, as far as 7:1 needs.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
+name = "Solarized Light"
+tabs = "underline"
+
+[surfaces]
+bg = "#fdf6e3"
+sidebar_bg = "#fdf6e3"
+bg_modeline = "#eee8d5"
+divider = "#93a1a1"
+caret = "#586e75"
+hl_line = "#eee8d5"
+selection = { color = "#268bd2", alpha = 0.15 }
+bracket_match = { color = "#2aa198", alpha = 0.15 }
+search_match = { color = "#b58900", alpha = 0.2 }
+
+[text]
+fg = "#495f66"
+fg_modeline = "#546a71"
+caret_text = "#546a71"
+gutter_fg = "#5c6969"
+
+[modes]
+normal = "#0074ba"
+insert = "#667700"
+visual = "#cb2d7b"
+replace = "#c5450c"
+command = "#6468ba"
+explorer = "#007d75"
+picker = "#6468ba"
+text_dark = "#fdf6e3"
+
+[syntax]
+keyword = "#6c7e00"
+string = "#00847c"
+comment = "#5c6969"
+function = "#077bc1"
+type = "#996e00"
+number = "#d33682"
+constant = "#cb4b16"
+variable = "#546a71"
+operator = "#6a6ec1"
+punctuation = "#6a6ec1"
+attribute = "#996e00"
+
+[explorer]
+folder = "#077bc1"
+file = "#546a71"
+
+[git]
+modified = "#996e00"
+staged = "#6c7e00"
+untracked = "#077bc1"
+ignored = "#6b7878"
+conflicted = "#dc322f"

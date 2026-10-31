@@ -1,0 +1,8 @@
+ZTC08001	Heater line enable			N		8	1	1010	1					TCS						
+ZTC08002	Heater line disable			N		8	1	1010	1					TCS						
+ZTC08101	Set heater control mode	Rejected while in SAFE mode.		N	TC_SVC8	8	1	1010	3			S	A	TCS						
+ZTC08102	Set heater thermostat limits			N		8	1	1010	4					TCS						
+ZTC03005	Enable HK report generation			N		3	5	1010	2					TCS						
+ZTC11004	Insert activities into time-based schedule			Y		11	4	1008	3					OBC						
+ZTC17001	Connection test			N		17	1	1008	0					OBC						
+ZTC20003	Set on-board parameter value			N		20	3	1009	2					OBC						

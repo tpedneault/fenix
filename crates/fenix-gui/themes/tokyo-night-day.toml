@@ -1,0 +1,58 @@
+# Tokyo Night's light variant, enkia's palette.
+#
+# A light theme: accents are kept at 3:1 on its surfaces, darkened from
+# the palette's own (in lightness only) where they fall short; body text,
+# identifiers, comments and line numbers at 4.5:1.
+name = "Tokyo Night Day"
+tabs = "underline"
+
+[surfaces]
+bg = "#e1e2e7"
+sidebar_bg = "#e1e2e7"
+bg_modeline = "#d0d5e3"
+divider = "#a8aecb"
+caret = "#3760bf"
+hl_line = "#d6d8e2"
+selection = { color = "#2e7de9", alpha = 0.15 }
+bracket_match = { color = "#007197", alpha = 0.12 }
+search_match = { color = "#8c6c3e", alpha = 0.18 }
+
+[text]
+fg = "#254ba8"
+fg_modeline = "#2e56b4"
+caret_text = "#2e56b4"
+gutter_fg = "#495894"
+
+[modes]
+normal = "#0660c9"
+insert = "#4f6c30"
+visual = "#8138d6"
+replace = "#9f4c00"
+command = "#7d5e30"
+explorer = "#006b91"
+picker = "#8138d6"
+text_dark = "#e1e2e7"
+
+[syntax]
+keyword = "#8942df"
+string = "#577337"
+comment = "#495894"
+function = "#007197"
+type = "#856638"
+number = "#a95400"
+constant = "#a95400"
+variable = "#2e56b4"
+operator = "#1568d2"
+punctuation = "#1568d2"
+attribute = "#d5004d"
+
+[explorer]
+folder = "#007197"
+file = "#2e56b4"
+
+[git]
+modified = "#856638"
+staged = "#577337"
+untracked = "#1568d2"
+ignored = "#5868a5"
+conflicted = "#bf3c3d"

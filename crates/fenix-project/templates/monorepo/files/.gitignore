@@ -1,0 +1,13 @@
+# Rust
+/target
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+# Node
+node_modules/
+dist/
+# C/C++
+build/

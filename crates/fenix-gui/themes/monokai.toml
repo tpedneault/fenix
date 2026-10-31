@@ -1,0 +1,54 @@
+# Monokai, Wimer Hazenberg's classic.
+name = "Monokai"
+tabs = "underline"
+
+[surfaces]
+bg = "#272822"
+sidebar_bg = "#1e1f1c"
+bg_modeline = "#1e1f1c"
+divider = "#49483e"
+caret = "#f8f8f0"
+hl_line = "#3e3d32"
+selection = { color = "#49483e", alpha = 0.6 }
+bracket_match = { color = "#a6e22e", alpha = 0.15 }
+search_match = { color = "#e6db74", alpha = 0.16 }
+
+[text]
+fg = "#f8f8f2"
+fg_modeline = "#f8f8f2"
+caret_text = "#f8f8f0"
+gutter_fg = "#aca998"
+
+[modes]
+normal = "#a6e22e"
+insert = "#66d9ef"
+visual = "#fa4f8d"
+replace = "#fd971f"
+command = "#ae81ff"
+explorer = "#66d9ef"
+picker = "#ae81ff"
+text_dark = "#272822"
+
+[syntax]
+keyword = "#fc81ad"
+string = "#e6db74"
+comment = "#aca998"
+function = "#a6e22e"
+type = "#66d9ef"
+number = "#bb95ff"
+constant = "#bb95ff"
+variable = "#f8f8f2"
+operator = "#fc81ad"
+punctuation = "#cfcfc2"
+attribute = "#a6e22e"
+
+[explorer]
+folder = "#66d9ef"
+file = "#f8f8f2"
+
+[git]
+modified = "#fd971f"
+staged = "#a6e22e"
+untracked = "#66d9ef"
+ignored = "#aca998"
+conflicted = "#fc81ad"

@@ -1,0 +1,102 @@
+//! Project task discovery, output parsing, and process-tree supervision.
+//!
+//! `TaskRunner` owns process execution and pipe polling behind an event callback.
+//! The GUI consumes output batches and terminal outcomes without managing child
+//! locks or reader threads. The low-level `spawn` API remains for simple callers
+//! that explicitly own their child's cleanup; the editor uses `TaskRunner`.
+
+mod supervisor;
+pub use supervisor::{OutputLine, OutputStream, RunId, TaskEvent, TaskOutcome, TaskRunner};
+
+mod tree;
+pub use tree::ProcessTree;
+
+mod defs;
+mod location;
+mod output;
+
+pub use defs::TaskDef;
+pub use location::{parse_path_position, PathPosition};
+pub use output::{parse_line, ParsedLine, TaskLocation};
+
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+
+/// The built-in tasks for `root` -- `defs::default_tasks`, for whichever
+/// project markers are actually present. A project's own tasks are in
+/// its `.fenix/tools.json`, which the editor adds to these.
+pub fn discover_tasks(root: &Path) -> Vec<TaskDef> {
+    defs::default_tasks(root)
+}
+
+/// Spawns `task` as a genuinely long-lived child (stdout/stderr both
+/// piped, kept separate rather than combined -- the caller reads each on
+/// its own thread), working directory `root`. Returns `None` (never
+/// panics) if the binary itself can't be launched -- a missing `cargo`/
+/// `pytest`/`npm`/whatever, the same "report it, don't crash" posture
+/// `fenix_docker::logs::spawn_log_follower` already established. The
+/// caller owns reading both pipes and eventually killing/waiting on the
+/// child (this crate has no event loop of its own to drive that from --
+/// see `fenix-gui`'s own task-runner session for the thread/kill
+/// lifecycle).
+pub fn spawn(task: &TaskDef, root: &Path) -> Option<Child> {
+    Command::new(&task.command).args(&task.args).current_dir(root).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TempDir(std::path::PathBuf);
+    impl TempDir {
+        fn new(name: &str) -> Self {
+            static COUNTER: AtomicU64 = AtomicU64::new(0);
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("fenix-tasks-lib-test-{name}-{}-{n}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn discover_tasks_offers_the_built_ins_a_projects_markers_call_for() {
+        let dir = TempDir::new("combined");
+        std::fs::write(dir.path().join("Cargo.toml"), b"[package]\nname=\"x\"").unwrap();
+        let tasks = discover_tasks(dir.path());
+        let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["cargo build", "cargo test", "cargo clippy"]);
+    }
+
+    #[test]
+    fn discover_tasks_is_empty_for_a_directory_with_no_markers_or_overrides() {
+        let dir = TempDir::new("empty");
+        assert!(discover_tasks(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn spawn_never_panics_for_a_nonexistent_binary() {
+        let dir = TempDir::new("spawn_missing");
+        let task = TaskDef { name: "nope".to_string(), command: "definitely-not-a-real-binary-xyz".to_string(), args: Vec::new() };
+        assert!(spawn(&task, dir.path()).is_none());
+    }
+
+    #[test]
+    fn spawn_launches_a_real_command_with_its_working_directory_and_args() {
+        let dir = TempDir::new("spawn_real");
+        let program = if cfg!(windows) { "cmd" } else { "echo" };
+        let args = if cfg!(windows) { vec!["/c".to_string(), "echo".to_string(), "hi".to_string()] } else { vec!["hi".to_string()] };
+        let task = TaskDef { name: "echo".to_string(), command: program.to_string(), args };
+        let mut child = spawn(&task, dir.path()).expect("echo/cmd should be launchable in any test environment");
+        let status = child.wait().expect("child should exit");
+        assert!(status.success());
+    }
+}

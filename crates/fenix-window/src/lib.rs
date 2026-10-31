@@ -1,0 +1,769 @@
+mod nav;
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+pub use nav::{pick, NavDirection};
+
+/// Identity of one leaf window in a `WindowTree`, stable across splits and
+/// closes of *other* windows (only closing a window invalidates its own id).
+///
+/// Unique across *every* tree in the process, not just within one -- ids
+/// come from `alloc_id`'s single counter rather than a per-tree one. The
+/// host app keys several of its own side tables by this id (`App::pane_
+/// titles`, `pdf_outline_panes`, `pdf_search_panes`, every panel session's
+/// pane fields), and those tables span every workspace -- and, once one
+/// process drives several OS windows, every window too. A per-tree counter
+/// made two different panes in two different trees genuinely
+/// indistinguishable in those maps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WindowId(u32);
+
+impl WindowId {
+    /// Its number: what an extension knows a pane by.
+    pub fn number(self) -> u32 {
+        self.0
+    }
+}
+
+/// Hands out the next never-yet-used `WindowId`. `Relaxed` is enough:
+/// the only thing being ordered against is this counter itself, and all
+/// that's required of it is that no two reads ever see the same value
+/// (which `fetch_add` guarantees on its own, at any ordering).
+fn alloc_id() -> WindowId {
+    static NEXT_ID: AtomicU32 = AtomicU32::new(0);
+    WindowId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+}
+
+/// `Horizontal` stacks two windows with a horizontal divider between them
+/// (Vim's `:split`); `Vertical` places them side by side with a vertical
+/// divider (Vim's `:vsplit`) -- Vim's own naming, not "which axis the
+/// windows are arranged along" (which would read backwards to a Vim user).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SplitKind {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Rect {
+    /// Point-in-rect hit test -- left/top edges inclusive, right/bottom
+    /// exclusive, so two adjacent rects sharing an edge never both
+    /// claim the same pixel.
+    pub fn contains_point(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+}
+
+#[cfg(test)]
+mod rect_tests {
+    use super::Rect;
+
+    #[test]
+    fn contains_point_is_true_inside_and_false_outside() {
+        let r = Rect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 };
+        assert!(r.contains_point(10.0, 20.0)); // top-left corner, inclusive
+        assert!(r.contains_point(50.0, 40.0)); // interior
+        assert!(!r.contains_point(110.0, 40.0)); // right edge, exclusive
+        assert!(!r.contains_point(50.0, 70.0)); // bottom edge, exclusive
+        assert!(!r.contains_point(9.9, 40.0)); // just left of the rect
+        assert!(!r.contains_point(50.0, 19.9)); // just above the rect
+    }
+}
+
+/// How lopsided one split is allowed to get. Applies to every way a
+/// ratio can be set -- dragged (`resize_focused`), computed
+/// (`set_split_near`), or restored from a saved session -- so no path
+/// can produce a pane too small to see or to aim at with a mouse.
+///
+/// Worth knowing when computing a whole stack's proportions: in a
+/// right-nested chain the outermost split's ratio *is* the first pane's
+/// share of the whole, so no pane in such a stack can be given less
+/// than `MIN_RATIO` of the total without the clamp quietly overriding
+/// it and throwing every ratio below it off.
+const MIN_RATIO: f32 = 0.1;
+const MAX_RATIO: f32 = 0.9;
+
+enum Node<T> {
+    Leaf { id: WindowId, content: T },
+    Split { kind: SplitKind, ratio: f32, first: Box<Node<T>>, second: Box<Node<T>> },
+}
+
+/// Portable layout without process-local window identities.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Layout<T> {
+    Leaf(T),
+    Split { kind: SplitKind, ratio: f32, first: Box<Layout<T>>, second: Box<Layout<T>> },
+}
+
+impl<T> WindowTree<T> {
+    pub fn snapshot<U>(&self, mut map: impl FnMut(WindowId, &T) -> U) -> Layout<U> {
+        fn visit<T, U>(node: &Node<T>, map: &mut impl FnMut(WindowId, &T) -> U) -> Layout<U> {
+            match node {
+                Node::Leaf { id, content } => Layout::Leaf(map(*id, content)),
+                Node::Split { kind, ratio, first, second } => Layout::Split {
+                    kind: *kind, ratio: *ratio, first: Box::new(visit(first, map)), second: Box::new(visit(second, map)),
+                },
+            }
+        }
+        visit(self.root(), &mut map)
+    }
+
+    /// Restores fresh identities, rejecting invalid or excessively deep trees.
+    pub fn from_layout(layout: Layout<T>, focused_leaf: usize) -> Result<Self, &'static str> {
+        fn visit<T>(layout: Layout<T>, depth: usize, leaves: &mut Vec<WindowId>) -> Result<Node<T>, &'static str> {
+            if depth > 32 || leaves.len() >= 256 { return Err("layout exceeds pane/depth limit"); }
+            Ok(match layout {
+                Layout::Leaf(content) => { let id = alloc_id(); leaves.push(id); Node::Leaf { id, content } }
+                Layout::Split { kind, ratio, first, second } => {
+                    if !ratio.is_finite() || !(MIN_RATIO..=MAX_RATIO).contains(&ratio) { return Err("invalid split ratio"); }
+                    Node::Split { kind, ratio, first: Box::new(visit(*first, depth + 1, leaves)?), second: Box::new(visit(*second, depth + 1, leaves)?) }
+                }
+            })
+        }
+        let mut leaves = Vec::new();
+        let root = visit(layout, 0, &mut leaves)?;
+        let focused = *leaves.get(focused_leaf).ok_or("invalid focused pane")?;
+        Ok(Self { root: Some(root), focused })
+    }
+}
+
+impl<T> Node<T> {
+    fn contains(&self, target: WindowId) -> bool {
+        match self {
+            Node::Leaf { id, .. } => *id == target,
+            Node::Split { first, second, .. } => first.contains(target) || second.contains(target),
+        }
+    }
+
+    fn first_leaf_id(&self) -> WindowId {
+        match self {
+            Node::Leaf { id, .. } => *id,
+            Node::Split { first, .. } => first.first_leaf_id(),
+        }
+    }
+
+    fn find(&self, target: WindowId) -> Option<&T> {
+        match self {
+            Node::Leaf { id, content } if *id == target => Some(content),
+            Node::Leaf { .. } => None,
+            Node::Split { first, second, .. } => {
+                if first.contains(target) { first.find(target) } else { second.find(target) }
+            }
+        }
+    }
+
+    fn find_mut(&mut self, target: WindowId) -> Option<&mut T> {
+        match self {
+            Node::Leaf { id, content } if *id == target => Some(content),
+            Node::Leaf { .. } => None,
+            Node::Split { first, second, .. } => {
+                if first.contains(target) { first.find_mut(target) } else { second.find_mut(target) }
+            }
+        }
+    }
+
+    /// In-place overwrite of one leaf's payload -- doesn't need to move the
+    /// old content out (just drops it via assignment), so unlike
+    /// `split_leaf`/`remove_from_split` below this needs no by-value
+    /// consume-and-rebuild dance.
+    fn set_content(&mut self, target: WindowId, content: T) {
+        match self {
+            Node::Leaf { id, content: c } if *id == target => *c = content,
+            Node::Leaf { .. } => {}
+            Node::Split { first, second, .. } => {
+                if first.contains(target) {
+                    first.set_content(target, content);
+                } else {
+                    second.set_content(target, content);
+                }
+            }
+        }
+    }
+
+    /// Consumes `self` and returns a new tree with `target` (a leaf
+    /// somewhere in this subtree) replaced by a `Split` of the old leaf
+    /// and a new one. Consuming `self` by value (rather than `&mut self`)
+    /// sidesteps needing a placeholder `Node<T>` to satisfy `mem::replace`
+    /// for a fully generic, unconstrained `T` -- `contains` (a cheap
+    /// `&self` read) picks which branch to recurse into *before* anything
+    /// is moved, so `new_content` is only ever consumed along the one path
+    /// that actually reaches `target`.
+    fn split_leaf(self, target: WindowId, kind: SplitKind, new_id: WindowId, new_content: T) -> Node<T> {
+        self.split_leaf_at(target, kind, new_id, new_content, false)
+    }
+
+    /// `split_leaf`, with the new leaf put `before` the target (left of
+    /// it, or above) rather than after.
+    fn split_leaf_at(self, target: WindowId, kind: SplitKind, new_id: WindowId, new_content: T, before: bool) -> Node<T> {
+        match self {
+            Node::Leaf { id, content } if id == target => {
+                let (old, new) = (Box::new(Node::Leaf { id, content }), Box::new(Node::Leaf { id: new_id, content: new_content }));
+                let (first, second) = if before { (new, old) } else { (old, new) };
+                Node::Split { kind, ratio: 0.5, first, second }
+            }
+            Node::Leaf { .. } => self,
+            Node::Split { kind: k, ratio, first, second } => {
+                if first.contains(target) {
+                    Node::Split { kind: k, ratio, first: Box::new(first.split_leaf_at(target, kind, new_id, new_content, before)), second }
+                } else {
+                    Node::Split { kind: k, ratio, first, second: Box::new(second.split_leaf_at(target, kind, new_id, new_content, before)) }
+                }
+            }
+        }
+    }
+
+    /// `self` must be a `Split` containing `target` somewhere in it.
+    /// Removes `target`, collapsing the `Split` it was directly under into
+    /// its sibling. Returns the resulting subtree plus a sensible new
+    /// focus (the first leaf of whichever side survived nearest the cut).
+    fn remove_from_split(self, target: WindowId) -> (Node<T>, WindowId) {
+        let Node::Split { kind, ratio, first, second } = self else {
+            unreachable!("remove_from_split called on a Leaf")
+        };
+        let first_is_target = matches!(&*first, Node::Leaf { id, .. } if *id == target);
+        let second_is_target = matches!(&*second, Node::Leaf { id, .. } if *id == target);
+        if first_is_target {
+            let focus = second.first_leaf_id();
+            (*second, focus)
+        } else if second_is_target {
+            let focus = first.first_leaf_id();
+            (*first, focus)
+        } else if first.contains(target) {
+            let (new_first, focus) = first.remove_from_split(target);
+            (Node::Split { kind, ratio, first: Box::new(new_first), second }, focus)
+        } else {
+            let (new_second, focus) = second.remove_from_split(target);
+            (Node::Split { kind, ratio, first, second: Box::new(new_second) }, focus)
+        }
+    }
+
+    fn into_leaf_content(self, target: WindowId) -> T {
+        match self {
+            Node::Leaf { id, content } if id == target => content,
+            Node::Leaf { .. } => unreachable!("target window id not found in tree"),
+            Node::Split { first, second, .. } => {
+                if first.contains(target) { first.into_leaf_content(target) } else { second.into_leaf_content(target) }
+            }
+        }
+    }
+
+    fn resize_near(&mut self, target: WindowId, delta: f32) -> bool {
+        self.adjust_near(target, &|ratio| ratio + delta)
+    }
+
+    fn set_near(&mut self, target: WindowId, ratio: f32) -> bool {
+        self.adjust_near(target, &|_| ratio)
+    }
+
+    /// Finds the split holding `target` as an immediate leaf child and
+    /// replaces its ratio with `f(current)`, clamped. Note "immediate
+    /// leaf child": in a right-nested stack each pane resolves to its
+    /// own split this way, except the last two, which share one -- so a
+    /// caller walking a stack should drive it from each split's *first*
+    /// pane and stop before the final one.
+    fn adjust_near(&mut self, target: WindowId, f: &dyn Fn(f32) -> f32) -> bool {
+        match self {
+            Node::Leaf { .. } => false,
+            Node::Split { ratio, first, second, .. } => {
+                let first_is_target = matches!(&**first, Node::Leaf { id, .. } if *id == target);
+                let second_is_target = matches!(&**second, Node::Leaf { id, .. } if *id == target);
+                if first_is_target || second_is_target {
+                    *ratio = f(*ratio).clamp(MIN_RATIO, MAX_RATIO);
+                    true
+                } else if first.adjust_near(target, f) {
+                    true
+                } else {
+                    second.adjust_near(target, f)
+                }
+            }
+        }
+    }
+
+    fn balance(&mut self) {
+        if let Node::Split { ratio, first, second, .. } = self {
+            *ratio = 0.5;
+            first.balance();
+            second.balance();
+        }
+    }
+
+    fn collect_ids(&self, out: &mut Vec<WindowId>) {
+        match self {
+            Node::Leaf { id, .. } => out.push(*id),
+            Node::Split { first, second, .. } => {
+                first.collect_ids(out);
+                second.collect_ids(out);
+            }
+        }
+    }
+
+    fn layout_into(&self, bounds: Rect, out: &mut Vec<(WindowId, Rect)>) {
+        match self {
+            Node::Leaf { id, .. } => out.push((*id, bounds)),
+            Node::Split { kind, ratio, first, second } => {
+                let (a, b) = split_rect(bounds, *kind, *ratio);
+                first.layout_into(a, out);
+                second.layout_into(b, out);
+            }
+        }
+    }
+}
+
+fn split_rect(bounds: Rect, kind: SplitKind, ratio: f32) -> (Rect, Rect) {
+    match kind {
+        SplitKind::Vertical => {
+            let w1 = bounds.w * ratio;
+            (
+                Rect { x: bounds.x, y: bounds.y, w: w1, h: bounds.h },
+                Rect { x: bounds.x + w1, y: bounds.y, w: bounds.w - w1, h: bounds.h },
+            )
+        }
+        SplitKind::Horizontal => {
+            let h1 = bounds.h * ratio;
+            (
+                Rect { x: bounds.x, y: bounds.y, w: bounds.w, h: h1 },
+                Rect { x: bounds.x, y: bounds.y + h1, w: bounds.w, h: bounds.h - h1 },
+            )
+        }
+    }
+}
+
+/// A binary tree of horizontal/vertical splits, leaves holding an opaque
+/// `T` (in practice a buffer handle) -- generic and host-agnostic, no
+/// knowledge of buffers, GPU, or rendering. Mirrors `fenix-picker`'s role
+/// as a small, independently-testable engine reused by the host app.
+///
+/// `root` is `Option<Node<T>>` purely as a `take()`/put-back vehicle for
+/// the handful of operations (`split`, `close_focused`, `only`) that need
+/// to consume-and-rebuild a subtree by value -- it is `Some` at every
+/// point control returns to a caller; every public method upholds and
+/// relies on that invariant.
+pub struct WindowTree<T> {
+    root: Option<Node<T>>,
+    focused: WindowId,
+}
+
+impl<T> WindowTree<T> {
+    pub fn new(content: T) -> Self {
+        let id = alloc_id();
+        Self { root: Some(Node::Leaf { id, content }), focused: id }
+    }
+
+    fn root(&self) -> &Node<T> {
+        self.root.as_ref().expect("WindowTree::root invariant: always Some between calls")
+    }
+
+    fn root_mut(&mut self) -> &mut Node<T> {
+        self.root.as_mut().expect("WindowTree::root invariant: always Some between calls")
+    }
+
+    pub fn focused_id(&self) -> WindowId {
+        self.focused
+    }
+
+    pub fn focus(&mut self, id: WindowId) -> bool {
+        if self.root().contains(id) {
+            self.focused = id;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn content(&self, id: WindowId) -> Option<&T> {
+        self.root().find(id)
+    }
+
+    pub fn content_mut(&mut self, id: WindowId) -> Option<&mut T> {
+        self.root_mut().find_mut(id)
+    }
+
+    pub fn focused_content(&self) -> &T {
+        self.content(self.focused).expect("focused window always has content")
+    }
+
+    pub fn focused_content_mut(&mut self) -> &mut T {
+        let id = self.focused;
+        self.content_mut(id).expect("focused window always has content")
+    }
+
+    pub fn set_content(&mut self, id: WindowId, content: T) {
+        self.root_mut().set_content(id, content);
+    }
+
+    /// Splits the focused window, placing the new one after (right of, for
+    /// `Vertical`; below, for `Horizontal`) the old one -- Doom Emacs's own
+    /// `splitright`/`splitbelow` default. The new window becomes focused.
+    pub fn split(&mut self, kind: SplitKind, content: T) -> WindowId {
+        let new_id = alloc_id();
+        let focused = self.focused;
+        let old_root = self.root.take().expect("WindowTree::root invariant");
+        self.root = Some(old_root.split_leaf(focused, kind, new_id, content));
+        self.focused = new_id;
+        new_id
+    }
+
+    /// `split`, with the new window put before the focused one -- to its
+    /// left, or above it. Focus moves to the new window, as with `split`.
+    pub fn split_before(&mut self, kind: SplitKind, content: T) -> WindowId {
+        let new_id = alloc_id();
+        let focused = self.focused;
+        let old_root = self.root.take().expect("WindowTree::root invariant");
+        self.root = Some(old_root.split_leaf_at(focused, kind, new_id, content, true));
+        self.focused = new_id;
+        new_id
+    }
+
+    /// A window beside everything else rather than beside the focused
+    /// one: the whole tree becomes the first side of a new top-level
+    /// split, `content` the second (right of it, for `Vertical`; below,
+    /// for `Horizontal`), taking `1 - ratio` of the room. For a column
+    /// that runs the full height whatever the panes are, such as a dock.
+    /// The new window becomes focused, as with `split`.
+    pub fn split_root(&mut self, kind: SplitKind, content: T, ratio: f32) -> WindowId {
+        let new_id = alloc_id();
+        let old_root = self.root.take().expect("WindowTree::root invariant");
+        let ratio = if ratio.is_finite() { ratio.clamp(MIN_RATIO, MAX_RATIO) } else { 0.5 };
+        self.root = Some(Node::Split { kind, ratio, first: Box::new(old_root), second: Box::new(Node::Leaf { id: new_id, content }) });
+        self.focused = new_id;
+        new_id
+    }
+
+    /// Closes the focused window. A no-op returning `false` if it's the
+    /// only window left (nothing to collapse into).
+    pub fn close_focused(&mut self) -> bool {
+        if self.window_count() <= 1 {
+            return false;
+        }
+        let focused = self.focused;
+        let old_root = self.root.take().expect("WindowTree::root invariant");
+        let (new_root, next_focus) = old_root.remove_from_split(focused);
+        self.root = Some(new_root);
+        self.focused = next_focus;
+        true
+    }
+
+    /// Closes every window except the focused one -- a permanent
+    /// `:only`/`SPC w o`, not Doom's reversible temporary "enlarge"
+    /// (that needs layout history this tree doesn't keep, a disclosed cut).
+    pub fn only(&mut self) {
+        let focused = self.focused;
+        let old_root = self.root.take().expect("WindowTree::root invariant");
+        let content = old_root.into_leaf_content(focused);
+        self.root = Some(Node::Leaf { id: focused, content });
+    }
+
+    /// Focuses the next window in a stable pre-order traversal, wrapping
+    /// around -- `SPC w w`.
+    pub fn cycle_next(&mut self) -> WindowId {
+        let ids = self.windows();
+        let pos = ids.iter().position(|&id| id == self.focused).unwrap_or(0);
+        let next = ids[(pos + 1) % ids.len()];
+        self.focused = next;
+        next
+    }
+
+    /// Adjusts the ratio of the focused window's nearest ancestor split by
+    /// `delta`, clamped to `[0.1, 0.9]` so neither side can be squeezed to
+    /// nothing. A no-op on a single-window tree.
+    pub fn resize_focused(&mut self, delta: f32) {
+        let focused = self.focused;
+        self.root_mut().resize_near(focused, delta);
+    }
+
+    /// Sets -- rather than nudges -- the ratio of the split holding
+    /// `target` as an immediate leaf child. The absolute counterpart to
+    /// `resize_focused`, for callers computing a whole stack's
+    /// proportions at once instead of dragging one edge; see
+    /// `Node::adjust_near` for which split a given pane resolves to, and
+    /// `MIN_RATIO` for the clamp a computed layout has to stay inside.
+    /// Returns whether such a split was found.
+    pub fn set_split_near(&mut self, target: WindowId, ratio: f32) -> bool {
+        self.root_mut().set_near(target, ratio)
+    }
+
+    /// Resets every split's ratio to an even 0.5 -- `SPC w =`.
+    pub fn balance(&mut self) {
+        self.root_mut().balance();
+    }
+
+    pub fn window_count(&self) -> usize {
+        self.windows().len()
+    }
+
+    /// All window ids in a stable pre-order traversal.
+    pub fn windows(&self) -> Vec<WindowId> {
+        let mut out = Vec::new();
+        self.root().collect_ids(&mut out);
+        out
+    }
+
+    /// Computes each leaf's pixel `Rect` within `bounds`, recursively
+    /// subdividing at each split's ratio. Content is fetched separately
+    /// via `content(id)` -- keeps layout decoupled from `T`'s ownership.
+    pub fn layout(&self, bounds: Rect) -> Vec<(WindowId, Rect)> {
+        let mut out = Vec::new();
+        self.root().layout_into(bounds, &mut out);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_tree_has_one_window_holding_the_given_content() {
+        let t = WindowTree::new("a");
+        assert_eq!(t.window_count(), 1);
+        assert_eq!(t.focused_content(), &"a");
+    }
+
+    #[test]
+    fn split_adds_a_window_and_focuses_it() {
+        let mut t = WindowTree::new("a");
+        let new_id = t.split(SplitKind::Vertical, "b");
+        assert_eq!(t.window_count(), 2);
+        assert_eq!(t.focused_id(), new_id);
+        assert_eq!(t.focused_content(), &"b");
+    }
+
+    #[test]
+    fn split_before_puts_the_new_window_on_the_left() {
+        let mut t = WindowTree::new("a");
+        let a = t.focused_id();
+        let b = t.split_before(SplitKind::Vertical, "b");
+        assert_eq!(t.focused_id(), b);
+        let layout = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
+        let x = |id| layout.iter().find(|(w, _)| *w == id).unwrap().1.x;
+        assert!(x(b) < x(a), "{layout:?}");
+    }
+
+    #[test]
+    fn split_root_runs_the_full_height_beside_every_pane() {
+        let mut t = WindowTree::new("a");
+        let a = t.focused_id();
+        let b = t.split(SplitKind::Horizontal, "b");
+        t.focus(a);
+        let dock = t.split_root(SplitKind::Vertical, "dock", 0.6);
+        assert_eq!(t.focused_id(), dock);
+        let layout = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
+        let rect = |id| layout.iter().find(|(w, _)| *w == id).unwrap().1;
+        assert_eq!((rect(dock).x.round(), rect(dock).h), (60.0, 50.0), "{layout:?}");
+        assert_eq!((rect(a).w.round(), rect(b).w.round()), (60.0, 60.0), "the panes keep their own split, narrower");
+    }
+
+    #[test]
+    fn splitting_twice_yields_three_windows_all_reachable() {
+        let mut t = WindowTree::new("a");
+        t.split(SplitKind::Vertical, "b");
+        t.split(SplitKind::Horizontal, "c");
+        assert_eq!(t.window_count(), 3);
+        let contents: Vec<&str> = t.windows().iter().map(|&id| *t.content(id).unwrap()).collect();
+        let mut sorted = contents.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn close_focused_returns_false_on_the_last_window() {
+        let mut t = WindowTree::new("a");
+        assert!(!t.close_focused());
+        assert_eq!(t.window_count(), 1);
+    }
+
+    #[test]
+    fn close_focused_collapses_back_to_one_window() {
+        let mut t = WindowTree::new("a");
+        t.split(SplitKind::Vertical, "b"); // focused: b
+        assert!(t.close_focused());
+        assert_eq!(t.window_count(), 1);
+        assert_eq!(t.focused_content(), &"a");
+    }
+
+    #[test]
+    fn close_focused_promotes_the_sibling_and_focuses_it() {
+        let mut t = WindowTree::new("a");
+        let b = t.split(SplitKind::Vertical, "b");
+        t.split(SplitKind::Horizontal, "c"); // splits b -> focused: c, sibling: b
+        t.focus(b);
+        assert!(t.close_focused()); // closes b, its sibling c should be promoted+focused
+        assert_eq!(t.window_count(), 2);
+        assert_eq!(t.focused_content(), &"c");
+        let remaining: Vec<&str> = t.windows().iter().map(|&id| *t.content(id).unwrap()).collect();
+        let mut sorted = remaining.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn only_closes_every_other_window() {
+        let mut t = WindowTree::new("a");
+        t.split(SplitKind::Vertical, "b");
+        t.split(SplitKind::Horizontal, "c"); // focused: c
+        t.only();
+        assert_eq!(t.window_count(), 1);
+        assert_eq!(t.focused_content(), &"c");
+    }
+
+    #[test]
+    fn focus_moves_to_an_existing_window_and_rejects_unknown_ids() {
+        let mut t = WindowTree::new("a");
+        let b = t.split(SplitKind::Vertical, "b");
+        assert!(t.focus(b));
+        assert_eq!(t.focused_content(), &"b");
+
+        // An id this tree never allocated. Ids are process-wide unique
+        // (see `alloc_id`), so a real id from another tree is guaranteed
+        // to be one this tree has never seen -- no need to fabricate an
+        // out-of-range one, and this now exercises the case that
+        // actually happens in the host app (a pane id belonging to some
+        // other workspace, or some other OS window's tree).
+        let other = WindowTree::new("elsewhere");
+        assert!(!t.focus(other.focused_id()));
+    }
+
+    #[test]
+    fn two_trees_never_hand_out_the_same_window_id() {
+        let mut a = WindowTree::new("a");
+        a.split(SplitKind::Vertical, "a2");
+        let mut b = WindowTree::new("b");
+        b.split(SplitKind::Vertical, "b2");
+
+        for id in a.windows() {
+            assert!(!b.windows().contains(&id), "{id:?} was handed out by both trees");
+        }
+    }
+
+    #[test]
+    fn set_content_overwrites_in_place_without_changing_shape() {
+        let mut t = WindowTree::new("a");
+        let b = t.split(SplitKind::Vertical, "b");
+        t.set_content(b, "b2");
+        assert_eq!(t.content(b), Some(&"b2"));
+        assert_eq!(t.window_count(), 2);
+    }
+
+    #[test]
+    fn content_mut_allows_in_place_mutation() {
+        let mut t = WindowTree::new(String::from("a"));
+        t.focused_content_mut().push('!');
+        assert_eq!(t.focused_content(), "a!");
+    }
+
+    #[test]
+    fn cycle_next_wraps_around() {
+        let mut t = WindowTree::new("a");
+        let b = t.split(SplitKind::Vertical, "b"); // focused: b
+        let a = t.windows().into_iter().find(|&id| id != b).unwrap();
+        assert_eq!(t.cycle_next(), a); // wraps from b back to a in a 2-window tree
+        assert_eq!(t.cycle_next(), b);
+    }
+
+    #[test]
+    fn resize_focused_clamps_the_nearest_ancestor_ratio() {
+        let mut t = WindowTree::new("a");
+        t.split(SplitKind::Vertical, "b"); // focused: b, ratio 0.5
+        t.resize_focused(0.3);
+        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        let a_rect = rects.iter().find(|(_, r)| r.x == 0.0).unwrap().1;
+        assert!((a_rect.w - 80.0).abs() < 0.01); // ratio 0.8 of width 100
+
+        t.resize_focused(1.0); // clamps at 0.9, not 1.0
+        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        let a_rect = rects.iter().find(|(_, r)| r.x == 0.0).unwrap().1;
+        assert!((a_rect.w - 90.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn balance_resets_every_split_to_half() {
+        let mut t = WindowTree::new("a");
+        t.split(SplitKind::Vertical, "b");
+        t.resize_focused(0.3);
+        t.balance();
+        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        for (_, r) in rects {
+            assert!((r.w - 50.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn layout_vertical_split_divides_width() {
+        let mut t = WindowTree::new("a");
+        t.split(SplitKind::Vertical, "b");
+        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 });
+        assert_eq!(rects.len(), 2);
+        for (_, r) in &rects {
+            assert_eq!(r.h, 100.0);
+            assert_eq!(r.w, 100.0);
+        }
+        let xs: Vec<f32> = rects.iter().map(|(_, r)| r.x).collect();
+        assert!(xs.contains(&0.0) && xs.contains(&100.0));
+    }
+
+    #[test]
+    fn layout_horizontal_split_divides_height() {
+        let mut t = WindowTree::new("a");
+        t.split(SplitKind::Horizontal, "b");
+        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 200.0 });
+        assert_eq!(rects.len(), 2);
+        for (_, r) in &rects {
+            assert_eq!(r.w, 100.0);
+            assert_eq!(r.h, 100.0);
+        }
+        let ys: Vec<f32> = rects.iter().map(|(_, r)| r.y).collect();
+        assert!(ys.contains(&0.0) && ys.contains(&100.0));
+    }
+
+    #[test]
+    fn layout_covers_the_full_bounds_with_no_overlap_in_a_nested_tree() {
+        let mut t = WindowTree::new("a");
+        t.split(SplitKind::Vertical, "b");
+        t.split(SplitKind::Horizontal, "c"); // splits b
+        let bounds = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let rects = t.layout(bounds);
+        assert_eq!(rects.len(), 3);
+        let total_area: f32 = rects.iter().map(|(_, r)| r.w * r.h).sum();
+        assert!((total_area - bounds.w * bounds.h).abs() < 0.01);
+    }
+}
+
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    #[test]
+    fn portable_layout_preserves_structure_and_focus_with_fresh_ids() {
+        let layout = Layout::Split { kind: SplitKind::Vertical, ratio: 0.3,
+            first: Box::new(Layout::Leaf("a")),
+            second: Box::new(Layout::Split { kind: SplitKind::Horizontal, ratio: 0.7,
+                first: Box::new(Layout::Leaf("b")), second: Box::new(Layout::Leaf("c")) }) };
+        let tree = WindowTree::from_layout(layout.clone(), 2).unwrap();
+        assert_eq!(tree.snapshot(|_, text| *text), layout);
+        assert_eq!(tree.content(tree.focused_id()), Some(&"c"));
+        let restored = WindowTree::from_layout(tree.snapshot(|_, text| *text), 2).unwrap();
+        assert!(restored.windows().iter().all(|id| !tree.windows().contains(id)));
+    }
+
+    #[test]
+    fn portable_layout_rejects_invalid_ratio_focus_and_excessive_depth() {
+        for ratio in [f32::NAN, f32::INFINITY, 0.0, 1.0] {
+            let layout = Layout::Split { kind: SplitKind::Vertical, ratio,
+                first: Box::new(Layout::Leaf(0)), second: Box::new(Layout::Leaf(1)) };
+            assert!(WindowTree::from_layout(layout, 0).is_err());
+        }
+        assert!(WindowTree::from_layout(Layout::Leaf(0), 1).is_err());
+        let mut deep = Layout::Leaf(0);
+        for _ in 0..34 { deep = Layout::Split { kind: SplitKind::Vertical, ratio: 0.5,
+            first: Box::new(deep), second: Box::new(Layout::Leaf(1)) }; }
+        assert!(WindowTree::from_layout(deep, 0).is_err());
+    }
+}

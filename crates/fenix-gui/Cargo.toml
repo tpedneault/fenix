@@ -1,0 +1,75 @@
+[package]
+name = "fenix-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fenix"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+arboard = "3"
+bytemuck = { version = "1.25.2", features = ["derive"] }
+chrono = "0.4"
+dirs = "6"
+fenix-acp = { path = "../fenix-acp" }
+fenix-buffers = { path = "../fenix-buffers" }
+fenix-completion = { path = "../fenix-completion" }
+fenix-config = { path = "../fenix-config" }
+fenix-control = { path = "../fenix-control" }
+fenix-core = { path = "../fenix-core" }
+fenix-dap = { path = "../fenix-dap" }
+fenix-explorer = { path = "../fenix-explorer" }
+fenix-extensions = { path = "../fenix-extensions" }
+# Extensions' rules for decorating files.
+regex = "1"
+fenix-wasm = { path = "../fenix-wasm" }
+fenix-model = { path = "../fenix-model" }
+glam = "0.30"
+semver = "1"
+fenix-format = { path = "../fenix-format" }
+fenix-fs = { path = "../fenix-fs" }
+fenix-diff = { path = "../fenix-diff" }
+fenix-git = { path = "../fenix-git" }
+fenix-keymap = { path = "../fenix-keymap" }
+fenix-lsp = { path = "../fenix-lsp" }
+fenix-picker = { path = "../fenix-picker" }
+fenix-project = { path = "../fenix-project" }
+fenix-recovery = { path = "../fenix-recovery" }
+fenix-syntax = { path = "../fenix-syntax" }
+fenix-brand = { path = "../fenix-brand" }
+fenix-snippets = { path = "../fenix-snippets" }
+fenix-table = { path = "../fenix-table" }
+fenix-tasks = { path = "../fenix-tasks" }
+fenix-terminal = { path = "../fenix-terminal" }
+fenix-vim = { path = "../fenix-vim" }
+fenix-window = { path = "../fenix-window" }
+glyphon = "0.12.0"
+image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg", "gif", "webp", "bmp"] }
+lsp-types = "0.97"
+pollster = "1.0.1"
+pulldown-cmark = { version = "0.13", default-features = false }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+unicode-width = "0.2"
+fenix-storage = { path = "../fenix-storage" }
+vt100 = "0.16"
+wgpu = "30.0.1"
+winit = "0.30.13"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+winresource = "0.1"
+fenix-brand = { path = "../fenix-brand", features = ["ico"] }
+
+[dev-dependencies]
+tempfile = "3"
+minisign-verify = "0.2"

@@ -1,0 +1,234 @@
+use std::path::Path;
+
+/// Font family the explorer's icon glyphs are rendered in -- a separate
+/// `Attrs::family` from the body text's `Family::Monospace`, mixed into
+/// the same row's rich-text spans exactly like `content_spans` already
+/// mixes gutter-number spans with content-text spans.
+///
+/// The face is **bundled**, not assumed installed: `text.rs` embeds
+/// `assets/fonts/symbols_nerd_font_mono.ttf` and registers it into the
+/// shared `FontSystem` font database at `TextPipeline::new`, so these
+/// codepoints resolve identically on Windows and Linux with nothing for
+/// the user to install. Redistribution is covered by the SIL Open Font
+/// License 1.1 (Copyright (c) 2014, Ryan L McIntyre), whose text ships
+/// next to the font as `assets/fonts/LICENSE-symbols-nerd-font.txt` --
+/// the OFL permits bundling precisely on the condition that the notice
+/// travels with the binary.
+///
+/// One thing this family is *not*: the same cell width as the body
+/// font. It's the `...Mono` build, which makes every icon the same
+/// width as every other icon, not the same width as a body character
+/// (it measures ~1.8x one at the same pt size -- see `text.rs`'s
+/// `the_icon_fonts_cell_is_not_the_body_fonts_cell`). Anything laying
+/// out a row that mixes the two must measure the shaped glyphs rather
+/// than multiply a character count by one cell width.
+pub const ICON_FONT_FAMILY: &str = "Symbols Nerd Font Mono";
+
+// Codepoints verified two ways before being hardcoded here: against the
+// authoritative glyph-name table (github.com/ryanoasis/nerd-fonts'
+// `glyphnames.json`) and against the actual installed font's cmap, not
+// guessed from memory or trusted from a summarized fetch.
+const FOLDER: char = '\u{f07b}'; // nf-fa-folder
+/// A workspace's Home tab.
+pub const HOME: char = '\u{f015}'; // nf-fa-home
+const FOLDER_OPEN: char = '\u{f07c}'; // nf-fa-folder_open
+const FILE_GENERIC: char = '\u{f15b}'; // nf-fa-file
+const FILE_CODE: char = '\u{f1c9}'; // nf-fa-file_code_o -- fallback for a recognized-but-iconless extension
+const RUST: char = '\u{e7a8}'; // nf-dev-rust
+const PYTHON: char = '\u{e73c}'; // nf-dev-python
+const JAVASCRIPT: char = '\u{e781}'; // nf-dev-javascript
+const TYPESCRIPT: char = '\u{e8ca}'; // nf-dev-typescript
+const MARKDOWN: char = '\u{e73e}'; // nf-dev-markdown
+const JSON: char = '\u{e60b}'; // nf-seti-json
+const HTML: char = '\u{e736}'; // nf-dev-html5
+const CSS: char = '\u{e749}'; // nf-dev-css3
+const C_LANG: char = '\u{e771}'; // nf-dev-c
+const CPP: char = '\u{e7a3}'; // nf-dev-cplusplus
+const SHELL: char = '\u{e691}'; // nf-seti-shell -- also used for Tcl, which has no dedicated
+// nerd-fonts icon (checked); closest honest fit is "scripting language."
+const YAML: char = '\u{e6a8}'; // nf-seti-yml
+const TOML: char = '\u{eb51}'; // nf-cod-settings_gear -- generic "config" fallback, TOML has no dedicated icon either
+const ARCHIVE: char = '\u{f1c6}'; // nf-fa-file_archive_o
+const IMAGE: char = '\u{f1c5}'; // nf-fa-file_image_o
+// Checked against the bundled font's cmap (fontTools), like the rest.
+const GO: char = '\u{e627}'; // nf-seti-go
+const JAVA: char = '\u{e738}'; // nf-dev-java
+const CSHARP: char = '\u{f031b}'; // nf-md-language_csharp
+const DOCKER: char = '\u{e7b0}'; // nf-dev-docker
+const LUA: char = '\u{e620}'; // nf-seti-lua
+const XML: char = '\u{f05c0}'; // nf-md-xml
+const DATABASE: char = '\u{e706}'; // nf-dev-database -- SQL
+const WINDOWS: char = '\u{e62a}'; // nf-custom-windows -- Batch
+const DIAGRAM: char = '\u{f0e8}'; // nf-fa-sitemap -- Mermaid
+const GIT: char = '\u{e702}'; // nf-dev-git -- .gitignore and friends
+const LICENSE: char = '\u{e60a}'; // nf-seti-license
+const MAKEFILE: char = '\u{e673}'; // nf-seti-makefile
+const PDF: char = '\u{f1c1}'; // nf-fa-file_pdf_o
+const TEXT: char = '\u{f15c}'; // nf-fa-file_text
+const LOCK: char = '\u{f023}'; // nf-fa-lock -- lockfiles
+
+/// A language's icon; none for one an extension's grammar brings.
+fn language_icon(language: fenix_syntax::LanguageId) -> Option<char> {
+    use fenix_syntax::LanguageId as L;
+    Some(match language {
+        L::Rust => RUST,
+        L::Toml => TOML,
+        L::Markdown => MARKDOWN,
+        L::Json => JSON,
+        L::Yaml => YAML,
+        L::Python => PYTHON,
+        L::JavaScript => JAVASCRIPT,
+        L::TypeScript | L::Tsx => TYPESCRIPT,
+        L::C => C_LANG,
+        L::Cpp => CPP,
+        L::Bash | L::Tcl => SHELL,
+        L::Dockerfile => DOCKER,
+        L::Batch => WINDOWS,
+        L::Xml | L::Dtd => XML,
+        L::Go => GO,
+        L::Java => JAVA,
+        L::CSharp => CSHARP,
+        L::Html => HTML,
+        L::Css => CSS,
+        L::Sql => DATABASE,
+        L::Lua => LUA,
+        L::Mermaid => DIAGRAM,
+        L::Grammar(_) => return None,
+    })
+}
+
+/// The icon for a file in the explorer: by the language the editor
+/// would open it as -- the language files' extensions and filenames
+/// included -- then by its name, then by its extension.
+pub fn file_icon(name: &str) -> char {
+    let lower = name.to_ascii_lowercase();
+    if let Some(icon) = fenix_syntax::detect_language_from_path(Path::new(name)).and_then(language_icon) {
+        return icon;
+    }
+    if lower.starts_with(".git") {
+        return GIT;
+    }
+    if lower.starts_with("license") || lower.starts_with("licence") || lower.starts_with("copying") {
+        return LICENSE;
+    }
+    if lower == "makefile" || lower == "gnumakefile" || lower.ends_with(".mk") {
+        return MAKEFILE;
+    }
+    if lower.ends_with(".lock") {
+        return LOCK;
+    }
+    if lower.ends_with(".pdf") {
+        return PDF;
+    }
+    if lower.ends_with(".txt") || lower.ends_with(".log") {
+        return TEXT;
+    }
+    icon_for(name, false, false)
+}
+
+/// Whether `c` is one of the icon font's glyphs (Unicode's private use
+/// areas, where Nerd Fonts puts them) -- drawn in that font wherever it
+/// turns up in a page.
+pub fn is_icon(c: char) -> bool {
+    matches!(c, '\u{e000}'..='\u{f8ff}' | '\u{f0000}'..='\u{ffffd}')
+}
+
+/// The icon glyph for one explorer row. `expanded` only matters for
+/// directories (open vs. closed folder); ignored for files.
+pub fn icon_for(name: &str, is_dir: bool, expanded: bool) -> char {
+    if is_dir {
+        return if expanded { FOLDER_OPEN } else { FOLDER };
+    }
+    let ext = Path::new(name).extension().and_then(|e| e.to_str()).map(str::to_lowercase);
+    match ext.as_deref() {
+        Some("rs") => RUST,
+        Some("py" | "pyi") => PYTHON,
+        Some("js" | "mjs" | "cjs" | "jsx") => JAVASCRIPT,
+        Some("ts" | "mts" | "cts" | "tsx") => TYPESCRIPT,
+        Some("md" | "markdown") => MARKDOWN,
+        Some("json") => JSON,
+        Some("html" | "htm") => HTML,
+        Some("css") => CSS,
+        Some("c" | "h") => C_LANG,
+        Some("cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl") => CPP,
+        Some("sh" | "bash" | "tcl" | "tm") => SHELL,
+        Some("yaml" | "yml") => YAML,
+        Some("toml") => TOML,
+        Some("zip" | "tar" | "gz" | "xz" | "bz2" | "7z") => ARCHIVE,
+        Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "bmp") => IMAGE,
+        Some(_) => FILE_CODE, // has *some* extension we don't specifically recognize
+        None => FILE_GENERIC,
+    }
+}
+
+/// A compact document-navigation icon. Tcl's shell glyph is useful in an
+/// explorer, but reads as a literal `$` when it sits inline with breadcrumb
+/// labels, so navigation deliberately uses the neutral code-file glyph.
+pub fn navigation_icon_for(name: &str) -> char {
+    match Path::new(name).extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+        Some("tcl" | "tm") => FILE_CODE,
+        _ => icon_for(name, false, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_file_gets_an_icon_by_its_language_or_name() {
+        assert_eq!(file_icon("main.go"), GO);
+        assert_eq!(file_icon("Dockerfile"), DOCKER);
+        assert_eq!(file_icon("App.java"), JAVA);
+        assert_eq!(file_icon(".gitignore"), GIT);
+        assert_eq!(file_icon("LICENSE"), LICENSE);
+        assert_eq!(file_icon("Cargo.lock"), LOCK);
+        assert_eq!(file_icon("notes.txt"), TEXT);
+        assert_eq!(file_icon("main.rs"), RUST);
+        assert!(is_icon(file_icon("odd.xyz")) && is_icon(CSHARP) && !is_icon('a'));
+    }
+
+    #[test]
+    fn directories_use_folder_icons_based_on_expansion() {
+        assert_eq!(icon_for("src", true, false), FOLDER);
+        assert_eq!(icon_for("src", true, true), FOLDER_OPEN);
+    }
+
+    #[test]
+    fn known_extensions_map_to_their_language_icon() {
+        assert_eq!(icon_for("main.rs", false, false), RUST);
+        assert_eq!(icon_for("script.py", false, false), PYTHON);
+        assert_eq!(icon_for("app.tsx", false, false), TYPESCRIPT);
+        assert_eq!(icon_for("README.md", false, false), MARKDOWN);
+    }
+
+    #[test]
+    fn tcl_and_toml_fall_back_to_their_closest_honest_icon() {
+        // Neither has a dedicated nerd-fonts icon -- verified against the
+        // authoritative glyph table, not assumed.
+        assert_eq!(icon_for("script.tcl", false, false), SHELL);
+        assert_eq!(icon_for("Cargo.toml", false, false), TOML);
+    }
+
+    #[test]
+    fn navigation_uses_a_document_icon_for_tcl_not_a_literal_dollar_sign() {
+        assert_eq!(navigation_icon_for("script.tcl"), FILE_CODE);
+        assert_eq!(navigation_icon_for("main.rs"), RUST);
+    }
+
+    #[test]
+    fn unrecognized_extension_gets_the_generic_code_file_icon() {
+        assert_eq!(icon_for("thing.xyz", false, false), FILE_CODE);
+    }
+
+    #[test]
+    fn no_extension_gets_the_plain_generic_file_icon() {
+        assert_eq!(icon_for("Makefile", false, false), FILE_GENERIC);
+        assert_eq!(icon_for("LICENSE", false, false), FILE_GENERIC);
+    }
+
+    #[test]
+    fn extension_matching_is_case_insensitive() {
+        assert_eq!(icon_for("Main.RS", false, false), RUST);
+    }
+}

@@ -1,0 +1,145 @@
+[template]
+name = "C / C++ · CMake"
+kind = "cpp"
+group = "Systems"
+description = "A CMake project: a library with its header, an optional program using it, tests, presets for debug and release builds, and clangd pointed at the build."
+needs = ["cmake"]
+open = ["src/{{name_snake}}.cpp", "src/{{name_snake}}.c"]
+
+[[ask]]
+key = "language"
+label = "Language"
+choices = ["C++", "C"]
+default = "C++"
+
+[[ask]]
+key = "cxx_standard"
+label = "C++ standard"
+choices = ["20", "17", "23"]
+default = "20"
+when = "language == C++"
+
+[[ask]]
+key = "c_standard"
+label = "C standard"
+choices = ["17", "11", "23"]
+default = "17"
+when = "language == C"
+
+[[ask]]
+key = "artifact"
+label = "Builds"
+choices = ["executable", "static library", "shared library"]
+default = "executable"
+hint = "an executable is a library of the code plus a small main that uses it"
+
+[[ask]]
+key = "cxx_tests"
+label = "Tests"
+choices = ["GoogleTest", "Catch2", "CTest", "none"]
+default = "GoogleTest"
+hint = "GoogleTest and Catch2 are fetched when CMake configures"
+when = "language == C++"
+
+[[ask]]
+key = "c_tests"
+label = "Tests"
+choices = ["CTest", "none"]
+default = "CTest"
+when = "language == C"
+
+[[ask]]
+key = "generator"
+label = "Generator"
+choices = ["platform default", "Ninja"]
+default = "platform default"
+hint = "Ninja writes compile_commands.json for clangd, but needs ninja and a compiler on PATH"
+
+[[ask]]
+key = "configure"
+label = "Configure now"
+default = true
+hint = "cmake --preset debug, once the files are written"
+
+[[file]]
+path = "include/{{name_snake}}/{{name_snake}}.hpp"
+from = "cpp/header.hpp"
+when = "language == C++"
+
+[[file]]
+path = "src/{{name_snake}}.cpp"
+from = "cpp/library.cpp"
+when = "language == C++"
+
+[[file]]
+path = "src/main.cpp"
+from = "cpp/main.cpp"
+when = ["language == C++", "artifact == executable"]
+
+[[file]]
+path = "tests/CMakeLists.txt"
+from = "cpp/tests.cmake"
+when = ["language == C++", "cxx_tests != none"]
+
+[[file]]
+path = "tests/test_{{name_snake}}.cpp"
+from = "cpp/test.cpp"
+when = ["language == C++", "cxx_tests != none"]
+
+[[file]]
+path = "include/{{name_snake}}/{{name_snake}}.h"
+from = "c/header.h"
+when = "language == C"
+
+[[file]]
+path = "src/{{name_snake}}.c"
+from = "c/library.c"
+when = "language == C"
+
+[[file]]
+path = "src/main.c"
+from = "c/main.c"
+when = ["language == C", "artifact == executable"]
+
+[[file]]
+path = "tests/CMakeLists.txt"
+from = "c/tests.cmake"
+when = ["language == C", "c_tests != none"]
+
+[[file]]
+path = "tests/test_{{name_snake}}.c"
+from = "c/test.c"
+when = ["language == C", "c_tests != none"]
+
+[[run]]
+exec = "cmake"
+args = ["--preset", "debug"]
+when = "configure"
+
+[[task]]
+name = "configure"
+exec = "cmake"
+args = ["--preset", "debug"]
+
+[[task]]
+name = "build"
+exec = "cmake"
+args = ["--build", "--preset", "debug"]
+
+[[task]]
+name = "run"
+exec = "cmake"
+args = ["--build", "--preset", "debug", "--target", "run"]
+when = "artifact == executable"
+
+[[task]]
+name = "test"
+exec = "ctest"
+args = ["--preset", "debug"]
+when = ["language == C++", "cxx_tests != none"]
+
+[[task]]
+name = "test"
+exec = "ctest"
+args = ["--preset", "debug"]
+when = ["language == C", "c_tests != none"]

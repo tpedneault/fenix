@@ -1,0 +1,24 @@
+[package]
+name = "fenix-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+fenix-storage = { path = "../fenix-storage" }
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+toml_edit = "0.22"
+
+
+# The keychain secrets are kept in (`keychain`): Windows' Credential
+# Manager and the macOS Keychain. Linux's Secret Service is reached
+# through `secret-tool`, so no D-Bus library is linked.
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6", default-features = false, features = ["apple-native"] }

@@ -1,0 +1,1076 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
+
+use crate::edit::{to_input_edit, RawEdit};
+use crate::highlight::{resolve_overlaps, RawCapture};
+use crate::language::LanguageId;
+use crate::todo::{self, TodoItem, TodoKind};
+use crate::xml;
+
+/// Markdown's own second grammar, for prose text a block-structure
+/// parse alone can't see inside of -- see `SyntaxState::inline`'s own
+/// doc comment for why this exists at all.
+struct InlineGrammar {
+    /// Finds every `(inline)` node in the *block* tree -- run against
+    /// the block grammar/tree, not this grammar's own one; what tells
+    /// `highlights_in_range` where to run the inline parse at all.
+    span_query: Arc<Query>,
+    /// Parses each of those spans' own text with the inline grammar.
+    /// `RefCell`, not a plain field: `Parser::parse` needs `&mut self`,
+    /// but `highlights_in_range` only ever borrows `&self` (matching
+    /// every other read-only accessor `SyntaxState` has) -- and a
+    /// fresh, from-scratch parse per span, not a persisted tree with
+    /// its own incremental-edit tracking, is genuinely all this needs:
+    /// a single paragraph's, heading's, or list item's worth of inline
+    /// content is cheap to reparse from nothing every call, and
+    /// `highlights_in_range` is already windowed to whatever's on
+    /// screen, the same reason the per-frame cost of the outer block
+    /// parse alone was never a concern either.
+    parser: RefCell<Parser>,
+    query: Arc<Query>,
+}
+
+fn is_scope_node(lang: LanguageId, node: Node<'_>) -> bool {
+    node.start_position().row < node.end_position().row
+        && match lang {
+            // Every multi-line element is a scope: foldable, listed by
+            // `SPC c s`, and a step in the breadcrumbs.
+            LanguageId::Xml => node.kind() == "element",
+            _ => matches!(node.kind(),
+                "function_item" | "impl_item" | "mod_item" | "struct_item" | "enum_item" |
+                "function_definition" | "class_definition" | "method_definition" | "procedure"),
+        }
+}
+
+/// A query compiled once per process and shared from then on. Compiling
+/// a grammar's highlights takes tens of milliseconds -- far longer than
+/// parsing a typical file -- and it's the same query every time, so a
+/// session restoring twenty buffers, or a TODO sweep reading thousands
+/// of files, pays for it once per language rather than once per file.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum QueryKey {
+    Highlights(LanguageId),
+    MarkdownInlineSpans,
+    MarkdownInline,
+    /// A grammar's `folds.scm` and `indents.scm`.
+    Folds(LanguageId),
+    Indents(LanguageId),
+}
+
+fn compiled(key: QueryKey, language: &Language, source: &str) -> Arc<Query> {
+    compiled_or_said(key, language, source).expect("bundled highlights.scm for this language failed to compile")
+}
+
+/// `compiled`, for a query that may not compile -- an extension's: what's
+/// wrong with it is said once, and it's none from then on.
+fn compiled_or_said(key: QueryKey, language: &Language, source: &str) -> Option<Arc<Query>> {
+    static CACHE: OnceLock<Mutex<HashMap<QueryKey, Option<Arc<Query>>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(query) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+        return query.clone();
+    }
+    // Compiled outside the lock: two threads racing on the same language
+    // both compile it, and one of the two copies is kept.
+    let query = match Query::new(language, source) {
+        Ok(query) => Some(Arc::new(query)),
+        Err(e) => {
+            let (lang, which) = match key {
+                QueryKey::Folds(l) => (l, "folds"),
+                QueryKey::Indents(l) => (l, "indents"),
+                QueryKey::Highlights(l) => (l, "highlights"),
+                _ => (LanguageId::Markdown, "inline"),
+            };
+            if !lang.is_grammar() {
+                panic!("bundled {which}.scm for {lang:?} failed to compile: {e}");
+            }
+            crate::grammar::said(format!("{}'s {which}.scm: {e}", lang.name()));
+            None
+        }
+    };
+    cache.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(query).clone()
+}
+
+/// The query of `key` for a grammar, when it has one and it compiles.
+fn grammar_query(key: QueryKey, language: Option<&Language>, source: &str) -> Option<Arc<Query>> {
+    language.filter(|_| !source.trim().is_empty()).and_then(|l| compiled_or_said(key, l, source))
+}
+
+impl InlineGrammar {
+    fn new(block_language: &Language) -> Self {
+        let span_query = compiled(QueryKey::MarkdownInlineSpans, block_language, "(inline) @inline");
+        let inline_language: Language = tree_sitter_md::INLINE_LANGUAGE.into();
+        let mut parser = Parser::new();
+        parser
+            .set_language(&inline_language)
+            .expect("bundled grammar's ABI is compatible with the bundled tree-sitter core");
+        let query = compiled(QueryKey::MarkdownInline, &inline_language, tree_sitter_md::HIGHLIGHT_QUERY_INLINE);
+        Self { span_query, parser: RefCell::new(parser), query }
+    }
+}
+
+/// Splits TODO-style keywords out of every comment capture already in
+/// `raw`, as narrower `comment.todo.*` captures `resolve_overlaps` then
+/// prefers over the comment they sit in. Deriving them from the
+/// grammar's own comment captures (rather than a per-language query) is
+/// what makes this work identically for every registered language.
+fn push_todo_captures<'a>(source: &str, raw: &mut Vec<RawCapture<'a>>) {
+    let comments: Vec<std::ops::Range<usize>> = raw
+        .iter()
+        .filter(|c| c.name == "comment" || c.name.starts_with("comment.") || c.name == "spell")
+        .map(|c| c.range.clone())
+        .collect();
+    for range in comments {
+        let Some(text) = source.get(range.clone()) else { continue };
+        for (keyword, kind) in todo::find_keywords(text) {
+            raw.push(RawCapture {
+                range: (range.start + keyword.start)..(range.start + keyword.end),
+                pattern_index: usize::MAX,
+                name: kind.capture_name(),
+            });
+        }
+    }
+}
+
+/// Per-buffer incremental parse + highlight state for one language.
+pub struct SyntaxState {
+    lang: LanguageId,
+    parser: Parser,
+    tree: Option<Tree>,
+    /// None for a grammar that doesn't load, or whose query doesn't.
+    query: Option<Arc<Query>>,
+    /// A grammar's `@fold`s: its scopes, in place of the node kinds
+    /// `is_scope_node` knows.
+    folds: Option<Arc<Query>>,
+    /// A grammar's `@indent`s (`indents_after`).
+    indents: Option<Arc<Query>>,
+    /// Markdown only: tree-sitter-md ships *two* grammars, one for
+    /// block structure (headings, lists, code fences -- everything
+    /// `query` above already covers) and a separate one for the prose
+    /// *inside* a block, which the block grammar itself only ever marks
+    /// with a bare `(inline)` node rather than parsing any further --
+    /// bold, italic, inline code spans, and links are the inline
+    /// grammar's own job, run as a second parse over each such span's
+    /// text (a real, if lightweight, language injection, not a
+    /// workaround). `None` for every other language, which has no such
+    /// split to begin with.
+    inline: Option<InlineGrammar>,
+}
+
+impl SyntaxState {
+    /// Every multiline declaration-like node as `(start_row, end_row)`.
+    /// Consumers that present a structural outline or folding controls use
+    /// this rather than guessing from indentation, which is unreliable for
+    /// Tcl and for brace-free languages.
+    pub fn scope_ranges(&self) -> Vec<(usize, usize)> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        if self.lang.is_grammar() {
+            let mut ranges: Vec<(usize, usize)> = self.folded(tree, None).into_iter().map(|n| (n.start_position().row, n.end_position().row)).collect();
+            ranges.sort_unstable();
+            ranges.dedup();
+            return ranges;
+        }
+        let mut cursor = tree.walk();
+        let mut ranges = Vec::new();
+        loop {
+            let node = cursor.node();
+            if is_scope_node(self.lang, node) {
+                ranges.push((node.start_position().row, node.end_position().row));
+            }
+            if cursor.goto_first_child() { continue }
+            loop {
+                if cursor.goto_next_sibling() { break }
+                if !cursor.goto_parent() { ranges.sort_unstable(); ranges.dedup(); return ranges }
+            }
+        }
+    }
+
+    /// Scope headers for an explicitly requested document navigation picker.
+    pub fn scope_lines(&self) -> Vec<usize> {
+        self.scope_ranges().into_iter().map(|(start, _)| start).collect()
+    }
+    /// Enclosing multiline scopes, outermost first, using the current tree.
+    pub fn enclosing_scopes(&self, byte: usize) -> Vec<(usize, usize)> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        let root = tree.root_node();
+        let byte = byte.min(root.end_byte());
+        if self.lang.is_grammar() {
+            let mut scopes: Vec<Node<'_>> = self.folded(tree, Some(byte)).into_iter().filter(|n| n.start_byte() <= byte && byte <= n.end_byte()).collect();
+            scopes.sort_by_key(|n| (n.start_byte(), std::cmp::Reverse(n.end_byte())));
+            let mut result: Vec<(usize, usize)> = scopes.into_iter().map(|n| (n.start_position().row, n.end_position().row)).collect();
+            result.dedup();
+            return result;
+        }
+        let Some(mut node) = root.descendant_for_byte_range(byte, byte) else { return Vec::new() };
+        let mut result = Vec::new();
+        loop {
+            if is_scope_node(self.lang, node) {
+                result.push((node.start_position().row, node.end_position().row));
+            }
+            match node.parent() { Some(parent) => node = parent, None => break }
+        }
+        result.reverse();
+        result
+    }
+    /// Seeds the initial parse tree from `source` (the buffer's full text
+    /// at the time highlighting starts).
+    /// A grammar from an extension that doesn't load leaves it with no
+    /// tree: plain text, as a file of no language is.
+    pub fn new(lang: LanguageId, source: &str) -> Self {
+        let language = lang.language();
+        let mut parser = match &language {
+            Some(language) if lang.is_grammar() => crate::grammar::parser(language).unwrap_or_default(),
+            Some(language) => {
+                let mut parser = Parser::new();
+                parser.set_language(language).expect("bundled grammar's ABI is compatible with the bundled tree-sitter core");
+                parser
+            }
+            None => Parser::new(),
+        };
+        let tree = language.as_ref().and_then(|_| parser.parse(source, None));
+        let query = match &language {
+            Some(language) if lang.is_grammar() => grammar_query(QueryKey::Highlights(lang), Some(language), lang.highlights_query()),
+            Some(language) => Some(compiled(QueryKey::Highlights(lang), language, lang.highlights_query())),
+            None => None,
+        };
+        let grammar = match lang {
+            LanguageId::Grammar(i) => crate::grammar::grammar(i),
+            _ => None,
+        };
+        let folds = grammar.and_then(|g| grammar_query(QueryKey::Folds(lang), language.as_ref(), &g.folds));
+        let indents = grammar.and_then(|g| grammar_query(QueryKey::Indents(lang), language.as_ref(), &g.indents));
+        let inline = language.as_ref().filter(|_| lang == LanguageId::Markdown).map(InlineGrammar::new);
+        Self { lang, parser, tree, query, folds, indents, inline }
+    }
+
+    /// The nodes a grammar's `@fold`s capture that span lines -- those
+    /// around `byte`, when it's given.
+    fn folded<'t>(&self, tree: &'t Tree, byte: Option<usize>) -> Vec<Node<'t>> {
+        let Some(folds) = &self.folds else { return Vec::new() };
+        let mut cursor = QueryCursor::new();
+        if let Some(byte) = byte {
+            cursor.set_byte_range(byte..byte + 1);
+        }
+        let names = folds.capture_names();
+        let mut found = Vec::new();
+        let mut captures = cursor.captures(folds, tree.root_node(), &[] as &[u8]);
+        while let Some((m, ix)) = captures.next() {
+            let capture = m.captures[*ix];
+            if names[capture.index as usize] == "fold" && capture.node.start_position().row < capture.node.end_position().row {
+                found.push(capture.node);
+            }
+        }
+        found
+    }
+
+    /// Whether Enter at `byte` indents the new line a level more, by a
+    /// grammar's `indents.scm`: an `@indent` (or `@indent.begin`) that
+    /// starts on `byte`'s line, before it, and ends after it. None when
+    /// there's no such query: the bracket before the cursor decides.
+    pub fn indents_after(&self, source: &str, byte: usize) -> Option<bool> {
+        let (Some(indents), Some(tree)) = (&self.indents, &self.tree) else { return None };
+        let line_start = source.get(..byte.min(source.len())).map(|s| s.rfind('\n').map_or(0, |i| i + 1)).unwrap_or(0);
+        let names = indents.capture_names();
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(byte.saturating_sub(1)..byte + 1);
+        let mut captures = cursor.captures(indents, tree.root_node(), source.as_bytes());
+        while let Some((m, ix)) = captures.next() {
+            let capture = m.captures[*ix];
+            let node = capture.node;
+            if matches!(names[capture.index as usize], "indent" | "indent.begin") && (line_start..byte).contains(&node.start_byte()) && node.end_byte() >= byte {
+                return Some(true);
+            }
+        }
+        Some(false)
+    }
+
+    /// Applies queued low-level edits (in the order they happened) to the
+    /// persisted tree, then incrementally reparses against `source` (the
+    /// *current*, already-edited text). Passing an empty `edits` slice
+    /// still reparses -- cheap, since tree-sitter reuses unchanged
+    /// subtrees when nothing actually changed.
+    pub fn apply_edits(&mut self, source: &str, edits: &[RawEdit]) {
+        if let Some(tree) = self.tree.as_mut() {
+            for edit in edits {
+                tree.edit(&to_input_edit(source, edit));
+            }
+        }
+        self.tree = self.parser.parse(source, self.tree.as_ref());
+    }
+
+    /// Highlight spans within `byte_range`, flattened into a non-
+    /// overlapping, ordered list of `(byte range, capture name)` --
+    /// restricted to the given range so callers doing windowed rendering
+    /// only pay for what's actually on screen, not the whole file.
+    pub fn highlights_in_range(&self, source: &str, byte_range: Range<usize>) -> Vec<(Range<usize>, &str)> {
+        let (Some(tree), Some(query)) = (&self.tree, &self.query) else { return Vec::new() };
+        let names = query.capture_names();
+
+        let mut cursor = QueryCursor::new();
+        cursor.set_byte_range(byte_range.clone());
+        let mut captures = cursor.captures(query, tree.root_node(), source.as_bytes());
+
+        let mut raw = Vec::new();
+        while let Some((query_match, capture_ix)) = captures.next() {
+            let capture = &query_match.captures[*capture_ix];
+            raw.push(RawCapture {
+                range: capture.node.start_byte()..capture.node.end_byte(),
+                pattern_index: query_match.pattern_index,
+                name: names[capture.index as usize],
+            });
+        }
+
+        if let Some(inline) = &self.inline {
+            self.push_inline_captures(inline, tree, source, byte_range, &mut raw);
+        }
+
+        push_todo_captures(source, &mut raw);
+        resolve_overlaps(raw)
+    }
+
+    /// Every TODO-style keyword (`TODO`, `FIXME`, `NOTE`, ...) in the
+    /// document's comments, in document order -- see `todo::find_
+    /// keywords` for what counts. Only comments count: a keyword in a
+    /// string literal or an identifier is never reported.
+    pub fn todo_items(&self, source: &str) -> Vec<TodoItem> {
+        let ranges = self
+            .highlights_in_range(source, 0..source.len())
+            .into_iter()
+            .filter_map(|(range, name)| TodoKind::from_capture_name(name).map(|kind| (range, kind)))
+            .collect();
+        todo::items_from_ranges(source, ranges)
+    }
+
+    /// `todo_items` for text that isn't open anywhere -- a TODO sweep of
+    /// a whole project. The same keywords in the same comments, found by
+    /// walking the parse for comment nodes instead of running the
+    /// highlight query over the whole file, which costs many times the
+    /// parse itself.
+    pub fn todo_items_of(lang: LanguageId, source: &str) -> Vec<TodoItem> {
+        let Some(mut parser) = lang.language().as_ref().and_then(crate::grammar::parser) else { return Vec::new() };
+        let Some(tree) = parser.parse(source, None) else { return Vec::new() };
+        let mut ranges = Vec::new();
+        let mut cursor = tree.walk();
+        loop {
+            let node = cursor.node();
+            let is_comment = node.kind().to_ascii_lowercase().contains("comment");
+            if is_comment {
+                let range = node.start_byte()..node.end_byte();
+                if let Some(text) = source.get(range.clone()) {
+                    ranges.extend(todo::find_keywords(text).into_iter().map(|(k, kind)| ((range.start + k.start)..(range.start + k.end), kind)));
+                }
+            }
+            if !is_comment && cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+                if !cursor.goto_parent() {
+                    return todo::items_from_ranges(source, ranges);
+                }
+            }
+        }
+    }
+
+    /// The language this state parses.
+    pub fn language(&self) -> LanguageId {
+        self.lang
+    }
+
+    /// XML only: every element in document order, for an outline. Empty
+    /// for any other language.
+    pub fn xml_elements(&self, source: &str) -> Vec<xml::XmlElement> {
+        match (&self.tree, self.lang) {
+            (Some(tree), LanguageId::Xml) => xml::elements(tree, source),
+            _ => Vec::new(),
+        }
+    }
+
+    /// XML only: with `byte` on a start or end tag, the byte offset of
+    /// the matching tag's name.
+    pub fn xml_matching_tag(&self, source: &str, byte: usize) -> Option<usize> {
+        match (&self.tree, self.lang) {
+            (Some(tree), LanguageId::Xml) => xml::matching_tag(tree, source, byte),
+            _ => None,
+        }
+    }
+
+    /// XML only: an XPath-style path to the element enclosing `byte`.
+    pub fn xml_element_path(&self, source: &str, byte: usize) -> Option<String> {
+        match (&self.tree, self.lang) {
+            (Some(tree), LanguageId::Xml) => xml::element_path(tree, source, byte),
+            _ => None,
+        }
+    }
+
+    /// Finds every `(inline)` span the block tree marks within
+    /// `byte_range`, reparses each one's own text with the inline
+    /// grammar, and appends its captures (byte-offset back into
+    /// `source`'s own coordinate space) onto `raw` -- the actual
+    /// injection `highlights_in_range` layers on top of the plain
+    /// block-only pass every other language stops at.
+    fn push_inline_captures<'a>(
+        &'a self,
+        inline: &'a InlineGrammar,
+        tree: &Tree,
+        source: &str,
+        byte_range: Range<usize>,
+        raw: &mut Vec<RawCapture<'a>>,
+    ) {
+        let inline_names = inline.query.capture_names();
+        let mut span_cursor = QueryCursor::new();
+        span_cursor.set_byte_range(byte_range);
+        let mut spans = span_cursor.captures(&inline.span_query, tree.root_node(), source.as_bytes());
+
+        let mut parser = inline.parser.borrow_mut();
+        while let Some((query_match, capture_ix)) = spans.next() {
+            let node = query_match.captures[*capture_ix].node;
+            let (start, end) = (node.start_byte(), node.end_byte());
+            let Some(span_text) = source.get(start..end) else { continue };
+            let Some(span_tree) = parser.parse(span_text, None) else { continue };
+
+            let mut inline_cursor = QueryCursor::new();
+            let mut inline_captures = inline_cursor.captures(&inline.query, span_tree.root_node(), span_text.as_bytes());
+            while let Some((inline_match, inline_ix)) = inline_captures.next() {
+                let capture = &inline_match.captures[*inline_ix];
+                raw.push(RawCapture {
+                    range: (start + capture.node.start_byte())..(start + capture.node.end_byte()),
+                    pattern_index: inline_match.pattern_index,
+                    name: inline_names[capture.index as usize],
+                });
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcl_document_scopes_include_procedures() {
+        let source = "proc mathutils::sum {numbers} {\n    set total 0\n    return $total\n}\n\nproc mathutils::average {numbers} {\n    return 0\n}\n";
+        let state = SyntaxState::new(LanguageId::Tcl, source);
+        assert_eq!(state.scope_lines(), vec![0, 5]);
+        assert_eq!(state.scope_ranges(), vec![(0, 3), (5, 7)]);
+        assert_eq!(state.enclosing_scopes(source.find("set total").unwrap()), vec![(0, 3)]);
+    }
+
+    /// Tcl gets no LSP -- there is no server for it -- so the
+    /// tree-sitter query *is* the whole of its code intelligence, and
+    /// anything it misses renders as plain body text. These pin the
+    /// four things it used to miss.
+    fn tcl_captures(source: &str) -> Vec<(String, String)> {
+        let state = SyntaxState::new(LanguageId::Tcl, source);
+        state.highlights_in_range(source, 0..source.len()).into_iter().map(|(r, n)| (n.to_string(), source[r].to_string())).collect()
+    }
+
+    fn captured_as(source: &str, text: &str) -> Vec<String> {
+        tcl_captures(source).into_iter().filter(|(_, t)| t == text).map(|(n, _)| n).collect()
+    }
+
+    #[test]
+    fn a_procs_own_name_reads_as_a_function_not_a_variable() {
+        // It was captured as a variable, which in most themes is just
+        // body text -- so every definition in a file looked unhighlighted.
+        assert_eq!(captured_as("proc build_all {} {}
+", "build_all"), vec!["function"]);
+    }
+
+    #[test]
+    fn a_ternary_in_an_expr_gets_its_operators_colored() {
+        let names = tcl_captures("set x [expr {1 ? 2 : 3}]
+");
+        let operators: Vec<&str> = names.iter().filter(|(n, _)| n == "operator").map(|(_, t)| t.as_str()).collect();
+        assert_eq!(operators, vec!["?", ":"]);
+    }
+
+    #[test]
+    fn a_fully_qualified_name_reads_as_a_variable() {
+        // `::build_flags` is a plain command argument as far as the
+        // grammar is concerned, so nothing captured it at all.
+        assert_eq!(captured_as("lappend ::build_flags $x
+", "::build_flags"), vec!["variable"]);
+        // `namespace eval`'s name is a namespace instead (see below).
+        assert_eq!(captured_as("namespace delete ::app
+", "::app"), vec!["variable"]);
+    }
+
+    #[test]
+    fn a_qualified_name_is_found_inside_a_nested_body_too() {
+        let source = "foreach f $flags {
+    lappend ::build_flags $f
+}
+";
+        assert_eq!(captured_as(source, "::build_flags"), vec!["variable"]);
+    }
+
+    #[test]
+    fn an_ordinary_word_is_not_mistaken_for_a_qualified_name() {
+        assert!(captured_as("puts hello
+", "hello").is_empty());
+    }
+
+    /// `dict keys $d`, `string compare $a $b`: the word right after an
+    /// ensemble command's own name is now colored the same way a
+    /// builtin command's own name is -- see `highlights.scm`'s own
+    /// "Ensemble subcommands" section for why this can only be checked
+    /// by the ensemble's own name, not by whether the word is a real
+    /// subcommand (there's no such check a tree-sitter predicate can
+    /// express). One representative per ensemble that gets the
+    /// treatment; `namespace`/`dict` checked separately below since
+    /// they inherit a different capture for their own name.
+    #[test]
+    fn a_subcommand_word_is_colored_like_a_builtin_command() {
+        for (source, subcommand) in [
+            ("string compare $a $b\n", "compare"),
+            ("array set arr {}\n", "set"),
+            ("binary format c $n\n", "format"),
+            ("chan gets $c\n", "gets"),
+            ("clock format $t\n", "format"),
+            ("encoding convertto utf-8 $s\n", "convertto"),
+            ("file exists $p\n", "exists"),
+            ("info exists x\n", "exists"),
+            ("interp create foo\n", "create"),
+            ("package require Tcl\n", "require"),
+            ("trace add variable x write cb\n", "add"),
+        ] {
+            assert_eq!(
+                captured_as(source, subcommand),
+                vec!["function.builtin".to_string()],
+                "{subcommand:?} in {source:?} should read as a subcommand"
+            );
+        }
+    }
+
+    #[test]
+    fn dict_is_a_builtin_like_the_others_and_its_subcommand_reads_as_a_function() {
+        assert_eq!(captured_as("dict keys $d\n", "dict"), vec!["function.builtin"]);
+        assert_eq!(captured_as("dict keys $d\n", "keys"), vec!["function.builtin"]);
+    }
+
+    #[test]
+    fn namespace_is_its_own_grammar_rule_and_still_gets_a_colored_subcommand() {
+        assert_eq!(captured_as("namespace eval ::app {}\n", "namespace"), vec!["keyword"]);
+        assert_eq!(captured_as("namespace eval ::app {}\n", "eval"), vec!["function.builtin"]);
+        assert_eq!(captured_as("namespace eval ::app {}\n", "::app"), vec!["namespace"], "the type's colour");
+    }
+
+    /// Each kind of word on a line in a colour of its own: the keyword
+    /// that steers it, the command it runs (a builtin as much as a proc of
+    /// yours), the variables it reads. Builtins were keywords, so a line
+    /// like `if {[llength $argv] != 1} { error ... }` was nearly all one
+    /// colour.
+    #[test]
+    fn keywords_commands_and_variables_each_read_as_their_own_kind() {
+        let source = "if {[llength $argv] != 1} {\n   error \"usage\"\n}\nset target [lindex $argv 0]\nputs [mathutils::sum $target]\nforeach x $xs { incr n }\n";
+        assert_eq!(captured_as(source, "if"), vec!["conditional"]);
+        assert_eq!(captured_as(source, "error"), vec!["keyword"]);
+        assert_eq!(captured_as(source, "llength"), vec!["function.builtin"]);
+        assert_eq!(captured_as(source, "lindex"), vec!["function.builtin"]);
+        assert_eq!(captured_as(source, "puts"), vec!["function.builtin"]);
+        assert_eq!(captured_as(source, "incr"), vec!["function.builtin"]);
+        assert_eq!(captured_as(source, "mathutils::sum"), vec!["function"], "a proc of yours");
+        assert_eq!(captured_as(source, "$argv"), vec!["variable", "variable"]);
+        assert_eq!(captured_as(source, "target"), vec!["variable"], "the name set assigns");
+    }
+
+    /// `after`'s the one ensemble with a second, non-subcommand calling
+    /// form (`after ms ?script ...?`) -- a plain delay must not read
+    /// as though it were one of its three real subcommands.
+    #[test]
+    fn afters_millisecond_delay_form_is_not_mistaken_for_a_subcommand() {
+        assert_eq!(captured_as("after cancel $id\n", "cancel"), vec!["function.builtin"]);
+        assert_eq!(captured_as("after idle {}\n", "idle"), vec!["function.builtin"]);
+        assert!(captured_as("after 500 {}\n", "500").iter().all(|n| n != "function.builtin"), "a delay in ms is not a subcommand");
+        assert_eq!(captured_as("after 500 {}\n", "500"), vec!["number"], "still colored as the number it is");
+    }
+
+    /// A command's ordinary, non-subcommand arguments must not pick up
+    /// the same color just for sitting in the same position -- `dict
+    /// set`'s own dictionary/key/value names are real data, not nested
+    /// ensemble words, the exact shape that would break if the
+    /// restriction were "any word after these command names" instead
+    /// of "the *real* subcommand set".
+    #[test]
+    fn an_ordinary_argument_after_a_real_subcommand_is_not_colored_as_one() {
+        assert!(captured_as("dict set d k v\n", "k").is_empty());
+        assert!(captured_as("dict set d k v\n", "v").is_empty());
+        assert!(captured_as("info exists x\n", "x").is_empty(), "`info exists` has no nested subcommand -- `x` is a plain variable name");
+        assert!(captured_as("array set arr {}\n", "arr").is_empty());
+    }
+
+    /// `string is alnum`, `binary encode hex`, `info class methods`,
+    /// `trace add variable` -- the four ensembles whose own subcommand
+    /// is itself another ensemble (confirmed against the generated
+    /// signature table's own depth-3 entries, not guessed). Both words
+    /// get colored; a plain, non-nesting subcommand of the same root
+    /// command (`info exists`) does not reach for a third word at all.
+    #[test]
+    fn a_second_level_of_nested_subcommands_is_colored_too() {
+        for (source, first, second) in [
+            ("string is alnum $x\n", "is", "alnum"),
+            ("binary encode hex $data\n", "encode", "hex"),
+            ("binary decode base64 $data\n", "decode", "base64"),
+            ("info class methods $obj\n", "class", "methods"),
+            ("info object methods $obj\n", "object", "methods"),
+            ("trace add variable x write cb\n", "add", "variable"),
+            ("trace remove command foo delete cb\n", "remove", "command"),
+        ] {
+            assert_eq!(captured_as(source, first), vec!["function.builtin".to_string()], "{source:?}");
+            let second_capture = captured_as(source, second);
+            assert_eq!(second_capture.len(), 1, "{source:?}: {second:?} captured as {second_capture:?}");
+            assert!(second_capture[0].starts_with("function"), "{source:?}: {second_capture:?}");
+        }
+    }
+
+    /// A nested-ensemble root used with a *non*-nesting subcommand
+    /// keeps its ordinary single-level treatment -- `info exists`
+    /// isn't `info class`/`info object`, so its second word is a plain
+    /// variable name, not a third-level subcommand.
+    #[test]
+    fn a_nested_ensemble_roots_other_subcommands_stay_single_level() {
+        assert_eq!(captured_as("info exists someVar\n", "exists"), vec!["function.builtin"]);
+        assert!(captured_as("info exists someVar\n", "someVar").is_empty());
+    }
+    use crate::language::LanguageId;
+
+    #[test]
+    fn parses_rust_and_highlights_a_keyword_and_a_string() {
+        let source = r#"fn main() { let s = "hi"; }"#;
+        let state = SyntaxState::new(LanguageId::Rust, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        assert!(!highlights.is_empty(), "expected at least one highlight span, got none");
+
+        // "fn" (byte 0..2) should be captured as some flavor of keyword.
+        let fn_capture = highlights.iter().find(|(range, _)| range.start == 0 && range.end == 2);
+        assert!(fn_capture.is_some(), "expected a capture covering \"fn\", got {highlights:?}");
+        assert!(fn_capture.unwrap().1.starts_with("keyword"), "got {highlights:?}");
+
+        // The string literal `"hi"` should be captured as some flavor of string.
+        let string_start = source.find('"').unwrap();
+        let has_string_capture =
+            highlights.iter().any(|(range, name)| range.start <= string_start && name.starts_with("string"));
+        assert!(has_string_capture, "expected a string capture, got {highlights:?}");
+    }
+
+    #[test]
+    fn highlights_in_range_is_windowed_to_the_requested_bytes() {
+        let source = "fn a() {}\nfn b() {}\n";
+        let state = SyntaxState::new(LanguageId::Rust, source);
+        // Restrict to just the second line -- shouldn't see anything from the first.
+        let second_line_start = source.find("fn b").unwrap();
+        let highlights = state.highlights_in_range(source, second_line_start..source.len());
+        assert!(highlights.iter().all(|(range, _)| range.start >= second_line_start));
+    }
+
+    #[test]
+    fn incremental_edit_is_reflected_after_apply_edits() {
+        let mut source = "fn a() {}".to_string();
+        let mut state = SyntaxState::new(LanguageId::Rust, &source);
+
+        // Insert "b" right after "fn a() {}" doesn't change much, so
+        // instead rename `a` to `main` by replacing char 3 ("a") -- an
+        // edit that should still parse cleanly and keep highlighting the
+        // "fn" keyword at the same position.
+        let edit = RawEdit { start_char: 3, new_end_char: 7, removed: "a".to_string() };
+        source.replace_range(3..4, "main");
+        state.apply_edits(&source, std::slice::from_ref(&edit));
+
+        let highlights = state.highlights_in_range(&source, 0..source.len());
+        let fn_capture = highlights.iter().find(|(range, _)| range.start == 0 && range.end == 2);
+        assert!(fn_capture.is_some(), "expected \"fn\" still highlighted after edit, got {highlights:?}");
+    }
+
+    #[test]
+    fn empty_source_yields_no_highlights() {
+        let state = SyntaxState::new(LanguageId::Rust, "");
+        assert_eq!(state.highlights_in_range("", 0..0), Vec::<(Range<usize>, &str)>::new());
+    }
+
+    /// One smoke test per newly-registered language: confirms `new` doesn't
+    /// panic (grammar ABI compatible, bundled highlights.scm compiles) and
+    /// that at least one capture comes back for representative source --
+    /// catches per-crate wiring mistakes (wrong query constant, wrong
+    /// `LanguageFn`) that pure logic tests wouldn't, the same role
+    /// `parses_rust_and_highlights_a_keyword_and_a_string` played for Rust.
+    fn smoke_test(lang: LanguageId, source: &str) {
+        let state = SyntaxState::new(lang, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        assert!(!highlights.is_empty(), "expected at least one highlight span for {lang:?}, got none");
+    }
+
+    #[test]
+    fn cpp_inherits_the_c_highlights_for_keywords_numbers_and_comments() {
+        let source = "// blink\nvoid setup() { delay(500); }\n";
+        let state = SyntaxState::new(LanguageId::Cpp, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        let captured = |text: &str| {
+            let start = source.find(text).unwrap();
+            highlights.iter().any(|(range, _)| range.start <= start && start < range.end)
+        };
+        assert!(captured("// blink"), "comment: {highlights:?}");
+        assert!(captured("void"), "primitive type: {highlights:?}");
+        assert!(captured("500"), "number: {highlights:?}");
+    }
+
+    #[test]
+    fn toml_highlights_something() {
+        smoke_test(LanguageId::Toml, "[package]\nname = \"fenix\"\nversion = \"0.0.1\"\n");
+    }
+
+    #[test]
+    fn markdown_highlights_something() {
+        smoke_test(LanguageId::Markdown, "# Heading\n\nSome *text* and a ```code``` fence.\n");
+    }
+
+    #[test]
+    fn markdown_strong_emphasis_is_captured_by_the_inline_grammar() {
+        let source = "Some **bold** text.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let bold_start = source.find("bold").unwrap();
+        let has_strong = highlights.iter().any(|(r, n)| r.start <= bold_start && r.end >= bold_start + 4 && *n == "text.strong");
+        assert!(has_strong, "expected \"bold\" captured as text.strong, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_plain_emphasis_is_captured_distinctly_from_strong() {
+        let source = "Some *italic* text.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let italic_start = source.find("italic").unwrap();
+        let has_emphasis =
+            highlights.iter().any(|(r, n)| r.start <= italic_start && r.end >= italic_start + 6 && *n == "text.emphasis");
+        assert!(has_emphasis, "expected \"italic\" captured as text.emphasis, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_inline_code_span_is_captured() {
+        let source = "Some `code` here.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let code_start = source.find("code").unwrap();
+        let has_literal = highlights.iter().any(|(r, n)| r.start <= code_start && r.end >= code_start + 4 && *n == "text.literal");
+        assert!(has_literal, "expected \"code\" captured as text.literal, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_link_destination_is_captured() {
+        let source = "See [here](https://example.com) for more.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let url_start = source.find("https").unwrap();
+        let has_uri = highlights.iter().any(|(r, n)| r.start <= url_start && *n == "text.uri");
+        assert!(has_uri, "expected the URL captured as text.uri, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_heading_text_and_its_own_inline_emphasis_are_both_captured() {
+        // The nesting case this whole injection exists for: the block
+        // grammar captures the heading's full text as `text.title`,
+        // the inline grammar separately captures just the `**bold**`
+        // portion within it as `text.strong` -- `resolve_overlaps`
+        // has to pick the narrower one there, not let the broader
+        // heading capture swallow it.
+        let source = "# A **bold** heading";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let bold_start = source.find("bold").unwrap();
+        let narrow_wins = highlights.iter().any(|(r, n)| r.start <= bold_start && r.end >= bold_start + 4 && *n == "text.strong");
+        assert!(narrow_wins, "expected the narrower text.strong capture to win inside the heading, got {highlights:?}");
+
+        let has_title = highlights.iter().any(|(_, n)| *n == "text.title");
+        assert!(has_title, "expected the rest of the heading still captured as text.title, got {highlights:?}");
+    }
+
+    #[test]
+    fn markdown_inline_highlighting_is_windowed_to_the_requested_byte_range() {
+        // Same windowing contract the block-only pass already has
+        // (`highlights_in_range_is_windowed_to_the_requested_bytes`) --
+        // an inline span entirely before the requested range shouldn't
+        // contribute anything either.
+        let source = "**early bold**\n\nSome *late italic* text.";
+        let state = SyntaxState::new(LanguageId::Markdown, source);
+        let second_line_start = source.find("Some").unwrap();
+        let highlights = state.highlights_in_range(source, second_line_start..source.len());
+        assert!(highlights.iter().all(|(r, _)| r.start >= second_line_start));
+    }
+
+    #[test]
+    fn markdown_inline_grammar_is_reflected_after_apply_edits() {
+        let mut source = "Some *italic* text.".to_string();
+        let mut state = SyntaxState::new(LanguageId::Markdown, &source);
+
+        // Turn the emphasis into strong emphasis by doubling the
+        // asterisks on both sides.
+        let star = source.find('*').unwrap();
+        source.replace_range(star..star + 1, "**");
+        let end_star = source.rfind('*').unwrap();
+        source.replace_range(end_star..end_star + 1, "**");
+        let edits = [
+            RawEdit { start_char: star, new_end_char: star + 2, removed: "*".to_string() },
+            RawEdit { start_char: end_star + 1, new_end_char: end_star + 3, removed: "*".to_string() },
+        ];
+        state.apply_edits(&source, &edits);
+
+        let highlights = state.highlights_in_range(&source, 0..source.len());
+        let italic_start = source.find("italic").unwrap();
+        let has_strong = highlights.iter().any(|(r, n)| r.start <= italic_start && r.end >= italic_start + 6 && *n == "text.strong");
+        assert!(has_strong, "expected the edited text now captured as text.strong, got {highlights:?}");
+    }
+
+    #[test]
+    fn non_markdown_languages_have_no_inline_grammar_and_are_unaffected() {
+        // The injection is Markdown-only -- confirms it doesn't
+        // somehow fire (or panic) for a language with no `(inline)`
+        // node kind at all.
+        let source = "let x = 1;";
+        let state = SyntaxState::new(LanguageId::Rust, source);
+        let _ = state.highlights_in_range(source, 0..source.len());
+        assert!(state.inline.is_none());
+    }
+
+    #[test]
+    fn json_highlights_something() {
+        smoke_test(LanguageId::Json, r#"{"key": "value", "n": 1, "ok": true}"#);
+    }
+
+    #[test]
+    fn yaml_highlights_something() {
+        smoke_test(LanguageId::Yaml, "key: value\nlist:\n  - one\n  - two\n");
+    }
+
+    #[test]
+    fn python_highlights_something() {
+        smoke_test(LanguageId::Python, "def main():\n    print(\"hi\")\n");
+    }
+
+    #[test]
+    fn javascript_highlights_something() {
+        smoke_test(LanguageId::JavaScript, "function main() { return \"hi\"; }");
+    }
+
+    #[test]
+    fn typescript_highlights_something() {
+        smoke_test(LanguageId::TypeScript, "function main(): string { return \"hi\"; }");
+    }
+
+    #[test]
+    fn tsx_highlights_something() {
+        // tree-sitter-typescript 0.23.2's bundled HIGHLIGHTS_QUERY only
+        // covers a small capture set (type, type.builtin,
+        // punctuation.bracket, variable.parameter, keyword) -- no
+        // standalone string/comment/keyword-per-token coverage. A type
+        // annotation is one of the few things it reliably captures under
+        // either TypeScript or Tsx.
+        smoke_test(LanguageId::Tsx, "function main(): string { return 1; }");
+    }
+
+    #[test]
+    fn c_highlights_something() {
+        smoke_test(LanguageId::C, "int main() { return 0; }");
+    }
+
+    #[test]
+    fn bash_highlights_something() {
+        smoke_test(LanguageId::Bash, "echo \"hello\"\n");
+    }
+
+    /// Each newer grammar: its query compiles against the bundled
+    /// tree-sitter, a keyword, a string and a comment come out as such,
+    /// and a TODO in the comment is found.
+    #[test]
+    fn the_newer_grammars_highlight_keywords_strings_and_comments() {
+        for (lang, source, keyword) in [
+            (LanguageId::Go, "package main\n// TODO: go\nfunc main() { println(\"hi\") }\n", "func"),
+            (LanguageId::Java, "// TODO: java\nclass A { String s = \"hi\"; }\n", "class"),
+            (LanguageId::CSharp, "// TODO: cs\nclass A { string s = \"hi\"; }\n", "class"),
+            (LanguageId::Lua, "-- TODO: lua\nlocal s = \"hi\"\n", "local"),
+            (LanguageId::Sql, "-- TODO: sql\nSELECT 'hi' FROM t;\n", "SELECT"),
+            (LanguageId::Css, "/* TODO: css */\na { color: red; }\n@media print { a { content: \"hi\"; } }\n", "@media"),
+            (LanguageId::Html, "<!-- TODO: html -->\n<p class=\"hi\">text</p>\n", "p"),
+            (LanguageId::Mermaid, "%% TODO: mmd\nflowchart TD\n    a[\"hi\"] --> b\n", "flowchart"),
+        ] {
+            let state = SyntaxState::new(lang, source);
+            let highlights = state.highlights_in_range(source, 0..source.len());
+            let name_of = |text: &str| highlights.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, n)| *n);
+            assert!(name_of(keyword).is_some_and(|n| n.starts_with("keyword") || n == "tag"), "{lang:?}: {keyword} -> {:?}", name_of(keyword));
+            assert!(highlights.iter().any(|(_, n)| n.starts_with("string")), "{lang:?}: a string: {highlights:?}");
+            assert!(highlights.iter().any(|(_, n)| n.starts_with("comment")), "{lang:?}: a comment: {highlights:?}");
+            let todos = state.todo_items(source);
+            assert_eq!(todos.len(), 1, "{lang:?}: {todos:?}");
+            assert_eq!(SyntaxState::todo_items_of(lang, source), todos, "{lang:?}: the sweep finds the same");
+        }
+    }
+
+    #[test]
+    fn tcl_highlights_something() {
+        smoke_test(LanguageId::Tcl, "proc greet {name} {\n    puts \"hello $name\"\n}\n");
+    }
+
+    #[test]
+    fn dockerfile_highlights_something() {
+        smoke_test(LanguageId::Dockerfile, "FROM rust:1\nRUN cargo build\nCMD [\"./app\"]\n");
+    }
+
+    #[test]
+    fn batch_highlights_something() {
+        smoke_test(LanguageId::Batch, "@echo off\nset FOO=bar\necho %FOO%\n");
+    }
+
+    /// Tcl is the primary language Fenix is meant to support well, and its
+    /// vendored `highlights.scm` pairs several captures on the same node
+    /// (`@repeat @keyword`, `@spell @comment`) -- confirms overlap
+    /// resolution doesn't just pick an arbitrary one of the pair that
+    /// happens to have no theme mapping.
+    #[test]
+    fn tcl_control_flow_keywords_and_comments_are_captured() {
+        let source = "# a comment\nif {1} {\n    puts hi\n} else {\n    while {0} {\n        break\n    }\n}\n";
+        let state = SyntaxState::new(LanguageId::Tcl, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+
+        let comment_start = source.find('#').unwrap();
+        let has_comment = highlights.iter().any(|(r, n)| r.start == comment_start && (*n == "comment" || *n == "spell"));
+        assert!(has_comment, "expected the comment to be captured, got {highlights:?}");
+
+        let if_start = source.find("if").unwrap();
+        let has_if = highlights
+            .iter()
+            .any(|(r, n)| r.start == if_start && (*n == "keyword" || *n == "conditional"));
+        assert!(has_if, "expected \"if\" to be captured as keyword/conditional, got {highlights:?}");
+
+        let while_start = source.find("while").unwrap();
+        let has_while = highlights
+            .iter()
+            .any(|(r, n)| r.start == while_start && (*n == "keyword" || *n == "repeat"));
+        assert!(has_while, "expected \"while\" to be captured as keyword/repeat, got {highlights:?}");
+    }
+
+    #[test]
+    fn todo_keywords_in_comments_get_their_own_capture() {
+        let source = "fn a() {
+    // TODO(tom): wire up
+    let s = \"TODO: not a comment\";
+    /* FIXME broken */
+}
+";
+        let state = SyntaxState::new(LanguageId::Rust, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        let todo = source.find("TODO(tom):").unwrap();
+        assert!(highlights.iter().any(|(r, n)| r.start == todo && &source[r.clone()] == "TODO(tom):" && *n == "comment.todo.todo"), "{highlights:?}");
+        let in_string = source.find("TODO: not").unwrap();
+        assert!(!highlights.iter().any(|(r, n)| r.start == in_string && n.starts_with("comment.todo")), "{highlights:?}");
+
+        let items = state.todo_items(source);
+        assert_eq!(SyntaxState::todo_items_of(LanguageId::Rust, source), items);
+        let summary: Vec<(TodoKind, usize, &str)> = items.iter().map(|i| (i.kind, i.line, i.message.as_str())).collect();
+        assert_eq!(summary, vec![(TodoKind::Todo, 1, "wire up"), (TodoKind::Fix, 3, "broken")]);
+    }
+
+    #[test]
+    fn todo_keywords_work_in_every_comment_syntax() {
+        for (lang, source) in [
+            (LanguageId::Python, "# TODO: py
+"),
+            (LanguageId::Tcl, "# TODO: tcl
+puts hi
+"),
+            (LanguageId::Xml, "<a><!-- TODO: xml --></a>
+"),
+            (LanguageId::Bash, "echo hi # TODO: sh
+"),
+        ] {
+            let state = SyntaxState::new(lang, source);
+            let items = state.todo_items(source);
+            assert_eq!(items.len(), 1, "{lang:?}: {items:?}");
+            assert_eq!(SyntaxState::todo_items_of(lang, source), items, "{lang:?}: the sweep finds the same");
+            assert_eq!(items[0].kind, TodoKind::Todo);
+        }
+    }
+
+    #[test]
+    fn xml_highlights_tags_attributes_and_comments() {
+        let source = "<?xml version=\"1.0\"?>
+<root id=\"x\"><!-- c --><child/></root>
+";
+        let state = SyntaxState::new(LanguageId::Xml, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        let name_of = |text: &str| highlights.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, n)| *n);
+        assert_eq!(name_of("root"), Some("tag"));
+        assert_eq!(name_of("id"), Some("property"));
+        assert_eq!(name_of("<!-- c -->"), Some("comment"));
+    }
+
+    #[test]
+    fn xml_multiline_elements_are_scopes() {
+        let source = "<root>
+  <a>
+    <b/>
+  </a>
+  <c>one line</c>
+</root>
+";
+        let state = SyntaxState::new(LanguageId::Xml, source);
+        assert_eq!(state.scope_ranges(), vec![(0, 5), (1, 3)]);
+    }
+
+    #[test]
+    fn dtd_highlights_something() {
+        smoke_test(LanguageId::Dtd, "<!ELEMENT note (to,from)>
+<!ATTLIST note id CDATA #REQUIRED>
+");
+    }
+
+    /// The JSON grammar as WebAssembly, as an extension would bring it, as
+    /// language `jsonw`, with folds and indents.
+    fn jsonw() -> LanguageId {
+        crate::grammar::set_grammars(vec![crate::Grammar {
+            name: "jsonw".into(),
+            symbol: "json".into(),
+            wasm: crate::grammar::tests::JSON_WASM.to_vec(),
+            highlights: tree_sitter_json::HIGHLIGHTS_QUERY.into(),
+            folds: "(object) @fold\n(array) @fold\n".into(),
+            indents: "(object) @indent\n(array) @indent.begin\n".into(),
+        }]);
+        LanguageId::from_name("JSONW").unwrap()
+    }
+
+    #[test]
+    fn a_grammar_from_an_extension_highlights_folds_and_indents() {
+        let lang = jsonw();
+        assert!(lang.is_grammar());
+        assert_eq!(lang.name(), "jsonw");
+        assert!(LanguageId::all().contains(&lang));
+        let source = "{\n  \"a\": [\n    1,\n    true\n  ],\n  \"b\": \"x\"\n}\n";
+        let mut state = SyntaxState::new(lang, source);
+        let highlights = state.highlights_in_range(source, 0..source.len());
+        let name_of = |text: &str| highlights.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, n)| n.to_string());
+        assert_eq!(name_of("true").as_deref(), Some("constant.builtin"));
+        assert_eq!(name_of("1").as_deref(), Some("number"));
+        assert_eq!(name_of("\"x\"").as_deref(), Some("string"));
+        assert_eq!(state.scope_ranges(), vec![(0, 6), (1, 4)]);
+        assert_eq!(state.enclosing_scopes(source.find("true").unwrap()), vec![(0, 6), (1, 4)]);
+        assert_eq!(state.indents_after(source, source.find('[').unwrap() + 1), Some(true), "after the array's [");
+        assert_eq!(state.indents_after(source, source.find("\"x\"").unwrap() + 3), Some(false), "after a string");
+        // Edited as any other.
+        let at = source.find("true").unwrap();
+        let edited = source.replacen("true", "false", 1);
+        state.apply_edits(&edited, &[RawEdit { start_char: at, new_end_char: at + 5, removed: "true".into() }]);
+        let highlights = state.highlights_in_range(&edited, 0..edited.len());
+        assert!(highlights.iter().any(|(r, n)| &edited[r.clone()] == "false" && *n == "constant.builtin"));
+        assert_eq!(SyntaxState::todo_items_of(lang, "{}"), Vec::new());
+        // Fenix's own have no indents query: the bracket decides.
+        assert_eq!(SyntaxState::new(LanguageId::Json, "{}").indents_after("{}", 1), None);
+    }
+}

@@ -1,0 +1,54 @@
+# GitHub's dark default, from its Primer palette.
+name = "GitHub Dark"
+tabs = "underline"
+
+[surfaces]
+bg = "#0d1117"
+sidebar_bg = "#010409"
+bg_modeline = "#161b22"
+divider = "#30363d"
+caret = "#58a6ff"
+hl_line = "#161b22"
+selection = { color = "#388bfd", alpha = 0.25 }
+bracket_match = { color = "#3fb950", alpha = 0.15 }
+search_match = { color = "#bb8009", alpha = 0.25 }
+
+[text]
+fg = "#e6edf3"
+fg_modeline = "#e6edf3"
+caret_text = "#58a6ff"
+gutter_fg = "#8b949e"
+
+[modes]
+normal = "#58a6ff"
+insert = "#3fb950"
+visual = "#bc8cff"
+replace = "#d29922"
+command = "#f0883e"
+explorer = "#58a6ff"
+picker = "#bc8cff"
+text_dark = "#0d1117"
+
+[syntax]
+keyword = "#ff7b72"
+string = "#a5d6ff"
+comment = "#8b949e"
+function = "#d2a8ff"
+type = "#79c0ff"
+number = "#79c0ff"
+constant = "#79c0ff"
+variable = "#ffa657"
+operator = "#ff7b72"
+punctuation = "#c9d1d9"
+attribute = "#7ee787"
+
+[explorer]
+folder = "#58a6ff"
+file = "#e6edf3"
+
+[git]
+modified = "#d29922"
+staged = "#3fb950"
+untracked = "#58a6ff"
+ignored = "#8b949e"
+conflicted = "#f85149"

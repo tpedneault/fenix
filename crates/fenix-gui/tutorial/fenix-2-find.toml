@@ -1,0 +1,46 @@
+id = "fenix.find"
+track = "Fenix"
+order = 2
+title = "Finding files and searching the project"
+about = "Pickers: type a part of what you want, Enter takes it, Esc doesn't."
+text = """
+SPC SPC (or SPC p f) finds a file in the project as you type part of its
+name; SPC f r is the files you opened lately and SPC b b the open buffers.
+SPC s l finds a line of this buffer as you type part of it; SPC s s
+searches this file on the Search page, SPC p s the whole project.
+
+a line
+another line
+the needle is here
+one more line
+"""
+
+[[step]]
+say = "SPC SPC: find a file."
+hint = "Space twice. Outside a project it looks in the folder Fenix started in."
+picker = "files"
+
+[[step]]
+say = "Esc closes it (Enter would open the file picked)."
+hint = "Esc."
+picker = "none"
+
+[[step]]
+say = "SPC s l, type needle and Enter: the cursor goes to its line."
+hint = "The list narrows as you type; Enter jumps to the line picked."
+line = 8
+
+[[step]]
+say = "SPC p s opens the Search page: what you type is searched for in the project's files as you type -- this practice isn't one of them, so try a word from your own code."
+hint = "Space, p (project), s."
+page = "search"
+
+[[step]]
+say = "Esc stops typing, and q closes the page, back to here."
+hint = "Esc, then q."
+closed = "search"
+
+[[step]]
+say = "SPC b b: the open buffers, to switch to one. Esc or Enter when you've looked."
+hint = "Space, b (buffer), b."
+picker = "buffers"

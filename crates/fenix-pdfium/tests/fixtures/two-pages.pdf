@@ -1,0 +1,66 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Outlines 9 0 R /PageMode /UseOutlines >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 6 0 R /Annots [8 0 R 12 0 R] >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 7 0 R >>
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+6 0 obj
+<< /Length 173 >>
+stream
+BT /F1 24 Tf 72 700 Td (Hello PDF reader) Tj ET
+BT /F1 12 Tf 72 660 Td (Go to page two) Tj ET
+BT /F1 12 Tf 72 640 Td (https://example.com) Tj ET
+1 0 0 rg 72 72 100 100 re f
+endstream
+endobj
+7 0 obj
+<< /Length 43 >>
+stream
+BT /F1 24 Tf 72 700 Td (Second page) Tj ET
+endstream
+endobj
+8 0 obj
+<< /Type /Annot /Subtype /Link /Rect [72 655 170 672] /Border [0 0 0] /Dest [4 0 R /XYZ 0 792 0] >>
+endobj
+9 0 obj
+<< /Type /Outlines /First 10 0 R /Last 11 0 R /Count 2 >>
+endobj
+10 0 obj
+<< /Title (Chapter 1) /Parent 9 0 R /Next 11 0 R /Dest [3 0 R /XYZ 0 792 0] >>
+endobj
+11 0 obj
+<< /Title (Chapter 2) /Parent 9 0 R /Prev 10 0 R /Dest [4 0 R /XYZ 0 792 0] >>
+endobj
+12 0 obj
+<< /Type /Annot /Subtype /Link /Rect [72 635 190 652] /Border [0 0 0] /A << /S /URI /URI (https://example.com/) >> >>
+endobj
+xref
+0 13
+0000000000 65535 f 
+0000000009 00000 n 
+0000000097 00000 n 
+0000000160 00000 n 
+0000000309 00000 n 
+0000000435 00000 n 
+0000000505 00000 n 
+0000000728 00000 n 
+0000000820 00000 n 
+0000000935 00000 n 
+0000001008 00000 n 
+0000001103 00000 n 
+0000001198 00000 n 
+trailer
+<< /Size 13 /Root 1 0 R >>
+startxref
+1332
+%%EOF
