@@ -15386,6 +15386,14 @@ impl App {
                     self.wake_caret();
                     return;
                 }
+                // Closes the view, as `q` closes the other Git views --
+                // not Vim's macro recording, which a read-only pane has
+                // no use for.
+                KeyCode::Char('q') => {
+                    self.history_close();
+                    self.wake_caret();
+                    return;
+                }
                 // Jump straight to a numbered pane, the same shortcut
                 // the Docker and Git panels' own titles advertise.
                 KeyCode::Char(c) if c.is_ascii_digit() => {

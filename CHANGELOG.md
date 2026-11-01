@@ -22,6 +22,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The which-key menu no longer lists an extension's keys, with no label,
   when that extension isn't installed (`SPC g P` and `SPC g M`, the
   Review extension's).
+- `q` in the Git graph view (`SPC g G`) closes it, as in the other Git
+  views, rather than starting a macro recording.
 
 ## [1.0.0] - 2026-10-31
 
