@@ -17,6 +17,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   standard library: a `rustc` on `PATH` without its source (a standalone
   install ahead of rustup's) made it report errors that aren't there.
 
+### Fixed
+
+- The which-key menu no longer lists an extension's keys, with no label,
+  when that extension isn't installed (`SPC g P` and `SPC g M`, the
+  Review extension's).
+
 ## [1.0.0] - 2026-10-31
 
 The first release: a keyboard-first, GPU-rendered editor with Vim's
