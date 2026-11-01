@@ -16,6 +16,13 @@ impl<A> Node<A> {
         Self { leaf: None, label: None, section: None, children: HashMap::new() }
     }
 
+    /// Whether anything is bound at or under it. A node made only to name
+    /// a section or a group ahead of its keys (an extension's, before it's
+    /// installed) offers nothing, so the menu doesn't list it.
+    fn offers(&self) -> bool {
+        self.leaf.is_some() || self.children.values().any(Node::offers)
+    }
+
     /// Actions reachable under this node.
     fn leaves(&self) -> usize {
         self.children.values().map(|c| usize::from(c.leaf.is_some()) + c.leaves()).sum()
@@ -170,6 +177,7 @@ impl<'a, A> Matcher<'a, A> {
         let node = self.current.unwrap_or(&self.trie.root);
         node.children
             .iter()
+            .filter(|(_, n)| n.offers())
             .map(|(k, n)| {
                 let group = n.leaf.is_none() && !n.children.is_empty();
                 Hint { key: *k, label: n.label.unwrap_or(""), group, count: if group { n.leaves() } else { 0 }, section: n.section }
@@ -211,7 +219,7 @@ impl<'a, A> Matcher<'a, A> {
 
     pub fn feed(&mut self, key: KeyPress) -> Step<'a, A> {
         let node = self.current.unwrap_or(&self.trie.root);
-        let Some(next) = node.children.get(&key) else {
+        let Some(next) = node.children.get(&key).filter(|n| n.offers()) else {
             self.cancel();
             return Step::NoMatch;
         };
@@ -231,7 +239,7 @@ impl<'a, A> Matcher<'a, A> {
 }
 
 fn children_labels<A>(node: &Node<A>) -> Vec<(KeyPress, &'static str)> {
-    node.children.iter().map(|(k, n)| (*k, n.label.unwrap_or(""))).collect()
+    node.children.iter().filter(|(_, n)| n.offers()).map(|(k, n)| (*k, n.label.unwrap_or(""))).collect()
 }
 
 #[cfg(test)]
@@ -251,6 +259,26 @@ mod tests {
         let mut found: Vec<(Vec<KeyPress>, i32)> = trie.bindings().into_iter().map(|(seq, a)| (seq, *a)).collect();
         found.sort_by_key(|(_, a)| *a);
         assert_eq!(found, vec![(vec![d, d], 1), (vec![d, w], 2), (vec![x], 3)]);
+    }
+
+    /// A section named ahead of its key -- an extension's, not installed --
+    /// offers nothing until something binds the key.
+    #[test]
+    fn a_section_alone_offers_nothing_until_its_key_is_bound() {
+        let mut trie = KeyTrie::new();
+        let (g, s, p) = (KeyPress::char('g'), KeyPress::char('s'), KeyPress::char('P'));
+        trie.insert(&[g, s], "status", 1);
+        trie.set_section(&[g, p], "Branch & remote");
+        let mut m = trie.matcher();
+        let Step::Pending(next) = m.feed(g) else { panic!("g is a group") };
+        assert_eq!(next, vec![(s, "status")], "no P yet");
+        assert_eq!(m.pending_hints().len(), 1);
+        assert!(matches!(m.feed(p), Step::NoMatch));
+        trie.insert(&[g, p], "open a pull request", 2);
+        let mut m = trie.matcher();
+        m.feed(g);
+        let hints = m.pending_hints();
+        assert!(hints.iter().any(|h| h.key == p && h.section == Some("Branch & remote") && h.label == "open a pull request"), "{hints:?}");
     }
 
     #[test]

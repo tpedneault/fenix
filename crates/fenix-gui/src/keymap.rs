@@ -575,6 +575,19 @@ mod tests {
         assert_eq!(describe_keypress(&KeyPress::named(FenixNamedKey::Escape)), "Esc");
     }
 
+    /// `SPC g P` and `SPC g M` are the Review extension's: their section is
+    /// named ahead in Fenix's keymap, but without the extension there's no
+    /// key to show, so the menu has no blank row for them.
+    #[test]
+    fn an_extension_s_keys_are_not_offered_without_it() {
+        let mut m = leader_trie().matcher();
+        m.feed(KeyPress::char(' '));
+        m.feed(KeyPress::char('g'));
+        let keys: Vec<KeyPress> = m.pending_hints().iter().map(|h| h.key).collect();
+        assert!(!keys.contains(&KeyPress::char('P')) && !keys.contains(&KeyPress::char('M')), "{keys:?}");
+        assert!(m.pending_hints().iter().all(|h| !h.label.is_empty()), "no blank row");
+    }
+
     #[test]
     fn spc_g_is_short_and_conflicts_have_a_group_of_their_own() {
         let trie = leader_trie();
