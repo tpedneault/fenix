@@ -266,6 +266,7 @@ pub fn diagnose_with(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bo
             } else {
                 d.program(Section::Toolchain, "rust-analyzer", Health::Warn, "");
             }
+            rust_src(&mut d);
         }
         ProjectKind::Cpp => {
             d.program(Section::Toolchain, "cmake", Health::Warn, "install CMake to configure and build");
@@ -287,6 +288,40 @@ pub fn diagnose_with(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bo
     }
     project(&mut d, tools);
     d.checks
+}
+
+/// The standard library's source, which rust-analyzer reads from the
+/// sysroot of the `rustc` on PATH: without it, it can't see `std` and
+/// reports errors that aren't there (`cannot index into a value of type
+/// &[u8]`). A deep pass only, since it runs `rustc`.
+fn rust_src(d: &mut Doctor) {
+    if !d.deep {
+        return;
+    }
+    let Some(rustc) = d.probe.locate("rustc") else { return };
+    let Some((true, out)) = d.probe.run(&rustc, &["--print", "sysroot"], d.root) else { return };
+    let sysroot = PathBuf::from(out.trim());
+    if sysroot.join("lib").join("rustlib").join("src").join("rust").join("library").is_dir() {
+        return;
+    }
+    // rustup's rustc is a proxy in ~/.cargo/bin; a component fixes it.
+    // Another install's (a standalone one in Program Files) it doesn't.
+    let rustup = rustc.components().any(|c| c.as_os_str() == ".cargo") || sysroot.components().any(|c| c.as_os_str() == ".rustup");
+    let check = if rustup {
+        Check::new(Section::Toolchain, "rust-src", Health::Warn, "the standard library's source isn't installed -- rust-analyzer reports errors that aren't there")
+            .run("rustup component add rust-src", "rustup", &["component", "add", "rust-src"], false)
+    } else {
+        Check::new(
+            Section::Toolchain,
+            "rust-src",
+            Health::Warn,
+            format!(
+                "{} has no standard library source -- rust-analyzer reports errors that aren't there; put rustup's toolchain (with rust-src) first on PATH",
+                rustc.display()
+            ),
+        )
+    };
+    d.push(check);
 }
 
 fn python(d: &mut Doctor, tools: Option<&ProjectTools>) {
@@ -452,6 +487,33 @@ mod tests {
 
     fn find<'a>(checks: &'a [Check], label: &str) -> &'a Check {
         checks.iter().find(|c| c.label == label).unwrap_or_else(|| panic!("no {label} check in {:?}", checks.iter().map(|c| &c.label).collect::<Vec<_>>()))
+    }
+
+    /// A sysroot with the standard library's source passes; one without
+    /// is flagged, with rustup's fix when it's rustup's rustc and only
+    /// what to do when it's another install's.
+    #[test]
+    fn a_rust_toolchain_without_the_std_source_is_flagged() {
+        let dir = TempDir::new("doctor_rust_src");
+        dir.write("Cargo.toml", "[package]\nname='x'\n");
+        let sysroot = dir.path().join("sysroot");
+        let probe = |sysroot: &Path, rustc: &'static str| FakeProbe {
+            programs: vec!["cargo", "rust-analyzer", rustc],
+            outputs: HashMap::from([(format!("{rustc} --print sysroot"), (true, format!("{}\n", sysroot.display())))]),
+            ..Default::default()
+        };
+        // FakeProbe locates programs at /bin/<name>: not rustup's.
+        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&sysroot, "rustc"), true);
+        let src = find(&checks, "rust-src");
+        assert_eq!(src.health, Health::Warn);
+        assert!(src.fix.is_none() && src.detail.contains("put rustup's toolchain"), "{}", src.detail);
+        let rustup_sysroot = dir.path().join(".rustup").join("toolchains").join("stable");
+        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&rustup_sysroot, "rustc"), true);
+        assert!(find(&checks, "rust-src").fix.as_ref().is_some_and(|f| f.label == "rustup component add rust-src"));
+        dir.write("sysroot/lib/rustlib/src/rust/library/core/lib.rs", "");
+        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&sysroot, "rustc"), true);
+        assert!(!checks.iter().any(|c| c.label == "rust-src"), "the source is there");
+        assert!(!diagnose(dir.path(), ProjectKind::Rust, &probe(&rustup_sysroot, "rustc"), false).iter().any(|c| c.label == "rust-src"), "a quick pass runs nothing");
     }
 
     #[test]
