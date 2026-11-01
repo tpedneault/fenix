@@ -14,6 +14,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `scoop bucket add fenix https://github.com/tpedneault/scoop-fenix`, then
   `scoop install fenix`.
 
+### Fixed
+
+- `q` in the Git graph view (`SPC g G`) closes it, as in the other Git
+  views, rather than starting a macro recording.
+
 ## [1.0.0] - 2026-10-31
 
 The first release: a keyboard-first, GPU-rendered editor with Vim's
