@@ -13,6 +13,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A [Scoop](https://scoop.sh) bucket, `tpedneault/scoop-fenix`:
   `scoop bucket add fenix https://github.com/tpedneault/scoop-fenix`, then
   `scoop install fenix`.
+- The project doctor (`SPC l m`) checks that rust-analyzer can read the
+  standard library: a `rustc` on `PATH` without its source (a standalone
+  install ahead of rustup's) made it report errors that aren't there.
 
 ## [1.0.0] - 2026-10-31
 
