@@ -50,8 +50,13 @@ checked by hand. Whole-workspace `rustfmt` isn't a gate yet; new code
 is formatted with it, and the rest is reformatted as it's touched.
 
 Releases are built by a separate workflow, `release.yml`, when a `v*`
-tag is pushed: the Windows zip and installer (`packaging/windows/fenix.iss`,
-Inno Setup 6) and the Linux archive, each with a `.sha256`.
+tag is pushed, or when it's run by hand on `master` with the tag (Actions,
+Release, Run workflow); publishing the release then makes the tag. It
+builds the Windows zip and installer (`packaging/windows/fenix.iss`,
+Inno Setup 6), and the Linux archive with its `.deb` and `.rpm`
+(`packaging/linux`), each with a `.sha256`. Either way, the tag must match
+the workspace version in `Cargo.toml`, and `CHANGELOG.md` must have an
+entry for it.
 
 Action references: [checkout](https://github.com/actions/checkout) and
 [upload-artifact](https://github.com/actions/upload-artifact).
