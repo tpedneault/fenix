@@ -51,7 +51,7 @@ pub use bindings::fenix::extension::types::{
     Problem, Severity,
     ClientCert, DecorationRule, HttpOptions, HttpPart, HttpTiming, PlatformInfo, TlsOptions,
     CellColor, TextView,
-    AgentTurn, DebugSession, DebugState, LaunchConfig, LaunchRequest, QuickFix,
+    AgentTurn, DebugSession, DebugState, GitSummary, LaunchConfig, LaunchRequest, QuickFix, TaskResult,
 };
 
 /// The most pixels a surface may have (4096 x 4096), and either side.
@@ -66,6 +66,9 @@ pub const MAX_FILE: u64 = 64 << 20;
 
 /// The most a sound (`play-sound`) may be.
 pub const MAX_SOUND: u64 = 8 << 20;
+
+/// `git-state` reads the repository again after this long.
+const GIT_READ_EVERY: Duration = Duration::from_secs(2);
 
 /// The most files `folder-list` gives.
 const MAX_LISTED: usize = 10_000;
@@ -423,6 +426,8 @@ pub enum Request {
     ModelLoad { id: u32, model: Shared },
     LayerOpen { id: u64, level: LayerLevel },
     LayerSet { layer: u64, items: Vec<Item> },
+    /// The task that ended last (`last-task`).
+    LastTask { answer: Answer<Option<TaskResult>> },
     LayerClose(u64),
     /// Answer with `Notice::ServiceReply((id, result))`.
     Service { id: u64, name: String, payload: String },
@@ -645,6 +650,9 @@ pub struct Spec {
     pub data: PathBuf,
     /// The open project, `/project` when its permissions allow.
     pub project: Option<PathBuf>,
+    /// What it's told of (`contributes.events`): what it may ask after,
+    /// too (`git-state` with `git`, `last-task` with `tasks`).
+    pub events: Vec<String>,
     /// Fenix's tools folder, where `find-program` looks first. Its own,
     /// `/tools`, is `<tools>/<id>` there.
     pub tools_dir: Option<PathBuf>,
@@ -689,6 +697,7 @@ impl Spec {
             permissions: Permissions::default(),
             data: dir.join("data"),
             project: None,
+            events: Vec::new(),
             tools_dir: None,
             setting_prefix: format!("{}.", id.rsplit('.').next().unwrap_or(id)),
             settings: Arc::default(),
@@ -990,6 +999,8 @@ struct State {
     next: u64,
     processes: HashMap<u64, Process>,
     timers: HashMap<u64, Arc<AtomicBool>>,
+    /// The project's repository as `git-state` last read it, and when.
+    git_read: Option<(Instant, Option<GitSummary>)>,
     /// The paths `find-program` gave it: these may run.
     found: Vec<String>,
     /// Where its language servers' messages go, by server.
@@ -2327,6 +2338,34 @@ impl fenix::extension::host::Host for State {
         chrono::Local.timestamp_opt(at, 0).earliest().map(|t| t.offset().fix().local_minus_utc()).unwrap_or(0)
     }
 
+    fn git_state(&mut self) -> Option<GitSummary> {
+        if !self.spec.events.iter().any(|e| e == "git") {
+            return None;
+        }
+        if let Some((at, state)) = &self.git_read {
+            if at.elapsed() < GIT_READ_EVERY {
+                return state.clone();
+            }
+        }
+        let state = self.spec.project.as_deref().and_then(fenix_git::summary).map(|s| GitSummary {
+            branch: s.branch,
+            head: s.head,
+            upstream: s.upstream,
+            ahead: s.ahead.min(u32::MAX as usize) as u32,
+            behind: s.behind.min(u32::MAX as usize) as u32,
+            conflicts: s.conflicts.min(u32::MAX as usize) as u32,
+        });
+        self.git_read = Some((Instant::now(), state.clone()));
+        state
+    }
+
+    fn last_task(&mut self) -> Option<TaskResult> {
+        if !self.spec.events.iter().any(|e| e == "tasks") {
+            return None;
+        }
+        self.ask_and_wait(|answer| Request::LastTask { answer }).flatten()
+    }
+
     fn cancel_timer(&mut self, timer: u64) {
         if let Some(stop) = self.timers.remove(&timer) {
             stop.store(true, Ordering::Relaxed);
@@ -3629,7 +3668,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         let limits = crate::limits(spec.memory);
         let activate_ticks = spec.activate_ticks;
         let state = State {
-            wasi: wasi.build(), table: ResourceTable::new(), limits, sink: sink.clone(), spec, jobs: back, next: 0, processes: HashMap::new(), timers: HashMap::new(), found: Vec::new(), lsp_out: HashMap::new(),
+            wasi: wasi.build(), table: ResourceTable::new(), limits, sink: sink.clone(), spec, jobs: back, next: 0, processes: HashMap::new(), timers: HashMap::new(), git_read: None, found: Vec::new(), lsp_out: HashMap::new(),
             sockets: HashMap::new(), surfaces: HashMap::new(), given: Vec::new(), restoring: None, listed: Vec::new(), scratches: HashSet::new(), requests: HashMap::new(),
             background: HashSet::new(), secrets_set: HashMap::new(),
         };

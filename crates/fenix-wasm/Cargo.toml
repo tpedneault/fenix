@@ -32,6 +32,8 @@ sha2 = "0.10"
 fenix-extensions = { path = "../fenix-extensions" }
 # The models a layer draws, read on the worker.
 fenix-model = { path = "../fenix-model" }
+# What `git-state` reads of the project's repository.
+fenix-git = { path = "../fenix-git" }
 ureq = "2"
 # TLS of its own on sockets and for `http-send` (what ureq uses: ring).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

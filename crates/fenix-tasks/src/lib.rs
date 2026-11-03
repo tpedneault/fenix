@@ -19,6 +19,9 @@ pub use defs::TaskDef;
 pub use location::{parse_path_position, PathPosition};
 pub use output::{parse_line, ParsedLine, TaskLocation};
 
+mod tests_count;
+pub use tests_count::test_counts;
+
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 

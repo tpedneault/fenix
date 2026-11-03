@@ -199,6 +199,8 @@ pub(crate) struct Layers {
     pub hits: Vec<(String, u64, u32, fenix_window::Rect)>,
     /// What each extension was last told of the layout.
     pub told: HashMap<String, Layout>,
+    /// The frame `next_wake` last asked the loop to wake for.
+    pub due: Option<Instant>,
 }
 
 /// The glide's progress by its clock, 0 to 1, `motion` off: there at once.
@@ -349,6 +351,15 @@ impl Layers {
                             && live.item.pose.as_ref().zip(live.acting.as_ref()).is_some_and(|(pose, acting)| self.models.get(&(ext.clone(), pose.model)).is_some_and(|m| acting.moving(m, pose.yaw, now))))
                 })
             })
+    }
+
+    /// Whether the frame last asked for has come due by `now` -- the loop
+    /// woke for it, so it's to be drawn -- and the next one asked for.
+    /// `next_wake` is always after `now`, so it alone never says when.
+    pub fn frame_due(&mut self, now: Instant, motion: bool) -> bool {
+        let due = self.due.is_some_and(|due| due <= now);
+        self.due = self.next_wake(now, motion);
+        due
     }
 
     /// When a layer next needs a frame, beyond what `moving` keeps going:
@@ -613,6 +624,14 @@ mod tests {
         let wake = layers.next_wake(t0 + Duration::from_millis(1200), true).unwrap();
         assert_eq!(wake, t0 + Duration::from_millis(1250));
         assert_eq!(layers.next_wake(t0, false), None);
+        // Woken for it, that frame is drawn, and the next one asked for.
+        assert!(!layers.frame_due(t0 + Duration::from_millis(1200), true), "asked for, not yet due");
+        assert_eq!(layers.due, Some(t0 + Duration::from_millis(1250)));
+        assert!(!layers.frame_due(t0 + Duration::from_millis(1240), true));
+        assert!(layers.frame_due(t0 + Duration::from_millis(1250), true), "due: drawn");
+        assert_eq!(layers.due, Some(t0 + Duration::from_millis(1500)));
+        assert!(!layers.frame_due(t0 + Duration::from_millis(1260), false));
+        assert_eq!(layers.due, None, "motion off: nothing asked for");
         // Turned round, it keeps its glide and its frames' clock; a new
         // glide starts from now, and new frames from now.
         walking.flip = true;

@@ -70,6 +70,7 @@ pub use bindings::fenix::extension::types::{
     CellColor, TextView,
     DebugSession, DebugState, LaunchConfig, LaunchRequest, QuickFix,
     AgentTurn,
+    GitSummary, TaskResult,
 };
 pub use bindings::{Event, Key, Page, SurfaceInput};
 

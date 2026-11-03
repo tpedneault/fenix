@@ -68,10 +68,75 @@ fn parse_status(lines: &[String]) -> Option<RepoStatus> {
     branch.map(|branch| RepoStatus { branch, upstream, ahead, behind })
 }
 
+/// What an extension may know of a repository (`git-state`): the branch,
+/// the commit it's on, how it stands against its upstream, and how many
+/// files are left in conflict -- from one `git status`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Summary {
+    /// None when `HEAD` is detached, or there are no commits yet.
+    pub branch: Option<String>,
+    /// The commit `HEAD` is on, none before the first.
+    pub head: Option<String>,
+    pub upstream: Option<String>,
+    pub ahead: usize,
+    pub behind: usize,
+    pub conflicts: usize,
+}
+
+/// `repo`'s summary, or none outside a repository (or without `git`).
+pub fn summary(repo: &Path) -> Option<Summary> {
+    let lines = run_lines(repo, &["status", "--porcelain=v2", "--branch"]);
+    parse_summary(&lines)
+}
+
+fn parse_summary(lines: &[String]) -> Option<Summary> {
+    let status = parse_status(lines)?;
+    let head = lines.iter().find_map(|l| l.strip_prefix("# branch.oid ")).filter(|oid| *oid != "(initial)").map(str::to_string);
+    let branch = Some(status.branch).filter(|b| b != "(detached)" && b != "(initial)");
+    let conflicts = lines.iter().filter(|l| l.starts_with("u ")).count();
+    Some(Summary { branch, head, upstream: status.upstream, ahead: status.ahead, behind: status.behind, conflicts })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::{git, init_repo, TempDir};
+
+    #[test]
+    fn a_summary_has_the_head_and_counts_conflicts() {
+        let lines: Vec<String> = [
+            "# branch.oid 1234abcd",
+            "# branch.head main",
+            "# branch.upstream origin/main",
+            "# branch.ab +2 -1",
+            "u UU N... 100644 100644 100644 100644 abc abc abc a.txt",
+            "1 .M N... 100644 100644 100644 abc abc b.txt",
+        ]
+        .map(String::from)
+        .into();
+        let s = parse_summary(&lines).unwrap();
+        assert_eq!(s, Summary { branch: Some("main".into()), head: Some("1234abcd".into()), upstream: Some("origin/main".into()), ahead: 2, behind: 1, conflicts: 1 });
+        let fresh: Vec<String> = ["# branch.oid (initial)", "# branch.head main"].map(String::from).into();
+        assert_eq!(parse_summary(&fresh).unwrap().head, None);
+        let detached: Vec<String> = ["# branch.oid 99", "# branch.head (detached)"].map(String::from).into();
+        assert_eq!(parse_summary(&detached).unwrap().branch, None);
+        assert_eq!(parse_summary(&[]), None);
+    }
+
+    #[test]
+    fn a_real_commit_moves_the_summarys_head() {
+        let dir = TempDir::new("summary_head");
+        init_repo(dir.path());
+        dir.write("a.txt", "1");
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-q", "-m", "one"]);
+        let first = summary(dir.path()).unwrap();
+        dir.write("a.txt", "2");
+        git(dir.path(), &["commit", "-q", "-am", "two"]);
+        let second = summary(dir.path()).unwrap();
+        assert!(first.head.is_some() && first.head != second.head);
+        assert_eq!(first.branch, second.branch);
+    }
 
     #[test]
     fn status_and_files_matches_the_two_separate_calls() {

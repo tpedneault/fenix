@@ -9592,6 +9592,7 @@ impl App {
 
         if let Some(session) = self.task_session.as_mut() { session.root = root.clone(); }
         // The extensions that asked are told before it can end.
+        self.wasm.task_name = Some(task.name.clone());
         self.editor_call("tasks", fenix_wasm::host::Call::TaskStarted(task.name.clone()));
         self.start_task_process(task, spec, root, buffer);
         self.wake_caret();
@@ -9773,6 +9774,14 @@ impl App {
         if let Some(session) = self.task_session.as_mut() {
             session.runner = None;
         }
+        // What `last-task` gives: its name, how it went, and its tests'
+        // counts when the output says.
+        let output = self.buffers.get(buffer_id).map(|ob| ob.buffer.text()).unwrap_or_default();
+        self.wasm.last_task = Some(fenix_wasm::host::TaskResult {
+            name: self.wasm.task_name.clone().unwrap_or_default(),
+            ok: success == Some(true),
+            tests: fenix_tasks::test_counts(&output),
+        });
         if let Some(root) = self.task_session.as_ref().map(|s| s.root.clone()) {
             self.tell_extensions(Happened::TaskFinished { root: root.clone(), success: success == Some(true) });
             self.debug_task_ended(&root, success == Some(true));
@@ -20800,6 +20809,15 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
         let wait_until = wait_until.min(self.next_disk_check);
         let wait_until = changes_told_at.map_or(wait_until, |at| wait_until.min(at));
+        // An extension's layer whose next frame the loop just woke for.
+        let motion_on = crate::motion::level(&self.config) != crate::motion::Level::Off;
+        if self.wasm.layers.frame_due(now, motion_on) {
+            for frame in 0..self.frames.len() {
+                if let Some(window) = self.frame_window(frame) {
+                    window.request_redraw();
+                }
+            }
+        }
         // A message about to fade, or the spinner's next blade.
         let wait_until = match self.motion_next_wake(now) {
             Some(wake) if wake <= now => {

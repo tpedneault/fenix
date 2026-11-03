@@ -104,7 +104,12 @@ impl App {
             self.agents_run(fx);
         }
         let turn = AgentTurn { agent, thread: thread.0.clone(), title, root: root.to_string_lossy().into_owned(), stop_reason: stop.to_string(), text };
-        self.editor_call("agents", Call::AgentTurnEnded(turn));
+        // What was said goes only to those with `permissions.agents`; the
+        // rest hear that a turn ended, and how.
+        self.editor_call_each("agents", |ext| {
+            let turn = if ext.manifest.permissions.agents { turn.clone() } else { AgentTurn { title: String::new(), text: String::new(), ..turn.clone() } };
+            Call::AgentTurnEnded(turn)
+        });
     }
 
     /// The last error the thread was told of.
