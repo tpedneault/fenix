@@ -239,7 +239,7 @@ impl AgentHost {
             (Link::Detached, ..) => ("not started".into(), Some(crate::page::Role::Muted)),
         };
         let logins = view.connection.filter(|c| c.state == ConnState::NeedsAuth).and_then(|c| c.info.as_ref()).map(|i| i.auth_methods.iter().map(|m| (m.id.clone(), m.name.clone())).collect()).unwrap_or_default();
-        agent_page::Status { agent, state, state_role: role, logins, queued: view.queued, terminals: HashMap::new() }
+        agent_page::Status { agent, state, state_role: role, logins, queued: view.queued, terminals: HashMap::new(), highlight: Some(super::reading_host::highlight_block) }
     }
 
     /// Reads the store's threads for `root` into the hub, newest first,
