@@ -20800,6 +20800,15 @@ impl ApplicationHandler<FenixUserEvent> for App {
         let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
         let wait_until = wait_until.min(self.next_disk_check);
         let wait_until = changes_told_at.map_or(wait_until, |at| wait_until.min(at));
+        // An extension's layer whose next frame the loop just woke for.
+        let motion_on = crate::motion::level(&self.config) != crate::motion::Level::Off;
+        if self.wasm.layers.frame_due(now, motion_on) {
+            for frame in 0..self.frames.len() {
+                if let Some(window) = self.frame_window(frame) {
+                    window.request_redraw();
+                }
+            }
+        }
         // A message about to fade, or the spinner's next blade.
         let wait_until = match self.motion_next_wake(now) {
             Some(wake) if wake <= now => {

@@ -24,6 +24,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Review extension's).
 - `q` in the Git graph view (`SPC g G`) closes it, as in the other Git
   views, rather than starting a macro recording.
+- An extension's layer is drawn when its next frame is due: a model
+  drawn a few times a second (the Pets extension's) moved only when
+  something else redrew the window.
 
 ## [1.0.0] - 2026-10-31
 
