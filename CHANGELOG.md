@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-03
+
 ### Added
 
 - Linux packages with each release, a `.deb` and an `.rpm` beside the
@@ -122,5 +124,6 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/tpedneault/fenix/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/tpedneault/fenix/releases/tag/v1.0.0
