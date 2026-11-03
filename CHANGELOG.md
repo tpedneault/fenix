@@ -17,6 +17,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   standard library: a `rustc` on `PATH` without its source (a standalone
   install ahead of rustup's) made it report errors that aren't there.
 
+### Extension API 1.1
+
+Everything 1.1 adds is something an extension asks of Fenix, so an
+extension built for 1.0 runs as it did.
+
+- `git-state`: the open project's repository (branch, commit, ahead and
+  behind its upstream, conflicts), for an extension that asks for `git`
+  events.
+- `last-task`: the task that ended last, and its tests passed and failed
+  when its output gives them (cargo, pytest, Jest, Vitest, `go test -v`).
+- An extension may hear of agents' turns (`events = ["agents"]`) without
+  `permissions.agents`. It's told a turn ended and how, but not the
+  thread's title or what was said.
+
 ### Fixed
 
 - The which-key menu no longer lists an extension's keys, with no label,

@@ -1,4 +1,4 @@
-// Fenix's extension API, 1.0. An extension is a component of the
+// Fenix's extension API, 1.1. An extension is a component of the
 // `extension` world: Fenix calls its exports, and it calls Fenix through
 // `host`, each call checked against the permissions its manifest asks
 // for (`[permissions]`).
@@ -33,7 +33,10 @@
 // for an extension to hear of is a new export, which Fenix calls only
 // when the extension has it -- never a new case of `event`, since a
 // guest's `handle` takes the `event` it was built with
-// (docs/adr/0001-wasm-runtime.md).
+// (docs/adr/0001-wasm-runtime.md). What it can ask of Fenix is a new
+// import, which one built for 1.0 never calls.
+//
+// 1.1 added `git-state` and `last-task`.
 package fenix:extension@1.0.0;
 
 interface types {
@@ -1040,10 +1043,37 @@ interface types {
         /// What the agent said in the turn, as text.
         text: string,
     }
+
+    /// The open project's repository, as `git status` has it
+    /// (`git-state`, 1.1).
+    record git-summary {
+        /// None when `HEAD` is detached, or there are no commits yet.
+        branch: option<string>,
+        /// The commit `HEAD` is on: none before the first.
+        head: option<string>,
+        /// What it tracks (`origin/main`), when it does.
+        upstream: option<string>,
+        /// Commits it's ahead of its upstream, and behind.
+        ahead: u32,
+        behind: u32,
+        /// Files left in conflict, by a merge, a rebase, a cherry-pick.
+        conflicts: u32,
+    }
+
+    /// The task that ended last (`last-task`, 1.1).
+    record task-result {
+        /// Its name, as `task-started` gave it.
+        name: string,
+        /// Whether it succeeded.
+        ok: bool,
+        /// Its tests, passed and failed, when its output says (cargo,
+        /// pytest, Jest, Vitest, `go test -v`).
+        tests: option<tuple<u32, u32>>,
+    }
 }
 
 interface host {
-    use types.{level, command, http-request, picker-item, check, task, layer-level, item, model-info, here, home-section, image-info, text-edit, editor-theme, rgb, surface-options, cursor-image, surface-mark, cursor-info, folder-entry, text-buffer, decoration, problem, tls-options, decoration-rule, platform-info, launch-config};
+    use types.{level, command, http-request, picker-item, check, task, layer-level, item, model-info, here, home-section, image-info, text-edit, editor-theme, rgb, surface-options, cursor-image, surface-mark, cursor-info, folder-entry, text-buffer, decoration, problem, tls-options, decoration-rule, platform-info, launch-config, git-summary, task-result};
 
     /// Kept for its output page (`SPC h l`).
     log: func(level: level, message: string);
@@ -1168,6 +1198,18 @@ interface host {
 
     /// Goes off after `millis`, once or every time.
     set-timer: func(millis: u32, repeat: bool) -> u64;
+
+    /// The open project's repository: its branch, the commit it's on, how
+    /// it stands against its upstream, its conflicts. None outside a
+    /// repository, or for an extension that doesn't ask for `git`
+    /// (`contributes.events`). Read afresh at most every two seconds:
+    /// ask as often as that to see a commit, a push or a conflict. 1.1.
+    git-state: func() -> option<git-summary>;
+
+    /// The task that ended last, with its tests' counts when its output
+    /// gives them: for an extension that asks for `tasks`, to call when
+    /// `task-ended` comes. 1.1.
+    last-task: func() -> option<task-result>;
     cancel-timer: func(timer: u64);
 
     /// Asks another extension's, or Fenix's, service; `service-reply`

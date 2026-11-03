@@ -265,6 +265,10 @@ pub(crate) struct WasmHost {
     pub(crate) granted: HashMap<String, Vec<PathBuf>>,
     /// What each was last told has the focus (`focus-moved`).
     focus_told: HashMap<String, fenix_wasm::host::Focus>,
+    /// The name of the task running, or that ran last (`task-started`).
+    pub(crate) task_name: Option<String>,
+    /// The task that ended last, and its tests' counts (`last-task`).
+    pub(crate) last_task: Option<fenix_wasm::host::TaskResult>,
     /// The theme's palette, as every worker reads it (`theme-palette`).
     palette: Option<Arc<RwLock<Vec<fenix_wasm::host::Rgb>>>>,
     /// Their decorations of buffers (`decorations-set`), by buffer and
@@ -724,6 +728,7 @@ impl App {
         // `/project` is fixed for as long as the worker runs; moving to
         // another project starts it again there (`code_focus_changed`).
         spec.project = self.code_project();
+        spec.events = ext.manifest.contributes.events.clone();
         spec.tools_dir = if cfg!(test) { None } else { fenix_storage::paths::tools_dir() };
         self.wasm.projects.insert(ext.id.clone(), spec.project.clone());
         spec.settings = settings;
@@ -859,9 +864,16 @@ impl App {
     /// the event (`contributes.events`). One built before it has no such
     /// export, and the call does nothing there.
     pub(crate) fn editor_call(&mut self, name: &str, call: Call) {
-        let to: Vec<String> = self.wasm.installed.iter().filter(|e| e.manifest.contributes.events.iter().any(|n| n == name) && self.code_ready(&e.id)).map(|e| e.id.clone()).collect();
-        for ext in to {
-            self.code_call(&ext, call.clone(), COMMAND_TICKS, Pending::Other);
+        self.editor_call_each(name, |_| call.clone());
+    }
+
+    /// `editor_call`, with each extension's call made for it: what it may
+    /// be told (an agent's turn without what was said, to one without
+    /// `permissions.agents`).
+    pub(crate) fn editor_call_each(&mut self, name: &str, call: impl Fn(&CodeExtension) -> Call) {
+        let to: Vec<(String, Call)> = self.wasm.installed.iter().filter(|e| e.manifest.contributes.events.iter().any(|n| n == name) && self.code_ready(&e.id)).map(|e| (e.id.clone(), call(e))).collect();
+        for (ext, call) in to {
+            self.code_call(&ext, call, COMMAND_TICKS, Pending::Other);
         }
     }
 
@@ -2480,6 +2492,7 @@ impl App {
             Request::LayerOpen { id, level } => {
                 self.wasm.layers.layers.insert((ext.to_string(), id), super::layers::Layer { level, items: Vec::new() });
             }
+            Request::LastTask { answer } => answer.send(self.wasm.last_task.clone()),
             Request::LayerSet { layer, items } => {
                 let most = 64;
                 if items.len() > most {
@@ -3572,6 +3585,21 @@ pub(crate) mod tests {
             assert!(started.elapsed() < std::time::Duration::from_secs(60));
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+    }
+
+    /// `last-task`: nothing before a task's ended, then its name, how it
+    /// went and its tests' counts.
+    #[test]
+    fn the_last_task_is_answered_with_its_tests() {
+        let mut app = App::with_file(None);
+        let ask = |app: &mut App| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            app.answer_code_request("test.hello", Request::LastTask { answer: fenix_wasm::host::Answer::new(tx) });
+            rx.try_recv().unwrap()
+        };
+        assert_eq!(ask(&mut app), None);
+        app.wasm.last_task = Some(fenix_wasm::host::TaskResult { name: "test".into(), ok: false, tests: fenix_tasks::test_counts("test result: FAILED. 9 passed; 1 failed;") });
+        assert_eq!(ask(&mut app), Some(fenix_wasm::host::TaskResult { name: "test".into(), ok: false, tests: Some((9, 1)) }));
     }
 
     /// Edits land at the places they name in the text as it was, as one

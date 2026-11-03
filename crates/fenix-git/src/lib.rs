@@ -44,7 +44,7 @@ pub use log::{checkout_detached, commit_file_diff, commit_files, line_log, log, 
 pub use rebase::{rebase_interactive, replayed, todo as rebase_todo, Planned, Replayed, Step};
 pub use stash::{list_stashes, Stash};
 pub use state::{conflict_sides, in_progress, ConflictSides, InProgress};
-pub use status::{status, status_and_files, RepoStatus};
+pub use status::{status, status_and_files, summary, RepoStatus, Summary};
 pub use worktree::{add_worktree, checked_out_elsewhere, default_worktree_path, list_worktrees, prune_worktrees, remove_worktree, Worktree};
 pub use verbs::{
     ahead_behind, autosquash, autosquash_args, branch_args, commit_args, commit_message, commit_with, contains, create_branch_at,

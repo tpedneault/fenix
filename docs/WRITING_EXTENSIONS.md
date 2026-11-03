@@ -187,7 +187,9 @@ and its answer comes to `handle` as an `Event` with that id.
 | `Extension::debug_changed(state)` | A debug session started (`DebugState::Started(DebugSession { id, name, language, parent })`), stopped where it was (`Paused((id, reason))`), ran on (`Resumed(id)`) or ended (`Ended(id)`), with `contributes.events = ["debug"]` -- an adapter's child sessions too, their `parent` the session they came from. |
 | `agents::provide(id, Some(&command))` | A coding agent its manifest names (`contributes.agents`), started by `command`: an ACP server on stdio, often in its tools folder. See [Coding agents](#coding-agents). |
 | `agents::ask(prompt, agent)` | A coding agent's answer to `prompt`, in a thread of its own, with `permissions.agents`: `agents::Answer { text, stop_reason, agent }`. |
-| `Extension::agent_turn_ended(turn)` | A coding agent's turn ended (`AgentTurn { agent, thread, title, root, stop_reason, text }`), with `contributes.events = ["agents"]` and `permissions.agents`. |
+| `Extension::agent_turn_ended(turn)` | A coding agent's turn ended (`AgentTurn { agent, thread, title, root, stop_reason, text }`), with `contributes.events = ["agents"]`. Without `permissions.agents`, `title` and `text` are empty: it hears that a turn ended and how, not what was said. |
+| `host::git_state()` | API 1.1. The open project's repository (`GitSummary { branch, head, upstream, ahead, behind, conflicts }`), with `contributes.events = ["git"]`: none outside a repository. Read again at most every two seconds; ask that often to notice a commit (a new `head` on the same branch), a push (`ahead` back to 0) or a conflict. |
+| `host::last_task()` | API 1.1. The task that ended last (`TaskResult { name, ok, tests }`), with `contributes.events = ["tasks"]`: `tests` is `Some((passed, failed))` when its output gives them (cargo, pytest, Jest, Vitest, `go test -v`). Call it when `task-ended` comes. |
 | `forge::call`, `forge::branch_answer`, `forge::refresh` | Being a code-review forge for Fenix's Git pages. See [Forges](#forges). |
 | `std::fs` | Its own folder, `/data`, kept between runs; its tools folder, `/tools`, when its manifest names a program there; and the project, `/project`, if its permissions say: the one you're in. Open a file in another project and Fenix starts the extension again there, its pages saved and opened again (`page_state`, `page_restore`), so keep in a page's state what it needs. |
 
@@ -689,11 +691,12 @@ It's Fenix's service `agents.ask`: `{"prompt": "...", "agent": "codex"}`
 in, `{"text", "stopReason", "agent", "thread"}` out. An ask unanswered
 after 10 minutes, or by an agent that wants a login, is an error.
 
-**Hearing them.** With `contributes.events = ["agents"]` (and
-`permissions.agents`), `Extension::agent_turn_ended` is told of each turn
-that ends, in any thread: the agent, the thread and its title, the
-project, the stop reason (`end_turn`, `cancelled`, `max_tokens`,
-`max_turn_requests`, `refusal`, `error`) and what the agent said.
+**Hearing them.** With `contributes.events = ["agents"]`,
+`Extension::agent_turn_ended` is told of each turn that ends, in any
+thread: the agent, the thread, the project and the stop reason
+(`end_turn`, `cancelled`, `max_tokens`, `max_turn_requests`, `refusal`,
+`error`). With `permissions.agents` too, it's also told the thread's
+title and what the agent said; without, those are empty.
 
 ## Its manifest
 

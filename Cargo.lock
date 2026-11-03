@@ -1500,6 +1500,7 @@ dependencies = [
  "bytes",
  "chrono",
  "fenix-extensions",
+ "fenix-git",
  "fenix-model",
  "image",
  "libc",
