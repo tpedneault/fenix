@@ -99,6 +99,11 @@ keys = "SPC f y"
 label = "yank file path"
 command = "file.yank_path"
 
+[[leader]]
+keys = "SPC f E"
+label = "read as another encoding"
+command = "file.reopen_with_encoding"
+
 # `v` for "revive" -- `r` is recent files and `R` is rename,
 # and this belongs in the same group as both.
 [[leader]]
