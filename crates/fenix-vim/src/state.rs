@@ -1936,8 +1936,7 @@ impl VimState {
             VimAction::ChangeLine => {
                 let (line, _) = buffer.line_col(cursor);
                 let end_line = (line + count as usize - 1).min(motion::last_line(buffer));
-                let range = lines_content_range(buffer, line, end_line);
-                self.finish_operator(buffer, cursor, Operator::Change, range, true);
+                self.change_lines(buffer, cursor, line, end_line);
             }
             VimAction::SubstituteChar => {
                 let end = (cursor.char_idx + count as usize).min(buffer.len_chars());
@@ -2371,12 +2370,12 @@ impl VimState {
             let total_count = self.pending_op_count.saturating_mul(self.count.take().unwrap_or(1).max(1));
             let (line, _) = buffer.line_col(cursor);
             let end_line = (line + total_count as usize - 1).min(motion::last_line(buffer));
-            let range = if op == Operator::Change {
-                lines_content_range(buffer, line, end_line)
+            if op == Operator::Change {
+                self.change_lines(buffer, cursor, line, end_line);
             } else {
-                linewise_range(buffer, line, end_line)
-            };
-            self.finish_operator(buffer, cursor, op, range, true);
+                let range = linewise_range(buffer, line, end_line);
+                self.finish_operator(buffer, cursor, op, range, true);
+            }
             return;
         }
 
@@ -2444,6 +2443,18 @@ impl VimState {
                 }
             }
         }
+    }
+
+    /// `cc`/`S`: the lines' text goes, into the register whole, and the
+    /// first line's indent stays to type after, as `o` starts indented.
+    fn change_lines(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, line: usize, end_line: usize) {
+        let start = buffer.line_start_char(line);
+        let text = buffer.text_range(start, start + buffer.line_len(line));
+        let indent: String = text.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+        let range = lines_content_range(buffer, line, end_line);
+        self.finish_operator(buffer, cursor, Operator::Change, range, true);
+        buffer.insert_str(cursor, &indent);
+        cursor.sticky_col = buffer.line_col(cursor).1;
     }
 
     /// Dispatches a key to whichever `SurroundPending` phase is active --
@@ -3403,6 +3414,20 @@ mod tests {
         let mut vim = VimState::new();
         press(&mut vim, &mut b, &mut c, seq);
         b.text()
+    }
+
+    #[test]
+    fn changing_a_line_keeps_its_indent() {
+        assert_eq!(after("    foo\n", "ccbar\u{1b}"), "    bar\n");
+        assert_eq!(after("    foo\n", "Sbar\u{1b}"), "    bar\n");
+        assert_eq!(after("\tfoo\n  two\nend\n", "2ccbar\u{1b}"), "\tbar\nend\n");
+        assert_eq!(after("foo\n", "ccbar\u{1b}"), "bar\n");
+    }
+
+    #[test]
+    fn a_changed_line_goes_to_the_register_with_its_indent_and_undo_brings_it_back() {
+        assert_eq!(after("    foo\n", "ccbar\u{1b}p"), "    bar\n    foo\n");
+        assert_eq!(after("    foo\n", "ccbar\u{1b}uu"), "    foo\n", "the typing, then the change");
     }
 
     #[test]
