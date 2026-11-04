@@ -9,5 +9,9 @@ bundles the following, each under its own terms.
 | [Symbols Nerd Font Mono](https://github.com/ryanoasis/nerd-fonts) | `crates/fenix-gui/assets/fonts/symbols_nerd_font_mono.ttf` | SIL OFL 1.1 and others: [LICENSE-symbols-nerd-font.txt](crates/fenix-gui/assets/fonts/LICENSE-symbols-nerd-font.txt) |
 | [Martian Mono](https://github.com/evilmartians/mono) outlines (the wordmark) | `crates/fenix-brand` | SIL OFL 1.1: [LICENSE-martian-mono.txt](crates/fenix-brand/LICENSE-martian-mono.txt) |
 
+Releases also ship [PDFium](https://pdfium.googlesource.com/pdfium/), built
+by [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries), beside
+Fenix, under its own terms and those of what it's built from: `licenses/pdfium`.
+
 Crates pulled from crates.io keep their own licenses. `cargo tree` or
 [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) lists them.

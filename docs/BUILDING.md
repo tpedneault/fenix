@@ -51,8 +51,9 @@ and degrade gracefully (never a hard error) if they're not:
 The PDF reader (the `fenix.pdf` extension, `SPC r ...`) renders through
 `fenix-pdfium`, a small program built with Fenix (`cargo build -p
 fenix-pdfium`, or `cargo build --workspace`) and shipped beside
-`fenix.exe` in every release. It needs a native library rather than a
-`PATH` executable, set up once by hand rather than auto-detected:
+`fenix.exe` in every release, with the native library it needs. Building
+Fenix yourself, you set that library up once by hand
+(`packaging/fetch-pdfium.sh` fetches the version releases use):
 
 - [`pdfium`](https://github.com/bblanchon/pdfium-binaries) — download
   the prebuilt release for your platform (`pdfium-win-x64.tgz` on

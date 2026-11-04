@@ -59,6 +59,14 @@ fn locate_pdfium_library() -> Option<PathBuf> {
             }
         }
     }
+    // A package installs the library in Fenix's own folder (`/usr/lib/fenix`)
+    // with the program in `/usr/bin`.
+    if let Some(prefix) = std::env::current_exe().ok().as_deref().and_then(Path::parent).and_then(Path::parent) {
+        let candidate = Pdfium::pdfium_platform_library_name_at_path(&prefix.join("lib").join("fenix"));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
     if let Ok(dir) = std::env::var("FENIX_PDFIUM_PATH") {
         let candidate = Pdfium::pdfium_platform_library_name_at_path(Path::new(&dir));
         if candidate.exists() {
