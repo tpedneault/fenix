@@ -19,6 +19,9 @@ pub enum InsertEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VimAction {
+    /// `&`: the last `:s` again on this line, without its flags. `g&`: on
+    /// every line, with them.
+    RepeatSubstitute { whole_buffer: bool },
     Motion(Motion),
     Operator(Operator),
     /// `D`/`C`/`Y`: the operator applied from the cursor to end of line in
@@ -295,6 +298,8 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('x').with_ctrl()], "decrement number", VimAction::IncrementNumber { delta: -1 });
 
     t.insert(&[KeyPress::char('.')], "repeat last change", VimAction::RepeatLastChange);
+    t.insert(&[KeyPress::char('&')], "repeat :s on this line", VimAction::RepeatSubstitute { whole_buffer: false });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('&')], "repeat :s everywhere", VimAction::RepeatSubstitute { whole_buffer: true });
 
     t
 }

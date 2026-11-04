@@ -15715,6 +15715,15 @@ impl App {
             VimEvent::RequestSaveAs(path) => {
                 self.save_unnamed_as(&path);
             }
+            VimEvent::RequestOpenFile { path, split } => {
+                if let Some(way) = split {
+                    self.run_command(event_loop, if way == fenix_vim::SplitWay::Vertical { "window.split_vertical" } else { "window.split_horizontal" });
+                }
+                self.open_typed_path(&path);
+            }
+            VimEvent::RunCommand(id) => {
+                self.run_command(event_loop, id);
+            }
             VimEvent::RequestForceSave => {
                 self.run_command(event_loop, "file.save_force");
             }

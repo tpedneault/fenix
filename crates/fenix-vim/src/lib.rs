@@ -1,5 +1,6 @@
 mod bracket;
 mod charclass;
+mod ex;
 mod indent;
 mod keymaps;
 mod keynotation;
@@ -22,7 +23,7 @@ pub use keymaps::{InsertEntry, ScrollTarget, VimAction};
 pub use mode::{Mode, VisualKind};
 pub use motion::Motion;
 pub use operator::Operator;
-pub use state::{BracketTarget, LspRequestKind, TabMove, VimEvent, VimState};
+pub use state::{BracketTarget, LspRequestKind, SplitWay, TabMove, VimEvent, VimState};
 pub use search::all_matches_in_range;
 pub use substitute::{replace_in_text, SubstitutePreview};
 pub use textobject::TextObject;
