@@ -281,6 +281,10 @@ struct BlockInsert {
     line_hi: usize,
     col: usize,
     typed: String,
+    /// `A`: lines too short to reach `col` are padded, not skipped.
+    pad: bool,
+    /// `$A`: at the end of each line, whatever its length.
+    at_line_end: bool,
 }
 
 /// `:s///c` asking about one match at a time.
@@ -360,6 +364,11 @@ pub struct VimState {
     count: Option<u32>,
     visual_anchor: usize,
     visual_kind: VisualKind,
+    /// What the last block `y`, `d` or `c` put in the unnamed register, so
+    /// `p` can put it back as a block while the register still holds it.
+    block_register: Option<String>,
+    /// `$` in Visual Block: the block reaches the end of every line.
+    block_to_line_end: bool,
     /// The kind/anchor/cursor of the most recently exited Visual
     /// selection, for `gv` to restore.
     last_visual: Option<(VisualKind, usize, usize)>,
@@ -518,6 +527,8 @@ impl VimState {
             count: None,
             visual_anchor: 0,
             visual_kind: VisualKind::Char,
+            block_register: None,
+            block_to_line_end: false,
             last_visual: None,
             block_insert: None,
             pending_pulse: None,
@@ -1250,12 +1261,18 @@ impl VimState {
             return;
         }
         for line in (bi.line_lo + 1)..=bi.line_hi {
-            if line >= buffer.line_count() || bi.col > buffer.line_len(line) {
+            if line >= buffer.line_count() {
                 continue;
             }
-            let at = buffer.line_start_char(line) + bi.col;
-            let mut c = Cursor { char_idx: at, sticky_col: 0 };
-            buffer.insert_str(&mut c, &bi.typed);
+            let len = buffer.line_len(line);
+            let start = buffer.line_start_char(line);
+            let at = if bi.at_line_end { len } else { bi.col };
+            if at > len && !bi.pad {
+                continue;
+            }
+            let mut c = Cursor { char_idx: start + len.min(at), sticky_col: 0 };
+            let padding = " ".repeat(at.saturating_sub(len));
+            buffer.insert_str(&mut c, &format!("{padding}{}", bi.typed));
         }
     }
 
@@ -2443,7 +2460,33 @@ impl VimState {
         self.registers.insert(name, Register { text: final_text, linewise });
     }
 
+    /// `p`/`P` of a block: each piece on its own line at the cursor's
+    /// column, short lines padded, and new lines made past the buffer's end.
+    fn paste_block(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, text: &str, after: bool, count: usize) {
+        let (first, col) = buffer.line_col(cursor);
+        let col = if after && buffer.line_len(first) > 0 { col + 1 } else { col };
+        for (i, piece) in text.split('\n').enumerate() {
+            let line = first + i;
+            let piece = piece.repeat(count);
+            if line > motion::last_line(buffer) {
+                let last = motion::last_line(buffer);
+                let mut c = Cursor { char_idx: buffer.line_start_char(last) + buffer.line_len(last), sticky_col: 0 };
+                buffer.insert_str(&mut c, &format!("\n{}{piece}", " ".repeat(col)));
+                continue;
+            }
+            let len = buffer.line_len(line);
+            let mut c = Cursor { char_idx: buffer.line_start_char(line) + col.min(len), sticky_col: 0 };
+            buffer.insert_str(&mut c, &format!("{}{piece}", " ".repeat(col.saturating_sub(len))));
+        }
+        cursor.char_idx = buffer.line_start_char(first) + col.min(buffer.line_len(first));
+        cursor.sticky_col = col;
+    }
+
     fn paste(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, after: bool, count: u32) {
+        let block = self.active_register.is_none().then(|| self.block_register.clone()).flatten().filter(|text| *text == self.register.text);
+        if let Some(text) = block {
+            return self.paste_block(buffer, cursor, &text, after, count.max(1) as usize);
+        }
         let (text, linewise) = match self.active_register.take() {
             Some((name, _append)) => match self.registers.get(&name) {
                 Some(r) => (r.text.clone(), r.linewise),
@@ -2627,6 +2670,7 @@ impl VimState {
         }
 
         if key.code == KeyCode::Named(NamedKey::Escape) {
+            self.visual_matcher.cancel();
             self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
             self.mode = Mode::Normal;
             return VimEvent::None;
@@ -2640,7 +2684,7 @@ impl VimState {
         // writes -- a bare, unmodified `"`, never a trie leaf (mirrors
         // `handle_normal_key`'s own treatment of it), since the Visual
         // trie has no notion of "wait for one more key."
-        if key.code == KeyCode::Char('"') && key.mods == Mods::default() {
+        if key.code == KeyCode::Char('"') && key.mods == Mods::default() && !self.visual_matcher.is_pending() {
             self.pending_prefix = Some(PendingPrefixKey::Register);
             return VimEvent::None;
         }
@@ -2649,7 +2693,52 @@ impl VimState {
             match *action {
                 // Counts aren't supported in Visual mode -- the selection
                 // is already explicit, unlike Normal mode's motions.
-                VisualAction::Motion(m) => apply_motion(buffer, cursor, m, 1, &self.iskeyword_extra),
+                VisualAction::Motion(m) => {
+                    apply_motion(buffer, cursor, m, 1, &self.iskeyword_extra);
+                    self.block_to_line_end = m == Motion::LineEnd || (self.block_to_line_end && matches!(m, Motion::Up | Motion::Down));
+                }
+                VisualAction::TextObject(object) => {
+                    let range = textobject::span(buffer, cursor, object, &self.iskeyword_extra);
+                    if !range.is_empty() {
+                        self.visual_kind = if textobject::is_linewise(object) { VisualKind::Line } else { VisualKind::Char };
+                        self.visual_anchor = range.start;
+                        cursor.char_idx = range.end - 1;
+                        let (_, col) = buffer.line_col(cursor);
+                        cursor.sticky_col = col;
+                    }
+                }
+                VisualAction::OtherEnd => {
+                    std::mem::swap(&mut self.visual_anchor, &mut cursor.char_idx);
+                    let (_, col) = buffer.line_col(cursor);
+                    cursor.sticky_col = col;
+                }
+                VisualAction::Join => {
+                    self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
+                    let anchor = Cursor { char_idx: self.visual_anchor, sticky_col: 0 };
+                    let (a, b) = (buffer.line_col(&anchor).0, buffer.line_col(cursor).0);
+                    let (first, last) = (a.min(b), a.max(b));
+                    cursor.char_idx = buffer.line_start_char(first);
+                    // One line selected still joins it to the next.
+                    for _ in 0..(last - first).max(1) {
+                        self.join_lines(buffer, cursor);
+                    }
+                    self.mode = Mode::Normal;
+                }
+                VisualAction::BlockAppend => {
+                    if self.visual_kind == VisualKind::Block {
+                        let (line_lo, line_hi, _, col_hi) = self.block_bounds(buffer, cursor);
+                        let at_line_end = self.block_to_line_end;
+                        let len = buffer.line_len(line_lo);
+                        let col = if at_line_end { len } else { col_hi };
+                        let padding = " ".repeat(col.saturating_sub(len));
+                        cursor.char_idx = buffer.line_start_char(line_lo) + len.min(col);
+                        buffer.insert_str(cursor, &padding);
+                        self.block_insert = Some(BlockInsert { line_lo, line_hi, col, typed: String::new(), pad: true, at_line_end });
+                        self.mode = Mode::Insert;
+                        let (_, col) = buffer.line_col(cursor);
+                        cursor.sticky_col = col;
+                    }
+                }
                 VisualAction::Apply(op) => {
                     self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
                     if self.visual_kind == VisualKind::Block {
@@ -2724,7 +2813,7 @@ impl VimState {
                     if self.visual_kind == VisualKind::Block {
                         let (line_lo, line_hi, col_lo, _) = self.block_bounds(buffer, cursor);
                         cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
-                        self.block_insert = Some(BlockInsert { line_lo, line_hi, col: col_lo, typed: String::new() });
+                        self.block_insert = Some(BlockInsert { line_lo, line_hi, col: col_lo, typed: String::new(), pad: false, at_line_end: false });
                         self.mode = Mode::Insert;
                         let (_, col) = buffer.line_col(cursor);
                         cursor.sticky_col = col;
@@ -2796,8 +2885,7 @@ impl VimState {
     /// every line in the block, clamped to each (possibly ragged) line's
     /// length. One delete_range per line, which `handle_key`'s undo group
     /// folds into a single undo step. The register just joins the per-line pieces with '\n' -- paste
-    /// (`p`/`P`) won't reconstruct the block shape, only Delete/Yank
-    /// themselves are block-aware.
+    /// (`p`/`P`) puts them back as a block through `block_register`.
     fn apply_block_operator(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, op: Operator) {
         let (line_lo, line_hi, col_lo, col_hi) = self.block_bounds(buffer, cursor);
         let mut pieces = vec![String::new(); line_hi - line_lo + 1];
@@ -2826,12 +2914,15 @@ impl VimState {
             }
         }
 
-        self.write_register(pieces.join("\n"), false);
+        let text = pieces.join("\n");
+        self.write_register(text.clone(), false);
+        self.block_register = Some(text);
         cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
         let (_, col) = buffer.line_col(cursor);
         cursor.sticky_col = col;
 
         if op == Operator::Change {
+            self.block_insert = Some(BlockInsert { line_lo, line_hi, col: col_lo, typed: String::new(), pad: false, at_line_end: false });
             self.mode = Mode::Insert;
         }
     }
@@ -3091,6 +3182,71 @@ mod tests {
         keys(&mut vim, &mut b, &mut c, "3[");
         let event = vim.handle_key(&mut b, &mut c, KeyPress::char('t'));
         assert_eq!(event, VimEvent::BracketJump { target: BracketTarget::Todo, forward: false, count: 3 });
+    }
+
+    fn press(vim: &mut VimState, b: &mut Buffer, c: &mut Cursor, seq: &str) {
+        for ch in seq.chars() {
+            match ch {
+                '\x1b' => vim.handle_key(b, c, KeyPress::named(NamedKey::Escape)),
+                '\x16' => vim.handle_key(b, c, KeyPress::char('v').with_ctrl()),
+                _ => vim.handle_key(b, c, KeyPress::char(ch)),
+            };
+        }
+    }
+
+    /// `seq` on `text`, and what's left.
+    fn after(text: &str, seq: &str) -> String {
+        let mut b = buf(text);
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        press(&mut vim, &mut b, &mut c, seq);
+        b.text()
+    }
+
+    #[test]
+    fn visual_takes_text_objects() {
+        assert_eq!(after("alpha beta gamma\n", "wviwd"), "alpha  gamma\n");
+        assert_eq!(after("alpha beta gamma\n", "wvawd"), "alpha gamma\n");
+        assert_eq!(after("foo(bar, baz)\n", "fbvi(d"), "foo()\n");
+        assert_eq!(after("foo(bar, baz)\n", "fbva(d"), "foo\n");
+        assert_eq!(after("a \"b c\" d\n", "fbvi\"d"), "a \"\" d\n");
+        assert_eq!(after("one\ntwo\n\nthree\n", "vipd"), "\nthree\n", "linewise, as `ip` is");
+        assert_eq!(after("<a>hi</a>\n", "fhvitd"), "<a></a>\n");
+    }
+
+    #[test]
+    fn a_text_object_replaces_a_visual_selection_by_paste() {
+        assert_eq!(after("alpha beta gamma\n", "yiwwviwp"), "alpha alpha gamma\n");
+    }
+
+    #[test]
+    fn visual_o_goes_to_the_other_end() {
+        assert_eq!(after("alpha beta gamma\n", "wvlohd"), "alphata gamma\n");
+    }
+
+    #[test]
+    fn visual_j_joins_the_selected_lines() {
+        assert_eq!(after("one\ntwo\nthree\nfour\n", "VjjJ"), "one two three\nfour\n");
+        assert_eq!(after("one\ntwo\n", "VJ"), "one two\n");
+    }
+
+    #[test]
+    fn block_change_and_append_reach_every_row() {
+        assert_eq!(after("one\ntwo\nthree\n", "\x16jlcQ\x1b"), "Qe\nQo\nthree\n");
+        assert_eq!(after("one\ntwo\nsix\n", "\x16jjlAX\x1b"), "onXe\ntwXo\nsiXx\n");
+        assert_eq!(after("one\ntwo\nthree\n", "\x16jj$AX\x1b"), "oneX\ntwoX\nthreeX\n");
+        assert_eq!(after("onemore\nab\n", "6l\x16jAX\x1b"), "onemoreX\nab     X\n", "`A` pads a short line");
+    }
+
+    #[test]
+    fn a_block_pastes_as_a_block() {
+        assert_eq!(after("one\ntwo\nthree\n", "\x16jly$p"), "oneon\ntwotw\nthree\n");
+        assert_eq!(after("ab\ncd\nx\n", "\x16jdGp"), "b\nd\nxa\n c\n", "past the buffer's end it makes lines");
+    }
+
+    #[test]
+    fn escape_cancels_a_half_typed_text_object() {
+        assert_eq!(after("abc\n", "vi\x1bx"), "bc\n");
     }
 
     #[test]

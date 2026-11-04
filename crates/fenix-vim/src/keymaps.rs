@@ -153,6 +153,14 @@ pub enum VisualAction {
     /// `~`/`u`/`U`: changes the case of every character in the
     /// selection (real Vim's own Visual-mode case operators).
     ChangeCase(CaseChange),
+    /// `iw`, `a(` and the rest: the selection becomes the object.
+    TextObject(TextObject),
+    /// `o`: the cursor goes to the other end of the selection.
+    OtherEnd,
+    /// `J`: joins the selected lines.
+    Join,
+    /// `A` in Visual Block: appends after the block on every line.
+    BlockAppend,
 }
 
 /// What `~`/`u`/`U` do to a character -- shared by Visual mode's own
@@ -301,6 +309,10 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
     t.insert(&[KeyPress::char('V')], "visual (line)", VisualAction::SetKind(VisualKind::Line));
     t.insert(&[KeyPress::char('v').with_ctrl()], "visual (block)", VisualAction::SetKind(VisualKind::Block));
     t.insert(&[KeyPress::char('I')], "insert at block left", VisualAction::BlockInsertLeft);
+    t.insert(&[KeyPress::char('A')], "append at block right", VisualAction::BlockAppend);
+    t.insert(&[KeyPress::char('o')], "other end", VisualAction::OtherEnd);
+    t.insert(&[KeyPress::char('J')], "join lines", VisualAction::Join);
+    add_text_objects(&mut t, VisualAction::TextObject);
     t.insert(&[KeyPress::char('>')], "indent selection", VisualAction::Indent);
     t.insert(&[KeyPress::char('<')], "dedent selection", VisualAction::Dedent);
     t.insert(&[KeyPress::char('r')], "replace selection", VisualAction::ReplaceChar);
@@ -316,51 +328,34 @@ fn build_visual_trie() -> KeyTrie<VisualAction> {
 fn build_pending_trie() -> KeyTrie<PendingTarget> {
     let mut t = KeyTrie::new();
     add_motions(&mut t, PendingTarget::Motion);
-    t.label_group(&[KeyPress::char('i')], "inner...");
-    t.insert(
-        &[KeyPress::char('i'), KeyPress::char('w')],
-        "inner word",
-        PendingTarget::TextObject(TextObject::InnerWord),
-    );
-    t.label_group(&[KeyPress::char('a')], "a...");
-    t.insert(
-        &[KeyPress::char('a'), KeyPress::char('w')],
-        "a word",
-        PendingTarget::TextObject(TextObject::AWord),
-    );
-    add_bracketed_and_quoted_objects(&mut t);
-    t.insert(
-        &[KeyPress::char('i'), KeyPress::char('p')],
-        "inner paragraph",
-        PendingTarget::TextObject(TextObject::InnerParagraph),
-    );
-    t.insert(
-        &[KeyPress::char('a'), KeyPress::char('p')],
-        "a paragraph",
-        PendingTarget::TextObject(TextObject::AParagraph),
-    );
-    t.insert(&[KeyPress::char('i'), KeyPress::char('t')], "inner tag", PendingTarget::TextObject(TextObject::InnerTag));
-    t.insert(&[KeyPress::char('a'), KeyPress::char('t')], "a tag", PendingTarget::TextObject(TextObject::ATag));
+    add_text_objects(&mut t, PendingTarget::TextObject);
     t
 }
 
-/// `i"`/`a"`, `i'`/`a'`, `` i` ``/`` a` ``, and the three bracket kinds
-/// (each with its `b`/`B` vim-surround-style alias, e.g. `ib` == `i(`) --
-/// split out from `build_pending_trie` since it's the same small
-/// (quote/bracket char, `TextObject` variant) pairing repeated many
-/// times, not because it's reused elsewhere.
-fn add_bracketed_and_quoted_objects(t: &mut KeyTrie<PendingTarget>) {
-    for &q in &['"', '\'', '`'] {
-        t.insert(&[KeyPress::char('i'), KeyPress::char(q)], "inner quote", PendingTarget::TextObject(TextObject::InnerQuote(q)));
-        t.insert(&[KeyPress::char('a'), KeyPress::char(q)], "a quote", PendingTarget::TextObject(TextObject::AQuote(q)));
+/// `iw`, `a(`, `ip`, `it` and the rest: operator-pending takes them as a
+/// target, Visual as a selection.
+fn add_text_objects<A>(t: &mut KeyTrie<A>, wrap: impl Fn(TextObject) -> A) {
+    t.label_group(&[KeyPress::char('i')], "inner...");
+    t.label_group(&[KeyPress::char('a')], "a...");
+    let mut add = |prefix: char, key: char, label: &'static str, object: TextObject| t.insert(&[KeyPress::char(prefix), KeyPress::char(key)], label, wrap(object));
+    add('i', 'w', "inner word", TextObject::InnerWord);
+    add('a', 'w', "a word", TextObject::AWord);
+    for q in ['"', '\'', '`'] {
+        add('i', q, "inner quote", TextObject::InnerQuote(q));
+        add('a', q, "a quote", TextObject::AQuote(q));
     }
+    // Each bracket with its aliases: `b` is `(`, `B` is `{`.
     let brackets: &[(char, &[char])] = &[('(', &['(', ')', 'b']), ('{', &['{', '}', 'B']), ('[', &['[', ']'])];
     for &(open, aliases) in brackets {
         for &key in aliases {
-            t.insert(&[KeyPress::char('i'), KeyPress::char(key)], "inner bracket", PendingTarget::TextObject(TextObject::InnerBracket(open)));
-            t.insert(&[KeyPress::char('a'), KeyPress::char(key)], "a bracket", PendingTarget::TextObject(TextObject::ABracket(open)));
+            add('i', key, "inner bracket", TextObject::InnerBracket(open));
+            add('a', key, "a bracket", TextObject::ABracket(open));
         }
     }
+    add('i', 'p', "inner paragraph", TextObject::InnerParagraph);
+    add('a', 'p', "a paragraph", TextObject::AParagraph);
+    add('i', 't', "inner tag", TextObject::InnerTag);
+    add('a', 't', "a tag", TextObject::ATag);
 }
 
 pub(crate) fn normal_trie() -> &'static KeyTrie<VimAction> {
