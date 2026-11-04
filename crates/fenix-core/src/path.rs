@@ -19,7 +19,11 @@ pub fn plain_path(path: &Path) -> PathBuf {
             match component {
                 Component::Prefix(prefix) => match prefix.kind() {
                     Prefix::VerbatimDisk(drive) => plain.push(format!("{}:", drive as char)),
-                    Prefix::VerbatimUNC(server, share) => plain.push(format!(r"\\{}\{}", server.to_string_lossy(), share.to_string_lossy())),
+                    Prefix::VerbatimUNC(server, share) => plain.push(format!(
+                        r"\\{}\{}",
+                        server.to_string_lossy(),
+                        share.to_string_lossy()
+                    )),
                     _ => plain.push(prefix.as_os_str()),
                 },
                 other => plain.push(other.as_os_str()),
@@ -55,17 +59,34 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn plain_path_drops_the_verbatim_prefix_and_mixed_separators() {
-        assert_eq!(plain_path(Path::new(r"\\?\C:\src\a.rs")).to_str(), Some(r"C:\src\a.rs"));
-        assert_eq!(plain_path(Path::new(r"\\?\UNC\server\share\a.rs")).to_str(), Some(r"\\server\share\a.rs"));
-        assert_eq!(plain_path(Path::new(r"C:\src/lib/a.rs")).to_str(), Some(r"C:\src\lib\a.rs"));
-        assert_eq!(plain_path(Path::new(r"C:\src\a.rs")).to_str(), Some(r"C:\src\a.rs"));
+        assert_eq!(
+            plain_path(Path::new(r"\\?\C:\src\a.rs")).to_str(),
+            Some(r"C:\src\a.rs")
+        );
+        assert_eq!(
+            plain_path(Path::new(r"\\?\UNC\server\share\a.rs")).to_str(),
+            Some(r"\\server\share\a.rs")
+        );
+        assert_eq!(
+            plain_path(Path::new(r"C:\src/lib/a.rs")).to_str(),
+            Some(r"C:\src\lib\a.rs")
+        );
+        assert_eq!(
+            plain_path(Path::new(r"C:\src\a.rs")).to_str(),
+            Some(r"C:\src\a.rs")
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn every_spelling_of_a_file_has_one_key() {
         let key = path_key(Path::new(r"C:\src\a.rs"));
-        for spelling in [r"\\?\C:\src\a.rs", r"C:\src/a.rs", r"c:\SRC\A.rs", r"\\?\c:\src\A.RS"] {
+        for spelling in [
+            r"\\?\C:\src\a.rs",
+            r"C:\src/a.rs",
+            r"c:\SRC\A.rs",
+            r"\\?\c:\src\A.RS",
+        ] {
             assert_eq!(path_key(Path::new(spelling)), key, "{spelling}");
         }
         assert_ne!(path_key(Path::new(r"C:\src\b.rs")), key);
@@ -75,6 +96,9 @@ mod tests {
     #[test]
     fn elsewhere_a_path_is_itself() {
         assert_eq!(plain_path(Path::new("/src/A.rs")), Path::new("/src/A.rs"));
-        assert_ne!(path_key(Path::new("/src/A.rs")), path_key(Path::new("/src/a.rs")));
+        assert_ne!(
+            path_key(Path::new("/src/A.rs")),
+            path_key(Path::new("/src/a.rs"))
+        );
     }
 }
