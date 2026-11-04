@@ -94,6 +94,9 @@ jobs:
             # The PDF reader extension's companion: it ships with Fenix,
             # never in an extension's package.
             companion: fenix-pdfium.exe
+            # What the companion renders with: packaging/fetch-pdfium.sh.
+            pdfium: win
+            pdfium_library: pdfium.dll
           - name: Linux x64
             # The oldest supported runner, so the binary runs on any
             # distribution with glibc 2.35 or newer.
@@ -101,6 +104,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
             exe: fenix
             companion: fenix-pdfium
+            pdfium: linux
+            pdfium_library: libpdfium.so
     defaults:
       run:
         shell: bash
@@ -114,10 +119,14 @@ jobs:
           rustup override set stable
       - name: Build
         run: cargo build --release --locked -p fenix-gui -p fenix-pdfium --target ${{ matrix.target }}
+      - name: PDFium
+        run: packaging/fetch-pdfium.sh ${{ matrix.pdfium }} "target/${{ matrix.target }}/release"
       - name: Package
         run: |
           name="fenix-${TAG#v}-${{ matrix.target }}"
           mkdir "$name"
+          cp "target/${{ matrix.target }}/release/${{ matrix.pdfium_library }}" "$name/"
+          cp -r "target/${{ matrix.target }}/release/licenses" "$name/"
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "target/${{ matrix.target }}/release/${{ matrix.companion }}" README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE THIRD-PARTY.md "$name/"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a -tzip "$name.zip" "$name" > /dev/null

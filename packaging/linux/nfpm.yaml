@@ -27,6 +27,13 @@ contents:
     dst: /usr/bin/fenix-pdfium
     file_info:
       mode: 0755
+  # What it renders with, in Fenix's own folder, found from there.
+  - src: ${SRC}/libpdfium.so
+    dst: /usr/lib/fenix/libpdfium.so
+    file_info:
+      mode: 0755
+  - src: ${SRC}/licenses/pdfium/*
+    dst: /usr/share/doc/fenix/licenses/pdfium/
   - src: packaging/linux/fenix.desktop
     dst: /usr/share/applications/fenix.desktop
   - src: docs/brand/fenix-icon-256.png

@@ -74,7 +74,7 @@ jobs:
         run: ${{ matrix.install }}
       - name: Check it
         run: |
-          test -x /usr/bin/fenix && test -x /usr/bin/fenix-pdfium
+          test -x /usr/bin/fenix && test -x /usr/bin/fenix-pdfium && test -f /usr/lib/fenix/libpdfium.so
           test -f /usr/share/applications/fenix.desktop
           test -f /usr/share/icons/hicolor/256x256/apps/fenix.png
           if ldd /usr/bin/fenix | grep 'not found'; then exit 1; fi

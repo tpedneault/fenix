@@ -61,6 +61,8 @@ Name: "openwith"; Description: "Add ""Open with Fenix"" to Explorer's right-clic
 [Files]
 Source: "{#SourceDir}\fenix.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\fenix-pdfium.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\licenses\pdfium\*"; DestDir: "{app}\licenses\pdfium"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\CHANGELOG.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
