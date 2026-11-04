@@ -163,7 +163,7 @@ impl App {
             let first = ob.buffer.rope().line(0);
             if first.len_chars() >= 2 && first.char(first.len_chars() - 2) == '\r' { "CRLF" } else { "LF" }
         } else { "No EOL" };
-        format!("{language_label}   Indent {}   UTF-8   {ending}", self.vim.indent_width())
+        format!("{language_label}   Indent {}   {}   {ending}", self.vim.indent_width(), ob.buffer.encoding().label())
     }
 
     #[cfg(test)]

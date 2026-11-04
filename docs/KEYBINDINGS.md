@@ -39,6 +39,7 @@ the other way round after `\v`.
 | `SPC f R` | Rename the current file on disk |
 | `SPC f D` | Delete the current file (with confirmation) |
 | `SPC f y` | Copy the current file's path to the clipboard |
+| `SPC f E` | Read this file again as another encoding (`file.save_with_encoding` in `SPC :` saves it in one) |
 | `SPC q q` | Quit |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
 | `SPC t p` | Pick a theme by name (fuzzy picker) |

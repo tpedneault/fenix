@@ -1198,6 +1198,7 @@ dependencies = [
 name = "fenix-core"
 version = "1.0.1"
 dependencies = [
+ "encoding_rs",
  "fenix-storage",
  "ropey",
  "tempfile",

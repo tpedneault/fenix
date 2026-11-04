@@ -2215,6 +2215,9 @@ enum ActivePicker {
     /// filtered over `theme::ALL` -- confirming applies it via
     /// `apply_theme`.
     Theme(fenix_picker::PickerState<&'static Theme>),
+    /// `SPC f E` and `file.save_with_encoding`: which encoding, and whether
+    /// to read the file with it (or else save it in it).
+    Encoding(fenix_picker::PickerState<(fenix_core::TextEncoding, bool)>),
     Snippet(fenix_picker::PickerState<snippets::SnippetChoice>),
     /// `SPC c s`: fuzzy-find any known Tcl definition by its fully-
     /// qualified name (same `ctags`-sourced list `tcl_candidates`'s own
@@ -2298,6 +2301,7 @@ fn picker_push_char(picker: &mut ActivePicker, c: char) {
         ActivePicker::Places(s) => s.push_char(c),
         ActivePicker::Agents(s) => s.push_char(c),
         ActivePicker::DeleteProject(s) => s.push_char(c),
+        ActivePicker::Encoding(s) => s.push_char(c),
         ActivePicker::Theme(s) => s.push_char(c),
         ActivePicker::Commands(s) => s.push_char(c),
         ActivePicker::Bindings(s) => s.push_char(c),
@@ -2332,6 +2336,7 @@ fn picker_backspace(picker: &mut ActivePicker) {
         ActivePicker::Places(s) => s.backspace(),
         ActivePicker::Agents(s) => s.backspace(),
         ActivePicker::DeleteProject(s) => s.backspace(),
+        ActivePicker::Encoding(s) => s.backspace(),
         ActivePicker::Theme(s) => s.backspace(),
         ActivePicker::Commands(s) => s.backspace(),
         ActivePicker::Bindings(s) => s.backspace(),
@@ -2366,6 +2371,7 @@ fn picker_move_selection(picker: &mut ActivePicker, delta: isize) {
         ActivePicker::Places(s) => s.move_selection(delta),
         ActivePicker::Agents(s) => s.move_selection(delta),
         ActivePicker::DeleteProject(s) => s.move_selection(delta),
+        ActivePicker::Encoding(s) => s.move_selection(delta),
         ActivePicker::Theme(s) => s.move_selection(delta),
         ActivePicker::Commands(s) => s.move_selection(delta),
         ActivePicker::Bindings(s) => s.move_selection(delta),
@@ -2403,6 +2409,7 @@ fn picker_toggle_mark(picker: &mut ActivePicker) {
         ActivePicker::Places(s) => s.toggle_mark(),
         ActivePicker::Agents(s) => s.toggle_mark(),
         ActivePicker::DeleteProject(s) => s.toggle_mark(),
+        ActivePicker::Encoding(s) => s.toggle_mark(),
         ActivePicker::Theme(s) => s.toggle_mark(),
         ActivePicker::Commands(s) => s.toggle_mark(),
         ActivePicker::Bindings(s) => s.toggle_mark(),
@@ -2437,6 +2444,7 @@ fn picker_query(picker: &ActivePicker) -> &str {
         ActivePicker::Places(s) => s.query(),
         ActivePicker::Agents(s) => s.query(),
         ActivePicker::DeleteProject(s) => s.query(),
+        ActivePicker::Encoding(s) => s.query(),
         ActivePicker::Theme(s) => s.query(),
         ActivePicker::Commands(s) => s.query(),
         ActivePicker::Bindings(s) => s.query(),
@@ -2471,6 +2479,7 @@ fn picker_len(picker: &ActivePicker) -> usize {
         ActivePicker::Places(s) => s.len(),
         ActivePicker::Agents(s) => s.len(),
         ActivePicker::DeleteProject(s) => s.len(),
+        ActivePicker::Encoding(s) => s.len(),
         ActivePicker::Theme(s) => s.len(),
         ActivePicker::Commands(s) => s.len(),
         ActivePicker::Bindings(s) => s.len(),
@@ -2505,6 +2514,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
         ActivePicker::Places(s) => s.selected_row(),
         ActivePicker::Agents(s) => s.selected_row(),
         ActivePicker::DeleteProject(s) => s.selected_row(),
+        ActivePicker::Encoding(s) => s.selected_row(),
         ActivePicker::Theme(s) => s.selected_row(),
         ActivePicker::Commands(s) => s.selected_row(),
         ActivePicker::Bindings(s) => s.selected_row(),
@@ -2543,6 +2553,7 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
         ActivePicker::Places(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Agents(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::DeleteProject(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
+        ActivePicker::Encoding(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Theme(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Commands(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
         ActivePicker::Bindings(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -11878,9 +11889,9 @@ impl App {
             return;
         }
 
-        let Ok(on_disk) = std::fs::read_to_string(&path) else {
-            // Stat'd fine but unreadable (a permission change, or a
-            // binary file that isn't UTF-8). Not a change we can act on.
+        let Some(Ok((on_disk, encoding))) = self.buffers.get(id).map(|ob| ob.buffer.read_disk_text()) else {
+            // Stat'd fine but unreadable (a permission change). Not a
+            // change we can act on.
             return;
         };
         let Some(ob) = self.buffers.get(id) else { return };
@@ -11913,6 +11924,9 @@ impl App {
         }
 
         self.replace_buffer_from_disk(id, &on_disk);
+        if let Some(ob) = self.buffers.get_mut(id) {
+            ob.buffer.set_encoding(encoding);
+        }
         self.disk_state.insert(id, fingerprint);
         self.externally_changed.remove(&id);
         sweep.reloaded.push(name);
@@ -12211,9 +12225,10 @@ impl App {
             self.set_error("this buffer has no file to reload from".to_string());
             return;
         };
-        match std::fs::read_to_string(&path) {
-            Ok(on_disk) => {
+        match self.open().buffer.read_disk_text() {
+            Ok((on_disk, encoding)) => {
                 self.replace_buffer_from_disk(id, &on_disk);
+                self.open_mut().buffer.set_encoding(encoding);
                 self.note_disk_state(id);
                 self.set_message(format!("reloaded {}", path.display()));
             }
@@ -13530,6 +13545,16 @@ impl App {
                 self.main_view = MainView::Editor;
                 self.insert_picked_snippet(choice);
             }
+            Some(ActivePicker::Encoding(state)) => {
+                let Some((encoding, reopen)) = state.selected().map(|c| c.payload) else { return };
+                self.active_picker = None;
+                self.main_view = MainView::Editor;
+                if reopen {
+                    self.reopen_with_encoding(encoding);
+                } else {
+                    self.save_with_encoding(encoding);
+                }
+            }
             Some(ActivePicker::Theme(state)) => {
                 let Some(theme) = state.selected().map(|c| c.payload) else { return };
                 self.active_picker = None;
@@ -13680,16 +13705,15 @@ impl App {
 
     /// Where a jump lands (`gd`, a search result, a symbol, `Ctrl-O`):
     /// the pane's preview tab, which the next jump reuses.
-    /// Whether `path` isn't text: a NUL, or bytes that aren't UTF-8, in
-    /// its first 8 KiB.
+    /// Whether `path` isn't text, by its first bytes.
     pub(crate) fn looks_binary(path: &Path) -> bool {
         use std::io::Read;
         let Ok(f) = std::fs::File::open(path) else { return false };
         let mut head = Vec::new();
-        if f.take(8192).read_to_end(&mut head).is_err() {
+        if f.take(fenix_core::TEXT_SNIFF_BYTES as u64).read_to_end(&mut head).is_err() {
             return false;
         }
-        head.contains(&0) || std::str::from_utf8(&head).is_err_and(|e| e.error_len().is_some())
+        !fenix_core::looks_like_text(&head)
     }
 
     /// A file that isn't text, in the hex view (`ccsds.hex`) -- or not
@@ -14677,6 +14701,51 @@ impl App {
         let candidates =
             theme::all().iter().map(|t| fenix_picker::Candidate::new(t.name.to_string(), *t)).collect();
         self.enter_picker(ActivePicker::Theme(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// The encodings, to read the focused file with (`reopen`) or save it in.
+    pub(crate) fn picker_pick_encoding(&mut self, reopen: bool) {
+        if self.open().buffer.path().is_none() && reopen {
+            return self.set_error("this buffer has no file to read".to_string());
+        }
+        let candidates = fenix_core::TextEncoding::choices().into_iter().map(|e| fenix_picker::Candidate::new(e.label().to_string(), (e, reopen))).collect();
+        self.enter_picker(ActivePicker::Encoding(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// The focused file read again as `encoding`.
+    pub(crate) fn reopen_with_encoding(&mut self, encoding: fenix_core::TextEncoding) {
+        let id = self.focused_buffer_id();
+        let Some(ob) = self.buffers.get(id) else { return };
+        if ob.buffer.is_dirty() {
+            return self.set_error("save or discard your edits first: this reads the file again".to_string());
+        }
+        let Some(path) = ob.buffer.path().map(Path::to_path_buf) else { return };
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                self.replace_buffer_from_disk(id, &encoding.decode(&bytes));
+                if let Some(ob) = self.buffers.get_mut(id) {
+                    ob.buffer.set_encoding(encoding);
+                }
+                self.note_disk_state(id);
+                self.set_message(format!("reading {} as {}", path.display(), encoding.label()));
+            }
+            Err(err) => self.set_error(format!("couldn't read {}: {err}", path.display())),
+        }
+        self.wake_caret();
+    }
+
+    /// The focused file saved as `encoding`, which stays its encoding. One
+    /// that can't hold the text changes nothing, and says why.
+    pub(crate) fn save_with_encoding(&mut self, encoding: fenix_core::TextEncoding) {
+        let ob = self.open_mut();
+        let before = ob.buffer.encoding();
+        ob.buffer.set_encoding(encoding);
+        ob.buffer.mark_unsaved();
+        self.save();
+        let ob = self.open_mut();
+        if ob.buffer.is_dirty() {
+            ob.buffer.set_encoding(before);
+        }
     }
 
     /// `SPC t =`/`Ctrl-=`/`SPC t -`/`Ctrl--`/`SPC t 0`/`Ctrl-0`: grows,
@@ -16231,6 +16300,7 @@ impl App {
                 Some(picker @ ActivePicker::Agents(_)) => ("AGENTS", picker_len(picker)),
                 Some(picker @ ActivePicker::DeleteProject(_)) => ("DELPROJ", picker_len(picker)),
                 Some(picker @ ActivePicker::Theme(_)) => ("THEME", picker_len(picker)),
+                Some(picker @ ActivePicker::Encoding(_)) => ("ENCODING", picker_len(picker)),
                 Some(picker @ ActivePicker::Commands(_)) => (if self.palette_describes { "DESCRIBE" } else { "COMMAND" }, picker_len(picker)),
                 Some(picker @ ActivePicker::Bindings(_)) => ("KEYS", picker_len(picker)),
                 Some(picker @ ActivePicker::SettingChoice { .. }) => ("SETTING", picker_len(picker)),
@@ -28310,6 +28380,64 @@ configure_board stm32
             other => panic!("expected an open Theme picker, got is_some={}", other.is_some()),
         }
         assert_eq!(app.main_view, MainView::Picker);
+    }
+
+    #[test]
+    fn text_in_other_encodings_opens_edits_and_saves_as_it_came() {
+        let dir = TempDir::new("encodings");
+        let mut app = App::with_file(None);
+        let utf16: Vec<u8> = [0xFF, 0xFE].into_iter().chain("h\u{e9}llo\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+        let cases: [(&str, &[u8], &[u8], &str); 3] = [
+            ("utf16.txt", &utf16, &[0xFF, 0xFE, b'Z', 0, 0xE9, 0, b'l', 0, b'l', 0, b'o', 0, b'\n', 0], "UTF-16 LE"),
+            ("latin1.txt", b"h\xE9llo\n", b"Z\xE9llo\n", "windows-1252"),
+            ("bom.txt", b"\xEF\xBB\xBFhello\n", b"\xEF\xBB\xBFZello\n", "UTF-8 BOM"),
+        ];
+        for (name, before, after, label) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, before).unwrap();
+            assert!(!App::looks_binary(&path), "{name}");
+            app.open_file_from_picker(&path);
+            assert!(app.editor_status_details().contains(label), "{name}: {}", app.editor_status_details());
+            assert!(!app.open().buffer.text().starts_with('\u{FEFF}'), "{name}: a mark isn't text");
+            let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+            buffer.replace_range(cursor, 0, 1, "Z");
+            app.save();
+            assert_eq!(std::fs::read(&path).unwrap(), after, "{name}");
+            app.reload_focused_file();
+            assert!(app.open().buffer.text().starts_with('Z'), "{name}");
+            assert!(app.editor_status_details().contains(label), "{name}, reloaded");
+        }
+    }
+
+    #[test]
+    fn saving_with_an_encoding_that_cant_hold_the_text_changes_nothing() {
+        let dir = TempDir::new("encoding_refused");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "plain\n").unwrap();
+        let mut app = App::with_file(None);
+        app.open_file_from_picker(&path);
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        buffer.replace_range(cursor, 0, 5, "\u{1F600}");
+        let latin = fenix_core::TextEncoding::choices().into_iter().find(|e| e.label() == "windows-1252").unwrap();
+        app.save_with_encoding(latin);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "plain\n");
+        assert_eq!(app.open().buffer.encoding(), fenix_core::TextEncoding::Utf8);
+        assert!(app.open().buffer.is_dirty());
+    }
+
+    #[test]
+    fn a_file_can_be_read_again_as_another_encoding_and_saved_in_one() {
+        let dir = TempDir::new("encoding_chosen");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, b"\xCF\xF0\xE8\xE2\xE5\xF2\n").unwrap();
+        let mut app = App::with_file(None);
+        app.open_file_from_picker(&path);
+        let cyrillic = fenix_core::TextEncoding::choices().into_iter().find(|e| e.label() == "windows-1251").unwrap();
+        app.reopen_with_encoding(cyrillic);
+        assert_eq!(app.open().buffer.text(), "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}\n");
+        assert!(!app.open().buffer.is_dirty());
+        app.save_with_encoding(fenix_core::TextEncoding::Utf8);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\u{41f}\u{440}\u{438}\u{432}\u{435}\u{442}\n");
     }
 
     #[test]

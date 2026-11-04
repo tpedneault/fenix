@@ -1,6 +1,7 @@
-use std::fs::File;
-use std::io::{self, BufReader};
+use std::io;
 use std::path::{Path, PathBuf};
+
+use crate::encoding::{decode_text, TextEncoding};
 
 use ropey::{Rope, RopeSlice};
 
@@ -80,6 +81,8 @@ struct Pending {
 pub struct Buffer {
     rope: Rope,
     path: Option<PathBuf>,
+    /// How the file's bytes read, and how they're written back.
+    encoding: TextEncoding,
     dirty: bool,
     undo_stack: Vec<UndoStep>,
     redo_stack: Vec<UndoStep>,
@@ -113,6 +116,7 @@ impl Buffer {
         Self {
             rope: Rope::new(),
             path: None,
+            encoding: TextEncoding::default(),
             dirty: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -137,6 +141,7 @@ impl Buffer {
         Self {
             rope: Rope::from_str(text),
             path: None,
+            encoding: TextEncoding::default(),
             dirty: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -159,10 +164,11 @@ impl Buffer {
 
     pub fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
-        let rope = Rope::from_reader(BufReader::new(File::open(path)?))?;
+        let (text, encoding) = decode_text(&std::fs::read(path)?);
         Ok(Self {
-            rope,
+            rope: Rope::from_str(&text),
             path: Some(crate::plain_path(path)),
+            encoding,
             dirty: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -173,6 +179,45 @@ impl Buffer {
             changes_overflowed: false,
             anchor_edits: None,
             edit_count: 0,
+        })
+    }
+
+    /// The text as bytes to write, when that isn't plain UTF-8: refused,
+    /// before anything's touched, if the encoding can't hold all of it.
+    fn encoded(&self) -> io::Result<Option<Vec<u8>>> {
+        if self.encoding == TextEncoding::Utf8 {
+            return Ok(None);
+        }
+        let label = self.encoding.label();
+        let encoded = self.encoding.encode(&self.rope.to_string());
+        encoded.map(Some).map_err(|c| io::Error::new(io::ErrorKind::InvalidData, format!("{c:?} can't be written as {label}: the file is unchanged. Save with an encoding that has it (file.save_with_encoding)")))
+    }
+
+    fn write_text<W: io::Write>(&self, writer: W, encoded: Option<&[u8]>) -> io::Result<()> {
+        let mut writer = writer;
+        match encoded {
+            Some(bytes) => writer.write_all(bytes),
+            None => self.rope.write_to(writer),
+        }
+    }
+
+    /// How the file's bytes read.
+    pub fn encoding(&self) -> TextEncoding {
+        self.encoding
+    }
+
+    pub fn set_encoding(&mut self, encoding: TextEncoding) {
+        self.encoding = encoding;
+    }
+
+    /// The file as it is on disk now, and its encoding: one of the older
+    /// encodings can't be told from another, so one in use stays.
+    pub fn read_disk_text(&self) -> io::Result<(String, TextEncoding)> {
+        let path = self.path.as_deref().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "buffer has no path"))?;
+        let bytes = std::fs::read(path)?;
+        Ok(match self.encoding {
+            TextEncoding::Legacy(_) => (self.encoding.decode(&bytes), self.encoding),
+            _ => decode_text(&bytes),
         })
     }
 
@@ -187,7 +232,8 @@ impl Buffer {
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
         self.flush_pending();
         let path = path.as_ref();
-        fenix_storage::atomic_write(path, |writer| self.rope.write_to(writer))?;
+        let encoded = self.encoded()?;
+        fenix_storage::atomic_write(path, |writer| self.write_text(writer, encoded.as_deref()))?;
         self.path = Some(crate::plain_path(path));
         self.dirty = false;
         Ok(())
@@ -196,7 +242,8 @@ impl Buffer {
     /// Name an unnamed document without overwriting a concurrently created file.
     pub fn save_new(&mut self, path: &Path) -> io::Result<()> {
         self.flush_pending();
-        fenix_storage::atomic_write_new(path, |writer| self.rope.write_to(writer))?;
+        let encoded = self.encoded()?;
+        fenix_storage::atomic_write_new(path, |writer| self.write_text(writer, encoded.as_deref()))?;
         self.path = Some(crate::plain_path(path));
         self.dirty = false;
         Ok(())

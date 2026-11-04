@@ -85,6 +85,8 @@ impl CommandRegistry {
         registry.register("file.save", "Save the current file", cmd_save);
         registry.register("file.save_force", "Save, overwriting a file that changed on disk (:w!)", cmd_save_force);
         registry.register("file.reload", "Re-read the current file from disk, discarding unsaved edits (:e!)", cmd_file_reload);
+        registry.register("file.reopen_with_encoding", "Read the current file again as another encoding", |ctx| ctx.app.picker_pick_encoding(true));
+        registry.register("file.save_with_encoding", "Save the current file in another encoding, which it keeps", |ctx| ctx.app.picker_pick_encoding(false));
         registry.register("file.open_as_text", "Switch between an extension's page for a file and the file's text", |ctx| ctx.app.toggle_file_text());
         registry.register("edit.undo", "Undo the last edit", cmd_undo);
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
