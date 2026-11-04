@@ -2736,6 +2736,24 @@ fn skip_chars(s: &str, n: usize) -> (&str, usize) {
     }
 }
 
+/// The most of one line a row hands to text shaping, from where it's
+/// scrolled to: more than any pane shows. Shaping is the slow part of a
+/// frame, and a line of minified JSON can be megabytes long.
+const MAX_ROW_CHARS: usize = 4096;
+
+/// Past this many characters on screen (so some line is very long), the
+/// grammar is asked about what `MAX_ROW_CHARS` leaves of each row, not the
+/// whole of the lines.
+const MAX_HIGHLIGHT_CHARS: usize = 1 << 16;
+
+/// `s` up to its `n`th character.
+fn keep_chars(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((byte_idx, _)) => &s[..byte_idx],
+        None => s,
+    }
+}
+
 /// Splits `line_text` into colored sub-spans according to `highlights`
 /// (document-wide byte ranges, already resolved to colors, sorted and
 /// non-overlapping -- the contract `fenix_syntax::SyntaxState::
@@ -16749,10 +16767,12 @@ impl App {
                     let theme = self.theme;
                     let ranges = decorated_ranges(remapped, &layout.runs, |role| pages::role_color(theme, role));
                     let (sliced, skipped_bytes) = skip_chars(display, scroll_col);
-                    spans.extend(split_line_by_highlights(sliced, skipped_bytes, display.len(), &ranges, theme.fg));
+                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
+                    spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &ranges, theme.fg));
                 } else if line_text.contains('\t') {
                     let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
                     let (sliced, skipped_bytes) = skip_chars(&display, scroll_col);
+                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
                     if syntax_highlights.is_empty() {
                         spans.push((sliced.to_string(), theme.fg));
                     } else {
@@ -16771,15 +16791,16 @@ impl App {
                         // to `display` (0-based), matching `remapped`'s
                         // own coordinate space -- not the real buffer's
                         // byte offsets, unlike the plain branch below.
-                        spans.extend(split_line_by_highlights(sliced, skipped_bytes, display.len(), &remapped, theme.fg));
+                        spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &remapped, theme.fg));
                     }
                 } else {
                     let (sliced, skipped_bytes) = skip_chars(&line_text, scroll_col);
+                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
                     if syntax_highlights.is_empty() {
                         spans.push((sliced.to_string(), theme.fg));
                     } else {
                         let line_byte_start = ob.buffer.char_to_byte(start) + skipped_bytes;
-                        let line_byte_end = ob.buffer.char_to_byte(start + len);
+                        let line_byte_end = line_byte_start + sliced.len();
                         spans.extend(split_line_by_highlights(
                             sliced,
                             line_byte_start,
@@ -16813,6 +16834,20 @@ impl App {
         id: BufferId,
         render_base_line: usize,
         rows: usize,
+    ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        self.syntax_highlights_from_column(id, render_base_line, rows, 0)
+    }
+
+    /// `syntax_highlights_for_visible_range`, for rows scrolled sideways to
+    /// `scroll_col`: on a very long line, only what those rows will show
+    /// is highlighted. A line with tabs as well may lose its colors far
+    /// along it, `scroll_col` being counted in visual columns.
+    fn syntax_highlights_from_column(
+        &mut self,
+        id: BufferId,
+        render_base_line: usize,
+        rows: usize,
+        scroll_col: usize,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
@@ -16873,11 +16908,29 @@ impl App {
         let last_line = (render_base_line + rows).min(visual_lines) - 1;
         let start_char = ob.buffer.line_start_char(render_base_line);
         let end_char = ob.buffer.line_start_char(last_line) + ob.buffer.line_len(last_line);
-        let byte_range = ob.buffer.char_to_byte(start_char)..ob.buffer.char_to_byte(end_char);
+        let everything = ob.buffer.char_to_byte(start_char)..ob.buffer.char_to_byte(end_char);
+        let byte_ranges: Vec<std::ops::Range<usize>> = if end_char - start_char <= MAX_HIGHLIGHT_CHARS {
+            vec![everything]
+        } else {
+            (render_base_line..=last_line)
+                .map(|line| {
+                    let first = ob.buffer.line_start_char(line);
+                    let len = ob.buffer.line_len(line);
+                    let from = first + scroll_col.min(len);
+                    let to = first + (scroll_col + MAX_ROW_CHARS).min(len);
+                    ob.buffer.char_to_byte(from)..ob.buffer.char_to_byte(to)
+                })
+                .filter(|range| !range.is_empty())
+                .collect()
+        };
 
-        let highlights: Vec<(std::ops::Range<usize>, &str)> = syntax
-            .highlights_in_range(&source, byte_range)
+        let syntax = &*syntax;
+        let highlights: Vec<(std::ops::Range<usize>, &str)> = byte_ranges
             .into_iter()
+            .flat_map(|window| {
+                let spans = syntax.highlights_in_range(&source, window.clone());
+                spans.into_iter().map(move |(range, name)| (range.start.max(window.start)..range.end.min(window.end), name))
+            })
             .filter(|(range, name)| {
                 // Only the generic, unvalidated "function" capture (any
                 // bare word in command position) needs cross-referencing
@@ -18787,7 +18840,7 @@ impl App {
             }
             let syntax_start = shown_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
-            let syntax_highlights = self.syntax_highlights_for_visible_range(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1);
+            let syntax_highlights = self.syntax_highlights_from_column(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col);
             let tab_stops = self.tab_stops_for(buffer_id);
             // Char-column -> visual-column map for every visible row
             // whose line actually contains a `\t` -- absent (not an
@@ -22944,6 +22997,25 @@ index 0000000..1111111 100644
         let spans = app.content_spans(ob, 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(4), 0);
 
         assert_eq!(spans, vec![("a   ".to_string(), fg), ("bb".to_string(), color)]);
+    }
+
+    #[test]
+    fn a_very_long_line_highlights_and_draws_only_what_shows() {
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        let text = "fn a() {} ".repeat(300_000);
+        app.open_mut().syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, &text));
+        app.open_mut().buffer = fenix_core::Buffer::from_text(&text);
+        let id = app.focused_buffer_id();
+
+        for scroll_col in [0, 2_000_000] {
+            let highlights = app.syntax_highlights_from_column(id, 0, 1, scroll_col);
+            let spans = app.content_spans(app.open(), 0, 1, 0, None, &highlights, 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), scroll_col);
+            assert!(highlights.len() < 2 * MAX_ROW_CHARS, "{} spans at column {scroll_col}", highlights.len());
+            assert_eq!(spans.iter().map(|(text, _)| text.chars().count()).sum::<usize>(), MAX_ROW_CHARS);
+            let keyword = spans.iter().find(|(text, _)| text == "fn");
+            assert_eq!(keyword.map(|(_, color)| *color), Some(app.theme.syntax_color("keyword")), "colored where it's scrolled to");
+        }
     }
 
     #[test]
