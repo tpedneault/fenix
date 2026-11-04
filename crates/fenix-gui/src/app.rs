@@ -7670,7 +7670,7 @@ impl App {
     /// see `RecentFiles`'s own doc comment.
     fn record_recent_file(&mut self, path: &Path) {
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        self.recent_files.add(canonical);
+        self.recent_files.add(fenix_core::plain_path(&canonical));
         if let Err(err) = self.recent_files.save() {
             eprintln!("fenix: couldn't save recent files: {err}");
         }
@@ -31944,7 +31944,7 @@ configure_board stm32
 
         app.record_recent_file(&file);
 
-        let canonical = std::fs::canonicalize(&file).unwrap();
+        let canonical = fenix_core::plain_path(&std::fs::canonicalize(&file).unwrap());
         assert_eq!(app.recent_files.paths(), std::slice::from_ref(&canonical));
         let reloaded =
             fenix_project::RecentFiles::load_or_default(recent_dir.path().join("recent_files.txt"));

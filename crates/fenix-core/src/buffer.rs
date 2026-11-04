@@ -154,7 +154,7 @@ impl Buffer {
     /// there -- text read elsewhere, as it was checked (an extension's
     /// `open-file`), so it isn't read again.
     pub fn from_text_at(path: impl AsRef<Path>, text: &str) -> Self {
-        Self { path: Some(path.as_ref().to_path_buf()), ..Self::from_text(text) }
+        Self { path: Some(crate::plain_path(path.as_ref())), ..Self::from_text(text) }
     }
 
     pub fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -162,7 +162,7 @@ impl Buffer {
         let rope = Rope::from_reader(BufReader::new(File::open(path)?))?;
         Ok(Self {
             rope,
-            path: Some(path.to_path_buf()),
+            path: Some(crate::plain_path(path)),
             dirty: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -188,7 +188,7 @@ impl Buffer {
         self.flush_pending();
         let path = path.as_ref();
         fenix_storage::atomic_write(path, |writer| self.rope.write_to(writer))?;
-        self.path = Some(path.to_path_buf());
+        self.path = Some(crate::plain_path(path));
         self.dirty = false;
         Ok(())
     }
@@ -197,7 +197,7 @@ impl Buffer {
     pub fn save_new(&mut self, path: &Path) -> io::Result<()> {
         self.flush_pending();
         fenix_storage::atomic_write_new(path, |writer| self.rope.write_to(writer))?;
-        self.path = Some(path.to_path_buf());
+        self.path = Some(crate::plain_path(path));
         self.dirty = false;
         Ok(())
     }
