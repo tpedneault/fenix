@@ -5123,6 +5123,8 @@ pub struct App {
     /// popup once it has something to complete from.
     completion: Option<CompletionState>,
     completion_selected: bool,
+    /// The popup was asked for (`Ctrl-Space`), not offered while typing.
+    completion_asked: bool,
     completion_generation: u64,
     /// Whether the open popup offers local candidates (buffer words,
     /// keywords, snippets) beside the servers' -- not in a comment or a
@@ -5785,6 +5787,7 @@ impl App {
             event_proxy: None,
             completion: None,
             completion_selected: false,
+            completion_asked: false,
             completion_generation: 0,
             completion_local: true,
             completion_context: None,
@@ -7813,6 +7816,7 @@ impl App {
 
         self.completion_context = Some((self.focused_buffer_id(), self.focused_pane_id(), cursor.char_idx, self.open().buffer.edit_count()));
         self.completion_selected = false;
+        self.completion_asked = false;
         self.completion_local = !in_comment;
         let mut picker = fenix_picker::PickerState::new(candidates);
         picker.set_query(&prefix);
@@ -7854,7 +7858,12 @@ impl App {
         if self.completion.is_none() {
             return false;
         }
-        if self.completion.as_ref().is_some_and(|s| s.picker.is_empty()) { return false; } self.completion_selected = true;
+        if self.completion.as_ref().is_some_and(|s| s.picker.is_empty()) { return false; }
+        if keypress.code == KeyCode::Named(FenixNamedKey::Enter) && keypress.mods == Mods::default() && self.enter_is_a_new_line() {
+            self.completion = None;
+            return false;
+        }
+        self.completion_selected = true;
         match keypress.code {
             KeyCode::Named(FenixNamedKey::PageDown) => self.completion.as_mut().unwrap().picker.move_selection(COMPLETION_MAX_ROWS as isize),
             KeyCode::Named(FenixNamedKey::PageUp) => self.completion.as_mut().unwrap().picker.move_selection(-(COMPLETION_MAX_ROWS as isize)),
@@ -7894,6 +7903,16 @@ impl App {
         true
     }
 
+    /// With the popup up unasked and nothing chosen in it, Enter is the
+    /// end of the line: nothing has been typed to complete (it's up after
+    /// a server's trigger, `:` say), or the word is already whole.
+    fn enter_is_a_new_line(&self) -> bool {
+        if self.completion_selected || self.completion_asked { return false; }
+        let Some(state) = &self.completion else { return false };
+        let at = self.cursor().char_idx;
+        at == state.prefix_start || state.picker.selected().is_some_and(|c| c.payload.label == self.open().buffer.text_range(state.prefix_start, at))
+    }
+
     /// Force-opens the completion popup at the current (possibly empty)
     /// prefix, bypassing the normal ">=1 char" auto-trigger threshold --
     /// `Ctrl-Space`'s effect, the near-universal manual-trigger
@@ -7915,6 +7934,7 @@ impl App {
 
     fn force_open_completion(&mut self) {
         self.completion_selected = false;
+        self.completion_asked = true;
         self.completion_context = Some((self.focused_buffer_id(), self.focused_pane_id(), self.cursor().char_idx, self.open().buffer.edit_count()));
         let (prefix_start, prefix, candidates) = match self.completion_at_cursor() {
             Some(found) => found,
@@ -23592,6 +23612,33 @@ configure_board stm32
 
         assert!(!app.completion_key(KeyPress::char('e').with_ctrl()));
         assert!(!app.completion_key(KeyPress::char('y').with_ctrl()));
+    }
+
+    #[test]
+    fn enter_after_a_word_already_whole_is_a_new_line() {
+        let (_dir, mut app) = app_with_an_open_completion_popup("enter_whole");
+        let (start, label) = {
+            let state = app.completion.as_ref().unwrap();
+            (state.prefix_start, state.picker.selected().unwrap().payload.label.clone())
+        };
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        buffer.replace_range(cursor, start, cursor.char_idx, &label);
+        assert!(app.enter_is_a_new_line());
+        app.test_completion_key(KeyPress::named(FenixNamedKey::Enter));
+        assert!(app.completion.is_none());
+    }
+
+    #[test]
+    fn enter_with_nothing_typed_is_a_new_line_unless_the_popup_was_asked_for() {
+        let (_dir, mut app) = app_with_an_open_completion_popup("enter_empty");
+        let at = app.cursor().char_idx;
+        app.completion.as_mut().unwrap().prefix_start = at;
+        assert!(app.enter_is_a_new_line());
+        app.completion_asked = true;
+        assert!(!app.enter_is_a_new_line());
+        app.completion_asked = false;
+        app.completion_selected = true;
+        assert!(!app.enter_is_a_new_line(), "an item picked with the arrows is taken");
     }
 
     #[test]
