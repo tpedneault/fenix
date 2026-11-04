@@ -312,6 +312,9 @@ pub struct VimState {
     /// Set by `"`/`q`/`@`; consumed by the very next raw key -- see
     /// `PendingPrefixKey`'s own doc comment.
     pending_prefix: Option<PendingPrefixKey>,
+    /// `Ctrl-O` in Insert or Replace: the mode to go back to once one
+    /// Normal command has finished.
+    one_shot_from: Option<Mode>,
     /// Set once `"`'s register name arrives: `(lowercase name, append)`
     /// -- consulted (and cleared) by the very next register-touching
     /// command (`write_register`/`paste`), or cleared without effect by
@@ -494,6 +497,7 @@ impl VimState {
             register: Register { text: String::new(), linewise: false },
             registers: HashMap::new(),
             pending_prefix: None,
+            one_shot_from: None,
             active_register: None,
             recording_register: None,
             pending_macro_start: None,
@@ -798,6 +802,15 @@ impl VimState {
     /// (see its own doc comment), never still-`Some` by the time a
     /// caller could observe `is_idle` from outside.
     pub fn is_idle(&self) -> bool {
+        self.is_idle_in_normal() && self.one_shot_from.is_none()
+    }
+
+    /// In Insert or Replace, where text is going in.
+    pub fn is_inserting(&self) -> bool {
+        matches!(self.mode, Mode::Insert | Mode::Replace)
+    }
+
+    fn is_idle_in_normal(&self) -> bool {
         self.mode == Mode::Normal
             && self.count.is_none()
             && self.pending_op.is_none()
@@ -944,6 +957,7 @@ impl VimState {
         if self.mode == Mode::Visual {
             self.note_visual_lines(buffer, cursor);
         }
+        let one_shot_from = self.one_shot_from;
         let event = match self.mode {
             Mode::Insert => self.handle_insert_key(buffer, cursor, key, false),
             Mode::Replace => self.handle_insert_key(buffer, cursor, key, true),
@@ -953,6 +967,15 @@ impl VimState {
             Mode::Search => self.handle_search_key(buffer, cursor, key),
         };
         buffer.end_undo_group();
+        if let Some(from) = one_shot_from {
+            if matches!(self.mode, Mode::Insert | Mode::Replace) {
+                // The command went into Insert itself (`o`, `cw`).
+                self.one_shot_from = None;
+            } else if self.is_idle_in_normal() {
+                self.one_shot_from = None;
+                self.mode = from;
+            }
+        }
         // All drained unconditionally (not just whichever's read below)
         // so none of them ever linger stale into the next keystroke,
         // even though nothing today sets more than one in the same call.
@@ -1006,6 +1029,11 @@ impl VimState {
         key: KeyPress,
         replace: bool,
     ) -> VimEvent {
+        if key == KeyPress::char('o').with_ctrl() {
+            self.one_shot_from = Some(self.mode);
+            self.mode = Mode::Normal;
+            return VimEvent::None;
+        }
         match key.code {
             KeyCode::Named(NamedKey::Escape) => {
                 self.mode = Mode::Normal;
@@ -3006,6 +3034,50 @@ mod tests {
 
     fn named(s: &mut VimState, b: &mut Buffer, c: &mut Cursor, n: NamedKey) -> VimEvent {
         s.handle_key(b, c, KeyPress::named(n))
+    }
+
+    #[test]
+    fn ctrl_o_in_insert_runs_one_normal_command_and_comes_back() {
+        let mut b = buf("alpha beta");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "A");
+        keys(&mut vim, &mut b, &mut c, "!");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('o').with_ctrl());
+        assert_eq!(vim.mode(), Mode::Normal);
+        keys(&mut vim, &mut b, &mut c, "0");
+        assert_eq!(vim.mode(), Mode::Insert, "one command, then back");
+        keys(&mut vim, &mut b, &mut c, "X");
+        assert_eq!(b.text(), "Xalpha beta!");
+    }
+
+    #[test]
+    fn ctrl_o_waits_for_a_command_of_several_keys() {
+        let mut b = buf("one two three");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('o').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "d");
+        assert_eq!(vim.mode(), Mode::Normal, "the operator wants its motion");
+        keys(&mut vim, &mut b, &mut c, "w");
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(b.text(), "two three");
+    }
+
+    #[test]
+    fn ctrl_o_stays_in_insert_after_a_command_that_inserts() {
+        let mut b = buf("a\nb");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "i");
+        vim.handle_key(&mut b, &mut c, KeyPress::char('o').with_ctrl());
+        keys(&mut vim, &mut b, &mut c, "o");
+        keys(&mut vim, &mut b, &mut c, "x");
+        assert_eq!(vim.mode(), Mode::Insert);
+        assert_eq!(b.text(), "a\nx\nb");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+        assert_eq!(vim.mode(), Mode::Normal, "nothing left waiting");
     }
 
     #[test]
