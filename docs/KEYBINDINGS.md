@@ -7,6 +7,10 @@ popup shows what keys continue it.
 `Ctrl+Alt+Q` does everything `Esc` does, for when Escape doesn't reach
 Fenix (some remote-desktop and UI-automation tools don't send it).
 
+A `:` command that doesn't exist says so. `:s` and `:g` take Vim's patterns:
+`\(`, `\|` and `\+` are operators and bare `(`, `|` and `+` are literal, or
+the other way round after `\v`.
+
 ## Leader (`SPC ...`)
 
 | Keys | Action |
@@ -14,6 +18,14 @@ Fenix (some remote-desktop and UI-automation tools don't send it).
 | `SPC SPC` | Find file in project (same as `SPC p f`) |
 | `SPC f s` | Save |
 | `:w!` / `:e!` | Save over a file that changed on disk / re-read it, discarding your edits |
+| `:N`, `:$`, `:.+2` | Go to a line |
+| `:[range]d` / `y` / `j` / `>` / `<` | Delete, yank, join or shift lines. A range is `2`, `2,5`, `.,$-1`, `%` or `'<,'>` |
+| `:[range]m{line}` / `:[range]t{line}` | Move or copy lines to after a line (`0` is the top) |
+| `:[range]norm {keys}` | Run Normal keys on each line |
+| `:[range]sort[!] [i] [n] [u]` | Sort lines: reversed, ignoring case, by number, dropping repeats |
+| `:e [file]` / `:sp [file]` / `:vs [file]` | Open a file, here or in a new pane. `:e` alone re-reads this one |
+| `:bd` / `:bn` / `:bp` / `:only` | Close the buffer, next and previous buffer, close the other panes |
+| `&` / `g&` | The last `:s` again: on this line, without its flags / on every line, with them |
 | `:lsp-restart` / `:lsp-restart NAME` | Restart this project's language servers / just the one called NAME |
 | `SPC f v` | Recover unsaved work a previous session left behind |
 | `SPC f j` | Open the file explorer at the current file's directory |

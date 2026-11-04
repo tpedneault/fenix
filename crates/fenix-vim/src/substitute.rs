@@ -66,26 +66,47 @@ pub fn run_ex_command(
         }
     }
 
+    // A delimiter follows `:g` and `:v`; a letter means some other
+    // command (`:garbage`, `:vs`), which isn't this one.
+    let global_rest = |prefix: &str| cmd.strip_prefix(prefix).filter(|rest| rest.chars().next().is_some_and(|c| !c.is_alphanumeric()));
     // `:g!`/`:v` before bare `:g` -- otherwise the `!`/`v` would be
     // swallowed as part of the pattern delimiter by the plain `g`
     // branch. Unlike `:s`, `:g` defaults to the *whole buffer* with no
     // range prefix (matching real Vim); range-restricted `:N,Mg/.../`
     // isn't supported here, same scope-limited posture `parse_range`'s
     // own doc comment already states for `:s`.
-    if let Some(rest) = cmd.strip_prefix("g!").or_else(|| cmd.strip_prefix('v')) {
+    if let Some(rest) = global_rest("g!").or_else(|| global_rest("v")) {
         return run_global(buffer, cursor, rest, true, last_search);
     }
-    if let Some(rest) = cmd.strip_prefix('g') {
+    if let Some(rest) = global_rest("g") {
         return run_global(buffer, cursor, rest, false, last_search);
     }
 
-    let (range, rest) = parse_range(cmd, motion::last_line(buffer));
-    if let Some(spec) = rest.strip_prefix('s') {
-        let (cur_line, _) = buffer.line_col(cursor);
-        let (start_line, end_line) = range.unwrap_or((cur_line, cur_line));
+    let last_line = motion::last_line(buffer);
+    let (cur_line, _) = buffer.line_col(cursor);
+    let (range, rest) = crate::ex::parse_range(cmd, cur_line, last_line);
+    if let Some(spec) = rest.strip_prefix('s').filter(|spec| spec.chars().next().is_some_and(|c| !c.is_alphanumeric() && !c.is_whitespace())) {
+        let Some((start_line, end_line)) = lines_in_buffer(range.unwrap_or((cur_line as isize, cur_line as isize)), last_line) else {
+            return VimEvent::Error("Invalid range".to_string());
+        };
         return run_substitute(buffer, cursor, start_line, end_line, spec, last_search);
     }
-    VimEvent::None
+    VimEvent::Error(format!("Not an editor command: {cmd}"))
+}
+
+/// A range that was read, as lines of the buffer: `None` past its end.
+pub(crate) fn lines_in_buffer((first, last): (isize, isize), last_line: usize) -> Option<(usize, usize)> {
+    (first >= 0 && last <= last_line as isize).then_some((first as usize, last as usize))
+}
+
+/// The `/pattern/replacement/` of a `:s`, for `&` to run again: `None` for
+/// any other command.
+pub(crate) fn substitute_spec(cmd: &str, here: usize, last_line: usize) -> Option<String> {
+    let (_, rest) = crate::ex::parse_range(cmd.trim(), here, last_line);
+    let spec = rest.strip_prefix('s')?;
+    let delim = spec.chars().next().filter(|c| !c.is_alphanumeric() && !c.is_whitespace())?;
+    let parts: Vec<&str> = spec[delim.len_utf8()..].splitn(3, delim).collect();
+    Some(format!("{delim}{}{delim}{}{delim}", parts.first()?, parts.get(1).copied().unwrap_or("")))
 }
 
 /// `:g/pattern/subcommand` (`invert` -- `:g!`/`:v` -- keeps the
@@ -115,7 +136,7 @@ fn run_global(buffer: &mut Buffer, cursor: &mut Cursor, rest: &str, invert: bool
     }
     let subcommand = parts.get(1).copied().unwrap_or("").trim();
 
-    let re = match Regex::new(pattern) {
+    let re = match Regex::new(&crate::ex::pattern_to_regex(pattern)) {
         Ok(re) => re,
         Err(err) => return VimEvent::Error(format!(":g pattern error: {err}")),
     };
@@ -247,33 +268,6 @@ fn apply_iskeyword_token(token: &str, extra: &mut Vec<char>) -> Option<bool> {
     Some(*extra != before)
 }
 
-/// Splits a leading Ex range off `cmd`: `%` (whole buffer, `(0,
-/// last_line)`) or a plain `N,M` two-number range (1-indexed in the
-/// command text, converted to 0-indexed line numbers here) -- Vim
-/// supports much more (marks, `'<,'>`, relative offsets like `.+1`);
-/// this covers the common cases without needing any of that (see the
-/// plan's own Scope/Out for why). `None` (no range recognized) leaves
-/// `cmd` untouched for the caller to default to "current line only".
-fn parse_range(cmd: &str, last_line: usize) -> (Option<(usize, usize)>, &str) {
-    if let Some(rest) = cmd.strip_prefix('%') {
-        return (Some((0, last_line)), rest);
-    }
-    let digits_end = |s: &str| s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    let end1 = digits_end(cmd);
-    if end1 == 0 {
-        return (None, cmd);
-    }
-    let Ok(n1) = cmd[..end1].parse::<usize>() else { return (None, cmd) };
-    let after1 = &cmd[end1..];
-    let Some(after_comma) = after1.strip_prefix(',') else { return (None, cmd) };
-    let end2 = digits_end(after_comma);
-    if end2 == 0 {
-        return (None, cmd);
-    }
-    let Ok(n2) = after_comma[..end2].parse::<usize>() else { return (None, cmd) };
-    (Some((n1.saturating_sub(1).min(last_line), n2.saturating_sub(1).min(last_line))), &after_comma[end2..])
-}
-
 /// `spec` is everything after the `s` in `s/pat/repl/flags` -- the first
 /// character is the delimiter (Vim convention: any punctuation works,
 /// not hardcoded to `/`, so a pattern that itself contains `/` can use
@@ -298,10 +292,11 @@ fn run_substitute(
     let replacement = parts.get(1).copied().unwrap_or("");
     let flags = parts.get(2).copied().unwrap_or("");
 
+    let pattern = crate::ex::pattern_to_regex(pattern);
     let spec = SubstituteSpec {
         start_line,
         end_line,
-        pattern,
+        pattern: &pattern,
         replacement,
         global: flags.contains('g'),
         ignore_case: flags.contains('i'),
@@ -476,7 +471,9 @@ impl SubstitutePlan {
 /// `last_search`'s, as `:s//new/` is in Vim.
 pub fn parse_substitute(cmd: &str, buffer: &Buffer, cursor: &Cursor, last_search: Option<&str>) -> Option<SubstitutePlan> {
     let cmd = cmd.trim();
-    let (range, rest) = parse_range(cmd, motion::last_line(buffer));
+    let (cur_line, _) = buffer.line_col(cursor);
+    let last = motion::last_line(buffer);
+    let (range, rest) = crate::ex::parse_range(cmd, cur_line, last);
     let spec = rest.strip_prefix('s')?;
     // `:set`, `:sort` and friends aren't substitutes.
     let delim = spec.chars().next().filter(|c| !c.is_alphanumeric() && !c.is_whitespace())?;
@@ -487,13 +484,11 @@ pub fn parse_substitute(cmd: &str, buffer: &Buffer, cursor: &Cursor, last_search
         return None;
     }
     let flags = parts.get(2).copied().unwrap_or("");
-    let (cur_line, _) = buffer.line_col(cursor);
-    let (a, b) = range.unwrap_or((cur_line, cur_line));
-    let last = motion::last_line(buffer);
+    let (a, b) = lines_in_buffer(range.unwrap_or((cur_line as isize, cur_line as isize)), last)?;
     Some(SubstitutePlan {
-        start_line: a.min(b).min(last),
-        end_line: a.max(b).min(last),
-        pattern: pattern.to_string(),
+        start_line: a,
+        end_line: b,
+        pattern: crate::ex::pattern_to_regex(pattern),
         replacement: parts.get(1).copied().unwrap_or("").to_string(),
         global: flags.contains('g'),
         ignore_case: flags.contains('i'),
@@ -662,12 +657,9 @@ mod tests {
 
     #[test]
     fn substitute_supports_ampersand_and_backreferences() {
-        // Pattern side uses the regex crate's own syntax (Scope's own
-        // disclosed cut -- Vim's `\(...\)` capture-group escaping isn't
-        // translated, only the *replacement* side is); `(...)` is
-        // already a capture group here, no backslash needed.
+        // Vim's own escaping, which `ex::pattern_to_regex` translates.
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command(r"s/(\w+) (\w+)/\2 \1: [&]/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
+        run_ex_command(r"s/\(\w\+\) \(\w\+\)/\2 \1: [&]/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
         assert_eq!(b.text(), "world hello: [hello world]");
     }
 
@@ -759,21 +751,21 @@ mod tests {
     #[test]
     fn g_with_an_invalid_pattern_raises_an_error_event() {
         let (mut b, mut c) = cmd("a\nb\n");
-        let event = run_ex_command("g/(unclosed/d", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
+        let event = run_ex_command(r"g/\(unclosed/d", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
         assert!(matches!(event, VimEvent::Error(_)), "expected an Error event, got {event:?}");
     }
 
     #[test]
     fn substitute_with_an_invalid_pattern_does_not_panic_or_change_the_buffer() {
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command("s/(unclosed/x/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
+        run_ex_command(r"s/\(unclosed/x/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
         assert_eq!(b.text(), "hello world");
     }
 
     #[test]
     fn substitute_with_an_invalid_pattern_raises_an_error_event() {
         let (mut b, mut c) = cmd("hello world");
-        let event = run_ex_command("s/(unclosed/x/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
+        let event = run_ex_command(r"s/\(unclosed/x/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
         assert!(matches!(event, VimEvent::Error(_)), "expected an Error event, got {event:?}");
     }
 

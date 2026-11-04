@@ -21,6 +21,11 @@ use crate::textobject;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VimEvent {
     None,
+    /// `:e path`, `:sp path`, `:vs path`: `split` opens a pane for it first.
+    RequestOpenFile { path: String, split: Option<SplitWay> },
+    /// One of Fenix's own commands, for a `:` command that's the same
+    /// thing: `:bd`, `:sp` with no file.
+    RunCommand(&'static str),
     RequestUndoRefactor,
     /// `:lsp-restart [NAME]` -- every language server of the project, or
     /// the one called NAME (empty for all).
@@ -186,6 +191,13 @@ pub enum TabMove {
 }
 
 /// What a `]`/`[` pair jumps between -- see `VimEvent::BracketJump`.
+/// Which way `:sp` and `:vs` divide the pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitWay {
+    Horizontal,
+    Vertical,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BracketTarget {
     /// `]t`/`[t`: a TODO/FIXME/NOTE-style comment keyword.
@@ -309,6 +321,8 @@ pub struct VimState {
     /// storage": `@a` just interprets whatever text register `a` holds,
     /// whether it got there by recording, yanking, or hand-editing.
     registers: HashMap<char, Register>,
+    /// The last `:s`, whole: `/pattern/replacement/flags`, for `&` and `g&`.
+    last_substitute: Option<String>,
     /// Set by `"`/`q`/`@`; consumed by the very next raw key -- see
     /// `PendingPrefixKey`'s own doc comment.
     pending_prefix: Option<PendingPrefixKey>,
@@ -493,6 +507,7 @@ impl VimState {
             mode: Mode::Normal,
             register: Register { text: String::new(), linewise: false },
             registers: HashMap::new(),
+            last_substitute: None,
             pending_prefix: None,
             active_register: None,
             recording_register: None,
@@ -1231,6 +1246,165 @@ impl VimState {
         }
     }
 
+    /// `:N`: the line, clamped as in Vim, and on the jumplist.
+    fn go_to_line(&mut self, buffer: &Buffer, cursor: &mut Cursor, line: isize, last_line: usize) -> VimEvent {
+        self.pending_jump = Some(cursor.char_idx);
+        cursor.char_idx = motion::line_first_non_blank(buffer, line.clamp(0, last_line as isize) as usize);
+        cursor.sticky_col = buffer.line_col(cursor).1;
+        VimEvent::None
+    }
+
+    /// One line, whole, with its line ending, or `eol` where it has none.
+    fn line_with_ending(buffer: &Buffer, line: usize, eol: &str) -> String {
+        if line + 1 < buffer.line_count() {
+            buffer.text_range(buffer.line_start_char(line), buffer.line_start_char(line + 1))
+        } else {
+            let start = buffer.line_start_char(line);
+            format!("{}{eol}", buffer.text_range(start, start + buffer.line_len(line)))
+        }
+    }
+
+    /// The buffer's line ending, by its first line.
+    fn line_ending(buffer: &Buffer) -> &'static str {
+        if buffer.line_count() > 1 && buffer.text_range(0, buffer.line_start_char(1)).ends_with("\r\n") { "\r\n" } else { "\n" }
+    }
+
+    /// Replaces the whole lines `first..=last` with `lines`, as one edit.
+    /// A last line of the buffer that had no line ending still hasn't.
+    fn replace_lines(buffer: &mut Buffer, cursor: &mut Cursor, first: usize, last: usize, lines: &[String]) {
+        let start = buffer.line_start_char(first);
+        let keeps_ending = last + 1 < buffer.line_count();
+        let end = if keeps_ending { buffer.line_start_char(last + 1) } else { buffer.line_start_char(last) + buffer.line_len(last) };
+        let mut text = lines.concat();
+        if !keeps_ending {
+            text.truncate(text.trim_end_matches(['\r', '\n']).len());
+        }
+        buffer.replace_range(cursor, start, end, &text);
+    }
+
+    fn cursor_to_line(buffer: &Buffer, cursor: &mut Cursor, line: usize) {
+        cursor.char_idx = motion::line_first_non_blank(buffer, line.min(motion::last_line(buffer)));
+        cursor.sticky_col = buffer.line_col(cursor).1;
+    }
+
+    fn run_line_command(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, command: crate::ex::ExCommand<'_>, lines: (isize, isize), last_line: usize) -> VimEvent {
+        use crate::ex::ExCommand;
+        match command {
+            ExCommand::Edit { path: "", force: false } if buffer.is_dirty() => return VimEvent::Error("No write since last change (add ! to override)".to_string()),
+            ExCommand::Edit { path: "", .. } => return VimEvent::RequestReloadFile,
+            ExCommand::Edit { path, .. } => return VimEvent::RequestOpenFile { path: path.to_string(), split: None },
+            ExCommand::Split { vertical, path } => {
+                let way = if vertical { SplitWay::Vertical } else { SplitWay::Horizontal };
+                if path.is_empty() {
+                    return VimEvent::RunCommand(if vertical { "window.split_vertical" } else { "window.split_horizontal" });
+                }
+                return VimEvent::RequestOpenFile { path: path.to_string(), split: Some(way) };
+            }
+            ExCommand::Run(id) => return VimEvent::RunCommand(id),
+            _ => {}
+        }
+        let Some((first, last)) = crate::substitute::lines_in_buffer(lines, last_line) else {
+            return VimEvent::Error("Invalid range".to_string());
+        };
+        match command {
+            ExCommand::Delete | ExCommand::Yank => {
+                let op = if command == ExCommand::Delete { Operator::Delete } else { Operator::Yank };
+                let here = *cursor;
+                self.finish_operator(buffer, cursor, op, linewise_range(buffer, first, last), true);
+                if op == Operator::Yank {
+                    *cursor = here;
+                }
+            }
+            ExCommand::Move(to) | ExCommand::Copy(to) => {
+                let Some((to, _)) = crate::substitute::lines_in_buffer((to, to), last_line).or((to == -1).then_some((usize::MAX, 0))) else {
+                    return VimEvent::Error("Invalid range".to_string());
+                };
+                // Lines count from after `to`; usize::MAX is before the first.
+                let after = to.wrapping_add(1);
+                let eol = Self::line_ending(buffer);
+                let moved: Vec<String> = (first..=last).map(|l| Self::line_with_ending(buffer, l, eol)).collect();
+                if matches!(command, ExCommand::Copy(_)) {
+                    let keeps = (after..=last_line).map(|l| Self::line_with_ending(buffer, l, eol));
+                    let lines: Vec<String> = moved.iter().cloned().chain(keeps).collect();
+                    if after > last_line {
+                        let mut end = Cursor { char_idx: buffer.line_start_char(last_line) + buffer.line_len(last_line), sticky_col: 0 };
+                        buffer.insert_str(&mut end, &format!("{eol}{}", moved.concat().trim_end_matches(['\r', '\n'])));
+                    } else {
+                        Self::replace_lines(buffer, cursor, after, last_line, &lines);
+                    }
+                    Self::cursor_to_line(buffer, cursor, after + moved.len() - 1);
+                } else {
+                    if after > first && after <= last + 1 {
+                        return VimEvent::Error("Move lines into themselves".to_string());
+                    }
+                    let (region_first, region_last) = (first.min(after), last.max(after.saturating_sub(1)));
+                    let mut region: Vec<String> = (region_first..=region_last).map(|l| Self::line_with_ending(buffer, l, eol)).collect();
+                    let count = moved.len();
+                    let landed = if after <= first {
+                        region.rotate_right(count);
+                        after + count - 1
+                    } else {
+                        region.rotate_left(count);
+                        after - 1
+                    };
+                    Self::replace_lines(buffer, cursor, region_first, region_last, &region);
+                    Self::cursor_to_line(buffer, cursor, landed);
+                }
+            }
+            ExCommand::Shift { right, by } => {
+                for line in first..=last {
+                    for _ in 0..by {
+                        if right {
+                            indent::indent_line(buffer, cursor, line, self.indent_width);
+                        } else {
+                            indent::dedent_line(buffer, cursor, line, self.indent_width);
+                        }
+                    }
+                }
+                Self::cursor_to_line(buffer, cursor, last);
+            }
+            ExCommand::Join => {
+                cursor.char_idx = buffer.line_start_char(first);
+                for _ in 0..(last - first).max(1) {
+                    self.join_lines(buffer, cursor);
+                }
+            }
+            ExCommand::Normal(keys) => {
+                // Bottom up, so what one line's keys add or remove doesn't
+                // move the lines still to do.
+                for line in (first..=last).rev() {
+                    cursor.char_idx = buffer.line_start_char(line);
+                    cursor.sticky_col = 0;
+                    for c in keys.chars() {
+                        self.handle_key(buffer, cursor, KeyPress::char(c));
+                    }
+                    self.handle_key(buffer, cursor, KeyPress::named(NamedKey::Escape));
+                }
+            }
+            ExCommand::Sort(by) => {
+                let eol = Self::line_ending(buffer);
+                let mut sorted: Vec<String> = (first..=last).map(|l| Self::line_with_ending(buffer, l, eol)).collect();
+                let key = |line: &String| if by.ignore_case { line.to_lowercase() } else { line.clone() };
+                let number = |line: &String| line.split(|c: char| !c.is_ascii_digit() && c != '-').find_map(|word| word.parse::<i64>().ok()).unwrap_or(i64::MIN);
+                if by.numeric {
+                    sorted.sort_by_key(number);
+                } else {
+                    sorted.sort_by_key(key);
+                }
+                if by.reverse {
+                    sorted.reverse();
+                }
+                if by.unique {
+                    sorted.dedup_by_key(|line| key(line));
+                }
+                Self::replace_lines(buffer, cursor, first, last, &sorted);
+                Self::cursor_to_line(buffer, cursor, first);
+            }
+            _ => {}
+        }
+        VimEvent::None
+    }
+
     fn handle_command_key(&mut self, buffer: &mut Buffer, cursor: &mut Cursor, key: KeyPress) -> VimEvent {
         match key.code {
             KeyCode::Named(NamedKey::Escape) => {
@@ -1244,6 +1418,23 @@ impl VimState {
                 if matches!(cmd.trim(), "noh" | "nohl" | "nohlsearch") {
                     self.hlsearch_active = false;
                     return VimEvent::None;
+                }
+                let (here, last_line) = (buffer.line_col(cursor).0, motion::last_line(buffer));
+                let (range, rest) = crate::ex::parse_range(cmd.trim(), here, last_line);
+                if rest.trim().is_empty() && range.is_some() {
+                    return self.go_to_line(buffer, cursor, range.map_or(0, |(_, end)| end), last_line);
+                }
+                match crate::ex::parse_command(rest, here, last_line) {
+                    Ok(Some(command)) => {
+                        let lines = range.unwrap_or((here as isize, here as isize));
+                        return self.run_line_command(buffer, cursor, command, lines, last_line);
+                    }
+                    Ok(None) => {}
+                    Err(why) => return VimEvent::Error(why),
+                }
+                if let Some(spec) = crate::substitute::substitute_spec(&cmd, here, last_line) {
+                    let flags = cmd.trim().rsplit(spec.chars().next().unwrap_or('/')).next().unwrap_or("");
+                    self.last_substitute = Some(format!("{spec}{flags}"));
                 }
                 let last_search = self.last_search.as_ref().map(|(pattern, _)| pattern.as_str());
                 // `c`: one match at a time, each asked about.
@@ -1762,6 +1953,17 @@ impl VimState {
             // count-override semantics (`3.` isn't "repeat with count 3
             // instead" the way real Vim's is) -- out of scope for now.
             VimAction::RepeatLastChange => self.pending_repeat_last_change = true,
+            VimAction::RepeatSubstitute { whole_buffer } => match self.last_substitute.clone() {
+                Some(spec) => {
+                    let spec = if whole_buffer { spec } else { crate::substitute::substitute_spec(&format!("s{spec}"), 0, 0).unwrap_or(spec) };
+                    let command = format!("{}s{spec}", if whole_buffer { "%" } else { "" });
+                    let last_search = self.last_search.as_ref().map(|(pattern, _)| pattern.as_str());
+                    if let VimEvent::Error(why) = crate::substitute::run_ex_command(&command, buffer, cursor, &mut self.indent_width, &mut self.iskeyword_extra, last_search) {
+                        self.pending_error = Some(why);
+                    }
+                }
+                None => self.pending_error = Some("No previous substitute".to_string()),
+            },
             VimAction::ToggleCommentPrompt => {
                 self.pending_comment = true;
                 self.pending_comment_count = count;
@@ -3055,6 +3257,134 @@ mod tests {
 
     /// A buffer, cursor at `at`, with the unnamed register (what the host
     /// fills from the clipboard) holding `register`.
+    /// `:` commands on `text`, each followed by Enter; what's left, and
+    /// the cursor's line and the last event.
+    fn ex(text: &str, commands: &[&str]) -> (String, usize, VimEvent) {
+        let mut b = buf(text);
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let mut event = VimEvent::None;
+        for command in commands {
+            for key in format!(":{command}").chars() {
+                vim.handle_key(&mut b, &mut c, KeyPress::char(key));
+            }
+            event = vim.handle_key(&mut b, &mut c, KeyPress::named(NamedKey::Enter));
+        }
+        let line = b.line_col(&c).0;
+        (b.text(), line, event)
+    }
+
+    const SIX: &str = "one\ntwo\nthree\nfour\nfive\nsix\n";
+
+    #[test]
+    fn a_line_number_goes_there() {
+        assert_eq!(ex(SIX, &["3"]).1, 2);
+        assert_eq!(ex(SIX, &["$"]).1, 5);
+        assert_eq!(ex(SIX, &["99"]).1, 5, "past the end, the last line");
+        assert_eq!(ex(SIX, &["3", "+1"]).1, 3);
+    }
+
+    #[test]
+    fn delete_and_yank_take_a_range() {
+        assert_eq!(ex(SIX, &["2d"]).0, "one\nthree\nfour\nfive\nsix\n");
+        assert_eq!(ex(SIX, &["2,3d"]).0, "one\nfour\nfive\nsix\n");
+        assert_eq!(ex(SIX, &[".+1d"]).0, "one\nthree\nfour\nfive\nsix\n");
+        assert_eq!(ex(SIX, &["%d"]).0, "");
+        assert_eq!(ex(SIX, &["99d"]).2, VimEvent::Error("Invalid range".to_string()));
+        let mut b = buf("one\ntwo\n");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        for key in ":2y".chars() {
+            vim.handle_key(&mut b, &mut c, KeyPress::char(key));
+        }
+        vim.handle_key(&mut b, &mut c, KeyPress::named(NamedKey::Enter));
+        assert_eq!(c.char_idx, 0, ":y leaves the cursor");
+        keys(&mut vim, &mut b, &mut c, "p");
+        assert_eq!(b.text(), "one\ntwo\ntwo\n");
+    }
+
+    #[test]
+    fn move_and_copy_put_lines_where_they_say() {
+        assert_eq!(ex(SIX, &["1m3"]).0, "two\nthree\none\nfour\nfive\nsix\n");
+        assert_eq!(ex(SIX, &["3m0"]).0, "three\none\ntwo\nfour\nfive\nsix\n");
+        assert_eq!(ex(SIX, &["5,6m1"]).0, "one\nfive\nsix\ntwo\nthree\nfour\n");
+        assert_eq!(ex(SIX, &["1t$"]).0, "one\ntwo\nthree\nfour\nfive\nsix\none\n");
+        assert_eq!(ex(SIX, &["1t0"]).0, "one\none\ntwo\nthree\nfour\nfive\nsix\n");
+        assert_eq!(ex("a\nb", &["1t$"]).0, "a\nb\na", "no line ending to begin with, none after");
+        assert_eq!(ex(SIX, &["2m2"]).2, VimEvent::Error("Move lines into themselves".to_string()));
+        assert_eq!(ex("a\r\nb\r\n", &["2m0"]).0, "b\r\na\r\n", "line endings stay");
+    }
+
+    #[test]
+    fn shift_join_sort_and_normal_take_a_range() {
+        assert_eq!(ex("a\nb\n", &["2>"]).0, "a\n    b\n");
+        assert_eq!(ex(SIX, &["1,3j"]).0, "one two three\nfour\nfive\nsix\n");
+        assert_eq!(ex(SIX, &["%sort"]).0, "five\nfour\none\nsix\nthree\ntwo\n");
+        assert_eq!(ex(SIX, &["%sort!"]).0, "two\nthree\nsix\none\nfour\nfive\n");
+        assert_eq!(ex("b\na\nb\n", &["%sor u"]).0, "a\nb\n");
+        assert_eq!(ex("10\n9\n", &["%sort n"]).0, "9\n10\n");
+        assert_eq!(ex(SIX, &["%norm Ax"]).0, "onex\ntwox\nthreex\nfourx\nfivex\nsixx\n");
+        assert_eq!(ex(SIX, &["2,3norm dd"]).0, "one\nfour\nfive\nsix\n");
+    }
+
+    #[test]
+    fn a_whole_ex_edit_is_one_undo() {
+        let mut b = buf(SIX);
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        for key in ":%norm Ax".chars() {
+            vim.handle_key(&mut b, &mut c, KeyPress::char(key));
+        }
+        vim.handle_key(&mut b, &mut c, KeyPress::named(NamedKey::Enter));
+        keys(&mut vim, &mut b, &mut c, "u");
+        assert_eq!(b.text(), SIX);
+    }
+
+    #[test]
+    fn commands_for_the_host_are_asked_for() {
+        assert_eq!(ex(SIX, &["e src/a.rs"]).2, VimEvent::RequestOpenFile { path: "src/a.rs".to_string(), split: None });
+        assert_eq!(ex(SIX, &["vs b.rs"]).2, VimEvent::RequestOpenFile { path: "b.rs".to_string(), split: Some(SplitWay::Vertical) });
+        assert_eq!(ex(SIX, &["sp"]).2, VimEvent::RunCommand("window.split_horizontal"));
+        assert_eq!(ex(SIX, &["bd"]).2, VimEvent::RunCommand("buffer.kill"));
+        assert_eq!(ex(SIX, &["e!"]).2, VimEvent::RequestReloadFile);
+    }
+
+    #[test]
+    fn what_isnt_a_command_says_so() {
+        assert_eq!(ex(SIX, &["nosuch"]).2, VimEvent::Error("Not an editor command: nosuch".to_string()));
+        assert_eq!(ex(SIX, &["garbage"]).2, VimEvent::Error("Not an editor command: garbage".to_string()));
+        assert_eq!(ex(SIX, &["sdf"]).2, VimEvent::Error("Not an editor command: sdf".to_string()));
+    }
+
+    #[test]
+    fn substitute_reads_vims_patterns_and_lines() {
+        assert_eq!(ex("alpha\n", &[r"s/\(a\)l/\1X/"]).0, "aXpha\n");
+        assert_eq!(ex(SIX, &[r"%s/\v(t.)/[\1]/"]).0, "one\n[tw]o\n[th]ree\nfour\nfive\nsix\n");
+        assert_eq!(ex("f(x)\n", &["s/(x)/y/"]).0, "fy\n", "a bare bracket is a bracket");
+        assert_eq!(ex(SIX, &["2s/t/T/"]).0, "one\nTwo\nthree\nfour\nfive\nsix\n");
+        assert_eq!(ex(SIX, &["$s/s/S/"]).0, "one\ntwo\nthree\nfour\nfive\nSix\n");
+    }
+
+    #[test]
+    fn ampersand_repeats_the_last_substitute() {
+        let mut b = buf("aaa\naaa\n");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        for key in ":s/a/Z/g".chars() {
+            vim.handle_key(&mut b, &mut c, KeyPress::char(key));
+        }
+        vim.handle_key(&mut b, &mut c, KeyPress::named(NamedKey::Enter));
+        keys(&mut vim, &mut b, &mut c, "j&");
+        assert_eq!(b.text(), "ZZZ\nZaa\n", "`&` drops the flags");
+        keys(&mut vim, &mut b, &mut c, "g&");
+        assert_eq!(b.text(), "ZZZ\nZZZ\n", "`g&` keeps them, everywhere");
+        let event = {
+            let (mut b, mut c, mut vim) = (buf("x"), Cursor::at_start(), VimState::new());
+            vim.handle_key(&mut b, &mut c, KeyPress::char('&'))
+        };
+        assert_eq!(event, VimEvent::Error("No previous substitute".to_string()));
+    }
+
     fn paste_setup(text: &str, at: usize, register: &str, linewise: bool) -> (VimState, Buffer, Cursor) {
         let mut vim = VimState::new();
         vim.set_register(register.to_string(), linewise);
