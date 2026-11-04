@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use fenix_core::{Buffer, Cursor};
+use fenix_core::{path_key, Buffer, Cursor};
 
 /// Identity of one open buffer, stable for as long as it stays open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -206,6 +206,7 @@ pub struct OpenBuffer {
 /// testable directly, mirroring `fenix-explorer`/`fenix-project`'s role.
 pub struct BufferList {
     buffers: BTreeMap<BufferId, OpenBuffer>,
+    /// By `path_key`: `\\?\C:\a.rs` and `C:\a.rs` are one file.
     path_index: HashMap<PathBuf, BufferId>,
     /// Most-recently-touched first -- drives buffer-switcher ordering and
     /// "what to fall back to when the current buffer closes."
@@ -228,7 +229,7 @@ impl BufferList {
         let id = BufferId(self.next_id);
         self.next_id += 1;
         if let Some(path) = buffer.path() {
-            self.path_index.insert(path.to_path_buf(), id);
+            self.path_index.insert(path_key(path), id);
         }
         self.buffers.insert(id, OpenBuffer { buffer, cursor: Cursor::at_start(), syntax, kind });
         self.touch(id);
@@ -366,7 +367,7 @@ impl BufferList {
     }
 
     pub fn open_path(&mut self, path: &Path) -> BufferId {
-        if let Some(&id) = self.path_index.get(path) {
+        if let Some(&id) = self.path_index.get(&path_key(path)) {
             self.touch(id);
             return id;
         }
@@ -384,7 +385,7 @@ impl BufferList {
     /// `open_path`, the file's text being `text` -- read already, as it was
     /// checked -- when it isn't open yet.
     pub fn open_path_with_text(&mut self, path: &Path, text: &str) -> BufferId {
-        if let Some(&id) = self.path_index.get(path) {
+        if let Some(&id) = self.path_index.get(&path_key(path)) {
             self.touch(id);
             return id;
         }
@@ -397,7 +398,7 @@ impl BufferList {
     /// through the real in-memory `Buffer` instead, so it never clobbers
     /// an open, possibly-dirty buffer's content out from under it.
     pub fn id_for_path(&self, path: &Path) -> Option<BufferId> {
-        self.path_index.get(path).copied()
+        self.path_index.get(&path_key(path)).copied()
     }
 
     /// Keeps `path_index` in sync after `id`'s underlying file was
@@ -412,10 +413,10 @@ impl BufferList {
     /// posture elsewhere.
     pub fn path_changed(&mut self, id: BufferId, old_path: Option<&Path>) {
         if let Some(old) = old_path {
-            self.path_index.remove(old);
+            self.path_index.remove(&path_key(old));
         }
         if let Some(new_path) = self.buffers.get(&id).and_then(|ob| ob.buffer.path()) {
-            self.path_index.insert(new_path.to_path_buf(), id);
+            self.path_index.insert(path_key(new_path), id);
         }
     }
 
@@ -434,7 +435,7 @@ impl BufferList {
     pub fn close(&mut self, id: BufferId) {
         if let Some(open) = self.buffers.remove(&id) {
             if let Some(path) = open.buffer.path() {
-                self.path_index.remove(path);
+                self.path_index.remove(&path_key(path));
             }
         }
         self.mru.retain(|&x| x != id);
@@ -636,6 +637,26 @@ mod tests {
         let second = list.open_path(&path);
         assert_eq!(first, second);
         assert_eq!(list.len(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_file_is_one_buffer_however_its_path_is_spelled() {
+        let dir = TempDir::new("one_document");
+        let path = dir.write("a.txt", "hello\n");
+        let verbatim = std::fs::canonicalize(&path).unwrap();
+        assert!(verbatim.to_string_lossy().starts_with(r"\\?\"));
+        let mut list = BufferList::new();
+        let first = list.open_path(&verbatim);
+        assert!(!list.get(first).unwrap().buffer.path().unwrap().to_string_lossy().contains('?'), "kept in plain form");
+        let plain = fenix_core::plain_path(&verbatim);
+        assert_eq!(list.open_path(&plain), first);
+        assert_eq!(list.open_path(Path::new(&plain.to_string_lossy().to_uppercase())), first);
+        assert_eq!(list.id_for_path(&verbatim), Some(first));
+        assert_eq!(list.open_path_with_text(&plain, "ignored"), first);
+        assert_eq!(list.len(), 1);
+        list.close(first);
+        assert_eq!(list.id_for_path(&plain), None);
     }
 
     #[test]
