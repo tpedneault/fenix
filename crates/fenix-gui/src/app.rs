@@ -15159,9 +15159,10 @@ impl App {
                     Some("view.decrease_font_size")
                 } else if c == '0' {
                     Some("view.reset_font_size")
-                } else if c.eq_ignore_ascii_case(&'o') {
+                } else if !self.vim.is_inserting() && c.eq_ignore_ascii_case(&'o') {
+                    // In Insert, Ctrl-O is Vim's: one Normal command.
                     Some("nav.jump_back")
-                } else if c.eq_ignore_ascii_case(&'i') {
+                } else if !self.vim.is_inserting() && c.eq_ignore_ascii_case(&'i') {
                     Some("nav.jump_forward")
                 } else {
                     None
