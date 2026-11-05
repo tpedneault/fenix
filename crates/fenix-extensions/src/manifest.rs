@@ -11,7 +11,7 @@ use serde::Deserialize;
 /// The extension API this Fenix offers code extensions
 /// (`fenix-extension-api`'s `wit/world.wit`). An extension built against
 /// 1.x runs on any later 1.x: a minor version only adds.
-pub const API: &str = "1.1.0";
+pub const API: &str = "1.2.0";
 
 /// Whether an extension built against `api` runs on this Fenix's `API`.
 pub fn api_fits(api: &str) -> bool {
@@ -493,6 +493,12 @@ pub struct Contributes {
     /// Those services agents may call, as tools (`fenix --mcp`).
     #[serde(default)]
     pub agent_tools: Vec<AgentToolContribution>,
+    /// What agents may read from it, as resources (1.2).
+    #[serde(default)]
+    pub agent_resources: Vec<AgentResourceContribution>,
+    /// The prompts it offers agents' clients (1.2).
+    #[serde(default)]
+    pub agent_prompts: Vec<AgentPromptContribution>,
     /// Where its `SPC m` menu applies (`[[local.<name>]]` in its keymaps).
     #[serde(default)]
     pub contexts: Vec<ContextContribution>,
@@ -784,9 +790,132 @@ pub struct AgentToolContribution {
     /// The JSON Schema of its arguments, as text.
     #[serde(default)]
     pub input: Option<String>,
-    /// It changes something: only with `agents.mcp.fenix_write`.
+    /// It changes something: only with `agents.mcp.fenix_write`. Read
+    /// as its class when it has none (`effective_class`).
     #[serde(default)]
     pub writes: bool,
+    /// What it may do (1.2): `read`, `show`, `edit`, `run` or `external`.
+    /// Agents' rules are per class.
+    #[serde(default)]
+    pub class: Option<ToolClass>,
+    /// How long a call may take, an answer given later included (1.2):
+    /// `TOOL_TIMEOUT_MS` when it doesn't say, at most `MAX_TOOL_TIMEOUT_MS`.
+    #[serde(default)]
+    pub timeout_ms: Option<u32>,
+    /// Offered to agents by default, when the extension is on (1.2): its
+    /// toolset (the extension's short name) is in every session's list.
+    #[serde(default)]
+    pub default: bool,
+}
+
+/// What a tool may do: a rule for each class says whether an agent may
+/// call it, must ask, or may not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolClass {
+    /// Reads what Fenix or the extension knows.
+    Read,
+    /// Moves what's on your screen.
+    Show,
+    /// Changes buffers and files.
+    Edit,
+    /// Starts processes, runs commands.
+    Run,
+    /// Acts outside this machine: posts, sends, changes a remote system.
+    External,
+}
+
+impl ToolClass {
+    /// Its name in a manifest, and in `fenix/tools`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ToolClass::Read => "read",
+            ToolClass::Show => "show",
+            ToolClass::Edit => "edit",
+            ToolClass::Run => "run",
+            ToolClass::External => "external",
+        }
+    }
+}
+
+/// How long a tool's call may take when its manifest doesn't say: 30 s.
+pub const TOOL_TIMEOUT_MS: u32 = 30_000;
+/// The most a tool's `timeout_ms` may be: 10 minutes.
+pub const MAX_TOOL_TIMEOUT_MS: u32 = 600_000;
+/// The longest a tool's (or a resource's, a prompt's) description may be,
+/// in characters, for an extension built for 1.2.
+pub const MAX_TOOL_DESCRIPTION: usize = 300;
+/// The largest a tool's input schema may be, in bytes.
+pub const MAX_TOOL_SCHEMA: usize = 2048;
+
+impl AgentToolContribution {
+    /// Its class: the one it says, else `writes` read the safe way --
+    /// `run` when it writes, `read` when it doesn't.
+    pub fn effective_class(&self) -> ToolClass {
+        self.class.unwrap_or(if self.writes { ToolClass::Run } else { ToolClass::Read })
+    }
+
+    /// How long a call may take, in milliseconds.
+    pub fn timeout_ms(&self) -> u32 {
+        self.timeout_ms.unwrap_or(TOOL_TIMEOUT_MS)
+    }
+}
+
+/// Something agents can read from an extension, as an MCP resource (1.2):
+/// a URI template (`fenix://ext/jira/issue/{key}`) and the service that
+/// reads one. The service is given `{"uri": ..., "params": {"key": ...}}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentResourceContribution {
+    pub uri_template: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// The service it calls, from `contributes.services`.
+    pub service: String,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+}
+
+impl AgentResourceContribution {
+    /// The names in its template's braces, in order: `key` for
+    /// `fenix://ext/jira/issue/{key}`.
+    pub fn parameters(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = self.uri_template.as_str();
+        while let Some(open) = rest.find('{') {
+            let Some(close) = rest[open..].find('}') else { break };
+            out.push(rest[open + 1..open + close].to_string());
+            rest = &rest[open + close + 1..];
+        }
+        out
+    }
+}
+
+/// A prompt agents' clients can offer, as an MCP prompt (1.2): its
+/// service is given the arguments as a JSON object and answers the
+/// prompt's messages.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPromptContribution {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub arguments: Vec<PromptArgument>,
+    /// The service it calls, from `contributes.services`.
+    pub service: String,
+}
+
+/// One of a prompt's arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptArgument {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// A command, run by calling the extension's `run-command`.
@@ -868,19 +997,7 @@ impl Manifest {
                 return Err(format!("extension.toml: setting {} is a choice of nothing (choices)", setting.key));
             }
         }
-        for tool in &self.contributes.agent_tools {
-            if tool.name.is_empty() || !tool.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-                return Err(format!("extension.toml: agent tool {:?} -- lower case letters, digits and _", tool.name));
-            }
-            if !self.contributes.services.contains(&tool.service) {
-                return Err(format!("extension.toml: agent tool {:?} -- {:?} isn't one of its services", tool.name, tool.service));
-            }
-            if let Some(input) = &tool.input {
-                if !serde_json::from_str::<serde_json::Value>(input).is_ok_and(|v| v.is_object()) {
-                    return Err(format!("extension.toml: agent tool {:?} -- input isn't a JSON object", tool.name));
-                }
-            }
-        }
+        self.check_agent_contributions()?;
         for service in &self.contributes.services {
             if !ours(service) {
                 return Err(format!("extension.toml: service {service:?} -- an extension's services start with its name ({own}...)"));
@@ -979,6 +1096,88 @@ impl Manifest {
         Ok(())
     }
 
+    /// `agent_tools`, `agent_resources` and `agent_prompts`: names, the
+    /// services they call, and -- for one built for 1.2 -- the sizes
+    /// agents are given and a class its permissions fit.
+    fn check_agent_contributions(&self) -> Result<(), String> {
+        let snake = |name: &str| !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+        // Held to the 1.2 limits when it's built for 1.2: one built before
+        // keeps loading as it did (`xtask validate` holds them all).
+        let strict = self.engine.api.as_deref().and_then(|a| semver::Version::parse(&full_version(a)).ok()).is_some_and(|v| v >= semver::Version::new(1, 2, 0));
+        let long = |description: &str| strict && description.chars().count() > MAX_TOOL_DESCRIPTION;
+        let p = &self.permissions;
+        for tool in &self.contributes.agent_tools {
+            if !snake(&tool.name) {
+                return Err(format!("extension.toml: agent tool {:?} -- lower case letters, digits and _", tool.name));
+            }
+            if !self.contributes.services.contains(&tool.service) {
+                return Err(format!("extension.toml: agent tool {:?} -- {:?} isn't one of its services", tool.name, tool.service));
+            }
+            if let Some(input) = &tool.input {
+                if !serde_json::from_str::<serde_json::Value>(input).is_ok_and(|v| v.is_object()) {
+                    return Err(format!("extension.toml: agent tool {:?} -- input isn't a JSON object", tool.name));
+                }
+                if strict && input.len() > MAX_TOOL_SCHEMA {
+                    return Err(format!("extension.toml: agent tool {:?} -- its input schema is {} bytes, and agents are given at most {MAX_TOOL_SCHEMA}", tool.name, input.len()));
+                }
+            }
+            if long(&tool.description) {
+                return Err(format!("extension.toml: agent tool {:?} -- its description is over {MAX_TOOL_DESCRIPTION} characters", tool.name));
+            }
+            if let Some(ms) = tool.timeout_ms.filter(|ms| *ms == 0 || *ms > MAX_TOOL_TIMEOUT_MS) {
+                return Err(format!("extension.toml: agent tool {:?} -- timeout_ms is {ms}: from 1 to {MAX_TOOL_TIMEOUT_MS} (10 minutes)", tool.name));
+            }
+            match tool.class {
+                Some(ToolClass::External) if p.network.is_empty() && p.sockets.is_empty() => {
+                    return Err(format!("extension.toml: agent tool {:?} is external -- it needs network or sockets in its permissions", tool.name));
+                }
+                Some(ToolClass::Edit) if p.editor != Editor::Write && p.filesystem != Filesystem::ProjectWrite => {
+                    return Err(format!("extension.toml: agent tool {:?} edits -- it needs editor = \"write\" or filesystem = \"project-write\" in its permissions", tool.name));
+                }
+                _ => {}
+            }
+        }
+        if let Some(twice) = self.contributes.agent_tools.iter().enumerate().find(|(i, t)| self.contributes.agent_tools[..*i].iter().any(|o| o.name == t.name)) {
+            return Err(format!("extension.toml: agent tool {:?} is there twice", twice.1.name));
+        }
+        for resource in &self.contributes.agent_resources {
+            if resource.name.trim().is_empty() || resource.uri_template.trim().is_empty() || !resource.uri_template.contains("://") {
+                return Err(format!("extension.toml: agent resource {:?} -- it has a name and a URI template (fenix://ext/jira/issue/{{key}})", resource.name));
+            }
+            if resource.uri_template.matches('{').count() != resource.uri_template.matches('}').count() || resource.parameters().iter().any(|n| !snake(n)) {
+                return Err(format!("extension.toml: agent resource {:?} -- {:?}: each {{name}} is lower case letters, digits and _", resource.name, resource.uri_template));
+            }
+            if !self.contributes.services.contains(&resource.service) {
+                return Err(format!("extension.toml: agent resource {:?} -- {:?} isn't one of its services", resource.name, resource.service));
+            }
+            if long(&resource.description) {
+                return Err(format!("extension.toml: agent resource {:?} -- its description is over {MAX_TOOL_DESCRIPTION} characters", resource.name));
+            }
+        }
+        for prompt in &self.contributes.agent_prompts {
+            if !snake(&prompt.name) {
+                return Err(format!("extension.toml: agent prompt {:?} -- lower case letters, digits and _", prompt.name));
+            }
+            if !self.contributes.services.contains(&prompt.service) {
+                return Err(format!("extension.toml: agent prompt {:?} -- {:?} isn't one of its services", prompt.name, prompt.service));
+            }
+            if long(&prompt.description) {
+                return Err(format!("extension.toml: agent prompt {:?} -- its description is over {MAX_TOOL_DESCRIPTION} characters", prompt.name));
+            }
+            if let Some(bad) = prompt.arguments.iter().find(|a| !snake(&a.name)) {
+                return Err(format!("extension.toml: agent prompt {:?} -- argument {:?}: lower case letters, digits and _", prompt.name, bad.name));
+            }
+        }
+        Ok(())
+    }
+
+    /// The name its agent tools, resources and prompts go by: its id's
+    /// last part, with `-` as `_` (`jira` for `acme.jira`). A tool is
+    /// `<toolset>_<name>`, and the toolset is the extension's.
+    pub fn toolset(&self) -> String {
+        toolset_of(&self.extension.id)
+    }
+
     /// A bundle's members: what it depends on.
     pub fn members(&self) -> Vec<String> {
         if self.extension.runtime == Runtime::Bundle { self.dependencies.keys().cloned().collect() } else { Vec::new() }
@@ -1008,6 +1207,11 @@ impl Manifest {
             Runtime::Lua => Err(format!("{} runs Lua code, which this Fenix can't yet", self.extension.name)),
         }
     }
+}
+
+/// The toolset of extension `id`'s agent tools: its last part, `-` as `_`.
+pub fn toolset_of(id: &str) -> String {
+    id.rsplit('.').next().unwrap_or(id).replace('-', "_")
 }
 
 /// `publisher.name`: two or more dot-separated parts of lowercase letters,
@@ -1047,7 +1251,7 @@ mod tests {
         assert!(Manifest::parse(&sample("acme.jira", "1.0.0", "wasm")).unwrap_err().contains("engine.api"), "a wasm one says its API");
         let wasm = |api: &str| Manifest::parse(&sample("acme.jira", "1.0.0", "wasm").replace("fenix = ", &format!("api = \"{api}\"\nfenix = "))).unwrap();
         assert!(wasm("1.0").runs_in(&v("1.0.0")).is_ok());
-        assert!(wasm("2.0").runs_in(&v("1.0.0")).unwrap_err().contains("built for extension API 2.0, and this Fenix offers 1.1.0"));
+        assert!(wasm("2.0").runs_in(&v("1.0.0")).unwrap_err().contains("built for extension API 2.0, and this Fenix offers 1.2.0"));
         assert!(Manifest::parse(&sample("acme.jira", "1.0.0", "lua")).unwrap().runs_in(&v("1.0.0")).unwrap_err().contains("Lua"));
     }
 
@@ -1073,8 +1277,8 @@ mod tests {
 
     #[test]
     fn the_api_fits_by_its_major_and_any_minor_up_to_this_one() {
-        assert!(api_fits("1") && api_fits("1.0") && api_fits("1.0.0") && api_fits("1.1"));
-        assert!(!api_fits("1.1.1") && !api_fits("1.2"), "a later 1.x has what this one lacks");
+        assert!(api_fits("1") && api_fits("1.0") && api_fits("1.0.0") && api_fits("1.1") && api_fits("1.2"));
+        assert!(!api_fits("1.2.1") && !api_fits("1.3"), "a later 1.x has what this one lacks");
         assert!(!api_fits("0.8") && !api_fits("0.8.8") && !api_fits("2.0") && !api_fits("x"));
     }
 
@@ -1196,6 +1400,55 @@ namespaces = [\"issues\"]
         let m = Manifest::parse(&bare).unwrap();
         assert_eq!((m.contributes.settings[2].default.as_str(), m.contributes.settings[3].default.as_str()), ("true", "30"));
         assert!(Manifest::parse(&bare.replace("default = 30", "default = [30]")).is_err(), "a list isn't a default");
+    }
+
+    /// 1.2's tools: a class that fits its permissions, read from `writes`
+    /// when it has none, a timeout, sizes held for one built for 1.2;
+    /// resources and prompts read and checked.
+    #[test]
+    fn agent_tools_have_classes_timeouts_and_sizes() {
+        let text = |api: &str, permissions: &str, tool: &str| {
+            sample("acme.jira", "1.0.0", "wasm").replace("fenix = ", &format!("api = \"{api}\"\nfenix = "))
+                + &format!("\n[permissions]\n{permissions}\n\n[contributes]\nservices = [\"jira.issue\"]\n\n[[contributes.agent_tools]]\nname = \"issue\"\ndescription = \"An issue\"\nservice = \"jira.issue\"\n{tool}\n")
+        };
+        let m = Manifest::parse(&text("1.2", "", "")).unwrap();
+        let tool = &m.contributes.agent_tools[0];
+        assert_eq!((tool.effective_class(), tool.timeout_ms(), tool.default), (ToolClass::Read, TOOL_TIMEOUT_MS, false));
+        assert_eq!(m.toolset(), "jira");
+        assert_eq!(toolset_of("acme.my-tools"), "my_tools");
+        let writes = Manifest::parse(&text("1.0", "", "writes = true")).unwrap();
+        assert_eq!(writes.contributes.agent_tools[0].effective_class(), ToolClass::Run, "writes, read the safe way");
+        let classed = Manifest::parse(&text("1.2", "network = [\"jira.example.com\"]", "class = \"external\"\ntimeout_ms = 120000\ndefault = true")).unwrap();
+        let tool = &classed.contributes.agent_tools[0];
+        assert_eq!((tool.effective_class(), tool.timeout_ms(), tool.default, tool.effective_class().as_str()), (ToolClass::External, 120_000, true, "external"));
+        assert!(Manifest::parse(&text("1.2", "", "class = \"external\"")).unwrap_err().contains("network or sockets"));
+        assert!(Manifest::parse(&text("1.2", "sockets = [\"jira.example.com:443\"]", "class = \"external\"")).is_ok());
+        assert!(Manifest::parse(&text("1.2", "editor = \"read\"", "class = \"edit\"")).unwrap_err().contains("editor = \"write\""));
+        assert!(Manifest::parse(&text("1.2", "editor = \"write\"", "class = \"edit\"")).is_ok());
+        assert!(Manifest::parse(&text("1.2", "filesystem = \"project-write\"", "class = \"edit\"")).is_ok());
+        assert!(Manifest::parse(&text("1.2", "", "class = \"show\"")).is_ok());
+        assert!(Manifest::parse(&text("1.2", "", "class = \"admin\"")).is_err(), "one of the five");
+        assert!(Manifest::parse(&text("1.2", "", "timeout_ms = 600001")).unwrap_err().contains("timeout_ms"));
+        assert!(Manifest::parse(&text("1.2", "", "timeout_ms = 0")).is_err());
+        let tool_long = text("1.2", "", "").replace("An issue", &"x".repeat(301));
+        assert!(Manifest::parse(&tool_long).unwrap_err().contains("over 300 characters"));
+        assert!(Manifest::parse(&tool_long.replace("api = \"1.2\"", "api = \"1.1\"")).is_ok(), "one built before 1.2 still loads");
+        let big = format!("input = '{{\"type\":\"object\",\"description\":\"{}\"}}'", "y".repeat(2100));
+        assert!(Manifest::parse(&text("1.2", "", &big)).unwrap_err().contains("at most 2048"));
+        let twice = text("1.2", "", "") + "\n[[contributes.agent_tools]]\nname = \"issue\"\ndescription = \"Again\"\nservice = \"jira.issue\"\n";
+        assert!(Manifest::parse(&twice).unwrap_err().contains("twice"));
+
+        let more = text("1.2", "", "") + "\n[[contributes.agent_resources]]\nuri_template = \"fenix://ext/jira/issue/{key}\"\nname = \"Issue\"\ndescription = \"A Jira issue\"\nservice = \"jira.issue\"\nmime_type = \"text/markdown\"\n\n[[contributes.agent_prompts]]\nname = \"triage\"\ndescription = \"Triage an issue\"\nservice = \"jira.issue\"\n\n[[contributes.agent_prompts.arguments]]\nname = \"key\"\ndescription = \"The issue\"\nrequired = true\n";
+        let m = Manifest::parse(&more).unwrap();
+        let resource = &m.contributes.agent_resources[0];
+        assert_eq!((resource.parameters(), resource.mime_type.as_deref()), (vec!["key".to_string()], Some("text/markdown")));
+        let prompt = &m.contributes.agent_prompts[0];
+        assert_eq!((prompt.name.as_str(), prompt.arguments[0].name.as_str(), prompt.arguments[0].required), ("triage", "key", true));
+        assert!(Manifest::parse(&more.replace("service = \"jira.issue\"\nmime_type", "service = \"jira.nope\"\nmime_type")).unwrap_err().contains("agent resource"));
+        assert!(Manifest::parse(&more.replace("{key}", "{Key}")).unwrap_err().contains("each {name}"));
+        assert!(Manifest::parse(&more.replace("fenix://ext/jira/issue/{key}", "issue")).unwrap_err().contains("URI template"));
+        assert!(Manifest::parse(&more.replace("name = \"triage\"", "name = \"Triage\"")).unwrap_err().contains("agent prompt"));
+        assert!(Manifest::parse(&more.replace("required = true", "required = true\nkind = 1")).is_err(), "an argument's field misspelt isn't let through");
     }
 
     /// `changed` and `focus` are events it may ask for -- `changed`

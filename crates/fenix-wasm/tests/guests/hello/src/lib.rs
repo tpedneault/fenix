@@ -1089,8 +1089,36 @@ impl Guest for Hello {
                 LATER.with(|l| *l.borrow_mut() = Some((call, timer, payload)));
                 None
             }
+            // Never answered: what it says while it works, and what it's
+            // told when it's given up on (1.2).
+            "hello.forever" => {
+                host::service_progress(call, "working", Some(0.5));
+                host::service_progress(call, "still working", None);
+                None
+            }
+            // Its code takes a while (under its deadline) before it answers.
+            "hello.busy" => {
+                busy(150);
+                Some(Ok("busy done".into()))
+            }
             _ => Some(Err(format!("no service {name}"))),
         }
+    }
+
+    fn service_cancelled(call: u64) {
+        log(&format!("service {call} cancelled"));
+    }
+
+    fn agent_ask_progress(call: u64, text: String) {
+        log(&format!("ask {call} so far: {text}"));
+    }
+}
+
+/// Runs for `ms` milliseconds, by the clock.
+fn busy(ms: u64) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < std::time::Duration::from_millis(ms) {
+        std::hint::black_box(0);
     }
 }
 

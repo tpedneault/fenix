@@ -201,6 +201,19 @@ pub async fn call(name: &str, payload: &str) -> Result<String, String> {
     }
 }
 
+/// The reply to service call `id`, made already (`host::call_service`):
+/// what [`crate::agents::AskHandle`] waits on.
+pub(crate) fn service_reply(id: u64) -> impl Future<Output = Result<String, String>> {
+    EXECUTOR.with(|e| e.borrow_mut().slots.insert(id, Slot::Waiting));
+    let wait = Wait { id: Some(id), send: None };
+    async move {
+        match wait.await? {
+            Answer::Service(r) => r,
+            _ => Err("not a service's answer".into()),
+        }
+    }
+}
+
 /// Waits `millis`.
 pub async fn sleep(millis: u32) {
     let _ = Wait::new(move || Ok(host::set_timer(millis, false))).await;

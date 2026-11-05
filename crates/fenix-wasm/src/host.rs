@@ -36,12 +36,13 @@ use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 /// What `wit/world.wit` makes: the extension's exports, the host's
 /// imports, and their types.
 mod bindings {
-    // Every export of 1.0 is required. What a 1.x adds is looked up when
-    // it's there (`get_typed_func`), so a guest built for 1.0 still loads.
-    wasmtime::component::bindgen!({ path: "../fenix-extension-api/wit", world: "extension", additional_derives: [PartialEq] });
+    // Every export of 1.0 is required (`extension-base`). What a 1.x adds
+    // is looked up when it's there (`get_typed_func`, `Optional`), so a
+    // guest built for 1.0 still loads.
+    wasmtime::component::bindgen!({ path: "../fenix-extension-api/wit", world: "extension-base", additional_derives: [PartialEq] });
 }
 
-use bindings::{fenix, Extension};
+use bindings::{fenix, ExtensionBase as Extension};
 pub use bindings::fenix::extension::types::{
     Anchor, Canvas, CanvasPopup, CellSpan, Cells, Check, Command, Ease, Event as Notice, Glide, Health, Here, HomeMark, HomeRow, HomeSection, HttpRequest, ImageInfo, Mark, TextEdit, EditorTheme, HttpResponse, Item, Key,
     KeyHint, LayerLevel, Layout, Level, Line, ModelInfo, Page, PaneBox, PickerItem, Picture, Place, Popup, Pose, ProcessOutput, ProjectInfo, Role, Section, Span, Style, Task,
@@ -375,6 +376,10 @@ pub enum Request {
     ImageFree(u32),
     /// The answer to service call `call` (`Call::Serve`), come later.
     ServiceAnswer { call: u64, answer: Result<String, String> },
+    /// How far service call `call` has got, before its answer
+    /// (`service-progress`, 1.2): what it's doing, and how much is done,
+    /// 0 to 1, when it knows.
+    ServiceProgress { call: u64, message: String, fraction: Option<f32> },
     PageOpen { page: u64, kind: String, title: String },
     /// A page in a new pane beside the focused one, `width` of it.
     PageOpenBeside { page: u64, kind: String, title: String, width: f32 },
@@ -626,6 +631,35 @@ pub enum Call {
     /// A coding agent's turn ended (`agent-turn-ended`), when it
     /// has that.
     AgentTurnEnded(AgentTurn),
+    /// Service call `call` was given up on (`service-cancelled`, 1.2),
+    /// when it has that.
+    ServiceCancelled(u64),
+    /// Its `agents.ask` call `call`'s answer so far
+    /// (`agent-ask-progress`, 1.2), when it has that.
+    AgentAskProgress { call: u64, text: String },
+}
+
+impl Call {
+    /// Whether it goes before what else waits (pages first): laying out a
+    /// page, its state and keys, a paste, a surface's input.
+    pub fn is_page(&self) -> bool {
+        matches!(self, Call::Render { .. } | Call::Key { .. } | Call::KeyPress { .. } | Call::Mouse { .. } | Call::PageState(_) | Call::PageRestore { .. } | Call::Paste { .. } | Call::SurfaceInput { .. })
+    }
+}
+
+/// The exports 1.x added, when the guest has them.
+struct Optional {
+    service_cancelled: Option<wasmtime::component::TypedFunc<(u64,), ()>>,
+    agent_ask_progress: Option<wasmtime::component::TypedFunc<(u64, String), ()>>,
+}
+
+impl Optional {
+    fn of(store: &mut Store<State>, instance: &wasmtime::component::Instance) -> Optional {
+        Optional {
+            service_cancelled: instance.get_typed_func::<(u64,), ()>(&mut *store, "service-cancelled").ok(),
+            agent_ask_progress: instance.get_typed_func::<(u64, String), ()>(&mut *store, "agent-ask-progress").ok(),
+        }
+    }
 }
 
 /// Reads a secret, for `host.secret`; Fenix's keychain behind it.
@@ -2847,6 +2881,11 @@ impl fenix::extension::host::Host for State {
         self.ask(Request::ServiceAnswer { call, answer });
     }
 
+    fn service_progress(&mut self, call: u64, message: String, fraction: Option<f32>) {
+        let fraction = fraction.filter(|f| f.is_finite()).map(|f| f.clamp(0.0, 1.0));
+        self.ask(Request::ServiceProgress { call, message, fraction });
+    }
+
     fn image_load(&mut self, bytes: Vec<u8>) -> Result<ImageInfo, String> {
         if bytes.len() as u64 > MAX_IMAGE {
             return Err(format!("an image is at most {} MiB", MAX_IMAGE >> 20));
@@ -3628,7 +3667,7 @@ impl Drop for Worker {
 fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mpsc::Receiver<Job>) {
     let id = spec.id.clone();
     let call_ticks = spec.call_ticks;
-    let started = (|| -> wasmtime::Result<(Store<State>, Extension)> {
+    let started = (|| -> wasmtime::Result<(Store<State>, Extension, Optional)> {
         let component = load(&engine, &spec.wasm, &spec.cache)?;
         let mut linker: Linker<State> = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
@@ -3677,8 +3716,9 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         store.set_epoch_deadline(activate_ticks);
         let instance = linker.instantiate(&mut store, &component)?;
         let ext = Extension::new(&mut store, &instance)?;
+        let optional = Optional::of(&mut store, &instance);
         ext.call_activate(&mut store)?.map_err(|e| wasmtime::format_err!("{e}"))?;
-        Ok((store, ext))
+        Ok((store, ext, optional))
     })();
     let mut running = match started {
         Ok(running) => {
@@ -3691,7 +3731,8 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
         }
     };
     let mut stopped_why = format!("{id} isn't running");
-    while let Ok(job) = jobs.recv() {
+    let mut lanes = Lanes::default();
+    while let Some(job) = lanes.next(&jobs) {
         // Bytes handed back to their reader once delivered (or dropped).
         let mut taken: Option<(Arc<AtomicUsize>, usize)> = None;
         let (call, what, ticks) = match job {
@@ -3705,13 +3746,13 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             Job::Tell(what) => (None, what, 0),
             Job::Lsp { server, message } => (None, Call::Lsp { server, message }, 0),
             Job::LspOpen { server, out } => {
-                if let Some((store, _)) = running.as_mut() {
+                if let Some((store, ..)) = running.as_mut() {
                     store.data_mut().lsp_out.insert(server, out);
                 }
                 continue;
             }
             Job::LspClose(server) => {
-                if let Some((store, _)) = running.as_mut() {
+                if let Some((store, ..)) = running.as_mut() {
                     store.data_mut().lsp_out.remove(&server);
                 }
                 continue;
@@ -3719,7 +3760,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             // Its own socket from now on, if it still listens and hears
             // of it; else let go.
             Job::Accepted { listener, stream, peer } => {
-                let Some((store, _)) = running.as_mut() else { continue };
+                let Some((store, ..)) = running.as_mut() else { continue };
                 let listens = store.data().sockets.get(&listener).is_some_and(|s| s.listening.is_some() && !s.closed.load(Ordering::Relaxed));
                 if !listens {
                     continue;
@@ -3729,7 +3770,7 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             }
         };
         let _release = Release(taken);
-        let Some((store, ext)) = running.as_mut() else {
+        let Some((store, ext, optional)) = running.as_mut() else {
             if let Some(call) = call {
                 sink(Event::Finished { call, result: Err(stopped_why.clone()) });
             }
@@ -3792,6 +3833,15 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
             Call::Serve { call, name, payload } => ext.call_serve(&mut *store, call, &name, &payload).map(|r| Ok(Reply::Served(r))),
             Call::Paste { page, text } => ext.call_page_paste(&mut *store, page, &text).map(|()| Ok(Reply::Done)),
             Call::Lsp { server, message } => ext.call_lsp_message(&mut *store, server, &message).map(|()| Ok(Reply::Done)),
+            // 1.2's, when it has them; else nothing to tell.
+            Call::ServiceCancelled(call) => match &optional.service_cancelled {
+                Some(f) => f.call(&mut *store, (call,)).map(|()| Ok(Reply::Done)),
+                None => Ok(Ok(Reply::Done)),
+            },
+            Call::AgentAskProgress { call, text } => match &optional.agent_ask_progress {
+                Some(f) => f.call(&mut *store, (call, text)).map(|()| Ok(Reply::Done)),
+                None => Ok(Ok(Reply::Done)),
+            },
         };
         match result {
             Ok(said) => {
@@ -3808,6 +3858,54 @@ fn run(engine: Engine, spec: Spec, sink: Sink, back: mpsc::Sender<Job>, jobs: mp
                 }
                 sink(Event::Stopped(stopped_why.clone()));
                 running = None;
+            }
+        }
+    }
+}
+
+/// The worker's queue in two lanes: pages first -- a render, a page's
+/// state, its keys, a paste, a surface's input -- then the rest, each in
+/// the order it came. A tool call waits behind at most one page's call,
+/// and a page never waits behind a queue of tool calls and events.
+#[derive(Default)]
+struct Lanes {
+    pages: std::collections::VecDeque<Job>,
+    rest: std::collections::VecDeque<Job>,
+    stop: bool,
+}
+
+impl Lanes {
+    fn sort(&mut self, job: Job) {
+        match job {
+            Job::Stop => self.stop = true,
+            Job::Call { ref what, .. } if what.is_page() => self.pages.push_back(job),
+            job => self.rest.push_back(job),
+        }
+    }
+
+    /// The next job: what's waiting taken in first, then pages before the
+    /// rest. None once it's told to stop, or Fenix has let it go.
+    fn next(&mut self, jobs: &mpsc::Receiver<Job>) -> Option<Job> {
+        loop {
+            loop {
+                match jobs.try_recv() {
+                    Ok(job) => self.sort(job),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        self.stop |= self.pages.is_empty() && self.rest.is_empty();
+                        break;
+                    }
+                }
+            }
+            if self.stop {
+                return None;
+            }
+            if let Some(job) = self.pages.pop_front().or_else(|| self.rest.pop_front()) {
+                return Some(job);
+            }
+            match jobs.recv() {
+                Ok(job) => self.sort(job),
+                Err(_) => return None,
             }
         }
     }

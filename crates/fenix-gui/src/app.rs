@@ -20999,6 +20999,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
+        // Extensions' service calls past their deadline (an agent's tool
+        // call), given up on.
+        let changes_told_at = match (changes_told_at, self.code_serve_deadlines(now)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         // What has the focus, when it moved -- the explorer, the terminal
         // panel, a picker too -- told to those that ask.
         self.code_focus_moved();

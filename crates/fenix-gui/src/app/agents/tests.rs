@@ -949,3 +949,98 @@ fn an_mcp_server_is_a_command_or_an_address() {
     assert!(matches!(mcp_server("c", "sse+https://mcp.example.com Authorization=Bearer"), Some(McpServer::Sse { url, headers, .. }) if url == "https://mcp.example.com" && headers == [("Authorization".to_string(), "Bearer".to_string())]));
     assert!(mcp_server("d", "").is_none());
 }
+
+/// 1.2's ask: what it attaches read by Fenix and sent as resources, a
+/// structured answer found and held to its schema, the agent's most
+/// restrictive mode, and -- since it sends a file -- your say first,
+/// kept for the next one.
+#[test]
+fn an_ask_with_options_attaches_answers_as_json_and_asks_before_it_sends_code() {
+    let mut f = fixture("");
+    f.app.wasm.installed.push(extension("[permissions]\nagents = true\n"));
+    std::fs::write(f.root.join("notes.md"), "on disk\n").unwrap();
+    let payload = json!({
+        "prompt": "{\"title\": \"Fix it\", \"body\": \"Because.\"}",
+        "attach": [{"kind": "file", "path": "notes.md"}, {"kind": "text", "name": "ticket", "text": "FEN-1"}],
+        "answerAs": {"type": "object", "required": ["title", "body"], "properties": {"title": {"type": "string"}, "body": {"type": "string"}}},
+        "show": "hidden",
+    })
+    .to_string();
+    f.app.agents_ask("test.hello", 7, &payload, Some(f.root.clone()));
+    assert!(f.app.agents.replies.is_empty() && f.app.agents.asks.is_empty(), "waits for your say");
+    assert!(matches!(f.app.active_picker, Some(ActivePicker::Agents(_))), "asked");
+    f.app.agents_picked(Pick::AskConsent { ext: "test.hello".into(), call: 7, allow: true });
+    assert_eq!(f.app.agents_ask_consents()["test.hello"], ["mock"]);
+    let thread = f.app.agents.asks.keys().next().cloned().expect("asked");
+    assert!(f.pump(|app| !app.agents.replies.is_empty()), "never answered");
+    let (_, call, answer) = f.app.agents.replies.remove(0);
+    assert_eq!(call, 7);
+    let answer: Value = serde_json::from_str(&answer.unwrap()).unwrap();
+    assert_eq!(answer["json"], json!({"title": "Fix it", "body": "Because."}), "{answer}");
+    assert_eq!(answer["reverted"], json!([]));
+    assert!(f.app.agents.hub.view(&thread).is_none(), "hidden: deleted once answered");
+
+    // The next one from it doesn't ask; one the schema doesn't fit is
+    // asked again, then fails.
+    let payload = json!({"prompt": "{\"a\": 1}", "attach": [{"kind": "file", "path": "notes.md"}], "answerAs": {"type": "object", "required": ["title"]}}).to_string();
+    f.app.agents_ask("test.hello", 8, &payload, Some(f.root.clone()));
+    let thread = f.app.agents.asks.keys().next().cloned().expect("asked at once");
+    assert!(f.pump(|app| !app.agents.replies.is_empty()), "never answered");
+    let err = f.app.agents.replies.remove(0).2.unwrap_err();
+    assert!(err.contains("doesn't match the schema") && err.contains("$.title is missing"), "{err}");
+    let view = f.app.agents.hub.view(&thread).unwrap();
+    assert_eq!(view.thread.modes.as_ref().map(|m| m.current.as_str()), Some("plan"), "the most restrictive mode");
+    let prompts: Vec<&Vec<ContentBlock>> = view.thread.entries.iter().filter_map(|e| if let Entry::User { blocks, .. } = e { Some(blocks) } else { None }).collect();
+    assert_eq!(prompts.len(), 2, "asked again once");
+    assert!(prompts[0].iter().any(|b| matches!(b, ContentBlock::Resource { text: Some(t), .. } if t == "on disk\n")), "the file, as a resource: {:?}", prompts[0]);
+    assert!(prompts[1][0].as_text().contains("doesn't match the schema"));
+}
+
+/// Said no to, an ask that sends code is refused; one that's cancelled
+/// ends; a file its turn changed is put back.
+#[test]
+fn an_ask_refused_cancelled_or_that_changed_a_file_is_answered_so() {
+    let mut f = fixture("");
+    f.app.wasm.installed.push(extension("[permissions]\nagents = true\n"));
+    f.app.agents_ask("test.hello", 1, &json!({"prompt": "hi", "attach": [{"kind": "diff", "of": "unstaged"}]}).to_string(), Some(f.root.clone()));
+    let refused = f.app.agents.replies.first().map(|r| r.2.clone());
+    if refused.is_none() {
+        // Not a Git repository here: the diff can't be read, which is an
+        // answer too. When it is, you're asked.
+        f.app.agents_picked(Pick::AskConsent { ext: "test.hello".into(), call: 1, allow: false });
+    }
+    let err = f.app.agents.replies.remove(0).2.unwrap_err();
+    assert!(err.contains("didn't let it send code") || err.contains("the diff"), "{err}");
+    assert!(f.app.agents_ask_consents().is_empty());
+
+    f.app.agents_ask("test.hello", 2, &json!({"prompt": "slow"}).to_string(), Some(f.root.clone()));
+    assert!(f.pump(|app| app.agents.hub.status().working > 0), "it's working");
+    assert!(f.app.agents_ask_cancel("test.hello", 2));
+    assert_eq!(f.app.agents.replies.remove(0).2.unwrap_err(), "cancelled");
+    assert!(!f.app.agents_ask_cancel("test.hello", 2), "gone");
+
+    std::fs::write(f.root.join("a.txt"), "changed\n").unwrap();
+    f.app.agents_ask("test.hello", 3, &json!({"prompt": "hello"}).to_string(), Some(f.root.clone()));
+    let thread = f.app.agents.asks.keys().next().cloned().unwrap();
+    f.app.agents.baselines.entry(thread).or_default().insert(f.root.join("a.txt"), Some("one\n".into()));
+    assert!(f.pump(|app| !app.agents.replies.is_empty()), "never answered");
+    let answer: Value = serde_json::from_str(&f.app.agents.replies.remove(0).2.unwrap()).unwrap();
+    assert_eq!(answer["reverted"], json!(["a.txt"]));
+    assert_eq!(std::fs::read_to_string(f.root.join("a.txt")).unwrap(), "one\n", "put back");
+}
+
+#[test]
+fn an_asks_options_are_read_and_checked() {
+    let o = extensions::AskOptions::parse(r#"{"prompt": " hi ", "stream": true, "show": "hidden", "timeoutMs": 5000, "attach": [{"kind": "selection"}]}"#).unwrap();
+    assert_eq!((o.prompt.as_str(), o.stream, o.show.as_deref(), o.timeout), ("hi", true, Some("hidden"), Some(Duration::from_secs(5))));
+    assert!(o.carries_code());
+    assert!(!extensions::AskOptions::parse(r#"{"prompt": "x", "attach": [{"kind": "commits", "range": "a..b"}]}"#).unwrap().carries_code());
+    assert!(extensions::AskOptions::parse(r#"{"prompt": "x", "show": "loud"}"#).unwrap_err().contains("show"));
+    assert!(extensions::AskOptions::parse(r#"{"prompt": "x", "answerAs": 3}"#).unwrap_err().contains("answerAs"));
+    assert!(extensions::AskOptions::parse("{}").unwrap_err().contains("prompt"));
+    let modes = fenix_acp::protocol::Modes {
+        current: "default".into(),
+        available: ["default", "acceptEdits", "plan"].iter().map(|id| fenix_acp::protocol::Mode { id: id.to_string(), name: id.to_string(), description: None }).collect(),
+    };
+    assert_eq!(extensions::restrictive_mode(&modes).as_deref(), Some("plan"));
+}

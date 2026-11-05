@@ -251,7 +251,7 @@ impl App {
         blocks
     }
 
-    fn agents_mention_block(&self, root: &Path, token: &str, embedded: bool) -> Option<ContentBlock> {
+    pub(super) fn agents_mention_block(&self, root: &Path, token: &str, embedded: bool) -> Option<ContentBlock> {
         let resource = |uri: String, text: String, name: &str| {
             if embedded {
                 ContentBlock::Resource { uri, text: Some(cut(text)), mime_type: Some("text/plain".into()) }
@@ -307,7 +307,7 @@ impl App {
         }
     }
 
-    fn agents_file_block(&self, root: &Path, path: &Path, embedded: bool) -> Option<ContentBlock> {
+    pub(super) fn agents_file_block(&self, root: &Path, path: &Path, embedded: bool) -> Option<ContentBlock> {
         let name = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
         if embedded {
             let text = self.agents_current(path)?;
@@ -447,7 +447,7 @@ pub(crate) fn mentions(text: &str) -> Vec<String> {
     out
 }
 
-fn cut(mut text: String) -> String {
+pub(super) fn cut(mut text: String) -> String {
     if text.len() > MENTION_BYTES {
         let mut end = MENTION_BYTES;
         while !text.is_char_boundary(end) {
@@ -459,7 +459,7 @@ fn cut(mut text: String) -> String {
     text
 }
 
-fn file_uri(path: &Path) -> String {
+pub(super) fn file_uri(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     if text.starts_with('/') {
         format!("file://{text}")
