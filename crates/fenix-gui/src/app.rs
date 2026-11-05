@@ -12548,6 +12548,13 @@ impl App {
     /// Tears the compose pane down and puts focus back where it was.
     fn close_compose(&mut self) {
         let Some(compose) = self.compose.take() else { return };
+        // Closed while still typing (it opens in Insert): back to Normal
+        // for wherever focus goes.
+        if self.vim.mode() == Mode::Insert {
+            if let (Some(ob), Some(state)) = (self.buffers.get_mut(compose.buffer), self.workspaces.active_pane_states_mut().get_mut(&compose.pane)) {
+                self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::named(FenixNamedKey::Escape));
+            }
+        }
         self.pane_titles.remove(&compose.pane);
         self.windows_mut().focus(compose.pane);
         if self.windows_mut().close_focused() {
