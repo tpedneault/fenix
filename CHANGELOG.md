@@ -8,6 +8,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `SPC p t` says where each task comes from (`[Fenix]`, the extension
+  that gave it, or `[tools.json]`) and its command line, so two of one
+  name can be told apart. The project doctor (`SPC p h`) lists each tool
+  once: where an extension checks what Fenix does (`rust-analyzer`,
+  `Rust`), its row takes Fenix's place, and the summary counts it once.
+  (#35)
 - A language server is looked for and started off the UI thread,
   Windows' search of `PATH` included: a slow `PATH` (a network drive on
   it) or a server slow to start no longer freezes the window as a file

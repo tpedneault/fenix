@@ -137,8 +137,7 @@ impl App {
         let probe = self.app_probe();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {
-                let mut checks = fenix_project::doctor::diagnose_with(root, self.project_kind_of(root), &probe, false, &[]);
-                checks.extend(self.wasm.doctor_checks(root));
+                let checks = fenix_project::doctor::merge(fenix_project::doctor::diagnose_with(root, self.project_kind_of(root), &probe, false, &[]), self.wasm.doctor_checks(root));
                 let health = (fenix_project::doctor::worst(&checks), checks.iter().filter(|c| c.health >= fenix_project::doctor::Health::Warn).count());
                 self.project_health.insert(root.clone(), health);
             }

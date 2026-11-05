@@ -2658,6 +2658,17 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
 }
 
 
+/// A task picker row: the task's name, its command line, and where it
+/// comes from, so two tasks of one name can be told apart.
+fn task_picker_label(task: &fenix_tasks::TaskDef, source: &str) -> String {
+    let command = std::iter::once(task.command.as_str()).chain(task.args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
+    // A name that is already its command line (`cargo build`) says it.
+    if command == task.name || command.starts_with(&format!("{} ", task.name)) {
+        return format!("{}   [{source}]", task.name);
+    }
+    format!("{}   {command}   [{source}]", task.name)
+}
+
 /// Where the explorer's own "places I have been" list lives.
 ///
 /// Somewhere throwaway under test. The tests here open real directories
@@ -9792,8 +9803,25 @@ impl App {
             self.set_error(format!("no known tasks for {}", root.display()));
             return;
         }
-        let candidates = tasks.into_iter().map(|t| fenix_picker::Candidate::new(t.name.clone(), t)).collect();
+        let own = fenix_project::tools::ProjectTools::read(&root).map(|tools| tools.tasks).unwrap_or_default();
+        let candidates = tasks
+            .into_iter()
+            .map(|t| {
+                let label = task_picker_label(&t, &self.task_source(&root, &t, own.contains_key(&t.name)));
+                fenix_picker::Candidate::new(label, t)
+            })
+            .collect();
         self.enter_picker(ActivePicker::Task(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Where task `task` of the project at `root` comes from, as the task
+    /// picker says: the project's own `tools.json` (`own`), the extension
+    /// that gave it, or Fenix's defaults for the project's kind (#35).
+    fn task_source(&self, root: &Path, task: &fenix_tasks::TaskDef, own: bool) -> String {
+        if own {
+            return "tools.json".to_string();
+        }
+        self.wasm.task_owner(root, task).unwrap_or_else(|| "Fenix".to_string())
     }
 
     /// `SPC p r`: the test the cursor is in, run in Task Output.
@@ -29740,6 +29768,24 @@ configure_board stm32
             Some(ActivePicker::Task(state)) => assert_eq!(state.len(), 3), // build/test/clippy
             _ => panic!("expected an open Task picker"),
         }
+    }
+
+    /// Each row says where its task comes from: Fenix's defaults, an
+    /// extension, or the project's `tools.json` (#35).
+    #[test]
+    fn the_task_picker_says_where_each_task_comes_from() {
+        let dir = TempDir::new("task_sources");
+        dir.write("Cargo.toml", "[package]\nname=\"x\"");
+        std::fs::create_dir_all(dir.path().join(".fenix")).unwrap();
+        dir.write(".fenix/tools.json", r#"{"tasks": {"lint": {"executable": "cargo", "args": ["clippy"]}}}"#);
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.picker_tasks();
+        let Some(ActivePicker::Task(state)) = &app.active_picker else { panic!("expected an open Task picker") };
+        let labels = picker_visible_labels(app.active_picker.as_ref().unwrap(), 0, state.len()).into_iter().map(|(_, l)| l).collect::<Vec<_>>();
+        assert!(labels.iter().any(|l| l == "cargo build   [Fenix]"), "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("lint   cargo clippy") && l.ends_with("[tools.json]")), "{labels:?}");
+        assert_eq!(task_picker_label(&fenix_tasks::TaskDef { name: "test".into(), command: "uv".into(), args: vec!["run".into(), "pytest".into()] }, "fenix.python"), "test   uv run pytest   [fenix.python]");
     }
 
     #[test]

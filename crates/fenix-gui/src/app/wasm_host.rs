@@ -567,6 +567,14 @@ impl WasmHost {
         self.tasks.iter().filter(|((ext, r), _)| same_dir(r, root) && self.is_for(ext, root)).flat_map(|(_, t)| t.clone()).collect()
     }
 
+    /// The extension that gave `task` for the project at `root`, if one
+    /// did: what the task picker says it comes from (#35).
+    pub(crate) fn task_owner(&self, root: &Path, task: &fenix_tasks::TaskDef) -> Option<String> {
+        let mut owners: Vec<&String> = self.tasks.iter().filter(|((ext, r), tasks)| same_dir(r, root) && self.is_for(ext, root) && tasks.contains(task)).map(|((ext, _), _)| ext).collect();
+        owners.sort();
+        owners.first().map(|ext| ext.to_string())
+    }
+
     /// How an extension's task `name` runs in the project at `root`: its
     /// program, where, and its environment.
     pub(crate) fn task_spec(&self, root: &Path, name: &str) -> Option<fenix_project::tools::CommandSpec> {

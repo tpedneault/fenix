@@ -1173,7 +1173,9 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   configure/build/`ctest` for a `CMakeLists.txt`, `npm run build`/`test`
   for a `package.json` -- every matching ecosystem contributes its own
   set, not just the first one found), plus the project's own
-  tasks from `.fenix/tools.json` (`SPC p ,` edits them).
+  tasks from `.fenix/tools.json` (`SPC p ,` edits them). Each row says
+  its command line, when the name doesn't already, and where the task
+  comes from: `[Fenix]`, the extension that gave it, or `[tools.json]`.
   Runs in a live-streamed single-pane Task Output panel (`SPC p T`
   reruns the last task, `SPC p k` ends it early); `cargo build`/`test`/
   `clippy` specifically run with `--message-format=json` so each

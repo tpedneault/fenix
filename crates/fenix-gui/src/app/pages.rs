@@ -930,8 +930,8 @@ impl App {
                 if let PageModel::Doctor(d) = &mut state.model {
                     let root = d.root.clone();
                     // The code extensions' checks, from what they last said.
-                    let mut checks = checks;
-                    checks.extend(self.wasm.doctor_checks(&root));
+                    // Each thing checked once (#35).
+                    let checks = doctor::merge(checks, self.wasm.doctor_checks(&root));
                     let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
                     d.set_checks(checks);
                     d.fixing = None;
