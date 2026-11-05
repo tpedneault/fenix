@@ -758,6 +758,103 @@ impl App {
         fenix_project::set_extension_markers(markers);
     }
 
+    /// The code extensions switched on now (`now`, as `installed` reads
+    /// them), put in use in the running editor (#40): one switched off,
+    /// removed or replaced is stopped and what it gave let go
+    /// (`unload_code_extension`); one switched on or installed has its
+    /// settings, commands and keys, and starts as it would with Fenix.
+    pub(super) fn code_extensions_now(&mut self, now: Vec<CodeExtension>) {
+        let same = |a: &CodeExtension, b: &CodeExtension| a.id == b.id && a.dir == b.dir && a.manifest.extension.version == b.manifest.extension.version;
+        let gone: Vec<String> = self.wasm.installed.iter().filter(|e| !now.iter().any(|n| same(n, e))).map(|e| e.id.clone()).collect();
+        for ext in &gone {
+            self.unload_code_extension(ext);
+        }
+        let added: Vec<CodeExtension> = now.iter().filter(|n| !self.wasm.installed.iter().any(|e| same(n, e))).cloned().collect();
+        for ext in &added {
+            let settings = crate::installed::settings_of(ext);
+            if !settings.is_empty() {
+                fenix_config::schema::register(Box::leak(settings.into_boxed_slice()));
+            }
+        }
+        if gone.is_empty() && added.is_empty() {
+            return;
+        }
+        self.wasm.installed = now;
+        let markers = self.wasm.installed.iter().flat_map(|e| &e.manifest.contributes.contexts).flat_map(|c| c.markers.iter().cloned()).collect();
+        fenix_project::set_extension_markers(markers);
+        self.commands = std::rc::Rc::new(crate::commands::CommandRegistry::with_builtins().with_code_extensions(&self.wasm.installed));
+        for ext in added.iter().filter(|e| e.manifest.activation.on_startup && !waits(e)) {
+            self.start_code_extension(&ext.id);
+        }
+        let file = self.open().buffer.path().map(Path::to_path_buf);
+        let project = file.as_deref().and_then(fenix_project::find_project_root);
+        self.code_start_waiting(file.as_deref(), project.as_deref());
+    }
+
+    /// Extension `ext` switched off or removed while Fenix runs: stopped
+    /// (let go, not waited for), its pages closed, and everything it gave
+    /// -- language servers, tasks, checks, launches, decorations, layers --
+    /// gone, the language servers it gave started again as the project
+    /// now has them (#40).
+    pub(super) fn unload_code_extension(&mut self, ext: &str) {
+        let pages: Vec<BufferId> = self.pages.iter().filter(|(_, s)| matches!(&s.model, PageModel::Code(p) if p.ext == ext)).map(|(id, _)| *id).collect();
+        for id in pages {
+            self.close_page_quietly(id);
+        }
+        if let Some(worker) = self.wasm.workers.remove(ext) {
+            worker.detach();
+        }
+        self.code_serving_stopped(ext, "it was switched off");
+        self.forget_code_lsp_sessions(ext);
+        let mine = |key: &(String, PathBuf)| key.0 == ext;
+        // The servers it gave, by project: those start again without it.
+        let mut served: Vec<(PathBuf, Vec<String>)> = self.wasm.servers.iter().filter(|(k, _)| mine(k)).map(|((_, root), (languages, _))| (root.clone(), languages.clone())).collect();
+        served.extend(self.wasm.added_servers.keys().filter(|k| mine(k)).map(|(_, root)| (root.clone(), Vec::new())));
+        let wasm = &mut self.wasm;
+        wasm.servers.retain(|k, _| !mine(k));
+        wasm.adapters.retain(|k, _| !mine(k));
+        wasm.formatters.retain(|k, _| !mine(k));
+        wasm.adapter_sockets.retain(|k, _| !mine(k));
+        wasm.keep_output.retain(|k| !mine(k));
+        wasm.server_settings.retain(|k, _| !mine(k));
+        wasm.launches.retain(|k, _| !mine(k));
+        wasm.launch_variables.retain(|k, _| !mine(k));
+        wasm.fixes.retain(|k, _| !mine(k));
+        wasm.checks.retain(|k, _| !mine(k));
+        wasm.tasks.retain(|k, _| !mine(k));
+        wasm.task_specs.retain(|k, _| !mine(k));
+        wasm.added_servers.retain(|k, _| !mine(k));
+        wasm.not_theirs.retain(|k| !mine(k));
+        for map in [&mut wasm.status as &mut dyn Forget, &mut wasm.queued, &mut wasm.statuses, &mut wasm.focused, &mut wasm.focus_told, &mut wasm.home, &mut wasm.views_told, &mut wasm.projects, &mut wasm.settings, &mut wasm.secrets, &mut wasm.beside, &mut wasm.rules] {
+            map.forget(ext);
+        }
+        wasm.calls.retain(|(e, _), _| e != ext);
+        wasm.stale.remove(ext);
+        wasm.scratches.retain(|_, s| s.ext != ext);
+        let by_rule = rules_key(ext);
+        for sets in wasm.decorations.values_mut() {
+            sets.retain(|(e, _)| e != ext && *e != by_rule);
+        }
+        wasm.rules_given += 1;
+        wasm.layers.forget(ext);
+        wasm.terminals.retain(|_, (e, _)| e != ext);
+        wasm.background.retain(|_, t| t.ext != ext);
+        if wasm.task.as_ref().is_some_and(|(e, _, _)| e == ext) {
+            wasm.task = None;
+        }
+        if wasm.prompt.as_ref().is_some_and(|p| p.ext == ext) {
+            wasm.prompt = None;
+        }
+        for (root, languages) in served {
+            if languages.is_empty() {
+                self.restart_language_servers_in(&root);
+            } else {
+                self.restart_language_servers_for(&root, &languages);
+            }
+        }
+        self.note_output(ext, "-- switched off".into());
+    }
+
     /// At start-up, once the project is known: those that start with
     /// Fenix, started -- each on a worker of its own, so nothing here
     /// waits for one to load. One for some languages or projects only (a
@@ -3740,6 +3837,18 @@ impl App {
     }
 }
 
+/// A map of something per extension, as `unload_code_extension` lets go
+/// of one's.
+trait Forget {
+    fn forget(&mut self, ext: &str);
+}
+
+impl<V> Forget for HashMap<String, V> {
+    fn forget(&mut self, ext: &str) {
+        self.remove(ext);
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -4572,6 +4681,35 @@ pub(crate) mod tests {
         assert_eq!((checks[1].label.as_str(), checks[1].health), ("board", fenix_project::doctor::Health::Warn));
         assert!(matches!(&checks[1].fix, Some(f) if matches!(&f.action, fenix_project::doctor::FixAction::Editor(fenix_project::doctor::EditorFix::RunCommand(c)) if c == "hello.greet")));
         assert_eq!(app.wasm.tasks(&root).iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["hello: build"]);
+    }
+
+    /// Switched on while Fenix runs, an extension's commands are there at
+    /// once; switched off, it stops and what it gave -- tasks, checks, its
+    /// language server, its pages -- goes with it, no restart (#40).
+    #[test]
+    fn an_extension_switched_on_and_off_is_loaded_and_let_go_at_once() {
+        let mut app = App::with_file(None);
+        assert!(app.commands.get("hello.greet").is_none());
+        app.code_extensions_now(vec![hello("[permissions]\nprocess = [\"cmd\"]\nfilesystem = \"project-read\"\n")]);
+        assert!(app.commands.get("hello.greet").is_some(), "its commands, at once");
+        app.run_extension_command("test.hello", "hello.project");
+        pump_until(&mut app, |a| said(a, "powershell isn't a program") && !a.wasm.tasks.is_empty());
+        let root = app.wasm.projects.get("test.hello").cloned().flatten().unwrap();
+        assert!(!app.wasm.doctor_checks(&root).is_empty() && app.wasm.language_server(&root, fenix_syntax::LanguageId::Cpp).is_some());
+        app.run_extension_command("test.hello", "hello.page");
+        pump_until(&mut app, |a| a.find_page(|m| matches!(m, PageModel::Code(_))).is_some());
+
+        app.code_extensions_now(Vec::new());
+        assert!(app.commands.get("hello.greet").is_none(), "its commands gone");
+        assert!(!app.wasm.workers.contains_key("test.hello") && app.wasm.installed.is_empty());
+        assert!(app.wasm.tasks(&root).is_empty() && app.wasm.doctor_checks(&root).is_empty());
+        assert!(app.wasm.language_server(&root, fenix_syntax::LanguageId::Cpp).is_none());
+        assert!(app.find_page(|m| matches!(m, PageModel::Code(_))).is_none(), "its page closed");
+        assert!(app.wasm.output.get("test.hello").is_some_and(|lines| lines.iter().any(|l| l == "-- switched off")));
+        // And on again: it starts as it would with Fenix.
+        app.code_extensions_now(vec![hello("")]);
+        app.run_extension_command("test.hello", "hello.greet");
+        pump_until(&mut app, |a| a.wasm.workers.contains_key("test.hello") && a.code_ready("test.hello"));
     }
 
     /// A language pack is for a project its contexts' markers or languages

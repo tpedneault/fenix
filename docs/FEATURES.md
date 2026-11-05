@@ -1599,9 +1599,14 @@ primary server, plus any additional servers a project declares, which can serve
 several languages from one process and share a buffer with its primary.
 Configure literal executables, argument arrays, working directories, and child
 environment values in `.fenix/tools.json` for LSP, DAP, and tasks.
+An extension installed, switched on or off, or removed is put in use
+at once, in the running editor: its code starts or stops (its pages,
+language servers, tasks and checks with it), and its commands, keys,
+snippets, templates and launches come and go. Only its themes and
+languages wait for the next start, and the Extensions page says so.
 `SPC q r` restarts Fenix where you are -- the session, unsaved text
-included, comes back -- so an extension installed, switched on or off,
-or a setting only read at start, is used without quitting yourself.
+included, comes back -- for those, and for a setting only read at start
+(the settings page marks it).
 `:lsp-restart` reloads language services for the current project;
 `:lsp-restart NAME` restarts one server. Task rerun history is per project; debugger
 and task controls guard against operating on another project's active process.

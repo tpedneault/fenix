@@ -10,7 +10,7 @@
 //! `policy.toml` can switch the store off, or name the registry, for
 //! everyone.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use fenix_extensions::{Installed, Policy, Store};
 
@@ -186,16 +186,64 @@ fn dirs_of(all: &[(Installed, bool)], kind: &str) -> Vec<PathBuf> {
     all.iter().filter(|(e, _)| e.enabled && e.manifest.is_ok()).map(|(e, _)| e.dir.join(kind)).filter(|d| d.is_dir()).collect()
 }
 
-/// The installed extensions that were switched on when Fenix started --
-/// whose data is in use this run (none in safe mode).
-fn running() -> &'static [String] {
-    static RUNNING: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
-    RUNNING.get_or_init(|| {
-        if safe_mode() {
-            return Vec::new();
+/// The installed extensions whose contributions are in use this run:
+/// those switched on when Fenix started, and those loaded or let go
+/// since (`now_in_use`). None in safe mode.
+fn running() -> Vec<String> {
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    running
+        .get_or_insert_with(|| {
+            if safe_mode() {
+                return Vec::new();
+            }
+            everything(machine().as_ref(), store().as_ref()).into_iter().filter(|(e, _)| e.enabled).map(|(e, _)| e.id).collect()
+        })
+        .clone()
+}
+
+static RUNNING: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+/// Extension `id` was loaded (`on`) or let go in the running editor: the
+/// Extensions page says so rather than "after a restart" (#40).
+pub fn now_in_use(id: &str, on: bool) {
+    running();
+    let mut running = RUNNING.lock().unwrap_or_else(|e| e.into_inner());
+    let running = running.get_or_insert_with(Vec::new);
+    running.retain(|r| r != id);
+    if on {
+        running.push(id.to_string());
+    }
+}
+
+/// What of extension `dir` is read only when Fenix starts: its themes
+/// and its languages. Everything else it brings -- code, keys, snippets,
+/// templates, launches, lessons -- is loaded and let go as it's switched
+/// (#40).
+pub fn read_at_start(dir: &Path) -> Vec<&'static str> {
+    ["themes", "languages"].into_iter().filter(|kind| dir.join(kind).is_dir()).collect()
+}
+
+/// The installed extensions whose switch is waiting on a restart, now
+/// that the rest are in use: their ids. Each that needs none is marked
+/// in use (`now_in_use`) as it's switched.
+pub fn settle_switches() -> Vec<String> {
+    if safe_mode() {
+        return Vec::new();
+    }
+    let running = running();
+    let mut waiting = Vec::new();
+    for (e, _) in everything(machine().as_ref(), store().as_ref()) {
+        let on = e.enabled && e.manifest.is_ok();
+        if on == running.contains(&e.id) {
+            continue;
         }
-        everything(machine().as_ref(), store().as_ref()).into_iter().filter(|(e, _)| e.enabled).map(|(e, _)| e.id).collect()
-    })
+        if read_at_start(&e.dir).is_empty() {
+            now_in_use(&e.id, on);
+        } else {
+            waiting.push(e.id);
+        }
+    }
+    waiting
 }
 
 /// The Extensions page's rows for what's installed.
@@ -265,7 +313,7 @@ fn registry_with(config: Option<&fenix_config::Config>, policy: &Policy) -> Resu
 /// Installs `id` from `registry` into `store`: what to say.
 pub fn install_from(registry: &fenix_extensions::registry::Registry, id: &str, store: &fenix_extensions::Store) -> Result<String, String> {
     let done = registry.install(id, store, &fenix_extensions::registry::Http, &release())?;
-    Ok(done.iter().map(|e| format!("Installed {} {} ({}) from the registry.", e.name(), e.version, e.id)).collect::<Vec<_>>().join("\n") + " It's used from the next start.")
+    Ok(done.iter().map(|e| format!("Installed {} {} ({}) from the registry.", e.name(), e.version, e.id)).collect::<Vec<_>>().join("\n"))
 }
 
 /// What `Store::uninstall_unneeded` removed, as said: `id`, and what it
@@ -329,7 +377,9 @@ pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<
             not_managed(id, managed)?;
             let config = settings();
             let registry = registry(config.as_ref())?;
-            install_from(&registry, id, store)
+            // A running Fenix is another process: it loads it when it's
+            // told, or at its next start.
+            install_from(&registry, id, store).map(|said| said + " It's used from the next start.")
         }
         Request::Install(path) => {
             not_managed(&fenix_extensions::Package::open(path)?.manifest.extension.id, managed)?;
@@ -366,6 +416,23 @@ pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only themes and languages wait for the next start (#40); and an
+    /// extension loaded or let go meanwhile is said to be in use, or not.
+    #[test]
+    fn only_themes_and_languages_are_read_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        for kind in ["snippets", "keymaps", "templates"] {
+            std::fs::create_dir(dir.path().join(kind)).unwrap();
+        }
+        assert!(read_at_start(dir.path()).is_empty());
+        std::fs::create_dir(dir.path().join("themes")).unwrap();
+        assert_eq!(read_at_start(dir.path()), ["themes"]);
+        now_in_use("acme.loaded", true);
+        assert!(running().contains(&"acme.loaded".to_string()));
+        now_in_use("acme.loaded", false);
+        assert!(!running().contains(&"acme.loaded".to_string()));
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

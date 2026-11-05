@@ -1064,7 +1064,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 if is_sel {
                     let mut help = s.help.to_string();
                     if s.restart {
-                        help.push_str(" Takes effect when Fenix restarts.");
+                        help.push_str(" Takes effect when Fenix restarts (SPC q r).");
                     }
                     for line in wrap(&help, sw.saturating_sub(label_w + 2)) {
                         g.put(y, vx, &line, Role::Muted);

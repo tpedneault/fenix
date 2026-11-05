@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An extension installed, switched on or off, or removed from the
+  Extensions page is put in use at once, without a restart: its code
+  starts or stops (its pages, language servers, tasks and checks with
+  it), and its commands and keys come and go. Only its themes and
+  languages wait for the next start, and the page and its messages say
+  so. A setting read only at start (`agents.mcp.http`) is marked so, and
+  saving it says `SPC q r` restarts now. (#40)
 - An idle window stops drawing: the caret blinks for 30 seconds after
   the last key or click, then stays lit, rather than waking the window
   for every blink and fade forever; and an extension's moving layer (the
