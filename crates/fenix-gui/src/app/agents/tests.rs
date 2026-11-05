@@ -1178,3 +1178,63 @@ fn an_asks_options_are_read_and_checked() {
     };
     assert_eq!(extensions::restrictive_mode(&modes).as_deref(), Some("plan"));
 }
+
+/// The agent asks for a form (`elicitation/create`): a card with its
+/// fields; `y` opens the form as TOML in a compose pane, and what's
+/// written there, checked against the form, is the answer.
+#[test]
+fn an_agents_form_is_filled_in_and_sent() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    f.type_prompt("elicit");
+    assert!(f.pump(|app| app.agents.hub.status().waiting == 1), "the card is up");
+    let text = f.page_text();
+    assert!(text.contains("The agent asks: How should I approach this?") && text.contains("Files to touch *") && text.contains("y fill it in"), "{text}");
+    f.key(Key::Char('y'));
+    let compose = f.app.compose.as_ref().map(|c| c.buffer).expect("the form, in a compose pane");
+    let form = f.app.buffers.get(compose).unwrap().buffer.text();
+    assert!(form.contains("strategy = \"careful\"") && form.contains("files ="), "{form}");
+    // Sent as it opened: the required count is missing, and it stays.
+    f.app.compose_submit();
+    assert!(f.app.compose.is_some(), "not sent: files is required");
+    f.app.replace_buffer_from_disk(compose, &form.replace("files = ", "files = 4").replace("\"careful\"", "\"quick\""));
+    f.app.compose_submit();
+    assert!(f.app.compose.is_none());
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
+    let said = f.view().thread.last_answer();
+    assert!(said.contains("\"strategy\":\"quick\"") && said.contains("\"files\":4"), "{said}");
+    assert!(f.page_text().contains("✓ How should I approach this? — accept: "));
+}
+
+/// `Y` takes the defaults, when they make a whole answer; `n` declines.
+#[test]
+fn defaults_that_dont_fit_are_refused_and_n_declines() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    f.type_prompt("elicit");
+    assert!(f.pump(|app| app.agents.hub.status().waiting == 1));
+    f.key(Key::Char('Y'));
+    assert_eq!(f.app.agents.hub.status().waiting, 1, "files has no default: still waiting");
+    f.key(Key::Char('n'));
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
+    assert!(f.view().thread.last_answer().contains("\"action\":\"decline\""));
+}
+
+/// A link: `y` opens it, and the agent's `elicitation/complete` marks the
+/// card done.
+#[test]
+fn a_link_is_opened_and_its_card_marked_done() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    f.type_prompt("oauth");
+    assert!(f.pump(|app| app.agents.hub.status().waiting == 1));
+    assert!(f.page_text().contains("https://example.com/connect?elicitationId=mock-1"));
+    f.key(Key::Char('y'));
+    assert_eq!(f.app.wasm.opened, vec!["https://example.com/connect?elicitationId=mock-1".to_string()]);
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.entries.iter().any(|e| matches!(e, Entry::Elicitation(c) if c.state == fenix_acp::thread::ElicitationState::Completed)))));
+    assert!(f.page_text().contains("Sign in to the example service — done"));
+}

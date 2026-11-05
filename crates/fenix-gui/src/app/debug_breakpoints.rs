@@ -159,6 +159,9 @@ pub(super) struct SavedBreakpoint {
     pub line: usize,
     #[serde(flatten)]
     pub breakpoint: Breakpoint,
+    /// A coding agent set it: it keeps its shade, and `SPC u A` clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent: bool,
 }
 
 impl App {
@@ -350,7 +353,7 @@ impl App {
 
     /// The debugger's part of the session file.
     pub(super) fn capture_debugging(&self) -> SavedDebugging {
-        let mut breakpoints: Vec<SavedBreakpoint> = self.breakpoints.iter().flat_map(|(path, lines)| lines.iter().map(move |(line, b)| SavedBreakpoint { path: path.clone(), line: *line, breakpoint: b.clone() })).collect();
+        let mut breakpoints: Vec<SavedBreakpoint> = self.breakpoints.iter().flat_map(|(path, lines)| lines.iter().map(move |(line, b)| SavedBreakpoint { path: path.clone(), line: *line, breakpoint: b.clone(), agent: self.agent_calls.agent_breakpoints.contains(&(path.clone(), *line)) })).collect();
         breakpoints.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         let mut launches: Vec<(PathBuf, String)> = self.debug_last_launch.iter().map(|(r, n)| (r.clone(), n.clone())).collect();
         launches.sort();
@@ -362,7 +365,11 @@ impl App {
     /// The debugger's part of a session file, put back.
     pub(super) fn restore_debugging(&mut self, saved: SavedDebugging) {
         self.breakpoints.clear();
+        self.agent_calls.agent_breakpoints.clear();
         for b in saved.breakpoints {
+            if b.agent {
+                self.agent_calls.agent_breakpoints.insert((b.path.clone(), b.line));
+            }
             self.breakpoints.entry(b.path).or_default().insert(b.line, b.breakpoint);
         }
         self.debug_pins = saved.pins;
@@ -411,7 +418,7 @@ mod tests {
     #[test]
     fn the_session_files_debugging_reads_back_and_a_plain_breakpoint_is_only_its_line() {
         let saved = SavedDebugging {
-            breakpoints: vec![SavedBreakpoint { path: PathBuf::from("/p/a.py"), line: 3, breakpoint: Breakpoint::default() }, SavedBreakpoint { path: PathBuf::from("/p/a.py"), line: 4, breakpoint: Breakpoint { condition: Some("i == 2".into()), off: true, ..Default::default() } }],
+            breakpoints: vec![SavedBreakpoint { path: PathBuf::from("/p/a.py"), line: 3, breakpoint: Breakpoint::default(), agent: false }, SavedBreakpoint { path: PathBuf::from("/p/a.py"), line: 4, breakpoint: Breakpoint { condition: Some("i == 2".into()), off: true, ..Default::default() }, agent: true }],
             pins: vec![Pin { path: PathBuf::from("/p/a.py"), line: 3, expression: "self.rows".into() }],
             launches: vec![(PathBuf::from("/p"), "Python: module".into())],
             exceptions: vec![("raised".into(), true)],
@@ -419,6 +426,7 @@ mod tests {
         let json = serde_json::to_value(&saved).unwrap();
         assert_eq!(json["breakpoints"][0], serde_json::json!({ "path": "/p/a.py", "line": 3 }));
         assert_eq!(json["breakpoints"][1]["off"], true);
+        assert_eq!(json["breakpoints"][1]["agent"], true, "an agent's keeps its shade");
         let back: SavedDebugging = serde_json::from_value(json).unwrap();
         assert_eq!(back, saved);
         if cfg!(not(windows)) {

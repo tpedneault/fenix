@@ -800,6 +800,8 @@ impl App {
             agent_page::Action::Compose => self.agents_focus_composer(),
             agent_page::Action::Cancel => self.agents_cancel(),
             agent_page::Action::Permission { key, option } => self.agents_answer(&thread, &key, Some(&option)),
+            agent_page::Action::Elicit { key, how } => self.agents_elicit(&thread, &key, how),
+            agent_page::Action::OtherStep(forward) => self.pipeline_other_step(&thread, forward),
             agent_page::Action::Open { path, line } => self.agents_open_location(&thread, &path, line),
             agent_page::Action::Yank(text) => {
                 if let Some(clipboard) = &mut self.clipboard {
@@ -1351,6 +1353,16 @@ impl App {
     /// or waiting on you), several by count, and once they're done the
     /// changes left to review.
     pub(super) fn agents_status_segment(&self) -> String {
+        let segment = self.agents_threads_segment();
+        let clients = crate::mcp_http::connected_clients();
+        if clients.is_empty() {
+            return segment;
+        }
+        format!("{segment}   ⇄ MCP: {}", clients.join(", "))
+    }
+
+    /// The agents' threads, for the modeline.
+    fn agents_threads_segment(&self) -> String {
         let status = self.agents.hub.status();
         let busy: Vec<&ThreadId> = self.agents.turning.keys().collect();
         let name = |t: &ThreadId| self.agents.status_of(t).agent;
@@ -1391,6 +1403,7 @@ impl App {
 }
 
 mod context;
+mod elicit;
 mod dock;
 mod review;
 mod terminals;

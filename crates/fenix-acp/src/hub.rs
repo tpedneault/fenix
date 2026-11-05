@@ -517,7 +517,7 @@ impl Hub {
     }
 
     /// `id` only plans: when its agent offers to leave its plan mode, the
-    /// plan goes on `Thread::proposed_plan` and the offer is turned down,
+    /// plan goes on `Thread::taken_plan` and the offer is turned down,
     /// which ends the turn with nothing carried out. A pipeline's gate
     /// decides what happens to the plan, not a card in the step.
     pub fn stop_at_plans(&mut self, id: &ThreadId) {
@@ -531,14 +531,33 @@ impl Hub {
     /// the arguments. The answer comes back as `Effect::FenixAnswered`
     /// with one of `FENIX_OPTIONS`' ids, never to the agent.
     pub fn ask_fenix(&mut self, id: &ThreadId, key: &str, title: &str, kind: protocol::ToolKind, input: Value) -> Vec<Effect> {
+        let options: Vec<(&str, &str, protocol::PermissionKind)> = FENIX_OPTIONS.to_vec();
+        self.ask_fenix_with(id, key, title, kind, input, &options)
+    }
+
+    /// `ask_fenix` with answers of its own: id, what the card says, kind.
+    pub fn ask_fenix_with(&mut self, id: &ThreadId, key: &str, title: &str, kind: protocol::ToolKind, input: Value, answers: &[(&str, &str, protocol::PermissionKind)]) -> Vec<Effect> {
         let mut fx = Vec::new();
         let Some(slot) = self.threads.get_mut(id) else { return fx };
         let tool_call = ToolCallFields { id: format!("fenix-{key}"), title: Some(title.to_string()), kind: Some(kind), status: None, content: None, locations: None, raw_input: Some(input), raw_output: None };
-        let options = FENIX_OPTIONS.iter().map(|(id, name, kind)| PermissionOption { id: id.to_string(), name: name.to_string(), kind: *kind }).collect();
+        let options = answers.iter().map(|(id, name, kind)| PermissionOption { id: id.to_string(), name: name.to_string(), kind: *kind }).collect();
         slot.fenix_questions.insert(key.to_string());
         slot.thread.push_permission(PermissionCard { key: key.to_string(), tool_call, options, state: PermissionState::Pending });
         fx.push(Effect::Changed(id.clone()));
         fx.push(Effect::Attention { thread: id.clone(), why: Attention::Permission });
+        fx
+    }
+
+    /// The user answered an elicitation: `action` is `accept` (with the
+    /// form's `content`), `decline` or `cancel`; `summary` is what the card
+    /// says was sent.
+    pub fn answer_elicitation(&mut self, id: &ThreadId, key: &str, action: &str, content: Option<Value>, summary: &str) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        let Some(slot) = self.threads.get_mut(id) else { return fx };
+        let Some((conn, request)) = slot.permissions.remove(key) else { return fx };
+        slot.thread.set_elicitation_state(key, crate::thread::ElicitationState::Answered { action: action.to_string(), summary: summary.to_string() });
+        fx.push(Effect::Respond { conn, id: request, result: Ok(protocol::elicitation_result(action, content)) });
+        fx.push(Effect::Changed(id.clone()));
         fx
     }
 
@@ -1231,7 +1250,7 @@ impl Hub {
         let Some(slot) = self.threads.get_mut(id) else { return };
         // Turning a plan down cancels the turn. That's how a plan step
         // ends, unless you cancelled it too.
-        let planned = slot.stops_at_plans && slot.thread.proposed_plan.is_some() && !matches!(slot.turn, Turn::Cancelling { .. });
+        let planned = slot.stops_at_plans && slot.thread.taken_plan.is_some() && !matches!(slot.turn, Turn::Cancelling { .. });
         slot.turn = Turn::Idle;
         let stop = match &result {
             Ok(v) if planned && matches!(StopReason::parse(v), StopReason::Cancelled) => "end_turn".to_string(),
@@ -1285,6 +1304,18 @@ impl Hub {
     }
 
     fn on_notification(&mut self, conn: ConnId, method: &str, params: &Value, fx: &mut Vec<Effect>) {
+        // A link's flow done: its card says so, in whichever of this
+        // connection's threads asked.
+        if method == "elicitation/complete" {
+            let Some(eid) = params.get("elicitationId").and_then(Value::as_str) else { return };
+            let ids: Vec<ThreadId> = self.routes.iter().filter(|((c, _), _)| *c == conn).map(|(_, t)| t.clone()).collect();
+            for id in ids {
+                if self.threads.get_mut(&id).is_some_and(|s| s.thread.complete_elicitation(eid)) {
+                    fx.push(Effect::Changed(id));
+                }
+            }
+            return;
+        }
         if method != "session/update" {
             // `$/cancel_request` for a request of the agent's Fenix is
             // serving, and agents' own `_` extensions: nothing to do.
@@ -1317,12 +1348,27 @@ impl Hub {
                 return;
             }
         };
-        let Some(thread) = self.routes.get(&(conn, request.session_id().to_string())).cloned() else {
+        // One outside a session (an elicitation during setup) goes to this
+        // connection's focused thread, else its first.
+        let scoped = if request.session_id().is_empty() {
+            let mine: Vec<ThreadId> = self.routes.iter().filter(|((c, _), _)| *c == conn).map(|(_, t)| t.clone()).collect();
+            self.focused.clone().filter(|f| mine.contains(f)).or_else(|| self.order.iter().find(|t| mine.contains(t)).cloned())
+        } else {
+            self.routes.get(&(conn, request.session_id().to_string())).cloned()
+        };
+        let Some(thread) = scoped else {
             fx.push(Effect::Respond { conn, id, result: Err(RpcError::new(code::INVALID_PARAMS, format!("no session {}", request.session_id()))) });
             return;
         };
         let slot = self.threads.get_mut(&thread).unwrap();
         match request {
+            ClientRequest::Elicit { elicitation, .. } => {
+                let key = id.to_string();
+                slot.permissions.insert(key.clone(), (conn, id));
+                slot.thread.push_elicitation(crate::thread::ElicitationCard { key, request: elicitation, state: crate::thread::ElicitationState::Pending });
+                fx.push(Effect::Changed(thread.clone()));
+                fx.push(Effect::Attention { thread, why: Attention::Permission });
+            }
             ClientRequest::RequestPermission { tool_call, options, .. } => {
                 let tool_call = merged_tool_call(&slot.thread, tool_call);
                 let options = options_or_default(options);
@@ -1333,7 +1379,7 @@ impl Hub {
                 if slot.stops_at_plans && tool_call.kind == Some(protocol::ToolKind::SwitchMode) {
                     let no = options.iter().find(|o| matches!(o.kind, protocol::PermissionKind::RejectOnce | protocol::PermissionKind::RejectAlways));
                     if let (Some(plan), Some(no)) = (offered_plan(&tool_call), no) {
-                        slot.thread.proposed_plan = Some(plan);
+                        slot.thread.taken_plan = Some(plan);
                         fx.push(Effect::Respond { conn, id, result: Ok(protocol::permission_result(Some(&no.id))) });
                         fx.push(Effect::Changed(thread));
                         return;

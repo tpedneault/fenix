@@ -118,9 +118,37 @@ pub fn reject(baseline: &str, current: &str, i: usize) -> Option<String> {
     Some(splice(current, hunk.new, &hunk.removed))
 }
 
+/// A finding a pipeline's review step reported, shown beside the hunk
+/// it's about.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    pub path: String,
+    pub line: Option<u64>,
+    pub severity: Option<String>,
+    pub message: String,
+}
+
+impl Note {
+    /// Whether it's about `file`: its path, as given or relative.
+    fn about(&self, file: &ReviewFile) -> bool {
+        let given = self.path.replace('\\', "/");
+        let have = file.path.to_string_lossy().replace('\\', "/");
+        !given.is_empty() && (have == given || have.ends_with(&format!("/{}", given.trim_start_matches("./"))))
+    }
+
+    fn text(&self) -> String {
+        match &self.severity {
+            Some(s) => format!("⚑ {s}: {}", self.message),
+            None => format!("⚑ {}", self.message),
+        }
+    }
+}
+
 pub struct ReviewPage {
     pub thread: fenix_acp::hub::ThreadId,
     pub files: Vec<ReviewFile>,
+    /// A review's findings, beside the hunks they're about.
+    pub notes: Vec<Note>,
     /// The focused row: a file, and one of its hunks (`None`: the file's
     /// own row).
     pub focus: (usize, Option<usize>),
@@ -141,7 +169,7 @@ pub enum Action {
 
 impl ReviewPage {
     pub fn new(thread: fenix_acp::hub::ThreadId, files: Vec<ReviewFile>) -> Self {
-        let mut page = ReviewPage { thread, files, focus: (0, None) };
+        let mut page = ReviewPage { thread, files, notes: Vec::new(), focus: (0, None) };
         page.focus = page.rows().first().copied().unwrap_or((0, None));
         page
     }
@@ -226,6 +254,12 @@ pub fn layout(page: &ReviewPage, title: &str, cols: usize) -> Page {
         let x = g.put(y, left, &fit(&file.name, width.saturating_sub(24)), Role::Title);
         g.put(y, x + 2, &file.summary(), if matches!(file.baseline, Baseline::Unknown) { Role::Warn } else { Role::Muted });
         y += 1;
+        // A finding on a line no hunk has: under the file.
+        let in_hunk = |line: u64| file.hunks.iter().any(|h| line >= h.new.start as u64 && line <= h.new.end as u64 + 1);
+        for note in page.notes.iter().filter(|n| n.about(file) && !n.line.is_some_and(in_hunk)) {
+            g.put(y, left + 2, &fit(&note.text(), width - 2), Role::Warn);
+            y += 1;
+        }
         for (h, hunk) in file.hunks.iter().enumerate() {
             if page.focus == (f, Some(h)) {
                 g.focus(y, left..left + width);
@@ -242,6 +276,10 @@ pub fn layout(page: &ReviewPage, title: &str, cols: usize) -> Page {
             }
             if hunk.removed.len() > 40 || hunk.added.len() > 40 {
                 g.put(y, left + 2, "… (Enter opens the file)", Role::Muted);
+                y += 1;
+            }
+            for note in page.notes.iter().filter(|n| n.about(file) && n.line.is_some_and(|l| l >= hunk.new.start as u64 && l <= hunk.new.end as u64 + 1)) {
+                g.put(y, left + 4, &fit(&note.text(), width - 4), Role::Warn);
                 y += 1;
             }
         }
@@ -282,6 +320,23 @@ mod tests {
         // Only the endings changed: nothing to review.
         let endings = ReviewFile::new("/p/e.py".into(), "e.py".into(), Baseline::Text(old.into()), Some(old.replace("\r\n", "\n")));
         assert!(!endings.changed());
+    }
+
+    #[test]
+    fn findings_show_beside_the_hunk_theyre_about() {
+        let file = ReviewFile::new("/p/src/a.rs".into(), "src/a.rs".into(), Baseline::Text("a\nb\nc\n".into()), Some("a\nB\nc\n".into()));
+        let mut page = ReviewPage::new(fenix_acp::hub::ThreadId("t".into()), vec![file]);
+        page.notes = vec![
+            Note { path: "src/a.rs".into(), line: Some(2), severity: Some("error".into()), message: "off by one".into() },
+            Note { path: "src/a.rs".into(), line: Some(30), severity: None, message: "elsewhere".into() },
+            Note { path: "other.rs".into(), line: Some(2), severity: None, message: "not this file".into() },
+        ];
+        let text = layout(&page, "t", 100).all_text();
+        let hunk = text.find("@@ line 2").unwrap();
+        let note = text.find("⚑ error: off by one").expect("the finding");
+        assert!(note > hunk, "under its hunk: {text}");
+        assert!(text.find("⚑ elsewhere").unwrap() < hunk, "a line no hunk has: under the file");
+        assert!(!text.contains("not this file"));
     }
 
     #[test]

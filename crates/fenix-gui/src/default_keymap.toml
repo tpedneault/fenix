@@ -799,6 +799,16 @@ label = "rename (LSP)"
 command = "code.lsp_rename"
 
 [[leader]]
+keys = "SPC c i"
+label = "implementations (LSP)"
+command = "code.implementations"
+
+[[leader]]
+keys = "SPC c h"
+label = "callers (LSP)"
+command = "code.callers"
+
+[[leader]]
 keys = "SPC c a"
 label = "code action"
 command = "code.lsp_code_action"

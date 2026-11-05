@@ -82,6 +82,24 @@ agents; extension API 1.2; and the fixes since 1.0.1.
 - The control channel's `fenix/agent.*` methods: what `fenix --mcp`
   calls, each for the thread its bridge speaks for (`client.thread` in
   `fenix/hello`).
+- An agent can ask you for something as it works (ACP's
+  `elicitation/create`): a form, shown as a card in its thread. `y` opens
+  it in a compose pane, a line per field saying what it takes, checked
+  before it's sent; `Y` sends its defaults, `n` declines, `x` cancels.
+  One that asks you to sign in somewhere gives a link: `y` opens it in
+  your browser, and the card says when the agent hears it's done.
+- Pipelines: the dock's title says which step is running
+  (`plan ✓ → build ● → review`), `[s` / `]s` go between the steps'
+  threads, `e` at a gate edits what's passed on before it goes, and the
+  review's findings show beside the hunks they're about in Agent changes.
+- `SPC c i` goes to where the trait, interface or method under the
+  cursor is implemented (listed when there are several), and `SPC c h`
+  lists who calls the function under the cursor, as `gr` lists
+  references.
+- A breakpoint a coding agent set has a gutter shade of its own, kept
+  across restarts, so you can tell it from yours; `SPC u A` clears them.
+- The modeline names the MCP clients connected to Fenix over HTTP
+  (`agents.mcp.http`) while they are.
 
 ### Extension API 1.2
 
@@ -262,7 +280,8 @@ it did.
   refused as stale.
 - A pipeline's plan step stops at the plan: its agent's offer to carry
   it out no longer has it build everything, only for that to be put
-  back and its summary passed on as the plan.
+  back and its summary passed on as the plan. Its gate says it's Fenix
+  asking.
 - A pipeline ends on the thread with its changes, so `SPC a r` finds them.
 - There's one agents' dock, and it comes with you between workspaces, so
   a card an agent waits on stays in sight. Opening it in a second
@@ -272,6 +291,8 @@ it did.
   with no prompt.
 - A file an agent shows, or that's opened from outside, goes beside the
   dock, not over a thread and its cards.
+- `SPC c i` and `SPC c h` say so when no language server runs for the
+  file, instead of doing nothing.
 
 ## [1.0.1] - 2026-11-03
 
