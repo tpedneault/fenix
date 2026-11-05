@@ -190,7 +190,7 @@ impl App {
     /// Rejects a hunk, or the whole file: it goes back to what it was. An
     /// open buffer takes it as one undo step, and is saved; with unsaved
     /// edits of yours in it, you're told to deal with those first.
-    fn agents_reject(&mut self, thread: &ThreadId, file: &ReviewFile, hunk: Option<usize>) {
+    pub(super) fn agents_reject(&mut self, thread: &ThreadId, file: &ReviewFile, hunk: Option<usize>) {
         let open = self.buffers.id_for_path(&file.path);
         if let Some(id) = open.filter(|id| self.buffers.get(*id).is_some_and(|b| b.buffer.is_dirty())) {
             let name = self.buffer_display_name(id);

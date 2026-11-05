@@ -76,6 +76,47 @@ pub(crate) enum Answer {
     Fenix(Box<dyn FnOnce(&mut App, Result<String, String>)>),
 }
 
+/// How far a service call has got (`service-progress`, 1.2): what it's
+/// doing, and how much is done, 0 to 1, when it says.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Progress {
+    pub message: String,
+    pub fraction: Option<f32>,
+}
+
+/// Where a service call's progress goes, each time it says how far it's
+/// got: an agent's tool card, MCP's `notifications/progress`.
+pub(crate) type OnProgress = Box<dyn FnMut(&mut App, &Progress)>;
+
+/// How Fenix waits on a service call of its own (`code_serve_with`).
+#[derive(Default)]
+pub(crate) struct ServeOptions {
+    /// Past this, the caller gets an error, and the extension is told
+    /// (`service-cancelled`): the whole call, an answer given later
+    /// included (an agent tool's `timeout_ms`). None: as long as it takes.
+    pub timeout: Option<std::time::Duration>,
+    pub progress: Option<OnProgress>,
+}
+
+/// A service call in flight: who gets its answer, by when, and where its
+/// progress goes.
+struct Serving {
+    answer: Answer,
+    /// When it's given up on, and how long that was, to say so.
+    deadline: Option<(std::time::Instant, std::time::Duration)>,
+    progress: Option<OnProgress>,
+    /// The service's name, to say which one took too long.
+    name: String,
+}
+
+/// One of Fenix's service calls in flight: the extension answering, and
+/// Fenix's number for it -- what `code_serve_cancel` takes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ServeId {
+    pub server: String,
+    pub call: u64,
+}
+
 /// The PDF reader's services Fenix asks (`fenix.pdf`'s): a file opened at
 /// a page or a heading -- `gf` on `x.pdf#page=38`, a standard's clause --
 /// and a file searched, for the standards library.
@@ -101,6 +142,17 @@ struct Scratch {
     ext: String,
     id: u64,
     title: String,
+}
+
+/// A deadline said plainly: `30 s`, `2 min`, `1 min 30 s`.
+fn said_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64().round() as u64;
+    match (secs / 60, secs % 60) {
+        (0, 0) => format!("{} ms", d.as_millis()),
+        (0, s) => format!("{s} s"),
+        (m, 0) => format!("{m} min"),
+        (m, s) => format!("{m} min {s} s"),
+    }
 }
 
 /// The key pages draw extension `ext`'s image `id` by.
@@ -152,7 +204,7 @@ pub(crate) struct WasmHost {
     pub(crate) statuses: HashMap<String, String>,
     /// Service calls in flight, by the extension answering and Fenix's
     /// number for the call: who gets the answer.
-    serving: HashMap<(String, u64), Answer>,
+    serving: HashMap<(String, u64), Serving>,
     next_serve: u64,
     /// Each one's section on Home (`home-set`).
     pub(crate) home: HashMap<String, fenix_wasm::host::HomeSection>,
@@ -1141,6 +1193,7 @@ impl App {
         self.forget_code_lsp_sessions(ext);
         self.wasm.status.remove(ext);
         self.wasm.queued.remove(ext);
+        self.code_serving_stopped(ext, "it started again, in the project you moved to");
         self.wasm.calls.retain(|(e, _), _| e != ext);
         self.wasm.statuses.remove(ext);
         self.wasm.focused.remove(ext);
@@ -1509,18 +1562,85 @@ impl App {
     /// Asks code extension `server` for service `name`; `answer` gets
     /// what it says, now or later.
     pub(crate) fn code_serve(&mut self, server: &str, name: &str, payload: String, answer: Answer) {
+        self.code_serve_with(server, name, payload, answer, ServeOptions::default());
+    }
+
+    /// `code_serve`, with a deadline for the whole call and somewhere for
+    /// its progress to go: what an agent's tool call is. The id it
+    /// returns is what `code_serve_cancel` takes.
+    pub(crate) fn code_serve_with(&mut self, server: &str, name: &str, payload: String, answer: Answer, options: ServeOptions) -> ServeId {
         self.wasm.next_serve += 1;
         let call = self.wasm.next_serve;
-        self.wasm.serving.insert((server.to_string(), call), answer);
+        let deadline = options.timeout.map(|t| (std::time::Instant::now() + t, t));
+        self.wasm.serving.insert((server.to_string(), call), Serving { answer, deadline, progress: options.progress, name: name.to_string() });
         self.code_call(server, Call::Serve { call, name: name.to_string(), payload }, COMMAND_TICKS, Pending::Serve(call));
+        ServeId { server: server.to_string(), call }
+    }
+
+    /// Service call `id` given up on -- an agent cancelled its tool call,
+    /// or its turn: its caller is answered with `why` (an error), and the
+    /// extension told (`service-cancelled`), so what it does for it can
+    /// stop. An answer it gives after goes nowhere. False when the call
+    /// was already answered.
+    pub(crate) fn code_serve_cancel(&mut self, id: &ServeId, why: &str) -> bool {
+        if !self.wasm.serving.contains_key(&(id.server.clone(), id.call)) {
+            return false;
+        }
+        self.code_answered(&id.server, id.call, Err(why.to_string()));
+        if self.code_ready(&id.server) {
+            self.code_call(&id.server, Call::ServiceCancelled(id.call), COMMAND_TICKS, Pending::Other);
+        }
+        true
+    }
+
+    /// Fenix's service calls past their deadline: given up on, with an
+    /// error saying so. When the next one is due.
+    pub(crate) fn code_serve_deadlines(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        let late: Vec<(ServeId, String)> = self
+            .wasm
+            .serving
+            .iter()
+            .filter_map(|((server, call), s)| {
+                let (at, took) = s.deadline?;
+                (now >= at).then(|| (ServeId { server: server.clone(), call: *call }, format!("{} didn't answer in {}: it took too long", s.name, said_duration(took))))
+            })
+            .collect();
+        for (id, why) in late {
+            self.note_output(&id.server, format!("  warn  {why}"));
+            self.code_serve_cancel(&id, &why);
+        }
+        self.wasm.serving.values().filter_map(|s| s.deadline.map(|(at, _)| at)).min()
+    }
+
+    /// Every service call extension `ext` was to answer, answered with an
+    /// error: it stopped (`why`), so none will come.
+    fn code_serving_stopped(&mut self, ext: &str, why: &str) {
+        let mut open: Vec<u64> = self.wasm.serving.keys().filter(|(server, _)| server == ext).map(|(_, call)| *call).collect();
+        open.sort_unstable();
+        let why = format!("the extension stopped: {why}");
+        for call in open {
+            self.code_answered(ext, call, Err(why.clone()));
+        }
     }
 
     /// Service call `call` to `server` answered: to whoever asked.
     fn code_answered(&mut self, server: &str, call: u64, answer: Result<String, String>) {
-        match self.wasm.serving.remove(&(server.to_string(), call)) {
+        match self.wasm.serving.remove(&(server.to_string(), call)).map(|s| s.answer) {
             Some(Answer::Ext { asker, id }) => self.code_deliver(&asker, Notice::ServiceReply((id, answer))),
             Some(Answer::Fenix(then)) => then(self, answer),
             None => {}
+        }
+    }
+
+    /// Service call `call` to `server` says how far it's got: to whoever
+    /// waits for it, when they listen (an extension asking another has no
+    /// event to hear it by).
+    fn code_progress(&mut self, server: &str, call: u64, progress: Progress) {
+        let key = (server.to_string(), call);
+        let Some(mut then) = self.wasm.serving.get_mut(&key).and_then(|s| s.progress.take()) else { return };
+        then(self, &progress);
+        if let Some(s) = self.wasm.serving.get_mut(&key) {
+            s.progress = Some(then);
         }
     }
 
@@ -1948,6 +2068,14 @@ impl App {
         self.wasm.decorations.get(&buffer).map(|sets| sets.iter().flat_map(|(_, set)| set.iter()).collect()).unwrap_or_default()
     }
 
+    /// Its `agents.ask` call `call`'s answer so far (`agent-ask-progress`),
+    /// told when it has that export.
+    pub(super) fn code_ask_progress(&mut self, ext: &str, call: u64, text: String) {
+        if self.code_ready(ext) {
+            self.code_call(ext, Call::AgentAskProgress { call, text }, COMMAND_TICKS, Pending::Other);
+        }
+    }
+
     /// Gives `notice` to extension `ext`, if it's running.
     pub(super) fn code_deliver(&mut self, ext: &str, notice: Notice) {
         if matches!(self.wasm.status.get(ext), Some(Status::Ready)) {
@@ -2084,6 +2212,9 @@ impl App {
                         self.set_error(format!("{why} -- SPC h l has what it said"));
                     }
                 }
+                // Its callers answered: those queued, and those it was
+                // to answer later.
+                self.code_serving_stopped(&ext, &why);
                 self.mark_code_pages(&ext, |p| p.stopped = Some(why.clone()));
                 self.wasm.focus_told.remove(&ext);
                 self.wasm.layers.forget(&ext);
@@ -2235,6 +2366,7 @@ impl App {
                 self.page_images.image_sizes.remove(&key);
             }
             Request::ServiceAnswer { call, answer } => self.code_answered(ext, call, answer),
+            Request::ServiceProgress { call, message, fraction } => self.code_progress(ext, call, Progress { message, fraction }),
             Request::Prompt { id, label, initial, masked } => {
                 self.wasm.prompt = Some(CodePrompt { ext: ext.to_string(), id, label, input: initial, masked });
                 self.wake_caret();
@@ -2749,6 +2881,15 @@ impl App {
             Request::Service { id, name, payload } if name == "agents.ask" => {
                 let root = self.wasm.projects.get(ext).cloned().flatten();
                 self.agents_ask(ext, id, &payload, root);
+            }
+            // One of its asks given up on: `{"call": <its agents.ask call>}`.
+            Request::Service { id, name, payload } if name == "agents.cancel" => {
+                let call = serde_json::from_str::<serde_json::Value>(&payload).ok().and_then(|v| v.get("call").and_then(serde_json::Value::as_u64));
+                let answer = match call {
+                    Some(call) => self.agents_ask_cancel(ext, call).then(String::new).ok_or_else(|| format!("no ask {call} of its is waiting")),
+                    None => Err("agents.cancel: {\"call\": <the agents.ask call>}".to_string()),
+                };
+                self.code_deliver(ext, Notice::ServiceReply((id, answer)));
             }
             Request::Service { id, name, payload } => {
                 // Another code extension's.
@@ -3538,6 +3679,10 @@ pub(crate) mod tests {
         let list = app.control_tools();
         assert_eq!(list["tools"][0]["name"], "hello_later");
         assert_eq!(list["tools"][1]["writes"], true);
+        let first = &list["tools"][0];
+        assert_eq!((first["class"].as_str(), first["toolset"].as_str(), first["default"].as_bool(), first["timeout_ms"].as_u64()), (Some("read"), Some("hello"), Some(false), Some(30_000)));
+        assert_eq!(list["tools"][1]["class"], "run", "writes, with no class: run");
+        assert!(first.get("stopped").is_none());
         let (reply, answer) = std::sync::mpsc::channel();
         app.control_tools_call(serde_json::json!({ "name": "hello_later", "arguments": { "a": 1 } }), reply);
         let got = std::cell::RefCell::new(None);
@@ -3554,6 +3699,68 @@ pub(crate) mod tests {
         let (reply, answer) = std::sync::mpsc::channel();
         app.control_tools_call(serde_json::json!({ "name": "hello_nothing" }), reply);
         assert!(answer.recv().unwrap().unwrap_err().message.contains("no tool"));
+    }
+
+    /// A tool call that's never answered is given up on at its deadline:
+    /// its caller gets an error, the extension is told; what it said of
+    /// its progress reached the caller first. A cancelled one is the same.
+    #[test]
+    fn a_tool_call_past_its_deadline_or_cancelled_is_answered_and_told() {
+        let mut app = App::with_file(None);
+        app.wasm.installed = vec![hello("[contributes]\nservices = [\"hello.forever\"]\n\n[[contributes.agent_tools]]\nname = \"forever\"\ndescription = \"Never\"\nservice = \"hello.forever\"\ntimeout_ms = 200\n")];
+        let list = app.control_tools();
+        assert_eq!(list["tools"][0]["timeout_ms"], 200);
+        let progress = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let heard = progress.clone();
+        let (reply, answer) = std::sync::mpsc::channel();
+        let id = app.control_tools_call_with(serde_json::json!({ "name": "hello_forever" }), reply, Some(Box::new(move |_, p: &Progress| heard.borrow_mut().push(p.clone())))).expect("in flight");
+        pump_until(&mut app, |_| progress.borrow().len() == 2);
+        assert_eq!(progress.borrow()[0], Progress { message: "working".into(), fraction: Some(0.5) });
+        assert_eq!(progress.borrow()[1].fraction, None);
+        assert!(answer.try_recv().is_err(), "nothing yet");
+        // Woken for its deadline (it may have passed while it started).
+        while let Some(due) = app.code_serve_deadlines(std::time::Instant::now()) {
+            std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+        }
+        let err = answer.recv().unwrap().unwrap_err().message;
+        assert!(err.contains("hello.forever didn't answer in 200 ms"), "{err}");
+        pump_until(&mut app, |a| said(a, &format!("service {} cancelled", id.call)));
+        assert!(!app.code_serve_cancel(&id, "again"), "answered already");
+
+        // Cancelled by its caller: the same, with why.
+        let got = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let kept = got.clone();
+        let id = app.code_serve_with("test.hello", "hello.forever", String::new(), Answer::Fenix(Box::new(move |_, a| *kept.borrow_mut() = Some(a))), ServeOptions::default());
+        pump_until(&mut app, |a| a.wasm.calls.is_empty());
+        assert!(app.code_serve_cancel(&id, "the agent cancelled it"));
+        assert_eq!(got.borrow().clone(), Some(Err("the agent cancelled it".to_string())));
+        pump_until(&mut app, |a| said(a, &format!("service {} cancelled", id.call)));
+    }
+
+    /// An extension that stops answers every call it was to answer: those
+    /// it would answer later, and those still waiting for it.
+    #[test]
+    fn a_stopped_extension_answers_its_callers() {
+        let mut app = App::with_file(None);
+        app.wasm.installed = vec![hello("")];
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let later = answers.clone();
+        app.code_serve("test.hello", "hello.forever", String::new(), Answer::Fenix(Box::new(move |_, a| later.borrow_mut().push(a))));
+        pump_until(&mut app, |a| a.code_ready("test.hello") && a.wasm.calls.is_empty());
+        app.run_extension_command("test.hello", "hello.spin");
+        let queued = answers.clone();
+        app.code_serve("test.hello", "hello.upper", "x".into(), Answer::Fenix(Box::new(move |_, a| queued.borrow_mut().push(a))));
+        pump_until(&mut app, |_| answers.borrow().len() == 2);
+        for answer in answers.borrow().iter() {
+            let err = answer.clone().unwrap_err();
+            assert!(err.contains("stopped") && err.contains("took too long"), "{err}");
+        }
+        assert!(answers.borrow()[0].clone().unwrap_err().starts_with("the extension stopped: "), "{:?}", answers.borrow());
+        let list = app.control_tools();
+        assert!(list["tools"].as_array().unwrap().is_empty());
+        app.wasm.installed = vec![hello("[contributes]\nservices = [\"hello.forever\"]\n\n[[contributes.agent_tools]]\nname = \"forever\"\ndescription = \"Never\"\nservice = \"hello.forever\"\n")];
+        let list = app.control_tools();
+        assert_eq!(list["tools"][0]["stopped"], true, "listed, marked stopped: {list}");
     }
 
     /// A service it answers later reaches Fenix's own caller when it
