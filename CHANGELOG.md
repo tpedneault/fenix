@@ -99,6 +99,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the rest) and `fenix --version` prints the version; both print and
   exit, on Windows too, rather than handing over to a running Fenix. An
   option Fenix doesn't know (`--projet`) is warned of. (#36)
+- The commit composer, and any other blank one, opens in Insert, so what
+  you type first is the message, not commands (`P` pasted the
+  clipboard). One with text to edit (amend, reword) still opens in
+  Normal. (#48)
 
 ## [1.0.1] - 2026-11-03
 

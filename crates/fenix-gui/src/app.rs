@@ -12470,7 +12470,17 @@ impl App {
         self.pane_titles.insert(pane, purpose.title());
         self.windows_mut().focus(pane);
         self.compose = Some(ComposeSession { pane, buffer, purpose, returning_to, seed: seed.to_string() });
-        self.set_message("write (i to insert), then Esc and Enter to send -- q discards");
+        // A blank one is there to be typed into: it opens in Insert, so
+        // the first word written isn't run as commands (`P` pasting).
+        // One with text to edit (an amend, a description) opens in Normal.
+        if seed.is_empty() && self.vim.mode() == Mode::Normal {
+            if let (Some(ob), Some(state)) = (self.buffers.get_mut(buffer), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+                self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('i'));
+            }
+            self.set_message("write, then Esc and Enter to send -- q discards");
+        } else {
+            self.set_message("write (i to insert), then Esc and Enter to send -- q discards");
+        }
         self.wake_caret();
     }
 
@@ -30946,6 +30956,8 @@ configure_board stm32
         assert!(app.git_prompt.is_none(), "and not the single-line prompt");
         assert!(app.pane_titles.get(&compose.pane).unwrap().contains("Commit message"));
         assert!(app.pane_titles.get(&compose.pane).unwrap().contains("Enter to commit"));
+        // Ready to type: what's typed first isn't run as commands.
+        assert_eq!(app.vim.mode(), Mode::Insert);
 
         app.test_insert_str("Add a.txt");
         app.compose_submit();
