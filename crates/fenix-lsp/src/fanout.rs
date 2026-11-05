@@ -453,6 +453,10 @@ mod tests {
                 Feature::Rename => c.rename_provider = Some(OneOf::Left(true)),
                 Feature::Formatting => c.document_formatting_provider = Some(OneOf::Left(true)),
                 Feature::SignatureHelp => c.signature_help_provider = Some(Default::default()),
+                Feature::Implementation => {
+                    c.implementation_provider =
+                        Some(lsp_types::ImplementationProviderCapability::Simple(true))
+                }
             }
         }
         c
