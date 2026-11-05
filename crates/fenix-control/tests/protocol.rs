@@ -169,6 +169,12 @@ fn hello_reports_the_version_pid_and_capabilities() {
             "fenix/tasks",
             "fenix/tasks.run",
             "fenix/agentCommand",
+            "fenix/buffer.read",
+            "fenix/lsp",
+            "fenix/debug.state",
+            "fenix/debug.evaluate",
+            "fenix/tools",
+            "fenix/tools.call",
         ]
     );
     assert_eq!(hello.capabilities, CAPABILITIES);

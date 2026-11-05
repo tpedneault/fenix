@@ -6,6 +6,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Coding agents can ask more of Fenix through `fenix --mcp`: definitions,
+  references, hover and symbols from the language servers for any file,
+  an open file's text with its unsaved edits, and where the debugger is
+  stopped. With `agents.mcp.fenix_write` they can evaluate in the
+  debugger too.
+- Agents Fenix starts are told to prefer those tools
+  (`agents.mcp.fenix_brief`), and use the ones that only read without
+  asking (`agents.mcp.fenix_auto_read`).
+- Extensions can offer agents tools (`contributes.agent_tools`).
+- `agents.mcp.servers` takes the address of a running MCP server, over
+  HTTP or SSE, as well as a command.
+- The control channel has what these use: `fenix/buffer.read`,
+  `fenix/lsp`, `fenix/debug.state`, `fenix/debug.evaluate`, `fenix/tools`
+  and `fenix/tools.call`.
+
 ### Changed
 
 - What a coding agent says reads as Markdown rendered, in the agent

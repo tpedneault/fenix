@@ -698,6 +698,26 @@ thread: the agent, the thread, the project and the stop reason
 `error`). With `permissions.agents` too, it's also told the thread's
 title and what the agent said; without, those are empty.
 
+### Tools for agents
+
+A service can be a tool the coding agents call, through Fenix's MCP server:
+
+```toml
+[contributes]
+services = ["counter.count"]
+
+[[contributes.agent_tools]]
+name = "count"
+description = "How many there are, for the agent to decide whether to call it"
+service = "counter.count"
+input = '{"type":"object","properties":{"of":{"type":"string"}}}'
+writes = false
+```
+
+Agents see it as `counter_count`: the last part of your id, then `name`. `serve` gets the arguments as JSON, and what it answers goes back. `writes = true` holds it back unless `agents.mcp.fenix_write` is on: say so for anything that changes something. An agent can be told anything your tool answers, so answer only what it should have.
+
+It needs Fenix 1.1 or later: set `fenix = ">=1.1"` in `[engine]`.
+
 ## Its manifest
 
 ```toml

@@ -287,6 +287,24 @@ impl AgentHost {
 /// `..` games: a path with one is refused). On Windows, as Windows reads
 /// paths: in any letter case, either slash, with or without `\\?\` -- an
 /// agent's own spelling of the project (`c:/users/...`) is the project.
+/// One of `agents.mcp.servers`: the command line that starts it, or the
+/// address of one that's running, `sse+` before an address that speaks
+/// SSE, and any headers it wants after it (`Authorization=Bearer abc`).
+fn mcp_server(name: &str, line: &str) -> Option<McpServer> {
+    let words = catalog::split_command_line(line);
+    let (first, rest) = words.split_first()?;
+    let (sse, address) = match first.strip_prefix("sse+") {
+        Some(address) => (true, address),
+        None => (false, first.as_str()),
+    };
+    if address.starts_with("http://") || address.starts_with("https://") {
+        let headers: Vec<(String, String)> = rest.iter().filter_map(|h| h.split_once('=')).map(|(n, v)| (n.to_string(), v.to_string())).collect();
+        let (name, url) = (name.to_string(), address.to_string());
+        return Some(if sse { McpServer::Sse { name, url, headers } } else { McpServer::Http { name, url, headers } });
+    }
+    Some(McpServer::Stdio { name: name.to_string(), command: first.clone(), args: rest.to_vec(), env: vec![] })
+}
+
 fn within(root: &Path, path: &Path) -> bool {
     if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         return false;
@@ -324,16 +342,18 @@ impl App {
         let entries = self.agents_catalog();
         self.agents.hub.set_agents(entries.iter().map(|e| e.spec.clone()).collect());
         let mut servers = Vec::new();
-        if self.config.bool_value("agents.mcp.fenix").unwrap_or(true) {
+        let fenix = self.config.bool_value("agents.mcp.fenix").unwrap_or(true);
+        let brief = fenix && self.config.bool_value("agents.mcp.fenix_brief").unwrap_or(true);
+        self.agents.hub.set_briefing(brief.then(|| crate::mcp::BRIEFING.to_string()));
+        let auto_read = fenix && self.config.bool_value("agents.mcp.fenix_auto_read").unwrap_or(true);
+        self.agents.hub.set_allowed_fenix_tools(if auto_read { crate::mcp::READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect() } else { Vec::new() });
+        if fenix {
             if let Ok(exe) = std::env::current_exe() {
                 servers.push(McpServer::Stdio { name: "fenix".into(), command: exe.to_string_lossy().into_owned(), args: vec!["--mcp".into(), "--thread".into(), "{thread}".into()], env: vec![] });
             }
         }
         for (name, line) in self.config.map_value("agents.mcp.servers") {
-            let words = catalog::split_command_line(line);
-            if let Some((command, args)) = words.split_first() {
-                servers.push(McpServer::Stdio { name: name.clone(), command: command.clone(), args: args.to_vec(), env: vec![] });
-            }
+            servers.extend(mcp_server(name, line));
         }
         self.agents.hub.set_mcp_servers(servers);
         let minutes = self.config.int_value("agents.idle_minutes").unwrap_or(10).max(1) as u64;
@@ -857,7 +877,7 @@ impl App {
                 let names: Vec<String> = dirty.iter().map(|id| self.buffer_display_name(*id)).collect();
                 let candidates = vec![
                     fenix_picker::Candidate::new(format!("Save {} first, then send (the agent reads files from disk)", names.join(", ")), Pick::Send { save: true }),
-                    fenix_picker::Candidate::new("Send without saving: the agent won't see those edits".to_string(), Pick::Send { save: false }),
+                    fenix_picker::Candidate::new("Send without saving: the agent's own tools won't see those edits".to_string(), Pick::Send { save: false }),
                 ];
                 self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
                 return;

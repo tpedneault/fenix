@@ -510,9 +510,11 @@ when it's out of date).
 | `agents.panel_width` | 20–80 | 38 | How much of the width the agent's thread takes, in percent. |
 | `agents.idle_minutes` | minutes | 10 | An agent with no thread open is stopped after this long. |
 | `agents.notify` | true / false | on | When Fenix isn't in front: a permission question, or a turn ended, asks for your attention. |
-| `agents.mcp.fenix` | true / false | on | Agents get Fenix as an MCP server (fenix --mcp): diagnostics, language servers' answers, open files. |
-| `agents.mcp.fenix_write` | true / false | off | Fenix's MCP server also runs project tasks and Fenix commands for the agent. |
-| `agents.mcp.servers` | name = command | – | Your own MCP servers, handed to every agent session, as the command line that starts each. |
+| `agents.mcp.fenix` | true / false | on | Agents get Fenix as an MCP server (fenix --mcp): diagnostics, language servers' answers, open files as they stand, the debugger's stop. |
+| `agents.mcp.fenix_brief` | true / false | on | Agents Fenix starts are told to prefer its tools, in a note before a new session's first prompt, which isn't shown in the thread. |
+| `agents.mcp.fenix_auto_read` | true / false | on | Agents use Fenix's read-only tools without asking: language server answers, open files, diagnostics, the debugger's stop. |
+| `agents.mcp.fenix_write` | true / false | off | Fenix's MCP server also runs project tasks and Fenix commands, evaluates in the debugger, and calls extension tools that change things. |
+| `agents.mcp.servers` | name = command | – | Your own MCP servers, handed to every agent session: the command line that starts each, or the https:// address of one that's running (sse+https:// for SSE), with any headers after it as Name=value. |
 | `agents.terminal.output_limit` | 16–65536 | 1024 | The most of a command's output an agent's terminal keeps, in KiB. |
 | `agents.handoff_kib` | 4–1024 | 64 | How much of a thread's transcript goes with a hand-off to another agent, in KiB. |
 | `agents.registry` | text | https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json | The ACP registry agents are installed from. Empty: none. |

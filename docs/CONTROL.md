@@ -336,14 +336,69 @@ the task pane, or a Fenix command marked `external`. For the coding
 agents (`fenix --mcp`'s `run_task` and `run_command`): both are refused
 (`-32602`) unless `agents.mcp.fenix_write` is on.
 
+### `fenix/buffer.read`
+
+Params: `{ "path": string, "startLine"?: number, "endLine"?: number }`,
+lines from 1. An open file as it stands in Fenix, unsaved edits and all:
+`{ "path", "unsaved", "lines", "startLine", "endLine", "text", "truncated" }`.
+At most 1 MiB of text comes back. A file that isn't open is refused
+(`-32602`): its text is on disk.
+
+### `fenix/lsp`
+
+Params: `{ "kind": string, ... }`. What the language servers say,
+answered once they have, or after 20 seconds with what's come. A
+relative `path` is from the project. A file needn't be open; one that
+isn't is read from disk and shown to its servers, which start if they
+need to (`-32602` says to ask again while they do).
+
+| `kind` | Params | Result |
+|---|---|---|
+| `definition`, `references` | `path`, `line`, and `symbol` or `column` | `{ "locations": [{ "path", "line", "column", "text" }], "total", "truncated" }` |
+| `hover` | `path`, `line`, and `symbol` or `column` | `{ "hover": string or null }` |
+| `document_symbols` | `path` | `{ "symbols": [{ "name", "kind", "line", "endLine", "depth", "detail" }] }` |
+| `workspace_symbols` | `query` | `{ "symbols": [{ "name", "kind", "path", "line", "container" }], "total", "truncated" }` |
+
+Lines and columns are from 1. `symbol` is the name on `line`, found as a
+whole word, for callers that know a line but not a column. With neither,
+it's the line's first non-blank. Lists stop at 200.
+
+### `fenix/debug.state` and `fenix/debug.evaluate`
+
+`fenix/debug.state`: params `{}`. `{ "session": false }` with no debug
+session, else `{ "session": true, "name", "ended", "stopped",
+"selectedFrame", "frames": [{ "function", "path", "line" }], "scopes":
+[{ "scope", "variables": [{ "name", "value", "children"? }] }],
+"watches", "console" }`: what the drawer has, and the last 40 lines of
+the program's output.
+
+`fenix/debug.evaluate`: params `{ "expression": string }`, evaluated in
+the selected frame: `{ "result", "type" }`. It can run code in the
+program, so it's refused (`-32602`) unless `agents.mcp.fenix_write` is
+on, and when the debugger isn't stopped.
+
+### `fenix/tools` and `fenix/tools.call`
+
+`fenix/tools`: params `{}`. What extensions offer agents
+(`contributes.agent_tools`): `{ "tools": [{ "name", "description",
+"inputSchema", "extension", "writes" }] }`.
+
+`fenix/tools.call`: params `{ "name": string, "arguments"?: object }`.
+Runs one: the result is what its service answers, as JSON if it is, else
+as a string. One with `"writes": true` is refused (`-32602`) unless
+`agents.mcp.fenix_write` is on.
+
 ## `fenix --mcp`
 
 `fenix --mcp` is an MCP server on stdio (JSON-RPC, a message a line)
 whose tools are the methods above: `diagnostics`, `open_files`,
 `selection`, `show_file` (`fenix/open`, without taking the focus),
-`tasks`, `run_task`, `run_command`. Fenix hands it to the coding agents
-it starts (`agents.mcp.fenix`); any MCP client can run it, with a Fenix
-running to answer.
+`tasks`, `read_buffer`, `definition`, `references`, `hover`,
+`document_symbols`, `workspace_symbols`, `debug_state`; with
+`agents.mcp.fenix_write`, `run_task`, `run_command`, `debug_evaluate`;
+and the extensions' tools. Fenix hands it to the coding agents it starts
+(`agents.mcp.fenix`); any MCP client can run it, with a Fenix running to
+answer.
 
 ## Fenix's files
 

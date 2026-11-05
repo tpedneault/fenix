@@ -152,11 +152,43 @@ resumed; after three crashes in a minute it stays down until
 ## Fenix as a tool
 
 Every session gets Fenix itself as an MCP server (`fenix --mcp`,
-`agents.mcp.fenix`): the agent can ask for the language servers'
-problems, the open files and which have unsaved edits, your selection,
-and show you a file. With `agents.mcp.fenix_write` it can also run the
-project's tasks and Fenix's commands. Your own MCP servers
-(`agents.mcp.servers`) go to every session too.
+`agents.mcp.fenix`). The agent can ask for:
+
+- the language servers' problems, and their definitions, references,
+  hover and symbols, for any file, open or not;
+- the open files, which have unsaved edits, and their text as it stands
+  in Fenix, which the disk doesn't have yet;
+- your selection;
+- where the debugger is stopped: the stack, the variables, watches and
+  the program's output.
+
+It can show you a file too. With `agents.mcp.fenix_write` it can also
+run the project's tasks and Fenix's commands, evaluate in the debugger,
+and call the extension tools that change things. Extensions offer tools
+of their own this way.
+
+Agents Fenix starts are steered towards these tools:
+
+- A note before a new session's first prompt tells the agent to prefer
+  them to searching text. You don't see it in the thread
+  (`agents.mcp.fenix_brief`).
+- The tools that only read don't ask for permission
+  (`agents.mcp.fenix_auto_read`). `show_file`, anything that changes
+  something, and extensions' tools still do.
+
+The agent still decides, and can use its own tools when it prefers.
+
+Your own MCP servers (`agents.mcp.servers`) go to every session too: the
+command line that starts one, or the address of one that's running.
+
+```toml
+[agents.mcp.servers]
+local = "my-server --project ."
+remote = "https://mcp.example.com/x Authorization=Bearer-abc"
+older = "sse+https://mcp.example.com/sse"
+```
+
+An agent that can't reach servers over HTTP or SSE isn't given those.
 
 An agent that runs its commands through Fenix (ACP terminals) gets them
 run in the project, shown in its card as they go, the whole process tree

@@ -32,6 +32,22 @@ impl App {
     /// `call`, sent to the code extension that answers it, its reply
     /// going back when it does. `Err` gives both back: Fenix answers it.
     pub(super) fn control_by_extension(&mut self, call: Call, reply: std::sync::mpsc::Sender<crate::ipc::Reply>) -> Result<(), (Call, std::sync::mpsc::Sender<crate::ipc::Reply>)> {
+        // Answered once a language server, an adapter or an extension has.
+        let call = match call {
+            Call::Lsp(params) => {
+                self.control_lsp(params, reply);
+                return Ok(());
+            }
+            Call::DebugEvaluate(params) => {
+                self.control_debug_evaluate(params, reply);
+                return Ok(());
+            }
+            Call::ToolsCall(params) => {
+                self.control_tools_call(params, reply);
+                return Ok(());
+            }
+            call => call,
+        };
         let asked: Option<ByExtension> = match &call {
             Call::NotebookCapture(params) => Some((
                 "notebook.capture",
@@ -107,6 +123,11 @@ impl App {
             Call::AgendaTasks(_) | Call::AgendaClockIn(_) | Call::AgendaClockOut => Err(RpcError::invalid_params("the agenda is an extension (fenix.agenda): SPC h x installs it")),
             Call::Diagnostics(params) => Ok(self.control_diagnostics(params.get("path").and_then(Value::as_str).map(PathBuf::from))),
             Call::Buffers => Ok(self.control_buffers()),
+            Call::BufferRead(params) => self.control_buffer_read(&params),
+            Call::DebugState => Ok(self.control_debug_state()),
+            Call::Tools => Ok(self.control_tools()),
+            // Answered later, on the reply (`control_by_extension`).
+            Call::Lsp(_) | Call::DebugEvaluate(_) | Call::ToolsCall(_) => Err(RpcError::internal("answered by what it asks")),
             Call::Selection => Ok(self.control_selection()),
             Call::Tasks => {
                 let root = self.integration_root();
@@ -134,7 +155,7 @@ impl App {
     }
 
     /// Whether agents may run things through Fenix's MCP server.
-    fn control_writes_allowed(&self) -> Result<(), RpcError> {
+    pub(super) fn control_writes_allowed(&self) -> Result<(), RpcError> {
         if self.config.bool_value("agents.mcp.fenix_write").unwrap_or(false) {
             Ok(())
         } else {
@@ -801,6 +822,54 @@ services = [\"notebook.capture\"]
 #[cfg(test)]
 mod agent_tool_tests {
     use super::*;
+
+    #[test]
+    fn an_open_file_reads_as_it_stands_not_as_it_was_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.rs");
+        std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        let path = file.to_string_lossy().into_owned();
+        let id = app.focused_buffer_id();
+        let ob = app.buffers.get_mut(id).unwrap();
+        ob.buffer.replace_range(&mut ob.cursor, 0, 3, "ONE");
+        let all = app.apply_control(Call::BufferRead(json!({ "path": path }))).unwrap();
+        assert!(all["text"].as_str().unwrap().starts_with("ONE\ntwo"), "{all}");
+        assert_eq!(all["unsaved"], true);
+        let part = app.apply_control(Call::BufferRead(json!({ "path": path, "startLine": 2, "endLine": 2 }))).unwrap();
+        assert_eq!(part["text"], "two");
+        assert!(app.apply_control(Call::BufferRead(json!({ "path": dir.path().join("b.rs") }))).unwrap_err().message.contains("isn't open"));
+    }
+
+    #[test]
+    fn the_debugger_says_when_theres_nothing_to_ask() {
+        let mut app = App::with_file(None);
+        assert_eq!(app.apply_control(Call::DebugState).unwrap(), json!({ "session": false }));
+        let (reply, answer) = std::sync::mpsc::channel();
+        app.config.set_value("agents.mcp.fenix_write", Some(fenix_config::Value::Bool(false)));
+        assert!(app.control_by_extension(Call::DebugEvaluate(json!({ "expression": "x" })), reply.clone()).is_ok());
+        assert!(answer.recv().unwrap().unwrap_err().message.contains("fenix_write"), "evaluating can run code");
+        app.config.set_value("agents.mcp.fenix_write", Some(fenix_config::Value::Bool(true)));
+        assert!(app.control_by_extension(Call::DebugEvaluate(json!({ "expression": "x" })), reply).is_ok());
+        assert!(answer.recv().unwrap().unwrap_err().message.contains("isn't stopped"));
+    }
+
+    #[test]
+    fn a_language_question_is_refused_plainly_when_it_cant_be_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("notes.nothing");
+        std::fs::write(&file, "text\n").unwrap();
+        let mut app = App::with_file(None);
+        let ask = |app: &mut App, params: Value| {
+            let (reply, answer) = std::sync::mpsc::channel();
+            assert!(app.control_by_extension(Call::Lsp(params), reply).is_ok());
+            answer.recv().unwrap().unwrap_err().message
+        };
+        assert!(ask(&mut app, json!({ "kind": "nonsense" })).contains("no such question"));
+        assert!(ask(&mut app, json!({ "kind": "hover", "path": file, "line": 1 })).contains("no language server"));
+        assert!(ask(&mut app, json!({ "kind": "hover", "path": dir.path().join("gone.rs"), "line": 1 })).contains("gone.rs"));
+        assert!(ask(&mut app, json!({ "kind": "workspace_symbols" })).contains("query"));
+    }
 
     #[test]
     fn open_files_say_which_have_unsaved_edits() {
