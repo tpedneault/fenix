@@ -159,7 +159,10 @@ impl Buffer {
     /// there -- text read elsewhere, as it was checked (an extension's
     /// `open-file`), so it isn't read again.
     pub fn from_text_at(path: impl AsRef<Path>, text: &str) -> Self {
-        Self { path: Some(crate::plain_path(path.as_ref())), ..Self::from_text(text) }
+        Self {
+            path: Some(crate::plain_path(path.as_ref())),
+            ..Self::from_text(text)
+        }
     }
 
     pub fn from_path(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -213,7 +216,10 @@ impl Buffer {
     /// The file as it is on disk now, and its encoding: one of the older
     /// encodings can't be told from another, so one in use stays.
     pub fn read_disk_text(&self) -> io::Result<(String, TextEncoding)> {
-        let path = self.path.as_deref().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "buffer has no path"))?;
+        let path = self
+            .path
+            .as_deref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "buffer has no path"))?;
         let bytes = std::fs::read(path)?;
         Ok(match self.encoding {
             TextEncoding::Legacy(_) => (self.encoding.decode(&bytes), self.encoding),
@@ -243,7 +249,9 @@ impl Buffer {
     pub fn save_new(&mut self, path: &Path) -> io::Result<()> {
         self.flush_pending();
         let encoded = self.encoded()?;
-        fenix_storage::atomic_write_new(path, |writer| self.write_text(writer, encoded.as_deref()))?;
+        fenix_storage::atomic_write_new(path, |writer| {
+            self.write_text(writer, encoded.as_deref())
+        })?;
         self.path = Some(crate::plain_path(path));
         self.dirty = false;
         Ok(())
@@ -311,15 +319,27 @@ impl Buffer {
     /// `EditDelta`'s doc comment for why the distinction matters.
     fn log_edit(&mut self, start_char: usize, removed: String, new_end_char: usize) {
         if self.change_log.len() < MAX_LOGGED_CHANGES {
-            self.change_log.push(EditDelta { start_char, new_end_char, removed: removed.clone() });
+            self.change_log.push(EditDelta {
+                start_char,
+                new_end_char,
+                removed: removed.clone(),
+            });
         } else {
             self.change_log.clear();
             self.changes_overflowed = true;
         }
         if let Some(anchors) = &mut self.anchor_edits {
-            anchors.push(EditDelta { start_char, new_end_char, removed: removed.clone() });
+            anchors.push(EditDelta {
+                start_char,
+                new_end_char,
+                removed: removed.clone(),
+            });
         }
-        self.pending_syntax_edits.push(EditDelta { start_char, new_end_char, removed });
+        self.pending_syntax_edits.push(EditDelta {
+            start_char,
+            new_end_char,
+            removed,
+        });
     }
 
     /// From now on, keeps every edit for `take_anchor_edits` as well.
@@ -330,7 +350,10 @@ impl Buffer {
     /// Every edit since the last call (or `track_anchors`), in order:
     /// what something anchored in the text moves by.
     pub fn take_anchor_edits(&mut self) -> Vec<EditDelta> {
-        self.anchor_edits.as_mut().map(std::mem::take).unwrap_or_default()
+        self.anchor_edits
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
     }
 
     /// Every edit since the last call, in order -- `None` when there were
@@ -400,7 +423,11 @@ impl Buffer {
     /// line, not ropey's internal one.
     pub fn visual_line_count(&self) -> usize {
         let n = self.rope.len_lines();
-        if n > 1 && self.line_len(n - 1) == 0 { n - 1 } else { n }
+        if n > 1 && self.line_len(n - 1) == 0 {
+            n - 1
+        } else {
+            n
+        }
     }
 
     pub fn line(&self, line_idx: usize) -> RopeSlice<'_> {
@@ -614,7 +641,13 @@ impl Buffer {
     /// string, since chaining those two would split what should be one
     /// undo-able change (e.g. Vim's `:s` substitute) into two, requiring
     /// two presses of `u` to fully revert. Returns the removed text.
-    pub fn replace_range(&mut self, cursor: &mut Cursor, start: usize, end: usize, text: &str) -> String {
+    pub fn replace_range(
+        &mut self,
+        cursor: &mut Cursor,
+        start: usize,
+        end: usize,
+        text: &str,
+    ) -> String {
         self.flush_pending();
         self.redo_stack.clear();
         let cursor_before = *cursor;
@@ -686,7 +719,9 @@ impl Buffer {
     /// Closes a `begin_undo_group`, merging the steps pushed since into
     /// one. Unmatched calls are ignored.
     pub fn end_undo_group(&mut self) {
-        let Some(group) = self.undo_group.as_mut() else { return };
+        let Some(group) = self.undo_group.as_mut() else {
+            return;
+        };
         group.depth -= 1;
         if group.depth > 0 {
             return;
@@ -718,7 +753,11 @@ impl Buffer {
         if !edit.inserted.is_empty() {
             self.rope.insert(edit.at, &edit.inserted);
         }
-        self.log_edit(edit.at, edit.removed.clone(), edit.at + edit.inserted.chars().count());
+        self.log_edit(
+            edit.at,
+            edit.removed.clone(),
+            edit.at + edit.inserted.chars().count(),
+        );
     }
 
     fn apply_inverse(&mut self, edit: &Edit) {
@@ -729,14 +768,20 @@ impl Buffer {
         if !edit.removed.is_empty() {
             self.rope.insert(edit.at, &edit.removed);
         }
-        self.log_edit(edit.at, edit.inserted.clone(), edit.at + edit.removed.chars().count());
+        self.log_edit(
+            edit.at,
+            edit.inserted.clone(),
+            edit.at + edit.removed.chars().count(),
+        );
     }
 
     /// Undoes the most recent edit run, restoring the cursor to where it was
     /// before that run started. Returns `false` if there was nothing to undo.
     pub fn undo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
-        let Some(step) = self.undo_stack.pop() else { return false };
+        let Some(step) = self.undo_stack.pop() else {
+            return false;
+        };
         for edit in step.iter().rev() {
             self.apply_inverse(edit);
         }
@@ -754,7 +799,9 @@ impl Buffer {
     /// was nothing to redo.
     pub fn redo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
-        let Some(step) = self.redo_stack.pop() else { return false };
+        let Some(step) = self.redo_stack.pop() else {
+            return false;
+        };
         for edit in &step {
             self.apply_forward(edit);
         }
@@ -813,7 +860,11 @@ impl Buffer {
 
     pub fn move_page(&mut self, cursor: &mut Cursor, lines: usize, down: bool) {
         self.flush_pending();
-        let delta = if down { lines as isize } else { -(lines as isize) };
+        let delta = if down {
+            lines as isize
+        } else {
+            -(lines as isize)
+        };
         self.move_vertical(cursor, delta);
     }
 
@@ -835,9 +886,14 @@ mod tests {
     fn positions_past_the_end_clamp_instead_of_panicking() {
         let mut b = Buffer::empty();
         let mut c = Cursor::at_start();
-        b.insert_str(&mut c, "ab
-cd");
-        let stale = Cursor { char_idx: 20_442, sticky_col: 0 };
+        b.insert_str(
+            &mut c, "ab
+cd",
+        );
+        let stale = Cursor {
+            char_idx: 20_442,
+            sticky_col: 0,
+        };
         assert_eq!(b.line_col(&stale), (1, 2));
         assert_eq!(b.line_start_char(99), b.len_chars());
         assert_eq!(b.line_len(99), 0);
@@ -899,7 +955,10 @@ cd");
     #[test]
     fn delete_forward_leaves_cursor_in_place() {
         let mut buf = buffer_with("abc");
-        let mut cur = Cursor { char_idx: 1, sticky_col: 1 };
+        let mut cur = Cursor {
+            char_idx: 1,
+            sticky_col: 1,
+        };
         buf.delete_forward(&mut cur);
         assert_eq!(buf.text(), "ac");
         assert_eq!(cur.char_idx, 1);
@@ -921,7 +980,10 @@ cd");
     #[test]
     fn home_and_end_use_line_content_length_excluding_newline() {
         let mut buf = buffer_with("hello\nworld\n");
-        let mut cur = Cursor { char_idx: 8, sticky_col: 2 };
+        let mut cur = Cursor {
+            char_idx: 8,
+            sticky_col: 2,
+        };
         buf.move_home(&mut cur);
         assert_eq!(buf.line_col(&cur), (1, 0));
 
@@ -972,7 +1034,10 @@ cd");
     #[test]
     fn delete_range_removes_atomically_and_is_one_undo_step() {
         let mut buf = buffer_with("hello world");
-        let mut cur = Cursor { char_idx: 11, sticky_col: 11 };
+        let mut cur = Cursor {
+            char_idx: 11,
+            sticky_col: 11,
+        };
         let removed = buf.delete_range(&mut cur, 5, 11);
         assert_eq!(removed, " world");
         assert_eq!(buf.text(), "hello");
@@ -986,36 +1051,56 @@ cd");
 
     #[test]
     fn an_undo_group_undoes_and_redoes_as_one_step() {
-        let mut buf = buffer_with("aaa
-bbb");
-        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let mut buf = buffer_with(
+            "aaa
+bbb",
+        );
+        let mut cur = Cursor {
+            char_idx: 0,
+            sticky_col: 0,
+        };
         buf.insert_str(&mut cur, "x"); // before the group: its own step
         buf.begin_undo_group();
         buf.replace_range(&mut cur, 1, 2, "#");
         buf.replace_range(&mut cur, 2, 3, "#");
         buf.delete_range(&mut cur, 5, 6);
         buf.end_undo_group();
-        assert_eq!(buf.text(), "x##a
-bb");
+        assert_eq!(
+            buf.text(),
+            "x##a
+bb"
+        );
 
         assert!(buf.undo(&mut cur));
-        assert_eq!(buf.text(), "xaaa
-bbb");
+        assert_eq!(
+            buf.text(),
+            "xaaa
+bbb"
+        );
         assert_eq!(cur.char_idx, 1); // where the group started
         assert!(buf.redo(&mut cur));
-        assert_eq!(buf.text(), "x##a
-bb");
+        assert_eq!(
+            buf.text(),
+            "x##a
+bb"
+        );
         assert!(buf.undo(&mut cur));
         assert!(buf.undo(&mut cur));
-        assert_eq!(buf.text(), "aaa
-bbb");
+        assert_eq!(
+            buf.text(),
+            "aaa
+bbb"
+        );
         assert!(!buf.undo(&mut cur));
     }
 
     #[test]
     fn a_typing_run_pending_when_a_group_opens_stays_its_own_step() {
         let mut buf = buffer_with("");
-        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let mut cur = Cursor {
+            char_idx: 0,
+            sticky_col: 0,
+        };
         buf.insert_char(&mut cur, 'a');
         buf.insert_char(&mut cur, 'b');
         buf.begin_undo_group();
@@ -1030,7 +1115,10 @@ bbb");
     #[test]
     fn redoing_inside_a_group_keeps_each_step_separate() {
         let mut buf = buffer_with("");
-        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let mut cur = Cursor {
+            char_idx: 0,
+            sticky_col: 0,
+        };
         buf.insert_str(&mut cur, "a");
         buf.insert_str(&mut cur, "b");
         buf.undo(&mut cur);
@@ -1047,7 +1135,10 @@ bbb");
     #[test]
     fn insert_str_inserts_atomically_and_is_one_undo_step() {
         let mut buf = buffer_with("hello");
-        let mut cur = Cursor { char_idx: 5, sticky_col: 5 };
+        let mut cur = Cursor {
+            char_idx: 5,
+            sticky_col: 5,
+        };
         buf.insert_str(&mut cur, " world");
         assert_eq!(buf.text(), "hello world");
         assert_eq!(cur.char_idx, 11);
@@ -1060,7 +1151,10 @@ bbb");
     #[test]
     fn replace_range_swaps_text_in_and_positions_the_cursor_after_it() {
         let mut buf = buffer_with("hello world");
-        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let mut cur = Cursor {
+            char_idx: 0,
+            sticky_col: 0,
+        };
         let removed = buf.replace_range(&mut cur, 0, 5, "goodbye");
         assert_eq!(removed, "hello");
         assert_eq!(buf.text(), "goodbye world");
@@ -1070,7 +1164,10 @@ bbb");
     #[test]
     fn replace_range_is_a_single_undo_step() {
         let mut buf = buffer_with("hello world");
-        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let mut cur = Cursor {
+            char_idx: 0,
+            sticky_col: 0,
+        };
         buf.replace_range(&mut cur, 0, 5, "goodbye");
         assert!(buf.undo(&mut cur));
         assert_eq!(buf.text(), "hello world"); // fully restored in one `u`
@@ -1080,7 +1177,10 @@ bbb");
     #[test]
     fn replace_range_with_empty_text_behaves_like_a_pure_delete() {
         let mut buf = buffer_with("hello world");
-        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let mut cur = Cursor {
+            char_idx: 0,
+            sticky_col: 0,
+        };
         let removed = buf.replace_range(&mut cur, 5, 11, "");
         assert_eq!(removed, " world");
         assert_eq!(buf.text(), "hello");
@@ -1090,7 +1190,10 @@ bbb");
     #[test]
     fn replace_range_with_an_empty_span_behaves_like_a_pure_insert() {
         let mut buf = buffer_with("hello");
-        let mut cur = Cursor { char_idx: 0, sticky_col: 0 };
+        let mut cur = Cursor {
+            char_idx: 0,
+            sticky_col: 0,
+        };
         let removed = buf.replace_range(&mut cur, 5, 5, " world");
         assert_eq!(removed, "");
         assert_eq!(buf.text(), "hello world");
@@ -1100,7 +1203,10 @@ bbb");
     #[test]
     fn delete_range_and_insert_str_are_no_ops_on_empty_input() {
         let mut buf = buffer_with("abc");
-        let mut cur = Cursor { char_idx: 1, sticky_col: 1 };
+        let mut cur = Cursor {
+            char_idx: 1,
+            sticky_col: 1,
+        };
         assert_eq!(buf.delete_range(&mut cur, 2, 2), "");
         assert_eq!(buf.text(), "abc");
         buf.insert_str(&mut cur, "");
@@ -1168,7 +1274,10 @@ bbb");
     #[test]
     fn backspace_run_coalesces_into_one_undo_step() {
         let mut buf = buffer_with("hello");
-        let mut cur = Cursor { char_idx: 5, sticky_col: 5 };
+        let mut cur = Cursor {
+            char_idx: 5,
+            sticky_col: 5,
+        };
         for _ in 0..5 {
             buf.delete_backward(&mut cur);
         }
@@ -1208,7 +1317,14 @@ bbb");
         b.undo(&mut c);
         let edits = b.take_anchor_edits();
         assert_eq!(edits.len(), 2, "{edits:?}");
-        assert_eq!(edits[0], EditDelta { start_char: 1, new_end_char: 2, removed: String::new() });
+        assert_eq!(
+            edits[0],
+            EditDelta {
+                start_char: 1,
+                new_end_char: 2,
+                removed: String::new()
+            }
+        );
         assert!(b.take_anchor_edits().is_empty());
     }
 
@@ -1222,8 +1338,16 @@ bbb");
         assert_eq!(
             edits,
             vec![
-                EditDelta { start_char: 0, new_end_char: 1, removed: String::new() },
-                EditDelta { start_char: 1, new_end_char: 2, removed: String::new() },
+                EditDelta {
+                    start_char: 0,
+                    new_end_char: 1,
+                    removed: String::new()
+                },
+                EditDelta {
+                    start_char: 1,
+                    new_end_char: 2,
+                    removed: String::new()
+                },
             ]
         );
         // Drained -- a second call sees nothing new until another edit happens.
@@ -1233,10 +1357,20 @@ bbb");
     #[test]
     fn drain_edits_logs_deletes_with_the_removed_text() {
         let mut buf = buffer_with("abc");
-        let mut cur = Cursor { char_idx: 3, sticky_col: 3 };
+        let mut cur = Cursor {
+            char_idx: 3,
+            sticky_col: 3,
+        };
         buf.delete_backward(&mut cur);
         let edits = buf.drain_edits();
-        assert_eq!(edits, vec![EditDelta { start_char: 2, new_end_char: 2, removed: "c".to_string() }]);
+        assert_eq!(
+            edits,
+            vec![EditDelta {
+                start_char: 2,
+                new_end_char: 2,
+                removed: "c".to_string()
+            }]
+        );
     }
 
     #[test]
@@ -1248,10 +1382,24 @@ bbb");
 
         buf.undo(&mut cur);
         let undo_edits = buf.drain_edits();
-        assert_eq!(undo_edits, vec![EditDelta { start_char: 0, new_end_char: 0, removed: "x".to_string() }]);
+        assert_eq!(
+            undo_edits,
+            vec![EditDelta {
+                start_char: 0,
+                new_end_char: 0,
+                removed: "x".to_string()
+            }]
+        );
 
         buf.redo(&mut cur);
         let redo_edits = buf.drain_edits();
-        assert_eq!(redo_edits, vec![EditDelta { start_char: 0, new_end_char: 1, removed: String::new() }]);
+        assert_eq!(
+            redo_edits,
+            vec![EditDelta {
+                start_char: 0,
+                new_end_char: 1,
+                removed: String::new()
+            }]
+        );
     }
 }

@@ -57,7 +57,12 @@ pub fn ipc(name: &str) -> Result<u64, String> {
 impl Default for TlsOptions {
     /// The host's name, checked against the system's certificates.
     fn default() -> TlsOptions {
-        TlsOptions { server_name: None, pinned: Vec::new(), accept_invalid: false, client_cert: None }
+        TlsOptions {
+            server_name: None,
+            pinned: Vec::new(),
+            accept_invalid: false,
+            client_cert: None,
+        }
     }
 }
 
@@ -86,7 +91,10 @@ impl TlsOptions {
 
     /// A client certificate and its key, PEM.
     pub fn client_cert(mut self, cert: &str, key: &str) -> TlsOptions {
-        self.client_cert = Some(ClientCert { cert: cert.into(), key: key.into() });
+        self.client_cert = Some(ClientCert {
+            cert: cert.into(),
+            key: key.into(),
+        });
         self
     }
 }
@@ -167,7 +175,11 @@ impl Inbox {
     pub fn take_line(&mut self) -> Option<String> {
         let at = self.available().iter().position(|b| *b == b'\n')?;
         let line = self.take(at + 1)?;
-        Some(String::from_utf8_lossy(&line).trim_end_matches(['\r', '\n']).to_string())
+        Some(
+            String::from_utf8_lossy(&line)
+                .trim_end_matches(['\r', '\n'])
+                .to_string(),
+        )
     }
 }
 

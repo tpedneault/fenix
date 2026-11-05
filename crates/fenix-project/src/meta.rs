@@ -29,7 +29,10 @@ impl ProjectMeta {
     /// Loads it, starting empty when the file is missing or unreadable
     /// -- a convenience, not critical data.
     pub fn load_or_default(path: PathBuf) -> Self {
-        let meta: Self = fenix_storage::state::read(&path, "meta").ok().flatten().unwrap_or_default();
+        let meta: Self = fenix_storage::state::read(&path, "meta")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         meta.plain(path)
     }
 
@@ -46,7 +49,11 @@ impl ProjectMeta {
     fn plain(self, path: PathBuf) -> Self {
         Self {
             pinned: self.pinned.into_iter().map(crate::plain_path).collect(),
-            groups: self.groups.into_iter().map(|(root, group)| (crate::plain_path(root), group)).collect(),
+            groups: self
+                .groups
+                .into_iter()
+                .map(|(root, group)| (crate::plain_path(root), group))
+                .collect(),
             path,
         }
     }
@@ -115,24 +122,39 @@ fn legacy(root: &Path, section: &str, key: &str) -> Option<String> {
 /// `[project] jira = "FNX"` -- the Jira project key a project's work is
 /// tracked under.
 pub fn jira_key(root: &Path) -> Option<String> {
-    fenix_storage::project_file::get(root, "project.jira").or_else(|| legacy(root, "project", "jira"))
+    fenix_storage::project_file::get(root, "project.jira")
+        .or_else(|| legacy(root, "project", "jira"))
 }
 
 /// Sets (or, with `None`, removes) the project's Jira key.
 pub fn set_jira_key(root: &Path, key: Option<&str>) -> io::Result<()> {
-    fenix_storage::project_file::set(root, "project.jira", key.filter(|k| !k.trim().is_empty()).map(|k| fenix_storage::project_file::Value::Text(k.trim().to_string())))
+    fenix_storage::project_file::set(
+        root,
+        "project.jira",
+        key.filter(|k| !k.trim().is_empty())
+            .map(|k| fenix_storage::project_file::Value::Text(k.trim().to_string())),
+    )
 }
 
 /// Declares (or, with `None`, stops declaring) the project's kind.
 pub fn set_kind(root: &Path, kind: Option<crate::ProjectKind>) -> io::Result<()> {
-    fenix_storage::project_file::set(root, "project.kind", kind.map(|k| fenix_storage::project_file::Value::Text(k.id().to_string())))
+    fenix_storage::project_file::set(
+        root,
+        "project.kind",
+        kind.map(|k| fenix_storage::project_file::Value::Text(k.id().to_string())),
+    )
 }
 
 /// `[git] reviewers = ["alex", "sam"]` -- who a new pull request for
 /// this project asks for a review.
 pub fn reviewers(root: &Path) -> Option<Vec<String>> {
     fenix_storage::project_file::get_list(root, "git.reviewers").or_else(|| {
-        let names: Vec<String> = legacy(root, "git", "reviewers")?.split([',', ' ']).map(|n| n.trim().trim_start_matches('@')).filter(|n| !n.is_empty()).map(str::to_string).collect();
+        let names: Vec<String> = legacy(root, "git", "reviewers")?
+            .split([',', ' '])
+            .map(|n| n.trim().trim_start_matches('@'))
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+            .collect();
         (!names.is_empty()).then_some(names)
     })
 }
@@ -148,7 +170,9 @@ pub fn migrate_project_ini(root: &Path) -> Option<Result<Vec<String>, String>> {
     Some((|| {
         use fenix_storage::project_file::{set, Value};
         let mut moved = Vec::new();
-        let value = |section: &str, key: &str| crate::kind::ini_value(&text, section, key).filter(|v| !v.trim().is_empty());
+        let value = |section: &str, key: &str| {
+            crate::kind::ini_value(&text, section, key).filter(|v| !v.trim().is_empty())
+        };
         let err = |e: io::Error| e.to_string();
         if let Some(kind) = value("project", "kind") {
             set(root, "project.kind", Some(Value::Text(kind))).map_err(err)?;
@@ -159,11 +183,17 @@ pub fn migrate_project_ini(root: &Path) -> Option<Result<Vec<String>, String>> {
             moved.push("Jira key".to_string());
         }
         if let Some(names) = value("git", "reviewers") {
-            let names: Vec<String> = names.split([',', ' ']).map(|n| n.trim().trim_start_matches('@')).filter(|n| !n.is_empty()).map(str::to_string).collect();
+            let names: Vec<String> = names
+                .split([',', ' '])
+                .map(|n| n.trim().trim_start_matches('@'))
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+                .collect();
             set(root, "git.reviewers", Some(Value::List(names))).map_err(err)?;
             moved.push("reviewers".to_string());
         }
-        if let Some(baud) = value("monitor", "baudrate").and_then(|b| b.trim().parse::<i64>().ok()) {
+        if let Some(baud) = value("monitor", "baudrate").and_then(|b| b.trim().parse::<i64>().ok())
+        {
             set(root, "monitor.baudrate", Some(Value::Int(baud))).map_err(err)?;
             moved.push("monitor speed".to_string());
         }
@@ -176,15 +206,24 @@ pub fn migrate_project_ini(root: &Path) -> Option<Result<Vec<String>, String>> {
                 in_section = header.trim().to_string();
                 continue;
             }
-            let Some((key, val)) = line.split_once('=') else { continue };
+            let Some((key, val)) = line.split_once('=') else {
+                continue;
+            };
             let (key, val) = (key.trim(), val.trim());
             match in_section.as_str() {
                 "tasks" if key.starts_with("task") => {
-                    let Some((name, command)) = val.split_once('|') else { continue };
+                    let Some((name, command)) = val.split_once('|') else {
+                        continue;
+                    };
                     let mut parts = command.split_whitespace().map(str::to_string);
-                    let Some(program) = parts.next() else { continue };
+                    let Some(program) = parts.next() else {
+                        continue;
+                    };
                     if !tools.tasks.contains_key(name.trim()) {
-                        tools.tasks.insert(name.trim().to_string(), crate::tools::CommandSpec::new(program, parts.collect()));
+                        tools.tasks.insert(
+                            name.trim().to_string(),
+                            crate::tools::CommandSpec::new(program, parts.collect()),
+                        );
                         changed = true;
                     }
                 }
@@ -242,23 +281,43 @@ mod tests {
         assert!(!project_ini(root).exists());
         assert_eq!(crate::declared_kind(root), Some(crate::ProjectKind::Rust));
         assert_eq!(jira_key(root).as_deref(), Some("FNX"));
-        assert_eq!(reviewers(root), Some(vec!["alex".to_string(), "sam".to_string()]));
-        assert_eq!(fenix_storage::project_file::get(root, "monitor.baudrate").as_deref(), Some("9600"));
+        assert_eq!(
+            reviewers(root),
+            Some(vec!["alex".to_string(), "sam".to_string()])
+        );
+        assert_eq!(
+            fenix_storage::project_file::get(root, "monitor.baudrate").as_deref(),
+            Some("9600")
+        );
         let tools = crate::tools::ProjectTools::read(root).unwrap();
-        assert_eq!((tools.tasks["Build"].executable.as_str(), tools.tasks["Build"].args.clone()), ("cargo", vec!["build".to_string(), "--release".to_string()]));
-        assert_eq!(tools.launch.program, Some(PathBuf::from("target/debug/app")));
+        assert_eq!(
+            (
+                tools.tasks["Build"].executable.as_str(),
+                tools.tasks["Build"].args.clone()
+            ),
+            ("cargo", vec!["build".to_string(), "--release".to_string()])
+        );
+        assert_eq!(
+            tools.launch.program,
+            Some(PathBuf::from("target/debug/app"))
+        );
         assert!(migrate_project_ini(root).is_none(), "nothing left to move");
     }
 
     #[test]
     fn a_project_not_yet_moved_is_still_read() {
         let dir = crate::test_util::TempDir::new("legacy_read");
-        dir.write(".fenix/project.ini", "[project]\njira = OPS\n[git]\nreviewers = jo\n");
+        dir.write(
+            ".fenix/project.ini",
+            "[project]\njira = OPS\n[git]\nreviewers = jo\n",
+        );
         assert_eq!(jira_key(dir.path()).as_deref(), Some("OPS"));
         assert_eq!(reviewers(dir.path()), Some(vec!["jo".to_string()]));
         set_jira_key(dir.path(), Some("FNX")).unwrap();
-        assert_eq!(jira_key(dir.path()).as_deref(), Some("FNX"), "the new file wins");
+        assert_eq!(
+            jira_key(dir.path()).as_deref(),
+            Some("FNX"),
+            "the new file wins"
+        );
     }
-
-
 }

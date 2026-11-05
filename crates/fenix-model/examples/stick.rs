@@ -15,6 +15,13 @@ fn main() {
     mesh.cuboid([0.0, 2.1, 0.0], [0.1, 0.1, 0.1], [0.2, 0.3, 0.9, 1.0], hat);
     b.mesh(mesh);
     let (s, c) = std::f32::consts::FRAC_PI_4.sin_cos();
-    b.clip("bend", vec![Track::rotation(tip, vec![0.0, 0.5, 1.0], vec![[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, s, c], [0.0, 0.0, 0.0, 1.0]])]);
+    b.clip(
+        "bend",
+        vec![Track::rotation(
+            tip,
+            vec![0.0, 0.5, 1.0],
+            vec![[0.0, 0.0, 0.0, 1.0], [0.0, 0.0, s, c], [0.0, 0.0, 0.0, 1.0]],
+        )],
+    );
     std::fs::write(&path, b.glb()).expect("written");
 }

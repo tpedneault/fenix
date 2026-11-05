@@ -15,13 +15,25 @@ fn main() -> std::io::Result<()> {
     let docs = root.join("docs/brand");
     std::fs::create_dir_all(&docs)?;
     let save = |name: &str, image: fenix_brand::Image| {
-        image::save_buffer(docs.join(name), &image.rgba, image.width, image.height, image::ExtendedColorType::Rgba8)
-            .map_err(std::io::Error::other)
+        image::save_buffer(
+            docs.join(name),
+            &image.rgba,
+            image.width,
+            image.height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(std::io::Error::other)
     };
     save("fenix-icon-256.png", fenix_brand::app_icon(256))?;
     save("fenix-mark-512.png", fenix_brand::mark(512))?;
-    save("fenix-lockup-dark-bg.png", fenix_brand::lockup(160, [0xF4, 0xF4, 0xF6]))?;
-    save("fenix-lockup-light-bg.png", fenix_brand::lockup(160, [0x17, 0x18, 0x1B]))?;
+    save(
+        "fenix-lockup-dark-bg.png",
+        fenix_brand::lockup(160, [0xF4, 0xF4, 0xF6]),
+    )?;
+    save(
+        "fenix-lockup-light-bg.png",
+        fenix_brand::lockup(160, [0x17, 0x18, 0x1B]),
+    )?;
     println!("wrote fenix.ico and docs/brand/*.png");
     Ok(())
 }

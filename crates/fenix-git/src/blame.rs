@@ -29,8 +29,27 @@ impl BlameLine {
 /// back uncommitted) and the lines match what's on screen.
 pub fn blame(repo: &Path, path: &str, contents: Option<&str>) -> Result<Vec<BlameLine>, String> {
     let output = match contents {
-        Some(text) => run_action_stdin(repo, &["blame".into(), "--porcelain".into(), "--contents".into(), "-".into(), "--".into(), path.into()], text)?,
-        None => run_action(repo, &["blame".into(), "--porcelain".into(), "--".into(), path.into()])?,
+        Some(text) => run_action_stdin(
+            repo,
+            &[
+                "blame".into(),
+                "--porcelain".into(),
+                "--contents".into(),
+                "-".into(),
+                "--".into(),
+                path.into(),
+            ],
+            text,
+        )?,
+        None => run_action(
+            repo,
+            &[
+                "blame".into(),
+                "--porcelain".into(),
+                "--".into(),
+                path.into(),
+            ],
+        )?,
     };
     Ok(parse_porcelain(&output))
 }
@@ -45,7 +64,12 @@ fn parse_porcelain(output: &str) -> Vec<BlameLine> {
     for line in output.lines() {
         if line.starts_with('\t') {
             let (author, time, summary) = known.get(&hash).cloned().unwrap_or_default();
-            lines.push(BlameLine { hash: hash.clone(), author, time, summary });
+            lines.push(BlameLine {
+                hash: hash.clone(),
+                author,
+                time,
+                summary,
+            });
             continue;
         }
         let mut words = line.splitn(2, ' ');
@@ -71,11 +95,23 @@ fn parse_porcelain(output: &str) -> Vec<BlameLine> {
 /// reflog's "checkout: moving from A to B" lines -- then the rest,
 /// newest commit first.
 pub fn branches_by_recency(repo: &Path) -> Vec<String> {
-    let local = run_lines(repo, &["for-each-ref", "--sort=-committerdate", "refs/heads", "--format=%(refname:short)"]);
+    let local = run_lines(
+        repo,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "refs/heads",
+            "--format=%(refname:short)",
+        ],
+    );
     let mut out: Vec<String> = Vec::new();
     for line in run_lines(repo, &["reflog", "--format=%gs", "-n", "2000"]) {
-        let Some(moves) = line.strip_prefix("checkout: moving from ") else { continue };
-        let Some((from, to)) = moves.split_once(" to ") else { continue };
+        let Some(moves) = line.strip_prefix("checkout: moving from ") else {
+            continue;
+        };
+        let Some((from, to)) = moves.split_once(" to ") else {
+            continue;
+        };
         for name in [to, from] {
             if local.iter().any(|b| b == name) && !out.iter().any(|b| b == name) {
                 out.push(name.to_string());
@@ -93,10 +129,20 @@ pub fn branches_by_recency(repo: &Path) -> Vec<String> {
 /// Each local branch's last commit, as git says it relatively ("3 days
 /// ago").
 pub fn branch_ages(repo: &Path) -> HashMap<String, String> {
-    run_lines(repo, &["for-each-ref", "refs/heads", "--format=%(refname:short)\x1f%(committerdate:relative)"])
-        .into_iter()
-        .filter_map(|l| l.split_once('\x1f').map(|(a, b)| (a.to_string(), b.to_string())))
-        .collect()
+    run_lines(
+        repo,
+        &[
+            "for-each-ref",
+            "refs/heads",
+            "--format=%(refname:short)\x1f%(committerdate:relative)",
+        ],
+    )
+    .into_iter()
+    .filter_map(|l| {
+        l.split_once('\x1f')
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -116,7 +162,10 @@ mod tests {
         git(dir.path(), &["commit", "-q", "-am", "second"]);
 
         let lines = blame(dir.path(), "a.txt", None).unwrap();
-        assert_eq!(lines.iter().map(|l| l.summary.as_str()).collect::<Vec<_>>(), ["first", "second", "second"]);
+        assert_eq!(
+            lines.iter().map(|l| l.summary.as_str()).collect::<Vec<_>>(),
+            ["first", "second", "second"]
+        );
         assert_eq!(lines[0].author, "Test");
         assert!(lines[0].time > 0);
 
@@ -141,7 +190,12 @@ mod tests {
         git(dir.path(), &["switch", "-q", "alpha"]);
         let order = branches_by_recency(dir.path());
         assert_eq!(&order[..3], ["alpha", "beta", "main"], "{order:?}");
-        assert!(order.contains(&"gamma".to_string()), "never checked out, still listed");
-        assert!(branch_ages(dir.path()).get("gamma").is_some_and(|a| a.contains("ago")));
+        assert!(
+            order.contains(&"gamma".to_string()),
+            "never checked out, still listed"
+        );
+        assert!(branch_ages(dir.path())
+            .get("gamma")
+            .is_some_and(|a| a.contains("ago")));
     }
 }

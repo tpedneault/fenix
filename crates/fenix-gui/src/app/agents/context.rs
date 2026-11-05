@@ -14,7 +14,10 @@ use super::*;
 const SPECIALS: &[(&str, &str)] = &[
     ("selection", "what you had selected (SPC a e)"),
     ("file", "the file beside the panel"),
-    ("diagnostics", "the problems the language servers found in open files"),
+    (
+        "diagnostics",
+        "the problems the language servers found in open files",
+    ),
     ("diff", "the working tree's changes (git diff HEAD)"),
 ];
 
@@ -45,7 +48,14 @@ impl App {
             self.agents_pick_mention();
             return true;
         }
-        if insert && keypress == KeyPress::char('/') && self.agents.composer.and_then(|c| self.buffers.get(c)).is_some_and(|b| b.buffer.text().trim().is_empty()) {
+        if insert
+            && keypress == KeyPress::char('/')
+            && self
+                .agents
+                .composer
+                .and_then(|c| self.buffers.get(c))
+                .is_some_and(|b| b.buffer.text().trim().is_empty())
+        {
             self.agents_composer_insert("/");
             self.agents_pick_command();
             return true;
@@ -58,7 +68,11 @@ impl App {
 
     /// The prompt's text.
     fn agents_composer_text(&self) -> String {
-        self.agents.composer.and_then(|c| self.buffers.get(c)).map(|b| b.buffer.text()).unwrap_or_default()
+        self.agents
+            .composer
+            .and_then(|c| self.buffers.get(c))
+            .map(|b| b.buffer.text())
+            .unwrap_or_default()
     }
 
     /// Typing in the prompt, or in Normal mode with nothing pending: not
@@ -70,14 +84,28 @@ impl App {
     /// A question waiting, and the prompt empty: its keys (`y`, `n`, ...)
     /// answer it from here, Insert mode or not. Anything else is typed.
     fn agents_composer_answer(&mut self, keypress: KeyPress) -> bool {
-        let KeyCode::Char(c) = keypress.code else { return false };
-        if keypress.mods.ctrl || keypress.mods.alt || !self.agents_composer_text().is_empty() || !self.agents_composer_calm() {
+        let KeyCode::Char(c) = keypress.code else {
+            return false;
+        };
+        if keypress.mods.ctrl
+            || keypress.mods.alt
+            || !self.agents_composer_text().is_empty()
+            || !self.agents_composer_calm()
+        {
             return false;
         }
-        let Some(thread) = self.agents.shown(&self.pages) else { return false };
-        let answer = self.agents.hub.view(&thread).and_then(|v| agent_page::answer_for(v.thread, crate::page::Key::Char(c)));
+        let Some(thread) = self.agents.shown(&self.pages) else {
+            return false;
+        };
+        let answer = self
+            .agents
+            .hub
+            .view(&thread)
+            .and_then(|v| agent_page::answer_for(v.thread, crate::page::Key::Char(c)));
         match answer {
-            Some(agent_page::Action::Permission { key, option }) => self.agents_answer(&thread, &key, Some(&option)),
+            Some(agent_page::Action::Permission { key, option }) => {
+                self.agents_answer(&thread, &key, Some(&option))
+            }
             Some(agent_page::Action::Elicit { key, how }) => self.agents_elicit(&thread, &key, how),
             _ => return false,
         }
@@ -97,10 +125,12 @@ impl App {
                     .entries
                     .iter()
                     .filter_map(|e| match e {
-                        fenix_acp::thread::Entry::User { blocks, .. } => blocks.iter().find_map(|b| match b {
-                            ContentBlock::Text(t) => Some(t.trim_end().to_string()),
-                            _ => None,
-                        }),
+                        fenix_acp::thread::Entry::User { blocks, .. } => {
+                            blocks.iter().find_map(|b| match b {
+                                ContentBlock::Text(t) => Some(t.trim_end().to_string()),
+                                _ => None,
+                            })
+                        }
                         _ => None,
                     })
                     .collect()
@@ -121,7 +151,10 @@ impl App {
     /// move in it as ever.
     fn agents_composer_recall(&mut self, keypress: KeyPress) -> bool {
         let up = keypress.code == KeyCode::Named(FenixNamedKey::Up);
-        if !(up || keypress.code == KeyCode::Named(FenixNamedKey::Down)) || keypress.mods != Mods::default() || !self.agents_composer_calm() {
+        if !(up || keypress.code == KeyCode::Named(FenixNamedKey::Down))
+            || keypress.mods != Mods::default()
+            || !self.agents_composer_calm()
+        {
             return false;
         }
         let text = self.agents_composer_text();
@@ -154,12 +187,20 @@ impl App {
                 }
             },
         };
-        let Some(composer) = self.agents.composer else { return true };
+        let Some(composer) = self.agents.composer else {
+            return true;
+        };
         self.replace_buffer_from_disk(composer, &shown);
         if let Some(pane) = self.agents_panes_showing(composer).first().copied() {
-            let end = self.buffers.get(composer).map_or(0, |b| b.buffer.len_chars());
+            let end = self
+                .buffers
+                .get(composer)
+                .map_or(0, |b| b.buffer.len_chars());
             if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
-                state.cursor = Cursor { char_idx: end, sticky_col: 0 };
+                state.cursor = Cursor {
+                    char_idx: end,
+                    sticky_col: 0,
+                };
             }
         }
         self.wake_caret();
@@ -168,16 +209,33 @@ impl App {
 
     /// Types `text` into the prompt at its cursor.
     pub(super) fn agents_composer_insert(&mut self, text: &str) {
-        let Some(composer) = self.agents.composer else { return };
-        let Some(pane) = self.agents_panes_showing(composer).first().copied() else { return };
-        let at = self.workspaces.active_pane_states().get(&pane).map(|s| s.cursor.char_idx).unwrap_or(0);
-        let Some(ob) = self.buffers.get_mut(composer) else { return };
+        let Some(composer) = self.agents.composer else {
+            return;
+        };
+        let Some(pane) = self.agents_panes_showing(composer).first().copied() else {
+            return;
+        };
+        let at = self
+            .workspaces
+            .active_pane_states()
+            .get(&pane)
+            .map(|s| s.cursor.char_idx)
+            .unwrap_or(0);
+        let Some(ob) = self.buffers.get_mut(composer) else {
+            return;
+        };
         let at = at.min(ob.buffer.len_chars());
-        let mut cursor = Cursor { char_idx: at, sticky_col: 0 };
+        let mut cursor = Cursor {
+            char_idx: at,
+            sticky_col: 0,
+        };
         ob.buffer.replace_range(&mut cursor, at, at, text);
         let after = at + text.chars().count();
         if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
-            state.cursor = Cursor { char_idx: after, sticky_col: 0 };
+            state.cursor = Cursor {
+                char_idx: after,
+                sticky_col: 0,
+            };
         }
         self.wake_caret();
     }
@@ -188,45 +246,95 @@ impl App {
         let mut candidates: Vec<fenix_picker::Candidate<Pick>> = SPECIALS
             .iter()
             .filter(|(name, _)| *name != "selection" || self.agents.selection.is_some())
-            .map(|(name, what)| fenix_picker::Candidate::new(format!("@{name}   {what}"), Pick::Mention(name.to_string())))
+            .map(|(name, what)| {
+                fenix_picker::Candidate::new(
+                    format!("@{name}   {what}"),
+                    Pick::Mention(name.to_string()),
+                )
+            })
             .collect();
         match self.listed_files(&root) {
-            Some(files) => candidates.extend(files.iter().map(|c| fenix_picker::Candidate::new(c.label.clone(), Pick::Mention(c.label.replace('\\', "/"))))),
+            Some(files) => candidates.extend(files.iter().map(|c| {
+                fenix_picker::Candidate::new(
+                    c.label.clone(),
+                    Pick::Mention(c.label.replace('\\', "/")),
+                )
+            })),
             None => self.prewarm_file_index(&root),
         }
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
+            candidates,
+        )));
     }
 
     /// `/` at the start of the prompt: the agent's own commands.
     pub(super) fn agents_pick_command(&mut self) {
-        let Some(thread) = self.agents.shown(&self.pages) else { return };
-        let commands = self.agents.hub.view(&thread).map(|v| v.thread.commands.clone()).unwrap_or_default();
+        let Some(thread) = self.agents.shown(&self.pages) else {
+            return;
+        };
+        let commands = self
+            .agents
+            .hub
+            .view(&thread)
+            .map(|v| v.thread.commands.clone())
+            .unwrap_or_default();
         if commands.is_empty() {
-            self.set_message("this agent offers no / commands (yet: they come once it's connected)");
+            self.set_message(
+                "this agent offers no / commands (yet: they come once it's connected)",
+            );
             return;
         }
         let candidates = commands
             .iter()
             .map(|c| {
-                let hint = c.hint.as_deref().map(|h| format!(" <{h}>")).unwrap_or_default();
-                fenix_picker::Candidate::new(format!("/{}{hint}   {}", c.name, c.description), Pick::Command(c.name.clone()))
+                let hint = c
+                    .hint
+                    .as_deref()
+                    .map(|h| format!(" <{h}>"))
+                    .unwrap_or_default();
+                fenix_picker::Candidate::new(
+                    format!("/{}{hint}   {}", c.name, c.description),
+                    Pick::Command(c.name.clone()),
+                )
             })
             .collect();
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
+            candidates,
+        )));
     }
 
     /// A picture on the clipboard, pasted into the prompt: it goes with
     /// it as an image, when the agent takes them.
     fn agents_paste_image(&mut self) -> bool {
-        let Some(thread) = self.agents.shown(&self.pages) else { return false };
-        let takes = self.agents.hub.connection_of(&thread).and_then(|c| self.agents.hub.connection(c)).and_then(|c| c.info.as_ref()).is_some_and(|i| i.prompt_image);
-        let Some(image) = self.clipboard.as_mut().and_then(|c| c.get_image().ok()) else { return false };
+        let Some(thread) = self.agents.shown(&self.pages) else {
+            return false;
+        };
+        let takes = self
+            .agents
+            .hub
+            .connection_of(&thread)
+            .and_then(|c| self.agents.hub.connection(c))
+            .and_then(|c| c.info.as_ref())
+            .is_some_and(|i| i.prompt_image);
+        let Some(image) = self.clipboard.as_mut().and_then(|c| c.get_image().ok()) else {
+            return false;
+        };
         if !takes {
             self.set_message("this agent doesn't take pictures");
             return true;
         }
-        let Some(png) = super::super::wasm_host::encode_png(image.width as u32, image.height as u32, image.bytes.into_owned()) else { return false };
-        self.agents.images.push(ContentBlock::Image { data: base64(&png), mime_type: "image/png".into(), uri: None });
+        let Some(png) = super::super::wasm_host::encode_png(
+            image.width as u32,
+            image.height as u32,
+            image.bytes.into_owned(),
+        ) else {
+            return false;
+        };
+        self.agents.images.push(ContentBlock::Image {
+            data: base64(&png),
+            mime_type: "image/png".into(),
+            uri: None,
+        });
         let n = self.agents.images.len();
         self.agents_composer_insert(&format!("[image {n}]"));
         true
@@ -237,10 +345,25 @@ impl App {
 
     /// The prompt as blocks: its text, then what its mentions name, then
     /// pictures pasted in.
-    pub(super) fn agents_prompt_blocks(&mut self, thread: &ThreadId, text: &str) -> Vec<ContentBlock> {
+    pub(super) fn agents_prompt_blocks(
+        &mut self,
+        thread: &ThreadId,
+        text: &str,
+    ) -> Vec<ContentBlock> {
         let mut blocks = vec![ContentBlock::text(text.to_string())];
-        let root = self.agents.hub.meta(thread).map(|m| m.root.clone()).unwrap_or_else(|| self.agents_root());
-        let embedded = self.agents.hub.connection_of(thread).and_then(|c| self.agents.hub.connection(c)).and_then(|c| c.info.as_ref()).is_some_and(|i| i.prompt_embedded_context);
+        let root = self
+            .agents
+            .hub
+            .meta(thread)
+            .map(|m| m.root.clone())
+            .unwrap_or_else(|| self.agents_root());
+        let embedded = self
+            .agents
+            .hub
+            .connection_of(thread)
+            .and_then(|c| self.agents.hub.connection(c))
+            .and_then(|c| c.info.as_ref())
+            .is_some_and(|i| i.prompt_embedded_context);
         let mut seen = HashSet::new();
         for token in mentions(text) {
             if !seen.insert(token.clone()) {
@@ -254,10 +377,19 @@ impl App {
         blocks
     }
 
-    pub(super) fn agents_mention_block(&self, root: &Path, token: &str, embedded: bool) -> Option<ContentBlock> {
+    pub(super) fn agents_mention_block(
+        &self,
+        root: &Path,
+        token: &str,
+        embedded: bool,
+    ) -> Option<ContentBlock> {
         let resource = |uri: String, text: String, name: &str| {
             if embedded {
-                ContentBlock::Resource { uri, text: Some(cut(text)), mime_type: Some("text/plain".into()) }
+                ContentBlock::Resource {
+                    uri,
+                    text: Some(cut(text)),
+                    mime_type: Some("text/plain".into()),
+                }
             } else {
                 ContentBlock::text(format!("{name}:\n{}", cut(text)))
             }
@@ -265,9 +397,26 @@ impl App {
         match token {
             "selection" => {
                 let s = self.agents.selection.as_ref()?;
-                let name = s.path.as_ref().map(|p| p.strip_prefix(root).unwrap_or(p).to_string_lossy().into_owned()).unwrap_or_else(|| "selection".into());
-                let uri = s.path.as_ref().map(|p| format!("{}#L{}", file_uri(p), s.line)).unwrap_or_else(|| "fenix://selection".into());
-                Some(resource(uri, s.text.clone(), &format!("{name}, from line {}", s.line)))
+                let name = s
+                    .path
+                    .as_ref()
+                    .map(|p| {
+                        p.strip_prefix(root)
+                            .unwrap_or(p)
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                    .unwrap_or_else(|| "selection".into());
+                let uri = s
+                    .path
+                    .as_ref()
+                    .map(|p| format!("{}#L{}", file_uri(p), s.line))
+                    .unwrap_or_else(|| "fenix://selection".into());
+                Some(resource(
+                    uri,
+                    s.text.clone(),
+                    &format!("{name}, from line {}", s.line),
+                ))
             }
             "file" => {
                 let path = self.agents_code_file()?;
@@ -276,29 +425,59 @@ impl App {
             "diagnostics" => {
                 let mut text = String::new();
                 for id in self.buffers.ids_sorted_by_path() {
-                    let Some(path) = self.buffers.get(id).and_then(|b| b.buffer.path()).map(Path::to_path_buf) else { continue };
+                    let Some(path) = self
+                        .buffers
+                        .get(id)
+                        .and_then(|b| b.buffer.path())
+                        .map(Path::to_path_buf)
+                    else {
+                        continue;
+                    };
                     if !path.starts_with(root) {
                         continue;
                     }
-                    let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
+                    let canonical = fenix_lsp::normalize(
+                        std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()),
+                    );
                     for d in self.all_diagnostics(&canonical) {
                         let severity = match d.severity {
                             Some(lsp_types::DiagnosticSeverity::ERROR) => "error",
                             Some(lsp_types::DiagnosticSeverity::WARNING) => "warning",
                             _ => "note",
                         };
-                        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
-                        text.push_str(&format!("{rel}:{}:{}: {severity}: {}\n", d.range.start.line + 1, d.range.start.character + 1, d.message));
+                        let rel = path
+                            .strip_prefix(root)
+                            .unwrap_or(&path)
+                            .to_string_lossy()
+                            .into_owned();
+                        text.push_str(&format!(
+                            "{rel}:{}:{}: {severity}: {}\n",
+                            d.range.start.line + 1,
+                            d.range.start.character + 1,
+                            d.message
+                        ));
                     }
                 }
                 if text.is_empty() {
                     text.push_str("(no problems in the open files)\n");
                 }
-                Some(resource("fenix://diagnostics".into(), text, "The problems the language servers found"))
+                Some(resource(
+                    "fenix://diagnostics".into(),
+                    text,
+                    "The problems the language servers found",
+                ))
             }
             "diff" => {
-                let out = std::process::Command::new("git").args(["diff", "HEAD"]).current_dir(root).output().ok()?;
-                Some(resource("fenix://git-diff".into(), String::from_utf8_lossy(&out.stdout).into_owned(), "The working tree's changes"))
+                let out = std::process::Command::new("git")
+                    .args(["diff", "HEAD"])
+                    .current_dir(root)
+                    .output()
+                    .ok()?;
+                Some(resource(
+                    "fenix://git-diff".into(),
+                    String::from_utf8_lossy(&out.stdout).into_owned(),
+                    "The working tree's changes",
+                ))
             }
             path => {
                 let path = root.join(path);
@@ -310,13 +489,30 @@ impl App {
         }
     }
 
-    pub(super) fn agents_file_block(&self, root: &Path, path: &Path, embedded: bool) -> Option<ContentBlock> {
-        let name = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
+    pub(super) fn agents_file_block(
+        &self,
+        root: &Path,
+        path: &Path,
+        embedded: bool,
+    ) -> Option<ContentBlock> {
+        let name = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned();
         if embedded {
             let text = self.agents_current(path)?;
-            Some(ContentBlock::Resource { uri: file_uri(path), text: Some(cut(text)), mime_type: Some("text/plain".into()) })
+            Some(ContentBlock::Resource {
+                uri: file_uri(path),
+                text: Some(cut(text)),
+                mime_type: Some("text/plain".into()),
+            })
         } else {
-            Some(ContentBlock::ResourceLink { uri: file_uri(path), name, mime_type: None })
+            Some(ContentBlock::ResourceLink {
+                uri: file_uri(path),
+                name,
+                mime_type: None,
+            })
         }
     }
 
@@ -328,12 +524,19 @@ impl App {
             return None;
         }
         let s = self.agents.selection.as_ref()?;
-        Some((s.path.as_ref().map(|p| p.to_string_lossy().into_owned()), s.line, s.text.clone()))
+        Some((
+            s.path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+            s.line,
+            s.text.clone(),
+        ))
     }
 
     /// The file in the pane beside the panel.
     fn agents_code_file(&self) -> Option<PathBuf> {
-        let pane = self.agents.code_pane.filter(|p| self.windows().windows().contains(p))?;
+        let pane = self
+            .agents
+            .code_pane
+            .filter(|p| self.windows().windows().contains(p))?;
         let id = *self.windows().content(pane)?;
         self.buffers.get(id)?.buffer.path().map(Path::to_path_buf)
     }
@@ -349,7 +552,11 @@ impl App {
             self.set_message("select something first (or put the cursor on a line)");
             return;
         }
-        self.agents.selection = Some(Selection { path: here.path.map(PathBuf::from), line: here.line, text: here.text });
+        self.agents.selection = Some(Selection {
+            path: here.path.map(PathBuf::from),
+            line: here.line,
+            text: here.text,
+        });
         let pane = self.focused_pane_id();
         self.agents_open_panel();
         if self.agents.page.is_some() {
@@ -370,19 +577,42 @@ impl App {
             let cursor = self.cursor();
             self.open().buffer.line_col(&cursor).0
         };
-        let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
+        let canonical =
+            fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
         let diagnostics = self.all_diagnostics(&canonical);
-        let Some(d) = diagnostics.iter().find(|d| d.range.start.line as usize <= line && line <= d.range.end.line as usize) else {
+        let Some(d) = diagnostics
+            .iter()
+            .find(|d| d.range.start.line as usize <= line && line <= d.range.end.line as usize)
+        else {
             self.set_message("no problem on this line");
             return;
         };
         let pane = self.focused_pane_id();
-        let text = format!("Fix this problem, and nothing else:\n\n{}:{}:{}: {}", path.display(), d.range.start.line + 1, d.range.start.character + 1, d.message);
+        let text = format!(
+            "Fix this problem, and nothing else:\n\n{}:{}:{}: {}",
+            path.display(),
+            d.range.start.line + 1,
+            d.range.start.character + 1,
+            d.message
+        );
         self.agents_open_panel();
-        let Some(thread) = self.agents.shown(&self.pages) else { return };
+        let Some(thread) = self.agents.shown(&self.pages) else {
+            return;
+        };
         self.agents.code_pane = Some(pane);
-        let root = self.agents.hub.meta(&thread).map(|m| m.root.clone()).unwrap_or_default();
-        let embedded = self.agents.hub.connection_of(&thread).and_then(|c| self.agents.hub.connection(c)).and_then(|c| c.info.as_ref()).is_some_and(|i| i.prompt_embedded_context);
+        let root = self
+            .agents
+            .hub
+            .meta(&thread)
+            .map(|m| m.root.clone())
+            .unwrap_or_default();
+        let embedded = self
+            .agents
+            .hub
+            .connection_of(&thread)
+            .and_then(|c| self.agents.hub.connection(c))
+            .and_then(|c| c.info.as_ref())
+            .is_some_and(|i| i.prompt_embedded_context);
         let mut blocks = vec![ContentBlock::text(text)];
         blocks.extend(self.agents_file_block(&root, &path, embedded));
         let fx = self.agents.hub.prompt(&thread, blocks);
@@ -395,11 +625,24 @@ impl App {
         // Into the commit composer, when one is open: its repository's
         // staged change.
         let composer = self.compose.as_ref().and_then(|c| match &c.purpose {
-            ComposePurpose::CommitMessage { repo_root } | ComposePurpose::GitCommit { repo_root, .. } => Some((c.buffer, repo_root.clone())),
+            ComposePurpose::CommitMessage { repo_root }
+            | ComposePurpose::GitCommit { repo_root, .. } => Some((c.buffer, repo_root.clone())),
             _ => None,
         });
-        let root = composer.as_ref().map(|(_, r)| r.clone()).unwrap_or_else(|| self.agents_root());
-        let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&root).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        let root = composer
+            .as_ref()
+            .map(|(_, r)| r.clone())
+            .unwrap_or_else(|| self.agents_root());
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        };
         let diff = git(&["diff", "--cached"]);
         if diff.trim().is_empty() {
             self.set_message("nothing staged to write a commit message for");
@@ -409,9 +652,16 @@ impl App {
         // The project's own rules for a message: a commit template, and
         // what CONTRIBUTING.md says of commits.
         let template = git(&["config", "commit.template"]).trim().to_string();
-        let template = if template.is_empty() { root.join(".gitmessage") } else { root.join(home_path(&template)) };
+        let template = if template.is_empty() {
+            root.join(".gitmessage")
+        } else {
+            root.join(home_path(&template))
+        };
         let template = std::fs::read_to_string(template).unwrap_or_default();
-        let contributing = std::fs::read_to_string(root.join("CONTRIBUTING.md")).ok().and_then(|t| commits_section(&t)).unwrap_or_default();
+        let contributing = std::fs::read_to_string(root.join("CONTRIBUTING.md"))
+            .ok()
+            .and_then(|t| commits_section(&t))
+            .unwrap_or_default();
         let composer_buffer = composer.map(|(b, _)| b);
         if composer_buffer.is_none() {
             self.agents_open_panel();
@@ -420,7 +670,12 @@ impl App {
             Some(thread) => thread,
             None => {
                 let entries = self.agents_configure();
-                let wanted = self.config.text_value("agents.ask.agent").map(str::trim).filter(|a| !a.is_empty()).map(catalog::slug);
+                let wanted = self
+                    .config
+                    .text_value("agents.ask.agent")
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                    .map(catalog::slug);
                 let Some(agent) = wanted.or_else(|| self.agents_default_of(&entries)) else {
                     self.agents_none_found(&entries);
                     return;
@@ -435,13 +690,25 @@ impl App {
             ContentBlock::Resource { uri: "fenix://git-diff-cached".into(), text: Some(cut(diff)), mime_type: Some("text/x-diff".into()) },
         ];
         if !subjects.trim().is_empty() {
-            blocks.push(ContentBlock::Resource { uri: "fenix://git-log-subjects".into(), text: Some(subjects), mime_type: Some("text/plain".into()) });
+            blocks.push(ContentBlock::Resource {
+                uri: "fenix://git-log-subjects".into(),
+                text: Some(subjects),
+                mime_type: Some("text/plain".into()),
+            });
         }
         if !template.trim().is_empty() {
-            blocks.push(ContentBlock::Resource { uri: "fenix://commit-template".into(), text: Some(template), mime_type: Some("text/plain".into()) });
+            blocks.push(ContentBlock::Resource {
+                uri: "fenix://commit-template".into(),
+                text: Some(template),
+                mime_type: Some("text/plain".into()),
+            });
         }
         if !contributing.trim().is_empty() {
-            blocks.push(ContentBlock::Resource { uri: "fenix://contributing-commits".into(), text: Some(contributing), mime_type: Some("text/markdown".into()) });
+            blocks.push(ContentBlock::Resource {
+                uri: "fenix://contributing-commits".into(),
+                text: Some(contributing),
+                mime_type: Some("text/markdown".into()),
+            });
         }
         self.agents.commit_message = Some(thread.clone());
         self.agents.commit_into = composer_buffer;
@@ -457,13 +724,28 @@ impl App {
         if self.agents.commit_message.as_ref() != Some(thread) {
             return;
         }
-        let Some(buffer) = self.agents.commit_into.filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b)) else { return };
-        let text = self.agents.hub.view(thread).map(|v| v.thread.last_answer()).unwrap_or_default();
+        let Some(buffer) = self
+            .agents
+            .commit_into
+            .filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b))
+        else {
+            return;
+        };
+        let text = self
+            .agents
+            .hub
+            .view(thread)
+            .map(|v| v.thread.last_answer())
+            .unwrap_or_default();
         if text.trim().is_empty() {
             return;
         }
         let message = strip_fence(&text);
-        if self.buffers.get(buffer).is_some_and(|ob| ob.buffer.text() != message) {
+        if self
+            .buffers
+            .get(buffer)
+            .is_some_and(|ob| ob.buffer.text() != message)
+        {
             self.replace_buffer_from_disk(buffer, &message);
         }
     }
@@ -479,16 +761,21 @@ impl App {
         self.agents.commit_message = None;
         let Some(text) = self.agents.hub.view(thread).and_then(|v| {
             v.thread.entries.iter().rev().find_map(|e| match e {
-                fenix_acp::thread::Entry::Agent { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+                fenix_acp::thread::Entry::Agent { text, .. } if !text.trim().is_empty() => {
+                    Some(text.clone())
+                }
                 _ => None,
             })
         }) else {
             return;
         };
         let message = strip_fence(&text);
-        if let Some(buffer) = into.filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b)) {
+        if let Some(buffer) = into.filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b))
+        {
             self.replace_buffer_from_disk(buffer, &message);
-            self.set_message("the agent's message is in the composer: edit it, then Esc and Enter to commit");
+            self.set_message(
+                "the agent's message is in the composer: edit it, then Esc and Enter to commit",
+            );
             return;
         }
         if let Some(clipboard) = &mut self.clipboard {
@@ -501,7 +788,11 @@ impl App {
 /// `~/` at the start of a path, as the home folder.
 fn home_path(path: &str) -> PathBuf {
     match path.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default().join(rest),
+        Some(rest) => std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(rest),
         None => PathBuf::from(path),
     }
 }
@@ -535,7 +826,10 @@ mod commit_tests {
     #[test]
     fn the_contributing_rules_on_commits_are_found() {
         let text = "# Contributing\n\nHi.\n\n## Making a change\n\nCommit subjects name the area first.\n\n## Releases\n\nTag it.\n";
-        assert_eq!(commits_section(text).as_deref(), Some("Commit subjects name the area first."));
+        assert_eq!(
+            commits_section(text).as_deref(),
+            Some("Commit subjects name the area first.")
+        );
         assert_eq!(commits_section("# Nothing\n"), None);
     }
 }
@@ -594,11 +888,21 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (chunk[0] as u32) << 16
+            | (*chunk.get(1).unwrap_or(&0) as u32) << 8
+            | *chunk.get(2).unwrap_or(&0) as u32;
         out.push(TABLE[(n >> 18) as usize & 63] as char);
         out.push(TABLE[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            TABLE[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -609,7 +913,10 @@ mod tests {
 
     #[test]
     fn mentions_are_words_after_an_at_sign() {
-        assert_eq!(mentions("look at @src/a.rs and @selection, not me@there or @ alone. @diff"), vec!["src/a.rs", "selection", "diff"]);
+        assert_eq!(
+            mentions("look at @src/a.rs and @selection, not me@there or @ alone. @diff"),
+            vec!["src/a.rs", "selection", "diff"]
+        );
     }
 
     #[test]
@@ -622,7 +929,10 @@ mod tests {
 
     #[test]
     fn a_fenced_answer_is_unwrapped() {
-        assert_eq!(strip_fence("```\nFix it\n\nBecause.\n```"), "Fix it\n\nBecause.");
+        assert_eq!(
+            strip_fence("```\nFix it\n\nBecause.\n```"),
+            "Fix it\n\nBecause."
+        );
         assert_eq!(strip_fence("Plain"), "Plain");
     }
 }

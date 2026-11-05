@@ -24,7 +24,13 @@ impl FrontMatter {
         if lines.first().map(|l| l.trim_end()) != Some("---") {
             return fm;
         }
-        let Some(end) = lines.iter().skip(1).position(|l| l.trim_end() == "---" || l.trim_end() == "...") else { return fm };
+        let Some(end) = lines
+            .iter()
+            .skip(1)
+            .position(|l| l.trim_end() == "---" || l.trim_end() == "...")
+        else {
+            return fm;
+        };
         let end = end + 1;
         fm.lines = Some(0..end + 1);
         let mut i = 1;
@@ -39,7 +45,9 @@ impl FrontMatter {
                                 // A block list on the lines under it.
                                 while i + 1 < end {
                                     let next = lines[i + 1].trim_start();
-                                    let Some(item) = next.strip_prefix("- ") else { break };
+                                    let Some(item) = next.strip_prefix("- ") else {
+                                        break;
+                                    };
                                     push_tag(&mut fm.tags, item);
                                     i += 1;
                                 }
@@ -50,7 +58,9 @@ impl FrontMatter {
                                 }
                             }
                         }
-                        "about" | "project" => fm.about = Some(unquote(value)).filter(|v| !v.is_empty()),
+                        "about" | "project" => {
+                            fm.about = Some(unquote(value)).filter(|v| !v.is_empty())
+                        }
                         "title" => fm.title = Some(unquote(value)).filter(|v| !v.is_empty()),
                         _ => {}
                     }
@@ -64,7 +74,11 @@ impl FrontMatter {
 
 fn unquote(s: &str) -> String {
     let s = s.trim();
-    let s = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')).or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))).unwrap_or(s);
+    let s = s
+        .strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(s);
     s.to_string()
 }
 
@@ -137,11 +151,22 @@ pub fn links_in_line(line: &str, line_no: usize) -> Vec<Link> {
                         None => (inner.clone(), None),
                     };
                     let (target, heading) = match rest.split_once('#') {
-                        Some((t, h)) if !t.contains("://") => (t.trim().to_string(), Some(h.trim().to_string()).filter(|h| !h.is_empty())),
+                        Some((t, h)) if !t.contains("://") => (
+                            t.trim().to_string(),
+                            Some(h.trim().to_string()).filter(|h| !h.is_empty()),
+                        ),
                         _ => (rest.trim().to_string(), None),
                     };
                     let start = if embed { i - 1 } else { i };
-                    out.push(Link { target, heading, alias, embed, markdown: false, line: line_no, cols: start..close + 2 });
+                    out.push(Link {
+                        target,
+                        heading,
+                        alias,
+                        embed,
+                        markdown: false,
+                        line: line_no,
+                        cols: start..close + 2,
+                    });
                     i = close + 2;
                     continue;
                 }
@@ -149,19 +174,37 @@ pub fn links_in_line(line: &str, line_no: usize) -> Vec<Link> {
         }
         if chars[i] == '[' && (i == 0 || chars[i - 1] != '[') {
             // [text](target) -- a Markdown link to a note or file.
-            if let Some(close) = chars[i + 1..].iter().position(|&c| c == ']').map(|p| p + i + 1) {
+            if let Some(close) = chars[i + 1..]
+                .iter()
+                .position(|&c| c == ']')
+                .map(|p| p + i + 1)
+            {
                 if chars.get(close + 1) == Some(&'(') {
-                    if let Some(end) = chars[close + 2..].iter().position(|&c| c == ')').map(|p| p + close + 2) {
+                    if let Some(end) = chars[close + 2..]
+                        .iter()
+                        .position(|&c| c == ')')
+                        .map(|p| p + close + 2)
+                    {
                         let text: String = chars[i + 1..close].iter().collect();
                         let target: String = chars[close + 2..end].iter().collect();
                         let target = target.trim().to_string();
                         let image = i > 0 && chars[i - 1] == '!';
                         if !target.is_empty() && !image {
                             let (t, heading) = match target.split_once('#') {
-                                Some((t, h)) if !t.contains("://") => (t.to_string(), Some(h.to_string())),
+                                Some((t, h)) if !t.contains("://") => {
+                                    (t.to_string(), Some(h.to_string()))
+                                }
                                 _ => (target.clone(), None),
                             };
-                            out.push(Link { target: t, heading, alias: Some(text), embed: false, markdown: true, line: line_no, cols: i..end + 1 });
+                            out.push(Link {
+                                target: t,
+                                heading,
+                                alias: Some(text),
+                                embed: false,
+                                markdown: true,
+                                line: line_no,
+                                cols: i..end + 1,
+                            });
                         }
                         i = end + 1;
                         continue;
@@ -239,9 +282,14 @@ pub fn inline_tags(line: &str) -> Vec<(Range<usize>, String)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        let starts = chars[i] == '#' && !code[i] && (i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(');
+        let starts = chars[i] == '#'
+            && !code[i]
+            && (i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '(');
         if starts {
-            let word: String = chars[i + 1..].iter().take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/')).collect();
+            let word: String = chars[i + 1..]
+                .iter()
+                .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/'))
+                .collect();
             let len = word.chars().count();
             if len > 0 && word.chars().any(|c| c.is_alphabetic()) {
                 out.push((i..i + 1 + len, word));
@@ -292,7 +340,12 @@ pub fn task_on(line: &str, n: usize) -> Option<Task> {
         return None;
     }
     let text: String = ac.collect();
-    Some(Task { done: mark != ' ', text: text.trim().to_string(), line: n, mark_col: indent + marker_len + 2 })
+    Some(Task {
+        done: mark != ' ',
+        text: text.trim().to_string(),
+        line: n,
+        mark_col: indent + marker_len + 2,
+    })
 }
 
 #[cfg(test)]
@@ -308,7 +361,10 @@ mod tests {
         let fm = FrontMatter::parse("---\ntags:\n  - a\n  - \"#b\"\ntitle: 'Hi'\n---\n");
         assert_eq!(fm.tags, vec!["a", "b"]);
         assert_eq!(fm.title.as_deref(), Some("Hi"));
-        assert_eq!(FrontMatter::parse("# no front matter\n"), FrontMatter::default());
+        assert_eq!(
+            FrontMatter::parse("# no front matter\n"),
+            FrontMatter::default()
+        );
     }
 
     #[test]
@@ -336,7 +392,10 @@ mod tests {
 
     #[test]
     fn tags_and_checkboxes_on_a_line() {
-        let tags: Vec<String> = inline_tags("retry #tc and #bench/uplink but not `#code` or #123").into_iter().map(|(_, t)| t).collect();
+        let tags: Vec<String> = inline_tags("retry #tc and #bench/uplink but not `#code` or #123")
+            .into_iter()
+            .map(|(_, t)| t)
+            .collect();
         assert_eq!(tags, vec!["tc", "bench/uplink"]);
         let t = task_on("- [ ] open item", 3).unwrap();
         assert!(!t.done && t.text == "open item" && t.mark_col == 3 && t.line == 3);

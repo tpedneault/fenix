@@ -15,7 +15,11 @@ pub struct TaskDef {
 
 impl TaskDef {
     fn new(name: &str, command: &str, args: &[&str]) -> Self {
-        Self { name: name.to_string(), command: command.to_string(), args: args.iter().map(|s| s.to_string()).collect() }
+        Self {
+            name: name.to_string(),
+            command: command.to_string(),
+            args: args.iter().map(|s| s.to_string()).collect(),
+        }
     }
 }
 
@@ -31,9 +35,21 @@ impl TaskDef {
 pub fn default_tasks(root: &Path) -> Vec<TaskDef> {
     let mut tasks = Vec::new();
     if root.join("Cargo.toml").is_file() {
-        tasks.push(TaskDef::new("cargo build", "cargo", &["build", "--message-format=json"]));
-        tasks.push(TaskDef::new("cargo test", "cargo", &["test", "--message-format=json"]));
-        tasks.push(TaskDef::new("cargo clippy", "cargo", &["clippy", "--message-format=json"]));
+        tasks.push(TaskDef::new(
+            "cargo build",
+            "cargo",
+            &["build", "--message-format=json"],
+        ));
+        tasks.push(TaskDef::new(
+            "cargo test",
+            "cargo",
+            &["test", "--message-format=json"],
+        ));
+        tasks.push(TaskDef::new(
+            "cargo clippy",
+            "cargo",
+            &["clippy", "--message-format=json"],
+        ));
     }
     if root.join("pyproject.toml").is_file() || root.join("setup.py").is_file() {
         // A uv project's tools are in its `.venv`, not on `PATH`.
@@ -64,7 +80,10 @@ pub fn default_tasks(root: &Path) -> Vec<TaskDef> {
 pub fn merge(first: Vec<TaskDef>, then: Vec<TaskDef>) -> Vec<TaskDef> {
     let mut out: Vec<TaskDef> = Vec::new();
     for task in first.into_iter().chain(then) {
-        if !out.iter().any(|t| t.name == task.name || (t.command == task.command && t.args == task.args)) {
+        if !out
+            .iter()
+            .any(|t| t.name == task.name || (t.command == task.command && t.args == task.args))
+        {
             out.push(task);
         }
     }
@@ -76,8 +95,16 @@ mod tests {
     #[test]
     fn merged_tasks_are_one_per_name_and_command() {
         let t = |name: &str, command: &str, args: &[&str]| TaskDef::new(name, command, args);
-        let extension = vec![t("build", "cargo", &["build"]), t("test", "cargo", &["test"]), t("build", "cargo", &["build"])];
-        let core = vec![t("cargo build", "cargo", &["build"]), t("cargo test", "cargo", &["test", "--message-format=json"]), t("test", "make", &["test"])];
+        let extension = vec![
+            t("build", "cargo", &["build"]),
+            t("test", "cargo", &["test"]),
+            t("build", "cargo", &["build"]),
+        ];
+        let core = vec![
+            t("cargo build", "cargo", &["build"]),
+            t("cargo test", "cargo", &["test", "--message-format=json"]),
+            t("test", "make", &["test"]),
+        ];
         let names: Vec<String> = merge(extension, core).into_iter().map(|t| t.name).collect();
         assert_eq!(names, ["build", "test", "cargo test"]);
     }
@@ -88,7 +115,10 @@ mod tests {
         std::fs::write(dir.path().join("pyproject.toml"), "").unwrap();
         std::fs::write(dir.path().join("uv.lock"), "").unwrap();
         let tasks = default_tasks(dir.path());
-        assert_eq!((tasks[0].command.as_str(), tasks[0].args.clone()), ("uv", vec!["run".to_string(), "pytest".to_string()]));
+        assert_eq!(
+            (tasks[0].command.as_str(), tasks[0].args.clone()),
+            ("uv", vec!["run".to_string(), "pytest".to_string()])
+        );
     }
 
     use super::*;
@@ -99,7 +129,10 @@ mod tests {
         fn new(name: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("fenix-tasks-test-{name}-{}-{n}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!(
+                "fenix-tasks-test-{name}-{}-{n}",
+                std::process::id()
+            ));
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
@@ -163,6 +196,15 @@ mod tests {
         std::fs::write(dir.path().join("package.json"), b"{}").unwrap();
         let tasks = default_tasks(dir.path());
         let names: Vec<&str> = tasks.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["cargo build", "cargo test", "cargo clippy", "npm run build", "npm test"]);
+        assert_eq!(
+            names,
+            vec![
+                "cargo build",
+                "cargo test",
+                "cargo clippy",
+                "npm run build",
+                "npm test"
+            ]
+        );
     }
 }

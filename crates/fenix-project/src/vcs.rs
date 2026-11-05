@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 /// with a `.git` -- so a subproject of a monorepo belongs to the
 /// monorepo's repository, not to none.
 pub fn repository_root(path: &Path) -> Option<PathBuf> {
-    path.ancestors().find(|dir| dir.join(".git").exists()).map(Path::to_path_buf)
+    path.ancestors()
+        .find(|dir| dir.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 /// The branch checked out in the repository `root` is in, read straight
@@ -23,7 +25,11 @@ pub fn git_branch(root: &Path) -> Option<String> {
         let pointer = std::fs::read_to_string(&dot_git).ok()?;
         let dir = pointer.trim().strip_prefix("gitdir:")?.trim();
         let dir = PathBuf::from(dir);
-        if dir.is_absolute() { dir } else { root.join(dir) }
+        if dir.is_absolute() {
+            dir
+        } else {
+            root.join(dir)
+        }
     } else {
         dot_git
     };
@@ -31,7 +37,8 @@ pub fn git_branch(root: &Path) -> Option<String> {
     let head = head.trim();
     match head.strip_prefix("ref: refs/heads/") {
         Some(branch) => Some(branch.to_string()),
-        None => (head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit())).then(|| head[..7].to_string()),
+        None => (head.len() >= 7 && head.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| head[..7].to_string()),
     }
 }
 
@@ -51,7 +58,10 @@ fn parse_status(text: &str, summary: &mut GitSummary) {
     for line in text.lines() {
         if let Some(header) = line.strip_prefix("## ") {
             // "main...origin/main [ahead 2, behind 1]" or "No commits yet on main"
-            let (names, counts) = header.split_once(" [").map(|(n, c)| (n, Some(c.trim_end_matches(']')))).unwrap_or((header, None));
+            let (names, counts) = header
+                .split_once(" [")
+                .map(|(n, c)| (n, Some(c.trim_end_matches(']'))))
+                .unwrap_or((header, None));
             let name = names.strip_prefix("No commits yet on ").unwrap_or(names);
             let branch = name.split("...").next().unwrap_or(name).trim();
             if !branch.is_empty() && branch != "HEAD (no branch)" {
@@ -71,8 +81,15 @@ fn parse_status(text: &str, summary: &mut GitSummary) {
 }
 
 fn git(root: &Path, args: &[&str]) -> Option<String> {
-    let output = crate::process::quiet("git").args(args).current_dir(root).output().ok()?;
-    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    let output = crate::process::quiet("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// `root`'s git summary, or `None` when it isn't in a repository (or git
@@ -87,10 +104,11 @@ pub fn git_summary(root: &Path) -> Option<GitSummary> {
     if summary.branch.is_none() {
         summary.branch = git_branch(root);
     }
-    summary.last_commit = git(root, &["log", "-1", "--format=%s%x1f%ct", "--", "."]).and_then(|text| {
-        let (subject, time) = text.trim().split_once('\u{1f}')?;
-        Some((subject.to_string(), time.trim().parse().ok()?))
-    });
+    summary.last_commit =
+        git(root, &["log", "-1", "--format=%s%x1f%ct", "--", "."]).and_then(|text| {
+            let (subject, time) = text.trim().split_once('\u{1f}')?;
+            Some((subject.to_string(), time.trim().parse().ok()?))
+        });
     Some(summary)
 }
 
@@ -102,8 +120,14 @@ mod tests {
     #[test]
     fn status_header_and_changes_are_read() {
         let mut s = GitSummary::default();
-        parse_status("## main...origin/main [ahead 2, behind 1]\n M a.rs\n?? b.rs\n", &mut s);
-        assert_eq!((s.branch.as_deref(), s.changed, s.ahead, s.behind), (Some("main"), 2, 2, 1));
+        parse_status(
+            "## main...origin/main [ahead 2, behind 1]\n M a.rs\n?? b.rs\n",
+            &mut s,
+        );
+        assert_eq!(
+            (s.branch.as_deref(), s.changed, s.ahead, s.behind),
+            (Some("main"), 2, 2, 1)
+        );
         let mut s = GitSummary::default();
         parse_status("## No commits yet on master\n", &mut s);
         assert_eq!((s.branch.as_deref(), s.changed), (Some("master"), 0));
@@ -117,9 +141,16 @@ mod tests {
         let other = TempDir::new("vcs_worktree");
         let real = other.path().join("realgit");
         std::fs::create_dir_all(&real).unwrap();
-        std::fs::write(real.join("HEAD"), "0123456789abcdef0123456789abcdef01234567\n").unwrap();
+        std::fs::write(
+            real.join("HEAD"),
+            "0123456789abcdef0123456789abcdef01234567\n",
+        )
+        .unwrap();
         other.write("wt/.git", &format!("gitdir: {}\n", real.display()));
-        assert_eq!(git_branch(&other.path().join("wt")).as_deref(), Some("0123456"));
+        assert_eq!(
+            git_branch(&other.path().join("wt")).as_deref(),
+            Some("0123456")
+        );
         assert_eq!(git_branch(&other.path().join("nowhere")), None);
     }
 
@@ -139,7 +170,10 @@ mod tests {
         let summary = git_summary(dir.path()).unwrap();
         assert_eq!(summary.branch.as_deref(), Some("trunk"));
         assert_eq!(summary.changed, 1);
-        assert_eq!(summary.last_commit.as_ref().map(|(s, _)| s.as_str()), Some("First thing"));
+        assert_eq!(
+            summary.last_commit.as_ref().map(|(s, _)| s.as_str()),
+            Some("First thing")
+        );
         assert!(git_summary(&dir.path().join("missing")).is_none());
 
         // A subproject: the repository's branch, its own changes only.
@@ -151,7 +185,13 @@ mod tests {
         assert_eq!(sub.branch.as_deref(), Some("trunk"));
         assert_eq!(sub.changed, 1, "b.txt at the top isn't the subproject's");
         assert_eq!(sub.last_commit.map(|(s, _)| s).as_deref(), Some("Add sub"));
-        assert_eq!(repository_root(&dir.path().join("sub")).as_deref(), Some(dir.path()));
-        assert_eq!(git_branch(&dir.path().join("sub")).as_deref(), Some("trunk"));
+        assert_eq!(
+            repository_root(&dir.path().join("sub")).as_deref(),
+            Some(dir.path())
+        );
+        assert_eq!(
+            git_branch(&dir.path().join("sub")).as_deref(),
+            Some("trunk")
+        );
     }
 }

@@ -58,7 +58,10 @@ impl From<fenix_completion::CompletionItem> for Item {
             fenix_completion::CompletionKind::Tag => Source::Symbol,
             fenix_completion::CompletionKind::Lsp => Source::Lsp,
         };
-        Self { detail: item.detail, ..Self::text(item.label, source) }
+        Self {
+            detail: item.detail,
+            ..Self::text(item.label, source)
+        }
     }
 }
 
@@ -193,7 +196,17 @@ pub fn apply_lsp(
     // An item kept from a complete list asked for a few keystrokes ago
     // ends where the cursor was then; what was typed since is part of the
     // word it replaces.
-    let main = if main.end < cursor.char_idx && main.start <= cursor.char_idx && main.end >= fallback.start && buffer.line_col(&Cursor { char_idx: main.end, sticky_col: 0 }).0 == buffer.line_col(cursor).0 {
+    let main = if main.end < cursor.char_idx
+        && main.start <= cursor.char_idx
+        && main.end >= fallback.start
+        && buffer
+            .line_col(&Cursor {
+                char_idx: main.end,
+                sticky_col: 0,
+            })
+            .0
+            == buffer.line_col(cursor).0
+    {
         main.start..cursor.char_idx
     } else {
         main
@@ -306,10 +319,18 @@ pub fn cursor_in_unterminated_string(buffer: &Buffer, cursor: &Cursor) -> bool {
 /// The words of your `completion.symbols_file`, read again only when the
 /// file changes (completion asks on every key).
 pub fn symbols_file(path: &std::path::Path) -> Vec<fenix_completion::CompletionItem> {
-    type Read = (std::path::PathBuf, Option<std::time::SystemTime>, u64, Vec<fenix_completion::CompletionItem>);
+    type Read = (
+        std::path::PathBuf,
+        Option<std::time::SystemTime>,
+        u64,
+        Vec<fenix_completion::CompletionItem>,
+    );
     static LAST: std::sync::Mutex<Option<Read>> = std::sync::Mutex::new(None);
     let meta = std::fs::metadata(path).ok();
-    let stamp = (meta.as_ref().and_then(|m| m.modified().ok()), meta.as_ref().map_or(0, |m| m.len()));
+    let stamp = (
+        meta.as_ref().and_then(|m| m.modified().ok()),
+        meta.as_ref().map_or(0, |m| m.len()),
+    );
     let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
     if let Some((p, modified, len, items)) = last.as_ref() {
         if p == path && (*modified, *len) == stamp {
@@ -361,7 +382,10 @@ pub fn buffer_words_besides_cursor(buffer: &Buffer, cursor: &Cursor) -> HashSet<
     }
     let typed: String = (start..end).filter_map(|i| buffer.char_at(i)).collect();
     let text = buffer.text();
-    let occurrences = text.split(|c: char| !is_ident_char(c)).filter(|w| *w == typed).count();
+    let occurrences = text
+        .split(|c: char| !is_ident_char(c))
+        .filter(|w| *w == typed)
+        .count();
     if occurrences <= 1 {
         words.remove(&typed);
     }
@@ -376,7 +400,10 @@ mod tests {
     fn the_word_being_typed_isnt_offered_unless_it_is_elsewhere() {
         let buffer = buf("class A:\n    pass\nclas");
         let words = buffer_words_besides_cursor(&buffer, &cur(buffer.len_chars()));
-        assert!(words.contains("class") && !words.contains("clas"), "{words:?}");
+        assert!(
+            words.contains("class") && !words.contains("clas"),
+            "{words:?}"
+        );
         // `level` is in the file: typing `lev` offers `level`, not `lev`.
         let buffer = buf("level = 1\nlev");
         let words = buffer_words_besides_cursor(&buffer, &cur(buffer.len_chars()));
@@ -561,7 +588,10 @@ mod tests {
     #[test]
     fn lsp_edits_use_utf16_and_keep_import_and_replacement_in_one_undo() {
         let mut buffer = buf("😀\npri");
-        let mut cursor = Cursor { char_idx: 5, ..Cursor::default() };
+        let mut cursor = Cursor {
+            char_idx: 5,
+            ..Cursor::default()
+        };
         let item: lsp_types::CompletionItem = serde_json::from_value(serde_json::json!({
             "label": "print(value)", "textEdit": {
                 "range": {"start":{"line":1,"character":0},"end":{"line":1,"character":3}},
@@ -582,7 +612,10 @@ mod tests {
     #[test]
     fn lsp_insert_text_and_invalid_edits() {
         let mut buffer = buf("pr");
-        let mut cursor = Cursor { char_idx: 2, ..Cursor::default() };
+        let mut cursor = Cursor {
+            char_idx: 2,
+            ..Cursor::default()
+        };
         let mut item = lsp_types::CompletionItem {
             label: "print(value)".into(),
             insert_text: Some("print".into()),
@@ -606,7 +639,10 @@ mod tests {
         // Asked at "REQ-0|"; the list was complete, so after typing "1"
         // the same item is applied with its range ending one short.
         let mut buffer = buf("// implements: REQ-01");
-        let mut cursor = Cursor { char_idx: 21, ..Cursor::default() };
+        let mut cursor = Cursor {
+            char_idx: 21,
+            ..Cursor::default()
+        };
         let item: lsp_types::CompletionItem = serde_json::from_value(serde_json::json!({
             "label": "REQ-014", "textEdit": {
                 "range": {"start":{"line":0,"character":15},"end":{"line":0,"character":20}},

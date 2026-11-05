@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::page::{fit, fit_path, frame, wrap, Grid, Key, Page, Role};
-use fenix_project::template::{Answer, Answers, AskKind, Hook, Plan, Step as CommandStep, Template};
+use fenix_project::template::{
+    Answer, Answers, AskKind, Hook, Plan, Step as CommandStep, Template,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
@@ -103,7 +105,9 @@ impl Run {
     }
 
     pub fn failed(&self) -> Option<usize> {
-        self.steps.iter().position(|s| matches!(s.status, Status::Failed(_)))
+        self.steps
+            .iter()
+            .position(|s| matches!(s.status, Status::Failed(_)))
     }
 
     /// The next step to start, if the run should go on.
@@ -115,7 +119,9 @@ impl Run {
     }
 
     pub fn finished(&self) -> bool {
-        self.running().is_none() && self.failed().is_none() && (self.cancel_requested || self.steps.iter().all(|s| s.status != Status::Pending))
+        self.running().is_none()
+            && self.failed().is_none()
+            && (self.cancel_requested || self.steps.iter().all(|s| s.status != Status::Pending))
     }
 
     pub fn push_output(&mut self, step: usize, line: String) {
@@ -162,10 +168,24 @@ pub struct Wizard {
 }
 
 /// The order groups are listed in; anything else ("Yours") comes after.
-const GROUPS: [&str; 8] = ["Python", "Systems", "Web", "Embedded", "Mission", "Scripting", "Fenix", "Start from"];
+const GROUPS: [&str; 8] = [
+    "Python",
+    "Systems",
+    "Web",
+    "Embedded",
+    "Mission",
+    "Scripting",
+    "Fenix",
+    "Start from",
+];
 
 impl Wizard {
-    pub fn new(templates: Vec<Template>, errors: Vec<String>, found: BTreeMap<String, bool>, parent: &Path) -> Self {
+    pub fn new(
+        templates: Vec<Template>,
+        errors: Vec<String>,
+        found: BTreeMap<String, bool>,
+        parent: &Path,
+    ) -> Self {
         let mut wizard = Wizard {
             templates,
             errors,
@@ -196,9 +216,19 @@ impl Wizard {
 
     /// Template indices in display order: by group, then as loaded.
     pub fn template_order(&self) -> Vec<usize> {
-        let rank = |group: &str| GROUPS.iter().position(|g| *g == group).unwrap_or(GROUPS.len());
+        let rank = |group: &str| {
+            GROUPS
+                .iter()
+                .position(|g| *g == group)
+                .unwrap_or(GROUPS.len())
+        };
         let mut order: Vec<usize> = (0..self.templates.len()).collect();
-        order.sort_by_key(|&i| (rank(&self.templates[i].group), self.templates[i].group.clone()));
+        order.sort_by_key(|&i| {
+            (
+                rank(&self.templates[i].group),
+                self.templates[i].group.clone(),
+            )
+        });
         order
     }
 
@@ -209,7 +239,9 @@ impl Wizard {
     /// Picks a template by id, resetting its answers.
     #[cfg(test)]
     pub fn choose(&mut self, id: &str) -> bool {
-        let Some(i) = self.templates.iter().position(|t| t.id == id) else { return false };
+        let Some(i) = self.templates.iter().position(|t| t.id == id) else {
+            return false;
+        };
         self.template = i;
         self.answers = self.templates[i].default_answers(&self.name);
         true
@@ -218,14 +250,32 @@ impl Wizard {
     /// The focusable rows of the current step, top to bottom.
     pub fn fields(&self) -> Vec<Field> {
         match self.step {
-            Step::Template => self.template_order().into_iter().map(Field::Template).collect(),
-            Step::Location => vec![Field::Name, Field::Parent, Field::GitInit, Field::GitCommit, Field::Register, Field::Continue],
+            Step::Template => self
+                .template_order()
+                .into_iter()
+                .map(Field::Template)
+                .collect(),
+            Step::Location => vec![
+                Field::Name,
+                Field::Parent,
+                Field::GitInit,
+                Field::GitCommit,
+                Field::Register,
+                Field::Continue,
+            ],
             Step::Options => {
                 let mut fields = Vec::new();
                 if let Some(template) = self.chosen() {
-                    for (i, ask) in template.asks.iter().enumerate().filter(|(i, _)| template.asks_now(*i, &self.answers)) {
+                    for (i, ask) in template
+                        .asks
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| template.asks_now(*i, &self.answers))
+                    {
                         match &ask.kind {
-                            AskKind::Many { options, .. } => fields.extend((0..options.len()).map(|o| Field::ManyOption(i, o))),
+                            AskKind::Many { options, .. } => {
+                                fields.extend((0..options.len()).map(|o| Field::ManyOption(i, o)))
+                            }
                             _ => fields.push(Field::Ask(i)),
                         }
                     }
@@ -251,7 +301,10 @@ impl Wizard {
     fn is_text(&self, field: Field) -> bool {
         match field {
             Field::Name | Field::Parent => true,
-            Field::Ask(i) => matches!(self.chosen().map(|t| &t.asks[i].kind), Some(AskKind::Text { .. })),
+            Field::Ask(i) => matches!(
+                self.chosen().map(|t| &t.asks[i].kind),
+                Some(AskKind::Text { .. })
+            ),
             _ => false,
         }
     }
@@ -318,15 +371,24 @@ impl Wizard {
             }
             Field::Register => self.register = !self.register,
             Field::Ask(i) => {
-                let Some(ask) = self.chosen().map(|t| t.asks[i].clone()) else { return };
+                let Some(ask) = self.chosen().map(|t| t.asks[i].clone()) else {
+                    return;
+                };
                 match &ask.kind {
                     AskKind::Choice { choices, .. } => {
                         let current = match self.answers.get(&ask.key) {
-                            Some(Answer::Text(s)) => choices.iter().position(|c| c == s).unwrap_or(0),
+                            Some(Answer::Text(s)) => {
+                                choices.iter().position(|c| c == s).unwrap_or(0)
+                            }
                             _ => 0,
                         };
-                        let next = if forward { (current + 1) % choices.len() } else { (current + choices.len() - 1) % choices.len() };
-                        self.answers.insert(ask.key.clone(), Answer::Text(choices[next].clone()));
+                        let next = if forward {
+                            (current + 1) % choices.len()
+                        } else {
+                            (current + choices.len() - 1) % choices.len()
+                        };
+                        self.answers
+                            .insert(ask.key.clone(), Answer::Text(choices[next].clone()));
                     }
                     AskKind::Toggle { .. } => {
                         let on = matches!(self.answers.get(&ask.key), Some(Answer::Bool(true)));
@@ -336,7 +398,9 @@ impl Wizard {
                 }
             }
             Field::ManyOption(i, o) => {
-                let Some(ask) = self.chosen().map(|t| t.asks[i].clone()) else { return };
+                let Some(ask) = self.chosen().map(|t| t.asks[i].clone()) else {
+                    return;
+                };
                 if let AskKind::Many { options, .. } = &ask.kind {
                     let mut chosen = match self.answers.get(&ask.key) {
                         Some(Answer::Many(items)) => items.clone(),
@@ -418,7 +482,10 @@ impl Wizard {
             plan.steps.push(CommandStep::new("git", &["init"]));
             if self.git_commit {
                 plan.steps.push(CommandStep::new("git", &["add", "-A"]));
-                plan.steps.push(CommandStep::new("git", &["commit", "-q", "-m", "Initial commit"]));
+                plan.steps.push(CommandStep::new(
+                    "git",
+                    &["commit", "-q", "-m", "Initial commit"],
+                ));
             }
         }
         Ok(plan)
@@ -444,7 +511,10 @@ impl Wizard {
     /// and `uv init` add themselves to one), for the review to say so.
     pub fn joins_workspace(&self) -> Option<PathBuf> {
         let kind = self.chosen()?.kind;
-        if !matches!(kind, fenix_project::ProjectKind::Rust | fenix_project::ProjectKind::Python) {
+        if !matches!(
+            kind,
+            fenix_project::ProjectKind::Rust | fenix_project::ProjectKind::Python
+        ) {
             return None;
         }
         fenix_project::workspace::workspace_above(Path::new(self.parent.trim()), kind)
@@ -479,18 +549,35 @@ impl Wizard {
                     self.problem = Some(problem);
                     return Action::None;
                 }
-                let Some(plan) = self.plan.clone() else { return Action::None };
-                let files = |n: usize, what: &str| format!("write {n} file{}{what}", if n == 1 { "" } else { "s" });
-                let step = |label: String, work: RunWork| RunStep { label, work, status: Status::Pending, output: Vec::new() };
+                let Some(plan) = self.plan.clone() else {
+                    return Action::None;
+                };
+                let files = |n: usize, what: &str| {
+                    format!("write {n} file{}{what}", if n == 1 { "" } else { "s" })
+                };
+                let step = |label: String, work: RunWork| RunStep {
+                    label,
+                    work,
+                    status: Status::Pending,
+                    output: Vec::new(),
+                };
                 let command = |s: &CommandStep| step(s.display(), RunWork::Command(s.clone()));
                 let mut steps = vec![step(files(plan.files.len(), ""), RunWork::WriteFiles)];
-                let (template, git) = plan.steps.split_at(self.template_steps.min(plan.steps.len()));
+                let (template, git) = plan
+                    .steps
+                    .split_at(self.template_steps.min(plan.steps.len()));
                 steps.extend(template.iter().map(command));
                 if !plan.after_files.is_empty() {
-                    steps.push(step(files(plan.after_files.len(), " the commands left for last"), RunWork::WriteAfterFiles));
+                    steps.push(step(
+                        files(plan.after_files.len(), " the commands left for last"),
+                        RunWork::WriteAfterFiles,
+                    ));
                 }
                 steps.extend(git.iter().map(command));
-                self.run = Some(Run { steps, cancel_requested: false });
+                self.run = Some(Run {
+                    steps,
+                    cancel_requested: false,
+                });
                 self.go_to(Step::Creating);
                 return Action::Create;
             }
@@ -506,7 +593,9 @@ impl Wizard {
     /// back to change them.
     pub fn preset(&mut self, args: &str) -> Result<(), String> {
         let mut words = args.split_whitespace();
-        let Some(id) = words.next() else { return Ok(()) };
+        let Some(id) = words.next() else {
+            return Ok(());
+        };
         let Some(i) = self.templates.iter().position(|t| t.id == id) else {
             let ids: Vec<&str> = self.templates.iter().map(|t| t.id.as_str()).collect();
             return Err(format!("no template called {id} -- try {}", ids.join(", ")));
@@ -516,24 +605,44 @@ impl Wizard {
         self.name = name.clone();
         self.answers = self.templates[i].default_answers(&name);
         for pair in words {
-            let Some((key, value)) = pair.split_once('=') else { return Err(format!("{pair}: options are key=value")) };
+            let Some((key, value)) = pair.split_once('=') else {
+                return Err(format!("{pair}: options are key=value"));
+            };
             let Some(ask) = self.templates[i].asks.iter().find(|a| a.key == key) else {
-                let keys: Vec<&str> = self.templates[i].asks.iter().map(|a| a.key.as_str()).collect();
-                return Err(format!("{id} has no option {key} -- it has {}", keys.join(", ")));
+                let keys: Vec<&str> = self.templates[i]
+                    .asks
+                    .iter()
+                    .map(|a| a.key.as_str())
+                    .collect();
+                return Err(format!(
+                    "{id} has no option {key} -- it has {}",
+                    keys.join(", ")
+                ));
             };
             let answer = match &ask.kind {
                 AskKind::Text { .. } => Answer::Text(value.to_string()),
-                AskKind::Choice { choices, .. } if choices.iter().any(|c| c == value) => Answer::Text(value.to_string()),
-                AskKind::Choice { choices, .. } => return Err(format!("{key} is one of {}", choices.join(", "))),
+                AskKind::Choice { choices, .. } if choices.iter().any(|c| c == value) => {
+                    Answer::Text(value.to_string())
+                }
+                AskKind::Choice { choices, .. } => {
+                    return Err(format!("{key} is one of {}", choices.join(", ")))
+                }
                 AskKind::Toggle { .. } => match value {
                     "true" | "yes" | "on" | "1" => Answer::Bool(true),
                     "false" | "no" | "off" | "0" => Answer::Bool(false),
                     _ => return Err(format!("{key} is true or false")),
                 },
                 AskKind::Many { options, .. } => {
-                    let items: Vec<String> = value.split(',').filter(|v| !v.is_empty()).map(str::to_string).collect();
+                    let items: Vec<String> = value
+                        .split(',')
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_string)
+                        .collect();
                     if let Some(bad) = items.iter().find(|v| !options.contains(v)) {
-                        return Err(format!("{bad} isn't one of {key}'s options ({})", options.join(", ")));
+                        return Err(format!(
+                            "{bad} isn't one of {key}'s options ({})",
+                            options.join(", ")
+                        ));
                     }
                     Answer::Many(items)
                 }
@@ -556,7 +665,13 @@ impl Wizard {
     fn enter_review(&mut self) -> Action {
         match self.build_plan() {
             Ok(plan) => {
-                self.template_steps = self.chosen().and_then(|t| t.plan(&self.name, Path::new(self.parent.trim()), &self.answers).ok()).map_or(0, |p| p.steps.len());
+                self.template_steps = self
+                    .chosen()
+                    .and_then(|t| {
+                        t.plan(&self.name, Path::new(self.parent.trim()), &self.answers)
+                            .ok()
+                    })
+                    .map_or(0, |p| p.steps.len());
                 self.plan = Some(plan);
                 self.go_to(Step::Review);
             }
@@ -572,7 +687,11 @@ impl Wizard {
             Step::Options => self.go_to(Step::Location),
             Step::Review => {
                 let has_options = self.chosen().is_some_and(|t| !t.asks.is_empty());
-                self.go_to(if has_options { Step::Options } else { Step::Location });
+                self.go_to(if has_options {
+                    Step::Options
+                } else {
+                    Step::Location
+                });
             }
             Step::Creating => {}
         }
@@ -670,8 +789,13 @@ impl Wizard {
     /// list option or a choice. Elsewhere it stays the leader.
     pub fn claims_space(&self) -> bool {
         match self.focused() {
-            Some(Field::GitInit | Field::GitCommit | Field::Register | Field::ManyOption(..)) => true,
-            Some(Field::Ask(i)) => matches!(self.chosen().map(|t| &t.asks[i].kind), Some(AskKind::Toggle { .. } | AskKind::Choice { .. })),
+            Some(Field::GitInit | Field::GitCommit | Field::Register | Field::ManyOption(..)) => {
+                true
+            }
+            Some(Field::Ask(i)) => matches!(
+                self.chosen().map(|t| &t.asks[i].kind),
+                Some(AskKind::Toggle { .. } | AskKind::Choice { .. })
+            ),
             _ => false,
         }
     }
@@ -691,7 +815,9 @@ impl Wizard {
     }
 
     fn creating_key(&mut self, key: Key) -> Action {
-        let Some(run) = &mut self.run else { return Action::None };
+        let Some(run) = &mut self.run else {
+            return Action::None;
+        };
         if run.failed().is_some() {
             return match key {
                 Key::Char('r') => Action::Retry,
@@ -727,13 +853,33 @@ pub fn layout(wizard: &Wizard, cols: usize) -> Page {
     // Header: the title, then the four steps, done ones ticked -- or,
     // where that doesn't fit, just which step this is.
     let mut x = g.put(1, left, "New project", Role::Title) + 4;
-    let steps = [(Step::Template, "Template"), (Step::Location, "Location"), (Step::Options, "Options"), (Step::Review, "Review")];
-    let current = steps.iter().position(|(s, _)| *s == wizard.step).unwrap_or(steps.len());
-    let full_len: usize = steps.iter().map(|(_, label)| label.len() + 2).sum::<usize>() + 5 * (steps.len() - 1);
+    let steps = [
+        (Step::Template, "Template"),
+        (Step::Location, "Location"),
+        (Step::Options, "Options"),
+        (Step::Review, "Review"),
+    ];
+    let current = steps
+        .iter()
+        .position(|(s, _)| *s == wizard.step)
+        .unwrap_or(steps.len());
+    let full_len: usize = steps
+        .iter()
+        .map(|(_, label)| label.len() + 2)
+        .sum::<usize>()
+        + 5 * (steps.len() - 1);
     let compact = x + full_len > left + width;
     if compact {
-        let (n, label) = steps.get(current).map(|(_, l)| (current + 1, *l)).unwrap_or((steps.len(), "Creating"));
-        x = g.put(1, x.saturating_sub(2), &format!("{n}/{}", steps.len()), Role::Accent) + 1;
+        let (n, label) = steps
+            .get(current)
+            .map(|(_, l)| (current + 1, *l))
+            .unwrap_or((steps.len(), "Creating"));
+        x = g.put(
+            1,
+            x.saturating_sub(2),
+            &format!("{n}/{}", steps.len()),
+            Role::Accent,
+        ) + 1;
         g.put(1, x, label, Role::Title);
     }
     for (i, (_, label)) in steps.iter().enumerate().filter(|_| !compact) {
@@ -746,7 +892,16 @@ pub fn layout(wizard: &Wizard, cols: usize) -> Page {
             std::cmp::Ordering::Greater => ((i + 1).to_string(), Role::Muted),
         };
         x = g.put(1, x, &mark, role) + 1;
-        x = g.put(1, x, label, if i == current { Role::Title } else { Role::Muted });
+        x = g.put(
+            1,
+            x,
+            label,
+            if i == current {
+                Role::Title
+            } else {
+                Role::Muted
+            },
+        );
     }
     g.rule(2, left..left + width);
     let top = 4;
@@ -759,12 +914,22 @@ pub fn layout(wizard: &Wizard, cols: usize) -> Page {
         Step::Creating => layout_creating(wizard, &mut g, left, width, top),
     };
 
-    let keys: &[(&str, &str)] = if wizard.editing.is_some() { &[("Enter", "done"), ("Tab", "next field"), ("Esc", "undo")] } else { keys };
+    let keys: &[(&str, &str)] = if wizard.editing.is_some() {
+        &[("Enter", "done"), ("Tab", "next field"), ("Esc", "undo")]
+    } else {
+        keys
+    };
     g.keys(left, width, keys);
     g.finish()
 }
 
-fn layout_templates(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: usize) -> &'static [(&'static str, &'static str)] {
+fn layout_templates(
+    wizard: &Wizard,
+    g: &mut Grid,
+    left: usize,
+    width: usize,
+    top: usize,
+) -> &'static [(&'static str, &'static str)] {
     let two_columns = width >= 80;
     let list_width = if two_columns { width * 11 / 20 } else { width };
     let mut y = top;
@@ -782,9 +947,21 @@ fn layout_templates(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, to
         }
         let tag = template.kind.tag();
         g.put(y, left + 2, tag, Role::Kind(template.kind));
-        let program = fenix_project::template::programs_needed(template).into_iter().next().unwrap_or_else(|| "built in".to_string());
+        let program = fenix_project::template::programs_needed(template)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "built in".to_string());
         let right = list_width.saturating_sub(program.chars().count() + 2);
-        g.put(y, left + 7, &fit(&template.name, right.saturating_sub(8)), if focused == Some(Field::Template(i)) { Role::Title } else { Role::Text });
+        g.put(
+            y,
+            left + 7,
+            &fit(&template.name, right.saturating_sub(8)),
+            if focused == Some(Field::Template(i)) {
+                Role::Title
+            } else {
+                Role::Text
+            },
+        );
         g.put(y, left + right, &program, Role::Muted);
         if focused == Some(Field::Template(i)) {
             g.focus(y, left..left + list_width - 2);
@@ -793,12 +970,21 @@ fn layout_templates(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, to
     }
     for error in &wizard.errors {
         y += 1;
-        g.put(y, left + 2, &fit(&format!("! {error}"), list_width - 4), Role::Bad);
+        g.put(
+            y,
+            left + 2,
+            &fit(&format!("! {error}"), list_width - 4),
+            Role::Bad,
+        );
     }
 
     // The chosen template, described -- beside the list, or under it.
     if let Some(template) = wizard.chosen() {
-        let (x, mut y, w) = if two_columns { (left + list_width + 2, top, width - list_width - 2) } else { (left, y + 2, width) };
+        let (x, mut y, w) = if two_columns {
+            (left + list_width + 2, top, width - list_width - 2)
+        } else {
+            (left, y + 2, width)
+        };
         let end = g.put(y, x, &template.name, Role::Title);
         g.put(y, end + 2, template.kind.tag(), Role::Kind(template.kind));
         y += 1;
@@ -815,28 +1001,52 @@ fn layout_templates(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, to
                 let found = wizard.found.get(&program).copied().unwrap_or(false);
                 g.put(y, x, "●", if found { Role::Good } else { Role::Bad });
                 let end = g.put(y, x + 2, &program, Role::Text);
-                g.put(y, end + 2, if found { "found" } else { "not found on PATH" }, Role::Muted);
+                g.put(
+                    y,
+                    end + 2,
+                    if found { "found" } else { "not found on PATH" },
+                    Role::Muted,
+                );
                 y += 1;
             }
         }
         // What it writes, from a plan with a sample name -- the files it
         // ships; what its commands add isn't known until they run.
-        let sample = if template.name_rule == fenix_project::template::NameRule::Sketch { "Example" } else { "example" };
+        let sample = if template.name_rule == fenix_project::template::NameRule::Sketch {
+            "Example"
+        } else {
+            "example"
+        };
         if let Ok(plan) = template.plan(sample, Path::new("."), &template.default_answers(sample)) {
             y += 1;
             g.heading(y, x, w, "Creates");
             y += 1;
             for file in plan.files.iter().take(6) {
-                g.put(y, x, &fit(&file.path.replace(sample, "<name>"), w), Role::Text);
+                g.put(
+                    y,
+                    x,
+                    &fit(&file.path.replace(sample, "<name>"), w),
+                    Role::Text,
+                );
                 y += 1;
             }
             if plan.files.len() > 6 {
-                g.put(y, x, &format!("and {} more", plan.files.len() - 6), Role::Muted);
+                g.put(
+                    y,
+                    x,
+                    &format!("and {} more", plan.files.len() - 6),
+                    Role::Muted,
+                );
                 y += 1;
             }
             if !plan.steps.is_empty() {
                 let n = plan.steps.len();
-                g.put(y, x, &format!("then {n} command{}", if n == 1 { "" } else { "s" }), Role::Muted);
+                g.put(
+                    y,
+                    x,
+                    &format!("then {n} command{}", if n == 1 { "" } else { "s" }),
+                    Role::Muted,
+                );
                 y += 1;
             }
         }
@@ -848,7 +1058,15 @@ fn layout_templates(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, to
 }
 
 /// One form row: the label, then `value` at the value column.
-fn form_row(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usize, field: Field, label: &str) -> usize {
+fn form_row(
+    g: &mut Grid,
+    wizard: &Wizard,
+    y: usize,
+    left: usize,
+    width: usize,
+    field: Field,
+    label: &str,
+) -> usize {
     let focused = wizard.focused() == Some(field);
     if focused {
         g.focus(y, left..left + width);
@@ -858,13 +1076,35 @@ fn form_row(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usize, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn text_field(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usize, field: Field, label: &str, hint: Option<&str>) {
+fn text_field(
+    g: &mut Grid,
+    wizard: &Wizard,
+    y: usize,
+    left: usize,
+    width: usize,
+    field: Field,
+    label: &str,
+    hint: Option<&str>,
+) {
     let x = form_row(g, wizard, y, left, width, field, label);
     let editing = wizard.focused() == Some(field) && wizard.editing.is_some();
-    let value = if editing { format!("{}▏", wizard.editing.as_deref().unwrap_or_default()) } else { wizard.text_value(field) };
-    let shown = if value.is_empty() { "—".to_string() } else { value };
+    let value = if editing {
+        format!("{}▏", wizard.editing.as_deref().unwrap_or_default())
+    } else {
+        wizard.text_value(field)
+    };
+    let shown = if value.is_empty() {
+        "—".to_string()
+    } else {
+        value
+    };
     let room = width.saturating_sub(x - left + 2);
-    let end = g.put(y, x, &fit(&shown, room), if editing { Role::Title } else { Role::Text });
+    let end = g.put(
+        y,
+        x,
+        &fit(&shown, room),
+        if editing { Role::Title } else { Role::Text },
+    );
     if editing {
         g.panels.push((y, x.saturating_sub(1)..end + 1));
     } else if let Some(hint) = hint {
@@ -875,14 +1115,38 @@ fn text_field(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usize
 }
 
 #[allow(clippy::too_many_arguments)]
-fn toggle_field(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usize, field: Field, label: &str, on: bool, text: &str) {
+fn toggle_field(
+    g: &mut Grid,
+    wizard: &Wizard,
+    y: usize,
+    left: usize,
+    width: usize,
+    field: Field,
+    label: &str,
+    on: bool,
+    text: &str,
+) {
     let x = form_row(g, wizard, y, left, width, field, label);
-    let end = g.put(y, x, if on { "[x]" } else { "[ ]" }, if on { Role::Good } else { Role::Muted });
-    g.put(y, end + 1, &fit(text, (left + width).saturating_sub(end + 1)), Role::Text);
+    let end = g.put(
+        y,
+        x,
+        if on { "[x]" } else { "[ ]" },
+        if on { Role::Good } else { Role::Muted },
+    );
+    g.put(
+        y,
+        end + 1,
+        &fit(text, (left + width).saturating_sub(end + 1)),
+        Role::Text,
+    );
 }
 
 fn continue_row(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usize, label: &str) {
-    let field = if wizard.step == Step::Review { Field::Create } else { Field::Continue };
+    let field = if wizard.step == Step::Review {
+        Field::Create
+    } else {
+        Field::Continue
+    };
     if wizard.focused() == Some(field) {
         g.focus(y, left..left + width);
     }
@@ -904,7 +1168,13 @@ fn problem_row(g: &mut Grid, wizard: &Wizard, y: usize, left: usize, width: usiz
     }
 }
 
-fn layout_location(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: usize) -> &'static [(&'static str, &'static str)] {
+fn layout_location(
+    wizard: &Wizard,
+    g: &mut Grid,
+    left: usize,
+    width: usize,
+    top: usize,
+) -> &'static [(&'static str, &'static str)] {
     let mut y = top;
     if let Some(template) = wizard.chosen() {
         let end = g.put(y, left + 2, template.kind.tag(), Role::Kind(template.kind));
@@ -914,34 +1184,125 @@ fn layout_location(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
     g.heading(y, left, width, "Where");
     y += 1;
     let name_hint = match wizard.chosen().map(|t| t.name_rule) {
-        Some(fenix_project::template::NameRule::Sketch) => "letters, digits, _ - . -- it names the .ino too",
+        Some(fenix_project::template::NameRule::Sketch) => {
+            "letters, digits, _ - . -- it names the .ino too"
+        }
         _ => "the folder's name",
     };
-    text_field(g, wizard, y, left, width, Field::Name, "Name", Some(name_hint));
-    text_field(g, wizard, y + 1, left, width, Field::Parent, "In", Some("b browse"));
+    text_field(
+        g,
+        wizard,
+        y,
+        left,
+        width,
+        Field::Name,
+        "Name",
+        Some(name_hint),
+    );
+    text_field(
+        g,
+        wizard,
+        y + 1,
+        left,
+        width,
+        Field::Parent,
+        "In",
+        Some("b browse"),
+    );
     let result = wizard.target();
     let ok = !wizard.name.is_empty() && wizard.location_problem().is_none();
     g.put(y + 2, left + 2, "Creates", Role::Muted);
-    g.put(y + 2, left + 18, "●", if ok { Role::Good } else { Role::Warn });
-    g.put(y + 2, left + 20, &fit_path(&result.display().to_string(), width.saturating_sub(22)), Role::Muted);
+    g.put(
+        y + 2,
+        left + 18,
+        "●",
+        if ok { Role::Good } else { Role::Warn },
+    );
+    g.put(
+        y + 2,
+        left + 20,
+        &fit_path(&result.display().to_string(), width.saturating_sub(22)),
+        Role::Muted,
+    );
     y += 4;
     g.heading(y, left, width, "After creating");
     y += 1;
     let git_text = match &wizard.repository {
-        Some(repo) => format!("git init -- it's inside the {} repository already", repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
+        Some(repo) => format!(
+            "git init -- it's inside the {} repository already",
+            repo.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ),
         None => "git init".to_string(),
     };
-    toggle_field(g, wizard, y, left, width, Field::GitInit, "Git", wizard.git_init, &git_text);
-    toggle_field(g, wizard, y + 1, left, width, Field::GitCommit, "", wizard.git_commit, "first commit");
-    toggle_field(g, wizard, y + 2, left, width, Field::Register, "Projects", wizard.register, "add to SPC p p and Home");
+    toggle_field(
+        g,
+        wizard,
+        y,
+        left,
+        width,
+        Field::GitInit,
+        "Git",
+        wizard.git_init,
+        &git_text,
+    );
+    toggle_field(
+        g,
+        wizard,
+        y + 1,
+        left,
+        width,
+        Field::GitCommit,
+        "",
+        wizard.git_commit,
+        "first commit",
+    );
+    toggle_field(
+        g,
+        wizard,
+        y + 2,
+        left,
+        width,
+        Field::Register,
+        "Projects",
+        wizard.register,
+        "add to SPC p p and Home",
+    );
     y += 4;
-    continue_row(g, wizard, y, left, width, if wizard.chosen().is_some_and(|t| t.asks.is_empty()) { "Review" } else { "Options" });
+    continue_row(
+        g,
+        wizard,
+        y,
+        left,
+        width,
+        if wizard.chosen().is_some_and(|t| t.asks.is_empty()) {
+            "Review"
+        } else {
+            "Options"
+        },
+    );
     problem_row(g, wizard, y + 2, left, width);
-    &[("Enter", "edit / next"), ("b", "browse"), ("Space", "toggle"), ("j k", "move"), ("Esc", "back"), ("q", "close")]
+    &[
+        ("Enter", "edit / next"),
+        ("b", "browse"),
+        ("Space", "toggle"),
+        ("j k", "move"),
+        ("Esc", "back"),
+        ("q", "close"),
+    ]
 }
 
-fn layout_options(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: usize) -> &'static [(&'static str, &'static str)] {
-    let Some(template) = wizard.chosen() else { return &[] };
+fn layout_options(
+    wizard: &Wizard,
+    g: &mut Grid,
+    left: usize,
+    width: usize,
+    top: usize,
+) -> &'static [(&'static str, &'static str)] {
+    let Some(template) = wizard.chosen() else {
+        return &[];
+    };
     let mut y = top;
     let end = g.put(y, left + 2, template.kind.tag(), Role::Kind(template.kind));
     g.put(y, end + 2, &wizard.name, Role::Title);
@@ -949,9 +1310,23 @@ fn layout_options(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top:
     g.heading(y, left, width, &template.name);
     y += 1;
     // A question that doesn't apply to the answers so far isn't shown.
-    for (i, ask) in template.asks.iter().enumerate().filter(|(i, _)| template.asks_now(*i, &wizard.answers)) {
+    for (i, ask) in template
+        .asks
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| template.asks_now(*i, &wizard.answers))
+    {
         match &ask.kind {
-            AskKind::Text { .. } => text_field(g, wizard, y, left, width, Field::Ask(i), &ask.label, ask.hint.as_deref()),
+            AskKind::Text { .. } => text_field(
+                g,
+                wizard,
+                y,
+                left,
+                width,
+                Field::Ask(i),
+                &ask.label,
+                ask.hint.as_deref(),
+            ),
             AskKind::Choice { choices, .. } => {
                 let x = form_row(g, wizard, y, left, width, Field::Ask(i), &ask.label);
                 let value = match wizard.answers.get(&ask.key) {
@@ -961,8 +1336,17 @@ fn layout_options(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top:
                 let mut end = g.put(y, x, "‹ ", Role::Accent);
                 end = g.put(y, end, &value, Role::Title);
                 end = g.put(y, end, " ›", Role::Accent);
-                let position = choices.iter().position(|c| *c == value).map(|p| p + 1).unwrap_or(0);
-                end = g.put(y, end + 2, &format!("{position}/{}", choices.len()), Role::Muted);
+                let position = choices
+                    .iter()
+                    .position(|c| *c == value)
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                end = g.put(
+                    y,
+                    end + 2,
+                    &format!("{position}/{}", choices.len()),
+                    Role::Muted,
+                );
                 if let Some(hint) = &ask.hint {
                     if end + 4 < left + width {
                         g.put(y, end + 3, &fit(hint, left + width - end - 3), Role::Muted);
@@ -971,7 +1355,17 @@ fn layout_options(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top:
             }
             AskKind::Toggle { .. } => {
                 let on = matches!(wizard.answers.get(&ask.key), Some(Answer::Bool(true)));
-                toggle_field(g, wizard, y, left, width, Field::Ask(i), &ask.label, on, ask.hint.as_deref().unwrap_or(""));
+                toggle_field(
+                    g,
+                    wizard,
+                    y,
+                    left,
+                    width,
+                    Field::Ask(i),
+                    &ask.label,
+                    on,
+                    ask.hint.as_deref().unwrap_or(""),
+                );
             }
             AskKind::Many { options, .. } => {
                 let chosen = match wizard.answers.get(&ask.key) {
@@ -980,7 +1374,17 @@ fn layout_options(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top:
                 };
                 for (o, option) in options.iter().enumerate() {
                     let label = if o == 0 { ask.label.as_str() } else { "" };
-                    toggle_field(g, wizard, y, left, width, Field::ManyOption(i, o), label, chosen.contains(option), option);
+                    toggle_field(
+                        g,
+                        wizard,
+                        y,
+                        left,
+                        width,
+                        Field::ManyOption(i, o),
+                        label,
+                        chosen.contains(option),
+                        option,
+                    );
                     y += 1;
                 }
                 y -= 1;
@@ -991,16 +1395,38 @@ fn layout_options(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top:
     y += 1;
     continue_row(g, wizard, y, left, width, "Review");
     problem_row(g, wizard, y + 2, left, width);
-    &[("Enter", "edit / next"), ("h l", "choose"), ("Space", "toggle"), ("Esc", "back"), ("q", "close")]
+    &[
+        ("Enter", "edit / next"),
+        ("h l", "choose"),
+        ("Space", "toggle"),
+        ("Esc", "back"),
+        ("q", "close"),
+    ]
 }
 
-fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: usize) -> &'static [(&'static str, &'static str)] {
+fn layout_review(
+    wizard: &Wizard,
+    g: &mut Grid,
+    left: usize,
+    width: usize,
+    top: usize,
+) -> &'static [(&'static str, &'static str)] {
     let Some(plan) = &wizard.plan else { return &[] };
     let mut y = top;
     let end = g.put(y, left + 2, plan.kind.tag(), Role::Kind(plan.kind));
-    g.put(y, end + 2, &fit_path(&plan.dir.display().to_string(), width.saturating_sub(8)), Role::Title);
+    g.put(
+        y,
+        end + 2,
+        &fit_path(&plan.dir.display().to_string(), width.saturating_sub(8)),
+        Role::Title,
+    );
     y += 2;
-    g.heading(y, left, width, &format!("Files · {} new", plan.files.len() + plan.after_files.len()));
+    g.heading(
+        y,
+        left,
+        width,
+        &format!("Files · {} new", plan.files.len() + plan.after_files.len()),
+    );
     y += 1;
     for file in &plan.files {
         g.put(y, left + 2, "+", Role::Good);
@@ -1009,7 +1435,12 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
     }
     for file in &plan.after_files {
         g.put(y, left + 2, "+", Role::Good);
-        let end = g.put(y, left + 4, &fit(&file.path, width.saturating_sub(30)), Role::Text);
+        let end = g.put(
+            y,
+            left + 4,
+            &fit(&file.path, width.saturating_sub(30)),
+            Role::Text,
+        );
         g.put(y, end + 2, "after the commands", Role::Muted);
         y += 1;
     }
@@ -1022,7 +1453,12 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
             g.put(y, left + 5, &fit(&step.display(), width - 7), Role::Text);
             y += 1;
         }
-        g.put(y, left + 5, "files a command makes aren't listed above", Role::Muted);
+        g.put(
+            y,
+            left + 5,
+            "files a command makes aren't listed above",
+            Role::Muted,
+        );
         y += 1;
     }
     y += 1;
@@ -1033,13 +1469,24 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
         then.push("add it to your projects".to_string());
     }
     if let Some(workspace) = wizard.joins_workspace() {
-        let tool = if plan.kind == fenix_project::ProjectKind::Rust { "cargo" } else { "uv" };
-        then.push(format!("{tool} adds it to the workspace at {}", workspace.display()));
+        let tool = if plan.kind == fenix_project::ProjectKind::Rust {
+            "cargo"
+        } else {
+            "uv"
+        };
+        then.push(format!(
+            "{tool} adds it to the workspace at {}",
+            workspace.display()
+        ));
     }
     for hook in &plan.hooks {
         match hook {
-            Hook::MibRoot { path, label } if path == "." => then.push(format!("register it as MIB root \"{label}\"")),
-            Hook::MibRoot { path, label } => then.push(format!("register {path}/ as MIB root \"{label}\"")),
+            Hook::MibRoot { path, label } if path == "." => {
+                then.push(format!("register it as MIB root \"{label}\""))
+            }
+            Hook::MibRoot { path, label } => {
+                then.push(format!("register {path}/ as MIB root \"{label}\""))
+            }
         }
     }
     then.push("open it".to_string());
@@ -1054,12 +1501,32 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
     &[("Enter", "create"), ("Esc", "back"), ("q", "close")]
 }
 
-fn layout_creating(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: usize) -> &'static [(&'static str, &'static str)] {
+fn layout_creating(
+    wizard: &Wizard,
+    g: &mut Grid,
+    left: usize,
+    width: usize,
+    top: usize,
+) -> &'static [(&'static str, &'static str)] {
     let Some(run) = &wizard.run else { return &[] };
     let mut y = top;
-    let done = run.steps.iter().filter(|s| matches!(s.status, Status::Done(_) | Status::Skipped)).count();
-    let end = g.put(y, left + 2, &format!("Creating {}", wizard.name), Role::Title);
-    g.put(y, end + 3, &format!("{done} / {}", run.steps.len()), Role::Muted);
+    let done = run
+        .steps
+        .iter()
+        .filter(|s| matches!(s.status, Status::Done(_) | Status::Skipped))
+        .count();
+    let end = g.put(
+        y,
+        left + 2,
+        &format!("Creating {}", wizard.name),
+        Role::Title,
+    );
+    g.put(
+        y,
+        end + 3,
+        &format!("{done} / {}", run.steps.len()),
+        Role::Muted,
+    );
     y += 2;
     for step in &run.steps {
         let (mark, role) = match &step.status {
@@ -1077,7 +1544,11 @@ fn layout_creating(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
             _ => String::new(),
         };
         let room = width.saturating_sub(right.chars().count() + 8);
-        let label_role = if step.status == Status::Pending { Role::Muted } else { Role::Text };
+        let label_role = if step.status == Status::Pending {
+            Role::Muted
+        } else {
+            Role::Text
+        };
         g.put(y, left + 4, &fit(&step.label, room), label_role);
         if !right.is_empty() {
             g.put(y, left + width - right.chars().count(), &right, Role::Muted);
@@ -1099,12 +1570,35 @@ fn layout_creating(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
     }
     y += 1;
     if run.failed().is_some() {
-        g.put(y, left + 2, "Stopped. What's been done stays; nothing is deleted.", Role::Warn);
-        return &[("r", "retry"), ("s", "skip"), ("o", "open what's there"), ("q", "close")];
+        g.put(
+            y,
+            left + 2,
+            "Stopped. What's been done stays; nothing is deleted.",
+            Role::Warn,
+        );
+        return &[
+            ("r", "retry"),
+            ("s", "skip"),
+            ("o", "open what's there"),
+            ("q", "close"),
+        ];
     }
     if run.finished() {
-        let text = if run.cancel_requested { "Cancelled. What's been done stays." } else { "Done." };
-        g.put(y, left + 2, text, if run.cancel_requested { Role::Warn } else { Role::Good });
+        let text = if run.cancel_requested {
+            "Cancelled. What's been done stays."
+        } else {
+            "Done."
+        };
+        g.put(
+            y,
+            left + 2,
+            text,
+            if run.cancel_requested {
+                Role::Warn
+            } else {
+                Role::Good
+            },
+        );
         g.focus(y, left..left + width);
         return &[("Enter", "open it"), ("q", "close")];
     }
@@ -1130,16 +1624,29 @@ mod tests {
     #[test]
     fn templates_are_listed_by_group_with_python_first() {
         let w = wizard(Path::new("/tmp"));
-        let groups: Vec<&str> = w.template_order().iter().map(|&i| w.templates[i].group.as_str()).collect();
+        let groups: Vec<&str> = w
+            .template_order()
+            .iter()
+            .map(|&i| w.templates[i].group.as_str())
+            .collect();
         assert_eq!(groups.first(), Some(&"Python"));
         let mut seen: Vec<&str> = groups.clone();
         seen.dedup();
         assert_eq!(seen, GROUPS, "each group once, in order");
         assert_eq!(groups.last(), Some(&"Start from"));
         let page = layout(&w, 120);
-        assert!(page.text.contains("PYTHON") && page.text.contains("SYSTEMS") && page.text.contains("EMBEDDED") && page.text.contains("MISSION"));
+        assert!(
+            page.text.contains("PYTHON")
+                && page.text.contains("SYSTEMS")
+                && page.text.contains("EMBEDDED")
+                && page.text.contains("MISSION")
+        );
         assert!(page.text.contains("Python · uv"));
-        assert!(page.text.contains("found"), "the focused template's needs are looked up:\n{}", page.text);
+        assert!(
+            page.text.contains("found"),
+            "the focused template's needs are looked up:\n{}",
+            page.text
+        );
     }
 
     #[test]
@@ -1151,7 +1658,11 @@ mod tests {
         type_str(&mut w, "orbit-tools");
         w.key(Key::Enter);
         assert_eq!(w.name, "orbit-tools");
-        assert_eq!(w.focused(), Some(Field::Parent), "Enter after the name moves on");
+        assert_eq!(
+            w.focused(),
+            Some(Field::Parent),
+            "Enter after the name moves on"
+        );
     }
 
     #[test]
@@ -1169,8 +1680,12 @@ mod tests {
         assert!(w.problem.as_deref().unwrap().contains("isn't empty"));
         let page = layout(&w, 100);
         let words: Vec<&str> = page.text.split_whitespace().collect();
-        assert!(words.windows(2).any(|w| w == ["isn't", "empty"]), "the problem is shown:
-{}", page.text);
+        assert!(
+            words.windows(2).any(|w| w == ["isn't", "empty"]),
+            "the problem is shown:
+{}",
+            page.text
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1190,7 +1705,11 @@ mod tests {
         w.key(Key::Char('l'));
         assert_eq!(w.answers["layout"], Answer::Text("lib".into()));
         // Untick ruff (the second dev option).
-        let ruff = w.fields().iter().position(|f| *f == Field::ManyOption(3, 1)).unwrap();
+        let ruff = w
+            .fields()
+            .iter()
+            .position(|f| *f == Field::ManyOption(3, 1))
+            .unwrap();
         w.focus = ruff;
         w.key(Key::Space);
         assert_eq!(w.answers["dev"], Answer::Many(vec!["pytest".into()]));
@@ -1198,7 +1717,11 @@ mod tests {
         w.key(Key::Enter);
         assert_eq!(w.step, Step::Review);
         let page = layout(&w, 110);
-        assert!(page.text.contains("uv init --lib --package"), "{}", page.text);
+        assert!(
+            page.text.contains("uv init --lib --package"),
+            "{}",
+            page.text
+        );
         assert!(page.text.contains("uv add --dev pytest"));
         assert!(page.text.contains("git commit -q -m \"Initial commit\""));
         assert!(page.text.contains("+ tests/test_smoke.py"));
@@ -1208,16 +1731,38 @@ mod tests {
     fn preset_goes_as_far_as_its_arguments_take_it() {
         let dir = std::env::temp_dir().join(format!("fenix-wizard-preset-{}", std::process::id()));
         let mut w = wizard(&dir);
-        w.preset("python-uv orbit python=3.13 dev=ruff pyright=yes").unwrap();
+        w.preset("python-uv orbit python=3.13 dev=ruff pyright=yes")
+            .unwrap();
         assert_eq!(w.step, Step::Review);
-        let steps: Vec<String> = w.plan.as_ref().unwrap().steps.iter().map(|s| s.display()).collect();
-        assert!(steps[0].contains("--python 3.13") && steps.iter().any(|s| s == "uv add --dev ruff") && steps.iter().any(|s| s == "uv tool install pyright"), "{steps:?}");
+        let steps: Vec<String> = w
+            .plan
+            .as_ref()
+            .unwrap()
+            .steps
+            .iter()
+            .map(|s| s.display())
+            .collect();
+        assert!(
+            steps[0].contains("--python 3.13")
+                && steps.iter().any(|s| s == "uv add --dev ruff")
+                && steps.iter().any(|s| s == "uv tool install pyright"),
+            "{steps:?}"
+        );
 
         let mut w = wizard(&dir);
         w.preset("arduino-sketch").unwrap();
-        assert_eq!((w.step, w.editing.is_some()), (Step::Location, true), "no name: it's asked for");
+        assert_eq!(
+            (w.step, w.editing.is_some()),
+            (Step::Location, true),
+            "no name: it's asked for"
+        );
 
-        for (bad, why) in [("cobol", "no template called cobol"), ("python-uv x python=2.7", "python is one of"), ("python-uv x colour=red", "no option colour"), ("python-uv x dev=pip", "isn't one of dev's options")] {
+        for (bad, why) in [
+            ("cobol", "no template called cobol"),
+            ("python-uv x python=2.7", "python is one of"),
+            ("python-uv x colour=red", "no option colour"),
+            ("python-uv x dev=pip", "isn't one of dev's options"),
+        ] {
             let error = wizard(&dir).preset(bad).unwrap_err();
             assert!(error.contains(why), "{bad}: {error}");
         }
@@ -1232,7 +1777,10 @@ mod tests {
         std::fs::write(repo.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
         let mut w = wizard(&repo.join("crates"));
         assert!(w.repository.is_some());
-        assert!(!w.git_init && !w.git_commit, "the repository already covers it");
+        assert!(
+            !w.git_init && !w.git_commit,
+            "the repository already covers it"
+        );
         assert!(w.choose("rust-cargo"));
         assert_eq!(w.joins_workspace().as_deref(), Some(repo.as_path()));
         w.set_parent(&std::env::temp_dir());
@@ -1257,8 +1805,18 @@ mod tests {
         w.key(Key::Enter); // Options -> Review
         assert_eq!(w.step, Step::Review);
         w.key(Key::Enter);
-        let labels: Vec<String> = w.run.as_ref().unwrap().steps.iter().map(|s| s.label.clone()).collect();
-        let late = labels.iter().position(|l| l.contains("left for last")).expect("a late-files step");
+        let labels: Vec<String> = w
+            .run
+            .as_ref()
+            .unwrap()
+            .steps
+            .iter()
+            .map(|s| s.label.clone())
+            .collect();
+        let late = labels
+            .iter()
+            .position(|l| l.contains("left for last"))
+            .expect("a late-files step");
         let first_git = labels.iter().position(|l| l.starts_with("git ")).unwrap();
         let last_uv = labels.iter().rposition(|l| l.starts_with("uv ")).unwrap();
         assert!(last_uv < late && late < first_git, "{labels:?}");
@@ -1291,9 +1849,14 @@ mod tests {
         assert!(w.choose("scos-mib"));
         w.set_text(Field::Name, "mission-c".into());
         assert_eq!(w.answers["label"], Answer::Text("mission-c".into()));
-        w.answers.insert("label".into(), Answer::Text("Mission C".into()));
+        w.answers
+            .insert("label".into(), Answer::Text("Mission C".into()));
         w.set_text(Field::Name, "mission-d".into());
-        assert_eq!(w.answers["label"], Answer::Text("Mission C".into()), "a label you typed is kept");
+        assert_eq!(
+            w.answers["label"],
+            Answer::Text("Mission C".into()),
+            "a label you typed is kept"
+        );
     }
 
     #[test]
@@ -1338,7 +1901,11 @@ mod tests {
         let mut w = wizard(Path::new("/tmp"));
         for _ in 0..3 {
             let page = layout(&w, 40);
-            assert!(page.text.lines().all(|l| l.chars().count() <= 40), "{}", page.text);
+            assert!(
+                page.text.lines().all(|l| l.chars().count() <= 40),
+                "{}",
+                page.text
+            );
             assert!(page.focus.is_some());
             w.key(Key::Enter);
             type_str(&mut w, "x");

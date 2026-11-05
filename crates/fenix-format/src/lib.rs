@@ -33,7 +33,10 @@ fn is_closing_bracket(c: char) -> bool {
 /// is considered, not just 1, matching how multiple nested calls
 /// closing on one line actually read.
 fn leading_closer_count(trimmed: &str) -> usize {
-    trimmed.chars().take_while(|&c| is_closing_bracket(c)).count()
+    trimmed
+        .chars()
+        .take_while(|&c| is_closing_bracket(c))
+        .count()
 }
 
 /// Recomputes the leading whitespace of every line in `first_line..=
@@ -68,7 +71,13 @@ fn leading_closer_count(trimmed: &str) -> usize {
 /// the file's actual range, unbalanced brackets) just does the most
 /// sensible possible thing rather than erroring -- see the tests for
 /// exactly what that is in each case.
-pub fn reindent(source: &str, first_line: usize, last_line: usize, indent_width: usize, skip: &[Range<usize>]) -> String {
+pub fn reindent(
+    source: &str,
+    first_line: usize,
+    last_line: usize,
+    indent_width: usize,
+    skip: &[Range<usize>],
+) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
     let mut out_lines: Vec<String> = Vec::with_capacity(lines.len());
     let mut depth: usize = 0;
@@ -125,10 +134,20 @@ pub fn reindent(source: &str, first_line: usize, last_line: usize, indent_width:
 /// `first_line > last_line`, or either past the end of `source`,
 /// degrades to an empty string -- there's nothing to splice in, not a
 /// panic.
-pub fn reindent_lines(source: &str, first_line: usize, last_line: usize, indent_width: usize, skip: &[Range<usize>]) -> String {
+pub fn reindent_lines(
+    source: &str,
+    first_line: usize,
+    last_line: usize,
+    indent_width: usize,
+    skip: &[Range<usize>],
+) -> String {
     let full = reindent(source, first_line, last_line, indent_width, skip);
     let count = (last_line + 1).saturating_sub(first_line);
-    full.split('\n').skip(first_line).take(count).collect::<Vec<_>>().join("\n")
+    full.split('\n')
+        .skip(first_line)
+        .take(count)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Where a tag-aware scan is, between two characters of an XML document.
@@ -144,7 +163,11 @@ enum XmlContext {
     /// Inside a start or end tag. `start_depth` is the element depth the
     /// tag began at, what a continuation line of a multi-line tag (one
     /// attribute per line) indents relative to.
-    Tag { closing: bool, quote: Option<u8>, start_depth: usize },
+    Tag {
+        closing: bool,
+        quote: Option<u8>,
+        start_depth: usize,
+    },
 }
 
 /// The XML counterpart of `reindent`: nesting depth comes from start and
@@ -159,7 +182,12 @@ enum XmlContext {
 /// Same contract as `reindent` otherwise: only `first_line..=last_line`
 /// is rewritten, but depth is tracked across the whole document; blank
 /// lines are left alone; malformed input degrades rather than fails.
-pub fn reindent_xml(source: &str, first_line: usize, last_line: usize, indent_width: usize) -> String {
+pub fn reindent_xml(
+    source: &str,
+    first_line: usize,
+    last_line: usize,
+    indent_width: usize,
+) -> String {
     let mut out_lines: Vec<String> = Vec::new();
     let mut depth: usize = 0;
     let mut ctx = XmlContext::Text;
@@ -200,10 +228,22 @@ pub fn reindent_xml(source: &str, first_line: usize, last_line: usize, indent_wi
                         ctx = XmlContext::Declaration(0);
                         advance = 2;
                     } else if rest.starts_with(b"</") {
-                        ctx = XmlContext::Tag { closing: true, quote: None, start_depth: depth };
+                        ctx = XmlContext::Tag {
+                            closing: true,
+                            quote: None,
+                            start_depth: depth,
+                        };
                         advance = 2;
-                    } else if rest.first() == Some(&b'<') && rest.get(1).is_some_and(|&b| b.is_ascii_alphabetic() || b == b'_' || b == b':' || b >= 0x80) {
-                        ctx = XmlContext::Tag { closing: false, quote: None, start_depth: depth };
+                    } else if rest.first() == Some(&b'<')
+                        && rest.get(1).is_some_and(|&b| {
+                            b.is_ascii_alphabetic() || b == b'_' || b == b':' || b >= 0x80
+                        })
+                    {
+                        ctx = XmlContext::Tag {
+                            closing: false,
+                            quote: None,
+                            start_depth: depth,
+                        };
                     }
                 }
                 XmlContext::Comment if rest.starts_with(b"-->") => {
@@ -224,9 +264,25 @@ pub fn reindent_xml(source: &str, first_line: usize, last_line: usize, indent_wi
                     b'>' if n == 0 => ctx = XmlContext::Text,
                     _ => {}
                 },
-                XmlContext::Tag { closing, quote, start_depth } => match (quote, bytes[i]) {
-                    (None, q @ (b'"' | b'\'')) => ctx = XmlContext::Tag { closing, quote: Some(q), start_depth },
-                    (Some(q), b) if b == q => ctx = XmlContext::Tag { closing, quote: None, start_depth },
+                XmlContext::Tag {
+                    closing,
+                    quote,
+                    start_depth,
+                } => match (quote, bytes[i]) {
+                    (None, q @ (b'"' | b'\'')) => {
+                        ctx = XmlContext::Tag {
+                            closing,
+                            quote: Some(q),
+                            start_depth,
+                        }
+                    }
+                    (Some(q), b) if b == q => {
+                        ctx = XmlContext::Tag {
+                            closing,
+                            quote: None,
+                            start_depth,
+                        }
+                    }
                     (None, b'>') => {
                         if closing {
                             depth = depth.saturating_sub(1);
@@ -259,10 +315,19 @@ fn leading_end_tags(trimmed: &str) -> usize {
 
 /// `reindent_xml`, returning only `first_line..=last_line` -- the same
 /// relationship `reindent_lines` has to `reindent`.
-pub fn reindent_xml_lines(source: &str, first_line: usize, last_line: usize, indent_width: usize) -> String {
+pub fn reindent_xml_lines(
+    source: &str,
+    first_line: usize,
+    last_line: usize,
+    indent_width: usize,
+) -> String {
     let full = reindent_xml(source, first_line, last_line, indent_width);
     let count = (last_line + 1).saturating_sub(first_line);
-    full.split('\n').skip(first_line).take(count).collect::<Vec<_>>().join("\n")
+    full.split('\n')
+        .skip(first_line)
+        .take(count)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -272,7 +337,10 @@ mod tests {
     #[test]
     fn xml_indents_by_element_nesting() {
         let source = "<a>\n<b>\n<c>text</c>\n<d/>\n</b>\n</a>";
-        assert_eq!(reindent_xml(source, 0, 5, 2), "<a>\n  <b>\n    <c>text</c>\n    <d/>\n  </b>\n</a>");
+        assert_eq!(
+            reindent_xml(source, 0, 5, 2),
+            "<a>\n  <b>\n    <c>text</c>\n    <d/>\n  </b>\n</a>"
+        );
     }
 
     #[test]
@@ -285,7 +353,10 @@ mod tests {
     #[test]
     fn xml_multi_line_start_tags_indent_their_attributes() {
         let source = "<a>\n<b\nx=\"1\"\ny=\"2\">\n<c/>\n</b>\n</a>";
-        assert_eq!(reindent_xml(source, 0, 6, 2), "<a>\n  <b\n    x=\"1\"\n    y=\"2\">\n    <c/>\n  </b>\n</a>");
+        assert_eq!(
+            reindent_xml(source, 0, 6, 2),
+            "<a>\n  <b\n    x=\"1\"\n    y=\"2\">\n    <c/>\n  </b>\n</a>"
+        );
     }
 
     #[test]
@@ -298,7 +369,10 @@ mod tests {
     fn reindents_simple_nested_blocks_from_scratch() {
         let source = "proc foo {a b} {\nif {$a} {\nputs hi\n}\n}";
         let got = reindent(source, 0, 4, 4, &[]);
-        assert_eq!(got, "proc foo {a b} {\n    if {$a} {\n        puts hi\n    }\n}");
+        assert_eq!(
+            got,
+            "proc foo {a b} {\n    if {$a} {\n        puts hi\n    }\n}"
+        );
     }
 
     #[test]
@@ -384,11 +458,17 @@ mod tests {
         // highlighter's own string-span capture would report.
         let source = "puts \"{ not real\"\nb";
         let unskipped = reindent(source, 0, 1, 4, &[]);
-        assert_eq!(unskipped, "puts \"{ not real\"\n    b", "sanity check: without skip, the stray brace does bump depth");
+        assert_eq!(
+            unskipped, "puts \"{ not real\"\n    b",
+            "sanity check: without skip, the stray brace does bump depth"
+        );
 
         let skip = 5..17; // byte range of the quoted string, including both quotes
         let skipped = reindent(source, 0, 1, 4, std::slice::from_ref(&skip));
-        assert_eq!(skipped, source, "with the string excluded, there's nothing to indent from");
+        assert_eq!(
+            skipped, source,
+            "with the string excluded, there's nothing to indent from"
+        );
     }
 
     #[test]

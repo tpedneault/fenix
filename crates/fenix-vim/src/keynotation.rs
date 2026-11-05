@@ -33,11 +33,18 @@ const NAMED_TOKENS: &[(NamedKey, &str)] = &[
 ];
 
 fn named_token(n: NamedKey) -> &'static str {
-    NAMED_TOKENS.iter().find(|(k, _)| *k == n).map(|(_, s)| *s).unwrap_or("?")
+    NAMED_TOKENS
+        .iter()
+        .find(|(k, _)| *k == n)
+        .map(|(_, s)| *s)
+        .unwrap_or("?")
 }
 
 fn token_to_named(token: &str) -> Option<NamedKey> {
-    NAMED_TOKENS.iter().find(|(_, s)| s.eq_ignore_ascii_case(token)).map(|(k, _)| *k)
+    NAMED_TOKENS
+        .iter()
+        .find(|(_, s)| s.eq_ignore_ascii_case(token))
+        .map(|(k, _)| *k)
 }
 
 /// Encodes `keys` into Vim's own keycode notation.
@@ -139,14 +146,20 @@ fn decode_token(token: &str) -> Option<KeyPress> {
         rest = tail;
     }
     if let Some(named) = token_to_named(rest) {
-        return Some(KeyPress { code: KeyCode::Named(named), mods });
+        return Some(KeyPress {
+            code: KeyCode::Named(named),
+            mods,
+        });
     }
     let mut chars = rest.chars();
     let c = chars.next()?;
     if chars.next().is_some() {
         return None; // more than one char left after stripping mods -- not decodable
     }
-    Some(KeyPress { code: KeyCode::Char(c), mods })
+    Some(KeyPress {
+        code: KeyCode::Char(c),
+        mods,
+    })
 }
 
 #[cfg(test)]
@@ -159,7 +172,11 @@ mod tests {
 
     #[test]
     fn plain_chars_encode_literally() {
-        let keys = vec![KeyPress::char('d'), KeyPress::char('w'), KeyPress::char('j')];
+        let keys = vec![
+            KeyPress::char('d'),
+            KeyPress::char('w'),
+            KeyPress::char('j'),
+        ];
         assert_eq!(encode(&keys), "dwj");
         roundtrip(&keys);
     }
@@ -225,7 +242,15 @@ mod tests {
 
     #[test]
     fn decode_of_an_unclosed_bracket_falls_back_to_literal_characters_without_panicking() {
-        assert_eq!(decode("<Esc"), vec![KeyPress::char('<'), KeyPress::char('E'), KeyPress::char('s'), KeyPress::char('c')]);
+        assert_eq!(
+            decode("<Esc"),
+            vec![
+                KeyPress::char('<'),
+                KeyPress::char('E'),
+                KeyPress::char('s'),
+                KeyPress::char('c')
+            ]
+        );
     }
 
     #[test]

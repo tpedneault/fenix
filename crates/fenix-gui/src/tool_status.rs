@@ -41,19 +41,18 @@ pub struct ToolEntry {
 /// install, so it's not listed, the same "no support for this, not a
 /// gap" posture `dap::default_adapter_command`'s own doc comment
 /// already takes for languages beyond Python.
-const KNOWN_LANGUAGES: &[LanguageId] =
-    &[
-        LanguageId::Python,
-        LanguageId::Rust,
-        LanguageId::C,
-        LanguageId::Cpp,
-        LanguageId::Bash,
-        LanguageId::JavaScript,
-        LanguageId::TypeScript,
-        LanguageId::Tsx,
-        LanguageId::Go,
-        LanguageId::Lua,
-    ];
+const KNOWN_LANGUAGES: &[LanguageId] = &[
+    LanguageId::Python,
+    LanguageId::Rust,
+    LanguageId::C,
+    LanguageId::Cpp,
+    LanguageId::Bash,
+    LanguageId::JavaScript,
+    LanguageId::TypeScript,
+    LanguageId::Tsx,
+    LanguageId::Go,
+    LanguageId::Lua,
+];
 
 /// The one-line command that installs `command` for `language` -- shown
 /// only when `command` isn't found on `PATH`. Keyed by the *command
@@ -63,11 +62,17 @@ const KNOWN_LANGUAGES: &[LanguageId] =
 fn install_hint_for(command: &str) -> Option<&'static str> {
     match command {
         "pyright-langserver" => Some("uv tool install pyright  (or: pip install pyright)"),
-        "python" => Some("install Python from https://python.org, or via your platform's package manager"),
+        "python" => {
+            Some("install Python from https://python.org, or via your platform's package manager")
+        }
         "rust-analyzer" => Some("rustup component add rust-analyzer"),
-        "clangd" => Some("install clangd via your platform's package manager, or the LLVM installer on Windows"),
+        "clangd" => Some(
+            "install clangd via your platform's package manager, or the LLVM installer on Windows",
+        ),
         "bash-language-server" => Some("npm install -g bash-language-server"),
-        "typescript-language-server" => Some("npm install -g typescript-language-server typescript"),
+        "typescript-language-server" => {
+            Some("npm install -g typescript-language-server typescript")
+        }
         _ => None,
     }
 }
@@ -91,13 +96,35 @@ pub fn scan(
     for &language in KNOWN_LANGUAGES {
         if let Some((command, _)) = resolve_lsp_command(language) {
             let found_on_path = is_on_path(&command);
-            let install_hint = if found_on_path { None } else { install_hint_for(&command) };
-            entries.push(ToolEntry { language, kind: ToolKind::Lsp, command, found_on_path, running: lsp_running(language), install_hint });
+            let install_hint = if found_on_path {
+                None
+            } else {
+                install_hint_for(&command)
+            };
+            entries.push(ToolEntry {
+                language,
+                kind: ToolKind::Lsp,
+                command,
+                found_on_path,
+                running: lsp_running(language),
+                install_hint,
+            });
         }
         if let Some((command, _)) = resolve_dap_command(language) {
             let found_on_path = is_on_path(&command);
-            let install_hint = if found_on_path { None } else { install_hint_for(&command) };
-            entries.push(ToolEntry { language, kind: ToolKind::Dap, command, found_on_path, running: dap_running(language), install_hint });
+            let install_hint = if found_on_path {
+                None
+            } else {
+                install_hint_for(&command)
+            };
+            entries.push(ToolEntry {
+                language,
+                kind: ToolKind::Dap,
+                command,
+                found_on_path,
+                running: dap_running(language),
+                install_hint,
+            });
         }
     }
     entries
@@ -120,9 +147,16 @@ pub(crate) fn is_on_path(command: &str) -> bool {
     if path.is_absolute() || command.contains(['/', '\\']) {
         return path.is_file();
     }
-    let Some(path_var) = std::env::var_os("PATH") else { return false };
+    let Some(path_var) = std::env::var_os("PATH") else {
+        return false;
+    };
     let extensions: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string()).split(';').filter(|e| !e.is_empty()).map(str::to_string).collect()
+        std::env::var("PATHEXT")
+            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
+            .split(';')
+            .filter(|e| !e.is_empty())
+            .map(str::to_string)
+            .collect()
     } else {
         vec![String::new()]
     };
@@ -151,9 +185,17 @@ pub fn render(entries: &[ToolEntry]) -> String {
             ToolKind::Lsp => "LSP",
             ToolKind::Dap => "DAP",
         };
-        let status = if entry.found_on_path { "found" } else { "missing" };
+        let status = if entry.found_on_path {
+            "found"
+        } else {
+            "missing"
+        };
         let running = if entry.running { ", running" } else { "" };
-        out.push_str(&format!("{:<12} {kind}  {:<28} [{status}{running}]\n", format!("{:?}", entry.language), entry.command));
+        out.push_str(&format!(
+            "{:<12} {kind}  {:<28} [{status}{running}]\n",
+            format!("{:?}", entry.language),
+            entry.command
+        ));
         if let Some(hint) = entry.install_hint {
             out.push_str(&format!("             install: {hint}\n"));
         }
@@ -183,7 +225,11 @@ pub fn render_additional(entries: &[AdditionalEntry]) -> String {
     }
     let mut out = String::from("\nAdditional language servers (beside each language's own)\n");
     for entry in entries {
-        let status = if entry.found_on_path { "found" } else { "missing" };
+        let status = if entry.found_on_path {
+            "found"
+        } else {
+            "missing"
+        };
         let state = if entry.running {
             ", running"
         } else if entry.failed {
@@ -191,8 +237,14 @@ pub fn render_additional(entries: &[AdditionalEntry]) -> String {
         } else {
             ""
         };
-        out.push_str(&format!("{:<12} LSP+ {:<28} [{status}{state}]\n", entry.name, entry.command));
-        out.push_str(&format!("             serves: {}\n", entry.languages.join(", ")));
+        out.push_str(&format!(
+            "{:<12} LSP+ {:<28} [{status}{state}]\n",
+            entry.name, entry.command
+        ));
+        out.push_str(&format!(
+            "             serves: {}\n",
+            entry.languages.join(", ")
+        ));
     }
     out
 }
@@ -221,18 +273,40 @@ mod tests {
     #[test]
     fn failed_servers_say_why_and_what_they_wrote() {
         assert_eq!(render_failures(&[]), "");
-        let text = render_failures(&[("typescript-language-server".into(), "didn't answer initialize in 30 s\n  | Could not find a valid TypeScript installation".into())]);
+        let text = render_failures(&[(
+            "typescript-language-server".into(),
+            "didn't answer initialize in 30 s\n  | Could not find a valid TypeScript installation"
+                .into(),
+        )]);
         assert!(text.contains("Language servers that failed"), "{text}");
-        assert!(text.contains("typescript-language-server: didn't answer initialize in 30 s\n"), "{text}");
-        assert!(text.contains("    | Could not find a valid TypeScript installation"), "{text}");
+        assert!(
+            text.contains("typescript-language-server: didn't answer initialize in 30 s\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("    | Could not find a valid TypeScript installation"),
+            "{text}"
+        );
     }
 
     #[test]
     fn additional_servers_are_listed_with_what_they_serve_and_how_they_are() {
-        let entry = |running, failed| AdditionalEntry { name: "kiln".into(), command: "kiln".into(), languages: vec!["rust".into(), "markdown".into()], found_on_path: true, running, failed };
+        let entry = |running, failed| AdditionalEntry {
+            name: "kiln".into(),
+            command: "kiln".into(),
+            languages: vec!["rust".into(), "markdown".into()],
+            found_on_path: true,
+            running,
+            failed,
+        };
         let text = render_additional(&[entry(true, false)]);
         assert!(text.contains("Additional language servers"));
-        assert!(text.contains("kiln") && text.contains("running") && text.contains("serves: rust, markdown"), "{text}");
+        assert!(
+            text.contains("kiln")
+                && text.contains("running")
+                && text.contains("serves: rust, markdown"),
+            "{text}"
+        );
         assert!(render_additional(&[entry(false, true)]).contains(":lsp-restart"));
         assert_eq!(render_additional(&[]), "");
     }
@@ -250,21 +324,38 @@ mod tests {
             |_| false,
         );
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().any(|e| e.language == LanguageId::Python && e.kind == ToolKind::Lsp));
-        assert!(entries.iter().any(|e| e.language == LanguageId::Rust && e.kind == ToolKind::Lsp));
+        assert!(entries
+            .iter()
+            .any(|e| e.language == LanguageId::Python && e.kind == ToolKind::Lsp));
+        assert!(entries
+            .iter()
+            .any(|e| e.language == LanguageId::Rust && e.kind == ToolKind::Lsp));
     }
 
     #[test]
     fn scan_includes_a_dap_row_alongside_an_lsp_row_for_the_same_language() {
         let entries = scan(
-            |language| (language == LanguageId::Python).then(|| ("pyright-langserver".to_string(), vec![])),
-            |language| (language == LanguageId::Python).then(|| ("python".to_string(), vec!["-m".to_string(), "debugpy.adapter".to_string()])),
+            |language| {
+                (language == LanguageId::Python).then(|| ("pyright-langserver".to_string(), vec![]))
+            },
+            |language| {
+                (language == LanguageId::Python).then(|| {
+                    (
+                        "python".to_string(),
+                        vec!["-m".to_string(), "debugpy.adapter".to_string()],
+                    )
+                })
+            },
             |_| false,
             |_| false,
         );
         assert_eq!(entries.len(), 2);
-        assert!(entries.iter().any(|e| e.kind == ToolKind::Lsp && e.command == "pyright-langserver"));
-        assert!(entries.iter().any(|e| e.kind == ToolKind::Dap && e.command == "python"));
+        assert!(entries
+            .iter()
+            .any(|e| e.kind == ToolKind::Lsp && e.command == "pyright-langserver"));
+        assert!(entries
+            .iter()
+            .any(|e| e.kind == ToolKind::Dap && e.command == "python"));
     }
 
     #[test]
@@ -272,14 +363,24 @@ mod tests {
         // `cmd`/`sh` are always on PATH in any real environment this
         // runs in -- a deliberately boring, always-true "found" case.
         let real_command = if cfg!(windows) { "cmd" } else { "sh" };
-        let entries = scan(|_| Some((real_command.to_string(), vec![])), |_| None, |_| false, |_| false);
+        let entries = scan(
+            |_| Some((real_command.to_string(), vec![])),
+            |_| None,
+            |_| false,
+            |_| false,
+        );
         assert!(entries[0].found_on_path);
         assert_eq!(entries[0].install_hint, None);
     }
 
     #[test]
     fn a_command_not_found_on_path_carries_its_install_hint() {
-        let entries = scan(|_| Some(("rust-analyzer".to_string(), vec![])), |_| None, |_| false, |_| false);
+        let entries = scan(
+            |_| Some(("rust-analyzer".to_string(), vec![])),
+            |_| None,
+            |_| false,
+            |_| false,
+        );
         // Whether rust-analyzer happens to be installed on the machine
         // running this test varies -- only assert the *pairing* holds:
         // missing implies a hint, found implies none.
@@ -291,7 +392,9 @@ mod tests {
     #[test]
     fn running_is_reported_per_entry_from_the_callbacks_given() {
         let entries = scan(
-            |language| (language == LanguageId::Python).then(|| ("pyright-langserver".to_string(), vec![])),
+            |language| {
+                (language == LanguageId::Python).then(|| ("pyright-langserver".to_string(), vec![]))
+            },
             |_| None,
             |language| language == LanguageId::Python,
             |_| false,

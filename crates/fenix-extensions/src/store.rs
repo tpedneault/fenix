@@ -69,7 +69,10 @@ pub struct Installed {
 
 impl Installed {
     pub fn name(&self) -> String {
-        self.manifest.as_ref().map(|m| m.extension.name.clone()).unwrap_or_else(|_| self.id.clone())
+        self.manifest
+            .as_ref()
+            .map(|m| m.extension.name.clone())
+            .unwrap_or_else(|_| self.id.clone())
     }
 }
 
@@ -98,7 +101,9 @@ impl Store {
     pub fn policy(&self) -> Result<Policy, String> {
         let path = self.root.join("policy.toml");
         match std::fs::read_to_string(&path) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("{}: {}", path.display(), e.message())),
+            Ok(text) => {
+                toml::from_str(&text).map_err(|e| format!("{}: {}", path.display(), e.message()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Policy::default()),
             Err(e) => Err(format!("{}: {e}", path.display())),
         }
@@ -114,7 +119,9 @@ impl Store {
 
     fn state(&self) -> Result<State, String> {
         match std::fs::read_to_string(self.state_path()) {
-            Ok(text) => toml::from_str(&text).map_err(|e| format!("extensions.toml: {}", e.message())),
+            Ok(text) => {
+                toml::from_str(&text).map_err(|e| format!("extensions.toml: {}", e.message()))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
             Err(e) => Err(format!("extensions.toml: {e}")),
         }
@@ -124,7 +131,8 @@ impl Store {
         std::fs::create_dir_all(&self.root).map_err(|e| format!("{}: {e}", self.root.display()))?;
         let text = "# The extensions installed here, and whether each is on. Fenix writes this;\n# SPC h x and fenix --install-extension change it.\n\n".to_string()
             + &toml::to_string(state).map_err(|e| e.to_string())?;
-        fenix_storage::write(&self.state_path(), text.as_bytes()).map_err(|e| format!("couldn't write extensions.toml: {e}"))
+        fenix_storage::write(&self.state_path(), text.as_bytes())
+            .map_err(|e| format!("couldn't write extensions.toml: {e}"))
     }
 
     fn dir_of(&self, id: &str, version: &str) -> PathBuf {
@@ -139,8 +147,17 @@ impl Store {
             .into_iter()
             .map(|(id, entry)| {
                 let dir = self.dir_of(&id, &entry.version);
-                let manifest = std::fs::read_to_string(dir.join("extension.toml")).map_err(|e| format!("{}: {e}", dir.display())).and_then(|t| Manifest::parse(&t));
-                Installed { id, version: entry.version, enabled: entry.enabled, dependency: entry.dependency, dir, manifest }
+                let manifest = std::fs::read_to_string(dir.join("extension.toml"))
+                    .map_err(|e| format!("{}: {e}", dir.display()))
+                    .and_then(|t| Manifest::parse(&t));
+                Installed {
+                    id,
+                    version: entry.version,
+                    enabled: entry.enabled,
+                    dependency: entry.dependency,
+                    dir,
+                    manifest,
+                }
             })
             .collect())
     }
@@ -148,7 +165,13 @@ impl Store {
     /// Where the switched-on extensions keep data of kind `kind` (`themes`,
     /// `snippets`, `templates`), those that carry it.
     pub fn data_dirs(&self, kind: &str) -> Vec<PathBuf> {
-        self.installed().unwrap_or_default().into_iter().filter(|e| e.enabled && e.manifest.is_ok()).map(|e| e.dir.join(kind)).filter(|d| d.is_dir()).collect()
+        self.installed()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.enabled && e.manifest.is_ok())
+            .map(|e| e.dir.join(kind))
+            .filter(|d| d.is_dir())
+            .collect()
     }
 
     /// Installs the package at `path` for this Fenix (`fenix`, its
@@ -162,24 +185,51 @@ impl Store {
     /// `install`, for another that needs it (`Registry::install`'s
     /// dependencies, a bundle's members): removed with the last that does
     /// (`uninstall_unneeded`).
-    pub fn install_dependency(&self, path: &Path, fenix: &semver::Version) -> Result<Installed, String> {
+    pub fn install_dependency(
+        &self,
+        path: &Path,
+        fenix: &semver::Version,
+    ) -> Result<Installed, String> {
         self.install_as(path, fenix, true)
     }
 
-    fn install_as(&self, path: &Path, fenix: &semver::Version, dependency: bool) -> Result<Installed, String> {
+    fn install_as(
+        &self,
+        path: &Path,
+        fenix: &semver::Version,
+        dependency: bool,
+    ) -> Result<Installed, String> {
         let package = Package::open(path)?;
         let m = &package.manifest;
         m.runs_in(fenix)?;
-        if m.extension.runtime == crate::Runtime::Wasm && !package.files.iter().any(|(rel, _)| std::path::Path::new(rel) == std::path::Path::new("extension.wasm")) {
-            return Err(format!("{} is a WebAssembly extension without its code (extension.wasm)", m.extension.name));
+        if m.extension.runtime == crate::Runtime::Wasm
+            && !package
+                .files
+                .iter()
+                .any(|(rel, _)| std::path::Path::new(rel) == std::path::Path::new("extension.wasm"))
+        {
+            return Err(format!(
+                "{} is a WebAssembly extension without its code (extension.wasm)",
+                m.extension.name
+            ));
         }
         let mut state = self.state()?;
         for (dep, range) in &m.dependencies {
             let req = semver::VersionReq::parse(range).map_err(|e| e.to_string())?;
             match state.extensions.get(dep) {
                 Some(e) if semver::Version::parse(&e.version).is_ok_and(|v| req.matches(&v)) => {}
-                Some(e) => return Err(format!("{} needs {dep} {range}, and {} is installed", m.extension.name, e.version)),
-                None => return Err(format!("{} needs {dep} {range} -- install that first", m.extension.name)),
+                Some(e) => {
+                    return Err(format!(
+                        "{} needs {dep} {range}, and {} is installed",
+                        m.extension.name, e.version
+                    ))
+                }
+                None => {
+                    return Err(format!(
+                        "{} needs {dep} {range} -- install that first",
+                        m.extension.name
+                    ))
+                }
             }
         }
         let (id, version) = (m.extension.id.clone(), m.extension.version.clone());
@@ -191,26 +241,47 @@ impl Store {
         for (rel, bytes) in &package.files {
             let to = unpacked.join(rel);
             if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("{}: {e}", parent.display()))?;
             }
             std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
         }
         let dest = self.dir_of(&id, &version);
         if dest.exists() {
-            std::fs::remove_dir_all(&dest).map_err(|e| format!("couldn't replace {}: {e}", dest.display()))?;
+            std::fs::remove_dir_all(&dest)
+                .map_err(|e| format!("couldn't replace {}: {e}", dest.display()))?;
         }
-        std::fs::create_dir_all(dest.parent().expect("under the root")).map_err(|e| e.to_string())?;
-        std::fs::rename(&unpacked, &dest).map_err(|e| format!("couldn't move {} into place: {e}", id))?;
+        std::fs::create_dir_all(dest.parent().expect("under the root"))
+            .map_err(|e| e.to_string())?;
+        std::fs::rename(&unpacked, &dest)
+            .map_err(|e| format!("couldn't move {} into place: {e}", id))?;
         let _ = std::fs::remove_dir_all(&staging);
 
-        let dependency = state.extensions.get(&id).map_or(dependency, |e| e.dependency);
-        let before = state.extensions.insert(id.clone(), Entry { version: version.clone(), enabled: true, dependency });
+        let dependency = state
+            .extensions
+            .get(&id)
+            .map_or(dependency, |e| e.dependency);
+        let before = state.extensions.insert(
+            id.clone(),
+            Entry {
+                version: version.clone(),
+                enabled: true,
+                dependency,
+            },
+        );
         self.save(&state)?;
         // Then the version it replaced, if another.
         if let Some(old) = before.filter(|old| old.version != version) {
             let _ = std::fs::remove_dir_all(self.dir_of(&id, &old.version));
         }
-        Ok(Installed { id, version, enabled: true, dependency, dir: dest, manifest: Ok(package.manifest) })
+        Ok(Installed {
+            id,
+            version,
+            enabled: true,
+            dependency,
+            dir: dest,
+            manifest: Ok(package.manifest),
+        })
     }
 
     /// Removes extension `id`: from the record first, then its files. A
@@ -218,10 +289,25 @@ impl Store {
     /// bundle is the rest.
     pub fn uninstall(&self, id: &str) -> Result<(), String> {
         let mut state = self.state()?;
-        let needs = |e: &Installed| e.id != id && e.manifest.as_ref().is_ok_and(|m| m.extension.runtime != crate::Runtime::Bundle && m.dependencies.contains_key(id));
-        let needed: Vec<String> = self.installed()?.into_iter().filter(needs).map(|e| e.name()).collect();
+        let needs = |e: &Installed| {
+            e.id != id
+                && e.manifest.as_ref().is_ok_and(|m| {
+                    m.extension.runtime != crate::Runtime::Bundle && m.dependencies.contains_key(id)
+                })
+        };
+        let needed: Vec<String> = self
+            .installed()?
+            .into_iter()
+            .filter(needs)
+            .map(|e| e.name())
+            .collect();
         if !needed.is_empty() {
-            return Err(format!("{} need{} {id} -- remove {} first", needed.join(", "), if needed.len() == 1 { "s" } else { "" }, if needed.len() == 1 { "it" } else { "them" }));
+            return Err(format!(
+                "{} need{} {id} -- remove {} first",
+                needed.join(", "),
+                if needed.len() == 1 { "s" } else { "" },
+                if needed.len() == 1 { "it" } else { "them" }
+            ));
         }
         if state.extensions.remove(id).is_none() {
             return Err(format!("{id} isn't installed"));
@@ -239,8 +325,16 @@ impl Store {
         let mut removed = vec![id.to_string()];
         loop {
             let installed = self.installed()?;
-            let needed = |id: &str| installed.iter().any(|e| e.manifest.as_ref().is_ok_and(|m| m.dependencies.contains_key(id)));
-            let Some(next) = installed.iter().find(|e| e.dependency && !needed(&e.id)) else { break };
+            let needed = |id: &str| {
+                installed.iter().any(|e| {
+                    e.manifest
+                        .as_ref()
+                        .is_ok_and(|m| m.dependencies.contains_key(id))
+                })
+            };
+            let Some(next) = installed.iter().find(|e| e.dependency && !needed(&e.id)) else {
+                break;
+            };
             self.uninstall(&next.id)?;
             removed.push(next.id.clone());
         }
@@ -250,7 +344,10 @@ impl Store {
     /// Switches extension `id` on or off, keeping it installed.
     pub fn set_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
         let mut state = self.state()?;
-        let entry = state.extensions.get_mut(id).ok_or_else(|| format!("{id} isn't installed"))?;
+        let entry = state
+            .extensions
+            .get_mut(id)
+            .ok_or_else(|| format!("{id} isn't installed"))?;
         entry.enabled = enabled;
         self.save(&state)
     }
@@ -269,7 +366,10 @@ mod tests {
     fn package(dir: &Path, id: &str, version: &str, extra: &str) -> PathBuf {
         let path = dir.join(format!("{id}-{version}.fenixext"));
         let manifest = sample(id, version, "none") + extra;
-        zip_of(&path, &[("extension.toml", &manifest), ("themes/dusk.toml", version)]);
+        zip_of(
+            &path,
+            &[("extension.toml", &manifest), ("themes/dusk.toml", version)],
+        );
         path
     }
 
@@ -278,8 +378,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
         assert_eq!(store.policy().unwrap(), Policy::default());
-        std::fs::write(dir.path().join("policy.toml"), "store = false\nregistry = \"https://mirror.test/index.json\"\n").unwrap();
-        assert_eq!(store.policy().unwrap(), Policy { store: Some(false), registry: Some("https://mirror.test/index.json".into()) });
+        std::fs::write(
+            dir.path().join("policy.toml"),
+            "store = false\nregistry = \"https://mirror.test/index.json\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            store.policy().unwrap(),
+            Policy {
+                store: Some(false),
+                registry: Some("https://mirror.test/index.json".into())
+            }
+        );
         std::fs::write(dir.path().join("policy.toml"), "stores = false\n").unwrap();
         assert!(store.policy().unwrap_err().contains("policy.toml"));
     }
@@ -288,12 +398,19 @@ mod tests {
     fn a_code_extension_needs_its_code() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("store"));
-        let manifest = sample("acme.code", "1.0.0", "wasm").replace("fenix = ", "api = \"1.0\"\nfenix = ");
+        let manifest =
+            sample("acme.code", "1.0.0", "wasm").replace("fenix = ", "api = \"1.0\"\nfenix = ");
         let without = dir.path().join("without.fenixext");
         zip_of(&without, &[("extension.toml", &manifest)]);
-        assert!(store.install(&without, &fenix()).unwrap_err().contains("without its code"));
+        assert!(store
+            .install(&without, &fenix())
+            .unwrap_err()
+            .contains("without its code"));
         let with = dir.path().join("with.fenixext");
-        zip_of(&with, &[("extension.toml", &manifest), ("extension.wasm", "\0asm")]);
+        zip_of(
+            &with,
+            &[("extension.toml", &manifest), ("extension.wasm", "\0asm")],
+        );
         assert!(store.install(&with, &fenix()).is_ok());
     }
 
@@ -301,29 +418,50 @@ mod tests {
     fn install_upgrade_switch_off_and_uninstall() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("extensions"));
-        assert!(store.installed().unwrap().is_empty(), "nothing installed: no file yet");
+        assert!(
+            store.installed().unwrap().is_empty(),
+            "nothing installed: no file yet"
+        );
 
-        let one = store.install(&package(dir.path(), "acme.themes", "1.0.0", ""), &fenix()).unwrap();
-        assert!(one.dir.ends_with("acme.themes/1.0.0") && one.dir.join("themes/dusk.toml").is_file());
+        let one = store
+            .install(&package(dir.path(), "acme.themes", "1.0.0", ""), &fenix())
+            .unwrap();
+        assert!(
+            one.dir.ends_with("acme.themes/1.0.0") && one.dir.join("themes/dusk.toml").is_file()
+        );
         assert_eq!(store.data_dirs("themes"), [one.dir.join("themes")]);
         assert!(store.data_dirs("snippets").is_empty(), "it carries none");
         assert!(!store.root().join(".staging").exists(), "staging cleared");
 
-        let two = store.install(&package(dir.path(), "acme.themes", "1.1.0", ""), &fenix()).unwrap();
-        assert_eq!(std::fs::read_to_string(two.dir.join("themes/dusk.toml")).unwrap(), "1.1.0");
+        let two = store
+            .install(&package(dir.path(), "acme.themes", "1.1.0", ""), &fenix())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(two.dir.join("themes/dusk.toml")).unwrap(),
+            "1.1.0"
+        );
         assert!(!one.dir.exists(), "the version it replaced is gone");
         let listed = store.installed().unwrap();
-        assert_eq!((listed.len(), listed[0].version.as_str(), listed[0].enabled), (1, "1.1.0", true));
+        assert_eq!(
+            (listed.len(), listed[0].version.as_str(), listed[0].enabled),
+            (1, "1.1.0", true)
+        );
 
         store.set_enabled("acme.themes", false).unwrap();
-        assert!(store.data_dirs("themes").is_empty(), "off: its data isn't read");
+        assert!(
+            store.data_dirs("themes").is_empty(),
+            "off: its data isn't read"
+        );
         assert!(!store.installed().unwrap()[0].enabled);
         assert!(store.set_enabled("acme.nope", true).is_err());
 
         store.uninstall("acme.themes").unwrap();
         assert!(store.installed().unwrap().is_empty());
         assert!(!store.root().join("acme.themes").exists());
-        assert!(store.uninstall("acme.themes").unwrap_err().contains("isn't installed"));
+        assert!(store
+            .uninstall("acme.themes")
+            .unwrap_err()
+            .contains("isn't installed"));
     }
 
     #[test]
@@ -332,12 +470,25 @@ mod tests {
         let store = Store::new(dir.path().join("extensions"));
         let needs = "\n[dependencies]\n\"acme.base\" = \"^1\"\n";
         let pack = package(dir.path(), "acme.pack", "1.0.0", needs);
-        assert!(store.install(&pack, &fenix()).unwrap_err().contains("install that first"));
-        store.install(&package(dir.path(), "acme.base", "2.0.0", ""), &fenix()).unwrap();
-        assert!(store.install(&pack, &fenix()).unwrap_err().contains("2.0.0 is installed"));
-        store.install(&package(dir.path(), "acme.base", "1.4.0", ""), &fenix()).unwrap();
+        assert!(store
+            .install(&pack, &fenix())
+            .unwrap_err()
+            .contains("install that first"));
+        store
+            .install(&package(dir.path(), "acme.base", "2.0.0", ""), &fenix())
+            .unwrap();
+        assert!(store
+            .install(&pack, &fenix())
+            .unwrap_err()
+            .contains("2.0.0 is installed"));
+        store
+            .install(&package(dir.path(), "acme.base", "1.4.0", ""), &fenix())
+            .unwrap();
         store.install(&pack, &fenix()).unwrap();
-        assert!(store.uninstall("acme.base").unwrap_err().contains("remove it first"));
+        assert!(store
+            .uninstall("acme.base")
+            .unwrap_err()
+            .contains("remove it first"));
         store.uninstall("acme.pack").unwrap();
         store.uninstall("acme.base").unwrap();
     }
@@ -351,28 +502,80 @@ mod tests {
         let store = Store::new(dir.path().join("extensions"));
         let bundle = |id: &str, members: &[&str]| {
             let path = dir.path().join(format!("{id}.fenixext"));
-            let deps: String = members.iter().map(|m| format!("\"{m}\" = \"^1\"\n")).collect();
-            zip_of(&path, &[("extension.toml", &(sample(id, "1.0.0", "bundle") + "\n[dependencies]\n" + &deps)), ("README.md", "# A bundle")]);
+            let deps: String = members
+                .iter()
+                .map(|m| format!("\"{m}\" = \"^1\"\n"))
+                .collect();
+            zip_of(
+                &path,
+                &[
+                    (
+                        "extension.toml",
+                        &(sample(id, "1.0.0", "bundle") + "\n[dependencies]\n" + &deps),
+                    ),
+                    ("README.md", "# A bundle"),
+                ],
+            );
             path
         };
-        store.install(&package(dir.path(), "acme.mine", "1.0.0", ""), &fenix()).unwrap();
+        store
+            .install(&package(dir.path(), "acme.mine", "1.0.0", ""), &fenix())
+            .unwrap();
         for id in ["acme.notes", "acme.board", "acme.shared"] {
-            store.install_dependency(&package(dir.path(), id, "1.0.0", ""), &fenix()).unwrap();
+            store
+                .install_dependency(&package(dir.path(), id, "1.0.0", ""), &fenix())
+                .unwrap();
         }
-        let personal = store.install(&bundle("acme.personal", &["acme.notes", "acme.board", "acme.mine", "acme.shared"]), &fenix()).unwrap();
+        let personal = store
+            .install(
+                &bundle(
+                    "acme.personal",
+                    &["acme.notes", "acme.board", "acme.mine", "acme.shared"],
+                ),
+                &fenix(),
+            )
+            .unwrap();
         assert_eq!(personal.manifest.unwrap().members().len(), 4);
-        store.install(&bundle("acme.other", &["acme.shared"]), &fenix()).unwrap();
-        assert!(store.installed().unwrap().iter().any(|e| e.id == "acme.notes" && e.dependency));
+        store
+            .install(&bundle("acme.other", &["acme.shared"]), &fenix())
+            .unwrap();
+        assert!(store
+            .installed()
+            .unwrap()
+            .iter()
+            .any(|e| e.id == "acme.notes" && e.dependency));
         // An update keeps how it came.
-        store.install(&package(dir.path(), "acme.notes", "1.1.0", ""), &fenix()).unwrap();
-        assert!(store.installed().unwrap().iter().any(|e| e.id == "acme.notes" && e.dependency && e.version == "1.1.0"));
+        store
+            .install(&package(dir.path(), "acme.notes", "1.1.0", ""), &fenix())
+            .unwrap();
+        assert!(store
+            .installed()
+            .unwrap()
+            .iter()
+            .any(|e| e.id == "acme.notes" && e.dependency && e.version == "1.1.0"));
 
-        assert_eq!(store.uninstall_unneeded("acme.personal").unwrap(), ["acme.personal", "acme.board", "acme.notes"]);
-        let left: Vec<String> = store.installed().unwrap().into_iter().map(|e| e.id).collect();
-        assert_eq!(left, ["acme.mine", "acme.other", "acme.shared"], "yours, and what another needs");
+        assert_eq!(
+            store.uninstall_unneeded("acme.personal").unwrap(),
+            ["acme.personal", "acme.board", "acme.notes"]
+        );
+        let left: Vec<String> = store
+            .installed()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(
+            left,
+            ["acme.mine", "acme.other", "acme.shared"],
+            "yours, and what another needs"
+        );
         // A member goes on its own; the bundle stays.
         store.uninstall("acme.shared").unwrap();
-        assert!(store.installed().unwrap().iter().any(|e| e.id == "acme.other"));
+        assert!(store
+            .installed()
+            .unwrap()
+            .iter()
+            .any(|e| e.id == "acme.other"));
     }
 
     #[test]
@@ -380,10 +583,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("extensions"));
         let wasm = dir.path().join("code.fenixext");
-        zip_of(&wasm, &[("extension.toml", &sample("acme.code", "1.0.0", "wasm"))]);
+        zip_of(
+            &wasm,
+            &[("extension.toml", &sample("acme.code", "1.0.0", "wasm"))],
+        );
         assert!(store.install(&wasm, &fenix()).is_err());
         let old = package(dir.path(), "acme.themes", "1.0.0", "");
-        assert!(store.install(&old, &semver::Version::parse("2.0.0").unwrap()).is_err(), "made for 1.x");
+        assert!(
+            store
+                .install(&old, &semver::Version::parse("2.0.0").unwrap())
+                .is_err(),
+            "made for 1.x"
+        );
         assert!(!store.root().exists() || store.installed().unwrap().is_empty());
     }
 
@@ -393,7 +604,12 @@ mod tests {
         let store = Store::new(dir.path());
         std::fs::write(dir.path().join("extensions.toml"), "extensions = 3").unwrap();
         assert!(store.installed().is_err());
-        assert!(store.install(&package(dir.path(), "acme.themes", "1.0.0", ""), &fenix()).is_err());
-        assert_eq!(std::fs::read_to_string(dir.path().join("extensions.toml")).unwrap(), "extensions = 3");
+        assert!(store
+            .install(&package(dir.path(), "acme.themes", "1.0.0", ""), &fenix())
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("extensions.toml")).unwrap(),
+            "extensions = 3"
+        );
     }
 }

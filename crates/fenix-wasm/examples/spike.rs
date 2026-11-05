@@ -11,12 +11,17 @@ use wasmtime::{Engine, Instance, Linker, Module, Store};
 /// Private bytes and working set of this process, in MiB.
 #[cfg(windows)]
 fn memory() -> (f64, f64) {
-    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let mut c: PROCESS_MEMORY_COUNTERS_EX = unsafe { std::mem::zeroed() };
     c.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
     unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut _ as *mut _, c.cb) };
-    (c.PrivateUsage as f64 / 1048576.0, c.WorkingSetSize as f64 / 1048576.0)
+    (
+        c.PrivateUsage as f64 / 1048576.0,
+        c.WorkingSetSize as f64 / 1048576.0,
+    )
 }
 
 #[cfg(not(windows))]
@@ -102,7 +107,11 @@ fn backend(name: &str, options: Options, big: &[u8]) -> wasmtime::Result<()> {
     println!("compile {:>5} KiB wasm:  {}", big.len() / 1024, ms(t));
     let (bytes, t) = time(|| engine.precompile_module(big));
     let bytes = bytes?;
-    println!("precompile:             {}  ({} KiB artifact)", ms(t), bytes.len() / 1024);
+    println!(
+        "precompile:             {}  ({} KiB artifact)",
+        ms(t),
+        bytes.len() / 1024
+    );
     // SAFETY: bytes this engine just produced.
     let (loaded, t) = time(|| unsafe { Module::deserialize(&engine, &bytes) });
     loaded?;
@@ -123,11 +132,17 @@ fn backend(name: &str, options: Options, big: &[u8]) -> wasmtime::Result<()> {
     let nop = inst.get_typed_func::<i32, i32>(&mut s, "nop")?;
     let n = 1_000_000;
     let (_, t) = time(|| (0..n).for_each(|i| drop(nop.call(&mut s, i))));
-    println!("host -> guest call:     {:.0} ns", t.as_nanos() as f64 / n as f64);
+    println!(
+        "host -> guest call:     {:.0} ns",
+        t.as_nanos() as f64 / n as f64
+    );
     let ticks = inst.get_typed_func::<i32, ()>(&mut s, "ticks")?;
     let (r, t) = time(|| ticks.call(&mut s, n));
     r?;
-    println!("guest -> host call:     {:.0} ns", t.as_nanos() as f64 / n as f64);
+    println!(
+        "guest -> host call:     {:.0} ns",
+        t.as_nanos() as f64 / n as f64
+    );
     let fib = inst.get_typed_func::<i32, i32>(&mut s, "fib")?;
     let (r, t) = time(|| fib.call(&mut s, 30));
     println!("fib(30) = {}:       {}", r?, ms(t));
@@ -144,18 +159,29 @@ fn backend(name: &str, options: Options, big: &[u8]) -> wasmtime::Result<()> {
         let (_, t) = time(|| frame.copy_from_slice(&memory.data(&s)[..8_294_400]));
         copied += t;
     }
-    println!("1080p frame, painted:   {} a frame (in the guest, a pixel at a time)", ms(painted / frames as u32));
-    println!("1080p frame, copied:    {} a frame (guest memory to the host)", ms(copied / frames as u32));
+    println!(
+        "1080p frame, painted:   {} a frame (in the guest, a pixel at a time)",
+        ms(painted / frames as u32)
+    );
+    println!(
+        "1080p frame, copied:    {} a frame (guest memory to the host)",
+        ms(copied / frames as u32)
+    );
 
     let component = Component::new(&engine, COMPONENT)?;
     let mut linker: ComponentLinker<wasmtime::StoreLimits> = ComponentLinker::new(&engine);
-    linker.root().func_wrap("host-add", |_, (a, b): (u32, u32)| Ok((a + b,)))?;
+    linker
+        .root()
+        .func_wrap("host-add", |_, (a, b): (u32, u32)| Ok((a + b,)))?;
     let mut s = store(&engine);
     let inst = linker.instantiate(&mut s, &component)?;
     let run = inst.get_typed_func::<(u32,), (u32,)>(&mut s, "run")?;
     let n = 200_000;
     let (_, t) = time(|| (0..n).for_each(|i| drop(run.call(&mut s, (i,)))));
-    println!("component call (+host): {:.0} ns", t.as_nanos() as f64 / n as f64);
+    println!(
+        "component call (+host): {:.0} ns",
+        t.as_nanos() as f64 / n as f64
+    );
 
     // What an extension costs to keep: twenty of the guest, each in its
     // own store, as twenty extensions would be.
@@ -168,7 +194,11 @@ fn backend(name: &str, options: Options, big: &[u8]) -> wasmtime::Result<()> {
         kept.push((s, i));
     }
     let after = memory_now();
-    println!("20 small instances:     +{:.1} MiB private, +{:.1} MiB working set", after.0 - before.0, after.1 - before.1);
+    println!(
+        "20 small instances:     +{:.1} MiB private, +{:.1} MiB working set",
+        after.0 - before.0,
+        after.1 - before.1
+    );
     drop(kept);
     Ok(())
 }
@@ -179,15 +209,35 @@ fn memory_now() -> (f64, f64) {
 
 fn main() -> wasmtime::Result<()> {
     let start = memory();
-    println!("process at start:       {:.1} MiB private, {:.1} MiB working set", start.0, start.1);
+    println!(
+        "process at start:       {:.1} MiB private, {:.1} MiB working set",
+        start.0, start.1
+    );
     let big = big_module(4000);
     backend("native (Cranelift)", Options::default(), &big)?;
     #[cfg(feature = "pulley")]
-    backend("pulley (interpreted)", Options { backend: Backend::Pulley, ..Options::default() }, &big)?;
+    backend(
+        "pulley (interpreted)",
+        Options {
+            backend: Backend::Pulley,
+            ..Options::default()
+        },
+        &big,
+    )?;
     #[cfg(feature = "winch")]
-    backend("winch (baseline compiler)", Options { backend: Backend::Winch, ..Options::default() }, &big)?;
+    backend(
+        "winch (baseline compiler)",
+        Options {
+            backend: Backend::Winch,
+            ..Options::default()
+        },
+        &big,
+    )?;
     let _ = Backend::Native;
     let end = memory();
-    println!("\nprocess at end:         {:.1} MiB private, {:.1} MiB working set", end.0, end.1);
+    println!(
+        "\nprocess at end:         {:.1} MiB private, {:.1} MiB working set",
+        end.0, end.1
+    );
     Ok(())
 }

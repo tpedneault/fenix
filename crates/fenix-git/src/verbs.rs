@@ -41,11 +41,18 @@ pub fn commit_args(kind: &CommitKind, flags: CommitFlags) -> Vec<String> {
     let mut args = strings(&["commit"]);
     match kind {
         CommitKind::New(message) => args.extend(["-m".to_string(), message.clone()]),
-        CommitKind::Amend(message) => args.extend(["--amend".to_string(), "-m".to_string(), message.clone()]),
+        CommitKind::Amend(message) => {
+            args.extend(["--amend".to_string(), "-m".to_string(), message.clone()])
+        }
         CommitKind::Extend => args.extend(strings(&["--amend", "--no-edit"])),
         // `--only` with no paths commits none of the index: the message
         // is all that changes.
-        CommitKind::Reword(message) => args.extend(["--amend".to_string(), "--only".to_string(), "-m".to_string(), message.clone()]),
+        CommitKind::Reword(message) => args.extend([
+            "--amend".to_string(),
+            "--only".to_string(),
+            "-m".to_string(),
+            message.clone(),
+        ]),
         CommitKind::Fixup(hash) => args.push(format!("--fixup={hash}")),
     }
     if flags.all {
@@ -74,7 +81,9 @@ pub fn commit_message(repo: &Path, rev: &str) -> Option<String> {
 
 /// Whether `hash` is a root commit (it has no parent to rebase from).
 fn is_root(repo: &Path, hash: &str) -> bool {
-    run_lines(repo, &["rev-list", "--parents", "-n", "1", hash]).first().is_some_and(|l| l.split_whitespace().count() == 1)
+    run_lines(repo, &["rev-list", "--parents", "-n", "1", hash])
+        .first()
+        .is_some_and(|l| l.split_whitespace().count() == 1)
 }
 
 /// Folds every `fixup!` commit into its target, starting from `hash`
@@ -131,7 +140,10 @@ pub fn push_with(repo: &Path, options: &PushOptions) -> Result<String, String> {
 }
 
 pub fn push_tags(repo: &Path, remote: &str) -> Result<String, String> {
-    run_action(repo, &["push".to_string(), remote.to_string(), "--tags".to_string()])
+    run_action(
+        repo,
+        &["push".to_string(), remote.to_string(), "--tags".to_string()],
+    )
 }
 
 /// `git pull --no-rebase`: merge what was fetched.
@@ -147,7 +159,10 @@ pub fn remotes(repo: &Path) -> Vec<String> {
 /// `pushDefault`, else `origin`, else the only remote there is.
 pub fn default_remote(repo: &Path) -> Option<String> {
     let all = remotes(repo);
-    if let Some(configured) = run_lines(repo, &["config", "--get", "remote.pushDefault"]).into_iter().next() {
+    if let Some(configured) = run_lines(repo, &["config", "--get", "remote.pushDefault"])
+        .into_iter()
+        .next()
+    {
         if all.contains(&configured) {
             return Some(configured);
         }
@@ -161,7 +176,17 @@ pub fn default_remote(repo: &Path) -> Option<String> {
 /// How far `head` has gone past `base` and fallen behind it: (ahead,
 /// behind). `None` when either doesn't resolve.
 pub fn ahead_behind(repo: &Path, base: &str, head: &str) -> Option<(usize, usize)> {
-    let line = run_lines(repo, &["rev-list", "--left-right", "--count", &format!("{base}...{head}")]).into_iter().next()?;
+    let line = run_lines(
+        repo,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{base}...{head}"),
+        ],
+    )
+    .into_iter()
+    .next()?;
     let mut parts = line.split_whitespace().map(|n| n.parse::<usize>().ok());
     let behind = parts.next()??;
     let ahead = parts.next()??;
@@ -169,7 +194,16 @@ pub fn ahead_behind(repo: &Path, base: &str, head: &str) -> Option<(usize, usize
 }
 
 fn resolves(repo: &Path, rev: &str) -> bool {
-    !run_lines(repo, &["rev-parse", "--verify", "--quiet", &format!("{rev}^{{commit}}")]).is_empty()
+    !run_lines(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )
+    .is_empty()
 }
 
 /// The branch this one is measured against: `configured` (`[git]
@@ -177,7 +211,10 @@ fn resolves(repo: &Path, rev: &str) -> bool {
 /// when it's there, since that's what a pull request targets and a local
 /// copy goes stale between pulls; else the local branch.
 pub fn resolve_base(repo: &Path, configured: Option<&str>) -> Option<String> {
-    let candidates = configured.into_iter().map(str::to_string).chain(["main".to_string(), "master".to_string()]);
+    let candidates = configured
+        .into_iter()
+        .map(str::to_string)
+        .chain(["main".to_string(), "master".to_string()]);
     for name in candidates {
         let remote = format!("origin/{name}");
         if resolves(repo, &remote) {
@@ -199,10 +236,17 @@ pub fn merge_base(repo: &Path, a: &str, b: &str) -> Option<String> {
 /// (`git diff --shortstat base...head`: since they last shared history).
 pub fn shortstat(repo: &Path, base: &str, head: &str) -> (usize, usize, usize) {
     let range = format!("{base}...{head}");
-    let line = run_lines(repo, &["diff", "--shortstat", &range]).into_iter().next().unwrap_or_default();
+    let line = run_lines(repo, &["diff", "--shortstat", &range])
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let mut out = (0, 0, 0);
     for part in line.split(',') {
-        let n = part.split_whitespace().next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let n = part
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
         if part.contains("file") {
             out.0 = n;
         } else if part.contains("insertion") {
@@ -218,7 +262,19 @@ pub fn shortstat(repo: &Path, base: &str, head: &str) -> (usize, usize, usize) {
 /// conflict, worked out without touching the working tree (`git
 /// merge-tree`); `None` when git couldn't say.
 pub fn merges_cleanly(repo: &Path, base: &str, head: &str) -> Option<bool> {
-    let out = crate::process::git_command(repo, &["merge-tree", "--write-tree", "--name-only", "--no-messages", base, head]).output().ok()?;
+    let out = crate::process::git_command(
+        repo,
+        &[
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            base,
+            head,
+        ],
+    )
+    .output()
+    .ok()?;
     match out.status.code() {
         Some(0) => Some(true),
         // A bad revision exits 1 too, but says so on stderr.
@@ -269,14 +325,23 @@ pub fn stash_with(repo: &Path, options: &StashOptions) -> Result<String, String>
 /// `git switch -c name [start]`, or just `git branch name [start]` when
 /// `switch` is off.
 pub fn branch_args(name: &str, start: Option<&str>, switch: bool) -> Vec<String> {
-    let mut args = if switch { strings(&["switch", "-c", name]) } else { strings(&["branch", name]) };
+    let mut args = if switch {
+        strings(&["switch", "-c", name])
+    } else {
+        strings(&["branch", name])
+    };
     if let Some(start) = start {
         args.push(start.to_string());
     }
     args
 }
 
-pub fn create_branch_at(repo: &Path, name: &str, start: Option<&str>, switch: bool) -> Result<String, String> {
+pub fn create_branch_at(
+    repo: &Path,
+    name: &str,
+    start: Option<&str>,
+    switch: bool,
+) -> Result<String, String> {
     run_action(repo, &branch_args(name, start, switch))
 }
 
@@ -309,7 +374,9 @@ mod tests {
     /// A file's text with line endings normalised -- `core.autocrlf` on
     /// Windows rewrites what git checks out.
     fn read(dir: &Path, name: &str) -> String {
-        std::fs::read_to_string(dir.join(name)).unwrap().replace("\r\n", "\n")
+        std::fs::read_to_string(dir.join(name))
+            .unwrap()
+            .replace("\r\n", "\n")
     }
 
     fn staged(dir: &Path) -> Vec<String> {
@@ -320,19 +387,27 @@ mod tests {
     fn a_branch_is_measured_and_checked_against_its_base_for_conflicts() {
         let dir = repo("verbs_shortstat");
         git(dir.path(), &["switch", "-q", "-c", "topic"]);
-        dir.write("a.txt", "one, changed
+        dir.write(
+            "a.txt",
+            "one, changed
 two
-");
-        dir.write("b.txt", "b
-");
+",
+        );
+        dir.write(
+            "b.txt", "b
+",
+        );
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "topic"]);
         let main = run_lines(dir.path(), &["rev-parse", "HEAD~1"]).remove(0);
         assert_eq!(shortstat(dir.path(), &main, "HEAD"), (2, 3, 1));
         assert_eq!(merges_cleanly(dir.path(), &main, "HEAD"), Some(true));
         git(dir.path(), &["switch", "-q", "--detach", &main]);
-        dir.write("a.txt", "one, differently
-");
+        dir.write(
+            "a.txt",
+            "one, differently
+",
+        );
         git(dir.path(), &["commit", "-q", "-am", "elsewhere"]);
         assert_eq!(merges_cleanly(dir.path(), "HEAD", "topic"), Some(false));
         assert_eq!(merges_cleanly(dir.path(), "HEAD", "no-such-branch"), None);
@@ -340,10 +415,23 @@ two
 
     #[test]
     fn commit_flags_become_the_matching_options() {
-        let flags = CommitFlags { all: true, signoff: true, no_verify: true };
-        assert_eq!(commit_args(&CommitKind::New("m".into()), flags), ["commit", "-m", "m", "--all", "--signoff", "--no-verify"]);
-        assert_eq!(commit_args(&CommitKind::Extend, CommitFlags::default()), ["commit", "--amend", "--no-edit"]);
-        assert_eq!(commit_args(&CommitKind::Fixup("abc".into()), CommitFlags::default()), ["commit", "--fixup=abc"]);
+        let flags = CommitFlags {
+            all: true,
+            signoff: true,
+            no_verify: true,
+        };
+        assert_eq!(
+            commit_args(&CommitKind::New("m".into()), flags),
+            ["commit", "-m", "m", "--all", "--signoff", "--no-verify"]
+        );
+        assert_eq!(
+            commit_args(&CommitKind::Extend, CommitFlags::default()),
+            ["commit", "--amend", "--no-edit"]
+        );
+        assert_eq!(
+            commit_args(&CommitKind::Fixup("abc".into()), CommitFlags::default()),
+            ["commit", "--fixup=abc"]
+        );
     }
 
     #[test]
@@ -352,12 +440,25 @@ two
         dir.write("b.txt", "two\n");
         git(dir.path(), &["add", "b.txt"]);
         commit_with(dir.path(), &CommitKind::Extend, CommitFlags::default()).unwrap();
-        assert_eq!(log(dir.path()), ["first"], "extend keeps the message and adds no commit");
-        assert!(run_lines(dir.path(), &["show", "--name-only", "--format="]).contains(&"b.txt".to_string()));
+        assert_eq!(
+            log(dir.path()),
+            ["first"],
+            "extend keeps the message and adds no commit"
+        );
+        assert!(run_lines(dir.path(), &["show", "--name-only", "--format="])
+            .contains(&"b.txt".to_string()));
 
-        commit_with(dir.path(), &CommitKind::Amend("first, better".into()), CommitFlags::default()).unwrap();
+        commit_with(
+            dir.path(),
+            &CommitKind::Amend("first, better".into()),
+            CommitFlags::default(),
+        )
+        .unwrap();
         assert_eq!(log(dir.path()), ["first, better"]);
-        assert_eq!(commit_message(dir.path(), "HEAD").as_deref(), Some("first, better"));
+        assert_eq!(
+            commit_message(dir.path(), "HEAD").as_deref(),
+            Some("first, better")
+        );
     }
 
     #[test]
@@ -365,9 +466,18 @@ two
         let dir = repo("verbs_reword");
         dir.write("a.txt", "one\nmore\n");
         git(dir.path(), &["add", "a.txt"]);
-        commit_with(dir.path(), &CommitKind::Reword("renamed".into()), CommitFlags::default()).unwrap();
+        commit_with(
+            dir.path(),
+            &CommitKind::Reword("renamed".into()),
+            CommitFlags::default(),
+        )
+        .unwrap();
         assert_eq!(log(dir.path()), ["renamed"]);
-        assert_eq!(staged(dir.path()), ["a.txt"], "the staged change wasn't swallowed into the commit");
+        assert_eq!(
+            staged(dir.path()),
+            ["a.txt"],
+            "the staged change wasn't swallowed into the commit"
+        );
     }
 
     #[test]
@@ -384,14 +494,23 @@ two
         dir.write("b.txt", "two, fixed\n");
         git(dir.path(), &["add", "b.txt"]);
         dir.write("a.txt", "one, still editing\n");
-        commit_with(dir.path(), &CommitKind::Fixup(second.clone()), CommitFlags::default()).unwrap();
+        commit_with(
+            dir.path(),
+            &CommitKind::Fixup(second.clone()),
+            CommitFlags::default(),
+        )
+        .unwrap();
         assert_eq!(log(dir.path())[0], "fixup! second");
 
         autosquash(dir.path(), &second).unwrap();
         assert_eq!(log(dir.path()), ["third", "second", "first"]);
         let b = run_lines(dir.path(), &["show", "HEAD~1:b.txt"]);
         assert_eq!(b, ["two, fixed"], "the fix is in the commit it named");
-        assert_eq!(read(dir.path(), "a.txt"), "one, still editing\n", "autostash kept the edit");
+        assert_eq!(
+            read(dir.path(), "a.txt"),
+            "one, still editing\n",
+            "autostash kept the edit"
+        );
     }
 
     #[test]
@@ -401,7 +520,12 @@ two
         assert_eq!(autosquash_args(&root, true).last().unwrap(), "--root");
         dir.write("a.txt", "one, fixed\n");
         git(dir.path(), &["add", "."]);
-        commit_with(dir.path(), &CommitKind::Fixup(root.clone()), CommitFlags::default()).unwrap();
+        commit_with(
+            dir.path(),
+            &CommitKind::Fixup(root.clone()),
+            CommitFlags::default(),
+        )
+        .unwrap();
         autosquash(dir.path(), &root).unwrap();
         assert_eq!(log(dir.path()), ["first"]);
     }
@@ -411,19 +535,58 @@ two
         let remote = TempDir::new("verbs_push_remote");
         git(remote.path(), &["init", "-q", "--bare"]);
         let dir = repo("verbs_push");
-        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         assert_eq!(default_remote(dir.path()).as_deref(), Some("origin"));
 
-        let first = PushOptions { remote: "origin".into(), branch: "main".into(), set_upstream: true, force_with_lease: false, dry_run: false };
-        assert_eq!(push_args(&first), ["push", "-u", "origin", "HEAD:refs/heads/main"]);
+        let first = PushOptions {
+            remote: "origin".into(),
+            branch: "main".into(),
+            set_upstream: true,
+            force_with_lease: false,
+            dry_run: false,
+        };
+        assert_eq!(
+            push_args(&first),
+            ["push", "-u", "origin", "HEAD:refs/heads/main"]
+        );
         push_with(dir.path(), &first).unwrap();
-        assert_eq!(crate::status::status(dir.path()).unwrap().upstream.as_deref(), Some("origin/main"));
+        assert_eq!(
+            crate::status::status(dir.path())
+                .unwrap()
+                .upstream
+                .as_deref(),
+            Some("origin/main")
+        );
 
-        commit_with(dir.path(), &CommitKind::Amend("first, rewritten".into()), CommitFlags::default()).unwrap();
-        let plain = PushOptions { set_upstream: false, ..first.clone() };
-        assert!(push_with(dir.path(), &plain).is_err(), "a rewrite is rejected without the lease");
-        push_with(dir.path(), &PushOptions { force_with_lease: true, ..plain }).unwrap();
-        assert_eq!(run_lines(remote.path(), &["log", "--format=%s", "main"]), ["first, rewritten"]);
+        commit_with(
+            dir.path(),
+            &CommitKind::Amend("first, rewritten".into()),
+            CommitFlags::default(),
+        )
+        .unwrap();
+        let plain = PushOptions {
+            set_upstream: false,
+            ..first.clone()
+        };
+        assert!(
+            push_with(dir.path(), &plain).is_err(),
+            "a rewrite is rejected without the lease"
+        );
+        push_with(
+            dir.path(),
+            &PushOptions {
+                force_with_lease: true,
+                ..plain
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            run_lines(remote.path(), &["log", "--format=%s", "main"]),
+            ["first, rewritten"]
+        );
     }
 
     #[test]
@@ -447,15 +610,28 @@ two
     fn the_base_is_the_configured_branch_else_main_or_master() {
         let dir = repo("verbs_base");
         assert_eq!(resolve_base(dir.path(), None).as_deref(), Some("main"));
-        assert_eq!(resolve_base(dir.path(), Some("develop")).as_deref(), Some("main"), "a missing configured base falls back");
+        assert_eq!(
+            resolve_base(dir.path(), Some("develop")).as_deref(),
+            Some("main"),
+            "a missing configured base falls back"
+        );
         git(dir.path(), &["branch", "develop"]);
-        assert_eq!(resolve_base(dir.path(), Some("develop")).as_deref(), Some("develop"));
+        assert_eq!(
+            resolve_base(dir.path(), Some("develop")).as_deref(),
+            Some("develop")
+        );
         // With a remote, its copy wins: the local one goes stale.
         let remote = TempDir::new("verbs_base_remote");
         git(remote.path(), &["init", "-q", "--bare"]);
-        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         git(dir.path(), &["push", "-q", "origin", "main"]);
-        assert_eq!(resolve_base(dir.path(), None).as_deref(), Some("origin/main"));
+        assert_eq!(
+            resolve_base(dir.path(), None).as_deref(),
+            Some("origin/main")
+        );
     }
 
     #[test]
@@ -464,18 +640,31 @@ two
         dir.write("a.txt", "one, staged\n");
         git(dir.path(), &["add", "a.txt"]);
         dir.write("new.txt", "untracked\n");
-        let options = StashOptions { message: Some("wip".into()), include_untracked: true, ..Default::default() };
+        let options = StashOptions {
+            message: Some("wip".into()),
+            include_untracked: true,
+            ..Default::default()
+        };
         assert_eq!(stash_args(&options), ["stash", "push", "-u", "-m", "wip"]);
         stash_with(dir.path(), &options).unwrap();
-        assert!(!dir.path().join("new.txt").exists(), "untracked went into the stash");
+        assert!(
+            !dir.path().join("new.txt").exists(),
+            "untracked went into the stash"
+        );
         assert!(run_lines(dir.path(), &["stash", "list"])[0].ends_with("wip"));
 
         git(dir.path(), &["stash", "pop", "-q"]);
         dir.write("b.txt", "b\n");
-        let only_a = StashOptions { paths: vec!["a.txt".into()], ..Default::default() };
+        let only_a = StashOptions {
+            paths: vec!["a.txt".into()],
+            ..Default::default()
+        };
         stash_with(dir.path(), &only_a).unwrap();
         assert_eq!(read(dir.path(), "a.txt"), "one\n");
-        assert!(dir.path().join("b.txt").exists(), "a path-limited stash leaves other files alone");
+        assert!(
+            dir.path().join("b.txt").exists(),
+            "a path-limited stash leaves other files alone"
+        );
     }
 
     #[test]
@@ -484,9 +673,16 @@ two
         create_branch_at(dir.path(), "topic", None, true).unwrap();
         assert_eq!(crate::status::status(dir.path()).unwrap().branch, "topic");
         rename_branch(dir.path(), "topic", "feature/topic").unwrap();
-        assert_eq!(crate::status::status(dir.path()).unwrap().branch, "feature/topic");
+        assert_eq!(
+            crate::status::status(dir.path()).unwrap().branch,
+            "feature/topic"
+        );
         create_branch_at(dir.path(), "later", Some("HEAD"), false).unwrap();
-        assert_eq!(crate::status::status(dir.path()).unwrap().branch, "feature/topic", "without switch it stays put");
+        assert_eq!(
+            crate::status::status(dir.path()).unwrap().branch,
+            "feature/topic",
+            "without switch it stays put"
+        );
         tag(dir.path(), "v1", "HEAD").unwrap();
         assert!(contains(dir.path(), "v1", "HEAD"));
     }

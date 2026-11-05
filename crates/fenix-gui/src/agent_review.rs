@@ -48,7 +48,13 @@ impl ReviewFile {
             (Baseline::Text(old), None) => hunks(old, ""),
             _ => Vec::new(),
         };
-        ReviewFile { path, name, baseline, current, hunks }
+        ReviewFile {
+            path,
+            name,
+            baseline,
+            current,
+            hunks,
+        }
     }
 
     /// Whether there's anything left to review.
@@ -63,7 +69,10 @@ impl ReviewFile {
     }
 
     fn summary(&self) -> String {
-        let (plus, minus) = self.hunks.iter().fold((0, 0), |(p, m), h| (p + h.added.len(), m + h.removed.len()));
+        let (plus, minus) = self
+            .hunks
+            .iter()
+            .fold((0, 0), |(p, m), h| (p + h.added.len(), m + h.removed.len()));
         match (&self.baseline, &self.current) {
             (Baseline::Absent, _) => format!("new · +{plus}"),
             (_, None) => "deleted".to_string(),
@@ -74,7 +83,9 @@ impl ReviewFile {
 }
 
 fn lines(text: &str) -> Vec<String> {
-    text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l).to_string()).collect()
+    text.split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l).to_string())
+        .collect()
 }
 
 /// The hunks between `old` and `new`, line by line.
@@ -84,7 +95,12 @@ pub fn hunks(old: &str, new: &str) -> Vec<Hunk> {
         .blocks
         .into_iter()
         .filter(|block| block.kind != BlockKind::Equal)
-        .map(|block| Hunk { removed: a[block.old.clone()].to_vec(), added: b[block.new.clone()].to_vec(), old: block.old, new: block.new })
+        .map(|block| Hunk {
+            removed: a[block.old.clone()].to_vec(),
+            added: b[block.new.clone()].to_vec(),
+            old: block.old,
+            new: block.new,
+        })
         .collect()
 }
 
@@ -133,7 +149,8 @@ impl Note {
     fn about(&self, file: &ReviewFile) -> bool {
         let given = self.path.replace('\\', "/");
         let have = file.path.to_string_lossy().replace('\\', "/");
-        !given.is_empty() && (have == given || have.ends_with(&format!("/{}", given.trim_start_matches("./"))))
+        !given.is_empty()
+            && (have == given || have.ends_with(&format!("/{}", given.trim_start_matches("./"))))
     }
 
     fn text(&self) -> String {
@@ -159,17 +176,31 @@ pub enum Action {
     None,
     Close,
     Refresh,
-    Keep { file: usize, hunk: usize },
-    Reject { file: usize, hunk: usize },
+    Keep {
+        file: usize,
+        hunk: usize,
+    },
+    Reject {
+        file: usize,
+        hunk: usize,
+    },
     KeepFile(usize),
     RejectFile(usize),
     /// The file, at a line (from 1).
-    Open { file: usize, line: usize },
+    Open {
+        file: usize,
+        line: usize,
+    },
 }
 
 impl ReviewPage {
     pub fn new(thread: fenix_acp::hub::ThreadId, files: Vec<ReviewFile>) -> Self {
-        let mut page = ReviewPage { thread, files, notes: Vec::new(), focus: (0, None) };
+        let mut page = ReviewPage {
+            thread,
+            files,
+            notes: Vec::new(),
+            focus: (0, None),
+        };
         page.focus = page.rows().first().copied().unwrap_or((0, None));
         page
     }
@@ -192,8 +223,17 @@ impl ReviewPage {
         let rows = self.rows();
         if !rows.contains(&self.focus) {
             let f = f.min(self.files.len().saturating_sub(1));
-            let h = h.and_then(|h| self.files.get(f).filter(|file| !file.hunks.is_empty()).map(|file| h.min(file.hunks.len() - 1)));
-            self.focus = if rows.contains(&(f, h)) { (f, h) } else { rows.first().copied().unwrap_or((0, None)) };
+            let h = h.and_then(|h| {
+                self.files
+                    .get(f)
+                    .filter(|file| !file.hunks.is_empty())
+                    .map(|file| h.min(file.hunks.len() - 1))
+            });
+            self.focus = if rows.contains(&(f, h)) {
+                (f, h)
+            } else {
+                rows.first().copied().unwrap_or((0, None))
+            };
         }
     }
 
@@ -203,10 +243,31 @@ impl ReviewPage {
         let (f, h) = self.focus;
         match key {
             Key::Char('q') | Key::Escape => return Action::Close,
-            Key::Char('j') | Key::Down => self.focus = rows.get(at + 1).copied().unwrap_or(self.focus),
-            Key::Char('k') | Key::Up => self.focus = rows.get(at.saturating_sub(1)).copied().unwrap_or(self.focus),
-            Key::Char('J') => self.focus = rows[at..].iter().skip(1).find(|r| r.1.is_none()).copied().unwrap_or(self.focus),
-            Key::Char('K') => self.focus = rows[..at].iter().rev().find(|r| r.1.is_none()).copied().unwrap_or(self.focus),
+            Key::Char('j') | Key::Down => {
+                self.focus = rows.get(at + 1).copied().unwrap_or(self.focus)
+            }
+            Key::Char('k') | Key::Up => {
+                self.focus = rows
+                    .get(at.saturating_sub(1))
+                    .copied()
+                    .unwrap_or(self.focus)
+            }
+            Key::Char('J') => {
+                self.focus = rows[at..]
+                    .iter()
+                    .skip(1)
+                    .find(|r| r.1.is_none())
+                    .copied()
+                    .unwrap_or(self.focus)
+            }
+            Key::Char('K') => {
+                self.focus = rows[..at]
+                    .iter()
+                    .rev()
+                    .find(|r| r.1.is_none())
+                    .copied()
+                    .unwrap_or(self.focus)
+            }
             Key::Char('g') => self.focus = rows.first().copied().unwrap_or(self.focus),
             Key::Char('G') => self.focus = rows.last().copied().unwrap_or(self.focus),
             Key::Char('r') => return Action::Refresh,
@@ -227,7 +288,9 @@ impl ReviewPage {
             Key::Char('A') if !self.files.is_empty() => return Action::KeepFile(f),
             Key::Char('X') if !self.files.is_empty() => return Action::RejectFile(f),
             Key::Enter if !self.files.is_empty() => {
-                let line = h.and_then(|h| self.files[f].hunks.get(h)).map_or(1, |hunk| hunk.new.start + 1);
+                let line = h
+                    .and_then(|h| self.files[f].hunks.get(h))
+                    .map_or(1, |hunk| hunk.new.start + 1);
                 return Action::Open { file: f, line };
             }
             _ => {}
@@ -240,7 +303,12 @@ pub fn layout(page: &ReviewPage, title: &str, cols: usize) -> Page {
     let (left, width) = frame(cols, 120);
     let mut g = Grid::new();
     g.put(1, left, "Agent changes", Role::Title);
-    g.put(1, left + 15, &fit(&format!("· {title}"), width.saturating_sub(15)), Role::Muted);
+    g.put(
+        1,
+        left + 15,
+        &fit(&format!("· {title}"), width.saturating_sub(15)),
+        Role::Muted,
+    );
     g.rule(2, left..left + width);
     let mut y = 4;
     if page.files.is_empty() {
@@ -251,12 +319,34 @@ pub fn layout(page: &ReviewPage, title: &str, cols: usize) -> Page {
         if page.focus == (f, None) {
             g.focus(y, left..left + width);
         }
-        let x = g.put(y, left, &fit(&file.name, width.saturating_sub(24)), Role::Title);
-        g.put(y, x + 2, &file.summary(), if matches!(file.baseline, Baseline::Unknown) { Role::Warn } else { Role::Muted });
+        let x = g.put(
+            y,
+            left,
+            &fit(&file.name, width.saturating_sub(24)),
+            Role::Title,
+        );
+        g.put(
+            y,
+            x + 2,
+            &file.summary(),
+            if matches!(file.baseline, Baseline::Unknown) {
+                Role::Warn
+            } else {
+                Role::Muted
+            },
+        );
         y += 1;
         // A finding on a line no hunk has: under the file.
-        let in_hunk = |line: u64| file.hunks.iter().any(|h| line >= h.new.start as u64 && line <= h.new.end as u64 + 1);
-        for note in page.notes.iter().filter(|n| n.about(file) && !n.line.is_some_and(in_hunk)) {
+        let in_hunk = |line: u64| {
+            file.hunks
+                .iter()
+                .any(|h| line >= h.new.start as u64 && line <= h.new.end as u64 + 1)
+        };
+        for note in page
+            .notes
+            .iter()
+            .filter(|n| n.about(file) && !n.line.is_some_and(in_hunk))
+        {
             g.put(y, left + 2, &fit(&note.text(), width - 2), Role::Warn);
             y += 1;
         }
@@ -264,28 +354,55 @@ pub fn layout(page: &ReviewPage, title: &str, cols: usize) -> Page {
             if page.focus == (f, Some(h)) {
                 g.focus(y, left..left + width);
             }
-            g.put(y, left + 2, &format!("@@ line {}", hunk.new.start + 1), Role::Accent);
+            g.put(
+                y,
+                left + 2,
+                &format!("@@ line {}", hunk.new.start + 1),
+                Role::Accent,
+            );
             y += 1;
             for line in hunk.removed.iter().take(40) {
                 g.put(y, left + 2, &fit(&format!("-{line}"), width - 2), Role::Bad);
                 y += 1;
             }
             for line in hunk.added.iter().take(40) {
-                g.put(y, left + 2, &fit(&format!("+{line}"), width - 2), Role::Good);
+                g.put(
+                    y,
+                    left + 2,
+                    &fit(&format!("+{line}"), width - 2),
+                    Role::Good,
+                );
                 y += 1;
             }
             if hunk.removed.len() > 40 || hunk.added.len() > 40 {
                 g.put(y, left + 2, "… (Enter opens the file)", Role::Muted);
                 y += 1;
             }
-            for note in page.notes.iter().filter(|n| n.about(file) && n.line.is_some_and(|l| l >= hunk.new.start as u64 && l <= hunk.new.end as u64 + 1)) {
+            for note in page.notes.iter().filter(|n| {
+                n.about(file)
+                    && n.line
+                        .is_some_and(|l| l >= hunk.new.start as u64 && l <= hunk.new.end as u64 + 1)
+            }) {
                 g.put(y, left + 4, &fit(&note.text(), width - 4), Role::Warn);
                 y += 1;
             }
         }
         y += 1;
     }
-    g.keys(left, width, &[("j k", "move"), ("J K", "files"), ("a", "keep"), ("x", "reject"), ("A X", "the whole file"), ("Enter", "open"), ("r", "refresh"), ("q", "close")]);
+    g.keys(
+        left,
+        width,
+        &[
+            ("j k", "move"),
+            ("J K", "files"),
+            ("a", "keep"),
+            ("x", "reject"),
+            ("A X", "the whole file"),
+            ("Enter", "open"),
+            ("r", "refresh"),
+            ("q", "close"),
+        ],
+    );
     g.finish()
 }
 
@@ -299,7 +416,10 @@ mod tests {
         let new = "a\nB\nc\nd\nE\nf\n";
         let hs = hunks(old, new);
         assert_eq!(hs.len(), 2);
-        assert_eq!((hs[0].removed.clone(), hs[0].added.clone()), (vec!["b".to_string()], vec!["B".to_string()]));
+        assert_eq!(
+            (hs[0].removed.clone(), hs[0].added.clone()),
+            (vec!["b".to_string()], vec!["B".to_string()])
+        );
         // Keeping the first: the baseline has B, the second is still a change.
         let kept = keep(old, new, 0).unwrap();
         assert_eq!(kept, "a\nB\nc\nd\ne\n");
@@ -318,56 +438,120 @@ mod tests {
         assert_eq!(reject(old, new, 0).unwrap(), old, "byte for byte");
         assert_eq!(keep(old, new, 0).unwrap(), new);
         // Only the endings changed: nothing to review.
-        let endings = ReviewFile::new("/p/e.py".into(), "e.py".into(), Baseline::Text(old.into()), Some(old.replace("\r\n", "\n")));
+        let endings = ReviewFile::new(
+            "/p/e.py".into(),
+            "e.py".into(),
+            Baseline::Text(old.into()),
+            Some(old.replace("\r\n", "\n")),
+        );
         assert!(!endings.changed());
     }
 
     #[test]
     fn findings_show_beside_the_hunk_theyre_about() {
-        let file = ReviewFile::new("/p/src/a.rs".into(), "src/a.rs".into(), Baseline::Text("a\nb\nc\n".into()), Some("a\nB\nc\n".into()));
+        let file = ReviewFile::new(
+            "/p/src/a.rs".into(),
+            "src/a.rs".into(),
+            Baseline::Text("a\nb\nc\n".into()),
+            Some("a\nB\nc\n".into()),
+        );
         let mut page = ReviewPage::new(fenix_acp::hub::ThreadId("t".into()), vec![file]);
         page.notes = vec![
-            Note { path: "src/a.rs".into(), line: Some(2), severity: Some("error".into()), message: "off by one".into() },
-            Note { path: "src/a.rs".into(), line: Some(30), severity: None, message: "elsewhere".into() },
-            Note { path: "other.rs".into(), line: Some(2), severity: None, message: "not this file".into() },
+            Note {
+                path: "src/a.rs".into(),
+                line: Some(2),
+                severity: Some("error".into()),
+                message: "off by one".into(),
+            },
+            Note {
+                path: "src/a.rs".into(),
+                line: Some(30),
+                severity: None,
+                message: "elsewhere".into(),
+            },
+            Note {
+                path: "other.rs".into(),
+                line: Some(2),
+                severity: None,
+                message: "not this file".into(),
+            },
         ];
         let text = layout(&page, "t", 100).all_text();
         let hunk = text.find("@@ line 2").unwrap();
         let note = text.find("⚑ error: off by one").expect("the finding");
         assert!(note > hunk, "under its hunk: {text}");
-        assert!(text.find("⚑ elsewhere").unwrap() < hunk, "a line no hunk has: under the file");
+        assert!(
+            text.find("⚑ elsewhere").unwrap() < hunk,
+            "a line no hunk has: under the file"
+        );
         assert!(!text.contains("not this file"));
     }
 
     #[test]
     fn a_new_file_and_a_deleted_one_are_one_hunk_each() {
-        let made = ReviewFile::new("/p/n.rs".into(), "n.rs".into(), Baseline::Absent, Some("x\ny\n".into()));
+        let made = ReviewFile::new(
+            "/p/n.rs".into(),
+            "n.rs".into(),
+            Baseline::Absent,
+            Some("x\ny\n".into()),
+        );
         assert!(made.changed() && made.summary().starts_with("new"));
-        let gone = ReviewFile::new("/p/g.rs".into(), "g.rs".into(), Baseline::Text("x\n".into()), None);
+        let gone = ReviewFile::new(
+            "/p/g.rs".into(),
+            "g.rs".into(),
+            Baseline::Text("x\n".into()),
+            None,
+        );
         assert_eq!(gone.summary(), "deleted");
-        let same = ReviewFile::new("/p/s.rs".into(), "s.rs".into(), Baseline::Text("x\n".into()), Some("x\n".into()));
+        let same = ReviewFile::new(
+            "/p/s.rs".into(),
+            "s.rs".into(),
+            Baseline::Text("x\n".into()),
+            Some("x\n".into()),
+        );
         assert!(!same.changed());
     }
 
     #[test]
     fn keys_walk_rows_and_ask_for_hunks_and_files() {
         let files = vec![
-            ReviewFile::new("/p/a.rs".into(), "a.rs".into(), Baseline::Text("1\n2\n3\n".into()), Some("1\nTWO\n3\n".into())),
-            ReviewFile::new("/p/b.rs".into(), "b.rs".into(), Baseline::Absent, Some("new\n".into())),
+            ReviewFile::new(
+                "/p/a.rs".into(),
+                "a.rs".into(),
+                Baseline::Text("1\n2\n3\n".into()),
+                Some("1\nTWO\n3\n".into()),
+            ),
+            ReviewFile::new(
+                "/p/b.rs".into(),
+                "b.rs".into(),
+                Baseline::Absent,
+                Some("new\n".into()),
+            ),
         ];
         let mut page = ReviewPage::new(fenix_acp::hub::ThreadId("t".into()), files);
         assert_eq!(page.focus, (0, None));
         page.key(Key::Char('j'));
-        assert_eq!(page.key(Key::Char('x')), Action::Reject { file: 0, hunk: 0 });
+        assert_eq!(
+            page.key(Key::Char('x')),
+            Action::Reject { file: 0, hunk: 0 }
+        );
         assert_eq!(page.key(Key::Char('a')), Action::Keep { file: 0, hunk: 0 });
         assert_eq!(page.key(Key::Enter), Action::Open { file: 0, line: 2 });
         page.key(Key::Char('J'));
         assert_eq!(page.focus, (1, None));
         assert_eq!(page.key(Key::Char('X')), Action::RejectFile(1));
         let text = layout(&page, "Fix it", 100).all_text();
-        assert!(text.contains("a.rs  +1 −1") && text.contains("-2") && text.contains("+TWO") && text.contains("b.rs  new · +1"), "{text}");
+        assert!(
+            text.contains("a.rs  +1 −1")
+                && text.contains("-2")
+                && text.contains("+TWO")
+                && text.contains("b.rs  new · +1"),
+            "{text}"
+        );
         page.set_files(vec![]);
         assert_eq!(page.focus, (0, None));
-        assert!(layout(&page, "Fix it", 100).all_text().contains("Nothing to review"));
+        assert!(layout(&page, "Fix it", 100)
+            .all_text()
+            .contains("Nothing to review"));
     }
 }

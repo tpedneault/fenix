@@ -49,7 +49,10 @@ impl Snapshot {
     /// `None` if the clock has moved backwards since (a reboot with a
     /// bad RTC, a VM restored from a saved state).
     pub fn label(&self) -> String {
-        self.original.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "unnamed buffer".to_string())
+        self.original
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "unnamed buffer".to_string())
     }
 
     pub fn age(&self) -> Option<std::time::Duration> {
@@ -112,17 +115,29 @@ pub fn write(dir: &Path, original: &Path, contents: &str) -> io::Result<PathBuf>
 pub fn unnamed_path(dir: &Path) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    dir.join(format!("unnamed-{}-{now}-{}.fenixsave", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    dir.join(format!(
+        "unnamed-{}-{now}-{}.fenixsave",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 pub fn write_unnamed(target: &Path, contents: &str) -> io::Result<()> {
-    if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     write_snapshot(target, None, contents)
 }
 
 fn write_snapshot(target: &Path, original: Option<&Path>, contents: &str) -> io::Result<()> {
-    let seconds = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let seconds = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let path_text = original.map(|p| p.to_string_lossy()).unwrap_or_default();
 
     let mut body = String::with_capacity(contents.len() + 128);
@@ -159,7 +174,9 @@ pub fn discard(dir: &Path, original: &Path) -> io::Result<()> {
 /// one corrupt file must not hide every other recoverable buffer, which
 /// is precisely the moment they matter.
 pub fn list(dir: &Path) -> Vec<Snapshot> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut out: Vec<Snapshot> = entries
         .flatten()
         .map(|entry| entry.path())
@@ -187,7 +204,10 @@ pub fn prune(dir: &Path, max_age: std::time::Duration) -> usize {
 }
 
 fn parse(raw: &str, snapshot: PathBuf) -> Option<Snapshot> {
-    let rest = raw.strip_prefix(MAGIC).or_else(|| raw.strip_prefix("fenix-recovery 1"))?.strip_prefix('\n')?;
+    let rest = raw
+        .strip_prefix(MAGIC)
+        .or_else(|| raw.strip_prefix("fenix-recovery 1"))?
+        .strip_prefix('\n')?;
     let (saved_line, rest) = rest.split_once('\n')?;
     let seconds: u64 = saved_line.strip_prefix("saved ")?.parse().ok()?;
     let (path_line, rest) = rest.split_once('\n')?;
@@ -201,7 +221,11 @@ fn parse(raw: &str, snapshot: PathBuf) -> Option<Snapshot> {
     let (original, rest) = rest.split_at(path_len);
     let contents = rest.strip_prefix('\n')?;
     Some(Snapshot {
-        original: if original.is_empty() { None } else { Some(PathBuf::from(original)) },
+        original: if original.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(original))
+        },
         saved_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
         contents: contents.to_string(),
         snapshot,
@@ -216,7 +240,8 @@ mod tests {
 
     impl TempDir {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("fenix-recovery-test-{name}-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("fenix-recovery-test-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             TempDir(dir)
@@ -272,7 +297,8 @@ mod tests {
         // The buffer is arbitrary text, and nothing stops it starting
         // with something that looks like this format's own header.
         let dir = TempDir::new("tricky_contents");
-        let contents = "fenix-recovery 1\nsaved 12345\npath 4\nfake\nreal contents\n\nwith a blank line\n";
+        let contents =
+            "fenix-recovery 1\nsaved 12345\npath 4\nfake\nreal contents\n\nwith a blank line\n";
 
         write(dir.path(), Path::new("/tmp/a.txt"), contents).unwrap();
 
@@ -351,8 +377,16 @@ mod tests {
         // buffer -- which is exactly the moment they matter.
         let dir = TempDir::new("corrupt");
         write(dir.path(), Path::new("/a/good.txt"), "good\n").unwrap();
-        std::fs::write(dir.path().join("garbage.fenixsave"), "not a snapshot at all").unwrap();
-        std::fs::write(dir.path().join("truncated.fenixsave"), "fenix-recovery 1\nsaved 1\n").unwrap();
+        std::fs::write(
+            dir.path().join("garbage.fenixsave"),
+            "not a snapshot at all",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("truncated.fenixsave"),
+            "fenix-recovery 1\nsaved 1\n",
+        )
+        .unwrap();
 
         let found = list(dir.path());
         assert_eq!(found.len(), 1);
@@ -362,8 +396,15 @@ mod tests {
     #[test]
     fn a_snapshot_from_a_future_format_version_is_skipped() {
         let dir = TempDir::new("future");
-        std::fs::write(dir.path().join("newer.fenixsave"), "fenix-recovery 9\nsaved 1\npath 6\n/a.txt\nbody").unwrap();
-        assert!(list(dir.path()).is_empty(), "better to offer nothing than to hand back the wrong bytes");
+        std::fs::write(
+            dir.path().join("newer.fenixsave"),
+            "fenix-recovery 9\nsaved 1\npath 6\n/a.txt\nbody",
+        )
+        .unwrap();
+        assert!(
+            list(dir.path()).is_empty(),
+            "better to offer nothing than to hand back the wrong bytes"
+        );
     }
 
     #[test]
@@ -409,14 +450,24 @@ mod tests {
             let path = format!("/x/{name}.txt");
             std::fs::write(
                 dir.path().join(format!("{name}.fenixsave")),
-                format!("{MAGIC}\nsaved {seconds}\npath {}\n{path}\n{name}\n", path.len()),
+                format!(
+                    "{MAGIC}\nsaved {seconds}\npath {}\n{path}\n{name}\n",
+                    path.len()
+                ),
             )
             .unwrap();
         }
 
-        let names: Vec<String> = list(dir.path()).into_iter().map(|s| s.contents.trim().to_string()).collect();
+        let names: Vec<String> = list(dir.path())
+            .into_iter()
+            .map(|s| s.contents.trim().to_string())
+            .collect();
 
-        assert_eq!(names, vec!["b", "c", "a"], "newest first, so the listing leads with what you just lost");
+        assert_eq!(
+            names,
+            vec!["b", "c", "a"],
+            "newest first, so the listing leads with what you just lost"
+        );
     }
 
     #[test]
@@ -426,7 +477,11 @@ mod tests {
         let dir = TempDir::new("atomic");
         let original = Path::new("/a/file.txt");
         write(dir.path(), original, "complete\n").unwrap();
-        std::fs::write(snapshot_path(dir.path(), original).with_extension("fenixsave.part"), "half writ").unwrap();
+        std::fs::write(
+            snapshot_path(dir.path(), original).with_extension("fenixsave.part"),
+            "half writ",
+        )
+        .unwrap();
 
         let found = list(dir.path());
         assert_eq!(found.len(), 1, "the partial file isn't a snapshot");

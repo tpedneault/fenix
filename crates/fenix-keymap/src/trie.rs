@@ -13,7 +13,12 @@ struct Node<A> {
 
 impl<A> Node<A> {
     fn new() -> Self {
-        Self { leaf: None, label: None, section: None, children: HashMap::new() }
+        Self {
+            leaf: None,
+            label: None,
+            section: None,
+            children: HashMap::new(),
+        }
     }
 
     /// Whether anything is bound at or under it. A node made only to name
@@ -25,7 +30,10 @@ impl<A> Node<A> {
 
     /// Actions reachable under this node.
     fn leaves(&self) -> usize {
-        self.children.values().map(|c| usize::from(c.leaf.is_some()) + c.leaves()).sum()
+        self.children
+            .values()
+            .map(|c| usize::from(c.leaf.is_some()) + c.leaves())
+            .sum()
     }
 }
 
@@ -97,7 +105,11 @@ impl<A> KeyTrie<A> {
     }
 
     pub fn matcher(&self) -> Matcher<'_, A> {
-        Matcher { trie: self, current: None, path: Vec::new() }
+        Matcher {
+            trie: self,
+            current: None,
+            path: Vec::new(),
+        }
     }
 
     /// The action `seq` reaches exactly, if it's bound.
@@ -125,7 +137,11 @@ impl<A> KeyTrie<A> {
     /// that runs through another action's key isn't listed, since the
     /// shorter one always wins (see `KeyTrie`). In no particular order.
     pub fn bindings(&self) -> Vec<(Vec<KeyPress>, &A)> {
-        fn walk<'t, A>(node: &'t Node<A>, path: &mut Vec<KeyPress>, out: &mut Vec<(Vec<KeyPress>, &'t A)>) {
+        fn walk<'t, A>(
+            node: &'t Node<A>,
+            path: &mut Vec<KeyPress>,
+            out: &mut Vec<(Vec<KeyPress>, &'t A)>,
+        ) {
             for (key, child) in &node.children {
                 path.push(*key);
                 match &child.leaf {
@@ -180,7 +196,13 @@ impl<'a, A> Matcher<'a, A> {
             .filter(|(_, n)| n.offers())
             .map(|(k, n)| {
                 let group = n.leaf.is_none() && !n.children.is_empty();
-                Hint { key: *k, label: n.label.unwrap_or(""), group, count: if group { n.leaves() } else { 0 }, section: n.section }
+                Hint {
+                    key: *k,
+                    label: n.label.unwrap_or(""),
+                    group,
+                    count: if group { n.leaves() } else { 0 },
+                    section: n.section,
+                }
             })
             .collect()
     }
@@ -239,7 +261,11 @@ impl<'a, A> Matcher<'a, A> {
 }
 
 fn children_labels<A>(node: &Node<A>) -> Vec<(KeyPress, &'static str)> {
-    node.children.iter().filter(|(_, n)| n.offers()).map(|(k, n)| (*k, n.label.unwrap_or(""))).collect()
+    node.children
+        .iter()
+        .filter(|(_, n)| n.offers())
+        .map(|(k, n)| (*k, n.label.unwrap_or("")))
+        .collect()
 }
 
 #[cfg(test)]
@@ -249,14 +275,22 @@ mod tests {
     #[test]
     fn bindings_list_every_reachable_action() {
         let mut trie = KeyTrie::new();
-        let (d, w, x) = (KeyPress::char('d'), KeyPress::char('w'), KeyPress::char('x'));
+        let (d, w, x) = (
+            KeyPress::char('d'),
+            KeyPress::char('w'),
+            KeyPress::char('x'),
+        );
         trie.insert(&[d, d], "delete line", 1);
         trie.insert(&[d, w], "delete word", 2);
         trie.insert(&[x], "delete char", 3);
         // Shadowed by `x`, which matches first.
         trie.insert(&[x, x], "never", 4);
         trie.label_group(&[d], "delete");
-        let mut found: Vec<(Vec<KeyPress>, i32)> = trie.bindings().into_iter().map(|(seq, a)| (seq, *a)).collect();
+        let mut found: Vec<(Vec<KeyPress>, i32)> = trie
+            .bindings()
+            .into_iter()
+            .map(|(seq, a)| (seq, *a))
+            .collect();
         found.sort_by_key(|(_, a)| *a);
         assert_eq!(found, vec![(vec![d, d], 1), (vec![d, w], 2), (vec![x], 3)]);
     }
@@ -266,11 +300,17 @@ mod tests {
     #[test]
     fn a_section_alone_offers_nothing_until_its_key_is_bound() {
         let mut trie = KeyTrie::new();
-        let (g, s, p) = (KeyPress::char('g'), KeyPress::char('s'), KeyPress::char('P'));
+        let (g, s, p) = (
+            KeyPress::char('g'),
+            KeyPress::char('s'),
+            KeyPress::char('P'),
+        );
         trie.insert(&[g, s], "status", 1);
         trie.set_section(&[g, p], "Branch & remote");
         let mut m = trie.matcher();
-        let Step::Pending(next) = m.feed(g) else { panic!("g is a group") };
+        let Step::Pending(next) = m.feed(g) else {
+            panic!("g is a group")
+        };
         assert_eq!(next, vec![(s, "status")], "no P yet");
         assert_eq!(m.pending_hints().len(), 1);
         assert!(matches!(m.feed(p), Step::NoMatch));
@@ -278,7 +318,12 @@ mod tests {
         let mut m = trie.matcher();
         m.feed(g);
         let hints = m.pending_hints();
-        assert!(hints.iter().any(|h| h.key == p && h.section == Some("Branch & remote") && h.label == "open a pull request"), "{hints:?}");
+        assert!(
+            hints.iter().any(|h| h.key == p
+                && h.section == Some("Branch & remote")
+                && h.label == "open a pull request"),
+            "{hints:?}"
+        );
     }
 
     #[test]
@@ -296,7 +341,11 @@ mod tests {
     #[test]
     fn multi_key_sequence_is_pending_then_matches() {
         let mut trie = KeyTrie::new();
-        trie.insert(&[KeyPress::char('d'), KeyPress::char('d')], "delete line", 42);
+        trie.insert(
+            &[KeyPress::char('d'), KeyPress::char('d')],
+            "delete line",
+            42,
+        );
         let mut m = trie.matcher();
         match m.feed(KeyPress::char('d')) {
             Step::Pending(children) => assert_eq!(children.len(), 1),
@@ -313,7 +362,11 @@ mod tests {
     #[test]
     fn unknown_key_resets_to_root() {
         let mut trie = KeyTrie::new();
-        trie.insert(&[KeyPress::char('d'), KeyPress::char('d')], "delete line", 42);
+        trie.insert(
+            &[KeyPress::char('d'), KeyPress::char('d')],
+            "delete line",
+            42,
+        );
         let mut m = trie.matcher();
         m.feed(KeyPress::char('d'));
         match m.feed(KeyPress::char('z')) {
@@ -334,13 +387,19 @@ mod tests {
         let mut trie = KeyTrie::new();
         trie.label_group(&[KeyPress::char(' '), KeyPress::char('f')], "files");
         trie.insert(
-            &[KeyPress::char(' '), KeyPress::char('f'), KeyPress::char('s')],
+            &[
+                KeyPress::char(' '),
+                KeyPress::char('f'),
+                KeyPress::char('s'),
+            ],
             "save",
             "file.save",
         );
         let mut m = trie.matcher();
         m.feed(KeyPress::char(' '));
-        let Step::Pending(children) = m.feed(KeyPress::char('f')) else { panic!("expected Pending") };
+        let Step::Pending(children) = m.feed(KeyPress::char('f')) else {
+            panic!("expected Pending")
+        };
         assert_eq!(children, vec![(KeyPress::char('s'), "save")]);
     }
 
@@ -357,11 +416,18 @@ mod tests {
         m.feed(spc);
         let mut hints = m.pending_hints();
         hints.sort_by_key(|h| h.label);
-        assert_eq!((hints[0].label, hints[0].group, hints[0].count), ("git", true, 2));
+        assert_eq!(
+            (hints[0].label, hints[0].group, hints[0].count),
+            ("git", true, 2)
+        );
         assert_eq!((hints[1].label, hints[1].group), ("settings", false));
         m.feed(KeyPress::char('g'));
         assert_eq!(m.path(), &[spc, KeyPress::char('g')]);
-        let fetch = m.pending_hints().into_iter().find(|h| h.label == "fetch").unwrap();
+        let fetch = m
+            .pending_hints()
+            .into_iter()
+            .find(|h| h.label == "fetch")
+            .unwrap();
         assert_eq!(fetch.section, Some("Remote"));
     }
 
@@ -375,7 +441,10 @@ mod tests {
         m.feed(KeyPress::char('g'));
         assert!(m.back());
         assert_eq!(m.path(), &[spc]);
-        assert!(m.pending_hints().iter().any(|h| h.key == KeyPress::char('g')));
+        assert!(m
+            .pending_hints()
+            .iter()
+            .any(|h| h.key == KeyPress::char('g')));
         assert!(!m.back());
         assert!(!m.is_pending());
     }
@@ -383,7 +452,11 @@ mod tests {
     #[test]
     fn cancel_resets_mid_sequence() {
         let mut trie = KeyTrie::new();
-        trie.insert(&[KeyPress::char('d'), KeyPress::char('d')], "delete line", 42);
+        trie.insert(
+            &[KeyPress::char('d'), KeyPress::char('d')],
+            "delete line",
+            42,
+        );
         let mut m = trie.matcher();
         m.feed(KeyPress::char('d'));
         m.cancel();
@@ -429,7 +502,11 @@ mod get_remove {
     #[test]
     fn a_binding_is_found_and_taken_out() {
         let mut t = KeyTrie::new();
-        let seq = [KeyPress::char(' '), KeyPress::char('f'), KeyPress::char('s')];
+        let seq = [
+            KeyPress::char(' '),
+            KeyPress::char('f'),
+            KeyPress::char('s'),
+        ];
         t.insert(&seq, "save", "file.save");
         assert_eq!(t.get(&seq), Some(&"file.save"));
         assert_eq!(t.get(&seq[..2]), None, "a group runs nothing");

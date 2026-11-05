@@ -9,7 +9,10 @@
 //! agent sent. Fenix's own entries -- the prompts you sent, notices,
 //! permission cards -- sit in the same list, in order.
 
-use crate::protocol::{AvailableCommand, ConfigOption, ContentBlock, Location, Modes, PermissionOption, PlanEntry, SessionUpdate, ToolCallFields, ToolContent, ToolKind, ToolStatus};
+use crate::protocol::{
+    AvailableCommand, ConfigOption, ContentBlock, Location, Modes, PermissionOption, PlanEntry,
+    SessionUpdate, ToolCallFields, ToolContent, ToolKind, ToolStatus,
+};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -35,18 +38,31 @@ pub struct Usage {
 impl Usage {
     /// How full the context is, 0-100.
     pub fn percent(&self) -> u8 {
-        self.used.saturating_mul(100).checked_div(self.size).map_or(0, |p| p.min(100) as u8)
+        self.used
+            .saturating_mul(100)
+            .checked_div(self.size)
+            .map_or(0, |p| p.min(100) as u8)
     }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Entry {
     /// A prompt: sent, or `queued` until the agent can take it.
-    User { blocks: Vec<ContentBlock>, queued: bool },
+    User {
+        blocks: Vec<ContentBlock>,
+        queued: bool,
+    },
     /// The agent's answer. Text chunks are joined into `text`; anything
     /// else it sends (a picture) goes in `extra`.
-    Agent { text: String, extra: Vec<ContentBlock>, message_id: Option<String> },
-    Thought { text: String, message_id: Option<String> },
+    Agent {
+        text: String,
+        extra: Vec<ContentBlock>,
+        message_id: Option<String>,
+    },
+    Thought {
+        text: String,
+        message_id: Option<String>,
+    },
     Tool(ToolCall),
     Permission(PermissionCard),
     /// The agent asks the user for something: a form, or a link to open.
@@ -67,7 +83,10 @@ pub struct ElicitationCard {
 pub enum ElicitationState {
     Pending,
     /// Answered: `accept`, `decline` or `cancel`, and what was sent.
-    Answered { action: String, summary: String },
+    Answered {
+        action: String,
+        summary: String,
+    },
     /// A link's flow, which the agent says is done (`elicitation/complete`).
     Completed,
     Withdrawn,
@@ -87,7 +106,16 @@ pub struct ToolCall {
 
 impl ToolCall {
     fn new(id: &str) -> Self {
-        Self { id: id.to_string(), title: String::new(), kind: ToolKind::Other, status: ToolStatus::Pending, content: Vec::new(), locations: Vec::new(), raw_input: None, raw_output: None }
+        Self {
+            id: id.to_string(),
+            title: String::new(),
+            kind: ToolKind::Other,
+            status: ToolStatus::Pending,
+            content: Vec::new(),
+            locations: Vec::new(),
+            raw_input: None,
+            raw_output: None,
+        }
     }
 
     /// The command line it runs, from its raw input as agents give it:
@@ -98,11 +126,18 @@ impl ToolCall {
         let words = |v: &Value| -> Option<String> {
             match v {
                 Value::String(s) => Some(s.clone()),
-                Value::Array(a) => Some(a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")),
+                Value::Array(a) => Some(
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                ),
                 _ => None,
             }
         };
-        let mut line = ["command", "cmd", "commandLine", "command_line"].iter().find_map(|k| input.get(*k).and_then(words))?;
+        let mut line = ["command", "cmd", "commandLine", "command_line"]
+            .iter()
+            .find_map(|k| input.get(*k).and_then(words))?;
         if let Some(args) = input.get("args").and_then(words).filter(|a| !a.is_empty()) {
             line.push(' ');
             line.push_str(&args);
@@ -223,13 +258,26 @@ impl Thread {
                     other => other,
                 };
                 match self.entries.last_mut() {
-                    Some(Entry::User { blocks, queued: false }) => push_block(blocks, content),
-                    _ => self.entries.push(Entry::User { blocks: vec![content], queued: false }),
+                    Some(Entry::User {
+                        blocks,
+                        queued: false,
+                    }) => push_block(blocks, content),
+                    _ => self.entries.push(Entry::User {
+                        blocks: vec![content],
+                        queued: false,
+                    }),
                 }
             }
-            SessionUpdate::AgentMessage { content, message_id } => {
+            SessionUpdate::AgentMessage {
+                content,
+                message_id,
+            } => {
                 let joined = match self.entries.last_mut() {
-                    Some(Entry::Agent { text, extra, message_id: last }) if same_message(last, &message_id) => {
+                    Some(Entry::Agent {
+                        text,
+                        extra,
+                        message_id: last,
+                    }) if same_message(last, &message_id) => {
                         match content.clone() {
                             ContentBlock::Text(t) => text.push_str(&t),
                             other => extra.push(other),
@@ -246,22 +294,37 @@ impl Thread {
                         ContentBlock::Text(t) => (t, Vec::new()),
                         other => (String::new(), vec![other]),
                     };
-                    self.entries.push(Entry::Agent { text, extra, message_id });
+                    self.entries.push(Entry::Agent {
+                        text,
+                        extra,
+                        message_id,
+                    });
                 }
             }
-            SessionUpdate::AgentThought { content, message_id } => {
+            SessionUpdate::AgentThought {
+                content,
+                message_id,
+            } => {
                 let piece = content.as_text();
                 match self.entries.last_mut() {
-                    Some(Entry::Thought { text, message_id: last }) if same_message(last, &message_id) => {
+                    Some(Entry::Thought {
+                        text,
+                        message_id: last,
+                    }) if same_message(last, &message_id) => {
                         text.push_str(&piece);
                         if last.is_none() {
                             *last = message_id;
                         }
                     }
-                    _ => self.entries.push(Entry::Thought { text: piece, message_id }),
+                    _ => self.entries.push(Entry::Thought {
+                        text: piece,
+                        message_id,
+                    }),
                 }
             }
-            SessionUpdate::ToolCall(fields) | SessionUpdate::ToolCallUpdate(fields) => self.upsert_tool(&fields),
+            SessionUpdate::ToolCall(fields) | SessionUpdate::ToolCallUpdate(fields) => {
+                self.upsert_tool(&fields)
+            }
             SessionUpdate::Plan(entries) => self.plan = entries,
             SessionUpdate::AvailableCommands(commands) => self.commands = commands,
             SessionUpdate::CurrentMode(id) => {
@@ -273,7 +336,9 @@ impl Thread {
                 // option.
                 for option in &mut self.config_options {
                     if option.category.as_deref() == Some("mode") {
-                        if let crate::protocol::ConfigValue::Select { current, .. } = &mut option.value {
+                        if let crate::protocol::ConfigValue::Select { current, .. } =
+                            &mut option.value
+                        {
                             *current = id.clone();
                         }
                     }
@@ -285,14 +350,21 @@ impl Thread {
                     self.title = title.filter(|t| !t.trim().is_empty());
                 }
             }
-            SessionUpdate::Usage { used, size, cost } => self.usage = Some(Usage { used, size, cost }),
+            SessionUpdate::Usage { used, size, cost } => {
+                self.usage = Some(Usage { used, size, cost })
+            }
             SessionUpdate::Unknown(_) => return,
         }
         self.revision += 1;
     }
 
     fn upsert_tool(&mut self, fields: &ToolCallFields) {
-        if let Some(Entry::Tool(call)) = self.entries.iter_mut().rev().find(|e| matches!(e, Entry::Tool(c) if c.id == fields.id)) {
+        if let Some(Entry::Tool(call)) = self
+            .entries
+            .iter_mut()
+            .rev()
+            .find(|e| matches!(e, Entry::Tool(c) if c.id == fields.id))
+        {
             call.merge(fields);
             return;
         }
@@ -315,7 +387,11 @@ impl Thread {
     /// the agent sends modes only that way.
     pub fn set_config_options(&mut self, options: Vec<ConfigOption>) {
         if let Some(modes) = &mut self.modes {
-            if let Some(crate::protocol::ConfigValue::Select { current, .. }) = options.iter().find(|o| o.category.as_deref() == Some("mode")).map(|o| &o.value) {
+            if let Some(crate::protocol::ConfigValue::Select { current, .. }) = options
+                .iter()
+                .find(|o| o.category.as_deref() == Some("mode"))
+                .map(|o| &o.value)
+            {
                 modes.current = current.clone();
             }
         }
@@ -336,7 +412,11 @@ impl Thread {
 
     /// The oldest queued prompt is going out now.
     pub fn mark_sent(&mut self) {
-        if let Some(Entry::User { queued, .. }) = self.entries.iter_mut().find(|e| matches!(e, Entry::User { queued: true, .. })) {
+        if let Some(Entry::User { queued, .. }) = self
+            .entries
+            .iter_mut()
+            .find(|e| matches!(e, Entry::User { queued: true, .. }))
+        {
             *queued = false;
             self.revision += 1;
         }
@@ -344,7 +424,11 @@ impl Thread {
 
     /// Takes the newest queued prompt back out of the thread.
     pub fn unqueue_last(&mut self) -> bool {
-        if let Some(i) = self.entries.iter().rposition(|e| matches!(e, Entry::User { queued: true, .. })) {
+        if let Some(i) = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::User { queued: true, .. }))
+        {
             self.entries.remove(i);
             self.revision += 1;
             return true;
@@ -353,7 +437,10 @@ impl Thread {
     }
 
     pub fn notice(&mut self, kind: NoticeKind, text: impl Into<String>) {
-        self.entries.push(Entry::Notice(Notice { kind, text: text.into() }));
+        self.entries.push(Entry::Notice(Notice {
+            kind,
+            text: text.into(),
+        }));
         self.revision += 1;
     }
 
@@ -391,7 +478,12 @@ impl Thread {
     pub fn complete_elicitation(&mut self, elicitation_id: &str) -> bool {
         for entry in self.entries.iter_mut().rev() {
             if let Entry::Elicitation(card) = entry {
-                if card.request.elicitation_id.as_deref() == Some(elicitation_id) && matches!(card.state, ElicitationState::Pending | ElicitationState::Answered { .. }) {
+                if card.request.elicitation_id.as_deref() == Some(elicitation_id)
+                    && matches!(
+                        card.state,
+                        ElicitationState::Pending | ElicitationState::Answered { .. }
+                    )
+                {
                     card.state = ElicitationState::Completed;
                     self.revision += 1;
                     return true;
@@ -456,30 +548,67 @@ impl Thread {
     }
 
     pub fn pending_permissions(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e, Entry::Permission(c) if c.state == PermissionState::Pending) || matches!(e, Entry::Elicitation(c) if c.state == ElicitationState::Pending)).count()
+        self.entries
+            .iter()
+            .filter(|e| {
+                matches!(e, Entry::Permission(c) if c.state == PermissionState::Pending)
+                    || matches!(e, Entry::Elicitation(c) if c.state == ElicitationState::Pending)
+            })
+            .count()
     }
 
     /// The first prompt's text, cut short: a title until the agent sends one.
     pub fn fallback_title(&self) -> Option<String> {
         self.entries.iter().find_map(|e| match e {
             Entry::User { blocks, .. } => {
-                let text: String = blocks.iter().filter_map(|b| if let ContentBlock::Text(t) = b { Some(t.as_str()) } else { None }).collect::<Vec<_>>().join(" ");
+                let text: String = blocks
+                    .iter()
+                    .filter_map(|b| {
+                        if let ContentBlock::Text(t) = b {
+                            Some(t.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let line = text.lines().find(|l| !l.trim().is_empty())?.trim();
-                Some(if line.chars().count() > 60 { format!("{}…", line.chars().take(59).collect::<String>()) } else { line.to_string() })
+                Some(if line.chars().count() > 60 {
+                    format!("{}…", line.chars().take(59).collect::<String>())
+                } else {
+                    line.to_string()
+                })
             }
             _ => None,
         })
     }
 
     pub fn display_title(&self) -> String {
-        self.title.clone().or_else(|| self.fallback_title()).unwrap_or_else(|| "New thread".to_string())
+        self.title
+            .clone()
+            .or_else(|| self.fallback_title())
+            .unwrap_or_else(|| "New thread".to_string())
     }
 
     /// What the agent said since the last prompt that went: its answer to
     /// it, as text.
     pub fn last_answer(&self) -> String {
-        let from = self.entries.iter().rposition(|e| matches!(e, Entry::User { queued: false, .. })).map_or(0, |i| i + 1);
-        let parts: Vec<&str> = self.entries[from..].iter().filter_map(|e| if let Entry::Agent { text, .. } = e { Some(text.trim()) } else { None }).filter(|t| !t.is_empty()).collect();
+        let from = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::User { queued: false, .. }))
+            .map_or(0, |i| i + 1);
+        let parts: Vec<&str> = self.entries[from..]
+            .iter()
+            .filter_map(|e| {
+                if let Entry::Agent { text, .. } = e {
+                    Some(text.trim())
+                } else {
+                    None
+                }
+            })
+            .filter(|t| !t.is_empty())
+            .collect();
         parts.join("\n\n")
     }
 
@@ -489,9 +618,18 @@ impl Thread {
         let mut out = String::new();
         for entry in &self.entries {
             match entry {
-                Entry::User { blocks, queued: false } => {
+                Entry::User {
+                    blocks,
+                    queued: false,
+                } => {
                     out.push_str("## You\n\n");
-                    out.push_str(&blocks.iter().map(ContentBlock::as_text).collect::<Vec<_>>().join("\n"));
+                    out.push_str(
+                        &blocks
+                            .iter()
+                            .map(ContentBlock::as_text)
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    );
                     out.push_str("\n\n");
                 }
                 Entry::Agent { text, .. } if !text.is_empty() => {
@@ -526,7 +664,8 @@ fn same_message(last: &Option<String>, new: &Option<String>) -> bool {
 }
 
 fn push_block(blocks: &mut Vec<ContentBlock>, block: ContentBlock) {
-    if let (Some(ContentBlock::Text(last)), ContentBlock::Text(more)) = (blocks.last_mut(), &block) {
+    if let (Some(ContentBlock::Text(last)), ContentBlock::Text(more)) = (blocks.last_mut(), &block)
+    {
         last.push_str(more);
         return;
     }
@@ -564,7 +703,9 @@ mod tests {
         );
         assert_eq!(t.entries.len(), 3);
         assert!(matches!(&t.entries[0], Entry::Thought { text, .. } if text == "Let me think."));
-        assert!(matches!(&t.entries[1], Entry::Agent { text, message_id: Some(id), .. } if text == "Hello" && id == "m2"));
+        assert!(
+            matches!(&t.entries[1], Entry::Agent { text, message_id: Some(id), .. } if text == "Hello" && id == "m2")
+        );
         assert!(matches!(&t.entries[2], Entry::Agent { text, .. } if text == "Again"));
     }
 
@@ -583,7 +724,12 @@ mod tests {
         assert_eq!(t.last_answer(), "Reading.\n\nDone.");
         t.push_user(vec![ContentBlock::text("more")], false);
         assert_eq!(t.last_answer(), "", "nothing yet to the new prompt");
-        feed(&mut t, &[json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Sure." } })]);
+        feed(
+            &mut t,
+            &[
+                json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": "Sure." } }),
+            ],
+        );
         assert_eq!(t.last_answer(), "Sure.");
     }
 
@@ -600,7 +746,10 @@ mod tests {
             ],
         );
         let call = t.tool("t1").unwrap();
-        assert_eq!((call.title.as_str(), call.kind, call.status), ("Edit a.rs", ToolKind::Edit, ToolStatus::Completed));
+        assert_eq!(
+            (call.title.as_str(), call.kind, call.status),
+            ("Edit a.rs", ToolKind::Edit, ToolStatus::Completed)
+        );
         assert_eq!(call.content.len(), 1, "an update without content leaves it");
         assert_eq!(t.tool("ghost").unwrap().title, "Tool");
         assert_eq!(t.entries.len(), 2);
@@ -610,18 +759,30 @@ mod tests {
     fn user_chunks_are_taken_only_from_a_replay() {
         let mut t = Thread::default();
         t.apply(up(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": as_note("for the agent") } })), true);
-        assert!(t.entries.is_empty(), "Fenix's note isn't a message of yours");
+        assert!(
+            t.entries.is_empty(),
+            "Fenix's note isn't a message of yours"
+        );
         t.apply(up(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "echo" } })), false);
         assert!(t.entries.is_empty());
         t.apply(up(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "fix " } })), true);
         t.apply(up(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "it" } })), true);
-        assert_eq!(t.entries, vec![Entry::User { blocks: vec![ContentBlock::text("fix it")], queued: false }]);
+        assert_eq!(
+            t.entries,
+            vec![Entry::User {
+                blocks: vec![ContentBlock::text("fix it")],
+                queued: false
+            }]
+        );
     }
 
     #[test]
     fn plan_commands_mode_options_usage_and_title_are_the_latest() {
         let mut t = Thread::default();
-        t.set_modes(Some(Modes { current: "default".into(), available: vec![] }));
+        t.set_modes(Some(Modes {
+            current: "default".into(),
+            available: vec![],
+        }));
         feed(
             &mut t,
             &[
@@ -638,7 +799,9 @@ mod tests {
         assert_eq!(t.plan[0].status, PlanStatus::Completed);
         assert_eq!(t.commands[1].hint.as_deref(), Some("a branch"));
         assert_eq!(t.modes.as_ref().unwrap().current, "acceptEdits");
-        assert!(matches!(&t.config_options[0].value, ConfigValue::Select { current, .. } if current == "acceptEdits"));
+        assert!(
+            matches!(&t.config_options[0].value, ConfigValue::Select { current, .. } if current == "acceptEdits")
+        );
         assert_eq!(t.usage.as_ref().unwrap().percent(), 25);
         assert_eq!(t.display_title(), "Fix the parser");
         assert!(t.entries.is_empty(), "none of those are entries");
@@ -652,18 +815,47 @@ mod tests {
         t.push_user(vec![ContentBlock::text("three")], true);
         t.mark_sent();
         assert!(t.unqueue_last());
-        assert_eq!(t.entries, vec![Entry::User { blocks: vec![ContentBlock::text("one")], queued: false }, Entry::User { blocks: vec![ContentBlock::text("two")], queued: true }]);
+        assert_eq!(
+            t.entries,
+            vec![
+                Entry::User {
+                    blocks: vec![ContentBlock::text("one")],
+                    queued: false
+                },
+                Entry::User {
+                    blocks: vec![ContentBlock::text("two")],
+                    queued: true
+                }
+            ]
+        );
         assert_eq!(t.display_title(), "one");
     }
 
     #[test]
     fn withdrawing_leaves_answered_cards_alone_and_running_tools_fail() {
         let mut t = Thread::default();
-        let card = |key: &str| PermissionCard { key: key.into(), tool_call: ToolCallFields { id: "t".into(), ..Default::default() }, options: vec![PermissionOption { id: "y".into(), name: "Yes".into(), kind: PermissionKind::AllowOnce }], state: PermissionState::Pending };
+        let card = |key: &str| PermissionCard {
+            key: key.into(),
+            tool_call: ToolCallFields {
+                id: "t".into(),
+                ..Default::default()
+            },
+            options: vec![PermissionOption {
+                id: "y".into(),
+                name: "Yes".into(),
+                kind: PermissionKind::AllowOnce,
+            }],
+            state: PermissionState::Pending,
+        };
         t.push_permission(card("1"));
         t.push_permission(card("2"));
         t.set_permission_state("1", PermissionState::Answered("Yes".into()));
-        feed(&mut t, &[json!({ "sessionUpdate": "tool_call", "toolCallId": "t", "title": "Run", "status": "in_progress" })]);
+        feed(
+            &mut t,
+            &[
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "t", "title": "Run", "status": "in_progress" }),
+            ],
+        );
         assert_eq!(t.withdraw_permissions(), vec!["2".to_string()]);
         t.end_running_tools();
         assert_eq!(t.tool("t").unwrap().status, ToolStatus::Failed);

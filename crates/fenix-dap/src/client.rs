@@ -21,9 +21,15 @@ use debug_adapter_protocol::{ProtocolMessage, ProtocolMessageContent};
 /// established for the identical role there.
 #[derive(Debug, Clone)]
 pub enum DapEvent {
-    Response { request_seq: i64, result: Result<SuccessResponse, ErrorResponse> },
+    Response {
+        request_seq: i64,
+        result: Result<SuccessResponse, ErrorResponse>,
+    },
     Event(Event),
-    ReverseRequest { seq: i64, request: Request },
+    ReverseRequest {
+        seq: i64,
+        request: Request,
+    },
     /// A well-framed, valid-JSON message that failed to decode into
     /// `ProtocolMessage`'s strict, spec-only `Event`/`Request`/
     /// `Response` shapes -- kept as the raw decoded JSON rather than
@@ -42,7 +48,11 @@ pub enum DapEvent {
     /// A reverse request the `debug-adapter-protocol` crate doesn't model
     /// -- js-debug's `startDebugging`, newer than it -- answered with
     /// `DapClient::respond_json`.
-    RawRequest { seq: i64, command: String, arguments: serde_json::Value },
+    RawRequest {
+        seq: i64,
+        command: String,
+        arguments: serde_json::Value,
+    },
     /// The connection ended -- a read error, the adapter closing its
     /// stdout, or a message that wasn't even valid JSON at all (as
     /// opposed to valid JSON in an unrecognized shape, which is
@@ -100,7 +110,9 @@ const LISTENING: Duration = Duration::from_secs(10);
 /// A port on 127.0.0.1 nothing listens on now: one for an adapter told to
 /// listen there (`--port ${port}`).
 pub fn free_port() -> std::io::Result<u16> {
-    Ok(std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port())
+    Ok(std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port())
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -111,7 +123,11 @@ impl DapClient {
     /// Spawns `command` (with `args`), working directory `cwd`. Uses
     /// `fenix_rpc::resolve_command` first -- see its own doc comment for
     /// why a bare command name needs that on Windows.
-    pub fn spawn(command: &str, args: &[String], cwd: &std::path::Path) -> std::io::Result<(DapClient, Receiver<DapEvent>)> {
+    pub fn spawn(
+        command: &str,
+        args: &[String],
+        cwd: &std::path::Path,
+    ) -> std::io::Result<(DapClient, Receiver<DapEvent>)> {
         let mut process = Command::new(fenix_rpc::resolve_command(command));
         process.args(args).current_dir(cwd);
         Self::spawn_command(process)
@@ -127,7 +143,11 @@ impl DapClient {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             process.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let mut child = process
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
 
         let stdin = child.stdin.take().expect("stdin was requested as piped");
         let stdout = child.stdout.take().expect("stdout was requested as piped");
@@ -144,7 +164,10 @@ impl DapClient {
         // adapter that quits did.
         let stderr_thread = thread::spawn(move || drain_keeping_tail(stderr, &said));
 
-        let outbox = Outbox { out: Some(Box::new(stdin)), waiting: Vec::new() };
+        let outbox = Outbox {
+            out: Some(Box::new(stdin)),
+            waiting: Vec::new(),
+        };
         Ok((
             DapClient {
                 outbox: Arc::new(Mutex::new(outbox)),
@@ -164,7 +187,10 @@ impl DapClient {
     /// as it listens there, within 10 seconds. Without a process, an
     /// adapter already listening. Returns at once: what's sent meanwhile
     /// waits, and a connection that can't be made is a `Disconnected`.
-    pub fn connect_command(process: Option<Command>, port: u16) -> std::io::Result<(DapClient, Receiver<DapEvent>)> {
+    pub fn connect_command(
+        process: Option<Command>,
+        port: u16,
+    ) -> std::io::Result<(DapClient, Receiver<DapEvent>)> {
         let mut threads = Vec::new();
         let child = match process {
             Some(mut process) => {
@@ -173,19 +199,35 @@ impl DapClient {
                     use std::os::windows::process::CommandExt;
                     process.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
                 }
-                let mut child = process.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+                let mut child = process
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()?;
                 // Its output isn't the protocol here: drained, as stderr
                 // is for one on stdio.
-                let (stdout, stderr) = (child.stdout.take().expect("piped"), child.stderr.take().expect("piped"));
+                let (stdout, stderr) = (
+                    child.stdout.take().expect("piped"),
+                    child.stderr.take().expect("piped"),
+                );
                 threads.push(thread::spawn(move || drain_and_discard(stdout)));
                 threads.push(thread::spawn(move || drain_and_discard(stderr)));
                 Some(Arc::new(Mutex::new(child)))
             }
             None => None,
         };
-        let (outbox, socket, closing) = (Arc::new(Mutex::new(Outbox::default())), Arc::new(Mutex::new(None::<TcpStream>)), Arc::new(AtomicBool::new(false)));
+        let (outbox, socket, closing) = (
+            Arc::new(Mutex::new(Outbox::default())),
+            Arc::new(Mutex::new(None::<TcpStream>)),
+            Arc::new(AtomicBool::new(false)),
+        );
         let (tx, rx) = mpsc::channel();
-        let (out2, socket2, closing2, child2) = (outbox.clone(), socket.clone(), closing.clone(), child.clone());
+        let (out2, socket2, closing2, child2) = (
+            outbox.clone(),
+            socket.clone(),
+            closing.clone(),
+            child.clone(),
+        );
         threads.push(thread::spawn(move || {
             let address = SocketAddr::from(([127, 0, 0, 1], port));
             let started = Instant::now();
@@ -193,23 +235,33 @@ impl DapClient {
                 if closing2.load(Ordering::Relaxed) {
                     return;
                 }
-                if let Ok(stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500)) {
+                if let Ok(stream) = TcpStream::connect_timeout(&address, Duration::from_millis(500))
+                {
                     break stream;
                 }
-                let exited = child2.as_ref().and_then(|c| lock(c).try_wait().ok().flatten());
+                let exited = child2
+                    .as_ref()
+                    .and_then(|c| lock(c).try_wait().ok().flatten());
                 if let Some(status) = exited {
-                    let _ = tx.send(DapEvent::Disconnected(format!("the adapter ended ({status}) before it listened on {address}")));
+                    let _ = tx.send(DapEvent::Disconnected(format!(
+                        "the adapter ended ({status}) before it listened on {address}"
+                    )));
                     return;
                 }
                 if started.elapsed() > LISTENING {
-                    let _ = tx.send(DapEvent::Disconnected(format!("nothing listened on {address} within {} seconds", LISTENING.as_secs())));
+                    let _ = tx.send(DapEvent::Disconnected(format!(
+                        "nothing listened on {address} within {} seconds",
+                        LISTENING.as_secs()
+                    )));
                     return;
                 }
                 thread::sleep(Duration::from_millis(100));
             };
             let _ = stream.set_nodelay(true);
             let (Ok(writing), Ok(kept)) = (stream.try_clone(), stream.try_clone()) else {
-                let _ = tx.send(DapEvent::Disconnected("couldn't share the connection".into()));
+                let _ = tx.send(DapEvent::Disconnected(
+                    "couldn't share the connection".into(),
+                ));
                 return;
             };
             *lock(&socket2) = Some(kept);
@@ -226,7 +278,17 @@ impl DapClient {
             }
             read_loop(stream, tx, None);
         }));
-        Ok((DapClient { outbox, next_seq: AtomicU64::new(1), child, socket, closing, threads }, rx))
+        Ok((
+            DapClient {
+                outbox,
+                next_seq: AtomicU64::new(1),
+                child,
+                socket,
+                closing,
+                threads,
+            },
+            rx,
+        ))
     }
 
     /// Sends a request, returning the `seq` its response will be tagged
@@ -236,7 +298,10 @@ impl DapClient {
     /// as `LspClient::request`.
     pub fn request(&self, req: Request) -> std::io::Result<i64> {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.write(&ProtocolMessage { seq, content: ProtocolMessageContent::Request(req) })?;
+        self.write(&ProtocolMessage {
+            seq,
+            content: ProtocolMessageContent::Request(req),
+        })?;
         Ok(seq as i64)
     }
 
@@ -244,7 +309,10 @@ impl DapClient {
     /// the program (a process id, a port). The `debug-adapter-protocol`
     /// crate's `AttachRequestArguments` has no room for those, so this
     /// one is written as JSON; its response decodes as any other.
-    pub fn attach(&self, arguments: serde_json::Map<String, serde_json::Value>) -> std::io::Result<i64> {
+    pub fn attach(
+        &self,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> std::io::Result<i64> {
         self.request_json("attach", serde_json::Value::Object(arguments))
     }
 
@@ -252,26 +320,47 @@ impl DapClient {
     /// crate's types have no room for -- `initialize`'s
     /// `supportsStartDebuggingRequest`, `attach`'s process id. Its response
     /// decodes as any other.
-    pub fn request_json(&self, command: &str, arguments: serde_json::Value) -> std::io::Result<i64> {
+    pub fn request_json(
+        &self,
+        command: &str,
+        arguments: serde_json::Value,
+    ) -> std::io::Result<i64> {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let body = serde_json::to_vec(&request_message(seq, command, arguments)).expect("JSON always serializes");
+        let body = serde_json::to_vec(&request_message(seq, command, arguments))
+            .expect("JSON always serializes");
         lock(&self.outbox).send(&body)?;
         Ok(seq as i64)
     }
 
     /// Answers a reverse request the crate doesn't model
     /// (`DapEvent::RawRequest`): with a body, or an error's message.
-    pub fn respond_json(&self, request_seq: i64, command: &str, result: Result<serde_json::Value, String>) -> std::io::Result<()> {
+    pub fn respond_json(
+        &self,
+        request_seq: i64,
+        command: &str,
+        result: Result<serde_json::Value, String>,
+    ) -> std::io::Result<()> {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        let body = serde_json::to_vec(&response_message(seq, request_seq, command, result)).expect("JSON always serializes");
+        let body = serde_json::to_vec(&response_message(seq, request_seq, command, result))
+            .expect("JSON always serializes");
         lock(&self.outbox).send(&body)
     }
 
     /// Answers an adapter-initiated reverse request (a
     /// `DapEvent::ReverseRequest`) -- e.g. `runInTerminal`.
-    pub fn respond(&self, request_seq: i64, result: Result<SuccessResponse, ErrorResponse>) -> std::io::Result<()> {
+    pub fn respond(
+        &self,
+        request_seq: i64,
+        result: Result<SuccessResponse, ErrorResponse>,
+    ) -> std::io::Result<()> {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
-        self.write(&ProtocolMessage { seq, content: ProtocolMessageContent::Response(Response { request_seq: request_seq as u64, result }) })
+        self.write(&ProtocolMessage {
+            seq,
+            content: ProtocolMessageContent::Response(Response {
+                request_seq: request_seq as u64,
+                result,
+            }),
+        })
     }
 
     fn write(&self, message: &ProtocolMessage) -> std::io::Result<()> {
@@ -301,7 +390,9 @@ impl DapClient {
         let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
         let disconnect = ProtocolMessage {
             seq,
-            content: ProtocolMessageContent::Request(Request::Disconnect(DisconnectRequestArguments::builder().build())),
+            content: ProtocolMessageContent::Request(Request::Disconnect(
+                DisconnectRequestArguments::builder().build(),
+            )),
         };
         let _ = self.write(&disconnect);
         self.closing.store(true, Ordering::Relaxed);
@@ -348,10 +439,19 @@ fn request_message(seq: u64, command: &str, arguments: serde_json::Value) -> ser
 }
 
 /// The answer to reverse request `request_seq`.
-fn response_message(seq: u64, request_seq: i64, command: &str, result: Result<serde_json::Value, String>) -> serde_json::Value {
+fn response_message(
+    seq: u64,
+    request_seq: i64,
+    command: &str,
+    result: Result<serde_json::Value, String>,
+) -> serde_json::Value {
     match result {
-        Ok(body) => serde_json::json!({ "seq": seq, "type": "response", "request_seq": request_seq, "success": true, "command": command, "body": body }),
-        Err(message) => serde_json::json!({ "seq": seq, "type": "response", "request_seq": request_seq, "success": false, "command": command, "message": message }),
+        Ok(body) => {
+            serde_json::json!({ "seq": seq, "type": "response", "request_seq": request_seq, "success": true, "command": command, "body": body })
+        }
+        Err(message) => {
+            serde_json::json!({ "seq": seq, "type": "response", "request_seq": request_seq, "success": false, "command": command, "message": message })
+        }
     }
 }
 
@@ -367,7 +467,10 @@ fn closed_stdout(said: Option<&StderrTail>) -> String {
     let last = said.and_then(|said| {
         thread::sleep(Duration::from_millis(200));
         let text = String::from_utf8_lossy(&lock(said)).into_owned();
-        text.lines().map(str::trim).rfind(|l| !l.is_empty()).map(str::to_string)
+        text.lines()
+            .map(str::trim)
+            .rfind(|l| !l.is_empty())
+            .map(str::to_string)
     });
     match last {
         Some(line) => format!("adapter closed its stdout: {line}"),
@@ -411,15 +514,22 @@ fn decode_message(bytes: &[u8]) -> DapEvent {
     // A refusal always goes through `lenient`, which reads its reason
     // from wherever the adapter put it; anything else is read as it came
     // first.
-    let refusal = serde_json::from_slice::<serde_json::Value>(bytes).ok().filter(|raw| raw["type"] == "response" && raw["success"] == false);
+    let refusal = serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .filter(|raw| raw["type"] == "response" && raw["success"] == false);
     if refusal.is_none() {
         if let Ok(msg) = serde_json::from_slice::<ProtocolMessage>(bytes) {
             return classify(msg);
         }
     }
-    let mut raw = match refusal.map(Ok).unwrap_or_else(|| serde_json::from_slice::<serde_json::Value>(bytes)) {
+    let mut raw = match refusal
+        .map(Ok)
+        .unwrap_or_else(|| serde_json::from_slice::<serde_json::Value>(bytes))
+    {
         Ok(raw) => raw,
-        Err(err) => return DapEvent::Disconnected(format!("malformed message from adapter: {err}")),
+        Err(err) => {
+            return DapEvent::Disconnected(format!("malformed message from adapter: {err}"))
+        }
     };
     // What the crate's types are stricter about than adapters are, put
     // right and read again (`lenient`).
@@ -432,7 +542,10 @@ fn decode_message(bytes: &[u8]) -> DapEvent {
         return DapEvent::RawRequest {
             seq: raw["seq"].as_i64().unwrap_or_default(),
             command: raw["command"].as_str().unwrap_or_default().to_string(),
-            arguments: raw.get("arguments").cloned().unwrap_or(serde_json::Value::Null),
+            arguments: raw
+                .get("arguments")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         };
     }
     DapEvent::Unknown(raw)
@@ -451,7 +564,11 @@ fn decode_message(bytes: &[u8]) -> DapEvent {
 fn lenient(raw: &mut serde_json::Value) -> bool {
     let mut changed = false;
     for key in ["seq", "request_seq"] {
-        if let Some(number) = raw.get(key).and_then(|v| v.as_str()).and_then(|s| s.trim().parse::<u64>().ok()) {
+        if let Some(number) = raw
+            .get(key)
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
             raw[key] = serde_json::json!(number);
             changed = true;
         }
@@ -462,7 +579,14 @@ fn lenient(raw: &mut serde_json::Value) -> bool {
     if raw["type"] == "response" && raw["success"] == false {
         let detail = refusal_detail(raw);
         if let Some(message) = raw.as_object_mut() {
-            let keep = ["seq", "type", "request_seq", "success", "command", "message"];
+            let keep = [
+                "seq",
+                "type",
+                "request_seq",
+                "success",
+                "command",
+                "message",
+            ];
             message.retain(|k, _| keep.contains(&k.as_str()));
             message.insert("body".into(), serde_json::json!({}));
             if !message.get("command").is_some_and(|c| c.is_string()) {
@@ -470,15 +594,24 @@ fn lenient(raw: &mut serde_json::Value) -> bool {
             }
             if let Some(detail) = detail {
                 message.insert("message".into(), serde_json::json!(detail));
-            } else if !message.get("message").is_some_and(|m| m.as_str().is_some_and(|m| !m.trim().is_empty())) {
-                message.insert("message".into(), serde_json::json!("the adapter refused, without saying why"));
+            } else if !message
+                .get("message")
+                .is_some_and(|m| m.as_str().is_some_and(|m| !m.trim().is_empty()))
+            {
+                message.insert(
+                    "message".into(),
+                    serde_json::json!("the adapter refused, without saying why"),
+                );
             }
             changed = true;
         }
     }
     // A success with an empty body where the crate has none (js-debug's
     // `launch`, `configurationDone`).
-    if raw["type"] == "response" && raw["success"] == true && raw["body"].as_object().is_some_and(|o| o.is_empty()) {
+    if raw["type"] == "response"
+        && raw["success"] == true
+        && raw["body"].as_object().is_some_and(|o| o.is_empty())
+    {
         if let Some(message) = raw.as_object_mut() {
             message.remove("body");
             changed = true;
@@ -506,9 +639,16 @@ fn lenient(raw: &mut serde_json::Value) -> bool {
             changed |= message.remove("body").is_some();
         }
     }
-    if let Some(frames) = raw.pointer_mut("/body/stackFrames").and_then(|f| f.as_array_mut()) {
+    if let Some(frames) = raw
+        .pointer_mut("/body/stackFrames")
+        .and_then(|f| f.as_array_mut())
+    {
         for frame in frames.iter_mut().filter_map(|f| f.as_object_mut()) {
-            if frame.get("presentationHint").and_then(|h| h.as_str()).is_some_and(|h| !matches!(h, "normal" | "label" | "subtle")) {
+            if frame
+                .get("presentationHint")
+                .and_then(|h| h.as_str())
+                .is_some_and(|h| !matches!(h, "normal" | "label" | "subtle"))
+            {
                 frame.remove("presentationHint");
                 changed = true;
             }
@@ -526,7 +666,10 @@ fn refusal_detail(raw: &serde_json::Value) -> Option<String> {
     let mut text = error["format"].as_str()?.to_string();
     if let Some(variables) = error["variables"].as_object() {
         for (name, value) in variables {
-            let value = value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string());
+            let value = value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string());
             text = text.replace(&format!("{{{name}}}"), &value);
         }
     }
@@ -535,7 +678,11 @@ fn refusal_detail(raw: &serde_json::Value) -> Option<String> {
         return None;
     }
     match raw["message"].as_str().map(str::trim) {
-        Some(message) if !message.is_empty() && !text.contains(message) && !message.contains(&text) => Some(format!("{message}: {text}")),
+        Some(message)
+            if !message.is_empty() && !text.contains(message) && !message.contains(&text) =>
+        {
+            Some(format!("{message}: {text}"))
+        }
         Some(message) if message.contains(&text) => Some(message.to_string()),
         _ => Some(text),
     }
@@ -543,9 +690,15 @@ fn refusal_detail(raw: &serde_json::Value) -> Option<String> {
 
 fn classify(msg: ProtocolMessage) -> DapEvent {
     match msg.content {
-        ProtocolMessageContent::Response(r) => DapEvent::Response { request_seq: r.request_seq as i64, result: r.result },
+        ProtocolMessageContent::Response(r) => DapEvent::Response {
+            request_seq: r.request_seq as i64,
+            result: r.result,
+        },
         ProtocolMessageContent::Event(e) => DapEvent::Event(e),
-        ProtocolMessageContent::Request(req) => DapEvent::ReverseRequest { seq: msg.seq as i64, request: req },
+        ProtocolMessageContent::Request(req) => DapEvent::ReverseRequest {
+            seq: msg.seq as i64,
+            request: req,
+        },
     }
 }
 
@@ -582,8 +735,17 @@ mod tests {
     use debug_adapter_protocol::responses::ErrorResponseBody;
     use debug_adapter_protocol::types::Capabilities;
 
-    fn response_msg(request_seq: u64, result: Result<SuccessResponse, ErrorResponse>) -> ProtocolMessage {
-        ProtocolMessage { seq: 99, content: ProtocolMessageContent::Response(Response { request_seq, result }) }
+    fn response_msg(
+        request_seq: u64,
+        result: Result<SuccessResponse, ErrorResponse>,
+    ) -> ProtocolMessage {
+        ProtocolMessage {
+            seq: 99,
+            content: ProtocolMessageContent::Response(Response {
+                request_seq,
+                result,
+            }),
+        }
     }
 
     #[test]
@@ -591,35 +753,71 @@ mod tests {
         let mut arguments = serde_json::Map::new();
         arguments.insert("processId".into(), serde_json::json!(42));
         let message = request_message(7, "attach", serde_json::Value::Object(arguments));
-        assert_eq!(message, serde_json::json!({ "seq": 7, "type": "request", "command": "attach", "arguments": { "processId": 42 } }));
-        let answer = br#"{"seq":3,"type":"response","request_seq":7,"success":true,"command":"attach"}"#;
-        assert!(matches!(decode_message(answer), DapEvent::Response { request_seq: 7, result: Ok(SuccessResponse::Attach) }), "{:?}", decode_message(answer));
+        assert_eq!(
+            message,
+            serde_json::json!({ "seq": 7, "type": "request", "command": "attach", "arguments": { "processId": 42 } })
+        );
+        let answer =
+            br#"{"seq":3,"type":"response","request_seq":7,"success":true,"command":"attach"}"#;
+        assert!(
+            matches!(
+                decode_message(answer),
+                DapEvent::Response {
+                    request_seq: 7,
+                    result: Ok(SuccessResponse::Attach)
+                }
+            ),
+            "{:?}",
+            decode_message(answer)
+        );
     }
 
     #[test]
     fn a_response_message_classifies_as_a_response_event() {
-        let event = classify(response_msg(1, Ok(SuccessResponse::Initialize(Capabilities::default()))));
-        assert!(matches!(event, DapEvent::Response { request_seq: 1, result: Ok(SuccessResponse::Initialize(_)) }));
+        let event = classify(response_msg(
+            1,
+            Ok(SuccessResponse::Initialize(Capabilities::default())),
+        ));
+        assert!(matches!(
+            event,
+            DapEvent::Response {
+                request_seq: 1,
+                result: Ok(SuccessResponse::Initialize(_))
+            }
+        ));
     }
 
     #[test]
     fn a_failed_response_carries_err_result() {
-        let err = ErrorResponse::builder().command("launch".to_string()).message("boom".to_string()).body(ErrorResponseBody::new(None)).build();
+        let err = ErrorResponse::builder()
+            .command("launch".to_string())
+            .message("boom".to_string())
+            .body(ErrorResponseBody::new(None))
+            .build();
         let event = classify(response_msg(2, Err(err.clone())));
         assert!(matches!(event, DapEvent::Response { request_seq: 2, result: Err(e) } if e == err));
     }
 
     #[test]
     fn an_event_message_classifies_as_an_event() {
-        let msg = ProtocolMessage { seq: 5, content: ProtocolMessageContent::Event(Event::Initialized) };
+        let msg = ProtocolMessage {
+            seq: 5,
+            content: ProtocolMessageContent::Event(Event::Initialized),
+        };
         let event = classify(msg);
         assert!(matches!(event, DapEvent::Event(Event::Initialized)));
     }
 
     #[test]
     fn an_output_event_carries_its_body() {
-        let body = OutputEventBody::builder().output("hello\n".to_string()).category(OutputCategory::Stdout).build();
-        let msg = ProtocolMessage { seq: 6, content: ProtocolMessageContent::Event(Event::Output(body.clone())) };
+        let body = OutputEventBody::builder()
+            .output("hello\n".to_string())
+            .category(OutputCategory::Stdout)
+            .build();
+        let msg = ProtocolMessage {
+            seq: 6,
+            content: ProtocolMessageContent::Event(Event::Output(body.clone())),
+        };
         let event = classify(msg);
         assert!(matches!(event, DapEvent::Event(Event::Output(b)) if b == body));
     }
@@ -628,16 +826,29 @@ mod tests {
     fn a_request_message_classifies_as_a_reverse_request() {
         let msg = ProtocolMessage {
             seq: 7,
-            content: ProtocolMessageContent::Request(Request::Initialize(InitializeRequestArguments::builder().adapter_id("test".to_string()).build())),
+            content: ProtocolMessageContent::Request(Request::Initialize(
+                InitializeRequestArguments::builder()
+                    .adapter_id("test".to_string())
+                    .build(),
+            )),
         };
         let event = classify(msg);
-        assert!(matches!(event, DapEvent::ReverseRequest { seq: 7, request: Request::Initialize(_) }));
+        assert!(matches!(
+            event,
+            DapEvent::ReverseRequest {
+                seq: 7,
+                request: Request::Initialize(_)
+            }
+        ));
     }
 
     #[test]
     fn a_well_known_event_decodes_normally() {
         let bytes = br#"{"seq":1,"type":"event","event":"initialized"}"#;
-        assert!(matches!(decode_message(bytes), DapEvent::Event(Event::Initialized)));
+        assert!(matches!(
+            decode_message(bytes),
+            DapEvent::Event(Event::Initialized)
+        ));
     }
 
     #[test]
@@ -668,7 +879,13 @@ mod tests {
         let _one = lock(&PORTS);
         let port = free_port().unwrap();
         let (client, rx) = DapClient::connect_command(None, port).unwrap();
-        let seq = client.request(Request::Initialize(InitializeRequestArguments::builder().adapter_id("fenix".to_string()).build())).unwrap();
+        let seq = client
+            .request(Request::Initialize(
+                InitializeRequestArguments::builder()
+                    .adapter_id("fenix".to_string())
+                    .build(),
+            ))
+            .unwrap();
         // It starts listening a moment later.
         std::thread::sleep(Duration::from_millis(300));
         let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
@@ -682,13 +899,22 @@ mod tests {
             }
         };
         let asked: serde_json::Value = serde_json::from_slice(&first).unwrap();
-        assert_eq!((asked["command"].as_str(), asked["seq"].as_i64()), (Some("initialize"), Some(seq)));
-        let answer = format!(r#"{{"seq":1,"type":"response","request_seq":{seq},"success":true,"command":"initialize","body":{{}}}}"#);
+        assert_eq!(
+            (asked["command"].as_str(), asked["seq"].as_i64()),
+            (Some("initialize"), Some(seq))
+        );
+        let answer = format!(
+            r#"{{"seq":1,"type":"response","request_seq":{seq},"success":true,"command":"initialize","body":{{}}}}"#
+        );
         fenix_rpc::write_message(&mut &stream, answer.as_bytes()).unwrap();
-        assert!(matches!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), DapEvent::Response { request_seq, result: Ok(_) } if request_seq == seq));
+        assert!(
+            matches!(rx.recv_timeout(Duration::from_secs(10)).unwrap(), DapEvent::Response { request_seq, result: Ok(_) } if request_seq == seq)
+        );
         drop(client);
         // Its `disconnect`, then the connection's end.
-        let bye: serde_json::Value = serde_json::from_slice(&fenix_rpc::read_message(&mut reading).unwrap().unwrap()).unwrap();
+        let bye: serde_json::Value =
+            serde_json::from_slice(&fenix_rpc::read_message(&mut reading).unwrap().unwrap())
+                .unwrap();
         assert_eq!(bye["command"], "disconnect");
     }
 
@@ -698,7 +924,9 @@ mod tests {
         let mut never = Command::new(std::env::current_exe().unwrap());
         never.arg("--exact").arg("no-such-test");
         let (_client, rx) = DapClient::connect_command(Some(never), free_port().unwrap()).unwrap();
-        assert!(matches!(rx.recv_timeout(Duration::from_secs(15)).unwrap(), DapEvent::Disconnected(why) if why.contains("before it listened")));
+        assert!(
+            matches!(rx.recv_timeout(Duration::from_secs(15)).unwrap(), DapEvent::Disconnected(why) if why.contains("before it listened"))
+        );
     }
 
     /// js-debug's `startDebugging`, which the crate has no type
@@ -707,14 +935,24 @@ mod tests {
     fn a_reverse_request_the_crate_doesnt_know_is_raw_and_answered_so() {
         let bytes = br#"{"seq":9,"type":"request","command":"startDebugging","arguments":{"request":"launch","configuration":{"type":"pwa-node","__pendingTargetId":"t1"}}}"#;
         match decode_message(bytes) {
-            DapEvent::RawRequest { seq, command, arguments } => {
+            DapEvent::RawRequest {
+                seq,
+                command,
+                arguments,
+            } => {
                 assert_eq!((seq, command.as_str()), (9, "startDebugging"));
                 assert_eq!(arguments["configuration"]["__pendingTargetId"], "t1");
             }
             other => panic!("expected a raw request, got {other:?}"),
         }
-        assert_eq!(response_message(3, 9, "startDebugging", Ok(serde_json::json!({}))), serde_json::json!({ "seq": 3, "type": "response", "request_seq": 9, "success": true, "command": "startDebugging", "body": {} }));
-        assert_eq!(response_message(4, 9, "x", Err("no".into()))["success"], false);
+        assert_eq!(
+            response_message(3, 9, "startDebugging", Ok(serde_json::json!({}))),
+            serde_json::json!({ "seq": 3, "type": "response", "request_seq": 9, "success": true, "command": "startDebugging", "body": {} })
+        );
+        assert_eq!(
+            response_message(4, 9, "x", Err("no".into()))["success"],
+            false
+        );
     }
 
     /// `terminated` with no body, as the spec allows, is still
@@ -722,9 +960,18 @@ mod tests {
     /// `initialized`.
     #[test]
     fn an_event_with_its_body_left_out_or_empty_decodes() {
-        assert!(matches!(decode_message(br#"{"seq":4,"type":"event","event":"terminated"}"#), DapEvent::Event(Event::Terminated(_))));
-        assert!(matches!(decode_message(br#"{"seq":2,"type":"event","event":"initialized","body":{}}"#), DapEvent::Event(Event::Initialized)));
-        assert!(matches!(decode_message(br#"{"seq":2,"type":"event","event":"initialized","body":null}"#), DapEvent::Event(Event::Initialized)));
+        assert!(matches!(
+            decode_message(br#"{"seq":4,"type":"event","event":"terminated"}"#),
+            DapEvent::Event(Event::Terminated(_))
+        ));
+        assert!(matches!(
+            decode_message(br#"{"seq":2,"type":"event","event":"initialized","body":{}}"#),
+            DapEvent::Event(Event::Initialized)
+        ));
+        assert!(matches!(
+            decode_message(br#"{"seq":2,"type":"event","event":"initialized","body":null}"#),
+            DapEvent::Event(Event::Initialized)
+        ));
         assert!(matches!(decode_message(br#"{"seq":7,"type":"response","request_seq":2,"command":"launch","success":true,"body":{}}"#), DapEvent::Response { request_seq: 2, result: Ok(SuccessResponse::Launch) }));
     }
 
@@ -733,14 +980,19 @@ mod tests {
     fn a_stack_frame_hinted_as_a_source_is_still_read() {
         let bytes = br#"{"seq":162,"type":"response","request_seq":7,"command":"stackTrace","success":true,"body":{"stackFrames":[{"id":0,"name":"<anonymous>","line":2,"column":11,"presentationHint":"normal"},{"id":1,"name":"run","line":9,"column":1,"source":{"sourceReference":7,"presentationHint":"deemphasize","origin":"Skipped by skipFiles"},"presentationHint":"deemphasize"}],"totalFrames":2}}"#;
         match decode_message(bytes) {
-            DapEvent::Response { result: Ok(SuccessResponse::StackTrace(body)), .. } => assert_eq!(body.stack_frames.len(), 2),
+            DapEvent::Response {
+                result: Ok(SuccessResponse::StackTrace(body)),
+                ..
+            } => assert_eq!(body.stack_frames.len(), 2),
             other => panic!("expected a stack, got {other:?}"),
         }
     }
 
     fn refusal_text(bytes: &[u8]) -> String {
         match decode_message(bytes) {
-            DapEvent::Response { result: Err(err), .. } => err.message,
+            DapEvent::Response {
+                result: Err(err), ..
+            } => err.message,
             other => panic!("expected a refusal, got {other:?}"),
         }
     }
@@ -751,7 +1003,10 @@ mod tests {
     #[test]
     fn a_refusal_s_reason_is_read_from_its_error_body() {
         let lldb = br#"{"seq":5,"type":"response","request_seq":9,"command":"evaluate","success":false,"body":{"error":{"id":3,"format":"error: use of undeclared identifier '{name}'","variables":{"name":"fraction"},"showUser":true}}}"#;
-        assert_eq!(refusal_text(lldb), "error: use of undeclared identifier 'fraction'");
+        assert_eq!(
+            refusal_text(lldb),
+            "error: use of undeclared identifier 'fraction'"
+        );
         // A short `message` and a detailed body: both.
         let both = br#"{"seq":5,"type":"response","request_seq":9,"command":"evaluate","success":false,"message":"notStopped","body":{"error":{"id":1,"format":"the program is running"}}}"#;
         assert_eq!(refusal_text(both), "notStopped: the program is running");
@@ -763,7 +1018,10 @@ mod tests {
         assert_eq!(refusal_text(plain), "ZeroDivisionError");
         // Nothing anywhere.
         let none = br#"{"seq":5,"type":"response","request_seq":9,"command":"evaluate","success":false,"body":{}}"#;
-        assert_eq!(refusal_text(none), "the adapter refused, without saying why");
+        assert_eq!(
+            refusal_text(none),
+            "the adapter refused, without saying why"
+        );
     }
 
     /// netcoredbg 3.1.2 numbers its messages with strings (`"seq":"2"`):
@@ -771,12 +1029,36 @@ mod tests {
     #[test]
     fn netcoredbg_s_string_numbers_still_read() {
         let initialize = include_bytes!("../tests/adapters/netcoredbg-3.1.2-initialize.json");
-        assert!(matches!(decode_message(initialize), DapEvent::Response { request_seq: 1, result: Ok(SuccessResponse::Initialize(_)) }), "{:?}", decode_message(initialize));
+        assert!(
+            matches!(
+                decode_message(initialize),
+                DapEvent::Response {
+                    request_seq: 1,
+                    result: Ok(SuccessResponse::Initialize(_))
+                }
+            ),
+            "{:?}",
+            decode_message(initialize)
+        );
         let initialized = include_bytes!("../tests/adapters/netcoredbg-3.1.2-initialized.json");
-        assert!(matches!(decode_message(initialized), DapEvent::Event(Event::Initialized)), "{:?}", decode_message(initialized));
+        assert!(
+            matches!(
+                decode_message(initialized),
+                DapEvent::Event(Event::Initialized)
+            ),
+            "{:?}",
+            decode_message(initialized)
+        );
         // Its own `capabilities` event, before the answer: not a disconnect.
         let capabilities = include_bytes!("../tests/adapters/netcoredbg-3.1.2-capabilities.json");
-        assert!(matches!(decode_message(capabilities), DapEvent::Event(Event::Capabilities(_)) | DapEvent::Unknown(_)), "{:?}", decode_message(capabilities));
+        assert!(
+            matches!(
+                decode_message(capabilities),
+                DapEvent::Event(Event::Capabilities(_)) | DapEvent::Unknown(_)
+            ),
+            "{:?}",
+            decode_message(capabilities)
+        );
     }
 
     /// lldb-dap 23 sends `initialized` with its statistics as the body:
@@ -784,7 +1066,14 @@ mod tests {
     #[test]
     fn lldb_dap_s_initialized_with_a_body_is_initialized() {
         let initialized = include_bytes!("../tests/adapters/lldb-dap-23.1.4-initialized.json");
-        assert!(matches!(decode_message(initialized), DapEvent::Event(Event::Initialized)), "{:?}", decode_message(initialized));
+        assert!(
+            matches!(
+                decode_message(initialized),
+                DapEvent::Event(Event::Initialized)
+            ),
+            "{:?}",
+            decode_message(initialized)
+        );
     }
 
     /// CodeLLDB 1.12.3 refuses a launch with `"command":""`, no body and
@@ -793,7 +1082,14 @@ mod tests {
     fn codelldb_s_failed_launch_is_an_error_with_its_message() {
         let failed = include_bytes!("../tests/adapters/codelldb-1.12.3-launch-failed.json");
         match decode_message(failed) {
-            DapEvent::Response { request_seq: 2, result: Err(err) } => assert!(err.message.contains("lldb_commands - file not found"), "{}", err.message),
+            DapEvent::Response {
+                request_seq: 2,
+                result: Err(err),
+            } => assert!(
+                err.message.contains("lldb_commands - file not found"),
+                "{}",
+                err.message
+            ),
             other => panic!("expected the launch's error, got {other:?}"),
         }
     }
@@ -806,15 +1102,24 @@ mod tests {
 
     #[test]
     fn an_adapter_that_quits_says_why_with_its_last_stderr_line() {
-        let mut process = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
+        let mut process = if cfg!(windows) {
+            Command::new("cmd")
+        } else {
+            Command::new("sh")
+        };
         if cfg!(windows) {
-            process.args(["/c", "echo starting 1>&2 && echo No module named debugpy 1>&2"]);
+            process.args([
+                "/c",
+                "echo starting 1>&2 && echo No module named debugpy 1>&2",
+            ]);
         } else {
             process.args(["-c", "echo starting >&2; echo No module named debugpy >&2"]);
         }
         let (_client, rx) = DapClient::spawn_command(process).unwrap();
         match rx.recv_timeout(Duration::from_secs(10)).unwrap() {
-            DapEvent::Disconnected(why) => assert_eq!(why, "adapter closed its stdout: No module named debugpy"),
+            DapEvent::Disconnected(why) => {
+                assert_eq!(why, "adapter closed its stdout: No module named debugpy")
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -822,7 +1127,11 @@ mod tests {
     #[test]
     fn closing_doesnt_wait_on_what_the_adapter_started() {
         // A grandchild holding the adapter's stdout and stderr past its end.
-        let mut process = if cfg!(windows) { Command::new("cmd") } else { Command::new("sh") };
+        let mut process = if cfg!(windows) {
+            Command::new("cmd")
+        } else {
+            Command::new("sh")
+        };
         if cfg!(windows) {
             process.args(["/c", "start /b ping -n 30 127.0.0.1 & ping -n 30 127.0.0.1"]);
         } else {
@@ -832,6 +1141,10 @@ mod tests {
         thread::sleep(Duration::from_millis(300));
         let started = Instant::now();
         client.close();
-        assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

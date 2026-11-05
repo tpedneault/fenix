@@ -45,12 +45,12 @@ const CSS: char = '\u{e749}'; // nf-dev-css3
 const C_LANG: char = '\u{e771}'; // nf-dev-c
 const CPP: char = '\u{e7a3}'; // nf-dev-cplusplus
 const SHELL: char = '\u{e691}'; // nf-seti-shell -- also used for Tcl, which has no dedicated
-// nerd-fonts icon (checked); closest honest fit is "scripting language."
+                                // nerd-fonts icon (checked); closest honest fit is "scripting language."
 const YAML: char = '\u{e6a8}'; // nf-seti-yml
 const TOML: char = '\u{eb51}'; // nf-cod-settings_gear -- generic "config" fallback, TOML has no dedicated icon either
 const ARCHIVE: char = '\u{f1c6}'; // nf-fa-file_archive_o
 const IMAGE: char = '\u{f1c5}'; // nf-fa-file_image_o
-// Checked against the bundled font's cmap (fontTools), like the rest.
+                                // Checked against the bundled font's cmap (fontTools), like the rest.
 const GO: char = '\u{e627}'; // nf-seti-go
 const JAVA: char = '\u{e738}'; // nf-dev-java
 const CSHARP: char = '\u{f031b}'; // nf-md-language_csharp
@@ -102,13 +102,16 @@ fn language_icon(language: fenix_syntax::LanguageId) -> Option<char> {
 /// included -- then by its name, then by its extension.
 pub fn file_icon(name: &str) -> char {
     let lower = name.to_ascii_lowercase();
-    if let Some(icon) = fenix_syntax::detect_language_from_path(Path::new(name)).and_then(language_icon) {
+    if let Some(icon) =
+        fenix_syntax::detect_language_from_path(Path::new(name)).and_then(language_icon)
+    {
         return icon;
     }
     if lower.starts_with(".git") {
         return GIT;
     }
-    if lower.starts_with("license") || lower.starts_with("licence") || lower.starts_with("copying") {
+    if lower.starts_with("license") || lower.starts_with("licence") || lower.starts_with("copying")
+    {
         return LICENSE;
     }
     if lower == "makefile" || lower == "gnumakefile" || lower.ends_with(".mk") {
@@ -139,7 +142,10 @@ pub fn icon_for(name: &str, is_dir: bool, expanded: bool) -> char {
     if is_dir {
         return if expanded { FOLDER_OPEN } else { FOLDER };
     }
-    let ext = Path::new(name).extension().and_then(|e| e.to_str()).map(str::to_lowercase);
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase);
     match ext.as_deref() {
         Some("rs") => RUST,
         Some("py" | "pyi") => PYTHON,
@@ -165,7 +171,12 @@ pub fn icon_for(name: &str, is_dir: bool, expanded: bool) -> char {
 /// explorer, but reads as a literal `$` when it sits inline with breadcrumb
 /// labels, so navigation deliberately uses the neutral code-file glyph.
 pub fn navigation_icon_for(name: &str) -> char {
-    match Path::new(name).extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() {
+    match Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .as_deref()
+    {
         Some("tcl" | "tm") => FILE_CODE,
         _ => icon_for(name, false, false),
     }

@@ -19,7 +19,8 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-pub const DEFAULT_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
+pub const DEFAULT_URL: &str =
+    "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 
 /// The most an archive may be.
 pub const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
@@ -55,7 +56,13 @@ pub struct Package {
 }
 
 fn strings(v: Option<&Value>) -> Vec<String> {
-    v.and_then(Value::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    v.and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|s| s.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn text(v: &Value, key: &str) -> Option<String> {
@@ -64,13 +71,24 @@ fn text(v: &Value, key: &str) -> Option<String> {
 
 /// The registry's agents. Entries it can't read are left out.
 pub fn parse(body: &[u8]) -> Result<Vec<RegistryAgent>, String> {
-    let v: Value = serde_json::from_slice(body).map_err(|e| format!("the registry isn't JSON: {e}"))?;
-    let agents = v.get("agents").and_then(Value::as_array).ok_or("the registry lists no agents")?;
+    let v: Value =
+        serde_json::from_slice(body).map_err(|e| format!("the registry isn't JSON: {e}"))?;
+    let agents = v
+        .get("agents")
+        .and_then(Value::as_array)
+        .ok_or("the registry lists no agents")?;
     Ok(agents
         .iter()
         .filter_map(|a| {
             let dist = a.get("distribution")?;
-            let package = |key: &str| dist.get(key).and_then(|p| Some(Package { package: text(p, "package")?, args: strings(p.get("args")) }));
+            let package = |key: &str| {
+                dist.get(key).and_then(|p| {
+                    Some(Package {
+                        package: text(p, "package")?,
+                        args: strings(p.get("args")),
+                    })
+                })
+            };
             let binary = dist
                 .get("binary")
                 .and_then(Value::as_object)
@@ -84,7 +102,17 @@ pub fn parse(body: &[u8]) -> Result<Vec<RegistryAgent>, String> {
                                     sha256: text(b, "sha256").map(|s| s.to_lowercase()),
                                     cmd: text(b, "cmd")?,
                                     args: strings(b.get("args")),
-                                    env: b.get("env").and_then(Value::as_object).map(|e| e.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default(),
+                                    env: b
+                                        .get("env")
+                                        .and_then(Value::as_object)
+                                        .map(|e| {
+                                            e.iter()
+                                                .filter_map(|(k, v)| {
+                                                    Some((k.clone(), v.as_str()?.to_string()))
+                                                })
+                                                .collect()
+                                        })
+                                        .unwrap_or_default(),
                                 },
                             ))
                         })
@@ -132,7 +160,11 @@ pub fn plan(agent: &RegistryAgent, platform: &str, have: &dyn Fn(&str) -> bool) 
     if let Some(p) = agent.npx.as_ref().filter(|_| have("npx")) {
         return Some(Plan::Npx(p.clone()));
     }
-    agent.uvx.as_ref().filter(|_| have("uvx")).map(|p| Plan::Uvx(p.clone()))
+    agent
+        .uvx
+        .as_ref()
+        .filter(|_| have("uvx"))
+        .map(|p| Plan::Uvx(p.clone()))
 }
 
 /// An agent Fenix installed from the registry.
@@ -150,7 +182,13 @@ pub struct Installed {
 
 impl Installed {
     pub fn spec(&self) -> AgentSpec {
-        AgentSpec { id: self.id.clone(), name: self.name.clone(), program: self.program.clone(), args: self.args.clone(), env: self.env.clone() }
+        AgentSpec {
+            id: self.id.clone(),
+            name: self.name.clone(),
+            program: self.program.clone(),
+            args: self.args.clone(),
+            env: self.env.clone(),
+        }
     }
 }
 
@@ -158,11 +196,36 @@ impl Installed {
 pub type Download<'a> = dyn Fn(&str, u64) -> Result<Vec<u8>, String> + 'a;
 
 /// Installs `agent` as `plan` says, under `dir` (`<data>/agents`).
-pub fn install(agent: &RegistryAgent, plan: &Plan, dir: &Path, fetch: &Download<'_>) -> Result<Installed, String> {
-    let base = |program: String, args: Vec<String>, env: Vec<(String, String)>, unchecked: bool| Installed { id: agent.id.clone(), name: agent.name.clone(), version: agent.version.clone(), program, args, env, unchecked };
+pub fn install(
+    agent: &RegistryAgent,
+    plan: &Plan,
+    dir: &Path,
+    fetch: &Download<'_>,
+) -> Result<Installed, String> {
+    let base = |program: String, args: Vec<String>, env: Vec<(String, String)>, unchecked: bool| {
+        Installed {
+            id: agent.id.clone(),
+            name: agent.name.clone(),
+            version: agent.version.clone(),
+            program,
+            args,
+            env,
+            unchecked,
+        }
+    };
     let installed = match plan {
-        Plan::Npx(p) => base("npx".into(), [vec!["-y".to_string(), p.package.clone()], p.args.clone()].concat(), vec![], false),
-        Plan::Uvx(p) => base("uvx".into(), [vec![p.package.clone()], p.args.clone()].concat(), vec![], false),
+        Plan::Npx(p) => base(
+            "npx".into(),
+            [vec!["-y".to_string(), p.package.clone()], p.args.clone()].concat(),
+            vec![],
+            false,
+        ),
+        Plan::Uvx(p) => base(
+            "uvx".into(),
+            [vec![p.package.clone()], p.args.clone()].concat(),
+            vec![],
+            false,
+        ),
         Plan::Binary(b) => {
             let bytes = fetch(&b.archive, MAX_ARCHIVE)?;
             if let Some(want) = &b.sha256 {
@@ -174,13 +237,19 @@ pub fn install(agent: &RegistryAgent, plan: &Plan, dir: &Path, fetch: &Download<
             let target = dir.join(safe(&agent.id)).join(safe(&agent.version));
             let _ = std::fs::remove_dir_all(&target);
             std::fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
-            unpack(&b.archive, &bytes, &target).map_err(|e| format!("couldn't unpack {}: {e}", b.archive))?;
+            unpack(&b.archive, &bytes, &target)
+                .map_err(|e| format!("couldn't unpack {}: {e}", b.archive))?;
             let program = target.join(b.cmd.trim_start_matches("./"));
             if !program.is_file() {
                 return Err(format!("{} has no {} in it", b.archive, b.cmd));
             }
             make_executable(&program);
-            base(program.to_string_lossy().into_owned(), b.args.clone(), b.env.clone(), b.sha256.is_none())
+            base(
+                program.to_string_lossy().into_owned(),
+                b.args.clone(),
+                b.env.clone(),
+                b.sha256.is_none(),
+            )
         }
     };
     let mut list = load(dir);
@@ -199,8 +268,12 @@ pub fn uninstall(dir: &Path, id: &str) -> io::Result<()> {
 
 /// The agents Fenix installed.
 pub fn load(dir: &Path) -> Vec<Installed> {
-    let Ok(bytes) = std::fs::read(dir.join("installed.json")) else { return Vec::new() };
-    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else { return Vec::new() };
+    let Ok(bytes) = std::fs::read(dir.join("installed.json")) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return Vec::new();
+    };
     v.get("agents")
         .and_then(Value::as_array)
         .map(|a| {
@@ -212,7 +285,15 @@ pub fn load(dir: &Path) -> Vec<Installed> {
                         version: text(i, "version").unwrap_or_default(),
                         program: text(i, "program")?,
                         args: strings(i.get("args")),
-                        env: i.get("env").and_then(Value::as_object).map(|e| e.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default(),
+                        env: i
+                            .get("env")
+                            .and_then(Value::as_object)
+                            .map(|e| {
+                                e.iter()
+                                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                         unchecked: i.get("unchecked").and_then(Value::as_bool).unwrap_or(false),
                     })
                 })
@@ -227,11 +308,24 @@ fn save(dir: &Path, list: &[Installed]) -> io::Result<()> {
         .iter()
         .map(|i| json!({ "id": i.id, "name": i.name, "version": i.version, "program": i.program, "args": i.args, "env": i.env.iter().cloned().collect::<BTreeMap<_, _>>(), "unchecked": i.unchecked }))
         .collect();
-    fenix_storage::write(&dir.join("installed.json"), &serde_json::to_vec_pretty(&json!({ "version": 1, "agents": agents }))?)
+    fenix_storage::write(
+        &dir.join("installed.json"),
+        &serde_json::to_vec_pretty(&json!({ "version": 1, "agents": agents }))?,
+    )
 }
 
 fn safe(name: &str) -> String {
-    name.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' }).collect::<String>().trim_matches('.').to_string()
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('.')
+        .to_string()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -244,14 +338,27 @@ fn hex(bytes: &[u8]) -> String {
 fn unpack(name: &str, bytes: &[u8], target: &Path) -> Result<(), String> {
     let lower = name.to_lowercase();
     if lower.ends_with(".zip") {
-        let mut archive = zip::ZipArchive::new(io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
+        let mut archive =
+            zip::ZipArchive::new(io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
         // Every entry stays inside the target (`enclosed_name`).
         return archive.extract(target).map_err(|e| e.to_string());
     }
     let file = target.join(".download");
     std::fs::write(&file, bytes).map_err(|e| e.to_string())?;
-    let flags = if lower.ends_with(".tar.xz") { "-xJf" } else if lower.ends_with(".tar") { "-xf" } else { "-xzf" };
-    let status = std::process::Command::new("tar").arg(flags).arg(&file).arg("-C").arg(target).status().map_err(|e| format!("tar: {e}"))?;
+    let flags = if lower.ends_with(".tar.xz") {
+        "-xJf"
+    } else if lower.ends_with(".tar") {
+        "-xf"
+    } else {
+        "-xzf"
+    };
+    let status = std::process::Command::new("tar")
+        .arg(flags)
+        .arg(&file)
+        .arg("-C")
+        .arg(target)
+        .status()
+        .map_err(|e| format!("tar: {e}"))?;
     let _ = std::fs::remove_file(&file);
     if !status.success() {
         return Err(format!("tar ended with {status}"));
@@ -293,14 +400,16 @@ mod tests {
     fn zip_with(path: &str, body: &[u8]) -> Vec<u8> {
         let mut out = io::Cursor::new(Vec::new());
         let mut z = zip::ZipWriter::new(&mut out);
-        z.start_file(path, zip::write::SimpleFileOptions::default()).unwrap();
+        z.start_file(path, zip::write::SimpleFileOptions::default())
+            .unwrap();
         io::Write::write_all(&mut z, body).unwrap();
         z.finish().unwrap();
         out.into_inner()
     }
 
     fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fenix-acp-registry-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fenix-acp-registry-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -310,11 +419,27 @@ mod tests {
         let agents = parse(&registry()).unwrap();
         assert_eq!(agents.len(), 3, "the broken entry is left out");
         let have_node = |p: &str| p == "npx";
-        assert!(matches!(plan(&agents[0], "linux-x86_64", &have_node), Some(Plan::Binary(b)) if b.cmd == "./bin/devin" && b.sha256.as_deref() == Some("ab")));
-        assert_eq!(plan(&agents[0], "windows-x86_64", &have_node), None, "no archive for Windows, no package");
-        assert!(matches!(plan(&agents[1], "windows-x86_64", &have_node), Some(Plan::Npx(_))));
-        assert_eq!(plan(&agents[1], "linux-x86_64", &|_| false), None, "npx isn't there");
-        assert!(matches!(plan(&agents[2], "linux-x86_64", &|p| p == "uvx"), Some(Plan::Uvx(_))));
+        assert!(
+            matches!(plan(&agents[0], "linux-x86_64", &have_node), Some(Plan::Binary(b)) if b.cmd == "./bin/devin" && b.sha256.as_deref() == Some("ab"))
+        );
+        assert_eq!(
+            plan(&agents[0], "windows-x86_64", &have_node),
+            None,
+            "no archive for Windows, no package"
+        );
+        assert!(matches!(
+            plan(&agents[1], "windows-x86_64", &have_node),
+            Some(Plan::Npx(_))
+        ));
+        assert_eq!(
+            plan(&agents[1], "linux-x86_64", &|_| false),
+            None,
+            "npx isn't there"
+        );
+        assert!(matches!(
+            plan(&agents[2], "linux-x86_64", &|p| p == "uvx"),
+            Some(Plan::Uvx(_))
+        ));
         assert!(platform().contains('-'));
     }
 
@@ -345,8 +470,23 @@ mod tests {
     fn a_package_is_a_command_line_and_nothing_to_download() {
         let dir = temp("npx");
         let agents = parse(&registry()).unwrap();
-        let installed = install(&agents[1], &Plan::Npx(agents[1].npx.clone().unwrap()), &dir, &|_, _| Err("no download".into())).unwrap();
-        assert_eq!((installed.program.as_str(), installed.args.clone()), ("npx", vec!["-y".to_string(), "@agentclientprotocol/codex-acp@2.5.0".to_string()]));
+        let installed = install(
+            &agents[1],
+            &Plan::Npx(agents[1].npx.clone().unwrap()),
+            &dir,
+            &|_, _| Err("no download".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            (installed.program.as_str(), installed.args.clone()),
+            (
+                "npx",
+                vec![
+                    "-y".to_string(),
+                    "@agentclientprotocol/codex-acp@2.5.0".to_string()
+                ]
+            )
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -63,18 +63,29 @@ pub(super) struct Blame {
 /// buffer opened from the command line can hold a relative one, whose
 /// ancestors run out before the repository's root.
 pub(super) fn repository_of(path: &Path) -> Option<PathBuf> {
-    let absolute = std::fs::canonicalize(path).map(fenix_lsp::normalize).unwrap_or_else(|_| path.to_path_buf());
+    let absolute = std::fs::canonicalize(path)
+        .map(fenix_lsp::normalize)
+        .unwrap_or_else(|_| path.to_path_buf());
     fenix_project::vcs::repository_root(&absolute)
 }
 
 /// `path` as git names it inside `root`: from the top, with `/`.
 pub(super) fn relative_to(path: &Path, root: &Path) -> String {
-    let absolute = std::fs::canonicalize(path).map(fenix_lsp::normalize).unwrap_or_else(|_| path.to_path_buf());
-    absolute.strip_prefix(root).unwrap_or(&absolute).to_string_lossy().replace('\\', "/")
+    let absolute = std::fs::canonicalize(path)
+        .map(fenix_lsp::normalize)
+        .unwrap_or_else(|_| path.to_path_buf());
+    absolute
+        .strip_prefix(root)
+        .unwrap_or(&absolute)
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// "3h", "2d", "5w", "1y" -- as short as a narrow column needs.
@@ -93,8 +104,21 @@ fn short_age(secs: u64) -> String {
 /// first added line, or for a pure deletion the line after it -- not the
 /// context git puts around it.
 fn change_start(h: &fenix_diff::Hunk) -> usize {
-    let first = h.lines.iter().position(|l| matches!(l.kind, fenix_diff::LineKind::Added | fenix_diff::LineKind::Removed)).unwrap_or(0);
-    h.lines[first..].iter().find_map(|l| l.new_line).unwrap_or(h.new_start + h.new_len).max(1)
+    let first = h
+        .lines
+        .iter()
+        .position(|l| {
+            matches!(
+                l.kind,
+                fenix_diff::LineKind::Added | fenix_diff::LineKind::Removed
+            )
+        })
+        .unwrap_or(0);
+    h.lines[first..]
+        .iter()
+        .find_map(|l| l.new_line)
+        .unwrap_or(h.new_start + h.new_len)
+        .max(1)
 }
 
 /// The hunk of `file` that covers 1-based `line`: its changed lines, or,
@@ -102,7 +126,11 @@ fn change_start(h: &fenix_diff::Hunk) -> usize {
 fn hunk_covering(file: &fenix_diff::FileDiff, line: usize) -> Option<usize> {
     file.hunks.iter().position(|h| {
         let start = h.new_start.max(1);
-        let end = if h.new_len == 0 { start + 1 } else { h.new_start + h.new_len };
+        let end = if h.new_len == 0 {
+            start + 1
+        } else {
+            h.new_start + h.new_len
+        };
         line >= start && line < end
     })
 }
@@ -140,11 +168,20 @@ impl App {
         } else {
             starts.into_iter().rev().filter(|&s| s < line).collect()
         };
-        let Some(&target) = candidates.get((count.max(1) as usize - 1).min(candidates.len().saturating_sub(1))) else {
-            self.set_message(if forward { "no more changed hunks below" } else { "no more changed hunks above" });
+        let Some(&target) =
+            candidates.get((count.max(1) as usize - 1).min(candidates.len().saturating_sub(1)))
+        else {
+            self.set_message(if forward {
+                "no more changed hunks below"
+            } else {
+                "no more changed hunks above"
+            });
             return;
         };
-        let from = JumpEntry { buffer, char_idx: self.cursor().char_idx };
+        let from = JumpEntry {
+            buffer,
+            char_idx: self.cursor().char_idx,
+        };
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target = target.min(buffer.line_count().saturating_sub(1));
         cursor.char_idx = buffer.line_start_char(target);
@@ -155,12 +192,21 @@ impl App {
 
     /// `SPC g a`: stages the hunk under the cursor.
     pub(crate) fn git_hunk_stage(&mut self) {
-        let Some((buffer, root, file, hunk)) = self.hunk_under_cursor() else { return };
+        let Some((buffer, root, file, hunk)) = self.hunk_under_cursor() else {
+            return;
+        };
         let dirty = self.open().buffer.is_dirty();
         let patch = fenix_diff::hunk_patch(&file, &file.hunks[hunk]);
         match fenix_git::apply_patch(&root, &patch, fenix_git::ApplyTarget::Stage) {
-            Ok(_) => self.set_message(if dirty { "staged the saved version of this hunk -- the unsaved edits aren't in it" } else { "hunk staged" }),
-            Err(err) => self.set_error(format!("couldn't stage the hunk: {}", err.lines().next().unwrap_or(""))),
+            Ok(_) => self.set_message(if dirty {
+                "staged the saved version of this hunk -- the unsaved edits aren't in it"
+            } else {
+                "hunk staged"
+            }),
+            Err(err) => self.set_error(format!(
+                "couldn't stage the hunk: {}",
+                err.lines().next().unwrap_or("")
+            )),
         }
         self.refresh_gutter_hunks(buffer);
         self.refresh_git_pages(false);
@@ -172,7 +218,9 @@ impl App {
             self.set_error("save first -- discarding works on what's on disk");
             return;
         }
-        let Some((buffer, _, file, hunk)) = self.hunk_under_cursor() else { return };
+        let Some((buffer, _, file, hunk)) = self.hunk_under_cursor() else {
+            return;
+        };
         let line = file.hunks[hunk].new_start.max(1);
         self.git_confirm = Some(GitConfirmAction::DiscardEditorHunk { buffer, line });
     }
@@ -181,7 +229,9 @@ impl App {
     /// bring it back, and re-reads the file.
     pub(super) fn git_hunk_discard(&mut self, buffer: BufferId, line: usize) {
         self.refresh_gutter_hunks(buffer);
-        let Some((root, file)) = self.gutter_diffs.get(&buffer).cloned() else { return };
+        let Some((root, file)) = self.gutter_diffs.get(&buffer).cloned() else {
+            return;
+        };
         let Some(hunk) = hunk_covering(&file, line) else {
             self.set_error("that hunk isn't there any more");
             return;
@@ -189,13 +239,23 @@ impl App {
         let patch = fenix_diff::hunk_patch(&file, &file.hunks[hunk]);
         let saved = oplog::save_patch(&root, &patch);
         let label = format!("discard a hunk of {}", file.display_path());
-        let result = oplog::logged(&root, &label, || fenix_git::apply_patch(&root, &patch, fenix_git::ApplyTarget::Discard), move |_| match saved {
-            Some(blob) => Undo::ApplyPatch(blob),
-            None => Undo::Not("the discarded lines couldn't be saved".to_string()),
-        });
+        let result = oplog::logged(
+            &root,
+            &label,
+            || fenix_git::apply_patch(&root, &patch, fenix_git::ApplyTarget::Discard),
+            move |_| match saved {
+                Some(blob) => Undo::ApplyPatch(blob),
+                None => Undo::Not("the discarded lines couldn't be saved".to_string()),
+            },
+        );
         match result {
-            Ok(_) => self.set_message("hunk discarded -- U on the Git page (SPC g z) brings it back"),
-            Err(err) => self.set_error(format!("couldn't discard the hunk: {}", err.lines().next().unwrap_or(""))),
+            Ok(_) => {
+                self.set_message("hunk discarded -- U on the Git page (SPC g z) brings it back")
+            }
+            Err(err) => self.set_error(format!(
+                "couldn't discard the hunk: {}",
+                err.lines().next().unwrap_or("")
+            )),
         }
         self.reload_buffers_changed_on_disk();
         self.refresh_gutter_hunks(buffer);
@@ -204,12 +264,31 @@ impl App {
 
     /// `SPC g i`: the hunk under the cursor, in the hover popup.
     pub(crate) fn git_hunk_preview(&mut self) {
-        let Some((_, _, file, hunk)) = self.hunk_under_cursor() else { return };
+        let Some((_, _, file, hunk)) = self.hunk_under_cursor() else {
+            return;
+        };
         let h = &file.hunks[hunk];
-        let added = h.lines.iter().filter(|l| l.kind == fenix_diff::LineKind::Added).count();
-        let removed = h.lines.iter().filter(|l| l.kind == fenix_diff::LineKind::Removed).count();
-        let mut text = format!("Hunk {} of {} · +{added} −{removed} · not staged\n", hunk + 1, file.hunks.len());
-        for line in h.lines.iter().filter(|l| l.kind != fenix_diff::LineKind::Context).take(30) {
+        let added = h
+            .lines
+            .iter()
+            .filter(|l| l.kind == fenix_diff::LineKind::Added)
+            .count();
+        let removed = h
+            .lines
+            .iter()
+            .filter(|l| l.kind == fenix_diff::LineKind::Removed)
+            .count();
+        let mut text = format!(
+            "Hunk {} of {} · +{added} −{removed} · not staged\n",
+            hunk + 1,
+            file.hunks.len()
+        );
+        for line in h
+            .lines
+            .iter()
+            .filter(|l| l.kind != fenix_diff::LineKind::Context)
+            .take(30)
+        {
             text.push_str(&line.raw());
             text.push('\n');
         }
@@ -232,7 +311,9 @@ impl App {
         };
         // One that hasn't come back in minutes is stuck, not slow: it
         // stops holding the next one up.
-        if self.chrome_git_out.as_ref().is_some_and(|(sent, done)| !done.load(Ordering::Relaxed) && sent.elapsed() < Duration::from_secs(300)) {
+        if self.chrome_git_out.as_ref().is_some_and(|(sent, done)| {
+            !done.load(Ordering::Relaxed) && sent.elapsed() < Duration::from_secs(300)
+        }) {
             return;
         }
         let done = Arc::new(AtomicBool::new(false));
@@ -254,7 +335,10 @@ impl App {
             let state = ChromeGit {
                 buffer,
                 branch: status.branch,
-                tracking: status.upstream.is_some().then_some((status.ahead, status.behind)),
+                tracking: status
+                    .upstream
+                    .is_some()
+                    .then_some((status.ahead, status.behind)),
                 dirty: files.len(),
                 op: fenix_git::in_progress(&root).map(|op| op.label()),
                 root,
@@ -268,22 +352,39 @@ impl App {
     /// and waits that long again after trying, whether it worked or not,
     /// so a remote that wants a password isn't asked every tick.
     pub(super) fn auto_fetch(&mut self) {
-        let Some(minutes) = self.config.git_auto_fetch_minutes else { return };
-        let Some(root) = self.chrome_git.as_ref().map(|c| c.root.clone()) else { return };
+        let Some(minutes) = self.config.git_auto_fetch_minutes else {
+            return;
+        };
+        let Some(root) = self.chrome_git.as_ref().map(|c| c.root.clone()) else {
+            return;
+        };
         let every = Duration::from_secs(minutes * 60);
-        if self.fetch_attempts.get(&root).is_some_and(|t| t.elapsed() < every) {
+        if self
+            .fetch_attempts
+            .get(&root)
+            .is_some_and(|t| t.elapsed() < every)
+        {
             return;
         }
         self.fetch_attempts.insert(root.clone(), Instant::now());
         self.page_spawn(move |send| {
             // Whether it's due is asked here, not on the UI thread: it
             // reads the repository and runs `git remote`.
-            if fenix_git::seconds_since_fetch(&root).is_some_and(|s| s < every.as_secs()) || fenix_git::remotes(&root).is_empty() {
+            if fenix_git::seconds_since_fetch(&root).is_some_and(|s| s < every.as_secs())
+                || fenix_git::remotes(&root).is_empty()
+            {
                 return;
             }
-            let result = fenix_git::oplog::logged(&root, "fetch --all --prune (automatic)", || fenix_git::fetch(&root), |_| {
-                fenix_git::oplog::Undo::Not("a fetch only updates what Fenix knows about the remote".to_string())
-            });
+            let result = fenix_git::oplog::logged(
+                &root,
+                "fetch --all --prune (automatic)",
+                || fenix_git::fetch(&root),
+                |_| {
+                    fenix_git::oplog::Undo::Not(
+                        "a fetch only updates what Fenix knows about the remote".to_string(),
+                    )
+                },
+            );
             send(PageEvent::AutoFetched { ok: result.is_ok() });
         });
     }
@@ -310,20 +411,52 @@ impl App {
     /// The blame column's text for one line: the commit, author and age
     /// on the first line of each run from one commit, blank below it --
     /// coloured by how recent the change is.
-    pub(super) fn blame_cell(&self, ob: &OpenBuffer, line: usize, width: usize) -> (String, glyphon::Color) {
+    pub(super) fn blame_cell(
+        &self,
+        ob: &OpenBuffer,
+        line: usize,
+        width: usize,
+    ) -> (String, glyphon::Color) {
         let theme = self.theme;
         let blank = (" ".repeat(width), theme.gutter_fg);
-        let Some(blame) = ob.buffer.path().and_then(|p| self.blames.get(p)) else { return blank };
-        let Some(this) = blame.lines.get(line) else { return blank };
-        if line > 0 && blame.lines.get(line - 1).is_some_and(|prev| prev.hash == this.hash) {
+        let Some(blame) = ob.buffer.path().and_then(|p| self.blames.get(p)) else {
+            return blank;
+        };
+        let Some(this) = blame.lines.get(line) else {
+            return blank;
+        };
+        if line > 0
+            && blame
+                .lines
+                .get(line - 1)
+                .is_some_and(|prev| prev.hash == this.hash)
+        {
             return blank;
         }
         if this.uncommitted() {
-            return (format!("{:<width$}", crate::page::fit("  not committed yet", width - 1)), theme.git_modified);
+            return (
+                format!(
+                    "{:<width$}",
+                    crate::page::fit("  not committed yet", width - 1)
+                ),
+                theme.git_modified,
+            );
         }
         let age = now_secs().saturating_sub(this.time);
-        let author: String = this.author.split_whitespace().next().unwrap_or("").chars().take(10).collect();
-        let text = format!("{} {} {}", &this.hash[..7.min(this.hash.len())], author, short_age(age));
+        let author: String = this
+            .author
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(10)
+            .collect();
+        let text = format!(
+            "{} {} {}",
+            &this.hash[..7.min(this.hash.len())],
+            author,
+            short_age(age)
+        );
         let color = if age < 7 * 86400 {
             theme.git_modified
         } else if age < 90 * 86400 {
@@ -331,7 +464,10 @@ impl App {
         } else {
             theme.gutter_fg
         };
-        (format!("{:<width$}", crate::page::fit(&text, width - 1)), color)
+        (
+            format!("{:<width$}", crate::page::fit(&text, width - 1)),
+            color,
+        )
     }
 
     /// `SPC g B`: shows who last changed each line of the focused file,
@@ -349,7 +485,14 @@ impl App {
             self.set_error("this file isn't in a git repository");
             return;
         }
-        self.blames.insert(path.clone(), Blame { lines: Vec::new(), edits: 0, loading: false });
+        self.blames.insert(
+            path.clone(),
+            Blame {
+                lines: Vec::new(),
+                edits: 0,
+                loading: false,
+            },
+        );
         self.request_blame(&path);
         self.set_message("reading blame… SPC g e explains a line, SPC g B hides it");
     }
@@ -357,11 +500,17 @@ impl App {
     /// Reads `path`'s blame off the UI thread, from the buffer's text so
     /// the lines match what's on screen.
     fn request_blame(&mut self, path: &Path) {
-        let Some(id) = self.buffers.id_for_path(path) else { return };
-        let Some(ob) = self.buffers.get(id) else { return };
+        let Some(id) = self.buffers.id_for_path(path) else {
+            return;
+        };
+        let Some(ob) = self.buffers.get(id) else {
+            return;
+        };
         let text = ob.buffer.text();
         let edits = ob.buffer.edit_count();
-        let Some(root) = repository_of(path) else { return };
+        let Some(root) = repository_of(path) else {
+            return;
+        };
         if let Some(blame) = self.blames.get_mut(path) {
             blame.loading = true;
         }
@@ -369,12 +518,23 @@ impl App {
         self.page_spawn(move |send| {
             let relative = relative_to(&path, &root);
             let result = fenix_git::blame(&root, &relative, Some(&text));
-            send(PageEvent::Blame { path, edits, result });
+            send(PageEvent::Blame {
+                path,
+                edits,
+                result,
+            });
         });
     }
 
-    pub(super) fn apply_blame(&mut self, path: PathBuf, edits: u64, result: Result<Vec<fenix_git::BlameLine>, String>) {
-        let Some(blame) = self.blames.get_mut(&path) else { return };
+    pub(super) fn apply_blame(
+        &mut self,
+        path: PathBuf,
+        edits: u64,
+        result: Result<Vec<fenix_git::BlameLine>, String>,
+    ) {
+        let Some(blame) = self.blames.get_mut(&path) else {
+            return;
+        };
         blame.loading = false;
         match result {
             Ok(lines) => {
@@ -383,7 +543,10 @@ impl App {
             }
             Err(err) => {
                 self.blames.remove(&path);
-                self.set_error(format!("couldn't blame it: {}", err.lines().next().unwrap_or("")));
+                self.set_error(format!(
+                    "couldn't blame it: {}",
+                    err.lines().next().unwrap_or("")
+                ));
             }
         }
         if let Some(window) = &self.window {
@@ -399,7 +562,11 @@ impl App {
             .iter()
             .filter(|(path, blame)| {
                 !blame.loading
-                    && self.buffers.id_for_path(path).and_then(|id| self.buffers.get(id)).is_some_and(|ob| ob.buffer.edit_count() != blame.edits)
+                    && self
+                        .buffers
+                        .id_for_path(path)
+                        .and_then(|id| self.buffers.get(id))
+                        .is_some_and(|ob| ob.buffer.edit_count() != blame.edits)
             })
             .map(|(path, _)| path.clone())
             .collect();
@@ -410,18 +577,28 @@ impl App {
 
     /// `SPC g e`: the commit that last changed the cursor's line, in full.
     pub(crate) fn git_blame_explain(&mut self) {
-        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
+            return;
+        };
         let (line, _) = self.open().buffer.line_col(&self.cursor());
         let Some(root) = repository_of(&path) else {
             self.set_error("this file isn't in a git repository");
             return;
         };
-        let this = match self.blames.get(&path).and_then(|b| b.lines.get(line)).cloned() {
+        let this = match self
+            .blames
+            .get(&path)
+            .and_then(|b| b.lines.get(line))
+            .cloned()
+        {
             Some(this) => this,
             None => {
                 let relative = relative_to(&path, &root);
                 let text = self.open().buffer.text();
-                match fenix_git::blame(&root, &relative, Some(&text)).ok().and_then(|lines| lines.get(line).cloned()) {
+                match fenix_git::blame(&root, &relative, Some(&text))
+                    .ok()
+                    .and_then(|lines| lines.get(line).cloned())
+                {
                     Some(this) => this,
                     None => {
                         self.set_error("couldn't blame this line");
@@ -431,13 +608,19 @@ impl App {
             }
         };
         if this.uncommitted() {
-            self.lsp_hover = Some("Not committed yet -- this line is yours, since the last commit.".to_string());
+            self.lsp_hover =
+                Some("Not committed yet -- this line is yours, since the last commit.".to_string());
             self.wake_caret();
             return;
         }
-        let message = fenix_git::commit_message(&root, &this.hash).unwrap_or_else(|| this.summary.clone());
+        let message =
+            fenix_git::commit_message(&root, &this.hash).unwrap_or_else(|| this.summary.clone());
         let age = crate::git_status::ago(now_secs().saturating_sub(this.time));
-        self.lsp_hover = Some(format!("{} · {} · {age}\n\n{message}", &this.hash[..7.min(this.hash.len())], this.author));
+        self.lsp_hover = Some(format!(
+            "{} · {} · {age}\n\n{message}",
+            &this.hash[..7.min(this.hash.len())],
+            this.author
+        ));
         self.wake_caret();
     }
 
@@ -451,7 +634,9 @@ impl App {
         let ages = fenix_git::branch_ages(&root);
         let mut candidates = Vec::new();
         for name in fenix_git::branches_by_recency(&root) {
-            let Some(branch) = local.iter().find(|b| b.name == name) else { continue };
+            let Some(branch) = local.iter().find(|b| b.name == name) else {
+                continue;
+            };
             if branch.current {
                 continue;
             }
@@ -467,16 +652,24 @@ impl App {
             candidates.push(fenix_picker::Candidate::new(label, name));
         }
         for remote in fenix_git::list_remote_branches(&root) {
-            let short = remote.split_once('/').map(|(_, b)| b.to_string()).unwrap_or_default();
+            let short = remote
+                .split_once('/')
+                .map(|(_, b)| b.to_string())
+                .unwrap_or_default();
             if short != "HEAD" && !short.is_empty() && !local.iter().any(|b| b.name == short) {
-                candidates.push(fenix_picker::Candidate::new(format!("{remote}  · remote"), remote));
+                candidates.push(fenix_picker::Candidate::new(
+                    format!("{remote}  · remote"),
+                    remote,
+                ));
             }
         }
         if candidates.is_empty() {
             self.set_error("no other branch to switch to".to_string());
             return;
         }
-        self.enter_picker(ActivePicker::SwitchBranch(fenix_picker::PickerState::new(candidates)));
+        self.enter_picker(ActivePicker::SwitchBranch(fenix_picker::PickerState::new(
+            candidates,
+        )));
     }
 
     /// Switches to `branch`; a remote branch (`origin/x`) becomes a local
@@ -490,19 +683,30 @@ impl App {
             _ => branch.to_string(),
         };
         let back = oplog::current_branch(&root);
-        let result = oplog::logged(&root, &format!("switch to {local}"), || fenix_git::checkout_branch(&root, &local), move |_| match back {
-            Some(branch) => Undo::Switch(branch),
-            None => Undo::Not("HEAD was detached".to_string()),
-        });
+        let result = oplog::logged(
+            &root,
+            &format!("switch to {local}"),
+            || fenix_git::checkout_branch(&root, &local),
+            move |_| match back {
+                Some(branch) => Undo::Switch(branch),
+                None => Undo::Not("HEAD was detached".to_string()),
+            },
+        );
         match result {
-            Err(err) if err.contains("would be overwritten") || err.contains("commit your changes or stash them") => {
+            Err(err)
+                if err.contains("would be overwritten")
+                    || err.contains("commit your changes or stash them") =>
+            {
                 self.git_confirm = Some(GitConfirmAction::SwitchWithStash { branch: local });
             }
             // Checked out in another worktree: go there instead.
             Err(err) if fenix_git::checked_out_elsewhere(&err).is_some() => {
                 let path = fenix_git::checked_out_elsewhere(&err).unwrap_or_default();
                 self.open_project(path.clone(), None, false);
-                self.set_message(format!("{local} is checked out in {} -- opened that worktree", path.display()));
+                self.set_message(format!(
+                    "{local} is checked out in {} -- opened that worktree",
+                    path.display()
+                ));
             }
             result => {
                 let ok = result.is_ok();
@@ -519,13 +723,25 @@ impl App {
     pub(super) fn git_switch_stashing(&mut self, branch: &str) {
         let root = self.git_action_repo_root();
         let from = oplog::current_branch(&root).unwrap_or_else(|| "HEAD".to_string());
-        let options = fenix_git::StashOptions { message: Some(format!("fenix: left {from} for {branch}")), include_untracked: true, ..Default::default() };
-        let stashed = oplog::logged(&root, &format!("stash, leaving {from}"), || fenix_git::stash_with(&root, &options), |r| match r {
-            Ok(_) => Undo::PopStash(oplog::rev(&root, "stash@{0}")),
-            Err(_) => Undo::Not("nothing was stashed".to_string()),
-        });
+        let options = fenix_git::StashOptions {
+            message: Some(format!("fenix: left {from} for {branch}")),
+            include_untracked: true,
+            ..Default::default()
+        };
+        let stashed = oplog::logged(
+            &root,
+            &format!("stash, leaving {from}"),
+            || fenix_git::stash_with(&root, &options),
+            |r| match r {
+                Ok(_) => Undo::PopStash(oplog::rev(&root, "stash@{0}")),
+                Err(_) => Undo::Not("nothing was stashed".to_string()),
+            },
+        );
         if let Err(err) = stashed {
-            self.set_error(format!("couldn't stash: {}", err.lines().next().unwrap_or("")));
+            self.set_error(format!(
+                "couldn't stash: {}",
+                err.lines().next().unwrap_or("")
+            ));
             return;
         }
         self.git_switch_to(branch);
@@ -535,11 +751,24 @@ impl App {
     /// if there are any.
     fn bring_back_stash(&mut self, root: &Path, branch: &str) {
         let tag = format!("fenix: left {branch} for ");
-        let Some(stash) = fenix_git::list_stashes(root).into_iter().find(|s| s.message.contains(&tag)) else { return };
+        let Some(stash) = fenix_git::list_stashes(root)
+            .into_iter()
+            .find(|s| s.message.contains(&tag))
+        else {
+            return;
+        };
         let commit = oplog::rev(root, &format!("stash@{{{}}}", stash.index));
-        let result = oplog::logged(root, &format!("bring back the changes left on {branch}"), || fenix_git::stash_pop(root, stash.index), |_| {
-            Undo::Not("the changes went into your files -- stash them again to take them back".to_string())
-        });
+        let result = oplog::logged(
+            root,
+            &format!("bring back the changes left on {branch}"),
+            || fenix_git::stash_pop(root, stash.index),
+            |_| {
+                Undo::Not(
+                    "the changes went into your files -- stash them again to take them back"
+                        .to_string(),
+                )
+            },
+        );
         match result {
             Ok(_) => self.set_message(format!("switched to {branch} and brought back the changes you left on it")),
             Err(err) => self.set_error(format!(
@@ -558,8 +787,16 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim_end().to_string()
     }
 
@@ -567,11 +804,17 @@ mod tests {
     struct Repo(PathBuf);
     impl Repo {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("fenix-git-editor-{name}-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("fenix-git-editor-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let dir = fenix_lsp::normalize(std::fs::canonicalize(&dir).unwrap());
-            for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@e.com"], &["config", "user.name", "Tess Ter"], &["config", "core.autocrlf", "false"]] {
+            for args in [
+                &["init", "-q", "-b", "main"][..],
+                &["config", "user.email", "t@e.com"],
+                &["config", "user.name", "Tess Ter"],
+                &["config", "core.autocrlf", "false"],
+            ] {
                 git(&dir, args);
             }
             std::fs::write(dir.join("a.txt"), lines(&[])).unwrap();
@@ -589,7 +832,15 @@ mod tests {
     /// Twenty numbered lines, the ones in `upper` shouted -- far enough
     /// apart that each change is its own hunk.
     fn lines(upper: &[usize]) -> String {
-        (1..=20).map(|n| if upper.contains(&n) { format!("LINE {n}\n") } else { format!("line {n}\n") }).collect()
+        (1..=20)
+            .map(|n| {
+                if upper.contains(&n) {
+                    format!("LINE {n}\n")
+                } else {
+                    format!("line {n}\n")
+                }
+            })
+            .collect()
     }
 
     /// An app editing `a.txt` after lines 2 and 18 changed on disk.
@@ -597,7 +848,11 @@ mod tests {
         std::fs::write(repo.0.join("a.txt"), lines(&[2, 18])).unwrap();
         let mut app = App::with_file(Some(repo.0.join("a.txt").to_string_lossy().into_owned()));
         app.refresh_gutter_hunks(app.focused_buffer_id());
-        assert_eq!(app.gutter_diffs.values().next().map(|d| d.1.hunks.len()), Some(2), "two hunks in the gutter");
+        assert_eq!(
+            app.gutter_diffs.values().next().map(|d| d.1.hunks.len()),
+            Some(2),
+            "two hunks in the gutter"
+        );
         app
     }
 
@@ -631,7 +886,11 @@ mod tests {
         goto_line(&mut app, 17); // line 18
         app.git_hunk_stage();
         assert_eq!(git(&repo.0, &["show", ":a.txt"]) + "\n", lines(&[18]));
-        assert_eq!(app.gutter_diffs.values().next().map(|d| d.1.hunks.len()), Some(1), "the gutter caught up");
+        assert_eq!(
+            app.gutter_diffs.values().next().map(|d| d.1.hunks.len()),
+            Some(1),
+            "the gutter caught up"
+        );
     }
 
     #[test]
@@ -640,14 +899,26 @@ mod tests {
         let mut app = edited(&repo);
         goto_line(&mut app, 1); // line 2
         app.git_hunk_discard_prompt();
-        assert!(app.git_confirm_text().is_some_and(|t| t.contains("Discard this hunk")));
+        assert!(app
+            .git_confirm_text()
+            .is_some_and(|t| t.contains("Discard this hunk")));
         app.git_confirm_key(KeyPress::char('y'));
-        assert_eq!(std::fs::read_to_string(repo.0.join("a.txt")).unwrap(), lines(&[18]));
-        assert_eq!(app.open().buffer.text(), lines(&[18]), "the buffer was re-read, the other hunk kept");
+        assert_eq!(
+            std::fs::read_to_string(repo.0.join("a.txt")).unwrap(),
+            lines(&[18])
+        );
+        assert_eq!(
+            app.open().buffer.text(),
+            lines(&[18]),
+            "the buffer was re-read, the other hunk kept"
+        );
         let log = oplog::entries(&repo.0, 5);
         assert!(log[0].label.starts_with("discard a hunk") && log[0].undo.possible());
         oplog::apply(&repo.0, &log[0].undo).unwrap();
-        assert_eq!(std::fs::read_to_string(repo.0.join("a.txt")).unwrap(), lines(&[2, 18]));
+        assert_eq!(
+            std::fs::read_to_string(repo.0.join("a.txt")).unwrap(),
+            lines(&[2, 18])
+        );
     }
 
     #[test]
@@ -658,10 +929,23 @@ mod tests {
         app.git_blame_toggle();
         assert_eq!(app.gutter_chars(app.open()), before + BLAME_WIDTH);
         let (first, _) = app.blame_cell(app.open(), 0, BLAME_WIDTH);
-        assert!(first.starts_with(&git(&repo.0, &["rev-parse", "--short=7", "HEAD"])) && first.contains("Tess"), "{first:?}");
-        assert!(app.blame_cell(app.open(), 1, BLAME_WIDTH).0.trim().is_empty(), "the rest of the run is blank");
+        assert!(
+            first.starts_with(&git(&repo.0, &["rev-parse", "--short=7", "HEAD"]))
+                && first.contains("Tess"),
+            "{first:?}"
+        );
+        assert!(
+            app.blame_cell(app.open(), 1, BLAME_WIDTH)
+                .0
+                .trim()
+                .is_empty(),
+            "the rest of the run is blank"
+        );
         app.git_blame_explain();
-        assert!(app.lsp_hover.as_deref().is_some_and(|h| h.contains("Tess Ter") && h.contains("first")));
+        assert!(app
+            .lsp_hover
+            .as_deref()
+            .is_some_and(|h| h.contains("Tess Ter") && h.contains("first")));
         app.git_blame_toggle();
         assert_eq!(app.gutter_chars(app.open()), before, "hidden again");
     }
@@ -676,12 +960,24 @@ mod tests {
         std::fs::write(repo.0.join("a.txt"), "main, in progress\n").unwrap();
         let mut app = App::with_file(Some(repo.0.join("a.txt").to_string_lossy().into_owned()));
         app.git_switch_to("topic");
-        assert!(app.git_confirm_text().is_some_and(|t| t.contains("stash them and switch")), "{:?}", app.git_confirm_text());
+        assert!(
+            app.git_confirm_text()
+                .is_some_and(|t| t.contains("stash them and switch")),
+            "{:?}",
+            app.git_confirm_text()
+        );
         app.git_confirm_key(KeyPress::char('y'));
-        assert_eq!(git(&repo.0, &["rev-parse", "--abbrev-ref", "HEAD"]), "topic");
+        assert_eq!(
+            git(&repo.0, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "topic"
+        );
         app.git_switch_to("main");
         assert_eq!(git(&repo.0, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
-        assert_eq!(std::fs::read_to_string(repo.0.join("a.txt")).unwrap(), "main, in progress\n", "the work came back");
+        assert_eq!(
+            std::fs::read_to_string(repo.0.join("a.txt")).unwrap(),
+            "main, in progress\n",
+            "the work came back"
+        );
         assert!(git(&repo.0, &["stash", "list"]).is_empty());
     }
 
@@ -696,7 +992,9 @@ mod tests {
         assert!(suffix.contains("main •1"), "{suffix}");
         let mut state = app.chrome_git.clone().unwrap();
         state.op = Some("REBASING 2/3".into());
-        assert!(state.segment().contains("REBASING 2/3 -- SPC g x c continue"));
+        assert!(state
+            .segment()
+            .contains("REBASING 2/3 -- SPC g x c continue"));
         state.op = None;
         state.tracking = Some((2, 1));
         assert_eq!(state.segment(), "   main ↑2 ↓1 •1");
@@ -709,7 +1007,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&remote);
         std::fs::create_dir_all(&remote).unwrap();
         git(&remote, &["init", "-q", "--bare"]);
-        git(&repo.0, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        git(
+            &repo.0,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
         git(&repo.0, &["push", "-q", "origin", "main"]);
         let mut app = App::with_file(Some(repo.0.join("a.txt").to_string_lossy().into_owned()));
         app.config.git_auto_fetch_minutes = Some(5);
@@ -719,7 +1020,11 @@ mod tests {
         let log = fenix_git::oplog::entries(&repo.0, 5);
         assert!(log[0].label.contains("automatic"));
         app.auto_fetch();
-        assert_eq!(fenix_git::oplog::entries(&repo.0, 5).len(), log.len(), "not again right away");
+        assert_eq!(
+            fenix_git::oplog::entries(&repo.0, 5).len(),
+            log.len(),
+            "not again right away"
+        );
         let _ = std::fs::remove_dir_all(&remote);
     }
 

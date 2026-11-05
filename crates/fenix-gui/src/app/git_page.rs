@@ -6,7 +6,9 @@
 
 use super::pages::{PageEvent, PageModel};
 use super::*;
-use crate::git_status::{Action, Compose, Confirm, DiffState, GitStatus, Job, Op, PickRef, Section, Snapshot};
+use crate::git_status::{
+    Action, Compose, Confirm, DiffState, GitStatus, Job, Op, PickRef, Section, Snapshot,
+};
 use crate::page::Role as PageRole;
 use fenix_git::oplog::{self, Undo};
 use fenix_git::{ApplyTarget, CommitKind, ResetMode};
@@ -20,14 +22,25 @@ const RECENT: usize = 10;
 fn read_snapshot(root: &Path, base: Option<&str>) -> Snapshot {
     let (status, files) = fenix_git::status_and_files(root);
     let upstream = status.as_ref().and_then(|s| s.upstream.clone());
-    let branch = status.as_ref().map(|s| s.branch.clone()).unwrap_or_default();
-    let base = fenix_git::resolve_base(root, base).and_then(|b| fenix_git::ahead_behind(root, &b, "HEAD").map(|(ahead, behind)| (b, ahead, behind)));
+    let branch = status
+        .as_ref()
+        .map(|s| s.branch.clone())
+        .unwrap_or_default();
+    let base = fenix_git::resolve_base(root, base).and_then(|b| {
+        fenix_git::ahead_behind(root, &b, "HEAD").map(|(ahead, behind)| (b, ahead, behind))
+    });
     let (unpulled, unpushed) = match &upstream {
-        Some(upstream) => (fenix_git::commits_between(root, "HEAD", upstream, COMMIT_LIMIT), fenix_git::commits_between(root, upstream, "HEAD", COMMIT_LIMIT)),
+        Some(upstream) => (
+            fenix_git::commits_between(root, "HEAD", upstream, COMMIT_LIMIT),
+            fenix_git::commits_between(root, upstream, "HEAD", COMMIT_LIMIT),
+        ),
         // With nothing pushed yet, what this branch has that its base
         // doesn't is what a first push would send.
         None => match &base {
-            Some((b, ..)) if *b != branch && !b.ends_with(&format!("/{branch}")) => (Vec::new(), fenix_git::commits_between(root, b, "HEAD", COMMIT_LIMIT)),
+            Some((b, ..)) if *b != branch && !b.ends_with(&format!("/{branch}")) => (
+                Vec::new(),
+                fenix_git::commits_between(root, b, "HEAD", COMMIT_LIMIT),
+            ),
             _ => (Vec::new(), Vec::new()),
         },
     };
@@ -37,7 +50,14 @@ fn read_snapshot(root: &Path, base: Option<&str>) -> Snapshot {
     let undone = undone_times(&oplog::entries(root, 200));
     let ops = log
         .into_iter()
-        .map(|e| Op { age: now.saturating_sub(e.time) / 1000, undoable: e.undo.possible(), undone: undone.contains(&e.time), ok: e.ok, time: e.time, label: e.label })
+        .map(|e| Op {
+            age: now.saturating_sub(e.time) / 1000,
+            undoable: e.undo.possible(),
+            undone: undone.contains(&e.time),
+            ok: e.ok,
+            time: e.time,
+            label: e.label,
+        })
         .collect();
     Snapshot {
         ops,
@@ -51,11 +71,17 @@ fn read_snapshot(root: &Path, base: Option<&str>) -> Snapshot {
         unpushed,
         recent,
         in_progress: fenix_git::in_progress(root).map(|op| op.label()),
-        gone: fenix_git::list_branches(root).into_iter().filter(|b| b.upstream_gone && !b.current).map(|b| b.name).collect(),
+        gone: fenix_git::list_branches(root)
+            .into_iter()
+            .filter(|b| b.upstream_gone && !b.current)
+            .map(|b| b.name)
+            .collect(),
         worktrees: fenix_git::list_worktrees(root)
             .into_iter()
             .map(|mut w| {
-                w.path = std::fs::canonicalize(&w.path).map(fenix_lsp::normalize).unwrap_or(w.path);
+                w.path = std::fs::canonicalize(&w.path)
+                    .map(fenix_lsp::normalize)
+                    .unwrap_or(w.path);
                 w
             })
             .collect(),
@@ -66,7 +92,9 @@ fn read_snapshot(root: &Path, base: Option<&str>) -> Snapshot {
 fn read_diff(root: &Path, section: Section, path: &str) -> DiffState {
     match fenix_git::file_diff(root, path, section == Section::Staged) {
         Ok(text) => match fenix_diff::parse(&text).into_iter().next() {
-            Some(diff) if diff.is_binary => DiffState::Empty("a binary file -- no text to show".to_string()),
+            Some(diff) if diff.is_binary => {
+                DiffState::Empty("a binary file -- no text to show".to_string())
+            }
             Some(diff) if !diff.hunks.is_empty() => DiffState::Loaded(Box::new(diff)),
             _ => DiffState::Empty("no changes left to show".to_string()),
         },
@@ -75,33 +103,54 @@ fn read_diff(root: &Path, section: Section, path: &str) -> DiffState {
 }
 
 fn now_millis() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// The times of the entries a later "undo #time: ..." entry took back.
 fn undone_times(entries: &[oplog::Entry]) -> Vec<u64> {
-    entries.iter().filter_map(|e| e.label.strip_prefix("undo #")?.split(':').next()?.parse().ok()).collect()
+    entries
+        .iter()
+        .filter_map(|e| {
+            e.label
+                .strip_prefix("undo #")?
+                .split(':')
+                .next()?
+                .parse()
+                .ok()
+        })
+        .collect()
 }
 
 /// What `U` with nothing chosen undoes: the newest operation that
 /// worked, can be taken back, and hasn't been.
 fn latest_undoable(entries: &[oplog::Entry]) -> Option<&oplog::Entry> {
     let undone = undone_times(entries);
-    entries.iter().find(|e| e.ok && e.undo.possible() && !undone.contains(&e.time))
+    entries
+        .iter()
+        .find(|e| e.ok && e.undo.possible() && !undone.contains(&e.time))
 }
 
 /// The question to ask before undoing: what it'll do, from the log.
 fn plan_undo(root: &Path, time: Option<u64>) -> Result<Confirm, String> {
     let entries = oplog::entries(root, 200);
     let entry = match time {
-        Some(t) => entries.iter().find(|e| e.time == t).ok_or("that operation isn't in the log any more")?,
+        Some(t) => entries
+            .iter()
+            .find(|e| e.time == t)
+            .ok_or("that operation isn't in the log any more")?,
         None => latest_undoable(&entries).ok_or("nothing Fenix ran here can be undone")?,
     };
     if let Undo::Not(why) = &entry.undo {
         return Err(format!("{} can't be undone: {why}", entry.label));
     }
     if !entry.ok {
-        return Err(format!("{} failed, so there's nothing to undo", entry.label));
+        return Err(format!(
+            "{} failed, so there's nothing to undo",
+            entry.label
+        ));
     }
     let now = now_millis();
     let detail = oplog::preview(root, &entry.undo)
@@ -118,29 +167,62 @@ fn plan_undo(root: &Path, time: Option<u64>) -> Result<Confirm, String> {
         })
         .collect();
     Ok(Confirm {
-        question: format!("Undo \"{}\" ({})?", entry.label, crate::git_status::ago(now.saturating_sub(entry.time) / 1000)),
+        question: format!(
+            "Undo \"{}\" ({})?",
+            entry.label,
+            crate::git_status::ago(now.saturating_sub(entry.time) / 1000)
+        ),
         detail,
-        choices: vec![('y', "undo it".to_string(), Job::Undo { time: entry.time, label: entry.label.clone() })],
+        choices: vec![(
+            'y',
+            "undo it".to_string(),
+            Job::Undo {
+                time: entry.time,
+                label: entry.label.clone(),
+            },
+        )],
     })
 }
 
 /// Takes an operation back -- logged too, with how to put it back again.
 fn run_undo(root: &Path, time: u64) -> Result<String, String> {
-    let entry = oplog::entries(root, 200).into_iter().find(|e| e.time == time).ok_or("that operation isn't in the log any more")?;
+    let entry = oplog::entries(root, 200)
+        .into_iter()
+        .find(|e| e.time == time)
+        .ok_or("that operation isn't in the log any more")?;
     let head = oplog::rev(root, "HEAD");
     let redo = match &entry.undo {
-        Undo::Reset { .. } | Undo::Restore { .. } => Undo::Reset { to: head, soft: false, saved: None },
-        Undo::Switch(_) | Undo::Unbranch { back_to: Some(_), .. } => match oplog::current_branch(root) {
+        Undo::Reset { .. } | Undo::Restore { .. } => Undo::Reset {
+            to: head,
+            soft: false,
+            saved: None,
+        },
+        Undo::Switch(_)
+        | Undo::Unbranch {
+            back_to: Some(_), ..
+        } => match oplog::current_branch(root) {
             Some(branch) => Undo::Switch(branch),
             None => Undo::Not("HEAD was detached".to_string()),
         },
-        Undo::Rename { from, to } => Undo::Rename { from: to.clone(), to: from.clone() },
-        Undo::DeleteBranch(name) => Undo::CreateBranches(vec![(name.clone(), oplog::rev(root, name))]),
-        Undo::CreateBranches(branches) if branches.len() == 1 => Undo::DeleteBranch(branches[0].0.clone()),
+        Undo::Rename { from, to } => Undo::Rename {
+            from: to.clone(),
+            to: from.clone(),
+        },
+        Undo::DeleteBranch(name) => {
+            Undo::CreateBranches(vec![(name.clone(), oplog::rev(root, name))])
+        }
+        Undo::CreateBranches(branches) if branches.len() == 1 => {
+            Undo::DeleteBranch(branches[0].0.clone())
+        }
         _ => Undo::Not("redo it by hand".to_string()),
     };
     let label = format!("undo #{}: {}", entry.time, entry.label);
-    oplog::logged(root, &label, || oplog::apply(root, &entry.undo), move |_| redo)
+    oplog::logged(
+        root,
+        &label,
+        || oplog::apply(root, &entry.undo),
+        move |_| redo,
+    )
 }
 
 /// How to take a job back, given how it went.
@@ -212,18 +294,23 @@ pub(super) fn run_logged(root: &Path, job: &Job) -> Result<String, String> {
 
 /// The line of git's output worth showing: the first that isn't a hint.
 fn first_line(text: &str) -> String {
-    text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("hint:")).unwrap_or("").to_string()
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("hint:"))
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Runs one job, returning what git printed.
 fn run_job(root: &Path, job: &Job) -> Result<String, String> {
-    let each = |items: &[String], f: &dyn Fn(&str) -> Result<String, String>| -> Result<String, String> {
-        let mut out = String::new();
-        for item in items {
-            out.push_str(&f(item)?);
-        }
-        Ok(out)
-    };
+    let each =
+        |items: &[String], f: &dyn Fn(&str) -> Result<String, String>| -> Result<String, String> {
+            let mut out = String::new();
+            for item in items {
+                out.push_str(&f(item)?);
+            }
+            Ok(out)
+        };
     match job {
         Job::Stage(paths) => each(paths, &|p| fenix_git::stage_file(root, p)),
         Job::Unstage(paths) => each(paths, &|p| fenix_git::unstage_file(root, p)),
@@ -246,7 +333,11 @@ fn run_job(root: &Path, job: &Job) -> Result<String, String> {
         Job::Pull { rebase: true } => fenix_git::pull_rebase(root),
         Job::Pull { rebase: false } => fenix_git::pull_merge(root),
         Job::Fetch => fenix_git::fetch(root),
-        Job::Branch { name, start, switch } => fenix_git::create_branch_at(root, name, start.as_deref(), *switch),
+        Job::Branch {
+            name,
+            start,
+            switch,
+        } => fenix_git::create_branch_at(root, name, start.as_deref(), *switch),
         Job::Rename { old, new } => fenix_git::rename_branch(root, old, new),
         // Force: a branch whose upstream is gone was usually merged by
         // squash, which `-d` can't see -- and the page asked first.
@@ -262,19 +353,30 @@ fn run_job(root: &Path, job: &Job) -> Result<String, String> {
         Job::Reset { target, mode } => fenix_git::reset(root, target, *mode),
         Job::Continue => match fenix_git::in_progress(root) {
             Some(fenix_git::InProgress::Rebase { .. }) => fenix_git::rebase_continue(root),
-            Some(fenix_git::InProgress::Merge) => fenix_git::commit(root, &fenix_git::merge_message(root).unwrap_or_else(|| "Merge".to_string())),
-            Some(op) => Err(format!("{} can't be continued from here -- finish it with git", op.label())),
+            Some(fenix_git::InProgress::Merge) => fenix_git::commit(
+                root,
+                &fenix_git::merge_message(root).unwrap_or_else(|| "Merge".to_string()),
+            ),
+            Some(op) => Err(format!(
+                "{} can't be continued from here -- finish it with git",
+                op.label()
+            )),
             None => Err("nothing in progress to continue".to_string()),
         },
         Job::Abort => match fenix_git::in_progress(root) {
             Some(fenix_git::InProgress::Rebase { .. }) => fenix_git::rebase_abort(root),
             Some(fenix_git::InProgress::Merge) => fenix_git::merge_abort(root),
-            Some(op) => Err(format!("{} can't be aborted from here -- finish it with git", op.label())),
+            Some(op) => Err(format!(
+                "{} can't be aborted from here -- finish it with git",
+                op.label()
+            )),
             None => Err("nothing in progress to abort".to_string()),
         },
         Job::Skip => fenix_git::rebase_skip(root),
         Job::Undo { time, .. } => run_undo(root, *time),
-        Job::RebasePlan { base, plan } => fenix_git::rebase_interactive(root, base.as_deref(), plan),
+        Job::RebasePlan { base, plan } => {
+            fenix_git::rebase_interactive(root, base.as_deref(), plan)
+        }
         Job::WorktreeAdd { branch, path } => fenix_git::add_worktree(root, path, branch, None),
         Job::WorktreeRemove(path) => fenix_git::remove_worktree(root, path),
         Job::WorktreePrune => fenix_git::prune_worktrees(root),
@@ -299,19 +401,35 @@ impl App {
         // workspace's, or a relative fallback, neither of which says which
         // repository this file is in.
         let start = match self.open().buffer.path() {
-            Some(path) if self.focused_git_page_root().is_none() => path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.git_action_repo_root()),
+            Some(path) if self.focused_git_page_root().is_none() => path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.git_action_repo_root()),
             _ => self.git_action_repo_root(),
         };
-        let start = std::fs::canonicalize(&start).map(fenix_lsp::normalize).unwrap_or(start);
+        let start = std::fs::canonicalize(&start)
+            .map(fenix_lsp::normalize)
+            .unwrap_or(start);
         // A file from outside any repository (one left open after a
         // project switch): the project's repository instead.
         let project = self.git_action_repo_root();
-        let project = std::fs::canonicalize(&project).map(fenix_lsp::normalize).unwrap_or(project);
-        let Some(root) = fenix_project::vcs::repository_root(&start).or_else(|| fenix_project::vcs::repository_root(&project)) else {
+        let project = std::fs::canonicalize(&project)
+            .map(fenix_lsp::normalize)
+            .unwrap_or(project);
+        let Some(root) = fenix_project::vcs::repository_root(&start)
+            .or_else(|| fenix_project::vcs::repository_root(&project))
+        else {
             if start == project {
-                self.set_error(format!("{} isn't in a git repository", readable_path(&start)));
+                self.set_error(format!(
+                    "{} isn't in a git repository",
+                    readable_path(&start)
+                ));
             } else {
-                self.set_error(format!("neither {} nor the project, {}, is in a git repository", readable_path(&start), readable_path(&project)));
+                self.set_error(format!(
+                    "neither {} nor the project, {}, is in a git repository",
+                    readable_path(&start),
+                    readable_path(&project)
+                ));
             }
             return;
         };
@@ -331,10 +449,17 @@ impl App {
     /// here to open one with -- none installed, or none that serves this
     /// repository's `origin`.
     fn no_forge(&mut self) {
-        if self.wasm.installed.iter().any(|e| !e.manifest.contributes.forges.is_empty()) {
+        if self
+            .wasm
+            .installed
+            .iter()
+            .any(|e| !e.manifest.contributes.forges.is_empty())
+        {
             self.set_error("this repository's origin isn't on a forge an extension serves -- git remote add origin <url>, or set the GitLab server in SPC , (Forges)");
         } else {
-            self.set_error("pull requests come with the Review extension (fenix.review): SPC h x installs it");
+            self.set_error(
+                "pull requests come with the Review extension (fenix.review): SPC h x installs it",
+            );
         }
     }
 
@@ -373,7 +498,9 @@ impl App {
     /// Reads the repository again for page `id`, and the diffs it has
     /// open.
     pub(super) fn git_page_refresh(&mut self, id: BufferId) {
-        let Some(root) = self.git_page(id).map(|g| g.root.clone()) else { return };
+        let Some(root) = self.git_page(id).map(|g| g.root.clone()) else {
+            return;
+        };
         let fallback = self.config.git_base_branch.clone();
         let Some(g) = self.git_page(id) else { return };
         g.loading = true;
@@ -382,10 +509,18 @@ impl App {
             // The project's settings are read here, not on the UI thread.
             let base = super::settings_host::base_branch_in(&root, fallback);
             let snapshot = read_snapshot(&root, base.as_deref());
-            send(PageEvent::GitSnapshot { buffer: id, snapshot: Box::new(snapshot) });
+            send(PageEvent::GitSnapshot {
+                buffer: id,
+                snapshot: Box::new(snapshot),
+            });
             for (section, path) in expanded {
                 let diff = read_diff(&root, section, &path);
-                send(PageEvent::GitDiff { buffer: id, section, path, diff });
+                send(PageEvent::GitDiff {
+                    buffer: id,
+                    section,
+                    path,
+                    diff,
+                });
             }
         });
     }
@@ -402,12 +537,21 @@ impl App {
             self.refresh_git_logs();
             self.refresh_git_compares();
         }
-        let visible: Vec<BufferId> = self.windows().windows().iter().filter_map(|p| self.windows().content(*p).copied()).collect();
+        let visible: Vec<BufferId> = self
+            .windows()
+            .windows()
+            .iter()
+            .filter_map(|p| self.windows().content(*p).copied())
+            .collect();
         let ids: Vec<BufferId> = self
             .pages
             .iter()
             .filter_map(|(id, s)| match &s.model {
-                PageModel::Git(g) if !timed || (visible.contains(id) && !g.loading && g.busy.is_none()) => Some(*id),
+                PageModel::Git(g)
+                    if !timed || (visible.contains(id) && !g.loading && g.busy.is_none()) =>
+                {
+                    Some(*id)
+                }
                 _ => None,
             })
             .collect();
@@ -417,7 +561,9 @@ impl App {
     }
 
     pub(super) fn git_page_action(&mut self, id: BufferId, action: Action) {
-        let Some(root) = self.git_page(id).map(|g| g.root.clone()) else { return };
+        let Some(root) = self.git_page(id).map(|g| g.root.clone()) else {
+            return;
+        };
         match action {
             Action::None => {}
             Action::Refresh => {
@@ -427,7 +573,12 @@ impl App {
             Action::LoadDiff { section, path } => {
                 self.page_spawn(move |send| {
                     let diff = read_diff(&root, section, &path);
-                    send(PageEvent::GitDiff { buffer: id, section, path, diff });
+                    send(PageEvent::GitDiff {
+                        buffer: id,
+                        section,
+                        path,
+                        diff,
+                    });
                 });
             }
             Action::Close => self.close_page(id),
@@ -439,23 +590,45 @@ impl App {
                 }
                 self.open_file_from_picker(&full);
                 if let Some(line) = line {
-                    self.jump_to_grep_match(&fenix_project::GrepMatch { path: full, line, col: 1, text: String::new() });
+                    self.jump_to_grep_match(&fenix_project::GrepMatch {
+                        path: full,
+                        line,
+                        col: 1,
+                        text: String::new(),
+                    });
                 }
             }
             // A merge finished with git's prepared message, in the
             // composer to be edited first, as `git commit` would.
-            Action::Run(Job::Continue) if fenix_git::in_progress(&root) == Some(fenix_git::InProgress::Merge) => {
-                let message = fenix_git::merge_message(&root).unwrap_or_else(|| "Merge".to_string());
+            Action::Run(Job::Continue)
+                if fenix_git::in_progress(&root) == Some(fenix_git::InProgress::Merge) =>
+            {
+                let message =
+                    fenix_git::merge_message(&root).unwrap_or_else(|| "Merge".to_string());
                 let compose = crate::git_status::Compose::New(Default::default());
-                self.open_compose_seeded(ComposePurpose::GitCommit { repo_root: root, compose }, &message);
+                self.open_compose_seeded(
+                    ComposePurpose::GitCommit {
+                        repo_root: root,
+                        compose,
+                    },
+                    &message,
+                );
             }
             Action::Run(job) => self.git_page_run(id, job),
             Action::Compose(compose) => {
                 let seed = match compose {
                     Compose::New(_) => String::new(),
-                    Compose::Amend(_) | Compose::Reword(_) => fenix_git::commit_message(&root, "HEAD").unwrap_or_default(),
+                    Compose::Amend(_) | Compose::Reword(_) => {
+                        fenix_git::commit_message(&root, "HEAD").unwrap_or_default()
+                    }
                 };
-                self.open_compose_seeded(ComposePurpose::GitCommit { repo_root: root, compose }, &seed);
+                self.open_compose_seeded(
+                    ComposePurpose::GitCommit {
+                        repo_root: root,
+                        compose,
+                    },
+                    &seed,
+                );
             }
             Action::Pick(PickRef::Switch) => self.start_switch_picker(),
             Action::Pick(PickRef::Merge) => self.start_merge_picker(),
@@ -474,13 +647,19 @@ impl App {
             Action::PlanUndo(time) => {
                 self.page_spawn(move |send| {
                     let confirm = plan_undo(&root, time);
-                    send(PageEvent::GitConfirm { buffer: id, confirm });
+                    send(PageEvent::GitConfirm {
+                        buffer: id,
+                        confirm,
+                    });
                 });
             }
             Action::Rebase(from) => self.open_rebase(from),
             Action::OpenWorktree(path) => {
                 if !path.is_dir() {
-                    self.set_error(format!("{} isn't there any more -- w p prunes it", path.display()));
+                    self.set_error(format!(
+                        "{} isn't there any more -- w p prunes it",
+                        path.display()
+                    ));
                     return;
                 }
                 self.open_project(path, None, false);
@@ -502,7 +681,11 @@ impl App {
             }
             Action::ShowOutput => {
                 let Some(g) = self.git_page(id) else { return };
-                let text = if g.output.is_empty() { "(nothing has run yet)".to_string() } else { g.output.join("\n") };
+                let text = if g.output.is_empty() {
+                    "(nothing has run yet)".to_string()
+                } else {
+                    g.output.join("\n")
+                };
                 let buffer = self.buffers.open_text_view(&text);
                 self.open_buffer_in_focused_pane(buffer);
             }
@@ -513,7 +696,10 @@ impl App {
     fn git_page_run(&mut self, id: BufferId, job: Job) {
         let Some(g) = self.git_page(id) else { return };
         if let Some(busy) = &g.busy {
-            g.message = Some((format!("still running {busy} -- wait for it to finish"), true));
+            g.message = Some((
+                format!("still running {busy} -- wait for it to finish"),
+                true,
+            ));
             return;
         }
         let label = job.label();
@@ -526,7 +712,11 @@ impl App {
         let root = g.root.clone();
         self.page_spawn(move |send| {
             let result = run_logged(&root, &job);
-            send(PageEvent::GitDone { buffer: id, label, result });
+            send(PageEvent::GitDone {
+                buffer: id,
+                label,
+                result,
+            });
         });
     }
 
@@ -544,9 +734,16 @@ impl App {
             CommitKind::Reword(_) => "reword",
             _ => "commit",
         };
-        let result = oplog::logged(&root, &format!("{label}: {}", body.lines().next().unwrap_or_default()), || fenix_git::commit_with(&root, &kind, flags), move |_| {
-            Undo::Reset { to: head, soft: true, saved: None }
-        });
+        let result = oplog::logged(
+            &root,
+            &format!("{label}: {}", body.lines().next().unwrap_or_default()),
+            || fenix_git::commit_with(&root, &kind, flags),
+            move |_| Undo::Reset {
+                to: head,
+                soft: true,
+                saved: None,
+            },
+        );
         match result {
             Ok(_) => {
                 self.close_compose();
@@ -561,7 +758,10 @@ impl App {
             }
             // The draft stays: a hook that rejected the message is fixed
             // in the message.
-            Err(err) => self.set_error(format!("commit failed: {} -- the message is still here", first_line(&err))),
+            Err(err) => self.set_error(format!(
+                "commit failed: {} -- the message is still here",
+                first_line(&err)
+            )),
         }
     }
 
@@ -572,26 +772,50 @@ impl App {
                     g.set_snapshot(*snapshot);
                 }
             }
-            PageEvent::GitDiff { buffer, section, path, diff } => {
+            PageEvent::GitDiff {
+                buffer,
+                section,
+                path,
+                diff,
+            } => {
                 if let Some(g) = self.git_page(buffer) {
                     g.set_diff(section, path, diff);
                 }
             }
-            PageEvent::GitDone { buffer, label, result } => {
-                let Some(g) = self.git_page(buffer) else { return };
+            PageEvent::GitDone {
+                buffer,
+                label,
+                result,
+            } => {
+                let Some(g) = self.git_page(buffer) else {
+                    return;
+                };
                 g.busy = None;
                 let stopped = fenix_git::in_progress(&g.root).map(|op| op.label());
                 let (text, failed) = match &result {
                     Ok(out) => (out.clone(), false),
                     Err(err) => (err.clone(), true),
                 };
-                g.output = std::iter::once(format!("$ {label}")).chain(text.lines().map(str::to_string)).collect();
+                g.output = std::iter::once(format!("$ {label}"))
+                    .chain(text.lines().map(str::to_string))
+                    .collect();
                 // A new worktree opens as its own workspace.
                 let opened = g.open_after.take().filter(|_| !failed);
                 g.message = Some(match (failed, stopped) {
-                    (true, Some(op)) => (format!("{label} stopped: {op} -- resolve the conflicts (r x), then r c"), true),
-                    (true, None) => (format!("{label} failed: {}  ($ shows everything)", first_line(&text)), true),
-                    (false, _) if label.starts_with("push ") && matches!(g.request, Some(None)) => (format!("{label} ✓ · o opens a pull request"), false),
+                    (true, Some(op)) => (
+                        format!("{label} stopped: {op} -- resolve the conflicts (r x), then r c"),
+                        true,
+                    ),
+                    (true, None) => (
+                        format!(
+                            "{label} failed: {}  ($ shows everything)",
+                            first_line(&text)
+                        ),
+                        true,
+                    ),
+                    (false, _) if label.starts_with("push ") && matches!(g.request, Some(None)) => {
+                        (format!("{label} ✓ · o opens a pull request"), false)
+                    }
                     (false, _) => (format!("{label} ✓"), false),
                 });
                 let pushed = !failed && label.starts_with("push ");
@@ -604,7 +828,9 @@ impl App {
                 }
             }
             PageEvent::GitConfirm { buffer, confirm } => {
-                let Some(g) = self.git_page(buffer) else { return };
+                let Some(g) = self.git_page(buffer) else {
+                    return;
+                };
                 match confirm {
                     Ok(confirm) => g.confirm = Some(confirm),
                     Err(why) => g.message = Some((why, true)),
@@ -630,7 +856,8 @@ mod tests {
 
     impl Repo {
         fn new(name: &str) -> Self {
-            let base = std::env::temp_dir().join(format!("fenix-git-page-{name}-{}", std::process::id()));
+            let base =
+                std::env::temp_dir().join(format!("fenix-git-page-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&base);
             let (dir, remote) = (base.join("work"), base.join("origin.git"));
             std::fs::create_dir_all(&dir).unwrap();
@@ -642,7 +869,10 @@ mod tests {
             git(&repo.dir, &["config", "user.email", "t@example.com"]);
             git(&repo.dir, &["config", "user.name", "T"]);
             git(&repo.dir, &["config", "core.autocrlf", "false"]);
-            git(&repo.dir, &["remote", "add", "origin", repo.remote.to_str().unwrap()]);
+            git(
+                &repo.dir,
+                &["remote", "add", "origin", repo.remote.to_str().unwrap()],
+            );
             repo.write("a.txt", "one\ntwo\nthree\n");
             git(&repo.dir, &["add", "."]);
             git(&repo.dir, &["commit", "-q", "-m", "first"]);
@@ -667,8 +897,16 @@ mod tests {
     }
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim_end().to_string()
     }
 
@@ -702,7 +940,10 @@ mod tests {
     fn text(app: &mut App) -> String {
         let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
         app.ensure_page_layout(id, pane, 120);
-        app.pages.get(&id).map(|s| s.page.all_text()).unwrap_or_default()
+        app.pages
+            .get(&id)
+            .map(|s| s.page.all_text())
+            .unwrap_or_default()
     }
 
     /// Puts the page's cursor on the first row matching `is`.
@@ -717,13 +958,27 @@ mod tests {
         repo.write("a.txt", "one\nTWO\nthree\n");
         let mut app = app_on(&repo, "a.txt");
         let shown = text(&mut app);
-        assert!(shown.contains("Head    main  first") && shown.contains("UNSTAGED 1") && shown.contains("a.txt"), "{shown}");
-        assert!(shown.contains("origin/main") && shown.contains("not pushed yet"), "{shown}");
-        goto(&mut app, |r| matches!(r, Row::File { path, .. } if path == "a.txt"));
+        assert!(
+            shown.contains("Head    main  first")
+                && shown.contains("UNSTAGED 1")
+                && shown.contains("a.txt"),
+            "{shown}"
+        );
+        assert!(
+            shown.contains("origin/main") && shown.contains("not pushed yet"),
+            "{shown}"
+        );
+        goto(
+            &mut app,
+            |r| matches!(r, Row::File { path, .. } if path == "a.txt"),
+        );
         press(&mut app, "s");
         assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "a.txt");
         let shown = text(&mut app);
-        assert!(shown.contains("STAGED 1") && !shown.contains("UNSTAGED"), "the page read the tree again:\n{shown}");
+        assert!(
+            shown.contains("STAGED 1") && !shown.contains("UNSTAGED"),
+            "the page read the tree again:\n{shown}"
+        );
         assert!(shown.contains("stage a.txt ✓"), "{shown}");
     }
 
@@ -732,7 +987,8 @@ mod tests {
     #[test]
     fn a_file_outside_any_repository_opens_the_project_s() {
         let repo = Repo::new("outside");
-        let elsewhere = std::env::temp_dir().join(format!("fenix-git-page-elsewhere-{}", std::process::id()));
+        let elsewhere =
+            std::env::temp_dir().join(format!("fenix-git-page-elsewhere-{}", std::process::id()));
         std::fs::create_dir_all(&elsewhere).unwrap();
         let file = elsewhere.join("notes.txt");
         std::fs::write(&file, "x\n").unwrap();
@@ -754,7 +1010,11 @@ mod tests {
         assert!(text(&mut app).contains("+extra"), "the diff opened inline");
         goto(&mut app, |r| matches!(r, Row::Line { line: 3, .. }));
         press(&mut app, "s");
-        assert_eq!(repo.git(&["show", ":a.txt"]), "one\ntwo\nextra\nthree", "only +extra went in");
+        assert_eq!(
+            repo.git(&["show", ":a.txt"]),
+            "one\ntwo\nextra\nthree",
+            "only +extra went in"
+        );
         assert!(text(&mut app).contains("stage 1 line of a.txt ✓"));
     }
 
@@ -765,7 +1025,11 @@ mod tests {
         repo.git(&["add", "b.txt"]);
         let mut app = app_on(&repo, "a.txt");
         press(&mut app, "cc");
-        let compose = app.compose.as_ref().expect("the message editor opened").buffer;
+        let compose = app
+            .compose
+            .as_ref()
+            .expect("the message editor opened")
+            .buffer;
         if let Some(ob) = app.buffers.get_mut(compose) {
             let mut c = Cursor::at_start();
             ob.buffer.replace_range(&mut c, 0, 0, "Add b\n\nBecause.");
@@ -783,7 +1047,13 @@ mod tests {
         press(&mut app, "ca");
         let compose = app.compose.as_ref().unwrap().buffer;
         assert_eq!(app.buffers.get(compose).unwrap().buffer.text(), "first");
-        assert!(app.compose.as_ref().unwrap().purpose.title().starts_with("Amend"));
+        assert!(app
+            .compose
+            .as_ref()
+            .unwrap()
+            .purpose
+            .title()
+            .starts_with("Amend"));
     }
 
     #[test]
@@ -791,9 +1061,15 @@ mod tests {
         let repo = Repo::new("push");
         let mut app = app_on(&repo, "a.txt");
         press(&mut app, "Pp");
-        assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "main@{upstream}"]), "origin/main");
+        assert_eq!(
+            repo.git(&["rev-parse", "--abbrev-ref", "main@{upstream}"]),
+            "origin/main"
+        );
         let shown = text(&mut app);
-        assert!(shown.contains("push to origin/main ✓") && shown.contains("origin/main ↑0 ↓0"), "{shown}");
+        assert!(
+            shown.contains("push to origin/main ✓") && shown.contains("origin/main ↑0 ↓0"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -810,7 +1086,10 @@ mod tests {
         let mut app = app_on(&repo, "a.txt");
         page_mut(&mut app).folded.clear();
         let second = repo.git(&["rev-parse", "HEAD~1"]);
-        goto(&mut app, |r| matches!(r, Row::Commit { hash, section: Section::Recent } if *hash == second));
+        goto(
+            &mut app,
+            |r| matches!(r, Row::Commit { hash, section: Section::Recent } if *hash == second),
+        );
         press(&mut app, "\nf");
         assert_eq!(repo.git(&["log", "--format=%s"]), "third\nsecond\nfirst");
         assert_eq!(repo.git(&["show", "HEAD~1:b.txt"]), "b, fixed");
@@ -824,7 +1103,10 @@ mod tests {
         let mut app = app_on(&repo, "a.txt");
         app.git_switch_to("origin/review");
         assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "review");
-        assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "review@{upstream}"]), "origin/review");
+        assert_eq!(
+            repo.git(&["rev-parse", "--abbrev-ref", "review@{upstream}"]),
+            "origin/review"
+        );
         assert!(text(&mut app).contains("Head    review"));
     }
 
@@ -839,21 +1121,43 @@ mod tests {
         let first = repo.git(&["rev-parse", "HEAD~1"]);
         let mut app = app_on(&repo, "a.txt");
         page_mut(&mut app).folded.clear();
-        goto(&mut app, |r| matches!(r, Row::Commit { hash, section: Section::Recent } if *hash == first));
+        goto(
+            &mut app,
+            |r| matches!(r, Row::Commit { hash, section: Section::Recent } if *hash == first),
+        );
         press(&mut app, "\nrhy");
         assert_eq!(repo.git(&["rev-parse", "HEAD"]), first, "reset --hard ran");
-        assert_eq!(std::fs::read_to_string(repo.dir.join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+        assert_eq!(
+            std::fs::read_to_string(repo.dir.join("a.txt")).unwrap(),
+            "one\ntwo\nthree\n"
+        );
 
         press(&mut app, "U");
         let shown = text(&mut app);
-        assert!(shown.contains("Undo \"reset --hard to") && shown.contains("brings back 1 commit") && shown.contains("uncommitted changes"), "{shown}");
+        assert!(
+            shown.contains("Undo \"reset --hard to")
+                && shown.contains("brings back 1 commit")
+                && shown.contains("uncommitted changes"),
+            "{shown}"
+        );
         press(&mut app, "y");
-        assert_eq!(repo.git(&["rev-parse", "HEAD"]), second, "the commit is back");
-        assert_eq!(std::fs::read_to_string(repo.dir.join("a.txt")).unwrap(), "one\nedited\nthree\n", "and the edit");
+        assert_eq!(
+            repo.git(&["rev-parse", "HEAD"]),
+            second,
+            "the commit is back"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.dir.join("a.txt")).unwrap(),
+            "one\nedited\nthree\n",
+            "and the edit"
+        );
 
         app.open_git_operations();
         let shown = text(&mut app);
-        assert!(shown.contains("OPERATIONS") && shown.contains("undo #") && shown.contains("undone"), "{shown}");
+        assert!(
+            shown.contains("OPERATIONS") && shown.contains("undo #") && shown.contains("undone"),
+            "{shown}"
+        );
     }
 
     #[test]
@@ -884,7 +1188,12 @@ mod tests {
         app.open_git_operations();
         goto(&mut app, |r| matches!(r, Row::Op(_)));
         press(&mut app, "U");
-        assert!(page_mut(&mut app).message.as_ref().unwrap().0.contains("can't be taken back"));
+        assert!(page_mut(&mut app)
+            .message
+            .as_ref()
+            .unwrap()
+            .0
+            .contains("can't be taken back"));
     }
 
     #[test]
@@ -896,12 +1205,24 @@ mod tests {
         page_mut(&mut app).type_text("hotfix");
         press(&mut app, "\n");
         let path = fenix_git::default_worktree_path(&repo.dir, "hotfix");
-        assert!(path.join("a.txt").exists(), "checked out beside the repository");
+        assert!(
+            path.join("a.txt").exists(),
+            "checked out beside the repository"
+        );
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap());
-        assert!(app.workspaces.workspaces.iter().any(|w| w.project.as_deref() == Some(canonical.as_path())), "opened as a workspace of its own");
+        assert!(
+            app.workspaces
+                .workspaces
+                .iter()
+                .any(|w| w.project.as_deref() == Some(canonical.as_path())),
+            "opened as a workspace of its own"
+        );
         assert!(app.workspaces.len() >= workspaces);
         assert_eq!(fenix_git::list_worktrees(&repo.dir).len(), 2);
-        let _ = std::process::Command::new("git").current_dir(&repo.dir).args(["worktree", "remove", "--force", &path.to_string_lossy()]).output();
+        let _ = std::process::Command::new("git")
+            .current_dir(&repo.dir)
+            .args(["worktree", "remove", "--force", &path.to_string_lossy()])
+            .output();
         let _ = std::fs::remove_dir_all(&path);
     }
 
@@ -912,7 +1233,10 @@ mod tests {
         app.config.git_layout = Some("panes".into());
         app.open_git();
         assert!(app.git_session.is_some());
-        assert!(!app.pages.values().any(|s| matches!(s.model, PageModel::Git(_))));
+        assert!(!app
+            .pages
+            .values()
+            .any(|s| matches!(s.model, PageModel::Git(_))));
     }
 
     #[test]
@@ -925,7 +1249,10 @@ mod tests {
         app.close_git_view();
         assert!(!app.pages.contains_key(&page), "closed");
         app.close_git_view();
-        assert_eq!(app.status_message.as_ref().map(|m| m.text.as_str()), Some("no Git view in front to close"));
+        assert_eq!(
+            app.status_message.as_ref().map(|m| m.text.as_str()),
+            Some("no Git view in front to close")
+        );
     }
 
     #[test]
@@ -936,6 +1263,12 @@ mod tests {
         app.open_file_from_picker(&repo.dir.join("a.txt"));
         app.open_git_status();
         assert_eq!(app.focused_buffer_id(), first);
-        assert_eq!(app.pages.values().filter(|s| matches!(s.model, PageModel::Git(_))).count(), 1);
+        assert_eq!(
+            app.pages
+                .values()
+                .filter(|s| matches!(s.model, PageModel::Git(_)))
+                .count(),
+            1
+        );
     }
 }

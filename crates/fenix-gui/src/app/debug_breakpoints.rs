@@ -88,13 +88,27 @@ impl Breakpoint {
 
 /// The `setBreakpoints` list for a file's breakpoints: those on, with
 /// what they are; `run_to` a plain one besides, unless there's one there.
-pub(super) fn source_breakpoints(breakpoints: &BTreeMap<usize, Breakpoint>, run_to: Option<usize>) -> Vec<fenix_dap::types::SourceBreakpoint> {
-    let mut on: BTreeMap<usize, Breakpoint> = breakpoints.iter().filter(|(_, b)| !b.off).map(|(l, b)| (*l, b.clone())).collect();
+pub(super) fn source_breakpoints(
+    breakpoints: &BTreeMap<usize, Breakpoint>,
+    run_to: Option<usize>,
+) -> Vec<fenix_dap::types::SourceBreakpoint> {
+    let mut on: BTreeMap<usize, Breakpoint> = breakpoints
+        .iter()
+        .filter(|(_, b)| !b.off)
+        .map(|(l, b)| (*l, b.clone()))
+        .collect();
     if let Some(line) = run_to {
         on.entry(line).or_default();
     }
     on.into_iter()
-        .map(|(line, b)| fenix_dap::types::SourceBreakpoint::builder().line(line as i32).condition(b.condition).hit_condition(b.hits).log_message(b.log).build())
+        .map(|(line, b)| {
+            fenix_dap::types::SourceBreakpoint::builder()
+                .line(line as i32)
+                .condition(b.condition)
+                .hit_condition(b.hits)
+                .log_message(b.log)
+                .build()
+        })
         .collect()
 }
 
@@ -142,7 +156,11 @@ impl SavedDebugging {
         if self.breakpoints.len() > 100_000 || self.pins.len() > 10_000 {
             return Err("too many breakpoints or pins".into());
         }
-        let paths = self.breakpoints.iter().map(|b| (&b.path, b.line)).chain(self.pins.iter().map(|p| (&p.path, p.line)));
+        let paths = self
+            .breakpoints
+            .iter()
+            .map(|b| (&b.path, b.line))
+            .chain(self.pins.iter().map(|p| (&p.path, p.line)));
         for (path, line) in paths {
             if !path.is_absolute() || line == 0 {
                 return Err("a breakpoint or pin must be at a line of an absolute path".into());
@@ -178,14 +196,26 @@ impl App {
     /// `SPC u B`, `SPC u h`, `SPC u l`: the drawer's line, to give the
     /// cursor's line's breakpoint a condition, a hit count or a message.
     pub(crate) fn debug_edit_breakpoint(&mut self, what: BreakpointPart) {
-        let Some((path, line)) = self.breakpoint_here() else { return };
+        let Some((path, line)) = self.breakpoint_here() else {
+            return;
+        };
         self.debug_edit_breakpoint_at(path, line, what);
     }
 
     /// The drawer's line, to give the breakpoint at `line` of `path` a
     /// condition, a hit count or a message: what it has now, to change.
-    pub(super) fn debug_edit_breakpoint_at(&mut self, path: PathBuf, line: usize, what: BreakpointPart) {
-        let now = self.breakpoints.get(&path).and_then(|l| l.get(&line)).cloned().unwrap_or_default();
+    pub(super) fn debug_edit_breakpoint_at(
+        &mut self,
+        path: PathBuf,
+        line: usize,
+        what: BreakpointPart,
+    ) {
+        let now = self
+            .breakpoints
+            .get(&path)
+            .and_then(|l| l.get(&line))
+            .cloned()
+            .unwrap_or_default();
         let text = match what {
             BreakpointPart::Condition => now.condition,
             BreakpointPart::Hits => now.hits,
@@ -193,14 +223,28 @@ impl App {
         };
         self.debug_dock_open = true;
         self.debug_drawer.focused = true;
-        self.debug_drawer.line = Some(debug_drawer::EvalLine { text: text.unwrap_or_default(), purpose: LinePurpose::Breakpoint(path, line, what) });
+        self.debug_drawer.line = Some(debug_drawer::EvalLine {
+            text: text.unwrap_or_default(),
+            purpose: LinePurpose::Breakpoint(path, line, what),
+        });
     }
 
     /// What the drawer's line gave a breakpoint: set, or taken away when
     /// it's empty. The breakpoint's made if it wasn't there.
-    pub(super) fn debug_set_breakpoint_part(&mut self, path: PathBuf, line: usize, what: BreakpointPart, text: String) {
+    pub(super) fn debug_set_breakpoint_part(
+        &mut self,
+        path: PathBuf,
+        line: usize,
+        what: BreakpointPart,
+        text: String,
+    ) {
         let text = Some(text.trim().to_string()).filter(|t| !t.is_empty());
-        let breakpoint = self.breakpoints.entry(path.clone()).or_default().entry(line).or_default();
+        let breakpoint = self
+            .breakpoints
+            .entry(path.clone())
+            .or_default()
+            .entry(line)
+            .or_default();
         match what {
             BreakpointPart::Condition => breakpoint.condition = text,
             BreakpointPart::Hits => breakpoint.hits = text,
@@ -213,7 +257,9 @@ impl App {
     /// `SPC u t`: the cursor's line's breakpoint off, or on again --
     /// kept either way. One's made, on, where there's none.
     pub(crate) fn debug_toggle_breakpoint_on(&mut self) {
-        let Some((path, line)) = self.breakpoint_here() else { return };
+        let Some((path, line)) = self.breakpoint_here() else {
+            return;
+        };
         self.debug_breakpoint_on_off(path, line);
     }
 
@@ -233,15 +279,35 @@ impl App {
     /// Whether the adapter's exception `filter` is on: as you said, or as
     /// the adapter has it.
     pub(super) fn debug_exception_on(&self, filter: &ExceptionFilter) -> bool {
-        self.debug_exceptions.get(&filter.filter).copied().unwrap_or(filter.default)
+        self.debug_exceptions
+            .get(&filter.filter)
+            .copied()
+            .unwrap_or(filter.default)
     }
 
     /// An exception filter on or off, and the adapter told.
     pub(super) fn debug_toggle_exception(&mut self, filter: String) {
-        let Some(known) = self.debug_session.as_ref().and_then(|s| s.exception_filters.iter().find(|f| f.filter == filter).cloned()) else { return };
+        let Some(known) = self.debug_session.as_ref().and_then(|s| {
+            s.exception_filters
+                .iter()
+                .find(|f| f.filter == filter)
+                .cloned()
+        }) else {
+            return;
+        };
         let on = !self.debug_exception_on(&known);
         self.debug_exceptions.insert(filter, on);
-        let ready: Vec<u64> = self.debug_session.as_ref().map(|s| std::iter::once((s.generation, s.initialized)).chain(s.children.iter().map(|c| (c.generation, c.initialized))).filter(|(_, r)| *r).map(|(on, _)| on).collect()).unwrap_or_default();
+        let ready: Vec<u64> = self
+            .debug_session
+            .as_ref()
+            .map(|s| {
+                std::iter::once((s.generation, s.initialized))
+                    .chain(s.children.iter().map(|c| (c.generation, c.initialized)))
+                    .filter(|(_, r)| *r)
+                    .map(|(on, _)| on)
+                    .collect()
+            })
+            .unwrap_or_default();
         for on in ready {
             self.send_exception_breakpoints_to(on);
         }
@@ -250,12 +316,21 @@ impl App {
     /// `setExceptionBreakpoints` on connection `on`, with the filters on:
     /// nothing for an adapter that offers none.
     pub(super) fn send_exception_breakpoints_to(&mut self, on: u64) {
-        let Some(session) = self.debug_session.as_ref() else { return };
+        let Some(session) = self.debug_session.as_ref() else {
+            return;
+        };
         if session.exception_filters.is_empty() {
             return;
         }
-        let filters: Vec<String> = session.exception_filters.iter().filter(|f| self.debug_exception_on(f)).map(|f| f.filter.clone()).collect();
-        let args = fenix_dap::requests::SetExceptionBreakpointsRequestArguments::builder().filters(filters).build();
+        let filters: Vec<String> = session
+            .exception_filters
+            .iter()
+            .filter(|f| self.debug_exception_on(f))
+            .map(|f| f.filter.clone())
+            .collect();
+        let args = fenix_dap::requests::SetExceptionBreakpointsRequestArguments::builder()
+            .filters(filters)
+            .build();
         if let Some(client) = session.client_of(on) {
             let _ = client.request(fenix_dap::requests::Request::SetExceptionBreakpoints(args));
         }
@@ -265,7 +340,10 @@ impl App {
     /// stop on.
     pub(crate) fn debug_exception_breakpoints(&mut self) {
         if self.debug_session.is_none() {
-            self.set_error("no debug session -- the exceptions to stop on are the adapter's, once one starts".to_string());
+            self.set_error(
+                "no debug session -- the exceptions to stop on are the adapter's, once one starts"
+                    .to_string(),
+            );
             return;
         }
         self.debug_dock_open = true;
@@ -288,7 +366,11 @@ impl App {
             return;
         };
         let path = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path));
-        let pin = Pin { path, line: line + 1, expression };
+        let pin = Pin {
+            path,
+            line: line + 1,
+            expression,
+        };
         if let Some(at) = self.debug_pins.iter().position(|p| *p == pin) {
             self.debug_pins.remove(at);
         } else {
@@ -300,17 +382,35 @@ impl App {
 
     /// A pin's value asked for in the selected frame, while stopped.
     pub(super) fn debug_ask_pin(&mut self, pin: &Pin) {
-        let Some(session) = self.debug_session.as_mut().filter(|s| s.stopped_thread.is_some()) else { return };
-        let Some(frame) = session.current_frame_id else { return };
+        let Some(session) = self
+            .debug_session
+            .as_mut()
+            .filter(|s| s.stopped_thread.is_some())
+        else {
+            return;
+        };
+        let Some(frame) = session.current_frame_id else {
+            return;
+        };
         let on = session.stopped_on;
-        let args = fenix_dap::requests::EvaluateRequestArguments::builder().expression(pin.expression.clone()).frame_id(Some(frame)).context(Some(fenix_dap::requests::EvaluateRequestContext::Watch)).build();
-        session.send(on, fenix_dap::requests::Request::Evaluate(args), PendingDapRequest::Pin { pin: pin.clone() });
+        let args = fenix_dap::requests::EvaluateRequestArguments::builder()
+            .expression(pin.expression.clone())
+            .frame_id(Some(frame))
+            .context(Some(fenix_dap::requests::EvaluateRequestContext::Watch))
+            .build();
+        session.send(
+            on,
+            fenix_dap::requests::Request::Evaluate(args),
+            PendingDapRequest::Pin { pin: pin.clone() },
+        );
     }
 
     /// A pin's value come: kept, fresh. One it couldn't give keeps the
     /// last, gone stale.
     pub(super) fn debug_pin_answered(&mut self, pin: Pin, value: Option<String>) {
-        let Some(session) = self.debug_session.as_mut() else { return };
+        let Some(session) = self.debug_session.as_mut() else {
+            return;
+        };
         match value {
             Some(v) => {
                 session.pin_values.insert(pin, (v, true));
@@ -326,17 +426,46 @@ impl App {
 
     /// The pins' decorations for the buffer on `path`: each pin of its,
     /// `◆ expr = value` at the end of its line, dim once stale.
-    pub(super) fn debug_pin_decorations(&self, path: &Path, buffer: &fenix_core::Buffer) -> Vec<crate::decorations::Decoration> {
-        let Some(session) = self.debug_session.as_ref() else { return Vec::new() };
+    pub(super) fn debug_pin_decorations(
+        &self,
+        path: &Path,
+        buffer: &fenix_core::Buffer,
+    ) -> Vec<crate::decorations::Decoration> {
+        let Some(session) = self.debug_session.as_ref() else {
+            return Vec::new();
+        };
         self.debug_pins
             .iter()
-            .filter(|p| debug_host::same_file(&p.path, path) && p.line >= 1 && p.line <= buffer.line_count())
+            .filter(|p| {
+                debug_host::same_file(&p.path, path) && p.line >= 1 && p.line <= buffer.line_count()
+            })
             .map(|p| {
-                let (value, fresh) = session.pin_values.get(p).map(|(v, f)| (v.as_str(), *f)).unwrap_or(("…", false));
-                let value: String = value.chars().map(|c| if c.is_control() { ' ' } else { c }).take(80).collect();
+                let (value, fresh) = session
+                    .pin_values
+                    .get(p)
+                    .map(|(v, f)| (v.as_str(), *f))
+                    .unwrap_or(("…", false));
+                let value: String = value
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .take(80)
+                    .collect();
                 let at = buffer.line_start_char(p.line - 1) + buffer.line_len(p.line - 1);
-                let role = if fresh { crate::page::Role::Accent } else { crate::page::Role::Muted };
-                crate::decorations::Decoration { start: at, end: at, look: crate::decorations::Look::Text { text: format!("    ◆ {} = {value}", p.expression), role, after: true }, id: None }
+                let role = if fresh {
+                    crate::page::Role::Accent
+                } else {
+                    crate::page::Role::Muted
+                };
+                crate::decorations::Decoration {
+                    start: at,
+                    end: at,
+                    look: crate::decorations::Look::Text {
+                        text: format!("    ◆ {} = {value}", p.expression),
+                        role,
+                        after: true,
+                    },
+                    id: None,
+                }
             })
             .collect()
     }
@@ -350,20 +479,46 @@ impl App {
 
     /// The debugger's part of the session file.
     pub(super) fn capture_debugging(&self) -> SavedDebugging {
-        let mut breakpoints: Vec<SavedBreakpoint> = self.breakpoints.iter().flat_map(|(path, lines)| lines.iter().map(move |(line, b)| SavedBreakpoint { path: path.clone(), line: *line, breakpoint: b.clone() })).collect();
+        let mut breakpoints: Vec<SavedBreakpoint> = self
+            .breakpoints
+            .iter()
+            .flat_map(|(path, lines)| {
+                lines.iter().map(move |(line, b)| SavedBreakpoint {
+                    path: path.clone(),
+                    line: *line,
+                    breakpoint: b.clone(),
+                })
+            })
+            .collect();
         breakpoints.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
-        let mut launches: Vec<(PathBuf, String)> = self.debug_last_launch.iter().map(|(r, n)| (r.clone(), n.clone())).collect();
+        let mut launches: Vec<(PathBuf, String)> = self
+            .debug_last_launch
+            .iter()
+            .map(|(r, n)| (r.clone(), n.clone()))
+            .collect();
         launches.sort();
-        let mut exceptions: Vec<(String, bool)> = self.debug_exceptions.iter().map(|(f, on)| (f.clone(), *on)).collect();
+        let mut exceptions: Vec<(String, bool)> = self
+            .debug_exceptions
+            .iter()
+            .map(|(f, on)| (f.clone(), *on))
+            .collect();
         exceptions.sort();
-        SavedDebugging { breakpoints, pins: self.debug_pins.clone(), launches, exceptions }
+        SavedDebugging {
+            breakpoints,
+            pins: self.debug_pins.clone(),
+            launches,
+            exceptions,
+        }
     }
 
     /// The debugger's part of a session file, put back.
     pub(super) fn restore_debugging(&mut self, saved: SavedDebugging) {
         self.breakpoints.clear();
         for b in saved.breakpoints {
-            self.breakpoints.entry(b.path).or_default().insert(b.line, b.breakpoint);
+            self.breakpoints
+                .entry(b.path)
+                .or_default()
+                .insert(b.line, b.breakpoint);
         }
         self.debug_pins = saved.pins;
         self.debug_last_launch = saved.launches.into_iter().collect();
@@ -397,34 +552,104 @@ mod tests {
     #[test]
     fn a_breakpoint_says_what_it_is_and_off_ones_arent_sent() {
         let mut lines = BTreeMap::new();
-        lines.insert(3, Breakpoint { condition: Some("x > 3".into()), hits: Some(">= 2".into()), ..Default::default() });
-        lines.insert(5, Breakpoint { log: Some("x is {x}".into()), ..Default::default() });
-        lines.insert(7, Breakpoint { off: true, ..Default::default() });
+        lines.insert(
+            3,
+            Breakpoint {
+                condition: Some("x > 3".into()),
+                hits: Some(">= 2".into()),
+                ..Default::default()
+            },
+        );
+        lines.insert(
+            5,
+            Breakpoint {
+                log: Some("x is {x}".into()),
+                ..Default::default()
+            },
+        );
+        lines.insert(
+            7,
+            Breakpoint {
+                off: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(lines[&3].describe(), "if x > 3  hits >= 2");
-        assert_eq!((lines[&3].look(), lines[&5].look(), lines[&7].look()), (BreakpointLook::Conditional, BreakpointLook::Log, BreakpointLook::Off));
+        assert_eq!(
+            (lines[&3].look(), lines[&5].look(), lines[&7].look()),
+            (
+                BreakpointLook::Conditional,
+                BreakpointLook::Log,
+                BreakpointLook::Off
+            )
+        );
         let sent = source_breakpoints(&lines, Some(9));
-        assert_eq!(sent.iter().map(|b| b.line).collect::<Vec<_>>(), [3, 5, 9], "7 is off; 9 is run to cursor's");
-        assert_eq!((sent[0].condition.as_deref(), sent[0].hit_condition.as_deref(), sent[1].log_message.as_deref()), (Some("x > 3"), Some(">= 2"), Some("x is {x}")));
-        assert_eq!(source_breakpoints(&lines, Some(3))[0].condition.as_deref(), Some("x > 3"), "run to cursor on one leaves it as it is");
+        assert_eq!(
+            sent.iter().map(|b| b.line).collect::<Vec<_>>(),
+            [3, 5, 9],
+            "7 is off; 9 is run to cursor's"
+        );
+        assert_eq!(
+            (
+                sent[0].condition.as_deref(),
+                sent[0].hit_condition.as_deref(),
+                sent[1].log_message.as_deref()
+            ),
+            (Some("x > 3"), Some(">= 2"), Some("x is {x}"))
+        );
+        assert_eq!(
+            source_breakpoints(&lines, Some(3))[0].condition.as_deref(),
+            Some("x > 3"),
+            "run to cursor on one leaves it as it is"
+        );
     }
 
     #[test]
     fn the_session_files_debugging_reads_back_and_a_plain_breakpoint_is_only_its_line() {
         let saved = SavedDebugging {
-            breakpoints: vec![SavedBreakpoint { path: PathBuf::from("/p/a.py"), line: 3, breakpoint: Breakpoint::default() }, SavedBreakpoint { path: PathBuf::from("/p/a.py"), line: 4, breakpoint: Breakpoint { condition: Some("i == 2".into()), off: true, ..Default::default() } }],
-            pins: vec![Pin { path: PathBuf::from("/p/a.py"), line: 3, expression: "self.rows".into() }],
+            breakpoints: vec![
+                SavedBreakpoint {
+                    path: PathBuf::from("/p/a.py"),
+                    line: 3,
+                    breakpoint: Breakpoint::default(),
+                },
+                SavedBreakpoint {
+                    path: PathBuf::from("/p/a.py"),
+                    line: 4,
+                    breakpoint: Breakpoint {
+                        condition: Some("i == 2".into()),
+                        off: true,
+                        ..Default::default()
+                    },
+                },
+            ],
+            pins: vec![Pin {
+                path: PathBuf::from("/p/a.py"),
+                line: 3,
+                expression: "self.rows".into(),
+            }],
             launches: vec![(PathBuf::from("/p"), "Python: module".into())],
             exceptions: vec![("raised".into(), true)],
         };
         let json = serde_json::to_value(&saved).unwrap();
-        assert_eq!(json["breakpoints"][0], serde_json::json!({ "path": "/p/a.py", "line": 3 }));
+        assert_eq!(
+            json["breakpoints"][0],
+            serde_json::json!({ "path": "/p/a.py", "line": 3 })
+        );
         assert_eq!(json["breakpoints"][1]["off"], true);
         let back: SavedDebugging = serde_json::from_value(json).unwrap();
         assert_eq!(back, saved);
         if cfg!(not(windows)) {
             assert!(back.validate().is_ok());
         }
-        let bad = SavedDebugging { pins: vec![Pin { path: PathBuf::from("rel.py"), line: 1, expression: "x".into() }], ..Default::default() };
+        let bad = SavedDebugging {
+            pins: vec![Pin {
+                path: PathBuf::from("rel.py"),
+                line: 1,
+                expression: "x".into(),
+            }],
+            ..Default::default()
+        };
         assert!(bad.validate().is_err());
         assert!(SavedDebugging::default().is_empty());
     }

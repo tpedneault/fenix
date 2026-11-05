@@ -67,7 +67,12 @@ mod rect_tests {
 
     #[test]
     fn contains_point_is_true_inside_and_false_outside() {
-        let r = Rect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 };
+        let r = Rect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 50.0,
+        };
         assert!(r.contains_point(10.0, 20.0)); // top-left corner, inclusive
         assert!(r.contains_point(50.0, 40.0)); // interior
         assert!(!r.contains_point(110.0, 40.0)); // right edge, exclusive
@@ -91,15 +96,28 @@ const MIN_RATIO: f32 = 0.1;
 const MAX_RATIO: f32 = 0.9;
 
 enum Node<T> {
-    Leaf { id: WindowId, content: T },
-    Split { kind: SplitKind, ratio: f32, first: Box<Node<T>>, second: Box<Node<T>> },
+    Leaf {
+        id: WindowId,
+        content: T,
+    },
+    Split {
+        kind: SplitKind,
+        ratio: f32,
+        first: Box<Node<T>>,
+        second: Box<Node<T>>,
+    },
 }
 
 /// Portable layout without process-local window identities.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Layout<T> {
     Leaf(T),
-    Split { kind: SplitKind, ratio: f32, first: Box<Layout<T>>, second: Box<Layout<T>> },
+    Split {
+        kind: SplitKind,
+        ratio: f32,
+        first: Box<Layout<T>>,
+        second: Box<Layout<T>>,
+    },
 }
 
 impl<T> WindowTree<T> {
@@ -107,8 +125,16 @@ impl<T> WindowTree<T> {
         fn visit<T, U>(node: &Node<T>, map: &mut impl FnMut(WindowId, &T) -> U) -> Layout<U> {
             match node {
                 Node::Leaf { id, content } => Layout::Leaf(map(*id, content)),
-                Node::Split { kind, ratio, first, second } => Layout::Split {
-                    kind: *kind, ratio: *ratio, first: Box::new(visit(first, map)), second: Box::new(visit(second, map)),
+                Node::Split {
+                    kind,
+                    ratio,
+                    first,
+                    second,
+                } => Layout::Split {
+                    kind: *kind,
+                    ratio: *ratio,
+                    first: Box::new(visit(first, map)),
+                    second: Box::new(visit(second, map)),
                 },
             }
         }
@@ -117,20 +143,45 @@ impl<T> WindowTree<T> {
 
     /// Restores fresh identities, rejecting invalid or excessively deep trees.
     pub fn from_layout(layout: Layout<T>, focused_leaf: usize) -> Result<Self, &'static str> {
-        fn visit<T>(layout: Layout<T>, depth: usize, leaves: &mut Vec<WindowId>) -> Result<Node<T>, &'static str> {
-            if depth > 32 || leaves.len() >= 256 { return Err("layout exceeds pane/depth limit"); }
+        fn visit<T>(
+            layout: Layout<T>,
+            depth: usize,
+            leaves: &mut Vec<WindowId>,
+        ) -> Result<Node<T>, &'static str> {
+            if depth > 32 || leaves.len() >= 256 {
+                return Err("layout exceeds pane/depth limit");
+            }
             Ok(match layout {
-                Layout::Leaf(content) => { let id = alloc_id(); leaves.push(id); Node::Leaf { id, content } }
-                Layout::Split { kind, ratio, first, second } => {
-                    if !ratio.is_finite() || !(MIN_RATIO..=MAX_RATIO).contains(&ratio) { return Err("invalid split ratio"); }
-                    Node::Split { kind, ratio, first: Box::new(visit(*first, depth + 1, leaves)?), second: Box::new(visit(*second, depth + 1, leaves)?) }
+                Layout::Leaf(content) => {
+                    let id = alloc_id();
+                    leaves.push(id);
+                    Node::Leaf { id, content }
+                }
+                Layout::Split {
+                    kind,
+                    ratio,
+                    first,
+                    second,
+                } => {
+                    if !ratio.is_finite() || !(MIN_RATIO..=MAX_RATIO).contains(&ratio) {
+                        return Err("invalid split ratio");
+                    }
+                    Node::Split {
+                        kind,
+                        ratio,
+                        first: Box::new(visit(*first, depth + 1, leaves)?),
+                        second: Box::new(visit(*second, depth + 1, leaves)?),
+                    }
                 }
             })
         }
         let mut leaves = Vec::new();
         let root = visit(layout, 0, &mut leaves)?;
         let focused = *leaves.get(focused_leaf).ok_or("invalid focused pane")?;
-        Ok(Self { root: Some(root), focused })
+        Ok(Self {
+            root: Some(root),
+            focused,
+        })
     }
 }
 
@@ -154,7 +205,11 @@ impl<T> Node<T> {
             Node::Leaf { id, content } if *id == target => Some(content),
             Node::Leaf { .. } => None,
             Node::Split { first, second, .. } => {
-                if first.contains(target) { first.find(target) } else { second.find(target) }
+                if first.contains(target) {
+                    first.find(target)
+                } else {
+                    second.find(target)
+                }
             }
         }
     }
@@ -164,7 +219,11 @@ impl<T> Node<T> {
             Node::Leaf { id, content } if *id == target => Some(content),
             Node::Leaf { .. } => None,
             Node::Split { first, second, .. } => {
-                if first.contains(target) { first.find_mut(target) } else { second.find_mut(target) }
+                if first.contains(target) {
+                    first.find_mut(target)
+                } else {
+                    second.find_mut(target)
+                }
             }
         }
     }
@@ -195,25 +254,76 @@ impl<T> Node<T> {
     /// `&self` read) picks which branch to recurse into *before* anything
     /// is moved, so `new_content` is only ever consumed along the one path
     /// that actually reaches `target`.
-    fn split_leaf(self, target: WindowId, kind: SplitKind, new_id: WindowId, new_content: T) -> Node<T> {
+    fn split_leaf(
+        self,
+        target: WindowId,
+        kind: SplitKind,
+        new_id: WindowId,
+        new_content: T,
+    ) -> Node<T> {
         self.split_leaf_at(target, kind, new_id, new_content, false)
     }
 
     /// `split_leaf`, with the new leaf put `before` the target (left of
     /// it, or above) rather than after.
-    fn split_leaf_at(self, target: WindowId, kind: SplitKind, new_id: WindowId, new_content: T, before: bool) -> Node<T> {
+    fn split_leaf_at(
+        self,
+        target: WindowId,
+        kind: SplitKind,
+        new_id: WindowId,
+        new_content: T,
+        before: bool,
+    ) -> Node<T> {
         match self {
             Node::Leaf { id, content } if id == target => {
-                let (old, new) = (Box::new(Node::Leaf { id, content }), Box::new(Node::Leaf { id: new_id, content: new_content }));
+                let (old, new) = (
+                    Box::new(Node::Leaf { id, content }),
+                    Box::new(Node::Leaf {
+                        id: new_id,
+                        content: new_content,
+                    }),
+                );
                 let (first, second) = if before { (new, old) } else { (old, new) };
-                Node::Split { kind, ratio: 0.5, first, second }
+                Node::Split {
+                    kind,
+                    ratio: 0.5,
+                    first,
+                    second,
+                }
             }
             Node::Leaf { .. } => self,
-            Node::Split { kind: k, ratio, first, second } => {
+            Node::Split {
+                kind: k,
+                ratio,
+                first,
+                second,
+            } => {
                 if first.contains(target) {
-                    Node::Split { kind: k, ratio, first: Box::new(first.split_leaf_at(target, kind, new_id, new_content, before)), second }
+                    Node::Split {
+                        kind: k,
+                        ratio,
+                        first: Box::new(first.split_leaf_at(
+                            target,
+                            kind,
+                            new_id,
+                            new_content,
+                            before,
+                        )),
+                        second,
+                    }
                 } else {
-                    Node::Split { kind: k, ratio, first, second: Box::new(second.split_leaf_at(target, kind, new_id, new_content, before)) }
+                    Node::Split {
+                        kind: k,
+                        ratio,
+                        first,
+                        second: Box::new(second.split_leaf_at(
+                            target,
+                            kind,
+                            new_id,
+                            new_content,
+                            before,
+                        )),
+                    }
                 }
             }
         }
@@ -224,7 +334,13 @@ impl<T> Node<T> {
     /// its sibling. Returns the resulting subtree plus a sensible new
     /// focus (the first leaf of whichever side survived nearest the cut).
     fn remove_from_split(self, target: WindowId) -> (Node<T>, WindowId) {
-        let Node::Split { kind, ratio, first, second } = self else {
+        let Node::Split {
+            kind,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
             unreachable!("remove_from_split called on a Leaf")
         };
         let first_is_target = matches!(&*first, Node::Leaf { id, .. } if *id == target);
@@ -237,10 +353,26 @@ impl<T> Node<T> {
             (*first, focus)
         } else if first.contains(target) {
             let (new_first, focus) = first.remove_from_split(target);
-            (Node::Split { kind, ratio, first: Box::new(new_first), second }, focus)
+            (
+                Node::Split {
+                    kind,
+                    ratio,
+                    first: Box::new(new_first),
+                    second,
+                },
+                focus,
+            )
         } else {
             let (new_second, focus) = second.remove_from_split(target);
-            (Node::Split { kind, ratio, first, second: Box::new(new_second) }, focus)
+            (
+                Node::Split {
+                    kind,
+                    ratio,
+                    first,
+                    second: Box::new(new_second),
+                },
+                focus,
+            )
         }
     }
 
@@ -249,7 +381,11 @@ impl<T> Node<T> {
             Node::Leaf { id, content } if id == target => content,
             Node::Leaf { .. } => unreachable!("target window id not found in tree"),
             Node::Split { first, second, .. } => {
-                if first.contains(target) { first.into_leaf_content(target) } else { second.into_leaf_content(target) }
+                if first.contains(target) {
+                    first.into_leaf_content(target)
+                } else {
+                    second.into_leaf_content(target)
+                }
             }
         }
     }
@@ -271,7 +407,12 @@ impl<T> Node<T> {
     fn adjust_near(&mut self, target: WindowId, f: &dyn Fn(f32) -> f32) -> bool {
         match self {
             Node::Leaf { .. } => false,
-            Node::Split { ratio, first, second, .. } => {
+            Node::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } => {
                 let first_is_target = matches!(&**first, Node::Leaf { id, .. } if *id == target);
                 let second_is_target = matches!(&**second, Node::Leaf { id, .. } if *id == target);
                 if first_is_target || second_is_target {
@@ -287,7 +428,13 @@ impl<T> Node<T> {
     }
 
     fn balance(&mut self) {
-        if let Node::Split { ratio, first, second, .. } = self {
+        if let Node::Split {
+            ratio,
+            first,
+            second,
+            ..
+        } = self
+        {
             *ratio = 0.5;
             first.balance();
             second.balance();
@@ -307,7 +454,12 @@ impl<T> Node<T> {
     fn layout_into(&self, bounds: Rect, out: &mut Vec<(WindowId, Rect)>) {
         match self {
             Node::Leaf { id, .. } => out.push((*id, bounds)),
-            Node::Split { kind, ratio, first, second } => {
+            Node::Split {
+                kind,
+                ratio,
+                first,
+                second,
+            } => {
                 let (a, b) = split_rect(bounds, *kind, *ratio);
                 first.layout_into(a, out);
                 second.layout_into(b, out);
@@ -321,15 +473,35 @@ fn split_rect(bounds: Rect, kind: SplitKind, ratio: f32) -> (Rect, Rect) {
         SplitKind::Vertical => {
             let w1 = bounds.w * ratio;
             (
-                Rect { x: bounds.x, y: bounds.y, w: w1, h: bounds.h },
-                Rect { x: bounds.x + w1, y: bounds.y, w: bounds.w - w1, h: bounds.h },
+                Rect {
+                    x: bounds.x,
+                    y: bounds.y,
+                    w: w1,
+                    h: bounds.h,
+                },
+                Rect {
+                    x: bounds.x + w1,
+                    y: bounds.y,
+                    w: bounds.w - w1,
+                    h: bounds.h,
+                },
             )
         }
         SplitKind::Horizontal => {
             let h1 = bounds.h * ratio;
             (
-                Rect { x: bounds.x, y: bounds.y, w: bounds.w, h: h1 },
-                Rect { x: bounds.x, y: bounds.y + h1, w: bounds.w, h: bounds.h - h1 },
+                Rect {
+                    x: bounds.x,
+                    y: bounds.y,
+                    w: bounds.w,
+                    h: h1,
+                },
+                Rect {
+                    x: bounds.x,
+                    y: bounds.y + h1,
+                    w: bounds.w,
+                    h: bounds.h - h1,
+                },
             )
         }
     }
@@ -353,15 +525,22 @@ pub struct WindowTree<T> {
 impl<T> WindowTree<T> {
     pub fn new(content: T) -> Self {
         let id = alloc_id();
-        Self { root: Some(Node::Leaf { id, content }), focused: id }
+        Self {
+            root: Some(Node::Leaf { id, content }),
+            focused: id,
+        }
     }
 
     fn root(&self) -> &Node<T> {
-        self.root.as_ref().expect("WindowTree::root invariant: always Some between calls")
+        self.root
+            .as_ref()
+            .expect("WindowTree::root invariant: always Some between calls")
     }
 
     fn root_mut(&mut self) -> &mut Node<T> {
-        self.root.as_mut().expect("WindowTree::root invariant: always Some between calls")
+        self.root
+            .as_mut()
+            .expect("WindowTree::root invariant: always Some between calls")
     }
 
     pub fn focused_id(&self) -> WindowId {
@@ -386,12 +565,14 @@ impl<T> WindowTree<T> {
     }
 
     pub fn focused_content(&self) -> &T {
-        self.content(self.focused).expect("focused window always has content")
+        self.content(self.focused)
+            .expect("focused window always has content")
     }
 
     pub fn focused_content_mut(&mut self) -> &mut T {
         let id = self.focused;
-        self.content_mut(id).expect("focused window always has content")
+        self.content_mut(id)
+            .expect("focused window always has content")
     }
 
     pub fn set_content(&mut self, id: WindowId, content: T) {
@@ -430,8 +611,20 @@ impl<T> WindowTree<T> {
     pub fn split_root(&mut self, kind: SplitKind, content: T, ratio: f32) -> WindowId {
         let new_id = alloc_id();
         let old_root = self.root.take().expect("WindowTree::root invariant");
-        let ratio = if ratio.is_finite() { ratio.clamp(MIN_RATIO, MAX_RATIO) } else { 0.5 };
-        self.root = Some(Node::Split { kind, ratio, first: Box::new(old_root), second: Box::new(Node::Leaf { id: new_id, content }) });
+        let ratio = if ratio.is_finite() {
+            ratio.clamp(MIN_RATIO, MAX_RATIO)
+        } else {
+            0.5
+        };
+        self.root = Some(Node::Split {
+            kind,
+            ratio,
+            first: Box::new(old_root),
+            second: Box::new(Node::Leaf {
+                id: new_id,
+                content,
+            }),
+        });
         self.focused = new_id;
         new_id
     }
@@ -457,7 +650,10 @@ impl<T> WindowTree<T> {
         let focused = self.focused;
         let old_root = self.root.take().expect("WindowTree::root invariant");
         let content = old_root.into_leaf_content(focused);
-        self.root = Some(Node::Leaf { id: focused, content });
+        self.root = Some(Node::Leaf {
+            id: focused,
+            content,
+        });
     }
 
     /// Focuses the next window in a stable pre-order traversal, wrapping
@@ -541,7 +737,12 @@ mod tests {
         let a = t.focused_id();
         let b = t.split_before(SplitKind::Vertical, "b");
         assert_eq!(t.focused_id(), b);
-        let layout = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
+        let layout = t.layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+        });
         let x = |id| layout.iter().find(|(w, _)| *w == id).unwrap().1.x;
         assert!(x(b) < x(a), "{layout:?}");
     }
@@ -554,10 +755,23 @@ mod tests {
         t.focus(a);
         let dock = t.split_root(SplitKind::Vertical, "dock", 0.6);
         assert_eq!(t.focused_id(), dock);
-        let layout = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
+        let layout = t.layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+        });
         let rect = |id| layout.iter().find(|(w, _)| *w == id).unwrap().1;
-        assert_eq!((rect(dock).x.round(), rect(dock).h), (60.0, 50.0), "{layout:?}");
-        assert_eq!((rect(a).w.round(), rect(b).w.round()), (60.0, 60.0), "the panes keep their own split, narrower");
+        assert_eq!(
+            (rect(dock).x.round(), rect(dock).h),
+            (60.0, 50.0),
+            "{layout:?}"
+        );
+        assert_eq!(
+            (rect(a).w.round(), rect(b).w.round()),
+            (60.0, 60.0),
+            "the panes keep their own split, narrower"
+        );
     }
 
     #[test]
@@ -566,7 +780,11 @@ mod tests {
         t.split(SplitKind::Vertical, "b");
         t.split(SplitKind::Horizontal, "c");
         assert_eq!(t.window_count(), 3);
-        let contents: Vec<&str> = t.windows().iter().map(|&id| *t.content(id).unwrap()).collect();
+        let contents: Vec<&str> = t
+            .windows()
+            .iter()
+            .map(|&id| *t.content(id).unwrap())
+            .collect();
         let mut sorted = contents.clone();
         sorted.sort();
         assert_eq!(sorted, vec!["a", "b", "c"]);
@@ -597,7 +815,11 @@ mod tests {
         assert!(t.close_focused()); // closes b, its sibling c should be promoted+focused
         assert_eq!(t.window_count(), 2);
         assert_eq!(t.focused_content(), &"c");
-        let remaining: Vec<&str> = t.windows().iter().map(|&id| *t.content(id).unwrap()).collect();
+        let remaining: Vec<&str> = t
+            .windows()
+            .iter()
+            .map(|&id| *t.content(id).unwrap())
+            .collect();
         let mut sorted = remaining.clone();
         sorted.sort();
         assert_eq!(sorted, vec!["a", "c"]);
@@ -638,7 +860,10 @@ mod tests {
         b.split(SplitKind::Vertical, "b2");
 
         for id in a.windows() {
-            assert!(!b.windows().contains(&id), "{id:?} was handed out by both trees");
+            assert!(
+                !b.windows().contains(&id),
+                "{id:?} was handed out by both trees"
+            );
         }
     }
 
@@ -672,12 +897,22 @@ mod tests {
         let mut t = WindowTree::new("a");
         t.split(SplitKind::Vertical, "b"); // focused: b, ratio 0.5
         t.resize_focused(0.3);
-        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        let rects = t.layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        });
         let a_rect = rects.iter().find(|(_, r)| r.x == 0.0).unwrap().1;
         assert!((a_rect.w - 80.0).abs() < 0.01); // ratio 0.8 of width 100
 
         t.resize_focused(1.0); // clamps at 0.9, not 1.0
-        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        let rects = t.layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        });
         let a_rect = rects.iter().find(|(_, r)| r.x == 0.0).unwrap().1;
         assert!((a_rect.w - 90.0).abs() < 0.01);
     }
@@ -688,7 +923,12 @@ mod tests {
         t.split(SplitKind::Vertical, "b");
         t.resize_focused(0.3);
         t.balance();
-        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        let rects = t.layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 100.0,
+        });
         for (_, r) in rects {
             assert!((r.w - 50.0).abs() < 0.01);
         }
@@ -698,7 +938,12 @@ mod tests {
     fn layout_vertical_split_divides_width() {
         let mut t = WindowTree::new("a");
         t.split(SplitKind::Vertical, "b");
-        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 });
+        let rects = t.layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 100.0,
+        });
         assert_eq!(rects.len(), 2);
         for (_, r) in &rects {
             assert_eq!(r.h, 100.0);
@@ -712,7 +957,12 @@ mod tests {
     fn layout_horizontal_split_divides_height() {
         let mut t = WindowTree::new("a");
         t.split(SplitKind::Horizontal, "b");
-        let rects = t.layout(Rect { x: 0.0, y: 0.0, w: 100.0, h: 200.0 });
+        let rects = t.layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 200.0,
+        });
         assert_eq!(rects.len(), 2);
         for (_, r) in &rects {
             assert_eq!(r.w, 100.0);
@@ -727,7 +977,12 @@ mod tests {
         let mut t = WindowTree::new("a");
         t.split(SplitKind::Vertical, "b");
         t.split(SplitKind::Horizontal, "c"); // splits b
-        let bounds = Rect { x: 0.0, y: 0.0, w: 200.0, h: 200.0 };
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 200.0,
+            h: 200.0,
+        };
         let rects = t.layout(bounds);
         assert_eq!(rects.len(), 3);
         let total_area: f32 = rects.iter().map(|(_, r)| r.w * r.h).sum();
@@ -735,35 +990,54 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod layout_tests {
     use super::*;
 
     #[test]
     fn portable_layout_preserves_structure_and_focus_with_fresh_ids() {
-        let layout = Layout::Split { kind: SplitKind::Vertical, ratio: 0.3,
+        let layout = Layout::Split {
+            kind: SplitKind::Vertical,
+            ratio: 0.3,
             first: Box::new(Layout::Leaf("a")),
-            second: Box::new(Layout::Split { kind: SplitKind::Horizontal, ratio: 0.7,
-                first: Box::new(Layout::Leaf("b")), second: Box::new(Layout::Leaf("c")) }) };
+            second: Box::new(Layout::Split {
+                kind: SplitKind::Horizontal,
+                ratio: 0.7,
+                first: Box::new(Layout::Leaf("b")),
+                second: Box::new(Layout::Leaf("c")),
+            }),
+        };
         let tree = WindowTree::from_layout(layout.clone(), 2).unwrap();
         assert_eq!(tree.snapshot(|_, text| *text), layout);
         assert_eq!(tree.content(tree.focused_id()), Some(&"c"));
         let restored = WindowTree::from_layout(tree.snapshot(|_, text| *text), 2).unwrap();
-        assert!(restored.windows().iter().all(|id| !tree.windows().contains(id)));
+        assert!(restored
+            .windows()
+            .iter()
+            .all(|id| !tree.windows().contains(id)));
     }
 
     #[test]
     fn portable_layout_rejects_invalid_ratio_focus_and_excessive_depth() {
         for ratio in [f32::NAN, f32::INFINITY, 0.0, 1.0] {
-            let layout = Layout::Split { kind: SplitKind::Vertical, ratio,
-                first: Box::new(Layout::Leaf(0)), second: Box::new(Layout::Leaf(1)) };
+            let layout = Layout::Split {
+                kind: SplitKind::Vertical,
+                ratio,
+                first: Box::new(Layout::Leaf(0)),
+                second: Box::new(Layout::Leaf(1)),
+            };
             assert!(WindowTree::from_layout(layout, 0).is_err());
         }
         assert!(WindowTree::from_layout(Layout::Leaf(0), 1).is_err());
         let mut deep = Layout::Leaf(0);
-        for _ in 0..34 { deep = Layout::Split { kind: SplitKind::Vertical, ratio: 0.5,
-            first: Box::new(deep), second: Box::new(Layout::Leaf(1)) }; }
+        for _ in 0..34 {
+            deep = Layout::Split {
+                kind: SplitKind::Vertical,
+                ratio: 0.5,
+                first: Box::new(deep),
+                second: Box::new(Layout::Leaf(1)),
+            };
+        }
         assert!(WindowTree::from_layout(deep, 0).is_err());
     }
 }

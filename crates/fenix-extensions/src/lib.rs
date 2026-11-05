@@ -15,12 +15,19 @@ pub mod registry;
 pub mod store;
 
 pub use manifest::{Manifest, Permissions, Runtime, ToolClass};
+pub use package::Package;
 /// The versions manifests are checked against.
 pub use semver;
-pub use package::Package;
 pub use store::{Installed, Policy, Store};
 
 /// The data folders an extension can carry, each read the way Fenix
 /// reads yours of the same name (`keymaps/*.toml` like your
 /// `keybindings.toml`) -- and `tutorial/*.toml`, lessons beside Fenix's.
-pub const DATA_DIRS: &[&str] = &["themes", "snippets", "templates", "keymaps", "languages", "tutorial"];
+pub const DATA_DIRS: &[&str] = &[
+    "themes",
+    "snippets",
+    "templates",
+    "keymaps",
+    "languages",
+    "tutorial",
+];

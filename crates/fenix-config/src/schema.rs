@@ -47,8 +47,14 @@ pub struct Field {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Kind {
     Bool,
-    Int { min: i64, max: i64 },
-    Float { min: f64, max: f64 },
+    Int {
+        min: i64,
+        max: i64,
+    },
+    Float {
+        min: f64,
+        max: f64,
+    },
     /// A number of minutes; `5`, `5m` and `1h` are all accepted.
     Minutes,
     Text,
@@ -62,7 +68,11 @@ pub enum Kind {
     /// A list of words (`["alex", "sam"]`).
     List,
     /// Named entries; `key` and `value` label the two halves.
-    Map { key: &'static str, value: &'static str, paths: bool },
+    Map {
+        key: &'static str,
+        value: &'static str,
+        paths: bool,
+    },
     Records(&'static [Field]),
     /// A token: typed masked on the page, and an environment variable
     /// overrides it.
@@ -197,8 +207,25 @@ impl Setting {
 
     /// A feature's setting, kept by its key: what a feature registers
     /// (`register`).
-    pub const fn stored(key: &'static str, category: Category, label: &'static str, kind: Kind, help: &'static str) -> Setting {
-        Setting { key, category, label, help, kind, default: "", project: false, restart: false, access: Access::Stored, check: None }
+    pub const fn stored(
+        key: &'static str,
+        category: Category,
+        label: &'static str,
+        kind: Kind,
+        help: &'static str,
+    ) -> Setting {
+        Setting {
+            key,
+            category,
+            label,
+            help,
+            kind,
+            default: "",
+            project: false,
+            restart: false,
+            access: Access::Stored,
+            check: None,
+        }
     }
 
     /// Checks a value beyond its kind (a Jira project's Blocked meaning):
@@ -233,8 +260,26 @@ impl Setting {
     }
 }
 
-fn s(key: &'static str, category: Category, label: &'static str, kind: Kind, help: &'static str, (get, set): (Get, Set)) -> Setting {
-    Setting { key, category, label, help, kind, default: "", project: false, restart: false, access: Access::Field(get, set), check: None }
+fn s(
+    key: &'static str,
+    category: Category,
+    label: &'static str,
+    kind: Kind,
+    help: &'static str,
+    (get, set): (Get, Set),
+) -> Setting {
+    Setting {
+        key,
+        category,
+        label,
+        help,
+        kind,
+        default: "",
+        project: false,
+        restart: false,
+        access: Access::Field(get, set),
+        check: None,
+    }
 }
 
 // -- Conversions between a field's type and a `Value` ---------------------
@@ -268,7 +313,9 @@ fn bool_set(v: Option<Value>) -> Result<Option<bool>, String> {
 fn int_set<T: TryFrom<i64>>(v: Option<Value>) -> Result<Option<T>, String> {
     match v {
         None => Ok(None),
-        Some(Value::Int(n)) => T::try_from(n).map(Some).map_err(|_| format!("{n} is out of range")),
+        Some(Value::Int(n)) => T::try_from(n)
+            .map(Some)
+            .map_err(|_| format!("{n} is out of range")),
         Some(other) => Err(format!("expected a whole number, got {}", other.describe())),
     }
 }
@@ -276,13 +323,17 @@ fn usize_get(v: &Option<usize>) -> Option<Value> {
     v.map(|n| Value::Int(n as i64))
 }
 fn usize_set(v: Option<Value>) -> Result<Option<usize>, String> {
-    int_set::<i64>(v)?.map(|n| usize::try_from(n).map_err(|_| format!("{n} is out of range"))).transpose()
+    int_set::<i64>(v)?
+        .map(|n| usize::try_from(n).map_err(|_| format!("{n} is out of range")))
+        .transpose()
 }
 fn u64_get(v: &Option<u64>) -> Option<Value> {
     v.map(|n| Value::Int(n as i64))
 }
 fn u64_set(v: Option<Value>) -> Result<Option<u64>, String> {
-    int_set::<i64>(v)?.map(|n| u64::try_from(n).map_err(|_| format!("{n} is out of range"))).transpose()
+    int_set::<i64>(v)?
+        .map(|n| u64::try_from(n).map_err(|_| format!("{n} is out of range")))
+        .transpose()
 }
 fn f32_get(v: &Option<f32>) -> Option<Value> {
     v.map(|n| Value::Float(n as f64))
@@ -317,23 +368,28 @@ fn map_set(v: Option<Value>) -> Result<Vec<(String, String)>, String> {
     }
 }
 
-
 macro_rules! field {
     ($f:ident, $get:expr, $set:expr) => {
-        (|c: &Config| $get(&c.$f), |c: &mut Config, v: Option<Value>| {
-            c.$f = $set(v)?;
-            Ok(())
-        })
+        (
+            |c: &Config| $get(&c.$f),
+            |c: &mut Config, v: Option<Value>| {
+                c.$f = $set(v)?;
+                Ok(())
+            },
+        )
     };
 }
 
 /// A field of one of `Config`'s grouped settings: `sub!(motion.beacon, ...)`.
 macro_rules! sub {
     ($group:ident . $f:ident, $get:expr, $set:expr) => {
-        (|c: &Config| $get(&c.$group.$f), |c: &mut Config, v: Option<Value>| {
-            c.$group.$f = $set(v)?;
-            Ok(())
-        })
+        (
+            |c: &Config| $get(&c.$group.$f),
+            |c: &mut Config, v: Option<Value>| {
+                c.$group.$f = $set(v)?;
+                Ok(())
+            },
+        )
     };
 }
 
@@ -479,9 +535,13 @@ static REGISTERED: std::sync::RwLock<Vec<&'static Setting>> = std::sync::RwLock:
 /// startup, before the settings are read; a key already declared is left
 /// as it was.
 pub fn register(settings: &'static [Setting]) {
-    let mut registered = REGISTERED.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut registered = REGISTERED
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for setting in settings {
-        if !SETTINGS.iter().any(|s| s.key == setting.key) && !registered.iter().any(|s| s.key == setting.key) {
+        if !SETTINGS.iter().any(|s| s.key == setting.key)
+            && !registered.iter().any(|s| s.key == setting.key)
+        {
             registered.push(setting);
         }
     }
@@ -489,7 +549,9 @@ pub fn register(settings: &'static [Setting]) {
 
 /// Every setting: core's in page order, then the features'.
 pub fn settings() -> Vec<&'static Setting> {
-    let registered = REGISTERED.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let registered = REGISTERED
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     SETTINGS.iter().chain(registered.iter().copied()).collect()
 }
 
@@ -501,12 +563,17 @@ pub fn setting(key: &str) -> Option<&'static Setting> {
 /// Every setting as a Markdown table, by category -- the copy in docs/CONFIGURATION.md,
 /// which a test keeps in step with this list.
 pub fn markdown_table() -> String {
-    let mut out = String::from("| Setting | Takes | Default | What it does |
+    let mut out = String::from(
+        "| Setting | Takes | Default | What it does |
 |---|---|---|---|
-");
+",
+    );
     for category in Category::ALL {
-        out.push_str(&format!("| **{}** | | | |
-", category.label()));
+        out.push_str(&format!(
+            "| **{}** | | | |
+",
+            category.label()
+        ));
         for s in settings().iter().filter(|s| s.category == category) {
             let takes = match s.kind {
                 Kind::Bool => "true / false".to_string(),
@@ -517,8 +584,13 @@ pub fn markdown_table() -> String {
                 Kind::Path => "a path".to_string(),
                 Kind::Choice(c) => c.join(" / "),
                 Kind::List => "a list".to_string(),
-                Kind::Map { key, value, .. } => format!("{} = {}", key.to_lowercase(), value.to_lowercase()),
-                Kind::Records(fields) => format!("[[tables]] of {}", fields.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")),
+                Kind::Map { key, value, .. } => {
+                    format!("{} = {}", key.to_lowercase(), value.to_lowercase())
+                }
+                Kind::Records(fields) => format!(
+                    "[[tables]] of {}",
+                    fields.iter().map(|f| f.name).collect::<Vec<_>>().join(", ")
+                ),
                 Kind::Secret(_) => "text (a token)".to_string(),
             };
             let mut help = s.help.replace('|', r"\|");
@@ -529,8 +601,15 @@ pub fn markdown_table() -> String {
                 help.push_str(" *Needs a restart.*");
             }
             let key = format!("`{}`", s.key);
-            out.push_str(&format!("| {key} | {takes} | {} | {help} |
-", if s.default.is_empty() { "–" } else { s.default }));
+            out.push_str(&format!(
+                "| {key} | {takes} | {} | {help} |
+",
+                if s.default.is_empty() {
+                    "–"
+                } else {
+                    s.default
+                }
+            ));
         }
     }
     out
@@ -586,27 +665,52 @@ impl Kind {
     /// Whether `value` is one this setting accepts, and why not.
     pub fn check(&self, value: &Value) -> Result<(), String> {
         match (self, value) {
-            (Kind::Int { min, max }, Value::Int(n)) if n < min || n > max => Err(format!("a whole number from {min} to {max}")),
-            (Kind::Float { min, max }, Value::Float(n)) if n < min || n > max => Err(format!("a number from {min} to {max}")),
-            (Kind::Float { min, max }, Value::Int(n)) if (*n as f64) < *min || (*n as f64) > *max => Err(format!("a number from {min} to {max}")),
+            (Kind::Int { min, max }, Value::Int(n)) if n < min || n > max => {
+                Err(format!("a whole number from {min} to {max}"))
+            }
+            (Kind::Float { min, max }, Value::Float(n)) if n < min || n > max => {
+                Err(format!("a number from {min} to {max}"))
+            }
+            (Kind::Float { min, max }, Value::Int(n))
+                if (*n as f64) < *min || (*n as f64) > *max =>
+            {
+                Err(format!("a number from {min} to {max}"))
+            }
             (Kind::Minutes, Value::Int(n)) if *n < 1 => Err("at least 1 minute".into()),
-            (Kind::Choice(choices), Value::Text(t)) if !choices.contains(&t.as_str()) => Err(format!("one of {}", choices.join(", "))),
+            (Kind::Choice(choices), Value::Text(t)) if !choices.contains(&t.as_str()) => {
+                Err(format!("one of {}", choices.join(", ")))
+            }
             (Kind::Records(fields), Value::Records(rows)) => {
                 for row in rows {
                     if row.len() != fields.len() {
-                        return Err(format!("each entry needs {}", fields.iter().map(|f| f.label).collect::<Vec<_>>().join(", ")));
+                        return Err(format!(
+                            "each entry needs {}",
+                            fields
+                                .iter()
+                                .map(|f| f.label)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
                     }
                     for (f, v) in fields.iter().zip(row) {
                         if v.trim().is_empty() && f.default.is_none() {
                             return Err(format!("{} can't be empty", f.label));
                         }
-                        if !f.choices.is_empty() && !v.trim().is_empty() && !f.choices.contains(&v.trim()) {
+                        if !f.choices.is_empty()
+                            && !v.trim().is_empty()
+                            && !f.choices.contains(&v.trim())
+                        {
                             return Err(format!("{}: one of {}", f.label, f.choices.join(", ")));
                         }
                         if let Some((min, max)) = f.range {
                             match v.trim().parse::<i64>() {
                                 Ok(n) if n >= min && n <= max => {}
-                                _ => return Err(format!("{}: a whole number from {min} to {max}", f.label)),
+                                _ => {
+                                    return Err(format!(
+                                        "{}: a whole number from {min} to {max}",
+                                        f.label
+                                    ))
+                                }
                             }
                         }
                     }
@@ -638,8 +742,14 @@ impl Kind {
                 "off" | "false" | "no" => Value::Bool(false),
                 _ => return Err("on or off".into()),
             },
-            Kind::Int { min, max } => Value::Int(t.parse().map_err(|_| format!("a whole number from {min} to {max}"))?),
-            Kind::Float { min, max } => Value::Float(t.parse().map_err(|_| format!("a number from {min} to {max}"))?),
+            Kind::Int { min, max } => Value::Int(
+                t.parse()
+                    .map_err(|_| format!("a whole number from {min} to {max}"))?,
+            ),
+            Kind::Float { min, max } => Value::Float(
+                t.parse()
+                    .map_err(|_| format!("a number from {min} to {max}"))?,
+            ),
             Kind::Minutes => Value::Int(minutes(t).ok_or("a number of minutes, like 5, 5m or 1h")?),
             Kind::List => Value::List(crate::names(t)),
             _ => Value::Text(text.to_string()),
@@ -652,17 +762,52 @@ impl Kind {
     pub(crate) fn read(&self, item: &Item) -> Result<Value, String> {
         let got = |what: &str| format!("expected {what}, got {}", item.type_name());
         match self {
-            Kind::Bool => item.as_bool().map(Value::Bool).ok_or_else(|| got("true or false")),
-            Kind::Int { .. } => item.as_integer().map(Value::Int).ok_or_else(|| got("a whole number")),
-            Kind::Float { .. } => item.as_float().or_else(|| item.as_integer().map(|n| n as f64)).map(Value::Float).ok_or_else(|| got("a number")),
-            Kind::Minutes => item.as_integer().or_else(|| item.as_str().and_then(minutes)).map(Value::Int).ok_or_else(|| got("a number of minutes")),
-            Kind::Text | Kind::Path | Kind::Choice(_) | Kind::Theme | Kind::Font | Kind::Secret(_) => item.as_str().map(|s| Value::Text(s.to_string())).ok_or_else(|| got("text in quotes")),
+            Kind::Bool => item
+                .as_bool()
+                .map(Value::Bool)
+                .ok_or_else(|| got("true or false")),
+            Kind::Int { .. } => item
+                .as_integer()
+                .map(Value::Int)
+                .ok_or_else(|| got("a whole number")),
+            Kind::Float { .. } => item
+                .as_float()
+                .or_else(|| item.as_integer().map(|n| n as f64))
+                .map(Value::Float)
+                .ok_or_else(|| got("a number")),
+            Kind::Minutes => item
+                .as_integer()
+                .or_else(|| item.as_str().and_then(minutes))
+                .map(Value::Int)
+                .ok_or_else(|| got("a number of minutes")),
+            Kind::Text
+            | Kind::Path
+            | Kind::Choice(_)
+            | Kind::Theme
+            | Kind::Font
+            | Kind::Secret(_) => item
+                .as_str()
+                .map(|s| Value::Text(s.to_string()))
+                .ok_or_else(|| got("text in quotes")),
             Kind::List => match item.as_array() {
-                Some(a) => a.iter().map(|v| v.as_str().map(str::to_string).ok_or_else(|| "every entry should be text in quotes".to_string())).collect::<Result<_, _>>().map(Value::List),
-                None => item.as_str().map(|s| Value::List(crate::names(s))).ok_or_else(|| got("a list, like [\"a\", \"b\"]")),
+                Some(a) => a
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .ok_or_else(|| "every entry should be text in quotes".to_string())
+                    })
+                    .collect::<Result<_, _>>()
+                    .map(Value::List),
+                None => item
+                    .as_str()
+                    .map(|s| Value::List(crate::names(s)))
+                    .ok_or_else(|| got("a list, like [\"a\", \"b\"]")),
             },
             Kind::Map { .. } => {
-                let table = item.as_table_like().ok_or_else(|| got("a table of names"))?;
+                let table = item
+                    .as_table_like()
+                    .ok_or_else(|| got("a table of names"))?;
                 table
                     .iter()
                     .map(|(k, v)| match v.as_str() {
@@ -673,14 +818,25 @@ impl Kind {
                     .map(Value::Map)
             }
             Kind::Records(fields) => {
-                let rows = item.as_array_of_tables().ok_or_else(|| got("a list of [[tables]]"))?;
+                let rows = item
+                    .as_array_of_tables()
+                    .ok_or_else(|| got("a list of [[tables]]"))?;
                 rows.iter()
                     .map(|row| {
                         fields
                             .iter()
                             .map(|f| match row.get(f.name) {
-                                Some(v) => v.as_str().map(str::to_string).or_else(|| v.as_integer().map(|n| n.to_string())).ok_or_else(|| format!("{}: expected text or a number", f.name)),
-                                None => f.default.map(str::to_string).ok_or_else(|| format!("an entry is missing {}", f.name)),
+                                Some(v) => v
+                                    .as_str()
+                                    .map(str::to_string)
+                                    .or_else(|| v.as_integer().map(|n| n.to_string()))
+                                    .ok_or_else(|| {
+                                        format!("{}: expected text or a number", f.name)
+                                    }),
+                                None => f
+                                    .default
+                                    .map(str::to_string)
+                                    .ok_or_else(|| format!("an entry is missing {}", f.name)),
                             })
                             .collect::<Result<Vec<_>, _>>()
                     })
@@ -723,7 +879,17 @@ impl Kind {
                 }
                 Item::ArrayOfTables(array)
             }
-            (_, Value::Records(rows)) => value(rows.iter().map(|r| InlineTable::from_iter(r.iter().enumerate().map(|(i, v)| (i.to_string(), v.as_str())))).collect::<Array>()),
+            (_, Value::Records(rows)) => value(
+                rows.iter()
+                    .map(|r| {
+                        InlineTable::from_iter(
+                            r.iter()
+                                .enumerate()
+                                .map(|(i, v)| (i.to_string(), v.as_str())),
+                        )
+                    })
+                    .collect::<Array>(),
+            ),
         }
     }
 }
@@ -751,9 +917,17 @@ mod tests {
         assert!(size.kind.parse("16px").is_err());
         let fetch = setting("git.auto_fetch").unwrap();
         assert_eq!(fetch.kind.parse("1h"), Ok(Value::Int(60)));
-        assert!(fetch.kind.parse("five minutes").unwrap_err().contains("minutes"));
+        assert!(fetch
+            .kind
+            .parse("five minutes")
+            .unwrap_err()
+            .contains("minutes"));
         let layout = setting("git.layout").unwrap();
-        assert!(layout.kind.parse("tabs").unwrap_err().contains("page, panes"));
+        assert!(layout
+            .kind
+            .parse("tabs")
+            .unwrap_err()
+            .contains("page, panes"));
     }
 }
 
@@ -761,26 +935,60 @@ mod tests {
 mod registered {
     use super::*;
 
-    static PORTS: [Setting; 1] = [Setting::stored("test.ports", Category::Extensions, "Ports", Kind::Records(&[Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] }]), "Test ports.")];
+    static PORTS: [Setting; 1] = [Setting::stored(
+        "test.ports",
+        Category::Extensions,
+        "Ports",
+        Kind::Records(&[Field {
+            name: "port",
+            label: "Port",
+            range: Some((1, 65535)),
+            default: Some("5900"),
+            choices: &[],
+        }]),
+        "Test ports.",
+    )];
 
     #[test]
     fn a_registered_setting_is_loaded_checked_saved_and_kept_by_key() {
         register(&PORTS);
         register(&PORTS);
-        assert_eq!(settings().iter().filter(|s| s.key == "test.ports").count(), 1, "registered once");
+        assert_eq!(
+            settings().iter().filter(|s| s.key == "test.ports").count(),
+            1,
+            "registered once"
+        );
         let ports = setting("test.ports").unwrap();
-        assert!(ports.set(&mut Config::empty("s.toml".into(), "state".into()), Some(Value::Records(vec![vec!["70000".into()]]))).unwrap_err().contains("Port"));
-        let dir = std::env::temp_dir().join(format!("fenix-config-registered-{}", std::process::id()));
+        assert!(ports
+            .set(
+                &mut Config::empty("s.toml".into(), "state".into()),
+                Some(Value::Records(vec![vec!["70000".into()]]))
+            )
+            .unwrap_err()
+            .contains("Port"));
+        let dir =
+            std::env::temp_dir().join(format!("fenix-config-registered-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("settings.toml");
         let mut config = Config::load(path.clone()).unwrap();
-        ports.set(&mut config, Some(Value::Records(vec![vec!["5901".into()]]))).unwrap();
-        assert_eq!(config.value("test.ports"), Some(&Value::Records(vec![vec!["5901".into()]])));
+        ports
+            .set(&mut config, Some(Value::Records(vec![vec!["5901".into()]])))
+            .unwrap();
+        assert_eq!(
+            config.value("test.ports"),
+            Some(&Value::Records(vec![vec!["5901".into()]]))
+        );
         config.save().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[[test.ports]]") && text.contains("port = 5901"), "{text}");
+        assert!(
+            text.contains("[[test.ports]]") && text.contains("port = 5901"),
+            "{text}"
+        );
         let reloaded = Config::load(path).unwrap();
-        assert_eq!(reloaded.value("test.ports"), Some(&Value::Records(vec![vec!["5901".into()]])));
+        assert_eq!(
+            reloaded.value("test.ports"),
+            Some(&Value::Records(vec![vec!["5901".into()]]))
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

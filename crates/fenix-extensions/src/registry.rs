@@ -15,7 +15,8 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 /// Where the index is, unless `extensions.registry` says otherwise.
-pub const DEFAULT_URL: &str = "https://raw.githubusercontent.com/tpedneault/fenix-extensions/registry/index.json";
+pub const DEFAULT_URL: &str =
+    "https://raw.githubusercontent.com/tpedneault/fenix-extensions/registry/index.json";
 
 /// The most an index may be.
 const MAX_INDEX: u64 = 8 * 1024 * 1024;
@@ -45,7 +46,10 @@ where
     T: serde::de::DeserializeOwned,
 {
     let raw: Vec<serde_json::Value> = Deserialize::deserialize(deserializer)?;
-    Ok(raw.into_iter().filter_map(|entry| serde_json::from_value(entry).ok()).collect())
+    Ok(raw
+        .into_iter()
+        .filter_map(|entry| serde_json::from_value(entry).ok())
+        .collect())
 }
 
 /// One extension in the index, with every version published.
@@ -103,9 +107,16 @@ pub struct Http;
 
 impl Fetch for Http {
     fn get(&self, url: &str, limit: u64) -> Result<Vec<u8>, String> {
-        let response = ureq::get(url).timeout(std::time::Duration::from_secs(30)).call().map_err(|e| format!("{url}: {e}"))?;
+        let response = ureq::get(url)
+            .timeout(std::time::Duration::from_secs(30))
+            .call()
+            .map_err(|e| format!("{url}: {e}"))?;
         let mut bytes = Vec::new();
-        response.into_reader().take(limit + 1).read_to_end(&mut bytes).map_err(|e| format!("{url}: {e}"))?;
+        response
+            .into_reader()
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("{url}: {e}"))?;
         if bytes.len() as u64 > limit {
             return Err(format!("{url} is bigger than it should be"));
         }
@@ -124,17 +135,26 @@ impl Registry<'_> {
     /// The index, its signature checked.
     pub fn index(&self, fetch: &dyn Fetch) -> Result<Index, String> {
         if self.public_key.is_empty() {
-            return Err("this Fenix has no registry key built in yet -- install from a file instead".into());
+            return Err(
+                "this Fenix has no registry key built in yet -- install from a file instead".into(),
+            );
         }
-        let key = minisign_verify::PublicKey::from_base64(self.public_key).map_err(|e| format!("the registry key: {e}"))?;
+        let key = minisign_verify::PublicKey::from_base64(self.public_key)
+            .map_err(|e| format!("the registry key: {e}"))?;
         let bytes = fetch.get(&self.url, MAX_INDEX)?;
         let sig = fetch.get(&format!("{}.minisig", self.url), 64 * 1024)?;
-        let sig = std::str::from_utf8(&sig).map_err(|_| "the index's signature isn't text".to_string())?;
-        let sig = minisign_verify::Signature::decode(sig).map_err(|e| format!("the index's signature: {e}"))?;
-        key.verify(&bytes, &sig, false).map_err(|_| format!("{}: the signature doesn't match -- not trusted", self.url))?;
+        let sig = std::str::from_utf8(&sig)
+            .map_err(|_| "the index's signature isn't text".to_string())?;
+        let sig = minisign_verify::Signature::decode(sig)
+            .map_err(|e| format!("the index's signature: {e}"))?;
+        key.verify(&bytes, &sig, false)
+            .map_err(|_| format!("{}: the signature doesn't match -- not trusted", self.url))?;
         let index: Index = serde_json::from_slice(&bytes).map_err(|e| format!("the index: {e}"))?;
         if index.format != 1 {
-            return Err(format!("the index is format {}, and this Fenix reads 1 -- a newer Fenix reads it", index.format));
+            return Err(format!(
+                "the index is format {}, and this Fenix reads 1 -- a newer Fenix reads it",
+                index.format
+            ));
         }
         Ok(index)
     }
@@ -143,12 +163,21 @@ impl Registry<'_> {
 impl Index {
     /// Extension or bundle `id`.
     pub fn listing(&self, id: &str) -> Option<&Listing> {
-        self.extensions.iter().chain(&self.bundles).find(|l| l.id == id)
+        self.extensions
+            .iter()
+            .chain(&self.bundles)
+            .find(|l| l.id == id)
     }
 
     /// The bundles whose newest version for this Fenix has `id` in it.
     pub fn bundles_of(&self, id: &str, fenix: &semver::Version) -> Vec<&Listing> {
-        self.bundles.iter().filter(|b| b.latest_for(fenix).is_some_and(|r| r.members().iter().any(|m| m == id))).collect()
+        self.bundles
+            .iter()
+            .filter(|b| {
+                b.latest_for(fenix)
+                    .is_some_and(|r| r.members().iter().any(|m| m == id))
+            })
+            .collect()
     }
 }
 
@@ -160,7 +189,9 @@ impl Listing {
             .iter()
             .filter(|r| match r.runtime {
                 crate::manifest::Runtime::None | crate::manifest::Runtime::Bundle => true,
-                crate::manifest::Runtime::Wasm => r.api.as_deref().is_some_and(crate::manifest::api_fits),
+                crate::manifest::Runtime::Wasm => {
+                    r.api.as_deref().is_some_and(crate::manifest::api_fits)
+                }
                 crate::manifest::Runtime::Lua => false,
             })
             .filter(|r| semver::VersionReq::parse(&r.fenix).is_ok_and(|req| req.matches(fenix)))
@@ -194,13 +225,16 @@ impl Release {
         let _ = std::fs::remove_file(&package);
         let _ = std::fs::remove_dir_all(&out);
         for (rel, bytes) in opened?.files {
-            let shown = rel == Path::new("README.md") || rel == Path::new("CHANGELOG.md") || rel.starts_with("screenshots");
+            let shown = rel == Path::new("README.md")
+                || rel == Path::new("CHANGELOG.md")
+                || rel.starts_with("screenshots");
             if !shown {
                 continue;
             }
             let to = out.join(&rel);
             if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("{}: {e}", parent.display()))?;
             }
             std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
         }
@@ -213,13 +247,19 @@ impl Release {
     /// hash and size: its path, ready for `Store::install`.
     pub fn download(&self, id: &str, fetch: &dyn Fetch, dir: &Path) -> Result<PathBuf, String> {
         if self.size > crate::package::MAX_UNPACKED {
-            return Err(format!("{id} {} is bigger than an extension may be", self.version));
+            return Err(format!(
+                "{id} {} is bigger than an extension may be",
+                self.version
+            ));
         }
         let bytes = fetch.get(&self.url, self.size)?;
         let hash = Sha256::digest(&bytes);
         let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
         if bytes.len() as u64 != self.size || !hex.eq_ignore_ascii_case(&self.sha256) {
-            return Err(format!("{id} {}: the download isn't what the index says it is -- not installed", self.version));
+            return Err(format!(
+                "{id} {}: the download isn't what the index says it is -- not installed",
+                self.version
+            ));
         }
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = dir.join(format!("{id}-{}.fenixext", self.version));
@@ -234,7 +274,13 @@ impl Registry<'_> {
     /// installed, first -- a bundle's members, for a bundle; those are
     /// removed with the last that needs them. What was installed, in
     /// order.
-    pub fn install(&self, id: &str, store: &crate::Store, fetch: &dyn Fetch, fenix: &semver::Version) -> Result<Vec<crate::Installed>, String> {
+    pub fn install(
+        &self,
+        id: &str,
+        store: &crate::Store,
+        fetch: &dyn Fetch,
+        fenix: &semver::Version,
+    ) -> Result<Vec<crate::Installed>, String> {
         let index = self.index(fetch)?;
         let have: Vec<String> = store.installed()?.into_iter().map(|e| e.id).collect();
         let mut plan = Vec::new();
@@ -243,7 +289,11 @@ impl Registry<'_> {
         let mut done = Vec::new();
         for (ext, release) in plan {
             let package = release.download(&ext, fetch, &downloads)?;
-            let installed = if ext == id { store.install(&package, fenix) } else { store.install_dependency(&package, fenix) };
+            let installed = if ext == id {
+                store.install(&package, fenix)
+            } else {
+                store.install_dependency(&package, fenix)
+            };
             let _ = std::fs::remove_file(&package);
             done.push(installed?);
         }
@@ -253,15 +303,29 @@ impl Registry<'_> {
 }
 
 /// `id` and what it needs, dependencies first, each once.
-fn plan_install<'a>(id: &str, index: &'a Index, fenix: &semver::Version, have: &[String], out: &mut Vec<(String, &'a Release)>, depth: usize) -> Result<(), String> {
+fn plan_install<'a>(
+    id: &str,
+    index: &'a Index,
+    fenix: &semver::Version,
+    have: &[String],
+    out: &mut Vec<(String, &'a Release)>,
+    depth: usize,
+) -> Result<(), String> {
     if depth > 16 {
         return Err(format!("{id}'s dependencies go round in a circle"));
     }
     if out.iter().any(|(o, _)| o == id) {
         return Ok(());
     }
-    let listing = index.listing(id).ok_or_else(|| format!("{id} isn't in the registry"))?;
-    let release = listing.latest_for(fenix).ok_or_else(|| format!("the registry has no version of {} for this Fenix", listing.name))?;
+    let listing = index
+        .listing(id)
+        .ok_or_else(|| format!("{id} isn't in the registry"))?;
+    let release = listing.latest_for(fenix).ok_or_else(|| {
+        format!(
+            "the registry has no version of {} for this Fenix",
+            listing.name
+        )
+    })?;
     for dep in release.dependencies.keys() {
         if !have.contains(dep) {
             plan_install(dep, index, fenix, have, out, depth + 1)?;
@@ -281,14 +345,23 @@ pub struct Update {
 
 /// The installed extensions (`(id, version)`) the index has newer
 /// versions of, for this Fenix.
-pub fn updates(index: &Index, installed: &[(String, String)], fenix: &semver::Version) -> Vec<Update> {
+pub fn updates(
+    index: &Index,
+    installed: &[(String, String)],
+    fenix: &semver::Version,
+) -> Vec<Update> {
     installed
         .iter()
         .filter_map(|(id, have)| {
             let listing = index.listing(id)?;
             let latest = listing.latest_for(fenix)?;
-            let newer = semver::Version::parse(&latest.version).ok()? > semver::Version::parse(have).ok()?;
-            newer.then(|| Update { id: id.clone(), installed: have.clone(), latest: latest.version.clone() })
+            let newer = semver::Version::parse(&latest.version).ok()?
+                > semver::Version::parse(have).ok()?;
+            newer.then(|| Update {
+                id: id.clone(),
+                installed: have.clone(),
+                latest: latest.version.clone(),
+            })
         })
         .collect()
 }
@@ -303,7 +376,11 @@ mod tests {
 
     impl Fetch for Fake {
         fn get(&self, url: &str, limit: u64) -> Result<Vec<u8>, String> {
-            let bytes = self.0.get(url).cloned().ok_or_else(|| format!("{url}: 404"))?;
+            let bytes = self
+                .0
+                .get(url)
+                .cloned()
+                .ok_or_else(|| format!("{url}: 404"))?;
             if bytes.len() as u64 > limit {
                 return Err(format!("{url} is bigger than it should be"));
             }
@@ -316,11 +393,17 @@ mod tests {
     }
 
     fn sign(kp: &minisign::KeyPair, bytes: &[u8]) -> Vec<u8> {
-        minisign::sign(Some(&kp.pk), &kp.sk, bytes, None, None).unwrap().to_string().into_bytes()
+        minisign::sign(Some(&kp.pk), &kp.sk, bytes, None, None)
+            .unwrap()
+            .to_string()
+            .into_bytes()
     }
 
     fn sha(bytes: &[u8]) -> String {
-        Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 
     const URL: &str = "https://example.test/index.json";
@@ -360,9 +443,17 @@ mod tests {
         ]}"#;
         let index: Index = serde_json::from_str(json).unwrap();
         let ids: Vec<&str> = index.extensions.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, vec!["fenix.pomodoro", "acme.dusk"], "only the listing it can't read is left out");
+        assert_eq!(
+            ids,
+            vec!["fenix.pomodoro", "acme.dusk"],
+            "only the listing it can't read is left out"
+        );
         let pomodoro = &index.extensions[0];
-        assert_eq!(pomodoro.versions.len(), 1, "the version asking for `teleport` is left out");
+        assert_eq!(
+            pomodoro.versions.len(),
+            1,
+            "the version asking for `teleport` is left out"
+        );
         assert_eq!(pomodoro.versions[0].version, "1.0.0");
     }
 
@@ -371,21 +462,61 @@ mod tests {
         let kp = keypair();
         let package = b"zip bytes".to_vec();
         let index = index_json(&package);
-        let fake = Fake(HashMap::from([(URL.to_string(), index.clone().into_bytes()), (format!("{URL}.minisig"), sign(&kp, index.as_bytes())), ("https://example.test/dusk-1.1.0.fenixext".to_string(), package.clone())]));
+        let fake = Fake(HashMap::from([
+            (URL.to_string(), index.clone().into_bytes()),
+            (format!("{URL}.minisig"), sign(&kp, index.as_bytes())),
+            (
+                "https://example.test/dusk-1.1.0.fenixext".to_string(),
+                package.clone(),
+            ),
+        ]));
         let pk = kp.pk.to_base64();
-        let registry = Registry { url: URL.into(), public_key: &pk };
+        let registry = Registry {
+            url: URL.into(),
+            public_key: &pk,
+        };
         let index = registry.index(&fake).unwrap();
         let dusk = &index.extensions[0];
-        assert_eq!(dusk.latest_for(&fenix()).map(|r| r.version.as_str()), Some("1.1.0"), "not 2.0.0 (a later Fenix) nor 1.5.0 (code for no API)");
+        assert_eq!(
+            dusk.latest_for(&fenix()).map(|r| r.version.as_str()),
+            Some("1.1.0"),
+            "not 2.0.0 (a later Fenix) nor 1.5.0 (code for no API)"
+        );
         let mut code = dusk.clone();
         code.versions[3].api = Some("1.0".into());
-        assert_eq!(code.latest_for(&fenix()).map(|r| r.version.as_str()), Some("1.5.0"), "code for this API");
+        assert_eq!(
+            code.latest_for(&fenix()).map(|r| r.version.as_str()),
+            Some("1.5.0"),
+            "code for this API"
+        );
         code.versions[3].api = Some("2.0".into());
-        assert_eq!(code.latest_for(&fenix()).map(|r| r.version.as_str()), Some("1.1.0"), "code for another API");
+        assert_eq!(
+            code.latest_for(&fenix()).map(|r| r.version.as_str()),
+            Some("1.1.0"),
+            "code for another API"
+        );
         let dir = tempfile::tempdir().unwrap();
-        let path = dusk.latest_for(&fenix()).unwrap().download("acme.dusk", &fake, dir.path()).unwrap();
+        let path = dusk
+            .latest_for(&fenix())
+            .unwrap()
+            .download("acme.dusk", &fake, dir.path())
+            .unwrap();
         assert_eq!(std::fs::read(path).unwrap(), package);
-        assert_eq!(updates(&index, &[("acme.dusk".into(), "1.0.0".into()), ("acme.other".into(), "1.0.0".into())], &fenix()), [Update { id: "acme.dusk".into(), installed: "1.0.0".into(), latest: "1.1.0".into() }]);
+        assert_eq!(
+            updates(
+                &index,
+                &[
+                    ("acme.dusk".into(), "1.0.0".into()),
+                    ("acme.other".into(), "1.0.0".into())
+                ],
+                &fenix()
+            ),
+            [Update {
+                id: "acme.dusk".into(),
+                installed: "1.0.0".into(),
+                latest: "1.1.0".into()
+            }]
+        );
         assert!(updates(&index, &[("acme.dusk".into(), "1.1.0".into())], &fenix()).is_empty());
     }
 
@@ -393,23 +524,55 @@ mod tests {
     fn an_index_not_signed_by_the_key_is_refused() {
         let (ours, theirs) = (keypair(), keypair());
         let index = index_json(b"x");
-        let fake = Fake(HashMap::from([(URL.to_string(), index.clone().into_bytes()), (format!("{URL}.minisig"), sign(&theirs, index.as_bytes()))]));
+        let fake = Fake(HashMap::from([
+            (URL.to_string(), index.clone().into_bytes()),
+            (format!("{URL}.minisig"), sign(&theirs, index.as_bytes())),
+        ]));
         let pk = ours.pk.to_base64();
-        assert!(Registry { url: URL.into(), public_key: &pk }.index(&fake).is_err());
+        assert!(Registry {
+            url: URL.into(),
+            public_key: &pk
+        }
+        .index(&fake)
+        .is_err());
         // Signed by ours, then changed on the way.
         let tampered = index.replace("A theme", "A virus");
-        let fake = Fake(HashMap::from([(URL.to_string(), tampered.into_bytes()), (format!("{URL}.minisig"), sign(&ours, index.as_bytes()))]));
-        assert!(Registry { url: URL.into(), public_key: &pk }.index(&fake).unwrap_err().contains("not trusted"));
-        assert!(Registry { url: URL.into(), public_key: "" }.index(&fake).unwrap_err().contains("no registry key"));
+        let fake = Fake(HashMap::from([
+            (URL.to_string(), tampered.into_bytes()),
+            (format!("{URL}.minisig"), sign(&ours, index.as_bytes())),
+        ]));
+        assert!(Registry {
+            url: URL.into(),
+            public_key: &pk
+        }
+        .index(&fake)
+        .unwrap_err()
+        .contains("not trusted"));
+        assert!(Registry {
+            url: URL.into(),
+            public_key: ""
+        }
+        .index(&fake)
+        .unwrap_err()
+        .contains("no registry key"));
     }
 
     /// A real package, zipped, with its index entry.
     fn published(dir: &Path, id: &str, version: &str, deps: &str) -> (Vec<u8>, String) {
         let path = dir.join(format!("{id}.fenixext"));
-        let manifest = crate::manifest::sample(id, version, "none") + &if deps.is_empty() { String::new() } else { format!("\n[dependencies]\n{deps}\n") };
+        let manifest = crate::manifest::sample(id, version, "none")
+            + &if deps.is_empty() {
+                String::new()
+            } else {
+                format!("\n[dependencies]\n{deps}\n")
+            };
         crate::package::zip_of(&path, &[("extension.toml", &manifest)]);
         let bytes = std::fs::read(&path).unwrap();
-        let dep_json = if deps.is_empty() { String::new() } else { format!(r#", "dependencies": {{{}}}"#, deps.replace(" = ", ": ")) };
+        let dep_json = if deps.is_empty() {
+            String::new()
+        } else {
+            format!(r#", "dependencies": {{{}}}"#, deps.replace(" = ", ": "))
+        };
         let entry = format!(
             r#"{{"id": "{id}", "name": "{id}", "versions": [{{"version": "{version}", "fenix": ">=1.0, <2", "runtime": "none", "url": "https://example.test/{id}.fenixext", "sha256": "{}", "size": {}{dep_json}}}]}}"#,
             sha(&bytes),
@@ -423,7 +586,8 @@ mod tests {
         let kp = keypair();
         let dir = tempfile::tempdir().unwrap();
         let (base, base_entry) = published(dir.path(), "acme.base", "1.0.0", "");
-        let (pack, pack_entry) = published(dir.path(), "acme.pack", "1.0.0", r#""acme.base" = "^1""#);
+        let (pack, pack_entry) =
+            published(dir.path(), "acme.pack", "1.0.0", r#""acme.base" = "^1""#);
         let index = format!(r#"{{"format": 1, "extensions": [{pack_entry}, {base_entry}]}}"#);
         let fake = Fake(HashMap::from([
             (URL.to_string(), index.clone().into_bytes()),
@@ -432,14 +596,30 @@ mod tests {
             ("https://example.test/acme.pack.fenixext".to_string(), pack),
         ]));
         let pk = kp.pk.to_base64();
-        let registry = Registry { url: URL.into(), public_key: &pk };
+        let registry = Registry {
+            url: URL.into(),
+            public_key: &pk,
+        };
         let store = crate::Store::new(dir.path().join("extensions"));
-        let done = registry.install("acme.pack", &store, &fake, &fenix()).unwrap();
-        assert_eq!(done.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["acme.base", "acme.pack"]);
-        assert!(!store.root().join(".downloads").exists(), "downloads cleared");
-        let again = registry.install("acme.pack", &store, &fake, &fenix()).unwrap();
+        let done = registry
+            .install("acme.pack", &store, &fake, &fenix())
+            .unwrap();
+        assert_eq!(
+            done.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["acme.base", "acme.pack"]
+        );
+        assert!(
+            !store.root().join(".downloads").exists(),
+            "downloads cleared"
+        );
+        let again = registry
+            .install("acme.pack", &store, &fake, &fenix())
+            .unwrap();
         assert_eq!(again.len(), 1, "what it needs is there already");
-        assert!(registry.install("acme.nope", &store, &fake, &fenix()).unwrap_err().contains("isn't in the registry"));
+        assert!(registry
+            .install("acme.nope", &store, &fake, &fenix())
+            .unwrap_err()
+            .contains("isn't in the registry"));
     }
 
     /// A bundle from the registry brings its members, each marked as
@@ -450,36 +630,84 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (notes, notes_entry) = published(dir.path(), "acme.notes", "1.0.0", "");
         let path = dir.path().join("acme.personal.fenixext");
-        let manifest = crate::manifest::sample("acme.personal", "1.0.0", "bundle") + "\n[dependencies]\n\"acme.notes\" = \"^1\"\n";
-        crate::package::zip_of(&path, &[("extension.toml", &manifest), ("README.md", "# Personal"), ("screenshots/board.png", "png")]);
+        let manifest = crate::manifest::sample("acme.personal", "1.0.0", "bundle")
+            + "\n[dependencies]\n\"acme.notes\" = \"^1\"\n";
+        crate::package::zip_of(
+            &path,
+            &[
+                ("extension.toml", &manifest),
+                ("README.md", "# Personal"),
+                ("screenshots/board.png", "png"),
+            ],
+        );
         let personal = std::fs::read(&path).unwrap();
         let bundle_entry = format!(
             r#"{{"id": "acme.personal", "name": "Personal", "description": "Notes", "categories": ["tools"], "versions": [{{"version": "1.0.0", "fenix": ">=1.0, <2", "runtime": "bundle", "url": "https://example.test/acme.personal.fenixext", "sha256": "{}", "size": {}, "dependencies": {{"acme.notes": "^1"}}, "categories": ["tools"], "bundle": ["acme.notes"]}}]}}"#,
             sha(&personal),
             personal.len()
         );
-        let index = format!(r#"{{"format": 1, "extensions": [{notes_entry}], "bundles": [{bundle_entry}]}}"#);
+        let index = format!(
+            r#"{{"format": 1, "extensions": [{notes_entry}], "bundles": [{bundle_entry}]}}"#
+        );
         let fake = Fake(HashMap::from([
             (URL.to_string(), index.clone().into_bytes()),
             (format!("{URL}.minisig"), sign(&kp, index.as_bytes())),
-            ("https://example.test/acme.notes.fenixext".to_string(), notes),
-            ("https://example.test/acme.personal.fenixext".to_string(), personal),
+            (
+                "https://example.test/acme.notes.fenixext".to_string(),
+                notes,
+            ),
+            (
+                "https://example.test/acme.personal.fenixext".to_string(),
+                personal,
+            ),
         ]));
         let pk = kp.pk.to_base64();
-        let registry = Registry { url: URL.into(), public_key: &pk };
+        let registry = Registry {
+            url: URL.into(),
+            public_key: &pk,
+        };
         let read = registry.index(&fake).unwrap();
-        assert_eq!(read.extensions.len(), 1, "a bundle isn't one of the extensions");
-        assert_eq!(read.bundles_of("acme.notes", &fenix()).iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Personal"]);
-        assert_eq!(read.listing("acme.personal").unwrap().versions[0].members(), ["acme.notes"]);
+        assert_eq!(
+            read.extensions.len(),
+            1,
+            "a bundle isn't one of the extensions"
+        );
+        assert_eq!(
+            read.bundles_of("acme.notes", &fenix())
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Personal"]
+        );
+        assert_eq!(
+            read.listing("acme.personal").unwrap().versions[0].members(),
+            ["acme.notes"]
+        );
 
         // Its README and screenshots, before it's installed.
-        let preview = read.listing("acme.personal").unwrap().versions[0].preview("acme.personal", &fake, &dir.path().join("previews")).unwrap();
-        assert!(preview.join("README.md").is_file() && preview.join("screenshots/board.png").is_file() && !preview.join("extension.toml").exists());
+        let preview = read.listing("acme.personal").unwrap().versions[0]
+            .preview("acme.personal", &fake, &dir.path().join("previews"))
+            .unwrap();
+        assert!(
+            preview.join("README.md").is_file()
+                && preview.join("screenshots/board.png").is_file()
+                && !preview.join("extension.toml").exists()
+        );
 
         let store = crate::Store::new(dir.path().join("extensions"));
-        let done = registry.install("acme.personal", &store, &fake, &fenix()).unwrap();
-        assert_eq!(done.iter().map(|e| (e.id.as_str(), e.dependency)).collect::<Vec<_>>(), [("acme.notes", true), ("acme.personal", false)]);
-        assert_eq!(store.uninstall_unneeded("acme.personal").unwrap(), ["acme.personal", "acme.notes"]);
+        let done = registry
+            .install("acme.personal", &store, &fake, &fenix())
+            .unwrap();
+        assert_eq!(
+            done.iter()
+                .map(|e| (e.id.as_str(), e.dependency))
+                .collect::<Vec<_>>(),
+            [("acme.notes", true), ("acme.personal", false)]
+        );
+        assert_eq!(
+            store.uninstall_unneeded("acme.personal").unwrap(),
+            ["acme.personal", "acme.notes"]
+        );
 
         // The index before bundles, and a Fenix before them reading this
         // one: `bundles` and the new fields are read past.
@@ -496,10 +724,25 @@ mod tests {
 
     #[test]
     fn a_download_that_isnt_what_the_index_says_is_refused() {
-        let release = Release { version: "1.0.0".into(), fenix: ">=2.0".into(), runtime: crate::manifest::Runtime::None, api: None, permissions: Default::default(), url: "u".into(), sha256: sha(b"good"), size: 4, dependencies: BTreeMap::new(), categories: Vec::new(), bundle: Vec::new() };
+        let release = Release {
+            version: "1.0.0".into(),
+            fenix: ">=2.0".into(),
+            runtime: crate::manifest::Runtime::None,
+            api: None,
+            permissions: Default::default(),
+            url: "u".into(),
+            sha256: sha(b"good"),
+            size: 4,
+            dependencies: BTreeMap::new(),
+            categories: Vec::new(),
+            bundle: Vec::new(),
+        };
         let dir = tempfile::tempdir().unwrap();
         let fake = Fake(HashMap::from([("u".to_string(), b"evil".to_vec())]));
-        assert!(release.download("acme.x", &fake, dir.path()).unwrap_err().contains("isn't what the index says"));
+        assert!(release
+            .download("acme.x", &fake, dir.path())
+            .unwrap_err()
+            .contains("isn't what the index says"));
         let fake = Fake(HashMap::from([("u".to_string(), b"good".to_vec())]));
         assert!(release.download("acme.x", &fake, dir.path()).is_ok());
     }

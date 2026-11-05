@@ -93,7 +93,13 @@ impl ExplorerAction {
     /// operations, and lets Vim move. One table, two readings of it,
     /// rather than two tables that drift.
     pub fn is_navigation(self) -> bool {
-        matches!(self, ExplorerAction::Down | ExplorerAction::Up | ExplorerAction::First | ExplorerAction::Last)
+        matches!(
+            self,
+            ExplorerAction::Down
+                | ExplorerAction::Up
+                | ExplorerAction::First
+                | ExplorerAction::Last
+        )
     }
 }
 
@@ -105,48 +111,184 @@ pub fn explorer_trie() -> &'static KeyTrie<ExplorerAction> {
         let mut t = KeyTrie::new();
         t.insert(&[KeyPress::char('j')], "down", ExplorerAction::Down);
         t.insert(&[KeyPress::char('k')], "up", ExplorerAction::Up);
-        t.insert(&[KeyPress::named(fenix_keymap::NamedKey::Down)], "down", ExplorerAction::Down);
-        t.insert(&[KeyPress::named(fenix_keymap::NamedKey::Up)], "up", ExplorerAction::Up);
-        t.insert(&[KeyPress::char('g'), KeyPress::char('g')], "first", ExplorerAction::First);
+        t.insert(
+            &[KeyPress::named(fenix_keymap::NamedKey::Down)],
+            "down",
+            ExplorerAction::Down,
+        );
+        t.insert(
+            &[KeyPress::named(fenix_keymap::NamedKey::Up)],
+            "up",
+            ExplorerAction::Up,
+        );
+        t.insert(
+            &[KeyPress::char('g'), KeyPress::char('g')],
+            "first",
+            ExplorerAction::First,
+        );
         t.insert(&[KeyPress::char('G')], "last", ExplorerAction::Last);
         t.insert(&[KeyPress::char('?')], "all keys", ExplorerAction::Help);
-        t.insert(&[KeyPress::named(fenix_keymap::NamedKey::Enter)], "open", ExplorerAction::Open);
+        t.insert(
+            &[KeyPress::named(fenix_keymap::NamedKey::Enter)],
+            "open",
+            ExplorerAction::Open,
+        );
         t.insert(&[KeyPress::char('l')], "open", ExplorerAction::Open);
-        t.insert(&[KeyPress::char('h')], "parent dir", ExplorerAction::ParentDir);
-        t.insert(&[KeyPress::char('-')], "parent dir", ExplorerAction::ParentDir);
-        t.insert(&[KeyPress::named(fenix_keymap::NamedKey::Tab)], "expand/collapse", ExplorerAction::ToggleExpand);
+        t.insert(
+            &[KeyPress::char('h')],
+            "parent dir",
+            ExplorerAction::ParentDir,
+        );
+        t.insert(
+            &[KeyPress::char('-')],
+            "parent dir",
+            ExplorerAction::ParentDir,
+        );
+        t.insert(
+            &[KeyPress::named(fenix_keymap::NamedKey::Tab)],
+            "expand/collapse",
+            ExplorerAction::ToggleExpand,
+        );
 
         t.insert(&[KeyPress::char('m')], "mark", ExplorerAction::ToggleMark);
         t.insert(&[KeyPress::char('u')], "unmark", ExplorerAction::ToggleMark);
-        t.insert(&[KeyPress::char('U')], "unmark all", ExplorerAction::UnmarkAll);
-        t.insert(&[KeyPress::char('t')], "toggle all marks", ExplorerAction::ToggleAllMarks);
+        t.insert(
+            &[KeyPress::char('U')],
+            "unmark all",
+            ExplorerAction::UnmarkAll,
+        );
+        t.insert(
+            &[KeyPress::char('t')],
+            "toggle all marks",
+            ExplorerAction::ToggleAllMarks,
+        );
 
-        t.insert(&[KeyPress::char('D')], "delete", ExplorerAction::BeginDelete);
-        t.insert(&[KeyPress::char('R')], "rename", ExplorerAction::BeginRename);
-        t.insert(&[KeyPress::char('a')], "new file", ExplorerAction::BeginCreateFile);
-        t.insert(&[KeyPress::char('A')], "new folder", ExplorerAction::BeginCreateDir);
-        t.insert(&[KeyPress::char('c')], "new file", ExplorerAction::BeginCreateFile);
-        t.insert(&[KeyPress::char('+')], "new folder", ExplorerAction::BeginCreateDir);
-        t.insert(&[KeyPress::char('C')], "copy to...", ExplorerAction::BeginCopy);
-        t.insert(&[KeyPress::char('M')], "move to...", ExplorerAction::BeginMove);
+        t.insert(
+            &[KeyPress::char('D')],
+            "delete",
+            ExplorerAction::BeginDelete,
+        );
+        t.insert(
+            &[KeyPress::char('R')],
+            "rename",
+            ExplorerAction::BeginRename,
+        );
+        t.insert(
+            &[KeyPress::char('a')],
+            "new file",
+            ExplorerAction::BeginCreateFile,
+        );
+        t.insert(
+            &[KeyPress::char('A')],
+            "new folder",
+            ExplorerAction::BeginCreateDir,
+        );
+        t.insert(
+            &[KeyPress::char('c')],
+            "new file",
+            ExplorerAction::BeginCreateFile,
+        );
+        t.insert(
+            &[KeyPress::char('+')],
+            "new folder",
+            ExplorerAction::BeginCreateDir,
+        );
+        t.insert(
+            &[KeyPress::char('C')],
+            "copy to...",
+            ExplorerAction::BeginCopy,
+        );
+        t.insert(
+            &[KeyPress::char('M')],
+            "move to...",
+            ExplorerAction::BeginMove,
+        );
 
-        t.insert(&[KeyPress::char('z')], "archive...", ExplorerAction::BeginArchive);
-        t.insert(&[KeyPress::char('x')], "extract", ExplorerAction::ExtractArchive);
-        t.insert(&[KeyPress::char('i')], "properties", ExplorerAction::ShowProperties);
-        t.insert(&[KeyPress::char('w')], "toggle read-only", ExplorerAction::ToggleReadOnly);
-        t.insert(&[KeyPress::char('/')], "filter", ExplorerAction::BeginFilter);
-        t.insert(&[KeyPress::char('f')], "filter", ExplorerAction::BeginFilter);
-        t.insert(&[KeyPress::char('n')], "next match", ExplorerAction::NextMatch);
-        t.insert(&[KeyPress::char('p')], "preview", ExplorerAction::TogglePreview);
-        t.insert(&[KeyPress::char('P')], "open in a preview tab", ExplorerAction::OpenPreviewTab);
-        t.insert(&[KeyPress::char('J')], "scroll the preview down", ExplorerAction::PreviewDown);
-        t.insert(&[KeyPress::char('K')], "scroll the preview up", ExplorerAction::PreviewUp);
-        t.insert(&[KeyPress::char('N')], "previous match", ExplorerAction::PrevMatch);
-        t.insert(&[KeyPress::char('F')], "find under here", ExplorerAction::BeginFind);
-        t.insert(&[KeyPress::char('.')], "toggle hidden", ExplorerAction::ToggleHidden);
-        t.insert(&[KeyPress::char('o')], "sort by...", ExplorerAction::CycleSort);
-        t.insert(&[KeyPress::char('O')], "reverse sort", ExplorerAction::ReverseSort);
-        t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "refresh", ExplorerAction::Refresh);
+        t.insert(
+            &[KeyPress::char('z')],
+            "archive...",
+            ExplorerAction::BeginArchive,
+        );
+        t.insert(
+            &[KeyPress::char('x')],
+            "extract",
+            ExplorerAction::ExtractArchive,
+        );
+        t.insert(
+            &[KeyPress::char('i')],
+            "properties",
+            ExplorerAction::ShowProperties,
+        );
+        t.insert(
+            &[KeyPress::char('w')],
+            "toggle read-only",
+            ExplorerAction::ToggleReadOnly,
+        );
+        t.insert(
+            &[KeyPress::char('/')],
+            "filter",
+            ExplorerAction::BeginFilter,
+        );
+        t.insert(
+            &[KeyPress::char('f')],
+            "filter",
+            ExplorerAction::BeginFilter,
+        );
+        t.insert(
+            &[KeyPress::char('n')],
+            "next match",
+            ExplorerAction::NextMatch,
+        );
+        t.insert(
+            &[KeyPress::char('p')],
+            "preview",
+            ExplorerAction::TogglePreview,
+        );
+        t.insert(
+            &[KeyPress::char('P')],
+            "open in a preview tab",
+            ExplorerAction::OpenPreviewTab,
+        );
+        t.insert(
+            &[KeyPress::char('J')],
+            "scroll the preview down",
+            ExplorerAction::PreviewDown,
+        );
+        t.insert(
+            &[KeyPress::char('K')],
+            "scroll the preview up",
+            ExplorerAction::PreviewUp,
+        );
+        t.insert(
+            &[KeyPress::char('N')],
+            "previous match",
+            ExplorerAction::PrevMatch,
+        );
+        t.insert(
+            &[KeyPress::char('F')],
+            "find under here",
+            ExplorerAction::BeginFind,
+        );
+        t.insert(
+            &[KeyPress::char('.')],
+            "toggle hidden",
+            ExplorerAction::ToggleHidden,
+        );
+        t.insert(
+            &[KeyPress::char('o')],
+            "sort by...",
+            ExplorerAction::CycleSort,
+        );
+        t.insert(
+            &[KeyPress::char('O')],
+            "reverse sort",
+            ExplorerAction::ReverseSort,
+        );
+        t.insert(
+            &[KeyPress::char('g'), KeyPress::char('r')],
+            "refresh",
+            ExplorerAction::Refresh,
+        );
         // `r` as well as `gr`. The buffer-backed listing claims single
         // keys only (a `g` prefix there would have to fight `gg`/`G`,
         // which are genuinely useful in a long directory), and the two
@@ -154,8 +296,16 @@ pub fn explorer_trie() -> &'static KeyTrie<ExplorerAction> {
         // lives in the one table both of them read.
         t.insert(&[KeyPress::char('r')], "refresh", ExplorerAction::Refresh);
         t.insert(&[KeyPress::char('q')], "quit", ExplorerAction::Quit);
-        t.insert(&[KeyPress::named(fenix_keymap::NamedKey::Escape)], "quit", ExplorerAction::Quit);
-        t.insert(&[KeyPress::char('S')], "select this directory", ExplorerAction::SelectCwd);
+        t.insert(
+            &[KeyPress::named(fenix_keymap::NamedKey::Escape)],
+            "quit",
+            ExplorerAction::Quit,
+        );
+        t.insert(
+            &[KeyPress::char('S')],
+            "select this directory",
+            ExplorerAction::SelectCwd,
+        );
 
         t
     })
@@ -252,7 +402,10 @@ mod tests {
     #[test]
     fn q_and_escape_both_quit() {
         let trie = explorer_trie();
-        for key in [KeyPress::char('q'), KeyPress::named(fenix_keymap::NamedKey::Escape)] {
+        for key in [
+            KeyPress::char('q'),
+            KeyPress::named(fenix_keymap::NamedKey::Escape),
+        ] {
             let mut m = trie.matcher();
             match m.feed(key) {
                 Step::Matched(ExplorerAction::Quit) => {}

@@ -25,11 +25,15 @@ pub fn procs_defined_in(source: &str) -> Vec<String> {
         // start -- not just the line's own.
         for piece in line.split(['{', '[', ';', '}', ']']) {
             let piece = piece.trim_start();
-            let Some(rest) = piece.strip_prefix("proc") else { continue };
+            let Some(rest) = piece.strip_prefix("proc") else {
+                continue;
+            };
             if !rest.starts_with(char::is_whitespace) {
                 continue;
             }
-            let Some(name) = rest.split_whitespace().next() else { continue };
+            let Some(name) = rest.split_whitespace().next() else {
+                continue;
+            };
             // A `$`-substituted or bracketed name isn't a literal
             // definition this can resolve, and a comment's `proc` is
             // not a definition at all.
@@ -57,15 +61,104 @@ pub fn procs_defined_in(source: &str) -> Vec<String> {
 /// added by hand: real Tcl syntax words accepted as arguments to `if`
 /// (not separate commands, so `info commands` correctly omits them).
 pub const KEYWORDS: &[&str] = &[
-    "after", "append", "apply", "array", "binary", "break", "case", "catch", "cd", "chan", "clock", "close",
-    "concat", "continue", "coroutine", "dict", "default", "else", "elseif", "encoding", "eof", "error", "eval",
-    "exec", "exit", "expr", "fblocked", "fconfigure", "fcopy", "file", "fileevent", "flush", "for", "foreach",
-    "format", "gets", "glob", "global", "history", "if", "incr", "info", "interp", "join", "lappend", "lassign",
-    "lindex", "linsert", "list", "llength", "lmap", "load", "lrange", "lrepeat", "lreplace", "lreverse", "lsearch",
-    "lset", "lsort", "namespace", "open", "package", "pid", "proc", "puts", "pwd", "read", "regexp", "regsub",
-    "rename", "return", "scan", "seek", "set", "socket", "source", "split", "string", "subst", "switch",
-    "tailcall", "tell", "then", "throw", "time", "trace", "try", "unload", "unset", "update", "uplevel", "upvar",
-    "variable", "vwait", "while", "yield", "yieldto", "zlib",
+    "after",
+    "append",
+    "apply",
+    "array",
+    "binary",
+    "break",
+    "case",
+    "catch",
+    "cd",
+    "chan",
+    "clock",
+    "close",
+    "concat",
+    "continue",
+    "coroutine",
+    "dict",
+    "default",
+    "else",
+    "elseif",
+    "encoding",
+    "eof",
+    "error",
+    "eval",
+    "exec",
+    "exit",
+    "expr",
+    "fblocked",
+    "fconfigure",
+    "fcopy",
+    "file",
+    "fileevent",
+    "flush",
+    "for",
+    "foreach",
+    "format",
+    "gets",
+    "glob",
+    "global",
+    "history",
+    "if",
+    "incr",
+    "info",
+    "interp",
+    "join",
+    "lappend",
+    "lassign",
+    "lindex",
+    "linsert",
+    "list",
+    "llength",
+    "lmap",
+    "load",
+    "lrange",
+    "lrepeat",
+    "lreplace",
+    "lreverse",
+    "lsearch",
+    "lset",
+    "lsort",
+    "namespace",
+    "open",
+    "package",
+    "pid",
+    "proc",
+    "puts",
+    "pwd",
+    "read",
+    "regexp",
+    "regsub",
+    "rename",
+    "return",
+    "scan",
+    "seek",
+    "set",
+    "socket",
+    "source",
+    "split",
+    "string",
+    "subst",
+    "switch",
+    "tailcall",
+    "tell",
+    "then",
+    "throw",
+    "time",
+    "trace",
+    "try",
+    "unload",
+    "unset",
+    "update",
+    "uplevel",
+    "upvar",
+    "variable",
+    "vwait",
+    "while",
+    "yield",
+    "yieldto",
+    "zlib",
 ];
 
 #[cfg(test)]
@@ -86,35 +179,70 @@ set x 1 ; proc gamma {} {}
 ";
         let mut found = procs_defined_in(source);
         found.sort();
-        assert_eq!(found, vec!["alpha", "beta", "gamma"].into_iter().map(String::from).collect::<Vec<_>>());
+        assert_eq!(
+            found,
+            vec!["alpha", "beta", "gamma"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn a_word_merely_starting_with_proc_is_not_a_definition() {
-        assert!(procs_defined_in("procedure_name foo
-").is_empty());
-        assert!(procs_defined_in("set procs 3
-").is_empty());
+        assert!(procs_defined_in(
+            "procedure_name foo
+"
+        )
+        .is_empty());
+        assert!(procs_defined_in(
+            "set procs 3
+"
+        )
+        .is_empty());
     }
 
     #[test]
     fn a_computed_proc_name_is_skipped_rather_than_guessed_at() {
-        assert!(procs_defined_in("proc $name {} {}
-").is_empty());
+        assert!(procs_defined_in(
+            "proc $name {} {}
+"
+        )
+        .is_empty());
     }
 
     #[test]
     fn common_builtins_are_present() {
-        for expected in ["set", "proc", "if", "foreach", "expr", "string", "dict", "namespace", "variable"] {
+        for expected in [
+            "set",
+            "proc",
+            "if",
+            "foreach",
+            "expr",
+            "string",
+            "dict",
+            "namespace",
+            "variable",
+        ] {
             assert!(KEYWORDS.contains(&expected), "missing {expected}");
         }
     }
 
     #[test]
     fn internal_autoloading_machinery_is_excluded() {
-        for excluded in ["auto_execok", "auto_import", "auto_load", "auto_load_index", "auto_qualify", "tclLog", "unknown"]
-        {
-            assert!(!KEYWORDS.contains(&excluded), "should not offer internal command {excluded}");
+        for excluded in [
+            "auto_execok",
+            "auto_import",
+            "auto_load",
+            "auto_load_index",
+            "auto_qualify",
+            "tclLog",
+            "unknown",
+        ] {
+            assert!(
+                !KEYWORDS.contains(&excluded),
+                "should not offer internal command {excluded}"
+            );
         }
     }
 

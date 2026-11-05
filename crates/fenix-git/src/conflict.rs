@@ -150,7 +150,8 @@ pub fn resolve_conflict(text: &str, conflict: &Conflict, resolution: Resolution)
 mod tests {
     use super::*;
 
-    const SIMPLE: &str = "before\n<<<<<<< HEAD\nour line\n=======\ntheir line\n>>>>>>> feature\nafter\n";
+    const SIMPLE: &str =
+        "before\n<<<<<<< HEAD\nour line\n=======\ntheir line\n>>>>>>> feature\nafter\n";
 
     #[test]
     fn finds_a_single_conflict_and_its_two_sides() {
@@ -195,7 +196,10 @@ mod tests {
         assert_eq!(conflicts.len(), 2);
 
         let out = resolve_conflict(text, &conflicts[0], Resolution::Theirs);
-        assert_eq!(out, "a\ny1\nmiddle\n<<<<<<< HEAD\nx2\n=======\ny2\n>>>>>>> b\nz\n");
+        assert_eq!(
+            out,
+            "a\ny1\nmiddle\n<<<<<<< HEAD\nx2\n=======\ny2\n>>>>>>> b\nz\n"
+        );
         assert_eq!(find_conflicts(&out).len(), 1, "the second is still there");
     }
 
@@ -204,21 +208,34 @@ mod tests {
         let text = "<<<<<<< HEAD\nours\n||||||| merged common ancestors\nthe original\n=======\ntheirs\n>>>>>>> other\n";
         let conflicts = find_conflicts(text);
         let c = &conflicts[0];
-        assert_eq!(c.ours, 1..2, "our side stops at the base marker, not the separator");
+        assert_eq!(
+            c.ours,
+            1..2,
+            "our side stops at the base marker, not the separator"
+        );
         assert_eq!(c.base, Some(3..4));
         assert_eq!(c.theirs, 5..6);
 
         // The ancestor is context, never content to keep.
         assert_eq!(resolve_conflict(text, c, Resolution::Ours), "ours\n");
-        assert_eq!(resolve_conflict(text, c, Resolution::Both), "ours\ntheirs\n");
+        assert_eq!(
+            resolve_conflict(text, c, Resolution::Both),
+            "ours\ntheirs\n"
+        );
     }
 
     #[test]
     fn a_multi_line_side_is_kept_whole() {
         let text = "<<<<<<< HEAD\nour 1\nour 2\n=======\ntheir 1\ntheir 2\ntheir 3\n>>>>>>> b\n";
         let c = &find_conflicts(text)[0];
-        assert_eq!(resolve_conflict(text, c, Resolution::Ours), "our 1\nour 2\n");
-        assert_eq!(resolve_conflict(text, c, Resolution::Theirs), "their 1\ntheir 2\ntheir 3\n");
+        assert_eq!(
+            resolve_conflict(text, c, Resolution::Ours),
+            "our 1\nour 2\n"
+        );
+        assert_eq!(
+            resolve_conflict(text, c, Resolution::Theirs),
+            "their 1\ntheir 2\ntheir 3\n"
+        );
     }
 
     #[test]
@@ -227,7 +244,10 @@ mod tests {
         // side means the region goes away entirely.
         let text = "before\n<<<<<<< HEAD\n=======\ntheirs\n>>>>>>> b\nafter\n";
         let c = &find_conflicts(text)[0];
-        assert_eq!(resolve_conflict(text, c, Resolution::Ours), "before\nafter\n");
+        assert_eq!(
+            resolve_conflict(text, c, Resolution::Ours),
+            "before\nafter\n"
+        );
     }
 
     #[test]
@@ -237,7 +257,10 @@ mod tests {
         // half-converted.
         let text = "before\r\n<<<<<<< HEAD\r\nours\r\n=======\r\ntheirs\r\n>>>>>>> b\r\nafter\r\n";
         let c = &find_conflicts(text)[0];
-        assert_eq!(resolve_conflict(text, c, Resolution::Theirs), "before\r\ntheirs\r\nafter\r\n");
+        assert_eq!(
+            resolve_conflict(text, c, Resolution::Theirs),
+            "before\r\ntheirs\r\nafter\r\n"
+        );
     }
 
     #[test]
@@ -267,7 +290,10 @@ mod tests {
         let text = "<<<<<<< HEAD\nstray\n<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> b\n";
         let conflicts = find_conflicts(text);
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].start, 2, "the well-formed region is the one found");
+        assert_eq!(
+            conflicts[0].start, 2,
+            "the well-formed region is the one found"
+        );
     }
 
     #[test]
@@ -282,7 +308,13 @@ mod tests {
 
     #[test]
     fn resolving_a_conflict_whose_lines_are_out_of_range_leaves_the_text_alone() {
-        let bogus = Conflict { start: 0, ours: 1..2, base: None, theirs: 3..4, end: 99 };
+        let bogus = Conflict {
+            start: 0,
+            ours: 1..2,
+            base: None,
+            theirs: 3..4,
+            end: 99,
+        };
         assert_eq!(resolve_conflict(SIMPLE, &bogus, Resolution::Ours), SIMPLE);
     }
 }

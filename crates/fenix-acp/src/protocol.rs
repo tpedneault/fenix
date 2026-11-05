@@ -55,7 +55,10 @@ fn offered(v: &Value, key: &str) -> bool {
 }
 
 fn array_of<'a>(v: &'a Value, key: &str) -> &'a [Value] {
-    v.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+    v.get(key)
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 // ---------------------------------------------------------------------
@@ -79,7 +82,15 @@ pub struct ClientCapabilities {
 impl ClientCapabilities {
     /// Everything Fenix implements.
     pub fn fenix() -> Self {
-        Self { read_text_file: true, write_text_file: true, terminal: true, terminal_auth: true, boolean_config_options: true, elicitation_form: true, elicitation_url: true }
+        Self {
+            read_text_file: true,
+            write_text_file: true,
+            terminal: true,
+            terminal_auth: true,
+            boolean_config_options: true,
+            elicitation_form: true,
+            elicitation_url: true,
+        }
     }
 }
 
@@ -132,14 +143,26 @@ pub struct AgentInfo {
 
 impl AgentInfo {
     pub fn parse(result: &Value) -> Self {
-        let caps = result.get("agentCapabilities").cloned().unwrap_or(Value::Null);
-        let prompt = caps.get("promptCapabilities").cloned().unwrap_or(Value::Null);
+        let caps = result
+            .get("agentCapabilities")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let prompt = caps
+            .get("promptCapabilities")
+            .cloned()
+            .unwrap_or(Value::Null);
         let mcp = caps.get("mcpCapabilities").cloned().unwrap_or(Value::Null);
-        let session = caps.get("sessionCapabilities").cloned().unwrap_or(Value::Null);
+        let session = caps
+            .get("sessionCapabilities")
+            .cloned()
+            .unwrap_or(Value::Null);
         let auth = caps.get("auth").cloned().unwrap_or(Value::Null);
         let info = result.get("agentInfo").cloned().unwrap_or(Value::Null);
         Self {
-            protocol_version: result.get("protocolVersion").and_then(Value::as_u64).unwrap_or(PROTOCOL_VERSION),
+            protocol_version: result
+                .get("protocolVersion")
+                .and_then(Value::as_u64)
+                .unwrap_or(PROTOCOL_VERSION),
             name: str_of(&info, "name"),
             title: str_of(&info, "title"),
             version: str_of(&info, "version"),
@@ -155,7 +178,10 @@ impl AgentInfo {
             session_delete: offered(&session, "delete"),
             additional_directories: offered(&session, "additionalDirectories"),
             logout: offered(&auth, "logout"),
-            auth_methods: array_of(result, "authMethods").iter().filter_map(AuthMethod::parse).collect(),
+            auth_methods: array_of(result, "authMethods")
+                .iter()
+                .filter_map(AuthMethod::parse)
+                .collect(),
         }
     }
 
@@ -180,7 +206,10 @@ pub enum AuthKind {
     /// Fenix runs the agent's own program with these arguments and
     /// environment in a terminal, for the user to log in there; exit 0
     /// is success. `authenticate` isn't called.
-    Terminal { args: Vec<String>, env: Vec<(String, String)> },
+    Terminal {
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
     /// A kind this Fenix doesn't know: shown, not offered.
     Other(String),
 }
@@ -191,16 +220,28 @@ impl AuthMethod {
         let kind = match v.get("type").and_then(Value::as_str) {
             None | Some("agent") => AuthKind::Agent,
             Some("terminal") => AuthKind::Terminal {
-                args: array_of(v, "args").iter().filter_map(|a| a.as_str().map(str::to_string)).collect(),
+                args: array_of(v, "args")
+                    .iter()
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect(),
                 env: v
                     .get("env")
                     .and_then(Value::as_object)
-                    .map(|m| m.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+                    .map(|m| {
+                        m.iter()
+                            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                            .collect()
+                    })
                     .unwrap_or_default(),
             },
             Some(other) => AuthKind::Other(other.to_string()),
         };
-        Some(Self { name: str_of(v, "name").unwrap_or_else(|| id.clone()), description: str_of(v, "description"), id, kind })
+        Some(Self {
+            name: str_of(v, "name").unwrap_or_else(|| id.clone()),
+            description: str_of(v, "description"),
+            id,
+            kind,
+        })
     }
 }
 
@@ -212,18 +253,45 @@ impl AuthMethod {
 /// only when the agent says it takes them.
 #[derive(Clone, Debug, PartialEq)]
 pub enum McpServer {
-    Stdio { name: String, command: String, args: Vec<String>, env: Vec<(String, String)> },
-    Http { name: String, url: String, headers: Vec<(String, String)> },
-    Sse { name: String, url: String, headers: Vec<(String, String)> },
+    Stdio {
+        name: String,
+        command: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    },
+    Http {
+        name: String,
+        url: String,
+        headers: Vec<(String, String)>,
+    },
+    Sse {
+        name: String,
+        url: String,
+        headers: Vec<(String, String)>,
+    },
 }
 
 impl McpServer {
     pub fn to_value(&self) -> Value {
-        let pairs = |pairs: &[(String, String)]| pairs.iter().map(|(n, v)| json!({ "name": n, "value": v })).collect::<Vec<_>>();
+        let pairs = |pairs: &[(String, String)]| {
+            pairs
+                .iter()
+                .map(|(n, v)| json!({ "name": n, "value": v }))
+                .collect::<Vec<_>>()
+        };
         match self {
-            Self::Stdio { name, command, args, env } => json!({ "name": name, "command": command, "args": args, "env": pairs(env) }),
-            Self::Http { name, url, headers } => json!({ "type": "http", "name": name, "url": url, "headers": pairs(headers) }),
-            Self::Sse { name, url, headers } => json!({ "type": "sse", "name": name, "url": url, "headers": pairs(headers) }),
+            Self::Stdio {
+                name,
+                command,
+                args,
+                env,
+            } => json!({ "name": name, "command": command, "args": args, "env": pairs(env) }),
+            Self::Http { name, url, headers } => {
+                json!({ "type": "http", "name": name, "url": url, "headers": pairs(headers) })
+            }
+            Self::Sse { name, url, headers } => {
+                json!({ "type": "sse", "name": name, "url": url, "headers": pairs(headers) })
+            }
         }
     }
 
@@ -236,7 +304,12 @@ impl McpServer {
 
 /// `session/new`'s parameters; `session/load` and `session/resume` add
 /// the session's id.
-pub fn session_params(session_id: Option<&str>, cwd: &str, additional_directories: &[String], mcp_servers: &[McpServer]) -> Value {
+pub fn session_params(
+    session_id: Option<&str>,
+    cwd: &str,
+    additional_directories: &[String],
+    mcp_servers: &[McpServer],
+) -> Value {
     let mut params = json!({
         "cwd": cwd,
         "mcpServers": mcp_servers.iter().map(McpServer::to_value).collect::<Vec<_>>(),
@@ -264,7 +337,10 @@ impl SessionSetup {
         Self {
             session_id: str_of(result, "sessionId"),
             modes: result.get("modes").and_then(Modes::parse),
-            config_options: result.get("configOptions").and_then(Value::as_array).map(|a| a.iter().filter_map(ConfigOption::parse).collect()),
+            config_options: result
+                .get("configOptions")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(ConfigOption::parse).collect()),
         }
     }
 }
@@ -290,7 +366,11 @@ impl Modes {
                 .iter()
                 .filter_map(|m| {
                     let id = str_of(m, "id")?;
-                    Some(Mode { name: str_of(m, "name").unwrap_or_else(|| id.clone()), description: str_of(m, "description"), id })
+                    Some(Mode {
+                        name: str_of(m, "name").unwrap_or_else(|| id.clone()),
+                        description: str_of(m, "description"),
+                        id,
+                    })
                 })
                 .collect(),
         })
@@ -312,7 +392,10 @@ pub struct ConfigOption {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConfigValue {
-    Select { current: String, choices: Vec<ConfigChoice> },
+    Select {
+        current: String,
+        choices: Vec<ConfigChoice>,
+    },
     Boolean(bool),
 }
 
@@ -329,29 +412,50 @@ impl ConfigOption {
     pub fn parse(v: &Value) -> Option<Self> {
         let id = str_of(v, "id")?;
         let value = match v.get("type").and_then(Value::as_str) {
-            Some("boolean") => ConfigValue::Boolean(v.get("currentValue").and_then(Value::as_bool).unwrap_or(false)),
+            Some("boolean") => ConfigValue::Boolean(
+                v.get("currentValue")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            ),
             Some("select") | None => {
                 let mut choices = Vec::new();
                 for item in array_of(v, "options") {
                     // Grouped choices have `group` and their own `options`.
                     if let Some(inner) = item.get("options").and_then(Value::as_array) {
                         let group = str_of(item, "name").or_else(|| str_of(item, "group"));
-                        choices.extend(inner.iter().filter_map(|c| ConfigChoice::parse(c, group.clone())));
+                        choices.extend(
+                            inner
+                                .iter()
+                                .filter_map(|c| ConfigChoice::parse(c, group.clone())),
+                        );
                     } else if let Some(choice) = ConfigChoice::parse(item, None) {
                         choices.push(choice);
                     }
                 }
-                ConfigValue::Select { current: str_of(v, "currentValue").unwrap_or_default(), choices }
+                ConfigValue::Select {
+                    current: str_of(v, "currentValue").unwrap_or_default(),
+                    choices,
+                }
             }
             Some(_) => return None,
         };
-        Some(Self { name: str_of(v, "name").unwrap_or_else(|| id.clone()), description: str_of(v, "description"), category: str_of(v, "category"), id, value })
+        Some(Self {
+            name: str_of(v, "name").unwrap_or_else(|| id.clone()),
+            description: str_of(v, "description"),
+            category: str_of(v, "category"),
+            id,
+            value,
+        })
     }
 
     /// The current value as shown: a select's choice name, or on/off.
     pub fn current_label(&self) -> String {
         match &self.value {
-            ConfigValue::Select { current, choices } => choices.iter().find(|c| &c.value == current).map(|c| c.name.clone()).unwrap_or_else(|| current.clone()),
+            ConfigValue::Select { current, choices } => choices
+                .iter()
+                .find(|c| &c.value == current)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| current.clone()),
             ConfigValue::Boolean(on) => if *on { "on" } else { "off" }.to_string(),
         }
     }
@@ -360,15 +464,24 @@ impl ConfigOption {
 impl ConfigChoice {
     fn parse(v: &Value, group: Option<String>) -> Option<Self> {
         let value = str_of(v, "value")?;
-        Some(Self { name: str_of(v, "name").unwrap_or_else(|| value.clone()), description: str_of(v, "description"), value, group })
+        Some(Self {
+            name: str_of(v, "name").unwrap_or_else(|| value.clone()),
+            description: str_of(v, "description"),
+            value,
+            group,
+        })
     }
 }
 
 /// `session/set_config_option`'s parameters.
 pub fn set_config_params(session_id: &str, config_id: &str, value: &ConfigValue) -> Value {
     match value {
-        ConfigValue::Boolean(on) => json!({ "sessionId": session_id, "configId": config_id, "type": "boolean", "value": on }),
-        ConfigValue::Select { current, .. } => json!({ "sessionId": session_id, "configId": config_id, "value": current }),
+        ConfigValue::Boolean(on) => {
+            json!({ "sessionId": session_id, "configId": config_id, "type": "boolean", "value": on })
+        }
+        ConfigValue::Select { current, .. } => {
+            json!({ "sessionId": session_id, "configId": config_id, "value": current })
+        }
     }
 }
 
@@ -385,7 +498,14 @@ pub struct ListedSession {
 pub fn parse_session_list(result: &Value) -> (Vec<ListedSession>, Option<String>) {
     let rows = array_of(result, "sessions")
         .iter()
-        .filter_map(|s| Some(ListedSession { session_id: str_of(s, "sessionId")?, cwd: str_of(s, "cwd").unwrap_or_default(), title: str_of(s, "title"), updated_at: str_of(s, "updatedAt") }))
+        .filter_map(|s| {
+            Some(ListedSession {
+                session_id: str_of(s, "sessionId")?,
+                cwd: str_of(s, "cwd").unwrap_or_default(),
+                title: str_of(s, "title"),
+                updated_at: str_of(s, "updatedAt"),
+            })
+        })
         .collect();
     (rows, str_of(result, "nextCursor"))
 }
@@ -396,13 +516,28 @@ pub fn parse_session_list(result: &Value) -> (Vec<ListedSession>, Option<String>
 #[derive(Clone, Debug, PartialEq)]
 pub enum ContentBlock {
     Text(String),
-    Image { data: String, mime_type: String, uri: Option<String> },
-    Audio { data: String, mime_type: String },
+    Image {
+        data: String,
+        mime_type: String,
+        uri: Option<String>,
+    },
+    Audio {
+        data: String,
+        mime_type: String,
+    },
     /// A file or URL the agent may read itself.
-    ResourceLink { uri: String, name: String, mime_type: Option<String> },
+    ResourceLink {
+        uri: String,
+        name: String,
+        mime_type: Option<String>,
+    },
     /// A file's contents, sent along (`promptCapabilities.embeddedContext`).
     /// `text` is `None` for a binary blob.
-    Resource { uri: String, text: Option<String>, mime_type: Option<String> },
+    Resource {
+        uri: String,
+        text: Option<String>,
+        mime_type: Option<String>,
+    },
     /// A block this Fenix doesn't know.
     Unknown(Value),
 }
@@ -415,12 +550,27 @@ impl ContentBlock {
     pub fn parse(v: &Value) -> Self {
         match v.get("type").and_then(Value::as_str) {
             Some("text") => Self::Text(str_of(v, "text").unwrap_or_default()),
-            Some("image") => Self::Image { data: str_of(v, "data").unwrap_or_default(), mime_type: str_of(v, "mimeType").unwrap_or_default(), uri: str_of(v, "uri") },
-            Some("audio") => Self::Audio { data: str_of(v, "data").unwrap_or_default(), mime_type: str_of(v, "mimeType").unwrap_or_default() },
-            Some("resource_link") => Self::ResourceLink { uri: str_of(v, "uri").unwrap_or_default(), name: str_of(v, "name").unwrap_or_default(), mime_type: str_of(v, "mimeType") },
+            Some("image") => Self::Image {
+                data: str_of(v, "data").unwrap_or_default(),
+                mime_type: str_of(v, "mimeType").unwrap_or_default(),
+                uri: str_of(v, "uri"),
+            },
+            Some("audio") => Self::Audio {
+                data: str_of(v, "data").unwrap_or_default(),
+                mime_type: str_of(v, "mimeType").unwrap_or_default(),
+            },
+            Some("resource_link") => Self::ResourceLink {
+                uri: str_of(v, "uri").unwrap_or_default(),
+                name: str_of(v, "name").unwrap_or_default(),
+                mime_type: str_of(v, "mimeType"),
+            },
             Some("resource") => {
                 let r = v.get("resource").cloned().unwrap_or(Value::Null);
-                Self::Resource { uri: str_of(&r, "uri").unwrap_or_default(), text: str_of(&r, "text"), mime_type: str_of(&r, "mimeType") }
+                Self::Resource {
+                    uri: str_of(&r, "uri").unwrap_or_default(),
+                    text: str_of(&r, "text"),
+                    mime_type: str_of(&r, "mimeType"),
+                }
             }
             _ => Self::Unknown(v.clone()),
         }
@@ -429,22 +579,36 @@ impl ContentBlock {
     pub fn to_value(&self) -> Value {
         match self {
             Self::Text(text) => json!({ "type": "text", "text": text }),
-            Self::Image { data, mime_type, uri } => {
+            Self::Image {
+                data,
+                mime_type,
+                uri,
+            } => {
                 let mut v = json!({ "type": "image", "data": data, "mimeType": mime_type });
                 if let Some(uri) = uri {
                     v["uri"] = json!(uri);
                 }
                 v
             }
-            Self::Audio { data, mime_type } => json!({ "type": "audio", "data": data, "mimeType": mime_type }),
-            Self::ResourceLink { uri, name, mime_type } => {
+            Self::Audio { data, mime_type } => {
+                json!({ "type": "audio", "data": data, "mimeType": mime_type })
+            }
+            Self::ResourceLink {
+                uri,
+                name,
+                mime_type,
+            } => {
                 let mut v = json!({ "type": "resource_link", "uri": uri, "name": name });
                 if let Some(m) = mime_type {
                     v["mimeType"] = json!(m);
                 }
                 v
             }
-            Self::Resource { uri, text, mime_type } => {
+            Self::Resource {
+                uri,
+                text,
+                mime_type,
+            } => {
                 let mut r = json!({ "uri": uri, "text": text.clone().unwrap_or_default() });
                 if let Some(m) = mime_type {
                     r["mimeType"] = json!(m);
@@ -461,7 +625,9 @@ impl ContentBlock {
             Self::Text(t) => t.clone(),
             Self::Image { .. } => "[image]".to_string(),
             Self::Audio { .. } => "[audio]".to_string(),
-            Self::ResourceLink { name, uri, .. } => format!("@{}", if name.is_empty() { uri } else { name }),
+            Self::ResourceLink { name, uri, .. } => {
+                format!("@{}", if name.is_empty() { uri } else { name })
+            }
             Self::Resource { uri, .. } => format!("@{uri}"),
             Self::Unknown(_) => String::new(),
         }
@@ -535,7 +701,11 @@ impl ToolStatus {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolContent {
     Content(ContentBlock),
-    Diff { path: String, old_text: Option<String>, new_text: String },
+    Diff {
+        path: String,
+        old_text: Option<String>,
+        new_text: String,
+    },
     Terminal(String),
 }
 
@@ -543,7 +713,11 @@ impl ToolContent {
     fn parse(v: &Value) -> Option<Self> {
         Some(match v.get("type").and_then(Value::as_str)? {
             "content" => Self::Content(ContentBlock::parse(v.get("content")?)),
-            "diff" => Self::Diff { path: str_of(v, "path")?, old_text: str_of(v, "oldText"), new_text: str_of(v, "newText").unwrap_or_default() },
+            "diff" => Self::Diff {
+                path: str_of(v, "path")?,
+                old_text: str_of(v, "oldText"),
+                new_text: str_of(v, "newText").unwrap_or_default(),
+            },
             "terminal" => Self::Terminal(str_of(v, "terminalId")?),
             _ => return None,
         })
@@ -579,10 +753,23 @@ impl ToolCallFields {
             id: str_of(v, "toolCallId")?,
             title: str_of(v, "title"),
             kind: v.get("kind").and_then(Value::as_str).map(ToolKind::parse),
-            status: v.get("status").and_then(Value::as_str).and_then(ToolStatus::parse),
-            content: v.get("content").and_then(Value::as_array).map(|a| a.iter().filter_map(ToolContent::parse).collect()),
+            status: v
+                .get("status")
+                .and_then(Value::as_str)
+                .and_then(ToolStatus::parse),
+            content: v
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(ToolContent::parse).collect()),
             locations: v.get("locations").and_then(Value::as_array).map(|a| {
-                a.iter().filter_map(|l| Some(Location { path: str_of(l, "path")?, line: l.get("line").and_then(Value::as_u64).map(|n| n as u32) })).collect()
+                a.iter()
+                    .filter_map(|l| {
+                        Some(Location {
+                            path: str_of(l, "path")?,
+                            line: l.get("line").and_then(Value::as_u64).map(|n| n as u32),
+                        })
+                    })
+                    .collect()
             }),
             raw_input: v.get("rawInput").filter(|v| !v.is_null()).cloned(),
             raw_output: v.get("rawOutput").filter(|v| !v.is_null()).cloned(),
@@ -644,9 +831,18 @@ pub struct AvailableCommand {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionUpdate {
-    UserMessage { content: ContentBlock, message_id: Option<String> },
-    AgentMessage { content: ContentBlock, message_id: Option<String> },
-    AgentThought { content: ContentBlock, message_id: Option<String> },
+    UserMessage {
+        content: ContentBlock,
+        message_id: Option<String>,
+    },
+    AgentMessage {
+        content: ContentBlock,
+        message_id: Option<String>,
+    },
+    AgentThought {
+        content: ContentBlock,
+        message_id: Option<String>,
+    },
     ToolCall(ToolCallFields),
     ToolCallUpdate(ToolCallFields),
     Plan(Vec<PlanEntry>),
@@ -654,8 +850,15 @@ pub enum SessionUpdate {
     CurrentMode(String),
     ConfigOptions(Vec<ConfigOption>),
     /// `title`: `Some(None)` clears it, `None` leaves it.
-    SessionInfo { title: Option<Option<String>>, updated_at: Option<String> },
-    Usage { used: u64, size: u64, cost: Option<(f64, String)> },
+    SessionInfo {
+        title: Option<Option<String>>,
+        updated_at: Option<String>,
+    },
+    Usage {
+        used: u64,
+        size: u64,
+        cost: Option<(f64, String)>,
+    },
     /// A kind this Fenix doesn't know (its name), or a malformed one.
     Unknown(String),
 }
@@ -670,22 +873,42 @@ impl SessionUpdate {
 
     pub fn parse(u: &Value) -> Self {
         let kind = u.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
-        let chunk = || (u.get("content").map(ContentBlock::parse).unwrap_or(ContentBlock::Text(String::new())), str_of(u, "messageId"));
+        let chunk = || {
+            (
+                u.get("content")
+                    .map(ContentBlock::parse)
+                    .unwrap_or(ContentBlock::Text(String::new())),
+                str_of(u, "messageId"),
+            )
+        };
         match kind {
             "user_message_chunk" => {
                 let (content, message_id) = chunk();
-                Self::UserMessage { content, message_id }
+                Self::UserMessage {
+                    content,
+                    message_id,
+                }
             }
             "agent_message_chunk" => {
                 let (content, message_id) = chunk();
-                Self::AgentMessage { content, message_id }
+                Self::AgentMessage {
+                    content,
+                    message_id,
+                }
             }
             "agent_thought_chunk" => {
                 let (content, message_id) = chunk();
-                Self::AgentThought { content, message_id }
+                Self::AgentThought {
+                    content,
+                    message_id,
+                }
             }
-            "tool_call" => ToolCallFields::parse(u).map(Self::ToolCall).unwrap_or_else(|| Self::Unknown(kind.into())),
-            "tool_call_update" => ToolCallFields::parse(u).map(Self::ToolCallUpdate).unwrap_or_else(|| Self::Unknown(kind.into())),
+            "tool_call" => ToolCallFields::parse(u)
+                .map(Self::ToolCall)
+                .unwrap_or_else(|| Self::Unknown(kind.into())),
+            "tool_call_update" => ToolCallFields::parse(u)
+                .map(Self::ToolCallUpdate)
+                .unwrap_or_else(|| Self::Unknown(kind.into())),
             "plan" => Self::Plan(
                 array_of(u, "entries")
                     .iter()
@@ -712,8 +935,15 @@ impl SessionUpdate {
                     })
                     .collect(),
             ),
-            "current_mode_update" => str_of(u, "currentModeId").map(Self::CurrentMode).unwrap_or_else(|| Self::Unknown(kind.into())),
-            "config_option_update" => Self::ConfigOptions(array_of(u, "configOptions").iter().filter_map(ConfigOption::parse).collect()),
+            "current_mode_update" => str_of(u, "currentModeId")
+                .map(Self::CurrentMode)
+                .unwrap_or_else(|| Self::Unknown(kind.into())),
+            "config_option_update" => Self::ConfigOptions(
+                array_of(u, "configOptions")
+                    .iter()
+                    .filter_map(ConfigOption::parse)
+                    .collect(),
+            ),
             "session_info_update" => Self::SessionInfo {
                 title: match u.get("title") {
                     None => None,
@@ -725,7 +955,9 @@ impl SessionUpdate {
             "usage_update" => Self::Usage {
                 used: u.get("used").and_then(Value::as_u64).unwrap_or(0),
                 size: u.get("size").and_then(Value::as_u64).unwrap_or(0),
-                cost: u.get("cost").and_then(|c| Some((c.get("amount")?.as_f64()?, str_of(c, "currency")?))),
+                cost: u
+                    .get("cost")
+                    .and_then(|c| Some((c.get("amount")?.as_f64()?, str_of(c, "currency")?))),
             },
             other => Self::Unknown(other.to_string()),
         }
@@ -747,7 +979,11 @@ pub enum StopReason {
 
 impl StopReason {
     pub fn parse(result: &Value) -> Self {
-        match result.get("stopReason").and_then(Value::as_str).unwrap_or("end_turn") {
+        match result
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .unwrap_or("end_turn")
+        {
             "end_turn" => Self::EndTurn,
             "max_tokens" => Self::MaxTokens,
             "max_turn_requests" => Self::MaxTurnRequests,
@@ -790,34 +1026,96 @@ pub struct PermissionOption {
 /// A request from the agent to Fenix, read from its method and params.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ClientRequest {
-    ReadTextFile { session_id: SessionId, path: String, line: Option<u32>, limit: Option<u32> },
-    WriteTextFile { session_id: SessionId, path: String, content: String },
-    RequestPermission { session_id: SessionId, tool_call: ToolCallFields, options: Vec<PermissionOption> },
-    CreateTerminal { session_id: SessionId, command: String, args: Vec<String>, env: Vec<(String, String)>, cwd: Option<String>, output_byte_limit: Option<u64> },
-    TerminalOutput { session_id: SessionId, terminal_id: String },
-    WaitForTerminalExit { session_id: SessionId, terminal_id: String },
-    KillTerminal { session_id: SessionId, terminal_id: String },
-    ReleaseTerminal { session_id: SessionId, terminal_id: String },
+    ReadTextFile {
+        session_id: SessionId,
+        path: String,
+        line: Option<u32>,
+        limit: Option<u32>,
+    },
+    WriteTextFile {
+        session_id: SessionId,
+        path: String,
+        content: String,
+    },
+    RequestPermission {
+        session_id: SessionId,
+        tool_call: ToolCallFields,
+        options: Vec<PermissionOption>,
+    },
+    CreateTerminal {
+        session_id: SessionId,
+        command: String,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+        cwd: Option<String>,
+        output_byte_limit: Option<u64>,
+    },
+    TerminalOutput {
+        session_id: SessionId,
+        terminal_id: String,
+    },
+    WaitForTerminalExit {
+        session_id: SessionId,
+        terminal_id: String,
+    },
+    KillTerminal {
+        session_id: SessionId,
+        terminal_id: String,
+    },
+    ReleaseTerminal {
+        session_id: SessionId,
+        terminal_id: String,
+    },
     /// `elicitation/create`: the agent asks the user for something, a form
     /// or a link. `session_id` is empty for one outside a session
     /// (request-scoped).
-    Elicit { session_id: SessionId, elicitation: Elicitation },
+    Elicit {
+        session_id: SessionId,
+        elicitation: Elicitation,
+    },
 }
 
 impl ClientRequest {
     /// Reads a request; `Err` carries the JSON-RPC error to answer with:
     /// method not found, or invalid params.
     pub fn parse(method: &str, params: &Value) -> Result<Self, (i64, String)> {
-        let need = |key: &str| str_of(params, key).ok_or_else(|| (code::INVALID_PARAMS, format!("`{method}` needs `{key}`")));
+        let need = |key: &str| {
+            str_of(params, key)
+                .ok_or_else(|| (code::INVALID_PARAMS, format!("`{method}` needs `{key}`")))
+        };
         let session_id = || need("sessionId");
-        let u32_of = |key: &str| params.get(key).and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32);
+        let u32_of = |key: &str| {
+            params
+                .get(key)
+                .and_then(Value::as_u64)
+                .map(|n| n.min(u32::MAX as u64) as u32)
+        };
         Ok(match method {
-            "elicitation/create" => Self::Elicit { session_id: str_of(params, "sessionId").unwrap_or_default(), elicitation: Elicitation::parse(params).map_err(|why| (code::INVALID_PARAMS, why))? },
-            "fs/read_text_file" => Self::ReadTextFile { session_id: session_id()?, path: need("path")?, line: u32_of("line"), limit: u32_of("limit") },
-            "fs/write_text_file" => Self::WriteTextFile { session_id: session_id()?, path: need("path")?, content: need("content")? },
+            "elicitation/create" => Self::Elicit {
+                session_id: str_of(params, "sessionId").unwrap_or_default(),
+                elicitation: Elicitation::parse(params)
+                    .map_err(|why| (code::INVALID_PARAMS, why))?,
+            },
+            "fs/read_text_file" => Self::ReadTextFile {
+                session_id: session_id()?,
+                path: need("path")?,
+                line: u32_of("line"),
+                limit: u32_of("limit"),
+            },
+            "fs/write_text_file" => Self::WriteTextFile {
+                session_id: session_id()?,
+                path: need("path")?,
+                content: need("content")?,
+            },
             "session/request_permission" => Self::RequestPermission {
                 session_id: session_id()?,
-                tool_call: params.get("toolCall").and_then(ToolCallFields::parse).ok_or((code::INVALID_PARAMS, "`session/request_permission` needs `toolCall`".to_string()))?,
+                tool_call: params
+                    .get("toolCall")
+                    .and_then(ToolCallFields::parse)
+                    .ok_or((
+                        code::INVALID_PARAMS,
+                        "`session/request_permission` needs `toolCall`".to_string(),
+                    ))?,
                 options: array_of(params, "options")
                     .iter()
                     .filter_map(|o| {
@@ -838,16 +1136,39 @@ impl ClientRequest {
             "terminal/create" => Self::CreateTerminal {
                 session_id: session_id()?,
                 command: need("command")?,
-                args: array_of(params, "args").iter().filter_map(|a| a.as_str().map(str::to_string)).collect(),
-                env: array_of(params, "env").iter().filter_map(|e| Some((str_of(e, "name")?, str_of(e, "value")?))).collect(),
+                args: array_of(params, "args")
+                    .iter()
+                    .filter_map(|a| a.as_str().map(str::to_string))
+                    .collect(),
+                env: array_of(params, "env")
+                    .iter()
+                    .filter_map(|e| Some((str_of(e, "name")?, str_of(e, "value")?)))
+                    .collect(),
                 cwd: str_of(params, "cwd"),
                 output_byte_limit: params.get("outputByteLimit").and_then(Value::as_u64),
             },
-            "terminal/output" => Self::TerminalOutput { session_id: session_id()?, terminal_id: need("terminalId")? },
-            "terminal/wait_for_exit" => Self::WaitForTerminalExit { session_id: session_id()?, terminal_id: need("terminalId")? },
-            "terminal/kill" => Self::KillTerminal { session_id: session_id()?, terminal_id: need("terminalId")? },
-            "terminal/release" => Self::ReleaseTerminal { session_id: session_id()?, terminal_id: need("terminalId")? },
-            _ => return Err((code::METHOD_NOT_FOUND, format!("Fenix doesn't serve `{method}`"))),
+            "terminal/output" => Self::TerminalOutput {
+                session_id: session_id()?,
+                terminal_id: need("terminalId")?,
+            },
+            "terminal/wait_for_exit" => Self::WaitForTerminalExit {
+                session_id: session_id()?,
+                terminal_id: need("terminalId")?,
+            },
+            "terminal/kill" => Self::KillTerminal {
+                session_id: session_id()?,
+                terminal_id: need("terminalId")?,
+            },
+            "terminal/release" => Self::ReleaseTerminal {
+                session_id: session_id()?,
+                terminal_id: need("terminalId")?,
+            },
+            _ => {
+                return Err((
+                    code::METHOD_NOT_FOUND,
+                    format!("Fenix doesn't serve `{method}`"),
+                ))
+            }
         })
     }
 
@@ -878,11 +1199,23 @@ pub enum ElicitMode {
 /// What a form's field takes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FieldKind {
-    Text { min: Option<u64>, max: Option<u64>, pattern: Option<String>, format: Option<String> },
-    Number { integer: bool, min: Option<f64>, max: Option<f64> },
+    Text {
+        min: Option<u64>,
+        max: Option<u64>,
+        pattern: Option<String>,
+        format: Option<String>,
+    },
+    Number {
+        integer: bool,
+        min: Option<f64>,
+        max: Option<f64>,
+    },
     Boolean,
     /// One of these (`multi`: any of them): value and title.
-    Choice { options: Vec<(String, String)>, multi: bool },
+    Choice {
+        options: Vec<(String, String)>,
+        multi: bool,
+    },
     /// A type this Fenix doesn't know: kept, its value sent as text.
     Unknown(String),
 }
@@ -911,9 +1244,25 @@ pub struct Elicitation {
 }
 
 fn choice_options(p: &Value) -> Option<(Vec<(String, String)>, bool)> {
-    let titled = |list: &[Value]| list.iter().filter_map(|o| Some((str_of(o, "const")?, str_of(o, "title").or_else(|| str_of(o, "const")).unwrap_or_default()))).collect::<Vec<_>>();
+    let titled = |list: &[Value]| {
+        list.iter()
+            .filter_map(|o| {
+                Some((
+                    str_of(o, "const")?,
+                    str_of(o, "title")
+                        .or_else(|| str_of(o, "const"))
+                        .unwrap_or_default(),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
     if let Some(list) = p.get("enum").and_then(Value::as_array) {
-        return Some((list.iter().filter_map(|v| v.as_str().map(|s| (s.to_string(), s.to_string()))).collect(), false));
+        return Some((
+            list.iter()
+                .filter_map(|v| v.as_str().map(|s| (s.to_string(), s.to_string())))
+                .collect(),
+            false,
+        ));
     }
     if let Some(list) = p.get("oneOf").and_then(Value::as_array) {
         return Some((titled(list), false));
@@ -921,7 +1270,12 @@ fn choice_options(p: &Value) -> Option<(Vec<(String, String)>, bool)> {
     if p.get("type").and_then(Value::as_str) == Some("array") {
         let items = p.get("items")?;
         if let Some(list) = items.get("enum").and_then(Value::as_array) {
-            return Some((list.iter().filter_map(|v| v.as_str().map(|s| (s.to_string(), s.to_string()))).collect(), true));
+            return Some((
+                list.iter()
+                    .filter_map(|v| v.as_str().map(|s| (s.to_string(), s.to_string())))
+                    .collect(),
+                true,
+            ));
         }
         if let Some(list) = items.get("anyOf").and_then(Value::as_array) {
             return Some((titled(list), true));
@@ -936,11 +1290,21 @@ impl Elicitation {
         let mode = match params.get("mode").and_then(Value::as_str) {
             Some("form") | None => ElicitMode::Form,
             Some("url") => ElicitMode::Url,
-            Some(other) => return Err(format!("elicitation mode {other} isn't one Fenix supports (form, url)")),
+            Some(other) => {
+                return Err(format!(
+                    "elicitation mode {other} isn't one Fenix supports (form, url)"
+                ))
+            }
         };
         let message = str_of(params, "message").unwrap_or_default();
-        let schema = params.get("requestedSchema").cloned().unwrap_or(Value::Null);
-        let required: Vec<String> = array_of(&schema, "required").iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let schema = params
+            .get("requestedSchema")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let required: Vec<String> = array_of(&schema, "required")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
         let mut fields = Vec::new();
         if let Some(props) = schema.get("properties").and_then(Value::as_object) {
             for (name, p) in props {
@@ -948,20 +1312,47 @@ impl Elicitation {
                     FieldKind::Choice { options, multi }
                 } else {
                     match p.get("type").and_then(Value::as_str).unwrap_or("string") {
-                        "string" => FieldKind::Text { min: p.get("minLength").and_then(Value::as_u64), max: p.get("maxLength").and_then(Value::as_u64), pattern: str_of(p, "pattern"), format: str_of(p, "format") },
-                        "number" => FieldKind::Number { integer: false, min: p.get("minimum").and_then(Value::as_f64), max: p.get("maximum").and_then(Value::as_f64) },
-                        "integer" => FieldKind::Number { integer: true, min: p.get("minimum").and_then(Value::as_f64), max: p.get("maximum").and_then(Value::as_f64) },
+                        "string" => FieldKind::Text {
+                            min: p.get("minLength").and_then(Value::as_u64),
+                            max: p.get("maxLength").and_then(Value::as_u64),
+                            pattern: str_of(p, "pattern"),
+                            format: str_of(p, "format"),
+                        },
+                        "number" => FieldKind::Number {
+                            integer: false,
+                            min: p.get("minimum").and_then(Value::as_f64),
+                            max: p.get("maximum").and_then(Value::as_f64),
+                        },
+                        "integer" => FieldKind::Number {
+                            integer: true,
+                            min: p.get("minimum").and_then(Value::as_f64),
+                            max: p.get("maximum").and_then(Value::as_f64),
+                        },
                         "boolean" => FieldKind::Boolean,
                         other => FieldKind::Unknown(other.to_string()),
                     }
                 };
-                fields.push(Field { title: str_of(p, "title").unwrap_or_else(|| name.clone()), description: str_of(p, "description"), kind, default: p.get("default").cloned().filter(|d| !d.is_null()), required: required.contains(name), name: name.clone() });
+                fields.push(Field {
+                    title: str_of(p, "title").unwrap_or_else(|| name.clone()),
+                    description: str_of(p, "description"),
+                    kind,
+                    default: p.get("default").cloned().filter(|d| !d.is_null()),
+                    required: required.contains(name),
+                    name: name.clone(),
+                });
             }
         }
         if mode == ElicitMode::Url && str_of(params, "url").is_none() {
             return Err("a URL elicitation needs `url`".into());
         }
-        Ok(Elicitation { mode, message, tool_call_id: str_of(params, "toolCallId"), fields, url: str_of(params, "url"), elicitation_id: str_of(params, "elicitationId") })
+        Ok(Elicitation {
+            mode,
+            message,
+            tool_call_id: str_of(params, "toolCallId"),
+            fields,
+            url: str_of(params, "url"),
+            elicitation_id: str_of(params, "elicitationId"),
+        })
     }
 
     /// Checks an answer against the fields: what's wrong with it, if
@@ -981,14 +1372,24 @@ impl Elicitation {
                     Some(s) => {
                         let n = s.chars().count() as u64;
                         if min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m) {
-                            out.push(format!("{}: {} characters, not within {}..{}", f.name, n, min.unwrap_or(0), max.map(|m| m.to_string()).unwrap_or_default()));
+                            out.push(format!(
+                                "{}: {} characters, not within {}..{}",
+                                f.name,
+                                n,
+                                min.unwrap_or(0),
+                                max.map(|m| m.to_string()).unwrap_or_default()
+                            ));
                         }
                     }
                     None => out.push(format!("{} is text, in quotes", f.name)),
                 },
                 FieldKind::Number { integer, min, max } => match v.as_f64() {
-                    Some(x) if *integer && x.fract() != 0.0 => out.push(format!("{} is a whole number", f.name)),
-                    Some(x) if min.is_some_and(|m| x < m) || max.is_some_and(|m| x > m) => out.push(format!("{} is out of range", f.name)),
+                    Some(x) if *integer && x.fract() != 0.0 => {
+                        out.push(format!("{} is a whole number", f.name))
+                    }
+                    Some(x) if min.is_some_and(|m| x < m) || max.is_some_and(|m| x > m) => {
+                        out.push(format!("{} is out of range", f.name))
+                    }
                     Some(_) => {}
                     None => out.push(format!("{} is a number", f.name)),
                 },
@@ -998,10 +1399,26 @@ impl Elicitation {
                     }
                 }
                 FieldKind::Choice { options, multi } => {
-                    let ok = |s: &Value| s.as_str().is_some_and(|s| options.iter().any(|(value, _)| value == s));
-                    let fine = if *multi { v.as_array().is_some_and(|a| a.iter().all(ok)) } else { ok(v) };
+                    let ok = |s: &Value| {
+                        s.as_str()
+                            .is_some_and(|s| options.iter().any(|(value, _)| value == s))
+                    };
+                    let fine = if *multi {
+                        v.as_array().is_some_and(|a| a.iter().all(ok))
+                    } else {
+                        ok(v)
+                    };
                     if !fine {
-                        out.push(format!("{} is {}: {}", f.name, if *multi { "a list of" } else { "one of" }, options.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>().join(", ")));
+                        out.push(format!(
+                            "{} is {}: {}",
+                            f.name,
+                            if *multi { "a list of" } else { "one of" },
+                            options
+                                .iter()
+                                .map(|(v, _)| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
                     }
                 }
                 FieldKind::Unknown(_) => {}
@@ -1053,7 +1470,12 @@ pub fn terminal_output_result(output: &str, truncated: bool, exit: Option<&ExitS
 /// `_meta`, but it's kept wherever a whole value is (raw input/output).
 pub fn without_meta(v: &Value) -> Value {
     match v {
-        Value::Object(m) => Value::Object(m.iter().filter(|(k, _)| k.as_str() != "_meta").map(|(k, v)| (k.clone(), without_meta(v))).collect::<Map<_, _>>()),
+        Value::Object(m) => Value::Object(
+            m.iter()
+                .filter(|(k, _)| k.as_str() != "_meta")
+                .map(|(k, v)| (k.clone(), without_meta(v)))
+                .collect::<Map<_, _>>(),
+        ),
         Value::Array(a) => Value::Array(a.iter().map(without_meta).collect()),
         other => other.clone(),
     }
@@ -1066,7 +1488,12 @@ mod tests {
     #[test]
     fn an_agent_that_says_nothing_offers_nothing() {
         let info = AgentInfo::parse(&json!({ "protocolVersion": 1 }));
-        assert!(!info.load_session && !info.session_resume && !info.session_list && info.auth_methods.is_empty());
+        assert!(
+            !info.load_session
+                && !info.session_resume
+                && !info.session_list
+                && info.auth_methods.is_empty()
+        );
     }
 
     #[test]
@@ -1088,17 +1515,41 @@ mod tests {
                 { "id": "y", "name": "From the future", "type": "carrier-pigeon" }
             ]
         }));
-        assert!(info.load_session && info.session_resume && info.session_list && info.session_close && info.session_delete && info.logout);
+        assert!(
+            info.load_session
+                && info.session_resume
+                && info.session_list
+                && info.session_close
+                && info.session_delete
+                && info.logout
+        );
         assert!(info.prompt_image && info.prompt_embedded_context && !info.prompt_audio);
         assert_eq!(info.display_name(), Some("Claude Agent"));
-        assert_eq!(info.auth_methods[0].kind, AuthKind::Terminal { args: vec!["--cli".into(), "auth".into(), "login".into(), "--claudeai".into()], env: vec![] });
+        assert_eq!(
+            info.auth_methods[0].kind,
+            AuthKind::Terminal {
+                args: vec![
+                    "--cli".into(),
+                    "auth".into(),
+                    "login".into(),
+                    "--claudeai".into()
+                ],
+                env: vec![]
+            }
+        );
         assert_eq!(info.auth_methods[1].kind, AuthKind::Agent);
-        assert_eq!(info.auth_methods[2].kind, AuthKind::Other("carrier-pigeon".into()));
+        assert_eq!(
+            info.auth_methods[2].kind,
+            AuthKind::Other("carrier-pigeon".into())
+        );
     }
 
     #[test]
     fn an_unknown_update_is_kept_by_name_not_refused() {
-        assert_eq!(SessionUpdate::parse(&json!({ "sessionUpdate": "hologram", "x": 1 })), SessionUpdate::Unknown("hologram".into()));
+        assert_eq!(
+            SessionUpdate::parse(&json!({ "sessionUpdate": "hologram", "x": 1 })),
+            SessionUpdate::Unknown("hologram".into())
+        );
     }
 
     #[test]
@@ -1132,36 +1583,84 @@ mod tests {
         .collect();
         assert_eq!(options.len(), 3);
         assert_eq!(options[0].current_label(), "B");
-        let ConfigValue::Select { choices, .. } = &options[1].value else { panic!() };
+        let ConfigValue::Select { choices, .. } = &options[1].value else {
+            panic!()
+        };
         assert_eq!(choices[0].group.as_deref(), Some("Fast"));
         assert_eq!(options[2].value, ConfigValue::Boolean(true));
-        assert_eq!(set_config_params("s", "fast", &options[2].value), json!({ "sessionId": "s", "configId": "fast", "type": "boolean", "value": true }));
+        assert_eq!(
+            set_config_params("s", "fast", &options[2].value),
+            json!({ "sessionId": "s", "configId": "fast", "type": "boolean", "value": true })
+        );
     }
 
     #[test]
     fn client_requests_read_and_refuse_what_they_must() {
-        let read = ClientRequest::parse("fs/read_text_file", &json!({ "sessionId": "s", "path": "/a", "line": 3 })).unwrap();
-        assert_eq!(read, ClientRequest::ReadTextFile { session_id: "s".into(), path: "/a".into(), line: Some(3), limit: None });
-        assert_eq!(ClientRequest::parse("fs/write_text_file", &json!({ "sessionId": "s", "path": "/a" })).unwrap_err().0, code::INVALID_PARAMS);
-        assert_eq!(ClientRequest::parse("fs/delete", &json!({})).unwrap_err().0, code::METHOD_NOT_FOUND);
+        let read = ClientRequest::parse(
+            "fs/read_text_file",
+            &json!({ "sessionId": "s", "path": "/a", "line": 3 }),
+        )
+        .unwrap();
+        assert_eq!(
+            read,
+            ClientRequest::ReadTextFile {
+                session_id: "s".into(),
+                path: "/a".into(),
+                line: Some(3),
+                limit: None
+            }
+        );
+        assert_eq!(
+            ClientRequest::parse(
+                "fs/write_text_file",
+                &json!({ "sessionId": "s", "path": "/a" })
+            )
+            .unwrap_err()
+            .0,
+            code::INVALID_PARAMS
+        );
+        assert_eq!(
+            ClientRequest::parse("fs/delete", &json!({})).unwrap_err().0,
+            code::METHOD_NOT_FOUND
+        );
         let ask = ClientRequest::parse(
             "session/request_permission",
             &json!({ "sessionId": "s", "toolCall": { "toolCallId": "t", "title": "Edit a.rs" }, "options": [{ "optionId": "allow-once", "name": "Yes", "kind": "allow_once" }, { "optionId": "reject", "name": "No", "kind": "reject_once" }] }),
         )
         .unwrap();
-        let ClientRequest::RequestPermission { options, .. } = ask else { panic!() };
+        let ClientRequest::RequestPermission { options, .. } = ask else {
+            panic!()
+        };
         assert_eq!(options[0].kind, PermissionKind::AllowOnce);
-        assert_eq!(permission_result(Some("allow-once")), json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }));
-        assert_eq!(permission_result(None), json!({ "outcome": { "outcome": "cancelled" } }));
+        assert_eq!(
+            permission_result(Some("allow-once")),
+            json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } })
+        );
+        assert_eq!(
+            permission_result(None),
+            json!({ "outcome": { "outcome": "cancelled" } })
+        );
     }
 
     #[test]
     fn content_blocks_round_trip() {
         for block in [
             ContentBlock::text("hi"),
-            ContentBlock::ResourceLink { uri: "file:///a.rs".into(), name: "a.rs".into(), mime_type: None },
-            ContentBlock::Resource { uri: "file:///a.rs".into(), text: Some("fn x() {}".into()), mime_type: Some("text/x-rust".into()) },
-            ContentBlock::Image { data: "AAAA".into(), mime_type: "image/png".into(), uri: None },
+            ContentBlock::ResourceLink {
+                uri: "file:///a.rs".into(),
+                name: "a.rs".into(),
+                mime_type: None,
+            },
+            ContentBlock::Resource {
+                uri: "file:///a.rs".into(),
+                text: Some("fn x() {}".into()),
+                mime_type: Some("text/x-rust".into()),
+            },
+            ContentBlock::Image {
+                data: "AAAA".into(),
+                mime_type: "image/png".into(),
+                uri: None,
+            },
         ] {
             assert_eq!(ContentBlock::parse(&block.to_value()), block);
         }
@@ -1169,7 +1668,19 @@ mod tests {
 
     #[test]
     fn session_info_tells_clearing_from_leaving() {
-        assert_eq!(SessionUpdate::parse(&json!({ "sessionUpdate": "session_info_update", "title": null })), SessionUpdate::SessionInfo { title: Some(None), updated_at: None });
-        assert_eq!(SessionUpdate::parse(&json!({ "sessionUpdate": "session_info_update" })), SessionUpdate::SessionInfo { title: None, updated_at: None });
+        assert_eq!(
+            SessionUpdate::parse(&json!({ "sessionUpdate": "session_info_update", "title": null })),
+            SessionUpdate::SessionInfo {
+                title: Some(None),
+                updated_at: None
+            }
+        );
+        assert_eq!(
+            SessionUpdate::parse(&json!({ "sessionUpdate": "session_info_update" })),
+            SessionUpdate::SessionInfo {
+                title: None,
+                updated_at: None
+            }
+        );
     }
 }

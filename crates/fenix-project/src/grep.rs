@@ -18,17 +18,34 @@ pub struct GrepMatch {
 /// `rg --vimgrep` lists them), honouring ignore files -- run by
 /// [`search`](crate::search) in this process, case as typed.
 pub fn grep_project(root: &Path, query: &str) -> io::Result<Vec<GrepMatch>> {
-    let options = Options { regex: true, match_case: true, ..Options::default() };
+    let options = Options {
+        regex: true,
+        match_case: true,
+        ..Options::default()
+    };
     let pattern = Pattern::new(query, &options).map_err(io::Error::other)?;
     let mut out = Vec::new();
-    search::search(&Scope::Folders(vec![root.to_path_buf()]), &pattern, &options, &HashMap::new(), usize::MAX, &AtomicBool::new(false), |file| {
-        for line in &file.lines {
-            for m in &line.matches {
-                out.push(GrepMatch { path: file.path.clone(), line: line.number, col: m.start + 1, text: line.text.clone() });
+    search::search(
+        &Scope::Folders(vec![root.to_path_buf()]),
+        &pattern,
+        &options,
+        &HashMap::new(),
+        usize::MAX,
+        &AtomicBool::new(false),
+        |file| {
+            for line in &file.lines {
+                for m in &line.matches {
+                    out.push(GrepMatch {
+                        path: file.path.clone(),
+                        line: line.number,
+                        col: m.start + 1,
+                        text: line.text.clone(),
+                    });
+                }
             }
-        }
-        ControlFlow::Continue(())
-    })
+            ControlFlow::Continue(())
+        },
+    )
     .map_err(io::Error::other)?;
     Ok(out)
 }
@@ -38,13 +55,25 @@ pub fn grep_project(root: &Path, query: &str) -> io::Result<Vec<GrepMatch>> {
 /// For callers that need to look at a matching file as a whole -- to
 /// parse it, say -- rather than at individual matched lines.
 pub fn files_matching(root: &Path, pattern: &str) -> io::Result<Vec<PathBuf>> {
-    let options = Options { regex: true, match_case: true, ..Options::default() };
+    let options = Options {
+        regex: true,
+        match_case: true,
+        ..Options::default()
+    };
     let compiled = Pattern::new(pattern, &options).map_err(io::Error::other)?;
     let mut files = Vec::new();
-    search::search(&Scope::Folders(vec![root.to_path_buf()]), &compiled, &options, &HashMap::new(), usize::MAX, &AtomicBool::new(false), |file| {
-        files.push(file.path);
-        ControlFlow::Continue(())
-    })
+    search::search(
+        &Scope::Folders(vec![root.to_path_buf()]),
+        &compiled,
+        &options,
+        &HashMap::new(),
+        usize::MAX,
+        &AtomicBool::new(false),
+        |file| {
+            files.push(file.path);
+            ControlFlow::Continue(())
+        },
+    )
     .map_err(io::Error::other)?;
     files.sort();
     Ok(files)

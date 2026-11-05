@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use grep_regex::RegexMatcherBuilder;
-use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch};
+use grep_searcher::{
+    BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
+};
 use regex::Regex;
 
 /// How a query is read.
@@ -61,7 +63,11 @@ impl Pattern {
         if query.is_empty() {
             return Err("nothing to search for".into());
         }
-        let mut source = if options.regex { query.to_string() } else { regex::escape(query) };
+        let mut source = if options.regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
         if options.whole_word {
             source = format!(r"\b(?:{source})\b");
         }
@@ -70,25 +76,43 @@ impl Pattern {
             source = format!("(?i){source}");
         }
         let regex = Regex::new(&source).map_err(|e| short_error(&e))?;
-        Ok(Pattern { source, regex, literal: !options.regex })
+        Ok(Pattern {
+            source,
+            regex,
+            literal: !options.regex,
+        })
     }
 
     /// The matches in one line (no line ending), as byte ranges.
     pub fn find_in(&self, line: &str) -> Vec<Range<usize>> {
-        self.regex.find_iter(line).map(|m| m.range()).filter(|r| !r.is_empty()).collect()
+        self.regex
+            .find_iter(line)
+            .map(|m| m.range())
+            .filter(|r| !r.is_empty())
+            .collect()
     }
 
     /// What `replacement` makes of the match at `range` in `line`:
     /// `$1`/`${name}` (and Vim's `\1`) in a regex search, the text as it
     /// is in a literal one. `preserve_case` carries the match's case over
     /// (`HELPER` -> `ASSIST`, `Helper` -> `Assist`).
-    pub fn replacement_for(&self, line: &str, range: Range<usize>, replacement: &str, preserve_case: bool) -> String {
+    pub fn replacement_for(
+        &self,
+        line: &str,
+        range: Range<usize>,
+        replacement: &str,
+        preserve_case: bool,
+    ) -> String {
         let matched = &line[range.clone()];
         let new = if self.literal {
             replacement.to_string()
         } else {
             // Captures for the match that starts here.
-            match self.regex.captures_at(line, range.start).filter(|c| c.get(0).is_some_and(|m| m.range() == range)) {
+            match self
+                .regex
+                .captures_at(line, range.start)
+                .filter(|c| c.get(0).is_some_and(|m| m.range() == range))
+            {
                 Some(caps) => {
                     let mut out = String::new();
                     caps.expand(&vim_groups(replacement), &mut out);
@@ -97,16 +121,29 @@ impl Pattern {
                 None => replacement.to_string(),
             }
         };
-        if preserve_case { with_case_of(matched, &new) } else { new }
+        if preserve_case {
+            with_case_of(matched, &new)
+        } else {
+            new
+        }
     }
 }
 
 /// The first line of a regex error, which is where it says what's wrong.
 fn short_error(e: &regex::Error) -> String {
     let text = e.to_string();
-    let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
     // The regex crate's message ends with an "error: ..." line.
-    match lines.iter().rev().find_map(|l| l.strip_prefix("error: ")).or(lines.last().copied()) {
+    match lines
+        .iter()
+        .rev()
+        .find_map(|l| l.strip_prefix("error: "))
+        .or(lines.last().copied())
+    {
         Some(line) => line.to_string(),
         None => text.clone(),
     }
@@ -228,7 +265,10 @@ pub fn search(
     cancel: &AtomicBool,
     mut found: impl FnMut(FileResult) -> ControlFlow<()>,
 ) -> Result<Summary, String> {
-    let matcher = RegexMatcherBuilder::new().line_terminator(Some(b'\n')).build(&pattern.source).map_err(|e| e.to_string())?;
+    let matcher = RegexMatcherBuilder::new()
+        .line_terminator(Some(b'\n'))
+        .build(&pattern.source)
+        .map_err(|e| e.to_string())?;
     let mut searcher = SearcherBuilder::new()
         .binary_detection(BinaryDetection::quit(0))
         .line_number(true)
@@ -246,7 +286,11 @@ pub fn search(
         let result = match unsaved.get(path) {
             Some(text) => search_text(path, text, pattern, options.context),
             None => {
-                let mut sink = Collect { pattern, lines: Vec::new(), binary: false };
+                let mut sink = Collect {
+                    pattern,
+                    lines: Vec::new(),
+                    binary: false,
+                };
                 if searcher.search_path(&matcher, path, &mut sink).is_err() {
                     return ControlFlow::Continue(());
                 }
@@ -254,7 +298,10 @@ pub fn search(
                     summary.binary_skipped += 1;
                     return ControlFlow::Continue(());
                 }
-                FileResult { path: path.to_path_buf(), lines: trim_context(sink.lines) }
+                FileResult {
+                    path: path.to_path_buf(),
+                    lines: trim_context(sink.lines),
+                }
             }
         };
         let count = result.match_count();
@@ -281,7 +328,9 @@ pub fn search(
         }
     }
     folders.retain(|f| f.is_dir());
-    let Some((first, rest)) = folders.split_first() else { return Ok(summary) };
+    let Some((first, rest)) = folders.split_first() else {
+        return Ok(summary);
+    };
     let mut walk = ignore::WalkBuilder::new(first);
     for folder in rest {
         walk.add(folder);
@@ -296,7 +345,12 @@ pub fn search(
         .sort_by_file_name(|a, b| a.cmp(b));
     if !options.globs.is_empty() {
         let mut overrides = ignore::overrides::OverrideBuilder::new(first);
-        for glob in options.globs.iter().map(|g| g.trim()).filter(|g| !g.is_empty()) {
+        for glob in options
+            .globs
+            .iter()
+            .map(|g| g.trim())
+            .filter(|g| !g.is_empty())
+        {
             overrides.add(glob).map_err(|e| format!("{glob}: {e}"))?;
         }
         walk.overrides(overrides.build().map_err(|e| e.to_string())?);
@@ -317,31 +371,62 @@ pub fn search(
 
 /// Text in memory searched as a file would be -- an open buffer's.
 fn search_text(path: &Path, text: &str, pattern: &Pattern, context: usize) -> FileResult {
-    let all: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
-    let hits: Vec<usize> = (0..all.len()).filter(|&i| !pattern.find_in(all[i]).is_empty()).collect();
+    let all: Vec<&str> = text
+        .split('\n')
+        .map(|l| l.strip_suffix('\r').unwrap_or(l))
+        .collect();
+    let hits: Vec<usize> = (0..all.len())
+        .filter(|&i| !pattern.find_in(all[i]).is_empty())
+        .collect();
     let mut keep = vec![false; all.len()];
     for &i in &hits {
         let end = (i + context).min(all.len().saturating_sub(1));
         keep[i.saturating_sub(context)..=end].fill(true);
     }
-    let lines = (0..all.len()).filter(|&i| keep[i]).map(|i| line_of(i + 1, all[i], pattern)).collect();
-    FileResult { path: path.to_path_buf(), lines: trim_context(lines) }
+    let lines = (0..all.len())
+        .filter(|&i| keep[i])
+        .map(|i| line_of(i + 1, all[i], pattern))
+        .collect();
+    FileResult {
+        path: path.to_path_buf(),
+        lines: trim_context(lines),
+    }
 }
 
 /// A line as a result keeps it: its matches, cut around them if it's long.
 fn line_of(number: usize, text: &str, pattern: &Pattern) -> Line {
     let matches = pattern.find_in(text);
     if text.len() <= LONG_LINE {
-        return Line { number, text: text.to_string(), matches, cut: (false, false) };
+        return Line {
+            number,
+            text: text.to_string(),
+            matches,
+            cut: (false, false),
+        };
     }
     let (from, to) = match (matches.first(), matches.last()) {
-        (Some(first), Some(last)) => (first.start.saturating_sub(AROUND), (last.end + AROUND).min(text.len())),
+        (Some(first), Some(last)) => (
+            first.start.saturating_sub(AROUND),
+            (last.end + AROUND).min(text.len()),
+        ),
         _ => (0, LONG_LINE.min(text.len())),
     };
     // A line full of matches is still kept to a few windows' worth.
-    let (from, to) = (floor_char(text, from), ceil_char(text, to.min(from + 4 * LONG_LINE)));
-    let matches = matches.into_iter().filter(|m| m.start >= from && m.end <= to).map(|m| m.start - from..m.end - from).collect();
-    Line { number, text: text[from..to].to_string(), matches, cut: (from > 0, to < text.len()) }
+    let (from, to) = (
+        floor_char(text, from),
+        ceil_char(text, to.min(from + 4 * LONG_LINE)),
+    );
+    let matches = matches
+        .into_iter()
+        .filter(|m| m.start >= from && m.end <= to)
+        .map(|m| m.start - from..m.end - from)
+        .collect();
+    Line {
+        number,
+        text: text[from..to].to_string(),
+        matches,
+        cut: (from > 0, to < text.len()),
+    }
 }
 
 fn floor_char(s: &str, mut i: usize) -> usize {
@@ -360,7 +445,10 @@ fn ceil_char(s: &str, mut i: usize) -> usize {
 
 /// Context at the very end of a file is only its final empty line.
 fn trim_context(mut lines: Vec<Line>) -> Vec<Line> {
-    while lines.last().is_some_and(|l| l.matches.is_empty() && l.text.is_empty()) {
+    while lines
+        .last()
+        .is_some_and(|l| l.matches.is_empty() && l.text.is_empty())
+    {
         lines.pop();
     }
     lines
@@ -427,7 +515,13 @@ pub type MatchAt = (usize, usize);
 /// `text` with every match of `pattern` replaced, except those `skip`
 /// names -- matched line by line, as the search was, so the numbering
 /// agrees. How many were replaced.
-pub fn replace(text: &str, pattern: &Pattern, replacement: &str, preserve_case: bool, skip: &dyn Fn(MatchAt) -> bool) -> (String, usize) {
+pub fn replace(
+    text: &str,
+    pattern: &Pattern,
+    replacement: &str,
+    preserve_case: bool,
+    skip: &dyn Fn(MatchAt) -> bool,
+) -> (String, usize) {
     let mut out = String::with_capacity(text.len());
     let mut count = 0;
     for (i, raw) in text.split('\n').enumerate() {
@@ -444,7 +538,12 @@ pub fn replace(text: &str, pattern: &Pattern, replacement: &str, preserve_case: 
             if skip((i + 1, nth)) {
                 out.push_str(&line[range.clone()]);
             } else {
-                out.push_str(&pattern.replacement_for(line, range.clone(), replacement, preserve_case));
+                out.push_str(&pattern.replacement_for(
+                    line,
+                    range.clone(),
+                    replacement,
+                    preserve_case,
+                ));
                 count += 1;
             }
             at = range.end;
@@ -467,10 +566,18 @@ mod tests {
     fn run(scope: &Scope, query: &str, options: &Options) -> (Vec<FileResult>, Summary) {
         let pattern = Pattern::new(query, options).unwrap();
         let mut out = Vec::new();
-        let summary = search(scope, &pattern, options, &HashMap::new(), 1000, &AtomicBool::new(false), |f| {
-            out.push(f);
-            ControlFlow::Continue(())
-        })
+        let summary = search(
+            scope,
+            &pattern,
+            options,
+            &HashMap::new(),
+            1000,
+            &AtomicBool::new(false),
+            |f| {
+                out.push(f);
+                ControlFlow::Continue(())
+            },
+        )
         .unwrap();
         (out, summary)
     }
@@ -479,12 +586,24 @@ mod tests {
     fn literal_by_default_so_regex_characters_are_just_text() {
         let dir = TempDir::new("search_literal");
         dir.write("a.rs", "foo.bar(1)\nfooXbar\n");
-        let (found, _) = run(&Scope::Folders(vec![dir.path().to_path_buf()]), "foo.bar(", &opts());
+        let (found, _) = run(
+            &Scope::Folders(vec![dir.path().to_path_buf()]),
+            "foo.bar(",
+            &opts(),
+        );
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].lines.len(), 1, "fooXbar isn't foo.bar(");
         assert_eq!(found[0].lines[0].matches, vec![0..8]);
-        let regex = Options { regex: true, ..opts() };
-        assert!(Pattern::new("foo.bar(", &regex).unwrap_err().contains("unclosed"), "a bad regex says why");
+        let regex = Options {
+            regex: true,
+            ..opts()
+        };
+        assert!(
+            Pattern::new("foo.bar(", &regex)
+                .unwrap_err()
+                .contains("unclosed"),
+            "a bad regex says why"
+        );
     }
 
     #[test]
@@ -493,13 +612,27 @@ mod tests {
         assert_eq!(p.find_in("Helper helper HELPER").len(), 3);
         let p = Pattern::new("Helper", &opts()).unwrap();
         assert_eq!(p.find_in("Helper helper HELPER"), vec![0..6]);
-        let p = Pattern::new("helper", &Options { match_case: true, ..opts() }).unwrap();
+        let p = Pattern::new(
+            "helper",
+            &Options {
+                match_case: true,
+                ..opts()
+            },
+        )
+        .unwrap();
         assert_eq!(p.find_in("Helper helper"), vec![7..13]);
     }
 
     #[test]
     fn whole_word_leaves_out_longer_names() {
-        let p = Pattern::new("helper", &Options { whole_word: true, ..opts() }).unwrap();
+        let p = Pattern::new(
+            "helper",
+            &Options {
+                whole_word: true,
+                ..opts()
+            },
+        )
+        .unwrap();
         assert_eq!(p.find_in("helper_two helper"), vec![11..17]);
     }
 
@@ -512,8 +645,21 @@ mod tests {
         dir.write("src/a.txt", "needle\n");
         let scope = Scope::Folders(vec![dir.path().to_path_buf()]);
         let (found, _) = run(&scope, "needle", &opts());
-        assert_eq!(found.iter().map(|f| f.path.file_name().unwrap().to_str().unwrap()).collect::<Vec<_>>(), vec!["a.txt"]);
-        let (found, _) = run(&scope, "needle", &Options { hidden: true, ..opts() });
+        assert_eq!(
+            found
+                .iter()
+                .map(|f| f.path.file_name().unwrap().to_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a.txt"]
+        );
+        let (found, _) = run(
+            &scope,
+            "needle",
+            &Options {
+                hidden: true,
+                ..opts()
+            },
+        );
         assert_eq!(found.len(), 3);
     }
 
@@ -524,10 +670,35 @@ mod tests {
         dir.write("b.md", "x\n");
         dir.write("gen/c.rs", "x\n");
         let scope = Scope::Folders(vec![dir.path().to_path_buf()]);
-        let names = |found: Vec<FileResult>| found.iter().map(|f| f.path.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/")).collect::<Vec<_>>();
-        let (found, _) = run(&scope, "x", &Options { globs: vec!["*.rs".into()], ..opts() });
+        let names = |found: Vec<FileResult>| {
+            found
+                .iter()
+                .map(|f| {
+                    f.path
+                        .strip_prefix(dir.path())
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                .collect::<Vec<_>>()
+        };
+        let (found, _) = run(
+            &scope,
+            "x",
+            &Options {
+                globs: vec!["*.rs".into()],
+                ..opts()
+            },
+        );
         assert_eq!(names(found), vec!["a.rs", "gen/c.rs"]);
-        let (found, _) = run(&scope, "x", &Options { globs: vec!["!gen".into()], ..opts() });
+        let (found, _) = run(
+            &scope,
+            "x",
+            &Options {
+                globs: vec!["!gen".into()],
+                ..opts()
+            },
+        );
         assert_eq!(names(found), vec!["a.rs", "b.md"]);
     }
 
@@ -538,10 +709,18 @@ mod tests {
         let pattern = Pattern::new("new", &opts()).unwrap();
         let unsaved = HashMap::from([(path.clone(), "brand new\n".to_string())]);
         let mut found = Vec::new();
-        search(&Scope::Files(vec![path]), &pattern, &opts(), &unsaved, 100, &AtomicBool::new(false), |f| {
-            found.push(f);
-            ControlFlow::Continue(())
-        })
+        search(
+            &Scope::Files(vec![path]),
+            &pattern,
+            &opts(),
+            &unsaved,
+            100,
+            &AtomicBool::new(false),
+            |f| {
+                found.push(f);
+                ControlFlow::Continue(())
+            },
+        )
         .unwrap();
         assert_eq!(found[0].lines[0].text, "brand new");
     }
@@ -551,9 +730,20 @@ mod tests {
         let dir = TempDir::new("search_context");
         dir.write("a.txt", "one\ntwo\nthree\nfour\n");
         std::fs::write(dir.path().join("b.bin"), b"thr\0ee three").unwrap();
-        let (found, summary) = run(&Scope::Folders(vec![dir.path().to_path_buf()]), "three", &Options { context: 1, ..opts() });
+        let (found, summary) = run(
+            &Scope::Folders(vec![dir.path().to_path_buf()]),
+            "three",
+            &Options {
+                context: 1,
+                ..opts()
+            },
+        );
         assert_eq!(found.len(), 1);
-        let lines: Vec<(usize, bool)> = found[0].lines.iter().map(|l| (l.number, !l.matches.is_empty())).collect();
+        let lines: Vec<(usize, bool)> = found[0]
+            .lines
+            .iter()
+            .map(|l| (l.number, !l.matches.is_empty()))
+            .collect();
         assert_eq!(lines, vec![(2, false), (3, true), (4, false)]);
         assert_eq!(summary.binary_skipped, 1);
     }
@@ -567,14 +757,31 @@ mod tests {
         let scope = Scope::Folders(vec![dir.path().to_path_buf()]);
         let pattern = Pattern::new("x", &opts()).unwrap();
         let mut n = 0;
-        let summary = search(&scope, &pattern, &opts(), &HashMap::new(), 3, &AtomicBool::new(false), |_| {
-            n += 1;
-            ControlFlow::Continue(())
-        })
+        let summary = search(
+            &scope,
+            &pattern,
+            &opts(),
+            &HashMap::new(),
+            3,
+            &AtomicBool::new(false),
+            |_| {
+                n += 1;
+                ControlFlow::Continue(())
+            },
+        )
         .unwrap();
         assert!(summary.truncated);
         assert_eq!(n, 2, "2 files make 4 matches, past the cap of 3");
-        let summary = search(&scope, &pattern, &opts(), &HashMap::new(), 100, &AtomicBool::new(true), |_| ControlFlow::Continue(())).unwrap();
+        let summary = search(
+            &scope,
+            &pattern,
+            &opts(),
+            &HashMap::new(),
+            100,
+            &AtomicBool::new(true),
+            |_| ControlFlow::Continue(()),
+        )
+        .unwrap();
         assert!(summary.cancelled && summary.files_searched == 0);
     }
 
@@ -598,11 +805,38 @@ mod tests {
 
     #[test]
     fn regex_groups_and_preserved_case() {
-        let pattern = Pattern::new(r"(\w+)_(\w+)", &Options { regex: true, ..opts() }).unwrap();
-        assert_eq!(replace("foo_bar", &pattern, "$2_$1", false, &|_| false).0, "bar_foo");
-        assert_eq!(replace("foo_bar", &pattern, r"\2-\1", false, &|_| false).0, "bar-foo");
+        let pattern = Pattern::new(
+            r"(\w+)_(\w+)",
+            &Options {
+                regex: true,
+                ..opts()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            replace("foo_bar", &pattern, "$2_$1", false, &|_| false).0,
+            "bar_foo"
+        );
+        assert_eq!(
+            replace("foo_bar", &pattern, r"\2-\1", false, &|_| false).0,
+            "bar-foo"
+        );
         let literal = Pattern::new("helper", &opts()).unwrap();
-        assert_eq!(replace("helper Helper HELPER", &literal, "assist", true, &|_| false).0, "assist Assist ASSIST");
-        assert_eq!(replace("a $1", &Pattern::new("a", &opts()).unwrap(), "$1", false, &|_| false).0, "$1 $1", "literal text is literal");
+        assert_eq!(
+            replace("helper Helper HELPER", &literal, "assist", true, &|_| false).0,
+            "assist Assist ASSIST"
+        );
+        assert_eq!(
+            replace(
+                "a $1",
+                &Pattern::new("a", &opts()).unwrap(),
+                "$1",
+                false,
+                &|_| false
+            )
+            .0,
+            "$1 $1",
+            "literal text is literal"
+        );
     }
 }

@@ -12,9 +12,9 @@
 use super::pages::{PageEvent, PageModel};
 use super::*;
 use crate::page::ImageKey;
-use crate::surface::Surface;
 use crate::reading::{self, Action as RAction};
 use crate::reading_page::{Action as ReadAction, ReadingPage};
+use crate::surface::Surface;
 
 /// A picture's pixels and, once uploaded, its texture.
 pub(super) struct PageTex {
@@ -31,7 +31,15 @@ const MAX_PICTURE_WIDTH: u32 = 2400;
 /// Reads a picture file into BGRA pixels.
 pub(super) fn decode_picture(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let img = image::open(path).map_err(|e| e.to_string())?;
-    let img = if img.width() > MAX_PICTURE_WIDTH { img.resize(MAX_PICTURE_WIDTH, u32::MAX, image::imageops::FilterType::Triangle) } else { img };
+    let img = if img.width() > MAX_PICTURE_WIDTH {
+        img.resize(
+            MAX_PICTURE_WIDTH,
+            u32::MAX,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        img
+    };
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     Ok((w, h, rgba_to_bgra(rgba.into_raw())))
@@ -40,7 +48,15 @@ pub(super) fn decode_picture(path: &Path) -> Result<(u32, u32, Vec<u8>), String>
 /// A picture from its bytes, as `decode_picture` reads a file.
 pub(super) fn decode_picture_bytes(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let img = image::load_from_memory(bytes).map_err(|e| e.to_string())?;
-    let img = if img.width() > MAX_PICTURE_WIDTH { img.resize(MAX_PICTURE_WIDTH, u32::MAX, image::imageops::FilterType::Triangle) } else { img };
+    let img = if img.width() > MAX_PICTURE_WIDTH {
+        img.resize(
+            MAX_PICTURE_WIDTH,
+            u32::MAX,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        img
+    };
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
     Ok((w, h, rgba_to_bgra(rgba.into_raw())))
@@ -59,9 +75,18 @@ pub(super) fn rgba_to_bgra(mut px: Vec<u8>) -> Vec<u8> {
 /// fitted, times its zoom, around its centre. Returns the rect drawn
 /// into, the part of the picture it shows (u0, v0, u1, v1), and where
 /// the whole picture sits (partly off-screen when zoomed).
-pub(super) type Placed = ((f32, f32, f32, f32), (f32, f32, f32, f32), (f32, f32, f32, f32));
+pub(super) type Placed = (
+    (f32, f32, f32, f32),
+    (f32, f32, f32, f32),
+    (f32, f32, f32, f32),
+);
 
-pub(super) fn place_picture(cell_box: (f32, f32, f32, f32), clip: (f32, f32, f32, f32), tex: (u32, u32), view: Option<(f32, f32, f32)>) -> Option<Placed> {
+pub(super) fn place_picture(
+    cell_box: (f32, f32, f32, f32),
+    clip: (f32, f32, f32, f32),
+    tex: (u32, u32),
+    view: Option<(f32, f32, f32)>,
+) -> Option<Placed> {
     let (bx, by, bw, bh) = cell_box;
     let (tw, th) = (tex.0 as f32, tex.1 as f32);
     if tw <= 0.0 || th <= 0.0 || bw <= 0.0 || bh <= 0.0 {
@@ -77,7 +102,13 @@ pub(super) fn place_picture(cell_box: (f32, f32, f32, f32), clip: (f32, f32, f32
         Some((zoom, cx, cy)) => {
             let s = fit * zoom.max(0.1);
             let (w, h) = (tw * s, th * s);
-            let place = |b: f32, bl: f32, len: f32, c: f32| if len <= bl { b + (bl - len) / 2.0 } else { (b + bl / 2.0 - c * len).clamp(b + bl - len, b) };
+            let place = |b: f32, bl: f32, len: f32, c: f32| {
+                if len <= bl {
+                    b + (bl - len) / 2.0
+                } else {
+                    (b + bl / 2.0 - c * len).clamp(b + bl - len, b)
+                }
+            };
             (place(bx, bw, w, cx), place(by, bh, h, cy), w, h)
         }
     };
@@ -110,7 +141,6 @@ impl ReadingPre {
         self.rendered.is_some()
     }
 }
-
 
 /// Pictures pages show (a note's images, a diagram's drawing), read and
 /// once drawn uploaded -- core, as the reading view is.
@@ -159,7 +189,14 @@ fn link_json(link: &crate::md::Link) -> serde_json::Value {
 
 /// What a link from file `from` is kept under.
 fn link_key(from: Option<&Path>, link: &crate::md::Link) -> String {
-    format!("{}|{}|{}|{}|{}", from.map(|p| p.display().to_string()).unwrap_or_default(), link.target, link.heading.as_deref().unwrap_or(""), link.markdown, link.embed)
+    format!(
+        "{}|{}|{}|{}|{}",
+        from.map(|p| p.display().to_string()).unwrap_or_default(),
+        link.target,
+        link.heading.as_deref().unwrap_or(""),
+        link.markdown,
+        link.embed
+    )
 }
 
 /// The key a diagram's source, drawn in theme `theme`, is kept under.
@@ -182,7 +219,9 @@ impl App {
         self.split_vertical();
         let id = self.open_page(model);
         let pane = self.focused_pane_id();
-        self.workspaces.active_pane_tabs_mut().insert(pane, vec![id]);
+        self.workspaces
+            .active_pane_tabs_mut()
+            .insert(pane, vec![id]);
         // The split starts even; this side (the right) gets `share`.
         self.windows_mut().set_split_near(pane, 1.0 - share);
         id
@@ -200,7 +239,11 @@ impl App {
     }
 
     /// What the reading layout needs, borrowing only what it reads.
-    pub(super) fn with_reading_ctx<R>(&self, base: Option<&Path>, f: impl FnOnce(&reading::Ctx) -> R) -> R {
+    pub(super) fn with_reading_ctx<R>(
+        &self,
+        base: Option<&Path>,
+        f: impl FnOnce(&reading::Ctx) -> R,
+    ) -> R {
         let sizes = &self.page_images.image_sizes;
         let (cw, lh) = match &self.text {
             Some(t) => (t.char_width(), t.line_height()),
@@ -212,10 +255,11 @@ impl App {
         let highlight = |lang: &str, text: &str| highlight_block(lang, text);
         let image_size = |key: &ImageKey| sizes.get(key).copied();
         let diagram_key = |source: &str| ImageKey::Diagram(self.diagram_key_of(source));
-        let diagram_error = |source: &str| match self.page_images.diagrams.get(&self.diagram_key_of(source)) {
-            Some(Drawing::Wrong(why)) => Some(why.clone()),
-            _ => None,
-        };
+        let diagram_error =
+            |source: &str| match self.page_images.diagrams.get(&self.diagram_key_of(source)) {
+                Some(Drawing::Wrong(why)) => Some(why.clone()),
+                _ => None,
+            };
         let drawn = |_: &str| drawing;
         let image_path = |src: &str| {
             if src.contains("://") {
@@ -223,15 +267,31 @@ impl App {
             }
             let decoded = src.replace("%20", " ");
             let p = PathBuf::from(&decoded);
-            let path = if p.is_absolute() { p } else { base_dir.clone().unwrap_or_default().join(p) };
+            let path = if p.is_absolute() {
+                p
+            } else {
+                base_dir.clone().unwrap_or_default().join(p)
+            };
             path.exists().then_some(path)
         };
         // `[[links]]` are the notebook extension's: as it said, else a
         // link as a link and an embed by its name.
-        let said = |link: &crate::md::Link| self.page_images.links.get(&link_key(base_file.as_deref(), link)).cloned().flatten();
+        let said = |link: &crate::md::Link| {
+            self.page_images
+                .links
+                .get(&link_key(base_file.as_deref(), link))
+                .cloned()
+                .flatten()
+        };
         let embed = |link: &crate::md::Link| match said(link) {
-            Some(s) if s.kind == "diagram" => reading::Embedded::Diagram { name: s.name, source: s.text },
-            Some(s) if s.kind == "note" => reading::Embedded::Note { name: s.name, text: s.text },
+            Some(s) if s.kind == "diagram" => reading::Embedded::Diagram {
+                name: s.name,
+                source: s.text,
+            },
+            Some(s) if s.kind == "note" => reading::Embedded::Note {
+                name: s.name,
+                text: s.text,
+            },
             Some(s) if !s.exists => reading::Embedded::Missing(link.target.clone()),
             _ => reading::Embedded::Unresolved(link.target.clone()),
         };
@@ -254,8 +314,12 @@ impl App {
     /// yet: its diagrams drawn, its links' targets. Each answer lays the
     /// page out again.
     pub(super) fn reading_ask(&mut self, id: BufferId) {
-        let Some(PageModel::Reading(p)) = self.pages.get(&id).map(|s| &s.model) else { return };
-        let Some(ob) = self.buffers.get(p.source) else { return };
+        let Some(PageModel::Reading(p)) = self.pages.get(&id).map(|s| &s.model) else {
+            return;
+        };
+        let Some(ob) = self.buffers.get(p.source) else {
+            return;
+        };
         let from = p.path.clone();
         let text = ob.buffer.text();
         let mut sources = Vec::new();
@@ -267,7 +331,11 @@ impl App {
                 _ => {}
             }
         }
-        links.extend(crate::md::meta::links(&text).into_iter().filter(|l| !l.markdown));
+        links.extend(
+            crate::md::meta::links(&text)
+                .into_iter()
+                .filter(|l| !l.markdown),
+        );
         self.ask_diagrams(sources);
         self.ask_links(from, links);
     }
@@ -275,7 +343,9 @@ impl App {
     /// Diagrams drawn by the extension that draws them, the ones not asked
     /// for yet.
     pub(super) fn ask_diagrams(&mut self, sources: Vec<String>) {
-        let Some(server) = self.diagram_server() else { return };
+        let Some(server) = self.diagram_server() else {
+            return;
+        };
         for source in sources {
             let h = self.diagram_key_of(&source);
             if self.page_images.diagrams.contains_key(&h) {
@@ -283,8 +353,14 @@ impl App {
             }
             self.page_images.diagrams.insert(h, Drawing::Asked);
             let payload = serde_json::json!({ "source": source }).to_string();
-            let then = move |app: &mut App, said: Result<String, String>| app.diagram_drawn(h, said);
-            self.code_serve(&server, "diagrams.render", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+            let then =
+                move |app: &mut App, said: Result<String, String>| app.diagram_drawn(h, said);
+            self.code_serve(
+                &server,
+                "diagrams.render",
+                payload,
+                super::wasm_host::Answer::Fenix(Box::new(then)),
+            );
         }
     }
 
@@ -301,7 +377,12 @@ impl App {
                 self.page_images.diagrams.insert(h, Drawing::Drawn);
                 let key = ImageKey::Diagram(h);
                 self.page_images.pending.insert(key.clone());
-                self.page_spawn(move |send| send(PageEvent::PageImage { key, result: decode_picture_bytes(&bytes) }));
+                self.page_spawn(move |send| {
+                    send(PageEvent::PageImage {
+                        key,
+                        result: decode_picture_bytes(&bytes),
+                    })
+                });
             }
             Err(why) => {
                 self.page_images.diagrams.insert(h, Drawing::Wrong(why));
@@ -312,7 +393,9 @@ impl App {
 
     /// What links from `from` go to, asked of the notebook extension.
     fn ask_links(&mut self, from: Option<PathBuf>, links: Vec<crate::md::Link>) {
-        let Some(server) = self.code_server("notebook.link", None) else { return };
+        let Some(server) = self.code_server("notebook.link", None) else {
+            return;
+        };
         let mut asked: Vec<(String, crate::md::Link)> = Vec::new();
         for link in links {
             let key = link_key(from.as_deref(), &link);
@@ -330,22 +413,37 @@ impl App {
         let payload = serde_json::json!({ "from": from, "links": asked.iter().map(|(_, l)| link_json(l)).collect::<Vec<_>>() }).to_string();
         let keys: Vec<String> = asked.into_iter().map(|(k, _)| k).collect();
         let then = move |app: &mut App, said: Result<String, String>| {
-            let said: Vec<LinkSaid> = said.ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            let said: Vec<LinkSaid> = said
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .unwrap_or_default();
             for (i, key) in keys.into_iter().enumerate() {
                 // What it didn't say is a link as a link, not asked again.
-                let one = said.get(i).cloned().unwrap_or(LinkSaid { exists: true, kind: "other".into(), name: String::new(), text: String::new() });
+                let one = said.get(i).cloned().unwrap_or(LinkSaid {
+                    exists: true,
+                    kind: "other".into(),
+                    name: String::new(),
+                    text: String::new(),
+                });
                 app.page_images.links.insert(key, Some(one));
             }
             app.page_pictures_arrived();
         };
-        self.code_serve(&server, "notebook.link", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+        self.code_serve(
+            &server,
+            "notebook.link",
+            payload,
+            super::wasm_host::Answer::Fenix(Box::new(then)),
+        );
     }
 
     /// What's known of links and diagrams is forgotten (a note saved, the
     /// theme changed): asked again as pages show them.
     pub(crate) fn reading_forget(&mut self) {
         self.page_images.links.clear();
-        self.page_images.diagrams.retain(|_, d| *d == Drawing::Asked);
+        self.page_images
+            .diagrams
+            .retain(|_, d| *d == Drawing::Asked);
     }
 
     /// Follows a `[[link]]` from the reading view, through the notebook
@@ -358,17 +456,29 @@ impl App {
                     app.set_error(e);
                 }
             };
-            return self.code_serve(&server, "notebook.follow", payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+            return self.code_serve(
+                &server,
+                "notebook.follow",
+                payload,
+                super::wasm_host::Answer::Fenix(Box::new(then)),
+            );
         }
         if link.markdown && !link.target.is_empty() {
-            let base = from.as_deref().and_then(Path::parent).map(Path::to_path_buf).unwrap_or_default();
+            let base = from
+                .as_deref()
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+                .unwrap_or_default();
             let path = base.join(link.target.replace("%20", " "));
             if path.exists() {
                 return self.open_file_as(&path, true);
             }
             return self.set_error(format!("no file {}", path.display()));
         }
-        self.set_message(format!("[[{}]] is a note's -- the notebook is an extension (SPC h x installs it)", link.target));
+        self.set_message(format!(
+            "[[{}]] is a note's -- the notebook is an extension (SPC h x installs it)",
+            link.target
+        ));
     }
 
     /// `SPC m r` (`replace`) / `SPC m p`: the focused Markdown buffer
@@ -391,9 +501,15 @@ impl App {
         self.reading_forget();
         // Beside: one reading pane per source; SPC m p again closes it.
         if !replace {
-            let existing = self.find_page(|m| matches!(m, PageModel::Reading(p) if p.source == source && !p.replaces));
+            let existing = self.find_page(
+                |m| matches!(m, PageModel::Reading(p) if p.source == source && !p.replaces),
+            );
             if let Some(id) = existing {
-                let pane = self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&id));
+                let pane = self
+                    .windows()
+                    .windows()
+                    .into_iter()
+                    .find(|&p| self.windows().content(p) == Some(&id));
                 self.close_page(id);
                 if let Some(p) = pane {
                     let back = self.focused_pane_id();
@@ -421,12 +537,23 @@ impl App {
     /// Works out a reading page's layout before the page is borrowed:
     /// laid out again when its source changed, and the line its source
     /// cursor moved to. `None` when it isn't a reading page.
-    pub(super) fn reading_precompute(&self, id: BufferId, cols: usize, force: bool) -> Option<ReadingPre> {
-        let Some(PageModel::Reading(p)) = self.pages.get(&id).map(|s| &s.model) else { return None };
+    pub(super) fn reading_precompute(
+        &self,
+        id: BufferId,
+        cols: usize,
+        force: bool,
+    ) -> Option<ReadingPre> {
+        let Some(PageModel::Reading(p)) = self.pages.get(&id).map(|s| &s.model) else {
+            return None;
+        };
         let ob = self.buffers.get(p.source)?;
         let width = cols.saturating_sub(2).max(20);
         let seen = (ob.buffer.edit_count(), width);
-        let rendered = (force || p.seen != Some(seen)).then(|| self.with_reading_ctx(p.path.as_deref(), |ctx| reading::layout(&ob.buffer.text(), width, ctx)));
+        let rendered = (force || p.seen != Some(seen)).then(|| {
+            self.with_reading_ctx(p.path.as_deref(), |ctx| {
+                reading::layout(&ob.buffer.text(), width, ctx)
+            })
+        });
         let follow = if p.replaces || self.focused_buffer_id() == id {
             None
         } else {
@@ -437,11 +564,19 @@ impl App {
                 .map(|pane| ob.buffer.line_col(&self.pane_state(pane).cursor).0)
                 .filter(|&l| Some(l) != p.followed)
         };
-        Some(ReadingPre { rendered, seen, follow })
+        Some(ReadingPre {
+            rendered,
+            seen,
+            follow,
+        })
     }
 
     /// Applies what `reading_precompute` found and lays the page out.
-    pub(super) fn reading_apply(p: &mut ReadingPage, pre: ReadingPre, cols: usize) -> crate::page::Page {
+    pub(super) fn reading_apply(
+        p: &mut ReadingPage,
+        pre: ReadingPre,
+        cols: usize,
+    ) -> crate::page::Page {
         let first = p.seen.is_none();
         if let Some(r) = pre.rendered {
             p.rendered = r;
@@ -460,7 +595,9 @@ impl App {
     }
 
     pub(super) fn reading_action(&mut self, page_id: BufferId, action: ReadAction) {
-        let Some(PageModel::Reading(p)) = self.pages.get(&page_id).map(|s| &s.model) else { return };
+        let Some(PageModel::Reading(p)) = self.pages.get(&page_id).map(|s| &s.model) else {
+            return;
+        };
         let (source, path, replaces, back) = (p.source, p.path.clone(), p.replaces, p.back);
         match action {
             ReadAction::None => {}
@@ -472,7 +609,9 @@ impl App {
                     self.open_buffer_in_focused_pane(back);
                 }
             }
-            ReadAction::Edit(_) if back.is_some() => self.set_message("Fenix wrote this page -- there's nothing to edit"),
+            ReadAction::Edit(_) if back.is_some() => {
+                self.set_message("Fenix wrote this page -- there's nothing to edit")
+            }
             ReadAction::Close => {
                 if replaces {
                     self.close_page(page_id);
@@ -487,12 +626,17 @@ impl App {
             }
             ReadAction::Edit(line) => self.reading_edit(page_id, source, line),
             ReadAction::Target(RAction::Checkbox { line, done }) => {
-                let Some(ob) = self.buffers.get_mut(source) else { return };
+                let Some(ob) = self.buffers.get_mut(source) else {
+                    return;
+                };
                 let text = ob.buffer.line(line).to_string();
-                if let Some(task) = crate::md::meta::task_on(text.trim_end_matches(['\n', '\r']), line) {
+                if let Some(task) =
+                    crate::md::meta::task_on(text.trim_end_matches(['\n', '\r']), line)
+                {
                     let at = ob.buffer.line_start_char(line) + task.mark_col;
                     let mut scratch = Cursor::at_start();
-                    ob.buffer.replace_range(&mut scratch, at, at + 1, if done { " " } else { "x" });
+                    ob.buffer
+                        .replace_range(&mut scratch, at, at + 1, if done { " " } else { "x" });
                     self.set_message(if done { "unticked" } else { "ticked" });
                 }
             }
@@ -514,7 +658,9 @@ impl App {
                     self.set_error(format!("couldn't open {}: {e}", file.display()));
                 }
             }
-            ReadAction::Target(RAction::Diagram { line, embed }) => self.reading_open_diagram(page_id, source, line, embed),
+            ReadAction::Target(RAction::Diagram { line, embed }) => {
+                self.reading_open_diagram(page_id, source, line, embed)
+            }
         }
     }
 
@@ -525,7 +671,12 @@ impl App {
         if replaces {
             return;
         }
-        if let Some(p) = self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&source)) {
+        if let Some(p) = self
+            .windows()
+            .windows()
+            .into_iter()
+            .find(|&p| self.windows().content(p) == Some(&source))
+        {
             self.windows_mut().focus(p);
         }
     }
@@ -545,10 +696,20 @@ impl App {
     }
 
     /// A diagram in the reading view: its source, for now.
-    pub(super) fn reading_open_diagram(&mut self, page_id: BufferId, source: BufferId, line: usize, embed: Option<crate::md::Link>) {
+    pub(super) fn reading_open_diagram(
+        &mut self,
+        page_id: BufferId,
+        source: BufferId,
+        line: usize,
+        embed: Option<crate::md::Link>,
+    ) {
         match embed {
             Some(link) => {
-                let path = self.buffers.get(source).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf);
+                let path = self
+                    .buffers
+                    .get(source)
+                    .and_then(|ob| ob.buffer.path())
+                    .map(Path::to_path_buf);
                 self.reading_to_source_pane(page_id, source);
                 self.follow_wiki_link(link, path);
             }
@@ -562,15 +723,30 @@ impl App {
 
     /// Starts reading the pictures page `id` shows that aren't read yet.
     pub(super) fn request_page_images(&mut self, id: BufferId) {
-        let Some(state) = self.pages.get(&id) else { return };
-        let wanted: Vec<ImageKey> = state.page.images.iter().map(|i| i.key.clone()).filter(|k| !self.page_images.textures.contains_key(k) && !self.page_images.pending.contains(k)).collect();
+        let Some(state) = self.pages.get(&id) else {
+            return;
+        };
+        let wanted: Vec<ImageKey> = state
+            .page
+            .images
+            .iter()
+            .map(|i| i.key.clone())
+            .filter(|k| {
+                !self.page_images.textures.contains_key(k) && !self.page_images.pending.contains(k)
+            })
+            .collect();
         for key in wanted {
             match &key {
                 ImageKey::File(path) => {
                     self.page_images.pending.insert(key.clone());
                     let path = path.clone();
                     let key2 = key.clone();
-                    self.page_spawn(move |send| send(PageEvent::PageImage { key: key2, result: decode_picture(&path) }));
+                    self.page_spawn(move |send| {
+                        send(PageEvent::PageImage {
+                            key: key2,
+                            result: decode_picture(&path),
+                        })
+                    });
                 }
                 // Asked of the diagrams extension with the page's other
                 // needs (`reading_ask`); it comes when it's drawn.
@@ -583,18 +759,38 @@ impl App {
 
     /// A picture arrived: kept for upload, and pages showing it laid out
     /// again at its size.
-    pub(super) fn apply_page_image(&mut self, key: ImageKey, result: Result<(u32, u32, Vec<u8>), String>) {
+    pub(super) fn apply_page_image(
+        &mut self,
+        key: ImageKey,
+        result: Result<(u32, u32, Vec<u8>), String>,
+    ) {
         self.page_images.pending.remove(&key);
         match result {
             Ok((w, h, bgra)) => {
                 self.page_images.image_sizes.insert(key.clone(), (w, h));
-                self.page_images.textures.insert(key, PageTex { w, h, bgra: Some(bgra), texture: None });
+                self.page_images.textures.insert(
+                    key,
+                    PageTex {
+                        w,
+                        h,
+                        bgra: Some(bgra),
+                        texture: None,
+                    },
+                );
             }
             Err(e) => {
                 // Remembered as failed (1x1, nothing drawn) so it isn't
                 // asked for every frame.
                 eprintln!("fenix: couldn't read a picture: {e}");
-                self.page_images.textures.insert(key, PageTex { w: 0, h: 0, bgra: None, texture: None });
+                self.page_images.textures.insert(
+                    key,
+                    PageTex {
+                        w: 0,
+                        h: 0,
+                        bgra: None,
+                        texture: None,
+                    },
+                );
             }
         }
         self.page_pictures_arrived();
@@ -624,7 +820,10 @@ fn base64_decode(text: &str) -> Result<Vec<u8>, String> {
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let (mut acc, mut bits) = (0u32, 0);
-    for c in text.bytes().filter(|c| !c.is_ascii_whitespace() && *c != b'=') {
+    for c in text
+        .bytes()
+        .filter(|c| !c.is_ascii_whitespace() && *c != b'=')
+    {
         let v = T.iter().position(|&b| b == c).ok_or("not base64")? as u32;
         acc = (acc << 6) | v;
         bits += 6;
@@ -675,13 +874,21 @@ fn language_for_fence(lang: &str) -> Option<fenix_syntax::LanguageId> {
 }
 
 /// A code block's colours, per line: (columns, capture).
-pub(super) fn highlight_block(lang: &str, text: &str) -> Vec<Vec<(std::ops::Range<usize>, &'static str)>> {
-    let Some(language) = language_for_fence(lang) else { return Vec::new() };
+pub(super) fn highlight_block(
+    lang: &str,
+    text: &str,
+) -> Vec<Vec<(std::ops::Range<usize>, &'static str)>> {
+    let Some(language) = language_for_fence(lang) else {
+        return Vec::new();
+    };
     highlight_lines(language, text)
 }
 
 /// `text`'s colours as `language`, per line: (columns, capture).
-pub(super) fn highlight_lines(language: fenix_syntax::LanguageId, text: &str) -> Vec<Vec<(std::ops::Range<usize>, &'static str)>> {
+pub(super) fn highlight_lines(
+    language: fenix_syntax::LanguageId,
+    text: &str,
+) -> Vec<Vec<(std::ops::Range<usize>, &'static str)>> {
     let state = fenix_syntax::SyntaxState::new(language, text);
     let spans = state.highlights_in_range(text, 0..text.len());
     let mut starts = vec![0usize];
@@ -722,22 +929,52 @@ mod tests {
         let source = app.focused_buffer_id();
         app.place_cursor(3, 0);
         app.open_reading_view(false);
-        assert_eq!(app.focused_buffer_id(), source, "typing stays in the source");
-        let page = app.find_page(|m| matches!(m, PageModel::Reading(_))).expect("the reading view");
-        let pane = app.windows().windows().into_iter().find(|&p| app.windows().content(p) == Some(&page)).unwrap();
+        assert_eq!(
+            app.focused_buffer_id(),
+            source,
+            "typing stays in the source"
+        );
+        let page = app
+            .find_page(|m| matches!(m, PageModel::Reading(_)))
+            .expect("the reading view");
+        let pane = app
+            .windows()
+            .windows()
+            .into_iter()
+            .find(|&p| app.windows().content(p) == Some(&page))
+            .unwrap();
         app.ensure_page_layout(page, pane, 60);
         let text = app.buffers.get(page).unwrap().buffer.text();
         assert!(text.contains("TITLE") && text.contains("[ ] two"), "{text}");
-        let Some(PageModel::Reading(p)) = app.pages.get(&page).map(|s| &s.model) else { unreachable!() };
+        let Some(PageModel::Reading(p)) = app.pages.get(&page).map(|s| &s.model) else {
+            unreachable!()
+        };
         assert_eq!(p.line, 3, "on the source cursor's block");
-        app.reading_action(page, ReadAction::Target(RAction::Checkbox { line: 3, done: false }));
-        assert_eq!(app.buffers.get(source).unwrap().buffer.text(), "# Title\n\n- [ ] one\n- [x] two\n");
+        app.reading_action(
+            page,
+            ReadAction::Target(RAction::Checkbox {
+                line: 3,
+                done: false,
+            }),
+        );
+        assert_eq!(
+            app.buffers.get(source).unwrap().buffer.text(),
+            "# Title\n\n- [ ] one\n- [x] two\n"
+        );
         // Typing in the source lays the view out again.
         app.ensure_page_layout(page, pane, 60);
-        assert!(app.buffers.get(page).unwrap().buffer.text().contains("[x] two"));
+        assert!(app
+            .buffers
+            .get(page)
+            .unwrap()
+            .buffer
+            .text()
+            .contains("[x] two"));
         // SPC m p again closes it.
         app.open_reading_view(false);
-        assert!(app.find_page(|m| matches!(m, PageModel::Reading(_))).is_none());
+        assert!(app
+            .find_page(|m| matches!(m, PageModel::Reading(_)))
+            .is_none());
     }
 
     /// Without the extensions a diagram shows as its source and an embed
@@ -747,14 +984,28 @@ mod tests {
     fn diagrams_and_embeds_are_the_extensions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("n.md");
-        std::fs::write(&path, "# Title\n\n```mermaid\nflowchart TD\n  a --> b\n```\n\n![[Ground station]]\n").unwrap();
+        std::fs::write(
+            &path,
+            "# Title\n\n```mermaid\nflowchart TD\n  a --> b\n```\n\n![[Ground station]]\n",
+        )
+        .unwrap();
         let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
         app.open_reading_view(false);
-        let page = app.find_page(|m| matches!(m, PageModel::Reading(_))).expect("the reading view");
-        let pane = app.windows().windows().into_iter().find(|&p| app.windows().content(p) == Some(&page)).unwrap();
+        let page = app
+            .find_page(|m| matches!(m, PageModel::Reading(_)))
+            .expect("the reading view");
+        let pane = app
+            .windows()
+            .windows()
+            .into_iter()
+            .find(|&p| app.windows().content(p) == Some(&page))
+            .unwrap();
         app.ensure_page_layout(page, pane, 60);
         let text = app.buffers.get(page).unwrap().buffer.text();
-        assert!(text.contains("flowchart TD") && text.contains("↳ Ground station"), "{text}");
+        assert!(
+            text.contains("flowchart TD") && text.contains("↳ Ground station"),
+            "{text}"
+        );
 
         let mut ext = super::super::wasm_host::tests::hello("");
         ext.manifest = fenix_extensions::Manifest::parse(
@@ -775,12 +1026,23 @@ mod tests {
             app.ensure_page_layout(page, pane, 60);
             app.pump_wasm();
             let text = app.buffers.get(page).unwrap().buffer.text();
-            let drawn = app.page_images.image_sizes.keys().any(|k| matches!(k, ImageKey::Diagram(_)));
+            let drawn = app
+                .page_images
+                .image_sizes
+                .keys()
+                .any(|k| matches!(k, ImageKey::Diagram(_)));
             if drawn && text.contains("Antenna notes") {
-                assert!(!text.contains("flowchart TD"), "drawn, not its source: {text}");
+                assert!(
+                    !text.contains("flowchart TD"),
+                    "drawn, not its source: {text}"
+                );
                 break;
             }
-            assert!(started.elapsed() < std::time::Duration::from_secs(60), "{text}\n{}", app.extension_output_text());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "{text}\n{}",
+                app.extension_output_text()
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
@@ -789,26 +1051,56 @@ mod tests {
     fn pictures_decode_to_bgra() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("a.png");
-        image::RgbaImage::from_raw(1, 1, vec![10, 20, 30, 255]).unwrap().save(&file).unwrap();
-        assert_eq!(decode_picture(&file).unwrap(), (1, 1, vec![30, 20, 10, 255]));
+        image::RgbaImage::from_raw(1, 1, vec![10, 20, 30, 255])
+            .unwrap()
+            .save(&file)
+            .unwrap();
+        assert_eq!(
+            decode_picture(&file).unwrap(),
+            (1, 1, vec![30, 20, 10, 255])
+        );
     }
 
     #[test]
     fn pictures_fit_or_zoom_and_are_cut_to_the_pane() {
         // 200x100 into a 100x100 box: half size, centred vertically.
-        let (dest, uv, whole) = place_picture((0.0, 0.0, 100.0, 100.0), (0.0, 0.0, 1000.0, 1000.0), (200, 100), None).unwrap();
+        let (dest, uv, whole) = place_picture(
+            (0.0, 0.0, 100.0, 100.0),
+            (0.0, 0.0, 1000.0, 1000.0),
+            (200, 100),
+            None,
+        )
+        .unwrap();
         assert_eq!(whole, (0.0, 25.0, 100.0, 50.0));
         assert_eq!(dest, (0.0, 25.0, 100.0, 50.0));
         assert_eq!(uv, (0.0, 0.0, 1.0, 1.0));
         // Small pictures aren't blown up...
-        let (_, _, whole) = place_picture((0.0, 0.0, 100.0, 100.0), (0.0, 0.0, 1000.0, 1000.0), (50, 50), None).unwrap();
+        let (_, _, whole) = place_picture(
+            (0.0, 0.0, 100.0, 100.0),
+            (0.0, 0.0, 1000.0, 1000.0),
+            (50, 50),
+            None,
+        )
+        .unwrap();
         assert_eq!((whole.2, whole.3), (50.0, 50.0));
         // ...unless zoomed; at 2x on the left edge, half is shown.
-        let (dest, uv, _) = place_picture((0.0, 0.0, 100.0, 100.0), (0.0, 0.0, 1000.0, 1000.0), (100, 100), Some((2.0, 0.0, 0.5))).unwrap();
+        let (dest, uv, _) = place_picture(
+            (0.0, 0.0, 100.0, 100.0),
+            (0.0, 0.0, 1000.0, 1000.0),
+            (100, 100),
+            Some((2.0, 0.0, 0.5)),
+        )
+        .unwrap();
         assert_eq!(dest, (0.0, 0.0, 100.0, 100.0));
         assert_eq!(uv, (0.0, 0.25, 0.5, 0.75));
         // Cut by the pane.
-        let (dest, uv, _) = place_picture((0.0, 0.0, 100.0, 100.0), (0.0, 50.0, 1000.0, 1000.0), (100, 100), None).unwrap();
+        let (dest, uv, _) = place_picture(
+            (0.0, 0.0, 100.0, 100.0),
+            (0.0, 50.0, 1000.0, 1000.0),
+            (100, 100),
+            None,
+        )
+        .unwrap();
         assert_eq!((dest.1, dest.3, uv.1), (50.0, 50.0, 0.5));
     }
 }

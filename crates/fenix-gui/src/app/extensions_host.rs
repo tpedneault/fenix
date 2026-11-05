@@ -31,7 +31,11 @@ impl App {
     }
 
     fn open_extensions(&mut self, welcome: bool) {
-        let mut page = if welcome { ExtensionsPage::welcome() } else { ExtensionsPage::new() };
+        let mut page = if welcome {
+            ExtensionsPage::welcome()
+        } else {
+            ExtensionsPage::new()
+        };
         page.safe_mode = crate::installed::safe_mode();
         page.installed = crate::installed::rows();
         page.release = crate::installed::release();
@@ -60,7 +64,9 @@ impl App {
 
     /// Changes the Extensions page, if it's open, and lays it out again.
     fn with_extensions_page(&mut self, change: impl FnOnce(&mut ExtensionsPage)) {
-        let Some(id) = self.find_page(|m| matches!(m, PageModel::Extensions(_))) else { return };
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::Extensions(_))) else {
+            return;
+        };
         if let Some(state) = self.pages.get_mut(&id) {
             if let PageModel::Extensions(page) = &mut state.model {
                 change(page);
@@ -80,11 +86,15 @@ impl App {
             Ok(registry) => registry,
             Err(e) => return self.with_extensions_page(|p| p.registry = Registry::Off(e)),
         };
-        let Some(proxy) = self.event_proxy.clone() else { return };
-        let _ = std::thread::Builder::new().name("fenix-registry".into()).spawn(move || {
-            let result = registry.index(&fenix_extensions::registry::Http);
-            let _ = proxy.send_event(FenixUserEvent::Registry(RegistryEvent::Read(result)));
-        });
+        let Some(proxy) = self.event_proxy.clone() else {
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("fenix-registry".into())
+            .spawn(move || {
+                let result = registry.index(&fenix_extensions::registry::Http);
+                let _ = proxy.send_event(FenixUserEvent::Registry(RegistryEvent::Read(result)));
+            });
     }
 
     /// Installs each of `exts` from the registry, one after another.
@@ -101,9 +111,12 @@ impl App {
     /// for more than its sandbox: the lines to show before it's installed.
     fn install_asks(&self, ext: &str) -> Option<(String, Vec<String>)> {
         let page = self.find_page(|m| matches!(m, PageModel::Extensions(_)))?;
-        let Some(PageModel::Extensions(page)) = self.pages.get(&page).map(|s| &s.model) else { return None };
+        let Some(PageModel::Extensions(page)) = self.pages.get(&page).map(|s| &s.model) else {
+            return None;
+        };
         let row = page.available().into_iter().find(|r| r.id == ext)?;
-        (row.runtime == fenix_extensions::manifest::Runtime::Wasm && !row.permissions.none()).then(|| (row.name.clone(), row.permissions.lines()))
+        (row.runtime == fenix_extensions::manifest::Runtime::Wasm && !row.permissions.none())
+            .then(|| (row.name.clone(), row.permissions.lines()))
     }
 
     /// Installs `ext` from the registry -- once you've said yes to what it
@@ -112,10 +125,18 @@ impl App {
         if let Some((name, asks)) = self.install_asks(&ext) {
             self.set_message(format!("{name} asks to: {}", asks.join("; ")));
             let candidates = vec![
-                fenix_picker::Candidate::new(format!("Install {name}, which may: {}", asks.join("; ")), super::agents::Pick::InstallExtension(ext)),
-                fenix_picker::Candidate::new("Don't install it".to_string(), super::agents::Pick::Nothing),
+                fenix_picker::Candidate::new(
+                    format!("Install {name}, which may: {}", asks.join("; ")),
+                    super::agents::Pick::InstallExtension(ext),
+                ),
+                fenix_picker::Candidate::new(
+                    "Don't install it".to_string(),
+                    super::agents::Pick::Nothing,
+                ),
             ];
-            self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
+            self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
+                candidates,
+            )));
             return;
         }
         self.install_from_registry_now(ext);
@@ -123,24 +144,35 @@ impl App {
 
     /// Installs `ext` from the registry, off the UI thread.
     pub(super) fn install_from_registry_now(&mut self, ext: String) {
-        let Some(store) = crate::installed::store() else { return self.set_error("no folder to keep extensions in") };
+        let Some(store) = crate::installed::store() else {
+            return self.set_error("no folder to keep extensions in");
+        };
         let registry = match crate::installed::registry(Some(&self.config)) {
             Ok(registry) => registry,
             Err(e) => return self.set_error(e),
         };
-        let Some(proxy) = self.event_proxy.clone() else { return };
+        let Some(proxy) = self.event_proxy.clone() else {
+            return;
+        };
         self.set_message(format!("Installing {ext} from the registry…"));
         self.wasm.installing = Some(ext.clone());
         self.with_extensions_page(|p| p.installing = Some(ext.clone()));
-        let _ = std::thread::Builder::new().name("fenix-registry-install".into()).spawn(move || {
-            let result = crate::installed::install_from(&registry, &ext, &store);
-            let _ = proxy.send_event(FenixUserEvent::Registry(RegistryEvent::Installed(result)));
-        });
+        let _ = std::thread::Builder::new()
+            .name("fenix-registry-install".into())
+            .spawn(move || {
+                let result = crate::installed::install_from(&registry, &ext, &store);
+                let _ =
+                    proxy.send_event(FenixUserEvent::Registry(RegistryEvent::Installed(result)));
+            });
     }
 
     /// The bundles the Extensions page knows with `id` in them.
     fn bundles_of(&self, id: &str) -> Vec<String> {
-        match self.find_page(|m| matches!(m, PageModel::Extensions(_))).and_then(|p| self.pages.get(&p)).map(|s| &s.model) {
+        match self
+            .find_page(|m| matches!(m, PageModel::Extensions(_)))
+            .and_then(|p| self.pages.get(&p))
+            .map(|s| &s.model)
+        {
             Some(PageModel::Extensions(page)) => page.bundles_of(id),
             _ => Vec::new(),
         }
@@ -155,29 +187,51 @@ impl App {
             Target::Installed(ext) => crate::installed::find(ext).map(|(e, managed)| {
                 let read = |name: &str| std::fs::read_to_string(e.dir.join(name)).ok();
                 let shots = crate::extensions_page::screenshots(&e.dir);
-                crate::extensions_page::installed_details(&e, managed, read("README.md").as_deref(), read("CHANGELOG.md").as_deref(), &shots, &self.bundles_of(ext))
+                crate::extensions_page::installed_details(
+                    &e,
+                    managed,
+                    read("README.md").as_deref(),
+                    read("CHANGELOG.md").as_deref(),
+                    &shots,
+                    &self.bundles_of(ext),
+                )
             }),
             Target::Available(ext) => {
                 let found = match self.pages.get(&page_id).map(|s| &s.model) {
                     Some(PageModel::Extensions(page)) => match &page.registry {
-                        Registry::Read(index) => index.listing(ext).and_then(|l| l.latest_for(&page.release)).cloned(),
+                        Registry::Read(index) => index
+                            .listing(ext)
+                            .and_then(|l| l.latest_for(&page.release))
+                            .cloned(),
                         _ => None,
                     },
                     _ => None,
                 };
-                let (Some(release), Some(store), Some(proxy)) = (found, crate::installed::store(), self.event_proxy.clone()) else {
+                let (Some(release), Some(store), Some(proxy)) =
+                    (found, crate::installed::store(), self.event_proxy.clone())
+                else {
                     return self.show_available_details(page_id, ext, None);
                 };
                 self.set_message(format!("Reading {ext}'s package for its details…"));
                 let ext = ext.clone();
-                let _ = std::thread::Builder::new().name("fenix-registry-preview".into()).spawn(move || {
-                    let result = release.preview(&ext, &fenix_extensions::registry::Http, &store.root().join(".previews"));
-                    let _ = proxy.send_event(FenixUserEvent::Registry(RegistryEvent::Preview(ext, result)));
-                });
+                let _ = std::thread::Builder::new()
+                    .name("fenix-registry-preview".into())
+                    .spawn(move || {
+                        let result = release.preview(
+                            &ext,
+                            &fenix_extensions::registry::Http,
+                            &store.root().join(".previews"),
+                        );
+                        let _ = proxy.send_event(FenixUserEvent::Registry(RegistryEvent::Preview(
+                            ext, result,
+                        )));
+                    });
                 return;
             }
         };
-        let Some(text) = text else { return self.set_error("that extension isn't there any more") };
+        let Some(text) = text else {
+            return self.set_error("that extension isn't there any more");
+        };
         self.show_details(page_id, &text);
     }
 
@@ -186,7 +240,14 @@ impl App {
     fn show_available_details(&mut self, page_id: BufferId, ext: &str, preview: Option<&Path>) {
         let text = match self.pages.get(&page_id).map(|s| &s.model) {
             Some(PageModel::Extensions(page)) => match &page.registry {
-                Registry::Read(index) => index.listing(ext).map(|l| crate::extensions_page::available_details(l, &page.release, preview, &page.bundles_of(ext))),
+                Registry::Read(index) => index.listing(ext).map(|l| {
+                    crate::extensions_page::available_details(
+                        l,
+                        &page.release,
+                        preview,
+                        &page.bundles_of(ext),
+                    )
+                }),
                 _ => None,
             },
             _ => None,
@@ -198,7 +259,9 @@ impl App {
     }
 
     fn show_details(&mut self, page_id: BufferId, text: &str) {
-        let source = self.buffers.open_text_view_like(text, Path::new("details.md"));
+        let source = self
+            .buffers
+            .open_text_view_like(text, Path::new("details.md"));
         let mut page = crate::reading_page::ReadingPage::new(source, None, true);
         page.back = Some(page_id);
         self.open_page(PageModel::Reading(Box::new(page)));
@@ -214,7 +277,10 @@ impl App {
             }),
             RegistryEvent::Installed(result) => {
                 match result {
-                    Ok(said) => self.set_message(format!("{} SPC q r restarts now, where you are.", said.replace('\n', " "))),
+                    Ok(said) => self.set_message(format!(
+                        "{} SPC q r restarts now, where you are.",
+                        said.replace('\n', " ")
+                    )),
                     Err(e) => self.set_error(e),
                 }
                 let rows = crate::installed::rows();
@@ -226,7 +292,10 @@ impl App {
                 self.install_all(Vec::new());
             }
             RegistryEvent::Preview(ext, result) => {
-                let Some(page_id) = self.find_page(|m| matches!(m, PageModel::Extensions(_))) else { return };
+                let Some(page_id) = self.find_page(|m| matches!(m, PageModel::Extensions(_)))
+                else {
+                    return;
+                };
                 match result {
                     Ok(dir) => self.show_available_details(page_id, &ext, Some(&dir)),
                     Err(e) => {
@@ -265,7 +334,6 @@ impl App {
 }
 
 impl App {
-
     pub(super) fn extensions_action(&mut self, id: BufferId, action: Action) {
         match action {
             Action::None => {}
@@ -282,7 +350,10 @@ impl App {
             }
             Action::SwitchInstalled(ext, on) => {
                 match crate::installed::store().map(|store| store.set_enabled(&ext, on)) {
-                    Some(Ok(())) => self.set_message(format!("{ext}: {} from the next start -- SPC q r restarts now, where you are", if on { "on" } else { "off" })),
+                    Some(Ok(())) => self.set_message(format!(
+                        "{ext}: {} from the next start -- SPC q r restarts now, where you are",
+                        if on { "on" } else { "off" }
+                    )),
                     Some(Err(e)) => self.set_error(e),
                     None => self.set_error("no folder to keep extensions in"),
                 }
@@ -296,12 +367,18 @@ impl App {
                 }
                 self.refresh_extensions_page(id);
             }
-            Action::SwitchBundle { on, members, install } => {
+            Action::SwitchBundle {
+                on,
+                members,
+                install,
+            } => {
                 let have = crate::installed::rows();
                 let mut missing = Vec::new();
                 for ext in members {
                     match have.iter().find(|r| r.id == ext) {
-                        Some(row) if row.on != on && !row.managed => self.extensions_action(id, Action::SwitchInstalled(ext, on)),
+                        Some(row) if row.on != on && !row.managed => {
+                            self.extensions_action(id, Action::SwitchInstalled(ext, on))
+                        }
                         Some(_) => {}
                         None if on => missing.push(ext),
                         None => {}
@@ -323,8 +400,12 @@ mod tests {
     use super::*;
 
     fn registry_of(app: &App) -> &Registry {
-        let id = app.find_page(|m| matches!(m, PageModel::Extensions(_))).expect("the page");
-        let Some(PageModel::Extensions(page)) = app.pages.get(&id).map(|s| &s.model) else { panic!() };
+        let id = app
+            .find_page(|m| matches!(m, PageModel::Extensions(_)))
+            .expect("the page");
+        let Some(PageModel::Extensions(page)) = app.pages.get(&id).map(|s| &s.model) else {
+            panic!()
+        };
         &page.registry
     }
 
@@ -343,14 +424,22 @@ mod tests {
         assert!(matches!(registry_of(&app), Registry::Read(_)));
         app.apply_registry_event(RegistryEvent::Read(Err("offline".into())));
         assert!(matches!(registry_of(&app), Registry::Failed(e) if e == "offline"));
-        app.set_setting("extensions.store", Some(fenix_config::Value::Bool(false))).unwrap();
+        app.set_setting("extensions.store", Some(fenix_config::Value::Bool(false)))
+            .unwrap();
         app.open_extensions_page();
         assert!(matches!(registry_of(&app), Registry::Off(e) if e.contains("extensions.store")));
         app.open_welcome_page();
-        assert!(matches!(registry_of(&app), Registry::Off(_)), "nor the welcome, for its bundles");
-        app.set_setting("extensions.store", Some(fenix_config::Value::Bool(true))).unwrap();
+        assert!(
+            matches!(registry_of(&app), Registry::Off(_)),
+            "nor the welcome, for its bundles"
+        );
+        app.set_setting("extensions.store", Some(fenix_config::Value::Bool(true)))
+            .unwrap();
         app.open_welcome_page();
-        assert!(matches!(registry_of(&app), Registry::Looking), "the welcome looks, for its bundles");
+        assert!(
+            matches!(registry_of(&app), Registry::Looking),
+            "the welcome looks, for its bundles"
+        );
     }
 
     /// A code extension that asks for anything waits for your yes before
@@ -361,19 +450,37 @@ mod tests {
         let mut app = App::with_file(None);
         app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
         app.open_extensions_page();
-        let release = |runtime: &str, extra: &str| format!(r#"{{"version": "1.0.0", "fenix": ">=1.0, <2", "runtime": "{runtime}", "url": "u", "sha256": "", "size": 1{extra}}}"#);
+        let release = |runtime: &str, extra: &str| {
+            format!(
+                r#"{{"version": "1.0.0", "fenix": ">=1.0, <2", "runtime": "{runtime}", "url": "u", "sha256": "", "size": 1{extra}}}"#
+            )
+        };
         let json = format!(
             r#"{{"format": 1, "extensions": [{{"id": "acme.net", "name": "Net", "description": "x", "versions": [{}]}}, {{"id": "acme.theme", "name": "Theme", "description": "x", "versions": [{}]}}]}}"#,
-            release("wasm", r#", "api": "1.0", "permissions": {"network": ["api.example.com"]}"#),
+            release(
+                "wasm",
+                r#", "api": "1.0", "permissions": {"network": ["api.example.com"]}"#
+            ),
             release("none", ""),
         );
-        app.apply_registry_event(RegistryEvent::Read(Ok(serde_json::from_str(&json).unwrap())));
-        assert!(app.install_asks("acme.theme").is_none(), "data asks for nothing");
+        app.apply_registry_event(RegistryEvent::Read(
+            Ok(serde_json::from_str(&json).unwrap()),
+        ));
+        assert!(
+            app.install_asks("acme.theme").is_none(),
+            "data asks for nothing"
+        );
         let (name, asks) = app.install_asks("acme.net").expect("it asks");
         assert_eq!(name, "Net");
-        assert!(asks.iter().any(|a| a.contains("api.example.com")), "{asks:?}");
+        assert!(
+            asks.iter().any(|a| a.contains("api.example.com")),
+            "{asks:?}"
+        );
         app.install_from_registry("acme.net".into());
-        assert!(matches!(app.active_picker, Some(ActivePicker::Agents(_))), "a question, not an install");
+        assert!(
+            matches!(app.active_picker, Some(ActivePicker::Agents(_))),
+            "a question, not an install"
+        );
         assert!(app.wasm.installing.is_none());
     }
 }

@@ -36,13 +36,18 @@ impl Secret {
 
     /// From the environment, when it's set there.
     pub fn from_env(self) -> Option<String> {
-        std::env::var(self.env()).ok().filter(|v| !v.trim().is_empty())
+        std::env::var(self.env())
+            .ok()
+            .filter(|v| !v.trim().is_empty())
     }
 }
 
 /// The environment variable that overrides secret `key`.
 pub fn env_of(key: &str) -> String {
-    format!("FENIX_{}", key.to_ascii_uppercase().replace(['.', '-'], "_"))
+    format!(
+        "FENIX_{}",
+        key.to_ascii_uppercase().replace(['.', '-'], "_")
+    )
 }
 
 #[cfg(test)]
@@ -52,7 +57,13 @@ mod tests {
     #[test]
     fn a_secret_is_named_by_its_key_and_overridden_by_its_variable() {
         assert_eq!(Secret::GitLab.env(), "FENIX_GITLAB_TOKEN");
-        assert_eq!(Secret::Named("http.secret.api-key").key(), "http.secret.api-key");
-        assert_eq!(Secret::Named("http.secret.api-key").env(), "FENIX_HTTP_SECRET_API_KEY");
+        assert_eq!(
+            Secret::Named("http.secret.api-key").key(),
+            "http.secret.api-key"
+        );
+        assert_eq!(
+            Secret::Named("http.secret.api-key").env(),
+            "FENIX_HTTP_SECRET_API_KEY"
+        );
     }
 }

@@ -43,7 +43,10 @@ pub(super) fn step(order: &[BufferId], current: Option<BufferId>, mv: TabMove) -
 /// tab.
 pub(super) fn tab_after_closing(order: &[BufferId], closed: BufferId) -> Option<BufferId> {
     let i = order.iter().position(|&id| id == closed)?;
-    order.get(i + 1).or_else(|| i.checked_sub(1).and_then(|j| order.get(j))).copied()
+    order
+        .get(i + 1)
+        .or_else(|| i.checked_sub(1).and_then(|j| order.get(j)))
+        .copied()
 }
 
 impl App {
@@ -51,7 +54,9 @@ impl App {
     /// ones'.
     fn all_workspaces(&self) -> impl Iterator<Item = &Workspace> {
         let parked = self.frames.iter().flatten().map(|frame| &frame.workspaces);
-        std::iter::once(&self.workspaces).chain(parked).flat_map(|list| list.workspaces.iter())
+        std::iter::once(&self.workspaces)
+            .chain(parked)
+            .flat_map(|list| list.workspaces.iter())
     }
 
     /// Whether `id` is some workspace's Home.
@@ -61,12 +66,18 @@ impl App {
 
     /// The project a Home buffer is scoped to: its workspace's.
     pub(super) fn home_project_of(&self, id: BufferId) -> Option<PathBuf> {
-        self.all_workspaces().find(|ws| ws.home == Some(id)).and_then(|ws| ws.project.clone())
+        self.all_workspaces()
+            .find(|ws| ws.home == Some(id))
+            .and_then(|ws| ws.project.clone())
     }
 
     /// Every project some workspace's Home is scoped to.
     pub(super) fn home_projects(&self) -> Vec<PathBuf> {
-        let mut roots: Vec<PathBuf> = self.all_workspaces().filter(|ws| ws.home.is_some()).filter_map(|ws| ws.project.clone()).collect();
+        let mut roots: Vec<PathBuf> = self
+            .all_workspaces()
+            .filter(|ws| ws.home.is_some())
+            .filter_map(|ws| ws.project.clone())
+            .collect();
         roots.sort();
         roots.dedup();
         roots
@@ -78,7 +89,9 @@ impl App {
         let ws = self.workspaces.active_workspace();
         let home = ws.home.filter(|id| self.buffers.get(*id).is_some());
         let files = ws.pane_tabs.get(&pane).into_iter().flatten().copied();
-        home.into_iter().chain(files.filter(|&id| Some(id) != home && self.buffers.get(id).is_some())).collect()
+        home.into_iter()
+            .chain(files.filter(|&id| Some(id) != home && self.buffers.get(id).is_some()))
+            .collect()
     }
 
     /// The label a tab shows: the workspace's name on its Home, the
@@ -100,12 +113,19 @@ impl App {
         if let Some(id) = ws.home.filter(|id| self.buffers.get(*id).is_some()) {
             return id;
         }
-        let shown = ws.windows.windows().into_iter().filter_map(|pane| ws.windows.content(pane).copied());
+        let shown = ws
+            .windows
+            .windows()
+            .into_iter()
+            .filter_map(|pane| ws.windows.content(pane).copied());
         let listed = ws.pane_tabs.values().flatten().copied();
         let shown: Vec<BufferId> = shown.chain(listed).collect();
-        let adopt = shown
-            .into_iter()
-            .find(|&id| self.buffers.get(id).is_some_and(|ob| ob.kind == BufferKind::Dashboard) && !self.is_a_workspace_home(id));
+        let adopt = shown.into_iter().find(|&id| {
+            self.buffers
+                .get(id)
+                .is_some_and(|ob| ob.kind == BufferKind::Dashboard)
+                && !self.is_a_workspace_home(id)
+        });
         let id = adopt.unwrap_or_else(|| self.buffers.open_dashboard(""));
         let ws = self.workspaces.active_workspace_mut();
         ws.home = Some(id);
@@ -141,7 +161,13 @@ impl App {
         let order = self.pane_tab_order(pane);
         let current = self.windows().content(pane).copied();
         let target = match mv {
-            TabMove::Last => self.workspaces.active_workspace().last_tab.get(&pane).copied().filter(|id| order.contains(id)),
+            TabMove::Last => self
+                .workspaces
+                .active_workspace()
+                .last_tab
+                .get(&pane)
+                .copied()
+                .filter(|id| order.contains(id)),
             _ => step(&order, current, mv),
         };
         match target {
@@ -166,7 +192,12 @@ impl App {
         // Worked out before touching anything: which tab each affected
         // pane goes to, per (list, workspace, pane).
         let mut moves = Vec::new();
-        for (list_index, ws_index, ws) in self.workspace_lists().flat_map(|(l, list)| list.workspaces.iter().enumerate().map(move |(w, ws)| (l, w, ws))) {
+        for (list_index, ws_index, ws) in self.workspace_lists().flat_map(|(l, list)| {
+            list.workspaces
+                .iter()
+                .enumerate()
+                .map(move |(w, ws)| (l, w, ws))
+        }) {
             for pane in ws.windows.windows() {
                 if ws.windows.content(pane) != Some(&id) {
                     continue;
@@ -174,7 +205,16 @@ impl App {
                 let home = ws.home.filter(|h| self.buffers.get(*h).is_some());
                 let order: Vec<BufferId> = home
                     .into_iter()
-                    .chain(ws.pane_tabs.get(&pane).into_iter().flatten().copied().filter(|&b| b == id || (Some(b) != home && self.buffers.get(b).is_some())))
+                    .chain(
+                        ws.pane_tabs
+                            .get(&pane)
+                            .into_iter()
+                            .flatten()
+                            .copied()
+                            .filter(|&b| {
+                                b == id || (Some(b) != home && self.buffers.get(b).is_some())
+                            }),
+                    )
                     .collect();
                 moves.push((list_index, ws_index, pane, tab_after_closing(&order, id)));
             }
@@ -186,11 +226,19 @@ impl App {
                 Some(target) => target,
                 None => self.home_of(list_index, ws_index),
             };
-            let cursor = self.buffers.get(target).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
-            let Some(ws) = self.workspace_at_mut(list_index, ws_index) else { continue };
+            let cursor = self
+                .buffers
+                .get(target)
+                .map(|ob| ob.cursor)
+                .unwrap_or(Cursor::at_start());
+            let Some(ws) = self.workspace_at_mut(list_index, ws_index) else {
+                continue;
+            };
             ws.windows.set_content(pane, target);
             ws.pane_states.insert(pane, PaneState::seeded_at(cursor));
-            if Some(target) != ws.home && !ws.pane_tabs.get(&pane).is_some_and(|t| t.contains(&target)) {
+            if Some(target) != ws.home
+                && !ws.pane_tabs.get(&pane).is_some_and(|t| t.contains(&target))
+            {
                 ws.pane_tabs.entry(pane).or_default().push(target);
             }
             if (list_index, ws_index) == active {
@@ -199,15 +247,25 @@ impl App {
             self.buffers.touch(target);
             self.refresh_gutter_hunks(target);
         }
-        for list in std::iter::once(&mut self.workspaces).chain(self.frames.iter_mut().flatten().map(|f| &mut f.workspaces)) {
+        for list in std::iter::once(&mut self.workspaces)
+            .chain(self.frames.iter_mut().flatten().map(|f| &mut f.workspaces))
+        {
             for ws in &mut list.workspaces {
-                ws.pane_tabs.values_mut().for_each(|tabs| tabs.retain(|&b| b != id));
+                ws.pane_tabs
+                    .values_mut()
+                    .for_each(|tabs| tabs.retain(|&b| b != id));
                 ws.last_tab.retain(|_, b| *b != id);
                 ws.preview.retain(|_, b| *b != id);
-                ws.closed_tabs.values_mut().for_each(|closed| closed.retain(|(b, _)| *b != id));
+                ws.closed_tabs
+                    .values_mut()
+                    .for_each(|closed| closed.retain(|(b, _)| *b != id));
             }
         }
-        if self.snippet.as_ref().is_some_and(|s| active_panes.contains(&s.pane)) {
+        if self
+            .snippet
+            .as_ref()
+            .is_some_and(|s| active_panes.contains(&s.pane))
+        {
             self.snippet = None;
         }
     }
@@ -217,9 +275,20 @@ impl App {
     /// pane's preview tab -- replacing the file that was previewed there
     /// rather than adding another tab. A buffer already listed stays
     /// where it is, preview or not.
-    pub(super) fn list_tab(&mut self, pane: fenix_window::WindowId, before: Option<BufferId>, id: BufferId, preview: bool) {
+    pub(super) fn list_tab(
+        &mut self,
+        pane: fenix_window::WindowId,
+        before: Option<BufferId>,
+        id: BufferId,
+        preview: bool,
+    ) {
         let preview = preview && self.config.preview_tab != Some(false);
-        let Workspace { pane_tabs, preview: previews, home, .. } = self.workspaces.active_workspace_mut();
+        let Workspace {
+            pane_tabs,
+            preview: previews,
+            home,
+            ..
+        } = self.workspaces.active_workspace_mut();
         if *home == Some(id) {
             return;
         }
@@ -227,7 +296,9 @@ impl App {
         if tabs.contains(&id) {
             return;
         }
-        let slot = previews.get(&pane).and_then(|p| tabs.iter().position(|b| b == p));
+        let slot = previews
+            .get(&pane)
+            .and_then(|p| tabs.iter().position(|b| b == p));
         match slot.filter(|_| preview) {
             Some(i) => tabs[i] = id,
             None => {
@@ -248,8 +319,12 @@ impl App {
     /// After a key: a preview that's just been edited is kept.
     pub(super) fn keep_edited_preview(&mut self) {
         let pane = self.focused_pane_id();
-        let Some(&id) = self.workspaces.active_workspace().preview.get(&pane) else { return };
-        if self.focused_buffer_id() == id && self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty()) {
+        let Some(&id) = self.workspaces.active_workspace().preview.get(&pane) else {
+            return;
+        };
+        if self.focused_buffer_id() == id
+            && self.buffers.get(id).is_some_and(|ob| ob.buffer.is_dirty())
+        {
             self.keep_preview(pane);
         }
     }
@@ -278,7 +353,11 @@ impl App {
         let pane = self.focused_pane_id();
         let current = self.focused_buffer_id();
         let home = self.workspaces.active_workspace().home;
-        let others: Vec<BufferId> = self.pane_tab_order(pane).into_iter().filter(|&id| id != current && Some(id) != home).collect();
+        let others: Vec<BufferId> = self
+            .pane_tab_order(pane)
+            .into_iter()
+            .filter(|&id| id != current && Some(id) != home)
+            .collect();
         for id in others.into_iter().rev() {
             self.close_pane_tab(pane, id);
         }
@@ -290,14 +369,24 @@ impl App {
     pub(crate) fn reopen_closed_tab(&mut self) {
         let pane = self.focused_pane_id();
         loop {
-            let Some((id, at)) = self.workspaces.active_workspace_mut().closed_tabs.get_mut(&pane).and_then(Vec::pop) else {
+            let Some((id, at)) = self
+                .workspaces
+                .active_workspace_mut()
+                .closed_tabs
+                .get_mut(&pane)
+                .and_then(Vec::pop)
+            else {
                 self.set_message("no closed tab to reopen");
                 break;
             };
             if self.buffers.get(id).is_none() {
                 continue;
             }
-            let tabs = self.workspaces.active_pane_tabs_mut().entry(pane).or_default();
+            let tabs = self
+                .workspaces
+                .active_pane_tabs_mut()
+                .entry(pane)
+                .or_default();
             if !tabs.contains(&id) {
                 tabs.insert(at.min(tabs.len()), id);
             }
@@ -327,10 +416,14 @@ impl App {
         let shown = self.pane_tab_order(pane);
         let ws = self.workspaces.active_workspace_mut();
         let home = ws.home;
-        let Some(tabs) = ws.pane_tabs.get_mut(&pane) else { return };
+        let Some(tabs) = ws.pane_tabs.get_mut(&pane) else {
+            return;
+        };
         // Only what the strip shows: Home and closed buffers dropped.
         tabs.retain(|b| shown.contains(b) && Some(*b) != home);
-        let Some(i) = tabs.iter().position(|&b| b == id) else { return };
+        let Some(i) = tabs.iter().position(|&b| b == id) else {
+            return;
+        };
         let j = i as isize + by;
         if j >= 0 && (j as usize) < tabs.len() {
             tabs.swap(i, j as usize);
@@ -341,8 +434,15 @@ impl App {
     /// Moves `id` to where `onto` is within `pane`'s tabs -- a dragged
     /// tab dropped on another.
     fn move_tab_onto(&mut self, pane: fenix_window::WindowId, id: BufferId, onto: BufferId) {
-        let Some(tabs) = self.workspaces.active_pane_tabs_mut().get_mut(&pane) else { return };
-        let (Some(from), Some(to)) = (tabs.iter().position(|&b| b == id), tabs.iter().position(|&b| b == onto)) else { return };
+        let Some(tabs) = self.workspaces.active_pane_tabs_mut().get_mut(&pane) else {
+            return;
+        };
+        let (Some(from), Some(to)) = (
+            tabs.iter().position(|&b| b == id),
+            tabs.iter().position(|&b| b == onto),
+        ) else {
+            return;
+        };
         let moved = tabs.remove(from);
         tabs.insert(to, moved);
     }
@@ -351,7 +451,9 @@ impl App {
     /// keeps it.
     pub(super) fn tab_clicked(&mut self, pane: fenix_window::WindowId, id: BufferId) {
         let now = Instant::now();
-        let double = self.last_tab_click.is_some_and(|(at, p, b)| p == pane && b == id && now.duration_since(at) < DOUBLE_CLICK);
+        let double = self.last_tab_click.is_some_and(|(at, p, b)| {
+            p == pane && b == id && now.duration_since(at) < DOUBLE_CLICK
+        });
         if double && self.is_preview_tab(pane, id) {
             self.keep_preview(pane);
         }
@@ -362,14 +464,20 @@ impl App {
     /// click closes the tab, and the left button pressed on one tab and
     /// released on another moves it there.
     pub(super) fn tab_mouse(&mut self, pos: (f32, f32), button: MouseButton, pressed: bool) {
-        let hit = self.tab_geometry.iter().find(|(_, tab)| tab.body.contains_point(pos.0, pos.1)).map(|(pane, tab)| (*pane, tab.buffer));
+        let hit = self
+            .tab_geometry
+            .iter()
+            .find(|(_, tab)| tab.body.contains_point(pos.0, pos.1))
+            .map(|(pane, tab)| (*pane, tab.buffer));
         let home = self.workspaces.active_workspace().home;
         match (button, pressed, hit) {
             (MouseButton::Middle, true, Some((pane, id))) if Some(id) != home => {
                 self.close_pane_tab(pane, id);
                 self.refresh_project_root();
             }
-            (MouseButton::Left, true, hit) => self.tab_drag = hit.filter(|(_, id)| Some(*id) != home),
+            (MouseButton::Left, true, hit) => {
+                self.tab_drag = hit.filter(|(_, id)| Some(*id) != home)
+            }
             (MouseButton::Left, false, hit) => {
                 if let (Some((pane, id)), Some((over, onto))) = (self.tab_drag.take(), hit) {
                     if pane == over && id != onto && Some(onto) != home {
@@ -385,14 +493,21 @@ impl App {
     /// Every workspace list with its index: 0 is the live frame's, the
     /// rest are parked frames' in order.
     fn workspace_lists(&self) -> impl Iterator<Item = (usize, &WorkspaceList)> {
-        std::iter::once(&self.workspaces).chain(self.frames.iter().flatten().map(|frame| &frame.workspaces)).enumerate()
+        std::iter::once(&self.workspaces)
+            .chain(self.frames.iter().flatten().map(|frame| &frame.workspaces))
+            .enumerate()
     }
 
     fn workspace_at_mut(&mut self, list_index: usize, ws_index: usize) -> Option<&mut Workspace> {
         let list = if list_index == 0 {
             &mut self.workspaces
         } else {
-            &mut self.frames.iter_mut().flatten().nth(list_index - 1)?.workspaces
+            &mut self
+                .frames
+                .iter_mut()
+                .flatten()
+                .nth(list_index - 1)?
+                .workspaces
         };
         list.workspaces.get_mut(ws_index)
     }
@@ -430,16 +545,33 @@ mod tests {
     fn next_and_previous_wrap_round_through_home() {
         let order = ids(4); // Home, then three files
         assert_eq!(step(&order, Some(order[1]), TabMove::Next), Some(order[2]));
-        assert_eq!(step(&order, Some(order[3]), TabMove::Next), Some(order[0]), "gt from the last tab is Home");
-        assert_eq!(step(&order, Some(order[0]), TabMove::Prev(1)), Some(order[3]), "gT from Home is the last tab");
-        assert_eq!(step(&order, Some(order[3]), TabMove::Prev(2)), Some(order[1]));
+        assert_eq!(
+            step(&order, Some(order[3]), TabMove::Next),
+            Some(order[0]),
+            "gt from the last tab is Home"
+        );
+        assert_eq!(
+            step(&order, Some(order[0]), TabMove::Prev(1)),
+            Some(order[3]),
+            "gT from Home is the last tab"
+        );
+        assert_eq!(
+            step(&order, Some(order[3]), TabMove::Prev(2)),
+            Some(order[1])
+        );
     }
 
     #[test]
     fn a_counted_gt_counts_files_not_home() {
         let order = ids(4);
-        assert_eq!(step(&order, Some(order[3]), TabMove::Nth(1)), Some(order[1]));
-        assert_eq!(step(&order, Some(order[0]), TabMove::Nth(3)), Some(order[3]));
+        assert_eq!(
+            step(&order, Some(order[3]), TabMove::Nth(1)),
+            Some(order[1])
+        );
+        assert_eq!(
+            step(&order, Some(order[0]), TabMove::Nth(3)),
+            Some(order[3])
+        );
         assert_eq!(step(&order, Some(order[0]), TabMove::Nth(4)), None);
     }
 
@@ -455,7 +587,11 @@ mod tests {
         let order = ids(4);
         assert_eq!(tab_after_closing(&order, order[2]), Some(order[3]));
         assert_eq!(tab_after_closing(&order, order[3]), Some(order[2]));
-        assert_eq!(tab_after_closing(&order[..2], order[1]), Some(order[0]), "the last file closes to Home");
+        assert_eq!(
+            tab_after_closing(&order[..2], order[1]),
+            Some(order[0]),
+            "the last file closes to Home"
+        );
         assert_eq!(tab_after_closing(&order[..1], order[0]), None);
     }
 }

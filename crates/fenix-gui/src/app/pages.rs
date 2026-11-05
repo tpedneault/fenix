@@ -12,15 +12,15 @@ use super::*;
 use crate::git_compare::{self, GitCompare};
 use crate::git_log::{self, GitLog};
 use crate::git_rebase::{self, RebasePage};
-use crate::settings_page::{self, SettingsPage};
-use crate::snippets_page::{self, SnippetsPage};
-use crate::reading_page::ReadingPage;
 use crate::git_status::{self, GitStatus};
 use crate::page::{Key, Page, Role as PageRole};
 use crate::project_doctor::{self, DoctorPage, Fixing};
 use crate::project_hub::{self, Hub, HubProject};
 use crate::project_settings::{self, Settings};
 use crate::project_wizard::{self, RunWork, Status, Wizard};
+use crate::reading_page::ReadingPage;
+use crate::settings_page::{self, SettingsPage};
+use crate::snippets_page::{self, SnippetsPage};
 use fenix_project::doctor::{self, Check, EditorFix, FixAction, Health, Probe};
 use fenix_project::vcs::GitSummary;
 use std::collections::BTreeMap;
@@ -49,7 +49,13 @@ pub(super) fn shade_color(theme: &Theme, shade: crate::page::Shade) -> [f32; 4] 
     use crate::page::Shade;
     let faded = |c: [f32; 4]| [c[0], c[1], c[2], 0.28];
     match shade {
-        Shade::Panel => if theme.sidebar_bg != theme.bg { theme.sidebar_bg } else { theme.bg_modeline },
+        Shade::Panel => {
+            if theme.sidebar_bg != theme.bg {
+                theme.sidebar_bg
+            } else {
+                theme.bg_modeline
+            }
+        }
         Shade::Focus => theme.hl_line,
         Shade::Selection => theme.selection,
         Shade::Accent => faded(theme.caret),
@@ -112,7 +118,17 @@ pub(super) struct PageState {
 
 impl PageState {
     fn new(model: PageModel) -> Self {
-        PageState { model, page: Page::default(), cols: 0, stale: true, generation: 0, started: None, last_focus: None, rows: None, laid_rows: None }
+        PageState {
+            model,
+            page: Page::default(),
+            cols: 0,
+            stale: true,
+            generation: 0,
+            started: None,
+            last_focus: None,
+            rows: None,
+            laid_rows: None,
+        }
     }
 
     /// Whether a text field on the page has the keyboard -- then every
@@ -122,7 +138,10 @@ impl PageState {
             PageModel::Wizard(w) => w.editing.is_some(),
             PageModel::Hub(h) => h.filtering || h.editing_group.is_some(),
             PageModel::Explorer(_, v) => v.edit.is_some(),
-            PageModel::Doctor(_) | PageModel::ExtensionOutput(_) | PageModel::Tutorial(_) | PageModel::Preview(_) => false,
+            PageModel::Doctor(_)
+            | PageModel::ExtensionOutput(_)
+            | PageModel::Tutorial(_)
+            | PageModel::Preview(_) => false,
             PageModel::Search(p) => p.typing(),
             PageModel::Agent(p) => p.typing(),
             PageModel::AgentReview(_) => false,
@@ -152,10 +171,19 @@ impl PageState {
         match &mut self.model {
             PageModel::Wizard(w) => w.type_text(text),
             PageModel::Hub(h) => {
-                let target = if let Some(group) = &mut h.editing_group { group } else { &mut h.filter };
+                let target = if let Some(group) = &mut h.editing_group {
+                    group
+                } else {
+                    &mut h.filter
+                };
                 target.extend(text.chars().filter(|c| !c.is_control()));
             }
-            PageModel::Doctor(_) | PageModel::ExtensionOutput(_) | PageModel::Code(_) | PageModel::Tutorial(_) | PageModel::Explorer(..) | PageModel::Preview(_) => {}
+            PageModel::Doctor(_)
+            | PageModel::ExtensionOutput(_)
+            | PageModel::Code(_)
+            | PageModel::Tutorial(_)
+            | PageModel::Explorer(..)
+            | PageModel::Preview(_) => {}
             PageModel::Search(p) => {
                 p.paste(text);
             }
@@ -176,37 +204,114 @@ impl PageState {
 /// What a background job sends back to its page.
 #[derive(Debug)]
 pub enum PageEvent {
-    Output { buffer: BufferId, generation: u64, line: String },
-    Finished { buffer: BufferId, generation: u64, result: Result<(), String> },
-    Checks { buffer: BufferId, generation: u64, checks: Vec<Check> },
-    HubInfo { buffer: BufferId, root: PathBuf, git: Option<GitSummary>, health: (Health, usize) },
-    Subprojects { buffer: BufferId, root: PathBuf, found: Vec<(PathBuf, fenix_project::ProjectKind)> },
-    GitSnapshot { buffer: BufferId, snapshot: Box<git_status::Snapshot> },
-    GitDiff { buffer: BufferId, section: git_status::Section, path: String, diff: git_status::DiffState },
-    GitDone { buffer: BufferId, label: String, result: Result<String, String> },
+    Output {
+        buffer: BufferId,
+        generation: u64,
+        line: String,
+    },
+    Finished {
+        buffer: BufferId,
+        generation: u64,
+        result: Result<(), String>,
+    },
+    Checks {
+        buffer: BufferId,
+        generation: u64,
+        checks: Vec<Check>,
+    },
+    HubInfo {
+        buffer: BufferId,
+        root: PathBuf,
+        git: Option<GitSummary>,
+        health: (Health, usize),
+    },
+    Subprojects {
+        buffer: BufferId,
+        root: PathBuf,
+        found: Vec<(PathBuf, fenix_project::ProjectKind)>,
+    },
+    GitSnapshot {
+        buffer: BufferId,
+        snapshot: Box<git_status::Snapshot>,
+    },
+    GitDiff {
+        buffer: BufferId,
+        section: git_status::Section,
+        path: String,
+        diff: git_status::DiffState,
+    },
+    GitDone {
+        buffer: BufferId,
+        label: String,
+        result: Result<String, String>,
+    },
     /// A question for the page to ask -- an undo's preview.
-    GitConfirm { buffer: BufferId, confirm: Result<git_status::Confirm, String> },
+    GitConfirm {
+        buffer: BufferId,
+        confirm: Result<git_status::Confirm, String>,
+    },
     /// A file's blame, read off the UI thread.
-    Blame { path: PathBuf, edits: u64, result: Result<Vec<fenix_git::BlameLine>, String> },
-    GitLogData { buffer: BufferId, data: Box<git_log::LogData> },
-    GitLogFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
-    GitLogDiff { buffer: BufferId, hash: String, path: String, diff: git_status::DiffState },
-    CompareData { buffer: BufferId, data: Box<git_compare::CompareData> },
-    CompareFiles { buffer: BufferId, hash: String, files: Vec<(char, String)> },
-    CompareDiff { buffer: BufferId, key: git_compare::DiffKey, diff: git_status::DiffState },
+    Blame {
+        path: PathBuf,
+        edits: u64,
+        result: Result<Vec<fenix_git::BlameLine>, String>,
+    },
+    GitLogData {
+        buffer: BufferId,
+        data: Box<git_log::LogData>,
+    },
+    GitLogFiles {
+        buffer: BufferId,
+        hash: String,
+        files: Vec<(char, String)>,
+    },
+    GitLogDiff {
+        buffer: BufferId,
+        hash: String,
+        path: String,
+        diff: git_status::DiffState,
+    },
+    CompareData {
+        buffer: BufferId,
+        data: Box<git_compare::CompareData>,
+    },
+    CompareFiles {
+        buffer: BufferId,
+        hash: String,
+        files: Vec<(char, String)>,
+    },
+    CompareDiff {
+        buffer: BufferId,
+        key: git_compare::DiffKey,
+        diff: git_status::DiffState,
+    },
     /// The Compare page's fetch finished: the remote, or why not.
-    CompareFetched { buffer: BufferId, result: Result<String, String> },
+    CompareFetched {
+        buffer: BufferId,
+        result: Result<String, String>,
+    },
     /// Where the focused file's repository stands, for the modeline.
     /// `None`: the focused file isn't in a repository.
     ChromeGit(Option<Box<super::git_editor::ChromeGit>>),
     /// A background fetch finished.
     AutoFetched { ok: bool },
     /// A picture a page shows, read: its size and BGRA pixels.
-    PageImage { key: crate::page::ImageKey, result: Result<(u32, u32, Vec<u8>), String> },
+    PageImage {
+        key: crate::page::ImageKey,
+        result: Result<(u32, u32, Vec<u8>), String>,
+    },
     /// Files the Search page's search found, as it goes.
-    SearchFound { buffer: BufferId, generation: u64, files: Vec<fenix_project::search::FileResult> },
+    SearchFound {
+        buffer: BufferId,
+        generation: u64,
+        files: Vec<fenix_project::search::FileResult>,
+    },
     /// The Search page's search finished.
-    SearchDone { buffer: BufferId, generation: u64, result: Result<fenix_project::search::Summary, String> },
+    SearchDone {
+        buffer: BufferId,
+        generation: u64,
+        result: Result<fenix_project::search::Summary, String>,
+    },
 }
 
 pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
@@ -214,21 +319,42 @@ pub(super) type Sender = Arc<dyn Fn(PageEvent) + Send + Sync>;
 /// Sends every line `stream` prints. Progress bars rewrite a line with
 /// `\r`; only the last state of each is worth a line in the log.
 fn forward_lines(stream: impl std::io::Read, buffer: BufferId, generation: u64, send: &Sender) {
-    for line in std::io::BufReader::new(stream).lines().map_while(Result::ok) {
-        let line = line.rsplit('\r').find(|part| !part.trim().is_empty()).unwrap_or_default().trim_end().to_string();
+    for line in std::io::BufReader::new(stream)
+        .lines()
+        .map_while(Result::ok)
+    {
+        let line = line
+            .rsplit('\r')
+            .find(|part| !part.trim().is_empty())
+            .unwrap_or_default()
+            .trim_end()
+            .to_string();
         if !line.is_empty() {
-            send(PageEvent::Output { buffer, generation, line });
+            send(PageEvent::Output {
+                buffer,
+                generation,
+                line,
+            });
         }
     }
 }
 
 /// Runs `command` to completion, sending each line it prints (both
 /// streams) and then how it ended.
-fn run_command(mut command: std::process::Command, buffer: BufferId, generation: u64, send: Sender) {
+fn run_command(
+    mut command: std::process::Command,
+    buffer: BufferId,
+    generation: u64,
+    send: Sender,
+) {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
-            send(PageEvent::Finished { buffer, generation, result: Err(format!("couldn't start: {e}")) });
+            send(PageEvent::Finished {
+                buffer,
+                generation,
+                result: Err(format!("couldn't start: {e}")),
+            });
             return;
         }
     };
@@ -250,7 +376,11 @@ fn run_command(mut command: std::process::Command, buffer: BufferId, generation:
         }),
         Err(e) => Err(e.to_string()),
     };
-    send(PageEvent::Finished { buffer, generation, result });
+    send(PageEvent::Finished {
+        buffer,
+        generation,
+        result,
+    });
 }
 
 /// What the doctor asks of the world, answered the way the rest of
@@ -308,18 +438,25 @@ pub(super) fn page_rich_spans(page: &Page, theme: &Theme) -> RowSpans {
     let lines: Vec<&str> = page.text.split('\n').collect();
     for (n, line) in lines.iter().enumerate() {
         let chars: Vec<char> = line.chars().collect();
-        let mut spans: Vec<&crate::page::Span> = page.spans.iter().filter(|s| s.line == n).collect();
+        let mut spans: Vec<&crate::page::Span> =
+            page.spans.iter().filter(|s| s.line == n).collect();
         spans.sort_by_key(|s| s.cols.start);
         let mut at = 0;
         for span in spans {
-            let (from, to) = (span.cols.start.max(at).min(chars.len()), span.cols.end.min(chars.len()));
+            let (from, to) = (
+                span.cols.start.max(at).min(chars.len()),
+                span.cols.end.min(chars.len()),
+            );
             if from >= to {
                 continue;
             }
             if from > at {
                 plain.push((chars[at..from].iter().collect::<String>(), theme.fg));
             }
-            plain.push((chars[from..to].iter().collect::<String>(), role_color(theme, span.role)));
+            plain.push((
+                chars[from..to].iter().collect::<String>(),
+                role_color(theme, span.role),
+            ));
             at = to;
         }
         if at < chars.len() {
@@ -334,7 +471,10 @@ pub(super) fn page_rich_spans(page: &Page, theme: &Theme) -> RowSpans {
 
 /// "5 min", "3 h", "2 d" since Unix time `then`.
 fn age_since(then: i64) -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(then);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(then);
     let mins = (now - then).max(0) / 60;
     match mins {
         0 => "now".to_string(),
@@ -348,7 +488,12 @@ fn age_since(then: i64) -> String {
 impl App {
     pub(super) fn app_probe(&self) -> AppProbe {
         // Where the code extensions found theirs (Arduino's tools).
-        let known = self.wasm.found.iter().map(|(name, path)| (name.clone(), Some(path.clone()))).collect();
+        let known = self
+            .wasm
+            .found
+            .iter()
+            .map(|(name, path)| (name.clone(), Some(path.clone())))
+            .collect();
         AppProbe { known }
     }
 
@@ -370,7 +515,11 @@ impl App {
             Some(PageModel::Explorer(ExplorerTarget::Overlay, _)) => "*pick a folder*".to_string(),
             Some(PageModel::Search(p)) => {
                 let verb = if p.replace_open { "replace" } else { "search" };
-                if p.query.text.is_empty() { format!("*{verb}*") } else { format!("*{verb}: {}*", crate::page::fit(&p.query.text, 24)) }
+                if p.query.text.is_empty() {
+                    format!("*{verb}*")
+                } else {
+                    format!("*{verb}: {}*", crate::page::fit(&p.query.text, 24))
+                }
             }
             Some(PageModel::Preview(p)) => match p.path.as_deref().and_then(|p| p.file_name()) {
                 Some(name) => format!("*preview: {}*", name.to_string_lossy()),
@@ -378,7 +527,14 @@ impl App {
             },
             Some(PageModel::Explorer(target, _)) => match self.explorer_state(*target) {
                 // The folder's name, as a file's tab is its name.
-                Some(state) => format!("{}/", state.cwd.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| readable_path(&state.cwd))),
+                Some(state) => format!(
+                    "{}/",
+                    state
+                        .cwd
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| readable_path(&state.cwd))
+                ),
                 None => "*files*".to_string(),
             },
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
@@ -389,7 +545,10 @@ impl App {
             Some(PageModel::Tutorial(_)) => "*tutorial*".to_string(),
             Some(PageModel::AgentReview(_)) => "*agent changes*".to_string(),
             Some(PageModel::Agent(p)) => match self.agents.hub.view(&p.thread) {
-                Some(view) => format!("*agent: {}*", crate::page::fit(&view.thread.display_title(), 32)),
+                Some(view) => format!(
+                    "*agent: {}*",
+                    crate::page::fit(&view.thread.display_title(), 32)
+                ),
                 None => "*agent*".to_string(),
             },
             Some(PageModel::UserSettings(p)) => match &p.scope {
@@ -397,7 +556,14 @@ impl App {
                 settings_page::Scope::Project { name, .. } => format!("*settings: {name}*"),
             },
             Some(PageModel::Reading(p)) if p.back.is_some() => "*details*".to_string(),
-            Some(PageModel::Reading(p)) => format!("*reading: {}*", p.path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default()),
+            Some(PageModel::Reading(p)) => format!(
+                "*reading: {}*",
+                p.path
+                    .as_deref()
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default()
+            ),
         }
     }
 
@@ -422,7 +588,10 @@ impl App {
     /// The open page of one kind, if there is one -- the wizard, the hub
     /// and the settings page each exist at most once.
     pub(super) fn find_page(&self, is: impl Fn(&PageModel) -> bool) -> Option<BufferId> {
-        self.pages.iter().find(|(_, s)| is(&s.model)).map(|(id, _)| *id)
+        self.pages
+            .iter()
+            .find(|(_, s)| is(&s.model))
+            .map(|(id, _)| *id)
     }
 
     /// A page for `model`, not shown anywhere yet (a session puts it back
@@ -481,7 +650,12 @@ impl App {
         self.forget_explorer_page(id);
         self.pages.remove(&id);
         self.buffers.close(id);
-        let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
+        let fallback = self
+            .buffers
+            .mru()
+            .first()
+            .copied()
+            .unwrap_or_else(|| self.buffers.open_scratch());
         self.repoint_panes_back(id, fallback);
         self.refresh_project_root();
     }
@@ -515,7 +689,9 @@ impl App {
     /// Starts `step` for page `buffer` in `dir`; its output and end come
     /// back as page events under a new generation.
     fn page_run(&mut self, buffer: BufferId, step: fenix_project::template::Step, dir: &Path) {
-        let Some(state) = self.pages.get_mut(&buffer) else { return };
+        let Some(state) = self.pages.get_mut(&buffer) else {
+            return;
+        };
         state.generation += 1;
         state.started = Some(Instant::now());
         let generation = state.generation;
@@ -524,8 +700,14 @@ impl App {
             step.spec.executable = located.display().to_string();
         }
         match step.command(dir) {
-            Ok(command) => self.page_spawn(move |send| run_command(command, buffer, generation, send)),
-            Err(e) => self.apply_page_event(PageEvent::Finished { buffer, generation, result: Err(e.to_string()) }),
+            Ok(command) => {
+                self.page_spawn(move |send| run_command(command, buffer, generation, send))
+            }
+            Err(e) => self.apply_page_event(PageEvent::Finished {
+                buffer,
+                generation,
+                result: Err(e.to_string()),
+            }),
         }
     }
 
@@ -535,8 +717,15 @@ impl App {
     /// shows from its top -- its title, tabs and whatever is above the
     /// rows -- not just from the selected line. Only on a move, so the
     /// wheel keeps where it put the page.
-    pub(super) fn page_scroll_to_top(&mut self, id: BufferId, pane: fenix_window::WindowId, visible: usize) {
-        let Some(state) = self.pages.get_mut(&id) else { return };
+    pub(super) fn page_scroll_to_top(
+        &mut self,
+        id: BufferId,
+        pane: fenix_window::WindowId,
+        visible: usize,
+    ) {
+        let Some(state) = self.pages.get_mut(&id) else {
+            return;
+        };
         let focus = state.page.focus.as_ref().map(|(line, _)| *line);
         let was = std::mem::replace(&mut state.last_focus, focus);
         if let (Some(before), Some(now)) = (was, focus) {
@@ -548,12 +737,26 @@ impl App {
         }
     }
 
-    pub(super) fn ensure_page_layout(&mut self, id: BufferId, pane: fenix_window::WindowId, cols: usize) {
+    pub(super) fn ensure_page_layout(
+        &mut self,
+        id: BufferId,
+        pane: fenix_window::WindowId,
+        cols: usize,
+    ) {
         // A code extension's page: asked for at this width, if it isn't
         // shown at it already; the last one stays meanwhile.
         // A canvas is laid out to the pane's width, as Fenix's own pages are.
-        if let Some(PageModel::Code(c)) = self.pages.get(&id).map(|s| &s.model).filter(|m| !matches!(m, PageModel::Code(c) if c.surface.is_some())) {
-            let width = if c.shown.as_ref().is_some_and(|p| p.canvas.is_some()) { cols as u32 } else { crate::code_page::content_width(cols) };
+        if let Some(PageModel::Code(c)) = self
+            .pages
+            .get(&id)
+            .map(|s| &s.model)
+            .filter(|m| !matches!(m, PageModel::Code(c) if c.surface.is_some()))
+        {
+            let width = if c.shown.as_ref().is_some_and(|p| p.canvas.is_some()) {
+                cols as u32
+            } else {
+                crate::code_page::content_width(cols)
+            };
             let height = self.pages.get(&id).and_then(|s| s.rows).unwrap_or(0) as u32;
             self.code_page_drawn(id, width, height);
         }
@@ -563,7 +766,9 @@ impl App {
             let waiting = self.explorer_waiting_on(*target).map(Path::to_path_buf);
             let rows = self.pages.get(&id).and_then(|s| s.rows);
             if view.waiting_on != waiting || view.height != rows {
-                if let Some(PageModel::Explorer(_, view)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+                if let Some(PageModel::Explorer(_, view)) =
+                    self.pages.get_mut(&id).map(|s| &mut s.model)
+                {
                     view.waiting_on = waiting;
                 }
                 self.restale_page(id);
@@ -573,13 +778,16 @@ impl App {
         if reading.as_ref().is_some_and(|r| r.laid_out()) {
             self.reading_ask(id);
         }
-        let Some(state) = self.pages.get_mut(&id) else { return };
+        let Some(state) = self.pages.get_mut(&id) else {
+            return;
+        };
         if reading.as_ref().is_some_and(|r| r.changed()) {
             state.stale = true;
         }
         // A preview is laid out for the pane's height too.
         let height_matters = matches!(state.model, PageModel::Preview(_) | PageModel::Search(_));
-        if !state.stale && state.cols == cols && !(height_matters && state.laid_rows != state.rows) {
+        if !state.stale && state.cols == cols && !(height_matters && state.laid_rows != state.rows)
+        {
             return;
         }
         let rows = state.rows;
@@ -609,7 +817,16 @@ impl App {
             PageModel::Snippets(p) => snippets_page::layout(p, cols),
             PageModel::Tutorial(p) => crate::tutorial::layout(p, cols),
             PageModel::Agent(p) => self.agents.layout(p, cols),
-            PageModel::AgentReview(p) => crate::agent_review::layout(p, &self.agents.hub.view(&p.thread).map(|v| v.thread.display_title()).unwrap_or_default(), cols),
+            PageModel::AgentReview(p) => crate::agent_review::layout(
+                p,
+                &self
+                    .agents
+                    .hub
+                    .view(&p.thread)
+                    .map(|v| v.thread.display_title())
+                    .unwrap_or_default(),
+                cols,
+            ),
         };
         if let PageModel::Reading(p) = &mut state.model {
             state.page = match reading {
@@ -629,7 +846,9 @@ impl App {
         if following {
             (line, col) = (text.lines().count().saturating_sub(1), 0);
         }
-        let Some(ob) = self.buffers.get_mut(id) else { return };
+        let Some(ob) = self.buffers.get_mut(id) else {
+            return;
+        };
         if ob.buffer.text() != text {
             let end = ob.buffer.len_chars();
             let mut scratch = Cursor::at_start();
@@ -669,7 +888,12 @@ impl App {
             self.page_g_pending = false;
             return false;
         };
-        if state.typing() || !self.vim.is_idle() || self.leader_matcher.is_pending() || self.local_matcher.is_some() || keypress.mods != Mods::default() {
+        if state.typing()
+            || !self.vim.is_idle()
+            || self.leader_matcher.is_pending()
+            || self.local_matcher.is_some()
+            || keypress.mods != Mods::default()
+        {
             self.page_g_pending = false;
             return self.page_key_now(keypress);
         }
@@ -698,7 +922,9 @@ impl App {
 
     fn page_key_now(&mut self, keypress: KeyPress) -> bool {
         let id = self.focused_buffer_id();
-        let Some(state) = self.pages.get(&id) else { return false };
+        let Some(state) = self.pages.get(&id) else {
+            return false;
+        };
         // A leader sequence under way is the leader's, not the page's --
         // an open `SPC m` menu included, so its next key reaches it.
         if !self.vim.is_idle() || self.leader_matcher.is_pending() || self.local_matcher.is_some() {
@@ -717,12 +943,17 @@ impl App {
         if is_search && self.search_page_special_key(id, keypress) {
             return true;
         }
-        let Some(state) = self.pages.get(&id) else { return false };
+        let Some(state) = self.pages.get(&id) else {
+            return false;
+        };
         let typing = state.typing();
         let claims_space = state.claims_space();
         if keypress == KeyPress::char('v').with_ctrl() && typing {
             if let Some(text) = self.clipboard_text() {
-                if matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Code(_))) {
+                if matches!(
+                    self.pages.get(&id).map(|s| &s.model),
+                    Some(PageModel::Code(_))
+                ) {
                     self.code_page_paste(id, text);
                 } else if let Some(state) = self.pages.get_mut(&id) {
                     state.type_text(&text);
@@ -732,7 +963,8 @@ impl App {
         }
         let shift = self.modifiers.shift_key();
         // A code page that takes more keys: those `page-key` doesn't.
-        if matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Code(c)) if c.more_keys()) {
+        if matches!(self.pages.get(&id).map(|s| &s.model), Some(PageModel::Code(c)) if c.more_keys())
+        {
             if let Some(press) = crate::code_page::key_press(keypress, shift, typing) {
                 self.code_page_key_press(id, press);
                 self.wake_caret();
@@ -767,7 +999,9 @@ impl App {
             (KeyCode::Named(FenixNamedKey::Delete), _) if typing => Key::Delete,
             _ => return false,
         };
-        let Some(state) = self.pages.get_mut(&id) else { return false };
+        let Some(state) = self.pages.get_mut(&id) else {
+            return false;
+        };
         state.stale = true;
         match &mut state.model {
             PageModel::Reading(p) => {
@@ -848,29 +1082,70 @@ impl App {
     /// A background job's news for its page.
     pub(super) fn apply_page_event(&mut self, event: PageEvent) {
         match event {
-            PageEvent::GitDone { buffer, .. } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Log(_))) => self.apply_git_log_event(event),
-            PageEvent::GitDone { buffer, label, result } if matches!(self.pages.get(&buffer).map(|s| &s.model), Some(PageModel::Rebase(_))) => {
+            PageEvent::GitDone { buffer, .. }
+                if matches!(
+                    self.pages.get(&buffer).map(|s| &s.model),
+                    Some(PageModel::Log(_))
+                ) =>
+            {
+                self.apply_git_log_event(event)
+            }
+            PageEvent::GitDone {
+                buffer,
+                label,
+                result,
+            } if matches!(
+                self.pages.get(&buffer).map(|s| &s.model),
+                Some(PageModel::Rebase(_))
+            ) =>
+            {
                 self.apply_git_rebase_done(buffer, label, result)
             }
-            event @ (PageEvent::GitSnapshot { .. } | PageEvent::GitDiff { .. } | PageEvent::GitDone { .. } | PageEvent::GitConfirm { .. }) => {
-                self.apply_git_page_event(event)
-            }
-            event @ (PageEvent::GitLogData { .. } | PageEvent::GitLogFiles { .. } | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
-            event @ (PageEvent::CompareData { .. } | PageEvent::CompareFiles { .. } | PageEvent::CompareDiff { .. } | PageEvent::CompareFetched { .. }) => {
-                self.apply_git_compare_event(event)
-            }
-            PageEvent::Blame { path, edits, result } => self.apply_blame(path, edits, result),
+            event @ (PageEvent::GitSnapshot { .. }
+            | PageEvent::GitDiff { .. }
+            | PageEvent::GitDone { .. }
+            | PageEvent::GitConfirm { .. }) => self.apply_git_page_event(event),
+            event @ (PageEvent::GitLogData { .. }
+            | PageEvent::GitLogFiles { .. }
+            | PageEvent::GitLogDiff { .. }) => self.apply_git_log_event(event),
+            event @ (PageEvent::CompareData { .. }
+            | PageEvent::CompareFiles { .. }
+            | PageEvent::CompareDiff { .. }
+            | PageEvent::CompareFetched { .. }) => self.apply_git_compare_event(event),
+            PageEvent::Blame {
+                path,
+                edits,
+                result,
+            } => self.apply_blame(path, edits, result),
             PageEvent::ChromeGit(state) => self.chrome_git = state.map(|s| *s),
             PageEvent::PageImage { key, result } => self.apply_page_image(key, result),
-            PageEvent::SearchFound { buffer, generation, files } => self.apply_search_found(buffer, generation, files),
-            PageEvent::SearchDone { buffer, generation, result } => self.apply_search_done(buffer, generation, result),
+            PageEvent::SearchFound {
+                buffer,
+                generation,
+                files,
+            } => self.apply_search_found(buffer, generation, files),
+            PageEvent::SearchDone {
+                buffer,
+                generation,
+                result,
+            } => self.apply_search_done(buffer, generation, result),
             PageEvent::AutoFetched { ok } => {
                 if ok {
                     self.refresh_git_pages(false);
                 }
             }
-            PageEvent::Output { buffer, generation, line } => {
-                let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
+            PageEvent::Output {
+                buffer,
+                generation,
+                line,
+            } => {
+                let Some(state) = self
+                    .pages
+                    .get_mut(&buffer)
+                    .filter(|s| s.generation == generation)
+                else {
+                    return;
+                };
                 state.stale = true;
                 match &mut state.model {
                     PageModel::Wizard(w) => {
@@ -884,8 +1159,18 @@ impl App {
                     _ => {}
                 }
             }
-            PageEvent::Finished { buffer, generation, result } => {
-                let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
+            PageEvent::Finished {
+                buffer,
+                generation,
+                result,
+            } => {
+                let Some(state) = self
+                    .pages
+                    .get_mut(&buffer)
+                    .filter(|s| s.generation == generation)
+                else {
+                    return;
+                };
                 state.stale = true;
                 let elapsed = state.started.map(|t| t.elapsed()).unwrap_or_default();
                 match &mut state.model {
@@ -903,7 +1188,12 @@ impl App {
                     }
                     PageModel::Doctor(d) => {
                         let ok = result.is_ok();
-                        let label = d.fixing.as_ref().and_then(|f| d.check(f.check)).and_then(|c| c.fix.as_ref()).map(|f| f.label.clone());
+                        let label = d
+                            .fixing
+                            .as_ref()
+                            .and_then(|f| d.check(f.check))
+                            .and_then(|c| c.fix.as_ref())
+                            .map(|f| f.label.clone());
                         if let Some(label) = label {
                             d.last_fix = Some((label, result.clone()));
                         }
@@ -924,15 +1214,28 @@ impl App {
                     _ => {}
                 }
             }
-            PageEvent::Checks { buffer, generation, checks } => {
-                let Some(state) = self.pages.get_mut(&buffer).filter(|s| s.generation == generation) else { return };
+            PageEvent::Checks {
+                buffer,
+                generation,
+                checks,
+            } => {
+                let Some(state) = self
+                    .pages
+                    .get_mut(&buffer)
+                    .filter(|s| s.generation == generation)
+                else {
+                    return;
+                };
                 state.stale = true;
                 if let PageModel::Doctor(d) = &mut state.model {
                     let root = d.root.clone();
                     // The code extensions' checks, from what they last said.
                     let mut checks = checks;
                     checks.extend(self.wasm.doctor_checks(&root));
-                    let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
+                    let health = (
+                        doctor::worst(&checks),
+                        checks.iter().filter(|c| c.health >= Health::Warn).count(),
+                    );
                     d.set_checks(checks);
                     d.fixing = None;
                     self.project_health.insert(root.clone(), health);
@@ -946,23 +1249,43 @@ impl App {
                     }
                 }
             }
-            PageEvent::Subprojects { buffer, root, found } => {
-                let Some(state) = self.pages.get_mut(&buffer) else { return };
+            PageEvent::Subprojects {
+                buffer,
+                root,
+                found,
+            } => {
+                let Some(state) = self.pages.get_mut(&buffer) else {
+                    return;
+                };
                 state.stale = true;
                 if let PageModel::Hub(h) = &mut state.model {
                     h.set_subprojects(&root, found);
-                    for p in h.projects.iter_mut().filter(|p| p.parent.is_some() && p.health.is_none()) {
+                    for p in h
+                        .projects
+                        .iter_mut()
+                        .filter(|p| p.parent.is_some() && p.health.is_none())
+                    {
                         p.health = self.project_health.get(&p.root).copied();
                     }
                 }
             }
-            PageEvent::HubInfo { buffer, root, git, health } => {
+            PageEvent::HubInfo {
+                buffer,
+                root,
+                git,
+                health,
+            } => {
                 self.project_health.insert(root.clone(), health);
-                let Some(state) = self.pages.get_mut(&buffer) else { return };
+                let Some(state) = self.pages.get_mut(&buffer) else {
+                    return;
+                };
                 state.stale = true;
                 if let PageModel::Hub(h) = &mut state.model {
                     if let Some(p) = h.projects.iter_mut().find(|p| p.root == root) {
-                        p.last_commit_age = git.as_ref().and_then(|g| g.last_commit.as_ref()).map(|(_, t)| age_since(*t));
+                        p.last_commit_age = git
+                            .as_ref()
+                            .and_then(|g| g.last_commit.as_ref())
+                            .map(|(_, t)| age_since(*t));
                         p.git = git;
                         p.health = Some(health);
                     }
@@ -976,8 +1299,15 @@ impl App {
 
     /// The page's colours for the visible lines, in the shape syntax
     /// highlighting hands the renderer.
-    pub(super) fn page_highlights(&self, id: BufferId, first_line: usize, rows: usize) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
-        let (Some(state), Some(ob)) = (self.pages.get(&id), self.buffers.get(id)) else { return Vec::new() };
+    pub(super) fn page_highlights(
+        &self,
+        id: BufferId,
+        first_line: usize,
+        rows: usize,
+    ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        let (Some(state), Some(ob)) = (self.pages.get(&id), self.buffers.get(id)) else {
+            return Vec::new();
+        };
         let theme = self.theme;
         let color = |role: PageRole| role_color(theme, role);
         let last = first_line + rows;
@@ -1010,19 +1340,37 @@ impl App {
     /// The page's backgrounds -- the focused rows' tint and rail, a field
     /// being typed into, a canvas's own -- and its hairlines and
     /// underlines, in Home's shapes, in cells: a wide character takes two.
-    pub(super) fn page_backgrounds(&self, id: BufferId, first_line: usize, rows: usize) -> (home::BgSegments, home::HomeOverlay) {
-        let Some(state) = self.pages.get(&id) else { return Default::default() };
+    pub(super) fn page_backgrounds(
+        &self,
+        id: BufferId,
+        first_line: usize,
+        rows: usize,
+    ) -> (home::BgSegments, home::HomeOverlay) {
+        let Some(state) = self.pages.get(&id) else {
+            return Default::default();
+        };
         let theme = self.theme;
-        let visible = |line: usize| (line >= first_line && line <= first_line + rows).then(|| line - first_line);
+        let visible = |line: usize| {
+            (line >= first_line && line <= first_line + rows).then(|| line - first_line)
+        };
         // Columns (characters) as cells, line by line.
-        let lines: HashMap<usize, Option<Vec<usize>>> = (first_line..=first_line + rows).map(|l| (l, state.page.cells(l))).collect();
+        let lines: HashMap<usize, Option<Vec<usize>>> = (first_line..=first_line + rows)
+            .map(|l| (l, state.page.cells(l)))
+            .collect();
         let cells = |line: usize, cols: &std::ops::Range<usize>| {
             let map = lines.get(&line).and_then(|m| m.as_deref());
-            (crate::page::cell_of(map, cols.start), crate::page::cell_of(map, cols.end))
+            (
+                crate::page::cell_of(map, cols.start),
+                crate::page::cell_of(map, cols.end),
+            )
         };
         let mut segments = Vec::new();
         let mut overlay = home::HomeOverlay::default();
-        let panel = if theme.sidebar_bg != theme.bg { theme.sidebar_bg } else { theme.bg_modeline };
+        let panel = if theme.sidebar_bg != theme.bg {
+            theme.sidebar_bg
+        } else {
+            theme.bg_modeline
+        };
         for (line, cols, shade) in &state.page.backgrounds {
             if let Some(row) = visible(*line) {
                 let (a, b) = cells(*line, cols);
@@ -1048,19 +1396,40 @@ impl App {
                 segments.push((row, a, b, panel));
             }
         }
-        overlay.rules = state.page.rules.iter().filter_map(|(line, cols)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); (row, a, b) })).collect();
+        overlay.rules = state
+            .page
+            .rules
+            .iter()
+            .filter_map(|(line, cols)| {
+                visible(*line).map(|row| {
+                    let (a, b) = cells(*line, cols);
+                    (row, a, b)
+                })
+            })
+            .collect();
         overlay.underlines = state
             .page
             .underlines
             .iter()
-            .filter_map(|(line, cols, role)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); (row, a, b, glyphon_to_rgba(role_color(theme, *role))) }))
+            .filter_map(|(line, cols, role)| {
+                visible(*line).map(|row| {
+                    let (a, b) = cells(*line, cols);
+                    (row, a, b, glyphon_to_rgba(role_color(theme, *role)))
+                })
+            })
             .collect();
         overlay.vertical_rules = state
             .page
             .vertical_rules
             .iter()
             .filter(|(_, lines)| lines.end > first_line && lines.start <= first_line + rows)
-            .map(|(col, lines)| (*col, lines.start as isize - first_line as isize, lines.len()))
+            .map(|(col, lines)| {
+                (
+                    *col,
+                    lines.start as isize - first_line as isize,
+                    lines.len(),
+                )
+            })
             .collect();
         overlay.rule_color = home::home_rule(theme);
         overlay.images = state
@@ -1070,8 +1439,18 @@ impl App {
             .filter(|i| i.line + i.rows > first_line && i.line <= first_line + rows)
             .map(|i| {
                 let map = state.page.cells(i.line);
-                let (a, b) = (crate::page::cell_of(map.as_deref(), i.col), crate::page::cell_of(map.as_deref(), i.col + i.cols));
-                (i.line as isize - first_line as isize, a, i.rows, b - a, i.key.clone(), i.view)
+                let (a, b) = (
+                    crate::page::cell_of(map.as_deref(), i.col),
+                    crate::page::cell_of(map.as_deref(), i.col + i.cols),
+                );
+                (
+                    i.line as isize - first_line as isize,
+                    a,
+                    i.rows,
+                    b - a,
+                    i.key.clone(),
+                    i.view,
+                )
             })
             .collect();
         // What an extension's page outlines over its picture (a diagram's
@@ -1107,7 +1486,9 @@ impl App {
     /// `workspace_per_project = false` it's the old behaviour: the file,
     /// or a find-file picker in the root.
     pub(super) fn open_project(&mut self, root: PathBuf, file: Option<PathBuf>, register: bool) {
-        let root = std::fs::canonicalize(&root).map(fenix_lsp::normalize).unwrap_or(root);
+        let root = std::fs::canonicalize(&root)
+            .map(fenix_lsp::normalize)
+            .unwrap_or(root);
         if register {
             self.known_projects.add(root.clone());
             if let Err(err) = self.known_projects.save() {
@@ -1116,8 +1497,16 @@ impl App {
         }
         let file = file.or_else(|| self.project_entry_file(&root));
         if self.config.workspace_per_project != Some(false) {
-            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-            if let Some(i) = self.workspaces.workspaces.iter().position(|w| w.project.as_deref() == Some(root.as_path())) {
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.display().to_string());
+            if let Some(i) = self
+                .workspaces
+                .workspaces
+                .iter()
+                .position(|w| w.project.as_deref() == Some(root.as_path()))
+            {
                 self.workspaces.switch_to_index(i);
                 if let Some(file) = &file {
                     self.open_file_from_picker(file);
@@ -1132,16 +1521,27 @@ impl App {
                 let panes = ws.windows.windows();
                 ws.project.is_none()
                     && panes.len() == 1
-                    && ws.windows.content(panes[0]).and_then(|id| self.buffers.get(*id)).is_none_or(|ob| {
-                        matches!(ob.kind, BufferKind::Dashboard | BufferKind::Page) || (ob.kind == BufferKind::Text && ob.buffer.path().is_none() && ob.buffer.len_chars() == 0)
-                    })
+                    && ws
+                        .windows
+                        .content(panes[0])
+                        .and_then(|id| self.buffers.get(*id))
+                        .is_none_or(|ob| {
+                            matches!(ob.kind, BufferKind::Dashboard | BufferKind::Page)
+                                || (ob.kind == BufferKind::Text
+                                    && ob.buffer.path().is_none()
+                                    && ob.buffer.len_chars() == 0)
+                        })
             };
             if !reusable {
                 let content = match &file {
                     Some(file) => self.buffers.open_path(file),
                     None => self.new_home_buffer(),
                 };
-                let cursor = self.buffers.get(content).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
+                let cursor = self
+                    .buffers
+                    .get(content)
+                    .map(|ob| ob.cursor)
+                    .unwrap_or(Cursor::at_start());
                 self.workspaces.new_workspace(content, cursor);
             }
             self.workspaces.rename_active(name);
@@ -1176,10 +1576,18 @@ impl App {
             self.close_page(id);
         }
         let user_dir = fenix_project::template::user_templates_dir();
-        let (templates, errors) = fenix_project::template::available_templates_with(&crate::installed::data_dirs("templates"), user_dir.as_deref(), self.project_root.as_deref());
+        let (templates, errors) = fenix_project::template::available_templates_with(
+            &crate::installed::data_dirs("templates"),
+            user_dir.as_deref(),
+            self.project_root.as_deref(),
+        );
         let probe = self.app_probe();
         let mut found = BTreeMap::new();
-        for program in templates.iter().flat_map(fenix_project::template::programs_needed).chain(["git".to_string()]) {
+        for program in templates
+            .iter()
+            .flat_map(fenix_project::template::programs_needed)
+            .chain(["git".to_string()])
+        {
             if let std::collections::btree_map::Entry::Vacant(entry) = found.entry(program) {
                 let located = probe.locate(entry.key()).is_some();
                 entry.insert(located);
@@ -1187,7 +1595,13 @@ impl App {
         }
         // New projects land beside the current one, else in the home
         // folder.
-        let parent = self.project_root.as_deref().and_then(Path::parent).map(Path::to_path_buf).or_else(dirs::home_dir).unwrap_or_default();
+        let parent = self
+            .project_root
+            .as_deref()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .or_else(dirs::home_dir)
+            .unwrap_or_default();
         let mut wizard = Wizard::new(templates, errors, found, &parent);
         if let Err(e) = wizard.preset(args) {
             self.set_error(e);
@@ -1214,7 +1628,11 @@ impl App {
                     if let Some(run) = w.run.as_mut() {
                         if let Some(i) = run.failed() {
                             run.steps[i].output.clear();
-                            run.steps[i].status = if action == Action::Retry { Status::Pending } else { Status::Skipped };
+                            run.steps[i].status = if action == Action::Retry {
+                                Status::Pending
+                            } else {
+                                Status::Skipped
+                            };
                         }
                     }
                 }
@@ -1222,10 +1640,17 @@ impl App {
             }
             Action::Finish => self.wizard_finish(id),
             Action::BrowseParent => {
-                let Some(PageModel::Wizard(w)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                let Some(PageModel::Wizard(w)) = self.pages.get(&id).map(|s| &s.model) else {
+                    return;
+                };
                 // Start where it points now, or the nearest folder of it
                 // that exists.
-                let start = Path::new(w.parent.trim()).ancestors().find(|p| p.is_dir()).map(Path::to_path_buf).or_else(dirs::home_dir).unwrap_or_default();
+                let start = Path::new(w.parent.trim())
+                    .ancestors()
+                    .find(|p| p.is_dir())
+                    .map(Path::to_path_buf)
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_default();
                 self.open_folder_picker(&start, ExplorerPurpose::PickWizardParent);
             }
         }
@@ -1235,7 +1660,9 @@ impl App {
     /// the project is created, and the wizard comes back.
     pub(super) fn wizard_parent_picked(&mut self, dir: &Path) {
         self.close_folder_picker();
-        let Some(id) = self.find_page(|m| matches!(m, PageModel::Wizard(_))) else { return };
+        let Some(id) = self.find_page(|m| matches!(m, PageModel::Wizard(_))) else {
+            return;
+        };
         if let Some(PageModel::Wizard(w)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
             w.set_parent(dir);
         }
@@ -1246,9 +1673,13 @@ impl App {
     /// files happens here and now, a command on its own thread. Once
     /// nothing's left and nothing failed, finishes.
     fn wizard_run_next(&mut self, id: BufferId) {
-        let Some(state) = self.pages.get_mut(&id) else { return };
+        let Some(state) = self.pages.get_mut(&id) else {
+            return;
+        };
         state.stale = true;
-        let PageModel::Wizard(w) = &mut state.model else { return };
+        let PageModel::Wizard(w) = &mut state.model else {
+            return;
+        };
         let Some(plan) = w.plan.clone() else { return };
         let Some(run) = w.run.as_mut() else { return };
         let Some(i) = run.next_pending() else {
@@ -1263,8 +1694,17 @@ impl App {
                 state.generation += 1;
                 state.started = Some(Instant::now());
                 let generation = state.generation;
-                let result = if matches!(work, RunWork::WriteFiles) { plan.write_files() } else { plan.write_after_files() }.map(|_| ());
-                self.apply_page_event(PageEvent::Finished { buffer: id, generation, result });
+                let result = if matches!(work, RunWork::WriteFiles) {
+                    plan.write_files()
+                } else {
+                    plan.write_after_files()
+                }
+                .map(|_| ());
+                self.apply_page_event(PageEvent::Finished {
+                    buffer: id,
+                    generation,
+                    result,
+                });
             }
             RunWork::Command(step) => self.page_run(id, step, &plan.dir),
         }
@@ -1274,13 +1714,19 @@ impl App {
     /// hooks, then the project opened -- in its own workspace -- on its
     /// main file, and the wizard closed.
     fn wizard_finish(&mut self, id: BufferId) {
-        let Some(state) = self.pages.remove(&id) else { return };
-        let PageModel::Wizard(wizard) = state.model else { return };
+        let Some(state) = self.pages.remove(&id) else {
+            return;
+        };
+        let PageModel::Wizard(wizard) = state.model else {
+            return;
+        };
         let Some(plan) = wizard.plan else {
             self.close_page(id);
             return;
         };
-        let dir = std::fs::canonicalize(&plan.dir).map(fenix_lsp::normalize).unwrap_or_else(|_| plan.dir.clone());
+        let dir = std::fs::canonicalize(&plan.dir)
+            .map(fenix_lsp::normalize)
+            .unwrap_or_else(|_| plan.dir.clone());
         self.project_kinds.borrow_mut().clear();
         for hook in &plan.hooks {
             match hook {
@@ -1291,9 +1737,14 @@ impl App {
                         _ => Vec::new(),
                     };
                     roots.push((label.clone(), path.clone()));
-                    let saved = settings.set("mib.roots", Some(fenix_config::Value::Map(roots))).map_err(std::io::Error::other).and_then(|()| settings.save());
+                    let saved = settings
+                        .set("mib.roots", Some(fenix_config::Value::Map(roots)))
+                        .map_err(std::io::Error::other)
+                        .and_then(|()| settings.save());
                     if let Err(e) = saved {
-                        self.set_error(format!("couldn't list the MIB in .fenix/settings.toml: {e}"));
+                        self.set_error(format!(
+                            "couldn't list the MIB in .fenix/settings.toml: {e}"
+                        ));
                     }
                 }
             }
@@ -1302,7 +1753,11 @@ impl App {
         self.open_project(dir.clone(), plan.file_to_open(), wizard.register);
         self.close_page(id);
         self.refresh_home_data(false);
-        self.set_message(format!("created {} -- {steps} step{}", dir.display(), if steps == 1 { "" } else { "s" }));
+        self.set_message(format!(
+            "created {} -- {steps} step{}",
+            dir.display(),
+            if steps == 1 { "" } else { "s" }
+        ));
     }
 
     // --------------------------------------------------------------
@@ -1321,7 +1776,9 @@ impl App {
                 p.group = self.project_meta.group(root).map(str::to_string);
                 p.branch = fenix_project::vcs::git_branch(root);
                 p.jira = fenix_project::meta::jira_key(root);
-                let mut tasks: Vec<String> = fenix_project::tools::ProjectTools::read(root).map(|t| t.tasks.into_keys().collect()).unwrap_or_default();
+                let mut tasks: Vec<String> = fenix_project::tools::ProjectTools::read(root)
+                    .map(|t| t.tasks.into_keys().collect())
+                    .unwrap_or_default();
                 for task in fenix_tasks::discover_tasks(root) {
                     if !tasks.contains(&task.name) {
                         tasks.push(task.name);
@@ -1355,7 +1812,9 @@ impl App {
     /// and the doctor already said and the selection where it was.
     fn hub_reload(&mut self, id: BufferId) {
         let fresh = self.hub_projects();
-        let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
+        let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) else {
+            return;
+        };
         let selected = hub.selected().map(|p| p.root.clone());
         let old = std::mem::take(&mut hub.projects);
         hub.projects = fresh
@@ -1371,7 +1830,12 @@ impl App {
             .collect();
         // Subprojects of projects still listed, until the next scan.
         let listed: Vec<PathBuf> = hub.projects.iter().map(|p| p.root.clone()).collect();
-        hub.projects.extend(old.into_iter().filter(|o| o.parent.as_ref().is_some_and(|parent| listed.contains(parent)) && !listed.contains(&o.root)));
+        hub.projects.extend(old.into_iter().filter(|o| {
+            o.parent
+                .as_ref()
+                .is_some_and(|parent| listed.contains(parent))
+                && !listed.contains(&o.root)
+        }));
         if let Some(root) = selected {
             hub.focus_root(&root);
         }
@@ -1383,22 +1847,40 @@ impl App {
     /// Git summaries and the doctor's quick pass for every project, off
     /// the UI thread, one project at a time.
     fn hub_fetch(&mut self, id: BufferId) {
-        let Some(PageModel::Hub(hub)) = self.pages.get(&id).map(|s| &s.model) else { return };
-        let projects: Vec<(PathBuf, fenix_project::ProjectKind)> =
-            hub.projects.iter().filter(|p| p.exists && p.parent.is_none()).map(|p| (p.root.clone(), p.kind)).collect();
+        let Some(PageModel::Hub(hub)) = self.pages.get(&id).map(|s| &s.model) else {
+            return;
+        };
+        let projects: Vec<(PathBuf, fenix_project::ProjectKind)> = hub
+            .projects
+            .iter()
+            .filter(|p| p.exists && p.parent.is_none())
+            .map(|p| (p.root.clone(), p.kind))
+            .collect();
         let probe = self.app_probe();
         self.page_spawn(move |send| {
             let info = |root: PathBuf, kind: fenix_project::ProjectKind| {
                 let git = fenix_project::vcs::git_summary(&root);
                 let checks = doctor::diagnose_with(&root, kind, &probe, false, &[]);
-                let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
-                send(PageEvent::HubInfo { buffer: id, root, git, health });
+                let health = (
+                    doctor::worst(&checks),
+                    checks.iter().filter(|c| c.health >= Health::Warn).count(),
+                );
+                send(PageEvent::HubInfo {
+                    buffer: id,
+                    root,
+                    git,
+                    health,
+                });
             };
             // Every project's own row first, then what's inside each.
             let mut found_all = Vec::new();
             for (root, kind) in &projects {
                 let found = fenix_project::workspace::subprojects(root);
-                send(PageEvent::Subprojects { buffer: id, root: root.clone(), found: found.clone() });
+                send(PageEvent::Subprojects {
+                    buffer: id,
+                    root: root.clone(),
+                    found: found.clone(),
+                });
                 info(root.clone(), *kind);
                 found_all.extend(found);
             }
@@ -1423,7 +1905,9 @@ impl App {
             Action::Add(path) => {
                 self.register_project_dir(&path);
                 self.hub_reload(id);
-                let root = std::fs::canonicalize(&path).map(fenix_lsp::normalize).unwrap_or(path);
+                let root = std::fs::canonicalize(&path)
+                    .map(fenix_lsp::normalize)
+                    .unwrap_or(path);
                 if let Some(PageModel::Hub(hub)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
                     hub.focus_root(&root);
                 }
@@ -1439,7 +1923,10 @@ impl App {
             }
             Action::Doctor(root) => self.open_doctor(root),
             Action::Settings(root) => {
-                let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+                let name = root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.display().to_string());
                 self.open_settings_page(crate::settings_page::Scope::Project { root, name }, None);
             }
             Action::TogglePin(root) => {
@@ -1467,7 +1954,10 @@ impl App {
                 self.project_meta.forget(&root);
                 self.save_project_meta();
                 self.hub_reload(id);
-                self.set_message(format!("removed {} from your projects -- the folder is untouched", root.display()));
+                self.set_message(format!(
+                    "removed {} from your projects -- the folder is untouched",
+                    root.display()
+                ));
             }
         }
     }
@@ -1491,7 +1981,11 @@ impl App {
     }
 
     pub(super) fn open_doctor(&mut self, root: PathBuf) {
-        let existing = self.pages.iter().find(|(_, s)| matches!(&s.model, PageModel::Doctor(d) if d.root == root)).map(|(id, _)| *id);
+        let existing = self
+            .pages
+            .iter()
+            .find(|(_, s)| matches!(&s.model, PageModel::Doctor(d) if d.root == root))
+            .map(|(id, _)| *id);
         let id = match existing {
             Some(id) => {
                 self.show_page(id);
@@ -1507,8 +2001,12 @@ impl App {
 
     /// Runs the deep check for doctor page `id` off the UI thread.
     pub(super) fn doctor_check(&mut self, id: BufferId) {
-        let Some(state) = self.pages.get_mut(&id) else { return };
-        let PageModel::Doctor(d) = &mut state.model else { return };
+        let Some(state) = self.pages.get_mut(&id) else {
+            return;
+        };
+        let PageModel::Doctor(d) = &mut state.model else {
+            return;
+        };
         let (root, kind) = (d.root.clone(), d.kind);
         d.checks = None;
         state.generation += 1;
@@ -1517,32 +2015,61 @@ impl App {
         let probe = self.app_probe();
         self.page_spawn(move |send| {
             let checks = doctor::diagnose_with(&root, kind, &probe, true, &[]);
-            send(PageEvent::Checks { buffer: id, generation, checks });
+            send(PageEvent::Checks {
+                buffer: id,
+                generation,
+                checks,
+            });
         });
     }
 
     /// Runs check `i`'s fix.
     fn doctor_fix(&mut self, id: BufferId, i: usize) {
-        let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
-        let Some(fix) = d.check(i).and_then(|c| c.fix.clone()) else { return };
+        let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) else {
+            return;
+        };
+        let Some(fix) = d.check(i).and_then(|c| c.fix.clone()) else {
+            return;
+        };
         let root = d.root.clone();
         match fix.action {
             FixAction::Run(step) => {
-                d.fixing = Some(Fixing { check: i, output: Vec::new(), result: None });
+                d.fixing = Some(Fixing {
+                    check: i,
+                    output: Vec::new(),
+                    result: None,
+                });
                 self.page_run(id, step, &root);
             }
             FixAction::Editor(fix) => {
                 match fix {
-                    EditorFix::UseLanguageServer { language, executable, args } => {
-                        let result = fenix_project::tools::ProjectTools::read(&root).and_then(|mut tools| {
-                            tools.lsp.insert(language, fenix_project::tools::CommandSpec::new(executable.display().to_string(), args));
-                            tools.write(&root)
-                        });
-                        if let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
-                            d.last_fix = Some(("use it for this project".to_string(), result.clone()));
+                    EditorFix::UseLanguageServer {
+                        language,
+                        executable,
+                        args,
+                    } => {
+                        let result = fenix_project::tools::ProjectTools::read(&root).and_then(
+                            |mut tools| {
+                                tools.lsp.insert(
+                                    language,
+                                    fenix_project::tools::CommandSpec::new(
+                                        executable.display().to_string(),
+                                        args,
+                                    ),
+                                );
+                                tools.write(&root)
+                            },
+                        );
+                        if let Some(PageModel::Doctor(d)) =
+                            self.pages.get_mut(&id).map(|s| &mut s.model)
+                        {
+                            d.last_fix =
+                                Some(("use it for this project".to_string(), result.clone()));
                         }
                         match result {
-                            Ok(()) => self.set_message("written to .fenix/tools.json -- :lsp-restart to start it"),
+                            Ok(()) => self.set_message(
+                                "written to .fenix/tools.json -- :lsp-restart to start it",
+                            ),
                             Err(e) => self.set_error(e),
                         }
                     }
@@ -1565,7 +2092,10 @@ impl App {
             Action::Recheck => self.doctor_check(id),
             Action::Fix(i) => self.doctor_fix(id, i),
             Action::FixAllSafe => {
-                let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
+                let Some(PageModel::Doctor(d)) = self.pages.get_mut(&id).map(|s| &mut s.model)
+                else {
+                    return;
+                };
                 let mut queue = d.safe_fixes();
                 if queue.is_empty() {
                     return;
@@ -1576,10 +2106,17 @@ impl App {
             }
             Action::Open(path, line) => {
                 self.open_file_from_picker(&path);
-                self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col: 1, text: String::new() });
+                self.jump_to_grep_match(&fenix_project::GrepMatch {
+                    path,
+                    line,
+                    col: 1,
+                    text: String::new(),
+                });
             }
             Action::CopyReport => {
-                let Some(PageModel::Doctor(d)) = self.pages.get(&id).map(|s| &s.model) else { return };
+                let Some(PageModel::Doctor(d)) = self.pages.get(&id).map(|s| &s.model) else {
+                    return;
+                };
                 let report = d.report();
                 match self.clipboard.as_mut().map(|c| c.set_text(report)) {
                     Some(Ok(())) => self.set_message("copied the doctor's report"),
@@ -1605,10 +2142,17 @@ impl App {
 
     /// The project's own section of the settings page, read for `root`.
     pub(super) fn project_page_model(&self, root: &Path) -> Settings {
-        let mut settings = Settings::new(root.to_path_buf(), fenix_project::detect_kind_from_files(root));
+        let mut settings = Settings::new(
+            root.to_path_buf(),
+            fenix_project::detect_kind_from_files(root),
+        );
         settings.declared = fenix_project::declared_kind(root);
         settings.pinned = self.project_meta.is_pinned(root);
-        settings.group = self.project_meta.group(root).unwrap_or_default().to_string();
+        settings.group = self
+            .project_meta
+            .group(root)
+            .unwrap_or_default()
+            .to_string();
         settings.jira = fenix_project::meta::jira_key(root).unwrap_or_default();
         settings
     }
@@ -1643,7 +2187,14 @@ impl App {
                 self.project_meta.set_pinned(&root, pinned);
                 self.save_project_meta();
             }
-            Action::RunTask(name) => self.run_task(fenix_tasks::TaskDef { name, command: String::new(), args: Vec::new() }, root),
+            Action::RunTask(name) => self.run_task(
+                fenix_tasks::TaskDef {
+                    name,
+                    command: String::new(),
+                    args: Vec::new(),
+                },
+                root,
+            ),
             Action::Browse { start, folder } => self.settings_browse(start.or(Some(root)), folder),
             Action::OpenRaw => {
                 let path = root.join(".fenix").join("tools.json");
@@ -1665,7 +2216,8 @@ mod tests {
     struct Scratch(PathBuf);
     impl Scratch {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("fenix-pages-{name}-{}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("fenix-pages-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             Scratch(fenix_lsp::normalize(std::fs::canonicalize(&dir).unwrap()))
@@ -1712,16 +2264,27 @@ mod tests {
         let mut app = App::with_file(None);
         app.cmd_project_new();
         let id = app.focused_buffer_id();
-        let Some(PageModel::Wizard(w)) = app.pages.get_mut(&id).map(|s| &mut s.model) else { panic!("no wizard") };
+        let Some(PageModel::Wizard(w)) = app.pages.get_mut(&id).map(|s| &mut s.model) else {
+            panic!("no wizard")
+        };
         w.parent = parent.display().to_string();
         (w.register, w.git_init, w.git_commit) = (false, git, false);
         let i = w.templates.iter().position(|t| t.id == template).unwrap();
-        w.focus = w.fields().iter().position(|f| *f == project_wizard::Field::Template(i)).unwrap();
+        w.focus = w
+            .fields()
+            .iter()
+            .position(|f| *f == project_wizard::Field::Template(i))
+            .unwrap();
         app
     }
 
     fn wizard(app: &App) -> &Wizard {
-        match app.pages.values().map(|s| &s.model).find(|m| matches!(m, PageModel::Wizard(_))) {
+        match app
+            .pages
+            .values()
+            .map(|s| &s.model)
+            .find(|m| matches!(m, PageModel::Wizard(_)))
+        {
             Some(PageModel::Wizard(w)) => w,
             _ => panic!("no wizard"),
         }
@@ -1742,11 +2305,19 @@ mod tests {
         app.page_scroll_to_top(id, pane, 40);
         app.pane_state_mut(pane).scroll_line = 3;
         app.page_scroll_to_top(id, pane, 40);
-        assert_eq!(app.pane_state(pane).scroll_line, 3, "no move: the page stays where it was put");
+        assert_eq!(
+            app.pane_state(pane).scroll_line,
+            3,
+            "no move: the page stays where it was put"
+        );
         app.page_key(KeyPress::char('k'));
         app.ensure_page_layout(id, pane, 160);
         app.page_scroll_to_top(id, pane, 40);
-        assert_eq!(app.pane_state(pane).scroll_line, 0, "back up in the first screenful: the top");
+        assert_eq!(
+            app.pane_state(pane).scroll_line,
+            0,
+            "back up in the first screenful: the top"
+        );
     }
 
     #[test]
@@ -1754,17 +2325,33 @@ mod tests {
         let mut app = App::with_file(None);
         app.cmd_project_new();
         assert_eq!(app.open().kind, BufferKind::Page);
-        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*new project*");
+        assert_eq!(
+            app.buffer_display_name(app.focused_buffer_id()),
+            "*new project*"
+        );
         let id = app.focused_buffer_id();
         let text = page_text(&mut app);
-        assert!(text.contains("New project") && text.contains("Python · uv"), "{text}");
+        assert!(
+            text.contains("New project") && text.contains("Python · uv"),
+            "{text}"
+        );
         assert!(!app.page_highlights(id, 0, 40).is_empty());
-        assert!(!app.page_key(KeyPress::char(' ')), "the leader still works from the page");
+        assert!(
+            !app.page_key(KeyPress::char(' ')),
+            "the leader still works from the page"
+        );
         app.leader_matcher.feed(KeyPress::char(' '));
-        assert!(!app.page_key(KeyPress::char('G')), "a pending leader sequence gets its keys");
+        assert!(
+            !app.page_key(KeyPress::char('G')),
+            "a pending leader sequence gets its keys"
+        );
         app.leader_matcher.cancel();
         app.cmd_project_new();
-        assert_eq!(app.focused_buffer_id(), id, "a second SPC p c brings back the same wizard");
+        assert_eq!(
+            app.focused_buffer_id(),
+            id,
+            "a second SPC p c brings back the same wizard"
+        );
     }
 
     #[test]
@@ -1784,13 +2371,31 @@ mod tests {
         assert_eq!(wizard(&app).step, project_wizard::Step::Review);
         press(&mut app, "\n");
         let project = dir.0.join("fresh");
-        assert_eq!(std::fs::read_to_string(project.join("README.md")).unwrap(), "# fresh\n");
+        assert_eq!(
+            std::fs::read_to_string(project.join("README.md")).unwrap(),
+            "# fresh\n"
+        );
         assert!(project.join(".git").is_dir(), "git init ran");
         assert!(app.pages.is_empty(), "the wizard closed itself");
-        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("README.md")), "and opened the README");
+        assert!(
+            app.open()
+                .buffer
+                .path()
+                .is_some_and(|p| p.ends_with("README.md")),
+            "and opened the README"
+        );
         assert_eq!(app.workspaces.active_name(), "fresh");
-        assert_eq!(app.workspaces.workspaces[app.workspaces.active_index()].project.as_deref(), Some(project.as_path()));
-        assert_eq!(app.workspaces.len(), 1, "Home's workspace was reused, not left behind empty");
+        assert_eq!(
+            app.workspaces.workspaces[app.workspaces.active_index()]
+                .project
+                .as_deref(),
+            Some(project.as_path())
+        );
+        assert_eq!(
+            app.workspaces.len(),
+            1,
+            "Home's workspace was reused, not left behind empty"
+        );
     }
 
     #[test]
@@ -1800,12 +2405,25 @@ mod tests {
         press(&mut app, "\nfresh\nG\n");
         let id = app.focused_buffer_id();
         if let Some(PageModel::Wizard(w)) = app.pages.get_mut(&id).map(|s| &mut s.model) {
-            w.plan.as_mut().unwrap().steps.push(fenix_project::template::Step::new("definitely-not-a-program-xyz", &[]));
+            w.plan
+                .as_mut()
+                .unwrap()
+                .steps
+                .push(fenix_project::template::Step::new(
+                    "definitely-not-a-program-xyz",
+                    &[],
+                ));
         }
         press(&mut app, "\n");
         let run = wizard(&app).run.as_ref().unwrap();
-        assert!(matches!(run.steps.last().unwrap().status, Status::Failed(_)));
-        assert!(dir.0.join("fresh/README.md").is_file(), "what was done stays");
+        assert!(matches!(
+            run.steps.last().unwrap().status,
+            Status::Failed(_)
+        ));
+        assert!(
+            dir.0.join("fresh/README.md").is_file(),
+            "what was done stays"
+        );
         assert!(page_text(&mut app).contains("r retry"));
         press(&mut app, "s");
         assert!(app.pages.is_empty(), "skipping the last step finishes");
@@ -1851,30 +2469,50 @@ mod tests {
         let hub_id = app.focused_buffer_id();
         let text = page_text(&mut app);
         let a_name = a.0.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(text.contains(&a_name) && text.contains("RS") && text.contains("PY"), "{text}");
-        assert!(text.contains("no problems found") || text.contains("problem"), "the quick pass reported in:\n{text}");
+        assert!(
+            text.contains(&a_name) && text.contains("RS") && text.contains("PY"),
+            "{text}"
+        );
+        assert!(
+            text.contains("no problems found") || text.contains("problem"),
+            "the quick pass reported in:\n{text}"
+        );
         // Open the first (a).
         press(&mut app, "\n");
         assert!(!app.pages.contains_key(&hub_id), "the hub closes behind it");
         app.cmd_project_hub();
-        assert_eq!(app.buffer_display_name(app.focused_buffer_id()), "*projects*");
+        assert_eq!(
+            app.buffer_display_name(app.focused_buffer_id()),
+            "*projects*"
+        );
         press(&mut app, "q");
         assert_eq!(app.workspaces.active_name(), a_name);
-        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("README.md")));
+        assert!(app
+            .open()
+            .buffer
+            .path()
+            .is_some_and(|p| p.ends_with("README.md")));
         // Back to b: a new workspace; back to a: its own again.
         app.cmd_project_hub();
         press(&mut app, "j\n");
         assert_eq!(app.workspaces.len(), 2);
         app.cmd_project_hub();
         let a_row = app.pages.values().find_map(|s| match &s.model {
-            PageModel::Hub(h) => h.rows().iter().position(|(_, i)| h.projects[*i].root == a.0),
+            PageModel::Hub(h) => h
+                .rows()
+                .iter()
+                .position(|(_, i)| h.projects[*i].root == a.0),
             _ => None,
         });
         for _ in 0..a_row.unwrap() {
             press(&mut app, "j");
         }
         press(&mut app, "\n");
-        assert_eq!(app.workspaces.len(), 2, "no third workspace: a already had one");
+        assert_eq!(
+            app.workspaces.len(),
+            2,
+            "no third workspace: a already had one"
+        );
         assert_eq!(app.workspaces.active_name(), a_name);
     }
 
@@ -1888,10 +2526,23 @@ mod tests {
         app.workspaces.new_workspace(home, Cursor::at_start());
         app.cmd_project_hub();
         let before = app.workspaces.len();
-        press(&mut app, "
-");
-        assert_eq!(app.workspaces.len(), before, "the hub's workspace became the project's");
-        assert!(app.workspaces.workspaces.iter().all(|w| w.windows.windows().iter().all(|p| w.windows.content(*p).is_some_and(|id| app.buffers.get(*id).is_some()))));
+        press(
+            &mut app, "
+",
+        );
+        assert_eq!(
+            app.workspaces.len(),
+            before,
+            "the hub's workspace became the project's"
+        );
+        assert!(app
+            .workspaces
+            .workspaces
+            .iter()
+            .all(|w| w.windows.windows().iter().all(|p| w
+                .windows
+                .content(*p)
+                .is_some_and(|id| app.buffers.get(*id).is_some()))));
     }
 
     #[test]
@@ -1901,20 +2552,41 @@ mod tests {
         std::fs::write(mono.0.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         std::fs::write(mono.0.join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::create_dir_all(mono.0.join("crates/core/src")).unwrap();
-        std::fs::write(mono.0.join("crates/core/Cargo.toml"), "[package]\nname = \"core\"\n").unwrap();
+        std::fs::write(
+            mono.0.join("crates/core/Cargo.toml"),
+            "[package]\nname = \"core\"\n",
+        )
+        .unwrap();
         std::fs::write(mono.0.join("crates/core/src/lib.rs"), "").unwrap();
         let mut app = app_with(&[&mono.0]);
         app.cmd_project_hub();
         let text = page_text(&mut app);
-        assert!(text.contains("crates/core"), "the subproject is listed:\n{text}");
+        assert!(
+            text.contains("crates/core"),
+            "the subproject is listed:\n{text}"
+        );
         press(&mut app, "j\n");
-        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("lib.rs")), "its main file");
+        assert!(
+            app.open()
+                .buffer
+                .path()
+                .is_some_and(|p| p.ends_with("lib.rs")),
+            "its main file"
+        );
         assert_eq!(app.workspaces.active_name(), "core");
-        assert_eq!(app.known_projects.roots(), std::slice::from_ref(&mono.0), "not added to the list");
+        assert_eq!(
+            app.known_projects.roots(),
+            std::slice::from_ref(&mono.0),
+            "not added to the list"
+        );
         // Its language server runs for the whole Cargo workspace.
         let lib = mono.0.join("crates/core/src/lib.rs");
         assert_eq!(tool_sessions::lsp_root_for_path(&lib), mono.0);
-        assert_eq!(tool_sessions::root_for_path(&lib), mono.0.join("crates/core"), "tasks and the modeline stay the member's");
+        assert_eq!(
+            tool_sessions::root_for_path(&lib),
+            mono.0.join("crates/core"),
+            "tasks and the modeline stay the member's"
+        );
     }
 
     #[test]
@@ -1932,7 +2604,11 @@ mod tests {
             press(&mut app, &c.to_string());
         }
         assert_eq!(app.project_meta.group(&b.0), Some("Labs"));
-        assert!(fenix_project::meta::ProjectMeta::load_or_default(a.0.join("meta.json")).is_pinned(&b.0), "saved to disk");
+        assert!(
+            fenix_project::meta::ProjectMeta::load_or_default(a.0.join("meta.json"))
+                .is_pinned(&b.0),
+            "saved to disk"
+        );
         press(&mut app, "d");
         assert!(app.known_projects.roots().contains(&b.0), "one d only asks");
         press(&mut app, "d");
@@ -1947,12 +2623,22 @@ mod tests {
         let mut app = App::with_file(None);
         app.open_doctor(dir.0.clone());
         let text = page_text(&mut app);
-        assert!(text.contains("TOOLCHAIN") && text.contains("cargo"), "{text}");
-        assert!(text.contains("not a repository") && text.contains("git init"), "{text}");
+        assert!(
+            text.contains("TOOLCHAIN") && text.contains("cargo"),
+            "{text}"
+        );
+        assert!(
+            text.contains("not a repository") && text.contains("git init"),
+            "{text}"
+        );
         // Focus the git row and fix it.
         let id = app.focused_buffer_id();
         let row = match &app.pages[&id].model {
-            PageModel::Doctor(d) => d.order().iter().position(|&i| d.check(i).unwrap().label == "git").unwrap(),
+            PageModel::Doctor(d) => d
+                .order()
+                .iter()
+                .position(|&i| d.check(i).unwrap().label == "git")
+                .unwrap(),
             _ => unreachable!(),
         };
         if let PageModel::Doctor(d) = &mut app.pages.get_mut(&id).unwrap().model {
@@ -1961,8 +2647,14 @@ mod tests {
         press(&mut app, "f");
         assert!(dir.0.join(".git").is_dir(), "git init ran");
         let text = page_text(&mut app);
-        assert!(!text.contains("not a repository"), "it checked again afterwards:\n{text}");
-        assert!(matches!(app.project_health.get(&dir.0), Some((_, _))), "the result feeds the hub's dot");
+        assert!(
+            !text.contains("not a repository"),
+            "it checked again afterwards:\n{text}"
+        );
+        assert!(
+            matches!(app.project_health.get(&dir.0), Some((_, _))),
+            "the result feeds the hub's dot"
+        );
     }
 
     #[test]
@@ -1970,21 +2662,42 @@ mod tests {
         let dir = Scratch::new("settings");
         std::fs::write(dir.0.join("pyproject.toml"), "").unwrap();
         let mut app = App::with_file(None);
-        app.project_meta = fenix_project::meta::ProjectMeta::load_or_default(dir.0.join("meta.json"));
+        app.project_meta =
+            fenix_project::meta::ProjectMeta::load_or_default(dir.0.join("meta.json"));
         // SPC p , on the project, then its own section at the top.
-        app.open_settings_page(crate::settings_page::Scope::Project { root: dir.0.clone(), name: "settings".into() }, None);
+        app.open_settings_page(
+            crate::settings_page::Scope::Project {
+                root: dir.0.clone(),
+                name: "settings".into(),
+            },
+            None,
+        );
         press(&mut app, "\tk\n");
         let text = page_text(&mut app);
-        assert!(text.contains("detect: Python") && text.contains("TASKS · 0"), "{text}");
+        assert!(
+            text.contains("detect: Python") && text.contains("TASKS · 0"),
+            "{text}"
+        );
         // Kind -> declared Python, then Jira.
         press(&mut app, "l");
-        assert!(std::fs::read_to_string(dir.0.join(".fenix/settings.toml")).unwrap().contains("kind = \"python\""));
+        assert!(std::fs::read_to_string(dir.0.join(".fenix/settings.toml"))
+            .unwrap()
+            .contains("kind = \"python\""));
         press(&mut app, "jjj\nfnx\n");
-        assert_eq!(fenix_project::meta::jira_key(&dir.0).as_deref(), Some("FNX"));
+        assert_eq!(
+            fenix_project::meta::jira_key(&dir.0).as_deref(),
+            Some("FNX")
+        );
         // Add a task.
         press(&mut app, "ja");
         for c in "test = uv run pytest -q\n".chars() {
-            let key = if c == ' ' { KeyPress::char(' ') } else if c == '\n' { KeyPress::named(FenixNamedKey::Enter) } else { KeyPress::char(c) };
+            let key = if c == ' ' {
+                KeyPress::char(' ')
+            } else if c == '\n' {
+                KeyPress::named(FenixNamedKey::Enter)
+            } else {
+                KeyPress::char(c)
+            };
             assert!(app.page_key(key));
         }
         let tools = fenix_project::tools::ProjectTools::read(&dir.0).unwrap();
@@ -1999,7 +2712,13 @@ mod tests {
         std::fs::write(sketch.join("Blinky.ino"), "void setup() {}").unwrap();
         let mut app = App::with_file(None);
         app.open_project(sketch.clone(), None, false);
-        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("Blinky.ino")), "not a find-file picker");
+        assert!(
+            app.open()
+                .buffer
+                .path()
+                .is_some_and(|p| p.ends_with("Blinky.ino")),
+            "not a find-file picker"
+        );
         assert_eq!(app.main_view, MainView::Editor);
     }
 
@@ -2012,6 +2731,10 @@ mod tests {
         let before = app.workspaces.active_name().to_string();
         app.open_project(dir.0.clone(), None, false);
         assert_eq!(app.workspaces.active_name(), before);
-        assert!(app.open().buffer.path().is_some_and(|p| p.ends_with("README.md")));
+        assert!(app
+            .open()
+            .buffer
+            .path()
+            .is_some_and(|p| p.ends_with("README.md")));
     }
 }

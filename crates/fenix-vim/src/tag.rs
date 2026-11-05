@@ -65,7 +65,12 @@ pub(crate) fn pairs(text: &str) -> Vec<TagPair> {
                     if let Some(i) = stack.iter().rposition(|(n, _, _)| *n == name) {
                         let (_, open_start, open_end) = stack[i].clone();
                         stack.truncate(i);
-                        out.push(TagPair { open_start, open_end, close_start: start, close_end: start + len });
+                        out.push(TagPair {
+                            open_start,
+                            open_end,
+                            close_start: start,
+                            close_end: start + len,
+                        });
                     }
                     Some(len)
                 }

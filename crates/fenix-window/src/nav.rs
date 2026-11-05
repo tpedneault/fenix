@@ -29,7 +29,11 @@ const REFERENCE_SIZE: f32 = 10_000.0;
 /// into the window on the monitor next door. Panes in the same window
 /// are simply nearer than panes in the one beside it, so unifying the
 /// two needs no special case at all.
-pub fn pick<K: Copy + PartialEq>(candidates: &[(K, Rect)], from: K, dir: NavDirection) -> Option<K> {
+pub fn pick<K: Copy + PartialEq>(
+    candidates: &[(K, Rect)],
+    from: K,
+    dir: NavDirection,
+) -> Option<K> {
     let &(_, from_rect) = candidates.iter().find(|(key, _)| *key == from)?;
 
     let mut best: Option<(K, f32, f32)> = None; // (key, overlap, distance): maximize overlap, then minimize distance
@@ -37,7 +41,9 @@ pub fn pick<K: Copy + PartialEq>(candidates: &[(K, Rect)], from: K, dir: NavDire
         if key == from {
             continue;
         }
-        let Some((overlap, distance)) = candidate_score(from_rect, rect, dir) else { continue };
+        let Some((overlap, distance)) = candidate_score(from_rect, rect, dir) else {
+            continue;
+        };
         let better = match best {
             None => true,
             Some((_, best_overlap, best_distance)) => {
@@ -56,7 +62,12 @@ impl<T> WindowTree<T> {
     /// Returns `false` (no-op, focus unchanged) if nothing qualifies --
     /// e.g. already at the grid's edge. See `pick` for the rule.
     pub fn navigate(&mut self, dir: NavDirection) -> bool {
-        let bounds = Rect { x: 0.0, y: 0.0, w: REFERENCE_SIZE, h: REFERENCE_SIZE };
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: REFERENCE_SIZE,
+            h: REFERENCE_SIZE,
+        };
         let rects = self.layout(bounds);
         match pick(&rects, self.focused_id(), dir) {
             Some(id) => {
@@ -124,7 +135,13 @@ mod tests {
 
     /// Builds a 2x2 grid: `Vertical(Horizontal(TL, BL), Horizontal(TR, BR))`.
     /// Returns the tree plus each quadrant's id.
-    fn grid() -> (WindowTree<&'static str>, WindowId, WindowId, WindowId, WindowId) {
+    fn grid() -> (
+        WindowTree<&'static str>,
+        WindowId,
+        WindowId,
+        WindowId,
+        WindowId,
+    ) {
         let mut t = WindowTree::new("TL");
         let tl = t.focused_id();
         let bl = t.split(SplitKind::Horizontal, "BL");
@@ -140,10 +157,42 @@ mod tests {
     /// Keyed `(window, pane)` the way the host app keys them.
     fn two_screens() -> Vec<((u8, u8), Rect)> {
         vec![
-            ((0, 0), Rect { x: 0.0, y: 0.0, w: 960.0, h: 1080.0 }),
-            ((0, 1), Rect { x: 960.0, y: 0.0, w: 960.0, h: 1080.0 }),
-            ((1, 0), Rect { x: 1920.0, y: 0.0, w: 960.0, h: 1080.0 }),
-            ((1, 1), Rect { x: 2880.0, y: 0.0, w: 960.0, h: 1080.0 }),
+            (
+                (0, 0),
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 960.0,
+                    h: 1080.0,
+                },
+            ),
+            (
+                (0, 1),
+                Rect {
+                    x: 960.0,
+                    y: 0.0,
+                    w: 960.0,
+                    h: 1080.0,
+                },
+            ),
+            (
+                (1, 0),
+                Rect {
+                    x: 1920.0,
+                    y: 0.0,
+                    w: 960.0,
+                    h: 1080.0,
+                },
+            ),
+            (
+                (1, 1),
+                Rect {
+                    x: 2880.0,
+                    y: 0.0,
+                    w: 960.0,
+                    h: 1080.0,
+                },
+            ),
         ]
     }
 
@@ -161,7 +210,11 @@ mod tests {
     #[test]
     fn pick_stays_inside_a_screen_while_there_is_somewhere_to_go() {
         let screens = two_screens();
-        assert_eq!(pick(&screens, (1, 1), NavDirection::Left), Some((1, 0)), "the neighbouring pane is nearer than the next screen");
+        assert_eq!(
+            pick(&screens, (1, 1), NavDirection::Left),
+            Some((1, 0)),
+            "the neighbouring pane is nearer than the next screen"
+        );
         assert_eq!(pick(&screens, (0, 0), NavDirection::Right), Some((0, 1)));
     }
 
@@ -179,7 +232,15 @@ mod tests {
         // horizontal band with the one to its left, so a leftward move
         // from it has no candidate rather than jumping diagonally.
         let mut screens = two_screens();
-        screens.push(((2, 0), Rect { x: 1920.0, y: -1080.0, w: 1920.0, h: 1080.0 }));
+        screens.push((
+            (2, 0),
+            Rect {
+                x: 1920.0,
+                y: -1080.0,
+                w: 1920.0,
+                h: 1080.0,
+            },
+        ));
         assert_eq!(pick(&screens, (2, 0), NavDirection::Left), None);
         assert_eq!(pick(&screens, (2, 0), NavDirection::Down), Some((1, 0)));
     }
@@ -231,7 +292,12 @@ mod tests {
     #[test]
     fn navigate_on_a_single_window_tree_is_always_a_no_op() {
         let mut t = WindowTree::new("only");
-        for dir in [NavDirection::Left, NavDirection::Right, NavDirection::Up, NavDirection::Down] {
+        for dir in [
+            NavDirection::Left,
+            NavDirection::Right,
+            NavDirection::Up,
+            NavDirection::Down,
+        ] {
             assert!(!t.navigate(dir));
         }
     }

@@ -11,7 +11,12 @@ use crate::entry::Entry;
 /// Every file and folder under `root` whose name contains `needle`,
 /// ignoring case -- folders taken from the paths of the `files` under
 /// them -- read from the disk, at most `limit` of them.
-pub fn search<'a>(files: impl IntoIterator<Item = &'a Path>, root: &Path, needle: &str, limit: usize) -> Vec<Entry> {
+pub fn search<'a>(
+    files: impl IntoIterator<Item = &'a Path>,
+    root: &Path,
+    needle: &str,
+    limit: usize,
+) -> Vec<Entry> {
     let needle = needle.trim().to_lowercase();
     if needle.is_empty() {
         return Vec::new();
@@ -19,11 +24,19 @@ pub fn search<'a>(files: impl IntoIterator<Item = &'a Path>, root: &Path, needle
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut found = Vec::new();
     for file in files {
-        let Ok(rel) = file.strip_prefix(root) else { continue };
+        let Ok(rel) = file.strip_prefix(root) else {
+            continue;
+        };
         let mut at = root.to_path_buf();
         for part in rel.components() {
             at.push(part);
-            if part.as_os_str().to_string_lossy().to_lowercase().contains(&needle) && seen.insert(at.clone()) {
+            if part
+                .as_os_str()
+                .to_string_lossy()
+                .to_lowercase()
+                .contains(&needle)
+                && seen.insert(at.clone())
+            {
                 found.push(Entry::at(&at));
                 if found.len() >= limit {
                     return found;
@@ -49,7 +62,11 @@ mod tests {
         let files = [deep.join("lexer.rs"), deep.join("other.rs")];
 
         let found = search(files.iter().map(PathBuf::as_path), dir.path(), "PARS", 10);
-        assert_eq!(found.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["parser"], "a folder, from the paths under it");
+        assert_eq!(
+            found.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
+            ["parser"],
+            "a folder, from the paths under it"
+        );
         assert!(found[0].is_dir());
 
         let found = search(files.iter().map(PathBuf::as_path), dir.path(), "lex", 10);
@@ -57,6 +74,10 @@ mod tests {
         assert_eq!(found[0].size, 0);
         assert!(found[0].readable);
 
-        assert_eq!(search(files.iter().map(PathBuf::as_path), dir.path(), "rs", 1).len(), 1, "no more than asked for");
+        assert_eq!(
+            search(files.iter().map(PathBuf::as_path), dir.path(), "rs", 1).len(),
+            1,
+            "no more than asked for"
+        );
     }
 }

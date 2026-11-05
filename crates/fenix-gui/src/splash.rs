@@ -48,7 +48,10 @@ impl SplashScene {
             sprites.upload(image.width, image.height, &image.rgba)
         };
         let to_u8 = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let word = fenix_brand::wordmark((mark * 0.2).round().max(6.0) as u32, [to_u8(fg[0]), to_u8(fg[1]), to_u8(fg[2])]);
+        let word = fenix_brand::wordmark(
+            (mark * 0.2).round().max(6.0) as u32,
+            [to_u8(fg[0]), to_u8(fg[1]), to_u8(fg[2])],
+        );
         SplashScene {
             blades: [blade(0), blade(1), blade(2)],
             word: sprites.upload(word.width, word.height, &word.rgba),
@@ -63,7 +66,16 @@ impl SplashScene {
     /// startup `progress` (0 to 1) along, everything at `alpha`. With
     /// `cover`, it first covers the window in its background: that's
     /// how the editor fades it out over its own first frames.
-    pub fn draw(&self, sprites: &mut SpriteRenderer, width: u32, height: u32, t: f32, progress: f32, alpha: f32, cover: bool) {
+    pub fn draw(
+        &self,
+        sprites: &mut SpriteRenderer,
+        width: u32,
+        height: u32,
+        t: f32,
+        progress: f32,
+        alpha: f32,
+        cover: bool,
+    ) {
         let (w, h) = (width as f32, height as f32);
         if cover {
             let [r, g, b, _] = self.bg;
@@ -76,27 +88,60 @@ impl SplashScene {
         for (i, sprite) in self.blades.iter().enumerate() {
             let appear = ease_out_cubic((t - 0.1 * i as f32) / 0.2);
             let travel = (1.0 - appear) * s * 0.14;
-            let (dx, dy) = if i == 0 { (0.0, travel) } else { (-travel, 0.0) };
+            let (dx, dy) = if i == 0 {
+                (0.0, travel)
+            } else {
+                (-travel, 0.0)
+            };
             // After assembling, a slow wave passes through the blades in
             // turn: alive, never distracting.
-            let phase = (t - BREATHE_AFTER - i as f32 * 0.2) / BREATHE_PERIOD * std::f32::consts::TAU;
+            let phase =
+                (t - BREATHE_AFTER - i as f32 * 0.2) / BREATHE_PERIOD * std::f32::consts::TAU;
             let wave = 0.5 + 0.5 * phase.cos();
             let level = lerp(1.0, 0.45 + 0.55 * wave, breathe);
-            sprites.push(sprite, x + dx, y + dy, s, s, [1.0, 1.0, 1.0, alpha * appear * level]);
+            sprites.push(
+                sprite,
+                x + dx,
+                y + dy,
+                s,
+                s,
+                [1.0, 1.0, 1.0, alpha * appear * level],
+            );
         }
         let word_alpha = ((t - 0.3) / 0.2).clamp(0.0, 1.0);
         let (ww, wh) = (self.word.width as f32, self.word.height as f32);
         let word_y = (y + s + s * 0.16).round();
-        sprites.push(&self.word, ((w - ww) / 2.0).round(), word_y, ww, wh, [1.0, 1.0, 1.0, alpha * word_alpha]);
+        sprites.push(
+            &self.word,
+            ((w - ww) / 2.0).round(),
+            word_y,
+            ww,
+            wh,
+            [1.0, 1.0, 1.0, alpha * word_alpha],
+        );
         // The hairline: a faint track, filled in ember as startup moves.
         let bar_w = (s * 1.3).round();
         let bar_x = ((w - bar_w) / 2.0).round();
         let bar_y = (word_y + wh + s * 0.2).round();
         let [r, g, b, _] = self.fg;
-        sprites.push(&self.white, bar_x, bar_y, bar_w, 2.0, [r, g, b, alpha * word_alpha * 0.14]);
+        sprites.push(
+            &self.white,
+            bar_x,
+            bar_y,
+            bar_w,
+            2.0,
+            [r, g, b, alpha * word_alpha * 0.14],
+        );
         let [er, eg, eb] = fenix_brand::EMBER.map(|c| c as f32 / 255.0);
         let fill = (bar_w * progress.clamp(0.0, 1.0)).round();
-        sprites.push(&self.white, bar_x, bar_y, fill, 2.0, [er, eg, eb, alpha * word_alpha]);
+        sprites.push(
+            &self.white,
+            bar_x,
+            bar_y,
+            fill,
+            2.0,
+            [er, eg, eb, alpha * word_alpha],
+        );
     }
 }
 
@@ -136,82 +181,127 @@ impl SplashHandle {
         let progress = Arc::new(AtomicU32::new(0));
         let (first_tx, first_frame) = mpsc::channel();
         let (thread_stop, thread_progress) = (Arc::clone(&stop), Arc::clone(&progress));
-        let thread = std::thread::Builder::new().name("fenix-splash".into()).spawn(move || {
-            let started = Instant::now();
-            let mut sprites = SpriteRenderer::new(Arc::clone(&device), Arc::clone(&queue), config.format);
-            let scene = SplashScene::new(&sprites, config.height, bg, fg);
-            let mut config = config;
-            let mut shown = 0.0f32;
-            let mut first_tx = Some(first_tx);
-            let (mut reported, mut reported_at) = (0.0f32, Instant::now());
-            loop {
-                let target = f32::from_bits(thread_progress.load(Ordering::Acquire));
-                if target != reported {
-                    (reported, reported_at) = (target, Instant::now());
-                }
-                // A long stage reports nothing until it's done, so the
-                // hairline creeps on towards the next stage meanwhile --
-                // never reaching it -- and eases rather than jumps.
-                let waited = reported_at.elapsed().as_secs_f32();
-                let goal = target + ((target + 0.4).min(0.95) - target).max(0.0) * (1.0 - (-waited / 2.0).exp());
-                shown = shown.max(shown + (goal - shown) * 0.12);
-                if thread_stop.load(Ordering::Acquire) {
-                    return Some(SplashReturn { surface, config, sprites, scene, started, progress: shown, still });
-                }
-                let size = window.inner_size();
-                if size.width > 0 && size.height > 0 && (size.width, size.height) != (config.width, config.height) {
-                    config.width = size.width;
-                    config.height = size.height;
-                    surface.configure(&device, &config);
-                }
-                let frame = match surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(frame) | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-                    wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+        let thread = std::thread::Builder::new()
+            .name("fenix-splash".into())
+            .spawn(move || {
+                let started = Instant::now();
+                let mut sprites =
+                    SpriteRenderer::new(Arc::clone(&device), Arc::clone(&queue), config.format);
+                let scene = SplashScene::new(&sprites, config.height, bg, fg);
+                let mut config = config;
+                let mut shown = 0.0f32;
+                let mut first_tx = Some(first_tx);
+                let (mut reported, mut reported_at) = (0.0f32, Instant::now());
+                loop {
+                    let target = f32::from_bits(thread_progress.load(Ordering::Acquire));
+                    if target != reported {
+                        (reported, reported_at) = (target, Instant::now());
+                    }
+                    // A long stage reports nothing until it's done, so the
+                    // hairline creeps on towards the next stage meanwhile --
+                    // never reaching it -- and eases rather than jumps.
+                    let waited = reported_at.elapsed().as_secs_f32();
+                    let goal = target
+                        + ((target + 0.4).min(0.95) - target).max(0.0)
+                            * (1.0 - (-waited / 2.0).exp());
+                    shown = shown.max(shown + (goal - shown) * 0.12);
+                    if thread_stop.load(Ordering::Acquire) {
+                        return Some(SplashReturn {
+                            surface,
+                            config,
+                            sprites,
+                            scene,
+                            started,
+                            progress: shown,
+                            still,
+                        });
+                    }
+                    let size = window.inner_size();
+                    if size.width > 0
+                        && size.height > 0
+                        && (size.width, size.height) != (config.width, config.height)
+                    {
+                        config.width = size.width;
+                        config.height = size.height;
                         surface.configure(&device, &config);
-                        continue;
                     }
-                    _ => {
-                        std::thread::sleep(Duration::from_millis(16));
-                        continue;
+                    let frame = match surface.get_current_texture() {
+                        wgpu::CurrentSurfaceTexture::Success(frame)
+                        | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+                        wgpu::CurrentSurfaceTexture::Outdated
+                        | wgpu::CurrentSurfaceTexture::Lost => {
+                            surface.configure(&device, &config);
+                            continue;
+                        }
+                        _ => {
+                            std::thread::sleep(Duration::from_millis(16));
+                            continue;
+                        }
+                    };
+                    let view = frame
+                        .texture
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    sprites.begin(config.width, config.height);
+                    // Held at the moment the mark has assembled when nothing
+                    // should move; only the hairline goes on filling.
+                    let t = if still {
+                        BREATHE_AFTER
+                    } else {
+                        started.elapsed().as_secs_f32()
+                    };
+                    scene.draw(
+                        &mut sprites,
+                        config.width,
+                        config.height,
+                        t,
+                        shown,
+                        1.0,
+                        false,
+                    );
+                    sprites.flush();
+                    let mut encoder =
+                        device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("splash"),
+                        });
+                    {
+                        let [r, g, b, a] = bg;
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("splash-pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                                        r: r as f64,
+                                        g: g as f64,
+                                        b: b as f64,
+                                        a: a as f64,
+                                    }),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        sprites.render(&mut pass);
                     }
-                };
-                let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                sprites.begin(config.width, config.height);
-                // Held at the moment the mark has assembled when nothing
-                // should move; only the hairline goes on filling.
-                let t = if still { BREATHE_AFTER } else { started.elapsed().as_secs_f32() };
-                scene.draw(&mut sprites, config.width, config.height, t, shown, 1.0, false);
-                sprites.flush();
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("splash") });
-                {
-                    let [r, g, b, a] = bg;
-                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("splash-pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color { r: r as f64, g: g as f64, b: b as f64, a: a as f64 }),
-                                store: wgpu::StoreOp::Store,
-                            },
-                            depth_slice: None,
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
-                    sprites.render(&mut pass);
+                    queue.submit(Some(encoder.finish()));
+                    window.pre_present_notify();
+                    queue.present(frame);
+                    if let Some(tx) = first_tx.take() {
+                        let _ = tx.send(());
+                    }
                 }
-                queue.submit(Some(encoder.finish()));
-                window.pre_present_notify();
-                queue.present(frame);
-                if let Some(tx) = first_tx.take() {
-                    let _ = tx.send(());
-                }
-            }
-        })?;
-        Ok(SplashHandle { stop, progress, first_frame, thread })
+            })?;
+        Ok(SplashHandle {
+            stop,
+            progress,
+            first_frame,
+            thread,
+        })
     }
 
     /// Waits (a little) for the first frame, so the window can be shown
@@ -222,7 +312,8 @@ impl SplashHandle {
 
     /// How far along startup is, 0 to 1.
     pub fn set_progress(&self, progress: f32) {
-        self.progress.store(progress.clamp(0.0, 1.0).to_bits(), Ordering::Release);
+        self.progress
+            .store(progress.clamp(0.0, 1.0).to_bits(), Ordering::Release);
     }
 
     /// Stops drawing and takes the surface back.
@@ -249,7 +340,8 @@ impl SplashFade {
         if self.still {
             return 0.0;
         }
-        let t = now.saturating_duration_since(self.fade_from).as_secs_f32() / FADE_OUT.as_secs_f32();
+        let t =
+            now.saturating_duration_since(self.fade_from).as_secs_f32() / FADE_OUT.as_secs_f32();
         1.0 - ease_out_cubic(t)
     }
 

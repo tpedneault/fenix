@@ -15,7 +15,11 @@ const MARKS: &str = "fenix:agents";
 impl App {
     /// A file's text now: its buffer's when it's open, else the disk's.
     pub(in crate::app) fn agents_current(&self, path: &Path) -> Option<String> {
-        match self.buffers.id_for_path(path).and_then(|id| self.buffers.get(id)) {
+        match self
+            .buffers
+            .id_for_path(path)
+            .and_then(|id| self.buffers.get(id))
+        {
             Some(ob) => Some(ob.buffer.text()),
             None => std::fs::read_to_string(path).ok(),
         }
@@ -23,29 +27,49 @@ impl App {
 
     /// Every file `thread` changed, as the review shows them.
     pub(super) fn agents_review_files(&self, thread: &ThreadId) -> Vec<ReviewFile> {
-        let root = self.agents.hub.meta(thread).map(|m| m.root.clone()).unwrap_or_default();
+        let root = self
+            .agents
+            .hub
+            .meta(thread)
+            .map(|m| m.root.clone())
+            .unwrap_or_default();
         let mut files = Vec::new();
         for (path, before) in self.agents.baselines.get(thread).into_iter().flatten() {
             let baseline = match before {
                 Some(text) => Baseline::Text(text.clone()),
                 None => Baseline::Absent,
             };
-            let name = path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.to_string_lossy().into_owned());
+            let name = path
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| path.to_string_lossy().into_owned());
             let file = ReviewFile::new(path.clone(), name, baseline, self.agents_current(path));
             if file.changed() {
                 files.push(file);
             }
         }
         for path in self.agents.unknown.get(thread).into_iter().flatten() {
-            let name = path.strip_prefix(&root).map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-            files.push(ReviewFile::new(path.clone(), name, Baseline::Unknown, self.agents_current(path)));
+            let name = path
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            files.push(ReviewFile::new(
+                path.clone(),
+                name,
+                Baseline::Unknown,
+                self.agents_current(path),
+            ));
         }
         files
     }
 
     /// `SPC a r`: the shown thread's changes.
     pub(crate) fn agents_open_review(&mut self) {
-        let Some(thread) = self.agents.shown(&self.pages).or_else(|| self.agents.hub.focused().cloned()) else {
+        let Some(thread) = self
+            .agents
+            .shown(&self.pages)
+            .or_else(|| self.agents.hub.focused().cloned())
+        else {
             self.set_message("no agent thread open: SPC a a");
             return;
         };
@@ -78,12 +102,28 @@ impl App {
 
     /// A pipeline review's findings about `thread`'s changes, as notes.
     fn agents_review_notes(&self, thread: &ThreadId) -> Vec<crate::agent_review::Note> {
-        self.pipelines.findings.get(thread).map(|f| f.iter().map(|f| crate::agent_review::Note { path: f.path.clone(), line: f.line, severity: f.severity.clone(), message: f.message.clone() }).collect()).unwrap_or_default()
+        self.pipelines
+            .findings
+            .get(thread)
+            .map(|f| {
+                f.iter()
+                    .map(|f| crate::agent_review::Note {
+                        path: f.path.clone(),
+                        line: f.line,
+                        severity: f.severity.clone(),
+                        message: f.message.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub(crate) fn agents_review_key(&mut self, id: BufferId, key: crate::page::Key) {
         let (action, thread) = {
-            let Some(PageModel::AgentReview(page)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
+            let Some(PageModel::AgentReview(page)) = self.pages.get_mut(&id).map(|s| &mut s.model)
+            else {
+                return;
+            };
             (page.key(key), page.thread.clone())
         };
         let file = |app: &App, f: usize| match app.pages.get(&id).map(|s| &s.model) {
@@ -120,7 +160,12 @@ impl App {
             agent_review::Action::Open { file: f, line } => {
                 if let Some(file) = file(self, f) {
                     self.open_file_from_picker(&file.path);
-                    self.jump_to_grep_match(&fenix_project::GrepMatch { path: file.path, line, col: 1, text: String::new() });
+                    self.jump_to_grep_match(&fenix_project::GrepMatch {
+                        path: file.path,
+                        line,
+                        col: 1,
+                        text: String::new(),
+                    });
                 }
                 return;
             }
@@ -143,7 +188,13 @@ impl App {
                     Some(text) => Baseline::Text(text.clone()),
                     None => Baseline::Absent,
                 };
-                !ReviewFile::new((*path).clone(), String::new(), baseline, self.agents_current(path)).changed()
+                !ReviewFile::new(
+                    (*path).clone(),
+                    String::new(),
+                    baseline,
+                    self.agents_current(path),
+                )
+                .changed()
             })
             .map(|(path, _)| path.clone())
             .collect();
@@ -153,7 +204,9 @@ impl App {
             }
         }
         let files = self.agents_review_files(thread);
-        if let Some(id) = self.find_page(|m| matches!(m, PageModel::AgentReview(p) if &p.thread == thread)) {
+        if let Some(id) =
+            self.find_page(|m| matches!(m, PageModel::AgentReview(p) if &p.thread == thread))
+        {
             if let Some(PageModel::AgentReview(p)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
                 p.set_files(files);
             }
@@ -199,9 +252,16 @@ impl App {
     /// Rejects a hunk, or the whole file: it goes back to what it was. An
     /// open buffer takes it as one undo step, and is saved; with unsaved
     /// edits of yours in it, you're told to deal with those first.
-    pub(super) fn agents_reject(&mut self, thread: &ThreadId, file: &ReviewFile, hunk: Option<usize>) {
+    pub(super) fn agents_reject(
+        &mut self,
+        thread: &ThreadId,
+        file: &ReviewFile,
+        hunk: Option<usize>,
+    ) {
         let open = self.buffers.id_for_path(&file.path);
-        if let Some(id) = open.filter(|id| self.buffers.get(*id).is_some_and(|b| b.buffer.is_dirty())) {
+        if let Some(id) =
+            open.filter(|id| self.buffers.get(*id).is_some_and(|b| b.buffer.is_dirty()))
+        {
             let name = self.buffer_display_name(id);
             self.set_error(format!("{name} has unsaved edits: save them (or :e! them away) before rejecting the agent's"));
             return;
@@ -218,7 +278,8 @@ impl App {
                     Baseline::Text(t) => t.as_str(),
                     _ => "",
                 };
-                agent_review::reject(old, current, h).filter(|t| !(matches!(baseline, Baseline::Absent) && t.is_empty()))
+                agent_review::reject(old, current, h)
+                    .filter(|t| !(matches!(baseline, Baseline::Absent) && t.is_empty()))
             }
             (Baseline::Text(old), Some(_), None) => Some(old.clone()),
             (Baseline::Absent, Some(_), None) => None,
@@ -253,13 +314,21 @@ impl App {
                 }
                 if let Some(id) = open {
                     self.buffers.close(id);
-                    let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
+                    let fallback = self
+                        .buffers
+                        .mru()
+                        .first()
+                        .copied()
+                        .unwrap_or_else(|| self.buffers.open_scratch());
                     self.repoint_panes_showing(id, fallback);
                 }
                 if let Some(b) = self.agents.baselines.get_mut(thread) {
                     b.remove(&file.path);
                 }
-                self.set_message(format!("{}: the agent's new file is in the Recycle Bin", file.name));
+                self.set_message(format!(
+                    "{}: the agent's new file is in the Recycle Bin",
+                    file.name
+                ));
             }
         }
     }
@@ -267,7 +336,13 @@ impl App {
     /// `:agent-reject-all`, `agents.reject_all`: every change of the
     /// shown thread, rejected.
     pub(crate) fn agents_reject_all(&mut self) {
-        let Some(thread) = self.agents.shown(&self.pages).or_else(|| self.agents.hub.focused().cloned()) else { return };
+        let Some(thread) = self
+            .agents
+            .shown(&self.pages)
+            .or_else(|| self.agents.hub.focused().cloned())
+        else {
+            return;
+        };
         for file in self.agents_review_files(&thread) {
             if !matches!(file.baseline, Baseline::Unknown) {
                 self.agents_reject(&thread, &file, None);
@@ -278,7 +353,13 @@ impl App {
 
     /// `agents.accept_all`: every change of the shown thread, kept.
     pub(crate) fn agents_accept_all(&mut self) {
-        let Some(thread) = self.agents.shown(&self.pages).or_else(|| self.agents.hub.focused().cloned()) else { return };
+        let Some(thread) = self
+            .agents
+            .shown(&self.pages)
+            .or_else(|| self.agents.hub.focused().cloned())
+        else {
+            return;
+        };
         self.agents.baselines.remove(&thread);
         self.agents.unknown.remove(&thread);
         self.agents_review_refresh(&thread);
@@ -290,8 +371,12 @@ impl App {
         let mut marks: HashMap<BufferId, Vec<crate::decorations::Decoration>> = HashMap::new();
         for baselines in self.agents.baselines.values() {
             for (path, before) in baselines {
-                let Some(id) = self.buffers.id_for_path(path) else { continue };
-                let Some(ob) = self.buffers.get(id) else { continue };
+                let Some(id) = self.buffers.id_for_path(path) else {
+                    continue;
+                };
+                let Some(ob) = self.buffers.get(id) else {
+                    continue;
+                };
                 let now = ob.buffer.text();
                 let old = before.clone().unwrap_or_default();
                 if old == now {
@@ -302,7 +387,12 @@ impl App {
                     let last = ob.buffer.line_count();
                     for line in hunk.new.clone().filter(|l| *l < last) {
                         let start = ob.buffer.line_start_char(line);
-                        set.push(crate::decorations::Decoration { start, end: start + ob.buffer.line_len(line), look: crate::decorations::Look::Tint(crate::page::Shade::Accent), id: None });
+                        set.push(crate::decorations::Decoration {
+                            start,
+                            end: start + ob.buffer.line_len(line),
+                            look: crate::decorations::Look::Tint(crate::page::Shade::Accent),
+                            id: None,
+                        });
                     }
                 }
             }
@@ -312,15 +402,24 @@ impl App {
             sets.retain(|(owner, _)| owner != MARKS);
         }
         for (id, set) in marks {
-            self.wasm.decorations.entry(id).or_default().push((MARKS.to_string(), set));
+            self.wasm
+                .decorations
+                .entry(id)
+                .or_default()
+                .push((MARKS.to_string(), set));
         }
     }
 
     /// A turn started: what git says is changed now, to tell later what
     /// changed during it.
     pub(super) fn agents_turn_started(&mut self, thread: &ThreadId) {
-        let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else { return };
-        let changed: HashSet<String> = fenix_git::list_files(&root).into_iter().map(|f| f.path).collect();
+        let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else {
+            return;
+        };
+        let changed: HashSet<String> = fenix_git::list_files(&root)
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
         self.agents.turn_start.insert(thread.clone(), changed);
     }
 
@@ -329,27 +428,48 @@ impl App {
     /// the index when they're tracked, else listed with nothing to
     /// compare them to.
     pub(in crate::app) fn agents_turn_ended(&mut self, thread: &ThreadId) {
-        let Some(before) = self.agents.turn_start.remove(thread) else { return };
-        let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else { return };
+        let Some(before) = self.agents.turn_start.remove(thread) else {
+            return;
+        };
+        let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else {
+            return;
+        };
         for entry in fenix_git::list_files(&root) {
             if before.contains(&entry.path) {
                 continue;
             }
             let path = root.join(&entry.path);
-            if self.agents.baselines.get(thread).is_some_and(|b| b.contains_key(&path)) {
+            if self
+                .agents
+                .baselines
+                .get(thread)
+                .is_some_and(|b| b.contains_key(&path))
+            {
                 continue;
             }
             match entry.index_status {
                 // Untracked, or added: it didn't exist before.
                 '?' | 'A' => {
-                    self.agents.baselines.entry(thread.clone()).or_default().insert(path, None);
+                    self.agents
+                        .baselines
+                        .entry(thread.clone())
+                        .or_default()
+                        .insert(path, None);
                 }
                 _ => match fenix_git::show_at(&root, "", &entry.path) {
                     Ok(text) => {
-                        self.agents.baselines.entry(thread.clone()).or_default().insert(path, Some(text));
+                        self.agents
+                            .baselines
+                            .entry(thread.clone())
+                            .or_default()
+                            .insert(path, Some(text));
                     }
                     Err(_) => {
-                        self.agents.unknown.entry(thread.clone()).or_default().insert(path);
+                        self.agents
+                            .unknown
+                            .entry(thread.clone())
+                            .or_default()
+                            .insert(path);
                     }
                 },
             }
@@ -364,25 +484,43 @@ impl App {
         if !self.agents.following {
             return;
         }
-        let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else { return };
+        let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else {
+            return;
+        };
         let Some((path, line)) = self.agents.hub.view(thread).and_then(|v| {
             v.thread.entries.iter().rev().find_map(|e| match e {
-                fenix_acp::thread::Entry::Tool(call) => call.locations.first().map(|l| (root.join(&l.path), l.line)),
+                fenix_acp::thread::Entry::Tool(call) => {
+                    call.locations.first().map(|l| (root.join(&l.path), l.line))
+                }
                 _ => None,
             })
         }) else {
             return;
         };
-        if self.agents.followed.as_ref() == Some(&(path.clone(), line)) || !within(&root, &path) || !path.is_file() {
+        if self.agents.followed.as_ref() == Some(&(path.clone(), line))
+            || !within(&root, &path)
+            || !path.is_file()
+        {
             return;
         }
         self.agents.followed = Some((path.clone(), line));
-        let Some(pane) = self.agents.code_pane.filter(|p| self.windows().windows().contains(p)) else { return };
+        let Some(pane) = self
+            .agents
+            .code_pane
+            .filter(|p| self.windows().windows().contains(p))
+        else {
+            return;
+        };
         let back = self.focused_pane_id();
         self.windows_mut().focus(pane);
         self.open_file_from_picker(&path);
         if let Some(line) = line {
-            self.jump_to_grep_match(&fenix_project::GrepMatch { path, line: line.max(1) as usize, col: 1, text: String::new() });
+            self.jump_to_grep_match(&fenix_project::GrepMatch {
+                path,
+                line: line.max(1) as usize,
+                col: 1,
+                text: String::new(),
+            });
         }
         if self.windows().windows().contains(&back) {
             self.windows_mut().focus(back);
@@ -399,11 +537,24 @@ impl App {
         let path = self.open().buffer.path().map(Path::to_path_buf);
         let (line, _) = self.open().buffer.line_col(&self.cursor());
         let found = path.and_then(|path| {
-            let threads: Vec<ThreadId> = self.agents.baselines.iter().filter(|(_, b)| b.contains_key(&path)).map(|(t, _)| t.clone()).collect();
+            let threads: Vec<ThreadId> = self
+                .agents
+                .baselines
+                .iter()
+                .filter(|(_, b)| b.contains_key(&path))
+                .map(|(t, _)| t.clone())
+                .collect();
             threads.into_iter().find_map(|thread| {
-                let file = self.agents_review_files(&thread).into_iter().find(|f| f.path == path)?;
+                let file = self
+                    .agents_review_files(&thread)
+                    .into_iter()
+                    .find(|f| f.path == path)?;
                 let hunk = file.hunks.iter().position(|h| {
-                    let end = if h.new.is_empty() { h.new.start + 1 } else { h.new.end };
+                    let end = if h.new.is_empty() {
+                        h.new.start + 1
+                    } else {
+                        h.new.end
+                    };
                     line >= h.new.start && line < end
                 })?;
                 Some((thread, file, hunk))
@@ -417,7 +568,9 @@ impl App {
 
     /// `SPC a y`: keeps the agent's change under the cursor.
     pub(crate) fn agents_keep_here(&mut self) {
-        let Some((thread, file, hunk)) = self.agents_hunk_here(false) else { return };
+        let Some((thread, file, hunk)) = self.agents_hunk_here(false) else {
+            return;
+        };
         self.agents_keep(&thread, &file, Some(hunk));
         self.agents_review_refresh(&thread);
         self.set_message(format!("{}: the agent's change kept", file.name));
@@ -425,7 +578,9 @@ impl App {
 
     /// `SPC a x`: puts the agent's change under the cursor back.
     pub(crate) fn agents_reject_here(&mut self) {
-        let Some((thread, file, hunk)) = self.agents_hunk_here(false) else { return };
+        let Some((thread, file, hunk)) = self.agents_hunk_here(false) else {
+            return;
+        };
         self.agents_reject(&thread, &file, Some(hunk));
         self.agents_review_refresh(&thread);
     }
@@ -433,10 +588,21 @@ impl App {
     /// `SPC a v`: what the agent's change under the cursor replaced, in
     /// the hover popup.
     pub(crate) fn agents_preview_here(&mut self) {
-        let Some((thread, file, hunk)) = self.agents_hunk_here(false) else { return };
+        let Some((thread, file, hunk)) = self.agents_hunk_here(false) else {
+            return;
+        };
         let h = &file.hunks[hunk];
-        let title = self.agents.hub.view(&thread).map(|v| v.thread.display_title()).unwrap_or_default();
-        let mut text = format!("Agent change {} of {} · {title}\n", hunk + 1, file.hunks.len());
+        let title = self
+            .agents
+            .hub
+            .view(&thread)
+            .map(|v| v.thread.display_title())
+            .unwrap_or_default();
+        let mut text = format!(
+            "Agent change {} of {} · {title}\n",
+            hunk + 1,
+            file.hunks.len()
+        );
         for line in h.removed.iter().take(30) {
             text.push_str(&format!("- {line}\n"));
         }
@@ -456,27 +622,59 @@ impl App {
             .iter()
             .flat_map(|t| self.agents_review_files(t))
             .filter(|f| f.current.is_some())
-            .flat_map(|f| f.hunks.iter().map(|h| (f.path.clone(), h.new.start)).collect::<Vec<_>>())
+            .flat_map(|f| {
+                f.hunks
+                    .iter()
+                    .map(|h| (f.path.clone(), h.new.start))
+                    .collect::<Vec<_>>()
+            })
             .collect();
         stops.sort();
         stops.dedup();
-        let here = (self.open().buffer.path().map(Path::to_path_buf).unwrap_or_default(), self.open().buffer.line_col(&self.cursor()).0);
-        let ahead: Vec<&(PathBuf, usize)> = if forward { stops.iter().filter(|s| **s > here).collect() } else { stops.iter().rev().filter(|s| **s < here).collect() };
-        let Some((path, line)) = ahead.get((count.max(1) as usize - 1).min(ahead.len().saturating_sub(1))).map(|s| (*s).clone()) else {
-            self.set_message(if forward { "no more agent changes after this" } else { "no more agent changes before this" });
+        let here = (
+            self.open()
+                .buffer
+                .path()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            self.open().buffer.line_col(&self.cursor()).0,
+        );
+        let ahead: Vec<&(PathBuf, usize)> = if forward {
+            stops.iter().filter(|s| **s > here).collect()
+        } else {
+            stops.iter().rev().filter(|s| **s < here).collect()
+        };
+        let Some((path, line)) = ahead
+            .get((count.max(1) as usize - 1).min(ahead.len().saturating_sub(1)))
+            .map(|s| (*s).clone())
+        else {
+            self.set_message(if forward {
+                "no more agent changes after this"
+            } else {
+                "no more agent changes before this"
+            });
             return;
         };
         if self.agents_is_dock_pane(self.focused_pane_id()) {
             self.agents_focus_code();
         }
         self.open_file_from_picker(&path);
-        self.jump_to_grep_match(&fenix_project::GrepMatch { path, line: line + 1, col: 1, text: String::new() });
+        self.jump_to_grep_match(&fenix_project::GrepMatch {
+            path,
+            line: line + 1,
+            col: 1,
+            text: String::new(),
+        });
     }
 
     /// `SPC a f`: follow mode on or off.
     pub(crate) fn agents_toggle_follow(&mut self) {
         self.agents.following = !self.agents.following;
         self.agents.followed = None;
-        self.set_message(if self.agents.following { "following the agent: the pane beside it shows where it works" } else { "not following the agent" });
+        self.set_message(if self.agents.following {
+            "following the agent: the pane beside it shows where it works"
+        } else {
+            "not following the agent"
+        });
     }
 }

@@ -33,13 +33,23 @@ impl ProjectSettings {
     /// The project at `root`'s settings: none when it has no file.
     pub fn load(root: &Path) -> Self {
         let path = Self::path_for(root);
-        let mut settings = ProjectSettings { path, values: HashMap::new(), baseline: HashMap::new(), broken: false, problems: Vec::new() };
+        let mut settings = ProjectSettings {
+            path,
+            values: HashMap::new(),
+            baseline: HashMap::new(),
+            broken: false,
+            problems: Vec::new(),
+        };
         let text = match std::fs::read_to_string(&settings.path) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return settings,
             Err(e) => {
                 settings.broken = true;
-                settings.problems.push(Problem { key: None, line: None, message: e.to_string() });
+                settings.problems.push(Problem {
+                    key: None,
+                    line: None,
+                    message: e.to_string(),
+                });
                 return settings;
             }
         };
@@ -47,13 +57,19 @@ impl ProjectSettings {
             Ok(doc) => doc,
             Err(e) => {
                 settings.broken = true;
-                settings.problems.push(Problem { key: None, line: e.span().map(|s| line_of(&text, s.start)), message: e.message().trim().to_string() });
+                settings.problems.push(Problem {
+                    key: None,
+                    line: e.span().map(|s| line_of(&text, s.start)),
+                    message: e.message().trim().to_string(),
+                });
                 return settings;
             }
         };
         let doc_mut = doc.clone().into_mut();
         for s in schema::settings() {
-            let Some(item) = lookup(&doc_mut, s.key) else { continue };
+            let Some(item) = lookup(&doc_mut, s.key) else {
+                continue;
+            };
             let line = {
                 let mut item = doc.as_item();
                 for part in s.key.split('.') {
@@ -65,17 +81,27 @@ impl ProjectSettings {
                 item.span().map(|span| line_of(&text, span.start))
             };
             if !s.project || matches!(s.kind, Kind::Secret(_)) {
-                settings.problems.push(Problem { key: Some(s.key.into()), line, message: "not something a project can set -- ignored".into() });
+                settings.problems.push(Problem {
+                    key: Some(s.key.into()),
+                    line,
+                    message: "not something a project can set -- ignored".into(),
+                });
                 continue;
             }
             match s.kind.read(item).and_then(|v| s.kind.check(&v).map(|_| v)) {
                 Ok(v) => {
                     settings.values.insert(s.key, v);
                 }
-                Err(message) => settings.problems.push(Problem { key: Some(s.key.into()), line, message }),
+                Err(message) => settings.problems.push(Problem {
+                    key: Some(s.key.into()),
+                    line,
+                    message,
+                }),
             }
         }
-        settings.problems.sort_by_key(|p| p.line.unwrap_or(usize::MAX));
+        settings
+            .problems
+            .sort_by_key(|p| p.line.unwrap_or(usize::MAX));
         settings.baseline = settings.values.clone();
         settings
     }
@@ -119,7 +145,13 @@ impl ProjectSettings {
     /// gets no file.
     pub fn save(&mut self) -> io::Result<()> {
         if self.broken {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} can't be read, so it wasn't written over -- fix it first", self.path.display())));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} can't be read, so it wasn't written over -- fix it first",
+                    self.path.display()
+                ),
+            ));
         }
         let on_disk = match std::fs::read_to_string(&self.path) {
             Ok(text) => Some(text),
@@ -131,7 +163,13 @@ impl ProjectSettings {
         }
         let mut doc = match on_disk.as_deref().map(str::parse::<toml_edit::DocumentMut>) {
             Some(Ok(doc)) => doc,
-            Some(Err(_)) => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} was changed into something that can't be read, so it wasn't written over", self.path.display()))),
+            Some(Err(_)) => return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} was changed into something that can't be read, so it wasn't written over",
+                    self.path.display()
+                ),
+            )),
             None => {
                 let mut doc = toml_edit::DocumentMut::new();
                 doc.decor_mut().set_prefix(HEADER);
@@ -162,7 +200,10 @@ mod tests {
     use super::*;
 
     fn project(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("fenix-project-settings-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fenix-project-settings-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -172,13 +213,26 @@ mod tests {
     fn a_project_sets_only_what_the_schema_allows_and_says_what_it_ignored() {
         let root = project("allowed");
         std::fs::create_dir_all(root.join(".fenix")).unwrap();
-        std::fs::write(ProjectSettings::path_for(&root), "[editor]\nindent_width = 2\ntheme = \"Nord\"\n[git]\nreviewers = [\"alex\"]\n").unwrap();
+        std::fs::write(
+            ProjectSettings::path_for(&root),
+            "[editor]\nindent_width = 2\ntheme = \"Nord\"\n[git]\nreviewers = [\"alex\"]\n",
+        )
+        .unwrap();
         let settings = ProjectSettings::load(&root);
         assert_eq!(settings.get("editor.indent_width"), Some(&Value::Int(2)));
-        assert_eq!(settings.get("git.reviewers"), Some(&Value::List(vec!["alex".into()])));
+        assert_eq!(
+            settings.get("git.reviewers"),
+            Some(&Value::List(vec!["alex".into()]))
+        );
         assert_eq!(settings.get("editor.theme"), None);
         assert_eq!(settings.problems.len(), 1);
-        assert!(settings.problems[0].to_string().starts_with("settings.toml:3 -- editor.theme: not something a project can set"), "{:?}", settings.problems);
+        assert!(
+            settings.problems[0]
+                .to_string()
+                .starts_with("settings.toml:3 -- editor.theme: not something a project can set"),
+            "{:?}",
+            settings.problems
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -187,21 +241,37 @@ mod tests {
         let root = project("save");
         let mut settings = ProjectSettings::load(&root);
         settings.save().unwrap();
-        assert!(!ProjectSettings::path_for(&root).exists(), "no file for nothing");
-        assert!(settings.set("editor.theme", Some(Value::Text("Nord".into()))).is_err());
-        settings.set("editor.tab_width", Some(Value::Int(4))).unwrap();
+        assert!(
+            !ProjectSettings::path_for(&root).exists(),
+            "no file for nothing"
+        );
+        assert!(settings
+            .set("editor.theme", Some(Value::Text("Nord".into())))
+            .is_err());
+        settings
+            .set("editor.tab_width", Some(Value::Int(4)))
+            .unwrap();
         settings.save().unwrap();
         let path = ProjectSettings::path_for(&root);
         let text = std::fs::read_to_string(&path).unwrap() + "# a note from the team\n";
         std::fs::write(&path, &text).unwrap();
         let mut settings = ProjectSettings::load(&root);
-        settings.set("git.base_branch", Some(Value::Text("develop".into()))).unwrap();
+        settings
+            .set("git.base_branch", Some(Value::Text("develop".into())))
+            .unwrap();
         settings.save().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("tab_width = 4") && text.contains("base_branch = \"develop\"") && text.contains("# a note from the team"), "{text}");
+        assert!(
+            text.contains("tab_width = 4")
+                && text.contains("base_branch = \"develop\"")
+                && text.contains("# a note from the team"),
+            "{text}"
+        );
         settings.set("editor.tab_width", None).unwrap();
         settings.save().unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("tab_width"));
+        assert!(!std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("tab_width"));
         let _ = std::fs::remove_dir_all(root);
     }
 }

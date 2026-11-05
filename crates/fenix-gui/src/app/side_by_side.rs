@@ -102,17 +102,30 @@ impl App {
     /// front.
     fn side_by_side_at(&self, pane: fenix_window::WindowId) -> Option<&SideBySide> {
         let here = self.workspaces.active_index();
-        self.side_by_sides.iter().find(|s| s.workspace == here && s.side_of(pane).is_some())
+        self.side_by_sides
+            .iter()
+            .find(|s| s.workspace == here && s.side_of(pane).is_some())
     }
 
     /// A pane's display lines: its buffer's lines with folds applied,
     /// and -- in a side-by-side pane -- the filler rows that keep it lined
     /// up with the other side.
-    pub(super) fn pane_display_lines(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Vec<usize> {
+    pub(super) fn pane_display_lines(
+        &self,
+        pane: fenix_window::WindowId,
+        buffer: BufferId,
+    ) -> Vec<usize> {
         let lines = self.folded_display_lines(buffer);
         match self.side_by_side_at(pane) {
-            Some(s) if (pane == s.ref_pane && buffer == s.ref_buffer) || (pane == s.live_pane && buffer == s.live_buffer) => {
-                let fillers = if pane == s.ref_pane { &s.alignment.old_fillers } else { &s.alignment.new_fillers };
+            Some(s)
+                if (pane == s.ref_pane && buffer == s.ref_buffer)
+                    || (pane == s.live_pane && buffer == s.live_buffer) =>
+            {
+                let fillers = if pane == s.ref_pane {
+                    &s.alignment.old_fillers
+                } else {
+                    &s.alignment.new_fillers
+                };
                 with_fillers(lines, fillers)
             }
             _ => lines,
@@ -131,8 +144,14 @@ impl App {
         };
         let mut refs = vec!["HEAD".to_string()];
         refs.extend(self.compare_targets(&fenix_lsp::normalize(root)));
-        let candidates = refs.into_iter().map(|r| fenix_picker::Candidate::new(r.clone(), r)).collect();
-        self.enter_picker(ActivePicker::Versus { path, picker: fenix_picker::PickerState::new(candidates) });
+        let candidates = refs
+            .into_iter()
+            .map(|r| fenix_picker::Candidate::new(r.clone(), r))
+            .collect();
+        self.enter_picker(ActivePicker::Versus {
+            path,
+            picker: fenix_picker::PickerState::new(candidates),
+        });
     }
 
     /// Sets the file at `path` -- open in the focused pane -- beside its
@@ -146,13 +165,17 @@ impl App {
         let text = match fenix_git::show_at(&root, rev, &relative) {
             Ok(text) => text,
             Err(_) => {
-                self.set_error(format!("{relative} isn't on {rev} -- nothing to set beside it"));
+                self.set_error(format!(
+                    "{relative} isn't on {rev} -- nothing to set beside it"
+                ));
                 return;
             }
         };
         let live_pane = self.focused_pane_id();
         let live_buffer = self.focused_buffer_id();
-        if let Some(i) = self.side_by_sides.iter().position(|s| s.live_buffer == live_buffer && s.workspace == self.workspaces.active_index()) {
+        if let Some(i) = self.side_by_sides.iter().position(|s| {
+            s.live_buffer == live_buffer && s.workspace == self.workspaces.active_index()
+        }) {
             let old = self.side_by_sides.remove(i);
             self.side_by_side_teardown(old);
             self.windows_mut().focus(live_pane);
@@ -163,11 +186,21 @@ impl App {
         // A tab strip like any file's, not a fixed title: both panes
         // then start their text on the same row, which the alignment
         // depends on.
-        let ref_pane = self.windows_mut().split_before(SplitKind::Vertical, ref_buffer);
+        let ref_pane = self
+            .windows_mut()
+            .split_before(SplitKind::Vertical, ref_buffer);
         self.set_pane_content(ref_pane, ref_buffer);
         self.windows_mut().focus(live_pane);
-        let live_text = self.buffers.get(live_buffer).map(buffer_text).unwrap_or_default();
-        let aligned_at = self.buffers.get(live_buffer).map(|ob| ob.buffer.edit_count()).unwrap_or(0);
+        let live_text = self
+            .buffers
+            .get(live_buffer)
+            .map(buffer_text)
+            .unwrap_or_default();
+        let aligned_at = self
+            .buffers
+            .get(live_buffer)
+            .map(|ob| ob.buffer.edit_count())
+            .unwrap_or(0);
         let alignment = fenix_diff::align(&text, &live_text);
         let changes = alignment.changes().count();
         self.side_by_sides.push(SideBySide {
@@ -183,7 +216,10 @@ impl App {
         });
         self.set_message(match changes {
             0 => format!("no differences from {rev}"),
-            n => format!("{} from {rev} -- ]c / [c walk them, do takes {rev}'s, q in the left pane closes", crate::git_status::count(n, "change")),
+            n => format!(
+                "{} from {rev} -- ]c / [c walk them, do takes {rev}'s, q in the left pane closes",
+                crate::git_status::count(n, "change")
+            ),
         });
         self.wake_caret();
     }
@@ -191,12 +227,20 @@ impl App {
     /// Closes a session: its read-only pane and buffer go, your buffer
     /// stays where it was.
     fn side_by_side_teardown(&mut self, session: SideBySide) {
-        if session.workspace == self.workspaces.active_index() && self.windows().windows().contains(&session.ref_pane) {
+        if session.workspace == self.workspaces.active_index()
+            && self.windows().windows().contains(&session.ref_pane)
+        {
             self.windows_mut().focus(session.ref_pane);
             if self.windows_mut().close_focused() {
-                self.workspaces.active_pane_states_mut().remove(&session.ref_pane);
-                self.workspaces.active_scroll_anims_mut().remove(&session.ref_pane);
-                self.workspaces.active_pane_tabs_mut().remove(&session.ref_pane);
+                self.workspaces
+                    .active_pane_states_mut()
+                    .remove(&session.ref_pane);
+                self.workspaces
+                    .active_scroll_anims_mut()
+                    .remove(&session.ref_pane);
+                self.workspaces
+                    .active_pane_tabs_mut()
+                    .remove(&session.ref_pane);
             }
             if self.windows().windows().contains(&session.live_pane) {
                 self.windows_mut().focus(session.live_pane);
@@ -211,7 +255,13 @@ impl App {
     pub(crate) fn side_by_side_close(&mut self) -> bool {
         let pane = self.focused_pane_id();
         let here = self.workspaces.active_index();
-        let Some(i) = self.side_by_sides.iter().position(|s| s.workspace == here && s.side_of(pane).is_some()) else { return false };
+        let Some(i) = self
+            .side_by_sides
+            .iter()
+            .position(|s| s.workspace == here && s.side_of(pane).is_some())
+        else {
+            return false;
+        };
         let session = self.side_by_sides.remove(i);
         self.side_by_side_teardown(session);
         self.wake_caret();
@@ -221,7 +271,8 @@ impl App {
     /// Whether `q` should close a side-by-side: in its read-only pane.
     pub(super) fn focused_is_side_by_side_ref(&self) -> bool {
         let pane = self.focused_pane_id();
-        self.side_by_side_at(pane).is_some_and(|s| s.ref_pane == pane)
+        self.side_by_side_at(pane)
+            .is_some_and(|s| s.ref_pane == pane)
     }
 
     /// Once a frame, before drawing: drops sessions whose panes went,
@@ -256,30 +307,64 @@ impl App {
             if self.side_by_sides[i].workspace != here {
                 continue;
             }
-            let (live_buffer, ref_buffer) = (self.side_by_sides[i].live_buffer, self.side_by_sides[i].ref_buffer);
-            let Some(edits) = self.buffers.get(live_buffer).map(|ob| ob.buffer.edit_count()) else { continue };
+            let (live_buffer, ref_buffer) = (
+                self.side_by_sides[i].live_buffer,
+                self.side_by_sides[i].ref_buffer,
+            );
+            let Some(edits) = self
+                .buffers
+                .get(live_buffer)
+                .map(|ob| ob.buffer.edit_count())
+            else {
+                continue;
+            };
             if edits != self.side_by_sides[i].aligned_at {
-                let live = self.buffers.get(live_buffer).map(buffer_text).unwrap_or_default();
-                let old = self.buffers.get(ref_buffer).map(buffer_text).unwrap_or_default();
+                let live = self
+                    .buffers
+                    .get(live_buffer)
+                    .map(buffer_text)
+                    .unwrap_or_default();
+                let old = self
+                    .buffers
+                    .get(ref_buffer)
+                    .map(buffer_text)
+                    .unwrap_or_default();
                 let session = &mut self.side_by_sides[i];
                 session.alignment = fenix_diff::align(&old, &live);
                 session.aligned_at = edits;
                 session.synced = None;
             }
             let session = &self.side_by_sides[i];
-            let Some(side) = session.side_of(focused) else { continue };
+            let Some(side) = session.side_of(focused) else {
+                continue;
+            };
             let other = session.other(focused);
-            let line = self.buffers.get(if side == Side::Old { ref_buffer } else { live_buffer }).map(|ob| ob.buffer.line_col(&self.pane_state(focused).cursor).0).unwrap_or(0);
+            let line = self
+                .buffers
+                .get(if side == Side::Old {
+                    ref_buffer
+                } else {
+                    live_buffer
+                })
+                .map(|ob| ob.buffer.line_col(&self.pane_state(focused).cursor).0)
+                .unwrap_or(0);
             if session.synced == Some((focused, line)) {
                 continue;
             }
             let target = session.alignment.counterpart(side, line);
-            let other_buffer = if side == Side::Old { live_buffer } else { ref_buffer };
+            let other_buffer = if side == Side::Old {
+                live_buffer
+            } else {
+                ref_buffer
+            };
             if let Some(ob) = self.buffers.get(other_buffer) {
                 let target = target.min(ob.buffer.line_count().saturating_sub(1));
                 let char_idx = ob.buffer.line_start_char(target);
                 if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&other) {
-                    state.cursor = Cursor { char_idx, sticky_col: 0 };
+                    state.cursor = Cursor {
+                        char_idx,
+                        sticky_col: 0,
+                    };
                 }
             }
             self.side_by_sides[i].synced = Some((focused, line));
@@ -291,7 +376,9 @@ impl App {
     /// followed its cursor (`visible` is the height both share).
     pub(super) fn side_by_side_follow(&mut self, pane: fenix_window::WindowId, visible: usize) {
         let focused = self.focused_pane_id();
-        let Some(session) = self.side_by_side_at(pane) else { return };
+        let Some(session) = self.side_by_side_at(pane) else {
+            return;
+        };
         if pane == focused || session.other(pane) != focused {
             return;
         }
@@ -308,17 +395,32 @@ impl App {
     /// buffer columns).
     pub(super) fn side_by_side_tints(&self, pane: fenix_window::WindowId, rows: &[usize]) -> Tints {
         let (mut whole, mut words) = (Vec::new(), Vec::new());
-        let Some(session) = self.side_by_side_at(pane) else { return (whole, words) };
-        let Some(side) = session.side_of(pane) else { return (whole, words) };
+        let Some(session) = self.side_by_side_at(pane) else {
+            return (whole, words);
+        };
+        let Some(side) = session.side_of(pane) else {
+            return (whole, words);
+        };
         let (Some(mine), Some(theirs)) = (
-            self.buffers.get(if side == Side::Old { session.ref_buffer } else { session.live_buffer }),
-            self.buffers.get(if side == Side::Old { session.live_buffer } else { session.ref_buffer }),
+            self.buffers.get(if side == Side::Old {
+                session.ref_buffer
+            } else {
+                session.live_buffer
+            }),
+            self.buffers.get(if side == Side::Old {
+                session.live_buffer
+            } else {
+                session.ref_buffer
+            }),
         ) else {
             return (whole, words);
         };
         let line_text = |ob: &OpenBuffer, line: usize| {
             let start = ob.buffer.line_start_char(line);
-            ob.buffer.text_range(start, start + ob.buffer.line_len(line)).trim_end_matches(['\r', '\n']).to_string()
+            ob.buffer
+                .text_range(start, start + ob.buffer.line_len(line))
+                .trim_end_matches(['\r', '\n'])
+                .to_string()
         };
         let [r, g, b, _] = glyphon_to_rgba(self.theme.gutter_fg);
         let filler = [r, g, b, 0.10];
@@ -327,24 +429,57 @@ impl App {
                 whole.push((row, filler));
                 continue;
             }
-            let Some(block) = session.alignment.blocks.iter().find(|b| if side == Side::Old { b.old.contains(&line) } else { b.new.contains(&line) }) else { continue };
-            let Some(color) = tint(block.kind, side, self.theme) else { continue };
+            let Some(block) = session.alignment.blocks.iter().find(|b| {
+                if side == Side::Old {
+                    b.old.contains(&line)
+                } else {
+                    b.new.contains(&line)
+                }
+            }) else {
+                continue;
+            };
+            let Some(color) = tint(block.kind, side, self.theme) else {
+                continue;
+            };
             whole.push((row, color));
             if block.kind != BlockKind::Changed {
                 continue;
             }
-            let (from, to) = if side == Side::Old { (&block.old, &block.new) } else { (&block.new, &block.old) };
+            let (from, to) = if side == Side::Old {
+                (&block.old, &block.new)
+            } else {
+                (&block.new, &block.old)
+            };
             let other_line = to.start + (line - from.start);
-            if !to.contains(&other_line) || line >= mine.buffer.line_count() || other_line >= theirs.buffer.line_count() {
+            if !to.contains(&other_line)
+                || line >= mine.buffer.line_count()
+                || other_line >= theirs.buffer.line_count()
+            {
                 continue;
             }
             let (here, there) = (line_text(mine, line), line_text(theirs, other_line));
-            let (old, new) = if side == Side::Old { (here.as_str(), there.as_str()) } else { (there.as_str(), here.as_str()) };
+            let (old, new) = if side == Side::Old {
+                (here.as_str(), there.as_str())
+            } else {
+                (there.as_str(), here.as_str())
+            };
             let (old_spans, new_spans) = fenix_diff::changed_spans(old, new);
-            let spans = if side == Side::Old { old_spans } else { new_spans };
-            let base = if side == Side::Old { self.theme.git_conflicted } else { self.theme.git_staged };
+            let spans = if side == Side::Old {
+                old_spans
+            } else {
+                new_spans
+            };
+            let base = if side == Side::Old {
+                self.theme.git_conflicted
+            } else {
+                self.theme.git_staged
+            };
             let [r, g, b, _] = glyphon_to_rgba(base);
-            words.extend(spans.into_iter().map(|s| (row, s.start, s.end, [r, g, b, 0.30])));
+            words.extend(
+                spans
+                    .into_iter()
+                    .map(|s| (row, s.start, s.end, [r, g, b, 0.30])),
+            );
         }
         (whole, words)
     }
@@ -356,15 +491,37 @@ impl App {
             self.set_message("]c and [c walk a side-by-side diff -- SPC g v opens one");
             return;
         };
-        let Some(side) = session.side_of(pane) else { return };
-        let buffer = if side == Side::Old { session.ref_buffer } else { session.live_buffer };
-        let starts: Vec<usize> = session.alignment.changes().map(|b| if side == Side::Old { b.old.start } else { b.new.start }).collect();
-        let Some(ob) = self.buffers.get(buffer) else { return };
+        let Some(side) = session.side_of(pane) else {
+            return;
+        };
+        let buffer = if side == Side::Old {
+            session.ref_buffer
+        } else {
+            session.live_buffer
+        };
+        let starts: Vec<usize> = session
+            .alignment
+            .changes()
+            .map(|b| {
+                if side == Side::Old {
+                    b.old.start
+                } else {
+                    b.new.start
+                }
+            })
+            .collect();
+        let Some(ob) = self.buffers.get(buffer) else {
+            return;
+        };
         let line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
         let mut target = None;
         let mut at = line;
         for _ in 0..count.max(1) {
-            let next = if forward { starts.iter().copied().find(|&s| s > at) } else { starts.iter().rev().copied().find(|&s| s < at) };
+            let next = if forward {
+                starts.iter().copied().find(|&s| s > at)
+            } else {
+                starts.iter().rev().copied().find(|&s| s < at)
+            };
             match next {
                 Some(s) => {
                     target = Some(s);
@@ -374,13 +531,20 @@ impl App {
             }
         }
         let Some(target) = target else {
-            self.set_message(if forward { "no more changes below" } else { "no more changes above" });
+            self.set_message(if forward {
+                "no more changes below"
+            } else {
+                "no more changes above"
+            });
             return;
         };
         let target = target.min(ob.buffer.line_count().saturating_sub(1));
         let char_idx = ob.buffer.line_start_char(target);
         let (_, cursor) = self.focused_buffer_and_cursor_mut();
-        *cursor = Cursor { char_idx, sticky_col: 0 };
+        *cursor = Cursor {
+            char_idx,
+            sticky_col: 0,
+        };
         self.wake_caret();
     }
 
@@ -389,42 +553,85 @@ impl App {
     pub(super) fn side_by_side_take(&mut self, put: bool) {
         let pane = self.focused_pane_id();
         let Some(session) = self.side_by_side_at(pane) else {
-            self.set_message("do and dp take a change across a side-by-side diff -- SPC g v opens one");
+            self.set_message(
+                "do and dp take a change across a side-by-side diff -- SPC g v opens one",
+            );
             return;
         };
-        let Some(side) = session.side_of(pane) else { return };
+        let Some(side) = session.side_of(pane) else {
+            return;
+        };
         // Only your buffer can change: `do` there, or `dp` from the ref.
         if (side == Side::New) == put {
             let rev = session.rev.clone();
             self.set_error(format!("the {rev} side is read-only -- do in your pane takes its version, dp in its pane gives it to you"));
             return;
         }
-        let (ref_buffer, live_buffer, live_pane) = (session.ref_buffer, session.live_buffer, session.live_pane);
-        let buffer = if side == Side::Old { ref_buffer } else { live_buffer };
-        let Some(line) = self.buffers.get(buffer).map(|ob| ob.buffer.line_col(&self.pane_state(pane).cursor).0) else { return };
-        let Some(block) = session.alignment.block_at(side, line).cloned() else { return };
+        let (ref_buffer, live_buffer, live_pane) =
+            (session.ref_buffer, session.live_buffer, session.live_pane);
+        let buffer = if side == Side::Old {
+            ref_buffer
+        } else {
+            live_buffer
+        };
+        let Some(line) = self
+            .buffers
+            .get(buffer)
+            .map(|ob| ob.buffer.line_col(&self.pane_state(pane).cursor).0)
+        else {
+            return;
+        };
+        let Some(block) = session.alignment.block_at(side, line).cloned() else {
+            return;
+        };
         if block.kind == BlockKind::Equal {
             self.set_message("no change here");
             return;
         }
-        let old_text = self.buffers.get(ref_buffer).map(buffer_text).unwrap_or_default();
-        let old_lines: Vec<&str> = old_text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
-        let Some(ob) = self.buffers.get_mut(live_buffer) else { return };
-        let crlf = ob.buffer.text_range(0, ob.buffer.len_chars().min(4096)).contains("\r\n");
+        let old_text = self
+            .buffers
+            .get(ref_buffer)
+            .map(buffer_text)
+            .unwrap_or_default();
+        let old_lines: Vec<&str> = old_text
+            .split('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .collect();
+        let Some(ob) = self.buffers.get_mut(live_buffer) else {
+            return;
+        };
+        let crlf = ob
+            .buffer
+            .text_range(0, ob.buffer.len_chars().min(4096))
+            .contains("\r\n");
         let eol = if crlf { "\r\n" } else { "\n" };
         let line_count = ob.buffer.line_count();
-        let start = if block.new.start < line_count { ob.buffer.line_start_char(block.new.start) } else { ob.buffer.len_chars() };
-        let end = if block.new.end < line_count { ob.buffer.line_start_char(block.new.end) } else { ob.buffer.len_chars() };
+        let start = if block.new.start < line_count {
+            ob.buffer.line_start_char(block.new.start)
+        } else {
+            ob.buffer.len_chars()
+        };
+        let end = if block.new.end < line_count {
+            ob.buffer.line_start_char(block.new.end)
+        } else {
+            ob.buffer.len_chars()
+        };
         let mut text = old_lines[block.old.clone()].join(eol);
         // Whole lines in, whole lines out: the line break after the
         // block stays, unless the block ran to the end of the file.
         if !block.old.is_empty() && block.new.end < line_count {
             text.push_str(eol);
         }
-        let mut cursor = Cursor { char_idx: start, sticky_col: 0 };
+        let mut cursor = Cursor {
+            char_idx: start,
+            sticky_col: 0,
+        };
         ob.buffer.replace_range(&mut cursor, start, end, &text);
         if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&live_pane) {
-            state.cursor = Cursor { char_idx: start, sticky_col: 0 };
+            state.cursor = Cursor {
+                char_idx: start,
+                sticky_col: 0,
+            };
         }
         self.wake_caret();
     }
@@ -436,8 +643,16 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
-        let out = Command::new("git").current_dir(dir).args(args).output().expect("git runs");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// A repository with `a.txt` committed as one, two, three.
@@ -445,7 +660,8 @@ mod tests {
 
     impl Repo {
         fn new(name: &str) -> Self {
-            let dir = std::env::temp_dir().join(format!("fenix-side-by-side-{name}-{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("fenix-side-by-side-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let dir = fenix_lsp::normalize(std::fs::canonicalize(&dir).unwrap());
@@ -496,20 +712,41 @@ mod tests {
     }
 
     fn live_text(app: &App) -> String {
-        app.buffers.get(app.side_by_sides[0].live_buffer).unwrap().buffer.text()
+        app.buffers
+            .get(app.side_by_sides[0].live_buffer)
+            .unwrap()
+            .buffer
+            .text()
     }
 
     #[test]
     fn an_unsaved_added_block_leaves_space_beside_it_on_the_left() {
         let (_repo, app) = opened("added", |app| insert_at_line(app, 1, "new A\nnew B\n"));
         let s = &app.side_by_sides[0];
-        assert_eq!(app.focused_pane_id(), s.live_pane, "your buffer keeps the keyboard");
-        let layout = app.windows().layout(fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
-        assert_eq!(layout.first().map(|(id, _)| *id), Some(s.ref_pane), "the ref's version is on the left");
+        assert_eq!(
+            app.focused_pane_id(),
+            s.live_pane,
+            "your buffer keeps the keyboard"
+        );
+        let layout = app.windows().layout(fenix_window::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+        });
+        assert_eq!(
+            layout.first().map(|(id, _)| *id),
+            Some(s.ref_pane),
+            "the ref's version is on the left"
+        );
         assert_eq!(lines_of(&app, true), vec![0, FILLER, FILLER, 1, 2, 3]);
         assert_eq!(lines_of(&app, false), vec![0, 1, 2, 3, 4, 5]);
         let (tints, _) = app.side_by_side_tints(s.live_pane, &lines_of(&app, false));
-        assert_eq!(tints.iter().map(|t| t.0).collect::<Vec<_>>(), vec![1, 2], "the two added lines are tinted");
+        assert_eq!(
+            tints.iter().map(|t| t.0).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the two added lines are tinted"
+        );
         assert_eq!(app.buffer_display_name(s.ref_buffer), "HEAD:a.txt");
     }
 
@@ -530,7 +767,11 @@ mod tests {
             buffer.replace_range(cursor, from, to, "");
         });
         assert_eq!(live_text(&app), "one\nthree\n");
-        assert_eq!(lines_of(&app, false), vec![0, FILLER, 1, 2], "space where two was");
+        assert_eq!(
+            lines_of(&app, false),
+            vec![0, FILLER, 1, 2],
+            "space where two was"
+        );
         // On the line under the removal, as in Vim.
         let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
         cursor.char_idx = buffer.line_start_char(1);
@@ -546,7 +787,10 @@ mod tests {
         let ref_pane = app.side_by_sides[0].ref_pane;
         app.windows_mut().focus(ref_pane);
         app.side_by_side_take(false);
-        assert!(app.status_message.as_ref().is_some_and(|m| m.is_error), "do in the ref's pane would change the ref");
+        assert!(
+            app.status_message.as_ref().is_some_and(|m| m.is_error),
+            "do in the ref's pane would change the ref"
+        );
         assert!(app.buffer_edits_are_reverted(app.side_by_sides[0].ref_buffer, BufferKind::Text));
     }
 
@@ -574,10 +818,22 @@ mod tests {
         let ref_pane = app.side_by_sides[0].ref_pane;
         let ref_buffer = app.side_by_sides[0].ref_buffer;
         let ref_cursor = app.pane_state(ref_pane).cursor;
-        assert_eq!(app.buffers.get(ref_buffer).unwrap().buffer.line_col(&ref_cursor).0, 2, "three to three");
+        assert_eq!(
+            app.buffers
+                .get(ref_buffer)
+                .unwrap()
+                .buffer
+                .line_col(&ref_cursor)
+                .0,
+            2,
+            "three to three"
+        );
         app.side_by_side_follow(ref_pane, 2);
         let live = *app.pane_state(app.focused_pane_id());
-        assert!(live.scroll_line > 0, "scrolled to keep the cursor in a two-row pane");
+        assert!(
+            live.scroll_line > 0,
+            "scrolled to keep the cursor in a two-row pane"
+        );
         assert_eq!(app.pane_state(ref_pane).scroll_line, live.scroll_line);
     }
 
@@ -590,13 +846,20 @@ mod tests {
         app.open_side_by_side(&path, "HEAD");
         assert!(app.side_by_sides.is_empty());
         assert_eq!(app.windows().windows().len(), 1);
-        assert!(app.status_message.as_ref().is_some_and(|m| m.text.contains("isn't on HEAD")));
+        assert!(app
+            .status_message
+            .as_ref()
+            .is_some_and(|m| m.text.contains("isn't on HEAD")));
     }
 
     #[test]
     fn q_in_the_left_pane_closes_it_and_leaves_your_buffer() {
         let (_repo, mut app) = opened("close", |app| insert_at_line(app, 0, "zero\n"));
-        let (ref_pane, ref_buffer, live_buffer) = (app.side_by_sides[0].ref_pane, app.side_by_sides[0].ref_buffer, app.side_by_sides[0].live_buffer);
+        let (ref_pane, ref_buffer, live_buffer) = (
+            app.side_by_sides[0].ref_pane,
+            app.side_by_sides[0].ref_buffer,
+            app.side_by_sides[0].live_buffer,
+        );
         app.windows_mut().focus(ref_pane);
         assert!(app.focused_is_side_by_side_ref());
         assert!(app.side_by_side_close());
@@ -604,12 +867,23 @@ mod tests {
         assert_eq!(app.windows().windows().len(), 1);
         assert_eq!(app.focused_buffer_id(), live_buffer);
         assert!(app.buffers.get(ref_buffer).is_none());
-        assert!(app.buffers.get(live_buffer).unwrap().buffer.text().starts_with("zero\n"), "unsaved edits kept");
+        assert!(
+            app.buffers
+                .get(live_buffer)
+                .unwrap()
+                .buffer
+                .text()
+                .starts_with("zero\n"),
+            "unsaved edits kept"
+        );
     }
 
     #[test]
     fn fillers_go_before_their_line_and_at_the_end() {
-        assert_eq!(with_fillers(vec![0, 1, 2], &[(1, 2), (3, 1)]), vec![0, FILLER, FILLER, 1, 2, FILLER]);
+        assert_eq!(
+            with_fillers(vec![0, 1, 2], &[(1, 2), (3, 1)]),
+            vec![0, FILLER, FILLER, 1, 2, FILLER]
+        );
         assert_eq!(with_fillers(vec![0, 1], &[]), vec![0, 1]);
     }
 

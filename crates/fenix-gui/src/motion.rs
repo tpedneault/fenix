@@ -108,7 +108,12 @@ pub fn level(config: &Config) -> Level {
     if config.animations == Some(false) {
         return Level::Off;
     }
-    config.motion.level.as_deref().and_then(Level::parse).unwrap_or(Level::Subtle)
+    config
+        .motion
+        .level
+        .as_deref()
+        .and_then(Level::parse)
+        .unwrap_or(Level::Subtle)
 }
 
 /// Whether `feature` plays: its own setting when it has one, else
@@ -118,12 +123,18 @@ pub fn on(config: &Config, feature: Feature) -> bool {
     if config.animations == Some(false) {
         return false;
     }
-    feature.setting(&config.motion).unwrap_or_else(|| level(config) >= feature.needs())
+    feature
+        .setting(&config.motion)
+        .unwrap_or_else(|| level(config) >= feature.needs())
 }
 
 /// `base_ms` scaled by `motion.speed`.
 pub fn duration(config: &Config, base_ms: u64) -> Duration {
-    let speed = config.motion.speed.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
+    let speed = config
+        .motion
+        .speed
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .unwrap_or(1.0);
     Duration::from_secs_f32(base_ms as f32 / 1000.0 * speed)
 }
 
@@ -214,7 +225,10 @@ pub struct Anim {
 
 impl Anim {
     pub fn new(now: Instant, duration: Duration) -> Self {
-        Anim { started: now, duration }
+        Anim {
+            started: now,
+            duration,
+        }
     }
 
     /// 0 at the start, 1 at the end, linear.
@@ -222,7 +236,8 @@ impl Anim {
         if self.duration.is_zero() {
             return 1.0;
         }
-        (now.saturating_duration_since(self.started).as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0)
+        (now.saturating_duration_since(self.started).as_secs_f32() / self.duration.as_secs_f32())
+            .clamp(0.0, 1.0)
     }
 
     /// 0 at the start, 1 at the end, fast then settling.
@@ -246,11 +261,21 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 pub fn lerp_rgba(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
-    [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t), lerp(a[3], b[3], t)]
+    [
+        lerp(a[0], b[0], t),
+        lerp(a[1], b[1], t),
+        lerp(a[2], b[2], t),
+        lerp(a[3], b[3], t),
+    ]
 }
 
 pub fn lerp_rect(a: fenix_window::Rect, b: fenix_window::Rect, t: f32) -> fenix_window::Rect {
-    fenix_window::Rect { x: lerp(a.x, b.x, t), y: lerp(a.y, b.y, t), w: lerp(a.w, b.w, t), h: lerp(a.h, b.h, t) }
+    fenix_window::Rect {
+        x: lerp(a.x, b.x, t),
+        y: lerp(a.y, b.y, t),
+        w: lerp(a.w, b.w, t),
+        h: lerp(a.h, b.h, t),
+    }
 }
 
 #[cfg(test)]
@@ -258,7 +283,10 @@ mod tests {
     use super::*;
 
     fn config() -> Config {
-        Config::empty(std::path::PathBuf::from("settings.toml"), std::path::PathBuf::from("state"))
+        Config::empty(
+            std::path::PathBuf::from("settings.toml"),
+            std::path::PathBuf::from("state"),
+        )
     }
 
     #[test]
@@ -281,7 +309,10 @@ mod tests {
         c.motion.beacon = Some(false);
         assert!(!on(&c, Feature::Beacon));
         c.motion.level = Some("off".into());
-        assert!(on(&c, Feature::CaretGlide), "on by itself even with the level off");
+        assert!(
+            on(&c, Feature::CaretGlide),
+            "on by itself even with the level off"
+        );
     }
 
     #[test]
@@ -308,7 +339,10 @@ mod tests {
         assert_eq!(a.linear(now), 0.0);
         assert!(a.running(now + Duration::from_millis(50)));
         assert!((a.linear(now + Duration::from_millis(50)) - 0.5).abs() < 1e-3);
-        assert!(a.eased(now + Duration::from_millis(50)) > 0.5, "eased is ahead of linear");
+        assert!(
+            a.eased(now + Duration::from_millis(50)) > 0.5,
+            "eased is ahead of linear"
+        );
         assert_eq!(a.linear(now + Duration::from_millis(200)), 1.0);
         assert!(!a.running(now + Duration::from_millis(100)));
     }

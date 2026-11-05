@@ -32,7 +32,9 @@ pub enum ProjectKind {
 /// The tables that say "this directory is a MIB": its version table,
 /// telecommands, TM parameters and packets, calibrations. Any one is
 /// enough -- a TM-only database has no `ccf.dat`.
-const MIB_TABLES: &[&str] = &["vdf.dat", "ccf.dat", "pcf.dat", "pid.dat", "tpcf.dat", "caf.dat", "txf.dat"];
+const MIB_TABLES: &[&str] = &[
+    "vdf.dat", "ccf.dat", "pcf.dat", "pid.dat", "tpcf.dat", "caf.dat", "txf.dat",
+];
 
 /// Whether `dir` holds MIB tables itself (not in a `mib/` below it).
 pub(crate) fn holds_mib_tables(dir: &Path) -> bool {
@@ -71,14 +73,17 @@ impl ProjectKind {
 
     pub fn from_id(id: &str) -> Option<Self> {
         let id = id.trim().to_ascii_lowercase();
-        Self::ALL.into_iter().find(|kind| kind.id() == id).or(match id.as_str() {
-            "py" | "uv" => Some(ProjectKind::Python),
-            "ino" | "sketch" => Some(ProjectKind::Arduino),
-            "rs" => Some(ProjectKind::Rust),
-            "c++" | "c" | "cmake" => Some(ProjectKind::Cpp),
-            "js" | "ts" | "javascript" | "typescript" => Some(ProjectKind::Node),
-            _ => None,
-        })
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.id() == id)
+            .or(match id.as_str() {
+                "py" | "uv" => Some(ProjectKind::Python),
+                "ino" | "sketch" => Some(ProjectKind::Arduino),
+                "rs" => Some(ProjectKind::Rust),
+                "c++" | "c" | "cmake" => Some(ProjectKind::Cpp),
+                "js" | "ts" | "javascript" | "typescript" => Some(ProjectKind::Node),
+                _ => None,
+            })
     }
 
     /// The two-or-three-letter tag every place a project is named shows
@@ -133,7 +138,8 @@ pub fn detect_kind_from_files(root: &Path) -> ProjectKind {
     let has = |name: &str| root.join(name).exists();
     if has("Cargo.toml") {
         ProjectKind::Rust
-    } else if has("pyproject.toml") || has("setup.py") || has("requirements.txt") || has("uv.lock") {
+    } else if has("pyproject.toml") || has("setup.py") || has("requirements.txt") || has("uv.lock")
+    {
         ProjectKind::Python
     } else if has("go.mod") {
         ProjectKind::Go
@@ -153,31 +159,72 @@ pub fn detect_kind_from_files(root: &Path) -> ProjectKind {
 /// one. What opening a project lands on when you've never had a file of
 /// it open.
 pub fn main_file(root: &Path, kind: ProjectKind) -> Option<std::path::PathBuf> {
-    let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let first_in = |dir: &Path, extension: &str| -> Option<std::path::PathBuf> {
-        let mut found: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).filter(|p| p.is_file() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case(extension))).collect();
+        let mut found: Vec<_> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.is_file()
+                    && p.extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+            })
+            .collect();
         found.sort();
         found.into_iter().next()
     };
     let candidates: Vec<std::path::PathBuf> = match kind {
-        ProjectKind::Arduino => vec![root.join(format!("{name}.ino")), root.join(format!("{name}.pde")), root.join(format!("src/{name}.cpp")), root.join(format!("src/{name}.h"))],
+        ProjectKind::Arduino => vec![
+            root.join(format!("{name}.ino")),
+            root.join(format!("{name}.pde")),
+            root.join(format!("src/{name}.cpp")),
+            root.join(format!("src/{name}.h")),
+        ],
         ProjectKind::Rust => vec![root.join("src/main.rs"), root.join("src/lib.rs")],
         ProjectKind::Python => {
             let mut c = vec![root.join("main.py"), root.join("app.py")];
             // A src-layout package: src/<package>/__init__.py.
-            let mut packages: Vec<_> = std::fs::read_dir(root.join("src")).into_iter().flatten().flatten().map(|e| e.path().join("__init__.py")).collect();
+            let mut packages: Vec<_> = std::fs::read_dir(root.join("src"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|e| e.path().join("__init__.py"))
+                .collect();
             packages.sort();
             c.extend(packages);
             c
         }
         ProjectKind::Go => vec![root.join("main.go")],
-        ProjectKind::Node => vec![root.join("src/index.ts"), root.join("src/index.js"), root.join("index.ts"), root.join("index.js")],
-        ProjectKind::Cpp => vec![root.join("src/main.cpp"), root.join("main.cpp"), root.join("src/main.c"), root.join("main.c")],
+        ProjectKind::Node => vec![
+            root.join("src/index.ts"),
+            root.join("src/index.js"),
+            root.join("index.ts"),
+            root.join("index.js"),
+        ],
+        ProjectKind::Cpp => vec![
+            root.join("src/main.cpp"),
+            root.join("main.cpp"),
+            root.join("src/main.c"),
+            root.join("main.c"),
+        ],
         ProjectKind::Tcl => vec![root.join("main.tcl")],
-        ProjectKind::Mib => ["ccf.dat", "pcf.dat", "vdf.dat"].iter().flat_map(|t| [root.join(t), root.join("mib").join(t)]).collect(),
+        ProjectKind::Mib => ["ccf.dat", "pcf.dat", "vdf.dat"]
+            .iter()
+            .flat_map(|t| [root.join(t), root.join("mib").join(t)])
+            .collect(),
         ProjectKind::Monorepo | ProjectKind::Other => Vec::new(),
     };
-    candidates.into_iter().find(|p| p.is_file()).or_else(|| if kind == ProjectKind::Tcl { first_in(root, "tcl") } else { None })
+    candidates.into_iter().find(|p| p.is_file()).or_else(|| {
+        if kind == ProjectKind::Tcl {
+            first_in(root, "tcl")
+        } else {
+            None
+        }
+    })
 }
 
 fn has_extension(dir: &Path, extension: &str) -> bool {
@@ -185,7 +232,13 @@ fn has_extension(dir: &Path, extension: &str) -> bool {
         .into_iter()
         .flatten()
         .flatten()
-        .any(|entry| entry.path().extension().is_some_and(|e| e.eq_ignore_ascii_case(extension)) && entry.path().is_file())
+        .any(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(extension))
+                && entry.path().is_file()
+        })
 }
 
 /// `[project] kind = ...` from the project's `.fenix/settings.toml` --
@@ -263,14 +316,26 @@ mod tests {
     fn main_files_are_found_by_kind() {
         let dir = TempDir::new("main_file");
         dir.write("Lab/Lab.ino", "");
-        assert_eq!(main_file(&dir.path().join("Lab"), ProjectKind::Arduino), Some(dir.path().join("Lab/Lab.ino")));
+        assert_eq!(
+            main_file(&dir.path().join("Lab"), ProjectKind::Arduino),
+            Some(dir.path().join("Lab/Lab.ino"))
+        );
         dir.write("py/src/orbit/__init__.py", "");
-        assert_eq!(main_file(&dir.path().join("py"), ProjectKind::Python), Some(dir.path().join("py/src/orbit/__init__.py")));
+        assert_eq!(
+            main_file(&dir.path().join("py"), ProjectKind::Python),
+            Some(dir.path().join("py/src/orbit/__init__.py"))
+        );
         dir.write("rs/src/lib.rs", "");
-        assert_eq!(main_file(&dir.path().join("rs"), ProjectKind::Rust), Some(dir.path().join("rs/src/lib.rs")));
+        assert_eq!(
+            main_file(&dir.path().join("rs"), ProjectKind::Rust),
+            Some(dir.path().join("rs/src/lib.rs"))
+        );
         dir.write("db/vdf.dat", "");
         dir.write("db/pcf.dat", "");
-        assert_eq!(main_file(&dir.path().join("db"), ProjectKind::Mib), Some(dir.path().join("db/pcf.dat")));
+        assert_eq!(
+            main_file(&dir.path().join("db"), ProjectKind::Mib),
+            Some(dir.path().join("db/pcf.dat"))
+        );
         assert_eq!(main_file(&dir.path().join("rs"), ProjectKind::Go), None);
     }
 
@@ -278,7 +343,10 @@ mod tests {
     fn a_declared_kind_wins_over_detection() {
         let dir = TempDir::new("kind_declared");
         dir.write("Cargo.toml", "");
-        dir.write(".fenix/project.ini", "[monitor]\nkind = rust\n[project]\n kind = MIB \n");
+        dir.write(
+            ".fenix/project.ini",
+            "[monitor]\nkind = rust\n[project]\n kind = MIB \n",
+        );
         assert_eq!(detect_kind(dir.path()), ProjectKind::Mib);
     }
 

@@ -72,10 +72,16 @@ mod tests {
     fn repo_with_two_hunks(name: &str) -> TempDir {
         let dir = TempDir::new(name);
         init_repo(dir.path());
-        dir.write("f.txt", "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n");
+        dir.write(
+            "f.txt",
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n",
+        );
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "initial"]);
-        dir.write("f.txt", "one\nTWO\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\nELEVEN\ntwelve\n");
+        dir.write(
+            "f.txt",
+            "one\nTWO\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\nELEVEN\ntwelve\n",
+        );
         dir
     }
 
@@ -88,14 +94,25 @@ mod tests {
         let dir = repo_with_two_hunks("apply_stage_one_hunk");
         let diff = file_diff(dir.path(), "f.txt", false).unwrap();
         let files = fenix_diff::parse(&diff);
-        assert_eq!(files[0].hunks.len(), 2, "test setup should produce two hunks, got:\n{diff}");
+        assert_eq!(
+            files[0].hunks.len(),
+            2,
+            "test setup should produce two hunks, got:\n{diff}"
+        );
 
         let patch = fenix_diff::hunk_patch(&files[0], &files[0].hunks[0]);
-        apply_patch(dir.path(), &patch, ApplyTarget::Stage).expect("git should accept the generated patch");
+        apply_patch(dir.path(), &patch, ApplyTarget::Stage)
+            .expect("git should accept the generated patch");
 
         let staged = file_diff(dir.path(), "f.txt", true).unwrap();
-        assert!(staged.contains("+TWO"), "the chosen hunk should be staged:\n{staged}");
-        assert!(!staged.contains("ELEVEN"), "the other hunk should not be:\n{staged}");
+        assert!(
+            staged.contains("+TWO"),
+            "the chosen hunk should be staged:\n{staged}"
+        );
+        assert!(
+            !staged.contains("ELEVEN"),
+            "the other hunk should not be:\n{staged}"
+        );
         // ...and the other one is still sitting unstaged in the worktree.
         let unstaged = file_diff(dir.path(), "f.txt", false).unwrap();
         assert!(unstaged.contains("+ELEVEN"));
@@ -110,11 +127,18 @@ mod tests {
         let staged = file_diff(dir.path(), "f.txt", true).unwrap();
         let files = fenix_diff::parse(&staged);
         let patch = fenix_diff::hunk_patch(&files[0], &files[0].hunks[0]);
-        apply_patch(dir.path(), &patch, ApplyTarget::Unstage).expect("git should accept the reverse patch");
+        apply_patch(dir.path(), &patch, ApplyTarget::Unstage)
+            .expect("git should accept the reverse patch");
 
         let after = file_diff(dir.path(), "f.txt", true).unwrap();
-        assert!(!after.contains("TWO"), "the unstaged hunk should be gone from the index:\n{after}");
-        assert!(after.contains("ELEVEN"), "the other hunk should still be staged:\n{after}");
+        assert!(
+            !after.contains("TWO"),
+            "the unstaged hunk should be gone from the index:\n{after}"
+        );
+        assert!(
+            after.contains("ELEVEN"),
+            "the other hunk should still be staged:\n{after}"
+        );
     }
 
     #[test]
@@ -124,11 +148,18 @@ mod tests {
         let files = fenix_diff::parse(&diff);
         let patch = fenix_diff::hunk_patch(&files[0], &files[0].hunks[0]);
 
-        apply_patch(dir.path(), &patch, ApplyTarget::Discard).expect("git should accept the reverse patch");
+        apply_patch(dir.path(), &patch, ApplyTarget::Discard)
+            .expect("git should accept the reverse patch");
 
         let contents = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
-        assert!(contents.contains("two"), "the discarded hunk should be back to its committed form");
-        assert!(contents.contains("ELEVEN"), "the other edit should be untouched");
+        assert!(
+            contents.contains("two"),
+            "the discarded hunk should be back to its committed form"
+        );
+        assert!(
+            contents.contains("ELEVEN"),
+            "the other edit should be untouched"
+        );
     }
 
     /// The CRLF hazard, end to end against real git rather than just
@@ -150,10 +181,14 @@ mod tests {
         let diff = file_diff(dir.path(), "c.txt", false).unwrap();
         let files = fenix_diff::parse(&diff);
         let patch = fenix_diff::hunk_patch(&files[0], &files[0].hunks[0]);
-        apply_patch(dir.path(), &patch, ApplyTarget::Stage).expect("git should accept a CRLF patch");
+        apply_patch(dir.path(), &patch, ApplyTarget::Stage)
+            .expect("git should accept a CRLF patch");
 
         let staged = file_diff(dir.path(), "c.txt", true).unwrap();
-        assert!(staged.contains("+TWO\r"), "the staged line must keep its carriage return:\n{staged:?}");
+        assert!(
+            staged.contains("+TWO\r"),
+            "the staged line must keep its carriage return:\n{staged:?}"
+        );
         // Nothing anywhere in the file quietly became LF-only.
         let worktree = std::fs::read(dir.path().join("c.txt")).unwrap();
         assert_eq!(worktree, b"one\r\nTWO\r\nthree\r\nfour\r\n");
@@ -172,15 +207,22 @@ mod tests {
         dir.write("n.txt", "alpha\nBETA");
 
         let diff = file_diff(dir.path(), "n.txt", false).unwrap();
-        assert!(diff.contains("\\ No newline at end of file"), "test setup should produce the marker:\n{diff}");
+        assert!(
+            diff.contains("\\ No newline at end of file"),
+            "test setup should produce the marker:\n{diff}"
+        );
         let files = fenix_diff::parse(&diff);
         let patch = fenix_diff::hunk_patch(&files[0], &files[0].hunks[0]);
-        apply_patch(dir.path(), &patch, ApplyTarget::Stage).expect("git should accept a no-trailing-newline patch");
+        apply_patch(dir.path(), &patch, ApplyTarget::Stage)
+            .expect("git should accept a no-trailing-newline patch");
 
         let staged = file_diff(dir.path(), "n.txt", true).unwrap();
         assert!(staged.contains("+BETA"));
         // The file itself still has no trailing newline.
-        assert_eq!(std::fs::read(dir.path().join("n.txt")).unwrap(), b"alpha\nBETA");
+        assert_eq!(
+            std::fs::read(dir.path().join("n.txt")).unwrap(),
+            b"alpha\nBETA"
+        );
     }
 
     #[test]
@@ -188,6 +230,9 @@ mod tests {
         let dir = repo_with_two_hunks("apply_rejects");
         let bogus = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-nothing like the real content\n+replacement\n";
         let err = apply_patch(dir.path(), bogus, ApplyTarget::Stage).unwrap_err();
-        assert!(err.contains("apply") || err.contains("patch"), "expected git's own apply error, got: {err}");
+        assert!(
+            err.contains("apply") || err.contains("patch"),
+            "expected git's own apply error, got: {err}"
+        );
     }
 }

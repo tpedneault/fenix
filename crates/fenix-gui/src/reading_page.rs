@@ -41,7 +41,17 @@ pub struct ReadingPage {
 
 impl ReadingPage {
     pub fn new(source: fenix_buffers::BufferId, path: Option<PathBuf>, replaces: bool) -> Self {
-        ReadingPage { source, path, replaces, rendered: Rendered::default(), seen: None, followed: None, line: 0, target: None, back: None }
+        ReadingPage {
+            source,
+            path,
+            replaces,
+            rendered: Rendered::default(),
+            seen: None,
+            followed: None,
+            line: 0,
+            target: None,
+            back: None,
+        }
     }
 
     fn lines(&self) -> usize {
@@ -65,7 +75,10 @@ impl ReadingPage {
             (Some(i), true) => (i + 1) % t.len(),
             (Some(i), false) => (i + t.len() - 1) % t.len(),
             (None, true) => t.iter().position(|x| x.line >= self.line).unwrap_or(0),
-            (None, false) => t.iter().rposition(|x| x.line <= self.line).unwrap_or(t.len() - 1),
+            (None, false) => t
+                .iter()
+                .rposition(|x| x.line <= self.line)
+                .unwrap_or(t.len() - 1),
         };
         self.target = Some(next);
         self.line = t[next].line;
@@ -101,7 +114,9 @@ impl ReadingPage {
             Key::Tab | Key::Char('n') => self.step_target(true),
             Key::BackTab | Key::Char('N') => self.step_target(false),
             Key::Char('q') | Key::Escape => return Action::Close,
-            Key::Char('i') => return Action::Edit(self.rendered.source_line_of(self.line).unwrap_or(0)),
+            Key::Char('i') => {
+                return Action::Edit(self.rendered.source_line_of(self.line).unwrap_or(0))
+            }
             Key::Enter | Key::Char('o') => {
                 if let Some(t) = self.selected() {
                     return Action::Target(t.action.clone());
@@ -109,8 +124,15 @@ impl ReadingPage {
                 return Action::Edit(self.rendered.source_line_of(self.line).unwrap_or(0));
             }
             Key::Char('x') => {
-                let on_line = self.rendered.targets.iter().find(|t| t.line == self.line && matches!(t.action, RAction::Checkbox { .. }));
-                if let Some(t) = self.selected().filter(|t| matches!(t.action, RAction::Checkbox { .. })).or(on_line) {
+                let on_line =
+                    self.rendered.targets.iter().find(|t| {
+                        t.line == self.line && matches!(t.action, RAction::Checkbox { .. })
+                    });
+                if let Some(t) = self
+                    .selected()
+                    .filter(|t| matches!(t.action, RAction::Checkbox { .. }))
+                    .or(on_line)
+                {
                     return Action::Target(t.action.clone());
                 }
             }
@@ -138,7 +160,9 @@ pub fn layout(page: &ReadingPage, cols: usize) -> Page {
     g.embed(&page.rendered.page, 0, left, false);
     let width = cols.saturating_sub(2);
     // The line (or target) the view is on.
-    let line = page.line.min(page.rendered.page.text.lines().count().saturating_sub(1));
+    let line = page
+        .line
+        .min(page.rendered.page.text.lines().count().saturating_sub(1));
     match page.target.and_then(|i| page.rendered.targets.get(i)) {
         Some(t) => g.focus(t.line, t.cols.start + left..t.cols.end + left),
         None => g.focus(line, left..left + width),
@@ -146,7 +170,13 @@ pub fn layout(page: &ReadingPage, cols: usize) -> Page {
     if page.rendered.page.text.trim().is_empty() {
         g.put(0, left, "Nothing to read yet.", Role::Muted);
     }
-    let keys: &[(&str, &str)] = &[("Tab", "next link"), ("Enter", "follow"), ("x", "tick"), ("i", "edit here"), ("q", "close")];
+    let keys: &[(&str, &str)] = &[
+        ("Tab", "next link"),
+        ("Enter", "follow"),
+        ("x", "tick"),
+        ("i", "edit here"),
+        ("q", "close"),
+    ];
     g.keys(left, width, keys);
     g.finish()
 }
@@ -167,11 +197,20 @@ mod tests {
         let mut p = page("# T\n\ntext [[A]] and [[B]]\n\n- [ ] task\n");
         p.follow(4);
         assert_eq!(p.line, 4);
-        assert_eq!(p.key(Key::Char('x')), Action::Target(RAction::Checkbox { line: 4, done: false }));
+        assert_eq!(
+            p.key(Key::Char('x')),
+            Action::Target(RAction::Checkbox {
+                line: 4,
+                done: false
+            })
+        );
         p.key(Key::Char('g'));
         p.key(Key::Tab);
         assert_eq!(p.line, 2);
-        assert!(matches!(p.key(Key::Enter), Action::Target(RAction::Link(_))));
+        assert!(matches!(
+            p.key(Key::Enter),
+            Action::Target(RAction::Link(_))
+        ));
         p.key(Key::Tab);
         p.key(Key::Tab);
         assert_eq!(p.line, 4);

@@ -51,7 +51,15 @@ pub const MAX_GRAMMAR: u64 = 32 << 20;
 /// Settles the language files' grammars for this run, before any file is
 /// opened. Once: a second call changes nothing.
 pub fn set_grammars(grammars: Vec<Grammar>) {
-    let _ = GRAMMARS.set(grammars.into_iter().map(|grammar| Loaded { grammar, language: OnceLock::new() }).collect());
+    let _ = GRAMMARS.set(
+        grammars
+            .into_iter()
+            .map(|grammar| Loaded {
+                grammar,
+                language: OnceLock::new(),
+            })
+            .collect(),
+    );
 }
 
 /// What went wrong loading a grammar since this was last asked: a grammar
@@ -61,7 +69,10 @@ pub fn take_grammar_problems() -> Vec<String> {
 }
 
 pub(crate) fn said(problem: String) {
-    PROBLEMS.lock().unwrap_or_else(|e| e.into_inner()).push(problem);
+    PROBLEMS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(problem);
 }
 
 fn all() -> &'static [Loaded] {
@@ -80,7 +91,10 @@ pub(crate) fn grammar(i: u16) -> Option<&'static Grammar> {
 
 /// The grammar called `name`, any case.
 pub(crate) fn find(name: &str) -> Option<u16> {
-    all().iter().position(|l| l.grammar.name.eq_ignore_ascii_case(name.trim())).map(|i| i as u16)
+    all()
+        .iter()
+        .position(|l| l.grammar.name.eq_ignore_ascii_case(name.trim()))
+        .map(|i| i as u16)
 }
 
 /// The engine every grammar's store is made from.
@@ -132,7 +146,9 @@ fn new_store() -> Result<WasmStore, String> {
 pub fn load(symbol: &str, wasm: &[u8]) -> Result<Language, String> {
     compiling(|| {
         let mut store = WasmStore::new(engine()).map_err(|e| format!("{symbol}: {e}"))?;
-        store.load_language(symbol, wasm).map_err(|e| format!("{symbol}: {e}"))
+        store
+            .load_language(symbol, wasm)
+            .map_err(|e| format!("{symbol}: {e}"))
     })
 }
 
@@ -166,7 +182,12 @@ pub(crate) mod tests {
         assert_eq!(tree.root_node().to_sexp(), "(document (object (pair key: (string (string_content)) value: (array (number) (true)))))");
         // A second parser, with a store of its own, on the same language.
         let mut other = super::parser(&language).unwrap();
-        assert!(!other.parse("[1, 2", None).unwrap().root_node().to_sexp().is_empty());
+        assert!(!other
+            .parse("[1, 2", None)
+            .unwrap()
+            .root_node()
+            .to_sexp()
+            .is_empty());
     }
 
     /// Compiling a grammar needs more stack than a caller may have (the
@@ -189,7 +210,12 @@ pub(crate) mod tests {
 
     #[test]
     fn what_isnt_a_grammar_is_said() {
-        assert!(load("json", b"\0asm\x01\0\0\0").unwrap_err().starts_with("json: "));
-        assert!(load("yaml", JSON_WASM).is_err(), "no tree_sitter_yaml in it");
+        assert!(load("json", b"\0asm\x01\0\0\0")
+            .unwrap_err()
+            .starts_with("json: "));
+        assert!(
+            load("yaml", JSON_WASM).is_err(),
+            "no tree_sitter_yaml in it"
+        );
     }
 }

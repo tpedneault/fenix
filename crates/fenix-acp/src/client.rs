@@ -38,13 +38,24 @@ pub struct RpcError {
 
 impl RpcError {
     pub fn new(code: i64, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), data: None }
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
     }
 
     fn parse(v: &Value) -> Self {
         Self {
-            code: v.get("code").and_then(Value::as_i64).unwrap_or(code::INTERNAL_ERROR),
-            message: v.get("message").and_then(Value::as_str).unwrap_or("unknown error").to_string(),
+            code: v
+                .get("code")
+                .and_then(Value::as_i64)
+                .unwrap_or(code::INTERNAL_ERROR),
+            message: v
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown error")
+                .to_string(),
             data: v.get("data").cloned(),
         }
     }
@@ -67,10 +78,20 @@ impl std::fmt::Display for RpcError {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AcpEvent {
     /// The answer to a request Fenix sent, by the id it gave.
-    Response { id: i64, result: Result<Value, RpcError> },
-    Notification { method: String, params: Value },
+    Response {
+        id: i64,
+        result: Result<Value, RpcError>,
+    },
+    Notification {
+        method: String,
+        params: Value,
+    },
     /// A request from the agent; answered with `respond(id, ..)`.
-    Request { id: Value, method: String, params: Value },
+    Request {
+        id: Value,
+        method: String,
+        params: Value,
+    },
     /// The agent is gone: its output closed, or what it sent can't be
     /// read as messages. Why, with its exit status when there is one.
     /// Always the last event.
@@ -116,8 +137,19 @@ impl Log {
         }
         // A replayed conversation is one line of megabytes: the log keeps
         // its start.
-        let text = if text.len() > 2000 { format!("{}… ({} bytes)", &text[..floor_char_boundary(text, 2000)], text.len()) } else { text.to_string() };
-        self.lines.push_back(LogLine { side, text: redact(&text) });
+        let text = if text.len() > 2000 {
+            format!(
+                "{}… ({} bytes)",
+                &text[..floor_char_boundary(text, 2000)],
+                text.len()
+            )
+        } else {
+            text.to_string()
+        };
+        self.lines.push_back(LogLine {
+            side,
+            text: redact(&text),
+        });
     }
 
     pub fn lines(&self) -> impl Iterator<Item = &LogLine> {
@@ -139,9 +171,20 @@ pub fn redact(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     'outer: while !rest.is_empty() {
-        for prefix in ["sk-ant-", "sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "xoxp-", "AKIA"] {
+        for prefix in [
+            "sk-ant-",
+            "sk-",
+            "ghp_",
+            "gho_",
+            "github_pat_",
+            "xoxb-",
+            "xoxp-",
+            "AKIA",
+        ] {
             if rest.starts_with(prefix) && !out.ends_with(|c: char| c.is_ascii_alphanumeric()) {
-                let len = rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_')).unwrap_or(rest.len());
+                let len = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                    .unwrap_or(rest.len());
                 if len >= prefix.len() + 12 {
                     out.push_str(prefix);
                     out.push_str("••••");
@@ -151,13 +194,25 @@ pub fn redact(text: &str) -> String {
             }
         }
         if let Some(after) = rest.strip_prefix("Bearer ") {
-            let len = after.find(|c: char| c.is_whitespace() || c == '"').unwrap_or(after.len());
+            let len = after
+                .find(|c: char| c.is_whitespace() || c == '"')
+                .unwrap_or(after.len());
             out.push_str("Bearer ••••");
             rest = &after[len..];
             continue;
         }
-        let lower: String = rest.chars().take(12).collect::<String>().to_ascii_lowercase();
-        for key in ["\"token\"", "\"apikey\"", "\"api_key\"", "\"password\"", "\"secret\""] {
+        let lower: String = rest
+            .chars()
+            .take(12)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        for key in [
+            "\"token\"",
+            "\"apikey\"",
+            "\"api_key\"",
+            "\"password\"",
+            "\"secret\"",
+        ] {
             if lower.starts_with(key) {
                 // "token": "value" -> "token": "••••"
                 let key_len = key.len();
@@ -194,27 +249,56 @@ impl AcpClient {
     /// Starts the agent and its reader threads. `send` gets every event
     /// and returns false once nobody wants them any more; the reader then
     /// stops. The process is killed, whole, when the client is dropped.
-    pub fn spawn(launch: &Launch, send: impl FnMut(AcpEvent) -> bool + Send + 'static) -> io::Result<Self> {
+    pub fn spawn(
+        launch: &Launch,
+        send: impl FnMut(AcpEvent) -> bool + Send + 'static,
+    ) -> io::Result<Self> {
         let mut command = Command::new(fenix_rpc::resolve_command(&launch.program));
-        command.args(&launch.args).current_dir(&launch.cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .args(&launch.args)
+            .current_dir(&launch.cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         for (k, v) in &launch.env {
             command.env(k, v);
         }
         let mut tree = fenix_tasks::ProcessTree::spawn(command)?;
-        let stdin = tree.take_stdin().ok_or_else(|| io::Error::other("the agent has no stdin"))?;
-        let stdout = tree.take_stdout().ok_or_else(|| io::Error::other("the agent has no stdout"))?;
-        let stderr = tree.take_stderr().ok_or_else(|| io::Error::other("the agent has no stderr"))?;
+        let stdin = tree
+            .take_stdin()
+            .ok_or_else(|| io::Error::other("the agent has no stdin"))?;
+        let stdout = tree
+            .take_stdout()
+            .ok_or_else(|| io::Error::other("the agent has no stdout"))?;
+        let stderr = tree
+            .take_stderr()
+            .ok_or_else(|| io::Error::other("the agent has no stderr"))?;
         let log = Arc::new(Mutex::new(Log::default()));
-        log.lock().unwrap().push(LogSide::Note, &format!("started {} {} (pid {}) in {}", launch.program, launch.args.join(" "), tree.id(), launch.cwd.display()));
+        log.lock().unwrap().push(
+            LogSide::Note,
+            &format!(
+                "started {} {} (pid {}) in {}",
+                launch.program,
+                launch.args.join(" "),
+                tree.id(),
+                launch.cwd.display()
+            ),
+        );
         let tree = Arc::new(Mutex::new(Some(tree)));
         let stderr_log = log.clone();
-        std::thread::Builder::new().name("fenix-acp-stderr".into()).spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                stderr_log.lock().unwrap().push(LogSide::Stderr, &line);
-            }
-        })?;
-        let client = Self { writer: Mutex::new(Box::new(stdin)), tree: tree.clone(), log: log.clone() };
+        std::thread::Builder::new()
+            .name("fenix-acp-stderr".into())
+            .spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    let Ok(line) = line else { break };
+                    stderr_log.lock().unwrap().push(LogSide::Stderr, &line);
+                }
+            })?;
+        let client = Self {
+            writer: Mutex::new(Box::new(stdin)),
+            tree: tree.clone(),
+            log: log.clone(),
+        };
         start_reader(BufReader::new(stdout), log, Some(tree), send)?;
         Ok(client)
     }
@@ -223,35 +307,55 @@ impl AcpClient {
     /// [`MOCK_PROGRAM`], the mock in this process (`launch.args` are its
     /// flags) -- for tests, and for trying Fenix's agent UI with no agent
     /// installed (`agents.servers`: `mock = "fenix:mock --profile claude"`).
-    pub fn start(launch: &Launch, send: impl FnMut(AcpEvent) -> bool + Send + 'static) -> io::Result<Self> {
+    pub fn start(
+        launch: &Launch,
+        send: impl FnMut(AcpEvent) -> bool + Send + 'static,
+    ) -> io::Result<Self> {
         if launch.program != MOCK_PROGRAM {
             return Self::spawn(launch, send);
         }
-        let options = crate::mock::MockOptions::from_args(launch.args.iter().cloned()).map_err(io::Error::other)?;
+        let options = crate::mock::MockOptions::from_args(launch.args.iter().cloned())
+            .map_err(io::Error::other)?;
         let (to_agent_read, to_agent_write) = io::pipe()?;
         let (from_agent_read, from_agent_write) = io::pipe()?;
         let client = Self::connect(from_agent_read, to_agent_write, send)?;
-        client.note(&format!("started the mock agent in Fenix ({})", launch.args.join(" ")));
-        std::thread::Builder::new().name("fenix-acp-mock".into()).spawn(move || {
-            // Its error (a crash cue) closes its output, which the reader
-            // reports as the agent going away.
-            let _ = crate::mock::run(BufReader::new(to_agent_read), from_agent_write, options);
-        })?;
+        client.note(&format!(
+            "started the mock agent in Fenix ({})",
+            launch.args.join(" ")
+        ));
+        std::thread::Builder::new()
+            .name("fenix-acp-mock".into())
+            .spawn(move || {
+                // Its error (a crash cue) closes its output, which the reader
+                // reports as the agent going away.
+                let _ = crate::mock::run(BufReader::new(to_agent_read), from_agent_write, options);
+            })?;
         Ok(client)
     }
 
     /// A client over streams already open: an agent running in this
     /// process (the mock, in tests).
-    pub fn connect<R: Read + Send + 'static, W: Write + Send + 'static>(reader: R, writer: W, send: impl FnMut(AcpEvent) -> bool + Send + 'static) -> io::Result<Self> {
+    pub fn connect<R: Read + Send + 'static, W: Write + Send + 'static>(
+        reader: R,
+        writer: W,
+        send: impl FnMut(AcpEvent) -> bool + Send + 'static,
+    ) -> io::Result<Self> {
         let log = Arc::new(Mutex::new(Log::default()));
-        let client = Self { writer: Mutex::new(Box::new(writer)), tree: Arc::new(Mutex::new(None)), log: log.clone() };
+        let client = Self {
+            writer: Mutex::new(Box::new(writer)),
+            tree: Arc::new(Mutex::new(None)),
+            log: log.clone(),
+        };
         start_reader(BufReader::new(reader), log, None, send)?;
         Ok(client)
     }
 
     fn write(&self, message: &Value) -> io::Result<()> {
         let body = serde_json::to_vec(message)?;
-        self.log.lock().unwrap().push(LogSide::Out, &String::from_utf8_lossy(&body));
+        self.log
+            .lock()
+            .unwrap()
+            .push(LogSide::Out, &String::from_utf8_lossy(&body));
         fenix_rpc::write_line_message(&mut *self.writer.lock().unwrap(), &body)
     }
 
@@ -266,7 +370,9 @@ impl AcpClient {
     pub fn respond(&self, id: Value, result: Result<Value, RpcError>) -> io::Result<()> {
         match result {
             Ok(result) => self.write(&json!({ "jsonrpc": "2.0", "id": id, "result": result })),
-            Err(error) => self.write(&json!({ "jsonrpc": "2.0", "id": id, "error": error.to_value() })),
+            Err(error) => {
+                self.write(&json!({ "jsonrpc": "2.0", "id": id, "error": error.to_value() }))
+            }
         }
     }
 
@@ -304,36 +410,44 @@ fn start_reader<R: BufRead + Send + 'static>(
     tree: Option<Arc<Mutex<Option<fenix_tasks::ProcessTree>>>>,
     mut send: impl FnMut(AcpEvent) -> bool + Send + 'static,
 ) -> io::Result<()> {
-    std::thread::Builder::new().name("fenix-acp-reader".into()).spawn(move || {
-        let why = loop {
-            let body = match fenix_rpc::read_line_message_limited(&mut reader, MAX_LINE) {
-                Ok(Some(body)) => body,
-                Ok(None) => break "the agent closed its output".to_string(),
-                Err(e) => break format!("couldn't read from the agent: {e}"),
+    std::thread::Builder::new()
+        .name("fenix-acp-reader".into())
+        .spawn(move || {
+            let why = loop {
+                let body = match fenix_rpc::read_line_message_limited(&mut reader, MAX_LINE) {
+                    Ok(Some(body)) => body,
+                    Ok(None) => break "the agent closed its output".to_string(),
+                    Err(e) => break format!("couldn't read from the agent: {e}"),
+                };
+                log.lock()
+                    .unwrap()
+                    .push(LogSide::In, &String::from_utf8_lossy(&body));
+                let Ok(message) = serde_json::from_slice::<Value>(&body) else {
+                    // Not JSON: something printed to stdout that shouldn't
+                    // have been. Logged, and the conversation goes on.
+                    log.lock()
+                        .unwrap()
+                        .push(LogSide::Note, "a line that isn't JSON was skipped");
+                    continue;
+                };
+                let Some(event) = classify(message) else {
+                    log.lock()
+                        .unwrap()
+                        .push(LogSide::Note, "a message that isn't JSON-RPC was skipped");
+                    continue;
+                };
+                if !send(event) {
+                    return;
+                }
             };
-            log.lock().unwrap().push(LogSide::In, &String::from_utf8_lossy(&body));
-            let Ok(message) = serde_json::from_slice::<Value>(&body) else {
-                // Not JSON: something printed to stdout that shouldn't
-                // have been. Logged, and the conversation goes on.
-                log.lock().unwrap().push(LogSide::Note, "a line that isn't JSON was skipped");
-                continue;
+            let status = tree.and_then(|tree| exit_status(&tree));
+            let why = match status {
+                Some(status) => format!("{why} ({status})"),
+                None => why,
             };
-            let Some(event) = classify(message) else {
-                log.lock().unwrap().push(LogSide::Note, "a message that isn't JSON-RPC was skipped");
-                continue;
-            };
-            if !send(event) {
-                return;
-            }
-        };
-        let status = tree.and_then(|tree| exit_status(&tree));
-        let why = match status {
-            Some(status) => format!("{why} ({status})"),
-            None => why,
-        };
-        log.lock().unwrap().push(LogSide::Note, &why);
-        send(AcpEvent::Disconnected(why));
-    })?;
+            log.lock().unwrap().push(LogSide::Note, &why);
+            send(AcpEvent::Disconnected(why));
+        })?;
     Ok(())
 }
 
@@ -341,7 +455,11 @@ fn start_reader<R: BufRead + Send + 'static>(
 fn exit_status(tree: &Mutex<Option<fenix_tasks::ProcessTree>>) -> Option<String> {
     let deadline = Instant::now() + Duration::from_millis(500);
     loop {
-        let status = tree.lock().unwrap().as_mut().and_then(|t| t.try_wait().ok().flatten());
+        let status = tree
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|t| t.try_wait().ok().flatten());
         if let Some(status) = status {
             return Some(match status.code() {
                 Some(code) => format!("exit code {code}"),
@@ -356,15 +474,27 @@ fn exit_status(tree: &Mutex<Option<fenix_tasks::ProcessTree>>) -> Option<String>
 }
 
 fn classify(message: Value) -> Option<AcpEvent> {
-    let method = message.get("method").and_then(Value::as_str).map(str::to_string);
+    let method = message
+        .get("method")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let id = message.get("id").filter(|id| !id.is_null()).cloned();
     match (method, id) {
-        (Some(method), Some(id)) => Some(AcpEvent::Request { id, method, params: message.get("params").cloned().unwrap_or(Value::Null) }),
-        (Some(method), None) => Some(AcpEvent::Notification { method, params: message.get("params").cloned().unwrap_or(Value::Null) }),
+        (Some(method), Some(id)) => Some(AcpEvent::Request {
+            id,
+            method,
+            params: message.get("params").cloned().unwrap_or(Value::Null),
+        }),
+        (Some(method), None) => Some(AcpEvent::Notification {
+            method,
+            params: message.get("params").cloned().unwrap_or(Value::Null),
+        }),
         (None, Some(id)) => {
             // Fenix only sends numeric ids; a string one is from a confused
             // agent and is matched as well as it can be.
-            let id = id.as_i64().or_else(|| id.as_str().and_then(|s| s.parse().ok()))?;
+            let id = id
+                .as_i64()
+                .or_else(|| id.as_str().and_then(|s| s.parse().ok()))?;
             let result = match message.get("error") {
                 Some(error) if !error.is_null() => Err(RpcError::parse(error)),
                 _ => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
@@ -381,22 +511,53 @@ mod tests {
 
     #[test]
     fn messages_are_told_apart_by_method_and_id() {
-        assert_eq!(classify(json!({ "jsonrpc": "2.0", "id": 3, "result": { "ok": true } })), Some(AcpEvent::Response { id: 3, result: Ok(json!({ "ok": true })) }));
         assert_eq!(
-            classify(json!({ "jsonrpc": "2.0", "id": 4, "error": { "code": -32000, "message": "Authentication required" } })),
-            Some(AcpEvent::Response { id: 4, result: Err(RpcError::new(-32000, "Authentication required")) })
+            classify(json!({ "jsonrpc": "2.0", "id": 3, "result": { "ok": true } })),
+            Some(AcpEvent::Response {
+                id: 3,
+                result: Ok(json!({ "ok": true }))
+            })
         );
-        assert!(matches!(classify(json!({ "jsonrpc": "2.0", "id": "a", "method": "fs/read_text_file", "params": {} })), Some(AcpEvent::Request { .. })));
-        assert!(matches!(classify(json!({ "jsonrpc": "2.0", "method": "session/update", "params": {} })), Some(AcpEvent::Notification { .. })));
+        assert_eq!(
+            classify(
+                json!({ "jsonrpc": "2.0", "id": 4, "error": { "code": -32000, "message": "Authentication required" } })
+            ),
+            Some(AcpEvent::Response {
+                id: 4,
+                result: Err(RpcError::new(-32000, "Authentication required"))
+            })
+        );
+        assert!(matches!(
+            classify(
+                json!({ "jsonrpc": "2.0", "id": "a", "method": "fs/read_text_file", "params": {} })
+            ),
+            Some(AcpEvent::Request { .. })
+        ));
+        assert!(matches!(
+            classify(json!({ "jsonrpc": "2.0", "method": "session/update", "params": {} })),
+            Some(AcpEvent::Notification { .. })
+        ));
         assert_eq!(classify(json!({ "jsonrpc": "2.0" })), None);
     }
 
     #[test]
     fn credentials_are_hidden_in_the_log() {
-        assert_eq!(redact("key sk-ant-api03-abcdefghijklmnopqrstuvwxyz end"), "key sk-ant-•••• end");
-        assert_eq!(redact("Authorization: Bearer abc.def.ghi rest"), "Authorization: Bearer •••• rest");
-        assert_eq!(redact(r#"{"token": "hunter2", "x": 1}"#), r#"{"token": "••••", "x": 1}"#);
-        assert_eq!(redact("task-list and sk-short stay"), "task-list and sk-short stay");
+        assert_eq!(
+            redact("key sk-ant-api03-abcdefghijklmnopqrstuvwxyz end"),
+            "key sk-ant-•••• end"
+        );
+        assert_eq!(
+            redact("Authorization: Bearer abc.def.ghi rest"),
+            "Authorization: Bearer •••• rest"
+        );
+        assert_eq!(
+            redact(r#"{"token": "hunter2", "x": 1}"#),
+            r#"{"token": "••••", "x": 1}"#
+        );
+        assert_eq!(
+            redact("task-list and sk-short stay"),
+            "task-list and sk-short stay"
+        );
         assert_eq!(redact("é sk-"), "é sk-");
     }
 

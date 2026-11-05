@@ -42,7 +42,11 @@ impl App {
 
     fn agent_debug_wait(&mut self, reply: Sender<Reply>, wait: Duration) {
         let stops_at = self.agent_calls.debug_stops;
-        self.agent_calls.debug_waits.push(DebugWait { reply, until: Instant::now() + wait, stops_at });
+        self.agent_calls.debug_waits.push(DebugWait {
+            reply,
+            until: Instant::now() + wait,
+            stops_at,
+        });
     }
 
     /// Waits whose stop has come (its stack read), whose session ended, or
@@ -52,7 +56,15 @@ impl App {
             return;
         }
         let ended = self.debug_session.as_ref().is_none_or(|s| s.ended);
-        let settled = self.debug_session.as_ref().is_some_and(|s| s.stopped_thread.is_some() && !s.call_stack.is_empty() && (!s.variables.is_empty() || self.agent_calls.debug_stopped_at.is_some_and(|at| now.duration_since(at) >= SETTLE)));
+        let settled = self.debug_session.as_ref().is_some_and(|s| {
+            s.stopped_thread.is_some()
+                && !s.call_stack.is_empty()
+                && (!s.variables.is_empty()
+                    || self
+                        .agent_calls
+                        .debug_stopped_at
+                        .is_some_and(|at| now.duration_since(at) >= SETTLE))
+        });
         let stops = self.agent_calls.debug_stops;
         let waits = std::mem::take(&mut self.agent_calls.debug_waits);
         for wait in waits {
@@ -60,7 +72,8 @@ impl App {
             if stopped || ended || now >= wait.until {
                 let mut state = self.control_debug_state();
                 if !stopped && !ended {
-                    state["note"] = json!("still running: debug_pause stops it, debug_state looks again");
+                    state["note"] =
+                        json!("still running: debug_pause stops it, debug_state looks again");
                 }
                 let _ = wait.reply.send(Ok(state));
             } else {
@@ -81,13 +94,23 @@ impl App {
 
     fn agent_breakpoint_path(&self, arguments: &Value) -> Result<(PathBuf, usize), RpcError> {
         let path = self.control_path(arguments)?;
-        let line = arguments.get("line").and_then(Value::as_u64).filter(|l| *l > 0).ok_or_else(|| invalid("line: which line, from 1"))? as usize;
-        Ok((fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path)), line))
+        let line = arguments
+            .get("line")
+            .and_then(Value::as_u64)
+            .filter(|l| *l > 0)
+            .ok_or_else(|| invalid("line: which line, from 1"))? as usize;
+        Ok((
+            fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path)),
+            line,
+        ))
     }
 
     /// The launches there are for the language of `path` (or the file in
     /// front): the extensions' templates and the project's own.
-    fn agent_launches(&self, arguments: &Value) -> Result<(Vec<crate::dap::Template>, bool), RpcError> {
+    fn agent_launches(
+        &self,
+        arguments: &Value,
+    ) -> Result<(Vec<crate::dap::Template>, bool), RpcError> {
         let language = match arguments.get("path").and_then(Value::as_str) {
             Some(path) => fenix_syntax::detect_language_from_path(Path::new(path)),
             None => self.focused_language(),
@@ -95,16 +118,31 @@ impl App {
         .ok_or_else(|| invalid("no language to debug: give path, a file of the program"))?;
         let root = self.integration_root();
         let name = crate::lsp::language_config_name(language);
-        let (mut templates, _) = crate::dap::templates_for(&crate::installed::data_dirs("launch"), &name);
-        templates.extend(self.wasm.launches(&root).into_iter().filter(|t| t.languages.contains(&name)));
-        let project = fenix_project::tools::ProjectTools::read(&root).is_ok_and(|t| !t.launch.is_empty());
+        let (mut templates, _) =
+            crate::dap::templates_for(&crate::installed::data_dirs("launch"), &name);
+        templates.extend(
+            self.wasm
+                .launches(&root)
+                .into_iter()
+                .filter(|t| t.languages.contains(&name)),
+        );
+        let project =
+            fenix_project::tools::ProjectTools::read(&root).is_ok_and(|t| !t.launch.is_empty());
         Ok((templates, project))
     }
 
     /// The `debug` toolset: answers `reply`, or gives it back for a tool
     /// that isn't one of its.
-    pub(super) fn agent_debug_call(&mut self, name: &str, arguments: Value, reply: Sender<Reply>) -> Result<(), Sender<Reply>> {
-        let stopped = self.debug_session.as_ref().is_some_and(|s| !s.ended && s.stopped_thread.is_some());
+    pub(super) fn agent_debug_call(
+        &mut self,
+        name: &str,
+        arguments: Value,
+        reply: Sender<Reply>,
+    ) -> Result<(), Sender<Reply>> {
+        let stopped = self
+            .debug_session
+            .as_ref()
+            .is_some_and(|s| !s.ended && s.stopped_thread.is_some());
         let running = self.debug_session.as_ref().is_some_and(|s| !s.ended);
         let answer: Option<Result<Value, RpcError>> = match name {
             "debug_launches" => Some(self.agent_launches(&arguments).map(|(templates, project)| {
@@ -251,7 +289,10 @@ impl App {
             self.send_set_breakpoints_for(path);
         }
         self.refresh_debug_panes();
-        self.set_message(format!("cleared the breakpoints agents set in {} file(s)", paths.len()));
+        self.set_message(format!(
+            "cleared the breakpoints agents set in {} file(s)",
+            paths.len()
+        ));
     }
 }
 
@@ -274,15 +315,42 @@ mod tests {
         std::fs::write(&file, "x = 1\ny = 2\n").unwrap();
         let mut app = App::with_file(None);
         let path = file.to_string_lossy().into_owned();
-        call(&mut app, "set_breakpoint", json!({ "path": path, "line": 2, "condition": "y > 1" })).unwrap().unwrap();
+        call(
+            &mut app,
+            "set_breakpoint",
+            json!({ "path": path, "line": 2, "condition": "y > 1" }),
+        )
+        .unwrap()
+        .unwrap();
         let listed = call(&mut app, "breakpoints", json!({})).unwrap().unwrap();
         assert_eq!(listed["breakpoints"][0]["line"], 2);
         assert_eq!(listed["breakpoints"][0]["condition"], "y > 1");
-        call(&mut app, "clear_breakpoint", json!({ "path": path, "line": 2 })).unwrap().unwrap();
-        assert!(call(&mut app, "clear_breakpoint", json!({ "path": path, "line": 2 })).unwrap().is_err());
-        call(&mut app, "set_breakpoint", json!({ "path": path, "line": 1 })).unwrap().unwrap();
+        call(
+            &mut app,
+            "clear_breakpoint",
+            json!({ "path": path, "line": 2 }),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(call(
+            &mut app,
+            "clear_breakpoint",
+            json!({ "path": path, "line": 2 })
+        )
+        .unwrap()
+        .is_err());
+        call(
+            &mut app,
+            "set_breakpoint",
+            json!({ "path": path, "line": 1 }),
+        )
+        .unwrap()
+        .unwrap();
         app.agent_clear_breakpoints();
-        assert!(app.breakpoints.values().all(|lines| lines.is_empty()), "the agents' are gone");
+        assert!(
+            app.breakpoints.values().all(|lines| lines.is_empty()),
+            "the agents' are gone"
+        );
     }
 
     #[test]
@@ -293,9 +361,21 @@ mod tests {
         let path = file.to_string_lossy().into_owned();
         let mut app = App::with_file(Some(path.clone()));
         let buffer = app.focused_buffer_id();
-        call(&mut app, "set_breakpoint", json!({ "path": path, "line": 2 })).unwrap().unwrap();
+        call(
+            &mut app,
+            "set_breakpoint",
+            json!({ "path": path, "line": 2 }),
+        )
+        .unwrap()
+        .unwrap();
         let plain = super::super::debug_breakpoints::BreakpointLook::Plain;
-        assert_eq!(app.debug_marks(buffer, &[0, 1], 2), vec![(1, super::super::debug_host::DebugMark::AgentBreakpoint(plain))]);
+        assert_eq!(
+            app.debug_marks(buffer, &[0, 1], 2),
+            vec![(
+                1,
+                super::super::debug_host::DebugMark::AgentBreakpoint(plain)
+            )]
+        );
         app.agent_clear_breakpoints();
         assert!(app.debug_marks(buffer, &[0, 1], 2).is_empty());
     }
@@ -303,11 +383,20 @@ mod tests {
     #[test]
     fn moving_without_a_session_says_what_to_do() {
         let mut app = App::with_file(None);
-        for tool in ["debug_continue", "debug_step", "debug_run_to", "debug_pause", "debug_stop"] {
+        for tool in [
+            "debug_continue",
+            "debug_step",
+            "debug_run_to",
+            "debug_pause",
+            "debug_stop",
+        ] {
             let answer = call(&mut app, tool, json!({ "path": "/x.py", "line": 1 })).unwrap();
             assert!(answer.is_err(), "{tool}");
         }
-        assert!(call(&mut app, "nope", json!({})).is_none(), "not this toolset's");
+        assert!(
+            call(&mut app, "nope", json!({})).is_none(),
+            "not this toolset's"
+        );
     }
 
     #[test]

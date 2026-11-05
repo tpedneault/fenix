@@ -1,7 +1,10 @@
 //! What a text file's bytes mean. Fenix edits Unicode text; a file that
 //! isn't UTF-8 is decoded when it's read and written back the way it came.
 
-use encoding_rs::{Encoding, EUC_JP, EUC_KR, GBK, ISO_8859_2, ISO_8859_15, KOI8_R, SHIFT_JIS, WINDOWS_1250, WINDOWS_1251, WINDOWS_1252};
+use encoding_rs::{
+    Encoding, EUC_JP, EUC_KR, GBK, ISO_8859_15, ISO_8859_2, KOI8_R, SHIFT_JIS, WINDOWS_1250,
+    WINDOWS_1251, WINDOWS_1252,
+};
 
 const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
 const UTF16_LE_BOM: &[u8] = &[0xFF, 0xFE];
@@ -27,8 +30,27 @@ pub enum TextEncoding {
 impl TextEncoding {
     /// Everything that can be chosen, in the order it's offered.
     pub fn choices() -> Vec<TextEncoding> {
-        let mut all = vec![TextEncoding::Utf8, TextEncoding::Utf8Bom, TextEncoding::Utf16Le, TextEncoding::Utf16Be];
-        all.extend([WINDOWS_1252, ISO_8859_15, WINDOWS_1250, ISO_8859_2, WINDOWS_1251, KOI8_R, SHIFT_JIS, EUC_JP, GBK, EUC_KR].map(TextEncoding::Legacy));
+        let mut all = vec![
+            TextEncoding::Utf8,
+            TextEncoding::Utf8Bom,
+            TextEncoding::Utf16Le,
+            TextEncoding::Utf16Be,
+        ];
+        all.extend(
+            [
+                WINDOWS_1252,
+                ISO_8859_15,
+                WINDOWS_1250,
+                ISO_8859_2,
+                WINDOWS_1251,
+                KOI8_R,
+                SHIFT_JIS,
+                EUC_JP,
+                GBK,
+                EUC_KR,
+            ]
+            .map(TextEncoding::Legacy),
+        );
         all
     }
 
@@ -47,10 +69,20 @@ impl TextEncoding {
     /// U+FFFD, which only a Unicode encoding will write back.
     pub fn decode(self, bytes: &[u8]) -> String {
         match self {
-            TextEncoding::Utf8 | TextEncoding::Utf8Bom => String::from_utf8_lossy(bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes)).into_owned(),
-            TextEncoding::Utf16Le => decode_utf16(bytes.strip_prefix(UTF16_LE_BOM).unwrap_or(bytes), u16::from_le_bytes),
-            TextEncoding::Utf16Be => decode_utf16(bytes.strip_prefix(UTF16_BE_BOM).unwrap_or(bytes), u16::from_be_bytes),
-            TextEncoding::Legacy(encoding) => encoding.decode_without_bom_handling(bytes).0.into_owned(),
+            TextEncoding::Utf8 | TextEncoding::Utf8Bom => {
+                String::from_utf8_lossy(bytes.strip_prefix(UTF8_BOM).unwrap_or(bytes)).into_owned()
+            }
+            TextEncoding::Utf16Le => decode_utf16(
+                bytes.strip_prefix(UTF16_LE_BOM).unwrap_or(bytes),
+                u16::from_le_bytes,
+            ),
+            TextEncoding::Utf16Be => decode_utf16(
+                bytes.strip_prefix(UTF16_BE_BOM).unwrap_or(bytes),
+                u16::from_be_bytes,
+            ),
+            TextEncoding::Legacy(encoding) => {
+                encoding.decode_without_bom_handling(bytes).0.into_owned()
+            }
         }
     }
 
@@ -71,7 +103,10 @@ impl TextEncoding {
             TextEncoding::Legacy(encoding) => {
                 let (encoded, _, had_errors) = encoding.encode(text);
                 if had_errors {
-                    let lost = text.chars().find(|c| encoding.encode(c.encode_utf8(&mut [0; 4])).2).unwrap_or('\u{FFFD}');
+                    let lost = text
+                        .chars()
+                        .find(|c| encoding.encode(c.encode_utf8(&mut [0; 4])).2)
+                        .unwrap_or('\u{FFFD}');
                     return Err(lost);
                 }
                 bytes.extend_from_slice(&encoded);
@@ -83,7 +118,9 @@ impl TextEncoding {
 
 fn decode_utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> String {
     let units = bytes.as_chunks::<2>().0.iter().map(|&pair| unit(pair));
-    char::decode_utf16(units).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)).collect()
+    char::decode_utf16(units)
+        .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect()
 }
 
 /// The text in `bytes` and the encoding that was found. A byte order mark
@@ -112,7 +149,10 @@ fn detect(bytes: &[u8]) -> TextEncoding {
 /// a byte order mark, valid UTF-8 (`head` may stop inside a character), or
 /// an older encoding, which has no NULs and few control characters.
 pub fn looks_like_text(head: &[u8]) -> bool {
-    if [UTF8_BOM, UTF16_LE_BOM, UTF16_BE_BOM].iter().any(|bom| head.starts_with(bom)) {
+    if [UTF8_BOM, UTF16_LE_BOM, UTF16_BE_BOM]
+        .iter()
+        .any(|bom| head.starts_with(bom))
+    {
         return true;
     }
     if head.contains(&0) {
@@ -121,7 +161,10 @@ pub fn looks_like_text(head: &[u8]) -> bool {
     if std::str::from_utf8(head).map_or_else(|e| e.error_len().is_none(), |_| true) {
         return true;
     }
-    let controls = head.iter().filter(|&&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0C | 0x1B)).count();
+    let controls = head
+        .iter()
+        .filter(|&&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x0C | 0x1B))
+        .count();
     controls * 50 < head.len()
 }
 
@@ -133,10 +176,21 @@ mod tests {
 
     #[test]
     fn every_encoding_comes_back_as_it_went() {
-        for encoding in [TextEncoding::Utf8, TextEncoding::Utf8Bom, TextEncoding::Utf16Le, TextEncoding::Utf16Be, TextEncoding::Legacy(WINDOWS_1252)] {
+        for encoding in [
+            TextEncoding::Utf8,
+            TextEncoding::Utf8Bom,
+            TextEncoding::Utf16Le,
+            TextEncoding::Utf16Be,
+            TextEncoding::Legacy(WINDOWS_1252),
+        ] {
             let bytes = encoding.encode(TEXT).unwrap();
             assert_eq!(encoding.decode(&bytes), TEXT, "{}", encoding.label());
-            assert_eq!(decode_text(&bytes), (TEXT.to_string(), encoding), "{}", encoding.label());
+            assert_eq!(
+                decode_text(&bytes),
+                (TEXT.to_string(), encoding),
+                "{}",
+                encoding.label()
+            );
         }
     }
 
@@ -165,20 +219,40 @@ mod tests {
 
     #[test]
     fn a_character_that_doesnt_fit_is_named_not_dropped() {
-        assert_eq!(TextEncoding::Legacy(WINDOWS_1252).encode("ok €"), Ok(vec![b'o', b'k', b' ', 0x80]));
-        assert_eq!(TextEncoding::Legacy(WINDOWS_1252).encode("ok 😀 日"), Err('😀'));
-        assert_eq!(TextEncoding::Legacy(SHIFT_JIS).encode("日本").map(|b| b.len()), Ok(4));
+        assert_eq!(
+            TextEncoding::Legacy(WINDOWS_1252).encode("ok €"),
+            Ok(vec![b'o', b'k', b' ', 0x80])
+        );
+        assert_eq!(
+            TextEncoding::Legacy(WINDOWS_1252).encode("ok 😀 日"),
+            Err('😀')
+        );
+        assert_eq!(
+            TextEncoding::Legacy(SHIFT_JIS)
+                .encode("日本")
+                .map(|b| b.len()),
+            Ok(4)
+        );
     }
 
     #[test]
     fn text_and_binary_are_told_apart() {
         assert!(looks_like_text(b"plain"));
         assert!(looks_like_text("日本語".as_bytes()));
-        assert!(looks_like_text(&"日本語".as_bytes()[..4]), "cut inside a character");
+        assert!(
+            looks_like_text(&"日本語".as_bytes()[..4]),
+            "cut inside a character"
+        );
         assert!(looks_like_text(b"caf\xE9 cr\xE8me\n"), "Latin-1");
-        assert!(looks_like_text(b"\xFF\xFEh\0i\0"), "UTF-16 has NULs and a mark");
+        assert!(
+            looks_like_text(b"\xFF\xFEh\0i\0"),
+            "UTF-16 has NULs and a mark"
+        );
         assert!(!looks_like_text(b"abc\0def"));
         let noise: Vec<u8> = (1..=255).cycle().take(1000).collect();
-        assert!(!looks_like_text(&noise), "control characters all through it");
+        assert!(
+            !looks_like_text(&noise),
+            "control characters all through it"
+        );
     }
 }

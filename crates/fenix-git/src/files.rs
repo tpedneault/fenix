@@ -21,7 +21,10 @@ pub struct FileEntry {
 /// error) outside a git repo, without `git` on `PATH`, or in a clean
 /// working tree with nothing to show.
 pub fn list_files(repo: &Path) -> Vec<FileEntry> {
-    run_lines(repo, &["status", "--porcelain=v2"]).iter().filter_map(|l| parse_line(l)).collect()
+    run_lines(repo, &["status", "--porcelain=v2"])
+        .iter()
+        .filter_map(|l| parse_line(l))
+        .collect()
 }
 
 /// Parses entry lines out of a `status --porcelain=v2 --branch` output
@@ -59,7 +62,11 @@ fn parse_line(line: &str) -> Option<FileEntry> {
             let xy = fields.next()?;
             let path = fields.nth(6)?; // sub, mH, mI, mW, hH, hI, then path
             let (index_status, worktree_status) = xy_chars(xy)?;
-            Some(FileEntry { path: path.to_string(), index_status, worktree_status })
+            Some(FileEntry {
+                path: path.to_string(),
+                index_status,
+                worktree_status,
+            })
         }
         "2" => {
             let mut fields = rest.splitn(9, ' ');
@@ -67,16 +74,28 @@ fn parse_line(line: &str) -> Option<FileEntry> {
             let path_and_orig = fields.nth(7)?; // sub, mH, mI, mW, hH, hI, Xscore, then path<TAB>orig
             let path = path_and_orig.split('\t').next()?;
             let (index_status, worktree_status) = xy_chars(xy)?;
-            Some(FileEntry { path: path.to_string(), index_status, worktree_status })
+            Some(FileEntry {
+                path: path.to_string(),
+                index_status,
+                worktree_status,
+            })
         }
         "u" => {
             let mut fields = rest.splitn(10, ' ');
             let xy = fields.next()?;
             let path = fields.nth(8)?; // sub, m1, m2, m3, mW, h1, h2, h3, then path
             let (index_status, worktree_status) = xy_chars(xy)?;
-            Some(FileEntry { path: path.to_string(), index_status, worktree_status })
+            Some(FileEntry {
+                path: path.to_string(),
+                index_status,
+                worktree_status,
+            })
         }
-        "?" => Some(FileEntry { path: rest.to_string(), index_status: '?', worktree_status: '?' }),
+        "?" => Some(FileEntry {
+            path: rest.to_string(),
+            index_status: '?',
+            worktree_status: '?',
+        }),
         _ => None,
     }
 }
@@ -94,31 +113,69 @@ mod tests {
     #[test]
     fn parse_line_reads_an_ordinary_unstaged_modification() {
         let entry = parse_line("1 .M N... 100644 100644 100644 abc abc test.tcl").unwrap();
-        assert_eq!(entry, FileEntry { path: "test.tcl".to_string(), index_status: '.', worktree_status: 'M' });
+        assert_eq!(
+            entry,
+            FileEntry {
+                path: "test.tcl".to_string(),
+                index_status: '.',
+                worktree_status: 'M'
+            }
+        );
     }
 
     #[test]
     fn parse_line_reads_an_untracked_file() {
         let entry = parse_line("? new_file.txt").unwrap();
-        assert_eq!(entry, FileEntry { path: "new_file.txt".to_string(), index_status: '?', worktree_status: '?' });
+        assert_eq!(
+            entry,
+            FileEntry {
+                path: "new_file.txt".to_string(),
+                index_status: '?',
+                worktree_status: '?'
+            }
+        );
     }
 
     #[test]
     fn parse_line_reads_a_staged_addition() {
         let entry = parse_line("1 A. N... 000000 100644 100644 abc abc new.txt").unwrap();
-        assert_eq!(entry, FileEntry { path: "new.txt".to_string(), index_status: 'A', worktree_status: '.' });
+        assert_eq!(
+            entry,
+            FileEntry {
+                path: "new.txt".to_string(),
+                index_status: 'A',
+                worktree_status: '.'
+            }
+        );
     }
 
     #[test]
     fn parse_line_reads_a_rename_keeping_only_the_new_path() {
-        let entry = parse_line("2 R. N... 100644 100644 100644 abc abc R100 new_name.txt\told_name.txt").unwrap();
-        assert_eq!(entry, FileEntry { path: "new_name.txt".to_string(), index_status: 'R', worktree_status: '.' });
+        let entry =
+            parse_line("2 R. N... 100644 100644 100644 abc abc R100 new_name.txt\told_name.txt")
+                .unwrap();
+        assert_eq!(
+            entry,
+            FileEntry {
+                path: "new_name.txt".to_string(),
+                index_status: 'R',
+                worktree_status: '.'
+            }
+        );
     }
 
     #[test]
     fn parse_line_reads_an_unmerged_conflict() {
-        let entry = parse_line("u UU N... 100644 100644 100644 100644 abc abc abc conflicted.txt").unwrap();
-        assert_eq!(entry, FileEntry { path: "conflicted.txt".to_string(), index_status: 'U', worktree_status: 'U' });
+        let entry =
+            parse_line("u UU N... 100644 100644 100644 100644 abc abc abc conflicted.txt").unwrap();
+        assert_eq!(
+            entry,
+            FileEntry {
+                path: "conflicted.txt".to_string(),
+                index_status: 'U',
+                worktree_status: 'U'
+            }
+        );
     }
 
     #[test]
@@ -148,8 +205,29 @@ mod tests {
 
         let files = list_files(dir.path());
         let by_path = |p: &str| files.iter().find(|f| f.path == p);
-        assert_eq!(by_path("committed.txt"), Some(&FileEntry { path: "committed.txt".to_string(), index_status: '.', worktree_status: 'M' }));
-        assert_eq!(by_path("staged.txt"), Some(&FileEntry { path: "staged.txt".to_string(), index_status: 'A', worktree_status: '.' }));
-        assert_eq!(by_path("untracked.txt"), Some(&FileEntry { path: "untracked.txt".to_string(), index_status: '?', worktree_status: '?' }));
+        assert_eq!(
+            by_path("committed.txt"),
+            Some(&FileEntry {
+                path: "committed.txt".to_string(),
+                index_status: '.',
+                worktree_status: 'M'
+            })
+        );
+        assert_eq!(
+            by_path("staged.txt"),
+            Some(&FileEntry {
+                path: "staged.txt".to_string(),
+                index_status: 'A',
+                worktree_status: '.'
+            })
+        );
+        assert_eq!(
+            by_path("untracked.txt"),
+            Some(&FileEntry {
+                path: "untracked.txt".to_string(),
+                index_status: '?',
+                worktree_status: '?'
+            })
+        );
     }
 }

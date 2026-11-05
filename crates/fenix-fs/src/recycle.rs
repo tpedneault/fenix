@@ -29,7 +29,10 @@ impl Outcome {
     }
 
     fn failed(path: PathBuf, error: impl std::fmt::Display) -> Self {
-        Self { path, error: Some(error.to_string()) }
+        Self {
+            path,
+            error: Some(error.to_string()),
+        }
     }
 
     pub fn succeeded(&self) -> bool {
@@ -122,7 +125,9 @@ fn remove_dir_all(path: &Path) -> io::Result<()> {
 }
 
 fn clear_readonly_recursively(path: &Path) {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else { return };
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return;
+    };
     let mut perms = metadata.permissions();
     if perms.readonly() {
         #[allow(clippy::permissions_set_readonly_false)]
@@ -132,7 +137,9 @@ fn clear_readonly_recursively(path: &Path) {
     // Never through a link: clearing flags on the far side would be
     // touching files outside the tree the user asked to remove.
     if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        let Ok(entries) = std::fs::read_dir(path) else { return };
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return;
+        };
         for entry in entries.flatten() {
             clear_readonly_recursively(&entry.path());
         }
@@ -169,7 +176,11 @@ mod tests {
         let outcomes = to_recycle_bin(std::slice::from_ref(&path));
 
         assert_eq!(outcomes.len(), 1);
-        assert!(outcomes[0].succeeded(), "expected the bin to accept it: {:?}", outcomes[0].error);
+        assert!(
+            outcomes[0].succeeded(),
+            "expected the bin to accept it: {:?}",
+            outcomes[0].error
+        );
         assert!(!path.exists(), "and the file is no longer where it was");
     }
 
@@ -197,10 +208,20 @@ mod tests {
 
         let outcomes = to_recycle_bin(&[good.clone(), missing.clone(), also_good.clone()]);
 
-        assert_eq!(outcomes.len(), 3, "every path is accounted for, not just the ones that worked");
+        assert_eq!(
+            outcomes.len(),
+            3,
+            "every path is accounted for, not just the ones that worked"
+        );
         assert!(outcomes[0].succeeded());
-        assert!(!outcomes[1].succeeded(), "a path that isn't there can't be binned");
-        assert!(outcomes[2].succeeded(), "and the one after the failure still happened");
+        assert!(
+            !outcomes[1].succeeded(),
+            "a path that isn't there can't be binned"
+        );
+        assert!(
+            outcomes[2].succeeded(),
+            "and the one after the failure still happened"
+        );
         assert!(!good.exists() && !also_good.exists());
     }
 
@@ -210,7 +231,10 @@ mod tests {
         let missing = dir.path().join("never-existed.txt");
         let outcomes = to_recycle_bin(std::slice::from_ref(&missing));
         assert_eq!(outcomes[0].path, missing);
-        assert!(outcomes[0].error.as_ref().is_some_and(|e| !e.is_empty()), "an empty reason is no reason");
+        assert!(
+            outcomes[0].error.as_ref().is_some_and(|e| !e.is_empty()),
+            "an empty reason is no reason"
+        );
     }
 
     #[test]

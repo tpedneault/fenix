@@ -35,10 +35,19 @@ pub enum Action {
     None,
     Close,
     /// Make a new one, then open its file.
-    Create { trigger: String, name: String, scopes: Vec<String>, body: String, project: bool },
+    Create {
+        trigger: String,
+        name: String,
+        scopes: Vec<String>,
+        body: String,
+        project: bool,
+    },
     Edit(PathBuf),
     /// Copy one into yours (`project: false`) or the project's.
-    Copy { item: Box<Item>, project: bool },
+    Copy {
+        item: Box<Item>,
+        project: bool,
+    },
     Delete(PathBuf),
     Try(Box<Item>),
 }
@@ -81,24 +90,46 @@ fn language(scope: &str) -> String {
         "cpp" => "C++".to_string(),
         other => {
             let mut chars = other.chars();
-            chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
+            chars
+                .next()
+                .map(|c| c.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
         }
     }
 }
 
 impl SnippetsPage {
     pub fn new(items: Vec<Item>, broken: Vec<String>, scope: String, has_project: bool) -> Self {
-        SnippetsPage { items, broken, scope, has_project, cursor: 0, filter: None, filtering: false, form: None, note: None, armed_delete: false }
+        SnippetsPage {
+            items,
+            broken,
+            scope,
+            has_project,
+            cursor: 0,
+            filter: None,
+            filtering: false,
+            form: None,
+            note: None,
+            armed_delete: false,
+        }
     }
 
     /// New contents, keeping the cursor on the same snippet when it's
     /// still there.
     pub fn refresh(&mut self, items: Vec<Item>, broken: Vec<String>) {
-        let before = self.selected().map(|i| (i.trigger.clone(), i.source, i.scopes.clone()));
+        let before = self
+            .selected()
+            .map(|i| (i.trigger.clone(), i.source, i.scopes.clone()));
         self.items = items;
         self.broken = broken;
         if let Some(key) = before {
-            if let Some(n) = self.selectable().iter().position(|&i| (self.items[i].trigger.clone(), self.items[i].source, self.items[i].scopes.clone()) == key) {
+            if let Some(n) = self.selectable().iter().position(|&i| {
+                (
+                    self.items[i].trigger.clone(),
+                    self.items[i].source,
+                    self.items[i].scopes.clone(),
+                ) == key
+            }) {
                 self.cursor = n;
             }
         }
@@ -107,7 +138,12 @@ impl SnippetsPage {
 
     /// Opens the new-snippet form with `body` already in it.
     pub fn new_from(&mut self, body: String) {
-        self.form = Some(Form { fields: [String::new(), String::new(), self.scope.clone()], at: 0, body, project: false });
+        self.form = Some(Form {
+            fields: [String::new(), String::new(), self.scope.clone()],
+            at: 0,
+            body,
+            project: false,
+        });
     }
 
     pub fn typing(&self) -> bool {
@@ -138,7 +174,11 @@ impl SnippetsPage {
     /// The languages, the current one first, then "All languages", then
     /// the rest by name.
     fn groups(&self) -> Vec<String> {
-        let mut scopes: Vec<String> = self.items.iter().map(|i| i.scopes.first().cloned().unwrap_or_else(|| "*".into())).collect();
+        let mut scopes: Vec<String> = self
+            .items
+            .iter()
+            .map(|i| i.scopes.first().cloned().unwrap_or_else(|| "*".into()))
+            .collect();
         scopes.sort();
         scopes.dedup();
         scopes.sort_by_key(|s| (s != &self.scope, s != "*", s.clone()));
@@ -146,10 +186,17 @@ impl SnippetsPage {
     }
 
     fn shown(&self, item: &Item) -> bool {
-        match self.filter.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+        match self
+            .filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+        {
             Some(f) => {
                 let f = f.to_lowercase();
-                item.trigger.to_lowercase().contains(&f) || item.name.to_lowercase().contains(&f) || item.scopes.iter().any(|s| s.contains(&f))
+                item.trigger.to_lowercase().contains(&f)
+                    || item.name.to_lowercase().contains(&f)
+                    || item.scopes.iter().any(|s| s.contains(&f))
             }
             None => true,
         }
@@ -159,9 +206,22 @@ impl SnippetsPage {
         let mut rows = Vec::new();
         for (g, scope) in self.groups().iter().enumerate() {
             let mut members: Vec<usize> = (0..self.items.len())
-                .filter(|&i| self.items[i].scopes.first().map(String::as_str).unwrap_or("*") == scope && self.shown(&self.items[i]))
+                .filter(|&i| {
+                    self.items[i]
+                        .scopes
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("*")
+                        == scope
+                        && self.shown(&self.items[i])
+                })
                 .collect();
-            members.sort_by_key(|&i| (self.items[i].trigger.clone(), std::cmp::Reverse(self.items[i].source)));
+            members.sort_by_key(|&i| {
+                (
+                    self.items[i].trigger.clone(),
+                    std::cmp::Reverse(self.items[i].source),
+                )
+            });
             if !members.is_empty() {
                 rows.push(Row::Heading(g));
                 rows.extend(members.into_iter().map(Row::Item));
@@ -171,7 +231,10 @@ impl SnippetsPage {
     }
 
     fn selectable(&self) -> Vec<usize> {
-        self.rows().into_iter().filter_map(|r| if let Row::Item(i) = r { Some(i) } else { None }).collect()
+        self.rows()
+            .into_iter()
+            .filter_map(|r| if let Row::Item(i) = r { Some(i) } else { None })
+            .collect()
     }
 
     pub fn selected(&self) -> Option<&Item> {
@@ -215,16 +278,35 @@ impl SnippetsPage {
                 Key::Enter => {
                     let trigger = form.fields[0].trim().to_string();
                     if trigger.is_empty() || trigger.chars().any(char::is_whitespace) {
-                        self.note = Some(("a trigger is one word: what you type before Tab".into(), true));
+                        self.note = Some((
+                            "a trigger is one word: what you type before Tab".into(),
+                            true,
+                        ));
                         form.at = 0;
                         self.form = Some(form);
                         return Action::None;
                     }
-                    let name = Some(form.fields[1].trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| trigger.clone());
-                    let scopes: Vec<String> = form.fields[2].split([',', ' ']).map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
-                    let scopes = if scopes.is_empty() { vec!["*".to_string()] } else { scopes };
+                    let name = Some(form.fields[1].trim().to_string())
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or_else(|| trigger.clone());
+                    let scopes: Vec<String> = form.fields[2]
+                        .split([',', ' '])
+                        .map(|s| s.trim().to_lowercase())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    let scopes = if scopes.is_empty() {
+                        vec!["*".to_string()]
+                    } else {
+                        scopes
+                    };
                     self.note = None;
-                    return Action::Create { trigger, name, scopes, body: form.body, project: form.project };
+                    return Action::Create {
+                        trigger,
+                        name,
+                        scopes,
+                        body: form.body,
+                        project: form.project,
+                    };
                 }
                 _ => {}
             }
@@ -249,8 +331,15 @@ impl SnippetsPage {
                 }
             }
             Key::Enter => match self.selected() {
-                Some(Item { file: Some(file), .. }) => return Action::Edit(file.clone()),
-                Some(_) => self.note = Some(("a built-in one -- c copies it to yours, where you can change it".into(), false)),
+                Some(Item {
+                    file: Some(file), ..
+                }) => return Action::Edit(file.clone()),
+                Some(_) => {
+                    self.note = Some((
+                        "a built-in one -- c copies it to yours, where you can change it".into(),
+                        false,
+                    ))
+                }
                 None => {}
             },
             Key::Char('c') => {
@@ -258,14 +347,26 @@ impl SnippetsPage {
                     if item.source == Source::User {
                         self.note = Some(("it's yours already -- Enter edits it".into(), false));
                     } else {
-                        return Action::Copy { item: Box::new(item.clone()), project: false };
+                        return Action::Copy {
+                            item: Box::new(item.clone()),
+                            project: false,
+                        };
                     }
                 }
             }
             Key::Char('p') => match (self.selected(), self.has_project) {
-                (_, false) => self.note = Some(("no project open -- open a file in one first".into(), true)),
-                (Some(item), true) if item.source == Source::Project => self.note = Some(("it's the project's already".into(), false)),
-                (Some(item), true) => return Action::Copy { item: Box::new(item.clone()), project: true },
+                (_, false) => {
+                    self.note = Some(("no project open -- open a file in one first".into(), true))
+                }
+                (Some(item), true) if item.source == Source::Project => {
+                    self.note = Some(("it's the project's already".into(), false))
+                }
+                (Some(item), true) => {
+                    return Action::Copy {
+                        item: Box::new(item.clone()),
+                        project: true,
+                    }
+                }
                 (None, _) => {}
             },
             Key::Char('d') => match self.selected().map(|i| i.file.clone()) {
@@ -278,7 +379,11 @@ impl SnippetsPage {
                     self.armed_delete = false;
                     return Action::Delete(file);
                 }
-                Some(_) => self.note = Some(("a built-in one can't be deleted -- [snippets] builtin = false hides them all".into(), false)),
+                Some(_) => self.note = Some((
+                    "a built-in one can't be deleted -- [snippets] builtin = false hides them all"
+                        .into(),
+                    false,
+                )),
                 None => {}
             },
             Key::Char('t') => {
@@ -298,20 +403,39 @@ pub fn layout(page: &SnippetsPage, cols: usize) -> Page {
     let x = g.put(1, left, "Snippets", Role::Title) + 2;
     g.put(1, x, &format!("for {}", language(&page.scope)), Role::Muted);
     let count = format!("{} snippets", page.items.len());
-    g.put(1, (left + width).saturating_sub(count.chars().count()), &count, Role::Muted);
+    g.put(
+        1,
+        (left + width).saturating_sub(count.chars().count()),
+        &count,
+        Role::Muted,
+    );
     let mut y = 2;
     let filter = match (&page.filter, page.filtering) {
         (Some(f), true) => format!("/ {f}▏"),
         (Some(f), false) if !f.is_empty() => format!("/ {f}  (Esc clears)"),
         _ => "/ filter".to_string(),
     };
-    let end = g.put(y, left, &filter, if page.filtering { Role::Title } else { Role::Muted });
+    let end = g.put(
+        y,
+        left,
+        &filter,
+        if page.filtering {
+            Role::Title
+        } else {
+            Role::Muted
+        },
+    );
     if page.filtering {
         g.panels.push((y, left..end.max(left + 30)));
     }
     y += 1;
     if let Some((text, bad)) = &page.note {
-        g.put(y, left, &fit(text, width), if *bad { Role::Bad } else { Role::Good });
+        g.put(
+            y,
+            left,
+            &fit(text, width),
+            if *bad { Role::Bad } else { Role::Good },
+        );
         y += 1;
     }
     for broken in page.broken.iter().take(3) {
@@ -332,22 +456,56 @@ pub fn layout(page: &SnippetsPage, cols: usize) -> Page {
                 if y > top {
                     y += 1;
                 }
-                let n = page.items.iter().filter(|i| i.scopes.first().map(String::as_str).unwrap_or("*") == groups[gi] && page.shown(i)).count();
+                let n = page
+                    .items
+                    .iter()
+                    .filter(|i| {
+                        i.scopes.first().map(String::as_str).unwrap_or("*") == groups[gi]
+                            && page.shown(i)
+                    })
+                    .count();
                 g.heading(y, left, list_w, &format!("{} {n}", language(&groups[gi])));
             }
             Row::Item(i) => {
                 let item = &page.items[i];
-                let x = g.put(y, left + 2, &fit(&item.trigger, 12), if selected == Some(i) { Role::Title } else { Role::Text }) + 1;
+                let x = g.put(
+                    y,
+                    left + 2,
+                    &fit(&item.trigger, 12),
+                    if selected == Some(i) {
+                        Role::Title
+                    } else {
+                        Role::Text
+                    },
+                ) + 1;
                 let x = x.max(left + 16);
-                g.put(y, x, &fit(&item.name, list_w.saturating_sub(x - left + 11)), if item.overridden { Role::Muted } else { Role::Text });
-                let tag = if item.overridden { "overridden" } else { item.source.label() };
+                g.put(
+                    y,
+                    x,
+                    &fit(&item.name, list_w.saturating_sub(x - left + 11)),
+                    if item.overridden {
+                        Role::Muted
+                    } else {
+                        Role::Text
+                    },
+                );
+                let tag = if item.overridden {
+                    "overridden"
+                } else {
+                    item.source.label()
+                };
                 let role = match (item.overridden, item.source) {
                     (true, _) => Role::Muted,
                     (_, Source::Project) => Role::Good,
                     (_, Source::User) => Role::Accent,
                     (_, Source::BuiltIn | Source::Extension) => Role::Muted,
                 };
-                g.put(y, (left + list_w).saturating_sub(tag.chars().count()), tag, role);
+                g.put(
+                    y,
+                    (left + list_w).saturating_sub(tag.chars().count()),
+                    tag,
+                    role,
+                );
                 if selected == Some(i) {
                     g.focus(y, left..left + list_w);
                     focus_line = y;
@@ -366,10 +524,26 @@ pub fn layout(page: &SnippetsPage, cols: usize) -> Page {
     if let Some(item) = page.selected() {
         let mut y = top;
         let rows: [(&str, String); 4] = [
-            ("Trigger", format!("{}  · Tab after it, or SPC i s", item.trigger)),
+            (
+                "Trigger",
+                format!("{}  · Tab after it, or SPC i s", item.trigger),
+            ),
             ("Name", item.name.clone()),
-            ("For", item.scopes.iter().map(|s| language(s)).collect::<Vec<_>>().join(", ")),
-            ("File", item.file.as_ref().map(|f| f.display().to_string()).unwrap_or_else(|| "built into Fenix".into())),
+            (
+                "For",
+                item.scopes
+                    .iter()
+                    .map(|s| language(s))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            (
+                "File",
+                item.file
+                    .as_ref()
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_else(|| "built into Fenix".into()),
+            ),
         ];
         for (label, value) in rows {
             g.put(y, dx, label, Role::Muted);
@@ -377,11 +551,19 @@ pub fn layout(page: &SnippetsPage, cols: usize) -> Page {
             y += 1;
         }
         y += 1;
-        g.heading(y, dx, dw, &format!("Preview · {}", match item.fields {
-            0 => "no fields".to_string(),
-            1 => "1 field".to_string(),
-            n => format!("{n} fields, Tab moves between them"),
-        }));
+        g.heading(
+            y,
+            dx,
+            dw,
+            &format!(
+                "Preview · {}",
+                match item.fields {
+                    0 => "no fields".to_string(),
+                    1 => "1 field".to_string(),
+                    n => format!("{n} fields, Tab moves between them"),
+                }
+            ),
+        );
         y += 1;
         for line in item.preview.lines().take(16) {
             g.put(y, dx + 2, &fit(line, dw.saturating_sub(2)), Role::Text);
@@ -389,38 +571,102 @@ pub fn layout(page: &SnippetsPage, cols: usize) -> Page {
         }
         if item.overridden {
             y += 1;
-            g.put(y, dx, &fit("A snippet closer to you has the same trigger, so this one isn't used.", dw), Role::Warn);
+            g.put(
+                y,
+                dx,
+                &fit(
+                    "A snippet closer to you has the same trigger, so this one isn't used.",
+                    dw,
+                ),
+                Role::Warn,
+            );
         }
     }
 
     // The new-snippet form floats by the list.
     if let Some(form) = &page.form {
         let labels = ["Trigger", "Name", "For"];
-        let hints = ["what you type before Tab", "what the list calls it", "languages, like tcl, python; empty for all"];
-        let mut rows = vec![vec![(format!("New snippet{}", if form.project { " · this project's" } else { "" }), Role::Title)], Vec::new()];
+        let hints = [
+            "what you type before Tab",
+            "what the list calls it",
+            "languages, like tcl, python; empty for all",
+        ];
+        let mut rows = vec![
+            vec![(
+                format!(
+                    "New snippet{}",
+                    if form.project {
+                        " · this project's"
+                    } else {
+                        ""
+                    }
+                ),
+                Role::Title,
+            )],
+            Vec::new(),
+        ];
         for (i, label) in labels.iter().enumerate() {
             let on = i == form.at;
-            let value = if on { format!("{}▏", form.fields[i]) } else { form.fields[i].clone() };
-            rows.push(vec![(format!("{label:<9}"), if on { Role::Accent } else { Role::Muted }), (format!("{value:<34}"), if on { Role::Title } else { Role::Text })]);
+            let value = if on {
+                format!("{}▏", form.fields[i])
+            } else {
+                form.fields[i].clone()
+            };
+            rows.push(vec![
+                (
+                    format!("{label:<9}"),
+                    if on { Role::Accent } else { Role::Muted },
+                ),
+                (
+                    format!("{value:<34}"),
+                    if on { Role::Title } else { Role::Text },
+                ),
+            ]);
         }
         // Only the field being typed in explains itself, on a line of its
         // own: text after the caret glyph wouldn't line up.
         rows.push(vec![(format!("{:9}{}", "", hints[form.at]), Role::Muted)]);
         if !form.body.is_empty() {
             rows.push(Vec::new());
-            rows.push(vec![(format!("Body: {} lines from your selection", form.body.lines().count().max(1)), Role::Muted)]);
+            rows.push(vec![(
+                format!(
+                    "Body: {} lines from your selection",
+                    form.body.lines().count().max(1)
+                ),
+                Role::Muted,
+            )]);
         }
         rows.push(Vec::new());
-        rows.push(vec![("Tab next field · Enter makes it and opens its file · Esc cancels".into(), Role::Muted)]);
-        g.popup = Some(Popup { line: focus_line, col: left + 2, rows });
+        rows.push(vec![(
+            "Tab next field · Enter makes it and opens its file · Esc cancels".into(),
+            Role::Muted,
+        )]);
+        g.popup = Some(Popup {
+            line: focus_line,
+            col: left + 2,
+            rows,
+        });
     }
 
     let keys: Vec<(&str, &str)> = if page.filtering {
         vec![("Enter", "done"), ("Esc", "clear")]
     } else if page.form.is_some() {
-        vec![("Tab", "next field"), ("Enter", "make it"), ("Esc", "cancel")]
+        vec![
+            ("Tab", "next field"),
+            ("Enter", "make it"),
+            ("Esc", "cancel"),
+        ]
     } else {
-        vec![("n", "new"), ("Enter", "edit"), ("c", "copy to yours"), ("p", "copy to the project"), ("d", "delete"), ("t", "try it"), ("/", "filter"), ("q", "close")]
+        vec![
+            ("n", "new"),
+            ("Enter", "edit"),
+            ("c", "copy to yours"),
+            ("p", "copy to the project"),
+            ("d", "delete"),
+            ("t", "try it"),
+            ("/", "filter"),
+            ("q", "close"),
+        ]
     };
     g.keys(left, width, &keys);
     g.finish()
@@ -436,7 +682,8 @@ mod tests {
             trigger: trigger.into(),
             scopes: vec![scope.into()],
             source,
-            file: (source != Source::BuiltIn).then(|| PathBuf::from(format!("/s/{scope}/{trigger}.snippet"))),
+            file: (source != Source::BuiltIn)
+                .then(|| PathBuf::from(format!("/s/{scope}/{trigger}.snippet"))),
             text: String::new(),
             preview: "proc name {args} {\n}".into(),
             fields: 2,
@@ -447,8 +694,19 @@ mod tests {
     fn page() -> SnippetsPage {
         let mut overridden = item("proc", "tcl", Source::BuiltIn);
         overridden.overridden = true;
-        let items = vec![item("header", "*", Source::BuiltIn), overridden, item("proc", "tcl", Source::User), item("tc", "tcl", Source::Project), item("fn", "rust", Source::User)];
-        SnippetsPage::new(items, vec!["/s/tcl/tm.snippet: missing # key:".into()], "tcl".into(), true)
+        let items = vec![
+            item("header", "*", Source::BuiltIn),
+            overridden,
+            item("proc", "tcl", Source::User),
+            item("tc", "tcl", Source::Project),
+            item("fn", "rust", Source::User),
+        ];
+        SnippetsPage::new(
+            items,
+            vec!["/s/tcl/tm.snippet: missing # key:".into()],
+            "tcl".into(),
+            true,
+        )
     }
 
     #[test]
@@ -459,8 +717,17 @@ mod tests {
         let all = text.find("ALL LANGUAGES 1").unwrap();
         let rust = text.find("RUST 1").unwrap();
         assert!(tcl < all && all < rust, "{text}");
-        assert!(text.contains("overridden") && text.contains("yours") && text.contains("project") && text.contains("built-in"), "{text}");
-        assert!(text.contains("✗ /s/tcl/tm.snippet: missing # key:"), "a broken file says why");
+        assert!(
+            text.contains("overridden")
+                && text.contains("yours")
+                && text.contains("project")
+                && text.contains("built-in"),
+            "{text}"
+        );
+        assert!(
+            text.contains("✗ /s/tcl/tm.snippet: missing # key:"),
+            "a broken file says why"
+        );
         assert!(text.contains("PREVIEW · 2 FIELDS"), "{text}");
     }
 
@@ -469,15 +736,24 @@ mod tests {
         let mut p = page();
         // tcl: proc (yours), proc (built-in, overridden), tc (project).
         assert_eq!(p.selected().unwrap().source, Source::User);
-        assert_eq!(p.key(Key::Enter), Action::Edit(PathBuf::from("/s/tcl/proc.snippet")));
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::Edit(PathBuf::from("/s/tcl/proc.snippet"))
+        );
         p.key(Key::Char('j'));
         assert_eq!(p.selected().unwrap().source, Source::BuiltIn);
         assert_eq!(p.key(Key::Enter), Action::None);
         assert!(p.note.as_ref().unwrap().0.contains("c copies it"));
-        assert!(matches!(p.key(Key::Char('c')), Action::Copy { project: false, .. }));
+        assert!(matches!(
+            p.key(Key::Char('c')),
+            Action::Copy { project: false, .. }
+        ));
         p.key(Key::Char('k'));
         assert_eq!(p.key(Key::Char('d')), Action::None, "asks first");
-        assert_eq!(p.key(Key::Char('d')), Action::Delete(PathBuf::from("/s/tcl/proc.snippet")));
+        assert_eq!(
+            p.key(Key::Char('d')),
+            Action::Delete(PathBuf::from("/s/tcl/proc.snippet"))
+        );
         assert!(matches!(p.key(Key::Char('t')), Action::Try(_)));
     }
 
@@ -485,13 +761,26 @@ mod tests {
     fn a_new_one_is_made_from_the_form_with_a_selection_as_its_body() {
         let mut p = page();
         p.new_from("puts $x\n".into());
-        assert!(layout(&p, 130).popup.unwrap().text().contains("Body: 1 lines from your selection"));
+        assert!(layout(&p, 130)
+            .popup
+            .unwrap()
+            .text()
+            .contains("Body: 1 lines from your selection"));
         for c in "say".chars() {
             p.key(Key::Char(c));
         }
         p.key(Key::Tab);
         p.key(Key::Tab);
-        assert_eq!(p.key(Key::Enter), Action::Create { trigger: "say".into(), name: "say".into(), scopes: vec!["tcl".into()], body: "puts $x\n".into(), project: false });
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::Create {
+                trigger: "say".into(),
+                name: "say".into(),
+                scopes: vec!["tcl".into()],
+                body: "puts $x\n".into(),
+                project: false
+            }
+        );
     }
 
     #[test]
@@ -503,7 +792,9 @@ mod tests {
         }
         p.key(Key::Enter);
         p.key(Key::Enter);
-        let Action::Create { trigger, .. } = p.key(Key::Enter) else { panic!() };
+        let Action::Create { trigger, .. } = p.key(Key::Enter) else {
+            panic!()
+        };
         assert_eq!(trigger, "ab", "a space isn't typed into a trigger");
         p.key(Key::Char('n'));
         p.key(Key::Enter);
@@ -520,6 +811,9 @@ mod tests {
             p.key(Key::Char(c));
         }
         let text = layout(&p, 130).text;
-        assert!(text.contains("fn snippet") && !text.contains("header snippet"), "{text}");
+        assert!(
+            text.contains("fn snippet") && !text.contains("header snippet"),
+            "{text}"
+        );
     }
 }

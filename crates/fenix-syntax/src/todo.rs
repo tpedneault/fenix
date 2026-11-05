@@ -28,8 +28,15 @@ pub enum TodoKind {
 }
 
 impl TodoKind {
-    pub const ALL: [TodoKind; 7] =
-        [TodoKind::Fix, TodoKind::Todo, TodoKind::Hack, TodoKind::Warn, TodoKind::Perf, TodoKind::Note, TodoKind::Test];
+    pub const ALL: [TodoKind; 7] = [
+        TodoKind::Fix,
+        TodoKind::Todo,
+        TodoKind::Hack,
+        TodoKind::Warn,
+        TodoKind::Perf,
+        TodoKind::Note,
+        TodoKind::Test,
+    ];
 
     /// The canonical spelling, used as a picker label and for filtering.
     pub fn label(self) -> &'static str {
@@ -81,8 +88,7 @@ impl TodoKind {
 /// Every spelling `TodoKind::from_word` accepts, as a ripgrep/regex
 /// alternation -- what a project-wide scan pre-filters files with before
 /// the precise, comment-aware pass decides what actually counts.
-pub const TODO_SEARCH_PATTERN: &str =
-    r"\b(FIXME|FIX|BUG|FIXIT|ISSUE|TODO|HACK|WARN|WARNING|XXX|PERF|OPTIM|OPTIMIZE|PERFORMANCE|NOTE|INFO|TEST|TESTING)\b";
+pub const TODO_SEARCH_PATTERN: &str = r"\b(FIXME|FIX|BUG|FIXIT|ISSUE|TODO|HACK|WARN|WARNING|XXX|PERF|OPTIM|OPTIMIZE|PERFORMANCE|NOTE|INFO|TEST|TESTING)\b";
 
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
@@ -121,7 +127,9 @@ pub fn find_keywords(text: &str) -> Vec<(Range<usize>, TodoKind)> {
         }
         let word = &text[start..end];
         i = end;
-        let Some(kind) = TodoKind::from_word(word) else { continue };
+        let Some(kind) = TodoKind::from_word(word) else {
+            continue;
+        };
 
         // Optional `(owner)` directly after the keyword.
         let mut tail = end;
@@ -140,7 +148,9 @@ pub fn find_keywords(text: &str) -> Vec<(Range<usize>, TodoKind)> {
 
         let line_start = text[..start].rfind('\n').map_or(0, |n| n + 1);
         let first_word = matches!(word, "TODO" | "FIXME" | "FIXIT" | "HACK" | "XXX" | "NOTE")
-            && text[line_start..start].bytes().all(|b| !b.is_ascii_alphanumeric());
+            && text[line_start..start]
+                .bytes()
+                .all(|b| !b.is_ascii_alphanumeric());
         if has_colon || first_word {
             out.push((start..tail, kind));
         }
@@ -166,7 +176,10 @@ pub struct TodoItem {
 
 /// Builds `TodoItem`s from keyword ranges already located in `source`
 /// (byte offsets), sorted by position.
-pub(crate) fn items_from_ranges(source: &str, mut ranges: Vec<(Range<usize>, TodoKind)>) -> Vec<TodoItem> {
+pub(crate) fn items_from_ranges(
+    source: &str,
+    mut ranges: Vec<(Range<usize>, TodoKind)>,
+) -> Vec<TodoItem> {
     ranges.sort_by_key(|(r, _)| r.start);
     ranges.dedup_by_key(|(r, _)| r.start);
     ranges
@@ -175,9 +188,17 @@ pub(crate) fn items_from_ranges(source: &str, mut ranges: Vec<(Range<usize>, Tod
             let line_start = source[..range.start].rfind('\n').map_or(0, |n| n + 1);
             let line = source[..range.start].matches('\n').count();
             let col = source[line_start..range.start].chars().count();
-            let line_end = source[range.end..].find('\n').map_or(source.len(), |n| range.end + n);
+            let line_end = source[range.end..]
+                .find('\n')
+                .map_or(source.len(), |n| range.end + n);
             let message = clean_message(&source[range.end..line_end]);
-            TodoItem { kind, range, line, col, message }
+            TodoItem {
+                kind,
+                range,
+                line,
+                col,
+                message,
+            }
         })
         .collect()
 }
@@ -186,8 +207,16 @@ fn clean_message(rest: &str) -> String {
     // A block comment can close before the line ends (`<!-- TODO: x
     // --></a>`), so the message stops at the first closing delimiter
     // rather than only losing one that ends the line.
-    let end = ["-->", "*/", "--]]", "#>", "\"\"\""].iter().filter_map(|closer| rest.find(closer)).min().unwrap_or(rest.len());
-    rest[..end].trim().trim_start_matches(':').trim().to_string()
+    let end = ["-->", "*/", "--]]", "#>", "\"\"\""]
+        .iter()
+        .filter_map(|closer| rest.find(closer))
+        .min()
+        .unwrap_or(rest.len());
+    rest[..end]
+        .trim()
+        .trim_start_matches(':')
+        .trim()
+        .to_string()
 }
 
 /// TODO items in a file no grammar is registered for (plain text, logs,
@@ -204,7 +233,10 @@ mod tests {
     use super::*;
 
     fn words(text: &str) -> Vec<(&str, TodoKind)> {
-        find_keywords(text).into_iter().map(|(r, k)| (&text[r], k)).collect()
+        find_keywords(text)
+            .into_iter()
+            .map(|(r, k)| (&text[r], k))
+            .collect()
     }
 
     #[test]
@@ -218,8 +250,14 @@ mod tests {
 
     #[test]
     fn an_owner_is_part_of_the_highlighted_keyword() {
-        assert_eq!(words("// TODO(tom): later"), vec![("TODO(tom):", TodoKind::Todo)]);
-        assert_eq!(words("// FIXME(#12) broken"), vec![("FIXME(#12)", TodoKind::Fix)]);
+        assert_eq!(
+            words("// TODO(tom): later"),
+            vec![("TODO(tom):", TodoKind::Todo)]
+        );
+        assert_eq!(
+            words("// FIXME(#12) broken"),
+            vec![("FIXME(#12)", TodoKind::Fix)]
+        );
     }
 
     #[test]
@@ -235,13 +273,19 @@ mod tests {
 
     #[test]
     fn a_colon_makes_a_mid_sentence_keyword_count() {
-        assert_eq!(words("// works, but XXX: slow"), vec![("XXX:", TodoKind::Warn)]);
+        assert_eq!(
+            words("// works, but XXX: slow"),
+            vec![("XXX:", TodoKind::Warn)]
+        );
     }
 
     #[test]
     fn every_line_of_a_block_comment_is_checked() {
         let text = "/*\n * TODO first\n * NOTE second\n */";
-        assert_eq!(words(text), vec![("TODO", TodoKind::Todo), ("NOTE", TodoKind::Note)]);
+        assert_eq!(
+            words(text),
+            vec![("TODO", TodoKind::Todo), ("NOTE", TodoKind::Note)]
+        );
     }
 
     #[test]
@@ -263,12 +307,20 @@ mod tests {
 
     #[test]
     fn the_message_stops_where_the_comment_closes() {
-        let items = find_in_plain_text("<a><!-- FIXME: in xml --></a>
-");
+        let items = find_in_plain_text(
+            "<a><!-- FIXME: in xml --></a>
+",
+        );
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].message, "in xml");
-        assert_eq!(find_in_plain_text("/* TODO: later */ int x;
-")[0].message, "later");
+        assert_eq!(
+            find_in_plain_text(
+                "/* TODO: later */ int x;
+"
+            )[0]
+            .message,
+            "later"
+        );
     }
 
     #[test]
@@ -281,9 +333,32 @@ mod tests {
 
     #[test]
     fn the_search_pattern_names_every_spelling() {
-        for word in ["FIXME", "FIX", "BUG", "FIXIT", "ISSUE", "TODO", "HACK", "WARN", "WARNING", "XXX", "PERF", "OPTIM", "OPTIMIZE", "PERFORMANCE", "NOTE", "INFO", "TEST", "TESTING"] {
+        for word in [
+            "FIXME",
+            "FIX",
+            "BUG",
+            "FIXIT",
+            "ISSUE",
+            "TODO",
+            "HACK",
+            "WARN",
+            "WARNING",
+            "XXX",
+            "PERF",
+            "OPTIM",
+            "OPTIMIZE",
+            "PERFORMANCE",
+            "NOTE",
+            "INFO",
+            "TEST",
+            "TESTING",
+        ] {
             assert!(TodoKind::from_word(word).is_some());
-            assert!(TODO_SEARCH_PATTERN.contains(&format!("|{word}|")) || TODO_SEARCH_PATTERN.contains(&format!("({word}|")) || TODO_SEARCH_PATTERN.contains(&format!("|{word})")));
+            assert!(
+                TODO_SEARCH_PATTERN.contains(&format!("|{word}|"))
+                    || TODO_SEARCH_PATTERN.contains(&format!("({word}|"))
+                    || TODO_SEARCH_PATTERN.contains(&format!("|{word})"))
+            );
         }
     }
 }

@@ -40,7 +40,11 @@ struct Showing {
 }
 
 enum State {
-    Pending { proxy: EventLoopProxy<FenixUserEvent>, startup: Invocation, queued: Vec<FenixUserEvent> },
+    Pending {
+        proxy: EventLoopProxy<FenixUserEvent>,
+        startup: Invocation,
+        queued: Vec<FenixUserEvent>,
+    },
     /// The window is up with the splash in it; the slow part waits for
     /// the event loop to have gone round once, so Windows has actually
     /// shown the window before the loop is kept busy.
@@ -55,7 +59,13 @@ impl Launcher {
     /// `App::new` opens it, the rest and any positions and project once
     /// the editor exists.
     pub fn new(proxy: EventLoopProxy<FenixUserEvent>, startup: Invocation) -> Self {
-        Launcher { state: State::Pending { proxy, startup, queued: Vec::new() } }
+        Launcher {
+            state: State::Pending {
+                proxy,
+                startup,
+                queued: Vec::new(),
+            },
+        }
     }
 
     /// Whether the editor quit to start again (`SPC q r`).
@@ -64,12 +74,22 @@ impl Launcher {
     }
 
     fn launch(&mut self, event_loop: &ActiveEventLoop) {
-        let State::Pending { proxy, startup, queued } = std::mem::replace(&mut self.state, State::Moving) else { return };
+        let State::Pending {
+            proxy,
+            startup,
+            queued,
+        } = std::mem::replace(&mut self.state, State::Moving)
+        else {
+            return;
+        };
 
         // Only what the window needs: where it goes, its colours, and
         // whether there's a splash. `App::new` reads the file properly.
         let config = match fenix_storage::paths::Roots::current() {
-            Some(roots) => fenix_config::Config::load_at_or_default(roots.settings_file(), roots.local.join("state")),
+            Some(roots) => fenix_config::Config::load_at_or_default(
+                roots.settings_file(),
+                roots.local.join("state"),
+            ),
             None => fenix_config::Config::empty("settings.toml".into(), "state".into()),
         };
         let look = theme::named_or_default(config.theme.as_deref());
@@ -78,7 +98,10 @@ impl Launcher {
         let splash_on = config.motion.splash != Some(false);
         let still = !motion::on(&config, Feature::Splash);
 
-        let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(crate::app::fenix_icon()).with_visible(false);
+        let mut attrs = Window::default_attributes()
+            .with_title("Fenix")
+            .with_window_icon(crate::app::fenix_icon())
+            .with_visible(false);
         if config.restore_windows != Some(false) {
             if let Some(first) = config.windows.first() {
                 attrs = attrs
@@ -87,47 +110,89 @@ impl Launcher {
                     .with_maximized(first.maximized);
             }
         }
-        let window = Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
+        let window = Arc::new(
+            event_loop
+                .create_window(attrs)
+                .expect("failed to create window"),
+        );
         crate::profile::launch_mark("window");
         let (gpu_context, mut gpu) = pollster::block_on(GpuContext::new(Arc::clone(&window)));
         crate::profile::launch_mark("gpu");
         if std::env::var_os("FENIX_PROFILE").is_some() {
             let adapter = gpu_context.adapter_info();
-            eprintln!("fenix-profile launch/adapter: {} via {:?}", adapter.name, adapter.backend);
+            eprintln!(
+                "fenix-profile launch/adapter: {} via {:?}",
+                adapter.name, adapter.backend
+            );
         }
 
         let splash = if splash_on {
             let fg = [look.fg.r(), look.fg.g(), look.fg.b(), look.fg.a()].map(|c| c as f32 / 255.0);
             gpu.take_surface().and_then(|surface| {
-                SplashHandle::start(Arc::clone(&window), Arc::clone(&gpu.device), Arc::clone(&gpu.queue), surface, gpu.config.clone(), look.bg, fg, still).ok()
+                SplashHandle::start(
+                    Arc::clone(&window),
+                    Arc::clone(&gpu.device),
+                    Arc::clone(&gpu.queue),
+                    surface,
+                    gpu.config.clone(),
+                    look.bg,
+                    fg,
+                    still,
+                )
+                .ok()
             })
         } else {
             None
         };
-        crate::profile::launch_mark(if splash.is_some() { "splash started" } else { "no splash" });
+        crate::profile::launch_mark(if splash.is_some() {
+            "splash started"
+        } else {
+            "no splash"
+        });
         if let Some(splash) = &splash {
             splash.wait_first_frame(Duration::from_millis(250));
             crate::profile::launch_mark("splash first frame");
             window.set_visible(true);
             splash.set_progress(0.1);
         }
-        self.state = State::Showing(Box::new(Showing { proxy, startup, queued, window, gpu_context, gpu, splash }));
+        self.state = State::Showing(Box::new(Showing {
+            proxy,
+            startup,
+            queued,
+            window,
+            gpu_context,
+            gpu,
+            splash,
+        }));
         // Round the loop once more before the slow part: see `Showing`.
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     }
 
     /// The slow part, behind the splash: the editor itself.
     fn load(&mut self, event_loop: &ActiveEventLoop) {
-        let State::Showing(showing) = std::mem::replace(&mut self.state, State::Moving) else { return };
+        let State::Showing(showing) = std::mem::replace(&mut self.state, State::Moving) else {
+            return;
+        };
         let _busy = crate::watchdog::enter("starting up");
-        let Showing { proxy, startup, queued, window, gpu_context, gpu, splash } = *showing;
+        let Showing {
+            proxy,
+            startup,
+            queued,
+            window,
+            gpu_context,
+            gpu,
+            splash,
+        } = *showing;
         let progress = |p: f32| {
             if let Some(splash) = &splash {
                 splash.set_progress(p);
             }
         };
         progress(0.15);
-        let first = startup.files.first().map(|f| f.path.to_string_lossy().into_owned());
+        let first = startup
+            .files
+            .first()
+            .map(|f| f.path.to_string_lossy().into_owned());
         let mut app = Box::new(App::new(proxy, first));
         app.apply_startup(&startup.files, startup.project.as_deref());
         crate::profile::launch_mark("App::new");

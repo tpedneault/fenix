@@ -147,7 +147,10 @@ struct Wait {
 
 impl Wait {
     fn new(send: impl FnOnce() -> Result<u64, String> + 'static) -> Wait {
-        Wait { id: None, send: Some(Box::new(send)) }
+        Wait {
+            id: None,
+            send: Some(Box::new(send)),
+        }
     }
 }
 
@@ -164,7 +167,9 @@ impl Future for Wait {
             self.id = Some(id);
             return Poll::Pending;
         }
-        let Some(id) = self.id else { return Poll::Pending };
+        let Some(id) = self.id else {
+            return Poll::Pending;
+        };
         let came = EXECUTOR.with(|e| {
             let mut e = e.borrow_mut();
             match e.slots.remove(&id) {
@@ -205,7 +210,10 @@ pub async fn call(name: &str, payload: &str) -> Result<String, String> {
 /// what [`crate::agents::AskHandle`] waits on.
 pub(crate) fn service_reply(id: u64) -> impl Future<Output = Result<String, String>> {
     EXECUTOR.with(|e| e.borrow_mut().slots.insert(id, Slot::Waiting));
-    let wait = Wait { id: Some(id), send: None };
+    let wait = Wait {
+        id: Some(id),
+        send: None,
+    };
     async move {
         match wait.await? {
             Answer::Service(r) => r,
@@ -225,7 +233,11 @@ mod tests {
 
     /// A slot answered by hand, as `deliver` fills one.
     fn answer(id: u64, text: &str) {
-        EXECUTOR.with(|e| e.borrow_mut().slots.insert(id, Slot::Came(Answer::Service(Ok(text.into())))));
+        EXECUTOR.with(|e| {
+            e.borrow_mut()
+                .slots
+                .insert(id, Slot::Came(Answer::Service(Ok(text.into()))))
+        });
         poll_all();
     }
 
@@ -237,8 +249,16 @@ mod tests {
         let next = move || -> Result<u64, String> { Ok(ids.borrow_mut().remove(0)) };
         let next2 = next.clone();
         spawn(async move {
-            for send in [Box::new(next) as Box<dyn FnOnce() -> Result<u64, String>>, Box::new(next2)] {
-                if let Ok(Answer::Service(Ok(text))) = (Wait { id: None, send: Some(send) }).await {
+            for send in [
+                Box::new(next) as Box<dyn FnOnce() -> Result<u64, String>>,
+                Box::new(next2),
+            ] {
+                if let Ok(Answer::Service(Ok(text))) = (Wait {
+                    id: None,
+                    send: Some(send),
+                })
+                .await
+                {
                     seen.borrow_mut().push(text);
                 }
             }

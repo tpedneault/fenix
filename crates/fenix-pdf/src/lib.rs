@@ -21,8 +21,8 @@
 //! vnc` into owning a small tokio runtime) -- no async runtime is needed
 //! or pulled in here at all.
 
-mod render;
 pub mod outline;
+mod render;
 pub mod search;
 pub mod text;
 
@@ -70,29 +70,56 @@ impl Default for PdfDocKey {
 /// wants -- see `PdfResponse::PageRendered`'s own doc comment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfRequest {
-    Open { key: PdfDocKey, path: PathBuf },
+    Open {
+        key: PdfDocKey,
+        path: PathBuf,
+    },
     /// `view` names which of the caller's views of the document asked:
     /// two panes can show one document at different pages, and each
     /// needs its own render.
-    RenderPage { key: PdfDocKey, view: u64, request_id: u64, page_index: u32, target_w: u32, target_h: u32 },
+    RenderPage {
+        key: PdfDocKey,
+        view: u64,
+        request_id: u64,
+        page_index: u32,
+        target_w: u32,
+        target_h: u32,
+    },
     /// Part of a page: the page laid out `page_w` x `page_h` pixels, and
     /// the rectangle `x, y, w, h` of that rendered -- a strip scrolled into
     /// view, or what a pane shows of a page zoomed past it. Never
     /// coalesced: two strips of one page are two different renders. A
     /// `CancelBefore` drops the ones a view no longer needs.
-    RenderRegion { key: PdfDocKey, view: u64, request_id: u64, page_index: u32, page_w: u32, page_h: u32, x: u32, y: u32, w: u32, h: u32 },
+    RenderRegion {
+        key: PdfDocKey,
+        view: u64,
+        request_id: u64,
+        page_index: u32,
+        page_w: u32,
+        page_h: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+    },
     /// Drops the region renders still queued for `view` of `key` that were
     /// asked for before `before` (request ids only grow): sent when a view
     /// zooms, resizes or jumps, so what it showed before isn't rendered
     /// after what it shows now.
-    CancelBefore { key: PdfDocKey, view: u64, before: u64 },
+    CancelBefore {
+        key: PdfDocKey,
+        view: u64,
+        before: u64,
+    },
     /// Fetches and flattens the document's bookmark tree (see the
     /// `outline` module). Cheap relative to `RenderPage` (no
     /// rasterization involved), but still routed through the same
     /// single worker thread as everything else -- pdfium's concurrency
     /// restriction applies to every call into a document, not just
     /// rendering ones.
-    FetchOutline { key: PdfDocKey },
+    FetchOutline {
+        key: PdfDocKey,
+    },
     /// Searches every page of the document, in page order, for `query`.
     /// Carries its own `request_id` for the same reason `RenderPage`
     /// does: a caller that fires a second search before the first reply
@@ -106,17 +133,35 @@ pub enum PdfRequest {
     /// is answered with the matches it found, then the rest of the search
     /// goes to the back of the queue, so renders keep coming while a long
     /// document is searched. `match_case` as for smart-case.
-    Search { key: PdfDocKey, request_id: u64, query: String, match_case: bool, from_page: u32 },
+    Search {
+        key: PdfDocKey,
+        request_id: u64,
+        query: String,
+        match_case: bool,
+        from_page: u32,
+    },
     /// Drops the renders still queued for `view` of `key` whose page isn't
     /// in `keep` -- sent when the view scrolls, so pages scrolled past
     /// aren't rendered after the ones now on screen. A render already
     /// under way finishes.
-    Cancel { key: PdfDocKey, view: u64, keep: Vec<u32> },
+    Cancel {
+        key: PdfDocKey,
+        view: u64,
+        keep: Vec<u32>,
+    },
     /// A page's characters and their boxes, for selecting and copying.
-    Text { key: PdfDocKey, page: u32 },
+    Text {
+        key: PdfDocKey,
+        page: u32,
+    },
     /// A page's links.
-    Links { key: PdfDocKey, page: u32 },
-    Close { key: PdfDocKey },
+    Links {
+        key: PdfDocKey,
+        page: u32,
+    },
+    Close {
+        key: PdfDocKey,
+    },
 }
 
 /// One reply from the worker thread, handed to the caller's own
@@ -127,8 +172,14 @@ pub enum PdfResponse {
     /// caller lays the whole document out before rendering any of it.
     /// Read without loading the pages, so it's cheap even for a long
     /// document.
-    Opened { key: PdfDocKey, pages: Vec<(f32, f32)> },
-    OpenFailed { key: PdfDocKey, message: String },
+    Opened {
+        key: PdfDocKey,
+        pages: Vec<(f32, f32)>,
+    },
+    OpenFailed {
+        key: PdfDocKey,
+        message: String,
+    },
     /// A page finished rendering, as a tightly-packed BGRA buffer of
     /// exactly `width` x `height` pixels (matches the `target_w`/
     /// `target_h` the triggering `RenderPage` asked for -- pdfium never
@@ -150,26 +201,65 @@ pub enum PdfResponse {
     /// ask for ahead of the page actually being opened), so a mismatch
     /// here is the caller's cue to immediately dispatch a corrected
     /// re-render at the right target for the page it actually landed on.
-    PageRendered { key: PdfDocKey, request_id: u64, page_index: u32, width: u32, height: u32, bgra: Vec<u8>, page_width_pts: f32, page_height_pts: f32 },
-    RenderFailed { key: PdfDocKey, request_id: u64, message: String },
+    PageRendered {
+        key: PdfDocKey,
+        request_id: u64,
+        page_index: u32,
+        width: u32,
+        height: u32,
+        bgra: Vec<u8>,
+        page_width_pts: f32,
+        page_height_pts: f32,
+    },
+    RenderFailed {
+        key: PdfDocKey,
+        request_id: u64,
+        message: String,
+    },
     /// Reply to `RenderRegion`: `w` x `h` BGRA pixels, row after row, of the
     /// page laid out at the size it asked for, from `(x, y)`.
-    RegionRendered { key: PdfDocKey, view: u64, request_id: u64, page_index: u32, x: u32, y: u32, w: u32, h: u32, bgra: Vec<u8> },
+    RegionRendered {
+        key: PdfDocKey,
+        view: u64,
+        request_id: u64,
+        page_index: u32,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        bgra: Vec<u8>,
+    },
     /// Reply to `PdfRequest::FetchOutline`. Empty (not an error) for a
     /// PDF with no bookmarks at all -- a document simply having none is
     /// normal and common, not a failure.
-    Outline { key: PdfDocKey, entries: Vec<outline::OutlineEntry> },
+    Outline {
+        key: PdfDocKey,
+        entries: Vec<outline::OutlineEntry>,
+    },
     /// Reply to `PdfRequest::Search`, carrying the same `request_id` back
     /// so the caller can drop a stale reply the same way it does for
     /// `PageRendered`. Empty `matches` (not an error) for a query with no
     /// hits anywhere in the document -- that's a completely normal search
     /// outcome, not a failure.
     /// `done` on the last batch.
-    SearchResults { key: PdfDocKey, request_id: u64, matches: Vec<search::PdfSearchMatch>, done: bool },
+    SearchResults {
+        key: PdfDocKey,
+        request_id: u64,
+        matches: Vec<search::PdfSearchMatch>,
+        done: bool,
+    },
     /// Reply to `Text`; empty for a page with no text (a scan).
-    Text { key: PdfDocKey, page: u32, chars: Vec<text::PageChar> },
+    Text {
+        key: PdfDocKey,
+        page: u32,
+        chars: Vec<text::PageChar>,
+    },
     /// Reply to `Links`.
-    Links { key: PdfDocKey, page: u32, links: Vec<text::PageLink> },
+    Links {
+        key: PdfDocKey,
+        page: u32,
+        links: Vec<text::PageLink>,
+    },
 }
 
 /// One shared background worker for every open PDF document in the
@@ -200,7 +290,10 @@ impl PdfWorker {
     pub fn spawn(response_sink: impl Fn(PdfResponse) + Send + 'static) -> Self {
         let (sender, receiver) = std_mpsc::channel::<PdfRequest>();
         let thread = thread::spawn(move || render::run(receiver, response_sink));
-        Self { sender: Some(sender), thread: Some(thread) }
+        Self {
+            sender: Some(sender),
+            thread: Some(thread),
+        }
     }
 
     /// Queues one request. A no-op if the worker's already been dropped
@@ -236,7 +329,13 @@ fn coalesce_render_requests(pending: Vec<PdfRequest>) -> Vec<PdfRequest> {
         if let PdfRequest::CancelBefore { key, view, before } = req {
             dropped[i] = true;
             for (j, earlier) in pending[..i].iter().enumerate() {
-                if let PdfRequest::RenderRegion { key: k, view: v, request_id, .. } = earlier {
+                if let PdfRequest::RenderRegion {
+                    key: k,
+                    view: v,
+                    request_id,
+                    ..
+                } = earlier
+                {
                     if k == key && v == view && request_id < before {
                         dropped[j] = true;
                     }
@@ -246,7 +345,13 @@ fn coalesce_render_requests(pending: Vec<PdfRequest>) -> Vec<PdfRequest> {
         if let PdfRequest::Cancel { key, view, keep } = req {
             dropped[i] = true;
             for (j, earlier) in pending[..i].iter().enumerate() {
-                if let PdfRequest::RenderPage { key: k, view: v, page_index, .. } = earlier {
+                if let PdfRequest::RenderPage {
+                    key: k,
+                    view: v,
+                    page_index,
+                    ..
+                } = earlier
+                {
                     if k == key && v == view && !keep.contains(page_index) {
                         dropped[j] = true;
                     }
@@ -257,13 +362,19 @@ fn coalesce_render_requests(pending: Vec<PdfRequest>) -> Vec<PdfRequest> {
     // Only the newest search of a document goes on.
     let mut newest_search: HashMap<PdfDocKey, u64> = HashMap::new();
     for req in &pending {
-        if let PdfRequest::Search { key, request_id, .. } = req {
+        if let PdfRequest::Search {
+            key, request_id, ..
+        } = req
+        {
             let newest = newest_search.entry(*key).or_insert(*request_id);
             *newest = (*newest).max(*request_id);
         }
     }
     for (i, req) in pending.iter().enumerate() {
-        if let PdfRequest::Search { key, request_id, .. } = req {
+        if let PdfRequest::Search {
+            key, request_id, ..
+        } = req
+        {
             if newest_search.get(key) != Some(request_id) {
                 dropped[i] = true;
             }
@@ -271,7 +382,13 @@ fn coalesce_render_requests(pending: Vec<PdfRequest>) -> Vec<PdfRequest> {
     }
     let mut latest: HashMap<(PdfDocKey, u64, u32), usize> = HashMap::new();
     for (i, req) in pending.iter().enumerate() {
-        if let PdfRequest::RenderPage { key, view, page_index, .. } = req {
+        if let PdfRequest::RenderPage {
+            key,
+            view,
+            page_index,
+            ..
+        } = req
+        {
             if !dropped[i] {
                 latest.insert((*key, *view, *page_index), i);
             }
@@ -293,18 +410,39 @@ mod tests {
     use super::*;
 
     fn render_req(key: PdfDocKey, request_id: u64) -> PdfRequest {
-        PdfRequest::RenderPage { key, view: 0, request_id, page_index: 0, target_w: 100, target_h: 100 }
+        PdfRequest::RenderPage {
+            key,
+            view: 0,
+            request_id,
+            page_index: 0,
+            target_w: 100,
+            target_h: 100,
+        }
     }
 
     fn page_req(key: PdfDocKey, view: u64, page_index: u32) -> PdfRequest {
-        PdfRequest::RenderPage { key, view, request_id: page_index as u64, page_index, target_w: 100, target_h: 100 }
+        PdfRequest::RenderPage {
+            key,
+            view,
+            request_id: page_index as u64,
+            page_index,
+            target_w: 100,
+            target_h: 100,
+        }
     }
 
     #[test]
     fn coalesce_keeps_one_render_per_page_so_a_view_can_ask_for_several_pages() {
         let key = PdfDocKey::new();
-        let pending = vec![page_req(key, 1, 3), page_req(key, 1, 4), page_req(key, 1, 3)];
-        assert_eq!(coalesce_render_requests(pending), vec![page_req(key, 1, 4), page_req(key, 1, 3)]);
+        let pending = vec![
+            page_req(key, 1, 3),
+            page_req(key, 1, 4),
+            page_req(key, 1, 3),
+        ];
+        assert_eq!(
+            coalesce_render_requests(pending),
+            vec![page_req(key, 1, 4), page_req(key, 1, 3)]
+        );
     }
 
     #[test]
@@ -316,12 +454,21 @@ mod tests {
             page_req(key, 1, 4),
             page_req(key, 2, 3),
             page_req(other, 1, 3),
-            PdfRequest::Cancel { key, view: 1, keep: vec![4, 9] },
+            PdfRequest::Cancel {
+                key,
+                view: 1,
+                keep: vec![4, 9],
+            },
             page_req(key, 1, 9),
         ];
         assert_eq!(
             coalesce_render_requests(pending),
-            vec![page_req(key, 1, 4), page_req(key, 2, 3), page_req(other, 1, 3), page_req(key, 1, 9)],
+            vec![
+                page_req(key, 1, 4),
+                page_req(key, 2, 3),
+                page_req(other, 1, 3),
+                page_req(key, 1, 9)
+            ],
             "only view 1's page 3 goes; later renders and other views' stay"
         );
     }
@@ -329,9 +476,34 @@ mod tests {
     #[test]
     fn cancel_before_drops_the_views_older_regions_and_keeps_the_rest() {
         let key = PdfDocKey::new();
-        let region = |view, request_id| PdfRequest::RenderRegion { key, view, request_id, page_index: 0, page_w: 612, page_h: 792, x: 0, y: request_id as u32, w: 612, h: 10 };
-        let pending = vec![region(1, 1), region(1, 2), region(2, 3), PdfRequest::CancelBefore { key, view: 1, before: 2 }, region(1, 4)];
-        assert_eq!(coalesce_render_requests(pending), vec![region(1, 2), region(2, 3), region(1, 4)], "two strips of one page are both kept");
+        let region = |view, request_id| PdfRequest::RenderRegion {
+            key,
+            view,
+            request_id,
+            page_index: 0,
+            page_w: 612,
+            page_h: 792,
+            x: 0,
+            y: request_id as u32,
+            w: 612,
+            h: 10,
+        };
+        let pending = vec![
+            region(1, 1),
+            region(1, 2),
+            region(2, 3),
+            PdfRequest::CancelBefore {
+                key,
+                view: 1,
+                before: 2,
+            },
+            region(1, 4),
+        ];
+        assert_eq!(
+            coalesce_render_requests(pending),
+            vec![region(1, 2), region(2, 3), region(1, 4)],
+            "two strips of one page are both kept"
+        );
     }
 
     #[test]
@@ -351,38 +523,70 @@ mod tests {
         let a = PdfDocKey::new();
         let b = PdfDocKey::new();
         let pending = vec![render_req(a, 1), render_req(b, 1), render_req(a, 2)];
-        assert_eq!(coalesce_render_requests(pending), vec![render_req(b, 1), render_req(a, 2)]);
+        assert_eq!(
+            coalesce_render_requests(pending),
+            vec![render_req(b, 1), render_req(a, 2)]
+        );
     }
 
     #[test]
     fn coalesce_keeps_the_last_render_of_each_view_of_one_document() {
         let key = PdfDocKey::new();
-        let view = |view, request_id| PdfRequest::RenderPage { key, view, request_id, page_index: 0, target_w: 100, target_h: 100 };
+        let view = |view, request_id| PdfRequest::RenderPage {
+            key,
+            view,
+            request_id,
+            page_index: 0,
+            target_w: 100,
+            target_h: 100,
+        };
         let pending = vec![view(1, 1), view(2, 2), view(1, 3)];
-        assert_eq!(coalesce_render_requests(pending), vec![view(2, 2), view(1, 3)]);
+        assert_eq!(
+            coalesce_render_requests(pending),
+            vec![view(2, 2), view(1, 3)]
+        );
     }
 
     #[test]
     fn only_the_newest_search_of_a_document_goes_on() {
         let key = PdfDocKey::new();
         let other = PdfDocKey::new();
-        let search = |key, request_id| PdfRequest::Search { key, request_id, query: "x".into(), match_case: false, from_page: 0 };
+        let search = |key, request_id| PdfRequest::Search {
+            key,
+            request_id,
+            query: "x".into(),
+            match_case: false,
+            from_page: 0,
+        };
         let pending = vec![search(key, 1), search(other, 1), search(key, 2)];
-        assert_eq!(coalesce_render_requests(pending), vec![search(other, 1), search(key, 2)]);
+        assert_eq!(
+            coalesce_render_requests(pending),
+            vec![search(other, 1), search(key, 2)]
+        );
     }
 
     #[test]
     fn coalesce_never_drops_open_or_close_requests() {
         let key = PdfDocKey::new();
         let pending = vec![
-            PdfRequest::Open { key, path: PathBuf::from("a.pdf") },
+            PdfRequest::Open {
+                key,
+                path: PathBuf::from("a.pdf"),
+            },
             render_req(key, 1),
             render_req(key, 2),
             PdfRequest::Close { key },
         ];
         assert_eq!(
             coalesce_render_requests(pending),
-            vec![PdfRequest::Open { key, path: PathBuf::from("a.pdf") }, render_req(key, 2), PdfRequest::Close { key }]
+            vec![
+                PdfRequest::Open {
+                    key,
+                    path: PathBuf::from("a.pdf")
+                },
+                render_req(key, 2),
+                PdfRequest::Close { key }
+            ]
         );
     }
 
@@ -392,7 +596,15 @@ mod tests {
         let b = PdfDocKey::new();
         // Interleaved renders for two different sessions -- the surviving
         // entries stay in their original relative order, just thinned.
-        let pending = vec![render_req(a, 1), render_req(b, 1), render_req(a, 2), render_req(b, 2)];
-        assert_eq!(coalesce_render_requests(pending), vec![render_req(a, 2), render_req(b, 2)]);
+        let pending = vec![
+            render_req(a, 1),
+            render_req(b, 1),
+            render_req(a, 2),
+            render_req(b, 2),
+        ];
+        assert_eq!(
+            coalesce_render_requests(pending),
+            vec![render_req(a, 2), render_req(b, 2)]
+        );
     }
 }

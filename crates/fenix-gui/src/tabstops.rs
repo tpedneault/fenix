@@ -49,7 +49,9 @@ impl TabStops {
                 Some(&stop) => stop,
                 None => {
                     let last = stops.last().copied().unwrap_or(visual_col);
-                    let overshoot = tab_index.saturating_sub(stops.len().saturating_sub(1)).max(1);
+                    let overshoot = tab_index
+                        .saturating_sub(stops.len().saturating_sub(1))
+                        .max(1);
                     last + overshoot * CUSTOM_FALLBACK_WIDTH
                 }
             },
@@ -98,7 +100,10 @@ pub fn expand_line(line: &str, stops: &TabStops) -> (String, Vec<usize>) {
 /// so an out-of-range column (e.g. a selection extending onto a ragged
 /// shorter line) degrades the same way everywhere instead of panicking.
 pub fn visual_col(col_map: &[usize], char_col: usize) -> usize {
-    col_map.get(char_col).copied().unwrap_or_else(|| col_map.last().copied().unwrap_or(char_col))
+    col_map
+        .get(char_col)
+        .copied()
+        .unwrap_or_else(|| col_map.last().copied().unwrap_or(char_col))
 }
 
 #[cfg(test)]

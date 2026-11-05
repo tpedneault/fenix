@@ -77,7 +77,15 @@ pub struct GraphRow {
 /// promise for the commits listed, which is all the graph needs.
 pub fn commit_graph(repo: &Path, limit: usize) -> Vec<GraphCommit> {
     let n = format!("-n{limit}");
-    let lines = run_lines(repo, &["log", "--all", &n, "--format=%H\x1f%h\x1f%P\x1f%D\x1f%an\x1f%ar\x1f%s"]);
+    let lines = run_lines(
+        repo,
+        &[
+            "log",
+            "--all",
+            &n,
+            "--format=%H\x1f%h\x1f%P\x1f%D\x1f%an\x1f%ar\x1f%s",
+        ],
+    );
     children_first(lines.iter().filter_map(|l| parse_line(l)).collect())
 }
 
@@ -89,7 +97,11 @@ pub fn children_first(commits: Vec<GraphCommit>) -> Vec<GraphCommit> {
     use std::cmp::Reverse;
     use std::collections::{BinaryHeap, HashMap};
 
-    let at: HashMap<&str, usize> = commits.iter().enumerate().map(|(i, c)| (c.hash.as_str(), i)).collect();
+    let at: HashMap<&str, usize> = commits
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.hash.as_str(), i))
+        .collect();
     // How many listed children each commit waits for.
     let mut waiting = vec![0usize; commits.len()];
     for c in &commits {
@@ -100,11 +112,18 @@ pub fn children_first(commits: Vec<GraphCommit>) -> Vec<GraphCommit> {
         }
     }
     // Almost always already so: then there's nothing to do.
-    let in_order = commits.iter().enumerate().all(|(i, c)| c.parents.iter().all(|p| at.get(p.as_str()).is_none_or(|&j| j > i)));
+    let in_order = commits.iter().enumerate().all(|(i, c)| {
+        c.parents
+            .iter()
+            .all(|p| at.get(p.as_str()).is_none_or(|&j| j > i))
+    });
     if in_order {
         return commits;
     }
-    let mut ready: BinaryHeap<Reverse<usize>> = (0..commits.len()).filter(|&i| waiting[i] == 0).map(Reverse).collect();
+    let mut ready: BinaryHeap<Reverse<usize>> = (0..commits.len())
+        .filter(|&i| waiting[i] == 0)
+        .map(Reverse)
+        .collect();
     let mut order = Vec::with_capacity(commits.len());
     while let Some(Reverse(i)) = ready.pop() {
         order.push(i);
@@ -137,7 +156,11 @@ fn parse_line(line: &str) -> Option<GraphCommit> {
         // A root commit has no parents at all, and `%P` is then empty --
         // `split_whitespace` yields nothing, which is right.
         parents: parents_raw.split_whitespace().map(str::to_string).collect(),
-        refs: refs_raw.split(", ").filter(|r| !r.is_empty()).map(str::to_string).collect(),
+        refs: refs_raw
+            .split(", ")
+            .filter(|r| !r.is_empty())
+            .map(str::to_string)
+            .collect(),
         author,
         relative_date,
         subject,
@@ -174,8 +197,12 @@ pub fn assign_lanes(commits: &[GraphCommit]) -> Vec<GraphRow> {
 
     for commit in commits {
         let live_before = occupied(&lanes);
-        let waiting: Vec<usize> =
-            lanes.iter().enumerate().filter(|(_, l)| l.as_deref() == Some(commit.hash.as_str())).map(|(i, _)| i).collect();
+        let waiting: Vec<usize> = lanes
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.as_deref() == Some(commit.hash.as_str()))
+            .map(|(i, _)| i)
+            .collect();
 
         let lane = match waiting.first() {
             Some(&i) => i,
@@ -192,7 +219,10 @@ pub fn assign_lanes(commits: &[GraphCommit]) -> Vec<GraphRow> {
 
         let mut branching = Vec::new();
         for parent in commit.parents.iter().skip(1) {
-            match lanes.iter().position(|l| l.as_deref() == Some(parent.as_str())) {
+            match lanes
+                .iter()
+                .position(|l| l.as_deref() == Some(parent.as_str()))
+            {
                 // Something already heads toward this parent -- draw the
                 // merge edge into that existing lane instead of opening
                 // a duplicate one beside it.
@@ -219,7 +249,12 @@ pub fn assign_lanes(commits: &[GraphCommit]) -> Vec<GraphRow> {
 
 /// The indices of every lane currently heading toward something.
 fn occupied(lanes: &[Option<String>]) -> Vec<usize> {
-    lanes.iter().enumerate().filter(|(_, l)| l.is_some()).map(|(i, _)| i).collect()
+    lanes
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.is_some())
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// The leftmost free lane, growing the set only when every existing lane
@@ -258,11 +293,17 @@ mod tests {
     fn a_linear_history_stays_in_one_lane() {
         let rows = assign_lanes(&[c("c", &["b"]), c("b", &["a"]), c("a", &[])]);
         assert!(rows.iter().all(|r| r.lane == 0), "{rows:?}");
-        assert!(rows.iter().all(|r| r.branching.is_empty() && r.closing.is_empty()));
+        assert!(rows
+            .iter()
+            .all(|r| r.branching.is_empty() && r.closing.is_empty()));
         assert!(rows.iter().all(|r| !r.is_merge));
         // Only lane 0 is ever live, and the root frees it again.
         assert_eq!(rows[1].live_before, vec![0]);
-        assert!(rows[2].live_after.is_empty(), "a root commit's lane goes free: {:?}", rows[2]);
+        assert!(
+            rows[2].live_after.is_empty(),
+            "a root commit's lane goes free: {:?}",
+            rows[2]
+        );
     }
 
     #[test]
@@ -285,18 +326,36 @@ mod tests {
         assert_eq!(rows[2].closing, vec![1]);
         // Both lanes were live coming in; only lane 0 survives.
         assert_eq!(rows[2].live_before, vec![0, 1]);
-        assert!(rows[2].live_after.is_empty(), "`a` is a root, so nothing is left heading anywhere");
+        assert!(
+            rows[2].live_after.is_empty(),
+            "`a` is a root, so nothing is left heading anywhere"
+        );
     }
 
     #[test]
     fn a_merge_opens_a_lane_for_its_second_parent() {
         // m merges side into main: parents are [main-tip, side-tip].
-        let rows = assign_lanes(&[c("m", &["p", "s"]), c("p", &["a"]), c("s", &["a"]), c("a", &[])]);
+        let rows = assign_lanes(&[
+            c("m", &["p", "s"]),
+            c("p", &["a"]),
+            c("s", &["a"]),
+            c("a", &[]),
+        ]);
         assert!(rows[0].is_merge);
         assert_eq!(rows[0].lane, 0);
-        assert_eq!(rows[0].branching, vec![1], "the second parent gets its own lane");
-        assert_eq!(rows[1].lane, 0, "the first parent inherits the merge's lane");
-        assert_eq!(rows[2].lane, 1, "the second parent is drawn in the lane opened for it");
+        assert_eq!(
+            rows[0].branching,
+            vec![1],
+            "the second parent gets its own lane"
+        );
+        assert_eq!(
+            rows[1].lane, 0,
+            "the first parent inherits the merge's lane"
+        );
+        assert_eq!(
+            rows[2].lane, 1,
+            "the second parent is drawn in the lane opened for it"
+        );
         // Both sides then converge on `a`.
         assert_eq!(rows[3].lane, 0);
         assert_eq!(rows[3].closing, vec![1]);
@@ -305,11 +364,20 @@ mod tests {
     #[test]
     fn a_merge_of_a_parent_something_already_heads_toward_reuses_that_lane() {
         // `m`'s second parent is `s`, which lane 1 is already waiting for.
-        let rows = assign_lanes(&[c("t", &["s"]), c("m", &["p", "s"]), c("p", &["a"]), c("s", &["a"]), c("a", &[])]);
+        let rows = assign_lanes(&[
+            c("t", &["s"]),
+            c("m", &["p", "s"]),
+            c("p", &["a"]),
+            c("s", &["a"]),
+            c("a", &[]),
+        ]);
         let merge = &rows[1];
         assert!(merge.is_merge);
         assert_eq!(merge.branching.len(), 1);
-        assert_eq!(merge.branching[0], 0, "reuses the lane already heading toward `s` instead of opening a second");
+        assert_eq!(
+            merge.branching[0], 0,
+            "reuses the lane already heading toward `s` instead of opening a second"
+        );
     }
 
     #[test]
@@ -318,7 +386,10 @@ mod tests {
         // tip `z` reuses it rather than opening a third column.
         let rows = assign_lanes(&[c("x", &["a"]), c("y", &[]), c("z", &["a"]), c("a", &[])]);
         assert_eq!(rows[1].lane, 1);
-        assert_eq!(rows[2].lane, 1, "lane 1 went idle at `y` and is available again");
+        assert_eq!(
+            rows[2].lane, 1,
+            "lane 1 went idle at `y` and is available again"
+        );
     }
 
     #[test]
@@ -339,7 +410,10 @@ mod tests {
         let commit = parse_line(line).unwrap();
         assert_eq!(commit.hash, "abc123");
         assert_eq!(commit.parents, vec!["p1".to_string(), "p2".to_string()]);
-        assert_eq!(commit.refs, vec!["HEAD -> main".to_string(), "origin/main".to_string()]);
+        assert_eq!(
+            commit.refs,
+            vec!["HEAD -> main".to_string(), "origin/main".to_string()]
+        );
         assert_eq!(commit.author, "Jane");
         assert_eq!(commit.subject, "Merge branch 'x'");
     }
@@ -374,7 +448,12 @@ mod tests {
         let commits = commit_graph(dir.path(), 50);
         assert_eq!(commits.len(), 2, "{commits:?}");
         assert!(commits.iter().any(|c| c.subject == "on side"));
-        assert!(commits.iter().any(|c| c.refs.iter().any(|r| r.contains("side"))), "refs should name the branch: {commits:?}");
+        assert!(
+            commits
+                .iter()
+                .any(|c| c.refs.iter().any(|r| r.contains("side"))),
+            "refs should name the branch: {commits:?}"
+        );
     }
 
     #[test]
@@ -392,14 +471,25 @@ mod tests {
         dir.write("c.txt", "main");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "on main"]);
-        git(dir.path(), &["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        git(
+            dir.path(),
+            &["merge", "-q", "--no-ff", "-m", "merge side", "side"],
+        );
 
         let commits = commit_graph(dir.path(), 50);
         let rows = assign_lanes(&commits);
-        let merge_index = commits.iter().position(|c| c.subject == "merge side").expect("the merge commit is listed");
+        let merge_index = commits
+            .iter()
+            .position(|c| c.subject == "merge side")
+            .expect("the merge commit is listed");
         assert_eq!(commits[merge_index].parents.len(), 2);
         assert!(rows[merge_index].is_merge);
-        assert_eq!(rows[merge_index].branching.len(), 1, "the merged-in side gets a lane: {:?}", rows[merge_index]);
+        assert_eq!(
+            rows[merge_index].branching.len(),
+            1,
+            "the merged-in side gets a lane: {:?}",
+            rows[merge_index]
+        );
         assert_eq!(rows.len(), commits.len(), "one row per commit");
     }
 }

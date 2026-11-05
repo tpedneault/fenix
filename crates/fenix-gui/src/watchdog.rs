@@ -31,7 +31,10 @@ struct State {
     since: Option<Instant>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { stack: Vec::new(), since: None });
+static STATE: Mutex<State> = Mutex::new(State {
+    stack: Vec::new(),
+    since: None,
+});
 
 thread_local! {
     static UI: Cell<bool> = const { Cell::new(false) };
@@ -67,7 +70,9 @@ impl Drop for Busy {
 /// writing to `log`.
 pub fn start(log: PathBuf) {
     UI.with(|ui| ui.set(true));
-    let _ = std::thread::Builder::new().name("fenix-watchdog".into()).spawn(move || monitor(log));
+    let _ = std::thread::Builder::new()
+        .name("fenix-watchdog".into())
+        .spawn(move || monitor(log));
 }
 
 fn monitor(log: PathBuf) {
@@ -97,14 +102,23 @@ fn monitor(log: PathBuf) {
             }
             // It ended (or a new one started): say how long it was.
             (_, Some((_, what, lasted))) => {
-                write(&log, &format!("free again after {:.0} s (was stuck in {what})", lasted.as_secs_f64().max(STUCK_AFTER.as_secs_f64())));
+                write(
+                    &log,
+                    &format!(
+                        "free again after {:.0} s (was stuck in {what})",
+                        lasted.as_secs_f64().max(STUCK_AFTER.as_secs_f64())
+                    ),
+                );
                 // A new stall starting the very tick the last one ended
                 // is looked at next tick.
             }
             (Some(since), None) => {
                 let busy = now.duration_since(since.max(woke));
                 if busy >= STUCK_AFTER {
-                    write(&log, &format!("stuck for {:.0} s in {stack}", busy.as_secs_f64()));
+                    write(
+                        &log,
+                        &format!("stuck for {:.0} s in {stack}", busy.as_secs_f64()),
+                    );
                     reported = Some((since, stack, busy));
                 }
             }
@@ -123,7 +137,11 @@ fn write(log: &PathBuf, line: &str) {
     if let Some(dir) = log.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log)
+    {
         let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let _ = writeln!(file, "{stamp}  {line}");
     }
@@ -141,7 +159,9 @@ mod tests {
     #[test]
     fn only_the_ui_thread_is_tracked_and_the_stack_unwinds() {
         // Another thread's scope never touches it.
-        std::thread::spawn(|| assert!(enter("worker").is_none())).join().unwrap();
+        std::thread::spawn(|| assert!(enter("worker").is_none()))
+            .join()
+            .unwrap();
         UI.with(|ui| ui.set(true));
         {
             let _outer = enter("user event");

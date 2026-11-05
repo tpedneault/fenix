@@ -45,8 +45,28 @@ impl Lighting {
         let dark = (bg[0] + bg[1] + bg[2]) / 3.0 < 0.5;
         // Shadows lean cool, towards the background on a dark theme.
         let cool = [0.52, 0.55, 0.72];
-        let shadow = if dark { [mix(cool[0], bg[0] * 2.0, 0.25), mix(cool[1], bg[1] * 2.0, 0.25), mix(cool[2], bg[2] * 2.0, 0.25)] } else { [mix(cool[0], bg[0], 0.15), mix(cool[1], bg[1], 0.15), mix(cool[2], bg[2], 0.15)] };
-        Lighting { light: [mix(1.0, fg[0], 0.12), mix(1.0, fg[1], 0.12), mix(1.0, fg[2], 0.12)], shadow, rim: [accent[0], accent[1], accent[2]] }
+        let shadow = if dark {
+            [
+                mix(cool[0], bg[0] * 2.0, 0.25),
+                mix(cool[1], bg[1] * 2.0, 0.25),
+                mix(cool[2], bg[2] * 2.0, 0.25),
+            ]
+        } else {
+            [
+                mix(cool[0], bg[0], 0.15),
+                mix(cool[1], bg[1], 0.15),
+                mix(cool[2], bg[2], 0.15),
+            ]
+        };
+        Lighting {
+            light: [
+                mix(1.0, fg[0], 0.12),
+                mix(1.0, fg[1], 0.12),
+                mix(1.0, fg[2], 0.12),
+            ],
+            shadow,
+            rim: [accent[0], accent[1], accent[2]],
+        }
     }
 }
 
@@ -155,13 +175,20 @@ pub struct ModelRenderer {
 
 impl ModelRenderer {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("model-shader"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("model-shader"),
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("model-globals-layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
                 count: None,
             }],
         });
@@ -171,13 +198,26 @@ impl ModelRenderer {
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture { multisampled: false, view_dimension: wgpu::TextureViewDimension::D2, sample_type: wgpu::TextureSampleType::Float { filterable: true } },
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
                     count: None,
                 },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("model-pipeline-layout"), bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout)], immediate_size: 0 });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("model-pipeline-layout"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&texture_layout)],
+            immediate_size: 0,
+        });
         let pipeline = |vs: &str, fs: &str, cull: wgpu::Face, samples: u32| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("model-pipeline"),
@@ -186,18 +226,34 @@ impl ModelRenderer {
                     module: &shader,
                     entry_point: Some(vs),
                     buffers: &[
-                        Some(wgpu::VertexBufferLayout { array_stride: 24, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3] }),
-                        Some(wgpu::VertexBufferLayout { array_stride: 24, step_mode: wgpu::VertexStepMode::Vertex, attributes: &wgpu::vertex_attr_array![2 => Float32x2, 3 => Float32x4] }),
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: 24,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                        }),
+                        Some(wgpu::VertexBufferLayout {
+                            array_stride: 24,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![2 => Float32x2, 3 => Float32x4],
+                        }),
                     ],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some(fs),
-                    targets: &[Some(wgpu::ColorTargetState { format: COLOR, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: COLOR,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                     compilation_options: Default::default(),
                 }),
-                primitive: wgpu::PrimitiveState { cull_mode: Some(cull), front_face: wgpu::FrontFace::Ccw, ..Default::default() },
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(cull),
+                    front_face: wgpu::FrontFace::Ccw,
+                    ..Default::default()
+                },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH,
                     depth_write_enabled: Some(true),
@@ -205,13 +261,22 @@ impl ModelRenderer {
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
-                multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
+                multisample: wgpu::MultisampleState {
+                    count: samples,
+                    ..Default::default()
+                },
                 multiview_mask: None,
                 cache: None,
             })
         };
-        let toon = [pipeline("vs_toon", "fs_toon", wgpu::Face::Back, 1), pipeline("vs_toon", "fs_toon", wgpu::Face::Back, SAMPLES)];
-        let outline = [pipeline("vs_outline", "fs_outline", wgpu::Face::Front, 1), pipeline("vs_outline", "fs_outline", wgpu::Face::Front, SAMPLES)];
+        let toon = [
+            pipeline("vs_toon", "fs_toon", wgpu::Face::Back, 1),
+            pipeline("vs_toon", "fs_toon", wgpu::Face::Back, SAMPLES),
+        ];
+        let outline = [
+            pipeline("vs_outline", "fs_outline", wgpu::Face::Front, 1),
+            pipeline("vs_outline", "fs_outline", wgpu::Face::Front, SAMPLES),
+        ];
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("model-sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -220,7 +285,15 @@ impl ModelRenderer {
             address_mode_v: wgpu::AddressMode::Repeat,
             ..Default::default()
         });
-        let white = texture(&device, &queue, &texture_layout, &sampler, 1, 1, &[255, 255, 255, 255]);
+        let white = texture(
+            &device,
+            &queue,
+            &texture_layout,
+            &sampler,
+            1,
+            1,
+            &[255, 255, 255, 255],
+        );
         ModelRenderer {
             white,
             device,
@@ -237,11 +310,24 @@ impl ModelRenderer {
     }
 
     fn texture(&self, width: u32, height: u32, rgba: &[u8]) -> wgpu::BindGroup {
-        texture(&self.device, &self.queue, &self.texture_layout, &self.sampler, width, height, rgba)
+        texture(
+            &self.device,
+            &self.queue,
+            &self.texture_layout,
+            &self.sampler,
+            width,
+            height,
+            rgba,
+        )
     }
 
     fn buffer(&self, label: &str, bytes: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some(label), size: (bytes.len() as u64).max(4).next_multiple_of(4), usage: usage | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (bytes.len() as u64).max(4).next_multiple_of(4),
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut padded = bytes.to_vec();
         padded.resize(buffer.size() as usize, 0);
         self.queue.write_buffer(&buffer, 0, &padded);
@@ -251,24 +337,54 @@ impl ModelRenderer {
     /// `model`'s fixed parts on the GPU, uploaded the first time.
     fn upload(&mut self, model: &Arc<Model>) -> usize {
         let key = Arc::as_ptr(model) as usize;
-        if self.models.get(&key).is_some_and(|m| m.model.upgrade().is_some()) {
+        if self
+            .models
+            .get(&key)
+            .is_some_and(|m| m.model.upgrade().is_some())
+        {
             return key;
         }
-        let textures: Vec<wgpu::BindGroup> = model.textures.iter().map(|t| self.texture(t.width, t.height, &t.rgba)).collect();
+        let textures: Vec<wgpu::BindGroup> = model
+            .textures
+            .iter()
+            .map(|t| self.texture(t.width, t.height, &t.rgba))
+            .collect();
         let parts = model
             .parts
             .iter()
             .map(|part| {
-                let fixed: Vec<f32> = part.uvs.iter().zip(&part.colors).flat_map(|(uv, c)| [uv[0], uv[1], c[0], c[1], c[2], c[3]]).collect();
+                let fixed: Vec<f32> = part
+                    .uvs
+                    .iter()
+                    .zip(&part.colors)
+                    .flat_map(|(uv, c)| [uv[0], uv[1], c[0], c[1], c[2], c[3]])
+                    .collect();
                 GpuPart {
-                    indices: self.buffer("model-indices", bytemuck::cast_slice(&part.indices), wgpu::BufferUsages::INDEX),
+                    indices: self.buffer(
+                        "model-indices",
+                        bytemuck::cast_slice(&part.indices),
+                        wgpu::BufferUsages::INDEX,
+                    ),
                     count: part.indices.len() as u32,
-                    fixed: self.buffer("model-fixed", bytemuck::cast_slice(&fixed), wgpu::BufferUsages::VERTEX),
-                    texture: part.texture.and_then(|t| textures.get(t).cloned()).unwrap_or_else(|| self.white.clone()),
+                    fixed: self.buffer(
+                        "model-fixed",
+                        bytemuck::cast_slice(&fixed),
+                        wgpu::BufferUsages::VERTEX,
+                    ),
+                    texture: part
+                        .texture
+                        .and_then(|t| textures.get(t).cloned())
+                        .unwrap_or_else(|| self.white.clone()),
                 }
             })
             .collect();
-        self.models.insert(key, GpuModel { model: Arc::downgrade(model), parts });
+        self.models.insert(
+            key,
+            GpuModel {
+                model: Arc::downgrade(model),
+                parts,
+            },
+        );
         key
     }
 
@@ -282,31 +398,69 @@ impl ModelRenderer {
     /// Draws `model` posed as `pose` into item `key`'s target, unless it
     /// shows that already, and says where it goes.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(&mut self, key: (String, u64, u32), model: &Arc<Model>, playing: &[fenix_model::Playing], parts: &[String], shot: &Shot, sprites: &SpriteRenderer) -> Option<Placed<'_>> {
+    pub fn draw(
+        &mut self,
+        key: (String, u64, u32),
+        model: &Arc<Model>,
+        playing: &[fenix_model::Playing],
+        parts: &[String],
+        shot: &Shot,
+        sprites: &SpriteRenderer,
+    ) -> Option<Placed<'_>> {
         let id = self.upload(model);
         let (least, most) = model.bounds;
         let height = (most.y - least.y).max(1e-4);
         // Screen pixels a target pixel, and model units a target pixel.
-        let scale = if shot.pixel { (shot.line / 11.0).round().max(2.0) } else { 1.0 };
+        let scale = if shot.pixel {
+            (shot.line / 11.0).round().max(2.0)
+        } else {
+            1.0
+        };
         let unit = height / (shot.height / scale).max(1.0);
         // Room for a stride, a hop and a turn: wide as the model is round
         // its middle, twice; tall as it is and half again.
         let center = Vec3::new((least.x + most.x) / 2.0, least.y, (least.z + most.z) / 2.0);
-        let reach = [least.x - center.x, most.x - center.x].iter().map(|x| x.abs()).fold(0.0, f32::max).hypot([least.z - center.z, most.z - center.z].iter().map(|z| z.abs()).fold(0.0, f32::max));
+        let reach = [least.x - center.x, most.x - center.x]
+            .iter()
+            .map(|x| x.abs())
+            .fold(0.0, f32::max)
+            .hypot(
+                [least.z - center.z, most.z - center.z]
+                    .iter()
+                    .map(|z| z.abs())
+                    .fold(0.0, f32::max),
+            );
         let width_u = (reach * 2.0 * 1.25).max(height * 0.8);
         let below_u = height * 0.12;
         let height_u = height * 1.55;
-        let size = (((width_u / unit).ceil() as u32).clamp(4, 1024), ((height_u / unit).ceil() as u32).clamp(4, 1024));
+        let size = (
+            ((width_u / unit).ceil() as u32).clamp(4, 1024),
+            ((height_u / unit).ceil() as u32).clamp(4, 1024),
+        );
         let samples = if shot.pixel { 1 } else { SAMPLES };
 
-        let drawn = Drawn { model: id, pose: playing.iter().map(|p| (p.clip, p.seconds, p.weight)).collect(), parts: parts.to_vec(), shot: shot.clone() };
-        let fresh = self.targets.get(&key).is_none_or(|t| t.size != size || t.samples != samples);
+        let drawn = Drawn {
+            model: id,
+            pose: playing
+                .iter()
+                .map(|p| (p.clip, p.seconds, p.weight))
+                .collect(),
+            parts: parts.to_vec(),
+            shot: shot.clone(),
+        };
+        let fresh = self
+            .targets
+            .get(&key)
+            .is_none_or(|t| t.size != size || t.samples != samples);
         if fresh {
             let target = self.target(size, samples);
             self.targets.insert(key.clone(), target);
         }
         self.prepare(&key, model);
-        let needs = self.targets.get(&key).is_some_and(|t| t.drawn.as_ref() != Some(&drawn));
+        let needs = self
+            .targets
+            .get(&key)
+            .is_some_and(|t| t.drawn.as_ref() != Some(&drawn));
         if needs {
             let wear = |name: &str| parts.iter().any(|p| p == name);
             let pose = model.pose(playing, &wear);
@@ -316,29 +470,72 @@ impl ModelRenderer {
             let toward = Vec3::new(0.0, elevation.sin(), elevation.cos());
             let distance = (width_u + height_u) * 4.0;
             let view = Mat4::look_at_rh(center + toward * distance, center, Vec3::Y);
-            let proj = Mat4::orthographic_rh(-w / 2.0, w / 2.0, -below_u, h - below_u, 0.01, distance * 2.0);
-            let turn = Mat4::from_translation(center) * Mat4::from_quat(Quat::from_rotation_y(shot.yaw.to_radians())) * Mat4::from_translation(-center);
-            let outline_px = if shot.pixel { 1.0 } else { (shot.line / 14.0).max(1.0) };
+            let proj = Mat4::orthographic_rh(
+                -w / 2.0,
+                w / 2.0,
+                -below_u,
+                h - below_u,
+                0.01,
+                distance * 2.0,
+            );
+            let turn = Mat4::from_translation(center)
+                * Mat4::from_quat(Quat::from_rotation_y(shot.yaw.to_radians()))
+                * Mat4::from_translation(-center);
+            let outline_px = if shot.pixel {
+                1.0
+            } else {
+                (shot.line / 14.0).max(1.0)
+            };
             let globals = Globals {
                 view_proj: (proj * view).to_cols_array_2d(),
                 model: turn.to_cols_array_2d(),
-                light_dir: Vec3::new(-0.45, 0.85, 0.55).normalize().extend(0.0).to_array(),
+                light_dir: Vec3::new(-0.45, 0.85, 0.55)
+                    .normalize()
+                    .extend(0.0)
+                    .to_array(),
                 view_dir: toward.extend(0.0).to_array(),
-                light: [shot.lighting.light[0], shot.lighting.light[1], shot.lighting.light[2], 2.0 * outline_px / size.0 as f32],
-                shadow: [shot.lighting.shadow[0], shot.lighting.shadow[1], shot.lighting.shadow[2], 2.0 * outline_px / size.1 as f32],
-                rim: [shot.lighting.rim[0], shot.lighting.rim[1], shot.lighting.rim[2], shot.glow.clamp(0.0, 1.0)],
+                light: [
+                    shot.lighting.light[0],
+                    shot.lighting.light[1],
+                    shot.lighting.light[2],
+                    2.0 * outline_px / size.0 as f32,
+                ],
+                shadow: [
+                    shot.lighting.shadow[0],
+                    shot.lighting.shadow[1],
+                    shot.lighting.shadow[2],
+                    2.0 * outline_px / size.1 as f32,
+                ],
+                rim: [
+                    shot.lighting.rim[0],
+                    shot.lighting.rim[1],
+                    shot.lighting.rim[2],
+                    shot.glow.clamp(0.0, 1.0),
+                ],
                 tint: [shot.tint[0], shot.tint[1], shot.tint[2], 1.0],
             };
             let gpu_model = self.models.get(&id)?;
             let target = self.targets.get_mut(&key)?;
-            self.queue.write_buffer(&target.globals, 0, bytemuck::bytes_of(&globals));
+            self.queue
+                .write_buffer(&target.globals, 0, bytemuck::bytes_of(&globals));
             for (buffer, part) in target.posed.iter().zip(&pose.parts) {
-                let data: Vec<f32> = part.positions.iter().zip(&part.normals).flat_map(|(p, n)| [p[0], p[1], p[2], n[0], n[1], n[2]]).collect();
+                let data: Vec<f32> = part
+                    .positions
+                    .iter()
+                    .zip(&part.normals)
+                    .flat_map(|(p, n)| [p[0], p[1], p[2], n[0], n[1], n[2]])
+                    .collect();
                 if !data.is_empty() {
-                    self.queue.write_buffer(buffer, 0, bytemuck::cast_slice(&data));
+                    self.queue
+                        .write_buffer(buffer, 0, bytemuck::cast_slice(&data));
                 }
             }
-            let encoder = self.encoder.get_or_insert_with(|| self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("model-encoder") }));
+            let encoder = self.encoder.get_or_insert_with(|| {
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("model-encoder"),
+                    })
+            });
             {
                 let (view, resolve) = match &target.msaa {
                     Some(msaa) => (msaa, Some(&target.view)),
@@ -346,8 +543,23 @@ impl ModelRenderer {
                 };
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("model-pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment { view, resolve_target: resolve, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store }, depth_slice: None })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment { view: &target.depth, depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }), stencil_ops: None }),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: resolve,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &target.depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
@@ -356,7 +568,12 @@ impl ModelRenderer {
                 pass.set_bind_group(0, &target.globals_bind, &[]);
                 for pipeline in [&self.toon[which], &self.outline[which]] {
                     pass.set_pipeline(pipeline);
-                    for ((gpu, posed), shown) in gpu_model.parts.iter().zip(&target.posed).zip(pose.parts.iter().map(|p| p.shown)) {
+                    for ((gpu, posed), shown) in gpu_model
+                        .parts
+                        .iter()
+                        .zip(&target.posed)
+                        .zip(pose.parts.iter().map(|p| p.shown))
+                    {
                         if !shown || gpu.count == 0 {
                             continue;
                         }
@@ -372,7 +589,12 @@ impl ModelRenderer {
             target.feet = (size.0 as f32 / 2.0, size.1 as f32 - below_u / unit);
             let body_w = ((most.x - least.x).max(most.z - least.z) / unit).min(size.0 as f32);
             let body_h = height / unit;
-            target.body = ((size.0 as f32 - body_w) / 2.0, target.feet.1 - body_h, body_w, body_h);
+            target.body = (
+                (size.0 as f32 - body_w) / 2.0,
+                target.feet.1 - body_h,
+                body_w,
+                body_h,
+            );
             target.scale = scale;
         }
         let target = self.targets.get_mut(&key)?;
@@ -385,7 +607,12 @@ impl ModelRenderer {
             sprite: target.sprite.as_ref()?,
             size: (size.0 as f32 * s, size.1 as f32 * s),
             feet: (target.feet.0 * s, target.feet.1 * s),
-            body: (target.body.0 * s, target.body.1 * s, target.body.2 * s, target.body.3 * s),
+            body: (
+                target.body.0 * s,
+                target.body.1 * s,
+                target.body.2 * s,
+                target.body.3 * s,
+            ),
         })
     }
 
@@ -393,7 +620,11 @@ impl ModelRenderer {
         let texture = |format, samples, usage| {
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("model-target"),
-                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
@@ -402,26 +633,79 @@ impl ModelRenderer {
                 view_formats: &[],
             })
         };
-        let color = texture(COLOR, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC);
+        let color = texture(
+            COLOR,
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+        );
         let view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let msaa = (samples > 1).then(|| texture(COLOR, samples, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default()));
-        let depth = texture(DEPTH, samples, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&wgpu::TextureViewDescriptor::default());
-        let globals = self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("model-globals"), size: std::mem::size_of::<Globals>() as u64, usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-        let globals_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("model-globals-bind"), layout: &self.globals_layout, entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() }] });
-        Target { size, samples, color, view, msaa, depth, globals, globals_bind, posed: Vec::new(), sprite: None, drawn: None, feet: (0.0, 0.0), body: (0.0, 0.0, 0.0, 0.0), scale: 1.0, used: false }
+        let msaa = (samples > 1).then(|| {
+            texture(COLOR, samples, wgpu::TextureUsages::RENDER_ATTACHMENT)
+                .create_view(&wgpu::TextureViewDescriptor::default())
+        });
+        let depth = texture(DEPTH, samples, wgpu::TextureUsages::RENDER_ATTACHMENT)
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let globals = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("model-globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let globals_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("model-globals-bind"),
+            layout: &self.globals_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: globals.as_entire_binding(),
+            }],
+        });
+        Target {
+            size,
+            samples,
+            color,
+            view,
+            msaa,
+            depth,
+            globals,
+            globals_bind,
+            posed: Vec::new(),
+            sprite: None,
+            drawn: None,
+            feet: (0.0, 0.0),
+            body: (0.0, 0.0, 0.0, 0.0),
+            scale: 1.0,
+            used: false,
+        }
     }
 
     /// The posed-vertex buffers `key`'s target needs for `model`, made
     /// when it hasn't them.
     fn prepare(&mut self, key: &(String, u64, u32), model: &Model) {
-        let Some(target) = self.targets.get(key) else { return };
-        if target.posed.len() == model.parts.len() && target.posed.iter().zip(&model.parts).all(|(b, p)| b.size() >= (p.vertices() * 24) as u64) {
+        let Some(target) = self.targets.get(key) else {
+            return;
+        };
+        if target.posed.len() == model.parts.len()
+            && target
+                .posed
+                .iter()
+                .zip(&model.parts)
+                .all(|(b, p)| b.size() >= (p.vertices() * 24) as u64)
+        {
             return;
         }
         let posed: Vec<wgpu::Buffer> = model
             .parts
             .iter()
-            .map(|p| self.device.create_buffer(&wgpu::BufferDescriptor { label: Some("model-posed"), size: ((p.vertices() * 24) as u64).max(24), usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false }))
+            .map(|p| {
+                self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("model-posed"),
+                    size: ((p.vertices() * 24) as u64).max(24),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
             .collect();
         if let Some(target) = self.targets.get_mut(key) {
             target.posed = posed;
@@ -540,10 +824,22 @@ fn fs_outline(in: VertexOutput) -> @location(0) vec4<f32> {
 "#;
 
 /// An image as a texture the models sample.
-fn texture(device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, width: u32, height: u32, rgba: &[u8]) -> wgpu::BindGroup {
+fn texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> wgpu::BindGroup {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("model-texture"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -552,16 +848,38 @@ fn texture(device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupL
         view_formats: &[],
     });
     queue.write_texture(
-        wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
         rgba,
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) },
-        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("model-texture-bind"),
         layout,
-        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) }],
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
     })
 }
 
@@ -575,8 +893,15 @@ mod tests {
     /// nothing to draw with.
     fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
         let instance = wgpu::Instance::default();
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::LowPower, compatible_surface: None, force_fallback_adapter: false, apply_limit_buckets: false })).ok()?;
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .ok()?;
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
         Some((Arc::new(device), Arc::new(queue)))
     }
 
@@ -588,9 +913,24 @@ mod tests {
         let hat = b.joint("opt:hat", Some(root), [0.0, 2.0, 0.0]);
         let mut mesh = Mesh::default();
         mesh.cuboid([0.0, 1.0, 0.0], [0.5, 1.0, 0.5], [0.9, 0.1, 0.1, 1.0], root);
-        mesh.ellipsoid([0.0, 2.3, 0.0], [0.4, 0.3, 0.4], Quat::IDENTITY, [0.1, 0.2, 0.9, 1.0], hat, 6, 10);
+        mesh.ellipsoid(
+            [0.0, 2.3, 0.0],
+            [0.4, 0.3, 0.4],
+            Quat::IDENTITY,
+            [0.1, 0.2, 0.9, 1.0],
+            hat,
+            6,
+            10,
+        );
         b.mesh(mesh);
-        b.clip("sink", vec![Track::translation(root, vec![0.0, 1.0], vec![[0.0, 0.0, 0.0], [0.0, -1.0, 0.0]])]);
+        b.clip(
+            "sink",
+            vec![Track::translation(
+                root,
+                vec![0.0, 1.0],
+                vec![[0.0, 0.0, 0.0], [0.0, -1.0, 0.0]],
+            )],
+        );
         Arc::new(Model::from_glb(&b.glb()).unwrap())
     }
 
@@ -598,12 +938,33 @@ mod tests {
     fn read(device: &wgpu::Device, queue: &wgpu::Queue, target: &Target) -> Vec<[u8; 4]> {
         let (w, h) = target.size;
         let row = (w * 4).next_multiple_of(256);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor { label: None, size: (row * h) as u64, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ, mapped_at_creation: false });
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: (row * h) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
         encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo { texture: &target.color, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            wgpu::TexelCopyBufferInfo { buffer: &buffer, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::TexelCopyTextureInfo {
+                texture: &target.color,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         queue.submit([encoder.finish()]);
         buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
@@ -621,7 +982,12 @@ mod tests {
 
     /// The rows a colour is drawn on, top to bottom.
     fn rows(pixels: &[[u8; 4]], width: u32, is: impl Fn([u8; 4]) -> bool) -> Option<(u32, u32)> {
-        let rows: Vec<u32> = pixels.chunks(width as usize).enumerate().filter(|(_, r)| r.iter().any(|p| is(*p))).map(|(y, _)| y as u32).collect();
+        let rows: Vec<u32> = pixels
+            .chunks(width as usize)
+            .enumerate()
+            .filter(|(_, r)| r.iter().any(|p| is(*p)))
+            .map(|(y, _)| y as u32)
+            .collect();
         Some((*rows.first()?, *rows.last()?))
     }
 
@@ -630,23 +996,48 @@ mod tests {
     fn shoot(pixels: &[[u8; 4]], size: (u32, u32), name: &str) {
         if let Ok(dir) = std::env::var("FENIX_MODEL_SHOT") {
             let flat: Vec<u8> = pixels.iter().flatten().copied().collect();
-            image::RgbaImage::from_raw(size.0, size.1, flat).unwrap().save(std::path::Path::new(&dir).join(name)).unwrap();
+            image::RgbaImage::from_raw(size.0, size.1, flat)
+                .unwrap()
+                .save(std::path::Path::new(&dir).join(name))
+                .unwrap();
         }
     }
 
     #[test]
     fn a_model_is_drawn_toon_shaded_into_its_target_standing_on_its_feet() {
-        let Some((device, queue)) = device() else { return };
-        let sprites = SpriteRenderer::with_filter(Arc::clone(&device), Arc::clone(&queue), wgpu::TextureFormat::Rgba8Unorm, wgpu::FilterMode::Nearest);
+        let Some((device, queue)) = device() else {
+            return;
+        };
+        let sprites = SpriteRenderer::with_filter(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::FilterMode::Nearest,
+        );
         let mut renderer = ModelRenderer::new(Arc::clone(&device), Arc::clone(&queue));
         let model = post();
-        let lighting = Lighting::from_theme([0.1, 0.1, 0.12, 1.0], [0.9, 0.9, 0.9], [1.0, 0.5, 0.0, 1.0]);
-        let shot = Shot { height: 120.0, yaw: 30.0, pixel: false, line: 20.0, tint: [1.0; 3], glow: 0.0, lighting };
+        let lighting =
+            Lighting::from_theme([0.1, 0.1, 0.12, 1.0], [0.9, 0.9, 0.9], [1.0, 0.5, 0.0, 1.0]);
+        let shot = Shot {
+            height: 120.0,
+            yaw: 30.0,
+            pixel: false,
+            line: 20.0,
+            tint: [1.0; 3],
+            glow: 0.0,
+            lighting,
+        };
         let key = ("x".to_string(), 1, 1);
-        let rest = [Playing { clip: Playing::REST, seconds: 0.0, weight: 1.0 }];
+        let rest = [Playing {
+            clip: Playing::REST,
+            seconds: 0.0,
+            weight: 1.0,
+        }];
 
         renderer.begin();
-        let placed = renderer.draw(key.clone(), &model, &rest, &[], &shot, &sprites).unwrap();
+        let placed = renderer
+            .draw(key.clone(), &model, &rest, &[], &shot, &sprites)
+            .unwrap();
         let (feet, size) = (placed.feet, placed.size);
         renderer.finish();
         let target = &renderer.targets[&key];
@@ -657,23 +1048,45 @@ mod tests {
         // Its feet where it says they are -- the middle of its base; seen
         // from a little above, its front corner a few pixels lower -- and
         // as tall as asked (a touch more, with the outline).
-        assert!(bottom as f32 >= feet.1 && bottom as f32 - feet.1 <= 12.0, "feet at {feet:?}, post down to {bottom}");
+        assert!(
+            bottom as f32 >= feet.1 && bottom as f32 - feet.1 <= 12.0,
+            "feet at {feet:?}, post down to {bottom}"
+        );
         shoot(&pixels, target.size, "post-smooth.png");
         // 120 tall without its hat; seen from above, its top shows too.
         let tall = (bottom - top) as f32;
-        assert!((118.0..150.0).contains(&tall), "the post is 120 tall: {tall}");
-        assert!(rows(&pixels, target.size.0, blue).is_none(), "no hat unless it's worn");
-        assert!(pixels.iter().any(|p| p[3] == 255 && p[0] < 80 && p[1] < 20 && p[0] > p[2]), "a dark red outline");
+        assert!(
+            (118.0..150.0).contains(&tall),
+            "the post is 120 tall: {tall}"
+        );
+        assert!(
+            rows(&pixels, target.size.0, blue).is_none(),
+            "no hat unless it's worn"
+        );
+        assert!(
+            pixels
+                .iter()
+                .any(|p| p[3] == 255 && p[0] < 80 && p[1] < 20 && p[0] > p[2]),
+            "a dark red outline"
+        );
         assert!(pixels[0][3] == 0, "the rest stays clear");
         assert!(size.0 > 0.0 && size.1 >= 120.0);
 
         // Asked again unchanged, it isn't drawn again.
         renderer.begin();
-        renderer.draw(key.clone(), &model, &rest, &[], &shot, &sprites).unwrap();
+        renderer
+            .draw(key.clone(), &model, &rest, &[], &shot, &sprites)
+            .unwrap();
         assert!(renderer.encoder.is_none(), "nothing to draw");
         // Wearing its hat, and half sunk into the floor.
-        let sunk = [Playing { clip: 0, seconds: 0.5, weight: 1.0 }];
-        renderer.draw(key.clone(), &model, &sunk, &["hat".into()], &shot, &sprites).unwrap();
+        let sunk = [Playing {
+            clip: 0,
+            seconds: 0.5,
+            weight: 1.0,
+        }];
+        renderer
+            .draw(key.clone(), &model, &sunk, &["hat".into()], &shot, &sprites)
+            .unwrap();
         renderer.finish();
         let target = &renderer.targets[&key];
         let pixels = read(&device, &queue, target);
@@ -681,18 +1094,41 @@ mod tests {
         let (sunk_top, _) = rows(&pixels, target.size.0, red).unwrap();
         assert!(sunk_top > top + 20, "sunk: {sunk_top} below {top}");
         // On its top: above the post's top face, down into it.
-        assert!(hat_top < sunk_top && hat_bottom > sunk_top && hat_bottom < sunk_top + 40, "hat {hat_top}..{hat_bottom}, post from {sunk_top}");
+        assert!(
+            hat_top < sunk_top && hat_bottom > sunk_top && hat_bottom < sunk_top + 40,
+            "hat {hat_top}..{hat_bottom}, post from {sunk_top}"
+        );
         shoot(&pixels, target.size, "post-hat.png");
 
         // Pixel style: a target a fraction the size, scaled up.
         renderer.begin();
-        let placed = renderer.draw(key.clone(), &model, &rest, &[], &Shot { pixel: true, ..shot.clone() }, &sprites).unwrap();
+        let placed = renderer
+            .draw(
+                key.clone(),
+                &model,
+                &rest,
+                &[],
+                &Shot {
+                    pixel: true,
+                    ..shot.clone()
+                },
+                &sprites,
+            )
+            .unwrap();
         let shown = placed.size;
         renderer.finish();
         let target = &renderer.targets[&key];
         assert_eq!(target.samples, 1);
-        assert!(shown.0 >= target.size.0 as f32 * 2.0, "{shown:?} from {:?}", target.size);
-        shoot(&read(&device, &queue, target), target.size, "post-pixel.png");
+        assert!(
+            shown.0 >= target.size.0 as f32 * 2.0,
+            "{shown:?} from {:?}",
+            target.size
+        );
+        shoot(
+            &read(&device, &queue, target),
+            target.size,
+            "post-pixel.png",
+        );
         // Not drawn in a frame, its target is let go.
         renderer.begin();
         renderer.finish();
@@ -706,12 +1142,27 @@ mod tests {
     #[test]
     #[ignore]
     fn preview() {
-        let Ok(dir) = std::env::var("FENIX_MODEL_PREVIEW") else { return };
-        let Some((device, queue)) = device() else { panic!("no adapter to draw with") };
-        let sprites = SpriteRenderer::with_filter(Arc::clone(&device), Arc::clone(&queue), wgpu::TextureFormat::Rgba8Unorm, wgpu::FilterMode::Nearest);
-        let lighting = Lighting::from_theme([0.12, 0.12, 0.14, 1.0], [0.9, 0.9, 0.88], [1.0, 0.55, 0.1, 1.0]);
+        let Ok(dir) = std::env::var("FENIX_MODEL_PREVIEW") else {
+            return;
+        };
+        let Some((device, queue)) = device() else {
+            panic!("no adapter to draw with")
+        };
+        let sprites = SpriteRenderer::with_filter(
+            Arc::clone(&device),
+            Arc::clone(&queue),
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::FilterMode::Nearest,
+        );
+        let lighting = Lighting::from_theme(
+            [0.12, 0.12, 0.14, 1.0],
+            [0.9, 0.9, 0.88],
+            [1.0, 0.55, 0.1, 1.0],
+        );
         let style = std::env::var("FENIX_MODEL_STYLE").unwrap_or_default();
-        let parts: Vec<String> = std::env::var("FENIX_MODEL_PARTS").map(|p| p.split(',').map(str::to_string).collect()).unwrap_or_default();
+        let parts: Vec<String> = std::env::var("FENIX_MODEL_PARTS")
+            .map(|p| p.split(',').map(str::to_string).collect())
+            .unwrap_or_default();
         for entry in std::fs::read_dir(&dir).unwrap().flatten() {
             let path = entry.path();
             if path.extension().is_none_or(|e| e != "glb") {
@@ -719,34 +1170,87 @@ mod tests {
             }
             let model = Arc::new(Model::from_glb(&std::fs::read(&path).unwrap()).unwrap());
             let mut renderer = ModelRenderer::new(Arc::clone(&device), Arc::clone(&queue));
-            let shot = Shot { height: 150.0, yaw: 35.0, pixel: style == "pixel", line: 30.0, tint: [1.0; 3], glow: 0.0, lighting };
+            let shot = Shot {
+                height: 150.0,
+                yaw: 35.0,
+                pixel: style == "pixel",
+                line: 30.0,
+                tint: [1.0; 3],
+                glow: 0.0,
+                lighting,
+            };
             let mut frames: Vec<Vec<image::RgbaImage>> = Vec::new();
             for (c, clip) in model.clips.iter().enumerate() {
                 let mut row = Vec::new();
                 for k in 0..4 {
-                    let playing = [Playing { clip: c, seconds: clip.seconds * k as f32 / 4.0, weight: 1.0 }];
+                    let playing = [Playing {
+                        clip: c,
+                        seconds: clip.seconds * k as f32 / 4.0,
+                        weight: 1.0,
+                    }];
                     renderer.begin();
                     let key = ("p".to_string(), c as u64, k);
-                    renderer.draw(key.clone(), &model, &playing, &parts, &shot, &sprites).unwrap();
+                    renderer
+                        .draw(key.clone(), &model, &playing, &parts, &shot, &sprites)
+                        .unwrap();
                     renderer.finish();
                     let target = &renderer.targets[&key];
-                    let mut img = image::RgbaImage::from_raw(target.size.0, target.size.1, read(&device, &queue, target).into_iter().flatten().collect()).unwrap();
+                    let mut img = image::RgbaImage::from_raw(
+                        target.size.0,
+                        target.size.1,
+                        read(&device, &queue, target)
+                            .into_iter()
+                            .flatten()
+                            .collect(),
+                    )
+                    .unwrap();
                     if target.scale > 1.0 {
-                        img = image::imageops::resize(&img, target.size.0 * target.scale as u32, target.size.1 * target.scale as u32, image::imageops::FilterType::Nearest);
+                        img = image::imageops::resize(
+                            &img,
+                            target.size.0 * target.scale as u32,
+                            target.size.1 * target.scale as u32,
+                            image::imageops::FilterType::Nearest,
+                        );
                     }
                     row.push(img);
                 }
                 frames.push(row);
             }
-            let (w, h) = frames.iter().flatten().fold((0, 0), |(w, h), i| (w.max(i.width()), h.max(i.height())));
-            let mut sheet = image::RgbaImage::from_pixel(w * 4, h * frames.len() as u32, image::Rgba([34, 34, 40, 255]));
+            let (w, h) = frames
+                .iter()
+                .flatten()
+                .fold((0, 0), |(w, h), i| (w.max(i.width()), h.max(i.height())));
+            let mut sheet = image::RgbaImage::from_pixel(
+                w * 4,
+                h * frames.len() as u32,
+                image::Rgba([34, 34, 40, 255]),
+            );
             for (y, row) in frames.iter().enumerate() {
                 for (x, img) in row.iter().enumerate() {
-                    image::imageops::overlay(&mut sheet, img, (x as u32 * w) as i64, (y as u32 * h) as i64);
+                    image::imageops::overlay(
+                        &mut sheet,
+                        img,
+                        (x as u32 * w) as i64,
+                        (y as u32 * h) as i64,
+                    );
                 }
             }
-            sheet.save(path.with_file_name(format!("{}-preview.png", path.file_stem().unwrap().to_string_lossy()))).unwrap();
-            println!("{}: {}", path.display(), model.clips.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(" "));
+            sheet
+                .save(path.with_file_name(format!(
+                    "{}-preview.png",
+                    path.file_stem().unwrap().to_string_lossy()
+                )))
+                .unwrap();
+            println!(
+                "{}: {}",
+                path.display(),
+                model
+                    .clips
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
         }
     }
 }

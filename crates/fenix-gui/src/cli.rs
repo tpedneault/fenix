@@ -95,7 +95,12 @@ const KNOWN_FLAGS: &[&str] = &[
 /// warned of, not quietly dropped. A value after an option that takes
 /// one isn't an option.
 pub fn unknown_flags(args: &[String]) -> Vec<String> {
-    let takes_value = [GOTO_FLAG, PROJECT_FLAG, "--install-extension", "--uninstall-extension"];
+    let takes_value = [
+        GOTO_FLAG,
+        PROJECT_FLAG,
+        "--install-extension",
+        "--uninstall-extension",
+    ];
     let mut unknown = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -200,20 +205,53 @@ mod tests {
     #[test]
     fn help_and_version_are_printed_not_handed_on() {
         let help = info_request(&args(&["--help"])).unwrap();
-        for flag in ["--mcp", "--install-extension", "--list-extensions", "--disable-extensions", "--goto", "--project", "--new-window", "--version"] {
+        for flag in [
+            "--mcp",
+            "--install-extension",
+            "--list-extensions",
+            "--disable-extensions",
+            "--goto",
+            "--project",
+            "--new-window",
+            "--version",
+        ] {
             assert!(help.contains(flag), "{flag} missing from:\n{help}");
         }
-        assert_eq!(info_request(&args(&["-V"])).unwrap(), format!("fenix {}", env!("CARGO_PKG_VERSION")));
-        assert_eq!(info_request(&args(&["a.rs", "--version"])), Some(version_text()));
-        assert_eq!(info_request(&args(&["--", "--help"])), None, "after -- it's a file");
+        assert_eq!(
+            info_request(&args(&["-V"])).unwrap(),
+            format!("fenix {}", env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            info_request(&args(&["a.rs", "--version"])),
+            Some(version_text())
+        );
+        assert_eq!(
+            info_request(&args(&["--", "--help"])),
+            None,
+            "after -- it's a file"
+        );
         assert_eq!(info_request(&args(&["a.rs"])), None);
     }
 
     #[test]
     fn an_option_fenix_doesnt_know_is_named() {
-        assert_eq!(unknown_flags(&args(&["--projet", "repo", "a.rs"])), ["--projet"]);
-        assert!(unknown_flags(&args(&["--project", "--odd-folder", "--goto=x:1", "--console", "--mcp", "--", "--file"])).is_empty());
-        assert!(unknown_flags(&args(&["--install-extension", "x.fenixext", "--machine"])).is_empty());
+        assert_eq!(
+            unknown_flags(&args(&["--projet", "repo", "a.rs"])),
+            ["--projet"]
+        );
+        assert!(unknown_flags(&args(&[
+            "--project",
+            "--odd-folder",
+            "--goto=x:1",
+            "--console",
+            "--mcp",
+            "--",
+            "--file"
+        ]))
+        .is_empty());
+        assert!(
+            unknown_flags(&args(&["--install-extension", "x.fenixext", "--machine"])).is_empty()
+        );
     }
 
     fn args(list: &[&str]) -> Vec<String> {

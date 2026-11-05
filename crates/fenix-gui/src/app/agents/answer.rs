@@ -65,19 +65,30 @@ fn type_fits(value: &Value, ty: &str) -> bool {
         "boolean" => value.is_boolean(),
         "null" => value.is_null(),
         "number" => value.is_number(),
-        "integer" => value.as_i64().is_some() || value.as_u64().is_some() || value.as_f64().is_some_and(|f| f.fract() == 0.0),
+        "integer" => {
+            value.as_i64().is_some()
+                || value.as_u64().is_some()
+                || value.as_f64().is_some_and(|f| f.fract() == 0.0)
+        }
         _ => true,
     }
 }
 
 fn check(value: &Value, schema: &Value, at: &str, errors: &mut Vec<String>) {
-    let Some(schema) = schema.as_object() else { return };
+    let Some(schema) = schema.as_object() else {
+        return;
+    };
     match schema.get("type") {
         Some(Value::String(ty)) if !type_fits(value, ty) => {
             errors.push(format!("{at} isn't of type {ty}"));
             return;
         }
-        Some(Value::Array(types)) if !types.iter().filter_map(Value::as_str).any(|ty| type_fits(value, ty)) => {
+        Some(Value::Array(types))
+            if !types
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|ty| type_fits(value, ty)) =>
+        {
             let names: Vec<&str> = types.iter().filter_map(Value::as_str).collect();
             errors.push(format!("{at} isn't one of {}", names.join(", ")));
             return;
@@ -91,15 +102,29 @@ fn check(value: &Value, schema: &Value, at: &str, errors: &mut Vec<String>) {
     }
     if let Some(text) = value.as_str() {
         let n = text.chars().count() as u64;
-        if schema.get("minLength").and_then(Value::as_u64).is_some_and(|min| n < min) {
+        if schema
+            .get("minLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|min| n < min)
+        {
             errors.push(format!("{at} is too short"));
         }
-        if schema.get("maxLength").and_then(Value::as_u64).is_some_and(|max| n > max) {
+        if schema
+            .get("maxLength")
+            .and_then(Value::as_u64)
+            .is_some_and(|max| n > max)
+        {
             errors.push(format!("{at} is too long"));
         }
     }
     if let Some(object) = value.as_object() {
-        for name in schema.get("required").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
+        for name in schema
+            .get("required")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
             if !object.contains_key(name) {
                 errors.push(format!("{at}.{name} is missing"));
             }
@@ -108,7 +133,9 @@ fn check(value: &Value, schema: &Value, at: &str, errors: &mut Vec<String>) {
         for (name, v) in object {
             match properties.and_then(|p| p.get(name)) {
                 Some(sub) => check(v, sub, &format!("{at}.{name}"), errors),
-                None if schema.get("additionalProperties") == Some(&Value::Bool(false)) => errors.push(format!("{at}.{name} isn't expected")),
+                None if schema.get("additionalProperties") == Some(&Value::Bool(false)) => {
+                    errors.push(format!("{at}.{name} isn't expected"))
+                }
                 None => {}
             }
         }
@@ -127,23 +154,58 @@ mod tests {
 
     #[test]
     fn the_json_in_an_answer_is_found() {
-        assert_eq!(find_json("Here:\n```json\n{\"title\": \"T\"}\n```\nDone."), Some(json!({"title": "T"})));
+        assert_eq!(
+            find_json("Here:\n```json\n{\"title\": \"T\"}\n```\nDone."),
+            Some(json!({"title": "T"}))
+        );
         assert_eq!(find_json("```\n[1, 2]\n```"), Some(json!([1, 2])));
-        assert_eq!(find_json("```rust\nfn x() {}\n```\nand {\"a\": 1} after"), Some(json!({"a": 1})), "not code that isn't JSON");
-        assert_eq!(find_json("Sure: {\"a\": {\"b\": 2}} -- that's it"), Some(json!({"a": {"b": 2}})));
+        assert_eq!(
+            find_json("```rust\nfn x() {}\n```\nand {\"a\": 1} after"),
+            Some(json!({"a": 1})),
+            "not code that isn't JSON"
+        );
+        assert_eq!(
+            find_json("Sure: {\"a\": {\"b\": 2}} -- that's it"),
+            Some(json!({"a": {"b": 2}}))
+        );
         assert_eq!(find_json("no braces {here"), None);
     }
 
     #[test]
     fn a_value_is_held_to_its_schema() {
         let schema = json!({"type": "object", "required": ["title", "body"], "properties": {"title": {"type": "string", "maxLength": 10}, "body": {"type": "string"}, "labels": {"type": "array", "items": {"enum": ["bug", "docs"]}}}, "additionalProperties": false});
-        assert!(schema_errors(&json!({"title": "T", "body": "B", "labels": ["bug"]}), &schema).is_empty());
-        assert_eq!(schema_errors(&json!({"title": "T"}), &schema), ["$.body is missing"]);
-        assert_eq!(schema_errors(&json!({"title": 3, "body": "B"}), &schema), ["$.title isn't of type string"]);
-        assert_eq!(schema_errors(&json!({"title": "a very long title", "body": "B"}), &schema), ["$.title is too long"]);
-        assert_eq!(schema_errors(&json!({"title": "T", "body": "B", "labels": ["x"]}), &schema), ["$.labels[0] isn't one of the values it may be"]);
-        assert_eq!(schema_errors(&json!({"title": "T", "body": "B", "extra": 1}), &schema), ["$.extra isn't expected"]);
-        assert_eq!(schema_errors(&json!([]), &schema), ["$ isn't of type object"]);
+        assert!(schema_errors(
+            &json!({"title": "T", "body": "B", "labels": ["bug"]}),
+            &schema
+        )
+        .is_empty());
+        assert_eq!(
+            schema_errors(&json!({"title": "T"}), &schema),
+            ["$.body is missing"]
+        );
+        assert_eq!(
+            schema_errors(&json!({"title": 3, "body": "B"}), &schema),
+            ["$.title isn't of type string"]
+        );
+        assert_eq!(
+            schema_errors(&json!({"title": "a very long title", "body": "B"}), &schema),
+            ["$.title is too long"]
+        );
+        assert_eq!(
+            schema_errors(
+                &json!({"title": "T", "body": "B", "labels": ["x"]}),
+                &schema
+            ),
+            ["$.labels[0] isn't one of the values it may be"]
+        );
+        assert_eq!(
+            schema_errors(&json!({"title": "T", "body": "B", "extra": 1}), &schema),
+            ["$.extra isn't expected"]
+        );
+        assert_eq!(
+            schema_errors(&json!([]), &schema),
+            ["$ isn't of type object"]
+        );
         assert!(schema_errors(&json!(3), &json!({"type": "integer"})).is_empty());
         assert!(schema_errors(&json!(null), &json!({"type": ["string", "null"]})).is_empty());
     }

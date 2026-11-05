@@ -5,67 +5,70 @@
 // whole payloads across threads, and state shared with background
 // threads is spelled out where it's declared: each of these lints would
 // trade that directness for a type alias or a struct used once.
-#![allow(clippy::type_complexity, clippy::too_many_arguments, clippy::large_enum_variant)]
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::large_enum_variant
+)]
 
 mod agent_page;
 mod agent_review;
 mod agent_tools;
 mod agent_work;
-mod mcp_http;
 mod app;
 mod cli;
 mod clipboard;
+mod code_page;
 mod commands;
 mod completion;
 mod console;
-mod installed;
-mod languages;
+mod dap;
 mod dashboard;
 mod decorations;
-mod code_page;
+mod diff_view;
+mod explorer_page;
 mod extension_output;
 mod extensions_page;
-mod explorer_page;
-mod preview_page;
-mod search_page;
+mod file_link;
+mod formatter;
+mod git_compare;
+mod git_log;
+mod git_panel;
+mod git_rebase;
+mod git_status;
+mod gpu;
+mod graph_view;
+mod icon;
+mod installed;
+mod ipc;
+mod keymap;
+mod languages;
+mod launch;
+mod lsp;
+mod markdown;
+mod mcp;
+mod mcp_http;
+mod md;
+mod merge_view;
+mod model3d;
+mod motion;
 mod page;
+mod popup;
+mod preview_page;
+mod processes;
+mod profile;
 mod project_doctor;
 mod project_hub;
 mod project_settings;
 mod project_wizard;
-mod diff_view;
-mod git_panel;
-mod git_compare;
-mod git_log;
-mod git_rebase;
-mod git_status;
+mod reading;
+mod reading_page;
+mod rect;
+mod search_page;
 mod settings_page;
 mod snippets_page;
 mod sound;
-mod md;
-mod reading;
-mod reading_page;
-mod graph_view;
-mod gpu;
-mod icon;
-mod ipc;
-mod keymap;
-mod launch;
-mod dap;
-mod processes;
-mod formatter;
-mod lsp;
-mod markdown;
-mod mcp;
-mod motion;
-mod merge_view;
-mod popup;
-mod profile;
-mod watchdog;
-mod file_link;
-mod rect;
 mod splash;
-mod model3d;
 mod sprite;
 mod surface;
 mod tabstops;
@@ -73,6 +76,7 @@ mod text;
 mod theme;
 mod tool_status;
 mod tutorial;
+mod watchdog;
 mod wrap;
 
 use winit::event_loop::{ControlFlow, EventLoop};
@@ -85,7 +89,9 @@ fn main() -> anyhow::Result<()> {
     // Fenix that's running. Before anything that opens a console or a
     // window: its stdio is the protocol.
     // `fenix mcp token`: what an MCP client over HTTP presents.
-    if args.first().map(String::as_str) == Some("mcp") && args.get(1).map(String::as_str) == Some("token") {
+    if args.first().map(String::as_str) == Some("mcp")
+        && args.get(1).map(String::as_str) == Some("token")
+    {
         match mcp_http::token() {
             Ok(token) => {
                 println!("{token}");
@@ -98,7 +104,11 @@ fn main() -> anyhow::Result<()> {
         }
     }
     if mcp::requested(&args) {
-        if let Some(address) = args.iter().position(|a| a == "--http").and_then(|i| args.get(i + 1)) {
+        if let Some(address) = args
+            .iter()
+            .position(|a| a == "--http")
+            .and_then(|i| args.get(i + 1))
+        {
             if let Err(why) = mcp_http::serve(address) {
                 eprintln!("fenix: {why}");
                 std::process::exit(1);
@@ -128,12 +138,20 @@ fn main() -> anyhow::Result<()> {
             console::open();
             // `--machine`: the machine's store, for everyone here.
             let machine = installed::wants_machine(&args);
-            let store = if machine { fenix_extensions::Store::managed() } else { fenix_extensions::Store::current() };
+            let store = if machine {
+                fenix_extensions::Store::managed()
+            } else {
+                fenix_extensions::Store::current()
+            };
             let Some(store) = store else {
                 eprintln!("fenix: no folder to keep extensions in");
                 std::process::exit(1);
             };
-            let managed = if machine { None } else { fenix_extensions::Store::managed() };
+            let managed = if machine {
+                None
+            } else {
+                fenix_extensions::Store::managed()
+            };
             match installed::run(&request, &store, managed.as_ref()) {
                 Ok(said) => {
                     println!("{said}");
@@ -195,8 +213,14 @@ fn main() -> anyhow::Result<()> {
         std::env::remove_var(ipc::RESTARTED_ENV);
         ipc::wait_until_free(std::time::Duration::from_secs(15));
     }
-    let standalone = std::env::var_os("FENIX_STANDALONE").is_some_and(|v| !v.is_empty() && v != "0") || installed::safe_mode();
-    let role = if standalone { ipc::Role::Standalone } else { ipc::negotiate(&invocation) };
+    let standalone = std::env::var_os("FENIX_STANDALONE")
+        .is_some_and(|v| !v.is_empty() && v != "0")
+        || installed::safe_mode();
+    let role = if standalone {
+        ipc::Role::Standalone
+    } else {
+        ipc::negotiate(&invocation)
+    };
     match role {
         ipc::Role::HandedOff => return Ok(()),
         ipc::Role::Server(listener) => ipc::spawn_accept_loop(listener, proxy.clone()),
@@ -218,7 +242,11 @@ fn main() -> anyhow::Result<()> {
     if launcher.restart_requested() {
         let keep: Vec<&String> = args.iter().filter(|a| a.as_str() == "--console").collect();
         let exe = std::env::current_exe()?;
-        if let Err(e) = std::process::Command::new(exe).args(keep).env(ipc::RESTARTED_ENV, "1").spawn() {
+        if let Err(e) = std::process::Command::new(exe)
+            .args(keep)
+            .env(ipc::RESTARTED_ENV, "1")
+            .spawn()
+        {
             eprintln!("fenix: couldn't start again ({e}); start Fenix yourself");
         }
     }

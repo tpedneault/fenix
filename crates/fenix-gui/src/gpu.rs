@@ -108,21 +108,35 @@ impl GpuContext {
         // gamma-encoded a second time on top of that). Forcing a plain
         // (non-sRGB) surface format keeps every pipeline's output byte-
         // for-byte as authored, matching what they already assume.
-        if let Some(non_srgb) = surface.get_capabilities(&adapter).formats.into_iter().find(|f| !f.is_srgb()) {
+        if let Some(non_srgb) = surface
+            .get_capabilities(&adapter)
+            .formats
+            .into_iter()
+            .find(|f| !f.is_srgb())
+        {
             config.format = non_srgb;
         }
         config.present_mode = wgpu::PresentMode::AutoVsync;
         // Copying a frame out is how the theme cross-fade keeps the old
         // colours to fade from.
-        if surface.get_capabilities(&adapter).usages.contains(wgpu::TextureUsages::COPY_SRC) {
+        if surface
+            .get_capabilities(&adapter)
+            .usages
+            .contains(wgpu::TextureUsages::COPY_SRC)
+        {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
         surface.configure(&device, &config);
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let context =
-            Self { instance, adapter, device: Arc::clone(&device), queue: Arc::clone(&queue), format: config.format };
+        let context = Self {
+            instance,
+            adapter,
+            device: Arc::clone(&device),
+            queue: Arc::clone(&queue),
+            format: config.format,
+        };
         let state = GpuState {
             surface: Some(surface),
             lent: false,
@@ -147,13 +161,20 @@ impl GpuContext {
     /// every frame has to agree on one.
     pub fn attach(&self, window: Arc<Window>) -> GpuState {
         let size = window.inner_size();
-        let surface = self.instance.create_surface(window).expect("create surface");
+        let surface = self
+            .instance
+            .create_surface(window)
+            .expect("create surface");
         let mut config = surface
             .get_default_config(&self.adapter, size.width.max(1), size.height.max(1))
             .expect("surface unsupported by adapter");
         config.format = self.format;
         config.present_mode = wgpu::PresentMode::AutoVsync;
-        if surface.get_capabilities(&self.adapter).usages.contains(wgpu::TextureUsages::COPY_SRC) {
+        if surface
+            .get_capabilities(&self.adapter)
+            .usages
+            .contains(wgpu::TextureUsages::COPY_SRC)
+        {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
         surface.configure(&self.device, &config);
@@ -306,7 +327,11 @@ impl SurfaceHealth {
         let report = n == RECREATE_AT && !self.reported;
         self.reported |= report;
         FailureResponse {
-            recovery: if recreate { Recovery::Recreate } else { Recovery::Reconfigure },
+            recovery: if recreate {
+                Recovery::Recreate
+            } else {
+                Recovery::Reconfigure
+            },
             retry: n <= RETRY_UP_TO,
             report,
         }
@@ -331,7 +356,14 @@ mod tests {
     #[test]
     fn a_single_failure_is_reconfigured_and_retried_quietly() {
         let mut health = SurfaceHealth::default();
-        assert_eq!(health.failed(), FailureResponse { recovery: Recovery::Reconfigure, retry: true, report: false });
+        assert_eq!(
+            health.failed(),
+            FailureResponse {
+                recovery: Recovery::Reconfigure,
+                retry: true,
+                report: false
+            }
+        );
         assert!(!health.presented());
         assert_eq!(health.failures(), 0);
     }
@@ -339,21 +371,30 @@ mod tests {
     #[test]
     fn a_run_of_failures_recreates_the_surface_and_says_so_once() {
         let mut health = SurfaceHealth::default();
-        let responses: Vec<FailureResponse> = (0..RECREATE_AT + RECREATE_EVERY).map(|_| health.failed()).collect();
+        let responses: Vec<FailureResponse> = (0..RECREATE_AT + RECREATE_EVERY)
+            .map(|_| health.failed())
+            .collect();
         let recreated: Vec<u32> = (1..)
             .zip(&responses)
             .filter(|(_, response)| response.recovery == Recovery::Recreate)
             .map(|(n, _)| n)
             .collect();
         assert_eq!(recreated, vec![RECREATE_AT, RECREATE_AT + RECREATE_EVERY]);
-        let reported: Vec<u32> = (1..).zip(&responses).filter(|(_, response)| response.report).map(|(n, _)| n).collect();
+        let reported: Vec<u32> = (1..)
+            .zip(&responses)
+            .filter(|(_, response)| response.report)
+            .map(|(n, _)| n)
+            .collect();
         assert_eq!(reported, vec![RECREATE_AT]);
     }
 
     #[test]
     fn retries_stop_after_a_while_so_the_loop_can_go_idle() {
         let mut health = SurfaceHealth::default();
-        let retried = (0..50).map(|_| health.failed()).take_while(|response| response.retry).count();
+        let retried = (0..50)
+            .map(|_| health.failed())
+            .take_while(|response| response.retry)
+            .count();
         assert_eq!(retried, RETRY_UP_TO as usize);
         assert!(!health.failed().retry);
     }

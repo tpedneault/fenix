@@ -31,7 +31,12 @@ impl App {
         if let Some(id) = self.tutorial_page_id() {
             // Where it is already -- not a second copy in the window you're
             // in, which the next lesson's practice would then split again.
-            match self.windows().windows().into_iter().find(|&p| self.windows().content(p) == Some(&id)) {
+            match self
+                .windows()
+                .windows()
+                .into_iter()
+                .find(|&p| self.windows().content(p) == Some(&id))
+            {
                 Some(pane) => {
                     self.windows_mut().focus(pane);
                     self.wake_caret();
@@ -42,42 +47,60 @@ impl App {
         }
         let (lessons, problems) = tutorial::load(&crate::installed::data_dirs("tutorial"));
         let done = tutorial::load_done(&self.tutorial_progress);
-        self.open_page(PageModel::Tutorial(Box::new(TutorialPage::new(lessons, problems, done))));
+        self.open_page(PageModel::Tutorial(Box::new(TutorialPage::new(
+            lessons, problems, done,
+        ))));
     }
 
     pub(super) fn tutorial_action(&mut self, id: BufferId, action: TutorialAction) {
         match action {
             TutorialAction::None => {}
             TutorialAction::Close => {
-                if let Some(practice) = self.tutorial_page(id).and_then(|p| p.run.take()).map(|r| r.practice) {
+                if let Some(practice) = self
+                    .tutorial_page(id)
+                    .and_then(|p| p.run.take())
+                    .map(|r| r.practice)
+                {
                     self.tutorial_close_practice(practice);
                 }
                 self.close_page(id);
             }
             TutorialAction::Start(lesson) => self.tutorial_start(id, lesson),
             TutorialAction::Practice => {
-                if let Some(practice) = self.tutorial_page(id).and_then(|p| p.run.as_ref()).map(|r| r.practice) {
+                if let Some(practice) = self
+                    .tutorial_page(id)
+                    .and_then(|p| p.run.as_ref())
+                    .map(|r| r.practice)
+                {
                     self.tutorial_show_practice(practice);
                 }
             }
             TutorialAction::Skip => {
                 let start = self.tutorial_start_now();
-                let Some(page) = self.tutorial_page(id) else { return };
+                let Some(page) = self.tutorial_page(id) else {
+                    return;
+                };
                 let edits = page.run.as_ref().map_or(0, |r| r.edits);
                 let mut finished = page.advance(start, edits, true);
                 // Skipping what opens a page skips closing it too: there's
                 // nothing to close.
                 let practice = page.run.as_ref().map(|r| r.practice);
-                if let (false, Some(step), Some(practice)) = (finished, page.step().cloned(), practice) {
+                if let (false, Some(step), Some(practice)) =
+                    (finished, page.step().cloned(), practice)
+                {
                     if tutorial::going_there(&step, &self.tutorial_seen(practice)) == Some(false) {
-                        let Some(page) = self.tutorial_page(id) else { return };
+                        let Some(page) = self.tutorial_page(id) else {
+                            return;
+                        };
                         finished = page.advance(start, edits, true);
                     }
                 }
                 self.tutorial_said_next(id, finished);
             }
             TutorialAction::Keybindings => {
-                let source = self.buffers.open_text_view_like(tutorial::KEYBINDINGS, Path::new("KEYBINDINGS.md"));
+                let source = self
+                    .buffers
+                    .open_text_view_like(tutorial::KEYBINDINGS, Path::new("KEYBINDINGS.md"));
                 let mut page = crate::reading_page::ReadingPage::new(source, None, true);
                 page.back = Some(id);
                 self.open_page(PageModel::Reading(Box::new(page)));
@@ -89,8 +112,16 @@ impl App {
     /// its text, in a window beside the page -- for one about Git, the
     /// file of a practice repository made fresh for it (`[repo]`).
     fn tutorial_start(&mut self, id: BufferId, lesson: usize) {
-        let Some(page) = self.tutorial_page(id) else { return };
-        let Some((text, repo)) = page.lessons.get(lesson).map(|l| (l.text.clone(), l.repo.clone())) else { return };
+        let Some(page) = self.tutorial_page(id) else {
+            return;
+        };
+        let Some((text, repo)) = page
+            .lessons
+            .get(lesson)
+            .map(|l| (l.text.clone(), l.repo.clone()))
+        else {
+            return;
+        };
         let practice = match repo {
             None => self.buffers.open_text_view(&text),
             Some(repo) => {
@@ -103,11 +134,16 @@ impl App {
                         }
                         self.buffers.open_path(&file)
                     }
-                    Err(why) => return self.set_error(format!("couldn't make the practice repository: {why}")),
+                    Err(why) => {
+                        return self
+                            .set_error(format!("couldn't make the practice repository: {why}"))
+                    }
                 }
             }
         };
-        let Some(page) = self.tutorial_page(id) else { return };
+        let Some(page) = self.tutorial_page(id) else {
+            return;
+        };
         let before = page.run.take().map(|r| r.practice);
         if let Some(before) = before.filter(|b| self.buffers.get(*b).is_some()) {
             self.buffers.close(before);
@@ -119,9 +155,22 @@ impl App {
             *cursor = Cursor::at_start();
         }
         let start = self.tutorial_start_now();
-        let Some(page) = self.tutorial_page(id) else { return };
+        let Some(page) = self.tutorial_page(id) else {
+            return;
+        };
         page.focus = lesson;
-        page.run = Some(Run { lesson, step: 0, practice, start, since: Instant::now(), hint: false, edits: 0, skipped: 0, there: false, finished: false });
+        page.run = Some(Run {
+            lesson,
+            step: 0,
+            practice,
+            start,
+            since: Instant::now(),
+            hint: false,
+            edits: 0,
+            skipped: 0,
+            there: false,
+            finished: false,
+        });
         let first = page.step().map(|s| s.say.clone()).unwrap_or_default();
         self.set_message(first);
     }
@@ -131,9 +180,16 @@ impl App {
     /// one focused. A lesson started over and over keeps to two windows.
     fn tutorial_show_practice(&mut self, practice: BufferId) {
         let windows = self.windows().windows();
-        let shown = windows.iter().copied().find(|&p| self.windows().content(p) == Some(&practice));
+        let shown = windows
+            .iter()
+            .copied()
+            .find(|&p| self.windows().content(p) == Some(&practice));
         let page = self.tutorial_page_id();
-        let copies: Vec<_> = windows.iter().copied().filter(|&p| page.is_some() && self.windows().content(p) == page.as_ref()).collect();
+        let copies: Vec<_> = windows
+            .iter()
+            .copied()
+            .filter(|&p| page.is_some() && self.windows().content(p) == page.as_ref())
+            .collect();
         match (shown, copies.as_slice()) {
             (Some(pane), _) => {
                 self.windows_mut().focus(pane);
@@ -158,27 +214,40 @@ impl App {
             return;
         }
         self.buffers.close(practice);
-        let fallback = self.buffers.mru().first().copied().unwrap_or_else(|| self.buffers.open_scratch());
+        let fallback = self
+            .buffers
+            .mru()
+            .first()
+            .copied()
+            .unwrap_or_else(|| self.buffers.open_scratch());
         self.repoint_panes_showing(practice, fallback);
     }
 
     /// What a practice buffer is called.
     pub(super) fn tutorial_buffer_name(&self, buffer: BufferId) -> Option<String> {
         let id = self.tutorial_page_id()?;
-        let Some(PageModel::Tutorial(page)) = self.pages.get(&id).map(|s| &s.model) else { return None };
+        let Some(PageModel::Tutorial(page)) = self.pages.get(&id).map(|s| &s.model) else {
+            return None;
+        };
         let run = page.run.as_ref().filter(|r| r.practice == buffer)?;
-        page.lessons.get(run.lesson).map(|l| format!("*practice: {}*", l.title))
+        page.lessons
+            .get(run.lesson)
+            .map(|l| format!("*practice: {}*", l.title))
     }
 
     fn tutorial_start_now(&self) -> Start {
-        Start { windows: self.windows().window_count(), pane: self.focused_pane_id() }
+        Start {
+            windows: self.windows().window_count(),
+            pane: self.focused_pane_id(),
+        }
     }
 
     /// What kind of page `id` is, and for some where on it you are -- as
     /// a step's `page` names it.
     fn tutorial_page_kind(&self, id: BufferId) -> Option<(String, Option<String>)> {
         let Some(state) = self.pages.get(&id) else {
-            return (self.buffers.get(id)?.kind == BufferKind::Dashboard).then(|| ("home".to_string(), None));
+            return (self.buffers.get(id)?.kind == BufferKind::Dashboard)
+                .then(|| ("home".to_string(), None));
         };
         let kind = match &state.model {
             PageModel::Code(p) => format!("{}/{}", p.ext, p.kind),
@@ -193,7 +262,12 @@ impl App {
             PageModel::Snippets(_) => "snippets".into(),
             PageModel::Reading(_) => "reading".into(),
             PageModel::Extensions(e) if e.welcome => "welcome".into(),
-            PageModel::Extensions(e) => return Some(("extensions".into(), Some(format!("extensions/{}", e.tab.label().to_lowercase())))),
+            PageModel::Extensions(e) => {
+                return Some((
+                    "extensions".into(),
+                    Some(format!("extensions/{}", e.tab.label().to_lowercase())),
+                ))
+            }
             PageModel::ExtensionOutput(_) => "extensions-output".into(),
             PageModel::Tutorial(_) => "tutorial".into(),
             PageModel::Explorer(..) => "explorer".into(),
@@ -229,10 +303,13 @@ impl App {
 
     fn tutorial_seen(&self, practice: BufferId) -> Seen {
         let focused = self.focused_buffer_id();
-        let practice = (focused == practice && !self.terminal_focused).then(|| self.buffers.get(practice)).flatten().map(|ob| {
-            let (line, col) = ob.buffer.line_col(&self.cursor());
-            (ob.buffer.text(), (line + 1, col + 1))
-        });
+        let practice = (focused == practice && !self.terminal_focused)
+            .then(|| self.buffers.get(practice))
+            .flatten()
+            .map(|ob| {
+                let (line, col) = ob.buffer.line_col(&self.cursor());
+                (ob.buffer.text(), (line + 1, col + 1))
+            });
         let mode = match self.vim.mode() {
             Mode::Normal => "normal",
             Mode::Insert => "insert",
@@ -244,13 +321,18 @@ impl App {
         let pane = self.focused_pane_id();
         let term = Term {
             panel: self.terminal_open,
-            pane: self.buffers.get(focused).is_some_and(|ob| ob.kind == BufferKind::Terminal),
+            pane: self
+                .buffers
+                .get(focused)
+                .is_some_and(|ob| ob.kind == BufferKind::Terminal),
             // A shell still starting takes the keyboard once it's up: not
             // yet given back with `Ctrl-\`.
             keyboard: self.terminal_focused
                 || (self.terminal_open && self.terminal_spawning)
                 || self.terminal_buffers_spawning.contains(&focused)
-                || self.terminal_buffer_focused.is_some_and(|t| self.windows().content(pane) == Some(&t)),
+                || self
+                    .terminal_buffer_focused
+                    .is_some_and(|t| self.windows().content(pane) == Some(&t)),
         };
         Seen {
             practice,
@@ -259,7 +341,12 @@ impl App {
             windows: self.windows().window_count(),
             pane,
             page: self.tutorial_page_kind(focused),
-            pages: self.pages.keys().filter_map(|id| self.tutorial_page_kind(*id)).map(|(kind, _)| kind).collect(),
+            pages: self
+                .pages
+                .keys()
+                .filter_map(|id| self.tutorial_page_kind(*id))
+                .map(|(kind, _)| kind)
+                .collect(),
             picker: self.tutorial_picker(),
             leader: self.leader_matcher.is_pending() || self.local_matcher.is_some(),
             term,
@@ -270,15 +357,32 @@ impl App {
     /// After a key: whether the step under way passed, or was a try
     /// that didn't (which shows its hint).
     pub(super) fn tutorial_check(&mut self) {
-        let Some(id) = self.tutorial_page_id() else { return };
-        let Some(PageModel::Tutorial(page)) = self.pages.get(&id).map(|s| &s.model) else { return };
-        let (Some(run), Some(step)) = (page.run.as_ref(), page.step().cloned()) else { return };
-        let text_before = page.lessons.get(run.lesson).map(|l| tutorial::text_before(l, run.step).to_string()).unwrap_or_default();
+        let Some(id) = self.tutorial_page_id() else {
+            return;
+        };
+        let Some(PageModel::Tutorial(page)) = self.pages.get(&id).map(|s| &s.model) else {
+            return;
+        };
+        let (Some(run), Some(step)) = (page.run.as_ref(), page.step().cloned()) else {
+            return;
+        };
+        let text_before = page
+            .lessons
+            .get(run.lesson)
+            .map(|l| tutorial::text_before(l, run.step).to_string())
+            .unwrap_or_default();
         let (practice, start, before, was_there) = (run.practice, run.start, run.edits, run.there);
-        let edits = self.buffers.get(practice).map_or(0, |ob| ob.buffer.edit_count());
+        let edits = self
+            .buffers
+            .get(practice)
+            .map_or(0, |ob| ob.buffer.edit_count());
         // Practice, not work: nothing to ask about saving -- unless it's
         // a practice repository's file, whose changes Git is to see.
-        if let Some(ob) = self.buffers.get_mut(practice).filter(|ob| ob.buffer.is_dirty() && ob.buffer.path().is_none()) {
+        if let Some(ob) = self
+            .buffers
+            .get_mut(practice)
+            .filter(|ob| ob.buffer.is_dirty() && ob.buffer.path().is_none())
+        {
             ob.buffer.mark_saved();
         }
         let seen = self.tutorial_seen(practice);
@@ -290,8 +394,13 @@ impl App {
             }
         }
         if tutorial::passes(&step, &text_before, &seen, start) && (going.is_none() || there) {
-            let start = Start { windows: seen.windows, pane: seen.pane };
-            let Some(page) = self.tutorial_page(id) else { return };
+            let start = Start {
+                windows: seen.windows,
+                pane: seen.pane,
+            };
+            let Some(page) = self.tutorial_page(id) else {
+                return;
+            };
             let finished = page.advance(start, edits, false);
             // What the next step closes may have opened with this key.
             if let Some(next) = page.step().cloned() {
@@ -302,7 +411,9 @@ impl App {
             }
             self.tutorial_said_next(id, finished);
         } else if edits != before && seen.idle && seen.practice.is_some() {
-            let Some(run) = self.tutorial_page(id).and_then(|p| p.run.as_mut()) else { return };
+            let Some(run) = self.tutorial_page(id).and_then(|p| p.run.as_mut()) else {
+                return;
+            };
             run.edits = edits;
             if !run.hint && !step.hint.is_empty() {
                 run.hint = true;
@@ -314,7 +425,9 @@ impl App {
     /// Says what's next after a step: the next one, or that the lesson's
     /// done -- kept, so it stays done.
     fn tutorial_said_next(&mut self, id: BufferId, finished: bool) {
-        let Some(PageModel::Tutorial(page)) = self.pages.get(&id).map(|s| &s.model) else { return };
+        let Some(PageModel::Tutorial(page)) = self.pages.get(&id).map(|s| &s.model) else {
+            return;
+        };
         if !finished {
             if let Some(next) = page.step() {
                 let said = next.say.clone();
@@ -322,15 +435,24 @@ impl App {
             }
             return;
         }
-        let title = page.run.as_ref().and_then(|r| page.lessons.get(r.lesson)).map(|l| l.title.clone()).unwrap_or_default();
+        let title = page
+            .run
+            .as_ref()
+            .and_then(|r| page.lessons.get(r.lesson))
+            .map(|l| l.title.clone())
+            .unwrap_or_default();
         let all = page.all_done();
         let done = page.done.clone();
         if let Err(e) = tutorial::save_done(&self.tutorial_progress, &done) {
-            self.set_error(format!("couldn't keep the tutorial's progress in {}: {e}", self.tutorial_progress.display()));
+            self.set_error(format!(
+                "couldn't keep the tutorial's progress in {}: {e}",
+                self.tutorial_progress.display()
+            ));
             return;
         }
         self.set_message(if all {
-            "Every lesson done -- d on the tutorial page (SPC h T) opens the keybindings doc".to_string()
+            "Every lesson done -- d on the tutorial page (SPC h T) opens the keybindings doc"
+                .to_string()
         } else {
             format!("{title}: done -- the tutorial page (SPC h T) has the next")
         });
@@ -340,14 +462,24 @@ impl App {
     /// and anything that changed without a key is looked at. Whether to
     /// draw again.
     pub(super) fn tutorial_tick(&mut self, now: Instant) -> bool {
-        let Some(id) = self.tutorial_page_id() else { return false };
-        let Some(PageModel::Tutorial(page)) = self.pages.get(&id).map(|s| &s.model) else { return false };
-        let Some(run) = page.run.as_ref().filter(|r| !r.finished) else { return false };
+        let Some(id) = self.tutorial_page_id() else {
+            return false;
+        };
+        let Some(PageModel::Tutorial(page)) = self.pages.get(&id).map(|s| &s.model) else {
+            return false;
+        };
+        let Some(run) = page.run.as_ref().filter(|r| !r.finished) else {
+            return false;
+        };
         let (step, since) = (run.step, run.since);
         self.tutorial_check();
-        let Some(page) = self.tutorial_page(id) else { return false };
+        let Some(page) = self.tutorial_page(id) else {
+            return false;
+        };
         let hint = page.step().map(|s| s.hint.clone()).unwrap_or_default();
-        let Some(run) = page.run.as_mut().filter(|r| !r.finished) else { return true };
+        let Some(run) = page.run.as_mut().filter(|r| !r.finished) else {
+            return true;
+        };
         if run.step != step {
             return true;
         }
@@ -378,7 +510,9 @@ mod tests {
                         "CR" => Some(KeyPress::named(FenixNamedKey::Enter)),
                         "Tab" => Some(KeyPress::named(FenixNamedKey::Tab)),
                         "Space" => Some(KeyPress::char(' ')),
-                        t if t.starts_with("C-") && t.chars().count() == 3 => t.chars().nth(2).map(|c| KeyPress::char(c).with_ctrl()),
+                        t if t.starts_with("C-") && t.chars().count() == 3 => {
+                            t.chars().nth(2).map(|c| KeyPress::char(c).with_ctrl())
+                        }
                         _ => None,
                     };
                     if let Some(key) = key {
@@ -412,7 +546,9 @@ mod tests {
             "git.switch" => app.start_switch_picker(),
             _ => {
                 let commands = Rc::clone(&app.commands);
-                commands.run_without_event_loop(app, id).unwrap_or_else(|e| panic!("{id}: {e:?}"));
+                commands
+                    .run_without_event_loop(app, id)
+                    .unwrap_or_else(|e| panic!("{id}: {e:?}"));
             }
         }
     }
@@ -431,7 +567,13 @@ mod tests {
             }
         } else if app.active_picker.is_some() {
             app.picker_key(key);
-        } else if app.compose.as_ref().is_some_and(|c| c.pane == app.focused_pane_id()) && app.vim.mode() == Mode::Normal && (key == KeyPress::named(FenixNamedKey::Enter) || key == KeyPress::char('q')) {
+        } else if app
+            .compose
+            .as_ref()
+            .is_some_and(|c| c.pane == app.focused_pane_id())
+            && app.vim.mode() == Mode::Normal
+            && (key == KeyPress::named(FenixNamedKey::Enter) || key == KeyPress::char('q'))
+        {
             // The compose pane's own two keys, as `App` takes them.
             if key == KeyPress::char('q') {
                 app.compose_cancel();
@@ -440,7 +582,9 @@ mod tests {
             }
         } else if app.page_key(key) {
             // The page's.
-        } else if app.leader_matcher.is_pending() || (matches!(app.vim.mode(), Mode::Normal | Mode::Visual) && key == KeyPress::char(' ')) {
+        } else if app.leader_matcher.is_pending()
+            || (matches!(app.vim.mode(), Mode::Normal | Mode::Visual) && key == KeyPress::char(' '))
+        {
             if let fenix_keymap::Step::Matched(&id) = app.leader_matcher.feed(key) {
                 run_test_command(app, id);
             }
@@ -461,19 +605,115 @@ mod tests {
     /// A way through each step of each built-in lesson, from where the
     /// step before left off.
     const SOLUTIONS: &[(&str, &[&str])] = &[
-        ("editing.modes", &["jjjjjjllllllll", "i", "<Esc>jj$hhhii<Esc>", "j$hhhx", "oI can do this.<Esc>", "gg"]),
-        ("editing.words", &["j$b", "/is is<CR>dw", "j/Remove<CR>D", "jdd", "J", "j3dd"]),
-        ("editing.objects", &["/hello<CR>ci\"goodbye<Esc>", "j/first<CR>di(", "/banana<CR>ciwcherry<Esc>", "/paragraph<CR>dap", "Gyyp"]),
-        ("editing.visual", &["/make this<CR>VU", "jVjd", "0<C-v>jjI- <Esc>", "j/two<CR>vecdeux<Esc>"]),
-        ("editing.search", &["/needle<CR>", "j:s/cat/bird/g<CR>", "0/dog<CR>n", ":%s/color/colour/g<CR>"]),
-        ("editing.macros", &["/Copy me<CR>\"ayyj\"ap", "/- item<CR>qaA done<Esc>jq3@a", "/TODO<CR>cwDONE<Esc>w.w."]),
-        ("fenix.leader", &["<Space>", "<Esc>", "<Space>:", "<Esc>", "<Space>hb", "<Esc>"]),
-        ("fenix.find", &["<Space><Space>", "<Esc>", "<Space>slneedle<CR>", "<Space>ps", "<Esc>q", "<Space>bb"]),
-        ("fenix.windows", &["<Space>wv", "<Space>wh", "<Space>ws", "<Space>wq", "<Space>wo", "<Space>hT"]),
-        ("fenix.pages", &["<Space>pp", "q", "<Space>gg", "q", "<Space>pt", "<Esc>"]),
-        ("fenix.terminals", &["<Space>ot", "<C-\\>", "<Space>ot", "<Space>oT", "<C-\\>"]),
-        ("fenix.settings", &["<Space>,", "q", "<Space>hx", "<Tab><Tab>", "q"]),
-        ("git.basics", &["<Space>gg", "s", "c", "ciFirst commit<Esc><CR>", "<Space>gl", "q", "<Space>ggb", "<Esc>q"]),
+        (
+            "editing.modes",
+            &[
+                "jjjjjjllllllll",
+                "i",
+                "<Esc>jj$hhhii<Esc>",
+                "j$hhhx",
+                "oI can do this.<Esc>",
+                "gg",
+            ],
+        ),
+        (
+            "editing.words",
+            &["j$b", "/is is<CR>dw", "j/Remove<CR>D", "jdd", "J", "j3dd"],
+        ),
+        (
+            "editing.objects",
+            &[
+                "/hello<CR>ci\"goodbye<Esc>",
+                "j/first<CR>di(",
+                "/banana<CR>ciwcherry<Esc>",
+                "/paragraph<CR>dap",
+                "Gyyp",
+            ],
+        ),
+        (
+            "editing.visual",
+            &[
+                "/make this<CR>VU",
+                "jVjd",
+                "0<C-v>jjI- <Esc>",
+                "j/two<CR>vecdeux<Esc>",
+            ],
+        ),
+        (
+            "editing.search",
+            &[
+                "/needle<CR>",
+                "j:s/cat/bird/g<CR>",
+                "0/dog<CR>n",
+                ":%s/color/colour/g<CR>",
+            ],
+        ),
+        (
+            "editing.macros",
+            &[
+                "/Copy me<CR>\"ayyj\"ap",
+                "/- item<CR>qaA done<Esc>jq3@a",
+                "/TODO<CR>cwDONE<Esc>w.w.",
+            ],
+        ),
+        (
+            "fenix.leader",
+            &[
+                "<Space>",
+                "<Esc>",
+                "<Space>:",
+                "<Esc>",
+                "<Space>hb",
+                "<Esc>",
+            ],
+        ),
+        (
+            "fenix.find",
+            &[
+                "<Space><Space>",
+                "<Esc>",
+                "<Space>slneedle<CR>",
+                "<Space>ps",
+                "<Esc>q",
+                "<Space>bb",
+            ],
+        ),
+        (
+            "fenix.windows",
+            &[
+                "<Space>wv",
+                "<Space>wh",
+                "<Space>ws",
+                "<Space>wq",
+                "<Space>wo",
+                "<Space>hT",
+            ],
+        ),
+        (
+            "fenix.pages",
+            &["<Space>pp", "q", "<Space>gg", "q", "<Space>pt", "<Esc>"],
+        ),
+        (
+            "fenix.terminals",
+            &["<Space>ot", "<C-\\>", "<Space>ot", "<Space>oT", "<C-\\>"],
+        ),
+        (
+            "fenix.settings",
+            &["<Space>,", "q", "<Space>hx", "<Tab><Tab>", "q"],
+        ),
+        (
+            "git.basics",
+            &[
+                "<Space>gg",
+                "s",
+                "c",
+                "ciFirst commit<Esc><CR>",
+                "<Space>gl",
+                "q",
+                "<Space>ggb",
+                "<Esc>q",
+            ],
+        ),
     ];
 
     #[test]
@@ -486,13 +726,21 @@ mod tests {
         app.project_root = Some(root);
         app.open_tutorial();
         let id = app.tutorial_page_id().unwrap();
-        let lessons: Vec<(String, usize)> = page(&app).lessons.iter().map(|l| (l.id.clone(), l.steps.len())).collect();
+        let lessons: Vec<(String, usize)> = page(&app)
+            .lessons
+            .iter()
+            .map(|l| (l.id.clone(), l.steps.len()))
+            .collect();
         assert_eq!(lessons.len(), SOLUTIONS.len());
         for (i, ((lesson, steps), (solved, keys))) in lessons.iter().zip(SOLUTIONS).enumerate() {
             assert_eq!(lesson, solved);
             assert_eq!(*steps, keys.len(), "{lesson}: a way through each step");
             // From the page, as you'd start one.
-            let shown = app.windows().windows().into_iter().find(|&p| app.windows().content(p) == Some(&id));
+            let shown = app
+                .windows()
+                .windows()
+                .into_iter()
+                .find(|&p| app.windows().content(p) == Some(&id));
             match shown {
                 Some(pane) => {
                     app.windows_mut().focus(pane);
@@ -500,14 +748,27 @@ mod tests {
                 None => app.open_tutorial(),
             }
             app.tutorial_action(id, TutorialAction::Start(i));
-            assert!(app.tutorial_buffer_name(app.focused_buffer_id()).is_some_and(|n| n.starts_with("*practice: ")), "{lesson}: in the practice buffer");
+            assert!(
+                app.tutorial_buffer_name(app.focused_buffer_id())
+                    .is_some_and(|n| n.starts_with("*practice: ")),
+                "{lesson}: in the practice buffer"
+            );
             for (n, seq) in keys.iter().enumerate() {
-                assert_eq!(page(&app).run.as_ref().map(|r| r.step), Some(n), "{lesson}: step {}", n + 1);
+                assert_eq!(
+                    page(&app).run.as_ref().map(|r| r.step),
+                    Some(n),
+                    "{lesson}: step {}",
+                    n + 1
+                );
                 for key in parse_keys(seq) {
                     route(&mut app, key);
                 }
                 let run = page(&app).run.clone().unwrap();
-                let text = app.buffers.get(run.practice).map(|ob| ob.buffer.text()).unwrap_or_default();
+                let text = app
+                    .buffers
+                    .get(run.practice)
+                    .map(|ob| ob.buffer.text())
+                    .unwrap_or_default();
                 assert!(run.step > n || run.finished, "{lesson}: step {} ({seq}) didn't pass -- the practice buffer:\n{text}\nseen: {:?}", n + 1, app.tutorial_seen(run.practice));
             }
             assert!(page(&app).run.as_ref().unwrap().finished, "{lesson}");
@@ -540,7 +801,10 @@ mod tests {
         let later = Instant::now() + HINT_AFTER + Duration::from_secs(1);
         assert!(app.tutorial_tick(later));
         assert!(page(&app).run.as_ref().unwrap().hint, "after a pause");
-        assert!(app.status_message.as_ref().is_some_and(|m| m.text.starts_with("hint: ")));
+        assert!(app
+            .status_message
+            .as_ref()
+            .is_some_and(|m| m.text.starts_with("hint: ")));
         // Step 3 is an edit: a wrong one shows its hint at once.
         for key in parse_keys("jjjjllllllll") {
             route(&mut app, key);
@@ -553,9 +817,15 @@ mod tests {
         for key in parse_keys("x") {
             route(&mut app, key);
         }
-        assert!(page(&app).run.as_ref().unwrap().hint, "a try that didn't do it");
+        assert!(
+            page(&app).run.as_ref().unwrap().hint,
+            "a try that didn't do it"
+        );
         let practice = page(&app).run.as_ref().unwrap().practice;
-        assert!(!app.buffers.get(practice).unwrap().buffer.is_dirty(), "practice isn't work to save");
+        assert!(
+            !app.buffers.get(practice).unwrap().buffer.is_dirty(),
+            "practice isn't work to save"
+        );
         // s on the page skips it; q closes the page and the practice.
         app.tutorial_action(id, TutorialAction::Skip);
         assert_eq!(page(&app).run.as_ref().unwrap().step, 3);
@@ -576,7 +846,15 @@ mod tests {
         let practice = app.focused_pane_id();
         app.open_tutorial();
         assert_ne!(app.focused_pane_id(), practice, "the page where it is");
-        assert_eq!(app.windows().windows().into_iter().filter(|&p| app.windows().content(p) == Some(&id)).count(), 1, "not a second copy");
+        assert_eq!(
+            app.windows()
+                .windows()
+                .into_iter()
+                .filter(|&p| app.windows().content(p) == Some(&id))
+                .count(),
+            1,
+            "not a second copy"
+        );
         for lesson in 1..4 {
             app.tutorial_action(id, TutorialAction::Start(lesson));
             assert_eq!(app.windows().window_count(), 2, "lesson {lesson}");
@@ -584,7 +862,12 @@ mod tests {
         }
         // Were it shown twice anyway, the next practice takes the copy.
         let page_pane = app.focused_pane_id();
-        let other = app.windows().windows().into_iter().find(|&p| p != page_pane).unwrap();
+        let other = app
+            .windows()
+            .windows()
+            .into_iter()
+            .find(|&p| p != page_pane)
+            .unwrap();
         app.windows_mut().focus(other);
         app.set_pane_content(other, id);
         app.tutorial_action(id, TutorialAction::Start(4));
@@ -619,12 +902,20 @@ mod tests {
         let mut app = App::with_file(None);
         app.open_tutorial();
         let id = app.tutorial_page_id().unwrap();
-        let pages = page(&app).lessons.iter().position(|l| l.id == "fenix.pages").unwrap();
+        let pages = page(&app)
+            .lessons
+            .iter()
+            .position(|l| l.id == "fenix.pages")
+            .unwrap();
         app.tutorial_action(id, TutorialAction::Start(pages));
         app.tutorial_check();
         assert_eq!(page(&app).run.as_ref().unwrap().step, 0);
         app.tutorial_action(id, TutorialAction::Skip);
-        assert_eq!(page(&app).run.as_ref().unwrap().step, 2, "SPC p p skipped, q too");
+        assert_eq!(
+            page(&app).run.as_ref().unwrap().step,
+            2,
+            "SPC p p skipped, q too"
+        );
         app.tutorial_check();
         assert_eq!(page(&app).run.as_ref().unwrap().step, 2);
         app.tutorial_action(id, TutorialAction::Skip);
@@ -657,8 +948,19 @@ mod tests {
         let id = app.tutorial_page_id().unwrap();
         app.tutorial_action(id, TutorialAction::Keybindings);
         let focused = app.focused_buffer_id();
-        assert!(matches!(app.pages.get(&focused).map(|s| &s.model), Some(PageModel::Reading(p)) if p.back == Some(id)));
-        let bound = keymap::leader_trie().bindings().into_iter().find(|(_, c)| **c == "tutorial.open").map(|(seq, _)| seq.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" "));
+        assert!(
+            matches!(app.pages.get(&focused).map(|s| &s.model), Some(PageModel::Reading(p)) if p.back == Some(id))
+        );
+        let bound = keymap::leader_trie()
+            .bindings()
+            .into_iter()
+            .find(|(_, c)| **c == "tutorial.open")
+            .map(|(seq, _)| {
+                seq.iter()
+                    .map(keymap::describe_keypress)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
         assert_eq!(bound.as_deref(), Some("SPC h T"));
     }
 }

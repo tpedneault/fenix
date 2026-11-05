@@ -66,10 +66,19 @@ pub(super) struct EmberTrail {
 
 /// What's changed from `before` to `after`: each name in both whose value
 /// isn't the same, with what it was.
-pub(super) fn changed_values(before: &[(String, String)], after: &[(String, String)]) -> Vec<(String, String)> {
+pub(super) fn changed_values(
+    before: &[(String, String)],
+    after: &[(String, String)],
+) -> Vec<(String, String)> {
     after
         .iter()
-        .filter_map(|(name, value)| before.iter().find(|(n, _)| n == name).filter(|(_, old)| old != value).map(|(_, old)| (name.clone(), old.clone())))
+        .filter_map(|(name, value)| {
+            before
+                .iter()
+                .find(|(n, _)| n == name)
+                .filter(|(_, old)| old != value)
+                .map(|(_, old)| (name.clone(), old.clone()))
+        })
         .collect()
 }
 
@@ -92,13 +101,22 @@ impl EmberTrail {
     /// The newest stop's values, come: what changed since the stop before
     /// it in the same function and session worked out.
     pub fn fill(&mut self, session: u64, values: Vec<(String, String)>) {
-        let Some(newest) = self.stops.len().checked_sub(1) else { return };
+        let Some(newest) = self.stops.len().checked_sub(1) else {
+            return;
+        };
         if self.stops[newest].session != session {
             return;
         }
-        let (path, function) = (self.stops[newest].path.clone(), self.stops[newest].function.clone());
-        let before = self.stops.iter().take(newest).rev().find(|s| s.session == session && s.function == function && s.path == path && !s.values.is_empty());
-        let changed = before.map(|b| changed_values(&b.values, &values)).unwrap_or_default();
+        let (path, function) = (
+            self.stops[newest].path.clone(),
+            self.stops[newest].function.clone(),
+        );
+        let before = self.stops.iter().take(newest).rev().find(|s| {
+            s.session == session && s.function == function && s.path == path && !s.values.is_empty()
+        });
+        let changed = before
+            .map(|b| changed_values(&b.values, &values))
+            .unwrap_or_default();
         let stop = &mut self.stops[newest];
         stop.values = values;
         stop.changed = changed;
@@ -134,25 +152,56 @@ impl EmberTrail {
 impl App {
     /// How many stops the trail keeps (`debug.trail_stops`).
     fn debug_trail_keep(&self) -> usize {
-        self.config.int_value(TRAIL_SETTING).and_then(|n| usize::try_from(n).ok()).filter(|n| *n > 0).unwrap_or(DEFAULT_TRAIL_STOPS)
+        self.config
+            .int_value(TRAIL_SETTING)
+            .and_then(|n| usize::try_from(n).ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_TRAIL_STOPS)
     }
 
     /// A stop, its stack come: on the trail, its values to follow. A
     /// session in another project starts the trail again.
     pub(super) fn debug_trail_stopped(&mut self) {
-        let Some(session) = self.debug_session.as_ref() else { return };
-        let Some((function, path, line)) = session.call_stack.first().filter(|(_, p, l)| !p.as_os_str().is_empty() && *l > 0).cloned() else { return };
+        let Some(session) = self.debug_session.as_ref() else {
+            return;
+        };
+        let Some((function, path, line)) = session
+            .call_stack
+            .first()
+            .filter(|(_, p, l)| !p.as_os_str().is_empty() && *l > 0)
+            .cloned()
+        else {
+            return;
+        };
         let (id, root) = (session.generation, session.root.clone());
-        if self.debug_trail.stops.back().is_some_and(|s| s.root != root) {
+        if self
+            .debug_trail
+            .stops
+            .back()
+            .is_some_and(|s| s.root != root)
+        {
             self.debug_trail.stops.clear();
         }
         let keep = self.debug_trail_keep();
-        self.debug_trail.push(StopSnapshot { session: id, root, path, line, function, values: Vec::new(), changed: Vec::new() }, keep);
+        self.debug_trail.push(
+            StopSnapshot {
+                session: id,
+                root,
+                path,
+                line,
+                function,
+                values: Vec::new(),
+                changed: Vec::new(),
+            },
+            keep,
+        );
     }
 
     /// The top frame's first scope's values, come: the newest stop's.
     pub(super) fn debug_trail_values(&mut self, values: Vec<(String, String)>) {
-        let Some(id) = self.debug_session.as_ref().map(|s| s.generation) else { return };
+        let Some(id) = self.debug_session.as_ref().map(|s| s.generation) else {
+            return;
+        };
         self.debug_trail.fill(id, values);
     }
 
@@ -161,15 +210,22 @@ impl App {
     /// otherwise.
     pub(super) fn debug_trail_here(&self) -> bool {
         let root = self.integration_root();
-        self.debug_session.as_ref().is_some_and(|s| s.root == root) && !self.debug_trail.stops.is_empty()
+        self.debug_session.as_ref().is_some_and(|s| s.root == root)
+            && !self.debug_trail.stops.is_empty()
     }
 
     /// `[t` (back) and `]t` (forward), `count` stops: the code and its
     /// values as they were then. Forward past the newest is now.
     pub(super) fn debug_trail_scrub(&mut self, forward: bool, count: usize) {
         let len = self.debug_trail.stops.len();
-        let Some(at) = self.debug_trail.shown() else { return };
-        let to = if forward { at + count } else { at.saturating_sub(count) };
+        let Some(at) = self.debug_trail.shown() else {
+            return;
+        };
+        let to = if forward {
+            at + count
+        } else {
+            at.saturating_sub(count)
+        };
         if to + 1 >= len {
             self.debug_trail_now();
             return;
@@ -197,7 +253,11 @@ impl App {
         if self.debug_trail.viewing.is_none() || key != KeyPress::named(FenixNamedKey::Enter) {
             return false;
         }
-        if self.vim.mode() != Mode::Normal || !self.vim.is_idle() || self.main_view != MainView::Editor || self.sidebar_focused {
+        if self.vim.mode() != Mode::Normal
+            || !self.vim.is_idle()
+            || self.main_view != MainView::Editor
+            || self.sidebar_focused
+        {
             return false;
         }
         self.debug_trail_now();
@@ -207,17 +267,34 @@ impl App {
     /// The stop gone back to, while one is: what the code shows instead
     /// of now.
     pub(super) fn debug_trail_viewed(&self) -> Option<&StopSnapshot> {
-        self.debug_trail.viewing.and_then(|i| self.debug_trail.stops.get(i))
+        self.debug_trail
+            .viewing
+            .and_then(|i| self.debug_trail.stops.get(i))
     }
 
     /// What changed at the stop now, when the values written in the code
     /// are its: the top frame selected, stopped where the trail's newest
     /// stop is.
     pub(super) fn debug_trail_changed_now(&self) -> Vec<(String, String)> {
-        let Some(session) = self.debug_session.as_ref().filter(|s| s.selected_frame == 0) else { return Vec::new() };
-        let Some(newest) = self.debug_trail.stops.back().filter(|s| s.session == session.generation) else { return Vec::new() };
+        let Some(session) = self
+            .debug_session
+            .as_ref()
+            .filter(|s| s.selected_frame == 0)
+        else {
+            return Vec::new();
+        };
+        let Some(newest) = self
+            .debug_trail
+            .stops
+            .back()
+            .filter(|s| s.session == session.generation)
+        else {
+            return Vec::new();
+        };
         match self.debug_stop_location() {
-            Some((path, line)) if same_file(&path, &newest.path) && line == newest.line => newest.changed.clone(),
+            Some((path, line)) if same_file(&path, &newest.path) && line == newest.line => {
+                newest.changed.clone()
+            }
             _ => Vec::new(),
         }
     }
@@ -225,12 +302,26 @@ impl App {
     /// The gutter's stripe for `buffer`, in a pane showing the 0-based
     /// document lines `lines` from its first row: each `(row, colour)`,
     /// this session's in ember as warm as it is, one before's dim.
-    pub(super) fn debug_trail_marks(&self, buffer: BufferId, lines: &[usize], rows: usize) -> Vec<(usize, [f32; 4])> {
+    pub(super) fn debug_trail_marks(
+        &self,
+        buffer: BufferId,
+        lines: &[usize],
+        rows: usize,
+    ) -> Vec<(usize, [f32; 4])> {
         if self.debug_trail.stops.is_empty() {
             return Vec::new();
         }
-        let Some(path) = self.buffers.get(buffer).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return Vec::new() };
-        let heat = self.debug_trail.heat(&path, self.debug_session.as_ref().map(|s| s.generation));
+        let Some(path) = self
+            .buffers
+            .get(buffer)
+            .and_then(|ob| ob.buffer.path())
+            .map(Path::to_path_buf)
+        else {
+            return Vec::new();
+        };
+        let heat = self
+            .debug_trail
+            .heat(&path, self.debug_session.as_ref().map(|s| s.generation));
         if heat.is_empty() {
             return Vec::new();
         }
@@ -240,7 +331,18 @@ impl App {
             .iter()
             .enumerate()
             .take(rows + 1)
-            .filter_map(|(row, line)| heat.get(&(line + 1)).map(|&(w, this)| (row, if this { [er, eg, eb, w] } else { [mr, mg, mb, w] })))
+            .filter_map(|(row, line)| {
+                heat.get(&(line + 1)).map(|&(w, this)| {
+                    (
+                        row,
+                        if this {
+                            [er, eg, eb, w]
+                        } else {
+                            [mr, mg, mb, w]
+                        },
+                    )
+                })
+            })
             .collect()
     }
 
@@ -263,12 +365,20 @@ impl App {
         let theme = &self.theme;
         let (ember, muted, text) = (theme.git_modified, theme.gutter_fg, theme.fg_modeline);
         let len = trail.stops.len();
-        let first = len.saturating_sub(RIBBON_STOPS).min(shown.saturating_sub(RIBBON_STOPS / 2));
+        let first = len
+            .saturating_sub(RIBBON_STOPS)
+            .min(shown.saturating_sub(RIBBON_STOPS / 2));
         let mut out = vec![(" ".to_string(), text, false)];
         if first > 0 {
             out.push(("… ".to_string(), muted, false));
         }
-        for (i, stop) in trail.stops.iter().enumerate().skip(first).take(RIBBON_STOPS) {
+        for (i, stop) in trail
+            .stops
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(RIBBON_STOPS)
+        {
             let this = Some(stop.session) == session;
             let (glyph, color) = match (i == shown, this) {
                 (true, _) => ("◉", ember),
@@ -278,13 +388,30 @@ impl App {
             out.push((glyph.to_string(), color, false));
         }
         let stop = &trail.stops[shown];
-        let name = stop.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        out.push((format!("   stop {}/{len}  {} {name}:{}", shown + 1, stop.function, stop.line), text, false));
+        let name = stop
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        out.push((
+            format!(
+                "   stop {}/{len}  {} {name}:{}",
+                shown + 1,
+                stop.function,
+                stop.line
+            ),
+            text,
+            false,
+        ));
         if !stop.changed.is_empty() {
             let names: Vec<&str> = stop.changed.iter().map(|(n, _)| n.as_str()).collect();
             out.push((format!("  changed {}", names.join(" ")), ember, false));
         }
-        let keys = if trail.viewing.is_some() { "   [t back  ]t on  Enter now" } else { "   [t goes back along the trail" };
+        let keys = if trail.viewing.is_some() {
+            "   [t back  ]t on  Enter now"
+        } else {
+            "   [t goes back along the trail"
+        };
         out.push((keys.to_string(), muted, true));
         Some(out)
     }
@@ -293,8 +420,17 @@ impl App {
     pub(super) fn debug_trail_modeline(&self) -> Option<String> {
         let at = self.debug_trail.viewing?;
         let stop = self.debug_trail.stops.get(at)?;
-        let name = stop.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        Some(format!("stop {}/{} {name}:{} -- Enter is now", at + 1, self.debug_trail.stops.len(), stop.line))
+        let name = stop
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        Some(format!(
+            "stop {}/{} {name}:{} -- Enter is now",
+            at + 1,
+            self.debug_trail.stops.len(),
+            stop.line
+        ))
     }
 }
 
@@ -303,11 +439,22 @@ mod tests {
     use super::*;
 
     fn stop(session: u64, file: &str, line: usize, function: &str) -> StopSnapshot {
-        StopSnapshot { session, root: PathBuf::from("/p"), path: PathBuf::from(file), line, function: function.into(), values: Vec::new(), changed: Vec::new() }
+        StopSnapshot {
+            session,
+            root: PathBuf::from("/p"),
+            path: PathBuf::from(file),
+            line,
+            function: function.into(),
+            values: Vec::new(),
+            changed: Vec::new(),
+        }
     }
 
     fn vals(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -316,7 +463,10 @@ mod tests {
         for line in 1..=5 {
             trail.push(stop(1, "/p/a.py", line, "f"), 3);
         }
-        assert_eq!(trail.stops.iter().map(|s| s.line).collect::<Vec<_>>(), [3, 4, 5]);
+        assert_eq!(
+            trail.stops.iter().map(|s| s.line).collect::<Vec<_>>(),
+            [3, 4, 5]
+        );
         trail.viewing = Some(0);
         trail.push(stop(1, "/p/a.py", 6, "f"), 3);
         assert_eq!(trail.viewing, None);
@@ -329,12 +479,19 @@ mod tests {
         trail.fill(1, vals(&[("total", "3.0"), ("i", "0")]));
         trail.push(stop(1, "/p/a.py", 9, "g"), 10);
         trail.fill(1, vals(&[("total", "99")]));
-        assert!(trail.stops[1].changed.is_empty(), "another function's total isn't this one's");
+        assert!(
+            trail.stops[1].changed.is_empty(),
+            "another function's total isn't this one's"
+        );
         trail.push(stop(1, "/p/a.py", 4, "f"), 10);
         trail.fill(1, vals(&[("total", "4.08"), ("i", "0"), ("new", "1")]));
         assert_eq!(trail.stops[2].changed, vals(&[("total", "3.0")]));
         trail.fill(2, vals(&[("x", "1")]));
-        assert_eq!(trail.stops[2].values.len(), 3, "another session's values aren't this stop's");
+        assert_eq!(
+            trail.stops[2].values.len(),
+            3,
+            "another session's values aren't this stop's"
+        );
     }
 
     #[test]
@@ -351,14 +508,25 @@ mod tests {
         assert_eq!(heat[&3], (COOLING * COOLING, true));
         trail.viewing = Some(2);
         let back = trail.heat(Path::new("/p/a.py"), Some(2));
-        assert_eq!(back[&3], (1.0, true), "gone back to line 3: it's the warm one");
-        assert_eq!(back[&2], (COOLING, true), "the visit to 2 after it isn't yet");
+        assert_eq!(
+            back[&3],
+            (1.0, true),
+            "gone back to line 3: it's the warm one"
+        );
+        assert_eq!(
+            back[&2],
+            (COOLING, true),
+            "the visit to 2 after it isn't yet"
+        );
         assert_eq!(warmth(40), None);
     }
 
     #[test]
     fn what_changed_is_by_name() {
-        let got = changed_values(&vals(&[("a", "1"), ("b", "2")]), &vals(&[("b", "3"), ("a", "1"), ("c", "9")]));
+        let got = changed_values(
+            &vals(&[("a", "1"), ("b", "2")]),
+            &vals(&[("b", "3"), ("a", "1"), ("c", "9")]),
+        );
         assert_eq!(got, vals(&[("b", "2")]));
     }
 }

@@ -84,14 +84,18 @@ fn measure_one(path: &Path, cancel: &impl Fn() -> bool, files: &mut usize, bytes
     if cancel() {
         return;
     }
-    let Ok(metadata) = fs::symlink_metadata(path) else { return };
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return;
+    };
     if metadata.file_type().is_symlink() {
         // A link is one entry to recreate, not the tree behind it.
         *files += 1;
         return;
     }
     if metadata.is_dir() {
-        let Ok(entries) = fs::read_dir(path) else { return };
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
         for entry in entries.flatten() {
             measure_one(&entry.path(), cancel, files, bytes);
         }
@@ -125,7 +129,11 @@ pub fn copy_into_reporting(
     report: &mut impl FnMut(&Progress),
 ) -> Vec<Outcome> {
     let (files_total, bytes_total) = measure(sources, cancel);
-    let mut progress = Progress { files_total, bytes_total, ..Progress::default() };
+    let mut progress = Progress {
+        files_total,
+        bytes_total,
+        ..Progress::default()
+    };
     run_reporting(sources, dest, on_conflict, cancel, |src, target| {
         copy_recursive_reporting(src, target, cancel, &mut progress, report)
     })
@@ -145,7 +153,11 @@ pub fn move_into_reporting(
     report: &mut impl FnMut(&Progress),
 ) -> Vec<Outcome> {
     let (files_total, bytes_total) = measure(sources, cancel);
-    let mut progress = Progress { files_total, bytes_total, ..Progress::default() };
+    let mut progress = Progress {
+        files_total,
+        bytes_total,
+        ..Progress::default()
+    };
     run_reporting(sources, dest, on_conflict, cancel, |src, target| {
         if fs::rename(src, target).is_ok() {
             // A rename moves the whole tree in one step, so there is
@@ -157,7 +169,9 @@ pub fn move_into_reporting(
             return Ok(());
         }
         copy_recursive_reporting(src, target, cancel, &mut progress, report)?;
-        let is_dir = fs::symlink_metadata(src).map(|m| m.is_dir()).unwrap_or(false);
+        let is_dir = fs::symlink_metadata(src)
+            .map(|m| m.is_dir())
+            .unwrap_or(false);
         if is_dir {
             fs::remove_dir_all(src)
         } else {
@@ -188,7 +202,13 @@ fn copy_recursive_reporting(
         fs::create_dir_all(dest)?;
         for entry in fs::read_dir(src)? {
             let entry = entry?;
-            copy_recursive_reporting(&entry.path(), &dest.join(entry.file_name()), cancel, progress, report)?;
+            copy_recursive_reporting(
+                &entry.path(),
+                &dest.join(entry.file_name()),
+                cancel,
+                progress,
+                report,
+            )?;
         }
         return Ok(());
     }
@@ -221,11 +241,17 @@ fn run_reporting(
     let mut outcomes = Vec::with_capacity(sources.len());
     for src in sources {
         if cancel() {
-            outcomes.push(Outcome { path: src.clone(), error: Some("cancelled".to_string()) });
+            outcomes.push(Outcome {
+                path: src.clone(),
+                error: Some("cancelled".to_string()),
+            });
             continue;
         }
         let Some(name) = src.file_name() else {
-            outcomes.push(Outcome { path: src.clone(), error: Some("no filename to copy under".to_string()) });
+            outcomes.push(Outcome {
+                path: src.clone(),
+                error: Some("no filename to copy under".to_string()),
+            });
             continue;
         };
         let mut target = dest.join(name);
@@ -237,23 +263,35 @@ fn run_reporting(
             match on_conflict {
                 OnConflict::KeepBoth => target = free_name(&target),
                 _ => {
-                    outcomes.push(Outcome { path: src.clone(), error: Some("source and destination are the same".to_string()) });
+                    outcomes.push(Outcome {
+                        path: src.clone(),
+                        error: Some("source and destination are the same".to_string()),
+                    });
                     continue;
                 }
             }
         } else if target.exists() {
             match on_conflict {
                 OnConflict::Skip => {
-                    outcomes.push(Outcome { path: src.clone(), error: Some("skipped -- already exists".to_string()) });
+                    outcomes.push(Outcome {
+                        path: src.clone(),
+                        error: Some("skipped -- already exists".to_string()),
+                    });
                     continue;
                 }
                 OnConflict::KeepBoth => target = free_name(&target),
                 OnConflict::Overwrite => {
                     // A file has to go before it can be replaced; a
                     // directory is merged into, so it stays.
-                    if fs::symlink_metadata(&target).map(|m| !m.is_dir()).unwrap_or(false) {
+                    if fs::symlink_metadata(&target)
+                        .map(|m| !m.is_dir())
+                        .unwrap_or(false)
+                    {
                         if let Err(err) = fs::remove_file(&target) {
-                            outcomes.push(Outcome { path: src.clone(), error: Some(err.to_string()) });
+                            outcomes.push(Outcome {
+                                path: src.clone(),
+                                error: Some(err.to_string()),
+                            });
                             continue;
                         }
                     }
@@ -262,8 +300,14 @@ fn run_reporting(
         }
 
         match each(src, &target) {
-            Ok(()) => outcomes.push(Outcome { path: src.clone(), error: None }),
-            Err(err) => outcomes.push(Outcome { path: src.clone(), error: Some(err.to_string()) }),
+            Ok(()) => outcomes.push(Outcome {
+                path: src.clone(),
+                error: None,
+            }),
+            Err(err) => outcomes.push(Outcome {
+                path: src.clone(),
+                error: Some(err.to_string()),
+            }),
         }
     }
     outcomes
@@ -274,7 +318,10 @@ fn run_reporting(
 /// it, so the result is still recognisably the same kind of file.
 fn free_name(taken: &Path) -> PathBuf {
     let parent = taken.parent().unwrap_or(Path::new(""));
-    let stem = taken.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = taken
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let ext = taken.extension().map(|e| e.to_string_lossy().into_owned());
     for n in 2..10_000 {
         let name = match &ext {
@@ -329,8 +376,14 @@ pub fn rename_all(renames: &[(PathBuf, PathBuf)], via_temporaries: bool) -> Vec<
         return renames
             .iter()
             .map(|(from, to)| match rename_one(from, to) {
-                Ok(()) => Outcome { path: from.clone(), error: None },
-                Err(err) => Outcome { path: from.clone(), error: Some(err.to_string()) },
+                Ok(()) => Outcome {
+                    path: from.clone(),
+                    error: None,
+                },
+                Err(err) => Outcome {
+                    path: from.clone(),
+                    error: Some(err.to_string()),
+                },
             })
             .collect();
     }
@@ -359,7 +412,13 @@ pub fn rename_all(renames: &[(PathBuf, PathBuf)], via_temporaries: bool) -> Vec<
         done.push((original.clone(), target.clone()));
     }
 
-    renames.iter().map(|(from, _)| Outcome { path: from.clone(), error: None }).collect()
+    renames
+        .iter()
+        .map(|(from, _)| Outcome {
+            path: from.clone(),
+            error: None,
+        })
+        .collect()
 }
 
 /// Undoes a partly-applied batch: whatever is still wearing a temporary
@@ -381,9 +440,15 @@ fn abandoned(renames: &[(PathBuf, PathBuf)], culprit: &Path, reason: &str) -> Ve
     renames
         .iter()
         .map(|(from, _)| {
-            let error =
-                if from == culprit { reason.to_string() } else { format!("not applied -- {} could not be renamed", culprit.display()) };
-            Outcome { path: from.clone(), error: Some(error) }
+            let error = if from == culprit {
+                reason.to_string()
+            } else {
+                format!("not applied -- {} could not be renamed", culprit.display())
+            };
+            Outcome {
+                path: from.clone(),
+                error: Some(error),
+            }
         })
         .collect()
 }
@@ -422,11 +487,20 @@ mod tests {
         let a = dir.write("a.txt", "A");
         let b = dir.write("b.txt", "B");
 
-        let outcomes = rename_all(&[(a, dir.path().join("x.txt")), (b, dir.path().join("y.txt"))], false);
+        let outcomes = rename_all(
+            &[(a, dir.path().join("x.txt")), (b, dir.path().join("y.txt"))],
+            false,
+        );
 
         assert!(outcomes.iter().all(|o| o.succeeded()), "{outcomes:?}");
-        assert_eq!(std::fs::read_to_string(dir.path().join("x.txt")).unwrap(), "A");
-        assert_eq!(std::fs::read_to_string(dir.path().join("y.txt")).unwrap(), "B");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("x.txt")).unwrap(),
+            "A"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("y.txt")).unwrap(),
+            "B"
+        );
     }
 
     #[test]
@@ -451,7 +525,14 @@ mod tests {
         let b = dir.write("b.txt", "B");
         let c = dir.write("c.txt", "C");
 
-        let outcomes = rename_all(&[(a.clone(), b.clone()), (b.clone(), c.clone()), (c.clone(), a.clone())], true);
+        let outcomes = rename_all(
+            &[
+                (a.clone(), b.clone()),
+                (b.clone(), c.clone()),
+                (c.clone(), a.clone()),
+            ],
+            true,
+        );
 
         assert!(outcomes.iter().all(|o| o.succeeded()), "{outcomes:?}");
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "C");
@@ -467,7 +548,10 @@ mod tests {
         let outcomes = rename_all(&[(a, dir.path().join("2026").join("a.txt"))], false);
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
-        assert_eq!(std::fs::read_to_string(dir.path().join("2026").join("a.txt")).unwrap(), "A");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("2026").join("a.txt")).unwrap(),
+            "A"
+        );
     }
 
     #[test]
@@ -483,15 +567,38 @@ mod tests {
         std::fs::create_dir(&blocked).unwrap();
         std::fs::write(blocked.join("inside.txt"), "x").unwrap();
 
-        let outcomes = rename_all(&[(a.clone(), dir.path().join("x.txt")), (b.clone(), blocked.clone())], true);
+        let outcomes = rename_all(
+            &[
+                (a.clone(), dir.path().join("x.txt")),
+                (b.clone(), blocked.clone()),
+            ],
+            true,
+        );
 
-        assert!(outcomes.iter().all(|o| !o.succeeded()), "a bulk rename is one edit: none of it applied");
-        assert_eq!(std::fs::read_to_string(&a).unwrap(), "A", "put back, even though its own rename worked");
-        assert_eq!(std::fs::read_to_string(&b).unwrap(), "B", "and so is this one");
-        assert!(!dir.path().join("x.txt").exists(), "and nothing was left half-renamed");
+        assert!(
+            outcomes.iter().all(|o| !o.succeeded()),
+            "a bulk rename is one edit: none of it applied"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "A",
+            "put back, even though its own rename worked"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&b).unwrap(),
+            "B",
+            "and so is this one"
+        );
+        assert!(
+            !dir.path().join("x.txt").exists(),
+            "and nothing was left half-renamed"
+        );
         // The message blames the file that actually went wrong, rather
         // than the first one in the list.
-        assert!(outcomes[0].error.as_ref().unwrap().contains("b.txt"), "{outcomes:?}");
+        assert!(
+            outcomes[0].error.as_ref().unwrap().contains("b.txt"),
+            "{outcomes:?}"
+        );
     }
 
     #[test]
@@ -502,9 +609,15 @@ mod tests {
 
         rename_all(&[(a.clone(), b.clone()), (b, a)], true);
 
-        let names: Vec<String> =
-            std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-        assert!(!names.iter().any(|n| n.contains("fenix-rename")), "got: {names:?}");
+        let names: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.contains("fenix-rename")),
+            "got: {names:?}"
+        );
     }
 
     #[test]
@@ -518,7 +631,11 @@ mod tests {
         let conflicts = conflicts_in(&[a, b], dest.path());
 
         assert_eq!(conflicts, vec![dest.path().join("a.txt")]);
-        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old", "and nothing was written");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("a.txt")).unwrap(),
+            "old",
+            "and nothing was written"
+        );
     }
 
     #[test]
@@ -537,15 +654,25 @@ mod tests {
         std::fs::write(tree.join("b.txt"), "123").unwrap();
 
         let mut seen: Vec<(usize, u64)> = Vec::new();
-        let outcomes = copy_into_reporting(&[tree], dest.path(), OnConflict::Overwrite, &|| false, &mut |p| {
-            seen.push((p.files_done, p.bytes_done));
-            // Both counts, because neither alone is honest.
-            assert_eq!(p.files_total, 2);
-            assert_eq!(p.bytes_total, 8);
-        });
+        let outcomes = copy_into_reporting(
+            &[tree],
+            dest.path(),
+            OnConflict::Overwrite,
+            &|| false,
+            &mut |p| {
+                seen.push((p.files_done, p.bytes_done));
+                // Both counts, because neither alone is honest.
+                assert_eq!(p.files_total, 2);
+                assert_eq!(p.bytes_total, 8);
+            },
+        );
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
-        assert_eq!(seen.last(), Some(&(2, 8)), "it finishes on the total: {seen:?}");
+        assert_eq!(
+            seen.last(),
+            Some(&(2, 8)),
+            "it finishes on the total: {seen:?}"
+        );
     }
 
     #[test]
@@ -571,9 +698,20 @@ mod tests {
         let a = src.write("a.txt", "A");
         let b = src.write("b.txt", "B");
 
-        let outcomes = copy_into_reporting(&[a, b], dest.path(), OnConflict::Overwrite, &|| true, &mut |_| {});
+        let outcomes = copy_into_reporting(
+            &[a, b],
+            dest.path(),
+            OnConflict::Overwrite,
+            &|| true,
+            &mut |_| {},
+        );
 
-        assert!(outcomes.iter().all(|o| o.error.as_deref() == Some("cancelled")), "{outcomes:?}");
+        assert!(
+            outcomes
+                .iter()
+                .all(|o| o.error.as_deref() == Some("cancelled")),
+            "{outcomes:?}"
+        );
         assert!(!dest.path().join("a.txt").exists());
     }
 
@@ -590,9 +728,18 @@ mod tests {
         // Allow the measuring pass and the first file, then stop.
         let cancel = || seen.fetch_add(1, Ordering::Relaxed) > 4;
 
-        copy_into_reporting(&[a, b], dest.path(), OnConflict::Overwrite, &cancel, &mut |_| {});
+        copy_into_reporting(
+            &[a, b],
+            dest.path(),
+            OnConflict::Overwrite,
+            &cancel,
+            &mut |_| {},
+        );
 
-        assert!(dest.path().join("a.txt").exists(), "the one that finished is still there");
+        assert!(
+            dest.path().join("a.txt").exists(),
+            "the one that finished is still there"
+        );
         assert!(!dest.path().join("b.txt").exists());
     }
 
@@ -607,8 +754,14 @@ mod tests {
         let outcomes = copy_into(&[file, tree], dest.path(), OnConflict::Overwrite);
 
         assert!(outcomes.iter().all(|o| o.succeeded()), "{outcomes:?}");
-        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "hello");
-        assert_eq!(std::fs::read_to_string(dest.path().join("tree").join("inner.txt")).unwrap(), "deep");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("a.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("tree").join("inner.txt")).unwrap(),
+            "deep"
+        );
     }
 
     #[test]
@@ -620,9 +773,15 @@ mod tests {
 
         let outcomes = copy_into(&[a], dest.path(), OnConflict::Skip);
 
-        assert!(!outcomes[0].succeeded(), "a skip is not a success -- the file did not arrive");
+        assert!(
+            !outcomes[0].succeeded(),
+            "a skip is not a success -- the file did not arrive"
+        );
         assert!(outcomes[0].error.as_ref().unwrap().contains("skipped"));
-        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("a.txt")).unwrap(),
+            "old"
+        );
     }
 
     #[test]
@@ -635,8 +794,15 @@ mod tests {
         let outcomes = copy_into(&[a], dest.path(), OnConflict::KeepBoth);
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
-        assert_eq!(std::fs::read_to_string(dest.path().join("notes.txt")).unwrap(), "old", "the original is untouched");
-        assert_eq!(std::fs::read_to_string(dest.path().join("notes (2).txt")).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("notes.txt")).unwrap(),
+            "old",
+            "the original is untouched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("notes (2).txt")).unwrap(),
+            "new"
+        );
     }
 
     #[test]
@@ -661,7 +827,10 @@ mod tests {
 
         copy_into(&[a], dest.path(), OnConflict::Overwrite);
 
-        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("a.txt")).unwrap(),
+            "new"
+        );
     }
 
     #[test]
@@ -678,7 +847,10 @@ mod tests {
         copy_into(&[tree], dest.path(), OnConflict::Overwrite);
 
         assert!(dest.path().join("tree").join("new.txt").exists());
-        assert!(dest.path().join("tree").join("kept.txt").exists(), "the destination's own file survived");
+        assert!(
+            dest.path().join("tree").join("kept.txt").exists(),
+            "the destination's own file survived"
+        );
     }
 
     #[test]
@@ -691,7 +863,10 @@ mod tests {
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
         assert!(!a.exists());
-        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("a.txt")).unwrap(),
+            "hello"
+        );
     }
 
     #[test]
@@ -706,7 +881,10 @@ mod tests {
         move_into(std::slice::from_ref(&a), dest.path(), OnConflict::Skip);
 
         assert!(a.exists(), "the source is still there");
-        assert_eq!(std::fs::read_to_string(dest.path().join("a.txt")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(dest.path().join("a.txt")).unwrap(),
+            "old"
+        );
     }
 
     #[test]
@@ -717,7 +895,11 @@ mod tests {
         let outcomes = copy_into(std::slice::from_ref(&a), dir.path(), OnConflict::Overwrite);
 
         assert!(!outcomes[0].succeeded());
-        assert_eq!(std::fs::read_to_string(&a).unwrap(), "x", "and it is still there");
+        assert_eq!(
+            std::fs::read_to_string(&a).unwrap(),
+            "x",
+            "and it is still there"
+        );
     }
 
     #[test]
@@ -730,7 +912,10 @@ mod tests {
         let outcomes = copy_into(&[a], dir.path(), OnConflict::KeepBoth);
 
         assert!(outcomes[0].succeeded(), "{:?}", outcomes[0].error);
-        assert_eq!(std::fs::read_to_string(dir.path().join("a (2).txt")).unwrap(), "x");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a (2).txt")).unwrap(),
+            "x"
+        );
     }
 
     #[test]
@@ -744,7 +929,10 @@ mod tests {
 
         assert_eq!(outcomes.len(), 2);
         assert!(!outcomes[0].succeeded());
-        assert!(outcomes[1].succeeded(), "the one after the failure still happened");
+        assert!(
+            outcomes[1].succeeded(),
+            "the one after the failure still happened"
+        );
         assert!(dest.path().join("real.txt").exists());
     }
 }

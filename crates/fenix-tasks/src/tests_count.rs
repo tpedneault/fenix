@@ -12,7 +12,10 @@ pub fn test_counts(output: &str) -> Option<(u32, u32)> {
     for line in output.lines() {
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("test result:") {
-            let (p, f) = (count_before(rest, "passed").unwrap_or(0), count_before(rest, "failed").unwrap_or(0));
+            let (p, f) = (
+                count_before(rest, "passed").unwrap_or(0),
+                count_before(rest, "failed").unwrap_or(0),
+            );
             let c = cargo.get_or_insert((0, 0));
             c.0 += p;
             c.1 += f;
@@ -33,8 +36,11 @@ pub fn test_counts(output: &str) -> Option<(u32, u32)> {
 /// pytest's `==== 2 failed, 10 passed in 0.31s ====`, Jest's `Tests: 1
 /// failed, 9 passed, 10 total`, Vitest's `Tests  1 failed | 9 passed (10)`.
 fn is_summary(line: &str) -> bool {
-    let pytest = line.starts_with('=') && line.contains(" in ") && (line.contains(" passed") || line.contains(" failed"));
-    let jest_or_vitest = line.starts_with("Tests") && (line.contains(" passed") || line.contains(" failed"));
+    let pytest = line.starts_with('=')
+        && line.contains(" in ")
+        && (line.contains(" passed") || line.contains(" failed"));
+    let jest_or_vitest =
+        line.starts_with("Tests") && (line.contains(" passed") || line.contains(" failed"));
     pytest || jest_or_vitest
 }
 
@@ -42,7 +48,14 @@ fn is_summary(line: &str) -> bool {
 fn count_before(text: &str, word: &str) -> Option<u32> {
     let at = text.find(word)?;
     let before = text[..at].trim_end();
-    let digits: String = before.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
+    let digits: String = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     digits.parse().ok()
 }
 
@@ -58,10 +71,22 @@ mod tests {
 
     #[test]
     fn pytest_jest_and_vitest_summaries() {
-        assert_eq!(test_counts("==== 2 failed, 10 passed in 0.31s ===="), Some((10, 2)));
-        assert_eq!(test_counts("========== 12 passed in 1.02s =========="), Some((12, 0)));
-        assert_eq!(test_counts("Tests:       1 failed, 9 passed, 10 total\nTime: 2s"), Some((9, 1)));
-        assert_eq!(test_counts(" Tests  1 failed | 9 passed (10)"), Some((9, 1)));
+        assert_eq!(
+            test_counts("==== 2 failed, 10 passed in 0.31s ===="),
+            Some((10, 2))
+        );
+        assert_eq!(
+            test_counts("========== 12 passed in 1.02s =========="),
+            Some((12, 0))
+        );
+        assert_eq!(
+            test_counts("Tests:       1 failed, 9 passed, 10 total\nTime: 2s"),
+            Some((9, 1))
+        );
+        assert_eq!(
+            test_counts(" Tests  1 failed | 9 passed (10)"),
+            Some((9, 1))
+        );
     }
 
     #[test]
@@ -72,7 +97,10 @@ mod tests {
 
     #[test]
     fn a_build_reports_no_tests() {
-        assert_eq!(test_counts("   Compiling foo v0.1.0\n    Finished `dev` profile"), None);
+        assert_eq!(
+            test_counts("   Compiling foo v0.1.0\n    Finished `dev` profile"),
+            None
+        );
         assert_eq!(test_counts("all 3 tests passed, said someone"), None);
     }
 }

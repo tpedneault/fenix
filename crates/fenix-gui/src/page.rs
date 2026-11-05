@@ -150,12 +150,26 @@ impl Popup {
     /// Its rows as plain text.
     #[cfg(test)]
     pub fn text(&self) -> String {
-        self.rows.iter().map(|r| r.iter().map(|(t, _)| t.as_str()).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+        self.rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|(t, _)| t.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Its width in cells: the longest row.
     pub fn cols(&self) -> usize {
-        self.rows.iter().map(|r| r.iter().map(|(t, _)| t.chars().count()).sum::<usize>()).max().unwrap_or(0)
+        self.rows
+            .iter()
+            .map(|r| r.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -178,7 +192,10 @@ impl Page {
 
     /// Where the cursor sits: on the focused row, else the top.
     pub fn cursor(&self) -> (usize, usize) {
-        self.focus.as_ref().map(|(line, cols)| (*line, cols.start + 1)).unwrap_or((0, 0))
+        self.focus
+            .as_ref()
+            .map(|(line, cols)| (*line, cols.start + 1))
+            .unwrap_or((0, 0))
     }
 }
 
@@ -196,7 +213,14 @@ pub fn line_cells(line: &str) -> Option<Vec<usize>> {
         return None;
     }
     let mut at = 0;
-    let mut cells: Vec<usize> = line.chars().map(|c| { let here = at; at += char_cells(c); here }).collect();
+    let mut cells: Vec<usize> = line
+        .chars()
+        .map(|c| {
+            let here = at;
+            at += char_cells(c);
+            here
+        })
+        .collect();
     cells.push(at);
     Some(cells)
 }
@@ -279,7 +303,11 @@ pub fn fit_path(s: &str, max: usize) -> String {
         return fit_tail(s, max);
     }
     let keep = max - 1;
-    let last = s.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().map_or(0, |l| l.chars().count() + 1);
+    let last = s
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .map_or(0, |l| l.chars().count() + 1);
     let back = last.max(keep * 2 / 3).min(keep);
     let front = keep - back;
     let mut out: String = s.chars().take(front).collect();
@@ -346,18 +374,36 @@ impl Filter {
 
     /// The words typed, lowercased.
     pub fn words(&self) -> Vec<String> {
-        self.text.split_whitespace().map(str::to_lowercase).collect()
+        self.text
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect()
     }
 
     /// The filter's line: being typed, set, or a `hint` of what it does.
     pub fn line(&self, hint: &str, width: usize) -> (String, Role) {
         if self.typing {
-            let caret = self.caret.unwrap_or(usize::MAX).min(self.text.chars().count());
-            (format!("/ {}", with_caret(&self.text, caret, width.saturating_sub(2))), Role::Title)
+            let caret = self
+                .caret
+                .unwrap_or(usize::MAX)
+                .min(self.text.chars().count());
+            (
+                format!(
+                    "/ {}",
+                    with_caret(&self.text, caret, width.saturating_sub(2))
+                ),
+                Role::Title,
+            )
         } else if self.is_empty() {
             (fit(&format!("/ {hint}"), width), Role::Muted)
         } else {
-            (fit_tail(&format!("/ {}  (/ changes it, Esc clears)", self.text), width), Role::Accent)
+            (
+                fit_tail(
+                    &format!("/ {}  (/ changes it, Esc clears)", self.text),
+                    width,
+                ),
+                Role::Accent,
+            )
         }
     }
 }
@@ -458,13 +504,22 @@ pub fn with_caret(text: &str, caret: usize, max: usize) -> String {
     }
     // The caret near the end: the end, as `fit_tail` shows it.
     if n - at < max {
-        return std::iter::once('…').chain(all[n - (max - 1)..].iter().copied()).collect();
+        return std::iter::once('…')
+            .chain(all[n - (max - 1)..].iter().copied())
+            .collect();
     }
     let start = at.saturating_sub(max / 2);
     if start == 0 {
-        return all[..max - 1].iter().copied().chain(std::iter::once('…')).collect();
+        return all[..max - 1]
+            .iter()
+            .copied()
+            .chain(std::iter::once('…'))
+            .collect();
     }
-    std::iter::once('…').chain(all[start + 1..start + max - 1].iter().copied()).chain(std::iter::once('…')).collect()
+    std::iter::once('…')
+        .chain(all[start + 1..start + max - 1].iter().copied())
+        .chain(std::iter::once('…'))
+        .collect()
 }
 
 /// `text` wrapped at word boundaries to lines of at most `width`; a
@@ -509,7 +564,16 @@ impl Default for Grid {
 
 impl Grid {
     pub fn new() -> Self {
-        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None, images: Vec::new(), underlines: Vec::new() }
+        Grid {
+            lines: Vec::new(),
+            spans: Vec::new(),
+            rules: Vec::new(),
+            panels: Vec::new(),
+            focus: None,
+            popup: None,
+            images: Vec::new(),
+            underlines: Vec::new(),
+        }
     }
 
     /// Draws `page` with its top-left at (`line`, `col`): its text, its
@@ -520,19 +584,37 @@ impl Grid {
             self.write(line + i, col, text);
         }
         let shift = |cols: &Range<usize>| cols.start + col..cols.end + col;
-        self.spans.extend(page.spans.iter().map(|s| Span { line: s.line + line, cols: shift(&s.cols), role: s.role }));
-        self.rules.extend(page.rules.iter().map(|(l, c)| (l + line, shift(c))));
-        self.panels.extend(page.panels.iter().map(|(l, c)| (l + line, shift(c))));
+        self.spans.extend(page.spans.iter().map(|s| Span {
+            line: s.line + line,
+            cols: shift(&s.cols),
+            role: s.role,
+        }));
+        self.rules
+            .extend(page.rules.iter().map(|(l, c)| (l + line, shift(c))));
+        self.panels
+            .extend(page.panels.iter().map(|(l, c)| (l + line, shift(c))));
         if focus {
             if let Some((l, c)) = &page.focus {
                 self.focus = Some((l + line, shift(c)));
             }
         }
         if let Some(popup) = &page.popup {
-            self.popup = Some(Popup { line: popup.line + line, col: popup.col + col, ..popup.clone() });
+            self.popup = Some(Popup {
+                line: popup.line + line,
+                col: popup.col + col,
+                ..popup.clone()
+            });
         }
-        self.images.extend(page.images.iter().map(|i| PageImage { line: i.line + line, col: i.col + col, ..i.clone() }));
-        self.underlines.extend(page.underlines.iter().map(|(l, c, r)| (l + line, shift(c), *r)));
+        self.images.extend(page.images.iter().map(|i| PageImage {
+            line: i.line + line,
+            col: i.col + col,
+            ..i.clone()
+        }));
+        self.underlines.extend(
+            page.underlines
+                .iter()
+                .map(|(l, c, r)| (l + line, shift(c), *r)),
+        );
     }
 
     /// Leaves `rows` lines for a picture `cols` wide at (`line`, `col`).
@@ -540,7 +622,14 @@ impl Grid {
         if self.lines.len() < line + rows {
             self.lines.resize(line + rows, Vec::new());
         }
-        self.images.push(PageImage { line, col, rows, cols, key, view: None });
+        self.images.push(PageImage {
+            line,
+            col,
+            rows,
+            cols,
+            key,
+            view: None,
+        });
     }
 
     /// Underlines `cols` of `line` in the accent.
@@ -602,7 +691,11 @@ impl Grid {
         for (i, c) in text.chars().enumerate() {
             row[col + i] = c;
         }
-        self.spans.push(Span { line, cols: col..col + len, role });
+        self.spans.push(Span {
+            line,
+            cols: col..col + len,
+            role,
+        });
         col + len
     }
 
@@ -642,8 +735,23 @@ impl Grid {
     }
 
     pub fn finish(self) -> Page {
-        let text = self.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
-        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup, images: self.images, underlines: self.underlines, ..Page::default() }
+        let text = self
+            .lines
+            .iter()
+            .map(|row| row.iter().collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Page {
+            text,
+            spans: self.spans,
+            rules: self.rules,
+            focus: self.focus,
+            panels: self.panels,
+            popup: self.popup,
+            images: self.images,
+            underlines: self.underlines,
+            ..Page::default()
+        }
     }
 }
 
@@ -656,12 +764,31 @@ mod tests {
     /// character being it; a line of narrow ones is cells as it is.
     #[test]
     fn a_wide_character_takes_two_cells() {
-        let page = Page { text: "ab\n日本 ok\n😀x".into(), ..Page::default() };
+        let page = Page {
+            text: "ab\n日本 ok\n😀x".into(),
+            ..Page::default()
+        };
         assert_eq!(page.cells(0), None);
         let cells = page.cells(1).unwrap();
         assert_eq!(cells, [0, 2, 4, 5, 6, 7]);
-        assert_eq!((cell_of(Some(&cells), 2), cell_of(Some(&cells), 5), cell_of(Some(&cells), 7)), (4, 7, 9), "past the end, a cell a character");
-        assert_eq!((col_of(Some(&cells), 0), col_of(Some(&cells), 1), col_of(Some(&cells), 3), col_of(Some(&cells), 4)), (0, 0, 1, 2));
+        assert_eq!(
+            (
+                cell_of(Some(&cells), 2),
+                cell_of(Some(&cells), 5),
+                cell_of(Some(&cells), 7)
+            ),
+            (4, 7, 9),
+            "past the end, a cell a character"
+        );
+        assert_eq!(
+            (
+                col_of(Some(&cells), 0),
+                col_of(Some(&cells), 1),
+                col_of(Some(&cells), 3),
+                col_of(Some(&cells), 4)
+            ),
+            (0, 0, 1, 2)
+        );
         assert_eq!(col_of(Some(&cells), 9), 7);
         assert_eq!(page.cells(2).unwrap(), [0, 2, 3]);
         assert_eq!((cell_of(None, 3), col_of(None, 3)), (3, 3));
@@ -671,7 +798,10 @@ mod tests {
     fn a_long_path_is_broken_to_fit() {
         let lines = wrap(&format!("{} already exists", "x".repeat(50)), 20);
         assert!(lines.iter().all(|l| l.chars().count() <= 20), "{lines:?}");
-        assert_eq!(lines.concat().replace(' ', ""), format!("{}alreadyexists", "x".repeat(50)));
+        assert_eq!(
+            lines.concat().replace(' ', ""),
+            format!("{}alreadyexists", "x".repeat(50))
+        );
     }
 
     #[test]
@@ -680,7 +810,11 @@ mod tests {
         g.put(0, 0, "x", Role::Text);
         g.keys(0, 20, &[("Enter", "open"), ("j k", "move"), ("q", "close")]);
         let page = g.finish();
-        assert!(page.text.lines().all(|l| l.chars().count() <= 20), "{}", page.text);
+        assert!(
+            page.text.lines().all(|l| l.chars().count() <= 20),
+            "{}",
+            page.text
+        );
         assert!(page.text.contains("Enter open"));
     }
 
@@ -696,7 +830,10 @@ mod tests {
         let long = r"C:\Users\thoma\AppData\Local\Temp\claude\C--Users-thoma-Development-fenix\dd8aac7e-b3fa-45cf-88aa\ledger";
         let fitted = fit_path(long, 40);
         assert_eq!(fitted.chars().count(), 40, "{fitted}");
-        assert!(fitted.starts_with(r"C:\Users") && fitted.ends_with(r"\ledger") && fitted.contains('…'), "{fitted}");
+        assert!(
+            fitted.starts_with(r"C:\Users") && fitted.ends_with(r"\ledger") && fitted.contains('…'),
+            "{fitted}"
+        );
         assert_eq!(fit_path("/a/b", 10), "/a/b");
         // A last folder longer than the room: its end.
         assert!(fit_path("/x/averyveryverylongname", 12).ends_with("longname"));
@@ -740,6 +877,12 @@ mod tests {
         assert_eq!(with_caret("abcdefghij", 10, 6), "…ghij▏");
         assert_eq!(with_caret("abcdefghij", 0, 6), "▏abcd…");
         let mid = with_caret("abcdefghij", 5, 6);
-        assert!(mid.starts_with('…') && mid.ends_with('…') && mid.contains('▏') && mid.chars().count() == 6, "{mid}");
+        assert!(
+            mid.starts_with('…')
+                && mid.ends_with('…')
+                && mid.contains('▏')
+                && mid.chars().count() == 6,
+            "{mid}"
+        );
     }
 }

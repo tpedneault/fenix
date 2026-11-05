@@ -87,7 +87,10 @@ mod tests {
     fn contiguous_match_scores_higher_than_scattered() {
         let contiguous = fuzzy_match("abc", "abcxyz").unwrap();
         let scattered = fuzzy_match("abc", "axbxcx").unwrap();
-        assert!(contiguous > scattered, "contiguous={contiguous} scattered={scattered}");
+        assert!(
+            contiguous > scattered,
+            "contiguous={contiguous} scattered={scattered}"
+        );
     }
 
     #[test]
@@ -95,7 +98,10 @@ mod tests {
         // "fp" should prefer the 'p' right after the '/' boundary.
         let boundary = fuzzy_match("fp", "foo/path").unwrap();
         let mid_word = fuzzy_match("fp", "foopxyz").unwrap();
-        assert!(boundary > mid_word, "boundary={boundary} mid_word={mid_word}");
+        assert!(
+            boundary > mid_word,
+            "boundary={boundary} mid_word={mid_word}"
+        );
     }
 
     #[test]

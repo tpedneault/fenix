@@ -12,7 +12,11 @@ use crate::{Canvas, CanvasPopup, CellSpan, Cells, Key, Picture, Role, Span};
 
 /// Cells `cols` of line `line`.
 fn cells(line: usize, cols: &Range<usize>) -> Cells {
-    Cells { line: line as u32, start: cols.start as u32, end: cols.end as u32 }
+    Cells {
+        line: line as u32,
+        start: cols.start as u32,
+        end: cols.end as u32,
+    }
 }
 
 /// A menu, field or question drawn over a page in Fenix's popup box,
@@ -31,7 +35,17 @@ pub struct Popup {
 impl Popup {
     /// Its rows as plain text.
     pub fn text(&self) -> String {
-        self.rows.iter().map(|r| r.iter().map(|(t, _)| t.as_str()).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+        self.rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|(t, _)| t.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -134,7 +148,10 @@ impl Filter {
 
     /// The words typed, lowercased.
     pub fn words(&self) -> Vec<String> {
-        self.text.split_whitespace().map(str::to_lowercase).collect()
+        self.text
+            .split_whitespace()
+            .map(str::to_lowercase)
+            .collect()
     }
 
     /// Whether `hay` has every word typed.
@@ -146,12 +163,27 @@ impl Filter {
     /// The filter's line: being typed, set, or a `hint` of what it does.
     pub fn line(&self, hint: &str, width: usize) -> (String, Role) {
         if self.typing {
-            let caret = self.caret.unwrap_or(usize::MAX).min(self.text.chars().count());
-            (format!("/ {}", with_caret(&self.text, caret, width.saturating_sub(2))), Role::Title)
+            let caret = self
+                .caret
+                .unwrap_or(usize::MAX)
+                .min(self.text.chars().count());
+            (
+                format!(
+                    "/ {}",
+                    with_caret(&self.text, caret, width.saturating_sub(2))
+                ),
+                Role::Title,
+            )
         } else if self.is_empty() {
             (fit(&format!("/ {hint}"), width), Role::Muted)
         } else {
-            (fit_tail(&format!("/ {}  (/ changes it, Esc clears)", self.text), width), Role::Accent)
+            (
+                fit_tail(
+                    &format!("/ {}  (/ changes it, Esc clears)", self.text),
+                    width,
+                ),
+                Role::Accent,
+            )
         }
     }
 }
@@ -248,13 +280,22 @@ pub fn with_caret(text: &str, caret: usize, max: usize) -> String {
     }
     // The caret near the end: the end, as `fit_tail` shows it.
     if n - at < max {
-        return std::iter::once('…').chain(all[n - (max - 1)..].iter().copied()).collect();
+        return std::iter::once('…')
+            .chain(all[n - (max - 1)..].iter().copied())
+            .collect();
     }
     let start = at.saturating_sub(max / 2);
     if start == 0 {
-        return all[..max - 1].iter().copied().chain(std::iter::once('…')).collect();
+        return all[..max - 1]
+            .iter()
+            .copied()
+            .chain(std::iter::once('…'))
+            .collect();
     }
-    std::iter::once('…').chain(all[start + 1..start + max - 1].iter().copied()).chain(std::iter::once('…')).collect()
+    std::iter::once('…')
+        .chain(all[start + 1..start + max - 1].iter().copied())
+        .chain(std::iter::once('…'))
+        .collect()
 }
 
 /// `text` wrapped at word boundaries to lines of at most `width`; a
@@ -298,11 +339,25 @@ impl Grid {
 
     /// Leaves `rows` lines for image `image` (from [`crate::image::load`]),
     /// `cols` wide at (`line`, `col`).
-    pub fn picture(&mut self, line: usize, col: usize, rows: usize, cols: usize, image: u32, view: Option<(f32, f32, f32)>) {
+    pub fn picture(
+        &mut self,
+        line: usize,
+        col: usize,
+        rows: usize,
+        cols: usize,
+        image: u32,
+        view: Option<(f32, f32, f32)>,
+    ) {
         if self.lines.len() < line + rows {
             self.lines.resize(line + rows, Vec::new());
         }
-        self.pictures.push(Picture { cells: cells(line, &(col..col + cols)), rows: rows as u32, image, view, marks: Vec::new() });
+        self.pictures.push(Picture {
+            cells: cells(line, &(col..col + cols)),
+            rows: rows as u32,
+            image,
+            view,
+            marks: Vec::new(),
+        });
     }
 
     /// Boxes outlined over the last picture: its nodes, say.
@@ -382,21 +437,48 @@ impl Grid {
 
     /// Its text so far: what a test reads.
     pub fn text(&self) -> String {
-        self.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+        self.lines
+            .iter()
+            .map(|row| row.iter().collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn finish(self) -> Canvas {
         Canvas {
             text: self.text(),
-            spans: self.spans.iter().map(|(line, cols, role)| CellSpan { cells: cells(*line, cols), role: role.clone() }).collect(),
-            rules: self.rules.iter().map(|(line, cols)| cells(*line, cols)).collect(),
+            spans: self
+                .spans
+                .iter()
+                .map(|(line, cols, role)| CellSpan {
+                    cells: cells(*line, cols),
+                    role: role.clone(),
+                })
+                .collect(),
+            rules: self
+                .rules
+                .iter()
+                .map(|(line, cols)| cells(*line, cols))
+                .collect(),
             focus: self.focus.as_ref().map(|(line, cols)| cells(*line, cols)),
-            panels: self.panels.iter().map(|(line, cols)| cells(*line, cols)).collect(),
+            panels: self
+                .panels
+                .iter()
+                .map(|(line, cols)| cells(*line, cols))
+                .collect(),
             pictures: self.pictures,
             popup: self.popup.map(|p| CanvasPopup {
                 line: p.line as u32,
                 column: p.col as u32,
-                rows: p.rows.into_iter().map(|row| row.into_iter().map(|(text, role)| Span { text, role }).collect()).collect(),
+                rows: p
+                    .rows
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|(text, role)| Span { text, role })
+                            .collect()
+                    })
+                    .collect(),
             }),
         }
     }
@@ -405,7 +487,17 @@ impl Grid {
 impl CanvasPopup {
     /// Its rows as plain text.
     pub fn text(&self) -> String {
-        self.rows.iter().map(|r| r.iter().map(|s| s.text.as_str()).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+        self.rows
+            .iter()
+            .map(|r| {
+                r.iter()
+                    .map(|s| s.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 
@@ -433,9 +525,32 @@ mod tests {
         g.keys(2, 30, &[("Enter", "open"), ("q", "close")]);
         let c = g.finish();
         assert_eq!(end, 7);
-        assert!(c.text.contains("  Today") && c.text.contains("DOING · 1") && c.text.contains("Enter open"), "{}", c.text);
-        assert_eq!(c.focus, Some(Cells { line: 4, start: 2, end: 32 }));
-        assert_eq!(c.spans[0], CellSpan { cells: Cells { line: 1, start: 2, end: 7 }, role: Role::Title });
+        assert!(
+            c.text.contains("  Today")
+                && c.text.contains("DOING · 1")
+                && c.text.contains("Enter open"),
+            "{}",
+            c.text
+        );
+        assert_eq!(
+            c.focus,
+            Some(Cells {
+                line: 4,
+                start: 2,
+                end: 32
+            })
+        );
+        assert_eq!(
+            c.spans[0],
+            CellSpan {
+                cells: Cells {
+                    line: 1,
+                    start: 2,
+                    end: 7
+                },
+                role: Role::Title
+            }
+        );
         assert!(c.rules.iter().any(|r| r.line == 3));
     }
 

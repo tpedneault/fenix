@@ -43,16 +43,64 @@ pub struct Fallback {
 /// registry -- offline, the page says why it can't. This is also the
 /// order bundles are shown in.
 pub const FALLBACK_BUNDLES: &[Fallback] = &[
-    Fallback { id: "fenix.personal-bundle", name: "Personal", about: "Notebook, Diagrams, Agenda", categories: &["tools"], members: &["fenix.notebook", "fenix.diagrams", "fenix.agenda"] },
-    Fallback { id: "fenix.mission-bundle", name: "Mission", about: "SCOS-2000 MIB, CCSDS & PUS, Tcl", categories: &["mission"], members: &["fenix.mib", "fenix.ccsds", "fenix.tcl"] },
-    Fallback { id: "fenix.review-bundle", name: "Review", about: "GitHub pull requests, GitLab merge requests", categories: &["tools"], members: &["fenix.review"] },
-    Fallback { id: "fenix.jira-bundle", name: "Jira", about: "Jira, with the agenda kept in step", categories: &["tools"], members: &["fenix.jira", "fenix.agenda"] },
-    Fallback { id: "fenix.lab-bundle", name: "Lab", about: "Arduino, containers, VNC", categories: &["tools"], members: &["fenix.containers", "fenix.arduino", "fenix.vnc"] },
-    Fallback { id: "fenix.reading-bundle", name: "Reading", about: "The PDF reader", categories: &["tools"], members: &["fenix.pdf"] },
+    Fallback {
+        id: "fenix.personal-bundle",
+        name: "Personal",
+        about: "Notebook, Diagrams, Agenda",
+        categories: &["tools"],
+        members: &["fenix.notebook", "fenix.diagrams", "fenix.agenda"],
+    },
+    Fallback {
+        id: "fenix.mission-bundle",
+        name: "Mission",
+        about: "SCOS-2000 MIB, CCSDS & PUS, Tcl",
+        categories: &["mission"],
+        members: &["fenix.mib", "fenix.ccsds", "fenix.tcl"],
+    },
+    Fallback {
+        id: "fenix.review-bundle",
+        name: "Review",
+        about: "GitHub pull requests, GitLab merge requests",
+        categories: &["tools"],
+        members: &["fenix.review"],
+    },
+    Fallback {
+        id: "fenix.jira-bundle",
+        name: "Jira",
+        about: "Jira, with the agenda kept in step",
+        categories: &["tools"],
+        members: &["fenix.jira", "fenix.agenda"],
+    },
+    Fallback {
+        id: "fenix.lab-bundle",
+        name: "Lab",
+        about: "Arduino, containers, VNC",
+        categories: &["tools"],
+        members: &["fenix.containers", "fenix.arduino", "fenix.vnc"],
+    },
+    Fallback {
+        id: "fenix.reading-bundle",
+        name: "Reading",
+        about: "The PDF reader",
+        categories: &["tools"],
+        members: &["fenix.pdf"],
+    },
 ];
 
 /// What `asks:` takes: the permissions an extension may ask for.
-pub const ASKS: &[&str] = &["network", "secrets", "process", "sockets", "files", "folders", "draw", "editor", "fonts", "clipboard", "settings"];
+pub const ASKS: &[&str] = &[
+    "network",
+    "secrets",
+    "process",
+    "sockets",
+    "files",
+    "folders",
+    "draw",
+    "editor",
+    "fonts",
+    "clipboard",
+    "settings",
+];
 
 /// The permissions `p` asks for, by `ASKS`' names.
 fn asks(p: &Permissions) -> Vec<&'static str> {
@@ -66,10 +114,16 @@ fn asks(p: &Permissions) -> Vec<&'static str> {
     add(!p.secrets.is_empty(), "secrets");
     add(!p.process.is_empty(), "process");
     add(!p.sockets.is_empty(), "sockets");
-    add(p.filesystem != fenix_extensions::manifest::Filesystem::None, "files");
+    add(
+        p.filesystem != fenix_extensions::manifest::Filesystem::None,
+        "files",
+    );
     add(!p.folders.is_empty(), "folders");
     add(p.draw != fenix_extensions::manifest::Draw::None, "draw");
-    add(p.editor != fenix_extensions::manifest::Editor::None, "editor");
+    add(
+        p.editor != fenix_extensions::manifest::Editor::None,
+        "editor",
+    );
     add(p.fonts, "fonts");
     add(p.clipboard, "clipboard");
     add(!p.settings.is_empty(), "settings");
@@ -83,7 +137,12 @@ pub fn screenshots(dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| ["png", "jpg", "jpeg", "gif", "webp"].contains(&x.to_string_lossy().to_ascii_lowercase().as_str())))
+        .filter(|p| {
+            p.extension().is_some_and(|x| {
+                ["png", "jpg", "jpeg", "gif", "webp"]
+                    .contains(&x.to_string_lossy().to_ascii_lowercase().as_str())
+            })
+        })
         .collect();
     out.sort();
     out
@@ -178,7 +237,11 @@ pub enum Action {
     /// A bundle: its members switched to `on` where they're installed;
     /// switched on, `install` (the registry's bundle) is installed, or --
     /// when the registry has none -- the members that aren't.
-    SwitchBundle { on: bool, members: Vec<String>, install: Option<String> },
+    SwitchBundle {
+        on: bool,
+        members: Vec<String>,
+        install: Option<String>,
+    },
     /// Say this on the page.
     Say(String),
     /// The welcome's `t`: the tutorial.
@@ -245,7 +308,9 @@ struct Facets<'a> {
 /// the page's).
 fn filed_under(categories: &[String], category: &str) -> bool {
     match category {
-        "other" => !categories.iter().any(|c| CATEGORIES.iter().any(|(k, _)| k == c)),
+        "other" => !categories
+            .iter()
+            .any(|c| CATEGORIES.iter().any(|(k, _)| k == c)),
         _ => categories.iter().any(|c| c == category),
     }
 }
@@ -320,12 +385,19 @@ impl ExtensionsPage {
 
     /// The welcome: the bundles.
     pub fn welcome() -> Self {
-        ExtensionsPage { welcome: true, tab: Tab::Bundles, ..ExtensionsPage::new() }
+        ExtensionsPage {
+            welcome: true,
+            tab: Tab::Bundles,
+            ..ExtensionsPage::new()
+        }
     }
 
     /// Whether a switch is waiting for a restart.
     pub fn pending(&self) -> usize {
-        self.installed.iter().filter(|r| r.runtime != Some(Runtime::Bundle) && r.on != r.running).count()
+        self.installed
+            .iter()
+            .filter(|r| r.runtime != Some(Runtime::Bundle) && r.on != r.running)
+            .count()
     }
 
     fn index(&self) -> Option<&Index> {
@@ -338,15 +410,29 @@ impl ExtensionsPage {
     /// What the registry has that isn't installed, for this Fenix:
     /// extensions, not bundles.
     pub fn available(&self) -> Vec<AvailableRow> {
-        let Some(index) = self.index() else { return Vec::new() };
+        let Some(index) = self.index() else {
+            return Vec::new();
+        };
         index
             .extensions
             .iter()
             .filter(|l| !self.installed.iter().any(|r| r.id == l.id))
             .filter_map(|l| {
                 let r = l.latest_for(&self.release)?;
-                let categories = if r.categories.is_empty() { l.categories.clone() } else { r.categories.clone() };
-                Some(AvailableRow { id: l.id.clone(), name: l.name.clone(), version: r.version.clone(), about: l.description.clone(), runtime: r.runtime, categories, permissions: r.permissions.clone() })
+                let categories = if r.categories.is_empty() {
+                    l.categories.clone()
+                } else {
+                    r.categories.clone()
+                };
+                Some(AvailableRow {
+                    id: l.id.clone(),
+                    name: l.name.clone(),
+                    version: r.version.clone(),
+                    about: l.description.clone(),
+                    runtime: r.runtime,
+                    categories,
+                    permissions: r.permissions.clone(),
+                })
             })
             .collect()
     }
@@ -356,19 +442,51 @@ impl ExtensionsPage {
     /// before bundles), `FALLBACK_BUNDLES`. In that one's order, then by
     /// name.
     pub fn bundles(&self) -> Vec<BundleRow> {
-        let installed = |id: &str| self.installed.iter().any(|r| r.id == id && r.runtime == Some(Runtime::Bundle));
+        let installed = |id: &str| {
+            self.installed
+                .iter()
+                .any(|r| r.id == id && r.runtime == Some(Runtime::Bundle))
+        };
         let mut out: Vec<BundleRow> = Vec::new();
-        for l in self.index().map(|i| i.bundles.as_slice()).unwrap_or_default() {
+        for l in self
+            .index()
+            .map(|i| i.bundles.as_slice())
+            .unwrap_or_default()
+        {
             if let Some(r) = l.latest_for(&self.release) {
-                let categories = if r.categories.is_empty() { l.categories.clone() } else { r.categories.clone() };
-                out.push(BundleRow { id: l.id.clone(), name: l.name.clone(), about: l.description.clone(), categories, members: r.members(), version: Some(r.version.clone()), installed: installed(&l.id) });
+                let categories = if r.categories.is_empty() {
+                    l.categories.clone()
+                } else {
+                    r.categories.clone()
+                };
+                out.push(BundleRow {
+                    id: l.id.clone(),
+                    name: l.name.clone(),
+                    about: l.description.clone(),
+                    categories,
+                    members: r.members(),
+                    version: Some(r.version.clone()),
+                    installed: installed(&l.id),
+                });
             }
         }
-        for r in self.installed.iter().filter(|r| r.runtime == Some(Runtime::Bundle)) {
+        for r in self
+            .installed
+            .iter()
+            .filter(|r| r.runtime == Some(Runtime::Bundle))
+        {
             if out.iter().any(|b| b.id == r.id) {
                 continue;
             }
-            out.push(BundleRow { id: r.id.clone(), name: r.name.clone(), about: r.about.clone(), categories: r.categories.clone(), members: r.dependencies.keys().cloned().collect(), version: None, installed: true });
+            out.push(BundleRow {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                about: r.about.clone(),
+                categories: r.categories.clone(),
+                members: r.dependencies.keys().cloned().collect(),
+                version: None,
+                installed: true,
+            });
         }
         if !out.iter().any(|b| b.version.is_some()) {
             for f in FALLBACK_BUNDLES {
@@ -386,20 +504,37 @@ impl ExtensionsPage {
                 });
             }
         }
-        let rank = |b: &BundleRow| FALLBACK_BUNDLES.iter().position(|f| f.id == b.id).unwrap_or(usize::MAX);
+        let rank = |b: &BundleRow| {
+            FALLBACK_BUNDLES
+                .iter()
+                .position(|f| f.id == b.id)
+                .unwrap_or(usize::MAX)
+        };
         out.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.name.cmp(&b.name)));
         out
     }
 
     /// The bundles' names that have `id` in them.
     pub fn bundles_of(&self, id: &str) -> Vec<String> {
-        self.bundles().into_iter().filter(|b| b.members.iter().any(|m| m == id)).map(|b| b.name).collect()
+        self.bundles()
+            .into_iter()
+            .filter(|b| b.members.iter().any(|m| m == id))
+            .map(|b| b.name)
+            .collect()
     }
 
     /// How bundle `b` stands: members installed, on, and all of them.
     pub fn bundle_state(&self, b: &BundleRow) -> (usize, usize, usize) {
-        let rows: Vec<&InstalledRow> = b.members.iter().filter_map(|m| self.installed.iter().find(|r| r.id == *m)).collect();
-        (rows.len(), rows.iter().filter(|r| r.on).count(), b.members.len())
+        let rows: Vec<&InstalledRow> = b
+            .members
+            .iter()
+            .filter_map(|m| self.installed.iter().find(|r| r.id == *m))
+            .collect();
+        (
+            rows.len(),
+            rows.iter().filter(|r| r.on).count(),
+            b.members.len(),
+        )
     }
 
     /// The newer version the registry has of installed row `row`, if any.
@@ -409,7 +544,10 @@ impl ExtensionsPage {
             return None;
         }
         let have = [(row.id.clone(), row.version.clone())];
-        fenix_extensions::registry::updates(index, &have, &self.release).into_iter().next().map(|u| u.latest)
+        fenix_extensions::registry::updates(index, &have, &self.release)
+            .into_iter()
+            .next()
+            .map(|u| u.latest)
     }
 
     fn query(&self) -> Query {
@@ -426,19 +564,40 @@ impl ExtensionsPage {
     }
 
     /// What row `entry` is searched by.
-    fn facets<'a>(&'a self, entry: Entry, available: &'a [AvailableRow], bundles: &'a [BundleRow]) -> Facets<'a> {
+    fn facets<'a>(
+        &'a self,
+        entry: Entry,
+        available: &'a [AvailableRow],
+        bundles: &'a [BundleRow],
+    ) -> Facets<'a> {
         match entry {
             Entry::Installed(i) => {
                 let r = &self.installed[i];
-                Facets { hay: format!("{} {} {}", r.name, r.id, r.about).to_lowercase(), categories: &r.categories, runtime: r.runtime, permissions: Some(&r.permissions) }
+                Facets {
+                    hay: format!("{} {} {}", r.name, r.id, r.about).to_lowercase(),
+                    categories: &r.categories,
+                    runtime: r.runtime,
+                    permissions: Some(&r.permissions),
+                }
             }
             Entry::Available(i) => {
                 let r = &available[i];
-                Facets { hay: format!("{} {} {}", r.name, r.id, r.about).to_lowercase(), categories: &r.categories, runtime: Some(r.runtime), permissions: Some(&r.permissions) }
+                Facets {
+                    hay: format!("{} {} {}", r.name, r.id, r.about).to_lowercase(),
+                    categories: &r.categories,
+                    runtime: Some(r.runtime),
+                    permissions: Some(&r.permissions),
+                }
             }
             Entry::Bundle(i) => {
                 let b = &bundles[i];
-                Facets { hay: format!("{} {} {} {}", b.name, b.id, b.about, b.members.join(" ")).to_lowercase(), categories: &b.categories, runtime: Some(Runtime::Bundle), permissions: None }
+                Facets {
+                    hay: format!("{} {} {} {}", b.name, b.id, b.about, b.members.join(" "))
+                        .to_lowercase(),
+                    categories: &b.categories,
+                    runtime: Some(Runtime::Bundle),
+                    permissions: None,
+                }
             }
         }
     }
@@ -448,12 +607,21 @@ impl ExtensionsPage {
     fn admits(&self, q: &Query, f: &Facets, with_category: bool) -> bool {
         // Typed, a category is its start too (`category:lang`); picked down
         // the left, the whole of it.
-        let typed = q.category.as_deref().is_none_or(|c| filed_under(f.categories, c) || (c != "other" && f.categories.iter().any(|k| k.starts_with(c))));
-        let picked = if with_category && q.category.is_none() { self.category.as_deref() } else { None };
+        let typed = q.category.as_deref().is_none_or(|c| {
+            filed_under(f.categories, c)
+                || (c != "other" && f.categories.iter().any(|k| k.starts_with(c)))
+        });
+        let picked = if with_category && q.category.is_none() {
+            self.category.as_deref()
+        } else {
+            None
+        };
         q.words.iter().all(|w| f.hay.contains(w.as_str()))
             && typed
             && picked.is_none_or(|c| filed_under(f.categories, c))
-            && q.runtime.as_deref().is_none_or(|r| runtime_is(r, f.runtime))
+            && q.runtime
+                .as_deref()
+                .is_none_or(|r| runtime_is(r, f.runtime))
             && q.asks.iter().all(|a| match f.permissions {
                 Some(p) if a == "nothing" || a == "none" => p.none(),
                 Some(p) => asks(p).contains(&a.as_str()),
@@ -462,20 +630,39 @@ impl ExtensionsPage {
     }
 
     /// Every row of `tab`, before the search.
-    fn tab_entries(&self, tab: Tab, available: &[AvailableRow], bundles: &[BundleRow]) -> Vec<Entry> {
+    fn tab_entries(
+        &self,
+        tab: Tab,
+        available: &[AvailableRow],
+        bundles: &[BundleRow],
+    ) -> Vec<Entry> {
         let not_bundle = |i: &usize| self.installed[*i].runtime != Some(Runtime::Bundle);
         match tab {
-            Tab::Installed => (0..self.installed.len()).filter(not_bundle).map(Entry::Installed).collect(),
-            Tab::Updates => (0..self.installed.len()).filter(|&i| self.update_of(&self.installed[i]).is_some()).map(Entry::Installed).collect(),
+            Tab::Installed => (0..self.installed.len())
+                .filter(not_bundle)
+                .map(Entry::Installed)
+                .collect(),
+            Tab::Updates => (0..self.installed.len())
+                .filter(|&i| self.update_of(&self.installed[i]).is_some())
+                .map(Entry::Installed)
+                .collect(),
             Tab::Browse => (0..available.len()).map(Entry::Available).collect(),
             Tab::Bundles => (0..bundles.len()).map(Entry::Bundle).collect(),
         }
     }
 
     /// What `tab` shows: its rows the search and category keep.
-    fn entries_of(&self, tab: Tab, available: &[AvailableRow], bundles: &[BundleRow]) -> Vec<Entry> {
+    fn entries_of(
+        &self,
+        tab: Tab,
+        available: &[AvailableRow],
+        bundles: &[BundleRow],
+    ) -> Vec<Entry> {
         let q = self.query();
-        self.tab_entries(tab, available, bundles).into_iter().filter(|e| self.admits(&q, &self.facets(*e, available, bundles), true)).collect()
+        self.tab_entries(tab, available, bundles)
+            .into_iter()
+            .filter(|e| self.admits(&q, &self.facets(*e, available, bundles), true))
+            .collect()
     }
 
     fn entries(&self) -> Vec<Entry> {
@@ -487,10 +674,19 @@ impl ExtensionsPage {
     pub fn categories(&self) -> Vec<(Option<String>, String, usize)> {
         let (available, bundles) = (self.available(), self.bundles());
         let q = self.query();
-        let all: Vec<Facets> = self.tab_entries(self.tab, &available, &bundles).into_iter().map(|e| self.facets(e, &available, &bundles)).filter(|f| self.admits(&q, f, false)).collect();
+        let all: Vec<Facets> = self
+            .tab_entries(self.tab, &available, &bundles)
+            .into_iter()
+            .map(|e| self.facets(e, &available, &bundles))
+            .filter(|f| self.admits(&q, f, false))
+            .collect();
         let count = |c: &str| all.iter().filter(|f| filed_under(f.categories, c)).count();
         let mut out = vec![(None, "All".to_string(), all.len())];
-        out.extend(CATEGORIES.iter().map(|(key, label)| (Some(key.to_string()), label.to_string(), count(key))));
+        out.extend(
+            CATEGORIES
+                .iter()
+                .map(|(key, label)| (Some(key.to_string()), label.to_string(), count(key))),
+        );
         out.push((Some("other".into()), "Other".into(), count("other")));
         out
     }
@@ -537,13 +733,18 @@ impl ExtensionsPage {
         let (have, on, all) = self.bundle_state(b);
         let switch_on = on < all;
         // The registry's: installed as a bundle, so it goes as one.
-        let install = (switch_on && b.version.is_some() && (have < all || !b.installed)).then(|| b.id.clone());
+        let install = (switch_on && b.version.is_some() && (have < all || !b.installed))
+            .then(|| b.id.clone());
         if install.is_some() {
             if let Some(busy) = &self.installing {
                 return Action::Say(format!("{busy} is still being installed -- one at a time"));
             }
         }
-        Action::SwitchBundle { on: switch_on, members: b.members.clone(), install }
+        Action::SwitchBundle {
+            on: switch_on,
+            members: b.members.clone(),
+            install,
+        }
     }
 
     /// Whether the filter has the keyboard.
@@ -584,7 +785,11 @@ impl ExtensionsPage {
             match key {
                 Key::Tab | Key::BackTab => {
                     let at = Tab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
-                    let next = if key == Key::Tab { (at + 1) % 4 } else { (at + 3) % 4 };
+                    let next = if key == Key::Tab {
+                        (at + 1) % 4
+                    } else {
+                        (at + 3) % 4
+                    };
                     self.show_tab(Tab::ALL[next]);
                     return Action::None;
                 }
@@ -604,7 +809,10 @@ impl ExtensionsPage {
             }
             if self.sidebar {
                 let categories = self.categories();
-                let at = categories.iter().position(|(c, _, _)| *c == self.category).unwrap_or(0);
+                let at = categories
+                    .iter()
+                    .position(|(c, _, _)| *c == self.category)
+                    .unwrap_or(0);
                 let to = match key {
                     Key::Char('j') | Key::Down => Some((at + 1).min(categories.len() - 1)),
                     Key::Char('k') | Key::Up => Some(at.saturating_sub(1)),
@@ -674,12 +882,22 @@ impl ExtensionsPage {
             Key::Char('r') => Action::Refresh,
             Key::Char('t') if self.welcome => Action::Tutorial,
             Key::Char('d') => match entry {
-                Some(Entry::Installed(i)) => Action::Details(Target::Installed(self.installed[i].id.clone())),
-                Some(Entry::Available(i)) => self.available().get(i).map_or(Action::None, |r| Action::Details(Target::Available(r.id.clone()))),
+                Some(Entry::Installed(i)) => {
+                    Action::Details(Target::Installed(self.installed[i].id.clone()))
+                }
+                Some(Entry::Available(i)) => self.available().get(i).map_or(Action::None, |r| {
+                    Action::Details(Target::Available(r.id.clone()))
+                }),
                 Some(Entry::Bundle(_)) => match &bundle {
                     Some(b) if b.installed => Action::Details(Target::Installed(b.id.clone())),
-                    Some(b) if b.version.is_some() => Action::Details(Target::Available(b.id.clone())),
-                    Some(b) => Action::Say(format!("{}: {} -- the registry has no more of it yet", b.name, b.members.join(", "))),
+                    Some(b) if b.version.is_some() => {
+                        Action::Details(Target::Available(b.id.clone()))
+                    }
+                    Some(b) => Action::Say(format!(
+                        "{}: {} -- the registry has no more of it yet",
+                        b.name,
+                        b.members.join(", ")
+                    )),
                     None => Action::None,
                 },
                 None => Action::None,
@@ -687,15 +905,27 @@ impl ExtensionsPage {
             Key::Char('u') => match installed {
                 Some(row) => match self.update_of(row) {
                     Some(_) => self.install(&row.id),
-                    None => Action::Say(format!("{} is the newest the registry has for this Fenix", row.name)),
+                    None => Action::Say(format!(
+                        "{} is the newest the registry has for this Fenix",
+                        row.name
+                    )),
                 },
                 None => Action::None,
             },
             Key::Char('U') => {
-                let ids: Vec<String> = self.installed.iter().filter(|r| self.update_of(r).is_some()).map(|r| r.id.clone()).collect();
+                let ids: Vec<String> = self
+                    .installed
+                    .iter()
+                    .filter(|r| self.update_of(r).is_some())
+                    .map(|r| r.id.clone())
+                    .collect();
                 match (&self.installing, ids.is_empty()) {
-                    (_, true) => Action::Say("Everything installed is the newest the registry has for this Fenix".into()),
-                    (Some(busy), _) => Action::Say(format!("{busy} is still being installed -- one at a time")),
+                    (_, true) => Action::Say(
+                        "Everything installed is the newest the registry has for this Fenix".into(),
+                    ),
+                    (Some(busy), _) => {
+                        Action::Say(format!("{busy} is still being installed -- one at a time"))
+                    }
                     (None, false) => Action::UpdateAll(ids),
                 }
             }
@@ -728,10 +958,15 @@ impl ExtensionsPage {
                     match (&row.broken, self.tab) {
                         (None, Tab::Updates) => self.install(&row.id),
                         (None, _) => Action::SwitchInstalled(row.id.clone(), !row.on),
-                        (Some(_), _) => Action::Say(format!("{} can't be read -- x x removes it", row.name)),
+                        (Some(_), _) => {
+                            Action::Say(format!("{} can't be read -- x x removes it", row.name))
+                        }
                     }
                 }
-                Some(Entry::Available(i)) => self.available().get(i).map_or(Action::None, |r| self.install(&r.id)),
+                Some(Entry::Available(i)) => self
+                    .available()
+                    .get(i)
+                    .map_or(Action::None, |r| self.install(&r.id)),
                 None => Action::None,
             },
             _ => Action::None,
@@ -802,7 +1037,8 @@ impl Pane {
         if text.is_empty() {
             self.lines.push((String::new(), role));
         }
-        self.lines.extend(wrap(text, width).into_iter().map(|l| (l, role)));
+        self.lines
+            .extend(wrap(text, width).into_iter().map(|l| (l, role)));
     }
 
     fn heading(&mut self, text: &str) {
@@ -811,8 +1047,17 @@ impl Pane {
     }
 }
 
-fn pane_of(page: &ExtensionsPage, entry: Entry, available: &[AvailableRow], bundles: &[BundleRow], width: usize) -> Pane {
-    let mut p = Pane { lines: Vec::new(), picture: None };
+fn pane_of(
+    page: &ExtensionsPage,
+    entry: Entry,
+    available: &[AvailableRow],
+    bundles: &[BundleRow],
+    width: usize,
+) -> Pane {
+    let mut p = Pane {
+        lines: Vec::new(),
+        picture: None,
+    };
     let index = page.index();
     let listing = |id: &str| index.and_then(|i| i.listing(id));
     let versions = |p: &mut Pane, l: Option<&Listing>| {
@@ -822,16 +1067,55 @@ fn pane_of(page: &ExtensionsPage, entry: Entry, available: &[AvailableRow], bund
             p.put(&format!("Versions: {}", v.join(", ")), Role::Muted, width);
         }
     };
-    let common = |p: &mut Pane, id: &str, categories: &[String], runtime: Option<Runtime>, permissions: &Permissions, deps: &BTreeMap<String, String>| {
-        let filed: Vec<String> = categories.iter().map(|c| CATEGORIES.iter().find(|(k, _)| k == c).map_or(c.clone(), |(_, l)| l.to_string())).collect();
-        p.put(&format!("Kind: {}{}", kind(runtime), if filed.is_empty() { String::new() } else { format!(" · {}", filed.join(", ")) }), Role::Muted, width);
+    let common = |p: &mut Pane,
+                  id: &str,
+                  categories: &[String],
+                  runtime: Option<Runtime>,
+                  permissions: &Permissions,
+                  deps: &BTreeMap<String, String>| {
+        let filed: Vec<String> = categories
+            .iter()
+            .map(|c| {
+                CATEGORIES
+                    .iter()
+                    .find(|(k, _)| k == c)
+                    .map_or(c.clone(), |(_, l)| l.to_string())
+            })
+            .collect();
+        p.put(
+            &format!(
+                "Kind: {}{}",
+                kind(runtime),
+                if filed.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", filed.join(", "))
+                }
+            ),
+            Role::Muted,
+            width,
+        );
         p.heading("Permissions");
-        p.put(&runtime.map_or("Its manifest can't be read".into(), |r| runtime_permissions(r, permissions)), Role::Text, width);
+        p.put(
+            &runtime.map_or("Its manifest can't be read".into(), |r| {
+                runtime_permissions(r, permissions)
+            }),
+            Role::Text,
+            width,
+        );
         if runtime != Some(Runtime::Bundle) {
-            p.put(&format!("Needs: {}", dependencies(deps).replace('`', "")), Role::Muted, width);
+            p.put(
+                &format!("Needs: {}", dependencies(deps).replace('`', "")),
+                Role::Muted,
+                width,
+            );
             let of = page.bundles_of(id);
             if !of.is_empty() {
-                p.put(&format!("In bundles: {}", of.join(", ")), Role::Muted, width);
+                p.put(
+                    &format!("In bundles: {}", of.join(", ")),
+                    Role::Muted,
+                    width,
+                );
             }
         }
     };
@@ -839,16 +1123,43 @@ fn pane_of(page: &ExtensionsPage, entry: Entry, available: &[AvailableRow], bund
         Entry::Installed(i) => {
             let r = &page.installed[i];
             p.put(&r.name, Role::Title, width);
-            p.put(&format!("{} {} · {}{}", r.id, r.version, if r.on { "on" } else { "off" }, if r.managed { ", managed" } else if r.dependency { ", for another" } else { "" }), Role::Muted, width);
+            p.put(
+                &format!(
+                    "{} {} · {}{}",
+                    r.id,
+                    r.version,
+                    if r.on { "on" } else { "off" },
+                    if r.managed {
+                        ", managed"
+                    } else if r.dependency {
+                        ", for another"
+                    } else {
+                        ""
+                    }
+                ),
+                Role::Muted,
+                width,
+            );
             p.put("", Role::Muted, width);
             match &r.broken {
                 Some(why) => p.put(why, Role::Warn, width),
                 None => p.put(&r.about, Role::Text, width),
             }
             if let Some(latest) = page.update_of(r) {
-                p.put(&format!("{latest} is in the registry -- u updates"), Role::Good, width);
+                p.put(
+                    &format!("{latest} is in the registry -- u updates"),
+                    Role::Good,
+                    width,
+                );
             }
-            common(&mut p, &r.id, &r.categories, r.runtime, &r.permissions, &r.dependencies);
+            common(
+                &mut p,
+                &r.id,
+                &r.categories,
+                r.runtime,
+                &r.permissions,
+                &r.dependencies,
+            );
             versions(&mut p, listing(&r.id));
             p.picture = r.screenshots.first().cloned();
             if let Some(text) = &r.readme {
@@ -867,12 +1178,23 @@ fn pane_of(page: &ExtensionsPage, entry: Entry, available: &[AvailableRow], bund
         Entry::Available(i) => {
             let r = &available[i];
             p.put(&r.name, Role::Title, width);
-            p.put(&format!("{} {} · in the registry", r.id, r.version), Role::Muted, width);
+            p.put(
+                &format!("{} {} · in the registry", r.id, r.version),
+                Role::Muted,
+                width,
+            );
             p.put("", Role::Muted, width);
             p.put(&r.about, Role::Text, width);
             let l = listing(&r.id);
             let release = l.and_then(|l| l.latest_for(&page.release));
-            common(&mut p, &r.id, &r.categories, Some(r.runtime), &r.permissions, &release.map(|r| r.dependencies.clone()).unwrap_or_default());
+            common(
+                &mut p,
+                &r.id,
+                &r.categories,
+                Some(r.runtime),
+                &r.permissions,
+                &release.map(|r| r.dependencies.clone()).unwrap_or_default(),
+            );
             versions(&mut p, l);
             if let Some(release) = release {
                 p.put("", Role::Muted, width);
@@ -898,8 +1220,15 @@ fn pane_of(page: &ExtensionsPage, entry: Entry, available: &[AvailableRow], bund
                     Some(_) => ("○ off", Role::Muted),
                     None => ("+ not installed", Role::Muted),
                 };
-                let name = page.installed.iter().find(|r| r.id == *m).map(|r| r.name.clone()).or_else(|| listing(m).map(|l| l.name.clone())).unwrap_or_else(|| m.clone());
-                p.lines.push((fit(&format!("{name} ({m}) {mark}"), width), role));
+                let name = page
+                    .installed
+                    .iter()
+                    .find(|r| r.id == *m)
+                    .map(|r| r.name.clone())
+                    .or_else(|| listing(m).map(|l| l.name.clone()))
+                    .unwrap_or_else(|| m.clone());
+                p.lines
+                    .push((fit(&format!("{name} ({m}) {mark}"), width), role));
             }
             p.put("", Role::Muted, width);
             p.put("Enter installs and switches on what isn't; x x removes the bundle and the members only it brought.", Role::Muted, width);
@@ -917,13 +1246,36 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
     let welcome = page.welcome;
     let (left, width) = frame(cols, if welcome { 100 } else { 160 });
     let mut g = Grid::new();
-    let end = g.put(1, left, if welcome { "Welcome to Fenix" } else { "Extensions" }, Role::Title);
-    g.put(1, end + 2, if welcome { "· pick what you'll use" } else { "· installed and in the registry" }, Role::Muted);
+    let end = g.put(
+        1,
+        left,
+        if welcome {
+            "Welcome to Fenix"
+        } else {
+            "Extensions"
+        },
+        Role::Title,
+    );
+    g.put(
+        1,
+        end + 2,
+        if welcome {
+            "· pick what you'll use"
+        } else {
+            "· installed and in the registry"
+        },
+        Role::Muted,
+    );
     let plain = |r: &&InstalledRow| r.runtime != Some(Runtime::Bundle);
     if !welcome {
         let on = page.installed.iter().filter(plain).filter(|r| r.on).count();
         let status = format!("{on} of {} on", page.installed.iter().filter(plain).count());
-        g.put(1, (left + width).saturating_sub(status.chars().count()), &status, Role::Muted);
+        g.put(
+            1,
+            (left + width).saturating_sub(status.chars().count()),
+            &status,
+            Role::Muted,
+        );
     }
     g.rule(2, left..left + width);
     let available = page.available();
@@ -934,7 +1286,11 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         for (i, tab) in Tab::ALL.iter().enumerate() {
             let n = page.entries_of(*tab, &available, &bundles).len();
             let label = format!("{} {} {n}", i + 1, tab.label());
-            let role = if *tab == page.tab { Role::Title } else { Role::Muted };
+            let role = if *tab == page.tab {
+                Role::Title
+            } else {
+                Role::Muted
+            };
             let end = g.put(3, x, &label, role);
             if *tab == page.tab {
                 g.panels.push((3, x.saturating_sub(1)..end + 1));
@@ -949,7 +1305,11 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         (false, 0) => "Enter switches one on or off, or installs it. What's off isn't loaded: no commands, keys, settings or pages.".to_string(),
         (_, n) => format!("{n} change{} -- restart Fenix to apply: SPC q r restarts it where you are", if n == 1 { "" } else { "s" }),
     };
-    let note_role = if pending == 0 || page.safe_mode { Role::Muted } else { Role::Warn };
+    let note_role = if pending == 0 || page.safe_mode {
+        Role::Muted
+    } else {
+        Role::Warn
+    };
     // The welcome has the room to say it all, and offers the tutorial.
     let mut welcome_top = 4;
     if welcome {
@@ -959,13 +1319,21 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         }
         let x = g.put(welcome_top - 1, left, "New to Fenix's keys? ", Role::Text);
         let x = g.put(welcome_top - 1, x, "t", Role::Accent);
-        g.put(welcome_top - 1, x, " starts the tutorial, a lesson at a time (SPC h T later).", Role::Text);
+        g.put(
+            welcome_top - 1,
+            x,
+            " starts the tutorial, a lesson at a time (SPC h T later).",
+            Role::Text,
+        );
         welcome_top += 1;
     } else {
         g.put(4, left, &fit(&note, width), note_role);
     }
     if !welcome {
-        let hint = format!("search: words, category:tools, runtime:data|code|bundle, asks:{}", ASKS.join("|"));
+        let hint = format!(
+            "search: words, category:tools, runtime:data|code|bundle, asks:{}",
+            ASKS.join("|")
+        );
         let (text, role) = page.filter.line(&hint, width.min(110));
         let end = g.put(5, left, &text, role);
         if page.filter.typing {
@@ -975,7 +1343,11 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
 
     // The columns: categories, the list, the details.
     let side_w = if welcome || width < 90 { 0 } else { 18 };
-    let pane_w = if welcome || width < 130 { 0 } else { (width * 2 / 5).min(64) };
+    let pane_w = if welcome || width < 130 {
+        0
+    } else {
+        (width * 2 / 5).min(64)
+    };
     let list_x = left + if side_w > 0 { side_w + 2 } else { 0 };
     let list_w = width.saturating_sub(list_x - left + if pane_w > 0 { pane_w + 3 } else { 0 });
     let pane_x = list_x + list_w + 3;
@@ -985,10 +1357,21 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         for (i, (category, label, n)) in page.categories().into_iter().enumerate() {
             let y = top + i;
             let chosen = category == page.category;
-            let role = if chosen { Role::Title } else if n == 0 { Role::Muted } else { Role::Text };
+            let role = if chosen {
+                Role::Title
+            } else if n == 0 {
+                Role::Muted
+            } else {
+                Role::Text
+            };
             g.put(y, left, &fit(&label, side_w - 5), role);
             let count = n.to_string();
-            g.put(y, left + side_w - count.chars().count(), &count, Role::Muted);
+            g.put(
+                y,
+                left + side_w - count.chars().count(),
+                &count,
+                Role::Muted,
+            );
             if chosen {
                 if page.sidebar {
                     g.focus(y, left..left + side_w);
@@ -1011,17 +1394,43 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
     }
     // A row: its mark, name, about and state, then its id (and what
     // follows it) below.
-    let row = |g: &mut Grid, y: &mut usize, at: usize, mark: (&str, Role), name: &str, about: (&str, Role), state: (&str, Role), id: &str| {
+    let row = |g: &mut Grid,
+               y: &mut usize,
+               at: usize,
+               mark: (&str, Role),
+               name: &str,
+               about: (&str, Role),
+               state: (&str, Role),
+               id: &str| {
         if at == page.focus && !page.sidebar {
             g.focus(*y, list_x..list_x + list_w);
         }
         g.put(*y, list_x + 1, mark.0, mark.1);
-        g.put(*y, list_x + 4, &fit(name, name_width), if mark.1 == Role::Muted { Role::Muted } else { Role::Text });
+        g.put(
+            *y,
+            list_x + 4,
+            &fit(name, name_width),
+            if mark.1 == Role::Muted {
+                Role::Muted
+            } else {
+                Role::Text
+            },
+        );
         let state_x = (list_x + list_w).saturating_sub(state.0.chars().count());
-        g.put(*y, about_x, &fit(about.0, state_x.saturating_sub(about_x + 2)), about.1);
+        g.put(
+            *y,
+            about_x,
+            &fit(about.0, state_x.saturating_sub(about_x + 2)),
+            about.1,
+        );
         g.put(*y, state_x, state.0, state.1);
         *y += 1;
-        let end = g.put(*y, about_x, &fit(id, (list_x + list_w).saturating_sub(about_x)), Role::Muted);
+        let end = g.put(
+            *y,
+            about_x,
+            &fit(id, (list_x + list_w).saturating_sub(about_x)),
+            Role::Muted,
+        );
         *y += 1;
         end
     };
@@ -1036,35 +1445,86 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
                 } else if page.installing.as_deref() == Some(r.id.as_str()) {
                     "updating…"
                 } else if r.managed {
-                    if r.on { "managed" } else { "managed, off" }
+                    if r.on {
+                        "managed"
+                    } else {
+                        "managed, off"
+                    }
                 } else if page.tab == Tab::Updates {
                     "Enter updates"
                 } else {
                     switch_state(r.running, r.on)
                 };
-                let mark = if r.on { ("●", Role::Good) } else { ("○", Role::Muted) };
+                let mark = if r.on {
+                    ("●", Role::Good)
+                } else {
+                    ("○", Role::Muted)
+                };
                 let about = match &r.broken {
                     Some(why) => (why.as_str(), Role::Warn),
                     None => (r.about.as_str(), Role::Muted),
                 };
-                let state_role = if (r.on == r.running || page.tab == Tab::Updates) && !armed { Role::Muted } else { Role::Warn };
-                let end = row(&mut g, &mut y, at, mark, &r.name, about, (state, state_role), &format!("{} {}", r.id, r.version));
+                let state_role = if (r.on == r.running || page.tab == Tab::Updates) && !armed {
+                    Role::Muted
+                } else {
+                    Role::Warn
+                };
+                let end = row(
+                    &mut g,
+                    &mut y,
+                    at,
+                    mark,
+                    &r.name,
+                    about,
+                    (state, state_role),
+                    &format!("{} {}", r.id, r.version),
+                );
                 if let Some(latest) = update {
-                    g.put(y - 1, end + 2, &fit(&format!("· {latest} available -- u updates"), (list_x + list_w).saturating_sub(end + 2)), Role::Good);
+                    g.put(
+                        y - 1,
+                        end + 2,
+                        &fit(
+                            &format!("· {latest} available -- u updates"),
+                            (list_x + list_w).saturating_sub(end + 2),
+                        ),
+                        Role::Good,
+                    );
                 }
             }
             Entry::Available(i) => {
                 let r = &available[i];
                 let installing = page.installing.as_deref() == Some(r.id.as_str());
-                let state = if installing { ("installing…", Role::Warn) } else { ("Enter installs", Role::Muted) };
-                row(&mut g, &mut y, at, ("+", Role::Text), &r.name, (&r.about, Role::Muted), state, &format!("{} {} · {}", r.id, r.version, kind(Some(r.runtime))));
+                let state = if installing {
+                    ("installing…", Role::Warn)
+                } else {
+                    ("Enter installs", Role::Muted)
+                };
+                row(
+                    &mut g,
+                    &mut y,
+                    at,
+                    ("+", Role::Text),
+                    &r.name,
+                    (&r.about, Role::Muted),
+                    state,
+                    &format!("{} {} · {}", r.id, r.version, kind(Some(r.runtime))),
+                );
             }
             Entry::Bundle(i) => {
                 let b = &bundles[i];
                 let (have, on, all) = page.bundle_state(b);
-                let mark = if on == all { ("●", Role::Good) } else if have > 0 { ("◐", Role::Text) } else { ("○", Role::Muted) };
+                let mark = if on == all {
+                    ("●", Role::Good)
+                } else if have > 0 {
+                    ("◐", Role::Text)
+                } else {
+                    ("○", Role::Muted)
+                };
                 let armed = page.armed.as_deref() == Some(b.id.as_str());
-                let installing = page.installing.as_deref().is_some_and(|id| id == b.id || b.members.iter().any(|m| m == id));
+                let installing = page
+                    .installing
+                    .as_deref()
+                    .is_some_and(|id| id == b.id || b.members.iter().any(|m| m == id));
                 let state = if armed {
                     ("x again removes it".to_string(), Role::Warn)
                 } else if installing {
@@ -1076,13 +1536,35 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
                 } else {
                     (format!("{on} of {all} on"), Role::Muted)
                 };
-                let id = format!("{}{} · {}", b.id, b.version.as_deref().map(|v| format!(" {v}")).unwrap_or_default(), b.members.join(", "));
-                row(&mut g, &mut y, at, mark, &b.name, (&b.about, Role::Muted), (&state.0, state.1), &id);
+                let id = format!(
+                    "{}{} · {}",
+                    b.id,
+                    b.version
+                        .as_deref()
+                        .map(|v| format!(" {v}"))
+                        .unwrap_or_default(),
+                    b.members.join(", ")
+                );
+                row(
+                    &mut g,
+                    &mut y,
+                    at,
+                    mark,
+                    &b.name,
+                    (&b.about, Role::Muted),
+                    (&state.0, state.1),
+                    &id,
+                );
             }
         }
     }
     if window.end < entries.len() {
-        g.put(y, list_x + 2, &format!("↓ {} more", entries.len() - window.end), Role::Muted);
+        g.put(
+            y,
+            list_x + 2,
+            &format!("↓ {} more", entries.len() - window.end),
+            Role::Muted,
+        );
         y += 1;
     }
     if entries.is_empty() {
@@ -1108,7 +1590,16 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         };
         y += 1;
         for line in wrap(&why, list_w.saturating_sub(2)) {
-            g.put(y, list_x + 1, &line, if matches!(page.registry, Registry::Failed(_)) { Role::Warn } else { Role::Muted });
+            g.put(
+                y,
+                list_x + 1,
+                &line,
+                if matches!(page.registry, Registry::Failed(_)) {
+                    Role::Warn
+                } else {
+                    Role::Muted
+                },
+            );
             y += 1;
         }
     }
@@ -1155,7 +1646,12 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         if welcome {
             keys.push(("t", "tutorial"));
         } else {
-            keys.extend([("Tab", "next tab"), ("d", "details"), ("/", "search"), ("h l", "categories")]);
+            keys.extend([
+                ("Tab", "next tab"),
+                ("d", "details"),
+                ("/", "search"),
+                ("h l", "categories"),
+            ]);
         }
         if page.installed.iter().any(|r| page.update_of(r).is_some()) {
             keys.extend([("u", "update"), ("U", "update all")]);
@@ -1171,16 +1667,24 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
 }
 
 /// What an extension of data asks for: nothing.
-const DATA_PERMISSIONS: &str = "None. It carries data (themes, snippets, templates, keys, language files) and runs no code.";
+const DATA_PERMISSIONS: &str =
+    "None. It carries data (themes, snippets, templates, keys, language files) and runs no code.";
 
 /// What an extension may do, as the details page says it.
 fn runtime_permissions(runtime: Runtime, asked: &Permissions) -> String {
     match runtime {
         Runtime::None => DATA_PERMISSIONS.into(),
-        Runtime::Wasm if asked.none() => "None. Its code runs sandboxed, with no files, network, programs or secrets.".into(),
-        Runtime::Wasm => format!("Its code runs sandboxed, with only these: {}.", asked.lines().join("; ")),
+        Runtime::Wasm if asked.none() => {
+            "None. Its code runs sandboxed, with no files, network, programs or secrets.".into()
+        }
+        Runtime::Wasm => format!(
+            "Its code runs sandboxed, with only these: {}.",
+            asked.lines().join("; ")
+        ),
         Runtime::Lua => "It runs Lua code, which this Fenix doesn't install yet.".into(),
-        Runtime::Bundle => "None of its own: it's the extensions in it, each asking for what it asks.".into(),
+        Runtime::Bundle => {
+            "None of its own: it's the extensions in it, each asking for what it asks.".into()
+        }
     }
 }
 
@@ -1188,16 +1692,30 @@ fn dependencies(deps: &BTreeMap<String, String>) -> String {
     if deps.is_empty() {
         return "none".into();
     }
-    deps.iter().map(|(id, range)| format!("`{id}` {range}")).collect::<Vec<_>>().join(", ")
+    deps.iter()
+        .map(|(id, range)| format!("`{id}` {range}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// A README, changelog and screenshots, after what an extension is.
-fn read_me_and_changes(out: &mut String, readme: Option<&str>, changelog: Option<&str>, screenshots: &[PathBuf]) {
+fn read_me_and_changes(
+    out: &mut String,
+    readme: Option<&str>,
+    changelog: Option<&str>,
+    screenshots: &[PathBuf],
+) {
     if !screenshots.is_empty() {
         *out += "\n---\n\n## Screenshots\n\n";
         for path in screenshots {
-            let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            *out += &format!("![{name}]({})\n\n", path.display().to_string().replace(' ', "%20"));
+            let name = path
+                .file_stem()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            *out += &format!(
+                "![{name}]({})\n\n",
+                path.display().to_string().replace(' ', "%20")
+            );
         }
     }
     for (title, text) in [("Read me", readme), ("Changes", changelog)] {
@@ -1210,7 +1728,14 @@ fn read_me_and_changes(out: &mut String, readme: Option<&str>, changelog: Option
 /// An installed extension's details page, as Markdown: what it is, the
 /// bundles it's in (`bundles`), then its screenshots, README and
 /// changelog when it carries them.
-pub fn installed_details(e: &fenix_extensions::Installed, managed: bool, readme: Option<&str>, changelog: Option<&str>, screenshots: &[PathBuf], bundles: &[String]) -> String {
+pub fn installed_details(
+    e: &fenix_extensions::Installed,
+    managed: bool,
+    readme: Option<&str>,
+    changelog: Option<&str>,
+    screenshots: &[PathBuf],
+    bundles: &[String],
+) -> String {
     let mut out = String::new();
     match &e.manifest {
         Ok(m) => {
@@ -1224,11 +1749,22 @@ pub fn installed_details(e: &fenix_extensions::Installed, managed: bool, readme:
             } else {
                 "by you"
             };
-            out += &format!("- **Installed:** {how}{}\n", if e.enabled { "" } else { " (switched off)" });
+            out += &format!(
+                "- **Installed:** {how}{}\n",
+                if e.enabled { "" } else { " (switched off)" }
+            );
             if info.runtime == Runtime::Bundle {
-                out += &format!("- **For Fenix:** {}\n- **Members:** {}\n", m.engine.fenix, dependencies(&m.dependencies));
+                out += &format!(
+                    "- **For Fenix:** {}\n- **Members:** {}\n",
+                    m.engine.fenix,
+                    dependencies(&m.dependencies)
+                );
             } else {
-                out += &format!("- **For Fenix:** {}\n- **Needs:** {}\n", m.engine.fenix, dependencies(&m.dependencies));
+                out += &format!(
+                    "- **For Fenix:** {}\n- **Needs:** {}\n",
+                    m.engine.fenix,
+                    dependencies(&m.dependencies)
+                );
             }
             if !bundles.is_empty() {
                 out += &format!("- **In bundles:** {}\n", bundles.join(", "));
@@ -1245,13 +1781,25 @@ pub fn installed_details(e: &fenix_extensions::Installed, managed: bool, readme:
             if let Some(repo) = &info.repository {
                 out += &format!("- **Source:** <{repo}>\n");
             }
-            out += &format!("- **Permissions:** {}\n", runtime_permissions(info.runtime, &m.permissions));
-            let carries: Vec<&str> = fenix_extensions::DATA_DIRS.iter().copied().filter(|d| e.dir.join(d).is_dir()).collect();
+            out += &format!(
+                "- **Permissions:** {}\n",
+                runtime_permissions(info.runtime, &m.permissions)
+            );
+            let carries: Vec<&str> = fenix_extensions::DATA_DIRS
+                .iter()
+                .copied()
+                .filter(|d| e.dir.join(d).is_dir())
+                .collect();
             if !carries.is_empty() {
                 out += &format!("- **Carries:** {}\n", carries.join(", "));
             }
         }
-        Err(why) => out += &format!("# {}\n\nIts manifest can't be read: {why}\n\n- **Id:** `{}`\n- **Version:** {}\n", e.id, e.id, e.version),
+        Err(why) => {
+            out += &format!(
+                "# {}\n\nIts manifest can't be read: {why}\n\n- **Id:** `{}`\n- **Version:** {}\n",
+                e.id, e.id, e.version
+            )
+        }
     }
     out += &format!("- **Folder:** `{}`\n", e.dir.display());
     read_me_and_changes(&mut out, readme, changelog, screenshots);
@@ -1261,8 +1809,16 @@ pub fn installed_details(e: &fenix_extensions::Installed, managed: bool, readme:
 /// The registry's extension's details page, as Markdown, from its
 /// listing -- and, once it's been fetched (`Release::preview`), the
 /// README, changelog and screenshots its package carries, from `preview`.
-pub fn available_details(l: &Listing, release: &semver::Version, preview: Option<&Path>, bundles: &[String]) -> String {
-    let mut out = format!("# {}\n\n{}\n\n- **Id:** `{}`\n", l.name, l.description, l.id);
+pub fn available_details(
+    l: &Listing,
+    release: &semver::Version,
+    preview: Option<&Path>,
+    bundles: &[String],
+) -> String {
+    let mut out = format!(
+        "# {}\n\n{}\n\n- **Id:** `{}`\n",
+        l.name, l.description, l.id
+    );
     match l.latest_for(release) {
         Some(r) => {
             let needs = if r.runtime == Runtime::Bundle { "Members" } else { "Needs" };
@@ -1283,10 +1839,18 @@ pub fn available_details(l: &Listing, release: &semver::Version, preview: Option
     }
     let mut versions: Vec<&str> = l.versions.iter().map(|r| r.version.as_str()).collect();
     versions.reverse();
-    out += &format!("- **Versions:** {}\n\nEnter on the Extensions page installs it.\n", versions.join(", "));
+    out += &format!(
+        "- **Versions:** {}\n\nEnter on the Extensions page installs it.\n",
+        versions.join(", ")
+    );
     if let Some(dir) = preview {
         let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
-        read_me_and_changes(&mut out, read("README.md").as_deref(), read("CHANGELOG.md").as_deref(), &screenshots(dir));
+        read_me_and_changes(
+            &mut out,
+            read("README.md").as_deref(),
+            read("CHANGELOG.md").as_deref(),
+            &screenshots(dir),
+        );
     }
     out
 }
@@ -1299,7 +1863,11 @@ fn demote(text: &str) -> String {
             if line.trim_start().starts_with("```") {
                 fenced = !fenced;
             }
-            if !fenced && line.starts_with('#') { format!("#{line}") } else { line.to_string() }
+            if !fenced && line.starts_with('#') {
+                format!("#{line}")
+            } else {
+                line.to_string()
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -1314,7 +1882,18 @@ mod tests {
     }
 
     fn installed(id: &str, on: bool, broken: Option<&str>) -> InstalledRow {
-        InstalledRow { id: id.into(), name: id.into(), version: "1.0.0".into(), about: "Themes".into(), running: on, on, broken: broken.map(str::to_string), runtime: broken.is_none().then_some(Runtime::None), categories: vec!["themes".into()], ..Default::default() }
+        InstalledRow {
+            id: id.into(),
+            name: id.into(),
+            version: "1.0.0".into(),
+            about: "Themes".into(),
+            running: on,
+            on,
+            broken: broken.map(str::to_string),
+            runtime: broken.is_none().then_some(Runtime::None),
+            categories: vec!["themes".into()],
+            ..Default::default()
+        }
     }
 
     /// Enter switches an installed extension, `x` twice removes it, and
@@ -1322,11 +1901,24 @@ mod tests {
     #[test]
     fn installed_extensions_switch_and_are_removed_with_a_second_x() {
         let mut p = page();
-        p.installed = vec![installed("acme.dusk", true, None), installed("acme.broken", true, Some("extension.toml: no version"))];
+        p.installed = vec![
+            installed("acme.dusk", true, None),
+            installed("acme.broken", true, Some("extension.toml: no version")),
+        ];
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("1 Installed 2") && text.contains("acme.dusk 1.0.0") && text.contains("no version"), "{text}");
-        assert_eq!(p.key(Key::Enter), Action::SwitchInstalled("acme.dusk".into(), false));
-        assert!(matches!(p.key(Key::Char('x')), Action::Say(s) if s.starts_with("x again removes acme.dusk")));
+        assert!(
+            text.contains("1 Installed 2")
+                && text.contains("acme.dusk 1.0.0")
+                && text.contains("no version"),
+            "{text}"
+        );
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::SwitchInstalled("acme.dusk".into(), false)
+        );
+        assert!(
+            matches!(p.key(Key::Char('x')), Action::Say(s) if s.starts_with("x again removes acme.dusk"))
+        );
         assert!(layout(&p, 160).all_text().contains("x again removes it"));
         assert_eq!(p.key(Key::Char('x')), Action::Uninstall("acme.dusk".into()));
         p.key(Key::Char('x'));
@@ -1338,20 +1930,36 @@ mod tests {
     }
 
     fn release(version: &str, runtime: &str, extra: &str) -> String {
-        format!(r#"{{"version": "{version}", "fenix": ">=1.0, <2", "runtime": "{runtime}", "url": "u", "sha256": "", "size": 1{extra}}}"#)
+        format!(
+            r#"{{"version": "{version}", "fenix": ">=1.0, <2", "runtime": "{runtime}", "url": "u", "sha256": "", "size": 1{extra}}}"#
+        )
     }
 
     fn index(json_versions: &[(&str, &str)]) -> Index {
         let listings: Vec<String> = json_versions.iter().map(|(id, version)| format!(r#"{{"id": "{id}", "name": "{id}", "description": "Themes", "categories": ["themes"], "versions": [{}]}}"#, release(version, "none", ""))).collect();
-        serde_json::from_str(&format!(r#"{{"format": 1, "extensions": [{}]}}"#, listings.join(","))).unwrap()
+        serde_json::from_str(&format!(
+            r#"{{"format": 1, "extensions": [{}]}}"#,
+            listings.join(",")
+        ))
+        .unwrap()
     }
 
     /// The registry's bundle `id` of `members`.
     fn with_bundle(mut index: Index, id: &str, name: &str, members: &[&str]) -> Index {
         let deps: Vec<String> = members.iter().map(|m| format!(r#""{m}": "^1""#)).collect();
-        let bundle = members.iter().map(|m| format!("\"{m}\"")).collect::<Vec<_>>().join(", ");
-        let extra = format!(r#", "dependencies": {{{}}}, "bundle": [{bundle}], "categories": ["tools"]"#, deps.join(", "));
-        let json = format!(r#"{{"id": "{id}", "name": "{name}", "description": "Together", "versions": [{}]}}"#, release("1.0.0", "bundle", &extra));
+        let bundle = members
+            .iter()
+            .map(|m| format!("\"{m}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let extra = format!(
+            r#", "dependencies": {{{}}}, "bundle": [{bundle}], "categories": ["tools"]"#,
+            deps.join(", ")
+        );
+        let json = format!(
+            r#"{{"id": "{id}", "name": "{name}", "description": "Together", "versions": [{}]}}"#,
+            release("1.0.0", "bundle", &extra)
+        );
         index.bundles.push(serde_json::from_str(&json).unwrap());
         index
     }
@@ -1363,12 +1971,32 @@ mod tests {
     fn the_registry_offers_what_isnt_installed_and_newer_versions() {
         let mut p = page();
         p.tab = Tab::Browse;
-        assert!(layout(&p, 160).all_text().contains("Looking at the registry"));
-        p.installed = vec![installed("acme.dusk", true, None), installed("acme.calm", true, None)];
-        p.registry = Registry::Read(index(&[("acme.dusk", "1.2.0"), ("acme.calm", "1.1.0"), ("acme.dawn", "1.0.0")]));
-        assert_eq!(p.available().iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["acme.dawn"]);
+        assert!(layout(&p, 160)
+            .all_text()
+            .contains("Looking at the registry"));
+        p.installed = vec![
+            installed("acme.dusk", true, None),
+            installed("acme.calm", true, None),
+        ];
+        p.registry = Registry::Read(index(&[
+            ("acme.dusk", "1.2.0"),
+            ("acme.calm", "1.1.0"),
+            ("acme.dawn", "1.0.0"),
+        ]));
+        assert_eq!(
+            p.available()
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            ["acme.dawn"]
+        );
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("3 Browse 1") && text.contains("acme.dawn 1.0.0 · data") && text.contains("2 Updates 2"), "{text}");
+        assert!(
+            text.contains("3 Browse 1")
+                && text.contains("acme.dawn 1.0.0 · data")
+                && text.contains("2 Updates 2"),
+            "{text}"
+        );
         assert_eq!(p.key(Key::Enter), Action::Install("acme.dawn".into()));
         p.installing = Some("acme.dawn".into());
         assert!(layout(&p, 160).all_text().contains("installing…"));
@@ -1378,17 +2006,27 @@ mod tests {
         p.key(Key::BackTab);
         assert_eq!(p.tab, Tab::Updates);
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("1.2.0 available -- u updates") && text.contains("Enter updates"), "{text}");
+        assert!(
+            text.contains("1.2.0 available -- u updates") && text.contains("Enter updates"),
+            "{text}"
+        );
         assert_eq!(p.key(Key::Char('u')), Action::Install("acme.dusk".into()));
-        assert_eq!(p.key(Key::Char('U')), Action::UpdateAll(vec!["acme.dusk".into(), "acme.calm".into()]));
+        assert_eq!(
+            p.key(Key::Char('U')),
+            Action::UpdateAll(vec!["acme.dusk".into(), "acme.calm".into()])
+        );
         p.installed[0].version = "1.2.0".into();
         p.installed[1].version = "1.1.0".into();
         assert!(matches!(p.key(Key::Char('U')), Action::Say(s) if s.contains("the newest")));
-        assert!(layout(&p, 160).all_text().contains("Everything installed is the newest"));
+        assert!(layout(&p, 160)
+            .all_text()
+            .contains("Everything installed is the newest"));
         assert_eq!(p.key(Key::Char('r')), Action::Refresh);
         p.registry = Registry::Failed("offline".into());
         p.key(Key::Char('3'));
-        assert!(layout(&p, 160).all_text().contains("couldn't be read: offline -- r tries again"));
+        assert!(layout(&p, 160)
+            .all_text()
+            .contains("couldn't be read: offline -- r tries again"));
         assert!(p.available().is_empty());
     }
 
@@ -1397,13 +2035,19 @@ mod tests {
     #[test]
     fn a_managed_extension_is_left_to_the_administrator() {
         let mut p = page();
-        p.installed = vec![InstalledRow { managed: true, ..installed("acme.dusk", true, None) }];
+        p.installed = vec![InstalledRow {
+            managed: true,
+            ..installed("acme.dusk", true, None)
+        }];
         p.registry = Registry::Read(index(&[("acme.dusk", "1.2.0")]));
         for key in [Key::Enter, Key::Char('x'), Key::Char('u')] {
             assert!(matches!(p.key(key), Action::Say(s) if s.contains("managed on this machine")));
         }
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("managed") && !text.contains("u updates") && !text.contains("x x"), "{text}");
+        assert!(
+            text.contains("managed") && !text.contains("u updates") && !text.contains("x x"),
+            "{text}"
+        );
     }
 
     fn type_in(p: &mut ExtensionsPage, text: &str) {
@@ -1417,7 +2061,10 @@ mod tests {
     #[test]
     fn search_keeps_to_what_matches() {
         let mut p = page();
-        p.installed = vec![installed("acme.dusk", true, None), installed("acme.dawn", true, None)];
+        p.installed = vec![
+            installed("acme.dusk", true, None),
+            installed("acme.dawn", true, None),
+        ];
         assert_eq!(p.count(), 2);
         p.key(Key::Char('/'));
         assert!(p.typing());
@@ -1425,14 +2072,25 @@ mod tests {
         p.key(Key::Enter);
         assert!(!p.typing());
         assert_eq!(p.count(), 1);
-        assert_eq!(p.key(Key::Enter), Action::SwitchInstalled("acme.dawn".into(), false), "the one match is under the cursor");
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::SwitchInstalled("acme.dawn".into(), false),
+            "the one match is under the cursor"
+        );
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("acme.dawn") && !text.contains("acme.dusk"), "{text}");
+        assert!(
+            text.contains("acme.dawn") && !text.contains("acme.dusk"),
+            "{text}"
+        );
         p.key(Key::Char('/'));
         type_in(&mut p, "x");
         p.key(Key::Enter);
         assert!(layout(&p, 160).all_text().contains("Nothing matches"));
-        assert_eq!(p.key(Key::Escape), Action::None, "Esc clears the search first");
+        assert_eq!(
+            p.key(Key::Escape),
+            Action::None,
+            "Esc clears the search first"
+        );
         assert_eq!(p.count(), 2);
         assert_eq!(p.key(Key::Escape), Action::Close);
     }
@@ -1448,16 +2106,41 @@ mod tests {
                 {{"id": "acme.ctr", "name": "Containers", "categories": ["tools"], "versions": [{}]}},
                 {{"id": "acme.odd", "name": "Odd", "categories": ["weird"], "versions": [{}]}}]}}"#,
             release("1.0.0", "none", ""),
-            release("1.0.0", "wasm", r#", "api": "1.0", "permissions": {"network": ["jira.example.com"], "secrets": ["jira.token"]}"#),
-            release("1.0.0", "wasm", r#", "api": "1.0", "permissions": {"process": ["docker"]}"#),
+            release(
+                "1.0.0",
+                "wasm",
+                r#", "api": "1.0", "permissions": {"network": ["jira.example.com"], "secrets": ["jira.token"]}"#
+            ),
+            release(
+                "1.0.0",
+                "wasm",
+                r#", "api": "1.0", "permissions": {"process": ["docker"]}"#
+            ),
             release("1.0.0", "none", ""),
         );
         let mut p = page();
         p.tab = Tab::Browse;
         p.registry = Registry::Read(serde_json::from_str(&json).unwrap());
-        let shown = |p: &ExtensionsPage| p.entries().iter().map(|e| match e { Entry::Available(i) => p.available()[*i].id.clone(), _ => String::new() }).collect::<Vec<_>>();
+        let shown = |p: &ExtensionsPage| {
+            p.entries()
+                .iter()
+                .map(|e| match e {
+                    Entry::Available(i) => p.available()[*i].id.clone(),
+                    _ => String::new(),
+                })
+                .collect::<Vec<_>>()
+        };
         assert_eq!(shown(&p).len(), 4);
-        for (search, want) in [("runtime:code", vec!["acme.jira", "acme.ctr"]), ("runtime:data", vec!["acme.dusk", "acme.odd"]), ("asks:network", vec!["acme.jira"]), ("asks:process runtime:code", vec!["acme.ctr"]), ("asks:nothing", vec!["acme.dusk", "acme.odd"]), ("category:tools jira", vec!["acme.jira"]), ("category:too jira", vec!["acme.jira"]), ("category:other", vec!["acme.odd"])] {
+        for (search, want) in [
+            ("runtime:code", vec!["acme.jira", "acme.ctr"]),
+            ("runtime:data", vec!["acme.dusk", "acme.odd"]),
+            ("asks:network", vec!["acme.jira"]),
+            ("asks:process runtime:code", vec!["acme.ctr"]),
+            ("asks:nothing", vec!["acme.dusk", "acme.odd"]),
+            ("category:tools jira", vec!["acme.jira"]),
+            ("category:too jira", vec!["acme.jira"]),
+            ("category:other", vec!["acme.odd"]),
+        ] {
             p.filter.text = search.into();
             assert_eq!(shown(&p), want, "{search}");
         }
@@ -1465,20 +2148,36 @@ mod tests {
         // The sidebar: h to it, j down to a category.
         let categories = p.categories();
         assert_eq!(categories[0], (None, "All".to_string(), 4));
-        assert!(categories.iter().any(|c| c == &(Some("tools".to_string()), "Tools".to_string(), 2)) && categories.last().unwrap().2 == 1, "{categories:?}");
+        assert!(
+            categories
+                .iter()
+                .any(|c| c == &(Some("tools".to_string()), "Tools".to_string(), 2))
+                && categories.last().unwrap().2 == 1,
+            "{categories:?}"
+        );
         p.key(Key::Char('h'));
         assert!(p.sidebar);
-        let at_tools = categories.iter().position(|c| c.0.as_deref() == Some("tools")).unwrap();
+        let at_tools = categories
+            .iter()
+            .position(|c| c.0.as_deref() == Some("tools"))
+            .unwrap();
         for _ in 0..at_tools {
             p.key(Key::Char('j'));
         }
         assert_eq!(p.category.as_deref(), Some("tools"));
         assert_eq!(shown(&p), ["acme.jira", "acme.ctr"]);
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("Tools") && text.contains("Containers") && !text.contains("Dusk"), "{text}");
+        assert!(
+            text.contains("Tools") && text.contains("Containers") && !text.contains("Dusk"),
+            "{text}"
+        );
         p.key(Key::Char('l'));
         assert!(!p.sidebar);
-        assert_eq!(p.key(Key::Escape), Action::None, "Esc lets go of the category");
+        assert_eq!(
+            p.key(Key::Escape),
+            Action::None,
+            "Esc lets go of the category"
+        );
         assert_eq!(p.category, None);
     }
 
@@ -1494,16 +2193,29 @@ mod tests {
         p.registry = Registry::Read(index(&pairs));
         assert_eq!(p.shown(), 10);
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("acme.theme-009") && !text.contains("acme.theme-010") && text.contains("↓ 490 more"), "{text}");
+        assert!(
+            text.contains("acme.theme-009")
+                && !text.contains("acme.theme-010")
+                && text.contains("↓ 490 more"),
+            "{text}"
+        );
         assert!(text.lines().count() < 40);
         p.key(Key::Char('G'));
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("acme.theme-499") && text.contains("↑ 490 more") && !text.contains("acme.theme-489 "), "{text}");
+        assert!(
+            text.contains("acme.theme-499")
+                && text.contains("↑ 490 more")
+                && !text.contains("acme.theme-489 "),
+            "{text}"
+        );
         let start = std::time::Instant::now();
         p.key(Key::Char('/'));
         type_in(&mut p, "theme-25");
         assert_eq!(p.count(), 10);
-        assert!(start.elapsed() < std::time::Duration::from_secs(1), "a search is instant");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "a search is instant"
+        );
     }
 
     #[test]
@@ -1514,7 +2226,13 @@ mod tests {
         let mut seen = vec![p.key(Key::Char('d'))];
         p.key(Key::Char('3'));
         seen.push(p.key(Key::Char('d')));
-        assert_eq!(seen, [Action::Details(Target::Installed("acme.dusk".into())), Action::Details(Target::Available("acme.dawn".into()))]);
+        assert_eq!(
+            seen,
+            [
+                Action::Details(Target::Installed("acme.dusk".into())),
+                Action::Details(Target::Available("acme.dawn".into()))
+            ]
+        );
     }
 
     /// The pane beside the list: what it is, asks for, needs, which
@@ -1529,18 +2247,48 @@ mod tests {
             screenshots: vec![PathBuf::from("/x/screenshots/dusk.png")],
             ..installed("acme.dusk", true, None)
         }];
-        p.registry = Registry::Read(with_bundle(index(&[("acme.dusk", "1.0.0")]), "acme.evening", "Evening", &["acme.dusk"]));
+        p.registry = Registry::Read(with_bundle(
+            index(&[("acme.dusk", "1.0.0")]),
+            "acme.evening",
+            "Evening",
+            &["acme.dusk"],
+        ));
         p.rows = 80;
         let page = layout(&p, 200);
         let text = page.all_text();
-        for want in ["Kind: data · Themes", "PERMISSIONS", "runs no code", "Needs: none", "In bundles: Evening", "Versions: 1.0.0", "READ ME", "Two late themes.", "Use", "CHANGES", "1.0.0", "- First"] {
+        for want in [
+            "Kind: data · Themes",
+            "PERMISSIONS",
+            "runs no code",
+            "Needs: none",
+            "In bundles: Evening",
+            "Versions: 1.0.0",
+            "READ ME",
+            "Two late themes.",
+            "Use",
+            "CHANGES",
+            "1.0.0",
+            "- First",
+        ] {
             assert!(text.contains(want), "{want:?} in {text}");
         }
         assert!(!text.contains("Older"), "the newest change alone");
-        assert_eq!(page.images.iter().map(|i| i.key.clone()).collect::<Vec<_>>(), [ImageKey::File(PathBuf::from("/x/screenshots/dusk.png"))]);
-        assert!(!layout(&p, 100).all_text().contains("PERMISSIONS"), "no room for it: d opens it");
+        assert_eq!(
+            page.images
+                .iter()
+                .map(|i| i.key.clone())
+                .collect::<Vec<_>>(),
+            [ImageKey::File(PathBuf::from("/x/screenshots/dusk.png"))]
+        );
+        assert!(
+            !layout(&p, 100).all_text().contains("PERMISSIONS"),
+            "no room for it: d opens it"
+        );
         p.rows = 30;
-        assert!(layout(&p, 200).all_text().contains("… d shows it all"), "cut where the list ends");
+        assert!(
+            layout(&p, 200).all_text().contains("… d shows it all"),
+            "cut where the list ends"
+        );
     }
 
     #[test]
@@ -1548,22 +2296,66 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manifest = fenix_extensions::Manifest::parse("[extension]\nid = \"acme.dusk\"\nname = \"Dusk\"\nversion = \"1.2.0\"\ndescription = \"Late themes\"\nruntime = \"none\"\nlicense = \"MIT\"\n\n[engine]\nfenix = \">=1.0, <2\"\n\n[dependencies]\n\"acme.base\" = \"^1\"\n").unwrap();
         std::fs::create_dir_all(dir.path().join("themes")).unwrap();
-        let e = fenix_extensions::Installed { id: "acme.dusk".into(), version: "1.2.0".into(), enabled: true, dependency: false, dir: dir.path().to_path_buf(), manifest: Ok(manifest) };
+        let e = fenix_extensions::Installed {
+            id: "acme.dusk".into(),
+            version: "1.2.0".into(),
+            enabled: true,
+            dependency: false,
+            dir: dir.path().to_path_buf(),
+            manifest: Ok(manifest),
+        };
         let shot = dir.path().join("screenshots").join("late night.png");
-        let md = installed_details(&e, true, Some("# Dusk\n\nTwo themes.\n\n```\n# not a heading\n```"), Some("## 1.2.0\n- calmer"), std::slice::from_ref(&shot), &["Evening".into()]);
-        for want in ["# Dusk\n\nLate themes", "**Version:** 1.2.0", "by its administrator", "`acme.base` ^1", "**In bundles:** Evening", "**License:** MIT", "runs no code", "**Carries:** themes", "## Screenshots", "late%20night.png)", "## Read me\n\n## Dusk", "# not a heading", "## Changes\n\n### 1.2.0"] {
+        let md = installed_details(
+            &e,
+            true,
+            Some("# Dusk\n\nTwo themes.\n\n```\n# not a heading\n```"),
+            Some("## 1.2.0\n- calmer"),
+            std::slice::from_ref(&shot),
+            &["Evening".into()],
+        );
+        for want in [
+            "# Dusk\n\nLate themes",
+            "**Version:** 1.2.0",
+            "by its administrator",
+            "`acme.base` ^1",
+            "**In bundles:** Evening",
+            "**License:** MIT",
+            "runs no code",
+            "**Carries:** themes",
+            "## Screenshots",
+            "late%20night.png)",
+            "## Read me\n\n## Dusk",
+            "# not a heading",
+            "## Changes\n\n### 1.2.0",
+        ] {
             assert!(md.contains(want), "{want:?} in {md}");
         }
         let listing: Listing = index(&[("acme.dawn", "1.0.0")]).extensions.remove(0);
         let md = available_details(&listing, &semver::Version::new(1, 0, 0), None, &[]);
-        assert!(md.contains("**Newest for this Fenix:** 1.0.0") && md.contains("**Download:** 1 KB") && md.contains("runs no code") && !md.contains("Read me"), "{md}");
+        assert!(
+            md.contains("**Newest for this Fenix:** 1.0.0")
+                && md.contains("**Download:** 1 KB")
+                && md.contains("runs no code")
+                && !md.contains("Read me"),
+            "{md}"
+        );
         // Its package's README and screenshots, once fetched.
         let preview = dir.path().join("preview");
         std::fs::create_dir_all(preview.join("screenshots")).unwrap();
         std::fs::write(preview.join("README.md"), "# Dawn\n\nEarly.").unwrap();
         std::fs::write(preview.join("screenshots/a.png"), "").unwrap();
-        let md = available_details(&listing, &semver::Version::new(1, 0, 0), Some(&preview), &[]);
-        assert!(md.contains("## Read me\n\n## Dawn") && md.contains("## Screenshots") && md.contains("a.png)"), "{md}");
+        let md = available_details(
+            &listing,
+            &semver::Version::new(1, 0, 0),
+            Some(&preview),
+            &[],
+        );
+        assert!(
+            md.contains("## Read me\n\n## Dawn")
+                && md.contains("## Screenshots")
+                && md.contains("a.png)"),
+            "{md}"
+        );
     }
 
     /// What a code extension may do is on its details before it's
@@ -1574,38 +2366,74 @@ mod tests {
             {"version": "2.0.0", "fenix": ">=1.0, <2", "runtime": "wasm", "api": "1.0", "url": "u", "sha256": "", "size": 1,
              "permissions": {"process": ["docker", "podman"]}}]}]}"#;
         let mut index: Index = serde_json::from_str(json).unwrap();
-        let md = available_details(&index.extensions[0], &semver::Version::new(1, 0, 0), None, &[]);
-        assert!(md.contains("sandboxed, with only these: Run the programs: docker, podman."), "{md}");
+        let md = available_details(
+            &index.extensions[0],
+            &semver::Version::new(1, 0, 0),
+            None,
+            &[],
+        );
+        assert!(
+            md.contains("sandboxed, with only these: Run the programs: docker, podman."),
+            "{md}"
+        );
         index.extensions[0].versions[0].permissions = Default::default();
-        let md = available_details(&index.extensions[0], &semver::Version::new(1, 0, 0), None, &[]);
-        assert!(md.contains("no files, network, programs or secrets"), "{md}");
+        let md = available_details(
+            &index.extensions[0],
+            &semver::Version::new(1, 0, 0),
+            None,
+            &[],
+        );
+        assert!(
+            md.contains("no files, network, programs or secrets"),
+            "{md}"
+        );
     }
 
     #[test]
     fn with_nothing_installed_the_page_says_how() {
         let text = layout(&page(), 160).all_text();
-        assert!(text.contains("None yet -- install one from Browse or Bundles"), "{text}");
+        assert!(
+            text.contains("None yet -- install one from Browse or Bundles"),
+            "{text}"
+        );
     }
 
     #[test]
     fn safe_mode_says_nothing_runs_rather_than_changes_waiting() {
         let mut p = page();
-        p.installed = vec![InstalledRow { running: false, ..installed("acme.dusk", true, None) }];
+        p.installed = vec![InstalledRow {
+            running: false,
+            ..installed("acme.dusk", true, None)
+        }];
         p.safe_mode = true;
         let text = layout(&p, 160).all_text();
-        assert!(text.contains("Safe mode: none of these runs") && !text.contains("restart Fenix to apply"), "{text}");
+        assert!(
+            text.contains("Safe mode: none of these runs")
+                && !text.contains("restart Fenix to apply"),
+            "{text}"
+        );
     }
 
     #[test]
     fn a_switch_waiting_for_a_restart_says_so() {
         let mut p = page();
-        p.installed = vec![installed("acme.dusk", true, None), installed("acme.dawn", false, None)];
+        p.installed = vec![
+            installed("acme.dusk", true, None),
+            installed("acme.dawn", false, None),
+        ];
         let text = layout(&p, 120).all_text();
-        assert!(text.contains("acme.dusk") && text.contains("acme.dawn") && text.contains("1 of 2 on"), "{text}");
+        assert!(
+            text.contains("acme.dusk") && text.contains("acme.dawn") && text.contains("1 of 2 on"),
+            "{text}"
+        );
         assert!(!text.contains("restart Fenix"));
         p.installed[0].on = false;
         let text = layout(&p, 120).all_text();
-        assert!(text.contains("off after a restart") && text.contains("1 change -- restart Fenix to apply"), "{text}");
+        assert!(
+            text.contains("off after a restart")
+                && text.contains("1 change -- restart Fenix to apply"),
+            "{text}"
+        );
     }
 
     /// The welcome is the bundles this Fenix knows until the registry is
@@ -1615,20 +2443,61 @@ mod tests {
     fn the_welcomes_bundles_are_fenixs_own_until_the_registry_is_read() {
         let mut p = ExtensionsPage::welcome();
         let text = layout(&p, 120).all_text();
-        assert!(text.contains("Welcome to Fenix") && text.contains("Looking at the registry") && !text.contains("Browse"), "{text}");
-        assert_eq!(p.bundles().iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Personal", "Mission", "Review", "Jira", "Lab", "Reading"]);
+        assert!(
+            text.contains("Welcome to Fenix")
+                && text.contains("Looking at the registry")
+                && !text.contains("Browse"),
+            "{text}"
+        );
+        assert_eq!(
+            p.bundles()
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Personal", "Mission", "Review", "Jira", "Lab", "Reading"]
+        );
         p.focus = 1;
-        let mission: Vec<String> = ["fenix.mib", "fenix.ccsds", "fenix.tcl"].map(String::from).to_vec();
-        assert_eq!(p.key(Key::Enter), Action::SwitchBundle { on: true, members: mission.clone(), install: None });
+        let mission: Vec<String> = ["fenix.mib", "fenix.ccsds", "fenix.tcl"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::SwitchBundle {
+                on: true,
+                members: mission.clone(),
+                install: None
+            }
+        );
         for id in ["fenix.mib", "fenix.ccsds"] {
-            p.installed.push(InstalledRow { version: "2.0.0".into(), ..installed(id, true, None) });
+            p.installed.push(InstalledRow {
+                version: "2.0.0".into(),
+                ..installed(id, true, None)
+            });
         }
         assert!(layout(&p, 120).all_text().contains("2 of 3 on"));
-        assert_eq!(p.key(Key::Enter), Action::SwitchBundle { on: true, members: mission.clone(), install: None }, "not all on without Tcl");
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::SwitchBundle {
+                on: true,
+                members: mission.clone(),
+                install: None
+            },
+            "not all on without Tcl"
+        );
         p.installed.push(installed("fenix.tcl", true, None));
-        assert_eq!(p.key(Key::Enter), Action::SwitchBundle { on: false, members: mission, install: None }, "all on: off again");
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::SwitchBundle {
+                on: false,
+                members: mission,
+                install: None
+            },
+            "all on: off again"
+        );
         p.registry = Registry::Failed("offline".into());
-        assert!(layout(&p, 120).all_text().contains("offline -- r tries again. These are the bundles this Fenix knows"));
+        assert!(layout(&p, 120)
+            .all_text()
+            .contains("offline -- r tries again. These are the bundles this Fenix knows"));
     }
 
     /// The welcome offers the tutorial; the Extensions page's `t` is
@@ -1637,7 +2506,11 @@ mod tests {
     fn the_welcome_offers_the_tutorial() {
         let mut p = ExtensionsPage::welcome();
         let text = layout(&p, 120).all_text();
-        assert!(text.contains("New to Fenix's keys? t starts the tutorial") && text.contains("t tutorial"), "{text}");
+        assert!(
+            text.contains("New to Fenix's keys? t starts the tutorial")
+                && text.contains("t tutorial"),
+            "{text}"
+        );
         assert_eq!(p.key(Key::Char('t')), Action::Tutorial);
         let mut e = ExtensionsPage::new();
         assert!(!layout(&e, 160).all_text().contains("tutorial"));
@@ -1649,19 +2522,67 @@ mod tests {
     #[test]
     fn the_registrys_bundles_install_and_go_as_one() {
         let mut p = ExtensionsPage::welcome();
-        p.registry = Registry::Read(with_bundle(with_bundle(index(&[("acme.notes", "1.0.0")]), "acme.zeta", "Zeta", &["acme.notes"]), "fenix.lab-bundle", "Lab", &["acme.notes", "acme.board"]));
-        assert_eq!(p.bundles().iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Lab", "Zeta"], "Fenix's order, then by name; the fallback gone");
-        assert_eq!(p.key(Key::Enter), Action::SwitchBundle { on: true, members: vec!["acme.notes".into(), "acme.board".into()], install: Some("fenix.lab-bundle".into()) });
-        assert!(matches!(p.key(Key::Char('x')), Action::Say(s) if s.contains("isn't installed as a bundle")));
+        p.registry = Registry::Read(with_bundle(
+            with_bundle(
+                index(&[("acme.notes", "1.0.0")]),
+                "acme.zeta",
+                "Zeta",
+                &["acme.notes"],
+            ),
+            "fenix.lab-bundle",
+            "Lab",
+            &["acme.notes", "acme.board"],
+        ));
+        assert_eq!(
+            p.bundles()
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Lab", "Zeta"],
+            "Fenix's order, then by name; the fallback gone"
+        );
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::SwitchBundle {
+                on: true,
+                members: vec!["acme.notes".into(), "acme.board".into()],
+                install: Some("fenix.lab-bundle".into())
+            }
+        );
+        assert!(
+            matches!(p.key(Key::Char('x')), Action::Say(s) if s.contains("isn't installed as a bundle"))
+        );
         p.installed = vec![
-            InstalledRow { runtime: Some(Runtime::Bundle), dependencies: [("acme.notes".to_string(), "^1".to_string()), ("acme.board".to_string(), "^1".to_string())].into(), ..installed("fenix.lab-bundle", true, None) },
-            InstalledRow { dependency: true, ..installed("acme.notes", true, None) },
+            InstalledRow {
+                runtime: Some(Runtime::Bundle),
+                dependencies: [
+                    ("acme.notes".to_string(), "^1".to_string()),
+                    ("acme.board".to_string(), "^1".to_string()),
+                ]
+                .into(),
+                ..installed("fenix.lab-bundle", true, None)
+            },
+            InstalledRow {
+                dependency: true,
+                ..installed("acme.notes", true, None)
+            },
             installed("acme.board", false, None),
         ];
         assert_eq!(p.bundles().len(), 2, "the installed one is the registry's");
-        assert_eq!(p.key(Key::Enter), Action::SwitchBundle { on: true, members: vec!["acme.notes".into(), "acme.board".into()], install: None }, "installed: switched");
+        assert_eq!(
+            p.key(Key::Enter),
+            Action::SwitchBundle {
+                on: true,
+                members: vec!["acme.notes".into(), "acme.board".into()],
+                install: None
+            },
+            "installed: switched"
+        );
         p.key(Key::Char('x'));
-        assert_eq!(p.key(Key::Char('x')), Action::Uninstall("fenix.lab-bundle".into()));
+        assert_eq!(
+            p.key(Key::Char('x')),
+            Action::Uninstall("fenix.lab-bundle".into())
+        );
         assert_eq!(p.bundles_of("acme.notes"), ["Lab", "Zeta"]);
         // On the plain page: the bundle isn't one of what's installed.
         let mut p2 = page();
@@ -1669,17 +2590,38 @@ mod tests {
         p2.registry = p.registry.clone();
         assert_eq!(p2.count(), 2);
         let text = layout(&p2, 160).all_text();
-        assert!(text.contains("1 of 2 on") && !text.contains("fenix.lab-bundle"), "{text}");
+        assert!(
+            text.contains("1 of 2 on") && !text.contains("fenix.lab-bundle"),
+            "{text}"
+        );
         p2.key(Key::Char('4'));
         assert_eq!(p2.count(), 2);
         let text = layout(&p2, 160).all_text();
-        assert!(text.contains("fenix.lab-bundle 1.0.0 · acme.notes, acme.board") && text.contains("MEMBERS"), "{text}");
+        assert!(
+            text.contains("fenix.lab-bundle 1.0.0 · acme.notes, acme.board")
+                && text.contains("MEMBERS"),
+            "{text}"
+        );
     }
 
     #[test]
     fn a_readme_and_changes_are_cut_to_their_start() {
-        assert_eq!(excerpt("# Name\n\nFirst.\n\n## How\n\nSo.", false, 8), ["First.", "", "How", "", "So."]);
-        assert_eq!(excerpt("# Changelog\n\n## 2.0.0\n\n- New\n\n## 1.0.0\n\n- Old", true, 8), ["2.0.0", "", "- New"]);
-        assert_eq!(excerpt("## 2.0.0\n- New\n## 1.0.0", true, 8), ["2.0.0", "- New"], "no title");
+        assert_eq!(
+            excerpt("# Name\n\nFirst.\n\n## How\n\nSo.", false, 8),
+            ["First.", "", "How", "", "So."]
+        );
+        assert_eq!(
+            excerpt(
+                "# Changelog\n\n## 2.0.0\n\n- New\n\n## 1.0.0\n\n- Old",
+                true,
+                8
+            ),
+            ["2.0.0", "", "- New"]
+        );
+        assert_eq!(
+            excerpt("## 2.0.0\n- New\n## 1.0.0", true, 8),
+            ["2.0.0", "- New"],
+            "no title"
+        );
     }
 }

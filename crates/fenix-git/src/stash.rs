@@ -11,13 +11,23 @@ pub struct Stash {
 }
 
 pub fn list_stashes(repo: &Path) -> Vec<Stash> {
-    run_lines(repo, &["stash", "list", "--format=%gd\x1f%s"]).iter().filter_map(|l| parse_line(l)).collect()
+    run_lines(repo, &["stash", "list", "--format=%gd\x1f%s"])
+        .iter()
+        .filter_map(|l| parse_line(l))
+        .collect()
 }
 
 fn parse_line(line: &str) -> Option<Stash> {
     let (gd, message) = line.split_once('\x1f')?;
-    let index = gd.strip_prefix("stash@{")?.strip_suffix('}')?.parse().ok()?;
-    Some(Stash { index, message: message.to_string() })
+    let index = gd
+        .strip_prefix("stash@{")?
+        .strip_suffix('}')?
+        .parse()
+        .ok()?;
+    Some(Stash {
+        index,
+        message: message.to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -28,7 +38,13 @@ mod tests {
     #[test]
     fn parse_line_reads_the_index_and_message() {
         let stash = parse_line("stash@{0}\x1fWIP on main: abc123 initial").unwrap();
-        assert_eq!(stash, Stash { index: 0, message: "WIP on main: abc123 initial".to_string() });
+        assert_eq!(
+            stash,
+            Stash {
+                index: 0,
+                message: "WIP on main: abc123 initial".to_string()
+            }
+        );
     }
 
     #[test]

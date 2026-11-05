@@ -25,7 +25,11 @@ pub(super) fn kind_color(kind: ProjectKind, theme: &Theme) -> glyphon::Color {
 
 /// `PY orbit-tools · ` -- the modeline's project segment, drawn between
 /// the mode label and the file name.
-pub(super) fn modeline_project_spans(kind: ProjectKind, name: &str, theme: &Theme) -> Vec<(String, glyphon::Color)> {
+pub(super) fn modeline_project_spans(
+    kind: ProjectKind,
+    name: &str,
+    theme: &Theme,
+) -> Vec<(String, glyphon::Color)> {
     vec![
         (format!("{} ", kind.tag()), kind_color(kind, theme)),
         (name.to_string(), theme.fg_modeline),
@@ -48,7 +52,11 @@ impl App {
     /// of the title bar, and this runs every frame.
     pub(super) fn sync_window_title(&self) {
         let Some(window) = &self.window else { return };
-        let name = self.project_root.as_deref().and_then(|root| root.file_name()).map(|n| n.to_string_lossy().into_owned());
+        let name = self
+            .project_root
+            .as_deref()
+            .and_then(|root| root.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
         let title = window_title(name.as_deref());
         if window.title() != title {
             window.set_title(&title);
@@ -62,15 +70,25 @@ mod tests {
 
     #[test]
     fn the_modeline_segment_is_the_tag_then_the_name() {
-        let spans = modeline_project_spans(ProjectKind::Arduino, "blink-lab", theme::by_name("Visual Studio Dark").unwrap());
+        let spans = modeline_project_spans(
+            ProjectKind::Arduino,
+            "blink-lab",
+            theme::by_name("Visual Studio Dark").unwrap(),
+        );
         let text: String = spans.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(text, "INO blink-lab · ");
-        assert_eq!(spans[0].1, rgba_to_glyphon(theme::by_name("Visual Studio Dark").unwrap().mode_insert));
+        assert_eq!(
+            spans[0].1,
+            rgba_to_glyphon(theme::by_name("Visual Studio Dark").unwrap().mode_insert)
+        );
     }
 
     #[test]
     fn the_window_is_named_after_its_project() {
-        assert_eq!(window_title(Some("orbit-tools")), "orbit-tools \u{2014} Fenix");
+        assert_eq!(
+            window_title(Some("orbit-tools")),
+            "orbit-tools \u{2014} Fenix"
+        );
         assert_eq!(window_title(None), "Fenix");
     }
 }

@@ -43,12 +43,19 @@ pub fn requested(args: &[String]) -> bool {
 
 /// The value after `flag` among the arguments.
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).filter(|v| !v.starts_with("--")).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .filter(|v| !v.starts_with("--"))
+        .cloned()
 }
 
 /// The revision to answer `asked` with.
 pub fn negotiate(asked: Option<&str>) -> &'static str {
-    asked.and_then(|a| PROTOCOLS.iter().find(|p| **p == a)).copied().unwrap_or(PROTOCOLS[0])
+    asked
+        .and_then(|a| PROTOCOLS.iter().find(|p| **p == a))
+        .copied()
+        .unwrap_or(PROTOCOLS[0])
 }
 
 /// What a session needs to remember between messages.
@@ -64,7 +71,10 @@ fn tool_result(answer: Result<Value, String>, structured: bool) -> Value {
     match answer {
         Ok(answer) => {
             // An answer that's text already goes as it is.
-            let text = answer.as_str().map(str::to_string).unwrap_or_else(|| serde_json::to_string_pretty(&answer).unwrap_or_default());
+            let text = answer
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| serde_json::to_string_pretty(&answer).unwrap_or_default());
             let mut result = json!({ "content": [{ "type": "text", "text": text }] });
             if structured && answer.is_object() {
                 result["structuredContent"] = answer;
@@ -77,7 +87,11 @@ fn tool_result(answer: Result<Value, String>, structured: bool) -> Value {
 
 /// The core tools, for a `tools/list` with no Fenix to ask.
 fn fallback_tools() -> Vec<Value> {
-    crate::agent_tools::TOOLS.iter().filter(|t| t.toolset == "core").map(crate::agent_tools::listed).collect()
+    crate::agent_tools::TOOLS
+        .iter()
+        .filter(|t| t.toolset == "core")
+        .map(crate::agent_tools::listed)
+        .collect()
 }
 
 /// What one MCP message comes to: the reply (none for a notification),
@@ -98,21 +112,30 @@ pub fn call_id(id: &Value) -> String {
 }
 
 /// One MCP message, answered: `call` makes a control request.
-pub fn handle(session: &mut Session, message: &Value, call: &mut dyn FnMut(&str, Value) -> Result<Value, String>) -> Output {
+pub fn handle(
+    session: &mut Session,
+    message: &Value,
+    call: &mut dyn FnMut(&str, Value) -> Result<Value, String>,
+) -> Output {
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
     let Some(id) = message.get("id").cloned().filter(|i| !i.is_null()) else {
         // Notifications. A cancelled request is cancelled in Fenix too.
         if method == "notifications/cancelled" {
             if let Some(request) = params.get("requestId") {
-                let _ = call(fenix_control::protocol::method::AGENT_CANCEL, json!({ "call": call_id(request) }));
+                let _ = call(
+                    fenix_control::protocol::method::AGENT_CANCEL,
+                    json!({ "call": call_id(request) }),
+                );
             }
         }
         return Output::default();
     };
     let mut after = Vec::new();
     let structured = session.protocol.is_none_or(|p| p >= "2025-06-18");
-    let forward = |call: &mut dyn FnMut(&str, Value) -> Result<Value, String>, method: &str, params: Value| call(method, params).map_err(|e| (-32603, e));
+    let forward = |call: &mut dyn FnMut(&str, Value) -> Result<Value, String>,
+                   method: &str,
+                   params: Value| call(method, params).map_err(|e| (-32603, e));
     let result: Result<Value, (i64, String)> = match method {
         "initialize" => {
             let protocol = negotiate(params.get("protocolVersion").and_then(Value::as_str));
@@ -143,24 +166,52 @@ pub fn handle(session: &mut Session, message: &Value, call: &mut dyn FnMut(&str,
             }
             let answer = call(fenix_control::protocol::method::AGENT_CALL, request);
             // A toolset turned on or off: the list is different now.
-            if answer.as_ref().is_ok_and(|a| a.get("toolsChanged").and_then(Value::as_bool) == Some(true)) {
+            if answer
+                .as_ref()
+                .is_ok_and(|a| a.get("toolsChanged").and_then(Value::as_bool) == Some(true))
+            {
                 after.push(notification("notifications/tools/list_changed", json!({})));
             }
-            Ok(tool_result(answer.map(|mut a| a.get_mut("answer").map(Value::take).unwrap_or(a)), structured))
+            Ok(tool_result(
+                answer.map(|mut a| a.get_mut("answer").map(Value::take).unwrap_or(a)),
+                structured,
+            ))
         }
-        "resources/list" => forward(call, fenix_control::protocol::method::AGENT_RESOURCES, json!({})),
-        "resources/templates/list" => forward(call, fenix_control::protocol::method::AGENT_RESOURCES, json!({ "templates": true })),
+        "resources/list" => forward(
+            call,
+            fenix_control::protocol::method::AGENT_RESOURCES,
+            json!({}),
+        ),
+        "resources/templates/list" => forward(
+            call,
+            fenix_control::protocol::method::AGENT_RESOURCES,
+            json!({ "templates": true }),
+        ),
         "resources/read" => forward(call, fenix_control::protocol::method::AGENT_READ, params),
-        "resources/subscribe" => forward(call, fenix_control::protocol::method::AGENT_SUBSCRIBE, json!({ "uri": params.get("uri"), "on": true })),
-        "resources/unsubscribe" => forward(call, fenix_control::protocol::method::AGENT_SUBSCRIBE, json!({ "uri": params.get("uri"), "on": false })),
-        "prompts/list" => forward(call, fenix_control::protocol::method::AGENT_PROMPTS, json!({})),
+        "resources/subscribe" => forward(
+            call,
+            fenix_control::protocol::method::AGENT_SUBSCRIBE,
+            json!({ "uri": params.get("uri"), "on": true }),
+        ),
+        "resources/unsubscribe" => forward(
+            call,
+            fenix_control::protocol::method::AGENT_SUBSCRIBE,
+            json!({ "uri": params.get("uri"), "on": false }),
+        ),
+        "prompts/list" => forward(
+            call,
+            fenix_control::protocol::method::AGENT_PROMPTS,
+            json!({}),
+        ),
         "prompts/get" => forward(call, fenix_control::protocol::method::AGENT_PROMPT, params),
         _ => Err((-32601, format!("no method {method}"))),
     };
     Output {
         reply: Some(match result {
             Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-            Err((code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+            Err((code, message)) => {
+                json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+            }
         }),
         after,
     }
@@ -196,8 +247,11 @@ pub fn notifications_for(events: &[Value]) -> Vec<Value> {
 type Control = fenix_control::Client<fenix_control::Stream, fenix_control::Stream>;
 
 fn connect(thread: Option<&str>) -> Result<Control, String> {
-    let mut c = fenix_control::Client::connect(&fenix_control::Endpoint::current()).map_err(|e| e.to_string())?.ok_or("Fenix isn't running")?;
-    c.hello_for("fenix-mcp", env!("CARGO_PKG_VERSION"), thread).map_err(|e| e.to_string())?;
+    let mut c = fenix_control::Client::connect(&fenix_control::Endpoint::current())
+        .map_err(|e| e.to_string())?
+        .ok_or("Fenix isn't running")?;
+    c.hello_for("fenix-mcp", env!("CARGO_PKG_VERSION"), thread)
+        .map_err(|e| e.to_string())?;
     Ok(c)
 }
 
@@ -214,7 +268,9 @@ impl Pool {
             Some(c) => c,
             None => connect(self.thread.as_deref())?,
         };
-        let result = client.request::<Value>(method, params).map_err(|e| e.to_string());
+        let result = client
+            .request::<Value>(method, params)
+            .map_err(|e| e.to_string());
         // A connection that failed is dropped, and tried afresh next time.
         if result.is_ok() {
             self.idle.lock().unwrap().push(client);
@@ -230,7 +286,10 @@ impl Pool {
 /// Fenix's news on as notifications.
 pub fn run(args: &[String]) -> ! {
     use std::sync::{Arc, Mutex};
-    let pool = Arc::new(Pool { thread: flag_value(args, "--thread"), idle: Mutex::new(Vec::new()) });
+    let pool = Arc::new(Pool {
+        thread: flag_value(args, "--thread"),
+        idle: Mutex::new(Vec::new()),
+    });
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let send = |out: &Mutex<std::io::Stdout>, messages: &[Value]| {
         let mut out = out.lock().unwrap();
@@ -248,18 +307,32 @@ pub fn run(args: &[String]) -> ! {
             Some(body) => body,
             None => std::process::exit(0),
         };
-        let Ok(message) = serde_json::from_slice::<Value>(&body) else { continue };
+        let Ok(message) = serde_json::from_slice::<Value>(&body) else {
+            continue;
+        };
         let slow = message.get("method").and_then(Value::as_str) == Some("tools/call");
-        if !watching && message.get("method").and_then(Value::as_str) == Some("notifications/initialized") {
+        if !watching
+            && message.get("method").and_then(Value::as_str) == Some("notifications/initialized")
+        {
             watching = true;
             let (pool, out) = (Arc::clone(&pool), Arc::clone(&out));
             std::thread::spawn(move || {
                 let mut since = 0u64;
                 loop {
-                    match pool.call(fenix_control::protocol::method::AGENT_WAIT, json!({ "since": since })) {
+                    match pool.call(
+                        fenix_control::protocol::method::AGENT_WAIT,
+                        json!({ "since": since }),
+                    ) {
                         Ok(news) => {
-                            since = news.get("revision").and_then(Value::as_u64).unwrap_or(since);
-                            let events = news.get("events").and_then(Value::as_array).cloned().unwrap_or_default();
+                            since = news
+                                .get("revision")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(since);
+                            let events = news
+                                .get("events")
+                                .and_then(Value::as_array)
+                                .cloned()
+                                .unwrap_or_default();
                             send(&out, &notifications_for(&events));
                         }
                         Err(_) => std::thread::sleep(std::time::Duration::from_secs(2)),
@@ -272,12 +345,21 @@ pub fn run(args: &[String]) -> ! {
             let mut call = |method: &str, params: Value| pool.call(method, params);
             // The session is only written by `initialize`, which isn't slow.
             let output = if slow {
-                let mut copy = Session { protocol: session.lock().unwrap().protocol };
+                let mut copy = Session {
+                    protocol: session.lock().unwrap().protocol,
+                };
                 handle(&mut copy, &message, &mut call)
             } else {
                 handle(&mut session.lock().unwrap(), &message, &mut call)
             };
-            send(&out, &output.reply.into_iter().chain(output.after).collect::<Vec<_>>());
+            send(
+                &out,
+                &output
+                    .reply
+                    .into_iter()
+                    .chain(output.after)
+                    .collect::<Vec<_>>(),
+            );
         };
         if slow {
             std::thread::spawn(work);
@@ -291,7 +373,9 @@ pub fn run(args: &[String]) -> ! {
 fn fenix_rpc_line(reader: &mut impl BufRead) -> Option<Vec<u8>> {
     loop {
         let mut line = Vec::new();
-        let n = std::io::Read::take(&mut *reader, 4 * 1024 * 1024).read_until(b'\n', &mut line).ok()?;
+        let n = std::io::Read::take(&mut *reader, 4 * 1024 * 1024)
+            .read_until(b'\n', &mut line)
+            .ok()?;
         if n == 0 {
             return None;
         }
@@ -311,7 +395,9 @@ mod tests {
             answers.push((method.to_string(), params.clone()));
             match params.get("tool").and_then(Value::as_str) {
                 Some("run_task") => Err("refused: you said no".to_string()),
-                Some("fenix_toolsets") => Ok(json!({ "answer": { "enabled": "git" }, "toolsChanged": true })),
+                Some("fenix_toolsets") => {
+                    Ok(json!({ "answer": { "enabled": "git" }, "toolsChanged": true }))
+                }
                 _ => Ok(json!({ "answer": { "ok": method } })),
             }
         };
@@ -324,7 +410,11 @@ mod tests {
         assert_eq!(negotiate(Some("2030-01-01")), PROTOCOLS[0]);
         assert_eq!(negotiate(None), PROTOCOLS[0]);
         let mut session = Session::default();
-        let init = handle(&mut session, &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2024-11-05" } }), &mut |_, _| unreachable!());
+        let init = handle(
+            &mut session,
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2024-11-05" } }),
+            &mut |_, _| unreachable!(),
+        );
         let result = &init.reply.unwrap()["result"];
         assert_eq!(result["protocolVersion"], "2024-11-05");
         assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
@@ -337,70 +427,165 @@ mod tests {
             assert_eq!(method, fenix_control::protocol::method::AGENT_TOOLS);
             Ok(json!({ "tools": [{ "name": "jira_issue" }] }))
         };
-        let list = handle(&mut Session::default(), &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), &mut call);
-        assert_eq!(list.reply.unwrap()["result"]["tools"][0]["name"], "jira_issue");
-        let mut gone = |_: &str, _: Value| -> Result<Value, String> { Err("Fenix isn't running".into()) };
-        let list = handle(&mut Session::default(), &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), &mut gone);
-        let names: Vec<String> = list.reply.unwrap()["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert!(names.contains(&"diagnostics".to_string()) && names.contains(&"fenix_toolsets".to_string()));
+        let list = handle(
+            &mut Session::default(),
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+            &mut call,
+        );
+        assert_eq!(
+            list.reply.unwrap()["result"]["tools"][0]["name"],
+            "jira_issue"
+        );
+        let mut gone =
+            |_: &str, _: Value| -> Result<Value, String> { Err("Fenix isn't running".into()) };
+        let list = handle(
+            &mut Session::default(),
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+            &mut gone,
+        );
+        let names: Vec<String> = list.reply.unwrap()["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            names.contains(&"diagnostics".to_string())
+                && names.contains(&"fenix_toolsets".to_string())
+        );
     }
 
     #[test]
     fn a_tool_is_an_agent_call_with_its_id_and_a_refusal_is_an_error_result() {
         let mut calls = Vec::new();
-        let answer = ask(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "diagnostics", "arguments": { "path": "/p/a.rs" }, "_meta": { "progressToken": "p1" } } }), &mut calls);
-        assert_eq!(calls[0], ("fenix/agent.call".to_string(), json!({ "call": "3", "tool": "diagnostics", "arguments": { "path": "/p/a.rs" }, "progressToken": "p1" })));
-        assert_eq!(answer.reply.unwrap()["result"]["structuredContent"], json!({ "ok": "fenix/agent.call" }));
-        let refused = ask(json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "run_task", "arguments": { "name": "test" } } }), &mut calls);
+        let answer = ask(
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "diagnostics", "arguments": { "path": "/p/a.rs" }, "_meta": { "progressToken": "p1" } } }),
+            &mut calls,
+        );
+        assert_eq!(
+            calls[0],
+            (
+                "fenix/agent.call".to_string(),
+                json!({ "call": "3", "tool": "diagnostics", "arguments": { "path": "/p/a.rs" }, "progressToken": "p1" })
+            )
+        );
+        assert_eq!(
+            answer.reply.unwrap()["result"]["structuredContent"],
+            json!({ "ok": "fenix/agent.call" })
+        );
+        let refused = ask(
+            json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "run_task", "arguments": { "name": "test" } } }),
+            &mut calls,
+        );
         assert_eq!(refused.reply.unwrap()["result"]["isError"], json!(true));
     }
 
     #[test]
     fn turning_on_a_toolset_says_the_list_changed() {
         let mut calls = Vec::new();
-        let out = ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "fenix_toolsets", "arguments": { "enable": "git" } } }), &mut calls);
-        assert_eq!(out.after, vec![notification("notifications/tools/list_changed", json!({}))]);
-        assert_eq!(out.reply.unwrap()["result"]["structuredContent"], json!({ "enabled": "git" }));
+        let out = ask(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "fenix_toolsets", "arguments": { "enable": "git" } } }),
+            &mut calls,
+        );
+        assert_eq!(
+            out.after,
+            vec![notification("notifications/tools/list_changed", json!({}))]
+        );
+        assert_eq!(
+            out.reply.unwrap()["result"]["structuredContent"],
+            json!({ "enabled": "git" })
+        );
     }
 
     #[test]
     fn a_cancelled_request_is_cancelled_in_fenix() {
         let mut calls = Vec::new();
-        let out = ask(json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 9 } }), &mut calls);
+        let out = ask(
+            json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 9 } }),
+            &mut calls,
+        );
         assert_eq!(out, Output::default());
-        assert_eq!(calls, vec![("fenix/agent.cancel".to_string(), json!({ "call": "9" }))]);
-        assert_eq!(ask(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), &mut calls), Output::default());
+        assert_eq!(
+            calls,
+            vec![("fenix/agent.cancel".to_string(), json!({ "call": "9" }))]
+        );
+        assert_eq!(
+            ask(
+                json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+                &mut calls
+            ),
+            Output::default()
+        );
     }
 
     #[test]
     fn an_older_revision_gets_no_structured_content() {
-        let mut session = Session { protocol: Some("2025-03-26") };
-        let out = handle(&mut session, &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "x" } }), &mut |_, _| Ok(json!({ "answer": { "a": 1 } })));
+        let mut session = Session {
+            protocol: Some("2025-03-26"),
+        };
+        let out = handle(
+            &mut session,
+            &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "x" } }),
+            &mut |_, _| Ok(json!({ "answer": { "a": 1 } })),
+        );
         let result = &out.reply.unwrap()["result"];
         assert!(result.get("structuredContent").is_none());
-        assert!(result["content"][0]["text"].as_str().unwrap().contains("\"a\": 1"));
+        assert!(result["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("\"a\": 1"));
     }
 
     #[test]
     fn fenixs_news_become_notifications() {
-        let out = notifications_for(&[json!({ "kind": "tools" }), json!({ "kind": "resource", "uri": "fenix://diagnostics" }), json!({ "kind": "progress", "token": "p1", "progress": 2, "total": 5, "message": "querying" }), json!({ "kind": "unknown" })]);
+        let out = notifications_for(&[
+            json!({ "kind": "tools" }),
+            json!({ "kind": "resource", "uri": "fenix://diagnostics" }),
+            json!({ "kind": "progress", "token": "p1", "progress": 2, "total": 5, "message": "querying" }),
+            json!({ "kind": "unknown" }),
+        ]);
         let methods: Vec<&str> = out.iter().map(|n| n["method"].as_str().unwrap()).collect();
-        assert_eq!(methods, ["notifications/tools/list_changed", "notifications/resources/updated", "notifications/progress"]);
-        assert_eq!(out[2]["params"], json!({ "progressToken": "p1", "progress": 2, "total": 5, "message": "querying" }));
+        assert_eq!(
+            methods,
+            [
+                "notifications/tools/list_changed",
+                "notifications/resources/updated",
+                "notifications/progress"
+            ]
+        );
+        assert_eq!(
+            out[2]["params"],
+            json!({ "progressToken": "p1", "progress": 2, "total": 5, "message": "querying" })
+        );
     }
 
     #[test]
     fn resources_and_prompts_are_asked_of_fenix() {
         let mut calls = Vec::new();
-        ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/subscribe", "params": { "uri": "fenix://selection" } }), &mut calls);
-        ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": { "name": "explain", "arguments": {} } }), &mut calls);
-        assert_eq!(calls[0], ("fenix/agent.subscribe".to_string(), json!({ "uri": "fenix://selection", "on": true })));
+        ask(
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/subscribe", "params": { "uri": "fenix://selection" } }),
+            &mut calls,
+        );
+        ask(
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": { "name": "explain", "arguments": {} } }),
+            &mut calls,
+        );
+        assert_eq!(
+            calls[0],
+            (
+                "fenix/agent.subscribe".to_string(),
+                json!({ "uri": "fenix://selection", "on": true })
+            )
+        );
         assert_eq!(calls[1].0, "fenix/agent.prompt");
     }
 
     #[test]
     fn the_thread_comes_from_the_arguments() {
-        let args: Vec<String> = ["fenix", "--mcp", "--thread", "t-1"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["fenix", "--mcp", "--thread", "t-1"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         assert_eq!(flag_value(&args, "--thread").as_deref(), Some("t-1"));
         assert_eq!(flag_value(&args[..2], "--thread"), None);
     }

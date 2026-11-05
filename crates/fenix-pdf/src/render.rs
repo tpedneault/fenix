@@ -61,8 +61,14 @@ fn locate_pdfium_library() -> Option<PathBuf> {
     }
     // A package installs the library in Fenix's own folder (`/usr/lib/fenix`)
     // with the program in `/usr/bin`.
-    if let Some(prefix) = std::env::current_exe().ok().as_deref().and_then(Path::parent).and_then(Path::parent) {
-        let candidate = Pdfium::pdfium_platform_library_name_at_path(&prefix.join("lib").join("fenix"));
+    if let Some(prefix) = std::env::current_exe()
+        .ok()
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    {
+        let candidate =
+            Pdfium::pdfium_platform_library_name_at_path(&prefix.join("lib").join("fenix"));
         if candidate.exists() {
             return Some(candidate);
         }
@@ -87,7 +93,9 @@ fn bind_pdfium() -> Result<Pdfium, PdfError> {
             return Ok(Pdfium::new(bindings));
         }
     }
-    Pdfium::bind_to_system_library().map(Pdfium::new).map_err(|_| PdfError::LibraryNotFound)
+    Pdfium::bind_to_system_library()
+        .map(Pdfium::new)
+        .map_err(|_| PdfError::LibraryNotFound)
 }
 
 /// The worker thread's entire lifetime: binds pdfium once, then drains
@@ -114,12 +122,19 @@ fn run_without_pdfium(receiver: Receiver<PdfRequest>, sink: impl Fn(PdfResponse)
     let message = err.to_string();
     while let Ok(req) = receiver.recv() {
         if let PdfRequest::Open { key, .. } = req {
-            sink(PdfResponse::OpenFailed { key, message: message.clone() });
+            sink(PdfResponse::OpenFailed {
+                key,
+                message: message.clone(),
+            });
         }
     }
 }
 
-fn run_with_pdfium(receiver: Receiver<PdfRequest>, sink: impl Fn(PdfResponse) + Send + 'static, pdfium: Pdfium) {
+fn run_with_pdfium(
+    receiver: Receiver<PdfRequest>,
+    sink: impl Fn(PdfResponse) + Send + 'static,
+    pdfium: Pdfium,
+) {
     let mut docs: HashMap<PdfDocKey, PdfDocument> = HashMap::new();
     // The worker's own queue: everything waiting is read in before each
     // request is handled, so a scroll's `Cancel` or a newer render gets
@@ -148,7 +163,12 @@ fn run_with_pdfium(receiver: Receiver<PdfRequest>, sink: impl Fn(PdfResponse) + 
 const SEARCH_BATCH: u32 = 8;
 
 /// Handles one request; what's left of a search comes back to be queued.
-fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocument<'a>>, req: PdfRequest, sink: &impl Fn(PdfResponse)) -> Option<PdfRequest> {
+fn handle_request<'a>(
+    pdfium: &'a Pdfium,
+    docs: &mut HashMap<PdfDocKey, PdfDocument<'a>>,
+    req: PdfRequest,
+    sink: &impl Fn(PdfResponse),
+) -> Option<PdfRequest> {
     match req {
         PdfRequest::Open { key, path } => match pdfium.load_pdf_from_file(&path, None) {
             Ok(doc) => {
@@ -157,33 +177,94 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
                 // US Letter, so the layout still has a place for it.
                 let sizes = pages
                     .as_range()
-                    .map(|i| pages.page_size(i).map(|rect| (rect.width().value, rect.height().value)).unwrap_or((612.0, 792.0)))
+                    .map(|i| {
+                        pages
+                            .page_size(i)
+                            .map(|rect| (rect.width().value, rect.height().value))
+                            .unwrap_or((612.0, 792.0))
+                    })
                     .collect();
                 docs.insert(key, doc);
                 sink(PdfResponse::Opened { key, pages: sizes });
             }
-            Err(err) => sink(PdfResponse::OpenFailed { key, message: format!("{err:?}") }),
+            Err(err) => sink(PdfResponse::OpenFailed {
+                key,
+                message: format!("{err:?}"),
+            }),
         },
-        PdfRequest::RenderPage { key, request_id, page_index, target_w, target_h, .. } => {
+        PdfRequest::RenderPage {
+            key,
+            request_id,
+            page_index,
+            target_w,
+            target_h,
+            ..
+        } => {
             let Some(doc) = docs.get(&key) else {
-                sink(PdfResponse::RenderFailed { key, request_id, message: "document not open".to_string() });
+                sink(PdfResponse::RenderFailed {
+                    key,
+                    request_id,
+                    message: "document not open".to_string(),
+                });
                 return None;
             };
             match render_page(doc, page_index, target_w, target_h) {
                 Ok((width, height, bgra, page_width_pts, page_height_pts)) => {
-                    sink(PdfResponse::PageRendered { key, request_id, page_index, width, height, bgra, page_width_pts, page_height_pts })
+                    sink(PdfResponse::PageRendered {
+                        key,
+                        request_id,
+                        page_index,
+                        width,
+                        height,
+                        bgra,
+                        page_width_pts,
+                        page_height_pts,
+                    })
                 }
-                Err(message) => sink(PdfResponse::RenderFailed { key, request_id, message }),
+                Err(message) => sink(PdfResponse::RenderFailed {
+                    key,
+                    request_id,
+                    message,
+                }),
             }
         }
-        PdfRequest::RenderRegion { key, view, request_id, page_index, page_w, page_h, x, y, w, h } => {
+        PdfRequest::RenderRegion {
+            key,
+            view,
+            request_id,
+            page_index,
+            page_w,
+            page_h,
+            x,
+            y,
+            w,
+            h,
+        } => {
             let Some(doc) = docs.get(&key) else {
-                sink(PdfResponse::RenderFailed { key, request_id, message: "document not open".to_string() });
+                sink(PdfResponse::RenderFailed {
+                    key,
+                    request_id,
+                    message: "document not open".to_string(),
+                });
                 return None;
             };
             match render_region(doc, page_index, (page_w, page_h), (x, y, w, h)) {
-                Ok(bgra) => sink(PdfResponse::RegionRendered { key, view, request_id, page_index, x, y, w, h, bgra }),
-                Err(message) => sink(PdfResponse::RenderFailed { key, request_id, message }),
+                Ok(bgra) => sink(PdfResponse::RegionRendered {
+                    key,
+                    view,
+                    request_id,
+                    page_index,
+                    x,
+                    y,
+                    w,
+                    h,
+                    bgra,
+                }),
+                Err(message) => sink(PdfResponse::RenderFailed {
+                    key,
+                    request_id,
+                    message,
+                }),
             }
         }
         PdfRequest::FetchOutline { key } => {
@@ -197,7 +278,13 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
                 sink(PdfResponse::Outline { key, entries });
             }
         }
-        PdfRequest::Search { key, request_id, query, match_case, from_page } => {
+        PdfRequest::Search {
+            key,
+            request_id,
+            query,
+            match_case,
+            from_page,
+        } => {
             // No document under this key is a caller bug, not a search
             // that found nothing, so there's no reply.
             let doc = docs.get(&key)?;
@@ -205,8 +292,19 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
             let to = from_page.saturating_add(SEARCH_BATCH).min(count);
             let matches = search_pages(doc, &query, match_case, from_page..to);
             let done = to >= count;
-            sink(PdfResponse::SearchResults { key, request_id, matches, done });
-            return (!done).then_some(PdfRequest::Search { key, request_id, query, match_case, from_page: to });
+            sink(PdfResponse::SearchResults {
+                key,
+                request_id,
+                matches,
+                done,
+            });
+            return (!done).then_some(PdfRequest::Search {
+                key,
+                request_id,
+                query,
+                match_case,
+                from_page: to,
+            });
         }
         PdfRequest::Close { key } => {
             docs.remove(&key);
@@ -215,11 +313,19 @@ fn handle_request<'a>(pdfium: &'a Pdfium, docs: &mut HashMap<PdfDocKey, PdfDocum
         PdfRequest::Cancel { .. } | PdfRequest::CancelBefore { .. } => {}
         PdfRequest::Text { key, page } => {
             let doc = docs.get(&key)?;
-            sink(PdfResponse::Text { key, page, chars: page_chars(doc, page) });
+            sink(PdfResponse::Text {
+                key,
+                page,
+                chars: page_chars(doc, page),
+            });
         }
         PdfRequest::Links { key, page } => {
             let doc = docs.get(&key)?;
-            sink(PdfResponse::Links { key, page, links: page_links(doc, page) });
+            sink(PdfResponse::Links {
+                key,
+                page,
+                links: page_links(doc, page),
+            });
         }
     }
     None
@@ -253,12 +359,24 @@ fn flatten_bookmarks(bookmarks: &PdfBookmarks) -> Vec<OutlineEntry> {
     out
 }
 
-fn flatten_bookmark<'a>(bookmark: PdfBookmark<'a>, depth: u32, out: &mut Vec<OutlineEntry>, visited: &mut HashSet<PdfBookmark<'a>>) {
+fn flatten_bookmark<'a>(
+    bookmark: PdfBookmark<'a>,
+    depth: u32,
+    out: &mut Vec<OutlineEntry>,
+    visited: &mut HashSet<PdfBookmark<'a>>,
+) {
     if !visited.insert(bookmark.clone()) {
         return;
     }
-    if let Some(page_index) = bookmark.destination().and_then(|dest| dest.page_index().ok()) {
-        out.push(OutlineEntry { title: bookmark.title().unwrap_or_default(), page_index: page_index.max(0) as u32, depth });
+    if let Some(page_index) = bookmark
+        .destination()
+        .and_then(|dest| dest.page_index().ok())
+    {
+        out.push(OutlineEntry {
+            title: bookmark.title().unwrap_or_default(),
+            page_index: page_index.max(0) as u32,
+            depth,
+        });
     }
     if let Some(child) = bookmark.first_child() {
         flatten_bookmark(child, depth + 1, out, visited);
@@ -288,31 +406,56 @@ fn flatten_bookmark<'a>(bookmark: PdfBookmark<'a>, depth: u32, out: &mut Vec<Out
 /// Err`, e.g. a malformed page) is skipped rather than aborting the
 /// whole-document search -- one bad page shouldn't hide matches on every
 /// other page.
-fn search_pages(doc: &PdfDocument, query: &str, match_case: bool, pages: std::ops::Range<u32>) -> Vec<PdfSearchMatch> {
+fn search_pages(
+    doc: &PdfDocument,
+    query: &str,
+    match_case: bool,
+    pages: std::ops::Range<u32>,
+) -> Vec<PdfSearchMatch> {
     if query.trim().is_empty() {
         return Vec::new();
     }
     let options = PdfSearchOptions::new().match_case(match_case);
     let mut matches = Vec::new();
     for page_index in pages {
-        let Ok(page) = doc.pages().get(page_index as i32) else { continue };
+        let Ok(page) = doc.pages().get(page_index as i32) else {
+            continue;
+        };
         let page_h = page.height().value;
         let Ok(text_page) = page.text() else { continue };
-        let Ok(search) = text_page.search(query, &options) else { continue };
+        let Ok(search) = text_page.search(query, &options) else {
+            continue;
+        };
         let page_chars: Vec<char> = text_page.all().chars().collect();
         while let Some(segments) = search.find_next() {
-            let char_index = segments.first().ok().and_then(|segment| segment.chars().ok()).and_then(|chars| chars.first_char_index());
-            let Some(char_index) = char_index else { continue };
+            let char_index = segments
+                .first()
+                .ok()
+                .and_then(|segment| segment.chars().ok())
+                .and_then(|chars| chars.first_char_index());
+            let Some(char_index) = char_index else {
+                continue;
+            };
             // pdfium's rects have their origin at the page's bottom-left.
             let rects = segments
                 .iter()
                 .map(|segment| {
                     let b = segment.bounds();
-                    [b.left().value, page_h - b.top().value, b.right().value, page_h - b.bottom().value]
+                    [
+                        b.left().value,
+                        page_h - b.top().value,
+                        b.right().value,
+                        page_h - b.bottom().value,
+                    ]
                 })
                 .collect();
             let context = build_context(&page_chars, char_index, query.chars().count());
-            matches.push(PdfSearchMatch { page_index, char_index, context, rects });
+            matches.push(PdfSearchMatch {
+                page_index,
+                char_index,
+                context,
+                rects,
+            });
         }
     }
     matches
@@ -321,16 +464,25 @@ fn search_pages(doc: &PdfDocument, query: &str, match_case: bool, pages: std::op
 /// A page's characters in reading order, each with its box in points from
 /// the page's top-left. Empty when pdfium can't read the page's text.
 fn page_chars(doc: &PdfDocument, page_index: u32) -> Vec<crate::text::PageChar> {
-    let Ok(page) = doc.pages().get(page_index as i32) else { return Vec::new() };
+    let Ok(page) = doc.pages().get(page_index as i32) else {
+        return Vec::new();
+    };
     let page_h = page.height().value;
-    let Ok(text) = page.text() else { return Vec::new() };
+    let Ok(text) = page.text() else {
+        return Vec::new();
+    };
     text.chars()
         .iter()
         .filter_map(|ch| {
             let c = ch.unicode_char()?;
             let c = if c == '\r' { '\n' } else { c };
             let rect = match ch.loose_bounds() {
-                Ok(b) if c != '\n' => [b.left().value, page_h - b.top().value, b.right().value, page_h - b.bottom().value],
+                Ok(b) if c != '\n' => [
+                    b.left().value,
+                    page_h - b.top().value,
+                    b.right().value,
+                    page_h - b.bottom().value,
+                ],
                 _ => [0.0; 4],
             };
             Some(crate::text::PageChar { c, rect })
@@ -347,19 +499,33 @@ fn page_chars(doc: &PdfDocument, page_index: u32) -> Vec<crate::text::PageChar> 
 /// A page's links, with where each goes, in points from its top-left.
 fn page_links(doc: &PdfDocument, page_index: u32) -> Vec<crate::text::PageLink> {
     use crate::text::{LinkTarget, PageLink};
-    let Ok(page) = doc.pages().get(page_index as i32) else { return Vec::new() };
+    let Ok(page) = doc.pages().get(page_index as i32) else {
+        return Vec::new();
+    };
     let page_h = page.height().value;
     let links = page.links();
     links
         .iter()
         .filter_map(|link| {
             let b = link.rect().ok()?;
-            let rect = [b.left().value, page_h - b.top().value, b.right().value, page_h - b.bottom().value];
+            let rect = [
+                b.left().value,
+                page_h - b.top().value,
+                b.right().value,
+                page_h - b.bottom().value,
+            ];
             let to_page = |dest: PdfDestination| {
                 let page = dest.page_index().ok()? as u32;
                 let y = match dest.view_settings() {
-                    Ok(PdfDestinationViewSettings::SpecificCoordinatesAndZoom(_, y, _) | PdfDestinationViewSettings::FitPageHorizontallyToWindow(y)) => y.map(|y| {
-                        let target_h = doc.pages().page_size(page as i32).map(|r| r.height().value).unwrap_or(page_h);
+                    Ok(
+                        PdfDestinationViewSettings::SpecificCoordinatesAndZoom(_, y, _)
+                        | PdfDestinationViewSettings::FitPageHorizontallyToWindow(y),
+                    ) => y.map(|y| {
+                        let target_h = doc
+                            .pages()
+                            .page_size(page as i32)
+                            .map(|r| r.height().value)
+                            .unwrap_or(page_h);
                         target_h - y.value
                     }),
                     _ => None,
@@ -391,7 +557,12 @@ fn build_context(chars: &[char], char_index: usize, match_len: usize) -> String 
     if start >= end {
         return String::new();
     }
-    chars[start..end].iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ")
+    chars[start..end]
+        .iter()
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Renders one page to a BGRA pixel buffer at exactly `target_w` x
@@ -423,19 +594,35 @@ fn build_context(chars: &[char], char_index: usize, match_len: usize) -> String 
 /// depends on the *caller* computing an aspect-correct `target_w`/
 /// `target_h` in the first place (see `coords::fit_page_size`/`fit_width_
 /// size`/`percent_size`), not on anything this function does.
-fn render_page(doc: &PdfDocument, page_index: u32, target_w: u32, target_h: u32) -> Result<(u32, u32, Vec<u8>, f32, f32), String> {
-    let page = doc.pages().get(page_index as i32).map_err(|err| format!("{err:?}"))?;
+fn render_page(
+    doc: &PdfDocument,
+    page_index: u32,
+    target_w: u32,
+    target_h: u32,
+) -> Result<(u32, u32, Vec<u8>, f32, f32), String> {
+    let page = doc
+        .pages()
+        .get(page_index as i32)
+        .map_err(|err| format!("{err:?}"))?;
     let (page_width_pts, page_height_pts) = (page.width().value, page.height().value);
     let (target_w, target_h) = (target_w.max(1) as i32, target_h.max(1) as i32);
-    let mut bitmap = PdfBitmap::empty(target_w, target_h, PdfBitmapFormat::BGRA).map_err(|err| format!("{err:?}"))?;
+    let mut bitmap = PdfBitmap::empty(target_w, target_h, PdfBitmapFormat::BGRA)
+        .map_err(|err| format!("{err:?}"))?;
     let config = PdfRenderConfig::new()
         .set_target_width(target_w)
         .set_target_height(target_h)
         .set_reverse_byte_order(false);
-    page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|err| format!("{err:?}"))?;
+    page.render_into_bitmap_with_config(&mut bitmap, &config)
+        .map_err(|err| format!("{err:?}"))?;
     let width = bitmap.width().max(0) as u32;
     let height = bitmap.height().max(0) as u32;
-    Ok((width, height, bitmap.as_raw_bytes(), page_width_pts, page_height_pts))
+    Ok((
+        width,
+        height,
+        bitmap.as_raw_bytes(),
+        page_width_pts,
+        page_height_pts,
+    ))
 }
 
 /// The part `(x, y, w, h)` of a page laid out `page` pixels big, as BGRA:
@@ -444,15 +631,26 @@ fn render_page(doc: &PdfDocument, page_index: u32, target_w: u32, target_h: u32)
 /// in costs a strip's pixels, not the page's. The bitmap is cleared to
 /// white first (pdfium's default), so asking past the page's edge gets
 /// paper there.
-fn render_region(doc: &PdfDocument, page_index: u32, page: (u32, u32), (x, y, w, h): (u32, u32, u32, u32)) -> Result<Vec<u8>, String> {
-    let pdf_page = doc.pages().get(page_index as i32).map_err(|err| format!("{err:?}"))?;
+fn render_region(
+    doc: &PdfDocument,
+    page_index: u32,
+    page: (u32, u32),
+    (x, y, w, h): (u32, u32, u32, u32),
+) -> Result<Vec<u8>, String> {
+    let pdf_page = doc
+        .pages()
+        .get(page_index as i32)
+        .map_err(|err| format!("{err:?}"))?;
     let (w, h) = (w.max(1) as i32, h.max(1) as i32);
-    let mut bitmap = PdfBitmap::empty(w, h, PdfBitmapFormat::BGRA).map_err(|err| format!("{err:?}"))?;
+    let mut bitmap =
+        PdfBitmap::empty(w, h, PdfBitmapFormat::BGRA).map_err(|err| format!("{err:?}"))?;
     let config = PdfRenderConfig::new()
         .set_fixed_size(page.0.max(1) as i32, page.1.max(1) as i32)
         .set_origin(-(x as i32), -(y as i32))
         .set_reverse_byte_order(false);
-    pdf_page.render_into_bitmap_with_config(&mut bitmap, &config).map_err(|err| format!("{err:?}"))?;
+    pdf_page
+        .render_into_bitmap_with_config(&mut bitmap, &config)
+        .map_err(|err| format!("{err:?}"))?;
     Ok(bitmap.as_raw_bytes())
 }
 
@@ -465,7 +663,10 @@ mod tests {
         let text = "the quick brown fox\njumps over the lazy dog";
         let chars: Vec<char> = text.chars().collect();
         let char_index = text.find("fox").unwrap();
-        assert_eq!(build_context(&chars, char_index, 3), "the quick brown fox jumps over the lazy dog");
+        assert_eq!(
+            build_context(&chars, char_index, 3),
+            "the quick brown fox jumps over the lazy dog"
+        );
     }
 
     #[test]
@@ -479,5 +680,4 @@ mod tests {
         let chars: Vec<char> = "short".chars().collect();
         assert_eq!(build_context(&chars, 100, 5), "");
     }
-
 }

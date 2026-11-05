@@ -18,7 +18,11 @@ use crate::tabstops::TabStops;
 pub enum Look {
     /// Text at `start`, taking room; `after`: it stays with the character
     /// before it as you type there.
-    Text { text: String, role: Role, after: bool },
+    Text {
+        text: String,
+        role: Role,
+        after: bool,
+    },
     Swatch((u8, u8, u8)),
     /// `start..end`, on one line, drawn as this off the cursor's line.
     Hide(String),
@@ -43,7 +47,10 @@ pub struct Decoration {
 
 impl Decoration {
     fn is_place(&self) -> bool {
-        matches!(self.look, Look::Text { .. } | Look::Swatch(_) | Look::Struck(_))
+        matches!(
+            self.look,
+            Look::Text { .. } | Look::Swatch(_) | Look::Struck(_)
+        )
     }
 
     /// Text inserted right at it moves it along (the place's char follows
@@ -55,7 +62,10 @@ impl Decoration {
 
 /// An extension's decoration of `buffer`, by char index; none when it
 /// marks nothing (an empty range).
-pub fn from_wit(buffer: &fenix_core::Buffer, d: &fenix_wasm::host::Decoration) -> Option<Decoration> {
+pub fn from_wit(
+    buffer: &fenix_core::Buffer,
+    d: &fenix_wasm::host::Decoration,
+) -> Option<Decoration> {
     use fenix_wasm::host::DecorationLook as L;
     let lines = buffer.line_count();
     let line_end = |line: usize| buffer.line_start_char(line) + buffer.line_len(line);
@@ -68,7 +78,11 @@ pub fn from_wit(buffer: &fenix_core::Buffer, d: &fenix_wasm::host::Decoration) -
     };
     let (start, end) = (at(d.start), at(d.end));
     let look = match &d.look {
-        L::Text(t) => Look::Text { text: t.text.chars().filter(|c| !c.is_control()).collect(), role: crate::code_page::role(&t.role), after: t.after },
+        L::Text(t) => Look::Text {
+            text: t.text.chars().filter(|c| !c.is_control()).collect(),
+            role: crate::code_page::role(&t.role),
+            after: t.after,
+        },
         L::Swatch(rgb) => Look::Swatch(*rgb),
         L::Hide(with) => Look::Hide(with.chars().filter(|c| !c.is_control()).collect()),
         L::Tint(shade) => Look::Tint(crate::code_page::shade(shade)),
@@ -77,15 +91,37 @@ pub fn from_wit(buffer: &fenix_core::Buffer, d: &fenix_wasm::host::Decoration) -
     match look {
         // After the character at `start`: the place past it, on its line.
         Look::Text { after: true, .. } => {
-            let p = (start + 1).min(line_end((d.start.0 as usize).min(lines.saturating_sub(1))).max(start));
-            Some(Decoration { start: p, end: p, look, id: None })
+            let p = (start + 1)
+                .min(line_end((d.start.0 as usize).min(lines.saturating_sub(1))).max(start));
+            Some(Decoration {
+                start: p,
+                end: p,
+                look,
+                id: None,
+            })
         }
-        Look::Text { .. } | Look::Swatch(_) => Some(Decoration { start, end: start, look, id: None }),
+        Look::Text { .. } | Look::Swatch(_) => Some(Decoration {
+            start,
+            end: start,
+            look,
+            id: None,
+        }),
         Look::Hide(_) => {
-            let end = end.min(line_end((d.start.0 as usize).min(lines.saturating_sub(1))).max(start));
-            (end > start).then_some(Decoration { start, end, look, id: None })
+            let end =
+                end.min(line_end((d.start.0 as usize).min(lines.saturating_sub(1))).max(start));
+            (end > start).then_some(Decoration {
+                start,
+                end,
+                look,
+                id: None,
+            })
         }
-        _ => (end > start).then_some(Decoration { start, end, look, id: None }),
+        _ => (end > start).then_some(Decoration {
+            start,
+            end,
+            look,
+            id: None,
+        }),
     }
 }
 
@@ -157,7 +193,13 @@ pub enum Mark {
 /// buffer: tabs expanded per `stops`, and `decorations` (any that touch
 /// it) drawn in. `cursor_here`: the cursor's on it, so hidden text shows
 /// as it is.
-pub fn layout_line(text: &str, line_start: usize, decorations: &[&Decoration], stops: &TabStops, cursor_here: bool) -> LineLayout {
+pub fn layout_line(
+    text: &str,
+    line_start: usize,
+    decorations: &[&Decoration],
+    stops: &TabStops,
+    cursor_here: bool,
+) -> LineLayout {
     let chars: Vec<char> = text.chars().collect();
     let len = chars.len();
     let line_end = line_start + len;
@@ -168,7 +210,13 @@ pub fn layout_line(text: &str, line_start: usize, decorations: &[&Decoration], s
     let mut places: Vec<(usize, u8, &Decoration)> = decorations
         .iter()
         .filter(|d| d.is_place() && (line_start..=line_end).contains(&d.start))
-        .map(|d| (d.start - line_start, if d.moves_with_insert() { 1 } else { 0 }, *d))
+        .map(|d| {
+            (
+                d.start - line_start,
+                if d.moves_with_insert() { 1 } else { 0 },
+                *d,
+            )
+        })
         .collect();
     places.sort_by_key(|(col, order, _)| (*col, *order));
     let hidden: Vec<(Range<usize>, &str, Option<u32>)> = if cursor_here {
@@ -177,14 +225,21 @@ pub fn layout_line(text: &str, line_start: usize, decorations: &[&Decoration], s
         let mut h: Vec<(Range<usize>, &str, Option<u32>)> = decorations
             .iter()
             .filter_map(|d| match &d.look {
-                Look::Hide(with) if (line_start..line_end).contains(&d.start) => Some((d.start - line_start..d.end.min(line_end) - line_start, with.as_str(), d.id)),
+                Look::Hide(with) if (line_start..line_end).contains(&d.start) => Some((
+                    d.start - line_start..d.end.min(line_end) - line_start,
+                    with.as_str(),
+                    d.id,
+                )),
                 _ => None,
             })
             .collect();
         h.sort_by_key(|(r, _, _)| r.start);
         h
     };
-    let mut out = LineLayout { col_map: vec![0; len + 1], ..LineLayout::default() };
+    let mut out = LineLayout {
+        col_map: vec![0; len + 1],
+        ..LineLayout::default()
+    };
     let mut vcol = 0;
     let mut place = places.iter().peekable();
     let mut hide = hidden.iter().peekable();
@@ -276,18 +331,39 @@ mod tests {
     use super::*;
 
     fn text(at: usize, s: &str, after: bool) -> Decoration {
-        Decoration { start: at, end: at, look: Look::Text { text: s.into(), role: Role::Muted, after }, id: None }
+        Decoration {
+            start: at,
+            end: at,
+            look: Look::Text {
+                text: s.into(),
+                role: Role::Muted,
+                after,
+            },
+            id: None,
+        }
     }
 
     fn edit(start: usize, new_end: usize, removed: &str) -> EditDelta {
-        EditDelta { start_char: start, new_end_char: new_end, removed: removed.into() }
+        EditDelta {
+            start_char: start,
+            new_end_char: new_end,
+            removed: removed.into(),
+        }
     }
 
     /// An inlay takes room: what follows moves along, and the caret's
     /// column maps past it; a swatch is a coloured cell and a space.
     #[test]
     fn virtual_text_and_swatches_take_room() {
-        let d = [text(3, ": i32", true), Decoration { start: 4, end: 4, look: Look::Swatch((255, 0, 0)), id: None }];
+        let d = [
+            text(3, ": i32", true),
+            Decoration {
+                start: 4,
+                end: 4,
+                look: Look::Swatch((255, 0, 0)),
+                id: None,
+            },
+        ];
         let refs: Vec<&Decoration> = d.iter().collect();
         let l = layout_line("let #f00", 0, &refs, &TabStops::Fixed(4), false);
         assert_eq!(l.display, "let: i32   #f00");
@@ -305,17 +381,41 @@ mod tests {
     #[test]
     fn hidden_text_tints_and_underlines() {
         let d = [
-            Decoration { start: 4, end: 10, look: Look::Hide("••••".into()), id: None },
-            Decoration { start: 0, end: 3, look: Look::Tint(Shade::Selection), id: None },
-            Decoration { start: 11, end: 12, look: Look::Underline(Role::Bad), id: None },
+            Decoration {
+                start: 4,
+                end: 10,
+                look: Look::Hide("••••".into()),
+                id: None,
+            },
+            Decoration {
+                start: 0,
+                end: 3,
+                look: Look::Tint(Shade::Selection),
+                id: None,
+            },
+            Decoration {
+                start: 11,
+                end: 12,
+                look: Look::Underline(Role::Bad),
+                id: None,
+            },
         ];
         let refs: Vec<&Decoration> = d.iter().collect();
         let l = layout_line("key=secret\tx", 0, &refs, &TabStops::Fixed(4), false);
         assert_eq!(l.display, "key=••••  x");
         assert_eq!(&l.col_map[4..], [4, 4, 4, 4, 4, 4, 8, 10, 11]);
-        assert_eq!(l.marks, [(0..3, Mark::Tint(Shade::Selection)), (10..11, Mark::Underline(Role::Bad))]);
+        assert_eq!(
+            l.marks,
+            [
+                (0..3, Mark::Tint(Shade::Selection)),
+                (10..11, Mark::Underline(Role::Bad))
+            ]
+        );
         let shown = layout_line("key=secret\tx", 0, &refs, &TabStops::Fixed(4), true);
-        assert_eq!(shown.display, "key=secret  x", "on the cursor's line, as it is");
+        assert_eq!(
+            shown.display, "key=secret  x",
+            "on the cursor's line, as it is"
+        );
     }
 
     /// Decorations move with the edits made before them; one typed at an
@@ -326,15 +426,31 @@ mod tests {
         let mut d = vec![
             text(5, "a", true),
             text(5, "b", false),
-            Decoration { start: 8, end: 10, look: Look::Tint(Shade::Good), id: None },
-            Decoration { start: 2, end: 4, look: Look::Underline(Role::Warn), id: None },
+            Decoration {
+                start: 8,
+                end: 10,
+                look: Look::Tint(Shade::Good),
+                id: None,
+            },
+            Decoration {
+                start: 2,
+                end: 4,
+                look: Look::Underline(Role::Warn),
+                id: None,
+            },
         ];
         // "xx" typed at 5.
         shift(&mut d, &[edit(5, 7, "")]);
-        assert_eq!(d.iter().map(|d| (d.start, d.end)).collect::<Vec<_>>(), [(5, 5), (7, 7), (10, 12), (2, 4)]);
+        assert_eq!(
+            d.iter().map(|d| (d.start, d.end)).collect::<Vec<_>>(),
+            [(5, 5), (7, 7), (10, 12), (2, 4)]
+        );
         // 0..3 deleted: the underline's start went, its end moves back.
         shift(&mut d, &[edit(0, 0, "abc")]);
-        assert_eq!(d.iter().map(|d| (d.start, d.end)).collect::<Vec<_>>(), [(2, 2), (4, 4), (7, 9), (0, 1)]);
+        assert_eq!(
+            d.iter().map(|d| (d.start, d.end)).collect::<Vec<_>>(),
+            [(2, 2), (4, 4), (7, 9), (0, 1)]
+        );
         // The tint's text replaced: the new text is tinted; deleted, the
         // tint goes.
         shift(&mut d, &[edit(7, 8, "ab")]);
@@ -342,7 +458,12 @@ mod tests {
         shift(&mut d, &[edit(7, 7, "c")]);
         assert_eq!(d.len(), 3);
         // Text typed at a range's ends isn't in it.
-        let mut r = vec![Decoration { start: 2, end: 4, look: Look::Tint(Shade::Good), id: None }];
+        let mut r = vec![Decoration {
+            start: 2,
+            end: 4,
+            look: Look::Tint(Shade::Good),
+            id: None,
+        }];
         shift(&mut r, &[edit(4, 5, ""), edit(2, 3, "")]);
         assert_eq!((r[0].start, r[0].end), (3, 5));
     }
@@ -352,10 +473,34 @@ mod tests {
     #[test]
     fn a_tagged_decoration_knows_its_columns() {
         let d = [
-            Decoration { start: 4, end: 4, look: Look::Swatch((255, 0, 0)), id: Some(7) },
-            Decoration { start: 0, end: 3, look: Look::Tint(Shade::Selection), id: Some(8) },
-            Decoration { start: 8, end: 8, look: Look::Text { text: "!!".into(), role: Role::Muted, after: false }, id: None },
-            Decoration { start: 11, end: 13, look: Look::Hide("*".into()), id: Some(9) },
+            Decoration {
+                start: 4,
+                end: 4,
+                look: Look::Swatch((255, 0, 0)),
+                id: Some(7),
+            },
+            Decoration {
+                start: 0,
+                end: 3,
+                look: Look::Tint(Shade::Selection),
+                id: Some(8),
+            },
+            Decoration {
+                start: 8,
+                end: 8,
+                look: Look::Text {
+                    text: "!!".into(),
+                    role: Role::Muted,
+                    after: false,
+                },
+                id: None,
+            },
+            Decoration {
+                start: 11,
+                end: 13,
+                look: Look::Hide("*".into()),
+                id: Some(9),
+            },
         ];
         let refs: Vec<&Decoration> = d.iter().collect();
         let l = layout_line("let #f00 = ab", 0, &refs, &TabStops::Fixed(4), false);

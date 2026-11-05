@@ -88,26 +88,56 @@ struct Session {
     focused_frame: usize,
     /// The breakpoints, pins, exceptions to stop on and each project's
     /// last launch.
-    #[serde(default, skip_serializing_if = "super::debug_breakpoints::SavedDebugging::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "super::debug_breakpoints::SavedDebugging::is_empty"
+    )]
     debugging: super::debug_breakpoints::SavedDebugging,
 }
 
 impl Session {
     fn validate(&self) -> Result<(), String> {
-        if self.version != VERSION { return Err("unsupported session version".into()); }
+        if self.version != VERSION {
+            return Err("unsupported session version".into());
+        }
         self.debugging.validate()?;
-        if self.documents.len() > 4096 || self.frames.is_empty() || self.frames.len() > 16 || self.focused_frame >= self.frames.len() { return Err("invalid session dimensions".into()); }
+        if self.documents.len() > 4096
+            || self.frames.is_empty()
+            || self.frames.len() > 16
+            || self.focused_frame >= self.frames.len()
+        {
+            return Err("invalid session dimensions".into());
+        }
         for doc in &self.documents {
-            if doc.path.as_ref().is_some_and(|p| !p.is_absolute()) { return Err("session document path must be absolute".into()); }
-            if doc.dirty && doc.text.is_none() && !doc.in_recovery { return Err("unsaved document has no contents".into()); }
+            if doc.path.as_ref().is_some_and(|p| !p.is_absolute()) {
+                return Err("session document path must be absolute".into());
+            }
+            if doc.dirty && doc.text.is_none() && !doc.in_recovery {
+                return Err("unsaved document has no contents".into());
+            }
         }
         for frame in &self.frames {
-            if frame.workspaces.is_empty() || frame.workspaces.len() > 128 || frame.active >= frame.workspaces.len() { return Err("invalid workspace selection".into()); }
+            if frame.workspaces.is_empty()
+                || frame.workspaces.len() > 128
+                || frame.active >= frame.workspaces.len()
+            {
+                return Err("invalid workspace selection".into());
+            }
             for workspace in &frame.workspaces {
-                if workspace.name.len() > 4096 { return Err("workspace name is too long".into()); }
-                let tree = WindowTree::from_layout(workspace.layout.clone(), workspace.focused).map_err(str::to_string)?;
+                if workspace.name.len() > 4096 {
+                    return Err("workspace name is too long".into());
+                }
+                let tree = WindowTree::from_layout(workspace.layout.clone(), workspace.focused)
+                    .map_err(str::to_string)?;
                 for pane in tree.windows() {
-                    if tree.content(pane).unwrap().document.is_some_and(|id| id >= self.documents.len()) { return Err("invalid session document reference".into()); }
+                    if tree
+                        .content(pane)
+                        .unwrap()
+                        .document
+                        .is_some_and(|id| id >= self.documents.len())
+                    {
+                        return Err("invalid session document reference".into());
+                    }
                 }
             }
         }
@@ -139,11 +169,19 @@ impl Session {
 fn prune_unrestorable(layout: Layout<Pane>) -> Option<Layout<Pane>> {
     match layout {
         Layout::Leaf(pane) => pane.document.is_some().then_some(Layout::Leaf(pane)),
-        Layout::Split { kind, ratio, first, second } => {
+        Layout::Split {
+            kind,
+            ratio,
+            first,
+            second,
+        } => {
             match (prune_unrestorable(*first), prune_unrestorable(*second)) {
-                (Some(first), Some(second)) => {
-                    Some(Layout::Split { kind, ratio, first: Box::new(first), second: Box::new(second) })
-                }
+                (Some(first), Some(second)) => Some(Layout::Split {
+                    kind,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
                 // The sibling takes the whole space, exactly as it would
                 // if the other pane had been closed by hand.
                 (Some(only), None) | (None, Some(only)) => Some(only),
@@ -171,22 +209,38 @@ fn remap_focus(layout: &Layout<Pane>, focused: usize) -> usize {
     let mut documented = Vec::new();
     leaves(layout, &mut documented);
     let kept = documented.iter().filter(|&&d| d).count();
-    documented[..focused.min(documented.len())].iter().filter(|&&d| d).count().min(kept.saturating_sub(1))
+    documented[..focused.min(documented.len())]
+        .iter()
+        .filter(|&&d| d)
+        .count()
+        .min(kept.saturating_sub(1))
 }
 
 impl App {
     /// The unsaved documents the session file can't hold, largest first
     /// to go, so that one huge file doesn't stop the others being kept.
     fn session_left_out(&self) -> HashSet<BufferId> {
-        if self.session.discard { return HashSet::new(); }
-        let mut unsaved: Vec<(usize, BufferId)> = self.buffers.ids_sorted_by_path().into_iter()
+        if self.session.discard {
+            return HashSet::new();
+        }
+        let mut unsaved: Vec<(usize, BufferId)> = self
+            .buffers
+            .ids_sorted_by_path()
+            .into_iter()
             .filter_map(|id| self.buffers.get(id).map(|ob| (id, ob)))
             .filter(|(_, ob)| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty())
             .map(|(id, ob)| (ob.buffer.len_chars(), id))
             .collect();
         unsaved.sort_by_key(|(chars, _)| *chars);
         let mut total = 0usize;
-        unsaved.into_iter().filter(|(chars, _)| { total = total.saturating_add(*chars); total > MAX_UNSAVED_CHARS }).map(|(_, id)| id).collect()
+        unsaved
+            .into_iter()
+            .filter(|(chars, _)| {
+                total = total.saturating_add(*chars);
+                total > MAX_UNSAVED_CHARS
+            })
+            .map(|(_, id)| id)
+            .collect()
     }
 
     fn capture_session(&self) -> Session {
@@ -195,84 +249,170 @@ impl App {
         let mut ids = HashMap::new();
         for id in self.buffers.ids_sorted_by_path() {
             let ob = self.buffers.get(id).unwrap();
-            if !ob.kind.tracks_unsaved_changes() { continue; }
+            if !ob.kind.tracks_unsaved_changes() {
+                continue;
+            }
             // An extension's scratch buffer is its own, gone with it.
-            if self.code_scratch_name(id).is_some() { continue; }
+            if self.code_scratch_name(id).is_some() {
+                continue;
+            }
             // So is a lesson's practice, gone with the tutorial page, and an
             // extension's compose pane's text, kept on its own.
-            if self.tutorial_buffer_name(id).is_some() || self.is_kept_compose(id) { continue; }
-            if self.session.discard && ob.buffer.path().is_none() && ob.buffer.is_dirty() { continue; }
-            let path = ob.buffer.path().map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
+            if self.tutorial_buffer_name(id).is_some() || self.is_kept_compose(id) {
+                continue;
+            }
+            if self.session.discard && ob.buffer.path().is_none() && ob.buffer.is_dirty() {
+                continue;
+            }
+            let path = ob
+                .buffer
+                .path()
+                .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
             let dirty = ob.buffer.is_dirty() && !self.session.discard;
             ids.insert(id, documents.len());
             let in_recovery = left_out.contains(&id);
             documents.push(Document {
                 in_recovery,
                 conflict: dirty && self.externally_changed.contains(&id),
-                recovery: self.unnamed_snapshots.get(&id).and_then(|p| p.file_name()).and_then(|n| n.to_str()).map(str::to_string),
-                disk: self.disk_state.get(&id).copied().or_else(|| path.as_ref().and_then(|p| DiskFingerprint::of(p))),
-                path: path.clone(), text: (!in_recovery && (dirty || path.is_none())).then(|| ob.buffer.text()), dirty, cursor: ob.cursor.char_idx, code_page: None,
+                recovery: self
+                    .unnamed_snapshots
+                    .get(&id)
+                    .and_then(|p| p.file_name())
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string),
+                disk: self
+                    .disk_state
+                    .get(&id)
+                    .copied()
+                    .or_else(|| path.as_ref().and_then(|p| DiskFingerprint::of(p))),
+                path: path.clone(),
+                text: (!in_recovery && (dirty || path.is_none())).then(|| ob.buffer.text()),
+                dirty,
+                cursor: ob.cursor.char_idx,
+                code_page: None,
             });
         }
         // Code extensions' pages, by what each needs to open again.
-        for page in self.code_pages_to_save().into_iter().chain(self.agents_pages_to_save()) {
+        for page in self
+            .code_pages_to_save()
+            .into_iter()
+            .chain(self.agents_pages_to_save())
+        {
             ids.insert(page.buffer, documents.len());
-            let saved = SavedCodePage { ext: page.ext, kind: page.kind, title: page.title, state: page.state, file: page.file, given: page.given };
-            documents.push(Document { path: None, text: None, dirty: false, disk: None, conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: Some(saved) });
-        }
-        let frames = (0..self.frames.len()).map(|frame| {
-            let list = if frame == self.active_frame { &self.workspaces } else { &self.frames[frame].as_ref().unwrap().workspaces };
-            // Docker/Git/Jira/PDF/Task/Debug/Terminal sessions each
-            // own a live, in-memory struct (`DockerSession`, `GitSession`,
-            // ...) that this whole `capture_session`/restore mechanism
-            // has no way to reconstruct -- none of it is captured here,
-            // and nothing on the restore side ever rebuilds one. Every
-            // one of those panels opens in its own dedicated workspace
-            // (`self.workspaces.new_workspace(...)`, never mixed into an
-            // ordinary file workspace), so restoring *that* workspace's
-            // layout unconditionally produced exactly the bug this skips:
-            // the right pane shapes, each one silently pointed at a blank
-            // placeholder buffer instead of the session it used to show,
-            // since `document: None` (nothing in `ids` for a buffer kind
-            // that isn't `tracks_unsaved_changes`) falls back to that
-            // placeholder on restore. Skipped here instead of only on
-            // restore so a broken layout is never written to disk in the
-            // first place. Kept (not skipped) in the one edge case where
-            // *every* workspace in this frame is one of these -- an empty
-            // `workspaces` list would fail `Session::validate`, and a
-            // frame that's nothing but ephemeral sessions restoring with
-            // its old (already-established-to-be-imperfect) behavior
-            // beats inventing a synthetic fallback workspace here.
-            let ephemeral: Vec<bool> = list.workspaces.iter().map(|w| self.workspace_is_ephemeral_session(w)).collect();
-            let keep_all = ephemeral.iter().all(|&e| e);
-            let workspaces = list
-                .workspaces
-                .iter()
-                .enumerate()
-                .filter(|&(i, _)| keep_all || !ephemeral[i])
-                .map(|(_, workspace)| SavedWorkspace {
-                    name: workspace.name.clone(),
-                    project: workspace.project.clone(),
-                    focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
-                    layout: workspace.windows.snapshot(|pane, buffer| {
-                        let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
-                        Pane { document: ids.get(buffer).copied(), cursor: state.cursor.char_idx, sticky_col: state.cursor.sticky_col,
-                            scroll_line: state.scroll_line, scroll_col: state.scroll_col }
-                    }),
-                })
-                .collect();
-            // Remapped to the filtered list's own indices -- falls back
-            // to 0 (not `list.active` unchanged) when the active
-            // workspace itself was the one skipped, same as an out-of-
-            // range index anywhere else in a freshly built list.
-            let active = if keep_all {
-                list.active
-            } else {
-                list.workspaces.iter().enumerate().filter(|&(i, _)| !ephemeral[i]).position(|(i, _)| i == list.active).unwrap_or(0)
+            let saved = SavedCodePage {
+                ext: page.ext,
+                kind: page.kind,
+                title: page.title,
+                state: page.state,
+                file: page.file,
+                given: page.given,
             };
-            SavedFrame { workspaces, active }
-        }).collect();
-        Session { version: VERSION, documents, frames, focused_frame: self.focused_frame.min(self.frames.len() - 1), debugging: self.capture_debugging() }
+            documents.push(Document {
+                path: None,
+                text: None,
+                dirty: false,
+                disk: None,
+                conflict: false,
+                recovery: None,
+                in_recovery: false,
+                cursor: 0,
+                code_page: Some(saved),
+            });
+        }
+        let frames = (0..self.frames.len())
+            .map(|frame| {
+                let list = if frame == self.active_frame {
+                    &self.workspaces
+                } else {
+                    &self.frames[frame].as_ref().unwrap().workspaces
+                };
+                // Docker/Git/Jira/PDF/Task/Debug/Terminal sessions each
+                // own a live, in-memory struct (`DockerSession`, `GitSession`,
+                // ...) that this whole `capture_session`/restore mechanism
+                // has no way to reconstruct -- none of it is captured here,
+                // and nothing on the restore side ever rebuilds one. Every
+                // one of those panels opens in its own dedicated workspace
+                // (`self.workspaces.new_workspace(...)`, never mixed into an
+                // ordinary file workspace), so restoring *that* workspace's
+                // layout unconditionally produced exactly the bug this skips:
+                // the right pane shapes, each one silently pointed at a blank
+                // placeholder buffer instead of the session it used to show,
+                // since `document: None` (nothing in `ids` for a buffer kind
+                // that isn't `tracks_unsaved_changes`) falls back to that
+                // placeholder on restore. Skipped here instead of only on
+                // restore so a broken layout is never written to disk in the
+                // first place. Kept (not skipped) in the one edge case where
+                // *every* workspace in this frame is one of these -- an empty
+                // `workspaces` list would fail `Session::validate`, and a
+                // frame that's nothing but ephemeral sessions restoring with
+                // its old (already-established-to-be-imperfect) behavior
+                // beats inventing a synthetic fallback workspace here.
+                let ephemeral: Vec<bool> = list
+                    .workspaces
+                    .iter()
+                    .map(|w| self.workspace_is_ephemeral_session(w))
+                    .collect();
+                let keep_all = ephemeral.iter().all(|&e| e);
+                let workspaces =
+                    list.workspaces
+                        .iter()
+                        .enumerate()
+                        .filter(|&(i, _)| keep_all || !ephemeral[i])
+                        .map(|(_, workspace)| SavedWorkspace {
+                            name: workspace.name.clone(),
+                            project: workspace.project.clone(),
+                            focused: workspace
+                                .windows
+                                .windows()
+                                .iter()
+                                .position(|id| *id == workspace.windows.focused_id())
+                                .unwrap_or(0),
+                            layout: workspace.windows.snapshot(|pane, buffer| {
+                                let state =
+                                    workspace.pane_states.get(&pane).copied().unwrap_or_else(
+                                        || {
+                                            PaneState::seeded_at(
+                                                self.buffers
+                                                    .get(*buffer)
+                                                    .map(|ob| ob.cursor)
+                                                    .unwrap_or(Cursor::at_start()),
+                                            )
+                                        },
+                                    );
+                                Pane {
+                                    document: ids.get(buffer).copied(),
+                                    cursor: state.cursor.char_idx,
+                                    sticky_col: state.cursor.sticky_col,
+                                    scroll_line: state.scroll_line,
+                                    scroll_col: state.scroll_col,
+                                }
+                            }),
+                        })
+                        .collect();
+                // Remapped to the filtered list's own indices -- falls back
+                // to 0 (not `list.active` unchanged) when the active
+                // workspace itself was the one skipped, same as an out-of-
+                // range index anywhere else in a freshly built list.
+                let active = if keep_all {
+                    list.active
+                } else {
+                    list.workspaces
+                        .iter()
+                        .enumerate()
+                        .filter(|&(i, _)| !ephemeral[i])
+                        .position(|(i, _)| i == list.active)
+                        .unwrap_or(0)
+                };
+                SavedFrame { workspaces, active }
+            })
+            .collect();
+        Session {
+            version: VERSION,
+            documents,
+            frames,
+            focused_frame: self.focused_frame.min(self.frames.len() - 1),
+            debugging: self.capture_debugging(),
+        }
     }
 
     /// Whether every pane in `workspace` shows a buffer kind backed by a
@@ -298,15 +438,26 @@ impl App {
 
     pub(super) fn checkpoint_session(&mut self) -> bool {
         self.save_explorer_sessions();
-        let Some(path) = self.session.path.clone() else { return true };
-        if self.config.restore_session == Some(false) || self.session.blocked || self.session.pending.is_some() { return false; }
+        let Some(path) = self.session.path.clone() else {
+            return true;
+        };
+        if self.config.restore_session == Some(false)
+            || self.session.blocked
+            || self.session.pending.is_some()
+        {
+            return false;
+        }
         let result = (|| -> Result<Vec<u8>, String> {
             let saved = self.capture_session();
             saved.validate()?;
             let bytes = serde_json::to_vec(&saved).map_err(|e| e.to_string())?;
-            if bytes.len() > MAX_BYTES { return Err("session exceeds 64 MiB; save large unsaved documents first".into()); }
+            if bytes.len() > MAX_BYTES {
+                return Err("session exceeds 64 MiB; save large unsaved documents first".into());
+            }
             if bytes != self.session.last {
-                if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
                 fenix_storage::write(&path, &bytes).map_err(|e| e.to_string())?;
             }
             Ok(bytes)
@@ -317,34 +468,53 @@ impl App {
                 self.session.error = None;
                 let left_out = self.session_left_out();
                 if let Some(id) = left_out.difference(&self.session.left_out).next() {
-                    let name = self.buffers.get(*id).and_then(|ob| ob.buffer.path()).and_then(Path::file_name).map_or("A document".to_string(), |n| n.to_string_lossy().into_owned());
+                    let name = self
+                        .buffers
+                        .get(*id)
+                        .and_then(|ob| ob.buffer.path())
+                        .and_then(Path::file_name)
+                        .map_or("A document".to_string(), |n| {
+                            n.to_string_lossy().into_owned()
+                        });
                     self.set_message(format!("{name} is too large for the session: its unsaved edits are kept in a recovery file"));
                 }
                 self.session.left_out = left_out;
                 true
             }
-            Err(error) => { self.session.error = Some(error.clone()); self.set_error(format!("Session save failed: {error}")); false }
+            Err(error) => {
+                self.session.error = Some(error.clone());
+                self.set_error(format!("Session save failed: {error}"));
+                false
+            }
         }
     }
 
     pub(super) fn restore_session(&mut self, prefer_first_frame: bool) {
-        let Some(path) = self.session.path.clone() else { return };
-        if self.config.restore_session == Some(false) { return; }
+        let Some(path) = self.session.path.clone() else {
+            return;
+        };
+        if self.config.restore_session == Some(false) {
+            return;
+        }
         let result = (|| -> Result<Option<(Session, Option<std::time::SystemTime>)>, String> {
             let meta = match std::fs::metadata(&path) {
                 Ok(meta) => meta,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                 Err(e) => return Err(e.to_string()),
             };
-            if meta.len() > MAX_BYTES as u64 { return Err("session file exceeds 64 MiB".into()); }
+            if meta.len() > MAX_BYTES as u64 {
+                return Err("session file exceeds 64 MiB".into());
+            }
             let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
             let saved: Session = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             saved.validate()?;
             Ok(Some((saved, meta.modified().ok())))
         })();
         match result {
-            Ok(Some((saved, modified))) => self.apply_saved_session(saved, prefer_first_frame, modified),
-            Ok(None) => {},
+            Ok(Some((saved, modified))) => {
+                self.apply_saved_session(saved, prefer_first_frame, modified)
+            }
+            Ok(None) => {}
             Err(error) => {
                 self.session.blocked = true;
                 self.session.error = Some(error.clone());
@@ -353,20 +523,39 @@ impl App {
         }
     }
 
-    fn apply_saved_session(&mut self, mut saved: Session, prefer_first_frame: bool, modified: Option<std::time::SystemTime>) {
+    fn apply_saved_session(
+        &mut self,
+        mut saved: Session,
+        prefer_first_frame: bool,
+        modified: Option<std::time::SystemTime>,
+    ) {
         self.restore_debugging(std::mem::take(&mut saved.debugging));
         let mut documents = Vec::new();
         let mut warnings = Vec::new();
-        let recovery = self.recovery_dir.as_ref().map(|dir| fenix_recovery::list(dir)).unwrap_or_default();
+        let recovery = self
+            .recovery_dir
+            .as_ref()
+            .map(|dir| fenix_recovery::list(dir))
+            .unwrap_or_default();
         for mut doc in saved.documents {
             if let Some(page) = doc.code_page.take() {
                 let restored = if page.ext == super::agents::threads::PAGE_EXT {
                     self.agents_restore_page(&page.kind, &page.state)
                 } else {
-                    self.restore_code_page(&page.ext, &page.kind, &page.title, &page.state, page.file.clone(), &page.given)
+                    self.restore_code_page(
+                        &page.ext,
+                        &page.kind,
+                        &page.title,
+                        &page.state,
+                        page.file.clone(),
+                        &page.given,
+                    )
                 };
                 if restored.is_none() {
-                    warnings.push(format!("{}: its extension ({}) isn't on to open it", page.title, page.ext));
+                    warnings.push(format!(
+                        "{}: its extension ({}) isn't on to open it",
+                        page.title, page.ext
+                    ));
                 }
                 documents.push(restored);
                 continue;
@@ -375,21 +564,42 @@ impl App {
             // can contain edits from a crash or failed session write in between.
             if let Some(snapshot) = recovery.iter().find(|snapshot| {
                 let matches = match (&doc.path, &snapshot.original) {
-                    (Some(path), Some(original)) => std::path::absolute(original).ok().as_ref() == Some(path),
-                    (None, None) => doc.recovery.is_some() && snapshot.snapshot.file_name().and_then(|n| n.to_str()) == doc.recovery.as_deref(),
+                    (Some(path), Some(original)) => {
+                        std::path::absolute(original).ok().as_ref() == Some(path)
+                    }
+                    (None, None) => {
+                        doc.recovery.is_some()
+                            && snapshot.snapshot.file_name().and_then(|n| n.to_str())
+                                == doc.recovery.as_deref()
+                    }
                     _ => false,
                 };
-                matches && (doc.in_recovery || modified.is_some_and(|time| std::fs::metadata(&snapshot.snapshot).and_then(|meta| meta.modified()).unwrap_or(snapshot.saved_at) > time))
+                matches
+                    && (doc.in_recovery
+                        || modified.is_some_and(|time| {
+                            std::fs::metadata(&snapshot.snapshot)
+                                .and_then(|meta| meta.modified())
+                                .unwrap_or(snapshot.saved_at)
+                                > time
+                        }))
             }) {
                 doc.text = Some(snapshot.contents.clone());
                 doc.dirty = true;
             }
             if doc.in_recovery && doc.text.is_none() {
                 doc.dirty = false;
-                let name = doc.path.as_ref().map_or("An unnamed document".to_string(), |p| p.display().to_string());
+                let name = doc
+                    .path
+                    .as_ref()
+                    .map_or("An unnamed document".to_string(), |p| {
+                        p.display().to_string()
+                    });
                 warnings.push(format!("{name}: its unsaved edits were too large for the session, and their recovery file is gone"));
             }
-            let existing = doc.path.as_ref().and_then(|p| self.buffer_id_for_lsp_path(p));
+            let existing = doc
+                .path
+                .as_ref()
+                .and_then(|p| self.buffer_id_for_lsp_path(p));
             let buffer = match doc.path.as_ref() {
                 Some(path) => match Buffer::from_path(path) {
                     Ok(buffer) => Some(buffer),
@@ -400,8 +610,13 @@ impl App {
                 },
                 None => Some(Buffer::from_text(doc.text.as_deref().unwrap_or(""))),
             };
-            let Some(buffer) = buffer else { documents.push(None); continue };
-            let id = existing.filter(|_| buffer.path().is_some()).unwrap_or_else(|| self.buffers.insert_loaded_document(buffer));
+            let Some(buffer) = buffer else {
+                documents.push(None);
+                continue;
+            };
+            let id = existing
+                .filter(|_| buffer.path().is_some())
+                .unwrap_or_else(|| self.buffers.insert_loaded_document(buffer));
             self.note_disk_state(id);
             let ob = self.buffers.get_mut(id).unwrap();
             if let Some(text) = &doc.text {
@@ -410,16 +625,33 @@ impl App {
                     ob.buffer.replace_range(&mut ob.cursor, 0, len, text);
                 }
             }
-            if doc.dirty { ob.buffer.mark_unsaved(); } else { ob.buffer.mark_saved(); }
+            if doc.dirty {
+                ob.buffer.mark_unsaved();
+            } else {
+                ob.buffer.mark_saved();
+            }
             ob.cursor.char_idx = doc.cursor.min(ob.buffer.len_chars());
             if doc.path.is_none() {
-                if let Some(snapshot) = recovery.iter().find(|snapshot| snapshot.original.is_none() && snapshot.snapshot.file_name().and_then(|n| n.to_str()) == doc.recovery.as_deref() && Some(&snapshot.contents) == doc.text.as_ref()) {
+                if let Some(snapshot) = recovery.iter().find(|snapshot| {
+                    snapshot.original.is_none()
+                        && snapshot.snapshot.file_name().and_then(|n| n.to_str())
+                            == doc.recovery.as_deref()
+                        && Some(&snapshot.contents) == doc.text.as_ref()
+                }) {
                     self.unnamed_snapshots.insert(id, snapshot.snapshot.clone());
                 }
             }
-            if doc.dirty && (doc.conflict || doc.path.as_ref().is_some_and(|p| DiskFingerprint::of(p) != doc.disk)) {
+            if doc.dirty
+                && (doc.conflict
+                    || doc
+                        .path
+                        .as_ref()
+                        .is_some_and(|p| DiskFingerprint::of(p) != doc.disk))
+            {
                 self.externally_changed.insert(id);
-                warnings.push("a restored document changed on disk; review the conflict before saving".into());
+                warnings.push(
+                    "a restored document changed on disk; review the conflict before saving".into(),
+                );
             }
             documents.push(Some(id));
         }
@@ -444,8 +676,12 @@ impl App {
                 .into_iter()
                 .map(|w| {
                     let focused = remap_focus(&w.layout, w.focused);
-                    let kept = prune_unrestorable(w.layout.clone())
-                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused, project: w.project.clone() });
+                    let kept = prune_unrestorable(w.layout.clone()).map(|layout| SavedWorkspace {
+                        name: w.name.clone(),
+                        layout,
+                        focused,
+                        project: w.project.clone(),
+                    });
                     (w, kept)
                 })
                 .collect();
@@ -456,64 +692,142 @@ impl App {
             // *single* transient pane -- it comes back as the start
             // screen.
             let keep_all = pruned.iter().all(|(_, kept)| kept.is_none());
-            let active = pruned[..frame.active.min(pruned.len())].iter().filter(|(_, k)| k.is_some()).count();
+            let active = pruned[..frame.active.min(pruned.len())]
+                .iter()
+                .filter(|(_, k)| k.is_some())
+                .count();
             let (kept, active) = if keep_all {
-                (pruned.into_iter().map(|(original, _)| original).collect(), frame.active)
+                (
+                    pruned.into_iter().map(|(original, _)| original).collect(),
+                    frame.active,
+                )
             } else {
-                let kept: Vec<SavedWorkspace> = pruned.into_iter().filter_map(|(_, kept)| kept).collect();
+                let kept: Vec<SavedWorkspace> =
+                    pruned.into_iter().filter_map(|(_, kept)| kept).collect();
                 let active = active.min(kept.len().saturating_sub(1));
                 (kept, active)
             };
-            let frame = SavedFrame { workspaces: kept, active };
+            let frame = SavedFrame {
+                workspaces: kept,
+                active,
+            };
             let mut workspaces = Vec::new();
             for workspace in frame.workspaces {
                 let mut states = Vec::new();
-                fn map(layout: Layout<Pane>, docs: &[Option<BufferId>], fallback: BufferId, states: &mut Vec<Pane>) -> Layout<BufferId> {
+                fn map(
+                    layout: Layout<Pane>,
+                    docs: &[Option<BufferId>],
+                    fallback: BufferId,
+                    states: &mut Vec<Pane>,
+                ) -> Layout<BufferId> {
                     match layout {
-                        Layout::Leaf(pane) => { let id = pane.document.and_then(|i| docs[i]).unwrap_or(fallback); states.push(pane); Layout::Leaf(id) }
-                        Layout::Split { kind, ratio, first, second } => Layout::Split { kind, ratio, first: Box::new(map(*first, docs, fallback, states)), second: Box::new(map(*second, docs, fallback, states)) },
+                        Layout::Leaf(pane) => {
+                            let id = pane.document.and_then(|i| docs[i]).unwrap_or(fallback);
+                            states.push(pane);
+                            Layout::Leaf(id)
+                        }
+                        Layout::Split {
+                            kind,
+                            ratio,
+                            first,
+                            second,
+                        } => Layout::Split {
+                            kind,
+                            ratio,
+                            first: Box::new(map(*first, docs, fallback, states)),
+                            second: Box::new(map(*second, docs, fallback, states)),
+                        },
                     }
                 }
                 let home = self.buffers.open_dashboard("");
                 let layout = map(workspace.layout, &documents, home, &mut states);
-                let tree = WindowTree::from_layout(layout, workspace.focused).expect("validated layout");
+                let tree =
+                    WindowTree::from_layout(layout, workspace.focused).expect("validated layout");
                 let mut pane_states = HashMap::new();
                 let mut pane_tabs = HashMap::new();
                 for (id, pane) in tree.windows().into_iter().zip(states) {
                     let shown = *tree.content(id).unwrap_or(&home);
-                    pane_tabs.insert(id, if shown == home { Vec::new() } else { vec![shown] });
+                    pane_tabs.insert(
+                        id,
+                        if shown == home {
+                            Vec::new()
+                        } else {
+                            vec![shown]
+                        },
+                    );
                     if shown == home {
                         pane_states.insert(id, PaneState::seeded_at(Cursor::at_start()));
                         continue;
                     }
                     let buffer = &self.buffers.get(*tree.content(id).unwrap()).unwrap().buffer;
-                    let scroll_line = pane.scroll_line.min(buffer.visual_line_count().saturating_sub(1));
-                    pane_states.insert(id, PaneState {
-                        cursor: Cursor { char_idx: pane.cursor.min(buffer.len_chars()), sticky_col: pane.sticky_col.min(1_000_000) },
-                        scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
-                    });
+                    let scroll_line = pane
+                        .scroll_line
+                        .min(buffer.visual_line_count().saturating_sub(1));
+                    pane_states.insert(
+                        id,
+                        PaneState {
+                            cursor: Cursor {
+                                char_idx: pane.cursor.min(buffer.len_chars()),
+                                sticky_col: pane.sticky_col.min(1_000_000),
+                            },
+                            scroll_line,
+                            rendered_scroll: scroll_line as f32,
+                            scroll_col: pane.scroll_col.min(1_000_000),
+                        },
+                    );
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() });
+                workspaces.push(Workspace {
+                    name: workspace.name,
+                    windows: tree,
+                    pane_states,
+                    scroll_anims: HashMap::new(),
+                    pane_tabs,
+                    project: workspace.project,
+                    home: Some(home),
+                    last_tab: HashMap::new(),
+                    preview: HashMap::new(),
+                    closed_tabs: HashMap::new(),
+                });
             }
-            frames.push(WorkspaceList { workspaces, active: frame.active });
+            frames.push(WorkspaceList {
+                workspaces,
+                active: frame.active,
+            });
         }
         self.workspaces = frames.remove(0);
         // The agents' dock came back as two ordinary panes: it's the dock.
         self.agents_adopt_dock();
-        self.session.pending = Some((frames, if prefer_first_frame { 0 } else { saved.focused_frame }));
+        self.session.pending = Some((
+            frames,
+            if prefer_first_frame {
+                0
+            } else {
+                saved.focused_frame
+            },
+        ));
         self.refresh_project_root();
         self.refresh_all_gutter_hunks();
         self.refresh_home_data(true);
         self.main_view = MainView::Editor;
-        if warnings.is_empty() { self.set_message("restored editor session"); }
-        else { self.set_error(format!("Session restored with warnings: {}", warnings.join("; "))); }
+        if warnings.is_empty() {
+            self.set_message("restored editor session");
+        } else {
+            self.set_error(format!(
+                "Session restored with warnings: {}",
+                warnings.join("; ")
+            ));
+        }
     }
 
     pub(super) fn restore_session_frames(&mut self, event_loop: &ActiveEventLoop) -> bool {
-        let Some((frames, focused)) = self.session.pending.take() else { return false };
+        let Some((frames, focused)) = self.session.pending.take() else {
+            return false;
+        };
         if self.config.restore_windows == Some(false) {
             for (index, frame) in frames.into_iter().enumerate() {
-                if index + 1 == focused { self.workspaces.active = self.workspaces.workspaces.len() + frame.active; }
+                if index + 1 == focused {
+                    self.workspaces.active = self.workspaces.workspaces.len() + frame.active;
+                }
                 self.workspaces.workspaces.extend(frame.workspaces);
             }
             self.refresh_project_root();
@@ -529,11 +843,17 @@ impl App {
         }
         for (index, frame) in frames.into_iter().enumerate() {
             let _profile = crate::profile::Scope::new("saved window opened");
-            let placement = layouts.get(index + 1).map(|layout| FramePlacement::from(*layout)).unwrap_or_else(|| self.next_frame_placement(event_loop));
+            let placement = layouts
+                .get(index + 1)
+                .map(|layout| FramePlacement::from(*layout))
+                .unwrap_or_else(|| self.next_frame_placement(event_loop));
             let before = self.frames.len();
             self.open_frame(event_loop, placement);
-            if self.frames.len() > before { self.workspaces = frame; }
-            else { self.workspaces.workspaces.extend(frame.workspaces); }
+            if self.frames.len() > before {
+                self.workspaces = frame;
+            } else {
+                self.workspaces.workspaces.extend(frame.workspaces);
+            }
         }
         {
             let _profile = crate::profile::Scope::new("saved window focused");
@@ -551,10 +871,16 @@ impl App {
 
     pub(crate) fn discard_session_edits(&mut self) -> bool {
         self.session.discard = true;
-        let saved = self.config.restore_session == Some(false) || self.session.blocked || self.checkpoint_session();
+        let saved = self.config.restore_session == Some(false)
+            || self.session.blocked
+            || self.checkpoint_session();
         if saved {
-            for id in self.dirty_tracked_buffer_ids() { self.discard_recovery_for(id); }
-        } else { self.session.discard = false; }
+            for id in self.dirty_tracked_buffer_ids() {
+                self.discard_recovery_for(id);
+            }
+        } else {
+            self.session.discard = false;
+        }
         saved
     }
 
@@ -579,12 +905,19 @@ impl App {
 
     pub(super) fn save_session_explicit(&mut self) -> bool {
         self.session.blocked = false;
-        if self.session.path.is_none() || self.config.restore_session == Some(false) { self.set_error("session persistence is disabled"); return false; }
+        if self.session.path.is_none() || self.config.restore_session == Some(false) {
+            self.set_error("session persistence is disabled");
+            return false;
+        }
         self.snapshot_dirty_buffers();
-        if self.checkpoint_session() { self.set_message("session saved"); true } else { false }
+        if self.checkpoint_session() {
+            self.set_message("session saved");
+            true
+        } else {
+            false
+        }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -595,7 +928,11 @@ mod tests {
     impl Temp {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
-            let path = std::env::temp_dir().join(format!("fenix-session-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let path = std::env::temp_dir().join(format!(
+                "fenix-session-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -617,7 +954,11 @@ mod tests {
             app
         }
     }
-    impl Drop for Temp { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     fn dirty(app: &mut App, id: BufferId, text: &str) {
         let ob = app.buffers.get_mut(id).unwrap();
@@ -633,11 +974,28 @@ mod tests {
         let temp = Temp::new();
         let file = std::path::absolute(temp.0.join("main.py")).unwrap();
         let mut app = temp.app();
-        app.breakpoints.entry(file.clone()).or_default().insert(3, Breakpoint { condition: Some("i == 2".into()), ..Default::default() });
-        app.breakpoints.entry(file.clone()).or_default().insert(5, Breakpoint { off: true, ..Default::default() });
-        app.debug_pins.push(Pin { path: file.clone(), line: 4, expression: "total".into() });
+        app.breakpoints.entry(file.clone()).or_default().insert(
+            3,
+            Breakpoint {
+                condition: Some("i == 2".into()),
+                ..Default::default()
+            },
+        );
+        app.breakpoints.entry(file.clone()).or_default().insert(
+            5,
+            Breakpoint {
+                off: true,
+                ..Default::default()
+            },
+        );
+        app.debug_pins.push(Pin {
+            path: file.clone(),
+            line: 4,
+            expression: "total".into(),
+        });
         app.debug_exceptions.insert("raised".into(), true);
-        app.debug_last_launch.insert(temp.0.clone(), "Python: module".into());
+        app.debug_last_launch
+            .insert(temp.0.clone(), "Python: module".into());
         assert!(app.checkpoint_session());
         let back = temp.restore();
         assert_eq!(back.breakpoints, app.breakpoints);
@@ -651,7 +1009,11 @@ mod tests {
         let temp = Temp::new();
         let mut app = temp.app();
         let pane = app.focused_pane_id();
-        app.workspaces.active_pane_states_mut().get_mut(&pane).unwrap().scroll_col = 500;
+        app.workspaces
+            .active_pane_states_mut()
+            .get_mut(&pane)
+            .unwrap()
+            .scroll_col = 500;
         assert!(app.checkpoint_session());
 
         let restored = temp.restore();
@@ -659,9 +1021,18 @@ mod tests {
         assert_eq!(restored.open().kind, BufferKind::Dashboard);
         let view = restored.test_home();
         let (id, pane) = (restored.focused_buffer_id(), restored.focused_pane_id());
-        let selected = restored.home_selected_slot(id, pane).expect("the cursor is on a slot");
-        assert_eq!(view.slots[selected].entry, dashboard::HomeEntry::Find, "a restored Home starts on the find field");
-        assert_eq!(restored.pane_state(restored.focused_pane_id()).scroll_col, 0);
+        let selected = restored
+            .home_selected_slot(id, pane)
+            .expect("the cursor is on a slot");
+        assert_eq!(
+            view.slots[selected].entry,
+            dashboard::HomeEntry::Find,
+            "a restored Home starts on the find field"
+        );
+        assert_eq!(
+            restored.pane_state(restored.focused_pane_id()).scroll_col,
+            0
+        );
     }
 
     #[test]
@@ -705,9 +1076,19 @@ mod tests {
         app.workspaces.new_workspace(status, Cursor::at_start());
         let main = app.buffers.open_diff("diff");
         let main_pane = app.windows_mut().split(SplitKind::Vertical, main);
-        app.workspaces.active_pane_states_mut().insert(main_pane, PaneState::seeded_at(Cursor::at_start()));
-        assert_eq!(app.workspaces.workspaces.len(), file_workspaces + 1, "panel opened in its own workspace");
-        assert_eq!(app.open().kind, BufferKind::Diff, "the Main pane is a Diff buffer, not a Git one");
+        app.workspaces
+            .active_pane_states_mut()
+            .insert(main_pane, PaneState::seeded_at(Cursor::at_start()));
+        assert_eq!(
+            app.workspaces.workspaces.len(),
+            file_workspaces + 1,
+            "panel opened in its own workspace"
+        );
+        assert_eq!(
+            app.open().kind,
+            BufferKind::Diff,
+            "the Main pane is a Diff buffer, not a Git one"
+        );
 
         assert!(app.checkpoint_session());
         let restored = temp.restore();
@@ -719,8 +1100,12 @@ mod tests {
         );
         for workspace in &restored.workspaces.workspaces {
             let panes = workspace.windows.windows();
-            let kinds: Vec<_> =
-                panes.iter().filter_map(|p| workspace.windows.content(*p)).filter_map(|id| restored.buffers.get(*id)).map(|ob| ob.kind).collect();
+            let kinds: Vec<_> = panes
+                .iter()
+                .filter_map(|p| workspace.windows.content(*p))
+                .filter_map(|id| restored.buffers.get(*id))
+                .map(|ob| ob.kind)
+                .collect();
             assert!(
                 !kinds.contains(&BufferKind::Diff) && !kinds.contains(&BufferKind::Git),
                 "no session-owned pane should survive a restore, got {kinds:?}"
@@ -742,37 +1127,80 @@ mod tests {
         // Hand-built the way the old code would have written it: a real
         // file workspace, plus a panel workspace whose panes all record
         // no document at all.
-        let pane = |document| Pane { document, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 };
-        let split = |first, second| Layout::Split { kind: SplitKind::Vertical, ratio: 0.5, first: Box::new(first), second: Box::new(second) };
+        let pane = |document| Pane {
+            document,
+            cursor: 0,
+            sticky_col: 0,
+            scroll_line: 0,
+            scroll_col: 0,
+        };
+        let split = |first, second| Layout::Split {
+            kind: SplitKind::Vertical,
+            ratio: 0.5,
+            first: Box::new(first),
+            second: Box::new(second),
+        };
         let saved = Session {
             version: VERSION,
             documents: vec![Document {
-                path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: None,
+                path: Some(file.clone()),
+                text: None,
+                dirty: false,
+                disk: DiskFingerprint::of(&file),
+                conflict: false,
+                recovery: None,
+                in_recovery: false,
+                cursor: 0,
+                code_page: None,
             }],
             frames: vec![SavedFrame {
                 active: 1,
                 workspaces: vec![
-                    SavedWorkspace { name: "workspace-1".into(), project: None, focused: 0, layout: Layout::Leaf(pane(Some(0))) },
+                    SavedWorkspace {
+                        name: "workspace-1".into(),
+                        project: None,
+                        focused: 0,
+                        layout: Layout::Leaf(pane(Some(0))),
+                    },
                     SavedWorkspace {
                         name: "workspace-2".into(),
                         project: None,
                         focused: 0,
-                        layout: split(Layout::Leaf(pane(None)), split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None)))),
+                        layout: split(
+                            Layout::Leaf(pane(None)),
+                            split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None))),
+                        ),
                     },
                 ],
             }],
             focused_frame: 0,
             debugging: Default::default(),
         };
-        saved.validate().expect("the broken shape is still a structurally valid session");
-        std::fs::write(temp.0.join("session.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
+        saved
+            .validate()
+            .expect("the broken shape is still a structurally valid session");
+        std::fs::write(
+            temp.0.join("session.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
 
         let restored = temp.restore();
-        assert_eq!(restored.workspaces.workspaces.len(), 1, "the placeholder-only panel workspace should be gone");
+        assert_eq!(
+            restored.workspaces.workspaces.len(),
+            1,
+            "the placeholder-only panel workspace should be gone"
+        );
         let kept = &restored.workspaces.workspaces[0];
-        assert_eq!(kept.windows.windows().len(), 1, "the real file workspace is untouched");
-        assert_eq!(restored.workspaces.active, 0, "active index follows the workspace that survived");
+        assert_eq!(
+            kept.windows.windows().len(),
+            1,
+            "the real file workspace is untouched"
+        );
+        assert_eq!(
+            restored.workspaces.active, 0,
+            "active index follows the workspace that survived"
+        );
     }
 
     /// The shape a real session file actually ends up in: using the Git
@@ -784,41 +1212,89 @@ mod tests {
     fn a_panel_workspace_that_had_a_file_opened_into_it_keeps_only_the_file() {
         let temp = Temp::new();
         let file = temp.0.join("opened.txt");
-        std::fs::write(&file, "the one real pane
-").unwrap();
+        std::fs::write(
+            &file,
+            "the one real pane
+",
+        )
+        .unwrap();
 
-        let pane = |document| Pane { document, cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 };
-        let split = |first, second| Layout::Split { kind: SplitKind::Vertical, ratio: 0.5, first: Box::new(first), second: Box::new(second) };
+        let pane = |document| Pane {
+            document,
+            cursor: 0,
+            sticky_col: 0,
+            scroll_line: 0,
+            scroll_col: 0,
+        };
+        let split = |first, second| Layout::Split {
+            kind: SplitKind::Vertical,
+            ratio: 0.5,
+            first: Box::new(first),
+            second: Box::new(second),
+        };
         // Six placeholder panes with the document third from the left,
         // so a passing result can't come from just taking the first or
         // last leaf.
         let panel = split(
             Layout::Leaf(pane(None)),
-            split(Layout::Leaf(pane(None)), split(Layout::Leaf(pane(Some(0))), split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None))))),
+            split(
+                Layout::Leaf(pane(None)),
+                split(
+                    Layout::Leaf(pane(Some(0))),
+                    split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None))),
+                ),
+            ),
         );
         let saved = Session {
             version: VERSION,
             documents: vec![Document {
-                path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: None,
+                path: Some(file.clone()),
+                text: None,
+                dirty: false,
+                disk: DiskFingerprint::of(&file),
+                conflict: false,
+                recovery: None,
+                in_recovery: false,
+                cursor: 0,
+                code_page: None,
             }],
             frames: vec![SavedFrame {
                 active: 0,
-                workspaces: vec![SavedWorkspace { name: "panel".into(), project: None, focused: 2, layout: panel }],
+                workspaces: vec![SavedWorkspace {
+                    name: "panel".into(),
+                    project: None,
+                    focused: 2,
+                    layout: panel,
+                }],
             }],
             focused_frame: 0,
             debugging: Default::default(),
         };
         saved.validate().expect("structurally valid");
-        std::fs::write(temp.0.join("session.json"), serde_json::to_vec(&saved).unwrap()).unwrap();
+        std::fs::write(
+            temp.0.join("session.json"),
+            serde_json::to_vec(&saved).unwrap(),
+        )
+        .unwrap();
 
         let restored = temp.restore();
         assert_eq!(restored.workspaces.workspaces.len(), 1);
         let kept = &restored.workspaces.workspaces[0];
-        assert_eq!(kept.windows.windows().len(), 1, "only the documented pane should survive");
+        assert_eq!(
+            kept.windows.windows().len(),
+            1,
+            "only the documented pane should survive"
+        );
         let id = *kept.windows.content(kept.windows.windows()[0]).unwrap();
-        assert_eq!(restored.buffers.get(id).unwrap().buffer.path(), Some(std::path::absolute(&file).unwrap().as_path()));
-        assert_eq!(restored.buffers.get(id).unwrap().kind, BufferKind::Text, "the survivor is the real file, not a placeholder");
+        assert_eq!(
+            restored.buffers.get(id).unwrap().buffer.path(),
+            Some(std::path::absolute(&file).unwrap().as_path())
+        );
+        assert_eq!(
+            restored.buffers.get(id).unwrap().kind,
+            BufferKind::Text,
+            "the survivor is the real file, not a placeholder"
+        );
     }
 
     #[test]
@@ -842,13 +1318,28 @@ mod tests {
         let mut app = temp.app();
         let id = app.buffers.open_scratch();
         dirty(&mut app, id, "hello\n世界\nthird\n");
-        let layout = Layout::Split { kind: SplitKind::Vertical, ratio: 0.35,
-            first: Box::new(Layout::Leaf(id)), second: Box::new(Layout::Leaf(id)) };
+        let layout = Layout::Split {
+            kind: SplitKind::Vertical,
+            ratio: 0.35,
+            first: Box::new(Layout::Leaf(id)),
+            second: Box::new(Layout::Leaf(id)),
+        };
         let tree = WindowTree::from_layout(layout.clone(), 1).unwrap();
         let original_panes = tree.windows();
         let mut workspace = Workspace::new("Writing".into(), tree, Cursor::at_start());
         for pane in &original_panes {
-            workspace.pane_states.insert(*pane, PaneState { cursor: Cursor { char_idx: 8, sticky_col: 2 }, scroll_line: 1, rendered_scroll: 1.0, scroll_col: 3 });
+            workspace.pane_states.insert(
+                *pane,
+                PaneState {
+                    cursor: Cursor {
+                        char_idx: 8,
+                        sticky_col: 2,
+                    },
+                    scroll_line: 1,
+                    rendered_scroll: 1.0,
+                    scroll_col: 3,
+                },
+            );
         }
         app.workspaces.workspaces = vec![workspace];
         let frame = app.test_add_frame(id);
@@ -886,7 +1377,11 @@ mod tests {
         let saved = std::fs::read_to_string(temp.0.join("session.json")).unwrap();
         assert!(saved.contains("\"project\""), "{saved}");
         let restored = temp.restore();
-        assert!(restored.workspaces.workspaces.iter().any(|w| w.project.as_deref() == Some(project.as_path()) && w.name == "demo"));
+        assert!(restored
+            .workspaces
+            .workspaces
+            .iter()
+            .any(|w| w.project.as_deref() == Some(project.as_path()) && w.name == "demo"));
     }
 
     #[test]
@@ -939,11 +1434,18 @@ mod tests {
         std::fs::write(&path, "external changes with different length").unwrap();
         let mut restored = temp.restore();
         assert_eq!(restored.open().buffer.text(), "my unsaved changes");
-        assert!(restored.externally_changed.contains(&restored.focused_buffer_id()));
+        assert!(restored
+            .externally_changed
+            .contains(&restored.focused_buffer_id()));
         assert!(restored.checkpoint_session());
         let restored_again = temp.restore();
-        assert!(restored_again.externally_changed.contains(&restored_again.focused_buffer_id()));
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "external changes with different length");
+        assert!(restored_again
+            .externally_changed
+            .contains(&restored_again.focused_buffer_id()));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "external changes with different length"
+        );
     }
 
     #[test]
@@ -983,7 +1485,10 @@ mod tests {
         let practice = app.focused_buffer_id();
         let text = app.buffers.get(practice).unwrap().buffer.text();
         let session = app.capture_session();
-        assert!(session.documents.iter().all(|d| d.text.as_deref() != Some(text.as_str())));
+        assert!(session
+            .documents
+            .iter()
+            .all(|d| d.text.as_deref() != Some(text.as_str())));
     }
 
     #[test]
@@ -1004,21 +1509,31 @@ mod tests {
         assert!(fenix_recovery::list(restored.recovery_dir.as_ref().unwrap()).is_empty());
         let again = temp.restore();
         assert!(again.dirty_tracked_buffer_ids().is_empty());
-        assert!(!std::fs::read_to_string(temp.0.join("session.json")).unwrap().contains("discard me"));
+        assert!(!std::fs::read_to_string(temp.0.join("session.json"))
+            .unwrap()
+            .contains("discard me"));
     }
 
     #[test]
     fn session_invalid_data_is_preserved_until_explicit_save() {
         let temp = Temp::new();
         let path = temp.0.join("session.json");
-        for invalid in ["not json", "{\"version\":999,\"documents\":[],\"frames\":[],\"focused_frame\":0}"] {
+        for invalid in [
+            "not json",
+            "{\"version\":999,\"documents\":[],\"frames\":[],\"focused_frame\":0}",
+        ] {
             std::fs::write(&path, invalid).unwrap();
             let mut app = temp.restore();
             assert!(app.session.blocked);
             assert!(!app.checkpoint_session());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
             assert!(app.save_session_explicit());
-            assert!(serde_json::from_slice::<Session>(&std::fs::read(&path).unwrap()).unwrap().validate().is_ok());
+            assert!(
+                serde_json::from_slice::<Session>(&std::fs::read(&path).unwrap())
+                    .unwrap()
+                    .validate()
+                    .is_ok()
+            );
         }
     }
 
@@ -1059,13 +1574,27 @@ mod tests {
         let temp = Temp::new();
         let app = temp.app();
         let mut saved = app.capture_session();
-        saved.frames[0].workspaces[0].layout = Layout::Leaf(Pane { document: Some(999), cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 });
+        saved.frames[0].workspaces[0].layout = Layout::Leaf(Pane {
+            document: Some(999),
+            cursor: 0,
+            sticky_col: 0,
+            scroll_line: 0,
+            scroll_col: 0,
+        });
         assert!(saved.validate().is_err());
     }
 
     /// One small and one huge unsaved file, checkpointed, with the huge
     /// one's edits in `recovery` when `snapshot`.
-    fn huge_unsaved_session(temp: &Temp, snapshot: bool) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, String) {
+    fn huge_unsaved_session(
+        temp: &Temp,
+        snapshot: bool,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        String,
+    ) {
         let (small, huge) = (temp.0.join("small.txt"), temp.0.join("huge.log"));
         std::fs::write(&small, "small").unwrap();
         std::fs::write(&huge, "huge").unwrap();
@@ -1089,14 +1618,30 @@ mod tests {
     fn a_huge_unsaved_file_stays_in_recovery_and_the_others_are_kept() {
         let temp = Temp::new();
         let (small, huge, recovery, text) = huge_unsaved_session(&temp, true);
-        assert!(std::fs::metadata(temp.0.join("session.json")).unwrap().len() < 1024 * 1024, "the huge file's text isn't in it");
+        assert!(
+            std::fs::metadata(temp.0.join("session.json"))
+                .unwrap()
+                .len()
+                < 1024 * 1024,
+            "the huge file's text isn't in it"
+        );
         let mut restored = temp.app();
         restored.recovery_dir = Some(recovery);
         restored.restore_session(false);
         restored.session.pending.take();
-        let buffer = |path: &Path| &restored.buffers.get(restored.buffers.id_for_path(path).unwrap()).unwrap().buffer;
+        let buffer = |path: &Path| {
+            &restored
+                .buffers
+                .get(restored.buffers.id_for_path(path).unwrap())
+                .unwrap()
+                .buffer
+        };
         assert_eq!(buffer(&small).text(), "small, edited");
-        assert_eq!(buffer(&huge).len_chars(), text.len(), "back from its recovery file");
+        assert_eq!(
+            buffer(&huge).len_chars(),
+            text.len(),
+            "back from its recovery file"
+        );
         assert!(buffer(&huge).is_dirty());
     }
 
@@ -1108,7 +1653,11 @@ mod tests {
         restored.recovery_dir = Some(recovery);
         restored.restore_session(false);
         restored.session.pending.take();
-        let buffer = &restored.buffers.get(restored.buffers.id_for_path(&huge).unwrap()).unwrap().buffer;
+        let buffer = &restored
+            .buffers
+            .get(restored.buffers.id_for_path(&huge).unwrap())
+            .unwrap()
+            .buffer;
         assert_eq!(buffer.text(), "huge");
         assert!(!buffer.is_dirty(), "nothing to save over the file");
     }
@@ -1123,8 +1672,15 @@ mod tests {
         let id = app.focused_buffer_id();
         dirty(&mut app, id, "older edits");
         assert!(app.checkpoint_session());
-        let file = std::fs::File::options().write(true).open(temp.0.join("session.json")).unwrap();
-        file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1))).unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(temp.0.join("session.json"))
+            .unwrap();
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1)),
+        )
+        .unwrap();
         drop(file);
         let recovery = temp.0.join("recovery");
         fenix_recovery::write(&recovery, &path, "newest edits").unwrap();
@@ -1155,7 +1711,10 @@ mod tests {
         assert_eq!(restored.open().buffer.text(), "hi");
         assert!(!restored.open().buffer.is_dirty());
         assert_eq!(restored.cursor().char_idx, 2);
-        assert_eq!(restored.pane_state(restored.focused_pane_id()).scroll_line, 0);
+        assert_eq!(
+            restored.pane_state(restored.focused_pane_id()).scroll_line,
+            0
+        );
     }
 
     #[test]
@@ -1177,7 +1736,6 @@ mod tests {
         assert_eq!(restored.dirty_tracked_buffer_ids().len(), 1);
     }
 
-
     #[test]
     fn session_cli_path_alias_reuses_unsaved_restored_document() {
         let temp = Temp::new();
@@ -1195,5 +1753,4 @@ mod tests {
         assert_eq!(restored.open().buffer.text(), "unsaved");
         assert!(restored.open().buffer.is_dirty());
     }
-
 }

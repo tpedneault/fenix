@@ -32,7 +32,9 @@ impl App {
         let after = buffer.text_range(at, at + after_len);
         match typed {
             '>' => {
-                let Some(close) = fenix_syntax::xml::close_tag_after_gt(&before) else { return };
+                let Some(close) = fenix_syntax::xml::close_tag_after_gt(&before) else {
+                    return;
+                };
                 if after.starts_with(&close) {
                     return;
                 }
@@ -40,8 +42,12 @@ impl App {
                 cursor.char_idx = at;
             }
             '/' => {
-                let Some(opener) = before.strip_suffix("</") else { return };
-                let Some(name) = fenix_syntax::xml::innermost_open_element(opener) else { return };
+                let Some(opener) = before.strip_suffix("</") else {
+                    return;
+                };
+                let Some(name) = fenix_syntax::xml::innermost_open_element(opener) else {
+                    return;
+                };
                 // Someone typing the name themselves after `</` would
                 // otherwise get it twice.
                 if after.starts_with(|c: char| c.is_alphanumeric() || c == '>') {
@@ -69,12 +75,20 @@ impl App {
         let id = self.focused_buffer_id();
         self.syntax_highlights_for_visible_range(id, 0, 1);
         let ob = self.open();
-        let Some(syntax) = &ob.syntax else { return false };
+        let Some(syntax) = &ob.syntax else {
+            return false;
+        };
         let source = ob.buffer.text();
         let cursor_idx = self.cursor().char_idx;
-        let Some(target) = syntax.xml_matching_tag(&source, ob.buffer.char_to_byte(cursor_idx)) else { return false };
+        let Some(target) = syntax.xml_matching_tag(&source, ob.buffer.char_to_byte(cursor_idx))
+        else {
+            return false;
+        };
         let target = ob.buffer.byte_to_char(target);
-        let from = JumpEntry { buffer: id, char_idx: cursor_idx };
+        let from = JumpEntry {
+            buffer: id,
+            char_idx: cursor_idx,
+        };
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         cursor.char_idx = target;
         let (_, col) = buffer.line_col(cursor);
@@ -97,8 +111,16 @@ impl App {
             .xml_elements(&source)
             .into_iter()
             .map(|element| {
-                let attribute = element.label_attribute.map(|(name, value)| format!("  {name}={value}")).unwrap_or_default();
-                let label = format!("{}{}{attribute}  ·  line {}", "  ".repeat(element.depth), element.name, element.start_row + 1);
+                let attribute = element
+                    .label_attribute
+                    .map(|(name, value)| format!("  {name}={value}"))
+                    .unwrap_or_default();
+                let label = format!(
+                    "{}{}{attribute}  ·  line {}",
+                    "  ".repeat(element.depth),
+                    element.name,
+                    element.start_row + 1
+                );
                 fenix_picker::Candidate::new(label, ob.buffer.byte_to_char(element.start_byte))
             })
             .collect();
@@ -106,7 +128,9 @@ impl App {
             self.set_message("no elements in this document");
             return;
         }
-        self.enter_picker(ActivePicker::Outline(fenix_picker::PickerState::new(candidates)));
+        self.enter_picker(ActivePicker::Outline(fenix_picker::PickerState::new(
+            candidates,
+        )));
     }
 
     /// `SPC c v`: checks the focused XML buffer is well-formed. On an
@@ -141,7 +165,14 @@ impl App {
         }
         fenix_syntax::xml::check_well_formed(&self.open().buffer.text())
             .err()
-            .map(|err| format!("not well-formed XML at {}:{}: {} (SPC c v to jump there)", err.line + 1, err.col + 1, err.message))
+            .map(|err| {
+                format!(
+                    "not well-formed XML at {}:{}: {} (SPC c v to jump there)",
+                    err.line + 1,
+                    err.col + 1,
+                    err.message
+                )
+            })
     }
 
     /// `SPC c y`: copies an XPath to the element under the cursor
@@ -155,7 +186,9 @@ impl App {
         self.syntax_highlights_for_visible_range(id, 0, 1);
         let ob = self.open();
         let Some(syntax) = &ob.syntax else { return };
-        let byte = ob.buffer.char_to_byte(self.cursor().char_idx.min(ob.buffer.len_chars()));
+        let byte = ob
+            .buffer
+            .char_to_byte(self.cursor().char_idx.min(ob.buffer.len_chars()));
         let Some(path) = syntax.xml_element_path(&ob.buffer.text(), byte) else {
             self.set_message("the cursor isn't inside an element");
             return;

@@ -76,27 +76,74 @@ fn parse(text: &str) -> Result<Definition, String> {
 /// is `LanguageId::Grammar(i)`.
 fn parse_with(text: &str, grammars: &[String]) -> Result<Definition, String> {
     let file: File = toml::from_str(text).map_err(|e| e.message().to_string())?;
-    let language = LanguageId::ALL.into_iter().find(|l| l.name().eq_ignore_ascii_case(file.language.trim())).or_else(|| grammars.iter().position(|g| g.eq_ignore_ascii_case(file.language.trim())).map(|i| LanguageId::Grammar(i as u16))).ok_or_else(|| {
-        let names: Vec<String> = LanguageId::ALL.iter().map(|l| l.name()).chain(grammars.iter().cloned()).collect();
-        format!("no language \"{}\" here -- one of {}", file.language, names.join(", "))
-    })?;
-    let extensions: Vec<String> = file.extensions.iter().map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase()).filter(|e| !e.is_empty()).collect();
-    let filenames: Vec<String> = file.filenames.iter().map(|f| f.trim().to_ascii_lowercase()).filter(|f| !f.is_empty()).collect();
+    let language = LanguageId::ALL
+        .into_iter()
+        .find(|l| l.name().eq_ignore_ascii_case(file.language.trim()))
+        .or_else(|| {
+            grammars
+                .iter()
+                .position(|g| g.eq_ignore_ascii_case(file.language.trim()))
+                .map(|i| LanguageId::Grammar(i as u16))
+        })
+        .ok_or_else(|| {
+            let names: Vec<String> = LanguageId::ALL
+                .iter()
+                .map(|l| l.name())
+                .chain(grammars.iter().cloned())
+                .collect();
+            format!(
+                "no language \"{}\" here -- one of {}",
+                file.language,
+                names.join(", ")
+            )
+        })?;
+    let extensions: Vec<String> = file
+        .extensions
+        .iter()
+        .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect();
+    let filenames: Vec<String> = file
+        .filenames
+        .iter()
+        .map(|f| f.trim().to_ascii_lowercase())
+        .filter(|f| !f.is_empty())
+        .collect();
     if let Some(bad) = filenames.iter().find(|f| f.contains(['/', '\\'])) {
         return Err(format!("\"{bad}\" is a path -- filenames are names alone"));
     }
-    let server = file.server.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let server = file
+        .server
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     if file.grammar.is_some() && !language.is_grammar() {
-        return Err(format!("{} is Fenix's own: a grammar is for a language it doesn't have", language.name()));
+        return Err(format!(
+            "{} is Fenix's own: a grammar is for a language it doesn't have",
+            language.name()
+        ));
     }
     let comment = file.comment.map(|c| c.trim().to_string());
-    if comment.as_deref().is_some_and(|c| c.is_empty() || c.contains(char::is_whitespace)) {
+    if comment
+        .as_deref()
+        .is_some_and(|c| c.is_empty() || c.contains(char::is_whitespace))
+    {
         return Err("comment is what starts a line comment, `//` or `#`".into());
     }
-    if extensions.is_empty() && filenames.is_empty() && server.is_none() && file.grammar.is_none() && comment.is_none() {
+    if extensions.is_empty()
+        && filenames.is_empty()
+        && server.is_none()
+        && file.grammar.is_none()
+        && comment.is_none()
+    {
         return Err("it gives no extensions, filenames or server".into());
     }
-    Ok(Definition { language, extensions, filenames, server, comment })
+    Ok(Definition {
+        language,
+        extensions,
+        filenames,
+        server,
+        comment,
+    })
 }
 
 /// The grammar a language file brings, if it does: read from under `root`
@@ -111,10 +158,18 @@ fn grammar_of(text: &str, root: &Path) -> Result<Option<fenix_syntax::Grammar>, 
     };
     let name = file.language.trim().to_ascii_lowercase();
     if LanguageId::ALL.iter().any(|l| l.name() == name) {
-        return Err(format!("{name} is Fenix's own: a grammar is for a language it doesn't have"));
+        return Err(format!(
+            "{name} is Fenix's own: a grammar is for a language it doesn't have"
+        ));
     }
-    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '#')) {
-        return Err(format!("\"{name}\" isn't a language's name: letters, digits, - and _"));
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '+' | '#'))
+    {
+        return Err(format!(
+            "\"{name}\" isn't a language's name: letters, digits, - and _"
+        ));
     }
     let wasm = read_under(root, grammar, fenix_syntax::MAX_GRAMMAR)?;
     if !wasm.starts_with(b"\0asm") {
@@ -123,11 +178,20 @@ fn grammar_of(text: &str, root: &Path) -> Result<Option<fenix_syntax::Grammar>, 
     let symbol = match file.symbol {
         Some(symbol) => symbol.trim().to_string(),
         None => {
-            let stem = Path::new(grammar).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            stem.strip_prefix("tree-sitter-").unwrap_or(&stem).replace('-', "_")
+            let stem = Path::new(grammar)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            stem.strip_prefix("tree-sitter-")
+                .unwrap_or(&stem)
+                .replace('-', "_")
         }
     };
-    if symbol.is_empty() || !symbol.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if symbol.is_empty()
+        || !symbol
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
         return Err(format!("\"{symbol}\" isn't what a grammar exports (tree_sitter_<symbol>): say it with `symbol`"));
     }
     let queries = file.queries.unwrap_or_else(|| format!("queries/{name}"));
@@ -139,7 +203,14 @@ fn grammar_of(text: &str, root: &Path) -> Result<Option<fenix_syntax::Grammar>, 
             Err(e) => Err(e),
         }
     };
-    Ok(Some(fenix_syntax::Grammar { name, symbol, wasm, highlights: query("highlights")?, folds: query("folds")?, indents: query("indents")? }))
+    Ok(Some(fenix_syntax::Grammar {
+        name,
+        symbol,
+        wasm,
+        highlights: query("highlights")?,
+        folds: query("folds")?,
+        indents: query("indents")?,
+    }))
 }
 
 /// The most a query file may be.
@@ -149,15 +220,29 @@ const MAX_QUERY: u64 = 1 << 20;
 /// of `..` or a link out of it.
 fn read_under(root: &Path, rel: &str, max: u64) -> Result<Vec<u8>, String> {
     let parts = Path::new(rel);
-    if rel.trim().is_empty() || parts.is_absolute() || parts.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
-        return Err(format!("{rel}: a file in its own folder, as `grammars/x.wasm`"));
+    if rel.trim().is_empty()
+        || parts.is_absolute()
+        || parts.components().any(|c| {
+            !matches!(
+                c,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(format!(
+            "{rel}: a file in its own folder, as `grammars/x.wasm`"
+        ));
     }
     let path = root.join(parts);
-    let (Ok(real_root), Ok(real)) = (root.canonicalize(), path.canonicalize()) else { return Err(format!("{rel}: no such file")) };
+    let (Ok(real_root), Ok(real)) = (root.canonicalize(), path.canonicalize()) else {
+        return Err(format!("{rel}: no such file"));
+    };
     if !real.starts_with(&real_root) {
         return Err(format!("{rel}: not in its own folder"));
     }
-    let size = std::fs::metadata(&real).map_err(|e| format!("{rel}: {e}"))?.len();
+    let size = std::fs::metadata(&real)
+        .map_err(|e| format!("{rel}: {e}"))?
+        .len();
     if size > max {
         return Err(format!("{rel}: at most {} MiB", max >> 20));
     }
@@ -185,9 +270,16 @@ fn load(dirs: &[(String, PathBuf)]) -> Loaded {
     let mut texts = Vec::new();
     for (shown, dir) in dirs {
         for path in toml_files(dir) {
-            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let file = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             match std::fs::read_to_string(&path) {
-                Ok(text) => texts.push((format!("{shown}{file}"), dir.parent().map(Path::to_path_buf).unwrap_or_default(), text)),
+                Ok(text) => texts.push((
+                    format!("{shown}{file}"),
+                    dir.parent().map(Path::to_path_buf).unwrap_or_default(),
+                    text,
+                )),
                 Err(e) => loaded.problems.push(format!("{shown}{file}: {e}")),
             }
         }
@@ -197,10 +289,12 @@ fn load(dirs: &[(String, PathBuf)]) -> Loaded {
     let mut bad = Vec::new();
     for (i, (shown, root, text)) in texts.iter().enumerate() {
         match grammar_of(text, root) {
-            Ok(Some(grammar)) => match loaded.grammars.iter_mut().find(|g| g.name == grammar.name) {
-                Some(kept) => *kept = grammar,
-                None => loaded.grammars.push(grammar),
-            },
+            Ok(Some(grammar)) => {
+                match loaded.grammars.iter_mut().find(|g| g.name == grammar.name) {
+                    Some(kept) => *kept = grammar,
+                    None => loaded.grammars.push(grammar),
+                }
+            }
             Ok(None) => {}
             Err(e) => {
                 loaded.problems.push(format!("{shown}: {e}"));
@@ -246,8 +340,17 @@ fn load(dirs: &[(String, PathBuf)]) -> Loaded {
 }
 
 fn toml_files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut files: Vec<PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml"))).collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("toml"))
+        })
+        .collect();
     files.sort();
     files
 }
@@ -261,7 +364,10 @@ pub fn init() {
         if cfg!(test) {
             return Loaded::default();
         }
-        let mut dirs: Vec<(String, PathBuf)> = crate::installed::data_dirs("languages").into_iter().map(|d| (format!("{}/", d.display()), d)).collect();
+        let mut dirs: Vec<(String, PathBuf)> = crate::installed::data_dirs("languages")
+            .into_iter()
+            .map(|d| (format!("{}/", d.display()), d))
+            .collect();
         dirs.extend(fenix_storage::paths::languages_dir().map(|d| ("languages/".to_string(), d)));
         load(&dirs)
     });
@@ -277,7 +383,12 @@ pub fn servers() -> &'static [(String, String)] {
 /// What starts a line comment in `language`, as a language file says it
 ///.
 pub fn comment(language: LanguageId) -> Option<&'static str> {
-    LOADED.get()?.comments.iter().find(|(l, _)| *l == language).map(|(_, c)| c.as_str())
+    LOADED
+        .get()?
+        .comments
+        .iter()
+        .find(|(l, _)| *l == language)
+        .map(|(_, c)| c.as_str())
 }
 
 /// What's wrong with the language files, to be said once.
@@ -292,15 +403,43 @@ mod tests {
     #[test]
     fn a_language_file_is_read_and_checked() {
         let def = parse("language = \"SQL\"\nextensions = [\".PKS\", \"pkb\"]\nfilenames = [\"Schema.ddl\"]\nserver = \"sqls\"\n").unwrap();
-        assert_eq!(def, Definition { language: LanguageId::Sql, extensions: vec!["pks".into(), "pkb".into()], filenames: vec!["schema.ddl".into()], server: Some("sqls".into()), comment: None });
+        assert_eq!(
+            def,
+            Definition {
+                language: LanguageId::Sql,
+                extensions: vec!["pks".into(), "pkb".into()],
+                filenames: vec!["schema.ddl".into()],
+                server: Some("sqls".into()),
+                comment: None
+            }
+        );
         // a line comment, alone or not.
-        assert_eq!(parse("language = \"batch\"\ncomment = \"REM\"\n").unwrap().comment.as_deref(), Some("REM"));
-        assert!(parse("language = \"sql\"\ncomment = \"\"\n").unwrap_err().contains("line comment"));
-        assert!(parse("language = \"cobol\"\nextensions = [\"cbl\"]\n").unwrap_err().contains("no language \"cobol\" here -- one of rust, toml"));
-        assert!(parse("language = \"sql\"\n").unwrap_err().contains("no extensions, filenames or server"));
-        assert!(parse("language = \"sql\"\nfilenames = [\"db/schema\"]\n").unwrap_err().contains("is a path"));
-        assert!(parse("language = \"sql\"\ncolour = \"x\"\n").is_err(), "an unknown key is a mistake, said");
-        assert!(parse("language = \"sql\"\ngrammar = \"x.wasm\"\n").unwrap_err().contains("Fenix's own"));
+        assert_eq!(
+            parse("language = \"batch\"\ncomment = \"REM\"\n")
+                .unwrap()
+                .comment
+                .as_deref(),
+            Some("REM")
+        );
+        assert!(parse("language = \"sql\"\ncomment = \"\"\n")
+            .unwrap_err()
+            .contains("line comment"));
+        assert!(parse("language = \"cobol\"\nextensions = [\"cbl\"]\n")
+            .unwrap_err()
+            .contains("no language \"cobol\" here -- one of rust, toml"));
+        assert!(parse("language = \"sql\"\n")
+            .unwrap_err()
+            .contains("no extensions, filenames or server"));
+        assert!(parse("language = \"sql\"\nfilenames = [\"db/schema\"]\n")
+            .unwrap_err()
+            .contains("is a path"));
+        assert!(
+            parse("language = \"sql\"\ncolour = \"x\"\n").is_err(),
+            "an unknown key is a mistake, said"
+        );
+        assert!(parse("language = \"sql\"\ngrammar = \"x.wasm\"\n")
+            .unwrap_err()
+            .contains("Fenix's own"));
     }
 
     /// The extensions' files, then yours: the later wins a file type or
@@ -311,26 +450,59 @@ mod tests {
         let (ext, yours) = (dir.path().join("ext"), dir.path().join("yours"));
         std::fs::create_dir_all(&ext).unwrap();
         std::fs::create_dir_all(&yours).unwrap();
-        std::fs::write(ext.join("plsql.toml"), "language = \"sql\"\nextensions = [\"pks\", \"inc\"]\nserver = \"plsql-ls --stdio\"\n").unwrap();
-        std::fs::write(yours.join("inc.toml"), "language = \"cpp\"\nextensions = [\"inc\"]\n").unwrap();
-        std::fs::write(yours.join("sql.toml"), "language = \"sql\"\nserver = \"sqls\"\n").unwrap();
+        std::fs::write(
+            ext.join("plsql.toml"),
+            "language = \"sql\"\nextensions = [\"pks\", \"inc\"]\nserver = \"plsql-ls --stdio\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            yours.join("inc.toml"),
+            "language = \"cpp\"\nextensions = [\"inc\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            yours.join("sql.toml"),
+            "language = \"sql\"\nserver = \"sqls\"\n",
+        )
+        .unwrap();
         std::fs::write(yours.join("broken.toml"), "language = 3\n").unwrap();
         let loaded = load(&[("ext/".into(), ext), ("languages/".into(), yours)]);
-        assert_eq!(loaded.file_types.extensions.get("pks"), Some(&LanguageId::Sql));
-        assert_eq!(loaded.file_types.extensions.get("inc"), Some(&LanguageId::Cpp), "yours wins");
+        assert_eq!(
+            loaded.file_types.extensions.get("pks"),
+            Some(&LanguageId::Sql)
+        );
+        assert_eq!(
+            loaded.file_types.extensions.get("inc"),
+            Some(&LanguageId::Cpp),
+            "yours wins"
+        );
         assert_eq!(loaded.servers, [("sql".to_string(), "sqls".to_string())]);
         assert_eq!(loaded.problems.len(), 1);
-        assert!(loaded.problems[0].starts_with("languages/broken.toml: "), "{:?}", loaded.problems);
+        assert!(
+            loaded.problems[0].starts_with("languages/broken.toml: "),
+            "{:?}",
+            loaded.problems
+        );
     }
 
     /// a file name with `*` or `?` is a pattern (`.env.*`).
     #[test]
     fn a_file_name_may_be_a_pattern() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("env.toml"), "language = \"bash\"\nfilenames = [\".env\", \".ENV.*\"]\n").unwrap();
+        std::fs::write(
+            dir.path().join("env.toml"),
+            "language = \"bash\"\nfilenames = [\".env\", \".ENV.*\"]\n",
+        )
+        .unwrap();
         let loaded = load(&[("languages/".into(), dir.path().to_path_buf())]);
-        assert_eq!(loaded.file_types.filenames.get(".env"), Some(&LanguageId::Bash));
-        assert_eq!(loaded.file_types.patterns, [(".env.*".to_string(), LanguageId::Bash)]);
+        assert_eq!(
+            loaded.file_types.filenames.get(".env"),
+            Some(&LanguageId::Bash)
+        );
+        assert_eq!(
+            loaded.file_types.patterns,
+            [(".env.*".to_string(), LanguageId::Bash)]
+        );
     }
 
     /// a grammar of its own, compiled to WebAssembly, and its
@@ -343,27 +515,85 @@ mod tests {
         std::fs::create_dir_all(ext.join("languages")).unwrap();
         std::fs::create_dir_all(ext.join("grammars")).unwrap();
         std::fs::create_dir_all(ext.join("queries/jsonw")).unwrap();
-        std::fs::write(ext.join("grammars/tree-sitter-json.wasm"), include_bytes!("../../fenix-syntax/tests/grammars/tree-sitter-json.wasm")).unwrap();
-        std::fs::write(ext.join("queries/jsonw/highlights.scm"), "(number) @number\n").unwrap();
+        std::fs::write(
+            ext.join("grammars/tree-sitter-json.wasm"),
+            include_bytes!("../../fenix-syntax/tests/grammars/tree-sitter-json.wasm"),
+        )
+        .unwrap();
+        std::fs::write(
+            ext.join("queries/jsonw/highlights.scm"),
+            "(number) @number\n",
+        )
+        .unwrap();
         std::fs::write(ext.join("queries/jsonw/folds.scm"), "(object) @fold\n").unwrap();
         std::fs::write(ext.join("languages/a.toml"), "language = \"jsonw\"\ngrammar = \"grammars/tree-sitter-json.wasm\"\nextensions = [\"jw\"]\nserver = \"jw-ls\"\n").unwrap();
-        std::fs::write(ext.join("languages/b.toml"), "language = \"JSONW\"\nfilenames = [\"Jwfile\"]\ncomment = \"//\"\n").unwrap();
-        std::fs::write(ext.join("languages/c.toml"), "language = \"up\"\ngrammar = \"../x.wasm\"\n").unwrap();
-        std::fs::write(ext.join("languages/d.toml"), "language = \"rust\"\ngrammar = \"grammars/tree-sitter-json.wasm\"\n").unwrap();
-        std::fs::write(ext.join("languages/e.toml"), "language = \"text\"\ngrammar = \"queries/jsonw/folds.scm\"\n").unwrap();
+        std::fs::write(
+            ext.join("languages/b.toml"),
+            "language = \"JSONW\"\nfilenames = [\"Jwfile\"]\ncomment = \"//\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext.join("languages/c.toml"),
+            "language = \"up\"\ngrammar = \"../x.wasm\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext.join("languages/d.toml"),
+            "language = \"rust\"\ngrammar = \"grammars/tree-sitter-json.wasm\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            ext.join("languages/e.toml"),
+            "language = \"text\"\ngrammar = \"queries/jsonw/folds.scm\"\n",
+        )
+        .unwrap();
         let loaded = load(&[("ext/".into(), ext.join("languages"))]);
         assert_eq!(loaded.grammars.len(), 1, "{:?}", loaded.problems);
         let g = &loaded.grammars[0];
-        assert_eq!((g.name.as_str(), g.symbol.as_str(), g.highlights.as_str(), g.folds.as_str(), g.indents.as_str()), ("jsonw", "json", "(number) @number\n", "(object) @fold\n", ""));
+        assert_eq!(
+            (
+                g.name.as_str(),
+                g.symbol.as_str(),
+                g.highlights.as_str(),
+                g.folds.as_str(),
+                g.indents.as_str()
+            ),
+            (
+                "jsonw",
+                "json",
+                "(number) @number\n",
+                "(object) @fold\n",
+                ""
+            )
+        );
         assert!(fenix_syntax::load_grammar(&g.symbol, &g.wasm).is_ok());
-        assert_eq!(loaded.file_types.extensions.get("jw"), Some(&LanguageId::Grammar(0)));
-        assert_eq!(loaded.file_types.filenames.get("jwfile"), Some(&LanguageId::Grammar(0)));
+        assert_eq!(
+            loaded.file_types.extensions.get("jw"),
+            Some(&LanguageId::Grammar(0))
+        );
+        assert_eq!(
+            loaded.file_types.filenames.get("jwfile"),
+            Some(&LanguageId::Grammar(0))
+        );
         assert_eq!(loaded.servers, [("jsonw".to_string(), "jw-ls".to_string())]);
-        assert_eq!(loaded.comments, [(LanguageId::Grammar(0), "//".to_string())], "gcc's comment for it");
+        assert_eq!(
+            loaded.comments,
+            [(LanguageId::Grammar(0), "//".to_string())],
+            "gcc's comment for it"
+        );
         let problems = loaded.problems.join("\n");
-        assert!(problems.contains("ext/c.toml: ../x.wasm: a file in its own folder"), "{problems}");
-        assert!(problems.contains("ext/d.toml: rust is Fenix's own"), "{problems}");
-        assert!(problems.contains("ext/e.toml: queries/jsonw/folds.scm isn't WebAssembly"), "{problems}");
+        assert!(
+            problems.contains("ext/c.toml: ../x.wasm: a file in its own folder"),
+            "{problems}"
+        );
+        assert!(
+            problems.contains("ext/d.toml: rust is Fenix's own"),
+            "{problems}"
+        );
+        assert!(
+            problems.contains("ext/e.toml: queries/jsonw/folds.scm isn't WebAssembly"),
+            "{problems}"
+        );
         assert_eq!(loaded.problems.len(), 3, "{problems}");
     }
 
@@ -375,11 +605,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ext = dir.path().join("ext");
         std::fs::create_dir_all(ext.join("languages")).unwrap();
-        std::fs::write(dir.path().join("outside.wasm"), include_bytes!("../../fenix-syntax/tests/grammars/tree-sitter-json.wasm")).unwrap();
+        std::fs::write(
+            dir.path().join("outside.wasm"),
+            include_bytes!("../../fenix-syntax/tests/grammars/tree-sitter-json.wasm"),
+        )
+        .unwrap();
         std::os::unix::fs::symlink("../outside.wasm", ext.join("json.wasm")).unwrap();
-        std::fs::write(ext.join("languages/a.toml"), "language = \"jsonw\"\ngrammar = \"json.wasm\"\n").unwrap();
+        std::fs::write(
+            ext.join("languages/a.toml"),
+            "language = \"jsonw\"\ngrammar = \"json.wasm\"\n",
+        )
+        .unwrap();
         let loaded = load(&[("ext/".into(), ext.join("languages"))]);
         assert!(loaded.grammars.is_empty());
-        assert!(loaded.problems[0].contains("not in its own folder"), "{:?}", loaded.problems);
+        assert!(
+            loaded.problems[0].contains("not in its own folder"),
+            "{:?}",
+            loaded.problems
+        );
     }
 }

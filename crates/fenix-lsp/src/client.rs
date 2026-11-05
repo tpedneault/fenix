@@ -25,9 +25,19 @@ use crate::envelope::{RawMessage, ResponseError};
 /// keyed off `method`.
 #[derive(Debug, Clone)]
 pub enum LspEvent {
-    Response { id: i64, result: Result<Value, ResponseError> },
-    Notification { method: String, params: Value },
-    ServerRequest { id: Value, method: String, params: Value },
+    Response {
+        id: i64,
+        result: Result<Value, ResponseError>,
+    },
+    Notification {
+        method: String,
+        params: Value,
+    },
+    ServerRequest {
+        id: Value,
+        method: String,
+        params: Value,
+    },
     /// The connection ended -- a read error, the server closing its
     /// stdout, or a malformed message this client couldn't make sense
     /// of (see `read_loop`'s own reasoning for treating that the same
@@ -71,7 +81,11 @@ impl LspClient {
     /// notion of "the project" -- against whatever directory it was
     /// started in, on top of whatever `rootUri`/`workspaceFolders` the
     /// `initialize` request itself carries).
-    pub fn spawn(command: &str, args: &[String], cwd: &std::path::Path) -> std::io::Result<(LspClient, Receiver<LspEvent>)> {
+    pub fn spawn(
+        command: &str,
+        args: &[String],
+        cwd: &std::path::Path,
+    ) -> std::io::Result<(LspClient, Receiver<LspEvent>)> {
         let mut process = Command::new(fenix_rpc::resolve_command(command));
         process.args(args).current_dir(cwd);
         Self::spawn_command(process)
@@ -87,7 +101,11 @@ impl LspClient {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             process.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let mut child = process
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
 
         let stdin = child.stdin.take().expect("stdin was requested as piped");
         let stdout = child.stdout.take().expect("stdout was requested as piped");
@@ -107,17 +125,37 @@ impl LspClient {
         let stderr_thread = thread::spawn(move || drain_keeping_tail(stderr, &keeping));
 
         Ok((
-            LspClient { stdin: Mutex::new(Box::new(stdin)), next_id: AtomicI64::new(1), child: Some(Mutex::new(child)), reader_thread: Some(reader_thread), stderr_thread: Some(stderr_thread), stderr: said },
+            LspClient {
+                stdin: Mutex::new(Box::new(stdin)),
+                next_id: AtomicI64::new(1),
+                child: Some(Mutex::new(child)),
+                reader_thread: Some(reader_thread),
+                stderr_thread: Some(stderr_thread),
+                stderr: said,
+            },
             rx,
         ))
     }
 
     /// A server that isn't a process: it reads what this client writes to
     /// `to_server` and answers into `from_server`, framed as over stdio.
-    pub fn connect(from_server: impl Read + Send + 'static, to_server: impl Write + Send + 'static) -> (LspClient, Receiver<LspEvent>) {
+    pub fn connect(
+        from_server: impl Read + Send + 'static,
+        to_server: impl Write + Send + 'static,
+    ) -> (LspClient, Receiver<LspEvent>) {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || read_loop(from_server, tx));
-        (LspClient { stdin: Mutex::new(Box::new(to_server)), next_id: AtomicI64::new(1), child: None, reader_thread: None, stderr_thread: None, stderr: Arc::default() }, rx)
+        (
+            LspClient {
+                stdin: Mutex::new(Box::new(to_server)),
+                next_id: AtomicI64::new(1),
+                child: None,
+                reader_thread: None,
+                stderr_thread: None,
+                stderr: Arc::default(),
+            },
+            rx,
+        )
     }
 
     /// The last lines the server wrote to stderr, trimmed: what a server
@@ -127,7 +165,11 @@ impl LspClient {
         let tail = self.stderr.lock().map(|t| t.clone()).unwrap_or_default();
         let text = String::from_utf8_lossy(&tail);
         // From a whole line on, once the tail has been cut.
-        let text = if tail.len() >= STDERR_TAIL { text.split_once('\n').map(|(_, rest)| rest).unwrap_or(&text) } else { &text };
+        let text = if tail.len() >= STDERR_TAIL {
+            text.split_once('\n').map(|(_, rest)| rest).unwrap_or(&text)
+        } else {
+            &text
+        };
         text.trim().to_string()
     }
 
@@ -136,17 +178,25 @@ impl LspClient {
     /// (`LspEvent::Response { id, .. }`). This client does no
     /// correlation beyond tagging the response with that id -- a caller
     /// tracking "what did I ask id 7 for" does so itself.
-    pub fn request<R: lsp_types::request::Request>(&self, params: R::Params) -> std::io::Result<i64> {
+    pub fn request<R: lsp_types::request::Request>(
+        &self,
+        params: R::Params,
+    ) -> std::io::Result<i64> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let params = serde_json::to_value(params).expect("lsp_types request params always serialize");
+        let params =
+            serde_json::to_value(params).expect("lsp_types request params always serialize");
         self.write(&RawMessage::request(id, R::METHOD, params))?;
         Ok(id)
     }
 
     /// Sends a typed notification (e.g.
     /// `lsp_types::notification::DidOpenTextDocument`).
-    pub fn notify<N: lsp_types::notification::Notification>(&self, params: N::Params) -> std::io::Result<()> {
-        let params = serde_json::to_value(params).expect("lsp_types notification params always serialize");
+    pub fn notify<N: lsp_types::notification::Notification>(
+        &self,
+        params: N::Params,
+    ) -> std::io::Result<()> {
+        let params =
+            serde_json::to_value(params).expect("lsp_types notification params always serialize");
         self.write(&RawMessage::notification(N::METHOD, params))
     }
 
@@ -159,7 +209,10 @@ impl LspClient {
 
     fn write(&self, message: &RawMessage) -> std::io::Result<()> {
         let body = serde_json::to_vec(message).expect("RawMessage always serializes");
-        let mut stdin = self.stdin.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut stdin = self
+            .stdin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         fenix_rpc::write_message(&mut *stdin, &body)
     }
 }
@@ -228,12 +281,16 @@ fn read_loop(stdout: impl Read, tx: Sender<LspEvent>) {
                     // treated the same as a disconnect rather than
                     // silently dropped, which would otherwise leave a
                     // caller with no idea why nothing more ever arrives.
-                    let _ = tx.send(LspEvent::Disconnected(format!("malformed message from server: {err}")));
+                    let _ = tx.send(LspEvent::Disconnected(format!(
+                        "malformed message from server: {err}"
+                    )));
                     return;
                 }
             },
             Ok(None) => {
-                let _ = tx.send(LspEvent::Disconnected("server closed its stdout".to_string()));
+                let _ = tx.send(LspEvent::Disconnected(
+                    "server closed its stdout".to_string(),
+                ));
                 return;
             }
             Err(err) => {
@@ -250,8 +307,15 @@ fn read_loop(stdout: impl Read, tx: Sender<LspEvent>) {
 /// `RawMessage`'s own doc comment).
 fn classify(msg: RawMessage) -> LspEvent {
     match (msg.id, msg.method) {
-        (Some(id), Some(method)) => LspEvent::ServerRequest { id, method, params: msg.params.unwrap_or(Value::Null) },
-        (None, Some(method)) => LspEvent::Notification { method, params: msg.params.unwrap_or(Value::Null) },
+        (Some(id), Some(method)) => LspEvent::ServerRequest {
+            id,
+            method,
+            params: msg.params.unwrap_or(Value::Null),
+        },
+        (None, Some(method)) => LspEvent::Notification {
+            method,
+            params: msg.params.unwrap_or(Value::Null),
+        },
         (Some(id), None) => {
             // A response: `result`/`error` are mutually exclusive per
             // spec. The id a compliant server echoes back is always one
@@ -273,7 +337,10 @@ fn classify(msg: RawMessage) -> LspEvent {
             // a fatal disconnect either; surfaced as an empty-method
             // notification so a caller can at least notice and log it
             // rather than this thread silently swallowing it.
-            LspEvent::Notification { method: String::new(), params: Value::Null }
+            LspEvent::Notification {
+                method: String::new(),
+                params: Value::Null,
+            }
         }
     }
 }
@@ -322,21 +389,34 @@ mod tests {
         said.push_str("Error: Could not find a valid TypeScript installation\n");
         drain_keeping_tail(said.as_bytes(), &client.stderr);
         let tail = client.stderr_tail();
-        assert!(tail.ends_with("Could not find a valid TypeScript installation"), "{tail}");
-        assert!(tail.len() <= STDERR_TAIL && tail.starts_with("line "), "{tail}");
+        assert!(
+            tail.ends_with("Could not find a valid TypeScript installation"),
+            "{tail}"
+        );
+        assert!(
+            tail.len() <= STDERR_TAIL && tail.starts_with("line "),
+            "{tail}"
+        );
         assert!(!tail.contains("line 0\n"));
     }
 
     #[test]
     fn a_message_with_both_id_and_method_is_a_server_request() {
         let event = classify(request_msg(1, "workspace/configuration"));
-        assert!(matches!(event, LspEvent::ServerRequest { id, method, .. } if id == 1 && method == "workspace/configuration"));
+        assert!(
+            matches!(event, LspEvent::ServerRequest { id, method, .. } if id == 1 && method == "workspace/configuration")
+        );
     }
 
     #[test]
     fn a_message_with_method_but_no_id_is_a_notification() {
-        let event = classify(RawMessage::notification("textDocument/publishDiagnostics", Value::from("params")));
-        assert!(matches!(event, LspEvent::Notification { method, params } if method == "textDocument/publishDiagnostics" && params == "params"));
+        let event = classify(RawMessage::notification(
+            "textDocument/publishDiagnostics",
+            Value::from("params"),
+        ));
+        assert!(
+            matches!(event, LspEvent::Notification { method, params } if method == "textDocument/publishDiagnostics" && params == "params")
+        );
     }
 
     #[test]
@@ -347,7 +427,11 @@ mod tests {
 
     #[test]
     fn a_failed_response_carries_err_result() {
-        let err = ResponseError { code: -32601, message: "method not found".to_string(), data: None };
+        let err = ResponseError {
+            code: -32601,
+            message: "method not found".to_string(),
+            data: None,
+        };
         let event = classify(RawMessage::response(Value::from(6), Err(err.clone())));
         assert!(matches!(event, LspEvent::Response { id: 6, result: Err(e) } if e == err));
     }
@@ -357,13 +441,23 @@ mod tests {
         // Not spec-compliant of a server (this client only ever sends
         // numeric ids), but shouldn't panic -- see `classify`'s own doc
         // comment.
-        let event = classify(RawMessage::response(Value::from("weird-id"), Ok(Value::Null)));
+        let event = classify(RawMessage::response(
+            Value::from("weird-id"),
+            Ok(Value::Null),
+        ));
         assert!(matches!(event, LspEvent::Response { id: -1, .. }));
     }
 
     #[test]
     fn neither_id_nor_method_classifies_as_an_empty_notification_rather_than_panicking() {
-        let msg = RawMessage { jsonrpc: "2.0".to_string(), id: None, method: None, params: None, result: None, error: None };
+        let msg = RawMessage {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: None,
+            params: None,
+            result: None,
+            error: None,
+        };
         let event = classify(msg);
         assert!(matches!(event, LspEvent::Notification { method, .. } if method.is_empty()));
     }

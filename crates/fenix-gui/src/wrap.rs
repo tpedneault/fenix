@@ -51,7 +51,14 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     for word in text.split_whitespace() {
         let word_len = word.chars().count();
         if word_len <= width {
-            place(&mut lines, &mut current, &mut current_len, word, word_len, width);
+            place(
+                &mut lines,
+                &mut current,
+                &mut current_len,
+                word,
+                word_len,
+                width,
+            );
             continue;
         }
         // `word` alone doesn't fit even on an empty line: flush
@@ -70,7 +77,11 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
         }
         let mut remaining = word;
         while !remaining.is_empty() {
-            let split_at = remaining.char_indices().nth(width).map(|(i, _)| i).unwrap_or(remaining.len());
+            let split_at = remaining
+                .char_indices()
+                .nth(width)
+                .map(|(i, _)| i)
+                .unwrap_or(remaining.len());
             lines.push(remaining[..split_at].to_string());
             remaining = &remaining[split_at..];
         }
@@ -84,7 +95,14 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
 /// Appends `word` (already known to fit within `width` on its own) to
 /// `current`, starting a fresh line first if it wouldn't fit alongside
 /// what's already there.
-fn place(lines: &mut Vec<String>, current: &mut String, current_len: &mut usize, word: &str, word_len: usize, width: usize) {
+fn place(
+    lines: &mut Vec<String>,
+    current: &mut String,
+    current_len: &mut usize,
+    word: &str,
+    word_len: usize,
+    width: usize,
+) {
     if current.is_empty() {
         current.push_str(word);
         *current_len = word_len;
@@ -115,7 +133,14 @@ mod tests {
 
     #[test]
     fn wraps_at_the_last_word_boundary_that_fits() {
-        assert_eq!(wrap_text("the quick brown fox jumps", 11), vec!["the quick".to_string(), "brown fox".to_string(), "jumps".to_string()]);
+        assert_eq!(
+            wrap_text("the quick brown fox jumps", 11),
+            vec![
+                "the quick".to_string(),
+                "brown fox".to_string(),
+                "jumps".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -129,14 +154,32 @@ mod tests {
     fn a_long_token_flushes_the_line_being_built_before_starting_its_own_chunks() {
         let long_token = "b".repeat(25);
         let result = wrap_text(&format!("short {long_token}"), 10);
-        assert_eq!(result, vec!["short".to_string(), "b".repeat(10), "b".repeat(10), "b".repeat(5)]);
+        assert_eq!(
+            result,
+            vec![
+                "short".to_string(),
+                "b".repeat(10),
+                "b".repeat(10),
+                "b".repeat(5)
+            ]
+        );
     }
 
     #[test]
     fn wrapping_continues_normally_with_ordinary_words_after_a_hard_broken_token() {
         let long_token = "c".repeat(25);
         let result = wrap_text(&format!("{long_token} then normal words"), 10);
-        assert_eq!(result, vec!["c".repeat(10), "c".repeat(10), "c".repeat(5), "then".to_string(), "normal".to_string(), "words".to_string()]);
+        assert_eq!(
+            result,
+            vec![
+                "c".repeat(10),
+                "c".repeat(10),
+                "c".repeat(5),
+                "then".to_string(),
+                "normal".to_string(),
+                "words".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -154,7 +197,10 @@ mod tests {
         // an unavoidable side effect of splitting into words at all, not
         // something this function sets out to do to short text (see the
         // test above).
-        assert_eq!(wrap_text("first    second    third    fourth", 12), vec!["first second".to_string(), "third fourth".to_string()]);
+        assert_eq!(
+            wrap_text("first    second    third    fourth", 12),
+            vec!["first second".to_string(), "third fourth".to_string()]
+        );
     }
 
     #[test]
@@ -176,7 +222,10 @@ mod tests {
 
     #[test]
     fn one_character_over_width_wraps() {
-        assert_eq!(wrap_text("01234567 9x", 10), vec!["01234567".to_string(), "9x".to_string()]);
+        assert_eq!(
+            wrap_text("01234567 9x", 10),
+            vec!["01234567".to_string(), "9x".to_string()]
+        );
     }
 
     #[test]
@@ -187,9 +236,16 @@ mod tests {
         // exactly the values it exists to handle.
         let path = format!("/var/lib/docker/volumes/{}/_data", "x".repeat(90));
         let result = wrap_text(&path, 40);
-        assert!(result.len() > 1, "expected the long path to wrap onto multiple lines, got {result:?}");
+        assert!(
+            result.len() > 1,
+            "expected the long path to wrap onto multiple lines, got {result:?}"
+        );
         assert!(result.iter().all(|l| l.chars().count() <= 40));
-        assert_eq!(result.concat(), path, "no characters should be lost across the wrap");
+        assert_eq!(
+            result.concat(),
+            path,
+            "no characters should be lost across the wrap"
+        );
     }
 
     #[test]

@@ -12,7 +12,10 @@
 pub fn play_bytes(bytes: Vec<u8>) -> Result<(), String> {
     #[cfg(windows)]
     {
-        std::thread::Builder::new().name("fenix-sound".into()).spawn(move || play_windows(&bytes)).map_err(|e| e.to_string())?;
+        std::thread::Builder::new()
+            .name("fenix-sound".into())
+            .spawn(move || play_windows(&bytes))
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
     #[cfg(target_os = "macos")]
@@ -21,7 +24,10 @@ pub fn play_bytes(bytes: Vec<u8>) -> Result<(), String> {
     }
     #[cfg(not(any(windows, target_os = "macos")))]
     {
-        spawn_first(&[("paplay", &[]), ("pw-play", &["-"]), ("aplay", &["-q"])], bytes)
+        spawn_first(
+            &[("paplay", &[]), ("pw-play", &["-"]), ("aplay", &["-q"])],
+            bytes,
+        )
     }
 }
 
@@ -32,7 +38,11 @@ fn play_windows(bytes: &[u8]) {
     // `bytes` lives until it has played (to its end, here, on a thread of
     // its own).
     unsafe {
-        PlaySoundW(bytes.as_ptr().cast(), std::ptr::null_mut(), SND_MEMORY | SND_NODEFAULT);
+        PlaySoundW(
+            bytes.as_ptr().cast(),
+            std::ptr::null_mut(),
+            SND_MEMORY | SND_NODEFAULT,
+        );
     }
 }
 
@@ -45,10 +55,21 @@ fn play_from_file(player: &str, bytes: &[u8]) -> Result<(), String> {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!("fenix-sound-{}-{n}.wav", std::process::id()));
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    file.write_all(bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    file.write_all(bytes)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     drop(file);
-    match Command::new(player).arg(&path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    match Command::new(player)
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
         Ok(mut child) => {
             std::thread::spawn(move || {
                 let _ = child.wait();
@@ -71,7 +92,11 @@ fn spawn_first(players: &[(&str, &[&str])], bytes: Vec<u8>) -> Result<(), String
     use std::process::{Command, Stdio};
     for (player, args) in players {
         let mut command = Command::new(player);
-        command.args(*args).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null());
+        command
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         match command.spawn() {
             Ok(mut child) => {
                 let stdin = child.stdin.take();
@@ -100,7 +125,12 @@ mod tests {
     #[test]
     fn the_first_player_there_is_plays_it() {
         let wav = b"RIFF....WAVE".to_vec();
-        assert!(spawn_first(&[("fenix-no-such-player", &[])], wav.clone()).unwrap_err().contains("nothing here plays sounds"));
-        assert_eq!(spawn_first(&[("fenix-no-such-player", &[]), ("cat", &[])], wav), Ok(()));
+        assert!(spawn_first(&[("fenix-no-such-player", &[])], wav.clone())
+            .unwrap_err()
+            .contains("nothing here plays sounds"));
+        assert_eq!(
+            spawn_first(&[("fenix-no-such-player", &[]), ("cat", &[])], wav),
+            Ok(())
+        );
     }
 }

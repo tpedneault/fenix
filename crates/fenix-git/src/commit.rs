@@ -17,7 +17,10 @@ pub struct Commit {
 /// one; `commit_diff`, not this, is where the full message shows up).
 pub fn list_commits(repo: &Path, limit: usize) -> Vec<Commit> {
     let n = format!("-n{limit}");
-    run_lines(repo, &["log", &n, "--format=%H\x1f%h\x1f%s\x1f%an\x1f%ar"]).iter().filter_map(|l| parse_line(l)).collect()
+    run_lines(repo, &["log", &n, "--format=%H\x1f%h\x1f%s\x1f%an\x1f%ar"])
+        .iter()
+        .filter_map(|l| parse_line(l))
+        .collect()
 }
 
 /// The commits `head` has that `base` doesn't (`git log base..head`),
@@ -31,7 +34,13 @@ pub fn list_commits(repo: &Path, limit: usize) -> Vec<Commit> {
 pub fn commits_between(repo: &Path, base: &str, head: &str, limit: usize) -> Vec<Commit> {
     let n = format!("-n{limit}");
     let range = format!("{base}..{head}");
-    run_lines(repo, &["log", &n, &range, "--format=%H\x1f%h\x1f%s\x1f%an\x1f%ar"]).iter().filter_map(|l| parse_line(l)).collect()
+    run_lines(
+        repo,
+        &["log", &n, &range, "--format=%H\x1f%h\x1f%s\x1f%an\x1f%ar"],
+    )
+    .iter()
+    .filter_map(|l| parse_line(l))
+    .collect()
 }
 
 /// One commit's own metadata, for showing above its diff.
@@ -61,7 +70,10 @@ pub fn commit_meta(repo: &Path, hash: &str) -> Option<CommitMeta> {
     // `%x1f` is git's own escape for the unit separator, so the format
     // string itself stays plain ASCII.
     let format = "--format=%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b";
-    let lines = run_lines(repo, &["show", "-s", "--date=format:%Y-%m-%d %H:%M", format, hash]);
+    let lines = run_lines(
+        repo,
+        &["show", "-s", "--date=format:%Y-%m-%d %H:%M", format, hash],
+    );
     // A body spans lines, so the record is the whole output rejoined,
     // not just the first line.
     let joined = lines.join("\n");
@@ -94,7 +106,8 @@ mod tests {
 
     #[test]
     fn parse_line_reads_every_field() {
-        let commit = parse_line("abc123full\x1fabc123\x1fFix the thing\x1fJane Doe\x1f3 days ago").unwrap();
+        let commit =
+            parse_line("abc123full\x1fabc123\x1fFix the thing\x1fJane Doe\x1f3 days ago").unwrap();
         assert_eq!(
             commit,
             Commit {
@@ -144,18 +157,40 @@ mod tests {
         init_repo(dir.path());
         dir.write("a.txt", "v1");
         git(dir.path(), &["add", "."]);
-        git(dir.path(), &["commit", "-q", "-m", "Fix the thing", "-m", "With a longer explanation
-over two lines."]);
+        git(
+            dir.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "Fix the thing",
+                "-m",
+                "With a longer explanation
+over two lines.",
+            ],
+        );
 
         let meta = commit_meta(dir.path(), "HEAD").expect("a commit exists");
         assert_eq!(meta.author, "Test");
         assert_eq!(meta.email, "test@example.com");
         assert_eq!(meta.subject, "Fix the thing");
-        assert!(meta.body.contains("longer explanation"), "the body should survive: {:?}", meta.body);
-        assert!(meta.body.contains("over two lines."), "including its later lines: {:?}", meta.body);
+        assert!(
+            meta.body.contains("longer explanation"),
+            "the body should survive: {:?}",
+            meta.body
+        );
+        assert!(
+            meta.body.contains("over two lines."),
+            "including its later lines: {:?}",
+            meta.body
+        );
         // `--date=format:` gives a fixed, sortable shape rather than
         // git's default locale-ish one.
-        assert!(meta.date.starts_with("20"), "expected an ISO-like date, got {:?}", meta.date);
+        assert!(
+            meta.date.starts_with("20"),
+            "expected an ISO-like date, got {:?}",
+            meta.date
+        );
         assert!(!meta.short_hash.is_empty());
     }
 

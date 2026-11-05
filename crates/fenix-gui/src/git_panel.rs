@@ -93,7 +93,10 @@ struct Builder {
 
 impl Builder {
     fn new() -> Self {
-        Self { text: String::new(), lines: Vec::new() }
+        Self {
+            text: String::new(),
+            lines: Vec::new(),
+        }
     }
 
     fn push(&mut self, text: &str, meta: Option<GitLine>) {
@@ -103,12 +106,23 @@ impl Builder {
     }
 
     fn finish(self) -> GitPanel {
-        GitPanel { text: self.text, lines: self.lines }
+        GitPanel {
+            text: self.text,
+            lines: self.lines,
+        }
     }
 }
 
 fn empty_line(message: &str) -> (String, Option<GitLine>) {
-    (format!("    {message}"), Some(GitLine { style: GitLineStyle::Empty, entry: None, dim_from: None, badge: None }))
+    (
+        format!("    {message}"),
+        Some(GitLine {
+            style: GitLineStyle::Empty,
+            entry: None,
+            dim_from: None,
+            badge: None,
+        }),
+    )
 }
 
 /// Git's own porcelain status letters verbatim, as a two-char string
@@ -127,7 +141,11 @@ fn file_status_badge(entry: &FileEntry) -> (String, GitBadgeColor) {
     if entry.index_status == 'U' || entry.worktree_status == 'U' {
         return (badge, GitBadgeColor::Bad);
     }
-    let color = if entry.index_status != '.' { status_color(entry.index_status) } else { status_color(entry.worktree_status) };
+    let color = if entry.index_status != '.' {
+        status_color(entry.index_status)
+    } else {
+        status_color(entry.worktree_status)
+    };
     (badge, color)
 }
 
@@ -158,7 +176,11 @@ fn describe_status(letters: &str) -> &'static str {
     if index == 'U' || worktree == 'U' {
         return "conflict";
     }
-    let (c, staged) = if index != '.' { (index, true) } else { (worktree, false) };
+    let (c, staged) = if index != '.' {
+        (index, true)
+    } else {
+        (worktree, false)
+    };
     match (c, staged) {
         ('?', _) => "untracked",
         ('A', _) => "staged, new",
@@ -218,13 +240,29 @@ struct FileTreeRow {
 /// directory's own children only when its full path is in `expanded`,
 /// so a collapsed directory renders as exactly one row no matter how
 /// much it contains underneath.
-fn flatten_file_tree(node: &DirNode, prefix: &str, depth: usize, expanded: &HashSet<String>, out: &mut Vec<FileTreeRow>) {
+fn flatten_file_tree(
+    node: &DirNode,
+    prefix: &str,
+    depth: usize,
+    expanded: &HashSet<String>,
+    out: &mut Vec<FileTreeRow>,
+) {
     let mut dir_names: Vec<&String> = node.children.keys().collect();
     dir_names.sort_by_key(|n| n.to_lowercase());
     for name in dir_names {
         let child = &node.children[name];
-        let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
-        out.push(FileTreeRow { depth, is_dir: true, path: path.clone(), name: name.clone(), file: None });
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        out.push(FileTreeRow {
+            depth,
+            is_dir: true,
+            path: path.clone(),
+            name: name.clone(),
+            file: None,
+        });
         if expanded.contains(&path) {
             flatten_file_tree(child, &path, depth + 1, expanded, out);
         }
@@ -233,7 +271,13 @@ fn flatten_file_tree(node: &DirNode, prefix: &str, depth: usize, expanded: &Hash
     files.sort_by_key(|f| f.path.to_lowercase());
     for f in files {
         let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_string();
-        out.push(FileTreeRow { depth, is_dir: false, path: f.path.clone(), name, file: Some(f) });
+        out.push(FileTreeRow {
+            depth,
+            is_dir: false,
+            path: f.path.clone(),
+            name,
+            file: Some(f),
+        });
     }
 }
 
@@ -244,7 +288,11 @@ fn flatten_file_tree(node: &DirNode, prefix: &str, depth: usize, expanded: &Hash
 /// already carries both halves independently, there's nothing to
 /// reconcile.
 pub fn render_staged(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> GitPanel {
-    let staged: Vec<FileEntry> = files.iter().filter(|f| f.index_status != '.' && f.index_status != '?').cloned().collect();
+    let staged: Vec<FileEntry> = files
+        .iter()
+        .filter(|f| f.index_status != '.' && f.index_status != '?')
+        .cloned()
+        .collect();
     render_file_tree(&staged, expanded_dirs, "Nothing staged")
 }
 
@@ -252,8 +300,16 @@ pub fn render_staged(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> Gi
 /// half, which covers both a plain unstaged modification *and* an
 /// untracked file (synthesized `worktree_status: '?'`, also `!= '.'`).
 pub fn render_unstaged(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> GitPanel {
-    let unstaged: Vec<FileEntry> = files.iter().filter(|f| f.worktree_status != '.').cloned().collect();
-    render_file_tree(&unstaged, expanded_dirs, "Nothing to commit, working tree clean")
+    let unstaged: Vec<FileEntry> = files
+        .iter()
+        .filter(|f| f.worktree_status != '.')
+        .cloned()
+        .collect();
+    render_file_tree(
+        &unstaged,
+        expanded_dirs,
+        "Nothing to commit, working tree clean",
+    )
 }
 
 /// Shared by `render_staged`/`render_unstaged`: `files` grouped into a
@@ -265,7 +321,11 @@ pub fn render_unstaged(files: &[FileEntry], expanded_dirs: &HashSet<String>) -> 
 /// human-readable part of the row. `expanded_dirs` is the pane's own
 /// persisted set of expanded directory paths -- a fresh/never-toggled
 /// directory starts collapsed, showing just its name.
-fn render_file_tree(files: &[FileEntry], expanded_dirs: &HashSet<String>, empty_message: &str) -> GitPanel {
+fn render_file_tree(
+    files: &[FileEntry],
+    expanded_dirs: &HashSet<String>,
+    empty_message: &str,
+) -> GitPanel {
     let mut b = Builder::new();
     if files.is_empty() {
         let (text, meta) = empty_line(empty_message);
@@ -277,11 +337,20 @@ fn render_file_tree(files: &[FileEntry], expanded_dirs: &HashSet<String>, empty_
         for row in rows {
             let margin = "  ".repeat(row.depth + 1);
             if row.is_dir {
-                let marker = if expanded_dirs.contains(&row.path) { "v" } else { ">" };
+                let marker = if expanded_dirs.contains(&row.path) {
+                    "v"
+                } else {
+                    ">"
+                };
                 let line = format!("{margin}{marker} {}/", row.name);
                 b.push(
                     &line,
-                    Some(GitLine { style: GitLineStyle::Dir, entry: Some(GitEntry::Dir(row.path)), dim_from: None, badge: None }),
+                    Some(GitLine {
+                        style: GitLineStyle::Dir,
+                        entry: Some(GitEntry::Dir(row.path)),
+                        dim_from: None,
+                        badge: None,
+                    }),
                 );
             } else {
                 let f = row.file.expect("file rows always carry a FileEntry");
@@ -326,7 +395,11 @@ pub fn render_branches(branches: &[Branch]) -> GitPanel {
                 (a, be) => format!("  +{a} -{be}"),
             };
             let line = format!("{prefix}{}{tracking}", br.name);
-            let color = if br.current { GitBadgeColor::Good } else { GitBadgeColor::Neutral };
+            let color = if br.current {
+                GitBadgeColor::Good
+            } else {
+                GitBadgeColor::Neutral
+            };
             b.push(
                 &line,
                 Some(GitLine {
@@ -418,14 +491,27 @@ pub fn render_status(
     if let Some(op) = in_progress {
         b.push(
             &format!("  {}  --  SPC g x c continue, SPC g x a abort", op.label()),
-            Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }),
+            Some(GitLine {
+                style: GitLineStyle::Header,
+                entry: None,
+                dim_from: None,
+                badge: None,
+            }),
         );
     }
     if conflicts > 0 {
         let (badge, color) = (format!("  [{conflicts}] "), GitBadgeColor::Bad);
         b.push(
-            &format!("{badge}conflicted file{}  --  SPC g x x to resolve", if conflicts == 1 { "" } else { "s" }),
-            Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: None, badge: Some((badge.chars().count(), color)) }),
+            &format!(
+                "{badge}conflicted file{}  --  SPC g x x to resolve",
+                if conflicts == 1 { "" } else { "s" }
+            ),
+            Some(GitLine {
+                style: GitLineStyle::Detail,
+                entry: None,
+                dim_from: None,
+                badge: Some((badge.chars().count(), color)),
+            }),
         );
         // Which branch each side of the markers actually is. During a
         // rebase git's own "ours" is the branch being rebased *onto*,
@@ -433,8 +519,16 @@ pub fn render_status(
         // it deletes their own work. Saying it here, where the conflict
         // count already is, is the cheapest possible place to stop that.
         if let Some(sides) = sides {
-            push_detail_line(&mut b, "ours", &format!("{} ({})", sides.ours, sides.ours_role));
-            push_detail_line(&mut b, "theirs", &format!("{} ({})", sides.theirs, sides.theirs_role));
+            push_detail_line(
+                &mut b,
+                "ours",
+                &format!("{} ({})", sides.ours, sides.ours_role),
+            );
+            push_detail_line(
+                &mut b,
+                "theirs",
+                &format!("{} ({})", sides.theirs, sides.theirs_role),
+            );
         }
     }
     match status {
@@ -446,7 +540,11 @@ pub fn render_status(
             push_detail_line(&mut b, "Branch", &s.branch);
             if let Some(upstream) = &s.upstream {
                 push_detail_line(&mut b, "Upstream", upstream);
-                push_detail_line(&mut b, "Ahead/Behind", &format!("+{} -{}", s.ahead, s.behind));
+                push_detail_line(
+                    &mut b,
+                    "Ahead/Behind",
+                    &format!("+{} -{}", s.ahead, s.behind),
+                );
             }
             push_detail_line(&mut b, "Staged", &staged.to_string());
             push_detail_line(&mut b, "Unstaged", &unstaged.to_string());
@@ -466,12 +564,30 @@ fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
     let prefix = format!("    {label}: ");
     let dim_from = prefix.chars().count();
     let indent = " ".repeat(dim_from);
-    let wrap_width = crate::wrap::DEFAULT_WRAP_WIDTH.saturating_sub(dim_from).max(20);
+    let wrap_width = crate::wrap::DEFAULT_WRAP_WIDTH
+        .saturating_sub(dim_from)
+        .max(20);
     let mut wrapped = crate::wrap::wrap_text(value, wrap_width).into_iter();
     let first = wrapped.next().unwrap_or_default();
-    b.push(&format!("{prefix}{first}"), Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: Some(dim_from), badge: None }));
+    b.push(
+        &format!("{prefix}{first}"),
+        Some(GitLine {
+            style: GitLineStyle::Detail,
+            entry: None,
+            dim_from: Some(dim_from),
+            badge: None,
+        }),
+    );
     for continuation in wrapped {
-        b.push(&format!("{indent}{continuation}"), Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: Some(0), badge: None }));
+        b.push(
+            &format!("{indent}{continuation}"),
+            Some(GitLine {
+                style: GitLineStyle::Detail,
+                entry: None,
+                dim_from: Some(0),
+                badge: None,
+            }),
+        );
     }
 }
 
@@ -482,15 +598,44 @@ fn push_detail_line(b: &mut Builder, label: &str, value: &str) {
 /// know which branch "ours" is -- and during a rebase it is *not* the
 /// branch you were on, which is the single most common way to resolve a
 /// conflict backwards.
-pub fn render_conflicts(files: &[String], ours: &str, theirs: &str, ours_role: &str, theirs_role: &str) -> GitPanel {
+pub fn render_conflicts(
+    files: &[String],
+    ours: &str,
+    theirs: &str,
+    ours_role: &str,
+    theirs_role: &str,
+) -> GitPanel {
     let mut b = Builder::new();
     let header = |b: &mut Builder, text: &str| {
-        b.push(text, Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }));
+        b.push(
+            text,
+            Some(GitLine {
+                style: GitLineStyle::Header,
+                entry: None,
+                dim_from: None,
+                badge: None,
+            }),
+        );
     };
     let note = |b: &mut Builder, text: &str| {
-        b.push(text, Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: Some(0), badge: None }));
+        b.push(
+            text,
+            Some(GitLine {
+                style: GitLineStyle::Detail,
+                entry: None,
+                dim_from: Some(0),
+                badge: None,
+            }),
+        );
     };
-    header(&mut b, &format!("  {} conflicted file{}", files.len(), if files.len() == 1 { "" } else { "s" }));
+    header(
+        &mut b,
+        &format!(
+            "  {} conflicted file{}",
+            files.len(),
+            if files.len() == 1 { "" } else { "s" }
+        ),
+    );
     note(&mut b, &format!("    o = keep {ours}"));
     note(&mut b, &format!("        ({ours_role})"));
     note(&mut b, &format!("    t = keep {theirs}"));
@@ -523,33 +668,69 @@ mod tests {
     use super::*;
 
     fn file(path: &str, index: char, worktree: char) -> FileEntry {
-        FileEntry { path: path.to_string(), index_status: index, worktree_status: worktree }
+        FileEntry {
+            path: path.to_string(),
+            index_status: index,
+            worktree_status: worktree,
+        }
     }
 
     fn branch(name: &str, current: bool) -> Branch {
-        Branch { name: name.to_string(), current, upstream: None, ahead: 0, behind: 0, upstream_gone: false }
+        Branch {
+            name: name.to_string(),
+            current,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+            upstream_gone: false,
+        }
     }
 
     fn commit(hash: &str, short: &str, message: &str) -> Commit {
-        Commit { hash: hash.to_string(), short_hash: short.to_string(), message: message.to_string(), author: "Test".to_string(), relative_date: "1 hour ago".to_string() }
+        Commit {
+            hash: hash.to_string(),
+            short_hash: short.to_string(),
+            message: message.to_string(),
+            author: "Test".to_string(),
+            relative_date: "1 hour ago".to_string(),
+        }
     }
 
     fn stash(index: usize, message: &str) -> Stash {
-        Stash { index, message: message.to_string() }
+        Stash {
+            index,
+            message: message.to_string(),
+        }
     }
 
     #[test]
     fn render_unstaged_lists_entries_with_the_right_entry() {
-        let panel = render_unstaged(&[file("a.txt", '.', 'M'), file("b.txt", '?', '?')], &HashSet::new());
-        let entries: Vec<_> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).collect();
+        let panel = render_unstaged(
+            &[file("a.txt", '.', 'M'), file("b.txt", '?', '?')],
+            &HashSet::new(),
+        );
+        let entries: Vec<_> = panel
+            .lines
+            .iter()
+            .flatten()
+            .filter(|l| l.style == GitLineStyle::File)
+            .collect();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].entry, Some(GitEntry::File("a.txt".to_string())));
     }
 
     #[test]
     fn render_staged_lists_entries_with_the_right_entry() {
-        let panel = render_staged(&[file("a.txt", 'M', '.'), file("b.txt", 'A', '.')], &HashSet::new());
-        let entries: Vec<_> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).collect();
+        let panel = render_staged(
+            &[file("a.txt", 'M', '.'), file("b.txt", 'A', '.')],
+            &HashSet::new(),
+        );
+        let entries: Vec<_> = panel
+            .lines
+            .iter()
+            .flatten()
+            .filter(|l| l.style == GitLineStyle::File)
+            .collect();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].entry, Some(GitEntry::File("a.txt".to_string())));
     }
@@ -571,8 +752,24 @@ mod tests {
         let files = [file("a.txt", 'M', 'M')]; // staged AND further modified
         let staged = render_staged(&files, &HashSet::new());
         let unstaged = render_unstaged(&files, &HashSet::new());
-        assert_eq!(staged.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).count(), 1);
-        assert_eq!(unstaged.lines.iter().flatten().filter(|l| l.style == GitLineStyle::File).count(), 1);
+        assert_eq!(
+            staged
+                .lines
+                .iter()
+                .flatten()
+                .filter(|l| l.style == GitLineStyle::File)
+                .count(),
+            1
+        );
+        assert_eq!(
+            unstaged
+                .lines
+                .iter()
+                .flatten()
+                .filter(|l| l.style == GitLineStyle::File)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -596,12 +793,17 @@ mod tests {
     #[test]
     fn render_unstaged_shows_a_led_and_the_readable_status_word() {
         let panel = render_unstaged(&[file("a.txt", '.', 'M')], &HashSet::new());
-        assert!(panel.text.contains(&format!("{STATUS_LED} a.txt  modified")));
+        assert!(panel
+            .text
+            .contains(&format!("{STATUS_LED} a.txt  modified")));
     }
 
     #[test]
     fn render_unstaged_groups_a_subdirectorys_files_under_one_collapsed_row() {
-        let panel = render_unstaged(&[file("src/a.txt", '.', 'M'), file("src/b.txt", '?', '?')], &HashSet::new());
+        let panel = render_unstaged(
+            &[file("src/a.txt", '.', 'M'), file("src/b.txt", '?', '?')],
+            &HashSet::new(),
+        );
         let lines: Vec<_> = panel.lines.iter().flatten().collect();
         // Collapsed: just the one directory row, no file rows underneath.
         assert_eq!(lines.len(), 1);
@@ -614,7 +816,10 @@ mod tests {
     fn render_unstaged_expanding_a_directory_reveals_its_files_indented_and_by_basename() {
         let mut expanded = HashSet::new();
         expanded.insert("src".to_string());
-        let panel = render_unstaged(&[file("src/a.txt", '.', 'M'), file("root.txt", '.', 'D')], &expanded);
+        let panel = render_unstaged(
+            &[file("src/a.txt", '.', 'M'), file("root.txt", '.', 'D')],
+            &expanded,
+        );
 
         let lines: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(lines.len(), 3); // src/ dir row + a.txt + root.txt
@@ -622,16 +827,23 @@ mod tests {
         let dir_row = lines.iter().find(|l| l.style == GitLineStyle::Dir).unwrap();
         assert_eq!(dir_row.entry, Some(GitEntry::Dir("src".to_string())));
 
-        let file_row = lines.iter().find(|l| l.entry == Some(GitEntry::File("src/a.txt".to_string()))).unwrap();
+        let file_row = lines
+            .iter()
+            .find(|l| l.entry == Some(GitEntry::File("src/a.txt".to_string())))
+            .unwrap();
         assert_eq!(file_row.style, GitLineStyle::File);
 
         assert!(panel.text.contains("v src/"));
         // The file row shows only its basename, indented deeper than
         // its parent directory row, not the full "src/a.txt" path.
-        assert!(panel.text.contains(&format!("    {STATUS_LED} a.txt  modified")));
+        assert!(panel
+            .text
+            .contains(&format!("    {STATUS_LED} a.txt  modified")));
         assert!(!panel.text.contains("src/a.txt"));
         // A root-level file (no directory) renders exactly as before.
-        assert!(panel.text.contains(&format!("  {STATUS_LED} root.txt  deleted")));
+        assert!(panel
+            .text
+            .contains(&format!("  {STATUS_LED} root.txt  deleted")));
     }
 
     #[test]
@@ -644,17 +856,26 @@ mod tests {
         let lines: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(lines.len(), 2); // "src/" row, "src/nested/" row -- no file row yet
         assert!(lines.iter().all(|l| l.style == GitLineStyle::Dir));
-        assert_eq!(lines[1].entry, Some(GitEntry::Dir("src/nested".to_string())));
+        assert_eq!(
+            lines[1].entry,
+            Some(GitEntry::Dir("src/nested".to_string()))
+        );
     }
 
     #[test]
     fn render_unstaged_directories_sort_before_files_alphabetically_within_each_level() {
-        let panel = render_unstaged(&[file("z.txt", '.', 'M'), file("a_dir/x.txt", '.', 'M')], &HashSet::new());
+        let panel = render_unstaged(
+            &[file("z.txt", '.', 'M'), file("a_dir/x.txt", '.', 'M')],
+            &HashSet::new(),
+        );
         // "a_dir/" (a directory) sorts before "z.txt" despite the
         // alphabetically-later name, matching `fenix_explorer`'s own
         // directories-first convention.
         let first_line = panel.text.lines().next().unwrap();
-        assert!(first_line.contains("a_dir/"), "expected the directory row first, got: {first_line:?}");
+        assert!(
+            first_line.contains("a_dir/"),
+            "expected the directory row first, got: {first_line:?}"
+        );
     }
 
     #[test]
@@ -691,8 +912,14 @@ mod tests {
 
     #[test]
     fn file_status_badge_marks_a_conflict_bad_regardless_of_which_side() {
-        assert_eq!(file_status_badge(&file("a.txt", 'U', 'U')).1, GitBadgeColor::Bad);
-        assert_eq!(file_status_badge(&file("a.txt", 'A', 'U')).1, GitBadgeColor::Bad);
+        assert_eq!(
+            file_status_badge(&file("a.txt", 'U', 'U')).1,
+            GitBadgeColor::Bad
+        );
+        assert_eq!(
+            file_status_badge(&file("a.txt", 'A', 'U')).1,
+            GitBadgeColor::Bad
+        );
     }
 
     #[test]
@@ -702,7 +929,10 @@ mod tests {
         assert!(panel.text.contains("  feature"));
         let entries: Vec<_> = panel.lines.iter().flatten().collect();
         assert_eq!(entries[0].badge.map(|(_, c)| c), Some(GitBadgeColor::Good));
-        assert_eq!(entries[1].badge.map(|(_, c)| c), Some(GitBadgeColor::Neutral));
+        assert_eq!(
+            entries[1].badge.map(|(_, c)| c),
+            Some(GitBadgeColor::Neutral)
+        );
     }
 
     #[test]
@@ -724,7 +954,10 @@ mod tests {
         let panel = render_commits(&[commit("abc123full", "abc123", "Fix the thing")]);
         assert!(panel.text.contains("[abc123] Fix the thing"));
         let entries: Vec<_> = panel.lines.iter().flatten().collect();
-        assert_eq!(entries[0].entry, Some(GitEntry::Commit("abc123full".to_string())));
+        assert_eq!(
+            entries[0].entry,
+            Some(GitEntry::Commit("abc123full".to_string()))
+        );
     }
 
     #[test]
@@ -747,12 +980,19 @@ mod tests {
 
     #[test]
     fn render_status_none_shows_not_a_repo() {
-        assert!(render_status(None, 0, 0, 0, None, 0, None).text.contains("Not a git repository"));
+        assert!(render_status(None, 0, 0, 0, None, 0, None)
+            .text
+            .contains("Not a git repository"));
     }
 
     #[test]
     fn render_status_shows_branch_and_file_counts() {
-        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
+        let s = RepoStatus {
+            branch: "main".to_string(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+        };
         let panel = render_status(Some(&s), 2, 1, 3, None, 0, None);
         assert!(panel.text.contains("Branch: main"));
         assert!(panel.text.contains("Staged: 2"));
@@ -763,7 +1003,12 @@ mod tests {
 
     #[test]
     fn render_status_shows_upstream_and_ahead_behind_when_tracking() {
-        let s = RepoStatus { branch: "main".to_string(), upstream: Some("origin/main".to_string()), ahead: 2, behind: 1 };
+        let s = RepoStatus {
+            branch: "main".to_string(),
+            upstream: Some("origin/main".to_string()),
+            ahead: 2,
+            behind: 1,
+        };
         let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
         assert!(panel.text.contains("Upstream: origin/main"));
         assert!(panel.text.contains("Ahead/Behind: +2 -1"));
@@ -771,68 +1016,152 @@ mod tests {
 
     #[test]
     fn a_suspended_operation_leads_the_status_pane_with_the_keys_that_end_it() {
-        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
+        let s = RepoStatus {
+            branch: "main".to_string(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+        };
         let op = fenix_git::InProgress::Rebase { step: Some((2, 5)) };
         let panel = render_status(Some(&s), 0, 0, 0, Some(&op), 0, None);
         let first = panel.text.lines().next().unwrap();
         assert!(first.contains("REBASING 2/5"), "got: {first:?}");
-        assert!(first.contains("continue") && first.contains("abort"), "the way out has to be on screen: {first:?}");
+        assert!(
+            first.contains("continue") && first.contains("abort"),
+            "the way out has to be on screen: {first:?}"
+        );
     }
 
     #[test]
     fn conflicted_files_are_counted_where_they_cannot_be_missed() {
-        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
-        let panel = render_status(Some(&s), 0, 0, 0, Some(&fenix_git::InProgress::Merge), 3, None);
-        assert!(panel.text.contains("[3] conflicted files"), "got:
-{}", panel.text);
+        let s = RepoStatus {
+            branch: "main".to_string(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+        };
+        let panel = render_status(
+            Some(&s),
+            0,
+            0,
+            0,
+            Some(&fenix_git::InProgress::Merge),
+            3,
+            None,
+        );
+        assert!(
+            panel.text.contains("[3] conflicted files"),
+            "got:
+{}",
+            panel.text
+        );
         // Singular reads properly too.
-        let one = render_status(Some(&s), 0, 0, 0, Some(&fenix_git::InProgress::Merge), 1, None);
-        assert!(one.text.contains("[1] conflicted file "), "got:
-{}", one.text);
-        assert!(!one.text.contains("conflicted files"), "got:
-{}", one.text);
+        let one = render_status(
+            Some(&s),
+            0,
+            0,
+            0,
+            Some(&fenix_git::InProgress::Merge),
+            1,
+            None,
+        );
+        assert!(
+            one.text.contains("[1] conflicted file "),
+            "got:
+{}",
+            one.text
+        );
+        assert!(
+            !one.text.contains("conflicted files"),
+            "got:
+{}",
+            one.text
+        );
         // And the row says where to go do something about it.
-        assert!(one.text.contains("SPC g x x to resolve"), "got:
-{}", one.text);
+        assert!(
+            one.text.contains("SPC g x x to resolve"),
+            "got:
+{}",
+            one.text
+        );
     }
 
     #[test]
     fn a_clean_repo_gets_no_banner_and_no_conflict_row() {
-        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
+        let s = RepoStatus {
+            branch: "main".to_string(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+        };
         let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
-        assert!(panel.text.starts_with("    Branch:"), "got:
-{}", panel.text);
+        assert!(
+            panel.text.starts_with("    Branch:"),
+            "got:
+{}",
+            panel.text
+        );
         assert!(!panel.text.contains("conflicted"));
     }
 
     #[test]
     fn a_long_status_detail_value_word_wraps_onto_continuation_lines() {
         let long_branch = format!("feature/{}", "a-very-descriptive-segment-".repeat(6));
-        let s = RepoStatus { branch: long_branch.clone(), upstream: None, ahead: 0, behind: 0 };
+        let s = RepoStatus {
+            branch: long_branch.clone(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+        };
         let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
-        let detail_rows = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Detail).count();
+        let detail_rows = panel
+            .lines
+            .iter()
+            .flatten()
+            .filter(|l| l.style == GitLineStyle::Detail)
+            .count();
         assert!(detail_rows > 4, "expected the long branch name to wrap onto more than one line, got {detail_rows} detail rows:\n{}", panel.text);
-        assert_eq!(panel.text.lines().count(), panel.lines.len(), "text and lines must stay in lockstep after wrapping");
+        assert_eq!(
+            panel.text.lines().count(),
+            panel.lines.len(),
+            "text and lines must stay in lockstep after wrapping"
+        );
     }
 
     #[test]
     fn a_wrapped_status_continuation_line_is_dimmed_in_full() {
         let long_branch = format!("feature/{}", "a-very-descriptive-segment-".repeat(6));
-        let s = RepoStatus { branch: long_branch, upstream: None, ahead: 0, behind: 0 };
+        let s = RepoStatus {
+            branch: long_branch,
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+        };
         let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
-        let detail_lines: Vec<&GitLine> = panel.lines.iter().flatten().filter(|l| l.style == GitLineStyle::Detail).collect();
-        assert!(detail_lines.iter().any(|l| l.dim_from == Some(0)), "expected a continuation line dimmed from column 0");
+        let detail_lines: Vec<&GitLine> = panel
+            .lines
+            .iter()
+            .flatten()
+            .filter(|l| l.style == GitLineStyle::Detail)
+            .collect();
+        assert!(
+            detail_lines.iter().any(|l| l.dim_from == Some(0)),
+            "expected a continuation line dimmed from column 0"
+        );
     }
 
     #[test]
     fn a_short_status_detail_value_never_wraps() {
-        let s = RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 };
+        let s = RepoStatus {
+            branch: "main".to_string(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+        };
         let panel = render_status(Some(&s), 0, 0, 0, None, 0, None);
-        assert!(!panel.text.contains("\nmain\n"), "a short value must not spill onto its own continuation line");
+        assert!(
+            !panel.text.contains("\nmain\n"),
+            "a short value must not spill onto its own continuation line"
+        );
     }
-
-
-
-
-
 }

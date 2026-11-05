@@ -28,9 +28,18 @@ const TILE_EDGE: [u8; 3] = [0x2F, 0x30, 0x36];
 type Blade = ([u8; 3], [(f32, f32); 4]);
 
 const MARK: [Blade; 3] = [
-    (CINDER, [(8.0, 45.0), (16.0, 45.0), (16.0, 7.0), (8.0, 11.0)]),
-    (EMBER, [(16.0, 15.0), (40.0, 3.0), (40.0, 11.0), (16.0, 23.0)]),
-    (FLAME, [(16.0, 29.0), (32.0, 21.0), (32.0, 29.0), (16.0, 37.0)]),
+    (
+        CINDER,
+        [(8.0, 45.0), (16.0, 45.0), (16.0, 7.0), (8.0, 11.0)],
+    ),
+    (
+        EMBER,
+        [(16.0, 15.0), (40.0, 3.0), (40.0, 11.0), (16.0, 23.0)],
+    ),
+    (
+        FLAME,
+        [(16.0, 29.0), (32.0, 21.0), (32.0, 29.0), (16.0, 37.0)],
+    ),
 ];
 const GRID: f32 = 48.0;
 /// Where the mark's blades stand within the grid: its visible top and
@@ -43,7 +52,10 @@ const BLADE: f32 = 8.0;
 fn draw_mark(canvas: &mut Canvas, x: f32, y: f32, box_size: f32) {
     let unit = box_size / GRID;
     for (color, points) in MARK {
-        let contour: Vec<(f32, f32)> = points.iter().map(|&(px, py)| (x + px * unit, y + py * unit)).collect();
+        let contour: Vec<(f32, f32)> = points
+            .iter()
+            .map(|&(px, py)| (x + px * unit, y + py * unit))
+            .collect();
         canvas.fill(&[contour], color, 1.0);
     }
 }
@@ -62,7 +74,10 @@ pub fn blade(index: usize, size: u32) -> Image {
     let mut canvas = Canvas::new(size, size);
     let unit = size as f32 / GRID;
     if let Some((color, points)) = MARK.get(index) {
-        let contour: Vec<(f32, f32)> = points.iter().map(|&(px, py)| (px * unit, py * unit)).collect();
+        let contour: Vec<(f32, f32)> = points
+            .iter()
+            .map(|&(px, py)| (px * unit, py * unit))
+            .collect();
         canvas.fill(&[contour], *color, 1.0);
     }
     canvas.into_image()
@@ -78,8 +93,14 @@ pub fn wordmark(cap_height: u32, text: [u8; 3]) -> Image {
     let origin_x = pad - wordmark::MIN_X * em;
     let baseline = pad - wordmark::MIN_Y * em;
     let mut canvas = Canvas::new(width.max(1), height.max(1));
-    let contours: Vec<Vec<(f32, f32)>> =
-        wordmark::CONTOURS.iter().map(|c| c.iter().map(|&(x, y)| (origin_x + x * em, baseline + y * em)).collect()).collect();
+    let contours: Vec<Vec<(f32, f32)>> = wordmark::CONTOURS
+        .iter()
+        .map(|c| {
+            c.iter()
+                .map(|&(x, y)| (origin_x + x * em, baseline + y * em))
+                .collect()
+        })
+        .collect();
     canvas.fill(&contours, text, 1.0);
     canvas.into_image()
 }
@@ -96,9 +117,24 @@ pub fn app_icon(size: u32) -> Image {
     let radius = s * 0.225;
     let edge = (s / 128.0).max(1.0);
     canvas.fill(&[rounded_rect(0.0, 0.0, s, s, radius)], TILE_EDGE, 1.0);
-    canvas.fill(&[rounded_rect(edge, edge, s - 2.0 * edge, s - 2.0 * edge, radius - edge)], TILE, 1.0);
+    canvas.fill(
+        &[rounded_rect(
+            edge,
+            edge,
+            s - 2.0 * edge,
+            s - 2.0 * edge,
+            radius - edge,
+        )],
+        TILE,
+        1.0,
+    );
     let box_size = s * 0.6;
-    draw_mark(&mut canvas, (s - box_size) / 2.0, (s - box_size) / 2.0, box_size);
+    draw_mark(
+        &mut canvas,
+        (s - box_size) / 2.0,
+        (s - box_size) / 2.0,
+        box_size,
+    );
     canvas.into_image()
 }
 
@@ -119,7 +155,11 @@ pub fn lockup(height: u32, text: [u8; 3]) -> Image {
     draw_mark(&mut canvas, 0.0, 0.0, h);
     let contours: Vec<Vec<(f32, f32)>> = wordmark::CONTOURS
         .iter()
-        .map(|c| c.iter().map(|&(x, y)| (origin_x + x * em, baseline + y * em)).collect())
+        .map(|c| {
+            c.iter()
+                .map(|&(x, y)| (origin_x + x * em, baseline + y * em))
+                .collect()
+        })
         .collect();
     canvas.fill(&contours, text, 1.0);
     canvas.into_image()
@@ -147,11 +187,14 @@ pub fn ico_bytes() -> Vec<u8> {
         .iter()
         .map(|&size| {
             let icon = app_icon(size);
-            IcoFrame::as_png(&icon.rgba, size, size, image::ExtendedColorType::Rgba8).expect("an RGBA frame of a valid icon size encodes")
+            IcoFrame::as_png(&icon.rgba, size, size, image::ExtendedColorType::Rgba8)
+                .expect("an RGBA frame of a valid icon size encodes")
         })
         .collect();
     let mut out = Vec::new();
-    IcoEncoder::new(&mut out).encode_images(&frames).expect("encoding into memory cannot fail");
+    IcoEncoder::new(&mut out)
+        .encode_images(&frames)
+        .expect("encoding into memory cannot fail");
     out
 }
 
@@ -178,7 +221,10 @@ mod tests {
     fn edges_are_antialiased() {
         let m = mark(96);
         let alphas: Vec<u8> = (0..96).map(|x| pixel(&m, x, 30)[3]).collect();
-        assert!(alphas.iter().any(|&a| a > 0 && a < 255), "no partial coverage along a row crossing the arms");
+        assert!(
+            alphas.iter().any(|&a| a > 0 && a < 255),
+            "no partial coverage along a row crossing the arms"
+        );
     }
 
     #[test]
@@ -186,7 +232,11 @@ mod tests {
         let icon = app_icon(256);
         assert_eq!(pixel(&icon, 0, 0)[3], 0, "the corner is cut away");
         assert_eq!(pixel(&icon, 128, 250), [TILE[0], TILE[1], TILE[2], 255]);
-        assert_eq!(&pixel(&icon, 128, 99)[..3], &EMBER, "the mark sits in the middle");
+        assert_eq!(
+            &pixel(&icon, 128, 99)[..3],
+            &EMBER,
+            "the mark sits in the middle"
+        );
     }
 
     #[test]
@@ -198,11 +248,24 @@ mod tests {
     fn the_lockup_is_the_mark_then_the_word() {
         let l = lockup(96, [0xF2, 0xF2, 0xF2]);
         assert_eq!(l.width, lockup_width(96));
-        assert!(l.width > 96 * 3, "the word is wider than the mark: {}", l.width);
-        let word_ink = (100..l.width).flat_map(|x| (0..96).map(move |y| (x, y))).filter(|&(x, y)| pixel(&l, x, y)[3] == 255).count();
-        assert!(word_ink > 1000, "the wordmark was drawn: {word_ink} solid pixels");
+        assert!(
+            l.width > 96 * 3,
+            "the word is wider than the mark: {}",
+            l.width
+        );
+        let word_ink = (100..l.width)
+            .flat_map(|x| (0..96).map(move |y| (x, y)))
+            .filter(|&(x, y)| pixel(&l, x, y)[3] == 255)
+            .count();
+        assert!(
+            word_ink > 1000,
+            "the wordmark was drawn: {word_ink} solid pixels"
+        );
         let above_mark_top = (0..l.width).filter(|&x| pixel(&l, x, 3)[3] > 0).count();
-        assert_eq!(above_mark_top, 0, "nothing reaches above the mark's top edge");
+        assert_eq!(
+            above_mark_top, 0,
+            "nothing reaches above the mark's top edge"
+        );
     }
 
     #[cfg(feature = "ico")]
@@ -221,11 +284,20 @@ mod tests {
     #[cfg(feature = "ico")]
     #[test]
     fn the_committed_fenix_ico_is_the_current_icon() {
-        let committed = image::load_from_memory_with_format(include_bytes!("../../../fenix.ico"), image::ImageFormat::Ico)
-            .expect("fenix.ico decodes")
-            .to_rgba8();
+        let committed = image::load_from_memory_with_format(
+            include_bytes!("../../../fenix.ico"),
+            image::ImageFormat::Ico,
+        )
+        .expect("fenix.ico decodes")
+        .to_rgba8();
         let expected = app_icon(committed.width());
-        let worst = committed.as_raw().iter().zip(&expected.rgba).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+        let worst = committed
+            .as_raw()
+            .iter()
+            .zip(&expected.rgba)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
         assert!(worst <= 2, "fenix.ico differs from fenix-brand's icon (worst channel diff {worst}); run the write-icon example");
     }
 }

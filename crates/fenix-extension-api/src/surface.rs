@@ -36,7 +36,10 @@
 //! [`crate::Event::PageShown`]. Its pixels are BGRA, row after row;
 //! what it writes is shown at the next [`present`], all at once.
 
-use crate::{host, CursorImage, KeyEvent, Modifiers, NamedKey, Role, SurfaceKey, SurfaceMark, SurfaceOptions, SurfaceScale};
+use crate::{
+    host, CursorImage, KeyEvent, Modifiers, NamedKey, Role, SurfaceKey, SurfaceMark,
+    SurfaceOptions, SurfaceScale,
+};
 
 /// Opens a surface; its pane's size comes as
 /// [`crate::Event::SurfaceResized`].
@@ -50,17 +53,39 @@ pub fn resize(surface: u64, width: u32, height: u32) -> Result<(), String> {
 }
 
 /// A rectangle of its pixels, BGRA, row after row.
-pub fn write(surface: u64, x: u32, y: u32, width: u32, height: u32, bgra: &[u8]) -> Result<(), String> {
+pub fn write(
+    surface: u64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    bgra: &[u8],
+) -> Result<(), String> {
     host::surface_write(surface, x, y, width, height, bgra)
 }
 
 /// A rectangle in one colour, (r, g, b).
-pub fn fill(surface: u64, x: u32, y: u32, width: u32, height: u32, rgb: (u8, u8, u8)) -> Result<(), String> {
+pub fn fill(
+    surface: u64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    rgb: (u8, u8, u8),
+) -> Result<(), String> {
     host::surface_fill(surface, x, y, width, height, rgb)
 }
 
 /// A rectangle moved within it, to (`to_x`, `to_y`): a scroll.
-pub fn copy(surface: u64, x: u32, y: u32, width: u32, height: u32, to_x: u32, to_y: u32) -> Result<(), String> {
+pub fn copy(
+    surface: u64,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    to_x: u32,
+    to_y: u32,
+) -> Result<(), String> {
     host::surface_copy(surface, x, y, width, height, to_x, to_y)
 }
 
@@ -87,7 +112,11 @@ pub fn retitle(page: u64, title: &str) {
 impl SurfaceOptions {
     /// In the focused pane, fitted, a page's keys.
     pub fn new() -> SurfaceOptions {
-        SurfaceOptions { capture: false, scale: SurfaceScale::Fit, beside: None }
+        SurfaceOptions {
+            capture: false,
+            scale: SurfaceScale::Fit,
+            beside: None,
+        }
     }
 
     /// Takes every key while focused, pressed and let go, as a remote
@@ -118,7 +147,13 @@ impl Default for SurfaceOptions {
 impl SurfaceMark {
     /// A box at (x, y), `width` x `height`, tinted in `role`'s colour.
     pub fn new(x: i32, y: i32, width: u32, height: u32, role: Role) -> SurfaceMark {
-        SurfaceMark { x, y, width, height, role }
+        SurfaceMark {
+            x,
+            y,
+            width,
+            height,
+            role,
+        }
     }
 }
 
@@ -162,7 +197,11 @@ impl Frame {
         for px in bgra.as_chunks_mut::<4>().0 {
             px[3] = 255;
         }
-        Frame { width, height, bgra }
+        Frame {
+            width,
+            height,
+            bgra,
+        }
     }
 
     /// RGBA pixels (a decoded PNG's) as a frame.
@@ -171,7 +210,11 @@ impl Frame {
         for px in bgra.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
-        Frame { width, height, bgra }
+        Frame {
+            width,
+            height,
+            bgra,
+        }
     }
 
     /// Pixel (x, y) in (r, g, b); outside it, nothing.
@@ -212,7 +255,15 @@ mod tests {
         f.fill(0, 1, 9, 9, (1, 2, 3));
         assert_eq!(&f.bgra[12..16], &[3, 2, 1, 255], "cut to the frame");
         assert_eq!(Frame::from_rgba(1, 1, &[1, 2, 3, 4]).bgra, [3, 2, 1, 4]);
-        let key = KeyEvent { key: SurfaceKey::Char('a'), down: true, mods: Modifiers { ctrl: false, alt: false, meta: false } };
+        let key = KeyEvent {
+            key: SurfaceKey::Char('a'),
+            down: true,
+            mods: Modifiers {
+                ctrl: false,
+                alt: false,
+                meta: false,
+            },
+        };
         assert_eq!(key.char(), Some('a'));
         assert!(key.mods.none() && !key.is(NamedKey::Enter));
         assert!(SurfaceOptions::new().capture().beside(0.4).capture);

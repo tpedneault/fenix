@@ -17,7 +17,11 @@ pub fn find_match(buffer: &Buffer, char_idx: usize) -> Option<usize> {
         '[' | ']' => ('[', ']'),
         _ => return None,
     };
-    if ch == open { find_forward(buffer, char_idx, open, close) } else { find_backward(buffer, char_idx, open, close) }
+    if ch == open {
+        find_forward(buffer, char_idx, open, close)
+    } else {
+        find_backward(buffer, char_idx, open, close)
+    }
 }
 
 fn find_forward(buffer: &Buffer, from: usize, open: char, close: char) -> Option<usize> {
@@ -42,7 +46,13 @@ fn find_forward(buffer: &Buffer, from: usize, open: char, close: char) -> Option
 /// search forward on the line" fallback for `enclosing_pair`, the same
 /// "search forward, don't just fail" behavior `quote_positions` already
 /// has for quote objects. `None` if there's no `open` in `at..line_end`.
-pub fn next_pair_on_line(buffer: &Buffer, at: usize, open: char, close: char, line_end: usize) -> Option<(usize, usize)> {
+pub fn next_pair_on_line(
+    buffer: &Buffer,
+    at: usize,
+    open: char,
+    close: char,
+    line_end: usize,
+) -> Option<(usize, usize)> {
     let mut i = at;
     while i < line_end {
         if buffer.char_at(i) == Some(open) {
@@ -68,7 +78,12 @@ pub fn next_pair_on_line(buffer: &Buffer, at: usize, open: char, close: char, li
 /// Same "ignores string/comment context" scope as `find_match`. `None`
 /// if `char_idx` isn't enclosed by a complete pair (unbalanced code, or
 /// genuinely outside any).
-pub fn enclosing_pair(buffer: &Buffer, char_idx: usize, open: char, close: char) -> Option<(usize, usize)> {
+pub fn enclosing_pair(
+    buffer: &Buffer,
+    char_idx: usize,
+    open: char,
+    close: char,
+) -> Option<(usize, usize)> {
     let len = buffer.len_chars();
     if len == 0 {
         return None;
@@ -208,13 +223,19 @@ mod tests {
     #[test]
     fn next_pair_on_line_finds_a_pair_starting_ahead_of_the_cursor() {
         let b = buf("x = (hello)");
-        assert_eq!(next_pair_on_line(&b, 0, '(', ')', b.len_chars()), Some((4, 10)));
+        assert_eq!(
+            next_pair_on_line(&b, 0, '(', ')', b.len_chars()),
+            Some((4, 10))
+        );
     }
 
     #[test]
     fn next_pair_on_line_finds_the_pair_it_already_starts_on() {
         let b = buf("(hello)");
-        assert_eq!(next_pair_on_line(&b, 0, '(', ')', b.len_chars()), Some((0, 6)));
+        assert_eq!(
+            next_pair_on_line(&b, 0, '(', ')', b.len_chars()),
+            Some((0, 6))
+        );
     }
 
     #[test]

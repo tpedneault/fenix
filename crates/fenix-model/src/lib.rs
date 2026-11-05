@@ -176,13 +176,23 @@ impl Model {
             .map(|n| {
                 let (t, r, s) = n.transform().decomposed();
                 Node {
-                    rest: Trs { t: Vec3::from(t), r: Quat::from_array(r).normalize(), s: Vec3::from(s) },
+                    rest: Trs {
+                        t: Vec3::from(t),
+                        r: Quat::from_array(r).normalize(),
+                        s: Vec3::from(s),
+                    },
                     children: n.children().map(|c| c.index()).collect(),
-                    optional: n.name().and_then(|name| name.strip_prefix("opt:")).map(str::to_string),
+                    optional: n
+                        .name()
+                        .and_then(|name| name.strip_prefix("opt:"))
+                        .map(str::to_string),
                 }
             })
             .collect();
-        let scene = doc.default_scene().or_else(|| doc.scenes().next()).ok_or("the model has no scene")?;
+        let scene = doc
+            .default_scene()
+            .or_else(|| doc.scenes().next())
+            .ok_or("the model has no scene")?;
         let roots: Vec<usize> = scene.nodes().map(|n| n.index()).collect();
         if has_cycle(&nodes, &roots) {
             return Err("the model's nodes go round in a circle".into());
@@ -198,32 +208,55 @@ impl Model {
                     continue;
                 }
                 let reader = prim.reader(get);
-                let positions: Vec<Vec3> = reader.read_positions().ok_or("a mesh without positions")?.map(Vec3::from).collect();
+                let positions: Vec<Vec3> = reader
+                    .read_positions()
+                    .ok_or("a mesh without positions")?
+                    .map(Vec3::from)
+                    .collect();
                 let n = positions.len();
                 let indices: Vec<u32> = match reader.read_indices() {
                     Some(i) => i.into_u32().collect(),
                     None => (0..n as u32).collect(),
                 };
                 if !indices.len().is_multiple_of(3) || indices.iter().any(|&i| i as usize >= n) {
-                    return Err("a mesh's indices don't make whole triangles of its vertices".into());
+                    return Err(
+                        "a mesh's indices don't make whole triangles of its vertices".into(),
+                    );
                 }
                 let normals = match reader.read_normals() {
                     Some(normals) => normals.map(|v| Vec3::from(v).normalize_or_zero()).collect(),
                     None => smooth_normals(&positions, &indices),
                 };
-                let uvs: Vec<[f32; 2]> = reader.read_tex_coords(0).map(|t| t.into_f32().collect()).unwrap_or_else(|| vec![[0.0; 2]; n]);
+                let uvs: Vec<[f32; 2]> = reader
+                    .read_tex_coords(0)
+                    .map(|t| t.into_f32().collect())
+                    .unwrap_or_else(|| vec![[0.0; 2]; n]);
                 let material = prim.material();
                 let pbr = material.pbr_metallic_roughness();
                 let factor = pbr.base_color_factor();
                 let colors: Vec<[f32; 4]> = match reader.read_colors(0) {
-                    Some(c) => c.into_rgba_f32().map(|c| [c[0] * factor[0], c[1] * factor[1], c[2] * factor[2], c[3] * factor[3]]).collect(),
+                    Some(c) => c
+                        .into_rgba_f32()
+                        .map(|c| {
+                            [
+                                c[0] * factor[0],
+                                c[1] * factor[1],
+                                c[2] * factor[2],
+                                c[3] * factor[3],
+                            ]
+                        })
+                        .collect(),
                     None => vec![factor; n],
                 };
                 let (joints, weights) = match (reader.read_joints(0), reader.read_weights(0)) {
                     (Some(j), Some(w)) => (j.into_u16().collect(), w.into_f32().collect()),
                     _ => (Vec::new(), Vec::new()),
                 };
-                if [uvs.len(), colors.len(), normals.len()].iter().any(|&len| len != n) || (!joints.is_empty() && (joints.len() != n || weights.len() != n)) {
+                if [uvs.len(), colors.len(), normals.len()]
+                    .iter()
+                    .any(|&len| len != n)
+                    || (!joints.is_empty() && (joints.len() != n || weights.len() != n))
+                {
                     return Err("a mesh's attributes don't all have one value a vertex".into());
                 }
                 let texture = match pbr.base_color_texture() {
@@ -241,8 +274,22 @@ impl Model {
                     }
                     None => None,
                 };
-                let skin = node.skin().map(|s| s.index()).filter(|_| !joints.is_empty());
-                parts.push(Part { indices, uvs, colors, texture, positions, normals, joints, weights, node: node.index(), skin });
+                let skin = node
+                    .skin()
+                    .map(|s| s.index())
+                    .filter(|_| !joints.is_empty());
+                parts.push(Part {
+                    indices,
+                    uvs,
+                    colors,
+                    texture,
+                    positions,
+                    normals,
+                    joints,
+                    weights,
+                    node: node.index(),
+                    skin,
+                });
             }
         }
         if parts.is_empty() {
@@ -262,7 +309,10 @@ impl Model {
             if inverse_bind.len() != joints.len() {
                 return Err("a skin has a different number of joints and bind matrices".into());
             }
-            skins.push(Skin { joints, inverse_bind });
+            skins.push(Skin {
+                joints,
+                inverse_bind,
+            });
         }
         for part in &parts {
             if let Some(skin) = part.skin {
@@ -278,16 +328,34 @@ impl Model {
             let mut channels = Vec::new();
             for channel in anim.channels() {
                 let reader = channel.reader(get);
-                let Some(times) = reader.read_inputs() else { continue };
+                let Some(times) = reader.read_inputs() else {
+                    continue;
+                };
                 let times: Vec<f32> = times.collect();
                 let cubic = channel.sampler().interpolation() == Interpolation::CubicSpline;
                 // A cubic spline keys an in-tangent, the value and an
                 // out-tangent: the value is the middle of each three.
                 let keep = |i: usize| !cubic || i % 3 == 1;
                 let values = match reader.read_outputs() {
-                    Some(ReadOutputs::Translations(v)) => Values::Translation(v.enumerate().filter(|(i, _)| keep(*i)).map(|(_, v)| Vec3::from(v)).collect()),
-                    Some(ReadOutputs::Rotations(v)) => Values::Rotation(v.into_f32().enumerate().filter(|(i, _)| keep(*i)).map(|(_, q)| Quat::from_array(q).normalize()).collect()),
-                    Some(ReadOutputs::Scales(v)) => Values::Scale(v.enumerate().filter(|(i, _)| keep(*i)).map(|(_, v)| Vec3::from(v)).collect()),
+                    Some(ReadOutputs::Translations(v)) => Values::Translation(
+                        v.enumerate()
+                            .filter(|(i, _)| keep(*i))
+                            .map(|(_, v)| Vec3::from(v))
+                            .collect(),
+                    ),
+                    Some(ReadOutputs::Rotations(v)) => Values::Rotation(
+                        v.into_f32()
+                            .enumerate()
+                            .filter(|(i, _)| keep(*i))
+                            .map(|(_, q)| Quat::from_array(q).normalize())
+                            .collect(),
+                    ),
+                    Some(ReadOutputs::Scales(v)) => Values::Scale(
+                        v.enumerate()
+                            .filter(|(i, _)| keep(*i))
+                            .map(|(_, v)| Vec3::from(v))
+                            .collect(),
+                    ),
                     _ => continue,
                 };
                 let len = match &values {
@@ -295,15 +363,41 @@ impl Model {
                     Values::Rotation(v) => v.len(),
                 };
                 if times.is_empty() || len != times.len() || times.windows(2).any(|w| w[1] < w[0]) {
-                    return Err(format!("animation {}: a channel's keys don't match its times", anim.name().unwrap_or("")));
+                    return Err(format!(
+                        "animation {}: a channel's keys don't match its times",
+                        anim.name().unwrap_or("")
+                    ));
                 }
-                channels.push(Channel { node: channel.target().node().index(), times, values, step: channel.sampler().interpolation() == Interpolation::Step });
+                channels.push(Channel {
+                    node: channel.target().node().index(),
+                    times,
+                    values,
+                    step: channel.sampler().interpolation() == Interpolation::Step,
+                });
             }
-            let seconds = channels.iter().filter_map(|c| c.times.last().copied()).fold(0.0, f32::max);
-            clips.push(Clip { name: anim.name().map(str::to_string).unwrap_or_else(|| format!("clip{i}")), seconds, channels });
+            let seconds = channels
+                .iter()
+                .filter_map(|c| c.times.last().copied())
+                .fold(0.0, f32::max);
+            clips.push(Clip {
+                name: anim
+                    .name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("clip{i}")),
+                seconds,
+                channels,
+            });
         }
 
-        let mut model = Model { nodes: std::mem::take(&mut nodes), roots, skins, parts, textures, clips, bounds: (Vec3::ZERO, Vec3::ZERO) };
+        let mut model = Model {
+            nodes: std::mem::take(&mut nodes),
+            roots,
+            skins,
+            parts,
+            textures,
+            clips,
+            bounds: (Vec3::ZERO, Vec3::ZERO),
+        };
         // What's drawn: the triangles not folded away with a hidden part.
         let rest = model.pose(&[], &|_| false);
         let mut least = Vec3::splat(f32::INFINITY);
@@ -335,7 +429,11 @@ impl Model {
         let locals = self.locals(playing);
         let mut world = vec![Mat4::IDENTITY; self.nodes.len()];
         let mut visible = vec![false; self.nodes.len()];
-        let mut stack: Vec<(usize, Mat4, bool)> = self.roots.iter().map(|&r| (r, Mat4::IDENTITY, true)).collect();
+        let mut stack: Vec<(usize, Mat4, bool)> = self
+            .roots
+            .iter()
+            .map(|&r| (r, Mat4::IDENTITY, true))
+            .collect();
         while let Some((i, parent, vis)) = stack.pop() {
             world[i] = parent * locals[i].matrix();
             visible[i] = vis && self.nodes[i].optional.as_deref().is_none_or(shown);
@@ -348,7 +446,19 @@ impl Model {
         let joint_mats: Vec<Vec<Mat4>> = self
             .skins
             .iter()
-            .map(|s| s.joints.iter().zip(&s.inverse_bind).map(|(&j, ib)| if visible[j] { world[j] * *ib } else { Mat4::from_cols(Vec4::ZERO, Vec4::ZERO, Vec4::ZERO, world[j].w_axis) }).collect())
+            .map(|s| {
+                s.joints
+                    .iter()
+                    .zip(&s.inverse_bind)
+                    .map(|(&j, ib)| {
+                        if visible[j] {
+                            world[j] * *ib
+                        } else {
+                            Mat4::from_cols(Vec4::ZERO, Vec4::ZERO, Vec4::ZERO, world[j].w_axis)
+                        }
+                    })
+                    .collect()
+            })
             .collect();
         let parts = self
             .parts
@@ -378,13 +488,25 @@ impl Model {
                     None => {
                         let m = world[part.node];
                         let nm = Mat3::from_mat4(m).inverse().transpose();
-                        positions.extend(part.positions.iter().map(|p| m.transform_point3(*p).to_array()));
-                        normals.extend(part.normals.iter().map(|n| (nm * *n).normalize_or_zero().to_array()));
+                        positions.extend(
+                            part.positions
+                                .iter()
+                                .map(|p| m.transform_point3(*p).to_array()),
+                        );
+                        normals.extend(
+                            part.normals
+                                .iter()
+                                .map(|n| (nm * *n).normalize_or_zero().to_array()),
+                        );
                     }
                 }
                 // A skinned mesh follows its joints, not its node: the
                 // node's own visibility is what an `opt:` parent decides.
-                PosedPart { positions, normals, shown: visible[part.node] }
+                PosedPart {
+                    positions,
+                    normals,
+                    shown: visible[part.node],
+                }
             })
             .collect();
         Pose { parts }
@@ -405,9 +527,15 @@ impl Model {
         for p in &playing {
             let w = p.weight / total;
             let mut one = rest.clone();
-            let channels = self.clips.get(p.clip).map(|c| c.channels.as_slice()).unwrap_or_default();
+            let channels = self
+                .clips
+                .get(p.clip)
+                .map(|c| c.channels.as_slice())
+                .unwrap_or_default();
             for ch in channels {
-                let Some(node) = one.get_mut(ch.node) else { continue };
+                let Some(node) = one.get_mut(ch.node) else {
+                    continue;
+                };
                 let (i, f) = key(&ch.times, p.seconds, ch.step);
                 match &ch.values {
                     Values::Translation(v) => node.t = v[i].lerp(v[(i + 1).min(v.len() - 1)], f),
@@ -420,13 +548,23 @@ impl Model {
                 s[n] += trs.s * w;
                 // Quaternions summed on one hemisphere, then normalised:
                 // close enough to a slerp for blending poses.
-                let q = if Quat::from_array(r[n]).dot(trs.r) < 0.0 { -trs.r } else { trs.r };
+                let q = if Quat::from_array(r[n]).dot(trs.r) < 0.0 {
+                    -trs.r
+                } else {
+                    trs.r
+                };
                 for (acc, v) in r[n].iter_mut().zip(q.to_array()) {
                     *acc += v * w;
                 }
             }
         }
-        (0..rest.len()).map(|n| Trs { t: t[n], r: Quat::from_array(r[n]).normalize(), s: s[n] }).collect()
+        (0..rest.len())
+            .map(|n| Trs {
+                t: t[n],
+                r: Quat::from_array(r[n]).normalize(),
+                s: s[n],
+            })
+            .collect()
     }
 }
 
@@ -456,7 +594,11 @@ fn key(times: &[f32], at: f32, step: bool) -> (usize, f32) {
     }
     let i = times.partition_point(|&t| t <= at) - 1;
     let span = times[i + 1] - times[i];
-    let f = if step || span <= 0.0 { 0.0 } else { (at - times[i]) / span };
+    let f = if step || span <= 0.0 {
+        0.0
+    } else {
+        (at - times[i]) / span
+    };
     (i, f)
 }
 
@@ -471,7 +613,10 @@ fn smooth_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
             normals[v] += face;
         }
     }
-    normals.into_iter().map(|n| n.normalize_or(Vec3::Y)).collect()
+    normals
+        .into_iter()
+        .map(|n| n.normalize_or(Vec3::Y))
+        .collect()
 }
 
 fn has_cycle(nodes: &[Node], roots: &[usize]) -> bool {
@@ -500,13 +645,21 @@ fn decode(image: &gltf::Image, blob: Option<&[u8]>) -> Result<Texture, String> {
         return Err("a model's textures are inside it, not other files".into());
     };
     let blob = blob.ok_or("the model has no binary chunk")?;
-    let bytes = blob.get(view.offset()..view.offset() + view.length()).ok_or("a texture runs past the model's end")?;
-    let decoded = image::load_from_memory(bytes).map_err(|e| format!("a texture: {e}"))?.to_rgba8();
+    let bytes = blob
+        .get(view.offset()..view.offset() + view.length())
+        .ok_or("a texture runs past the model's end")?;
+    let decoded = image::load_from_memory(bytes)
+        .map_err(|e| format!("a texture: {e}"))?
+        .to_rgba8();
     let (width, height) = decoded.dimensions();
     if width > MAX_TEXTURE || height > MAX_TEXTURE {
         return Err(format!("a texture is at most {MAX_TEXTURE}x{MAX_TEXTURE}"));
     }
-    Ok(Texture { width, height, rgba: decoded.into_raw() })
+    Ok(Texture {
+        width,
+        height,
+        rgba: decoded.into_raw(),
+    })
 }
 
 #[cfg(test)]
@@ -527,7 +680,14 @@ mod tests {
         mesh.cuboid([0.0, 2.1, 0.0], [0.1, 0.1, 0.1], [0.0, 0.0, 1.0, 1.0], hat);
         b.mesh(mesh);
         let quarter = Quat::from_rotation_z(std::f32::consts::FRAC_PI_2).to_array();
-        b.clip("bend", vec![Track::rotation(tip, vec![0.0, 1.0], vec![Quat::IDENTITY.to_array(), quarter])]);
+        b.clip(
+            "bend",
+            vec![Track::rotation(
+                tip,
+                vec![0.0, 1.0],
+                vec![Quat::IDENTITY.to_array(), quarter],
+            )],
+        );
         b.glb()
     }
 
@@ -550,9 +710,16 @@ mod tests {
     fn a_built_model_reads_back() {
         let model = Model::from_glb(&stick()).unwrap();
         assert_eq!(model.clips.len(), 1);
-        assert_eq!((model.clips[0].name.as_str(), model.clips[0].seconds), ("bend", 1.0));
+        assert_eq!(
+            (model.clips[0].name.as_str(), model.clips[0].seconds),
+            ("bend", 1.0)
+        );
         assert_eq!(model.clip("bend"), Some(0));
-        assert!((model.bounds.1.y - 2.0).abs() < 1e-4, "the hat's left out: {:?}", model.bounds);
+        assert!(
+            (model.bounds.1.y - 2.0).abs() < 1e-4,
+            "the hat's left out: {:?}",
+            model.bounds
+        );
         assert!(model.bounds.0.y.abs() < 1e-4);
     }
 
@@ -563,14 +730,49 @@ mod tests {
         assert!((highest(&rest) - 2.2).abs() < 1e-4);
         // Bent a quarter round at the tip, the top box lies on its side:
         // nothing's above the joint by more than half the box's width.
-        let bent = model.pose(&[Playing { clip: 0, seconds: 1.0, weight: 1.0 }], &|_| false);
+        let bent = model.pose(
+            &[Playing {
+                clip: 0,
+                seconds: 1.0,
+                weight: 1.0,
+            }],
+            &|_| false,
+        );
         assert!(highest(&bent) < 1.3, "{}", highest(&bent));
         // Halfway between, blended half and half.
-        let half = model.pose(&[Playing { clip: 0, seconds: 1.0, weight: 1.0 }, Playing { clip: 0, seconds: 0.0, weight: 1.0 }], &|_| false);
+        let half = model.pose(
+            &[
+                Playing {
+                    clip: 0,
+                    seconds: 1.0,
+                    weight: 1.0,
+                },
+                Playing {
+                    clip: 0,
+                    seconds: 0.0,
+                    weight: 1.0,
+                },
+            ],
+            &|_| false,
+        );
         let h = highest(&half);
         assert!(h > 1.3 && h < 2.0, "{h}");
         // Blending back to rest: the rest pose is a clip of its own.
-        let back = model.pose(&[Playing { clip: 0, seconds: 1.0, weight: 1.0 }, Playing { clip: Playing::REST, seconds: 0.0, weight: 1.0 }], &|_| false);
+        let back = model.pose(
+            &[
+                Playing {
+                    clip: 0,
+                    seconds: 1.0,
+                    weight: 1.0,
+                },
+                Playing {
+                    clip: Playing::REST,
+                    seconds: 0.0,
+                    weight: 1.0,
+                },
+            ],
+            &|_| false,
+        );
         assert_eq!(highest(&back), h);
     }
 
@@ -597,7 +799,11 @@ mod tests {
     #[test]
     fn what_isnt_a_model_is_refused() {
         assert!(Model::from_glb(b"not a model").is_err());
-        assert!(Model::from_glb(&vec![0; (MAX_MODEL + 1) as usize]).unwrap_err().contains("at most"));
-        assert!(Model::from_glb(&Builder::new().glb()).unwrap_err().contains("no triangles"));
+        assert!(Model::from_glb(&vec![0; (MAX_MODEL + 1) as usize])
+            .unwrap_err()
+            .contains("at most"));
+        assert!(Model::from_glb(&Builder::new().glb())
+            .unwrap_err()
+            .contains("no triangles"));
     }
 }

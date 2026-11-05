@@ -25,9 +25,10 @@ use std::process::Command;
 pub fn archiver() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        let path = PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
-            .join("System32")
-            .join("tar.exe");
+        let path =
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into()))
+                .join("System32")
+                .join("tar.exe");
         path.exists().then_some(path)
     }
     #[cfg(not(windows))]
@@ -53,19 +54,34 @@ pub fn archiver() -> Option<PathBuf> {
 /// whatever opens it will expect.
 pub fn create(sources: &[PathBuf], archive: &Path) -> io::Result<()> {
     let Some(tar) = archiver() else {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "no archiver available on this machine"));
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no archiver available on this machine",
+        ));
     };
     if sources.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "nothing to archive"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "nothing to archive",
+        ));
     }
-    let base = sources[0].parent().map(Path::to_path_buf).unwrap_or_default();
+    let base = sources[0]
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
     let mut names = Vec::with_capacity(sources.len());
     for source in sources {
         if source.parent().map(Path::to_path_buf).unwrap_or_default() != base {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "everything in one archive has to come from one directory"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "everything in one archive has to come from one directory",
+            ));
         }
         let Some(name) = source.file_name() else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "nothing to name inside the archive"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "nothing to name inside the archive",
+            ));
         };
         names.push(name.to_owned());
     }
@@ -73,7 +89,13 @@ pub fn create(sources: &[PathBuf], archive: &Path) -> io::Result<()> {
     // `-a` picks the format from the name, which is why the extension is
     // the whole of the format decision.
     let mut command = no_window(&tar);
-    command.arg("-a").arg("-c").arg("-f").arg(archive).arg("-C").arg(&base);
+    command
+        .arg("-a")
+        .arg("-c")
+        .arg("-f")
+        .arg(archive)
+        .arg("-C")
+        .arg(&base);
     for name in &names {
         command.arg(name);
     }
@@ -88,7 +110,10 @@ pub fn create(sources: &[PathBuf], archive: &Path) -> io::Result<()> {
 /// Choosing that directory is the caller's job; this only makes it.
 pub fn extract(archive: &Path, dest: &Path) -> io::Result<()> {
     let Some(tar) = archiver() else {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "no archiver available on this machine"));
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no archiver available on this machine",
+        ));
     };
     std::fs::create_dir_all(dest)?;
     let mut command = no_window(&tar);
@@ -102,8 +127,13 @@ pub fn extract(archive: &Path, dest: &Path) -> io::Result<()> {
 /// every file in a listing to decide whether to offer one key on it,
 /// which on a share is a listing that never finishes.
 pub fn looks_like_archive(path: &Path) -> bool {
-    const SUFFIXES: &[&str] = &[".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tar.xz", ".txz", ".tar.zst", ".7z"];
-    let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    const SUFFIXES: &[&str] = &[
+        ".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz", ".tar.xz", ".txz", ".tar.zst", ".7z",
+    ];
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
     SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
 }
 
@@ -112,7 +142,12 @@ pub fn looks_like_archive(path: &Path) -> bool {
 /// there are several.
 pub fn suggested_name(sources: &[PathBuf]) -> String {
     match sources {
-        [only] => format!("{}.zip", only.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "archive".into())),
+        [only] => format!(
+            "{}.zip",
+            only.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "archive".into())
+        ),
         _ => {
             let folder = sources
                 .first()
@@ -128,12 +163,23 @@ pub fn suggested_name(sources: &[PathBuf]) -> String {
 /// A sensible directory to unpack into: the archive's own name without
 /// its extension, beside it.
 pub fn suggested_destination(archive: &Path) -> PathBuf {
-    let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "extracted".into());
+    let name = archive
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "extracted".into());
     let lower = name.to_lowercase();
     let stem = ["tar.gz", "tar.bz2", "tar.xz", "tar.zst"]
         .iter()
-        .find_map(|multi| lower.strip_suffix(&format!(".{multi}")).map(|s| s.to_string()))
-        .unwrap_or_else(|| name.rsplit_once('.').map(|(stem, _)| stem.to_string()).unwrap_or_else(|| name.clone()));
+        .find_map(|multi| {
+            lower
+                .strip_suffix(&format!(".{multi}"))
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| {
+            name.rsplit_once('.')
+                .map(|(stem, _)| stem.to_string())
+                .unwrap_or_else(|| name.clone())
+        });
     archive.parent().unwrap_or(Path::new(".")).join(stem)
 }
 
@@ -143,7 +189,12 @@ fn run(mut command: Command) -> io::Result<()> {
         return Ok(());
     }
     let message = String::from_utf8_lossy(&output.stderr);
-    let message = message.lines().find(|l| !l.trim().is_empty()).unwrap_or("the archiver failed").trim().to_string();
+    let message = message
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("the archiver failed")
+        .trim()
+        .to_string();
     Err(io::Error::other(message))
 }
 
@@ -180,8 +231,14 @@ mod tests {
         let back = dir.path().join("back");
         extract(&zip, &back).unwrap();
 
-        assert_eq!(std::fs::read_to_string(back.join("tree").join("a.txt")).unwrap(), "hello");
-        assert_eq!(std::fs::read_to_string(back.join("tree").join("sub").join("b.txt")).unwrap(), "world");
+        assert_eq!(
+            std::fs::read_to_string(back.join("tree").join("a.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(back.join("tree").join("sub").join("b.txt")).unwrap(),
+            "world"
+        );
     }
 
     #[test]
@@ -197,7 +254,12 @@ mod tests {
         create(&[file], &zip).unwrap();
 
         let bytes = std::fs::read(&zip).unwrap();
-        assert_eq!(&bytes[..2], b"PK", "not a zip -- got {:?}", &bytes[..4.min(bytes.len())]);
+        assert_eq!(
+            &bytes[..2],
+            b"PK",
+            "not a zip -- got {:?}",
+            &bytes[..4.min(bytes.len())]
+        );
     }
 
     #[test]
@@ -223,7 +285,11 @@ mod tests {
         // opens it.
         let a = TempDir::new("archive_mixed_a");
         let b = TempDir::new("archive_mixed_b");
-        let err = create(&[a.write("a.txt", "A"), b.write("b.txt", "B")], &a.path().join("out.zip")).unwrap_err();
+        let err = create(
+            &[a.write("a.txt", "A"), b.write("b.txt", "B")],
+            &a.path().join("out.zip"),
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 
@@ -258,14 +324,29 @@ mod tests {
 
     #[test]
     fn one_item_is_named_after_itself_and_several_after_their_folder() {
-        assert_eq!(suggested_name(&[PathBuf::from(r"C:\work\report.docx")]), "report.docx.zip");
-        assert_eq!(suggested_name(&[PathBuf::from(r"C:\work\a.txt"), PathBuf::from(r"C:\work\b.txt")]), "work.zip");
+        assert_eq!(
+            suggested_name(&[PathBuf::from(r"C:\work\report.docx")]),
+            "report.docx.zip"
+        );
+        assert_eq!(
+            suggested_name(&[
+                PathBuf::from(r"C:\work\a.txt"),
+                PathBuf::from(r"C:\work\b.txt")
+            ]),
+            "work.zip"
+        );
     }
 
     #[test]
     fn an_archive_unpacks_into_a_directory_named_after_itself() {
-        assert_eq!(suggested_destination(Path::new(r"C:\work\backup.zip")), PathBuf::from(r"C:\work\backup"));
+        assert_eq!(
+            suggested_destination(Path::new(r"C:\work\backup.zip")),
+            PathBuf::from(r"C:\work\backup")
+        );
         // A two-part extension is one extension.
-        assert_eq!(suggested_destination(Path::new(r"C:\work\src.tar.gz")), PathBuf::from(r"C:\work\src"));
+        assert_eq!(
+            suggested_destination(Path::new(r"C:\work\src.tar.gz")),
+            PathBuf::from(r"C:\work\src")
+        );
     }
 }

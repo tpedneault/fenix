@@ -6,8 +6,7 @@
 
 use fenix_control::protocol::OpenProjectParams;
 use fenix_control::{
-    Call, CaptureResult, CaptureTarget, CommandInfo, CommandsResult, RpcError,
-    StateResult,
+    Call, CaptureResult, CaptureTarget, CommandInfo, CommandsResult, RpcError, StateResult,
 };
 use fenix_tasks::PathPosition;
 use serde_json::{json, Value};
@@ -31,17 +30,30 @@ pub(crate) fn unopenable(path: &Path) -> Option<String> {
     if path.as_os_str().is_empty() {
         return Some("an empty path names no file".into());
     }
-    let shown = fenix_lsp::normalize(path.to_path_buf()).display().to_string();
+    let shown = fenix_lsp::normalize(path.to_path_buf())
+        .display()
+        .to_string();
     if path.is_dir() {
-        return Some(format!("{shown} is a folder: fenix/openProject opens one as the project"));
+        return Some(format!(
+            "{shown} is a folder: fenix/openProject opens one as the project"
+        ));
     }
     if path.exists() {
         return None;
     }
-    let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().map(|d| d.join(path)).unwrap_or_else(|_| path.to_path_buf()) };
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|d| d.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
     match absolute.parent() {
         Some(parent) if parent.is_dir() => None,
-        Some(parent) => Some(format!("{shown}: no folder {}", fenix_lsp::normalize(parent.to_path_buf()).display())),
+        Some(parent) => Some(format!(
+            "{shown}: no folder {}",
+            fenix_lsp::normalize(parent.to_path_buf()).display()
+        )),
         None => Some(format!("{shown} names no file")),
     }
 }
@@ -54,7 +66,11 @@ impl App {
     /// `call`, sent to the code extension that answers it, its reply
     /// going back when it does. `Err` gives both back: Fenix answers it.
     #[allow(clippy::result_large_err)]
-    pub(super) fn control_by_extension(&mut self, call: Call, reply: std::sync::mpsc::Sender<crate::ipc::Reply>) -> Result<(), (Call, std::sync::mpsc::Sender<crate::ipc::Reply>)> {
+    pub(super) fn control_by_extension(
+        &mut self,
+        call: Call,
+        reply: std::sync::mpsc::Sender<crate::ipc::Reply>,
+    ) -> Result<(), (Call, std::sync::mpsc::Sender<crate::ipc::Reply>)> {
         // Answered once a language server, an adapter or an extension has.
         let call = match call {
             Call::Lsp(params) => {
@@ -69,7 +85,11 @@ impl App {
                 self.control_tools_call(params, reply);
                 return Ok(());
             }
-            Call::Agent { method, caller, params } => {
+            Call::Agent {
+                method,
+                caller,
+                params,
+            } => {
                 self.control_agent(&method, caller, params, reply);
                 return Ok(());
             }
@@ -81,29 +101,51 @@ impl App {
                 json!({ "to": match params.target { CaptureTarget::Inbox => "inbox", CaptureTarget::Journal => "journal" }, "text": params.text }),
                 |entry| Ok(to_value(CaptureResult { entry })),
             )),
-            Call::AgendaTasks(params) => Some(("agenda.tasks", to_value(params), |tasks| serde_json::from_str(&tasks).map_err(|e| RpcError::internal(e.to_string())))),
-            Call::AgendaClockIn(params) => Some(("agenda.clock_in", json!({ "task_id": params.task_id }), done)),
+            Call::AgendaTasks(params) => Some(("agenda.tasks", to_value(params), |tasks| {
+                serde_json::from_str(&tasks).map_err(|e| RpcError::internal(e.to_string()))
+            })),
+            Call::AgendaClockIn(params) => Some((
+                "agenda.clock_in",
+                json!({ "task_id": params.task_id }),
+                done,
+            )),
             Call::AgendaClockOut => Some(("agenda.clock_out", Value::Null, done)),
             _ => None,
         };
         // `fenix/state`: Fenix's, with the agenda's clock asked for.
         if matches!(call, Call::State) {
-            let Some(server) = self.code_server("agenda.timer", None) else { return Err((call, reply)) };
+            let Some(server) = self.code_server("agenda.timer", None) else {
+                return Err((call, reply));
+            };
             let state = self.control_state();
             let then = move |_: &mut App, timer: Result<String, String>| {
                 let mut state = state;
                 state.agenda_timer = timer.ok().and_then(|t| serde_json::from_str(&t).ok());
                 let _ = reply.send(Ok(to_value(state)));
             };
-            self.code_serve(&server, "agenda.timer", "null".into(), super::wasm_host::Answer::Fenix(Box::new(then)));
+            self.code_serve(
+                &server,
+                "agenda.timer",
+                "null".into(),
+                super::wasm_host::Answer::Fenix(Box::new(then)),
+            );
             return Ok(());
         }
-        let Some((name, payload, answer)) = asked else { return Err((call, reply)) };
-        let Some(server) = self.code_server(name, None) else { return Err((call, reply)) };
+        let Some((name, payload, answer)) = asked else {
+            return Err((call, reply));
+        };
+        let Some(server) = self.code_server(name, None) else {
+            return Err((call, reply));
+        };
         let then = move |_: &mut App, said: Result<String, String>| {
             let _ = reply.send(said.map_err(RpcError::invalid_params).and_then(answer));
         };
-        self.code_serve(&server, name, payload.to_string(), super::wasm_host::Answer::Fenix(Box::new(then)));
+        self.code_serve(
+            &server,
+            name,
+            payload.to_string(),
+            super::wasm_host::Answer::Fenix(Box::new(then)),
+        );
         Ok(())
     }
 
@@ -150,37 +192,69 @@ impl App {
             },
             // Answered by the notebook extension (`control_by_extension`)
             // when it's installed.
-            Call::NotebookCapture(_) => Err(RpcError::invalid_params("the notebook is an extension (fenix.notebook): SPC h x installs it")),
+            Call::NotebookCapture(_) => Err(RpcError::invalid_params(
+                "the notebook is an extension (fenix.notebook): SPC h x installs it",
+            )),
             // Answered by the agenda extension too.
-            Call::AgendaTasks(_) | Call::AgendaClockIn(_) | Call::AgendaClockOut => Err(RpcError::invalid_params("the agenda is an extension (fenix.agenda): SPC h x installs it")),
-            Call::Diagnostics(params) => Ok(self.control_diagnostics(params.get("path").and_then(Value::as_str).map(PathBuf::from))),
+            Call::AgendaTasks(_) | Call::AgendaClockIn(_) | Call::AgendaClockOut => {
+                Err(RpcError::invalid_params(
+                    "the agenda is an extension (fenix.agenda): SPC h x installs it",
+                ))
+            }
+            Call::Diagnostics(params) => Ok(self.control_diagnostics(
+                params
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from),
+            )),
             Call::Buffers => Ok(self.control_buffers()),
             Call::BufferRead(params) => self.control_buffer_read(&params),
             Call::DebugState => Ok(self.control_debug_state()),
             Call::Tools => Ok(self.control_tools()),
             // Answered later, on the reply (`control_by_extension`).
-            Call::Lsp(_) | Call::DebugEvaluate(_) | Call::ToolsCall(_) | Call::Agent { .. } => Err(RpcError::internal("answered by what it asks")),
+            Call::Lsp(_) | Call::DebugEvaluate(_) | Call::ToolsCall(_) | Call::Agent { .. } => {
+                Err(RpcError::internal("answered by what it asks"))
+            }
             Call::Selection => Ok(self.control_selection()),
             Call::Tasks => {
                 let root = self.integration_root();
                 let tasks = self.tasks_for(&root).map_err(RpcError::internal)?;
-                Ok(json!({ "root": root.to_string_lossy(), "tasks": tasks.iter().map(|t| json!({ "name": t.name, "command": t.command, "args": t.args })).collect::<Vec<_>>() }))
+                Ok(
+                    json!({ "root": root.to_string_lossy(), "tasks": tasks.iter().map(|t| json!({ "name": t.name, "command": t.command, "args": t.args })).collect::<Vec<_>>() }),
+                )
             }
             Call::TasksRun(params) => {
                 self.control_writes_allowed()?;
-                let name = params.get("name").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("name: which task"))?;
+                let name = params
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| RpcError::invalid_params("name: which task"))?;
                 let root = self.integration_root();
-                let task = self.tasks_for(&root).map_err(RpcError::internal)?.into_iter().find(|t| t.name == name).ok_or_else(|| RpcError::invalid_params(format!("no task {name}")))?;
+                let task = self
+                    .tasks_for(&root)
+                    .map_err(RpcError::internal)?
+                    .into_iter()
+                    .find(|t| t.name == name)
+                    .ok_or_else(|| RpcError::invalid_params(format!("no task {name}")))?;
                 self.run_task(task, root);
-                Ok(json!({ "started": name, "note": "its output is in Fenix's task pane; problems go to the quickfix list" }))
+                Ok(
+                    json!({ "started": name, "note": "its output is in Fenix's task pane; problems go to the quickfix list" }),
+                )
             }
             Call::AgentCommand(params) => {
                 self.control_writes_allowed()?;
-                let id = params.get("id").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("id: which command"))?;
+                let id = params
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| RpcError::invalid_params("id: which command"))?;
                 match self.run_external_command(id) {
                     Ok(()) => Ok(json!({})),
-                    Err(ExternalError::Unknown) => Err(RpcError::invalid_params(format!("no command {id}"))),
-                    Err(ExternalError::NotExternal) => Err(RpcError::invalid_params(format!("{id} acts on what's in front of you in Fenix: not from outside"))),
+                    Err(ExternalError::Unknown) => {
+                        Err(RpcError::invalid_params(format!("no command {id}")))
+                    }
+                    Err(ExternalError::NotExternal) => Err(RpcError::invalid_params(format!(
+                        "{id} acts on what's in front of you in Fenix: not from outside"
+                    ))),
                 }
             }
         }
@@ -189,10 +263,17 @@ impl App {
     /// Whether agents may run things through Fenix's MCP server.
     pub(super) fn control_writes_allowed(&self) -> Result<(), RpcError> {
         // A call through `fenix/agent.call` was decided by the rules.
-        if self.agent_calls.authorized || self.config.bool_value("agents.mcp.fenix_write").unwrap_or(false) {
+        if self.agent_calls.authorized
+            || self
+                .config
+                .bool_value("agents.mcp.fenix_write")
+                .unwrap_or(false)
+        {
             Ok(())
         } else {
-            Err(RpcError::invalid_params("running things through Fenix is off: agents.mcp.fenix_write"))
+            Err(RpcError::invalid_params(
+                "running things through Fenix is off: agents.mcp.fenix_write",
+            ))
         }
     }
 
@@ -200,11 +281,22 @@ impl App {
     fn control_diagnostics(&self, path: Option<PathBuf>) -> Value {
         let paths: Vec<PathBuf> = match path {
             Some(p) => vec![p],
-            None => self.buffers.ids_sorted_by_path().into_iter().filter_map(|id| self.buffers.get(id).and_then(|b| b.buffer.path()).map(Path::to_path_buf)).collect(),
+            None => self
+                .buffers
+                .ids_sorted_by_path()
+                .into_iter()
+                .filter_map(|id| {
+                    self.buffers
+                        .get(id)
+                        .and_then(|b| b.buffer.path())
+                        .map(Path::to_path_buf)
+                })
+                .collect(),
         };
         let mut out = Vec::new();
         for path in paths {
-            let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
+            let canonical =
+                fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
             for d in self.all_diagnostics(&canonical) {
                 let severity = match d.severity {
                     Some(lsp_types::DiagnosticSeverity::ERROR) => "error",
@@ -496,7 +588,11 @@ mod tests {
 
     fn open_one(app: &mut App, path: &str) -> Result<Value, RpcError> {
         app.apply_control(Call::Open(OpenParams {
-            paths: vec![OpenPath { path: path.into(), line: None, column: None }],
+            paths: vec![OpenPath {
+                path: path.into(),
+                line: None,
+                column: None,
+            }],
             new_window: false,
             focus: false,
         }))
@@ -523,8 +619,16 @@ mod tests {
         // One bad path among good ones: none of them open.
         let err = app.apply_control(Call::Open(OpenParams {
             paths: vec![
-                OpenPath { path: good.display().to_string(), line: None, column: None },
-                OpenPath { path: String::new(), line: None, column: None },
+                OpenPath {
+                    path: good.display().to_string(),
+                    line: None,
+                    column: None,
+                },
+                OpenPath {
+                    path: String::new(),
+                    line: None,
+                    column: None,
+                },
             ],
             new_window: false,
             focus: false,
@@ -540,7 +644,10 @@ mod tests {
         let dir = TempDir::new("control-open-new");
         let new = dir.path().join("new.rs");
         let mut app = App::with_file(None);
-        assert_eq!(open_one(&mut app, &new.display().to_string()).unwrap(), json!({}));
+        assert_eq!(
+            open_one(&mut app, &new.display().to_string()).unwrap(),
+            json!({})
+        );
         assert_eq!(app.open().buffer.path(), Some(new.as_path()));
         assert!(!new.exists());
     }
@@ -644,10 +751,7 @@ mod tests {
         assert_eq!(get("project.find_file").keys.as_deref(), Some("SPC SPC"));
         // Run by a Ctrl chord, not the leader: no keys.
         assert_eq!(get("nav.jump_back").keys, None);
-        for id in [
-            "project.switch_project",
-            "snippets.open",
-        ] {
+        for id in ["project.switch_project", "snippets.open"] {
             assert!(get(id).external, "{id}");
         }
         for id in ["edit.undo", "git.hunk_stage", "app.quit", "frame.new"] {
@@ -726,8 +830,12 @@ mod tests {
                     // A page no external command opens itself: a
                     // Markdown file's reading view.
                     let readme = dir.path().join("README.md");
-                    std::fs::write(&readme, "# Read me
-").unwrap();
+                    std::fs::write(
+                        &readme,
+                        "# Read me
+",
+                    )
+                    .unwrap();
                     app.open_file_from_picker(&readme);
                     app.open_reading_view(true);
                     assert_ne!(app.focused_buffer_id(), text_buffer);
@@ -792,11 +900,20 @@ mod tests {
     #[test]
     fn a_capture_is_answered_by_the_notebook_extension() {
         let mut app = App::with_file(None);
-        let params = || fenix_control::CaptureParams { text: "call OBSW".into(), target: CaptureTarget::Inbox };
-        let err = app.apply_control(Call::NotebookCapture(params())).unwrap_err();
+        let params = || fenix_control::CaptureParams {
+            text: "call OBSW".into(),
+            target: CaptureTarget::Inbox,
+        };
+        let err = app
+            .apply_control(Call::NotebookCapture(params()))
+            .unwrap_err();
         assert!(err.message.contains("fenix.notebook"), "{}", err.message);
         let (reply, answer) = std::sync::mpsc::channel();
-        assert!(app.control_by_extension(Call::NotebookCapture(params()), reply.clone()).is_err(), "nothing serves it");
+        assert!(
+            app.control_by_extension(Call::NotebookCapture(params()), reply.clone())
+                .is_err(),
+            "nothing serves it"
+        );
 
         let mut notebook = super::super::wasm_host::tests::hello("");
         notebook.manifest = fenix_extensions::Manifest::parse(
@@ -817,14 +934,20 @@ services = [\"notebook.capture\"]
         .unwrap();
         notebook.id = "test.notebook".into();
         app.wasm.installed = vec![notebook];
-        assert!(app.control_by_extension(Call::NotebookCapture(params()), reply).is_ok());
+        assert!(app
+            .control_by_extension(Call::NotebookCapture(params()), reply)
+            .is_ok());
         let started = std::time::Instant::now();
         let said = loop {
             app.pump_wasm();
             if let Ok(said) = answer.try_recv() {
                 break said;
             }
-            assert!(started.elapsed() < std::time::Duration::from_secs(60), "{}", app.extension_output_text());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "{}",
+                app.extension_output_text()
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         let result: CaptureResult = serde_json::from_value(said.unwrap()).unwrap();
@@ -840,8 +963,17 @@ services = [\"notebook.capture\"]
         let dir = tempfile::tempdir().unwrap();
         let mut app = isolated(dir.path(), None);
         let (reply, answer) = std::sync::mpsc::channel();
-        assert!(app.control_by_extension(Call::AgendaTasks(TasksParams { status: None }), reply.clone()).is_err(), "nothing serves it");
-        assert!(app.apply_control(Call::AgendaTasks(TasksParams { status: None })).is_err());
+        assert!(
+            app.control_by_extension(
+                Call::AgendaTasks(TasksParams { status: None }),
+                reply.clone()
+            )
+            .is_err(),
+            "nothing serves it"
+        );
+        assert!(app
+            .apply_control(Call::AgendaTasks(TasksParams { status: None }))
+            .is_err());
 
         // The test guest, as an agenda: its services are named for it.
         let mut agenda = super::super::wasm_host::tests::hello("");
@@ -851,18 +983,36 @@ services = [\"notebook.capture\"]
         .unwrap();
         agenda.id = "test.agenda".into();
         app.wasm.installed = vec![agenda];
-        assert!(app.control_by_extension(Call::AgendaTasks(TasksParams { status: None }), reply.clone()).is_ok());
+        assert!(app
+            .control_by_extension(
+                Call::AgendaTasks(TasksParams { status: None }),
+                reply.clone()
+            )
+            .is_ok());
         let started = std::time::Instant::now();
         let said = loop {
             app.pump_wasm();
             if let Ok(said) = answer.try_recv() {
                 break said;
             }
-            assert!(started.elapsed() < std::time::Duration::from_secs(60), "{}", app.extension_output_text());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "{}",
+                app.extension_output_text()
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         let tasks: TasksResult = serde_json::from_value(said.unwrap()).unwrap();
-        assert_eq!(tasks.tasks, [AgendaTask { id: 7, title: "From the guest".into(), status: TaskStatus::InProgress, jira_key: Some("FEN-1".into()), elapsed_minutes: 30 }]);
+        assert_eq!(
+            tasks.tasks,
+            [AgendaTask {
+                id: 7,
+                title: "From the guest".into(),
+                status: TaskStatus::InProgress,
+                jira_key: Some("FEN-1".into()),
+                elapsed_minutes: 30
+            }]
+        );
 
         // `fenix/state`: Fenix's, with the extension's clock.
         assert!(app.control_by_extension(Call::State, reply).is_ok());
@@ -872,11 +1022,18 @@ services = [\"notebook.capture\"]
             if let Ok(said) = answer.try_recv() {
                 break said;
             }
-            assert!(started.elapsed() < std::time::Duration::from_secs(60), "{}", app.extension_output_text());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(60),
+                "{}",
+                app.extension_output_text()
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         };
         let state: StateResult = serde_json::from_value(said.unwrap()).unwrap();
-        assert_eq!(state.agenda_timer.map(|t| (t.task_id, t.title)), Some((7, "From the guest".to_string())));
+        assert_eq!(
+            state.agenda_timer.map(|t| (t.task_id, t.title)),
+            Some((7, "From the guest".to_string()))
+        );
     }
 
     #[test]
@@ -919,25 +1076,67 @@ mod agent_tool_tests {
         let id = app.focused_buffer_id();
         let ob = app.buffers.get_mut(id).unwrap();
         ob.buffer.replace_range(&mut ob.cursor, 0, 3, "ONE");
-        let all = app.apply_control(Call::BufferRead(json!({ "path": path }))).unwrap();
-        assert!(all["text"].as_str().unwrap().starts_with("ONE\ntwo"), "{all}");
+        let all = app
+            .apply_control(Call::BufferRead(json!({ "path": path })))
+            .unwrap();
+        assert!(
+            all["text"].as_str().unwrap().starts_with("ONE\ntwo"),
+            "{all}"
+        );
         assert_eq!(all["unsaved"], true);
-        let part = app.apply_control(Call::BufferRead(json!({ "path": path, "startLine": 2, "endLine": 2 }))).unwrap();
+        let part = app
+            .apply_control(Call::BufferRead(
+                json!({ "path": path, "startLine": 2, "endLine": 2 }),
+            ))
+            .unwrap();
         assert_eq!(part["text"], "two");
-        assert!(app.apply_control(Call::BufferRead(json!({ "path": dir.path().join("b.rs") }))).unwrap_err().message.contains("isn't open"));
+        assert!(app
+            .apply_control(Call::BufferRead(json!({ "path": dir.path().join("b.rs") })))
+            .unwrap_err()
+            .message
+            .contains("isn't open"));
     }
 
     #[test]
     fn the_debugger_says_when_theres_nothing_to_ask() {
         let mut app = App::with_file(None);
-        assert_eq!(app.apply_control(Call::DebugState).unwrap(), json!({ "session": false }));
+        assert_eq!(
+            app.apply_control(Call::DebugState).unwrap(),
+            json!({ "session": false })
+        );
         let (reply, answer) = std::sync::mpsc::channel();
-        app.config.set_value("agents.mcp.fenix_write", Some(fenix_config::Value::Bool(false)));
-        assert!(app.control_by_extension(Call::DebugEvaluate(json!({ "expression": "x" })), reply.clone()).is_ok());
-        assert!(answer.recv().unwrap().unwrap_err().message.contains("fenix_write"), "evaluating can run code");
-        app.config.set_value("agents.mcp.fenix_write", Some(fenix_config::Value::Bool(true)));
-        assert!(app.control_by_extension(Call::DebugEvaluate(json!({ "expression": "x" })), reply).is_ok());
-        assert!(answer.recv().unwrap().unwrap_err().message.contains("isn't stopped"));
+        app.config.set_value(
+            "agents.mcp.fenix_write",
+            Some(fenix_config::Value::Bool(false)),
+        );
+        assert!(app
+            .control_by_extension(
+                Call::DebugEvaluate(json!({ "expression": "x" })),
+                reply.clone()
+            )
+            .is_ok());
+        assert!(
+            answer
+                .recv()
+                .unwrap()
+                .unwrap_err()
+                .message
+                .contains("fenix_write"),
+            "evaluating can run code"
+        );
+        app.config.set_value(
+            "agents.mcp.fenix_write",
+            Some(fenix_config::Value::Bool(true)),
+        );
+        assert!(app
+            .control_by_extension(Call::DebugEvaluate(json!({ "expression": "x" })), reply)
+            .is_ok());
+        assert!(answer
+            .recv()
+            .unwrap()
+            .unwrap_err()
+            .message
+            .contains("isn't stopped"));
     }
 
     #[test]
@@ -952,8 +1151,16 @@ mod agent_tool_tests {
             answer.recv().unwrap().unwrap_err().message
         };
         assert!(ask(&mut app, json!({ "kind": "nonsense" })).contains("no such question"));
-        assert!(ask(&mut app, json!({ "kind": "hover", "path": file, "line": 1 })).contains("no language server"));
-        assert!(ask(&mut app, json!({ "kind": "hover", "path": dir.path().join("gone.rs"), "line": 1 })).contains("gone.rs"));
+        assert!(ask(
+            &mut app,
+            json!({ "kind": "hover", "path": file, "line": 1 })
+        )
+        .contains("no language server"));
+        assert!(ask(
+            &mut app,
+            json!({ "kind": "hover", "path": dir.path().join("gone.rs"), "line": 1 })
+        )
+        .contains("gone.rs"));
         assert!(ask(&mut app, json!({ "kind": "workspace_symbols" })).contains("query"));
     }
 
@@ -967,18 +1174,46 @@ mod agent_tool_tests {
         let id = app.buffers.id_for_path(&file).unwrap();
         app.buffers.get_mut(id).unwrap().buffer.mark_unsaved();
         let answer = app.apply_control(Call::Buffers).unwrap();
-        let row = answer["buffers"].as_array().unwrap().iter().find(|b| b["path"].as_str().unwrap().ends_with("a.rs")).unwrap().clone();
-        assert_eq!((row["unsaved"].clone(), row["focused"].clone()), (json!(true), json!(true)));
-        assert_eq!(app.apply_control(Call::Diagnostics(json!({}))).unwrap(), json!({ "diagnostics": [] }));
+        let row = answer["buffers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|b| b["path"].as_str().unwrap().ends_with("a.rs"))
+            .unwrap()
+            .clone();
+        assert_eq!(
+            (row["unsaved"].clone(), row["focused"].clone()),
+            (json!(true), json!(true))
+        );
+        assert_eq!(
+            app.apply_control(Call::Diagnostics(json!({}))).unwrap(),
+            json!({ "diagnostics": [] })
+        );
     }
 
     #[test]
     fn running_things_needs_the_setting() {
         let mut app = App::with_file(None);
-        app.config.set_value("agents.mcp.fenix_write", Some(fenix_config::Value::Bool(false)));
-        assert!(app.apply_control(Call::TasksRun(json!({ "name": "build" }))).is_err());
-        assert!(app.apply_control(Call::AgentCommand(json!({ "id": "view.toggle_animations" }))).is_err());
-        app.config.set_value("agents.mcp.fenix_write", Some(fenix_config::Value::Bool(true)));
-        assert!(app.apply_control(Call::AgentCommand(json!({ "id": "no.such" }))).unwrap_err().message.contains("no command"));
+        app.config.set_value(
+            "agents.mcp.fenix_write",
+            Some(fenix_config::Value::Bool(false)),
+        );
+        assert!(app
+            .apply_control(Call::TasksRun(json!({ "name": "build" })))
+            .is_err());
+        assert!(app
+            .apply_control(Call::AgentCommand(
+                json!({ "id": "view.toggle_animations" })
+            ))
+            .is_err());
+        app.config.set_value(
+            "agents.mcp.fenix_write",
+            Some(fenix_config::Value::Bool(true)),
+        );
+        assert!(app
+            .apply_control(Call::AgentCommand(json!({ "id": "no.such" })))
+            .unwrap_err()
+            .message
+            .contains("no command"));
     }
 }

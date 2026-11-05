@@ -235,7 +235,13 @@ pub struct Facts {
 /// `disabled` (`fenix_toolsets`). `extensions` are the extensions'
 /// toolsets with whether each is offered by default. `core` is always
 /// there.
-pub fn offered(facts: Facts, setting: &[String], enabled: &BTreeSet<String>, disabled: &BTreeSet<String>, extensions: &[(String, bool)]) -> BTreeSet<String> {
+pub fn offered(
+    facts: Facts,
+    setting: &[String],
+    enabled: &BTreeSet<String>,
+    disabled: &BTreeSet<String>,
+    extensions: &[(String, bool)],
+) -> BTreeSet<String> {
     let mut on: BTreeSet<String> = TOOLSETS
         .iter()
         .filter(|t| match t.offered {
@@ -248,12 +254,22 @@ pub fn offered(facts: Facts, setting: &[String], enabled: &BTreeSet<String>, dis
         })
         .map(|t| t.name.to_string())
         .collect();
-    on.extend(extensions.iter().filter(|(_, default)| *default).map(|(name, _)| name.clone()));
+    on.extend(
+        extensions
+            .iter()
+            .filter(|(_, default)| *default)
+            .map(|(name, _)| name.clone()),
+    );
     for entry in setting {
         let entry = entry.trim();
         if let Some(name) = entry.strip_prefix('-').or_else(|| entry.strip_prefix('!')) {
             on.remove(name.trim());
-        } else if let Some(name) = entry.strip_prefix('+').map(str::trim).or(Some(entry)).filter(|n| !n.is_empty()) {
+        } else if let Some(name) = entry
+            .strip_prefix('+')
+            .map(str::trim)
+            .or(Some(entry))
+            .filter(|n| !n.is_empty())
+        {
             on.insert(name.to_string());
         }
     }
@@ -277,13 +293,19 @@ pub struct Rules {
 /// Reads a rules map (`agents.mcp.allow`): keys as given, values that
 /// aren't `allow`, `ask` or `deny` dropped.
 pub fn parse_rules(map: &BTreeMap<String, String>) -> BTreeMap<String, Rule> {
-    map.iter().filter_map(|(k, v)| Some((k.trim().to_string(), Rule::parse(v)?))).collect()
+    map.iter()
+        .filter_map(|(k, v)| Some((k.trim().to_string(), Rule::parse(v)?)))
+        .collect()
 }
 
 /// The rules 1.0's switches mean, for whoever still has them set:
 /// `fenix_write = on` lets agents edit and run, `fenix_auto_read = off`
 /// makes them ask to read. A rule the user wrote for a class wins.
-pub fn migrated(mut user: BTreeMap<String, Rule>, fenix_write: Option<bool>, fenix_auto_read: Option<bool>) -> BTreeMap<String, Rule> {
+pub fn migrated(
+    mut user: BTreeMap<String, Rule>,
+    fenix_write: Option<bool>,
+    fenix_auto_read: Option<bool>,
+) -> BTreeMap<String, Rule> {
     if fenix_write == Some(true) {
         user.entry("edit".into()).or_insert(Rule::Allow);
         user.entry("run".into()).or_insert(Rule::Allow);
@@ -297,8 +319,20 @@ pub fn migrated(mut user: BTreeMap<String, Rule>, fenix_write: Option<bool>, fen
 /// The rule in `map` for this tool, most specific first: the tool's
 /// name, its toolset (`toolset:<name>`), its class; each with `prefix`
 /// in front (`client:` for clients Fenix didn't start).
-fn most_specific(map: &BTreeMap<String, Rule>, prefix: &str, name: &str, toolset: &str, class: Class) -> Option<Rule> {
-    [name.to_string(), format!("toolset:{toolset}"), class.as_str().to_string()].iter().find_map(|key| map.get(&format!("{prefix}{key}")).copied())
+fn most_specific(
+    map: &BTreeMap<String, Rule>,
+    prefix: &str,
+    name: &str,
+    toolset: &str,
+    class: Class,
+) -> Option<Rule> {
+    [
+        name.to_string(),
+        format!("toolset:{toolset}"),
+        class.as_str().to_string(),
+    ]
+    .iter()
+    .find_map(|key| map.get(&format!("{prefix}{key}")).copied())
 }
 
 /// What happens when `name` (in `toolset`, of `class`) is called.
@@ -308,9 +342,13 @@ fn most_specific(map: &BTreeMap<String, Rule>, prefix: &str, name: &str, toolset
 /// (`"client:edit" = "allow"`); the agents' rules don't apply to it.
 pub fn decide(rules: &Rules, name: &str, toolset: &str, class: Class) -> Rule {
     let prefix = if rules.external_client { "client:" } else { "" };
-    let user = most_specific(&rules.user, prefix, name, toolset, class).unwrap_or_else(|| class.default_rule(rules.external_client));
+    let user = most_specific(&rules.user, prefix, name, toolset, class)
+        .unwrap_or_else(|| class.default_rule(rules.external_client));
     // A project's rule, for either kind of caller, can only tighten.
-    let project = most_specific(&rules.project, prefix, name, toolset, class).into_iter().chain(most_specific(&rules.project, "", name, toolset, class)).max();
+    let project = most_specific(&rules.project, prefix, name, toolset, class)
+        .into_iter()
+        .chain(most_specific(&rules.project, "", name, toolset, class))
+        .max();
     match project {
         Some(project) => user.max(project),
         None => user,
@@ -319,8 +357,15 @@ pub fn decide(rules: &Rules, name: &str, toolset: &str, class: Class) -> Rule {
 
 /// What `fenix_toolsets` answers: every toolset, whether it's on, and a
 /// line about it; with the tools of one just turned on.
-pub fn toolsets_answer(on: &BTreeSet<String>, extensions: &[(String, String)], turned_on: Option<(&str, Vec<Value>)>) -> Value {
-    let mut sets: Vec<Value> = TOOLSETS.iter().map(|t| json!({ "name": t.name, "description": t.description, "on": on.contains(t.name) })).collect();
+pub fn toolsets_answer(
+    on: &BTreeSet<String>,
+    extensions: &[(String, String)],
+    turned_on: Option<(&str, Vec<Value>)>,
+) -> Value {
+    let mut sets: Vec<Value> = TOOLSETS
+        .iter()
+        .map(|t| json!({ "name": t.name, "description": t.description, "on": on.contains(t.name) }))
+        .collect();
     sets.extend(extensions.iter().map(|(name, description)| json!({ "name": name, "description": description, "on": on.contains(name), "extension": true })));
     let mut answer = json!({ "toolsets": sets });
     if let Some((name, tools)) = turned_on {
@@ -330,7 +375,6 @@ pub fn toolsets_answer(on: &BTreeSet<String>, extensions: &[(String, String)], t
     }
     answer
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -345,8 +389,19 @@ mod tests {
     }
 
     fn rules(user: &[(&str, &str)], project: &[(&str, &str)]) -> Rules {
-        let map = |pairs: &[(&str, &str)]| parse_rules(&pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect());
-        Rules { user: map(user), project: map(project), external_client: false }
+        let map = |pairs: &[(&str, &str)]| {
+            parse_rules(
+                &pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
+            )
+        };
+        Rules {
+            user: map(user),
+            project: map(project),
+            external_client: false,
+        }
     }
 
     #[test]
@@ -356,24 +411,63 @@ mod tests {
         assert_eq!(decide(&r, "show_file", "core", Class::Show), Rule::Allow);
         assert_eq!(decide(&r, "rename", "refactor", Class::Edit), Rule::Ask);
         assert_eq!(decide(&r, "run_task", "tasks", Class::Run), Rule::Ask);
-        assert_eq!(decide(&r, "jira_transition", "jira", Class::External), Rule::Deny);
+        assert_eq!(
+            decide(&r, "jira_transition", "jira", Class::External),
+            Rule::Deny
+        );
     }
 
     #[test]
     fn the_most_specific_rule_wins() {
-        let r = rules(&[("edit", "allow"), ("toolset:git", "deny"), ("git_stage", "ask"), ("run", "allow")], &[]);
+        let r = rules(
+            &[
+                ("edit", "allow"),
+                ("toolset:git", "deny"),
+                ("git_stage", "ask"),
+                ("run", "allow"),
+            ],
+            &[],
+        );
         assert_eq!(decide(&r, "rename", "refactor", Class::Edit), Rule::Allow);
-        assert_eq!(decide(&r, "git_diff", "git", Class::Read), Rule::Deny, "the toolset's rule beats the class's");
-        assert_eq!(decide(&r, "git_stage", "git", Class::Edit), Rule::Ask, "the tool's beats the toolset's");
+        assert_eq!(
+            decide(&r, "git_diff", "git", Class::Read),
+            Rule::Deny,
+            "the toolset's rule beats the class's"
+        );
+        assert_eq!(
+            decide(&r, "git_stage", "git", Class::Edit),
+            Rule::Ask,
+            "the tool's beats the toolset's"
+        );
         assert_eq!(decide(&r, "run_task", "tasks", Class::Run), Rule::Allow);
     }
 
     #[test]
     fn a_project_can_only_tighten() {
-        let r = rules(&[("run", "allow")], &[("run", "ask"), ("edit", "allow"), ("external", "allow"), ("diagnostics", "deny")]);
-        assert_eq!(decide(&r, "run_task", "tasks", Class::Run), Rule::Ask, "tightened");
-        assert_eq!(decide(&r, "rename", "refactor", Class::Edit), Rule::Ask, "a project can't loosen edit");
-        assert_eq!(decide(&r, "x_post", "x", Class::External), Rule::Deny, "nor external");
+        let r = rules(
+            &[("run", "allow")],
+            &[
+                ("run", "ask"),
+                ("edit", "allow"),
+                ("external", "allow"),
+                ("diagnostics", "deny"),
+            ],
+        );
+        assert_eq!(
+            decide(&r, "run_task", "tasks", Class::Run),
+            Rule::Ask,
+            "tightened"
+        );
+        assert_eq!(
+            decide(&r, "rename", "refactor", Class::Edit),
+            Rule::Ask,
+            "a project can't loosen edit"
+        );
+        assert_eq!(
+            decide(&r, "x_post", "x", Class::External),
+            Rule::Deny,
+            "nor external"
+        );
         assert_eq!(decide(&r, "diagnostics", "core", Class::Read), Rule::Deny);
     }
 
@@ -383,10 +477,18 @@ mod tests {
         r.external_client = true;
         assert_eq!(decide(&r, "diagnostics", "core", Class::Read), Rule::Allow);
         assert_eq!(decide(&r, "run_task", "tasks", Class::Run), Rule::Deny);
-        assert_eq!(decide(&r, "rename", "refactor", Class::Edit), Rule::Deny, "the agents' rules aren't its");
+        assert_eq!(
+            decide(&r, "rename", "refactor", Class::Edit),
+            Rule::Deny,
+            "the agents' rules aren't its"
+        );
         let mut r = rules(&[("client:edit", "allow")], &[("edit", "ask")]);
         r.external_client = true;
-        assert_eq!(decide(&r, "rename", "refactor", Class::Edit), Rule::Ask, "its own rule, tightened by the project's");
+        assert_eq!(
+            decide(&r, "rename", "refactor", Class::Edit),
+            Rule::Ask,
+            "its own rule, tightened by the project's"
+        );
     }
 
     #[test]
@@ -401,8 +503,16 @@ mod tests {
         assert_eq!(user.get("edit"), Some(&Rule::Allow));
         assert_eq!(user.get("run"), Some(&Rule::Allow));
         assert_eq!(user.get("read"), Some(&Rule::Ask));
-        let kept = migrated(BTreeMap::from([("run".to_string(), Rule::Deny)]), Some(true), None);
-        assert_eq!(kept.get("run"), Some(&Rule::Deny), "a rule written beats the old switch");
+        let kept = migrated(
+            BTreeMap::from([("run".to_string(), Rule::Deny)]),
+            Some(true),
+            None,
+        );
+        assert_eq!(
+            kept.get("run"),
+            Some(&Rule::Deny),
+            "a rule written beats the old switch"
+        );
         assert!(migrated(BTreeMap::new(), Some(false), Some(true)).is_empty());
     }
 
@@ -410,15 +520,41 @@ mod tests {
     fn toolsets_follow_the_project_the_setting_and_the_session() {
         let none = BTreeSet::new();
         let bare = offered(Facts::default(), &[], &none, &none, &[]);
-        assert_eq!(bare, BTreeSet::from(["core".to_string(), "search".into(), "syntax".into()]));
-        let full = offered(Facts { lsp: true, git: true, tasks: true, debug: true }, &[], &none, &none, &[("jira".into(), true), ("db".into(), false)]);
+        assert_eq!(
+            bare,
+            BTreeSet::from(["core".to_string(), "search".into(), "syntax".into()])
+        );
+        let full = offered(
+            Facts {
+                lsp: true,
+                git: true,
+                tasks: true,
+                debug: true,
+            },
+            &[],
+            &none,
+            &none,
+            &[("jira".into(), true), ("db".into(), false)],
+        );
         for name in ["core", "lsp", "refactor", "git", "tasks", "debug", "jira"] {
             assert!(full.contains(name), "{name}");
         }
         assert!(!full.contains("db") && !full.contains("commands"));
-        let set = offered(Facts::default(), &["-search".into(), "+commands".into(), "db".into()], &none, &none, &[]);
+        let set = offered(
+            Facts::default(),
+            &["-search".into(), "+commands".into(), "db".into()],
+            &none,
+            &none,
+            &[],
+        );
         assert!(!set.contains("search") && set.contains("commands") && set.contains("db"));
-        let session = offered(Facts::default(), &["-core".into()], &BTreeSet::from(["debug".to_string()]), &BTreeSet::from(["syntax".to_string()]), &[]);
+        let session = offered(
+            Facts::default(),
+            &["-core".into()],
+            &BTreeSet::from(["debug".to_string()]),
+            &BTreeSet::from(["syntax".to_string()]),
+            &[],
+        );
         assert!(session.contains("debug") && !session.contains("syntax"));
         assert!(session.contains("core"), "core can't be taken away");
     }
@@ -437,8 +573,23 @@ mod tests {
     #[test]
     fn the_default_tool_list_fits_the_budget() {
         // A typical project: language servers, Git, tasks; no debugger yet.
-        let on = offered(Facts { lsp: true, git: true, tasks: true, debug: false }, &[], &BTreeSet::new(), &BTreeSet::new(), &[]);
-        let tools: Vec<Value> = TOOLS.iter().filter(|t| on.contains(t.toolset)).map(listed).collect();
+        let on = offered(
+            Facts {
+                lsp: true,
+                git: true,
+                tasks: true,
+                debug: false,
+            },
+            &[],
+            &BTreeSet::new(),
+            &BTreeSet::new(),
+            &[],
+        );
+        let tools: Vec<Value> = TOOLS
+            .iter()
+            .filter(|t| on.contains(t.toolset))
+            .map(listed)
+            .collect();
         let bytes = list_bytes(&tools);
         assert!(bytes <= BUDGET, "the default tool list is {bytes} bytes, over the {BUDGET}-byte budget: put a tool in a toolset that's off by default, or say less");
     }

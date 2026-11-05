@@ -173,9 +173,9 @@ impl Theme {
         // not an entry per exact capture" design.
         match capture_name {
             "text.title" => return self.syntax_function, // headings: the same prominent accent a function name gets
-            "text.strong" => return self.syntax_keyword,  // **bold**: keywords are usually the strongest, most saturated accent
-            "text.emphasis" => return self.syntax_type,   // *italic*: a secondary accent, less emphatic than strong
-            "text.literal" => return self.syntax_string,  // `code spans`: read as a literal value, same as a real string
+            "text.strong" => return self.syntax_keyword, // **bold**: keywords are usually the strongest, most saturated accent
+            "text.emphasis" => return self.syntax_type, // *italic*: a secondary accent, less emphatic than strong
+            "text.literal" => return self.syntax_string, // `code spans`: read as a literal value, same as a real string
             "text.uri" | "text.reference" => return self.syntax_constant, // links
             // XML: CDATA contents read as a literal, its `<![CDATA[`/`]]>`
             // brackets as punctuation, a link (a DOCTYPE's system ID) as
@@ -196,7 +196,9 @@ impl Theme {
             // it's not guaranteed which of the two wins the overlap
             // resolution, so both need a real mapping. Same for "spell",
             // which it pairs with "comment".
-            "keyword" | "repeat" | "conditional" | "storageclass" | "include" => self.syntax_keyword,
+            "keyword" | "repeat" | "conditional" | "storageclass" | "include" => {
+                self.syntax_keyword
+            }
             // Preprocessor lines (C#'s `#region`, `#if`) read as
             // annotations, like an attribute.
             "preproc" => self.syntax_attribute,
@@ -231,11 +233,30 @@ impl Theme {
     /// their hue.
     pub fn palette(&self) -> Vec<(u8, u8, u8)> {
         let rgb = |c: glyphon::Color| (c.r(), c.g(), c.b());
-        let rgbf = |c: [f32; 4]| ((c[0] * 255.0).round() as u8, (c[1] * 255.0).round() as u8, (c[2] * 255.0).round() as u8);
+        let rgbf = |c: [f32; 4]| {
+            (
+                (c[0] * 255.0).round() as u8,
+                (c[1] * 255.0).round() as u8,
+                (c[2] * 255.0).round() as u8,
+            )
+        };
         let candidates = [
-            rgb(self.syntax_keyword), rgb(self.syntax_string), rgb(self.syntax_function), rgb(self.syntax_type), rgb(self.syntax_number), rgb(self.syntax_constant),
-            rgb(self.git_staged), rgb(self.git_modified), rgb(self.git_conflicted), rgbf(self.caret), rgbf(self.mode_insert), rgbf(self.mode_visual), rgbf(self.mode_replace),
-            rgbf(self.mode_command), rgb(self.syntax_attribute), rgb(self.syntax_variable),
+            rgb(self.syntax_keyword),
+            rgb(self.syntax_string),
+            rgb(self.syntax_function),
+            rgb(self.syntax_type),
+            rgb(self.syntax_number),
+            rgb(self.syntax_constant),
+            rgb(self.git_staged),
+            rgb(self.git_modified),
+            rgb(self.git_conflicted),
+            rgbf(self.caret),
+            rgbf(self.mode_insert),
+            rgbf(self.mode_visual),
+            rgbf(self.mode_replace),
+            rgbf(self.mode_command),
+            rgb(self.syntax_attribute),
+            rgb(self.syntax_variable),
         ];
         palette_from(&candidates, rgbf(self.bg), 8)
     }
@@ -273,33 +294,84 @@ impl Theme {
 const BUILT_IN: &[(&str, &str)] = &[
     ("orbit-dark.toml", include_str!("../themes/orbit-dark.toml")),
     ("templeos.toml", include_str!("../themes/templeos.toml")),
-    ("gruvbox-dark.toml", include_str!("../themes/gruvbox-dark.toml")),
+    (
+        "gruvbox-dark.toml",
+        include_str!("../themes/gruvbox-dark.toml"),
+    ),
     ("nord.toml", include_str!("../themes/nord.toml")),
     ("dracula.toml", include_str!("../themes/dracula.toml")),
-    ("solarized-dark.toml", include_str!("../themes/solarized-dark.toml")),
+    (
+        "solarized-dark.toml",
+        include_str!("../themes/solarized-dark.toml"),
+    ),
     ("one-dark.toml", include_str!("../themes/one-dark.toml")),
-    ("visual-studio-dark.toml", include_str!("../themes/visual-studio-dark.toml")),
-    ("catppuccin-latte.toml", include_str!("../themes/catppuccin-latte.toml")),
-    ("catppuccin-frappe.toml", include_str!("../themes/catppuccin-frappe.toml")),
-    ("catppuccin-macchiato.toml", include_str!("../themes/catppuccin-macchiato.toml")),
-    ("catppuccin-mocha.toml", include_str!("../themes/catppuccin-mocha.toml")),
+    (
+        "visual-studio-dark.toml",
+        include_str!("../themes/visual-studio-dark.toml"),
+    ),
+    (
+        "catppuccin-latte.toml",
+        include_str!("../themes/catppuccin-latte.toml"),
+    ),
+    (
+        "catppuccin-frappe.toml",
+        include_str!("../themes/catppuccin-frappe.toml"),
+    ),
+    (
+        "catppuccin-macchiato.toml",
+        include_str!("../themes/catppuccin-macchiato.toml"),
+    ),
+    (
+        "catppuccin-mocha.toml",
+        include_str!("../themes/catppuccin-mocha.toml"),
+    ),
     ("monokai.toml", include_str!("../themes/monokai.toml")),
-    ("github-dark.toml", include_str!("../themes/github-dark.toml")),
-    ("tokyo-night-storm.toml", include_str!("../themes/tokyo-night-storm.toml")),
+    (
+        "github-dark.toml",
+        include_str!("../themes/github-dark.toml"),
+    ),
+    (
+        "tokyo-night-storm.toml",
+        include_str!("../themes/tokyo-night-storm.toml"),
+    ),
     ("kanagawa.toml", include_str!("../themes/kanagawa.toml")),
     ("rose-pine.toml", include_str!("../themes/rose-pine.toml")),
-    ("everforest-dark.toml", include_str!("../themes/everforest-dark.toml")),
+    (
+        "everforest-dark.toml",
+        include_str!("../themes/everforest-dark.toml"),
+    ),
     ("ayu-mirage.toml", include_str!("../themes/ayu-mirage.toml")),
     ("night-owl.toml", include_str!("../themes/night-owl.toml")),
-    ("material-palenight.toml", include_str!("../themes/material-palenight.toml")),
+    (
+        "material-palenight.toml",
+        include_str!("../themes/material-palenight.toml"),
+    ),
     ("zenburn.toml", include_str!("../themes/zenburn.toml")),
-    ("github-light.toml", include_str!("../themes/github-light.toml")),
+    (
+        "github-light.toml",
+        include_str!("../themes/github-light.toml"),
+    ),
     ("one-light.toml", include_str!("../themes/one-light.toml")),
-    ("solarized-light.toml", include_str!("../themes/solarized-light.toml")),
-    ("gruvbox-light.toml", include_str!("../themes/gruvbox-light.toml")),
-    ("rose-pine-dawn.toml", include_str!("../themes/rose-pine-dawn.toml")),
-    ("tokyo-night-day.toml", include_str!("../themes/tokyo-night-day.toml")),
-    ("visual-studio-light.toml", include_str!("../themes/visual-studio-light.toml")),
+    (
+        "solarized-light.toml",
+        include_str!("../themes/solarized-light.toml"),
+    ),
+    (
+        "gruvbox-light.toml",
+        include_str!("../themes/gruvbox-light.toml"),
+    ),
+    (
+        "rose-pine-dawn.toml",
+        include_str!("../themes/rose-pine-dawn.toml"),
+    ),
+    (
+        "tokyo-night-day.toml",
+        include_str!("../themes/tokyo-night-day.toml"),
+    ),
+    (
+        "visual-studio-light.toml",
+        include_str!("../themes/visual-studio-light.toml"),
+    ),
 ];
 
 /// The theme used when none is set, or the one set isn't there.
@@ -419,13 +491,23 @@ impl ColorSpec {
             ColorSpec::Hex(hex) => (hex.as_str(), None),
             ColorSpec::Alpha { color, alpha } => (color.as_str(), Some(*alpha)),
         };
-        let digits = hex.strip_prefix('#').filter(|d| (d.len() == 6 || d.len() == 8) && d.chars().all(|c| c.is_ascii_hexdigit()));
-        let Some(digits) = digits else { return Err(format!("{key}: {hex} isn't a color -- write #rrggbb")) };
-        let byte = |i: usize| u8::from_str_radix(&digits[i..i + 2], 16).expect("checked hex") as f32 / 255.0;
+        let digits = hex
+            .strip_prefix('#')
+            .filter(|d| (d.len() == 6 || d.len() == 8) && d.chars().all(|c| c.is_ascii_hexdigit()));
+        let Some(digits) = digits else {
+            return Err(format!("{key}: {hex} isn't a color -- write #rrggbb"));
+        };
+        let byte = |i: usize| {
+            u8::from_str_radix(&digits[i..i + 2], 16).expect("checked hex") as f32 / 255.0
+        };
         let alpha = match (alpha, digits.len()) {
             (Some(a), 6) if (0.0..=1.0).contains(&a) => a,
             (Some(_), 6) => return Err(format!("{key}: alpha is from 0 to 1")),
-            (Some(_), _) => return Err(format!("{key}: an alpha of its own, or #rrggbbaa -- not both")),
+            (Some(_), _) => {
+                return Err(format!(
+                    "{key}: an alpha of its own, or #rrggbbaa -- not both"
+                ))
+            }
             (None, 8) => byte(6),
             (None, _) => 1.0,
         };
@@ -477,12 +559,29 @@ pub fn parse(text: &str) -> Result<Theme, String> {
         divider: s.divider.rgba("surfaces.divider")?,
         tabs,
         bg,
-        sidebar_bg: s.sidebar_bg.as_ref().map(|c| c.rgba("surfaces.sidebar_bg")).transpose()?.unwrap_or(bg),
+        sidebar_bg: s
+            .sidebar_bg
+            .as_ref()
+            .map(|c| c.rgba("surfaces.sidebar_bg"))
+            .transpose()?
+            .unwrap_or(bg),
         bg_modeline: s.bg_modeline.rgba("surfaces.bg_modeline")?,
         fg,
-        fg_modeline: f.text.fg_modeline.as_ref().map(|c| c.text("text.fg_modeline")).transpose()?.unwrap_or(fg),
+        fg_modeline: f
+            .text
+            .fg_modeline
+            .as_ref()
+            .map(|c| c.text("text.fg_modeline"))
+            .transpose()?
+            .unwrap_or(fg),
         caret,
-        caret_text: f.text.caret_text.as_ref().map(|c| c.text("text.caret_text")).transpose()?.unwrap_or(opaque(caret)),
+        caret_text: f
+            .text
+            .caret_text
+            .as_ref()
+            .map(|c| c.text("text.caret_text"))
+            .transpose()?
+            .unwrap_or(opaque(caret)),
         hl_line: s.hl_line.rgba("surfaces.hl_line")?,
         selection: s.selection.rgba("surfaces.selection")?,
         bracket_match: s.bracket_match.rgba("surfaces.bracket_match")?,
@@ -495,7 +594,12 @@ pub fn parse(text: &str) -> Result<Theme, String> {
         mode_explorer: m.explorer.rgba("modes.explorer")?,
         mode_picker: m.picker.rgba("modes.picker")?,
         mode_text_dark: text_dark,
-        mode_text_light: m.text_light.as_ref().map(|c| c.text("modes.text_light")).transpose()?.unwrap_or(text_dark),
+        mode_text_light: m
+            .text_light
+            .as_ref()
+            .map(|c| c.text("modes.text_light"))
+            .transpose()?
+            .unwrap_or(text_dark),
         gutter_fg: f.text.gutter_fg.text("text.gutter_fg")?,
         syntax_keyword: f.syntax.keyword.text("syntax.keyword")?,
         syntax_string: f.syntax.string.text("syntax.string")?,
@@ -527,7 +631,10 @@ struct Library {
 fn library() -> &'static Library {
     static LIBRARY: std::sync::OnceLock<Library> = std::sync::OnceLock::new();
     LIBRARY.get_or_init(|| {
-        let mut lib = Library { themes: Vec::new(), problems: Vec::new() };
+        let mut lib = Library {
+            themes: Vec::new(),
+            problems: Vec::new(),
+        };
         for (file, text) in BUILT_IN {
             match parse(text) {
                 Ok(theme) => lib.themes.push(Box::leak(Box::new(theme))),
@@ -540,14 +647,21 @@ fn library() -> &'static Library {
         // from `themes/` in the settings folder: one with the same name as
         // a theme before it takes its place. Tests use the shipped ones
         // only.
-        let mut dirs: Vec<(String, std::path::PathBuf)> = crate::installed::data_dirs("themes").into_iter().map(|d| (format!("{}/", d.display()), d)).collect();
+        let mut dirs: Vec<(String, std::path::PathBuf)> = crate::installed::data_dirs("themes")
+            .into_iter()
+            .map(|d| (format!("{}/", d.display()), d))
+            .collect();
         if !cfg!(test) {
             dirs.extend(fenix_storage::paths::themes_dir().map(|d| ("themes/".to_string(), d)));
         }
         for (shown, dir) in dirs {
             for (file, result) in read_dir_themes(&dir) {
                 match result {
-                    Ok(theme) => match lib.themes.iter().position(|t| t.name.eq_ignore_ascii_case(theme.name)) {
+                    Ok(theme) => match lib
+                        .themes
+                        .iter()
+                        .position(|t| t.name.eq_ignore_ascii_case(theme.name))
+                    {
                         Some(i) => lib.themes[i] = Box::leak(Box::new(theme)),
                         None => lib.themes.push(Box::leak(Box::new(theme))),
                     },
@@ -561,14 +675,28 @@ fn library() -> &'static Library {
 
 /// Every `.toml` in `dir`, by file name, read.
 fn read_dir_themes(dir: &std::path::Path) -> Vec<(String, Result<Theme, String>)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut files: Vec<std::path::PathBuf> = entries.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml"))).collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("toml"))
+        })
+        .collect();
     files.sort();
     files
         .into_iter()
         .map(|path| {
-            let file = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            let result = std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|text| parse(&text));
+            let file = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let result = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| parse(&text));
             (file, result)
         })
         .collect()
@@ -588,7 +716,10 @@ pub fn problems() -> &'static [String] {
 /// Case-insensitive lookup by `Theme::name` -- the saved setting just
 /// holds a name.
 pub fn by_name(name: &str) -> Option<&'static Theme> {
-    all().iter().find(|t| t.name.eq_ignore_ascii_case(name)).copied()
+    all()
+        .iter()
+        .find(|t| t.name.eq_ignore_ascii_case(name))
+        .copied()
 }
 
 /// `DEFAULT`, the theme there always is.
@@ -606,34 +737,60 @@ fn color_distance(a: (u8, u8, u8), b: (u8, u8, u8)) -> f32 {
     let d = |x: u8, y: u8| x as f32 - y as f32;
     let mean_r = (a.0 as f32 + b.0 as f32) / 2.0;
     let (dr, dg, db) = (d(a.0, b.0), d(a.1, b.1), d(a.2, b.2));
-    ((2.0 + mean_r / 256.0) * dr * dr + 4.0 * dg * dg + (2.0 + (255.0 - mean_r) / 256.0) * db * db).sqrt()
+    ((2.0 + mean_r / 256.0) * dr * dr + 4.0 * dg * dg + (2.0 + (255.0 - mean_r) / 256.0) * db * db)
+        .sqrt()
 }
 
 /// `n` colours from `candidates`, readable on `background` and each as far
 /// from the ones before as can be; past the distinct ones, more made by
 /// turning their hue.
-fn palette_from(candidates: &[(u8, u8, u8)], background: (u8, u8, u8), n: usize) -> Vec<(u8, u8, u8)> {
+fn palette_from(
+    candidates: &[(u8, u8, u8)],
+    background: (u8, u8, u8),
+    n: usize,
+) -> Vec<(u8, u8, u8)> {
     // Too close to the background to read on it, or to one another to
     // tell apart.
     const UNREADABLE: f32 = 120.0;
     const SAME: f32 = 60.0;
-    let mut left: Vec<(u8, u8, u8)> = candidates.iter().copied().filter(|c| color_distance(*c, background) >= UNREADABLE).collect();
+    let mut left: Vec<(u8, u8, u8)> = candidates
+        .iter()
+        .copied()
+        .filter(|c| color_distance(*c, background) >= UNREADABLE)
+        .collect();
     let mut out: Vec<(u8, u8, u8)> = Vec::new();
     while out.len() < n && !left.is_empty() {
         // The farthest from those picked; the first, the farthest from
         // the background.
-        let score = |c: &(u8, u8, u8)| out.iter().map(|o| color_distance(*c, *o)).fold(color_distance(*c, background), f32::min);
-        let (i, best) = left.iter().enumerate().map(|(i, c)| (i, score(c))).fold((0, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
+        let score = |c: &(u8, u8, u8)| {
+            out.iter()
+                .map(|o| color_distance(*c, *o))
+                .fold(color_distance(*c, background), f32::min)
+        };
+        let (i, best) = left
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, score(c)))
+            .fold((0, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
         let c = left.remove(i);
         if !out.is_empty() && best < SAME {
             break;
         }
         out.push(c);
     }
-    let seed = out.first().copied().unwrap_or(if color_distance((255, 255, 255), background) > color_distance((0, 0, 0), background) { (200, 120, 80) } else { (150, 60, 30) });
+    let seed = out.first().copied().unwrap_or(
+        if color_distance((255, 255, 255), background) > color_distance((0, 0, 0), background) {
+            (200, 120, 80)
+        } else {
+            (150, 60, 30)
+        },
+    );
     let mut turn = 1;
     while out.len() < n {
-        let made = turn_hue(seed, turn as f32 * 360.0 / n as f32 + 15.0 * (turn / n) as f32);
+        let made = turn_hue(
+            seed,
+            turn as f32 * 360.0 / n as f32 + 15.0 * (turn / n) as f32,
+        );
         turn += 1;
         if out.iter().all(|o| color_distance(*o, made) >= SAME / 2.0) || turn > 4 * n {
             out.push(made);
@@ -648,7 +805,11 @@ fn turn_hue((r, g, b): (u8, u8, u8), degrees: f32) -> (u8, u8, u8) {
     let (r, g, b) = (r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0);
     let (max, min) = (r.max(g).max(b), r.min(g).min(b));
     let (l, d) = ((max + min) / 2.0, max - min);
-    let s = if d == 0.0 { 0.5 } else { d / (1.0 - (2.0 * l - 1.0).abs()) };
+    let s = if d == 0.0 {
+        0.5
+    } else {
+        d / (1.0 - (2.0 * l - 1.0).abs())
+    };
     let h = if d == 0.0 {
         0.0
     } else if max == r {
@@ -682,17 +843,35 @@ mod tests {
     #[test]
     fn a_themes_palette_is_eight_distinct_readable_colours() {
         for theme in super::all() {
-            let bg = ((theme.bg[0] * 255.0).round() as u8, (theme.bg[1] * 255.0).round() as u8, (theme.bg[2] * 255.0).round() as u8);
+            let bg = (
+                (theme.bg[0] * 255.0).round() as u8,
+                (theme.bg[1] * 255.0).round() as u8,
+                (theme.bg[2] * 255.0).round() as u8,
+            );
             let palette = theme.palette();
             assert_eq!(palette.len(), 8, "{}", theme.name);
             for (i, a) in palette.iter().enumerate() {
-                assert!(palette[i + 1..].iter().all(|b| a != b), "{}: {palette:?}", theme.name);
-                assert!(super::color_distance(*a, bg) > 40.0, "{}: {a:?} on {bg:?}", theme.name);
+                assert!(
+                    palette[i + 1..].iter().all(|b| a != b),
+                    "{}: {palette:?}",
+                    theme.name
+                );
+                assert!(
+                    super::color_distance(*a, bg) > 40.0,
+                    "{}: {a:?} on {bg:?}",
+                    theme.name
+                );
             }
         }
         let made = super::palette_from(&[(200, 40, 40), (201, 41, 41)], (0, 0, 0), 8);
         assert_eq!(made.len(), 8);
-        assert_eq!(made.iter().filter(|c| **c == (200, 40, 40) || **c == (201, 41, 41)).count(), 1, "one of two too alike: {made:?}");
+        assert_eq!(
+            made.iter()
+                .filter(|c| **c == (200, 40, 40) || **c == (201, 41, 41))
+                .count(),
+            1,
+            "one of two too alike: {made:?}"
+        );
         assert_eq!(super::palette_from(&[], (0, 0, 0), 8).len(), 8);
     }
 
@@ -730,7 +909,14 @@ mod tests {
     #[test]
     fn every_theme_keeps_text_readable_on_editor_and_popup_surfaces() {
         for theme in all().iter().filter(|theme| theme.name != "TempleOS") {
-            let reading = [theme.fg, theme.gutter_fg, theme.syntax_comment, theme.syntax_variable, theme.icon_file, theme.caret_text];
+            let reading = [
+                theme.fg,
+                theme.gutter_fg,
+                theme.syntax_comment,
+                theme.syntax_variable,
+                theme.icon_file,
+                theme.caret_text,
+            ];
             let accents = [
                 theme.syntax_keyword,
                 theme.syntax_string,
@@ -754,15 +940,27 @@ mod tests {
                 for (colors, need) in [(&reading[..], 4.5), (&accents[..], accent_need)] {
                     for &color in colors {
                         let ratio = contrast(color, surface);
-                        assert!(ratio >= need, "{}: {color:?} on {surface:?}: {ratio:.2}:1, wants {need}", theme.name);
+                        assert!(
+                            ratio >= need,
+                            "{}: {color:?} on {surface:?}: {ratio:.2}:1, wants {need}",
+                            theme.name
+                        );
                     }
                 }
             }
             for overlay in [theme.selection, theme.bracket_match, theme.search_match] {
                 let surface = composite(overlay, line);
-                assert!(contrast(theme.fg, surface) >= 4.5, "{}: highlighted body text", theme.name);
+                assert!(
+                    contrast(theme.fg, surface) >= 4.5,
+                    "{}: highlighted body text",
+                    theme.name
+                );
                 for color in reading.iter().chain(&accents) {
-                    assert!(contrast(*color, surface) >= 3.0, "{}: highlighted {color:?}", theme.name);
+                    assert!(
+                        contrast(*color, surface) >= 3.0,
+                        "{}: highlighted {color:?}",
+                        theme.name
+                    );
                 }
             }
             assert!(contrast(theme.fg_modeline, theme.bg_modeline) >= 4.5);
@@ -774,10 +972,22 @@ mod tests {
     /// colour rather than as shades of the same ink.
     #[test]
     fn light_themes_keep_their_main_accents_apart_from_body_text() {
-        for theme in all().iter().filter(|theme| is_light(theme) && theme.name != "TempleOS") {
-            for (role, color) in [("keyword", theme.syntax_keyword), ("string", theme.syntax_string), ("function", theme.syntax_function), ("type", theme.syntax_type)] {
+        for theme in all()
+            .iter()
+            .filter(|theme| is_light(theme) && theme.name != "TempleOS")
+        {
+            for (role, color) in [
+                ("keyword", theme.syntax_keyword),
+                ("string", theme.syntax_string),
+                ("function", theme.syntax_function),
+                ("type", theme.syntax_type),
+            ] {
                 let apart = oklab_distance(color, theme.fg);
-                assert!(apart >= 0.10, "{}: {role} is {apart:.3} from body text", theme.name);
+                assert!(
+                    apart >= 0.10,
+                    "{}: {role} is {apart:.3} from body text",
+                    theme.name
+                );
             }
         }
     }
@@ -785,7 +995,11 @@ mod tests {
     fn oklab(c: glyphon::Color) -> [f32; 3] {
         let lin = |v: u8| {
             let v = v as f32 / 255.0;
-            if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
         };
         let (r, g, b) = (lin(c.r()), lin(c.g()), lin(c.b()));
         let l = (0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
@@ -814,9 +1028,17 @@ mod tests {
                 theme.mode_explorer,
                 theme.mode_picker,
             ] {
-                assert!(contrast(theme.mode_text_dark, bg) >= 4.5, "{}: badge {bg:?}", theme.name);
+                assert!(
+                    contrast(theme.mode_text_dark, bg) >= 4.5,
+                    "{}: badge {bg:?}",
+                    theme.name
+                );
             }
-            assert!(contrast(theme.mode_text_light, theme.mode_visual) >= 4.5, "{}: visual badge", theme.name);
+            assert!(
+                contrast(theme.mode_text_light, theme.mode_visual) >= 4.5,
+                "{}: visual badge",
+                theme.name
+            );
         }
     }
 
@@ -838,7 +1060,11 @@ mod tests {
 
     fn bg_luminance(theme: &Theme) -> f32 {
         let to_u8 = |v: f32| (v * 255.0).round() as u8;
-        luminance(glyphon::Color::rgb(to_u8(theme.bg[0]), to_u8(theme.bg[1]), to_u8(theme.bg[2])))
+        luminance(glyphon::Color::rgb(
+            to_u8(theme.bg[0]),
+            to_u8(theme.bg[1]),
+            to_u8(theme.bg[2]),
+        ))
     }
 
     /// Comments must read as *quieter* than ordinary code in every
@@ -849,7 +1075,11 @@ mod tests {
     #[test]
     fn every_theme_dims_its_comments_below_its_body_text() {
         for theme in all() {
-            let (bg, fg, comment) = (bg_luminance(theme), luminance(theme.fg), luminance(theme.syntax_comment));
+            let (bg, fg, comment) = (
+                bg_luminance(theme),
+                luminance(theme.fg),
+                luminance(theme.syntax_comment),
+            );
             assert!(
                 (comment - bg).abs() < (fg - bg).abs(),
                 "{}: comments ({comment:.3}) must sit closer to the background ({bg:.3}) than body text ({fg:.3}) does",
@@ -867,9 +1097,22 @@ mod tests {
     #[test]
     fn every_theme_makes_its_symbols_stand_out_from_text_and_comments() {
         for theme in all() {
-            for (role, color) in [("operator", theme.syntax_operator), ("punctuation", theme.syntax_punctuation)] {
-                assert_ne!(rgb_of(color), rgb_of(theme.fg), "{}: {role} is the same color as body text", theme.name);
-                assert_ne!(rgb_of(color), rgb_of(theme.syntax_comment), "{}: {role} is as dim as a comment", theme.name);
+            for (role, color) in [
+                ("operator", theme.syntax_operator),
+                ("punctuation", theme.syntax_punctuation),
+            ] {
+                assert_ne!(
+                    rgb_of(color),
+                    rgb_of(theme.fg),
+                    "{}: {role} is the same color as body text",
+                    theme.name
+                );
+                assert_ne!(
+                    rgb_of(color),
+                    rgb_of(theme.syntax_comment),
+                    "{}: {role} is as dim as a comment",
+                    theme.name
+                );
             }
         }
     }
@@ -885,15 +1128,30 @@ mod tests {
 
     #[test]
     fn exact_top_level_names_resolve_directly() {
-        assert_eq!(named("Orbit Dark").syntax_color("keyword"), named("Orbit Dark").syntax_keyword);
-        assert_eq!(named("Orbit Dark").syntax_color("string"), named("Orbit Dark").syntax_string);
+        assert_eq!(
+            named("Orbit Dark").syntax_color("keyword"),
+            named("Orbit Dark").syntax_keyword
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("string"),
+            named("Orbit Dark").syntax_string
+        );
     }
 
     #[test]
     fn dotted_sub_captures_fall_back_to_their_top_level_color() {
-        assert_eq!(named("Orbit Dark").syntax_color("function.method"), named("Orbit Dark").syntax_function);
-        assert_eq!(named("Orbit Dark").syntax_color("constant.builtin"), named("Orbit Dark").syntax_constant);
-        assert_eq!(named("Orbit Dark").syntax_color("punctuation.bracket"), named("Orbit Dark").syntax_punctuation);
+        assert_eq!(
+            named("Orbit Dark").syntax_color("function.method"),
+            named("Orbit Dark").syntax_function
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("constant.builtin"),
+            named("Orbit Dark").syntax_constant
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("punctuation.bracket"),
+            named("Orbit Dark").syntax_punctuation
+        );
     }
 
     #[test]
@@ -910,7 +1168,10 @@ mod tests {
 
     #[test]
     fn unrecognized_capture_falls_back_to_plain_fg() {
-        assert_eq!(named("Orbit Dark").syntax_color("some.unknown.capture"), named("Orbit Dark").fg);
+        assert_eq!(
+            named("Orbit Dark").syntax_color("some.unknown.capture"),
+            named("Orbit Dark").fg
+        );
     }
 
     #[test]
@@ -918,18 +1179,46 @@ mod tests {
         // All six share the same "text" top-level segment -- proves
         // they're actually distinguished by their exact name, not all
         // silently landing on one fallback color together.
-        assert_eq!(named("Orbit Dark").syntax_color("text.title"), named("Orbit Dark").syntax_function);
-        assert_eq!(named("Orbit Dark").syntax_color("text.strong"), named("Orbit Dark").syntax_keyword);
-        assert_eq!(named("Orbit Dark").syntax_color("text.emphasis"), named("Orbit Dark").syntax_type);
-        assert_eq!(named("Orbit Dark").syntax_color("text.literal"), named("Orbit Dark").syntax_string);
-        assert_eq!(named("Orbit Dark").syntax_color("text.uri"), named("Orbit Dark").syntax_constant);
-        assert_eq!(named("Orbit Dark").syntax_color("text.reference"), named("Orbit Dark").syntax_constant);
+        assert_eq!(
+            named("Orbit Dark").syntax_color("text.title"),
+            named("Orbit Dark").syntax_function
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("text.strong"),
+            named("Orbit Dark").syntax_keyword
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("text.emphasis"),
+            named("Orbit Dark").syntax_type
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("text.literal"),
+            named("Orbit Dark").syntax_string
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("text.uri"),
+            named("Orbit Dark").syntax_constant
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("text.reference"),
+            named("Orbit Dark").syntax_constant
+        );
 
-        let distinct: std::collections::HashSet<_> = ["text.title", "text.strong", "text.emphasis", "text.literal", "text.uri"]
-            .map(|name| format!("{:?}", named("Orbit Dark").syntax_color(name)))
-            .into_iter()
-            .collect();
-        assert_eq!(distinct.len(), 5, "each of these should read as visibly different from the others");
+        let distinct: std::collections::HashSet<_> = [
+            "text.title",
+            "text.strong",
+            "text.emphasis",
+            "text.literal",
+            "text.uri",
+        ]
+        .map(|name| format!("{:?}", named("Orbit Dark").syntax_color(name)))
+        .into_iter()
+        .collect();
+        assert_eq!(
+            distinct.len(),
+            5,
+            "each of these should read as visibly different from the others"
+        );
     }
 
     #[test]
@@ -939,24 +1228,51 @@ mod tests {
         // isn't one of the five specific ones above should fall all
         // the way through to plain `fg`, not silently match one of
         // them by accident.
-        assert_eq!(named("Orbit Dark").syntax_color("text.something_else"), named("Orbit Dark").fg);
+        assert_eq!(
+            named("Orbit Dark").syntax_color("text.something_else"),
+            named("Orbit Dark").fg
+        );
     }
 
     #[test]
     fn tcls_bare_control_flow_and_spell_captures_resolve() {
-        assert_eq!(named("Orbit Dark").syntax_color("repeat"), named("Orbit Dark").syntax_keyword);
-        assert_eq!(named("Orbit Dark").syntax_color("conditional"), named("Orbit Dark").syntax_keyword);
-        assert_eq!(named("Orbit Dark").syntax_color("spell"), named("Orbit Dark").syntax_comment);
+        assert_eq!(
+            named("Orbit Dark").syntax_color("repeat"),
+            named("Orbit Dark").syntax_keyword
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("conditional"),
+            named("Orbit Dark").syntax_keyword
+        );
+        assert_eq!(
+            named("Orbit Dark").syntax_color("spell"),
+            named("Orbit Dark").syntax_comment
+        );
     }
 
     #[test]
     fn git_status_color_covers_every_status() {
         use fenix_explorer::GitStatus;
-        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Modified), named("Orbit Dark").git_modified);
-        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Staged), named("Orbit Dark").git_staged);
-        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Untracked), named("Orbit Dark").git_untracked);
-        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Ignored), named("Orbit Dark").git_ignored);
-        assert_eq!(named("Orbit Dark").git_status_color(GitStatus::Conflicted), named("Orbit Dark").git_conflicted);
+        assert_eq!(
+            named("Orbit Dark").git_status_color(GitStatus::Modified),
+            named("Orbit Dark").git_modified
+        );
+        assert_eq!(
+            named("Orbit Dark").git_status_color(GitStatus::Staged),
+            named("Orbit Dark").git_staged
+        );
+        assert_eq!(
+            named("Orbit Dark").git_status_color(GitStatus::Untracked),
+            named("Orbit Dark").git_untracked
+        );
+        assert_eq!(
+            named("Orbit Dark").git_status_color(GitStatus::Ignored),
+            named("Orbit Dark").git_ignored
+        );
+        assert_eq!(
+            named("Orbit Dark").git_status_color(GitStatus::Conflicted),
+            named("Orbit Dark").git_conflicted
+        );
     }
 
     #[test]
@@ -964,11 +1280,23 @@ mod tests {
         // named("TempleOS") is a plain data value like named("Orbit Dark") -- no special
         // casing anywhere in `syntax_color`/`git_status_color`, so this
         // is really a check that the const itself is well-formed.
-        assert_eq!(named("TempleOS").syntax_color("keyword"), named("TempleOS").syntax_keyword);
-        assert_eq!(named("TempleOS").syntax_color("function.method"), named("TempleOS").syntax_function);
-        assert_eq!(named("TempleOS").syntax_color("some.unknown.capture"), named("TempleOS").fg);
+        assert_eq!(
+            named("TempleOS").syntax_color("keyword"),
+            named("TempleOS").syntax_keyword
+        );
+        assert_eq!(
+            named("TempleOS").syntax_color("function.method"),
+            named("TempleOS").syntax_function
+        );
+        assert_eq!(
+            named("TempleOS").syntax_color("some.unknown.capture"),
+            named("TempleOS").fg
+        );
         use fenix_explorer::GitStatus;
-        assert_eq!(named("TempleOS").git_status_color(GitStatus::Staged), named("TempleOS").git_staged);
+        assert_eq!(
+            named("TempleOS").git_status_color(GitStatus::Staged),
+            named("TempleOS").git_staged
+        );
     }
 
     #[test]
@@ -1018,12 +1346,42 @@ mod tests {
         // color` are called.
         use fenix_explorer::GitStatus;
         for theme in all().iter().copied() {
-            assert_eq!(theme.syntax_color("keyword"), theme.syntax_keyword, "{}", theme.name);
-            assert_eq!(theme.syntax_color("function.method"), theme.syntax_function, "{}", theme.name);
-            assert_eq!(theme.syntax_color("some.unknown.capture"), theme.fg, "{}", theme.name);
-            assert_eq!(theme.syntax_color("text.title"), theme.syntax_function, "{}", theme.name);
-            assert_eq!(theme.syntax_color("text.strong"), theme.syntax_keyword, "{}", theme.name);
-            assert_eq!(theme.git_status_color(GitStatus::Staged), theme.git_staged, "{}", theme.name);
+            assert_eq!(
+                theme.syntax_color("keyword"),
+                theme.syntax_keyword,
+                "{}",
+                theme.name
+            );
+            assert_eq!(
+                theme.syntax_color("function.method"),
+                theme.syntax_function,
+                "{}",
+                theme.name
+            );
+            assert_eq!(
+                theme.syntax_color("some.unknown.capture"),
+                theme.fg,
+                "{}",
+                theme.name
+            );
+            assert_eq!(
+                theme.syntax_color("text.title"),
+                theme.syntax_function,
+                "{}",
+                theme.name
+            );
+            assert_eq!(
+                theme.syntax_color("text.strong"),
+                theme.syntax_keyword,
+                "{}",
+                theme.name
+            );
+            assert_eq!(
+                theme.git_status_color(GitStatus::Staged),
+                theme.git_staged,
+                "{}",
+                theme.name
+            );
         }
     }
 
@@ -1046,23 +1404,46 @@ mod tests {
     /// with it is said, by key.
     #[test]
     fn a_theme_file_fills_its_defaults_and_says_what_is_wrong() {
-        let mine = BUILT_IN[0].1.replace("name = \"Orbit Dark\"", "name = \"Mine\"").replace("sidebar_bg = \"#1a1b26\"\n", "").replace("fg_modeline = \"#c0caf5\"\n", "").replace("caret_text = \"#e0af68\"\n", "");
+        let mine = BUILT_IN[0]
+            .1
+            .replace("name = \"Orbit Dark\"", "name = \"Mine\"")
+            .replace("sidebar_bg = \"#1a1b26\"\n", "")
+            .replace("fg_modeline = \"#c0caf5\"\n", "")
+            .replace("caret_text = \"#e0af68\"\n", "");
         let theme = parse(&mine).expect("reads");
         assert_eq!(theme.name, "Mine");
-        assert_eq!(theme.sidebar_bg, theme.bg, "the sidebar is the editor's background");
+        assert_eq!(
+            theme.sidebar_bg, theme.bg,
+            "the sidebar is the editor's background"
+        );
         assert_eq!(theme.fg_modeline, theme.fg);
         assert_eq!(theme.caret_text, opaque(theme.caret));
         assert_eq!(theme.tabs, TabStyle::Underline);
 
         let alpha = mine.replace("hl_line = \"#222534\"", "hl_line = \"#22253480\"");
-        assert!((parse(&alpha).unwrap().hl_line[3] - 128.0 / 255.0).abs() < 1e-6, "#rrggbbaa");
+        assert!(
+            (parse(&alpha).unwrap().hl_line[3] - 128.0 / 255.0).abs() < 1e-6,
+            "#rrggbbaa"
+        );
         let bad = mine.replace("keyword = \"#bb9af7\"", "keyword = \"purple\"");
-        assert_eq!(parse(&bad).err().as_deref(), Some("syntax.keyword: purple isn't a color -- write #rrggbb"));
-        let see_through = mine.replace("keyword = \"#bb9af7\"", "keyword = { color = \"#bb9af7\", alpha = 0.5 }");
-        assert!(parse(&see_through).err().unwrap().starts_with("syntax.keyword: text can't be see-through"));
+        assert_eq!(
+            parse(&bad).err().as_deref(),
+            Some("syntax.keyword: purple isn't a color -- write #rrggbb")
+        );
+        let see_through = mine.replace(
+            "keyword = \"#bb9af7\"",
+            "keyword = { color = \"#bb9af7\", alpha = 0.5 }",
+        );
+        assert!(parse(&see_through)
+            .err()
+            .unwrap()
+            .starts_with("syntax.keyword: text can't be see-through"));
         let tabs = mine.replace("tabs = \"underline\"", "tabs = \"round\"");
         assert!(parse(&tabs).err().unwrap().contains("underline or block"));
-        assert!(parse(&mine.replace("[git]", "[gits]")).is_err(), "an unknown section is an error, not ignored");
+        assert!(
+            parse(&mine.replace("[git]", "[gits]")).is_err(),
+            "an unknown section is an error, not ignored"
+        );
     }
 
     /// Yours are read from a folder, sorted; a broken one is said, not
@@ -1070,11 +1451,18 @@ mod tests {
     #[test]
     fn your_themes_are_read_from_their_folder() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("b.toml"), BUILT_IN[0].1.replace("Orbit Dark", "Mine")).unwrap();
+        std::fs::write(
+            dir.path().join("b.toml"),
+            BUILT_IN[0].1.replace("Orbit Dark", "Mine"),
+        )
+        .unwrap();
         std::fs::write(dir.path().join("a.toml"), "name = \"Broken\"").unwrap();
         std::fs::write(dir.path().join("notes.txt"), "not a theme").unwrap();
         let read = read_dir_themes(dir.path());
-        assert_eq!(read.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(), ["a.toml", "b.toml"]);
+        assert_eq!(
+            read.iter().map(|(f, _)| f.as_str()).collect::<Vec<_>>(),
+            ["a.toml", "b.toml"]
+        );
         assert!(read[0].1.is_err() && read[1].1.as_ref().is_ok_and(|t| t.name == "Mine"));
     }
 
@@ -1085,5 +1473,4 @@ mod tests {
         assert_eq!(by_name("orbit dark").map(|t| t.name), Some("Orbit Dark"));
         assert!(by_name("nonexistent-theme").is_none());
     }
-
 }

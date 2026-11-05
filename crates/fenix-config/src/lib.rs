@@ -16,9 +16,9 @@
 //! changes only the lines of the settings that changed (`toml_edit`), so
 //! comments and hand edits survive it.
 
+pub mod keychain;
 mod project;
 pub mod schema;
-pub mod keychain;
 pub mod secrets;
 
 use std::cell::RefCell;
@@ -29,8 +29,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 pub mod keybindings;
-pub use schema::{setting, settings, Category, Field, Kind, Setting, Value};
 pub use project::ProjectSettings;
+pub use schema::{setting, settings, Category, Field, Kind, Setting, Value};
 pub use secrets::Secret;
 
 /// `[motion]`. Each feature unset follows `level`: `subtle` turns on
@@ -338,7 +338,10 @@ impl std::fmt::Display for Problem {
 }
 
 /// Walks `key`'s dotted path in `doc`.
-pub(crate) fn lookup<'a>(doc: &'a toml_edit::DocumentMut, key: &str) -> Option<&'a toml_edit::Item> {
+pub(crate) fn lookup<'a>(
+    doc: &'a toml_edit::DocumentMut,
+    key: &str,
+) -> Option<&'a toml_edit::Item> {
     let mut item = doc.as_item();
     for part in key.split('.') {
         item = item.as_table_like()?.get(part)?;
@@ -363,7 +366,10 @@ pub(crate) fn store(doc: &mut toml_edit::DocumentMut, key: &str, item: Option<to
             new.set_implicit(true);
             table.insert(part, toml_edit::Item::Table(new));
         }
-        table = table.get_mut(part).and_then(|i| i.as_table_like_mut()).expect("just made");
+        table = table
+            .get_mut(part)
+            .and_then(|i| i.as_table_like_mut())
+            .expect("just made");
     }
     match item {
         Some(item) => {
@@ -393,7 +399,12 @@ fn put_header_first(doc: &mut toml_edit::DocumentMut, header: String) {
         // A plain `key = value` at the top.
         _ => {
             if let Some(mut key) = table.key_mut(&first) {
-                let mine = key.leaf_decor().prefix().and_then(|p| p.as_str()).unwrap_or_default().to_string();
+                let mine = key
+                    .leaf_decor()
+                    .prefix()
+                    .and_then(|p| p.as_str())
+                    .unwrap_or_default()
+                    .to_string();
                 key.leaf_decor_mut().set_prefix(format!("{header}{mine}"));
             }
         }
@@ -411,7 +422,12 @@ fn prefix_first_header(table: &mut toml_edit::Table, header: &str) {
             }
         }
     }
-    let mine = table.decor().prefix().and_then(|p| p.as_str()).unwrap_or_default().to_string();
+    let mine = table
+        .decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or_default()
+        .to_string();
     table.decor_mut().set_prefix(format!("{header}{mine}"));
 }
 
@@ -489,7 +505,10 @@ impl Config {
     /// can't be parsed is the same, with the reason in `problems` -- and
     /// is never written over until it's fixed.
     pub fn load(path: PathBuf) -> io::Result<Self> {
-        let state_dir = path.parent().map(|p| p.join("state")).unwrap_or_else(|| PathBuf::from("state"));
+        let state_dir = path
+            .parent()
+            .map(|p| p.join("state"))
+            .unwrap_or_else(|| PathBuf::from("state"));
         Self::load_at(path, state_dir)
     }
 
@@ -513,7 +532,11 @@ impl Config {
             let state_dir = path.parent().map(|p| p.join("state")).unwrap_or_default();
             let mut config = Self::empty(path, state_dir);
             config.broken = true;
-            config.problems.push(Problem { key: None, line: None, message: e.to_string() });
+            config.problems.push(Problem {
+                key: None,
+                line: None,
+                message: e.to_string(),
+            });
             config
         })
     }
@@ -523,7 +546,11 @@ impl Config {
         Self::load_at(path.clone(), state_dir.clone()).unwrap_or_else(|e| {
             let mut config = Self::empty(path, state_dir);
             config.broken = true;
-            config.problems.push(Problem { key: None, line: None, message: e.to_string() });
+            config.problems.push(Problem {
+                key: None,
+                line: None,
+                message: e.to_string(),
+            });
             config
         })
     }
@@ -534,7 +561,11 @@ impl Config {
             Err(e) => {
                 self.broken = true;
                 let line = e.span().map(|s| line_of(text, s.start));
-                self.problems.push(Problem { key: None, line, message: e.message().trim().to_string() });
+                self.problems.push(Problem {
+                    key: None,
+                    line,
+                    message: e.message().trim().to_string(),
+                });
                 return;
             }
         };
@@ -552,10 +583,19 @@ impl Config {
             .collect();
         let doc = parsed.into_mut();
         for setting in schema::settings() {
-            let Some(item) = lookup(&doc, setting.key) else { continue };
-            let result = setting.kind.read(item).and_then(|value| setting.set(self, Some(value)));
+            let Some(item) = lookup(&doc, setting.key) else {
+                continue;
+            };
+            let result = setting
+                .kind
+                .read(item)
+                .and_then(|value| setting.set(self, Some(value)));
             if let Err(message) = result {
-                self.problems.push(Problem { key: Some(setting.key.into()), line: lines.get(setting.key).copied(), message });
+                self.problems.push(Problem {
+                    key: Some(setting.key.into()),
+                    line: lines.get(setting.key).copied(),
+                    message,
+                });
             }
         }
         // In the order they're in the file.
@@ -565,9 +605,15 @@ impl Config {
 
     fn read_state(&mut self) {
         let windows = self.state_dir.join("windows.json");
-        self.windows = fenix_storage::state::read(&windows, "windows").ok().flatten().unwrap_or_default();
+        self.windows = fenix_storage::state::read(&windows, "windows")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
         let bookmarks = self.state_dir.join("bookmarks.json");
-        self.explorer_bookmarks = fenix_storage::state::read(&bookmarks, "explorer").ok().flatten().unwrap_or_default();
+        self.explorer_bookmarks = fenix_storage::state::read(&bookmarks, "explorer")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
     }
 
     /// Notes every setting's value as the file has it, so a save knows
@@ -603,7 +649,11 @@ impl Config {
     pub fn save(&self) -> io::Result<()> {
         self.save_state()?;
         if self.broken {
-            let why = self.problems.first().map(|p| p.to_string()).unwrap_or_default();
+            let why = self
+                .problems
+                .first()
+                .map(|p| p.to_string())
+                .unwrap_or_default();
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("settings.toml can't be read, so it wasn't written over -- fix it first ({why})")));
         }
         let on_disk = match std::fs::read_to_string(&self.path) {
@@ -638,9 +688,14 @@ impl Config {
             if baseline.get(setting.key) == Some(&now) {
                 continue;
             }
-            let same_on_disk = lookup(&doc, setting.key).and_then(|i| setting.kind.read(i).ok()) == now;
+            let same_on_disk =
+                lookup(&doc, setting.key).and_then(|i| setting.kind.read(i).ok()) == now;
             if !same_on_disk {
-                store(&mut doc, setting.key, now.as_ref().map(|v| setting.kind.write(v)));
+                store(
+                    &mut doc,
+                    setting.key,
+                    now.as_ref().map(|v| setting.kind.write(v)),
+                );
             }
             baseline.insert(setting.key, now);
         }
@@ -677,7 +732,11 @@ impl Config {
             Ok(text) => fresh.read_toml(&text),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => {
-                self.problems = vec![Problem { key: None, line: None, message: e.to_string() }];
+                self.problems = vec![Problem {
+                    key: None,
+                    line: None,
+                    message: e.to_string(),
+                }];
                 return;
             }
         }
@@ -785,12 +844,15 @@ impl Config {
             .filter(|t| !t.trim().is_empty())
         })
     }
-
 }
 
 /// Usernames written with commas or spaces between them, `@` or not.
 pub fn names(text: &str) -> Vec<String> {
-    text.split([',', ' ']).map(|n| n.trim().trim_start_matches('@')).filter(|n| !n.is_empty()).map(str::to_string).collect()
+    text.split([',', ' '])
+        .map(|n| n.trim().trim_start_matches('@'))
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 #[cfg(test)]
@@ -802,11 +864,13 @@ mod tests {
     fn temp_path(name: &str) -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("fenix-config-test-{name}-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "fenix-config-test-{name}-{}-{n}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         dir.join("settings.toml")
     }
-
 
     /// The first setting saved goes below the header comment a new
     /// settings.toml starts with, not above it.
@@ -827,7 +891,10 @@ mod tests {
             let header_end = text.find("needs to be here.").unwrap();
             let setting = text.find("restore").unwrap();
             assert!(setting > header_end, "{text}");
-            assert_eq!(Config::load(path.clone()).unwrap().restore_session, Some(false));
+            assert_eq!(
+                Config::load(path.clone()).unwrap().restore_session,
+                Some(false)
+            );
             let _ = std::fs::remove_dir_all(path.parent().unwrap());
         }
     }
@@ -837,10 +904,22 @@ mod tests {
         let path = temp_path("windows_round_trip");
         let mut config = Config::load(path.clone()).unwrap();
         config.windows = vec![
-            WindowLayout { x: 0, y: 0, width: 2560, height: 1440, maximized: true },
+            WindowLayout {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+                maximized: true,
+            },
             // A monitor to the left of the primary one sits at a
             // negative x on Windows.
-            WindowLayout { x: -1920, y: -120, width: 1920, height: 1080, maximized: false },
+            WindowLayout {
+                x: -1920,
+                y: -120,
+                width: 1920,
+                height: 1080,
+                maximized: false,
+            },
         ];
         config.restore_windows = Some(false);
         config.restore_session = Some(false);
@@ -860,13 +939,25 @@ mod tests {
     fn lsp_servers_round_trip_through_save_and_load() {
         let path = temp_path("lsp_servers_round_trip");
         let mut config = Config::load_or_default(path.clone());
-        config.lsp_servers = vec![("python".to_string(), "pyright-langserver --stdio".to_string()), ("rust".to_string(), "rust-analyzer".to_string())];
+        config.lsp_servers = vec![
+            (
+                "python".to_string(),
+                "pyright-langserver --stdio".to_string(),
+            ),
+            ("rust".to_string(), "rust-analyzer".to_string()),
+        ];
         config.save().unwrap();
 
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(
             reloaded.lsp_servers,
-            vec![("python".to_string(), "pyright-langserver --stdio".to_string()), ("rust".to_string(), "rust-analyzer".to_string())]
+            vec![
+                (
+                    "python".to_string(),
+                    "pyright-langserver --stdio".to_string()
+                ),
+                ("rust".to_string(), "rust-analyzer".to_string())
+            ]
         );
         std::fs::remove_file(&path).ok();
     }
@@ -875,7 +966,10 @@ mod tests {
     fn no_windows_section_means_nothing_recorded_and_no_opt_out() {
         let config = Config::load(temp_path("windows_absent")).unwrap();
         assert!(config.windows.is_empty());
-        assert_eq!(config.restore_windows, None, "unset means restore, which is the default the app applies");
+        assert_eq!(
+            config.restore_windows, None,
+            "unset means restore, which is the default the app applies"
+        );
     }
 
     #[test]
@@ -912,7 +1006,10 @@ mod tests {
         assert!(config.tab_width.is_none());
         assert!(config.animations.is_none());
         assert!(config.completion_symbols_file.is_none());
-        assert!(config.value("vnc.hosts").is_none(), "a feature's setting, unset");
+        assert!(
+            config.value("vnc.hosts").is_none(),
+            "a feature's setting, unset"
+        );
     }
 
     #[test]
@@ -943,9 +1040,16 @@ mod tests {
         assert_eq!(reloaded.font_size, Some(18.0));
         assert_eq!(reloaded.font_family, Some("Fira Code".to_string()));
         assert_eq!(reloaded.indent_width, Some(2));
-        assert_eq!(reloaded.iskeyword_extra, Some(String::new()), "an explicit empty set round-trips distinctly from unset");
+        assert_eq!(
+            reloaded.iskeyword_extra,
+            Some(String::new()),
+            "an explicit empty set round-trips distinctly from unset"
+        );
         assert_eq!(reloaded.tab_width, Some(4));
-        assert_eq!(reloaded.completion_symbols_file, Some(PathBuf::from("/home/thomas/tcl-symbols.txt")));
+        assert_eq!(
+            reloaded.completion_symbols_file,
+            Some(PathBuf::from("/home/thomas/tcl-symbols.txt"))
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -982,7 +1086,10 @@ mod tests {
         config.save().unwrap();
 
         let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.jira_base_url, Some("https://jira.example.com".to_string()));
+        assert_eq!(
+            reloaded.jira_base_url,
+            Some("https://jira.example.com".to_string())
+        );
         assert_eq!(reloaded.jira_token, Some("secret-token-value".to_string()));
         std::fs::remove_file(&path).ok();
     }
@@ -996,15 +1103,24 @@ mod tests {
         config.save().unwrap();
 
         let reloaded = Config::load(path.clone()).unwrap();
-        assert_eq!(reloaded.gitlab_base_url.as_deref(), Some("https://gitlab.example.com"));
+        assert_eq!(
+            reloaded.gitlab_base_url.as_deref(),
+            Some("https://gitlab.example.com")
+        );
         assert_eq!(reloaded.gitlab_token.as_deref(), Some("glpat-secret"));
         // No project key: which project a repo belongs to comes from
         // its own `origin` remote, so one pair covers every repo.
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[gitlab]"), "got:
-{text}");
-        assert!(!text.contains("project ="), "got:
-{text}");
+        assert!(
+            text.contains("[gitlab]"),
+            "got:
+{text}"
+        );
+        assert!(
+            !text.contains("project ="),
+            "got:
+{text}"
+        );
         std::fs::remove_file(&path).ok();
     }
 
@@ -1023,7 +1139,11 @@ mod tests {
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.git_graph_limit, Some(500));
         assert_eq!(reloaded.git_base_branch, Some("develop".to_string()));
-        assert_eq!(reloaded.git_graph_style, Some("unicode".to_string()), "graph_style used to be dropped on save");
+        assert_eq!(
+            reloaded.git_graph_style,
+            Some("unicode".to_string()),
+            "graph_style used to be dropped on save"
+        );
         assert_eq!(reloaded.git_layout, Some("panes".to_string()));
         assert_eq!(reloaded.git_auto_fetch_minutes, Some(5));
         assert_eq!(reloaded.git_reviewers, ["alex", "sam"]);
@@ -1050,8 +1170,10 @@ mod tests {
         // bookmarks wherever you are -- so a save has to carry them.
         let path = temp_path("explorer_bookmarks_round_trip");
         let mut config = Config::load_or_default(path.clone());
-        config.explorer_bookmarks =
-            vec![("nas".to_string(), PathBuf::from(r"\\nas\media")), ("work".to_string(), PathBuf::from(r"C:\work"))];
+        config.explorer_bookmarks = vec![
+            ("nas".to_string(), PathBuf::from(r"\\nas\media")),
+            ("work".to_string(), PathBuf::from(r"C:\work")),
+        ];
 
         config.save().unwrap();
 
@@ -1061,7 +1183,11 @@ mod tests {
 
     #[test]
     fn save_creates_missing_parent_directories() {
-        let path = temp_path("creates_parents").parent().unwrap().join("nested-fenix-config-test").join("config.ini");
+        let path = temp_path("creates_parents")
+            .parent()
+            .unwrap()
+            .join("nested-fenix-config-test")
+            .join("config.ini");
         let mut config = Config::load_or_default(path.clone());
         config.theme = Some("Orbit Dark".to_string());
         config.save().unwrap();
@@ -1073,11 +1199,35 @@ mod tests {
     /// declare itself, kept by key. Registered by every test that counts on it,
     /// since the tests run in any order.
     fn register_vnc() {
-        static VNC: [Setting; 1] = [Setting::stored("vnc.hosts", schema::Category::Extensions, "Hosts", Kind::Records(&[
-            schema::Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
-            schema::Field { name: "host", label: "Host", range: None, default: None, choices: &[] },
-            schema::Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] },
-        ]), "Hosts.")];
+        static VNC: [Setting; 1] = [Setting::stored(
+            "vnc.hosts",
+            schema::Category::Extensions,
+            "Hosts",
+            Kind::Records(&[
+                schema::Field {
+                    name: "name",
+                    label: "Name",
+                    range: None,
+                    default: None,
+                    choices: &[],
+                },
+                schema::Field {
+                    name: "host",
+                    label: "Host",
+                    range: None,
+                    default: None,
+                    choices: &[],
+                },
+                schema::Field {
+                    name: "port",
+                    label: "Port",
+                    range: Some((1, 65535)),
+                    default: Some("5900"),
+                    choices: &[],
+                },
+            ]),
+            "Hosts.",
+        )];
         schema::register(&VNC);
     }
 
@@ -1093,8 +1243,14 @@ mod tests {
             Kind::Minutes => Value::Int(7),
             Kind::Choice(choices) => Value::Text(choices[1].to_string()),
             Kind::List => Value::List(vec!["alex".into(), "sam".into()]),
-            Kind::Map { paths: true, .. } => Value::Map(vec![("First one".into(), r"C:\refs\a b.pdf".into()), ("b".into(), "/refs/b".into())]),
-            Kind::Map { .. } => Value::Map(vec![("k 1".into(), "flag".into()), ("k2".into(), "10103: On Hold".into())]),
+            Kind::Map { paths: true, .. } => Value::Map(vec![
+                ("First one".into(), r"C:\refs\a b.pdf".into()),
+                ("b".into(), "/refs/b".into()),
+            ]),
+            Kind::Map { .. } => Value::Map(vec![
+                ("k 1".into(), "flag".into()),
+                ("k2".into(), "10103: On Hold".into()),
+            ]),
             Kind::Records(fields) => Value::Records(
                 (0..2)
                     .map(|row| {
@@ -1104,7 +1260,9 @@ mod tests {
                             .map(|(i, f)| match (f.range, f.choices) {
                                 (Some((min, _)), _) => (min + 1 + row).to_string(),
                                 (None, []) => format!("v{row} {i}"),
-                                (None, choices) => choices[(row as usize + 1) % choices.len()].to_string(),
+                                (None, choices) => {
+                                    choices[(row as usize + 1) % choices.len()].to_string()
+                                }
                             })
                             .collect()
                     })
@@ -1112,9 +1270,13 @@ mod tests {
             ),
             _ => Value::Text(r#"C:\a "b"\c = d"#.into()),
         };
-        let settable: Vec<&Setting> = settings().into_iter().filter(|s| !matches!(s.kind, Kind::Secret(_))).collect();
+        let settable: Vec<&Setting> = settings()
+            .into_iter()
+            .filter(|s| !matches!(s.kind, Kind::Secret(_)))
+            .collect();
         for s in &settable {
-            s.set(&mut config, Some(sample(&s.kind))).unwrap_or_else(|e| panic!("{}: {e}", s.key));
+            s.set(&mut config, Some(sample(&s.kind)))
+                .unwrap_or_else(|e| panic!("{}: {e}", s.key));
         }
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
@@ -1123,9 +1285,20 @@ mod tests {
             assert_eq!(s.get(&reloaded), s.get(&config), "{}", s.key);
         }
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("[[vnc.hosts]]") && text.contains("[lsp.servers]") && !text.contains("port = 5900"), "a port at its default isn't written:\n{text}");
-        assert!(!text.contains("[lsp]") && !text.contains("[vnc]\n"), "no empty parent headers:\n{text}");
-        assert!(text.contains("[editor]\nindent_width = 2"), "a table with settings has its header:\n{text}");
+        assert!(
+            text.contains("[[vnc.hosts]]")
+                && text.contains("[lsp.servers]")
+                && !text.contains("port = 5900"),
+            "a port at its default isn't written:\n{text}"
+        );
+        assert!(
+            !text.contains("[lsp]") && !text.contains("[vnc]\n"),
+            "no empty parent headers:\n{text}"
+        );
+        assert!(
+            text.contains("[editor]\nindent_width = 2"),
+            "a table with settings has its header:\n{text}"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1136,14 +1309,26 @@ mod tests {
         let hand = "# my settings\n[editor]\ntheme = \"Nord\" # the blue one\nfont_size = 14\n\n[mystery]\nfrom_the_future = true\n";
         std::fs::write(&path, hand).unwrap();
         let mut config = Config::load(path.clone()).unwrap();
-        assert_eq!((config.theme.as_deref(), config.font_size), (Some("Nord"), Some(14.0)));
+        assert_eq!(
+            (config.theme.as_deref(), config.font_size),
+            (Some("Nord"), Some(14.0))
+        );
         config.font_size = Some(18.0);
         config.save().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(text, hand.replace("font_size = 14", "font_size = 18"), "comments, the unknown section and the theme are as they were");
+        assert_eq!(
+            text,
+            hand.replace("font_size = 14", "font_size = 18"),
+            "comments, the unknown section and the theme are as they were"
+        );
         config.font_size = None;
         config.save().unwrap();
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("font_size"), "back at the default: the line goes");
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("font_size"),
+            "back at the default: the line goes"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1164,10 +1349,25 @@ mod tests {
         config.save().unwrap();
         let reloaded = Config::load(path.clone()).unwrap();
         let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(saved.contains("[[vnc.hosts]]\nname = \"lab\""), "a feature's setting Fenix didn't change stays as written:\n{saved}");
-        assert!(saved.contains("[[nobody.declares]]\nthis = 1"), "a key no setting declares stays as it was:\n{saved}");
-        assert_eq!(reloaded.lsp_servers, [("python".to_string(), "pyright-langserver --stdio".to_string())]);
-        assert_eq!((reloaded.theme.as_deref(), reloaded.font_size), (Some("Nord"), Some(20.0)));
+        assert!(
+            saved.contains("[[vnc.hosts]]\nname = \"lab\""),
+            "a feature's setting Fenix didn't change stays as written:\n{saved}"
+        );
+        assert!(
+            saved.contains("[[nobody.declares]]\nthis = 1"),
+            "a key no setting declares stays as it was:\n{saved}"
+        );
+        assert_eq!(
+            reloaded.lsp_servers,
+            [(
+                "python".to_string(),
+                "pyright-langserver --stdio".to_string()
+            )]
+        );
+        assert_eq!(
+            (reloaded.theme.as_deref(), reloaded.font_size),
+            (Some("Nord"), Some(20.0))
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1178,13 +1378,32 @@ mod tests {
         std::fs::write(&path, "[editor]\ntheme = \"Nord\"\nfont_size = \"16px\"\nindent_width = 99\n[git]\nlayout = \"tabs\"\n").unwrap();
         let config = Config::load(path.clone()).unwrap();
         assert_eq!(config.theme.as_deref(), Some("Nord"));
-        assert_eq!((config.font_size, config.indent_width, config.git_layout.as_deref()), (None, None, None));
+        assert_eq!(
+            (
+                config.font_size,
+                config.indent_width,
+                config.git_layout.as_deref()
+            ),
+            (None, None, None)
+        );
         let shown: Vec<String> = config.problems.iter().map(|p| p.to_string()).collect();
         assert_eq!(shown.len(), 3, "{shown:?}");
-        assert!(shown[0].starts_with("settings.toml:3 -- editor.font_size: expected a number"), "{shown:?}");
-        assert!(shown[1].contains("editor.indent_width: a whole number from 1 to 16"), "{shown:?}");
-        assert!(shown[2].starts_with("settings.toml:6 -- git.layout: one of page, panes"), "{shown:?}");
-        assert!(!config.is_broken(), "a bad value doesn't stop the file being saved");
+        assert!(
+            shown[0].starts_with("settings.toml:3 -- editor.font_size: expected a number"),
+            "{shown:?}"
+        );
+        assert!(
+            shown[1].contains("editor.indent_width: a whole number from 1 to 16"),
+            "{shown:?}"
+        );
+        assert!(
+            shown[2].starts_with("settings.toml:6 -- git.layout: one of page, panes"),
+            "{shown:?}"
+        );
+        assert!(
+            !config.is_broken(),
+            "a bad value doesn't stop the file being saved"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1212,14 +1431,21 @@ mod tests {
         let mut config = Config::load(path.clone()).unwrap();
         std::fs::write(&path, "[editor]\nfont_size = 18\ntheme = \"Nord\"\n").unwrap();
         config.reload();
-        assert_eq!((config.font_size, config.theme.as_deref()), (Some(18.0), Some("Nord")));
+        assert_eq!(
+            (config.font_size, config.theme.as_deref()),
+            (Some(18.0), Some("Nord"))
+        );
         std::fs::write(&path, "[editor\nfont_size = 22\n").unwrap();
         config.reload();
         assert_eq!(config.font_size, Some(18.0), "still in use");
         assert_eq!(config.problems.len(), 1);
         std::fs::write(&path, "[editor]\n").unwrap();
         config.reload();
-        assert_eq!((config.font_size, config.theme.as_deref()), (None, None), "a line taken out is back at its default");
+        assert_eq!(
+            (config.font_size, config.theme.as_deref()),
+            (None, None),
+            "a line taken out is back at its default"
+        );
         assert!(config.problems.is_empty());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1232,16 +1458,29 @@ mod tests {
         config.save().unwrap();
         let again = Config::load(path.clone()).unwrap();
         assert!(again.problems.is_empty(), "{:?}", again.problems);
-        assert_eq!(again.token(Secret::GitLab).as_deref(), Some("glpat-in-the-file"));
-        assert!(std::fs::read_to_string(&path).unwrap().contains("[gitlab]\ntoken = \"glpat-in-the-file\""));
+        assert_eq!(
+            again.token(Secret::GitLab).as_deref(),
+            Some("glpat-in-the-file")
+        );
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("[gitlab]\ntoken = \"glpat-in-the-file\""));
         // Jira's variable, which nothing else in the tests sets.
         std::env::set_var("FENIX_JIRA_TOKEN", "from-the-environment");
         let mut config = Config::load(path.clone()).unwrap();
-        assert_eq!(config.token(Secret::Jira).as_deref(), Some("from-the-environment"));
+        assert_eq!(
+            config.token(Secret::Jira).as_deref(),
+            Some("from-the-environment")
+        );
         config.font_size = Some(20.0);
         config.save().unwrap();
         std::env::remove_var("FENIX_JIRA_TOKEN");
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("from-the-environment"), "never written");
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("from-the-environment"),
+            "never written"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1249,12 +1488,24 @@ mod tests {
     fn window_placement_and_bookmarks_are_state_not_settings() {
         let path = temp_path("state");
         let mut config = Config::load(path.clone()).unwrap();
-        config.windows = vec![WindowLayout { x: -8, y: -8, width: 2560, height: 1369, maximized: true }];
+        config.windows = vec![WindowLayout {
+            x: -8,
+            y: -8,
+            width: 2560,
+            height: 1369,
+            maximized: true,
+        }];
         config.explorer_bookmarks = vec![("src".into(), PathBuf::from("C:/code/src"))];
         config.save().unwrap();
         let dir = path.parent().unwrap();
-        assert!(dir.join("state").join("windows.json").is_file() && dir.join("state").join("bookmarks.json").is_file());
-        assert!(!std::fs::read_to_string(&path).unwrap().contains("2560"), "not in settings.toml");
+        assert!(
+            dir.join("state").join("windows.json").is_file()
+                && dir.join("state").join("bookmarks.json").is_file()
+        );
+        assert!(
+            !std::fs::read_to_string(&path).unwrap().contains("2560"),
+            "not in settings.toml"
+        );
         let reloaded = Config::load(path.clone()).unwrap();
         assert_eq!(reloaded.windows, config.windows);
         assert_eq!(reloaded.explorer_bookmarks, config.explorer_bookmarks);
@@ -1266,15 +1517,22 @@ mod tests {
         let path = temp_path("new_file");
         Config::load(path.clone()).unwrap().save().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.starts_with("# Fenix settings.") && text.lines().all(|l| l.is_empty() || l.starts_with('#')), "{text}");
+        assert!(
+            text.starts_with("# Fenix settings.")
+                && text.lines().all(|l| l.is_empty() || l.starts_with('#')),
+            "{text}"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
     fn the_default_path_is_settings_toml_in_the_fenix_folder() {
         if let Some(path) = Config::default_path() {
-            assert!(path.ends_with(std::path::Path::new("fenix").join("settings.toml")), "{}", path.display());
+            assert!(
+                path.ends_with(std::path::Path::new("fenix").join("settings.toml")),
+                "{}",
+                path.display()
+            );
         }
     }
-
 }

@@ -36,27 +36,40 @@ pub struct PythonEnvironment {
 }
 
 pub fn resolve(project_root: &Path) -> PythonEnvironment {
-    let pyproject_text = std::fs::read_to_string(project_root.join("pyproject.toml")).unwrap_or_default();
+    let pyproject_text =
+        std::fs::read_to_string(project_root.join("pyproject.toml")).unwrap_or_default();
 
     if pyproject_text.contains("[tool.uv]") || project_root.join("uv.lock").is_file() {
         if let Some(interpreter) = venv_interpreter_path(&project_root.join(".venv")) {
-            return PythonEnvironment { interpreter, kind: PythonEnvKind::Uv };
+            return PythonEnvironment {
+                interpreter,
+                kind: PythonEnvKind::Uv,
+            };
         }
     }
 
     if pyproject_text.contains("[tool.poetry]") {
         if let Some(interpreter) = poetry_env_interpreter(project_root) {
-            return PythonEnvironment { interpreter, kind: PythonEnvKind::Poetry };
+            return PythonEnvironment {
+                interpreter,
+                kind: PythonEnvKind::Poetry,
+            };
         }
     }
 
     for dir_name in [".venv", "venv"] {
         if let Some(interpreter) = venv_interpreter_path(&project_root.join(dir_name)) {
-            return PythonEnvironment { interpreter, kind: PythonEnvKind::Venv };
+            return PythonEnvironment {
+                interpreter,
+                kind: PythonEnvKind::Venv,
+            };
         }
     }
 
-    PythonEnvironment { interpreter: system_python(), kind: PythonEnvKind::System }
+    PythonEnvironment {
+        interpreter: system_python(),
+        kind: PythonEnvKind::System,
+    }
 }
 
 /// What a language server's view of a project's packages depends on:
@@ -93,7 +106,8 @@ fn stamp(project_root: &Path, interpreter: &Path) -> EnvironmentStamp {
         interpreter: interpreter.to_path_buf(),
         // `.venv`/`venv` themselves too: a folder's time changes when
         // something is created in it, so a venv appearing shows here.
-        files: ["pyproject.toml", "uv.lock", "poetry.lock", ".venv", "venv"].map(|name| modified(&project_root.join(name))),
+        files: ["pyproject.toml", "uv.lock", "poetry.lock", ".venv", "venv"]
+            .map(|name| modified(&project_root.join(name))),
         packages: site_packages(interpreter).and_then(|dir| modified(&dir)),
     }
 }
@@ -112,7 +126,12 @@ fn site_packages(interpreter: &Path) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|entry| entry.path().join("site-packages"))
-        .find(|dir| dir.parent().and_then(|p| p.file_name()).is_some_and(|n| n.to_string_lossy().starts_with("python")) && dir.is_dir())
+        .find(|dir| {
+            dir.parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n.to_string_lossy().starts_with("python"))
+                && dir.is_dir()
+        })
 }
 
 /// The interpreter executable inside a venv directory, or `None` if
@@ -122,7 +141,11 @@ fn site_packages(interpreter: &Path) -> Option<PathBuf> {
 /// inside it yet) correctly falls through to the next check rather than
 /// being treated as a real environment.
 fn venv_interpreter_path(venv_dir: &Path) -> Option<PathBuf> {
-    let candidate = if cfg!(windows) { venv_dir.join("Scripts").join("python.exe") } else { venv_dir.join("bin").join("python") };
+    let candidate = if cfg!(windows) {
+        venv_dir.join("Scripts").join("python.exe")
+    } else {
+        venv_dir.join("bin").join("python")
+    };
     candidate.is_file().then_some(candidate)
 }
 
@@ -132,7 +155,11 @@ fn venv_interpreter_path(venv_dir: &Path) -> Option<PathBuf> {
 /// failure (Poetry not installed, no env created yet, ...), which the
 /// caller treats as "fall through to the next check," not an error.
 fn poetry_env_interpreter(project_root: &Path) -> Option<PathBuf> {
-    let output = no_console_command("poetry").args(["env", "info", "--path"]).current_dir(project_root).output().ok()?;
+    let output = no_console_command("poetry")
+        .args(["env", "info", "--path"])
+        .current_dir(project_root)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -149,7 +176,11 @@ fn poetry_env_interpreter(project_root: &Path) -> Option<PathBuf> {
 /// no worse a starting point than no command at all.
 fn system_python() -> PathBuf {
     for name in ["python3", "python"] {
-        if no_console_command(name).arg("--version").output().is_ok_and(|out| out.status.success()) {
+        if no_console_command(name)
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success())
+        {
             return PathBuf::from(name);
         }
     }
@@ -185,7 +216,8 @@ mod tests {
         fn new(name: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("fenix-lsp-test-{name}-{}-{n}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("fenix-lsp-test-{name}-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
@@ -201,9 +233,17 @@ mod tests {
 
     fn fake_venv(root: &Path, dir_name: &str) {
         let venv = root.join(dir_name);
-        let interpreter = if cfg!(windows) { venv.join("Scripts") } else { venv.join("bin") };
+        let interpreter = if cfg!(windows) {
+            venv.join("Scripts")
+        } else {
+            venv.join("bin")
+        };
         std::fs::create_dir_all(&interpreter).unwrap();
-        let exe_name = if cfg!(windows) { "python.exe" } else { "python" };
+        let exe_name = if cfg!(windows) {
+            "python.exe"
+        } else {
+            "python"
+        };
         std::fs::write(interpreter.join(exe_name), b"").unwrap();
     }
 
@@ -244,7 +284,11 @@ mod tests {
     #[test]
     fn an_explicit_tool_uv_table_resolves_as_uv_even_without_a_lockfile() {
         let dir = TempDir::new("tool_uv_table");
-        std::fs::write(dir.path().join("pyproject.toml"), b"[project]\nname = \"x\"\n[tool.uv]\ndev-dependencies = []\n").unwrap();
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            b"[project]\nname = \"x\"\n[tool.uv]\ndev-dependencies = []\n",
+        )
+        .unwrap();
         fake_venv(dir.path(), ".venv");
         let env = resolve(dir.path());
         assert_eq!(env.kind, PythonEnvKind::Uv);
@@ -266,9 +310,16 @@ mod tests {
         // function must never panic and must land on *some* real
         // environment (Poetry success, or a graceful fall-through).
         let dir = TempDir::new("tool_poetry");
-        std::fs::write(dir.path().join("pyproject.toml"), b"[tool.poetry]\nname = \"x\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            b"[tool.poetry]\nname = \"x\"\n",
+        )
+        .unwrap();
         let env = resolve(dir.path());
-        assert!(matches!(env.kind, PythonEnvKind::Poetry | PythonEnvKind::System));
+        assert!(matches!(
+            env.kind,
+            PythonEnvKind::Poetry | PythonEnvKind::System
+        ));
     }
 
     #[test]
@@ -281,9 +332,16 @@ mod tests {
         fake_venv(dir.path(), ".venv");
         let env = resolve(dir.path());
         assert_eq!(env.kind, PythonEnvKind::Uv);
-        assert!(before.is_stale(dir.path()), "the venv appearing is a change");
+        assert!(
+            before.is_stale(dir.path()),
+            "the venv appearing is a change"
+        );
 
-        let site = if cfg!(windows) { dir.path().join(".venv/Lib/site-packages") } else { dir.path().join(".venv/lib/python3.13/site-packages") };
+        let site = if cfg!(windows) {
+            dir.path().join(".venv/Lib/site-packages")
+        } else {
+            dir.path().join(".venv/lib/python3.13/site-packages")
+        };
         std::fs::create_dir_all(&site).unwrap();
         let with_site = environment_stamp(dir.path(), &env);
         // Folder times can be coarse; wait until a new package would
@@ -291,13 +349,20 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         std::fs::create_dir(site.join("humanize")).unwrap();
         assert!(with_site.packages.is_some());
-        assert!(with_site.is_stale(dir.path()), "a package installed is a change");
+        assert!(
+            with_site.is_stale(dir.path()),
+            "a package installed is a change"
+        );
     }
 
     #[test]
     fn uv_is_checked_before_poetry_when_both_markers_are_present() {
         let dir = TempDir::new("both_markers");
-        std::fs::write(dir.path().join("pyproject.toml"), b"[tool.poetry]\nname = \"x\"\n[tool.uv]\n").unwrap();
+        std::fs::write(
+            dir.path().join("pyproject.toml"),
+            b"[tool.poetry]\nname = \"x\"\n[tool.uv]\n",
+        )
+        .unwrap();
         fake_venv(dir.path(), ".venv");
         let env = resolve(dir.path());
         assert_eq!(env.kind, PythonEnvKind::Uv);

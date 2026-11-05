@@ -410,5 +410,9 @@ pub enum Call {
     /// `resources`, `read`, `subscribe`, `prompts`, `prompt`), `caller`
     /// who asked. Each tool's class and the user's rules decide what it
     /// may do, whoever calls (`docs/CONTROL.md`).
-    Agent { method: String, caller: AgentCaller, params: Value },
+    Agent {
+        method: String,
+        caller: AgentCaller,
+        params: Value,
+    },
 }

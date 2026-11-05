@@ -73,7 +73,10 @@ pub struct Rename {
 /// touches nothing that was left alone.
 pub fn plan_renames(entries: &[Entry], edited: &[&str]) -> Result<Vec<Rename>, RenameError> {
     if edited.len() != entries.len() {
-        return Err(RenameError::LineCountChanged { expected: entries.len(), found: edited.len() });
+        return Err(RenameError::LineCountChanged {
+            expected: entries.len(),
+            found: edited.len(),
+        });
     }
 
     let mut targets: Vec<PathBuf> = Vec::with_capacity(entries.len());
@@ -96,7 +99,10 @@ pub fn plan_renames(entries: &[Entry], edited: &[&str]) -> Result<Vec<Rename>, R
     let mut seen: HashMap<&Path, usize> = HashMap::new();
     for target in &targets {
         if seen.insert(target, 0).is_some() {
-            let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| target.display().to_string());
+            let name = target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| target.display().to_string());
             return Err(RenameError::DuplicateName { name });
         }
     }
@@ -111,7 +117,9 @@ pub fn plan_renames(entries: &[Entry], edited: &[&str]) -> Result<Vec<Rename>, R
         }
         let freed_by_this_edit = sources.contains(&target.as_path());
         if !freed_by_this_edit && target.exists() {
-            return Err(RenameError::AlreadyExists { path: target.clone() });
+            return Err(RenameError::AlreadyExists {
+                path: target.clone(),
+            });
         }
     }
 
@@ -119,7 +127,10 @@ pub fn plan_renames(entries: &[Entry], edited: &[&str]) -> Result<Vec<Rename>, R
         .iter()
         .zip(targets)
         .filter(|(entry, target)| &entry.path != target)
-        .map(|(entry, target)| Rename { from: entry.path.clone(), to: target })
+        .map(|(entry, target)| Rename {
+            from: entry.path.clone(),
+            to: target,
+        })
         .collect())
 }
 
@@ -135,7 +146,9 @@ pub fn plan_renames(entries: &[Entry], edited: &[&str]) -> Result<Vec<Rename>, R
 /// where one would do.
 pub fn needs_two_phases(renames: &[Rename]) -> bool {
     let destinations: Vec<&Path> = renames.iter().map(|r| r.to.as_path()).collect();
-    renames.iter().any(|r| destinations.contains(&r.from.as_path()))
+    renames
+        .iter()
+        .any(|r| destinations.contains(&r.from.as_path()))
 }
 
 #[cfg(test)]
@@ -194,7 +207,10 @@ mod tests {
         dir.mkdir("src");
         let entries = entries_of(&dir);
 
-        assert!(plan_renames(&entries, &["src/"]).unwrap().is_empty(), "unchanged");
+        assert!(
+            plan_renames(&entries, &["src/"]).unwrap().is_empty(),
+            "unchanged"
+        );
         let plan = plan_renames(&entries, &["source/"]).unwrap();
         assert_eq!(plan[0].to, dir.path().join("source"));
     }
@@ -218,8 +234,17 @@ mod tests {
         let entries = entries_of(&dir);
 
         let err = plan_renames(&entries, &["a.txt"]).unwrap_err();
-        assert_eq!(err, RenameError::LineCountChanged { expected: 2, found: 1 });
-        assert!(err.to_string().contains("not a deleted file"), "the message explains itself: {err}");
+        assert_eq!(
+            err,
+            RenameError::LineCountChanged {
+                expected: 2,
+                found: 1
+            }
+        );
+        assert!(
+            err.to_string().contains("not a deleted file"),
+            "the message explains itself: {err}"
+        );
 
         assert!(plan_renames(&entries, &["a.txt", "b.txt", "c.txt"]).is_err());
     }
@@ -229,7 +254,10 @@ mod tests {
         let dir = TempDir::new("rename_empty");
         dir.touch("a.txt");
         let entries = entries_of(&dir);
-        assert_eq!(plan_renames(&entries, &["   "]).unwrap_err(), RenameError::EmptyName { line: 0 });
+        assert_eq!(
+            plan_renames(&entries, &["   "]).unwrap_err(),
+            RenameError::EmptyName { line: 0 }
+        );
     }
 
     #[test]
@@ -242,7 +270,12 @@ mod tests {
 
         let err = plan_renames(&entries, &["same.txt", "same.txt"]).unwrap_err();
 
-        assert_eq!(err, RenameError::DuplicateName { name: "same.txt".to_string() });
+        assert_eq!(
+            err,
+            RenameError::DuplicateName {
+                name: "same.txt".to_string()
+            }
+        );
     }
 
     #[test]
@@ -255,7 +288,12 @@ mod tests {
 
         let err = plan_renames(&entries, &["keep.txt"]).unwrap_err();
 
-        assert_eq!(err, RenameError::AlreadyExists { path: dir.path().join("keep.txt") });
+        assert_eq!(
+            err,
+            RenameError::AlreadyExists {
+                path: dir.path().join("keep.txt")
+            }
+        );
     }
 
     #[test]
@@ -270,7 +308,10 @@ mod tests {
         let plan = plan_renames(&entries, &["b.txt", "a.txt"]).unwrap();
 
         assert_eq!(plan.len(), 2);
-        assert!(needs_two_phases(&plan), "a swap cannot be done one rename at a time");
+        assert!(
+            needs_two_phases(&plan),
+            "a swap cannot be done one rename at a time"
+        );
     }
 
     #[test]

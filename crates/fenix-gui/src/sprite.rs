@@ -39,12 +39,21 @@ pub struct SpriteRenderer {
 }
 
 impl SpriteRenderer {
-    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        format: wgpu::TextureFormat,
+    ) -> Self {
         Self::with_filter(device, queue, format, wgpu::FilterMode::Linear)
     }
 
     /// One whose images are scaled by `filter`: `Nearest` for pixel art.
-    pub fn with_filter(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, format: wgpu::TextureFormat, filter: wgpu::FilterMode) -> Self {
+    pub fn with_filter(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        format: wgpu::TextureFormat,
+        filter: wgpu::FilterMode,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sprite-shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -112,7 +121,18 @@ impl SpriteRenderer {
         });
         let capacity = 64 * 6;
         let vertex_buffer = Self::buffer(&device, capacity);
-        SpriteRenderer { device, queue, pipeline, layout, sampler, vertex_buffer, capacity, vertices: Vec::new(), draws: Vec::new(), size: (1.0, 1.0) }
+        SpriteRenderer {
+            device,
+            queue,
+            pipeline,
+            layout,
+            sampler,
+            vertex_buffer,
+            capacity,
+            vertices: Vec::new(),
+            draws: Vec::new(),
+            size: (1.0, 1.0),
+        }
     }
 
     fn buffer(device: &wgpu::Device, vertices: usize) -> wgpu::Buffer {
@@ -128,7 +148,11 @@ impl SpriteRenderer {
     pub fn upload(&self, width: u32, height: u32, rgba: &[u8]) -> Sprite {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("sprite-texture"),
-            size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -138,14 +162,31 @@ impl SpriteRenderer {
         });
         if width > 0 && height > 0 {
             self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo { texture: &texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
                 rgba,
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * width), rows_per_image: Some(height) },
-                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * width),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
             );
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        Sprite { width, height, bind_group: self.bind(&view) }
+        Sprite {
+            width,
+            height,
+            bind_group: self.bind(&view),
+        }
     }
 
     /// A 1x1 white sprite: tinted, a plain rect.
@@ -156,7 +197,11 @@ impl SpriteRenderer {
     /// Any texture view as a sprite -- the copied frame a theme change
     /// fades out of.
     pub fn sprite_of_view(&self, view: &wgpu::TextureView, width: u32, height: u32) -> Sprite {
-        Sprite { width, height, bind_group: self.bind(view) }
+        Sprite {
+            width,
+            height,
+            bind_group: self.bind(view),
+        }
     }
 
     fn bind(&self, view: &wgpu::TextureView) -> wgpu::BindGroup {
@@ -164,8 +209,14 @@ impl SpriteRenderer {
             label: Some("sprite-bind-group"),
             layout: &self.layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
             ],
         })
     }
@@ -186,15 +237,33 @@ impl SpriteRenderer {
     /// Queues the part `uv` (`[left, top, right, bottom]`, 0 to 1) of
     /// `sprite` over the pixel rect: a frame of a sheet, and flipped when
     /// `right` < `left`.
-    pub fn push_part(&mut self, sprite: &Sprite, x: f32, y: f32, w: f32, h: f32, uv: [f32; 4], tint: [f32; 4]) {
+    pub fn push_part(
+        &mut self,
+        sprite: &Sprite,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        uv: [f32; 4],
+        tint: [f32; 4],
+    ) {
         if tint[3] <= 0.0 || w <= 0.0 || h <= 0.0 {
             return;
         }
         let (sw, sh) = self.size;
         let ndc = |px: f32, py: f32| [(px / sw) * 2.0 - 1.0, 1.0 - (py / sh) * 2.0];
-        let v = |px: f32, py: f32, u: f32, t: f32| Vertex { position: ndc(px, py), uv: [u, t], tint };
+        let v = |px: f32, py: f32, u: f32, t: f32| Vertex {
+            position: ndc(px, py),
+            uv: [u, t],
+            tint,
+        };
         let [u0, v0, u1, v1] = uv;
-        let (a, b, c, d) = (v(x, y, u0, v0), v(x + w, y, u1, v0), v(x, y + h, u0, v1), v(x + w, y + h, u1, v1));
+        let (a, b, c, d) = (
+            v(x, y, u0, v0),
+            v(x + w, y, u1, v0),
+            v(x, y + h, u0, v1),
+            v(x + w, y + h, u1, v1),
+        );
         self.vertices.extend_from_slice(&[a, b, c, b, d, c]);
         self.draws.push(sprite.bind_group.clone());
     }
@@ -206,7 +275,8 @@ impl SpriteRenderer {
             self.vertex_buffer = Self::buffer(&self.device, self.capacity);
         }
         if !self.vertices.is_empty() {
-            self.queue.write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
+            self.queue
+                .write_buffer(&self.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
         }
     }
 

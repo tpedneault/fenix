@@ -82,19 +82,25 @@ fn parse_list_item_text(line_text: &str) -> Option<ListItem> {
     let indent_len = line_text.len() - line_text.trim_start_matches(' ').len();
     let (indent, rest) = line_text.split_at(indent_len);
 
-    let (marker, ordered_paren, after_marker) =
-        if let Some(c) = rest.chars().next().filter(|&c| c == '-' || c == '*' || c == '+') {
-            (ListMarker::Bullet(c), false, &rest[1..])
-        } else {
-            let digits = rest.chars().take_while(char::is_ascii_digit).count();
-            if digits == 0 {
-                return None;
-            }
-            let after_digits = &rest[digits..];
-            let delim = after_digits.chars().next().filter(|&c| c == '.' || c == ')')?;
-            let n: u64 = rest[..digits].parse().ok()?;
-            (ListMarker::Ordered(n), delim == ')', &after_digits[1..])
-        };
+    let (marker, ordered_paren, after_marker) = if let Some(c) = rest
+        .chars()
+        .next()
+        .filter(|&c| c == '-' || c == '*' || c == '+')
+    {
+        (ListMarker::Bullet(c), false, &rest[1..])
+    } else {
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        let after_digits = &rest[digits..];
+        let delim = after_digits
+            .chars()
+            .next()
+            .filter(|&c| c == '.' || c == ')')?;
+        let n: u64 = rest[..digits].parse().ok()?;
+        (ListMarker::Ordered(n), delim == ')', &after_digits[1..])
+    };
 
     // CommonMark requires a space (or nothing at all) right after the
     // marker -- "-item"/"1.5" aren't list items, just text that starts
@@ -112,7 +118,13 @@ fn parse_list_item_text(line_text: &str) -> Option<ListItem> {
         .map(|rest| (true, rest))
         .unwrap_or((false, content));
 
-    Some(ListItem { indent: indent.to_string(), marker, ordered_paren, has_checkbox, content_is_empty: content.trim().is_empty() })
+    Some(ListItem {
+        indent: indent.to_string(),
+        marker,
+        ordered_paren,
+        has_checkbox,
+        content_is_empty: content.trim().is_empty(),
+    })
 }
 
 /// What Enter/`o` should insert to continue `item`'s list onto the next
@@ -176,7 +188,9 @@ pub fn checkbox_char_index(buffer: &Buffer, line: usize) -> Option<(usize, bool)
     }
     let start = buffer.line_start_char(line);
     let text = buffer.text_range(start, start + buffer.line_len(line));
-    let bracket_byte = ["[ ]", "[x]", "[X]"].iter().find_map(|pat| text.find(pat))?;
+    let bracket_byte = ["[ ]", "[x]", "[X]"]
+        .iter()
+        .find_map(|pat| text.find(pat))?;
     let state_byte = bracket_byte + 1; // one past the '[' -- still an ASCII (so char-boundary-safe) offset
     let state_char = text[state_byte..].chars().next()?;
     let char_offset = text[..state_byte].chars().count();
@@ -189,7 +203,9 @@ pub fn checkbox_char_index(buffer: &Buffer, line: usize) -> Option<(usize, bool)
 /// gate, same "the text shape alone is the signal" posture every other
 /// list-item function in this module already has.
 pub fn toggle_checkbox(buffer: &mut Buffer, cursor: &mut Cursor, line: usize) -> bool {
-    let Some((at, checked)) = checkbox_char_index(buffer, line) else { return false };
+    let Some((at, checked)) = checkbox_char_index(buffer, line) else {
+        return false;
+    };
     let new_char = if checked { ' ' } else { 'x' };
     buffer.replace_range(cursor, at, at + 1, &new_char.to_string());
     true
@@ -212,7 +228,10 @@ pub fn dedent_line(buffer: &mut Buffer, cursor: &mut Cursor, line: usize, width:
     let start = buffer.line_start_char(line);
     let end_of_line = start + buffer.line_len(line);
     let mut end = start;
-    while end < end_of_line && end - start < width && matches!(buffer.char_at(end), Some(' ') | Some('\t')) {
+    while end < end_of_line
+        && end - start < width
+        && matches!(buffer.char_at(end), Some(' ') | Some('\t'))
+    {
         end += 1;
     }
     buffer.delete_range(cursor, start, end);
@@ -245,7 +264,10 @@ pub fn matching_close_bracket(c: char) -> Option<char> {
 pub fn line_blank_before_cursor(buffer: &Buffer, cursor: &Cursor) -> bool {
     let (line, _) = buffer.line_col(cursor);
     let start = buffer.line_start_char(line);
-    buffer.text_range(start, cursor.char_idx).chars().all(|c| c == ' ' || c == '\t')
+    buffer
+        .text_range(start, cursor.char_idx)
+        .chars()
+        .all(|c| c == ' ' || c == '\t')
 }
 
 #[cfg(test)]
@@ -257,7 +279,8 @@ mod tests {
     fn parse_list_item_recognizes_every_bullet_character() {
         for c in ['-', '*', '+'] {
             let line = format!("{c} item");
-            let item = parse_list_item_text(&line).unwrap_or_else(|| panic!("{line:?} should parse"));
+            let item =
+                parse_list_item_text(&line).unwrap_or_else(|| panic!("{line:?} should parse"));
             assert_eq!(item.marker, ListMarker::Bullet(c));
             assert!(!item.content_is_empty);
         }
@@ -526,10 +549,16 @@ mod tests {
     #[test]
     fn line_blank_before_cursor_true_only_when_nothing_real_precedes_it() {
         let b = buf("    x");
-        let blank = Cursor { char_idx: 4, sticky_col: 4 }; // right after the 4 spaces, before "x"
+        let blank = Cursor {
+            char_idx: 4,
+            sticky_col: 4,
+        }; // right after the 4 spaces, before "x"
         assert!(line_blank_before_cursor(&b, &blank));
 
-        let past_x = Cursor { char_idx: 5, sticky_col: 5 }; // right after "x"
+        let past_x = Cursor {
+            char_idx: 5,
+            sticky_col: 5,
+        }; // right after "x"
         assert!(!line_blank_before_cursor(&b, &past_x));
     }
 }

@@ -27,11 +27,18 @@ pub fn parse(text: &str, delimiter: char) -> Vec<Vec<String>> {
 /// many the widest of `columns`/any row actually has; a shorter row or
 /// header set just doesn't contribute to columns past its own length.
 pub fn column_widths(columns: &[String], rows: &[Vec<String>]) -> Vec<usize> {
-    let count = columns.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
+    let count = columns
+        .len()
+        .max(rows.iter().map(Vec::len).max().unwrap_or(0));
     (0..count)
         .map(|i| {
             let header_w = columns.get(i).map(|s| s.chars().count()).unwrap_or(0);
-            let data_w = rows.iter().filter_map(|r| r.get(i)).map(|s| s.chars().count()).max().unwrap_or(0);
+            let data_w = rows
+                .iter()
+                .filter_map(|r| r.get(i))
+                .map(|s| s.chars().count())
+                .max()
+                .unwrap_or(0);
             header_w.max(data_w)
         })
         .collect()
@@ -80,7 +87,10 @@ mod tests {
     #[test]
     fn column_widths_takes_the_wider_of_header_or_data() {
         let columns = vec!["Name".to_string(), "X".to_string()];
-        let rows = vec![vec!["Al".to_string(), "Longer".to_string()], vec!["Alexandria".to_string(), "Y".to_string()]];
+        let rows = vec![
+            vec!["Al".to_string(), "Longer".to_string()],
+            vec!["Alexandria".to_string(), "Y".to_string()],
+        ];
         assert_eq!(column_widths(&columns, &rows), vec![10, 6]); // "Alexandria"=10, "Longer"=6
     }
 
@@ -94,7 +104,10 @@ mod tests {
     #[test]
     fn column_widths_handles_ragged_rows_without_panicking() {
         let columns = vec!["A".to_string(), "B".to_string(), "C".to_string()];
-        let rows = vec![vec!["x".to_string()], vec!["y".to_string(), "zz".to_string(), "zzz".to_string()]];
+        let rows = vec![
+            vec!["x".to_string()],
+            vec!["y".to_string(), "zz".to_string(), "zzz".to_string()],
+        ];
         assert_eq!(column_widths(&columns, &rows), vec![1, 2, 3]);
     }
 

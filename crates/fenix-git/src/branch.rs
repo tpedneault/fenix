@@ -21,13 +21,17 @@ pub struct Branch {
 /// `\x1f` (unit separator) rather than a printable delimiter like `|` --
 /// virtually never appears in a real branch name/upstream string, unlike
 /// `|`, which is a legal (if unusual) git ref character.
-const FORMAT: &str = "--format=%(refname:short)\x1f%(HEAD)\x1f%(upstream:short)\x1f%(upstream:track)";
+const FORMAT: &str =
+    "--format=%(refname:short)\x1f%(HEAD)\x1f%(upstream:short)\x1f%(upstream:track)";
 
 /// Local branches via `git for-each-ref refs/heads` -- deliberately not
 /// `git branch` (whose plain output isn't reliably machine-parsable, per
 /// git's own docs recommending `for-each-ref`/`branch --format` instead).
 pub fn list_branches(repo: &Path) -> Vec<Branch> {
-    run_lines(repo, &["for-each-ref", "refs/heads", FORMAT]).iter().filter_map(|l| parse_line(l)).collect()
+    run_lines(repo, &["for-each-ref", "refs/heads", FORMAT])
+        .iter()
+        .filter_map(|l| parse_line(l))
+        .collect()
 }
 
 /// Verified against real `git for-each-ref` output (run directly in this
@@ -43,7 +47,14 @@ fn parse_line(line: &str) -> Option<Branch> {
     let upstream = (!upstream_raw.is_empty()).then(|| upstream_raw.to_string());
     let track = fields.next().unwrap_or("");
     let (ahead, behind) = parse_track(track);
-    Some(Branch { name, current, upstream, ahead, behind, upstream_gone: track.contains("gone") })
+    Some(Branch {
+        name,
+        current,
+        upstream,
+        ahead,
+        behind,
+        upstream_gone: track.contains("gone"),
+    })
 }
 
 /// Remote-tracking branches (`refs/remotes`), e.g. `origin/main` --
@@ -60,17 +71,28 @@ fn parse_line(line: &str) -> Option<Branch> {
 /// obvious check never matches, and a bare remote name (`origin`) leaks
 /// into what is supposed to be a list of branches.
 pub fn list_remote_branches(repo: &Path) -> Vec<String> {
-    run_lines(repo, &["for-each-ref", "refs/remotes", "--format=%(refname:short)"])
-        .into_iter()
-        .filter(|name| name.contains('/'))
-        .collect()
+    run_lines(
+        repo,
+        &["for-each-ref", "refs/remotes", "--format=%(refname:short)"],
+    )
+    .into_iter()
+    .filter(|name| name.contains('/'))
+    .collect()
 }
 
 /// Tags (`refs/tags`), newest first -- `--sort=-creatordate` covers both
 /// lightweight tags (no date of their own, so this falls back to the
 /// tagged commit's) and annotated ones.
 pub fn list_tags(repo: &Path) -> Vec<String> {
-    run_lines(repo, &["for-each-ref", "refs/tags", "--sort=-creatordate", "--format=%(refname:short)"])
+    run_lines(
+        repo,
+        &[
+            "for-each-ref",
+            "refs/tags",
+            "--sort=-creatordate",
+            "--format=%(refname:short)",
+        ],
+    )
 }
 
 fn parse_track(track: &str) -> (usize, usize) {
@@ -97,7 +119,14 @@ mod tests {
         let branch = parse_line("main\x1f*\x1f\x1f").unwrap();
         assert_eq!(
             branch,
-            Branch { name: "main".to_string(), current: true, upstream: None, ahead: 0, behind: 0, upstream_gone: false }
+            Branch {
+                name: "main".to_string(),
+                current: true,
+                upstream: None,
+                ahead: 0,
+                behind: 0,
+                upstream_gone: false
+            }
         );
     }
 
@@ -162,7 +191,10 @@ mod tests {
 
         let dir = TempDir::new("refs_remote_clone");
         init_repo(dir.path());
-        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         dir.write("a.txt", "v1");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "first"]);
@@ -183,7 +215,10 @@ mod tests {
 
         let dir = TempDir::new("refs_remote_head_clone");
         init_repo(dir.path());
-        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         dir.write("a.txt", "v1");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "first"]);
@@ -192,7 +227,10 @@ mod tests {
         git(dir.path(), &["remote", "set-head", "origin", "main"]);
 
         let remotes = list_remote_branches(dir.path());
-        assert!(!remotes.contains(&"origin".to_string()), "a bare remote name is not a branch: {remotes:?}");
+        assert!(
+            !remotes.contains(&"origin".to_string()),
+            "a bare remote name is not a branch: {remotes:?}"
+        );
         assert_eq!(remotes, vec!["origin/main".to_string()]);
     }
 
@@ -226,7 +264,10 @@ mod tests {
 
         let dir = TempDir::new("branch_ahead_clone");
         init_repo(dir.path());
-        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        );
         dir.write("a.txt", "v1");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "first"]);

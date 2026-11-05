@@ -1,8 +1,8 @@
 mod files;
 mod grep;
-pub mod search;
 mod process;
 mod root;
+pub mod search;
 
 #[cfg(test)]
 mod test_util;

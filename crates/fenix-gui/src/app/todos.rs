@@ -38,7 +38,11 @@ fn todo_summary(kinds: &[TodoKind], files: usize) -> String {
         })
         .collect();
     let noun = if kinds.len() == 1 { "TODO" } else { "TODOs" };
-    let files = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
+    let files = if files == 1 {
+        "1 file".to_string()
+    } else {
+        format!("{files} files")
+    };
     format!("{} {noun} in {files} -- {}", kinds.len(), counts.join(", "))
 }
 
@@ -52,8 +56,17 @@ impl App {
         self.syntax_highlights_for_visible_range(id, 0, 1);
         let ob = self.open();
         let text = ob.buffer.text();
-        match (&ob.syntax, ob.buffer.path().and_then(fenix_syntax::detect_language_from_path)) {
-            (Some(syntax), Some(language)) if !matches!(language, LanguageId::Markdown | LanguageId::Json) => syntax.todo_items(&text),
+        match (
+            &ob.syntax,
+            ob.buffer
+                .path()
+                .and_then(fenix_syntax::detect_language_from_path),
+        ) {
+            (Some(syntax), Some(language))
+                if !matches!(language, LanguageId::Markdown | LanguageId::Json) =>
+            {
+                syntax.todo_items(&text)
+            }
             (_, language) => scan_todos(language, &text),
         }
     }
@@ -65,13 +78,22 @@ impl App {
         let items = self.focused_todo_items();
         let cursor_idx = self.cursor().char_idx;
         let buffer = &self.open().buffer;
-        let starts: Vec<usize> = items.iter().map(|item| buffer.byte_to_char(item.range.start)).collect();
+        let starts: Vec<usize> = items
+            .iter()
+            .map(|item| buffer.byte_to_char(item.range.start))
+            .collect();
         let candidates: Vec<usize> = if forward {
             starts.into_iter().filter(|&c| c > cursor_idx).collect()
         } else {
-            starts.into_iter().rev().filter(|&c| c < cursor_idx).collect()
+            starts
+                .into_iter()
+                .rev()
+                .filter(|&c| c < cursor_idx)
+                .collect()
         };
-        let Some(&target) = candidates.get((count.max(1) as usize - 1).min(candidates.len().saturating_sub(1))) else {
+        let Some(&target) =
+            candidates.get((count.max(1) as usize - 1).min(candidates.len().saturating_sub(1)))
+        else {
             self.set_message(if items.is_empty() {
                 "no TODO comments in this buffer"
             } else if forward {
@@ -81,7 +103,10 @@ impl App {
             });
             return;
         };
-        let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: cursor_idx };
+        let from = JumpEntry {
+            buffer: self.focused_buffer_id(),
+            char_idx: cursor_idx,
+        };
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         cursor.char_idx = target;
         let (_, col) = buffer.line_col(cursor);
@@ -103,10 +128,15 @@ impl App {
             .into_iter()
             .map(|item| {
                 let offset = buffer.byte_to_char(item.range.start);
-                fenix_picker::Candidate::new(todo_label(item.kind, &format!("{:>4}", item.line + 1), &item.message), offset)
+                fenix_picker::Candidate::new(
+                    todo_label(item.kind, &format!("{:>4}", item.line + 1), &item.message),
+                    offset,
+                )
             })
             .collect();
-        self.enter_picker(ActivePicker::BufferTodos(fenix_picker::PickerState::new(candidates)));
+        self.enter_picker(ActivePicker::BufferTodos(fenix_picker::PickerState::new(
+            candidates,
+        )));
         self.set_message(todo_summary(&kinds, 1));
     }
 
@@ -135,17 +165,26 @@ impl App {
             return;
         }
         let kinds: Vec<TodoKind> = matches.iter().map(|(kind, _)| *kind).collect();
-        self.quickfix = matches.iter().map(|(_, m)| QuickfixEntry::Grep(m.clone())).collect();
+        self.quickfix = matches
+            .iter()
+            .map(|(_, m)| QuickfixEntry::Grep(m.clone()))
+            .collect();
         self.quickfix_index = None;
         let candidates = matches
             .into_iter()
             .map(|(kind, m)| {
                 let location = format!("{}:{}", Self::relative_label(&root, &m.path), m.line);
-                let message = m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string();
+                let message = m
+                    .text
+                    .split_once(' ')
+                    .map_or("", |(_, rest)| rest)
+                    .to_string();
                 fenix_picker::Candidate::new(todo_label(kind, &location, &message), m)
             })
             .collect();
-        self.enter_picker(ActivePicker::ProjectTodos(fenix_picker::PickerState::new(candidates)));
+        self.enter_picker(ActivePicker::ProjectTodos(fenix_picker::PickerState::new(
+            candidates,
+        )));
         self.set_message(todo_summary(&kinds, files_with_todos));
     }
 
@@ -176,7 +215,10 @@ pub(super) type ProjectTodos = (Vec<(TodoKind, fenix_project::GrepMatch)>, usize
 
 /// `App::collect_project_todos`, with the open buffers' unsaved text
 /// handed over -- so it can run on another thread (Home's sweep does).
-pub(super) fn collect_todos(root: &Path, unsaved: &HashMap<PathBuf, String>) -> std::io::Result<ProjectTodos> {
+pub(super) fn collect_todos(
+    root: &Path,
+    unsaved: &HashMap<PathBuf, String>,
+) -> std::io::Result<ProjectTodos> {
     let _profile = crate::profile::Scope::new("collect project TODOs");
     let files = fenix_project::files_matching(root, fenix_syntax::todo::TODO_SEARCH_PATTERN)?;
     let mut matches: Vec<(TodoKind, fenix_project::GrepMatch)> = Vec::new();
@@ -197,7 +239,15 @@ pub(super) fn collect_todos(root: &Path, unsaved: &HashMap<PathBuf, String>) -> 
         }
         for item in items {
             let text = format!("{} {}", item.kind.label(), item.message);
-            matches.push((item.kind, fenix_project::GrepMatch { path: path.clone(), line: item.line + 1, col: item.col + 1, text }));
+            matches.push((
+                item.kind,
+                fenix_project::GrepMatch {
+                    path: path.clone(),
+                    line: item.line + 1,
+                    col: item.col + 1,
+                    text,
+                },
+            ));
         }
     }
     Ok((matches, files_with_todos))
@@ -226,7 +276,13 @@ mod tests {
     #[test]
     fn summary_counts_per_kind_most_urgent_first() {
         let kinds = [TodoKind::Todo, TodoKind::Fix, TodoKind::Todo];
-        assert_eq!(todo_summary(&kinds, 2), "3 TODOs in 2 files -- FIX 1, TODO 2");
-        assert_eq!(todo_summary(&[TodoKind::Note], 1), "1 TODO in 1 file -- NOTE 1");
+        assert_eq!(
+            todo_summary(&kinds, 2),
+            "3 TODOs in 2 files -- FIX 1, TODO 2"
+        );
+        assert_eq!(
+            todo_summary(&[TodoKind::Note], 1),
+            "1 TODO in 1 file -- NOTE 1"
+        );
     }
 }

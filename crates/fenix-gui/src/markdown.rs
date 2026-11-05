@@ -27,7 +27,11 @@ pub fn parse_heading(line_text: &str) -> Option<(usize, String)> {
         return None;
     }
     let rest = &line_text[level..];
-    let title = if rest.is_empty() { rest } else { rest.strip_prefix(' ')? };
+    let title = if rest.is_empty() {
+        rest
+    } else {
+        rest.strip_prefix(' ')?
+    };
     Some((level, title.trim().to_string()))
 }
 
@@ -76,7 +80,10 @@ mod tests {
 
     #[test]
     fn parse_heading_trims_surrounding_whitespace_from_the_title() {
-        assert_eq!(parse_heading("#   spaced out   "), Some((1, "spaced out".to_string())));
+        assert_eq!(
+            parse_heading("#   spaced out   "),
+            Some((1, "spaced out".to_string()))
+        );
     }
 
     #[test]
@@ -84,7 +91,10 @@ mod tests {
         // Disclosed simplification -- see this function's own doc
         // comment on why stripping it correctly isn't worth the risk
         // of also eating a genuine trailing "#" like "C#".
-        assert_eq!(parse_heading("## Title ##"), Some((2, "Title ##".to_string())));
+        assert_eq!(
+            parse_heading("## Title ##"),
+            Some((2, "Title ##".to_string()))
+        );
     }
 
     #[test]

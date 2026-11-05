@@ -31,7 +31,11 @@ pub struct Roots {
 impl Roots {
     /// All four under `home`.
     pub fn portable(home: &Path) -> Self {
-        Roots { settings: home.to_path_buf(), data: home.join("data"), local: home.to_path_buf() }
+        Roots {
+            settings: home.to_path_buf(),
+            data: home.join("data"),
+            local: home.to_path_buf(),
+        }
     }
 
     /// The platform's own folders, `None` where it has no notion of them.
@@ -42,11 +46,22 @@ impl Roots {
             Some(dir) if dir.join("fenix") != settings => dir.join("fenix"),
             _ => settings.join("data"),
         };
-        let local = dirs::state_dir().or_else(dirs::data_local_dir).map(|d| d.join("fenix")).unwrap_or_else(|| settings.clone());
+        let local = dirs::state_dir()
+            .or_else(dirs::data_local_dir)
+            .map(|d| d.join("fenix"))
+            .unwrap_or_else(|| settings.clone());
         // A local folder that is the settings folder (macOS) keeps the
         // two apart by a subfolder.
-        let local = if local == settings { settings.join("local") } else { local };
-        Some(Roots { settings, data, local })
+        let local = if local == settings {
+            settings.join("local")
+        } else {
+            local
+        };
+        Some(Roots {
+            settings,
+            data,
+            local,
+        })
     }
 
     /// `FENIX_HOME` when it's set, else the platform's folders.
@@ -148,9 +163,13 @@ pub fn managed_extensions_dir() -> Option<PathBuf> {
         return Some(Path::new(&home).join("managed"));
     }
     if cfg!(windows) {
-        std::env::var_os("ProgramData").filter(|v| !v.is_empty()).map(|d| Path::new(&d).join("Fenix").join("extensions"))
+        std::env::var_os("ProgramData")
+            .filter(|v| !v.is_empty())
+            .map(|d| Path::new(&d).join("Fenix").join("extensions"))
     } else if cfg!(target_os = "macos") {
-        Some(PathBuf::from("/Library/Application Support/Fenix/extensions"))
+        Some(PathBuf::from(
+            "/Library/Application Support/Fenix/extensions",
+        ))
     } else {
         Some(PathBuf::from("/etc/fenix/extensions"))
     }
@@ -206,7 +225,13 @@ mod tests {
         assert_eq!(r.settings_file(), Path::new("/p/settings.toml"));
         assert_eq!(r.state("session.json"), Path::new("/p/state/session.json"));
         assert_eq!(r.data.join("agenda.json"), Path::new("/p/data/agenda.json"));
-        for dir in [r.recovery(), r.tools(), r.backup(), r.snippets(), r.templates()] {
+        for dir in [
+            r.recovery(),
+            r.tools(),
+            r.backup(),
+            r.snippets(),
+            r.templates(),
+        ] {
             assert!(dir.starts_with("/p"), "{}", dir.display());
         }
     }
@@ -215,11 +240,24 @@ mod tests {
     fn the_platform_keeps_settings_apart_from_this_machines_state() {
         let Some(r) = Roots::platform() else { return };
         assert!(r.settings.ends_with("fenix"));
-        assert_ne!(r.local, r.settings, "state and downloads don't roam with the settings");
-        assert!(!r.state("session.json").starts_with(&r.settings) || r.local.starts_with(&r.settings));
+        assert_ne!(
+            r.local, r.settings,
+            "state and downloads don't roam with the settings"
+        );
+        assert!(
+            !r.state("session.json").starts_with(&r.settings) || r.local.starts_with(&r.settings)
+        );
         if cfg!(windows) {
-            assert!(r.settings.to_string_lossy().contains("Roaming"), "{}", r.settings.display());
-            assert!(r.local.to_string_lossy().contains("Local"), "{}", r.local.display());
+            assert!(
+                r.settings.to_string_lossy().contains("Roaming"),
+                "{}",
+                r.settings.display()
+            );
+            assert!(
+                r.local.to_string_lossy().contains("Local"),
+                "{}",
+                r.local.display()
+            );
             assert_eq!(r.data, r.settings.join("data"));
         }
     }

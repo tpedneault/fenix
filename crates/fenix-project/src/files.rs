@@ -4,7 +4,15 @@ use std::path::{Path, PathBuf};
 /// `.gitignore` parsing in that fallback path, so this is a small,
 /// hardcoded stand-in for the most common "never want these" directories
 /// rather than an attempt at real ignore-file support.
-const WALK_IGNORE: &[&str] = &[".git", "node_modules", "target", ".venv", "__pycache__", "dist", "build"];
+const WALK_IGNORE: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    ".venv",
+    "__pycache__",
+    "dist",
+    "build",
+];
 
 /// Lists every file under `root`, as absolute paths. Tries, in order:
 /// `git ls-files` (when `root` looks like a git repo -- gitignore-aware
@@ -46,7 +54,11 @@ fn list_project_files_impl(root: &Path, include_ignored: bool) -> Vec<PathBuf> {
 
 /// Paths from a helper's NUL-separated output, joined onto `root`.
 fn nul_separated(root: &Path, stdout: &[u8]) -> Vec<PathBuf> {
-    String::from_utf8_lossy(stdout).split('\0').filter(|line| !line.is_empty()).map(|line| root.join(line)).collect()
+    String::from_utf8_lossy(stdout)
+        .split('\0')
+        .filter(|line| !line.is_empty())
+        .map(|line| root.join(line))
+        .collect()
 }
 
 fn git_ls_files(root: &Path, include_ignored: bool) -> Option<Vec<PathBuf>> {
@@ -56,7 +68,11 @@ fn git_ls_files(root: &Path, include_ignored: bool) -> Option<Vec<PathBuf>> {
     if !include_ignored {
         args.push("--exclude-standard");
     }
-    let output = crate::process::quiet("git").args(&args).current_dir(root).output().ok()?;
+    let output = crate::process::quiet("git")
+        .args(&args)
+        .current_dir(root)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -71,7 +87,11 @@ fn fd_list_files(root: &Path, include_ignored: bool) -> Option<Vec<PathBuf>> {
     if include_ignored {
         args.push("--no-ignore");
     }
-    let output = crate::process::quiet("fd").args(&args).current_dir(root).output().ok()?;
+    let output = crate::process::quiet("fd")
+        .args(&args)
+        .current_dir(root)
+        .output()
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -90,16 +110,23 @@ fn walk_files(root: &Path) -> Vec<PathBuf> {
 }
 
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         if out.len() >= WALK_LIMIT {
             return;
         }
         let name = entry.file_name();
-        if WALK_IGNORE.iter().any(|ignored| name == std::ffi::OsStr::new(ignored)) {
+        if WALK_IGNORE
+            .iter()
+            .any(|ignored| name == std::ffi::OsStr::new(ignored))
+        {
             continue;
         }
-        let Ok(file_type) = entry.file_type() else { continue };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_dir() {
             walk_dir(&entry.path(), out);
         } else if file_type.is_file() {
@@ -115,7 +142,11 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git").args(args).current_dir(dir).status().expect("run git");
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("run git");
         assert!(status.success(), "git {args:?} failed");
     }
 
@@ -137,7 +168,15 @@ mod tests {
         dir.write("ignored.txt", "x");
 
         let files = git_ls_files(dir.path(), false).expect("git available");
-        let names: Vec<String> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
         assert!(names.contains(&"tracked.txt".to_string()));
         assert!(names.contains(&"untracked.txt".to_string()));
         assert!(!names.contains(&"ignored.txt".to_string()));
@@ -154,7 +193,15 @@ mod tests {
         dir.write("ignored.txt", "x");
 
         let files = git_ls_files(dir.path(), true).expect("git available");
-        let names: Vec<String> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
         assert!(names.contains(&"tracked.txt".to_string()));
         assert!(names.contains(&"ignored.txt".to_string()));
     }
@@ -170,14 +217,34 @@ mod tests {
         dir.write(".env", "SECRET=1");
 
         let plain = list_project_files(dir.path());
-        let plain_names: Vec<String> =
-            plain.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
-        assert!(!plain_names.contains(&".env".to_string()), "list_project_files should still exclude it");
+        let plain_names: Vec<String> = plain
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            !plain_names.contains(&".env".to_string()),
+            "list_project_files should still exclude it"
+        );
 
         let all = list_project_files_including_ignored(dir.path());
-        let all_names: Vec<String> =
-            all.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
-        assert!(all_names.contains(&".env".to_string()), "list_project_files_including_ignored should find it");
+        let all_names: Vec<String> = all
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert!(
+            all_names.contains(&".env".to_string()),
+            "list_project_files_including_ignored should find it"
+        );
     }
 
     #[test]
@@ -188,7 +255,15 @@ mod tests {
         dir.write("node_modules/pkg/index.js", "x");
 
         let files = walk_files(dir.path());
-        let names: Vec<String> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
         assert!(names.iter().any(|n| n == "real.txt"));
         assert!(!names.iter().any(|n| n.starts_with("target")));
         assert!(!names.iter().any(|n| n.starts_with("node_modules")));
@@ -212,7 +287,15 @@ mod tests {
         git(dir.path(), &["commit", "-q", "-m", "initial"]);
 
         let files = list_project_files(dir.path());
-        let names: Vec<String> = files.iter().map(|p| p.strip_prefix(dir.path()).unwrap().to_string_lossy().into_owned()).collect();
+        let names: Vec<String> = files
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
         assert!(names.contains(&"a.rs".to_string()));
         assert!(names.iter().any(|n| n.ends_with("b.rs")));
     }
@@ -227,7 +310,12 @@ mod tests {
         git(dir.path(), &["commit", "-q", "-m", "initial"]);
 
         let files = list_project_files(dir.path());
-        assert!(files.iter().any(|p| p.ends_with("sub/café.rs") && p.is_file()), "{files:?}");
+        assert!(
+            files
+                .iter()
+                .any(|p| p.ends_with("sub/café.rs") && p.is_file()),
+            "{files:?}"
+        );
 
         let sub = list_project_files(&dir.path().join("sub"));
         assert_eq!(sub.len(), 1, "only the subfolder's own files: {sub:?}");

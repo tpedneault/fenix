@@ -92,7 +92,10 @@ struct Builder {
 
 impl Builder {
     fn new() -> Self {
-        Self { text: String::new(), lines: Vec::new() }
+        Self {
+            text: String::new(),
+            lines: Vec::new(),
+        }
     }
 
     fn push(&mut self, text: &str, meta: Option<DiffViewLine>) {
@@ -102,7 +105,10 @@ impl Builder {
     }
 
     fn finish(self) -> DiffView {
-        DiffView { text: self.text, lines: self.lines }
+        DiffView {
+            text: self.text,
+            lines: self.lines,
+        }
     }
 }
 
@@ -135,7 +141,9 @@ fn gutter_width(files: &[FileDiff]) -> usize {
 /// when the thing being reviewed is whitespace.
 fn content_row(width: usize, old: Option<usize>, new: Option<usize>, raw: &str) -> (String, usize) {
     let blank = " ".repeat(width);
-    let old_col = old.map(|n| format!("{n:>width$}")).unwrap_or_else(|| blank.clone());
+    let old_col = old
+        .map(|n| format!("{n:>width$}"))
+        .unwrap_or_else(|| blank.clone());
     let new_col = new.map(|n| format!("{n:>width$}")).unwrap_or(blank);
     let content_from = width * 2 + 2;
     (format!("{old_col} {new_col} {raw}"), content_from)
@@ -148,18 +156,29 @@ fn push_thread(b: &mut Builder, gutter: usize, thread: &ThreadAnnotation, anchor
     let indent = " ".repeat(gutter * 2 + 3);
     let state = if thread.resolved { " (resolved)" } else { "" };
     let meta = |style: DiffStyle| {
-        Some(DiffViewLine { style, content_from: indent.chars().count(), anchor: Some(anchor), thread: Some(thread.id.clone()) })
+        Some(DiffViewLine {
+            style,
+            content_from: indent.chars().count(),
+            anchor: Some(anchor),
+            thread: Some(thread.id.clone()),
+        })
     };
     for (index, (author, body)) in thread.notes.iter().enumerate() {
         // Only the first note carries the resolved marker: it belongs to
         // the thread, not to each reply.
         let suffix = if index == 0 { state } else { "" };
-        b.push(&format!("{indent}| {author}{suffix}:"), meta(DiffStyle::NoteHeader));
+        b.push(
+            &format!("{indent}| {author}{suffix}:"),
+            meta(DiffStyle::NoteHeader),
+        );
         for line in body.trim_end().split('\n') {
             b.push(&format!("{indent}|   {line}"), meta(DiffStyle::NoteBody));
         }
     }
-    b.push(&format!("{indent}| r reply, R resolve"), meta(DiffStyle::Meta));
+    b.push(
+        &format!("{indent}| r reply, R resolve"),
+        meta(DiffStyle::Meta),
+    );
 }
 
 /// A review thread to show inline, under the diff line it hangs on.
@@ -218,7 +237,11 @@ pub fn render(files: &[FileDiff], collapsed: &HashSet<String>) -> DiffView {
 ///
 /// Header rows carry no anchor: there's no hunk or line under them to
 /// act on, so `diff_apply_hunk` and friends correctly decline on them.
-pub fn render_with_header(header: &[(String, DiffStyle)], files: &[FileDiff], collapsed: &HashSet<String>) -> DiffView {
+pub fn render_with_header(
+    header: &[(String, DiffStyle)],
+    files: &[FileDiff],
+    collapsed: &HashSet<String>,
+) -> DiffView {
     render_with_threads(header, files, collapsed, &[])
 }
 
@@ -238,45 +261,94 @@ pub fn render_with_threads(
 ) -> DiffView {
     let mut b = Builder::new();
     for (text, style) in header {
-        b.push(text, Some(DiffViewLine { style: *style, content_from: 0, anchor: None, thread: None }));
+        b.push(
+            text,
+            Some(DiffViewLine {
+                style: *style,
+                content_from: 0,
+                anchor: None,
+                thread: None,
+            }),
+        );
     }
     if files.is_empty() {
-        b.push("    (no changes)", Some(DiffViewLine { style: DiffStyle::Meta, content_from: 0, anchor: None, thread: None }));
+        b.push(
+            "    (no changes)",
+            Some(DiffViewLine {
+                style: DiffStyle::Meta,
+                content_from: 0,
+                anchor: None,
+                thread: None,
+            }),
+        );
         return b.finish();
     }
 
-
     let width = gutter_width(files);
     for (file_index, file) in files.iter().enumerate() {
-        let (adds, dels) = file
-            .hunks
-            .iter()
-            .flat_map(|h| h.lines.iter())
-            .fold((0usize, 0usize), |(a, d), l| match l.kind {
-                LineKind::Added => (a + 1, d),
-                LineKind::Removed => (a, d + 1),
-                _ => (a, d),
-            });
+        let (adds, dels) =
+            file.hunks
+                .iter()
+                .flat_map(|h| h.lines.iter())
+                .fold((0usize, 0usize), |(a, d), l| match l.kind {
+                    LineKind::Added => (a + 1, d),
+                    LineKind::Removed => (a, d + 1),
+                    _ => (a, d),
+                });
         let path = if file.status == FileStatus::Renamed && file.old_path != file.new_path {
             format!("{} -> {}", file.old_path, file.new_path)
         } else {
             file.display_path().to_string()
         };
         let header = format!("{}  {path}   +{adds} -{dels}", status_marker(file.status));
-        let anchor = DiffAnchor { file: file_index, hunk: None, old_line: None, new_line: None };
-        b.push(&header, Some(DiffViewLine { style: DiffStyle::FileHeader, content_from: 0, anchor: Some(anchor), thread: None }));
+        let anchor = DiffAnchor {
+            file: file_index,
+            hunk: None,
+            old_line: None,
+            new_line: None,
+        };
+        b.push(
+            &header,
+            Some(DiffViewLine {
+                style: DiffStyle::FileHeader,
+                content_from: 0,
+                anchor: Some(anchor),
+                thread: None,
+            }),
+        );
 
         if collapsed.contains(file.display_path()) {
             continue;
         }
         if file.is_binary {
-            b.push("    (binary file)", Some(DiffViewLine { style: DiffStyle::Meta, content_from: 0, anchor: Some(anchor), thread: None }));
+            b.push(
+                "    (binary file)",
+                Some(DiffViewLine {
+                    style: DiffStyle::Meta,
+                    content_from: 0,
+                    anchor: Some(anchor),
+                    thread: None,
+                }),
+            );
             continue;
         }
 
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
-            let hunk_anchor = DiffAnchor { file: file_index, hunk: Some(hunk_index), old_line: None, new_line: None };
-            b.push(&hunk.header, Some(DiffViewLine { style: DiffStyle::HunkHeader, content_from: 0, anchor: Some(hunk_anchor), thread: None }));
+            let hunk_anchor = DiffAnchor {
+                file: file_index,
+                hunk: Some(hunk_index),
+                old_line: None,
+                new_line: None,
+            };
+            b.push(
+                &hunk.header,
+                Some(DiffViewLine {
+                    style: DiffStyle::HunkHeader,
+                    content_from: 0,
+                    anchor: Some(hunk_anchor),
+                    thread: None,
+                }),
+            );
 
             for line in &hunk.lines {
                 let style = match line.kind {
@@ -285,17 +357,29 @@ pub fn render_with_threads(
                     LineKind::Removed => DiffStyle::Removed,
                     LineKind::NoNewline => DiffStyle::Meta,
                 };
-                let (row, content_from) = content_row(width, line.old_line, line.new_line, &line.raw());
+                let (row, content_from) =
+                    content_row(width, line.old_line, line.new_line, &line.raw());
                 let anchor = DiffAnchor {
                     file: file_index,
                     hunk: Some(hunk_index),
                     old_line: line.old_line,
                     new_line: line.new_line,
                 };
-                b.push(&row, Some(DiffViewLine { style, content_from, anchor: Some(anchor), thread: None }));
+                b.push(
+                    &row,
+                    Some(DiffViewLine {
+                        style,
+                        content_from,
+                        anchor: Some(anchor),
+                        thread: None,
+                    }),
+                );
 
                 let path = file.display_path();
-                for thread in threads.iter().filter(|t| t.path == path && t.anchors_to(line.old_line, line.new_line)) {
+                for thread in threads
+                    .iter()
+                    .filter(|t| t.path == path && t.anchors_to(line.old_line, line.new_line))
+                {
                     push_thread(&mut b, width, thread, anchor);
                 }
             }
@@ -308,14 +392,22 @@ pub fn render_with_threads(
 mod tests {
     use super::*;
 
-    fn thread(id: &str, new_line: Option<usize>, old_line: Option<usize>, resolved: bool) -> ThreadAnnotation {
+    fn thread(
+        id: &str,
+        new_line: Option<usize>,
+        old_line: Option<usize>,
+        resolved: bool,
+    ) -> ThreadAnnotation {
         ThreadAnnotation {
             id: id.to_string(),
             path: "foo.txt".to_string(),
             old_line,
             new_line,
             resolved,
-            notes: vec![("Alice".to_string(), "This looks wrong.".to_string()), ("Bob".to_string(), "Fixed.".to_string())],
+            notes: vec![
+                ("Alice".to_string(), "This looks wrong.".to_string()),
+                ("Bob".to_string(), "Fixed.".to_string()),
+            ],
         }
     }
 
@@ -328,18 +420,37 @@ mod tests {
         // `+two` is new line 2 in SIMPLE.
         let view = render_with(&[thread("t1", Some(2), None, false)]);
         let rows: Vec<&str> = view.text.lines().collect();
-        let code = rows.iter().position(|r| r.ends_with("+two")).expect("the commented line");
-        assert!(rows[code + 1].contains("Alice:"), "the thread follows its line:\n{}", view.text);
+        let code = rows
+            .iter()
+            .position(|r| r.ends_with("+two"))
+            .expect("the commented line");
+        assert!(
+            rows[code + 1].contains("Alice:"),
+            "the thread follows its line:\n{}",
+            view.text
+        );
         assert!(rows[code + 2].contains("This looks wrong."));
-        assert!(rows[code + 3].contains("Bob:"), "replies in order:\n{}", view.text);
+        assert!(
+            rows[code + 3].contains("Bob:"),
+            "replies in order:\n{}",
+            view.text
+        );
     }
 
     #[test]
     fn every_row_of_a_thread_carries_its_id_so_reply_works_from_anywhere_in_it() {
         let view = render_with(&[thread("t1", Some(2), None, false)]);
-        let ids: Vec<Option<String>> =
-            view.lines.iter().flatten().filter(|l| l.thread.is_some()).map(|l| l.thread.clone()).collect();
-        assert!(ids.len() >= 5, "header, body, reply header, reply body, key hint");
+        let ids: Vec<Option<String>> = view
+            .lines
+            .iter()
+            .flatten()
+            .filter(|l| l.thread.is_some())
+            .map(|l| l.thread.clone())
+            .collect();
+        assert!(
+            ids.len() >= 5,
+            "header, body, reply header, reply body, key hint"
+        );
         assert!(ids.iter().all(|id| id.as_deref() == Some("t1")));
     }
 
@@ -347,7 +458,10 @@ mod tests {
     fn diff_rows_carry_no_thread_which_is_how_a_comment_row_is_told_apart() {
         let view = render_with(&[thread("t1", Some(2), None, false)]);
         let code_rows = view.lines.iter().flatten().filter(|l| {
-            matches!(l.style, DiffStyle::Added | DiffStyle::Removed | DiffStyle::Context | DiffStyle::HunkHeader)
+            matches!(
+                l.style,
+                DiffStyle::Added | DiffStyle::Removed | DiffStyle::Context | DiffStyle::HunkHeader
+            )
         });
         assert!(code_rows.into_iter().all(|l| l.thread.is_none()));
     }
@@ -355,8 +469,17 @@ mod tests {
     #[test]
     fn a_resolved_thread_says_so_once_rather_than_on_every_reply() {
         let view = render_with(&[thread("t1", Some(2), None, true)]);
-        assert_eq!(view.text.matches("(resolved)").count(), 1, "got:\n{}", view.text);
-        assert!(view.text.contains("Alice (resolved):"), "got:\n{}", view.text);
+        assert_eq!(
+            view.text.matches("(resolved)").count(),
+            1,
+            "got:\n{}",
+            view.text
+        );
+        assert!(
+            view.text.contains("Alice (resolved):"),
+            "got:\n{}",
+            view.text
+        );
     }
 
     #[test]
@@ -364,7 +487,10 @@ mod tests {
         // `-second` is old line 2.
         let view = render_with(&[thread("t1", None, Some(2), false)]);
         let rows: Vec<&str> = view.text.lines().collect();
-        let code = rows.iter().position(|r| r.ends_with("-second")).expect("the removed line");
+        let code = rows
+            .iter()
+            .position(|r| r.ends_with("-second"))
+            .expect("the removed line");
         assert!(rows[code + 1].contains("Alice:"), "got:\n{}", view.text);
     }
 
@@ -376,12 +502,18 @@ mod tests {
         let view = render_with(&[thread("t2", Some(999), None, false), elsewhere]);
         assert!(!view.text.contains("Alice:"), "got:\n{}", view.text);
         // And the diff itself is untouched.
-        assert_eq!(view.text.lines().count(), render_simple().text.lines().count());
+        assert_eq!(
+            view.text.lines().count(),
+            render_simple().text.lines().count()
+        );
     }
 
     #[test]
     fn threads_and_metadata_stay_the_same_length_as_the_text() {
-        let view = render_with(&[thread("t1", Some(2), None, false), thread("t2", None, Some(2), true)]);
+        let view = render_with(&[
+            thread("t1", Some(2), None, false),
+            thread("t2", None, Some(2), true),
+        ]);
         assert_eq!(view.text.lines().count(), view.lines.len());
     }
 
@@ -390,7 +522,12 @@ mod tests {
         // So "comment on this line" from inside a thread still knows
         // which file it's in.
         let view = render_with(&[thread("t1", Some(2), None, false)]);
-        let row = view.lines.iter().flatten().find(|l| l.thread.is_some()).unwrap();
+        let row = view
+            .lines
+            .iter()
+            .flatten()
+            .find(|l| l.thread.is_some())
+            .unwrap();
         let anchor = row.anchor.expect("thread rows keep an anchor");
         assert_eq!(anchor.file, 0);
         assert_eq!(anchor.hunk, Some(0));
@@ -436,7 +573,10 @@ mod tests {
         assert_eq!(rows[2], "      2 +two");
         assert_eq!(rows[3], "      3 +extra");
         assert_eq!(rows[4], "  3   4  third");
-        assert!(rows.iter().all(|r| r.chars().nth(8).is_some_and(|c| matches!(c, ' ' | '+' | '-'))));
+        assert!(rows.iter().all(|r| r
+            .chars()
+            .nth(8)
+            .is_some_and(|c| matches!(c, ' ' | '+' | '-'))));
     }
 
     #[test]
@@ -444,10 +584,26 @@ mod tests {
         let view = render_simple();
         let removed = view.lines[3].as_ref().unwrap();
         assert_eq!(removed.style, DiffStyle::Removed);
-        assert_eq!(removed.anchor, Some(DiffAnchor { file: 0, hunk: Some(0), old_line: Some(2), new_line: None }));
+        assert_eq!(
+            removed.anchor,
+            Some(DiffAnchor {
+                file: 0,
+                hunk: Some(0),
+                old_line: Some(2),
+                new_line: None
+            })
+        );
         let added = view.lines[4].as_ref().unwrap();
         assert_eq!(added.style, DiffStyle::Added);
-        assert_eq!(added.anchor, Some(DiffAnchor { file: 0, hunk: Some(0), old_line: None, new_line: Some(2) }));
+        assert_eq!(
+            added.anchor,
+            Some(DiffAnchor {
+                file: 0,
+                hunk: Some(0),
+                old_line: None,
+                new_line: Some(2)
+            })
+        );
     }
 
     #[test]
@@ -458,19 +614,40 @@ mod tests {
         // Everything before `content_from` is gutter; everything from it
         // on is the verbatim patch line, marker included.
         assert_eq!(&row[meta.content_from..], " first");
-        assert!(row[..meta.content_from].chars().all(|c| c.is_ascii_digit() || c == ' '), "the gutter holds only line numbers");
+        assert!(
+            row[..meta.content_from]
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == ' '),
+            "the gutter holds only line numbers"
+        );
     }
 
     #[test]
     fn a_hunk_header_row_anchors_to_its_hunk_with_no_line_numbers() {
         let view = render_simple();
-        assert_eq!(view.lines[1].as_ref().unwrap().anchor, Some(DiffAnchor { file: 0, hunk: Some(0), old_line: None, new_line: None }));
+        assert_eq!(
+            view.lines[1].as_ref().unwrap().anchor,
+            Some(DiffAnchor {
+                file: 0,
+                hunk: Some(0),
+                old_line: None,
+                new_line: None
+            })
+        );
     }
 
     #[test]
     fn a_file_header_row_anchors_to_the_file_with_no_hunk() {
         let view = render_simple();
-        assert_eq!(view.lines[0].as_ref().unwrap().anchor, Some(DiffAnchor { file: 0, hunk: None, old_line: None, new_line: None }));
+        assert_eq!(
+            view.lines[0].as_ref().unwrap().anchor,
+            Some(DiffAnchor {
+                file: 0,
+                hunk: None,
+                old_line: None,
+                new_line: None
+            })
+        );
     }
 
     #[test]
@@ -494,7 +671,15 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         assert_eq!(file_rows.len(), 2);
-        assert_eq!(view.lines[file_rows[1]].as_ref().unwrap().anchor.unwrap().file, 1);
+        assert_eq!(
+            view.lines[file_rows[1]]
+                .as_ref()
+                .unwrap()
+                .anchor
+                .unwrap()
+                .file,
+            1
+        );
     }
 
     #[test]
@@ -509,14 +694,23 @@ mod tests {
     fn a_rename_header_shows_both_paths() {
         let text = "diff --git a/old.txt b/new.txt\nsimilarity index 100%\nrename from old.txt\nrename to new.txt\n";
         let view = render(&fenix_diff::parse(text), &HashSet::new());
-        assert!(view.text.starts_with("R  old.txt -> new.txt"), "got {:?}", view.text.lines().next());
+        assert!(
+            view.text.starts_with("R  old.txt -> new.txt"),
+            "got {:?}",
+            view.text.lines().next()
+        );
     }
 
     #[test]
     fn a_no_newline_marker_renders_as_a_meta_row() {
         let text = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n";
         let view = render(&fenix_diff::parse(text), &HashSet::new());
-        let meta = view.lines.iter().flatten().find(|l| l.style == DiffStyle::Meta).unwrap();
+        let meta = view
+            .lines
+            .iter()
+            .flatten()
+            .find(|l| l.style == DiffStyle::Meta)
+            .unwrap();
         assert_eq!(meta.anchor.unwrap().old_line, None);
         assert!(view.text.contains("\\ No newline at end of file"));
     }
@@ -524,14 +718,21 @@ mod tests {
     #[test]
     fn a_header_is_rendered_above_the_diff_and_carries_no_anchor() {
         let header = vec![
-            ("abc1234  Jane Doe  2026-09-03 14:22".to_string(), DiffStyle::Title),
+            (
+                "abc1234  Jane Doe  2026-09-03 14:22".to_string(),
+                DiffStyle::Title,
+            ),
             ("Fix the thing".to_string(), DiffStyle::Meta),
         ];
         let view = render_with_header(&header, &fenix_diff::parse(SIMPLE), &HashSet::new());
         let lines: Vec<&str> = view.text.lines().collect();
         assert_eq!(lines[0], "abc1234  Jane Doe  2026-09-03 14:22");
         assert_eq!(lines[1], "Fix the thing");
-        assert!(lines[2].starts_with("M  foo.txt"), "the diff still follows: {:?}", lines[2]);
+        assert!(
+            lines[2].starts_with("M  foo.txt"),
+            "the diff still follows: {:?}",
+            lines[2]
+        );
         // Nothing to stage or open on a header row.
         assert!(view.lines[0].as_ref().unwrap().anchor.is_none());
         assert_eq!(view.text.lines().count(), view.lines.len());
@@ -558,7 +759,11 @@ mod tests {
         let view = render(&fenix_diff::parse(text), &HashSet::new());
         // Both files share one gutter width, driven by the widest number
         // anywhere -- so scrolling between them doesn't shift the text.
-        let rows: Vec<&str> = view.text.lines().filter(|l| l.contains("-x") || l.contains("-m")).collect();
+        let rows: Vec<&str> = view
+            .text
+            .lines()
+            .filter(|l| l.contains("-x") || l.contains("-m"))
+            .collect();
         assert_eq!(rows[0], "   1      -x");
         assert_eq!(rows[1], "1200      -m");
     }
@@ -567,6 +772,9 @@ mod tests {
     fn a_crlf_line_keeps_its_carriage_return_in_the_rendered_row() {
         let text = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\r\n+new\r\n";
         let view = render(&fenix_diff::parse(text), &HashSet::new());
-        assert!(view.text.contains("-old\r"), "the rendered row must not quietly drop the CR");
+        assert!(
+            view.text.contains("-old\r"),
+            "the rendered row must not quietly drop the CR"
+        );
     }
 }

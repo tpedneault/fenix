@@ -1,7 +1,11 @@
 use super::*;
 
 #[derive(Clone)]
-enum BreadcrumbTarget { Directory(PathBuf), Symbols, Line(usize) }
+enum BreadcrumbTarget {
+    Directory(PathBuf),
+    Symbols,
+    Line(usize),
+}
 
 impl App {
     /// The actual document rows that occupy display rows after the current
@@ -10,12 +14,18 @@ impl App {
     /// mutating buffer text is what makes folds safe to undo, edit and share
     /// across split panes.
     pub(super) fn folded_display_lines(&self, id: BufferId) -> Vec<usize> {
-        let Some(ob) = self.buffers.get(id) else { return Vec::new() };
+        let Some(ob) = self.buffers.get(id) else {
+            return Vec::new();
+        };
         let collapsed = self.code_folds.get(&id);
         if collapsed.is_none_or(HashSet::is_empty) {
             return (0..ob.buffer.line_count()).collect();
         }
-        let ranges = ob.syntax.as_ref().map(|syntax| syntax.scope_ranges()).unwrap_or_default();
+        let ranges = ob
+            .syntax
+            .as_ref()
+            .map(|syntax| syntax.scope_ranges())
+            .unwrap_or_default();
         let mut end_by_header = HashMap::new();
         for (start, end) in ranges {
             if collapsed.is_some_and(|headers| headers.contains(&start)) {
@@ -26,7 +36,10 @@ impl App {
         let mut line = 0;
         while line < ob.buffer.line_count() {
             lines.push(line);
-            line = end_by_header.get(&line).copied().map_or(line + 1, |end| end + 1);
+            line = end_by_header
+                .get(&line)
+                .copied()
+                .map_or(line + 1, |end| end + 1);
         }
         lines
     }
@@ -38,7 +51,11 @@ impl App {
         let (line, ranges) = {
             let ob = self.open();
             let line = ob.buffer.line_col(&self.cursor()).0;
-            let ranges = ob.syntax.as_ref().map(|syntax| syntax.scope_ranges()).unwrap_or_default();
+            let ranges = ob
+                .syntax
+                .as_ref()
+                .map(|syntax| syntax.scope_ranges())
+                .unwrap_or_default();
             (line, ranges)
         };
         let target = ranges
@@ -63,23 +80,44 @@ impl App {
             cursor.sticky_col = 0;
         } else if let Some(&(_, end)) = ranges.iter().find(|&&(start, _)| start == header) {
             // Unfolded: the body opens downwards from under its header.
-            let first = self.folded_display_lines(id).iter().position(|&l| l == header + 1).unwrap_or(header + 1);
+            let first = self
+                .folded_display_lines(id)
+                .iter()
+                .position(|&l| l == header + 1)
+                .unwrap_or(header + 1);
             self.reveal_lines(id, first, end.saturating_sub(header));
         }
-        self.set_message(if now_collapsed { "Scope folded" } else { "Scope expanded" });
+        self.set_message(if now_collapsed {
+            "Scope folded"
+        } else {
+            "Scope expanded"
+        });
         self.wake_caret();
     }
 
     /// Keeps a cursor from becoming invisible after a scope that contains it
     /// was collapsed in another split. The buffer position remains valid; we
     /// simply present the scope header, which is the only visible row for it.
-    pub(super) fn normalize_cursor_for_folds(&mut self, id: BufferId, pane: fenix_window::WindowId) {
-        let Some(headers) = self.code_folds.get(&id) else { return };
+    pub(super) fn normalize_cursor_for_folds(
+        &mut self,
+        id: BufferId,
+        pane: fenix_window::WindowId,
+    ) {
+        let Some(headers) = self.code_folds.get(&id) else {
+            return;
+        };
         let (line, ranges) = {
             let ob = self.buffers.get(id).expect("open pane buffer");
-            (ob.buffer.line_col(&self.pane_state(pane).cursor).0, ob.syntax.as_ref().map(|syntax| syntax.scope_ranges()).unwrap_or_default())
+            (
+                ob.buffer.line_col(&self.pane_state(pane).cursor).0,
+                ob.syntax
+                    .as_ref()
+                    .map(|syntax| syntax.scope_ranges())
+                    .unwrap_or_default(),
+            )
         };
-        let header = ranges.into_iter()
+        let header = ranges
+            .into_iter()
             .filter(|(start, end)| headers.contains(start) && *start < line && line <= *end)
             .max_by_key(|(start, _)| *start)
             .map(|(start, _)| start);
@@ -110,14 +148,38 @@ impl App {
                 // A side-by-side's filler row: blank, gutter and all.
                 spans.push((" ".repeat(gutter_chars), self.theme.gutter_fg));
             } else if let Some(&line) = display_lines.get(row) {
-                spans.extend(self.content_spans_decorated(ob, line, 1, gutter_chars, None, syntax_highlights, cursor_line, tab_stops, scroll_col, decorated));
+                spans.extend(self.content_spans_decorated(
+                    ob,
+                    line,
+                    1,
+                    gutter_chars,
+                    None,
+                    syntax_highlights,
+                    cursor_line,
+                    tab_stops,
+                    scroll_col,
+                    decorated,
+                ));
                 if collapsed_headers.contains(&line) {
                     spans.push(("  …".to_string(), self.theme.gutter_fg));
                 }
             } else {
-                spans.extend(self.content_spans_decorated(ob, ob.buffer.line_count(), 1, gutter_chars, None, syntax_highlights, cursor_line, tab_stops, scroll_col, decorated));
+                spans.extend(self.content_spans_decorated(
+                    ob,
+                    ob.buffer.line_count(),
+                    1,
+                    gutter_chars,
+                    None,
+                    syntax_highlights,
+                    cursor_line,
+                    tab_stops,
+                    scroll_col,
+                    decorated,
+                ));
             }
-            if row + 1 < rows { spans.push(("\n".to_string(), self.theme.fg)); }
+            if row + 1 < rows {
+                spans.push(("\n".to_string(), self.theme.fg));
+            }
         }
         spans
     }
@@ -128,23 +190,46 @@ impl App {
         self.syntax_highlights_for_visible_range(id, 0, 1);
         let ob = self.open();
         let Some(file) = ob.buffer.path().map(Path::to_path_buf) else {
-            self.set_message("Save the buffer to navigate document symbols"); return;
+            self.set_message("Save the buffer to navigate document symbols");
+            return;
         };
-        let rows = ob.syntax.as_ref().map(|syntax| syntax.scope_lines()).unwrap_or_default();
-        let candidates = rows.into_iter().filter(|&row| row < ob.buffer.line_count()).map(|row| {
-            let start = ob.buffer.line_start_char(row);
-            let name = ob.buffer.text_range(start, start + ob.buffer.line_len(row)).trim().to_string();
-            let tag = fenix_completion::ctags::TagEntry { name: name.clone(), file: file.clone(), line: row + 1 };
-            fenix_picker::Candidate::new(format!("{}  ·  line {}", name, row + 1), tag)
-        }).collect();
-        self.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(candidates)));
+        let rows = ob
+            .syntax
+            .as_ref()
+            .map(|syntax| syntax.scope_lines())
+            .unwrap_or_default();
+        let candidates = rows
+            .into_iter()
+            .filter(|&row| row < ob.buffer.line_count())
+            .map(|row| {
+                let start = ob.buffer.line_start_char(row);
+                let name = ob
+                    .buffer
+                    .text_range(start, start + ob.buffer.line_len(row))
+                    .trim()
+                    .to_string();
+                let tag = fenix_completion::ctags::TagEntry {
+                    name: name.clone(),
+                    file: file.clone(),
+                    line: row + 1,
+                };
+                fenix_picker::Candidate::new(format!("{}  ·  line {}", name, row + 1), tag)
+            })
+            .collect();
+        self.enter_picker(ActivePicker::Symbol(fenix_picker::PickerState::new(
+            candidates,
+        )));
     }
     pub(crate) fn jump_scope_parent(&mut self) {
         let ob = self.open();
         let line = ob.buffer.line_col(&self.cursor()).0;
         let target = ob.syntax.as_ref().and_then(|syntax| {
-            syntax.enclosing_scopes(ob.buffer.char_to_byte(self.cursor().char_idx))
-                .into_iter().rev().find(|&(start, _)| start < line).map(|(start, _)| start)
+            syntax
+                .enclosing_scopes(ob.buffer.char_to_byte(self.cursor().char_idx))
+                .into_iter()
+                .rev()
+                .find(|&(start, _)| start < line)
+                .map(|(start, _)| start)
         });
         if let Some(line) = target {
             let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
@@ -156,41 +241,82 @@ impl App {
 
     pub(super) fn editor_status_details(&self) -> String {
         let ob = self.open();
-        if ob.kind != BufferKind::Text { return String::new() }
-        let language = ob.syntax.as_ref().map(|s| s.language()).or_else(|| ob.buffer.path().and_then(fenix_syntax::detect_language_from_path));
-        let language_label = language.map(|lang| if lang.is_grammar() { lang.name() } else { format!("{lang:?}") }).unwrap_or_else(|| "Plain text".into());
+        if ob.kind != BufferKind::Text {
+            return String::new();
+        }
+        let language = ob.syntax.as_ref().map(|s| s.language()).or_else(|| {
+            ob.buffer
+                .path()
+                .and_then(fenix_syntax::detect_language_from_path)
+        });
+        let language_label = language
+            .map(|lang| {
+                if lang.is_grammar() {
+                    lang.name()
+                } else {
+                    format!("{lang:?}")
+                }
+            })
+            .unwrap_or_else(|| "Plain text".into());
         let ending = if ob.buffer.rope().len_lines() > 1 {
             let first = ob.buffer.rope().line(0);
-            if first.len_chars() >= 2 && first.char(first.len_chars() - 2) == '\r' { "CRLF" } else { "LF" }
-        } else { "No EOL" };
-        format!("{language_label}   Indent {}   {}   {ending}", self.vim.indent_width(), ob.buffer.encoding().label())
+            if first.len_chars() >= 2 && first.char(first.len_chars() - 2) == '\r' {
+                "CRLF"
+            } else {
+                "LF"
+            }
+        } else {
+            "No EOL"
+        };
+        format!(
+            "{language_label}   Indent {}   {}   {ending}",
+            self.vim.indent_width(),
+            ob.buffer.encoding().label()
+        )
     }
 
     #[cfg(test)]
     pub(super) fn scope_breadcrumbs(&self, id: BufferId, char_idx: usize) -> String {
-        self.breadcrumb_parts(id, char_idx).into_iter().map(|(text, _)| text).collect::<Vec<_>>().join(" › ")
+        self.breadcrumb_parts(id, char_idx)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<_>>()
+            .join(" › ")
     }
 
     /// Presentation-ready breadcrumbs for the two-line VS-style title area.
     /// Icons make the hierarchy scannable while the muted separators avoid
     /// competing with the document's actual syntax colors.
-    pub(super) fn breadcrumb_spans(&self, id: BufferId, char_idx: usize) -> Vec<(String, glyphon::Color, bool)> {
+    pub(super) fn breadcrumb_spans(
+        &self,
+        id: BufferId,
+        char_idx: usize,
+    ) -> Vec<(String, glyphon::Color, bool)> {
         let mut spans = Vec::new();
         // The tab's own content has a leading cell before its icon. Give the
         // breadcrumb the identical inset so the two navigation rows share a
         // clean left edge and icon overhang never touches the window edge.
         spans.push((" ".to_string(), self.theme.fg_modeline, false));
-        for (index, (label, target)) in self.breadcrumb_parts(id, char_idx).into_iter().enumerate() {
+        for (index, (label, target)) in self.breadcrumb_parts(id, char_idx).into_iter().enumerate()
+        {
             if index != 0 {
                 spans.push(("  ›  ".to_string(), self.theme.gutter_fg, false));
             }
             match target {
                 BreadcrumbTarget::Directory(_) => {
-                    spans.push((format!("{} ", icon::icon_for("folder", true, false)), self.theme.icon_folder, true));
+                    spans.push((
+                        format!("{} ", icon::icon_for("folder", true, false)),
+                        self.theme.icon_folder,
+                        true,
+                    ));
                     spans.push((label, self.theme.fg_modeline, false));
                 }
                 BreadcrumbTarget::Symbols => {
-                    spans.push((format!("{} ", icon::navigation_icon_for(&label)), self.theme.icon_file, true));
+                    spans.push((
+                        format!("{} ", icon::navigation_icon_for(&label)),
+                        self.theme.icon_file,
+                        true,
+                    ));
                     spans.push((label, self.theme.fg_modeline, false));
                 }
                 BreadcrumbTarget::Line(_) => {
@@ -206,46 +332,86 @@ impl App {
     }
 
     fn breadcrumb_parts(&self, id: BufferId, char_idx: usize) -> Vec<(String, BreadcrumbTarget)> {
-        let Some(ob) = self.buffers.get(id) else { return Vec::new() };
+        let Some(ob) = self.buffers.get(id) else {
+            return Vec::new();
+        };
         let mut parts = Vec::new();
         if let Some(path) = ob.buffer.path() {
-            let root = self.project_root.as_deref().filter(|root| path.starts_with(root));
-            let relative = root.and_then(|root| path.strip_prefix(root).ok()).unwrap_or(path);
+            let root = self
+                .project_root
+                .as_deref()
+                .filter(|root| path.starts_with(root));
+            let relative = root
+                .and_then(|root| path.strip_prefix(root).ok())
+                .unwrap_or(path);
             let mut target = root.map(Path::to_path_buf).unwrap_or_default();
             for component in relative.components() {
                 target.push(component);
-                let action = if target == path { BreadcrumbTarget::Symbols } else { BreadcrumbTarget::Directory(target.clone()) };
+                let action = if target == path {
+                    BreadcrumbTarget::Symbols
+                } else {
+                    BreadcrumbTarget::Directory(target.clone())
+                };
                 parts.push((component.as_os_str().to_string_lossy().into_owned(), action));
             }
         } else {
             parts.push((self.buffer_display_name(id), BreadcrumbTarget::Symbols));
         }
         if let Some(syntax) = &ob.syntax {
-            for (line, _) in syntax.enclosing_scopes(ob.buffer.char_to_byte(char_idx.min(ob.buffer.rope().len_chars()))) {
-                if line >= ob.buffer.rope().len_lines() { continue }
+            for (line, _) in syntax.enclosing_scopes(
+                ob.buffer
+                    .char_to_byte(char_idx.min(ob.buffer.rope().len_chars())),
+            ) {
+                if line >= ob.buffer.rope().len_lines() {
+                    continue;
+                }
                 let start = ob.buffer.line_start_char(line);
-                let label = ob.buffer.text_range(start, start + ob.buffer.line_len(line));
-                parts.push((truncate_tab_name(label.trim(), 48), BreadcrumbTarget::Line(line)));
+                let label = ob
+                    .buffer
+                    .text_range(start, start + ob.buffer.line_len(line));
+                parts.push((
+                    truncate_tab_name(label.trim(), 48),
+                    BreadcrumbTarget::Line(line),
+                ));
             }
         }
         parts
     }
 
     pub(super) fn click_breadcrumb(&mut self, geometry: &FrameGeometry, pos: (f32, f32)) -> bool {
-        if self.tab_style().is_none() { return false }
-        let height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+        if self.tab_style().is_none() {
+            return false;
+        }
+        let height = self
+            .text
+            .as_ref()
+            .map(|t| t.line_height())
+            .unwrap_or(text::LINE_HEIGHT);
         // Breadcrumb text renders at `text::TITLE_FONT_SCALE` of the body
         // font (same as the tab strip above it), so hit-testing its glyph
         // positions needs that narrower measurement, not the body `char_
         // width` -- see `title_char_width`'s own doc comment.
-        let width = self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
+        let width = self
+            .text
+            .as_ref()
+            .map(|t| t.title_char_width())
+            .unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
         let tab_h = tab_strip_height(height);
         let total_h = title_reserved_height(height);
         for &(pane, rect) in &geometry.panes {
-            if !rect.contains_point(pos.0, pos.1) || pos.1 < rect.y + tab_h || pos.1 >= rect.y + total_h
-                || self.pane_titles.contains_key(&pane) || !geometry.tabs.iter().any(|(id, _)| *id == pane)
-                || (pane == self.focused_pane_id() && (self.main_view != MainView::Editor || self.debug_ribbon_shown())) { continue }
-            let Some(&id) = self.windows().content(pane) else { continue };
+            if !rect.contains_point(pos.0, pos.1)
+                || pos.1 < rect.y + tab_h
+                || pos.1 >= rect.y + total_h
+                || self.pane_titles.contains_key(&pane)
+                || !geometry.tabs.iter().any(|(id, _)| *id == pane)
+                || (pane == self.focused_pane_id()
+                    && (self.main_view != MainView::Editor || self.debug_ribbon_shown()))
+            {
+                continue;
+            }
+            let Some(&id) = self.windows().content(pane) else {
+                continue;
+            };
             let parts = self.breadcrumb_parts(id, self.pane_state(pane).cursor.char_idx);
             // Matches the leading inset emitted by `breadcrumb_spans`.
             let mut x = rect.x + text::PAD_LEFT + width;
@@ -253,7 +419,9 @@ impl App {
                 // Keep hit targets aligned with the visible icon and muted
                 // separator chrome emitted by `breadcrumb_spans`: two cells
                 // for each item's marker, and five for each inter-item gap.
-                if index != 0 { x += 5.0 * width; }
+                if index != 0 {
+                    x += 5.0 * width;
+                }
                 x += 2.0 * width;
                 let end = x + label.chars().count() as f32 * width;
                 if pos.0 >= x && pos.0 < end {
@@ -264,7 +432,10 @@ impl App {
                         BreadcrumbTarget::Directory(path) => self.open_dired_at(&path),
                         BreadcrumbTarget::Symbols => self.picker_document_scopes(),
                         BreadcrumbTarget::Line(line) => {
-                            let from = JumpEntry { buffer: id, char_idx: self.cursor().char_idx };
+                            let from = JumpEntry {
+                                buffer: id,
+                                char_idx: self.cursor().char_idx,
+                            };
                             let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
                             cursor.char_idx = buffer.line_start_char(line);
                             cursor.sticky_col = 0;
@@ -292,14 +463,32 @@ mod tests {
         let id = app.focused_buffer_id();
         app.test_insert_str("mod outer {\n    fn inner() {\n        let value = 1;\n    }\n}\n");
         let source = app.open().buffer.text();
-        app.buffers.get_mut(id).unwrap().syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, &source));
+        app.buffers.get_mut(id).unwrap().syntax = Some(fenix_syntax::SyntaxState::new(
+            fenix_syntax::LanguageId::Rust,
+            &source,
+        ));
         let offset = source.find("let value").unwrap();
         let parts = app.breadcrumb_parts(id, offset);
-        assert_eq!(parts.iter().filter_map(|(_, action)| match action { BreadcrumbTarget::Line(line) => Some(*line), _ => None }).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(
+            parts
+                .iter()
+                .filter_map(|(_, action)| match action {
+                    BreadcrumbTarget::Line(line) => Some(*line),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
         assert!(app.scope_breadcrumbs(id, offset).contains("fn inner()"));
         let rendered = app.breadcrumb_spans(id, offset);
-        assert!(rendered.iter().any(|(text, _, _)| text == "ƒ "), "scope breadcrumbs carry a stable function marker");
-        assert!(rendered.iter().any(|(text, _, _)| text.contains('›')), "hierarchy separators remain visible between breadcrumb items");
+        assert!(
+            rendered.iter().any(|(text, _, _)| text == "ƒ "),
+            "scope breadcrumbs carry a stable function marker"
+        );
+        assert!(
+            rendered.iter().any(|(text, _, _)| text.contains('›')),
+            "hierarchy separators remain visible between breadcrumb items"
+        );
         assert_eq!(app.open().buffer.text(), source);
     }
 
@@ -324,12 +513,22 @@ mod tests {
         let ob = app.buffers.get_mut(id).unwrap();
         ob.kind = BufferKind::Text;
         ob.buffer = Buffer::from_text(&source);
-        app.buffers.get_mut(id).unwrap().syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, &source));
-        app.test_set_cursor(Cursor { char_idx: source.find("hidden").unwrap(), sticky_col: 0 });
+        app.buffers.get_mut(id).unwrap().syntax = Some(fenix_syntax::SyntaxState::new(
+            fenix_syntax::LanguageId::Rust,
+            &source,
+        ));
+        app.test_set_cursor(Cursor {
+            char_idx: source.find("hidden").unwrap(),
+            sticky_col: 0,
+        });
 
         app.toggle_code_fold();
         assert_eq!(app.folded_display_lines(id), vec![0, 3, 4]);
-        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 0, "a collapsed scope must leave a visible cursor");
+        assert_eq!(
+            app.open().buffer.line_col(&app.cursor()).0,
+            0,
+            "a collapsed scope must leave a visible cursor"
+        );
 
         app.toggle_code_fold();
         assert_eq!(app.folded_display_lines(id), vec![0, 1, 2, 3, 4]);

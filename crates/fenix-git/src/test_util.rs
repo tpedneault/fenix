@@ -15,7 +15,8 @@ impl TempDir {
     pub fn new(name: &str) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("fenix-git-test-{name}-{}-{n}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("fenix-git-test-{name}-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temp test dir");
         Self(dir)
     }
@@ -45,7 +46,11 @@ impl Drop for TempDir {
 /// run_action` (which never panics, since it also runs against whatever
 /// real repo the user has open).
 pub fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git").current_dir(dir).args(args).status().expect("run git");
+    let status = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .status()
+        .expect("run git");
     assert!(status.success(), "git {args:?} failed");
 }
 

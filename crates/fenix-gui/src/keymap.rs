@@ -15,8 +15,14 @@ pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
     // some remote-desktop tools) can fail to deliver Escape itself; this
     // combination is bound to nothing else. Matched on the physical key
     // so the layout's idea of Ctrl+Alt+Q (AltGr on some) doesn't matter.
-    if mods.control_key() && mods.alt_key() && event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ) {
-        return Some(KeyPress { code: KeyCode::Named(FenixNamedKey::Escape), mods: Mods::default() });
+    if mods.control_key()
+        && mods.alt_key()
+        && event.physical_key == PhysicalKey::Code(winit::keyboard::KeyCode::KeyQ)
+    {
+        return Some(KeyPress {
+            code: KeyCode::Named(FenixNamedKey::Escape),
+            mods: Mods::default(),
+        });
     }
     let code = match &event.logical_key {
         Key::Named(NamedKey::Space) => KeyCode::Char(' '),
@@ -38,7 +44,11 @@ pub fn to_keypress(event: &KeyEvent, mods: ModifiersState) -> Option<KeyPress> {
     };
     Some(KeyPress {
         code,
-        mods: Mods { ctrl: mods.control_key(), alt: mods.alt_key(), super_: mods.super_key() },
+        mods: Mods {
+            ctrl: mods.control_key(),
+            alt: mods.alt_key(),
+            super_: mods.super_key(),
+        },
     })
 }
 
@@ -122,7 +132,12 @@ impl LocalContext {
     fn bind(self, t: &mut KeyTrie<&'static str>) {
         insert_data(t, &[], default_local(self.name()));
         // The installed extensions' `[[local.<name>]]` entries.
-        for entry in EXTENSION_LOCALS.read().unwrap_or_else(|p| p.into_inner()).iter().filter(|e| e.menu == self.name()) {
+        for entry in EXTENSION_LOCALS
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|e| e.menu == self.name())
+        {
             match entry.command {
                 Some(command) => t.insert(&entry.keys, entry.label, command),
                 None => t.label_group(&entry.keys, entry.label),
@@ -142,14 +157,21 @@ struct ExtensionLocal {
 
 /// What the installed extensions' keymaps put in `SPC m` menus, read with
 /// the leader map (`reload_leader`).
-static EXTENSION_LOCALS: std::sync::RwLock<Vec<ExtensionLocal>> = std::sync::RwLock::new(Vec::new());
+static EXTENSION_LOCALS: std::sync::RwLock<Vec<ExtensionLocal>> =
+    std::sync::RwLock::new(Vec::new());
 
 /// The `SPC m` menus built so far, by their contexts.
-static LOCAL_TRIES: OnceLock<std::sync::Mutex<std::collections::HashMap<Vec<LocalContext>, &'static KeyTrie<&'static str>>>> = OnceLock::new();
+static LOCAL_TRIES: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<Vec<LocalContext>, &'static KeyTrie<&'static str>>>,
+> = OnceLock::new();
 
 /// An extension keymap's `[[local.*]]` entries, checked: what's wrong with
 /// one is said, and it's left out.
-fn extension_locals(data: &'static KeymapData, known: &dyn Fn(&str) -> bool, problems: &mut Vec<String>) -> Vec<ExtensionLocal> {
+fn extension_locals(
+    data: &'static KeymapData,
+    known: &dyn Fn(&str) -> bool,
+    problems: &mut Vec<String>,
+) -> Vec<ExtensionLocal> {
     let mut out = Vec::new();
     for (menu, entries) in &data.local {
         for entry in entries {
@@ -162,10 +184,26 @@ fn extension_locals(data: &'static KeymapData, known: &dyn Fn(&str) -> bool, pro
                 }
             };
             match (entry.command.as_deref(), entry.group.as_deref()) {
-                (Some(command), _) if !known(command) => problems.push(format!("[[local.{menu}]] {}: {command} isn't a command", entry.keys)),
-                (Some(command), _) => out.push(ExtensionLocal { menu: menu.clone(), keys, label: entry.label.as_deref().unwrap_or(command), command: Some(command) }),
-                (None, Some(group)) => out.push(ExtensionLocal { menu: menu.clone(), keys, label: group, command: None }),
-                (None, None) => problems.push(format!("[[local.{menu}]] {}: needs a command or a group", entry.keys)),
+                (Some(command), _) if !known(command) => problems.push(format!(
+                    "[[local.{menu}]] {}: {command} isn't a command",
+                    entry.keys
+                )),
+                (Some(command), _) => out.push(ExtensionLocal {
+                    menu: menu.clone(),
+                    keys,
+                    label: entry.label.as_deref().unwrap_or(command),
+                    command: Some(command),
+                }),
+                (None, Some(group)) => out.push(ExtensionLocal {
+                    menu: menu.clone(),
+                    keys,
+                    label: group,
+                    command: None,
+                }),
+                (None, None) => problems.push(format!(
+                    "[[local.{menu}]] {}: needs a command or a group",
+                    entry.keys
+                )),
             }
         }
     }
@@ -175,12 +213,16 @@ fn extension_locals(data: &'static KeymapData, known: &dyn Fn(&str) -> bool, pro
 /// The `SPC m` menu of context `name` from an extension keymap `text`,
 /// and what was wrong with it: as `reload_leader` reads one.
 #[cfg(test)]
-pub(crate) fn extension_local_menu_for_tests(name: &str, text: &str) -> (&'static KeyTrie<&'static str>, Vec<String>) {
+pub(crate) fn extension_local_menu_for_tests(
+    name: &str,
+    text: &str,
+) -> (&'static KeyTrie<&'static str>, Vec<String>) {
     let data: &'static KeymapData = Box::leak(Box::new(toml::from_str(text).expect("a keymap")));
     let mut problems = Vec::new();
     let registry = crate::commands::CommandRegistry::with_builtins();
     let known = |id: &str| registry.get(id).is_some() || id.starts_with("hello.");
-    *EXTENSION_LOCALS.write().unwrap_or_else(|p| p.into_inner()) = extension_locals(data, &known, &mut problems);
+    *EXTENSION_LOCALS.write().unwrap_or_else(|p| p.into_inner()) =
+        extension_locals(data, &known, &mut problems);
     if let Some(tries) = LOCAL_TRIES.get() {
         tries.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }
@@ -192,7 +234,10 @@ pub(crate) fn extension_local_menu_for_tests(name: &str, text: &str) -> (&'stati
 /// once per combination and kept -- there are only ever a handful -- until
 /// the keymaps are read again.
 pub fn local_trie(contexts: &[LocalContext]) -> &'static KeyTrie<&'static str> {
-    let mut tries = LOCAL_TRIES.get_or_init(Default::default).lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut tries = LOCAL_TRIES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     tries.entry(contexts.to_vec()).or_insert_with(|| {
         let mut t = KeyTrie::new();
         for context in contexts.iter().rev() {
@@ -215,7 +260,8 @@ pub const WHICH_KEY_SECTIONS: &[&str] = &["View", "Branch & remote", "This chang
 /// The leader map in use: built on first use, and again when your
 /// keybindings change (`reload_leader`). A rebuilt map replaces it; one a
 /// matcher still walks stays alive (they're leaked, and few).
-static LEADER: std::sync::RwLock<Option<&'static KeyTrie<&'static str>>> = std::sync::RwLock::new(None);
+static LEADER: std::sync::RwLock<Option<&'static KeyTrie<&'static str>>> =
+    std::sync::RwLock::new(None);
 
 pub fn leader_trie() -> &'static KeyTrie<&'static str> {
     if let Some(t) = *LEADER.read().unwrap_or_else(|p| p.into_inner()) {
@@ -229,7 +275,10 @@ pub fn leader_trie() -> &'static KeyTrie<&'static str> {
         }
     });
     reload_leader();
-    LEADER.read().unwrap_or_else(|p| p.into_inner()).expect("just built")
+    LEADER
+        .read()
+        .unwrap_or_else(|p| p.into_inner())
+        .expect("just built")
 }
 
 /// Builds the leader map again -- Fenix's keys, the switched-on
@@ -240,7 +289,10 @@ pub fn reload_leader() -> Vec<String> {
     let registry = crate::commands::CommandRegistry::with_builtins();
     // A code extension's commands are registered once it's loaded; its
     // manifest says them now.
-    let contributed: Vec<String> = crate::installed::code_extensions().into_iter().flat_map(|e| e.manifest.contributes.commands.into_iter().map(|c| c.id)).collect();
+    let contributed: Vec<String> = crate::installed::code_extensions()
+        .into_iter()
+        .flat_map(|e| e.manifest.contributes.commands.into_iter().map(|c| c.id))
+        .collect();
     let known = |id: &str| registry.get(id).is_some() || contributed.iter().any(|c| c == id);
     // The installed extensions' keymaps, then yours over them.
     let mut problems = Vec::new();
@@ -250,9 +302,17 @@ pub fn reload_leader() -> Vec<String> {
             Ok(Some(keys)) => {
                 let mut wrong = Vec::new();
                 locals.extend(extension_locals(keys, &known, &mut wrong));
-                let leader = if keys.local.is_empty() { keys } else { leader_only_of(keys) };
+                let leader = if keys.local.is_empty() {
+                    keys
+                } else {
+                    leader_only_of(keys)
+                };
                 wrong.extend(apply_user_keys(&mut t, leader, &known).1);
-                problems.extend(wrong.into_iter().map(|w| format!("{}: {w}", path.display())));
+                problems.extend(
+                    wrong
+                        .into_iter()
+                        .map(|w| format!("{}: {w}", path.display())),
+                );
             }
             Ok(None) => {}
             Err(problem) => problems.push(format!("{}: {problem}", path.display())),
@@ -285,8 +345,22 @@ pub fn reload_leader() -> Vec<String> {
 /// `data`'s `[[leader]]` entries alone: an extension's `[[local.*]]`
 /// entries are read apart. Kept, like the file.
 fn leader_only_of(data: &'static KeymapData) -> &'static KeymapData {
-    let leader = data.leader.iter().map(|e| KeyEntry { keys: e.keys.clone(), label: e.label.clone(), command: e.command.clone(), group: e.group.clone(), section: e.section.clone(), unbind: e.unbind }).collect();
-    Box::leak(Box::new(KeymapData { leader, local: Default::default() }))
+    let leader = data
+        .leader
+        .iter()
+        .map(|e| KeyEntry {
+            keys: e.keys.clone(),
+            label: e.label.clone(),
+            command: e.command.clone(),
+            group: e.group.clone(),
+            section: e.section.clone(),
+            unbind: e.unbind,
+        })
+        .collect();
+    Box::leak(Box::new(KeymapData {
+        leader,
+        local: Default::default(),
+    }))
 }
 
 /// Your keybindings: `keybindings.toml`, beside `settings.toml`. None
@@ -297,7 +371,10 @@ fn extension_keymaps() -> Vec<std::path::PathBuf> {
         .into_iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
         .flat_map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml")))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("toml"))
+        })
         .collect();
     files.sort();
     files
@@ -307,7 +384,8 @@ pub fn user_keymap_path() -> Option<std::path::PathBuf> {
     if cfg!(test) {
         return None;
     }
-    fenix_storage::paths::Roots::current().map(|roots| roots.settings_file().with_file_name("keybindings.toml"))
+    fenix_storage::paths::Roots::current()
+        .map(|roots| roots.settings_file().with_file_name("keybindings.toml"))
 }
 
 /// One of your bindings, as the map has it now.
@@ -322,16 +400,25 @@ pub struct UserKey {
 }
 
 /// Your bindings, and what was wrong with the file, from its last read.
-static USER_KEYS: std::sync::Mutex<(Vec<UserKey>, Vec<String>)> = std::sync::Mutex::new((Vec::new(), Vec::new()));
+static USER_KEYS: std::sync::Mutex<(Vec<UserKey>, Vec<String>)> =
+    std::sync::Mutex::new((Vec::new(), Vec::new()));
 
 /// Your bindings in use (`SPC h b` marks them).
 pub fn user_keys() -> Vec<UserKey> {
-    USER_KEYS.lock().unwrap_or_else(|p| p.into_inner()).0.clone()
+    USER_KEYS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .0
+        .clone()
 }
 
 /// What's wrong with `keybindings.toml`, from its last read.
 pub fn user_key_problems() -> Vec<String> {
-    USER_KEYS.lock().unwrap_or_else(|p| p.into_inner()).1.clone()
+    USER_KEYS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .1
+        .clone()
 }
 
 /// Your file, parsed: `None` when there isn't one. It's kept for good
@@ -343,24 +430,34 @@ fn read_user_keymap(path: &std::path::Path) -> Result<Option<&'static KeymapData
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    let data: KeymapData = toml::from_str(&text).map_err(|e| format!("keybindings.toml: {}", e.message()))?;
+    let data: KeymapData =
+        toml::from_str(&text).map_err(|e| format!("keybindings.toml: {}", e.message()))?;
     Ok(Some(Box::leak(Box::new(data))))
 }
 
 /// Lays your `[[leader]]` entries over `t`: each binds keys to a command
 /// (shown as its `label`), names a `group`, or (`unbind = true`) takes
 /// Fenix's binding away. What can't be done is said, not done.
-fn apply_user_keys(t: &mut KeyTrie<&'static str>, user: &'static KeymapData, known: &dyn Fn(&str) -> bool) -> (Vec<UserKey>, Vec<String>) {
+fn apply_user_keys(
+    t: &mut KeyTrie<&'static str>,
+    user: &'static KeymapData,
+    known: &dyn Fn(&str) -> bool,
+) -> (Vec<UserKey>, Vec<String>) {
     let mut bound = Vec::new();
     let mut problems = Vec::new();
     if !user.local.is_empty() {
-        problems.push("[[local.*]] menus aren't yours to change yet -- only [[leader]] keys".to_string());
+        problems.push(
+            "[[local.*]] menus aren't yours to change yet -- only [[leader]] keys".to_string(),
+        );
     }
     for entry in &user.leader {
         let keys = match parse_keys(&entry.keys) {
             Ok(keys) if keys.first() == Some(&KeyPress::char(' ')) && keys.len() > 1 => keys,
             Ok(_) => {
-                problems.push(format!("{}: your keys start with SPC, then at least one more", entry.keys));
+                problems.push(format!(
+                    "{}: your keys start with SPC, then at least one more",
+                    entry.keys
+                ));
                 continue;
             }
             Err(e) => {
@@ -368,13 +465,21 @@ fn apply_user_keys(t: &mut KeyTrie<&'static str>, user: &'static KeymapData, kno
                 continue;
             }
         };
-        let text = keys.iter().map(describe_keypress).collect::<Vec<_>>().join(" ");
+        let text = keys
+            .iter()
+            .map(describe_keypress)
+            .collect::<Vec<_>>()
+            .join(" ");
         if entry.unbind {
             let replaced = t.remove(&keys);
             if replaced.is_none() {
                 problems.push(format!("{text}: nothing to unbind"));
             }
-            bound.push(UserKey { keys: text, command: None, replaced });
+            bound.push(UserKey {
+                keys: text,
+                command: None,
+                replaced,
+            });
             continue;
         }
         if let Some(group) = entry.group.as_deref() {
@@ -382,17 +487,25 @@ fn apply_user_keys(t: &mut KeyTrie<&'static str>, user: &'static KeymapData, kno
         }
         let Some(command) = entry.command.as_deref() else {
             if entry.group.is_none() {
-                problems.push(format!("{text}: needs a command, a group, or unbind = true"));
+                problems.push(format!(
+                    "{text}: needs a command, a group, or unbind = true"
+                ));
             }
             continue;
         };
         if !known(command) {
-            problems.push(format!("{text}: {command} isn't a command (SPC h c lists them)"));
+            problems.push(format!(
+                "{text}: {command} isn't a command (SPC h c lists them)"
+            ));
             continue;
         }
         let replaced = t.get(&keys).copied().filter(|old| *old != command);
         t.insert(&keys, entry.label.as_deref().unwrap_or(command), command);
-        bound.push(UserKey { keys: text, command: Some(command.to_string()), replaced });
+        bound.push(UserKey {
+            keys: text,
+            command: Some(command.to_string()),
+            replaced,
+        });
     }
     (bound, problems)
 }
@@ -402,7 +515,12 @@ fn apply_user_keys(t: &mut KeyTrie<&'static str>, user: &'static KeymapData, kno
 /// and sections left with nothing under them.
 fn build_leader() -> KeyTrie<&'static str> {
     let registry = crate::commands::CommandRegistry::with_builtins();
-    let off: Vec<&str> = default_keymap().leader.iter().filter_map(|e| e.command.as_deref()).filter(|c| registry.get(c).is_none()).collect();
+    let off: Vec<&str> = default_keymap()
+        .leader
+        .iter()
+        .filter_map(|e| e.command.as_deref())
+        .filter(|c| registry.get(c).is_none())
+        .collect();
     let mut t = KeyTrie::new();
     insert_data_without(&mut t, &[], &default_keymap().leader, &off);
     t
@@ -445,12 +563,19 @@ struct KeyEntry {
 
 fn default_keymap() -> &'static KeymapData {
     static DATA: OnceLock<KeymapData> = OnceLock::new();
-    DATA.get_or_init(|| toml::from_str(DEFAULT_KEYMAP).unwrap_or_else(|e| panic!("the built-in keymap doesn't parse: {e}")))
+    DATA.get_or_init(|| {
+        toml::from_str(DEFAULT_KEYMAP)
+            .unwrap_or_else(|e| panic!("the built-in keymap doesn't parse: {e}"))
+    })
 }
 
 /// Core's entries for `SPC m` menu `name`.
 fn default_local(name: &str) -> &'static [KeyEntry] {
-    default_keymap().local.get(name).map(Vec::as_slice).unwrap_or(&[])
+    default_keymap()
+        .local
+        .get(name)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
 }
 
 /// Keys as the which-key menu writes them (`SPC f s`, `SPC Tab n`, `x`).
@@ -477,17 +602,29 @@ fn insert_data(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &'st
 
 /// `insert_data`, leaving out the bindings to `off` commands, and a group
 /// or section that then has nothing under it.
-fn insert_data_without(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entries: &'static [KeyEntry], off: &[&str]) {
+fn insert_data_without(
+    t: &mut KeyTrie<&'static str>,
+    prefix: &[KeyPress],
+    entries: &'static [KeyEntry],
+    off: &[&str],
+) {
     let keys_of = |entry: &KeyEntry| -> Vec<KeyPress> {
         let keys = parse_keys(&entry.keys).unwrap_or_else(|e| panic!("the built-in keymap: {e}"));
         prefix.iter().copied().chain(keys).collect()
     };
-    let bound: Vec<Vec<KeyPress>> = entries.iter().filter(|e| e.command.as_deref().is_some_and(|c| !off.contains(&c))).map(keys_of).collect();
+    let bound: Vec<Vec<KeyPress>> = entries
+        .iter()
+        .filter(|e| e.command.as_deref().is_some_and(|c| !off.contains(&c)))
+        .map(keys_of)
+        .collect();
     for entry in entries {
         if entry.command.as_deref().is_some_and(|c| off.contains(&c)) {
             continue;
         }
-        if entry.command.is_none() && !off.is_empty() && !bound.iter().any(|b| b.starts_with(&keys_of(entry))) {
+        if entry.command.is_none()
+            && !off.is_empty()
+            && !bound.iter().any(|b| b.starts_with(&keys_of(entry)))
+        {
             continue;
         }
         let seq = keys_of(entry);
@@ -508,12 +645,22 @@ fn insert_data_without(t: &mut KeyTrie<&'static str>, prefix: &[KeyPress], entri
 /// `SPC f s: file.save and file.other`. A later one would silently win.
 pub(crate) fn keymap_conflicts() -> Vec<String> {
     use std::collections::HashMap;
-    fn note(seen: &mut HashMap<String, String>, conflicts: &mut Vec<String>, keys: String, what: String) {
+    fn note(
+        seen: &mut HashMap<String, String>,
+        conflicts: &mut Vec<String>,
+        keys: String,
+        what: String,
+    ) {
         if let Some(before) = seen.insert(keys.clone(), what.clone()) {
             conflicts.push(format!("{keys}: {before} and {what}"));
         }
     }
-    fn data(seen: &mut HashMap<String, String>, conflicts: &mut Vec<String>, prefix: &str, entries: &[KeyEntry]) {
+    fn data(
+        seen: &mut HashMap<String, String>,
+        conflicts: &mut Vec<String>,
+        prefix: &str,
+        entries: &[KeyEntry],
+    ) {
         for e in entries {
             let keys = format!("{prefix}{}", e.keys);
             if let Some(command) = &e.command {
@@ -528,14 +675,18 @@ pub(crate) fn keymap_conflicts() -> Vec<String> {
     let mut leader = HashMap::new();
     data(&mut leader, &mut conflicts, "", &default_keymap().leader);
     let menus = [
-
         ("markdown", LocalContext::Markdown),
         ("tcl", LocalContext::Tcl),
         ("mermaid", LocalContext::Mermaid),
     ];
     for (name, context) in menus {
         let mut menu = HashMap::new();
-        data(&mut menu, &mut conflicts, &format!("SPC m ({name}) "), default_local(context.name()));
+        data(
+            &mut menu,
+            &mut conflicts,
+            &format!("SPC m ({name}) "),
+            default_local(context.name()),
+        );
     }
     conflicts
 }
@@ -545,9 +696,14 @@ pub(crate) fn keymap_conflicts() -> Vec<String> {
 /// twice gets its shortest sequence, the first in order among equals, so
 /// the answer doesn't change from one run to the next.
 pub fn leader_keys() -> std::collections::HashMap<&'static str, String> {
-    let mut keys: std::collections::HashMap<&'static str, (usize, String)> = std::collections::HashMap::new();
+    let mut keys: std::collections::HashMap<&'static str, (usize, String)> =
+        std::collections::HashMap::new();
     for (seq, id) in leader_trie().bindings() {
-        let text = seq.iter().map(describe_keypress).collect::<Vec<_>>().join(" ");
+        let text = seq
+            .iter()
+            .map(describe_keypress)
+            .collect::<Vec<_>>()
+            .join(" ");
         let candidate = (seq.len(), text);
         match keys.get(*id) {
             Some(best) if *best <= candidate => {}
@@ -572,7 +728,10 @@ mod tests {
 
     #[test]
     fn describe_keypress_formats_named_keys() {
-        assert_eq!(describe_keypress(&KeyPress::named(FenixNamedKey::Escape)), "Esc");
+        assert_eq!(
+            describe_keypress(&KeyPress::named(FenixNamedKey::Escape)),
+            "Esc"
+        );
     }
 
     /// `SPC g P` and `SPC g M` are the Review extension's: their section is
@@ -584,8 +743,14 @@ mod tests {
         m.feed(KeyPress::char(' '));
         m.feed(KeyPress::char('g'));
         let keys: Vec<KeyPress> = m.pending_hints().iter().map(|h| h.key).collect();
-        assert!(!keys.contains(&KeyPress::char('P')) && !keys.contains(&KeyPress::char('M')), "{keys:?}");
-        assert!(m.pending_hints().iter().all(|h| !h.label.is_empty()), "no blank row");
+        assert!(
+            !keys.contains(&KeyPress::char('P')) && !keys.contains(&KeyPress::char('M')),
+            "{keys:?}"
+        );
+        assert!(
+            m.pending_hints().iter().all(|h| !h.label.is_empty()),
+            "no blank row"
+        );
     }
 
     #[test]
@@ -595,7 +760,11 @@ mod tests {
         m.feed(KeyPress::char(' '));
         m.feed(KeyPress::char('g'));
         let listed = m.pending_children();
-        assert!(listed.len() <= 22, "{} entries under SPC g: {listed:?}", listed.len());
+        assert!(
+            listed.len() <= 22,
+            "{} entries under SPC g: {listed:?}",
+            listed.len()
+        );
         let resolve = |keys: &str| {
             let mut m = trie.matcher();
             m.feed(KeyPress::char(' '));
@@ -685,9 +854,18 @@ mod tests {
             m.feed(KeyPress::char(key))
         };
 
-        assert!(matches!(resolve('='), fenix_keymap::Step::Matched(&"view.increase_font_size")));
-        assert!(matches!(resolve('-'), fenix_keymap::Step::Matched(&"view.decrease_font_size")));
-        assert!(matches!(resolve('0'), fenix_keymap::Step::Matched(&"view.reset_font_size")));
+        assert!(matches!(
+            resolve('='),
+            fenix_keymap::Step::Matched(&"view.increase_font_size")
+        ));
+        assert!(matches!(
+            resolve('-'),
+            fenix_keymap::Step::Matched(&"view.decrease_font_size")
+        ));
+        assert!(matches!(
+            resolve('0'),
+            fenix_keymap::Step::Matched(&"view.reset_font_size")
+        ));
     }
 
     #[test]
@@ -766,7 +944,13 @@ mod tests {
             _ => panic!("expected SPC p N to resolve to project.quickfix_prev"),
         }
 
-        for (key, id) in [('p', "project.hub"), ('P', "project.switch_project"), ('c', "project.new"), ('h', "project.doctor"), (',', "project.settings")] {
+        for (key, id) in [
+            ('p', "project.hub"),
+            ('P', "project.switch_project"),
+            ('c', "project.new"),
+            ('h', "project.doctor"),
+            (',', "project.settings"),
+        ] {
             let mut m = trie.matcher();
             m.feed(KeyPress::char(' '));
             m.feed(KeyPress::char('p'));
@@ -837,16 +1021,29 @@ mod tests {
     #[test]
     fn an_extensions_keys_sit_between_fenixs_and_yours() {
         let mut t = build_leader();
-        let leak = |text: &str| -> &'static KeymapData { Box::leak(Box::new(toml::from_str(text).unwrap())) };
+        let leak = |text: &str| -> &'static KeymapData {
+            Box::leak(Box::new(toml::from_str(text).unwrap()))
+        };
         let known = |id: &str| id == "file.save" || id == "agenda.open";
         let extension = leak("[[leader]]\nkeys = \"SPC o z\"\ncommand = \"file.save\"\n\n[[leader]]\nkeys = \"SPC o y\"\ncommand = \"agenda.open\"\n");
         apply_user_keys(&mut t, extension, &known);
         let yours = leak("[[leader]]\nkeys = \"SPC o z\"\ncommand = \"agenda.open\"\n");
         let (bound, _) = apply_user_keys(&mut t, yours, &known);
         let seq = |text: &str| parse_keys(text).unwrap();
-        assert_eq!(t.get(&seq("SPC o y")), Some(&"agenda.open"), "the extension's");
-        assert_eq!(t.get(&seq("SPC o z")), Some(&"agenda.open"), "yours over the extension's");
-        assert_eq!(bound.iter().map(|b| b.keys.as_str()).collect::<Vec<_>>(), ["SPC o z"]);
+        assert_eq!(
+            t.get(&seq("SPC o y")),
+            Some(&"agenda.open"),
+            "the extension's"
+        );
+        assert_eq!(
+            t.get(&seq("SPC o z")),
+            Some(&"agenda.open"),
+            "yours over the extension's"
+        );
+        assert_eq!(
+            bound.iter().map(|b| b.keys.as_str()).collect::<Vec<_>>(),
+            ["SPC o z"]
+        );
     }
 
     /// Your keys go over Fenix's: a new binding, one moved to another
@@ -887,16 +1084,36 @@ command = "file.save"
         assert_eq!(t.get(&seq("SPC o s")), Some(&"file.save"));
         assert_eq!(t.get(&seq("SPC f s")), Some(&"agenda.open"));
         assert_eq!(t.get(&seq("SPC o T")), None);
-        assert!(bound.contains(&UserKey { keys: "SPC f s".into(), command: Some("agenda.open".into()), replaced: Some("file.save") }), "{bound:?}");
-        assert!(bound.iter().any(|b| b.keys == "SPC o T" && b.command.is_none() && b.replaced == Some("terminal.open_buffer")), "{bound:?}");
+        assert!(
+            bound.contains(&UserKey {
+                keys: "SPC f s".into(),
+                command: Some("agenda.open".into()),
+                replaced: Some("file.save")
+            }),
+            "{bound:?}"
+        );
+        assert!(
+            bound.iter().any(|b| b.keys == "SPC o T"
+                && b.command.is_none()
+                && b.replaced == Some("terminal.open_buffer")),
+            "{bound:?}"
+        );
         assert_eq!(problems.len(), 2, "{problems:?}");
-        assert!(problems.iter().any(|p| p.contains("no.such isn't a command")) && problems.iter().any(|p| p.contains("start with SPC")));
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("no.such isn't a command"))
+                && problems.iter().any(|p| p.contains("start with SPC"))
+        );
     }
 
     #[test]
     fn spc_v_is_left_to_the_vnc_extension() {
         // VNC is an extension: its keymap brings `SPC v`.
-        let taken: Vec<String> = leader_keys().into_values().filter(|k| k.starts_with("SPC v ")).collect();
+        let taken: Vec<String> = leader_keys()
+            .into_values()
+            .filter(|k| k.starts_with("SPC v "))
+            .collect();
         assert!(taken.is_empty(), "{taken:?}");
     }
 
@@ -970,14 +1187,19 @@ command = "file.save"
     fn spc_m_is_the_local_leader_and_nothing_else_lives_under_it() {
         let mut m = leader_trie().matcher();
         m.feed(KeyPress::char(' '));
-        assert!(matches!(m.feed(KeyPress::char('m')), fenix_keymap::Step::Matched(&"leader.local")));
+        assert!(matches!(
+            m.feed(KeyPress::char('m')),
+            fenix_keymap::Step::Matched(&"leader.local")
+        ));
     }
 
     #[test]
     fn a_more_specific_context_wins_a_shared_key() {
         // An extension's Tcl menu and Fenix's own Markdown one both bind
         // `p`.
-        let (_, problems) = extension_local_menu_for_tests("tcl", "[[local.tcl]]
+        let (_, problems) = extension_local_menu_for_tests(
+            "tcl",
+            "[[local.tcl]]
 keys = \"p\"
 label = \"a parameter\"
 command = \"hello.parameter\"
@@ -986,14 +1208,33 @@ command = \"hello.parameter\"
 keys = \"k\"
 label = \"a packet\"
 command = \"hello.packet\"
-");
+",
+        );
         assert!(problems.is_empty(), "{problems:?}");
         let tcl_first = local_trie(&[LocalContext::Tcl, LocalContext::Markdown]);
-        assert!(matches!(tcl_first.matcher().feed(KeyPress::char('p')), fenix_keymap::Step::Matched(&"hello.parameter")));
+        assert!(matches!(
+            tcl_first.matcher().feed(KeyPress::char('p')),
+            fenix_keymap::Step::Matched(&"hello.parameter")
+        ));
         let markdown_first = local_trie(&[LocalContext::Markdown, LocalContext::Tcl]);
-        assert!(matches!(markdown_first.matcher().feed(KeyPress::char('p')), fenix_keymap::Step::Matched(&"notebook.preview")));
-        assert!(matches!(markdown_first.matcher().feed(KeyPress::char('k')), fenix_keymap::Step::Matched(_)), "the other's keys stay");
-        assert!(std::ptr::eq(tcl_first, local_trie(&[LocalContext::Tcl, LocalContext::Markdown])), "built once per combination");
+        assert!(matches!(
+            markdown_first.matcher().feed(KeyPress::char('p')),
+            fenix_keymap::Step::Matched(&"notebook.preview")
+        ));
+        assert!(
+            matches!(
+                markdown_first.matcher().feed(KeyPress::char('k')),
+                fenix_keymap::Step::Matched(_)
+            ),
+            "the other's keys stay"
+        );
+        assert!(
+            std::ptr::eq(
+                tcl_first,
+                local_trie(&[LocalContext::Tcl, LocalContext::Markdown])
+            ),
+            "built once per combination"
+        );
     }
 
     #[test]
@@ -1011,16 +1252,46 @@ command = \"hello.packet\"
             last.unwrap()
         };
 
-        assert!(matches!(resolve(&['v']), fenix_keymap::Step::Matched(&"window.split_vertical")));
-        assert!(matches!(resolve(&['s']), fenix_keymap::Step::Matched(&"window.split_horizontal")));
-        assert!(matches!(resolve(&['h']), fenix_keymap::Step::Matched(&"window.navigate_left")));
-        assert!(matches!(resolve(&['l']), fenix_keymap::Step::Matched(&"window.navigate_right")));
-        assert!(matches!(resolve(&['k']), fenix_keymap::Step::Matched(&"window.navigate_up")));
-        assert!(matches!(resolve(&['j']), fenix_keymap::Step::Matched(&"window.navigate_down")));
-        assert!(matches!(resolve(&['w']), fenix_keymap::Step::Matched(&"window.cycle")));
-        assert!(matches!(resolve(&['q']), fenix_keymap::Step::Matched(&"window.close")));
-        assert!(matches!(resolve(&['o']), fenix_keymap::Step::Matched(&"window.only")));
-        assert!(matches!(resolve(&['=']), fenix_keymap::Step::Matched(&"window.balance")));
+        assert!(matches!(
+            resolve(&['v']),
+            fenix_keymap::Step::Matched(&"window.split_vertical")
+        ));
+        assert!(matches!(
+            resolve(&['s']),
+            fenix_keymap::Step::Matched(&"window.split_horizontal")
+        ));
+        assert!(matches!(
+            resolve(&['h']),
+            fenix_keymap::Step::Matched(&"window.navigate_left")
+        ));
+        assert!(matches!(
+            resolve(&['l']),
+            fenix_keymap::Step::Matched(&"window.navigate_right")
+        ));
+        assert!(matches!(
+            resolve(&['k']),
+            fenix_keymap::Step::Matched(&"window.navigate_up")
+        ));
+        assert!(matches!(
+            resolve(&['j']),
+            fenix_keymap::Step::Matched(&"window.navigate_down")
+        ));
+        assert!(matches!(
+            resolve(&['w']),
+            fenix_keymap::Step::Matched(&"window.cycle")
+        ));
+        assert!(matches!(
+            resolve(&['q']),
+            fenix_keymap::Step::Matched(&"window.close")
+        ));
+        assert!(matches!(
+            resolve(&['o']),
+            fenix_keymap::Step::Matched(&"window.only")
+        ));
+        assert!(matches!(
+            resolve(&['=']),
+            fenix_keymap::Step::Matched(&"window.balance")
+        ));
     }
 
     #[test]
@@ -1038,17 +1309,50 @@ command = \"hello.packet\"
             last.unwrap()
         };
 
-        assert!(matches!(resolve(&['b']), fenix_keymap::Step::Matched(&"buffer.switch")));
-        assert!(matches!(resolve(&['n']), fenix_keymap::Step::Matched(&"buffer.next")));
-        assert!(matches!(resolve(&['p']), fenix_keymap::Step::Matched(&"buffer.prev")));
-        assert!(matches!(resolve(&['k']), fenix_keymap::Step::Matched(&"buffer.kill")));
-        assert!(matches!(resolve(&['d']), fenix_keymap::Step::Matched(&"tab.close")));
-        assert!(matches!(resolve(&['o']), fenix_keymap::Step::Matched(&"tab.close_others")));
-        assert!(matches!(resolve(&['u']), fenix_keymap::Step::Matched(&"tab.reopen")));
-        assert!(matches!(resolve(&['P']), fenix_keymap::Step::Matched(&"tab.keep")));
-        assert!(matches!(resolve(&['<']), fenix_keymap::Step::Matched(&"tab.move_left")));
-        assert!(matches!(resolve(&['>']), fenix_keymap::Step::Matched(&"tab.move_right")));
-        assert!(matches!(resolve(&['X']), fenix_keymap::Step::Matched(&"buffer.scratch")));
+        assert!(matches!(
+            resolve(&['b']),
+            fenix_keymap::Step::Matched(&"buffer.switch")
+        ));
+        assert!(matches!(
+            resolve(&['n']),
+            fenix_keymap::Step::Matched(&"buffer.next")
+        ));
+        assert!(matches!(
+            resolve(&['p']),
+            fenix_keymap::Step::Matched(&"buffer.prev")
+        ));
+        assert!(matches!(
+            resolve(&['k']),
+            fenix_keymap::Step::Matched(&"buffer.kill")
+        ));
+        assert!(matches!(
+            resolve(&['d']),
+            fenix_keymap::Step::Matched(&"tab.close")
+        ));
+        assert!(matches!(
+            resolve(&['o']),
+            fenix_keymap::Step::Matched(&"tab.close_others")
+        ));
+        assert!(matches!(
+            resolve(&['u']),
+            fenix_keymap::Step::Matched(&"tab.reopen")
+        ));
+        assert!(matches!(
+            resolve(&['P']),
+            fenix_keymap::Step::Matched(&"tab.keep")
+        ));
+        assert!(matches!(
+            resolve(&['<']),
+            fenix_keymap::Step::Matched(&"tab.move_left")
+        ));
+        assert!(matches!(
+            resolve(&['>']),
+            fenix_keymap::Step::Matched(&"tab.move_right")
+        ));
+        assert!(matches!(
+            resolve(&['X']),
+            fenix_keymap::Step::Matched(&"buffer.scratch")
+        ));
     }
 
     #[test]
@@ -1063,13 +1367,34 @@ command = \"hello.packet\"
             m.feed(key)
         };
 
-        assert!(matches!(resolve(KeyPress::char('n')), fenix_keymap::Step::Matched(&"workspace.new")));
-        assert!(matches!(resolve(KeyPress::char(']')), fenix_keymap::Step::Matched(&"workspace.next")));
-        assert!(matches!(resolve(KeyPress::char('[')), fenix_keymap::Step::Matched(&"workspace.prev")));
-        assert!(matches!(resolve(KeyPress::char('d')), fenix_keymap::Step::Matched(&"workspace.remove")));
-        assert!(matches!(resolve(tab), fenix_keymap::Step::Matched(&"workspace.switch")));
-        assert!(matches!(resolve(KeyPress::char('f')), fenix_keymap::Step::Matched(&"workspace.find")));
-        assert!(matches!(resolve(KeyPress::char('r')), fenix_keymap::Step::Matched(&"workspace.rename")));
+        assert!(matches!(
+            resolve(KeyPress::char('n')),
+            fenix_keymap::Step::Matched(&"workspace.new")
+        ));
+        assert!(matches!(
+            resolve(KeyPress::char(']')),
+            fenix_keymap::Step::Matched(&"workspace.next")
+        ));
+        assert!(matches!(
+            resolve(KeyPress::char('[')),
+            fenix_keymap::Step::Matched(&"workspace.prev")
+        ));
+        assert!(matches!(
+            resolve(KeyPress::char('d')),
+            fenix_keymap::Step::Matched(&"workspace.remove")
+        ));
+        assert!(matches!(
+            resolve(tab),
+            fenix_keymap::Step::Matched(&"workspace.switch")
+        ));
+        assert!(matches!(
+            resolve(KeyPress::char('f')),
+            fenix_keymap::Step::Matched(&"workspace.find")
+        ));
+        assert!(matches!(
+            resolve(KeyPress::char('r')),
+            fenix_keymap::Step::Matched(&"workspace.rename")
+        ));
     }
 
     // The default keymap is data (`default_keymap.toml`).
@@ -1085,7 +1410,11 @@ command = \"hello.packet\"
         let all = data.leader.iter().chain(data.local.values().flatten());
         for entry in all {
             let keys = parse_keys(&entry.keys).unwrap_or_else(|e| panic!("{e}"));
-            let written = keys.iter().map(describe_keypress).collect::<Vec<_>>().join(" ");
+            let written = keys
+                .iter()
+                .map(describe_keypress)
+                .collect::<Vec<_>>()
+                .join(" ");
             assert_eq!(written, entry.keys);
         }
         assert!(parse_keys("SPC ff").is_err() && parse_keys("SPC <nope>").is_err());
@@ -1095,8 +1424,16 @@ command = \"hello.packet\"
     fn every_command_the_default_keymap_names_exists() {
         let registry = crate::commands::CommandRegistry::with_builtins();
         let data = default_keymap();
-        for command in data.leader.iter().chain(data.local.values().flatten()).filter_map(|e| e.command.as_deref()) {
-            assert!(registry.iter().any(|c| c.id == command), "{command} isn't a command");
+        for command in data
+            .leader
+            .iter()
+            .chain(data.local.values().flatten())
+            .filter_map(|e| e.command.as_deref())
+        {
+            assert!(
+                registry.iter().any(|c| c.id == command),
+                "{command} isn't a command"
+            );
         }
     }
 
@@ -1119,9 +1456,15 @@ command = \"two\"
             }
         }
         assert_eq!(conflicts.len(), 1);
-        assert!(toml::from_str::<KeymapData>("[[leader]]
+        assert!(
+            toml::from_str::<KeymapData>(
+                "[[leader]]
 keys = \"SPC x\"
 what = 1
-").is_err(), "an unknown field is refused");
+"
+            )
+            .is_err(),
+            "an unknown field is refused"
+        );
     }
 }

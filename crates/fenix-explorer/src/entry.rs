@@ -70,7 +70,10 @@ impl Entry {
         if self.is_dir() {
             return String::new();
         }
-        self.name.rsplit_once('.').map(|(_, ext)| ext.to_lowercase()).unwrap_or_default()
+        self.name
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.to_lowercase())
+            .unwrap_or_default()
     }
 
     /// `path` as a listing would describe it, read from the disk:
@@ -79,15 +82,23 @@ impl Entry {
     pub fn at(path: &Path) -> Self {
         let metadata = std::fs::symlink_metadata(path).ok();
         let kind = match &metadata {
-            Some(m) if m.file_type().is_symlink() => EntryKind::Link { to_dir: path.is_dir() },
+            Some(m) if m.file_type().is_symlink() => EntryKind::Link {
+                to_dir: path.is_dir(),
+            },
             Some(m) if m.is_dir() => EntryKind::Dir,
             _ => EntryKind::File,
         };
         Self {
-            name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             path: path.to_path_buf(),
             kind,
-            size: metadata.as_ref().filter(|m| m.is_file()).map_or(0, |m| m.len()),
+            size: metadata
+                .as_ref()
+                .filter(|m| m.is_file())
+                .map_or(0, |m| m.len()),
             modified: metadata.as_ref().and_then(|m| m.modified().ok()),
             attributes: Attributes::default(),
             readable: metadata.is_some(),
@@ -100,7 +111,10 @@ impl Entry {
     /// something a search found.
     pub(crate) fn folder(path: &Path) -> Self {
         Self {
-            name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            name: path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             path: path.to_path_buf(),
             kind: EntryKind::Dir,
             size: 0,

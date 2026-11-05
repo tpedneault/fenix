@@ -80,7 +80,12 @@ pub fn wants_machine(args: &[String]) -> bool {
 /// The managed extensions, then yours that none of them replaces:
 /// `(extension, managed)`.
 fn everything(machine: Option<&Store>, yours: Option<&Store>) -> Vec<(Installed, bool)> {
-    let mut all: Vec<(Installed, bool)> = machine.and_then(|m| m.installed().ok()).unwrap_or_default().into_iter().map(|e| (e, true)).collect();
+    let mut all: Vec<(Installed, bool)> = machine
+        .and_then(|m| m.installed().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| (e, true))
+        .collect();
     for e in yours.and_then(|s| s.installed().ok()).unwrap_or_default() {
         if !all.iter().any(|(m, _)| m.id == e.id) {
             all.push((e, false));
@@ -124,27 +129,66 @@ pub fn settings_of(ext: &CodeExtension) -> Vec<fenix_config::schema::Setting> {
         .map(|c| {
             let kind = match c.kind.as_str() {
                 "bool" => Kind::Bool,
-                "int" => Kind::Int { min: i64::MIN, max: i64::MAX },
+                "int" => Kind::Int {
+                    min: i64::MIN,
+                    max: i64::MAX,
+                },
                 "minutes" => Kind::Minutes,
                 "path" => Kind::Path,
                 "list" => Kind::List,
                 // A map whose values are a "Folder", "File" or "Path" is
                 // browsed for them (`mib.roots`, `reader.documents`).
-                "map" => Kind::Map { key: leak(c.columns.first().map_or("Name", String::as_str)), value: leak(c.columns.get(1).map_or("Value", String::as_str)), paths: c.columns.get(1).is_some_and(|v| matches!(v.as_str(), "Folder" | "File" | "Path")) },
+                "map" => Kind::Map {
+                    key: leak(c.columns.first().map_or("Name", String::as_str)),
+                    value: leak(c.columns.get(1).map_or("Value", String::as_str)),
+                    paths: c
+                        .columns
+                        .get(1)
+                        .is_some_and(|v| matches!(v.as_str(), "Folder" | "File" | "Path")),
+                },
                 "records" => Kind::Records(Box::leak(
-                    c.columns.iter().map(|col| fenix_config::Field { name: leak(col), label: leak(col), range: None, default: Some(""), choices: &[] }).collect::<Vec<_>>().into_boxed_slice(),
+                    c.columns
+                        .iter()
+                        .map(|col| fenix_config::Field {
+                            name: leak(col),
+                            label: leak(col),
+                            range: None,
+                            default: Some(""),
+                            choices: &[],
+                        })
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
                 )),
                 // Masked on the settings page, kept in the keychain.
                 "secret" => Kind::Secret(fenix_config::Secret::Named(leak(&c.key))),
-                "choice" => Kind::Choice(Box::leak(c.choices.iter().map(|w| leak(w)).collect::<Vec<_>>().into_boxed_slice())),
+                "choice" => Kind::Choice(Box::leak(
+                    c.choices
+                        .iter()
+                        .map(|w| leak(w))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                )),
                 _ => Kind::Text,
             };
-            let label = if c.label.is_empty() { c.key.as_str() } else { c.label.as_str() };
+            let label = if c.label.is_empty() {
+                c.key.as_str()
+            } else {
+                c.label.as_str()
+            };
             let section = Category::Extension(leak(c.section.as_deref().unwrap_or(&ext.name)));
-            let help = if c.description.is_empty() { String::new() } else { format!("{}.", c.description.trim_end_matches('.')) };
-            let setting = Setting::stored(leak(&c.key), section, leak(label), kind, leak(&help)).with_default(leak(&c.default));
+            let help = if c.description.is_empty() {
+                String::new()
+            } else {
+                format!("{}.", c.description.trim_end_matches('.'))
+            };
+            let setting = Setting::stored(leak(&c.key), section, leak(label), kind, leak(&help))
+                .with_default(leak(&c.default));
             // One a project may set too, in its `.fenix/settings.toml`.
-            if c.project { setting.project() } else { setting }
+            if c.project {
+                setting.project()
+            } else {
+                setting
+            }
         })
         .collect()
 }
@@ -170,7 +214,14 @@ fn code_of(all: &[(Installed, bool)]) -> Vec<CodeExtension> {
         .filter(|(e, _)| e.enabled)
         .filter_map(|(e, _)| {
             let m = e.manifest.as_ref().ok()?;
-            (m.extension.runtime == fenix_extensions::Runtime::Wasm && m.runs_in(&release()).is_ok()).then(|| CodeExtension { id: e.id.clone(), name: m.extension.name.clone(), dir: e.dir.clone(), manifest: m.clone() })
+            (m.extension.runtime == fenix_extensions::Runtime::Wasm
+                && m.runs_in(&release()).is_ok())
+            .then(|| CodeExtension {
+                id: e.id.clone(),
+                name: m.extension.name.clone(),
+                dir: e.dir.clone(),
+                manifest: m.clone(),
+            })
         })
         .collect()
 }
@@ -178,12 +229,18 @@ fn code_of(all: &[(Installed, bool)]) -> Vec<CodeExtension> {
 /// Installed extension `id` as Fenix uses it -- the machine's when it has
 /// one -- and whether it's the machine's.
 pub fn find(id: &str) -> Option<(Installed, bool)> {
-    everything(machine().as_ref(), store().as_ref()).into_iter().find(|(e, _)| e.id == id)
+    everything(machine().as_ref(), store().as_ref())
+        .into_iter()
+        .find(|(e, _)| e.id == id)
 }
 
 /// Where the switched-on ones in `all` keep data of kind `kind`.
 fn dirs_of(all: &[(Installed, bool)], kind: &str) -> Vec<PathBuf> {
-    all.iter().filter(|(e, _)| e.enabled && e.manifest.is_ok()).map(|(e, _)| e.dir.join(kind)).filter(|d| d.is_dir()).collect()
+    all.iter()
+        .filter(|(e, _)| e.enabled && e.manifest.is_ok())
+        .map(|(e, _)| e.dir.join(kind))
+        .filter(|d| d.is_dir())
+        .collect()
 }
 
 /// The installed extensions that were switched on when Fenix started --
@@ -194,7 +251,11 @@ fn running() -> &'static [String] {
         if safe_mode() {
             return Vec::new();
         }
-        everything(machine().as_ref(), store().as_ref()).into_iter().filter(|(e, _)| e.enabled).map(|(e, _)| e.id).collect()
+        everything(machine().as_ref(), store().as_ref())
+            .into_iter()
+            .filter(|(e, _)| e.enabled)
+            .map(|(e, _)| e.id)
+            .collect()
     })
 }
 
@@ -209,12 +270,16 @@ pub fn rows() -> Vec<crate::extensions_page::InstalledRow> {
             crate::extensions_page::InstalledRow {
                 managed,
                 name: e.name(),
-                about: m.map(|m| m.extension.description.clone()).unwrap_or_default(),
+                about: m
+                    .map(|m| m.extension.description.clone())
+                    .unwrap_or_default(),
                 broken: e.manifest.as_ref().err().cloned(),
                 running: running.contains(&e.id),
                 on: e.enabled,
                 runtime: m.map(|m| m.extension.runtime),
-                categories: m.map(|m| m.extension.categories.clone()).unwrap_or_default(),
+                categories: m
+                    .map(|m| m.extension.categories.clone())
+                    .unwrap_or_default(),
                 permissions: m.map(|m| m.permissions.clone()).unwrap_or_default(),
                 dependencies: m.map(|m| m.dependencies.clone()).unwrap_or_default(),
                 dependency: e.dependency,
@@ -243,29 +308,63 @@ fn settings() -> Option<fenix_config::Config> {
 /// The registry this machine's policy and your settings name, unless one
 /// of them switches the store off. A policy that can't be read keeps the
 /// store shut rather than guess.
-pub fn registry(config: Option<&fenix_config::Config>) -> Result<fenix_extensions::registry::Registry<'static>, String> {
-    let policy = machine().map(|m| m.policy()).transpose()?.unwrap_or_default();
+pub fn registry(
+    config: Option<&fenix_config::Config>,
+) -> Result<fenix_extensions::registry::Registry<'static>, String> {
+    let policy = machine()
+        .map(|m| m.policy())
+        .transpose()?
+        .unwrap_or_default();
     registry_with(config, &policy)
 }
 
-fn registry_with(config: Option<&fenix_config::Config>, policy: &Policy) -> Result<fenix_extensions::registry::Registry<'static>, String> {
+fn registry_with(
+    config: Option<&fenix_config::Config>,
+    policy: &Policy,
+) -> Result<fenix_extensions::registry::Registry<'static>, String> {
     if policy.store == Some(false) {
         return Err("the store is switched off on this machine by its administrator -- install from a file instead".into());
     }
     if config.and_then(|c| c.bool_value("extensions.store")) == Some(false) {
-        return Err("the store is switched off here (extensions.store) -- install from a file instead".into());
+        return Err(
+            "the store is switched off here (extensions.store) -- install from a file instead"
+                .into(),
+        );
     }
     let url = match policy.registry.as_deref().filter(|u| !u.trim().is_empty()) {
         Some(url) => url.to_string(),
-        None => config.and_then(|c| c.text_value("extensions.registry")).filter(|u| !u.trim().is_empty()).unwrap_or(fenix_extensions::registry::DEFAULT_URL).to_string(),
+        None => config
+            .and_then(|c| c.text_value("extensions.registry"))
+            .filter(|u| !u.trim().is_empty())
+            .unwrap_or(fenix_extensions::registry::DEFAULT_URL)
+            .to_string(),
     };
-    Ok(fenix_extensions::registry::Registry { url, public_key: REGISTRY_KEY })
+    Ok(fenix_extensions::registry::Registry {
+        url,
+        public_key: REGISTRY_KEY,
+    })
 }
 
 /// Installs `id` from `registry` into `store`: what to say.
-pub fn install_from(registry: &fenix_extensions::registry::Registry, id: &str, store: &fenix_extensions::Store) -> Result<String, String> {
+pub fn install_from(
+    registry: &fenix_extensions::registry::Registry,
+    id: &str,
+    store: &fenix_extensions::Store,
+) -> Result<String, String> {
     let done = registry.install(id, store, &fenix_extensions::registry::Http, &release())?;
-    Ok(done.iter().map(|e| format!("Installed {} {} ({}) from the registry.", e.name(), e.version, e.id)).collect::<Vec<_>>().join("\n") + " It's used from the next start.")
+    Ok(done
+        .iter()
+        .map(|e| {
+            format!(
+                "Installed {} {} ({}) from the registry.",
+                e.name(),
+                e.version,
+                e.id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + " It's used from the next start.")
 }
 
 /// What `Store::uninstall_unneeded` removed, as said: `id`, and what it
@@ -300,9 +399,18 @@ pub fn request(args: &[String]) -> Result<Option<Request>, String> {
             Some((flag, value)) => (flag, Some(value.to_string())),
             None => (arg.as_str(), None),
         };
-        let mut value = |what: &str| inline.clone().or_else(|| args.next().cloned()).ok_or_else(|| format!("{flag} needs {what}"));
+        let mut value = |what: &str| {
+            inline
+                .clone()
+                .or_else(|| args.next().cloned())
+                .ok_or_else(|| format!("{flag} needs {what}"))
+        };
         match flag {
-            INSTALL_FLAG => return Ok(Some(Request::Install(PathBuf::from(value("a .fenixext file, an extension's folder, or an id from the registry")?)))),
+            INSTALL_FLAG => {
+                return Ok(Some(Request::Install(PathBuf::from(value(
+                    "a .fenixext file, an extension's folder, or an id from the registry",
+                )?))))
+            }
             UNINSTALL_FLAG => return Ok(Some(Request::Uninstall(value("an extension's id")?))),
             LIST_FLAG => return Ok(Some(Request::List)),
             _ => {}
@@ -324,7 +432,12 @@ fn not_managed(id: &str, managed: Option<&Store>) -> Result<(), String> {
 pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<String, String> {
     match request {
         // An id, not a file there: from the registry.
-        Request::Install(path) if !path.exists() && path.to_str().is_some_and(fenix_extensions::manifest::valid_id) => {
+        Request::Install(path)
+            if !path.exists()
+                && path
+                    .to_str()
+                    .is_some_and(fenix_extensions::manifest::valid_id) =>
+        {
             let id = path.to_str().expect("checked");
             not_managed(id, managed)?;
             let config = settings();
@@ -332,19 +445,33 @@ pub fn run(request: &Request, store: &Store, managed: Option<&Store>) -> Result<
             install_from(&registry, id, store)
         }
         Request::Install(path) => {
-            not_managed(&fenix_extensions::Package::open(path)?.manifest.extension.id, managed)?;
+            not_managed(
+                &fenix_extensions::Package::open(path)?.manifest.extension.id,
+                managed,
+            )?;
             let installed = store.install(path, &release())?;
-            Ok(format!("Installed {} {} ({}). It's used from the next start.", installed.name(), installed.version, installed.id))
+            Ok(format!(
+                "Installed {} {} ({}). It's used from the next start.",
+                installed.name(),
+                installed.version,
+                installed.id
+            ))
         }
         Request::Uninstall(id) => {
             not_managed(id, managed)?;
             let removed = store.uninstall_unneeded(id)?;
-            Ok(format!("Removed {}. It's gone from the next start.", said_removed(&removed)))
+            Ok(format!(
+                "Removed {}. It's gone from the next start.",
+                said_removed(&removed)
+            ))
         }
         Request::List => {
             let all = everything(managed, Some(store));
             if all.is_empty() {
-                return Ok(format!("No extensions installed (in {}).", store.root().display()));
+                return Ok(format!(
+                    "No extensions installed (in {}).",
+                    store.root().display()
+                ));
             }
             Ok(all
                 .iter()
@@ -373,11 +500,22 @@ mod tests {
 
     #[test]
     fn the_extension_flags_are_read() {
-        assert_eq!(request(&args(&["--console", "--install-extension", "x.fenixext"])), Ok(Some(Request::Install("x.fenixext".into()))));
-        assert_eq!(request(&args(&["--uninstall-extension=acme.x"])), Ok(Some(Request::Uninstall("acme.x".into()))));
-        assert_eq!(request(&args(&["--list-extensions"])), Ok(Some(Request::List)));
+        assert_eq!(
+            request(&args(&["--console", "--install-extension", "x.fenixext"])),
+            Ok(Some(Request::Install("x.fenixext".into())))
+        );
+        assert_eq!(
+            request(&args(&["--uninstall-extension=acme.x"])),
+            Ok(Some(Request::Uninstall("acme.x".into())))
+        );
+        assert_eq!(
+            request(&args(&["--list-extensions"])),
+            Ok(Some(Request::List))
+        );
         assert_eq!(request(&args(&["a.rs"])), Ok(None));
-        assert!(request(&args(&["--install-extension"])).unwrap_err().contains("needs a .fenixext"));
+        assert!(request(&args(&["--install-extension"]))
+            .unwrap_err()
+            .contains("needs a .fenixext"));
     }
 
     #[test]
@@ -387,7 +525,10 @@ mod tests {
 
     #[test]
     fn the_registrys_default_is_the_settings_default() {
-        assert_eq!(fenix_config::setting("extensions.registry").map(|s| s.default), Some(fenix_extensions::registry::DEFAULT_URL));
+        assert_eq!(
+            fenix_config::setting("extensions.registry").map(|s| s.default),
+            Some(fenix_extensions::registry::DEFAULT_URL)
+        );
     }
 
     #[test]
@@ -396,8 +537,14 @@ mod tests {
         let path = dir.path().join("settings.toml");
         std::fs::write(&path, "[extensions]\nstore = false\n").unwrap();
         let config = fenix_config::Config::load(path).unwrap();
-        assert!(registry(Some(&config)).err().unwrap().contains("extensions.store"));
-        assert_eq!(registry(None).ok().map(|r| r.url), Some(fenix_extensions::registry::DEFAULT_URL.to_string()));
+        assert!(registry(Some(&config))
+            .err()
+            .unwrap()
+            .contains("extensions.store"));
+        assert_eq!(
+            registry(None).ok().map(|r| r.url),
+            Some(fenix_extensions::registry::DEFAULT_URL.to_string())
+        );
     }
 
     #[test]
@@ -415,13 +562,28 @@ mod tests {
     fn installing_listing_and_removing_say_what_happened() {
         let dir = tempfile::tempdir().unwrap();
         let store = fenix_extensions::Store::new(dir.path().join("extensions"));
-        assert!(run(&Request::List, &store, None).unwrap().starts_with("No extensions installed"));
+        assert!(run(&Request::List, &store, None)
+            .unwrap()
+            .starts_with("No extensions installed"));
         let pack = extension(dir.path(), "acme.dusk", "1.0.0");
-        assert_eq!(run(&Request::Install(pack), &store, None).unwrap(), "Installed Dusk 1.0.0 (acme.dusk). It's used from the next start.");
-        assert_eq!(run(&Request::List, &store, None).unwrap(), "acme.dusk  1.0.0  Dusk  (on)");
-        assert!(run(&Request::Uninstall("acme.dusk".into()), &store, None).unwrap().starts_with("Removed acme.dusk"));
-        assert!(run(&Request::Uninstall("acme.dusk".into()), &store, None).unwrap_err().contains("isn't installed"));
-        assert_eq!(said_removed(&["acme.lab".into(), "acme.vnc".into(), "acme.pdf".into()]), "acme.lab, and acme.vnc, acme.pdf that only it needed");
+        assert_eq!(
+            run(&Request::Install(pack), &store, None).unwrap(),
+            "Installed Dusk 1.0.0 (acme.dusk). It's used from the next start."
+        );
+        assert_eq!(
+            run(&Request::List, &store, None).unwrap(),
+            "acme.dusk  1.0.0  Dusk  (on)"
+        );
+        assert!(run(&Request::Uninstall("acme.dusk".into()), &store, None)
+            .unwrap()
+            .starts_with("Removed acme.dusk"));
+        assert!(run(&Request::Uninstall("acme.dusk".into()), &store, None)
+            .unwrap_err()
+            .contains("isn't installed"));
+        assert_eq!(
+            said_removed(&["acme.lab".into(), "acme.vnc".into(), "acme.pdf".into()]),
+            "acme.lab, and acme.vnc, acme.pdf that only it needed"
+        );
     }
 
     /// An extension's folder, `id` at `version`, carrying a theme folder.
@@ -438,37 +600,128 @@ mod tests {
     #[test]
     fn a_managed_extension_is_pinned_and_replaces_yours() {
         let dir = tempfile::tempdir().unwrap();
-        let (yours, machine) = (Store::new(dir.path().join("yours")), Store::new(dir.path().join("machine")));
-        run(&Request::Install(extension(dir.path(), "acme.dusk", "1.0.0")), &yours, None).unwrap();
-        run(&Request::Install(extension(dir.path(), "acme.dawn", "1.0.0")), &yours, None).unwrap();
+        let (yours, machine) = (
+            Store::new(dir.path().join("yours")),
+            Store::new(dir.path().join("machine")),
+        );
+        run(
+            &Request::Install(extension(dir.path(), "acme.dusk", "1.0.0")),
+            &yours,
+            None,
+        )
+        .unwrap();
+        run(
+            &Request::Install(extension(dir.path(), "acme.dawn", "1.0.0")),
+            &yours,
+            None,
+        )
+        .unwrap();
         // The administrator, with --machine.
-        run(&Request::Install(extension(dir.path(), "acme.dusk", "0.9.0")), &machine, None).unwrap();
+        run(
+            &Request::Install(extension(dir.path(), "acme.dusk", "0.9.0")),
+            &machine,
+            None,
+        )
+        .unwrap();
         let all = everything(Some(&machine), Some(&yours));
-        assert_eq!(all.iter().map(|(e, m)| (e.id.as_str(), e.version.as_str(), *m)).collect::<Vec<_>>(), [("acme.dusk", "0.9.0", true), ("acme.dawn", "1.0.0", false)]);
-        assert_eq!(dirs_of(&all, "themes"), [machine.root().join("acme.dusk").join("0.9.0").join("themes"), yours.root().join("acme.dawn").join("1.0.0").join("themes")]);
-        let pinned = run(&Request::Install(extension(dir.path(), "acme.dusk", "2.0.0")), &yours, Some(&machine)).unwrap_err();
-        assert!(pinned.contains("acme.dusk 0.9.0 is managed on this machine"), "{pinned}");
-        assert!(run(&Request::Install("acme.dusk".into()), &yours, Some(&machine)).unwrap_err().contains("managed"), "not from the registry either");
-        assert!(run(&Request::Uninstall("acme.dusk".into()), &yours, Some(&machine)).unwrap_err().contains("managed"));
-        assert_eq!(run(&Request::List, &yours, Some(&machine)).unwrap(), "acme.dusk  0.9.0  Dusk  (on, managed)\nacme.dawn  1.0.0  Dusk  (on)");
+        assert_eq!(
+            all.iter()
+                .map(|(e, m)| (e.id.as_str(), e.version.as_str(), *m))
+                .collect::<Vec<_>>(),
+            [("acme.dusk", "0.9.0", true), ("acme.dawn", "1.0.0", false)]
+        );
+        assert_eq!(
+            dirs_of(&all, "themes"),
+            [
+                machine
+                    .root()
+                    .join("acme.dusk")
+                    .join("0.9.0")
+                    .join("themes"),
+                yours.root().join("acme.dawn").join("1.0.0").join("themes")
+            ]
+        );
+        let pinned = run(
+            &Request::Install(extension(dir.path(), "acme.dusk", "2.0.0")),
+            &yours,
+            Some(&machine),
+        )
+        .unwrap_err();
+        assert!(
+            pinned.contains("acme.dusk 0.9.0 is managed on this machine"),
+            "{pinned}"
+        );
+        assert!(
+            run(
+                &Request::Install("acme.dusk".into()),
+                &yours,
+                Some(&machine)
+            )
+            .unwrap_err()
+            .contains("managed"),
+            "not from the registry either"
+        );
+        assert!(run(
+            &Request::Uninstall("acme.dusk".into()),
+            &yours,
+            Some(&machine)
+        )
+        .unwrap_err()
+        .contains("managed"));
+        assert_eq!(
+            run(&Request::List, &yours, Some(&machine)).unwrap(),
+            "acme.dusk  0.9.0  Dusk  (on, managed)\nacme.dawn  1.0.0  Dusk  (on)"
+        );
     }
 
     #[test]
     fn the_machines_policy_wins_over_your_settings() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
-        std::fs::write(&path, "[extensions]\nregistry = \"https://yours.test/index.json\"\n").unwrap();
+        std::fs::write(
+            &path,
+            "[extensions]\nregistry = \"https://yours.test/index.json\"\n",
+        )
+        .unwrap();
         let config = fenix_config::Config::load(path).unwrap();
-        let off = Policy { store: Some(false), registry: None };
-        assert!(registry_with(Some(&config), &off).err().unwrap().contains("by its administrator"));
-        let mirror = Policy { store: None, registry: Some("https://mirror.test/index.json".into()) };
-        assert_eq!(registry_with(Some(&config), &mirror).ok().map(|r| r.url).as_deref(), Some("https://mirror.test/index.json"));
-        assert_eq!(registry_with(Some(&config), &Policy::default()).ok().map(|r| r.url).as_deref(), Some("https://yours.test/index.json"));
+        let off = Policy {
+            store: Some(false),
+            registry: None,
+        };
+        assert!(registry_with(Some(&config), &off)
+            .err()
+            .unwrap()
+            .contains("by its administrator"));
+        let mirror = Policy {
+            store: None,
+            registry: Some("https://mirror.test/index.json".into()),
+        };
+        assert_eq!(
+            registry_with(Some(&config), &mirror)
+                .ok()
+                .map(|r| r.url)
+                .as_deref(),
+            Some("https://mirror.test/index.json")
+        );
+        assert_eq!(
+            registry_with(Some(&config), &Policy::default())
+                .ok()
+                .map(|r| r.url)
+                .as_deref(),
+            Some("https://yours.test/index.json")
+        );
     }
 
     #[test]
     fn machine_is_asked_for_by_its_flag() {
-        assert!(wants_machine(&args(&["--install-extension", "x.fenixext", "--machine"])));
-        assert!(!wants_machine(&args(&["--install-extension", "x.fenixext"])));
+        assert!(wants_machine(&args(&[
+            "--install-extension",
+            "x.fenixext",
+            "--machine"
+        ])));
+        assert!(!wants_machine(&args(&[
+            "--install-extension",
+            "x.fenixext"
+        ])));
     }
 }
