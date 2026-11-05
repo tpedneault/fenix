@@ -23,6 +23,41 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `fenix/lsp`, `fenix/debug.state`, `fenix/debug.evaluate`, `fenix/tools`
   and `fenix/tools.call`.
 
+### Extension API 1.2
+
+Everything 1.2 adds is a new import, or a new export Fenix calls only
+when an extension has it, so an extension built for 1.0 or 1.1 runs as
+it did.
+
+- An agent tool says what it may do (`class`: `read`, `show`, `edit`,
+  `run`, `external`), how long it may take (`timeout_ms`, 30 seconds
+  unless it says, up to 10 minutes) and whether it's offered by default
+  (`default`). Its class must fit its permissions; a tool without one is
+  `run` when it `writes`, else `read`.
+- A tool call's deadline holds, an answer given later included: past it
+  the agent gets an error and the extension hears `service-cancelled`.
+  An extension that stops answers every call it had.
+- A long tool says how far it's got (`service-progress`).
+- An extension's pages go before its tool calls and events: a slow tool
+  no longer freezes them.
+- `fenix/tools` lists only the tools of extensions that are switched on,
+  with each one's class, toolset, deadline and whether it's offered by
+  default; a stopped extension's tools are marked stopped.
+- `agents::ask_with`: an ask with attachments Fenix reads (a diff,
+  commits, a file with its unsaved edits, the selection, the problems,
+  text), a structured answer held to a JSON Schema, its draft as it's
+  written (`agent-ask-progress`), a thread kept or hidden, a timeout, and
+  a handle to cancel it. An ask runs in the agent's most restrictive
+  mode, and a file its turn changes anyway is put back
+  (`answer.reverted`). The first ask that sends code asks you, once per
+  extension and agent (`agents.forget_ask_consent` asks again).
+  `agents.ask.agent`, `agents.ask.model` and `agents.ask.show` choose the
+  agent, the model and whether the thread stays.
+- `[[contributes.agent_resources]]` and `[[contributes.agent_prompts]]`:
+  what an extension offers agents to read, and prompts.
+- A tool's description is at most 300 characters and its schema 2 KiB,
+  for an extension built for 1.2.
+
 ### Changed
 
 - What a coding agent says reads as Markdown rendered, in the agent
