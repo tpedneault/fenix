@@ -16741,9 +16741,19 @@ impl App {
     /// vim mode label -- there's no Normal/Insert/Visual distinction worth
     /// showing while every key goes straight to it instead of vim's own
     /// dispatch.
+    /// Whether a terminal has the keyboard: the panel (`SPC o t`), or the
+    /// one in the focused pane. `Ctrl-\` gives it back.
+    fn terminal_has_keyboard(&self) -> bool {
+        self.terminal_focused || self.terminal_buffer_focused.is_some_and(|id| self.windows().content(self.focused_pane_id()) == Some(&id))
+    }
+
     fn mode_badge_label(&self) -> &'static str {
         if self.wasm.captured.is_some() {
             return "CAPTURE";
+        }
+        // Keys go to a shell: Vim's mode means nothing meanwhile (#42).
+        if self.terminal_has_keyboard() {
+            return "TERMINAL";
         }
         if self.debug_mode_active() {
             return "DEBUG";
@@ -16933,8 +16943,10 @@ impl App {
             Some((i, n)) => format!("   [{i}/{n}]"),
         };
         let debug_indicator = self.debug_modeline_segment();
+        // How to get the keyboard back, while a shell has it (#42).
+        let terminal_hint = if self.terminal_has_keyboard() { "   Ctrl-\\ back to the editor" } else { "" };
         let suffix = format!(
-            "{filename}{modified}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}   Ln {}, Col {}   {details} ",
+            "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );
@@ -19819,7 +19831,8 @@ impl App {
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
-        let caret_alpha = self.caret_alpha();
+        // The panel has the keyboard: the editor's caret isn't where keys go.
+        let caret_alpha = if self.terminal_focused { 0.0 } else { self.caret_alpha() };
         let message_alpha = self.message_alpha(now);
         let jobs = self.background_jobs();
         let frame_ws = (self.active_frame, self.workspaces.active);
@@ -27034,6 +27047,23 @@ configure_board stm32
         assert!(!app.sidebar_open);
         assert!(!app.sidebar_focused);
         assert!(app.sidebar.is_none());
+    }
+
+    /// While the terminal panel has the keyboard the modeline says so,
+    /// and how to get it back (#42).
+    #[test]
+    fn the_modeline_says_when_a_terminal_has_the_keyboard() {
+        let mut app = App::with_file(None);
+        assert_ne!(app.modeline_pieces().0, "TERMINAL");
+        app.toggle_terminal();
+        app.status_message = None;
+        let (badge, rest) = app.modeline_pieces();
+        assert_eq!(badge, "TERMINAL");
+        assert!(rest.contains("Ctrl-\\ back to the editor"), "{rest}");
+        app.terminal_focused = false;
+        let (badge, rest) = app.modeline_pieces();
+        assert_ne!(badge, "TERMINAL");
+        assert!(!rest.contains("back to the editor"));
     }
 
     #[test]

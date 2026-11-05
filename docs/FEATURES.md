@@ -1549,7 +1549,9 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   (or a click into the pane) takes it back, and running `exit` hands it
   back on its own. A pane terminal only receives what you type while its
   own pane is focused, so a keystroke meant for the file next door never
-  lands in a shell.
+  lands in a shell. While a shell has the keyboard the modeline's mode says
+  `TERMINAL`, with `Ctrl-\ back to the editor` beside the file name, and
+  the editor's caret is hidden behind the panel.
 
   A terminal buffer holds no text of its own -- what you see is the
   shell's screen grid, rendered directly -- so there is nothing there

@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- While a terminal has the keyboard (`SPC o t`, or one in a pane), the
+  modeline's mode says `TERMINAL` with `Ctrl-\ back to the editor`
+  beside it, and the editor's caret is hidden behind the panel, so it's
+  plain that keys, `SPC` included, go to the shell. (#42)
 - An extension's page that couldn't be shown -- a `bad.pdf` that isn't
   a PDF -- says so on the page, with what went wrong, rather than going
   blank once the red message fades. (#75)
