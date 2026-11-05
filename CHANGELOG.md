@@ -133,6 +133,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In the Merge view, `o` and `t` on the header row, where the cursor
   starts, take the only conflicted file, as the hints above it say,
   rather than doing nothing. (#46)
+- `SPC p t` lists each task once: an extension's and Fenix's own with
+  the same name or command line are one row, the extension's. In a uv
+  project Fenix's `pytest` and `ruff check` run through `uv run`. (#35)
 
 ## [1.0.1] - 2026-11-03
 

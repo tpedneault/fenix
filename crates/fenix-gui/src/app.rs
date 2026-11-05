@@ -9684,8 +9684,9 @@ impl App {
     /// extensions', those found from its files, and its own
     /// (`tools.json`'s), which win by name.
     fn tasks_for(&self, root: &Path) -> Result<Vec<fenix_tasks::TaskDef>, String> {
-        let mut tasks: Vec<fenix_tasks::TaskDef> = self.wasm.tasks(root);
-        tasks.extend(fenix_tasks::discover_tasks(root));
+        // An extension's first; core's defaults only where they add a
+        // name and a command line it doesn't have (#35).
+        let mut tasks = fenix_tasks::merge_tasks(self.wasm.tasks(root), fenix_tasks::discover_tasks(root));
         let tools = fenix_project::tools::ProjectTools::read(root)?;
         for (name, spec) in tools.tasks {
             tasks.retain(|task| task.name != name);
