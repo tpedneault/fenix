@@ -6,6 +6,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- What a coding agent says reads as Markdown rendered, in the agent
+  panel: headings, emphasis, inline code, lists, quotes, tables, links
+  and highlighted code blocks, laid out as the reading view lays out a
+  note. Yanking a message (`y`) still copies the Markdown it said.
+
 ## [1.0.1] - 2026-11-03
 
 ### Added

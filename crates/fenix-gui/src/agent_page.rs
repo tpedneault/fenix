@@ -40,6 +40,32 @@ pub struct Status {
     pub queued: usize,
     /// Each terminal the agent ran through Fenix, by its id.
     pub terminals: std::collections::HashMap<String, TermView>,
+    /// How a code block in what the agent says is coloured: per line,
+    /// (columns, capture name). None: plain.
+    pub highlight: Option<Highlight>,
+}
+
+/// A code block's colours by its language: per line, (columns, capture).
+pub type Highlight = fn(&str, &str) -> Vec<Vec<(std::ops::Range<usize>, &'static str)>>;
+
+/// What the agent said, as Markdown laid out the way the reading view
+/// lays it out -- headings, emphasis, inline code, lists, quotes, tables
+/// and highlighted code -- `width` cells wide. Pictures and diagrams stay
+/// text: the panel draws none.
+fn markdown(text: &str, width: usize, highlight: Option<Highlight>) -> Page {
+    let colours = |lang: &str, code: &str| highlight.map(|h| h(lang, code)).unwrap_or_default();
+    let ctx = crate::reading::Ctx {
+        highlight: &colours,
+        image_size: &|_| None,
+        diagram_key: &|source| crate::page::ImageKey::Diagram(source.len() as u64),
+        diagram_error: &|_| None,
+        drawn: &|_| false,
+        image_path: &|_| None,
+        embed: &|link| crate::reading::Embedded::Unresolved(link.target.clone()),
+        link_exists: &|_| true,
+        cell: (1.0, 2.0),
+    };
+    crate::reading::layout(text, width, &ctx).page
 }
 
 /// A terminal an agent ran through Fenix, as its tool card shows it.
@@ -422,29 +448,11 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                 }
             }
             Entry::Agent { text, extra, .. } => {
-                let mut code = false;
-                for line in text.lines() {
-                    let fence = line.trim_start().starts_with("```");
-                    let role = if fence {
-                        Role::Muted
-                    } else if code {
-                        Role::Syntax("string")
-                    } else if line.starts_with('#') {
-                        Role::Title
-                    } else {
-                        Role::Text
-                    };
-                    if fence {
-                        code = !code;
-                    }
-                    let lines = if code && !fence { vec![fit(line, width)] } else { wrap(line, width) };
-                    if lines.is_empty() {
-                        y += 1;
-                    }
-                    for piece in lines {
-                        g.put(y, left, &piece, role);
-                        y += 1;
-                    }
+                if !text.trim().is_empty() {
+                    let laid = markdown(text, width, status.highlight);
+                    let lines = laid.text.lines().count();
+                    g.embed(&laid, y, left, false);
+                    y += lines;
                 }
                 for block in extra {
                     g.put(y, left, &fit(&block.as_text(), width), Role::Muted);
@@ -657,6 +665,32 @@ mod tests {
         assert!(!text.contains("test ok"), "a command's output is folded");
         assert!(!text.contains("Then the tests."), "thinking is folded");
         assert_eq!(page.focus, 4, "following the newest card");
+    }
+
+    /// What the agent says is Markdown, and reads as it would rendered:
+    /// no `#`, `**` or backticks, a heading and inline code in colours of
+    /// their own, list markers, a table's grid, code without its fences --
+    /// and yanking it still gives the Markdown it said.
+    #[test]
+    fn what_the_agent_says_is_rendered_markdown() {
+        let mut t = Thread::default();
+        let said = "## The fix\n\nThe parser **skipped** `\\r\\n` endings:\n\n- read the line\n- trim *both*\n\n| file | change |\n|---|---|\n| parse.rs | trim |\n\n```rust\nfn trim() {}\n```\n\nSee [the docs](https://example.com).";
+        t.apply(SessionUpdate::parse(&json!({ "sessionUpdate": "agent_message_chunk", "content": { "type": "text", "text": said } })), false);
+        let page = AgentPage::new(ThreadId("x".into()));
+        let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100);
+        let text = laid.all_text();
+        for want in ["The fix", "The parser skipped \\r\\n endings:", "read the line", "trim both", "parse.rs", "fn trim() {}", "the docs"] {
+            assert!(text.contains(want), "missing {want:?} in\n{text}");
+        }
+        for gone in ["##", "**", "`", "```", "|---|", "](https://"] {
+            assert!(!text.contains(gone), "{gone:?} left in\n{text}");
+        }
+        let line = |needle: &str| text.lines().position(|l| l.contains(needle)).unwrap();
+        let roles = |n: usize| laid.spans.iter().filter(|s| s.line == n).map(|s| s.role).collect::<Vec<_>>();
+        assert!(roles(line("The fix")).iter().any(|r| *r != Role::Text), "the heading has a style of its own");
+        assert!(roles(line("The parser")).len() > 1, "emphasis and inline code are styled apart from the text");
+        let mut page = page;
+        assert_eq!(page.key(&t, Key::Char('y')), Action::Yank(said.to_string()), "yanked as Markdown");
     }
 
     /// A card titled only "Ran command" says which: from the call's input,
