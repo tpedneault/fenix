@@ -273,6 +273,15 @@ impl App {
 mod tests {
     use super::*;
 
+    /// An editor whose agents can't start: a step shown in the dock tries
+    /// to start its agent, and a real one (`npx`, downloading) must never
+    /// run in a test.
+    fn app() -> App {
+        let mut app = App::with_file(None);
+        app.config.set_value("agents.servers", Some(fenix_config::Value::Map(vec![("claude".into(), "fenix-test-no-such-agent".into())])));
+        app
+    }
+
     #[test]
     fn the_built_in_pipeline_is_offered_and_a_project_one_too() {
         let dir = tempfile::tempdir().unwrap();
@@ -289,7 +298,7 @@ mod tests {
 
     #[test]
     fn an_armed_pipeline_takes_the_next_prompt_and_a_step_waits_for_its_session() {
-        let mut app = App::with_file(None);
+        let mut app = app();
         assert!(!app.pipeline_take_prompt("nothing armed"));
         app.pipelines.armed = Some(PipelineSpec::parse("one", "[[steps]]\nname = \"do\"\nagent = \"claude\"\nprompt = \"Do: {input}\"\n").unwrap());
         assert!(app.pipeline_take_prompt("the thing"));
@@ -304,7 +313,7 @@ mod tests {
 
     #[test]
     fn a_gate_is_a_question_and_no_stops_the_run() {
-        let mut app = App::with_file(None);
+        let mut app = app();
         app.pipelines.armed = Some(PipelineSpec::parse("g", "[[steps]]\nname = \"a\"\nagent = \"claude\"\nprompt = \"{input}\"\ngate = true\n[[steps]]\nname = \"b\"\nagent = \"claude\"\nprompt = \"{previous}\"\n").unwrap());
         app.pipeline_take_prompt("x");
         let thread = app.pipelines.runs.values().next().unwrap().threads[0].clone();
