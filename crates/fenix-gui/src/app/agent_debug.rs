@@ -286,6 +286,21 @@ mod tests {
     }
 
     #[test]
+    fn an_agents_breakpoint_has_a_shade_of_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.py");
+        std::fs::write(&file, "x = 1\ny = 2\n").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let mut app = App::with_file(Some(path.clone()));
+        let buffer = app.focused_buffer_id();
+        call(&mut app, "set_breakpoint", json!({ "path": path, "line": 2 })).unwrap().unwrap();
+        let plain = super::super::debug_breakpoints::BreakpointLook::Plain;
+        assert_eq!(app.debug_marks(buffer, &[0, 1], 2), vec![(1, super::super::debug_host::DebugMark::AgentBreakpoint(plain))]);
+        app.agent_clear_breakpoints();
+        assert!(app.debug_marks(buffer, &[0, 1], 2).is_empty());
+    }
+
+    #[test]
     fn moving_without_a_session_says_what_to_do() {
         let mut app = App::with_file(None);
         for tool in ["debug_continue", "debug_step", "debug_run_to", "debug_pause", "debug_stop"] {

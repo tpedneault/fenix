@@ -20301,9 +20301,9 @@ impl App {
                 let stop = glyphon_to_rgba(theme.git_modified);
                 // A breakpoint's square: with a hole for a condition, as two
                 // bars for a logpoint, dim and hollow when it's off.
-                let breakpoint = |look: debug_breakpoints::BreakpointLook, bg_rect: &mut RectRenderer| {
+                let breakpoint = |look: debug_breakpoints::BreakpointLook, agent: bool, bg_rect: &mut RectRenderer| {
                     use debug_breakpoints::BreakpointLook as L;
-                    let color = glyphon_to_rgba(if look == L::Off { theme.gutter_fg } else { theme.git_conflicted });
+                    let color = glyphon_to_rgba(if look == L::Off { theme.gutter_fg } else if agent { theme.git_staged } else { theme.git_conflicted });
                     match look {
                         L::Plain => bg_rect.push_rect(gpu, x, y, size, size, color),
                         L::Log => {
@@ -20317,10 +20317,11 @@ impl App {
                     }
                 };
                 match mark {
-                    debug_host::DebugMark::Breakpoint(look) => breakpoint(look, &mut *bg_rect),
+                    debug_host::DebugMark::Breakpoint(look) => breakpoint(look, false, &mut *bg_rect),
+                    debug_host::DebugMark::AgentBreakpoint(look) => breakpoint(look, true, &mut *bg_rect),
                     debug_host::DebugMark::Stop => bg_rect.push_rect(gpu, x, top + 2.0, size * 0.6, line_height - 4.0, stop),
                     debug_host::DebugMark::StopOnBreakpoint(look) => {
-                        breakpoint(look, &mut *bg_rect);
+                        breakpoint(look, false, &mut *bg_rect);
                         bg_rect.push_rect(gpu, x + size * 0.25, y + size * 0.25, size * 0.5, size * 0.5, stop);
                     }
                 }

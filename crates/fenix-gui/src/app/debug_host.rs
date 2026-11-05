@@ -113,6 +113,9 @@ const DEBUG_KEYS: &str = "n next  s in  o out  c continue  r to cursor  Esc norm
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DebugMark {
     Breakpoint(BreakpointLook),
+    /// One a coding agent set (`set_breakpoint`): its own shade, so it's
+    /// told from yours.
+    AgentBreakpoint(BreakpointLook),
     /// Where the selected frame is stopped.
     Stop,
     /// Stopped on a line that has a breakpoint.
@@ -422,6 +425,7 @@ impl App {
             let mark = match (stop_line == Some(one_based), breakpoints.get(&one_based)) {
                 (true, Some(look)) => DebugMark::StopOnBreakpoint(*look),
                 (true, None) => DebugMark::Stop,
+                (false, Some(look)) if self.agent_calls.agent_breakpoints.iter().any(|(p, l)| *l == one_based && same_file(p, &path)) => DebugMark::AgentBreakpoint(*look),
                 (false, Some(look)) => DebugMark::Breakpoint(*look),
                 (false, None) => continue,
             };
