@@ -1103,6 +1103,9 @@ struct LspSession {
     /// spec (a server hasn't necessarily finished setting up its own
     /// state to answer anything else yet).
     capabilities: Option<lsp_types::ServerCapabilities>,
+    /// When it was started: one that hasn't answered `initialize`
+    /// `LSP_INITIALIZE_TIMEOUT` later is given up on.
+    started: Instant,
     /// Canonicalized paths that have had `textDocument/didOpen` sent to
     /// this server, each mapped to `(last_synced_edit_count, next_
     /// version)` -- `last_synced_edit_count` is `Buffer::edit_count()`'s
@@ -1137,6 +1140,29 @@ struct LspSession {
     /// (`textDocument/diagnostic`), each document's: its last
     /// result id, and whether an ask is out and another is due after it.
     pulls: HashMap<PathBuf, LspPull>,
+}
+
+/// How long a language server has to answer `initialize` before it's
+/// given up on, said to be failing, and stopped: one that never will
+/// (typescript-language-server with no `tsserver.js`) otherwise shows
+/// "starting" for good.
+const LSP_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `, last said: <its last line>` of what a server wrote to stderr, for
+/// a one-line message; empty when it said nothing.
+fn last_line_of(said: &str) -> String {
+    said.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(" -- it said: {l}")).unwrap_or_default()
+}
+
+/// A failed server's row in Tool Status: why, then the last lines it
+/// wrote to stderr.
+fn failure_text(why: &str, said: &str) -> String {
+    let lines: Vec<&str> = said.lines().filter(|l| !l.trim().is_empty()).collect();
+    let last = &lines[lines.len().saturating_sub(8)..];
+    if last.is_empty() {
+        return format!("{why} (it wrote nothing to stderr)");
+    }
+    format!("{why}\n{}", last.iter().map(|l| format!("  | {l}")).collect::<Vec<_>>().join("\n"))
 }
 
 /// One document's diagnostics asked of a server (`LspSession::pulls`).
@@ -5017,6 +5043,9 @@ pub struct App {
     /// `lsp_workspace_names` its calls are colored by.
     tcl_name_servers: HashMap<BufferId, (Instant, Vec<LspKey>)>,
     lsp_unavailable: std::collections::HashSet<LspKey>,
+    /// Why each of `lsp_unavailable` stopped, with the last it wrote to
+    /// stderr: what Tool Status shows.
+    lsp_failures: HashMap<LspKey, String>,
     /// Each project root's additional servers (`tools.json`'s
     /// `lsp.additional`), read once and again on `:lsp-restart`.
     lsp_additional: HashMap<PathBuf, Vec<fenix_project::tools::AdditionalServer>>,
@@ -5772,6 +5801,7 @@ impl App {
             lsp_workspace_names: HashMap::new(),
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
+            lsp_failures: HashMap::new(),
             lsp_additional: HashMap::new(),
             lsp_fanouts: HashMap::new(),
             next_lsp_fanout: 1,
@@ -6711,7 +6741,7 @@ impl App {
         let generation = tool_sessions::generation();
         let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
         self.lsp_sessions.insert(key.clone(), LspSession {
-            generation, client, name: name.to_string(), languages, root: key.root.clone(), reader, capabilities: None,
+            generation, client, name: name.to_string(), languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
             open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         });
         self.send_lsp_initialize(key, cwd);
@@ -6783,12 +6813,13 @@ impl App {
                 let generation = tool_sessions::generation();
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
                 self.lsp_sessions.insert(key.clone(), LspSession {
-                    generation, client, name, languages, root: key.root.clone(), reader, capabilities: None,
+                    generation, client, name, languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
                     open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
                 });
                 self.send_lsp_initialize(key, cwd);
             }
             Err(err) => {
+                self.lsp_failures.insert(key.clone(), format!("couldn't start {}: {err}", spec.executable));
                 self.lsp_unavailable.insert(key);
                 self.set_error(format!("couldn't start {name} ({}) for {}: {err}", spec.executable, cwd.display()));
             }
@@ -6859,8 +6890,10 @@ impl App {
                 // Only this server goes: the buffer's other servers keep
                 // their sessions, diagnostics and requests.
                 let name = self.lsp_server_name(&key);
+                let said = self.lsp_sessions.get(&key).map(|s| s.client.stderr_tail()).unwrap_or_default();
                 self.stop_lsp_session(&key);
-                self.set_error(format!("{name} disconnected: {reason}"));
+                self.set_error(format!("{name} disconnected: {reason}{}", last_line_of(&said)));
+                self.lsp_failures.insert(key.clone(), failure_text(&format!("disconnected: {reason}"), &said));
                 self.lsp_unavailable.insert(key);
             }
         }
@@ -6912,6 +6945,8 @@ impl App {
                 Err(err) => {
                     let name = self.lsp_server_name(&key);
                     self.set_error(format!("{name} failed to initialize: {}", err.message));
+                    let said = self.lsp_sessions.get(&key).map(|s| s.client.stderr_tail()).unwrap_or_default();
+                    self.lsp_failures.insert(key, failure_text(&format!("failed to initialize: {}", err.message), &said));
                 }
             },
             PendingLspRequest::Control { fanout } => {
@@ -10838,7 +10873,14 @@ impl App {
                 }
             })
             .collect();
-        let text = crate::tool_status::render(&entries) + &crate::tool_status::render_additional(&additional);
+        let mut failures: Vec<(String, String)> = self
+            .lsp_failures
+            .iter()
+            .filter(|(key, _)| key.root == root && self.lsp_unavailable.contains(key))
+            .map(|(key, why)| (self.lsp_server_name(key), why.clone()))
+            .collect();
+        failures.sort();
+        let text = crate::tool_status::render(&entries) + &crate::tool_status::render_additional(&additional) + &crate::tool_status::render_failures(&failures);
 
         if let Some(session) = &self.tool_status_session {
             let (workspace_index, pane, buffer) = (session.workspace_index, session.pane, session.buffer);
@@ -21083,6 +21125,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             .filter(|r| !r.done)
             .map(|r| r.started + SLOW_LISTING_AFTER)
             .fold(wait_until, |acc, deadline| acc.min(deadline));
+        // A language server that never answered `initialize`, given up.
+        let wait_until = match self.lsp_initialize_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
         // The Search page's typing, once it pauses.
         let wait_until = match self.search_fire_due(now) {
             Some(due) => wait_until.min(due),
@@ -30337,6 +30384,43 @@ configure_board stm32
         }
     }
 
+    /// A server that never answers `initialize` doesn't say "starting"
+    /// for good: past `LSP_INITIALIZE_TIMEOUT` it's stopped, said to have
+    /// failed, and shown so in Tool Status until `:lsp-restart`.
+    #[test]
+    fn a_server_that_never_initializes_is_given_up_on() {
+        let mut app = App::with_file(None);
+        let key = LspKey::primary(fenix_syntax::LanguageId::TypeScript, PathBuf::from("/project"));
+        let (client, _rx) = fenix_lsp::LspClient::connect(std::io::empty(), std::io::sink());
+        let started = Instant::now();
+        app.lsp_sessions.insert(key.clone(), LspSession {
+            generation: tool_sessions::generation(), client, name: "typescript-language-server".into(), languages: vec!["typescript".into()], root: key.root.clone(), reader: None,
+            started, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+        });
+        assert!(app.background_jobs().iter().any(|j| j == "starting typescript-language-server"));
+        // Not yet: when it's due is said.
+        assert_eq!(app.lsp_initialize_tick(started + Duration::from_secs(1)), Some(started + LSP_INITIALIZE_TIMEOUT));
+        assert!(app.lsp_sessions.contains_key(&key));
+
+        assert_eq!(app.lsp_initialize_tick(started + LSP_INITIALIZE_TIMEOUT), None);
+        assert!(!app.lsp_sessions.contains_key(&key));
+        assert!(app.lsp_unavailable.contains(&key), "not started again every frame");
+        assert!(app.background_jobs().is_empty());
+        let said = app.modeline_pieces().1;
+        assert!(said.contains("typescript-language-server didn't start") && said.contains(":lsp-restart"), "{said}");
+        assert!(app.lsp_failures[&key].contains("didn't answer initialize in 30 s"));
+    }
+
+    #[test]
+    fn a_failure_shows_the_last_lines_a_server_wrote() {
+        assert_eq!(last_line_of(""), "");
+        assert_eq!(last_line_of("starting\nError: no tsserver.js\n\n"), " -- it said: Error: no tsserver.js");
+        let text = failure_text("didn't answer", &(0..20).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n"));
+        assert!(text.starts_with("didn't answer\n  | line 12"), "{text}");
+        assert!(text.ends_with("  | line 19"));
+        assert_eq!(failure_text("gone", ""), "gone (it wrote nothing to stderr)");
+    }
+
     #[test]
     fn apply_lsp_diagnostics_stores_and_then_clears_them_by_path() {
         let mut app = App::with_file(None);
@@ -33547,7 +33631,7 @@ name = \"orbit\"
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let mut session = LspSession {
             generation: tool_sessions::generation(), client, name: "pyright-langserver".into(), languages: vec!["python".into()], root: key.root.clone(), reader: None,
-            capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         };
         push_python_environment(&mut session);
         app.lsp_sessions.insert(key.clone(), session);
@@ -33580,7 +33664,7 @@ name = \"orbit\"
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
-            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         });
         key
     }
@@ -33773,7 +33857,7 @@ name = \"orbit\"
         }
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client: sink_client(&key.root), name: name.into(), languages: languages.iter().map(|l| l.to_string()).collect(),
-            root: key.root.clone(), reader: None, capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            root: key.root.clone(), reader: None, started: Instant::now(), capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         });
         key
     }

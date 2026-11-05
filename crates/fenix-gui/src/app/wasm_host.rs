@@ -4940,7 +4940,7 @@ pub(crate) mod tests {
         let (client, _) = fenix_lsp::LspClient::connect(from_server, to_server);
         app.lsp_sessions.insert(key.clone(), super::super::LspSession {
             generation: 1, client, name: "server".into(), languages: vec!["javascript".into()], root: key.root.clone(), reader: None,
-            capabilities: Some(serde_json::from_value(caps).unwrap()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(serde_json::from_value(caps).unwrap()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         });
         std::io::BufReader::new(from_fenix)
     }

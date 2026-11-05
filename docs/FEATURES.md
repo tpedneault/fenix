@@ -1255,7 +1255,10 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   typescript-language-server typescript`, ...). Detect and guide only --
   Fenix never downloads or manages a tool binary itself, the same
   posture the debugger bullet above already takes for adapters it
-  doesn't have.
+  doesn't have. A language server that failed -- couldn't start, crashed,
+  or didn't answer `initialize` within 30 seconds -- is listed with why
+  and the last lines it wrote to stderr, until `:lsp-restart` tries it
+  again.
 - **Symbol picker**: with the Tcl extension, `SPC m s` in a Tcl file opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan

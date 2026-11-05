@@ -87,6 +87,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Fenix switches to, launch configurations handed to an extension
   (`${file}`, `${project}`), and the control channel (`fenix/state` said
   `...\ledger\src/main.rs`). (#38)
+- A language server that never answers `initialize` no longer shows
+  "starting" for good: after 30 seconds Fenix stops it and says so, with
+  the last thing it wrote. Tool Status (`SPC l m`) lists each server that
+  failed, why, and the last lines of its stderr. (#34)
 
 ## [1.0.1] - 2026-11-03
 

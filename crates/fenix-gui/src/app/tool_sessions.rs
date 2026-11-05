@@ -100,6 +100,7 @@ impl App {
         }
         for key in &unavailable {
             self.lsp_unavailable.remove(key);
+            self.lsp_failures.remove(key);
         }
         if name.is_empty() {
             // The list of additional servers is re-read too.
@@ -115,6 +116,29 @@ impl App {
             let what = if name.is_empty() || names.is_empty() { "language services".to_string() } else { names.join(", ") };
             self.set_message(format!("restarted {what} for {}", root.display()));
         }
+    }
+
+    /// Gives up on each language server that hasn't answered `initialize`
+    /// within `LSP_INITIALIZE_TIMEOUT`: it's stopped, said to be failing
+    /// with the last it wrote to stderr, shown so in Tool Status, and left
+    /// until `:lsp-restart`. The next time one is due, if any is starting.
+    pub(super) fn lsp_initialize_tick(&mut self, now: Instant) -> Option<Instant> {
+        let late: Vec<LspKey> = self
+            .lsp_sessions
+            .iter()
+            .filter(|(_, s)| s.capabilities.is_none() && now.duration_since(s.started) >= LSP_INITIALIZE_TIMEOUT)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in late {
+            let name = self.lsp_server_name(&key);
+            let said = self.lsp_sessions.get(&key).map(|s| s.client.stderr_tail()).unwrap_or_default();
+            self.stop_lsp_session(&key);
+            let secs = LSP_INITIALIZE_TIMEOUT.as_secs();
+            self.set_error(format!("{name} didn't start: no answer to initialize in {secs} s{} -- SPC l m shows more, :lsp-restart tries again", last_line_of(&said)));
+            self.lsp_failures.insert(key.clone(), failure_text(&format!("didn't answer initialize in {secs} s"), &said));
+            self.lsp_unavailable.insert(key);
+        }
+        self.lsp_sessions.values().filter(|s| s.capabilities.is_none()).map(|s| s.started + LSP_INITIALIZE_TIMEOUT).min()
     }
 
     /// Stops one server: its process, its diagnostics, and anything still
