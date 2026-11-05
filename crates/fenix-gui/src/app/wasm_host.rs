@@ -3737,6 +3737,27 @@ pub(crate) mod tests {
     use super::*;
     use fenix_wasm::host::Focus;
 
+    /// `cmd` as the test extension runs it (`cmd /c echo ...`): Windows'
+    /// own there; elsewhere one of the tests' that runs what follows `/c`
+    /// with `sh`, put first on `PATH` once for the whole run.
+    pub(crate) fn cmd_on_path() {
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            static SHIM: std::sync::Once = std::sync::Once::new();
+            SHIM.call_once(|| {
+                let dir = std::env::temp_dir().join(format!("fenix-gui-cmd-{}", std::process::id()));
+                std::fs::create_dir_all(&dir).unwrap();
+                let shim = dir.join("cmd");
+                std::fs::write(&shim, "#!/bin/sh\n[ \"$1\" = /c ] && shift\neval \"$@\"\n").unwrap();
+                std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+                let path = std::env::var_os("PATH").unwrap_or_default();
+                let joined = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path))).unwrap();
+                std::env::set_var("PATH", joined);
+            });
+        }
+    }
+
     pub(crate) fn hello(manifest_extra: &str) -> CodeExtension {
         let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fenix-wasm/tests/guests");
         let staged = tempfile::tempdir().unwrap().keep();
@@ -4332,6 +4353,7 @@ pub(crate) mod tests {
     /// Fenix's own task, and its end is told back too.
     #[test]
     fn its_terminals_and_tasks_are_fenixs_own_and_their_ends_go_back() {
+        cmd_on_path();
         let mut app = App::with_file(None);
         app.wasm.installed = vec![hello("[permissions]\nprocess = [\"cmd\"]\n")];
         let panes = app.windows().windows().len();

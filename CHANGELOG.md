@@ -6,6 +6,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- The explorer's `x` on an archive named in capitals (`Backup.TAR.GZ`)
+  unpacks into a folder spelled as it is (`Backup`), not lowercased.
+
 ## [1.1.0] - 2026-11-05
 
 The agents and MCP release: Fenix's tools for coding agents in toolsets,

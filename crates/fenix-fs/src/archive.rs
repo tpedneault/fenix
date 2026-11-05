@@ -52,9 +52,6 @@ pub fn archiver() -> Option<PathBuf> {
 /// `.tgz` and the rest -- because that is what the user typed and what
 /// whatever opens it will expect.
 pub fn create(sources: &[PathBuf], archive: &Path) -> io::Result<()> {
-    let Some(tar) = archiver() else {
-        return Err(io::Error::new(io::ErrorKind::Unsupported, "no archiver available on this machine"));
-    };
     if sources.is_empty() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "nothing to archive"));
     }
@@ -69,6 +66,11 @@ pub fn create(sources: &[PathBuf], archive: &Path) -> io::Result<()> {
         };
         names.push(name.to_owned());
     }
+    // What it was asked is checked first: a request that makes no
+    // sense says so wherever it's asked, archiver or not.
+    let Some(tar) = archiver() else {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "no archiver available on this machine"));
+    };
 
     // `-a` picks the format from the name, which is why the extension is
     // the whole of the format decision.
@@ -129,10 +131,13 @@ pub fn suggested_name(sources: &[PathBuf]) -> String {
 /// its extension, beside it.
 pub fn suggested_destination(archive: &Path) -> PathBuf {
     let name = archive.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "extracted".into());
-    let lower = name.to_lowercase();
-    let stem = ["tar.gz", "tar.bz2", "tar.xz", "tar.zst"]
+    // The stem as it's spelled: `Backup.TAR.GZ` unpacks into `Backup`.
+    let stem = [".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst"]
         .iter()
-        .find_map(|multi| lower.strip_suffix(&format!(".{multi}")).map(|s| s.to_string()))
+        .find_map(|multi| {
+            let cut = name.len().checked_sub(multi.len()).filter(|&at| name.is_char_boundary(at))?;
+            name[cut..].eq_ignore_ascii_case(multi).then(|| name[..cut].to_string())
+        })
         .unwrap_or_else(|| name.rsplit_once('.').map(|(stem, _)| stem.to_string()).unwrap_or_else(|| name.clone()));
     archive.parent().unwrap_or(Path::new(".")).join(stem)
 }
@@ -256,16 +261,22 @@ mod tests {
         assert!(!looks_like_archive(Path::new("zip")));
     }
 
+    /// `name` in a folder called `work`, as this platform spells it.
+    fn work(name: &str) -> PathBuf {
+        Path::new(if cfg!(windows) { r"C:\work" } else { "/work" }).join(name)
+    }
+
     #[test]
     fn one_item_is_named_after_itself_and_several_after_their_folder() {
-        assert_eq!(suggested_name(&[PathBuf::from(r"C:\work\report.docx")]), "report.docx.zip");
-        assert_eq!(suggested_name(&[PathBuf::from(r"C:\work\a.txt"), PathBuf::from(r"C:\work\b.txt")]), "work.zip");
+        assert_eq!(suggested_name(&[work("report.docx")]), "report.docx.zip");
+        assert_eq!(suggested_name(&[work("a.txt"), work("b.txt")]), "work.zip");
     }
 
     #[test]
     fn an_archive_unpacks_into_a_directory_named_after_itself() {
-        assert_eq!(suggested_destination(Path::new(r"C:\work\backup.zip")), PathBuf::from(r"C:\work\backup"));
+        assert_eq!(suggested_destination(&work("backup.zip")), work("backup"));
         // A two-part extension is one extension.
-        assert_eq!(suggested_destination(Path::new(r"C:\work\src.tar.gz")), PathBuf::from(r"C:\work\src"));
+        assert_eq!(suggested_destination(&work("src.tar.gz")), work("src"));
+        assert_eq!(suggested_destination(&work("Backup.TAR.GZ")), work("Backup"), "spelled as it was");
     }
 }
