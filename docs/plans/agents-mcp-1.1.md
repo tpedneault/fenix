@@ -1,6 +1,8 @@
 # Plan: Fenix 1.1.0, agents and MCP
 
-- **Status:** draft, 2026-11-05
+- **Status:** built, 2026-11-05 (M0–M10 merged into `release/v1.1.0`;
+  see "Where it landed" at the end). The live conformance run (ADR 0003's
+  table) and a pass in the GUI with real agents are still to do.
 - **Version:** Fenix **1.1.0**, extension API **1.2**. It also ships every
   fix made since 1.0.1 and a set of open bugs (§10).
 - **Builds on:** [`agents-acp.md`](agents-acp.md) (M0–M9, built) and
@@ -1026,3 +1028,36 @@ changes, against API 1.2.
    - Every pipeline step and every ask shows its agent and model.
    - `agents.ask.model` lets drafts go to a cheap one.
    - Pipelines stop after `max_rounds`.
+
+---
+
+## Where it landed
+
+Built as planned, with these differences:
+
+- **One control method for every tool.** Tools are rows in
+  `agent_tools.rs`, all called through `fenix/agent.call` (ADR 0003),
+  not a control method each.
+- **"For this thread" is `Y`/`N`**, the keys agents' own questions use,
+  and lasts while Fenix runs, not across restarts.
+- **Extension tools are listed** for every installed, enabled
+  extension. Fenix has no notion of an extension being on for one
+  project and not another.
+- **The extension API test kit** (§4.8) is host-side tests in
+  `fenix-wasm`, not a `testing` module: calling a guest natively needs
+  the host imports mocked.
+- **Review's drafts** are 1.1.0 of the extension, not 2.x: nothing
+  breaks for those who have it.
+
+Not built in 1.1, for later:
+
+- ACP elicitation (§5.10): ACP's shape for it isn't settled.
+- `SPC c i` / `SPC c h` as Fenix's own commands (the agent tools exist).
+- In a pipeline: findings shown beside their hunks in Agent changes, the
+  dock's step strip and `[s`/`]s`, and editing at a gate (`e`).
+- The modeline saying an MCP client over HTTP is connected (`SPC h a`
+  logs it).
+- Agents' breakpoints in a gutter shade of their own (`SPC u A` clears
+  them).
+- `cargo xtask validate` checking agent tools' classes and sizes in
+  `fenix-extensions` (Fenix's manifest check does, for API 1.2).

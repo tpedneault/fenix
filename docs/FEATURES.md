@@ -888,7 +888,8 @@ the guide.
   working tree's changes (`@diff`). `/` offers the agent's own commands;
   a picture pasted with `Ctrl-V` goes along too. `SPC a d` asks the
   agent to fix the problem on the cursor's line; `SPC a c` has it write
-  a commit message for what's staged, onto the clipboard.
+  a commit message for what's staged, in the project's style: into the
+  commit composer when it's open, else onto the clipboard.
 - **Questions**: when the agent asks before an edit or a command, the
   question is a card with its own answers (`y`, `n`, …), and the
   modeline says an agent is waiting on you.
@@ -926,15 +927,37 @@ the guide.
 - **Logins**: an agent that wants one says so in the thread. `SPC a p`
   offers its ways: one the agent does itself, or its own login command
   in a terminal pane under the thread, after which Fenix asks again.
-- **Fenix as a tool**: language server answers, unsaved text, the
-  debugger's stop and extensions' tools, as well as the following. Every
-  session gets Fenix as an MCP server
-  (`fenix --mcp`, `agents.mcp.fenix`): the agent can ask for the
-  language servers' problems, the open files (and which have unsaved
-  edits), your selection, and show you a file. With
-  `agents.mcp.fenix_write` it can also run the project's tasks and
-  Fenix's commands. Your own MCP servers (`agents.mcp.servers`) are
-  handed to every session too.
+- **Fenix as a tool**: every session gets Fenix as an MCP server
+  (`fenix --mcp`, `agents.mcp.fenix`), its tools in toolsets shown as the
+  project calls for them (`fenix_toolsets` turns on others):
+  - `core`: problems, open files and their unsaved text, the selection,
+    definitions, references, hover and symbols, and showing you a file;
+  - `lsp` and `refactor`: implementations, call and type hierarchies,
+    signature help, code actions, and renames, fixes and formatting by
+    the language servers;
+  - `git`: status, diffs, log, a commit, blame and staging -- never a
+    commit or a push;
+  - `search` and `syntax`: a search that sees unsaved text, a replace,
+    and the syntax tree's nodes and queries;
+  - `tasks`: a task or the test at a line, waited for, with its problems
+    and tests;
+  - `debug`: launches, breakpoints, starting, stepping, running to a
+    line, each answering at the program's next stop;
+  - the extensions' tools, resources and prompts.
+
+  Every edit a tool makes goes to Agent changes, like the agent's own.
+  What each may do is a rule per class (read, show, edit, run,
+  external), toolset or tool (`agents.mcp.allow`): reads are allowed,
+  edits and running asked about -- by Fenix, as a card in the thread --
+  and a project's rules can only be stricter. Resources (with
+  subscriptions) and prompts are there for clients that use them, and
+  other MCP clients can use Fenix too, over stdio or HTTP
+  (`agents.mcp.http`), under rules of their own. Your own MCP servers
+  (`agents.mcp.servers`) are handed to every session too.
+- **Pipelines** (`SPC a P`): your next prompt through agents in turn --
+  plan (you approve it), build, review, the review's findings sent back
+  to be fixed -- each step a thread with its own agent, mode and
+  toolsets, their changes one review. Your own are `pipelines/*.toml`.
 - **Agents** (`SPC a p`): a thread with another, a login, a restart.
   It also reads the ACP registry (`agents.registry`) and installs an
   agent from it into Fenix's data folder -- a download whose SHA-256 is
@@ -944,8 +967,11 @@ the guide.
   `SPC h a` shows everything said on each connection.
 - **API keys** (`SPC a s`): kept in the system's keychain and given to
   every agent as their variable (`agents.secrets`).
-- **Extensions** can bring an agent of their own, ask one a question,
-  and hear each turn end.
+- **Extensions** can bring an agent of their own, ask one a question
+  (with the branch's diff, a file or the selection attached, and a
+  structured answer), offer agents tools, resources and prompts, and
+  hear each turn end. The Review extension drafts a pull request's
+  description and summarizes one under review this way.
 
 ## Agenda and Jira
 
