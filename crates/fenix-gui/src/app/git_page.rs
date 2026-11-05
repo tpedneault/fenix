@@ -303,8 +303,16 @@ impl App {
             _ => self.git_action_repo_root(),
         };
         let start = std::fs::canonicalize(&start).map(fenix_lsp::normalize).unwrap_or(start);
-        let Some(root) = fenix_project::vcs::repository_root(&start) else {
-            self.set_error(format!("{} isn't in a git repository", readable_path(&start)));
+        // A file from outside any repository (one left open after a
+        // project switch): the project's repository instead.
+        let project = self.git_action_repo_root();
+        let project = std::fs::canonicalize(&project).map(fenix_lsp::normalize).unwrap_or(project);
+        let Some(root) = fenix_project::vcs::repository_root(&start).or_else(|| fenix_project::vcs::repository_root(&project)) else {
+            if start == project {
+                self.set_error(format!("{} isn't in a git repository", readable_path(&start)));
+            } else {
+                self.set_error(format!("neither {} nor the project, {}, is in a git repository", readable_path(&start), readable_path(&project)));
+            }
             return;
         };
         let root = fenix_lsp::normalize(root);
@@ -717,6 +725,23 @@ mod tests {
         let shown = text(&mut app);
         assert!(shown.contains("STAGED 1") && !shown.contains("UNSTAGED"), "the page read the tree again:\n{shown}");
         assert!(shown.contains("stage a.txt ✓"), "{shown}");
+    }
+
+    /// `SPC g g` with a file from outside any repository in front: the
+    /// project's repository, not nothing.
+    #[test]
+    fn a_file_outside_any_repository_opens_the_project_s() {
+        let repo = Repo::new("outside");
+        let elsewhere = std::env::temp_dir().join(format!("fenix-git-page-elsewhere-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let file = elsewhere.join("notes.txt");
+        std::fs::write(&file, "x\n").unwrap();
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(repo.dir.clone());
+        app.open_git_status();
+        let said = app.modeline_pieces().1;
+        assert_eq!(page_mut(&mut app).root, repo.dir, "{said}");
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 
     #[test]

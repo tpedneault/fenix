@@ -127,6 +127,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   clipboard. (#26)
 - Home opens on the file to resume when there is one, so the `Enter`
   its column shows resumes it rather than opening the file finder. (#49)
+- `SPC g g` with a file from outside any repository in front (one left
+  open after a project switch) opens the project's repository, or says
+  that neither is in one, rather than nothing. (#47)
 
 ## [1.0.1] - 2026-11-03
 
