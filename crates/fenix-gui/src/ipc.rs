@@ -104,10 +104,13 @@ pub fn wait_until_free(timeout: Duration) -> bool {
 fn wait_until_free_at(endpoint: &Endpoint, timeout: Duration) -> bool {
     let until = std::time::Instant::now() + timeout;
     loop {
+        // Only "nobody serves it" is free. A connection that fails (a
+        // Windows pipe whose one instance is taken answers "busy") means
+        // the old Fenix still holds it.
         match Client::connect(endpoint) {
-            Ok(Some(_)) if std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
-            Ok(Some(_)) => return false,
-            Ok(None) | Err(_) => return true,
+            Ok(None) => return true,
+            _ if std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
+            _ => return false,
         }
     }
 }
