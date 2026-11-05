@@ -130,6 +130,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `SPC g g` with a file from outside any repository in front (one left
   open after a project switch) opens the project's repository, or says
   that neither is in one, rather than nothing. (#47)
+- In the Merge view, `o` and `t` on the header row, where the cursor
+  starts, take the only conflicted file, as the hints above it say,
+  rather than doing nothing. (#46)
 
 ## [1.0.1] - 2026-11-03
 

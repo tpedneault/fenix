@@ -12767,9 +12767,22 @@ impl App {
         }
     }
 
+    /// The conflicted file the Conflicts pane's cursor is on -- or, on
+    /// its header row with only one file listed, that one, which is what
+    /// the hints above it offer to act on.
+    fn merge_file_at_cursor(&self) -> Option<String> {
+        if let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() {
+            return Some(path);
+        }
+        match self.merge_session.as_ref().map(|s| s.files.as_slice()) {
+            Some([only]) => Some(only.clone()),
+            _ => None,
+        }
+    }
+
     /// `Enter` on the Conflicts pane: show that file in the right pane.
     pub(crate) fn merge_select_at_cursor(&mut self) {
-        let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() else {
+        let Some(path) = self.merge_file_at_cursor() else {
             self.set_message("put the cursor on a conflicted file");
             return;
         };
@@ -12791,7 +12804,7 @@ impl App {
         let Some(session) = self.merge_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         let labels = session.labels.clone();
-        let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() else {
+        let Some(path) = self.merge_file_at_cursor() else {
             self.set_message("put the cursor on a conflicted file");
             return;
         };
@@ -31855,6 +31868,27 @@ configure_board stm32
         assert_eq!(on_disk, "shared\nvalue = DEVELOP\nfooter\n", "ours during a rebase is develop's version");
         assert!(app.modeline_pieces().1.contains("kept develop"), "got: {}", app.modeline_pieces().1);
         assert_eq!(fenix_git::list_files(dir.path()).iter().filter(|f| f.index_status == 'U').count(), 0, "and it's staged");
+    }
+
+    /// `o` on the header row, where the view opens, with one file listed:
+    /// that file, as the hints above it say -- not nothing.
+    #[test]
+    fn taking_a_side_on_the_header_row_takes_the_only_file() {
+        let dir = rebase_conflict_repo("merge_view_header");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+        app.open_merge_view();
+        let session = app.merge_session.as_ref().unwrap();
+        let files_pane = session.files_pane;
+        app.windows_mut().focus(files_pane);
+        app.pane_state_mut(files_pane).cursor = Cursor::at_start();
+
+        app.merge_take_whole_file(fenix_git::Resolution::Ours);
+
+        assert!(app.modeline_pieces().1.contains("kept develop"), "got: {}", app.modeline_pieces().1);
+        assert_eq!(fenix_git::list_files(dir.path()).iter().filter(|f| f.index_status == 'U').count(), 0);
     }
 
     #[test]
