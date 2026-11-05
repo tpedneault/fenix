@@ -15,7 +15,7 @@
 //!   `clientInfo`: the `client:` rules apply to it (`agent_tools::decide`).
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
 
@@ -113,6 +113,7 @@ pub fn token() -> Result<String, String> {
 fn fresh_token() -> String {
     #[cfg(unix)]
     if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        use std::io::Read;
         let mut bytes = [0u8; 32];
         if f.read_exact(&mut bytes).is_ok() {
             return bytes.iter().map(|b| format!("{b:02x}")).collect();
