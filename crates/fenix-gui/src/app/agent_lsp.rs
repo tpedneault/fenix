@@ -376,6 +376,11 @@ impl App {
         let _ = reply.send(answer);
     }
 
+    /// The soonest a request runs out of time.
+    pub(super) fn agent_lsp_next(&self) -> Option<Instant> {
+        self.agent_lsp.waiting.values().map(|w| w.until).min()
+    }
+
     /// Requests past their time are answered.
     pub(super) fn agent_lsp_tick(&mut self, now: Instant) {
         let late: Vec<u64> = self.agent_lsp.waiting.iter().filter(|(_, w)| now >= w.until).map(|(id, _)| *id).collect();

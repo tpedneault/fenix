@@ -183,6 +183,13 @@ Beyond those, Fenix's toolsets give an agent:
 - **syntax**: `syntax_node` says what function, class or block a place
   is in, and `syntax_query` runs a tree-sitter query, in any language
   Fenix has a grammar for.
+- **debug**: `debug_launches`, `debug_start`, `breakpoints`,
+  `set_breakpoint` (with a condition or a log message),
+  `clear_breakpoint`, `debug_continue`, `debug_step` (over, into, out),
+  `debug_run_to` a line, `debug_pause`, `debug_stop`, `debug_state` and
+  `debug_evaluate`. Whatever moves the program answers at its next stop,
+  with the stack and variables, so an agent steps as you would.
+  `SPC u A` clears the breakpoints agents set; yours stay.
 - **tasks**: `run_task` waits for its task and answers how it went: its
   problems with their lines, its tests, the end of its output;
   `task_output` reads the rest.

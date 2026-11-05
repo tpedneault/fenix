@@ -37,6 +37,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   type hierarchies, signature help and code actions, and have them
   rename, apply a code action or format: every edit goes to Agent
   changes, as the agent's own do.
+- Agents can drive the debugger: list launches, start one, set and
+  clear breakpoints (with conditions and log messages), continue, step,
+  run to a line, pause and stop. Each answers at the program's next
+  stop, with its stack and variables. `SPC u A` clears the breakpoints
+  agents set.
 - Agents get Git through Fenix (`git_status`, `git_diff`, `git_log`,
   `git_show`, `git_blame`, `git_stage`), a project search that sees
   unsaved text and a replace whose edits you review, the syntax tree

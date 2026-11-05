@@ -194,6 +194,7 @@ impl CommandRegistry {
         registry.register("debug.breakpoint_on_off", "Turn the line's breakpoint off, or on again, keeping it", cmd_debug_breakpoint_on_off);
         registry.register("debug.exception_breakpoints", "Choose the exceptions the debugger stops on", cmd_debug_exception_breakpoints);
         registry.register("debug.pin", "Pin the value under the cursor to its line, or unpin it", cmd_debug_pin);
+        registry.register("debug.clear_agent_breakpoints", "Clear the breakpoints coding agents set (yours stay)", |ctx| ctx.app.agent_clear_breakpoints());
         registry.register("debug.pick_launch", "Start a debug session with a launch picked again", cmd_debug_pick_launch);
         registry.external("tools.status", "Show which LSP servers/DAP adapters are found on PATH and running", |app| app.open_tool_status_panel());
 

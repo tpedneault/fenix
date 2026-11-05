@@ -90,6 +90,7 @@ the other way round after `\v`.
 | `SPC u t` | Turn the line's breakpoint off, or on again, keeping it |
 | `SPC u x` | The exceptions to stop on, in the drawer (`t` turns one on or off) |
 | `SPC u P` | Pin the value under the cursor to its line, or unpin it |
+| `SPC u A` | Clear the breakpoints coding agents set; yours stay |
 | `SPC u U` | Start debugging with a launch picked again (`SPC u u` reuses the project's last) |
 | `K` while stopped | The lens: the value of the name under the cursor, and what's in it |
 | `[t` / `]t` while debugging | Back / on along the Ember Trail, the code and its values as they were; Enter returns to now |

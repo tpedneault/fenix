@@ -195,6 +195,16 @@ pub const TOOLS: &[Tool] = &[
     // debug
     Tool { name: "debug_state", toolset: "debug", class: Class::Read, description: "Where the debugger is stopped: the stack, the selected frame's variables, watches, the program's latest output.", schema: none },
     Tool { name: "debug_evaluate", toolset: "debug", class: Class::Run, description: "Evaluates an expression where the debugger is stopped. It may run code in the program.", schema: || json!({ "type": "object", "properties": { "expression": { "type": "string" } }, "required": ["expression"] }) },
+    Tool { name: "debug_launches", toolset: "debug", class: Class::Read, description: "The launches there are for a program's language (path: a file of it; else the file in front): \"project\" for the project's own.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" } } }) },
+    Tool { name: "debug_start", toolset: "debug", class: Class::Run, description: "Starts debugging (launch, from debug_launches; path, a file of the program) and answers at the first stop, or when it ends.", schema: || json!({ "type": "object", "properties": { "launch": { "type": "string" }, "path": { "type": "string" } } }) },
+    Tool { name: "breakpoints", toolset: "debug", class: Class::Read, description: "Every breakpoint, with its condition, hit count, log message, and whether it's off.", schema: none },
+    Tool { name: "set_breakpoint", toolset: "debug", class: Class::Run, description: "Sets a breakpoint at a line, with a condition or a log message (a logpoint) if given.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer" }, "condition": { "type": "string" }, "log": { "type": "string" } }, "required": ["path", "line"] }) },
+    Tool { name: "clear_breakpoint", toolset: "debug", class: Class::Run, description: "Takes away the breakpoint at a line.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer" } }, "required": ["path", "line"] }) },
+    Tool { name: "debug_continue", toolset: "debug", class: Class::Run, description: "Continues the stopped program; answers at its next stop, its end, or after 10 s.", schema: none },
+    Tool { name: "debug_step", toolset: "debug", class: Class::Run, description: "Steps (kind: over, the default, into or out) and answers with the new stop.", schema: || json!({ "type": "object", "properties": { "kind": { "enum": ["over", "into", "out"] } } }) },
+    Tool { name: "debug_run_to", toolset: "debug", class: Class::Run, description: "Runs on to a line and answers when it stops there, or anywhere else first.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer" } }, "required": ["path", "line"] }) },
+    Tool { name: "debug_pause", toolset: "debug", class: Class::Run, description: "Stops the running program where it is.", schema: none },
+    Tool { name: "debug_stop", toolset: "debug", class: Class::Run, description: "Ends the debug session.", schema: none },
     // commands
     Tool { name: "run_command", toolset: "commands", class: Class::Run, description: "Runs a Fenix command by its id.", schema: || json!({ "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }) },
 ];

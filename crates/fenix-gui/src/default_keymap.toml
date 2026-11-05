@@ -590,6 +590,11 @@ label = "pin value"
 command = "debug.pin"
 
 [[leader]]
+keys = "SPC u A"
+label = "clear agents' breakpoints"
+command = "debug.clear_agent_breakpoints"
+
+[[leader]]
 keys = "SPC u U"
 label = "pick launch"
 command = "debug.pick_launch"

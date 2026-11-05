@@ -88,6 +88,13 @@ pub(crate) struct AgentCalls {
     seen: Option<(Option<PathBuf>, Vec<String>)>,
     /// Agents waiting for a task to end (`run_task`).
     pub(super) task_waits: Vec<super::agent_toolsets::TaskWait>,
+    /// Agents waiting for the program to stop (`debug_step` and the rest).
+    pub(super) debug_waits: Vec<super::agent_debug::DebugWait>,
+    /// Stops so far, and when the last was.
+    pub(super) debug_stops: u64,
+    pub(super) debug_stopped_at: Option<Instant>,
+    /// The breakpoints agents set, which `agents.clear_breakpoints` takes.
+    pub(super) agent_breakpoints: std::collections::HashSet<(PathBuf, usize)>,
 }
 
 /// The key a caller's toolsets and news are kept under.
@@ -296,6 +303,7 @@ impl App {
         }
         self.agent_task_waits_tick(now);
         self.agent_lsp_tick(now);
+        self.agent_debug_tick(now);
         let revision = self.agent_calls.revision;
         self.agent_calls.waiters.retain(|w| {
             if now >= w.until {
@@ -305,7 +313,7 @@ impl App {
                 true
             }
         });
-        self.agent_calls.waiters.iter().map(|w| w.until).chain(self.agent_calls.task_waits.iter().map(|w| w.until)).min()
+        self.agent_calls.waiters.iter().map(|w| w.until).chain(self.agent_calls.task_waits.iter().map(|w| w.until)).chain(self.agent_lsp_next()).chain(self.agent_debug_next()).min()
     }
 
     /// The tool list may be different now (an extension came or went, a
@@ -540,6 +548,12 @@ impl App {
             "tasks" => Call::Tasks,
             "run_command" => Call::AgentCommand(arguments),
             "debug_state" => Call::DebugState,
+            name if name.starts_with("debug_") && name != "debug_evaluate" || matches!(name, "breakpoints" | "set_breakpoint" | "clear_breakpoint") => {
+                return match self.agent_debug_call(name, arguments, reply) {
+                    Ok(()) => Ok(()),
+                    Err(reply) => Err((None, reply)),
+                };
+            }
             "debug_evaluate" => Call::DebugEvaluate(arguments),
             name => {
                 return match self.agent_toolset_call(_caller, name, arguments, reply) {

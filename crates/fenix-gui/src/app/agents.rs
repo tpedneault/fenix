@@ -1252,7 +1252,7 @@ impl App {
         }
         self.agents_fetched_tick();
         self.agents_asks_tick(now);
-        self.agent_calls_tick(now);
+        let calls_next = self.agent_calls_tick(now);
         let running = self.agents_terminals_tick();
         self.agents_logins_tick();
         let status = self.agents.hub.status();
@@ -1273,13 +1273,15 @@ impl App {
                 self.agents.save(&id);
             }
         }
-        if busy || !self.agents.inbox.lock().unwrap().is_empty() {
+        let next = if busy || !self.agents.inbox.lock().unwrap().is_empty() {
             Some(now + WATCH_EVERY)
         } else if self.agents.hub.connections().next().is_some() {
             Some(now + Duration::from_secs(1))
         } else {
             None
-        }
+        };
+        // What Fenix's tools wait for (a long poll, a task, a stop).
+        next.into_iter().chain(calls_next).min()
     }
 
     /// Files announced for change: an open, clean buffer follows the

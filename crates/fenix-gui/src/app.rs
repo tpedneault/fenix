@@ -2,6 +2,7 @@ mod agents;
 mod agent_calls;
 mod agent_toolsets;
 mod agent_lsp;
+mod agent_debug;
 mod control_agent;
 mod refactor;
 mod snippets;
@@ -8049,7 +8050,7 @@ impl App {
     /// exclude string/comment spans from the bracket scan, not to gate
     /// whether it runs at all -- `format_buffer`/`format_selection`
     /// work on any buffer regardless) `reindent_skip_ranges`.
-    fn focused_language(&self) -> Option<fenix_syntax::LanguageId> {
+    pub(super) fn focused_language(&self) -> Option<fenix_syntax::LanguageId> {
         self.open().buffer.path().and_then(|p| p.extension()).and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language)
     }
 
@@ -10301,7 +10302,7 @@ impl App {
     /// the *whole* file's breakpoint list, per DAP spec (one call replaces
     /// every breakpoint the adapter knows about for that source, there's
     /// no incremental add/remove request).
-    fn send_set_breakpoints_for(&mut self, path: &Path) {
+    pub(super) fn send_set_breakpoints_for(&mut self, path: &Path) {
         let Some(session) = self.debug_session.as_ref() else { return };
         let ready: Vec<u64> = std::iter::once((session.generation, session.initialized)).chain(session.children.iter().map(|c| (c.generation, c.initialized))).filter(|(_, ready)| *ready).map(|(on, _)| on).collect();
         for on in ready {
@@ -10634,6 +10635,7 @@ impl App {
                 session.send(on, fenix_dap::requests::Request::StackTrace(args), PendingDapRequest::StackTrace);
                 let why = serde_json::to_value(&body.reason).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
                 self.debug_mode_left = false;
+                self.agent_debug_stopped();
                 self.debug_run_to_reached();
                 self.tell_debug(fenix_wasm::host::DebugState::Paused((on, why)));
             }
