@@ -15,7 +15,11 @@
 //! - `slow`: many chunks, slowly (for cancelling);
 //! - `fail`: a tool call that fails;
 //! - `refuse`: ends the turn with `refusal`;
-//! - `long`: ends the turn with `max_tokens`.
+//! - `long`: ends the turn with `max_tokens`;
+//! - `elicit`: an `elicitation/create` form (a strategy to pick, a count, a
+//!   flag), then says what came back;
+//! - `oauth`: an `elicitation/create` URL, then `elicitation/complete`
+//!   once it's accepted.
 //!
 //! Anything else is answered "You said: <text>". In OLD, NEW and CONTENT,
 //! `\n` stands for a line break.
@@ -41,6 +45,8 @@ pub(super) enum Step {
     Fail,
     Refuse,
     Long,
+    Ask,
+    Link,
 }
 
 pub(super) fn parse(text: &str) -> Vec<Step> {
@@ -107,6 +113,10 @@ fn command(text: &str) -> Step {
         Step::Refuse
     } else if has("long") {
         Step::Long
+    } else if has("elicit") {
+        Step::Ask
+    } else if has("oauth") {
+        Step::Link
     } else {
         Step::Echo(text.to_string())
     }

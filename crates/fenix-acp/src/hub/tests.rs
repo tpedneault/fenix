@@ -674,3 +674,33 @@ fn guarded_fenix_tools_are_let_through_without_a_card() {
     assert!(fx.contains(&Effect::Respond { conn, id: json!(9), result: Ok(json!({ "outcome": { "outcome": "selected", "optionId": "ok" } })) }));
     assert_eq!(h.hub.status().waiting, 0);
 }
+
+#[test]
+fn an_elicitation_is_a_card_answered_back_to_the_agent() {
+    let mut h = Harness::new();
+    let (id, conn) = h.live_thread();
+    h.hub.prompt(&id, texts(&["go"]));
+    let params = json!({ "sessionId": "s1", "mode": "form", "message": "Which strategy?", "requestedSchema": { "type": "object", "properties": { "strategy": { "type": "string", "enum": ["a", "b"], "default": "a" }, "n": { "type": "integer", "minimum": 1 } }, "required": ["strategy"] } });
+    let fx = h.event(conn, AcpEvent::Request { id: json!(41), method: "elicitation/create".into(), params });
+    assert!(fx.contains(&Effect::Attention { thread: id.clone(), why: Attention::Permission }));
+    assert_eq!(h.hub.status().waiting, 1);
+    let card = h.hub.view(&id).unwrap().thread.entries.iter().find_map(|e| if let Entry::Elicitation(c) = e { Some(c.clone()) } else { None }).unwrap();
+    assert_eq!(card.request.fields.len(), 2);
+    let fx = h.hub.answer_elicitation(&id, &card.key, "accept", Some(json!({ "strategy": "b" })), "strategy: b");
+    assert!(fx.contains(&Effect::Respond { conn, id: json!(41), result: Ok(json!({ "action": "accept", "content": { "strategy": "b" } })) }));
+    assert_eq!(h.hub.status().waiting, 0);
+}
+
+#[test]
+fn a_link_elicitation_completes_and_an_unknown_mode_is_refused() {
+    let mut h = Harness::new();
+    let (id, conn) = h.live_thread();
+    h.event(conn, AcpEvent::Request { id: json!(5), method: "elicitation/create".into(), params: json!({ "requestId": 3, "mode": "url", "url": "https://example.com/auth", "elicitationId": "e1", "message": "Sign in" }) });
+    assert_eq!(h.hub.status().waiting, 1, "one outside a session goes to the connection's thread");
+    let fx = h.hub.answer_elicitation(&id, "5", "accept", None, "opened");
+    assert!(fx.contains(&Effect::Respond { conn, id: json!(5), result: Ok(json!({ "action": "accept" })) }));
+    let fx = h.event(conn, AcpEvent::Notification { method: "elicitation/complete".into(), params: json!({ "elicitationId": "e1" }) });
+    assert!(fx.contains(&Effect::Changed(id.clone())));
+    let fx = h.event(conn, AcpEvent::Request { id: json!(6), method: "elicitation/create".into(), params: json!({ "sessionId": "s1", "mode": "telepathy", "message": "?" }) });
+    assert!(matches!(&fx[..], [Effect::Respond { result: Err(e), .. }] if e.code == crate::protocol::code::INVALID_PARAMS));
+}

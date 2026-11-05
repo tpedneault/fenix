@@ -166,7 +166,7 @@ impl Driver {
                 }
                 std::fs::write(&path, content).map(|_| json!(null)).map_err(failed)
             }
-            ClientRequest::RequestPermission { .. } => return None,
+            ClientRequest::RequestPermission { .. } | ClientRequest::Elicit { .. } => return None,
             ClientRequest::CreateTerminal { command, args, env, cwd, output_byte_limit, .. } => {
                 let root = self.hub.meta(thread).map(|m| m.root.clone()).unwrap_or_default();
                 let mut cmd = Command::new(&command);

@@ -70,17 +70,21 @@ pub struct ClientCapabilities {
     pub terminal_auth: bool,
     /// Config options of `type: "boolean"` are understood.
     pub boolean_config_options: bool,
+    /// `elicitation/create` in form mode: a form from a restricted schema.
+    pub elicitation_form: bool,
+    /// `elicitation/create` in URL mode: a link opened out of band.
+    pub elicitation_url: bool,
 }
 
 impl ClientCapabilities {
     /// Everything Fenix implements.
     pub fn fenix() -> Self {
-        Self { read_text_file: true, write_text_file: true, terminal: true, terminal_auth: true, boolean_config_options: true }
+        Self { read_text_file: true, write_text_file: true, terminal: true, terminal_auth: true, boolean_config_options: true, elicitation_form: true, elicitation_url: true }
     }
 }
 
 pub fn initialize_params(capabilities: &ClientCapabilities, client_version: &str) -> Value {
-    json!({
+    let mut params = json!({
         "protocolVersion": PROTOCOL_VERSION,
         "clientCapabilities": {
             "fs": { "readTextFile": capabilities.read_text_file, "writeTextFile": capabilities.write_text_file },
@@ -89,7 +93,19 @@ pub fn initialize_params(capabilities: &ClientCapabilities, client_version: &str
             "session": { "configOptions": { "boolean": capabilities.boolean_config_options } },
         },
         "clientInfo": { "name": "fenix", "title": "Fenix", "version": client_version },
-    })
+    });
+    // Each mode it supports, said explicitly: `{}` would mean none.
+    if capabilities.elicitation_form || capabilities.elicitation_url {
+        let mut modes = Map::new();
+        if capabilities.elicitation_form {
+            modes.insert("form".into(), json!({}));
+        }
+        if capabilities.elicitation_url {
+            modes.insert("url".into(), json!({}));
+        }
+        params["clientCapabilities"]["elicitation"] = Value::Object(modes);
+    }
+    params
 }
 
 /// What the agent said about itself in answer to `initialize`.
@@ -782,6 +798,10 @@ pub enum ClientRequest {
     WaitForTerminalExit { session_id: SessionId, terminal_id: String },
     KillTerminal { session_id: SessionId, terminal_id: String },
     ReleaseTerminal { session_id: SessionId, terminal_id: String },
+    /// `elicitation/create`: the agent asks the user for something, a form
+    /// or a link. `session_id` is empty for one outside a session
+    /// (request-scoped).
+    Elicit { session_id: SessionId, elicitation: Elicitation },
 }
 
 impl ClientRequest {
@@ -792,6 +812,7 @@ impl ClientRequest {
         let session_id = || need("sessionId");
         let u32_of = |key: &str| params.get(key).and_then(Value::as_u64).map(|n| n.min(u32::MAX as u64) as u32);
         Ok(match method {
+            "elicitation/create" => Self::Elicit { session_id: str_of(params, "sessionId").unwrap_or_default(), elicitation: Elicitation::parse(params).map_err(|why| (code::INVALID_PARAMS, why))? },
             "fs/read_text_file" => Self::ReadTextFile { session_id: session_id()?, path: need("path")?, line: u32_of("line"), limit: u32_of("limit") },
             "fs/write_text_file" => Self::WriteTextFile { session_id: session_id()?, path: need("path")?, content: need("content")? },
             "session/request_permission" => Self::RequestPermission {
@@ -839,8 +860,163 @@ impl ClientRequest {
             | Self::TerminalOutput { session_id, .. }
             | Self::WaitForTerminalExit { session_id, .. }
             | Self::KillTerminal { session_id, .. }
-            | Self::ReleaseTerminal { session_id, .. } => session_id,
+            | Self::ReleaseTerminal { session_id, .. }
+            | Self::Elicit { session_id, .. } => session_id,
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// elicitation
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElicitMode {
+    Form,
+    Url,
+}
+
+/// What a form's field takes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldKind {
+    Text { min: Option<u64>, max: Option<u64>, pattern: Option<String>, format: Option<String> },
+    Number { integer: bool, min: Option<f64>, max: Option<f64> },
+    Boolean,
+    /// One of these (`multi`: any of them): value and title.
+    Choice { options: Vec<(String, String)>, multi: bool },
+    /// A type this Fenix doesn't know: kept, its value sent as text.
+    Unknown(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    pub name: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub kind: FieldKind,
+    pub default: Option<Value>,
+    pub required: bool,
+}
+
+/// An `elicitation/create`, read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Elicitation {
+    pub mode: ElicitMode,
+    pub message: String,
+    pub tool_call_id: Option<String>,
+    /// Form mode: its fields, in the schema's order.
+    pub fields: Vec<Field>,
+    /// URL mode: where, and the id `elicitation/complete` names it by.
+    pub url: Option<String>,
+    pub elicitation_id: Option<String>,
+}
+
+fn choice_options(p: &Value) -> Option<(Vec<(String, String)>, bool)> {
+    let titled = |list: &[Value]| list.iter().filter_map(|o| Some((str_of(o, "const")?, str_of(o, "title").or_else(|| str_of(o, "const")).unwrap_or_default()))).collect::<Vec<_>>();
+    if let Some(list) = p.get("enum").and_then(Value::as_array) {
+        return Some((list.iter().filter_map(|v| v.as_str().map(|s| (s.to_string(), s.to_string()))).collect(), false));
+    }
+    if let Some(list) = p.get("oneOf").and_then(Value::as_array) {
+        return Some((titled(list), false));
+    }
+    if p.get("type").and_then(Value::as_str) == Some("array") {
+        let items = p.get("items")?;
+        if let Some(list) = items.get("enum").and_then(Value::as_array) {
+            return Some((list.iter().filter_map(|v| v.as_str().map(|s| (s.to_string(), s.to_string()))).collect(), true));
+        }
+        if let Some(list) = items.get("anyOf").and_then(Value::as_array) {
+            return Some((titled(list), true));
+        }
+    }
+    None
+}
+
+impl Elicitation {
+    /// Reads `elicitation/create`'s params: an unknown mode is an error.
+    pub fn parse(params: &Value) -> Result<Elicitation, String> {
+        let mode = match params.get("mode").and_then(Value::as_str) {
+            Some("form") | None => ElicitMode::Form,
+            Some("url") => ElicitMode::Url,
+            Some(other) => return Err(format!("elicitation mode {other} isn't one Fenix supports (form, url)")),
+        };
+        let message = str_of(params, "message").unwrap_or_default();
+        let schema = params.get("requestedSchema").cloned().unwrap_or(Value::Null);
+        let required: Vec<String> = array_of(&schema, "required").iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+        let mut fields = Vec::new();
+        if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+            for (name, p) in props {
+                let kind = if let Some((options, multi)) = choice_options(p) {
+                    FieldKind::Choice { options, multi }
+                } else {
+                    match p.get("type").and_then(Value::as_str).unwrap_or("string") {
+                        "string" => FieldKind::Text { min: p.get("minLength").and_then(Value::as_u64), max: p.get("maxLength").and_then(Value::as_u64), pattern: str_of(p, "pattern"), format: str_of(p, "format") },
+                        "number" => FieldKind::Number { integer: false, min: p.get("minimum").and_then(Value::as_f64), max: p.get("maximum").and_then(Value::as_f64) },
+                        "integer" => FieldKind::Number { integer: true, min: p.get("minimum").and_then(Value::as_f64), max: p.get("maximum").and_then(Value::as_f64) },
+                        "boolean" => FieldKind::Boolean,
+                        other => FieldKind::Unknown(other.to_string()),
+                    }
+                };
+                fields.push(Field { title: str_of(p, "title").unwrap_or_else(|| name.clone()), description: str_of(p, "description"), kind, default: p.get("default").cloned().filter(|d| !d.is_null()), required: required.contains(name), name: name.clone() });
+            }
+        }
+        if mode == ElicitMode::Url && str_of(params, "url").is_none() {
+            return Err("a URL elicitation needs `url`".into());
+        }
+        Ok(Elicitation { mode, message, tool_call_id: str_of(params, "toolCallId"), fields, url: str_of(params, "url"), elicitation_id: str_of(params, "elicitationId") })
+    }
+
+    /// Checks an answer against the fields: what's wrong with it, if
+    /// anything. A pattern isn't evaluated (the agent wrote it; Fenix
+    /// doesn't run its regexes), only noted.
+    pub fn problems(&self, content: &Map<String, Value>) -> Vec<String> {
+        let mut out = Vec::new();
+        for f in &self.fields {
+            let Some(v) = content.get(&f.name).filter(|v| !v.is_null()) else {
+                if f.required {
+                    out.push(format!("{} is required", f.name));
+                }
+                continue;
+            };
+            match &f.kind {
+                FieldKind::Text { min, max, .. } => match v.as_str() {
+                    Some(s) => {
+                        let n = s.chars().count() as u64;
+                        if min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m) {
+                            out.push(format!("{}: {} characters, not within {}..{}", f.name, n, min.unwrap_or(0), max.map(|m| m.to_string()).unwrap_or_default()));
+                        }
+                    }
+                    None => out.push(format!("{} is text, in quotes", f.name)),
+                },
+                FieldKind::Number { integer, min, max } => match v.as_f64() {
+                    Some(x) if *integer && x.fract() != 0.0 => out.push(format!("{} is a whole number", f.name)),
+                    Some(x) if min.is_some_and(|m| x < m) || max.is_some_and(|m| x > m) => out.push(format!("{} is out of range", f.name)),
+                    Some(_) => {}
+                    None => out.push(format!("{} is a number", f.name)),
+                },
+                FieldKind::Boolean => {
+                    if !v.is_boolean() {
+                        out.push(format!("{} is true or false", f.name));
+                    }
+                }
+                FieldKind::Choice { options, multi } => {
+                    let ok = |s: &Value| s.as_str().is_some_and(|s| options.iter().any(|(value, _)| value == s));
+                    let fine = if *multi { v.as_array().is_some_and(|a| a.iter().all(ok)) } else { ok(v) };
+                    if !fine {
+                        out.push(format!("{} is {}: {}", f.name, if *multi { "a list of" } else { "one of" }, options.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>().join(", ")));
+                    }
+                }
+                FieldKind::Unknown(_) => {}
+            }
+        }
+        out
+    }
+}
+
+/// The answer to `elicitation/create`: `accept` (with the form's
+/// content), `decline` or `cancel`.
+pub fn elicitation_result(action: &str, content: Option<Value>) -> Value {
+    match content {
+        Some(content) if action == "accept" => json!({ "action": "accept", "content": content }),
+        _ => json!({ "action": action }),
     }
 }
 

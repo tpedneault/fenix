@@ -277,6 +277,17 @@ fn entry_value(e: &Entry) -> Value {
             "state": match &card.state { PermissionState::Answered(name) => json!({ "answered": name }), _ => json!("withdrawn") },
         }),
         Entry::Notice(n) => json!({ "type": "notice", "kind": notice_name(n.kind), "text": n.text }),
+        // Kept as what was asked and answered: nothing waits on it after a
+        // restart.
+        Entry::Elicitation(card) => {
+            let how = match &card.state {
+                crate::thread::ElicitationState::Answered { action, summary } if summary.is_empty() => action.clone(),
+                crate::thread::ElicitationState::Answered { action, summary } => format!("{action}: {summary}"),
+                crate::thread::ElicitationState::Completed => "done".into(),
+                _ => "not answered".into(),
+            };
+            json!({ "type": "notice", "kind": "info", "text": format!("Asked: {} ({how})", card.request.message) })
+        }
     }
 }
 

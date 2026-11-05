@@ -171,6 +171,7 @@ the other way round after `\v`.
 | `SPC a n` / `SPC a t` | A new thread with the default agent (`SPC a p` for another) / this project's threads |
 | `SPC a p` | The agents: a thread with one, a login, a restart |
 | `SPC a P` | Run the next prompt through a pipeline: plan, build and review by agents in turn |
+| `[s` / `]s` (in a thread) | A pipeline's step before or after |
 | `SPC a m` / `SPC a M` | The agent's mode / its model and other settings |
 | `SPC a k` / `SPC a R` | Cancel the agent's turn / start its agent again |
 | `SPC a i` | Continue a session the agent started outside Fenix |
@@ -255,6 +256,8 @@ the other way round after `\v`.
 | `gr` | Find references (LSP) -- populates the quickfix list, `SPC p n` / `SPC p N` to step through |
 | `K` | Show hover information for the symbol under the cursor (LSP) |
 | `SPC c r` | Rename the symbol under the cursor across the project (LSP) |
+| `SPC c i` | Where the trait, interface or method under the cursor is implemented: jumped to, or listed when there are several (LSP) |
+| `SPC c h` | Who calls the function under the cursor, listed as `gr` lists references (LSP call hierarchy) |
 | `SPC c a` | Choose a code action and preview its edits (LSP) |
 | `SPC c f` | Indent region -- reindent the active Visual selection structurally, or (with an attached language server) reformat the whole document (LSP) |
 | `SPC c F` | Indent region -- reindent the whole focused buffer structurally, or (with an attached language server) reformat it (LSP) |

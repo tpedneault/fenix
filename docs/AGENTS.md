@@ -80,6 +80,13 @@ prompt goes to and in which mode.
   it asks for your attention (`agents.notify`).
 - A command's card says what ran (`$ rg -n session`) when the agent's
   own title for it doesn't ("Ran command").
+- When the agent asks you for something as it works -- a choice, a
+  few values, a sign-in -- its question is a card too. A form: `y` opens
+  it in a compose pane, each field a line with its default and what it
+  takes; send it (`Esc`, `Enter`) and it's checked first, `q` declines.
+  `Y` sends the defaults as they are, `n` declines, `x` cancels. A link
+  (a sign-in elsewhere): `y` opens it in your browser; the card says when
+  the agent hears it's done.
 - `SPC a m` picks the agent's mode (Claude Code's *plan*, *accept
   edits*…), `SPC a M` its model and other settings.
 
@@ -148,14 +155,18 @@ resumed; after three crashes in a minute it stays down until
 own, *Plan, build, review*:
 
 1. **plan**: the default agent, in its plan mode, plans the change. You
-   see the plan and say `y` to go on or `n` to stop.
+   see the plan and say `y` to go on, `e` to edit what's passed on
+   first (in a compose pane), or `n` to stop.
 2. **build**: carries it out and runs the tests.
 3. **review**: in plan mode again, reviews the changes against the plan
    and answers with findings. While there are any, they go back to
    build, at most twice.
 
-Each step is a thread of its own, shown in the dock as it runs. What the
-steps change goes into one review, so `SPC a r` shows the outcome once.
+Each step is a thread of its own, shown in the dock as it runs; the
+dock's title says where the pipeline is (`plan ✓ → build ● → review`),
+and `[s` / `]s` in the thread go to the step before or after. What the
+steps change goes into one review, so `SPC a r` shows the outcome once,
+the review's findings beside the hunks they're about.
 A step in a plan or read-only mode can't change files: anything it
 writes anyway is put back. `SPC a k` stops the step, and the pipeline.
 

@@ -76,8 +76,11 @@ impl App {
         }
         let Some(thread) = self.agents.shown(&self.pages) else { return false };
         let answer = self.agents.hub.view(&thread).and_then(|v| agent_page::answer_for(v.thread, crate::page::Key::Char(c)));
-        let Some(agent_page::Action::Permission { key, option }) = answer else { return false };
-        self.agents_answer(&thread, &key, Some(&option));
+        match answer {
+            Some(agent_page::Action::Permission { key, option }) => self.agents_answer(&thread, &key, Some(&option)),
+            Some(agent_page::Action::Elicit { key, how }) => self.agents_elicit(&thread, &key, how),
+            _ => return false,
+        }
         self.agents_dock_titles();
         true
     }
