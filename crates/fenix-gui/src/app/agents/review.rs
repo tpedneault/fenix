@@ -56,8 +56,10 @@ impl App {
             self.agents_focus_code();
         }
         if let Some(id) = self.find_page(|m| matches!(m, PageModel::AgentReview(_))) {
+            let notes = self.agents_review_notes(&thread);
             if let Some(PageModel::AgentReview(p)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
-                **p = ReviewPage::new(thread, files);
+                **p = ReviewPage::new(thread.clone(), files);
+                p.notes = notes;
             }
             self.restale_page(id);
             match self.agents_panes_showing(id).first() {
@@ -69,7 +71,14 @@ impl App {
             }
             return;
         }
-        self.open_page(PageModel::AgentReview(Box::new(ReviewPage::new(thread, files))));
+        let mut page = ReviewPage::new(thread.clone(), files);
+        page.notes = self.agents_review_notes(&thread);
+        self.open_page(PageModel::AgentReview(Box::new(page)));
+    }
+
+    /// A pipeline review's findings about `thread`'s changes, as notes.
+    fn agents_review_notes(&self, thread: &ThreadId) -> Vec<crate::agent_review::Note> {
+        self.pipelines.findings.get(thread).map(|f| f.iter().map(|f| crate::agent_review::Note { path: f.path.clone(), line: f.line, severity: f.severity.clone(), message: f.message.clone() }).collect()).unwrap_or_default()
     }
 
     pub(crate) fn agents_review_key(&mut self, id: BufferId, key: crate::page::Key) {

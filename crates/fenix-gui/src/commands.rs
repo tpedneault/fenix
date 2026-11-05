@@ -311,6 +311,8 @@ impl CommandRegistry {
         registry.external("workspace.switch", "Switch to an open workspace by name", |app| app.picker_switch_workspace());
         registry.external("workspace.find", "Open a configured workspace by name, creating it if it isn't already open", |app| app.start_workspace_launcher_picker());
         registry.register("workspace.rename", "Rename the active workspace", cmd_rename_workspace);
+        registry.register("code.implementations", "Where the trait, interface or method under the cursor is implemented (LSP)", |ctx| ctx.app.request_implementations());
+        registry.register("code.callers", "Who calls the function under the cursor (LSP call hierarchy)", |ctx| ctx.app.request_callers());
         registry.register(
             "code.lsp_rename",
             "Rename the symbol under the cursor across the project (LSP)",

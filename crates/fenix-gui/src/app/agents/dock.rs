@@ -121,7 +121,13 @@ impl App {
         }
         self.agents.titled = page_pane.into_iter().chain(composer_pane).collect();
         if let Some(pane) = page_pane {
-            self.pane_titles.insert(pane, format!("Agent · {title}"));
+            // A pipeline's step: where it's at, first.
+            let strip = thread.as_ref().and_then(|t| self.pipeline_strip(t));
+            let shown = match strip {
+                Some(strip) => format!("Agent · {strip} · {title}"),
+                None => format!("Agent · {title}"),
+            };
+            self.pane_titles.insert(pane, shown);
         }
         if let Some(pane) = composer_pane {
             let to = match &mode {

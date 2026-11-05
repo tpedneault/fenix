@@ -482,6 +482,11 @@ enum ComposePurpose {
     /// A code extension's (`compose`): what's written goes back to it as
     /// `composed` for its call `id`.
     Code { ext: String, id: u64, what: String, verb: &'static str, allow_empty: bool },
+    /// What a pipeline's gate passes on, edited before it goes (`e`).
+    PipelineGate { run: u64 },
+    /// The form an agent asked to have filled in (`elicitation/create`),
+    /// for its card `key` in thread `thread`.
+    Elicitation { thread: String, key: String },
 }
 
 /// Where an extension's compose pane `what` is kept unsent.
@@ -544,6 +549,8 @@ impl ComposePurpose {
             },
             ComposePurpose::RebaseMessage { hash, .. } => (format!("New message for {}", &hash[..7.min(hash.len())]), "keep"),
             ComposePurpose::Code { what, verb, .. } => (what.clone(), *verb),
+            ComposePurpose::Elicitation { .. } => ("The agent asks".to_string(), "send it"),
+            ComposePurpose::PipelineGate { .. } => ("What the pipeline passes on".to_string(), "go on (q stops)"),
         };
         format!("{what}  --  Esc then Enter to {verb}, q to cancel")
     }
@@ -7368,7 +7375,7 @@ impl App {
     /// one's has landed). The servers come primary first. The shared
     /// precondition every LSP request this app sends starts from
     /// (`gd`/`gr`/`K`/rename/code actions/format all begin here).
-    fn focused_lsp_context(&self) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
+    pub(super) fn focused_lsp_context(&self) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
         let ob = self.open();
         let path = ob.buffer.path()?;
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
@@ -7459,7 +7466,7 @@ impl App {
     /// `quickfix` list, then jumps to the first entry immediately --
     /// matching real Vim's own `:grep`/tag-list auto-jump-to-first
     /// convention, and `run_grep`'s own precedent in this codebase.
-    fn apply_lsp_references(&mut self, locations: Vec<lsp_types::Location>) {
+    pub(super) fn apply_lsp_references(&mut self, locations: Vec<lsp_types::Location>) {
         self.quickfix = locations
             .into_iter()
             .filter_map(|loc| fenix_lsp::uri_to_path(&loc.uri).map(|path| QuickfixEntry::Lsp { path, position: loc.range.start }))
@@ -7597,6 +7604,30 @@ impl App {
     /// own "find references" shows by default).
     pub(crate) fn request_references(&mut self) {
         self.request_lsp_locations(true);
+    }
+
+    /// `SPC c i` -- where the trait, interface or abstract method under the
+    /// cursor is implemented, from every server that can say: jumped to
+    /// when there's one, listed when there are more (as `gd` does).
+    pub(crate) fn request_implementations(&mut self) {
+        let Some((keys, text_document, position)) = self.focused_lsp_context() else {
+            self.set_error("no language server is running for this file");
+            return;
+        };
+        let buffer = self.focused_buffer_id();
+        let targets = self.lsp_route(&keys, fenix_lsp::fanout::Feature::Implementation);
+        if targets.is_empty() {
+            self.set_error("no language server here finds implementations");
+            return;
+        }
+        let order = targets.clone();
+        let fanout = self.start_lsp_fanout(|deadline| LspFanout::Locations { buffer, references: false, gather: fenix_lsp::fanout::Gather::new(order, deadline) }, targets.len());
+        let at = lsp_types::TextDocumentPositionParams { text_document, position };
+        for key in targets {
+            let params = lsp_types::request::GotoImplementationParams { text_document_position_params: at.clone(), work_done_progress_params: Default::default(), partial_result_params: Default::default() };
+            // Answered as a definition is: a location, or several.
+            self.send_lsp_fanout_request::<lsp_types::request::GotoImplementation>(&key, params, PendingLspRequest::Definition { fanout });
+        }
     }
 
     /// `gd`/`gr` sent to every attached server that can answer, the
@@ -12643,6 +12674,18 @@ impl App {
             self.close_compose();
             return self.code_deliver(&ext, fenix_wasm::host::Notice::Composed((id, None)));
         }
+        if let ComposePurpose::PipelineGate { run } = &compose.purpose {
+            let run = *run;
+            self.close_compose();
+            self.set_message("the pipeline stopped at its gate");
+            return self.pipeline_gate_edited(run, None);
+        }
+        if let ComposePurpose::Elicitation { thread, key } = &compose.purpose {
+            let (thread, key) = (thread.clone(), key.clone());
+            self.close_compose();
+            self.set_message("declined");
+            return self.agents_elicit_discarded(&thread, &key);
+        }
         self.close_compose();
         self.set_message("comment discarded");
     }
@@ -12654,6 +12697,22 @@ impl App {
         let body = body.trim().to_string();
         let purpose = compose.purpose.clone();
 
+        // A pipeline's gate, edited: passed on.
+        if let ComposePurpose::PipelineGate { run } = &purpose {
+            let run = *run;
+            self.close_compose();
+            self.pipeline_gate_edited(run, Some(body));
+            self.wake_caret();
+            return;
+        }
+        // An agent's form: checked against what it asked, and sent.
+        if let ComposePurpose::Elicitation { thread, key } = &purpose {
+            if self.agents_elicit_submit(thread, key, &body) {
+                self.close_compose();
+            }
+            self.wake_caret();
+            return;
+        }
         // An extension's text: back to it.
         if let ComposePurpose::Code { ext, id, allow_empty, .. } = &purpose {
             if body.is_empty() && !allow_empty {
@@ -20245,9 +20304,9 @@ impl App {
                 let stop = glyphon_to_rgba(theme.git_modified);
                 // A breakpoint's square: with a hole for a condition, as two
                 // bars for a logpoint, dim and hollow when it's off.
-                let breakpoint = |look: debug_breakpoints::BreakpointLook, bg_rect: &mut RectRenderer| {
+                let breakpoint = |look: debug_breakpoints::BreakpointLook, agent: bool, bg_rect: &mut RectRenderer| {
                     use debug_breakpoints::BreakpointLook as L;
-                    let color = glyphon_to_rgba(if look == L::Off { theme.gutter_fg } else { theme.git_conflicted });
+                    let color = glyphon_to_rgba(if look == L::Off { theme.gutter_fg } else if agent { theme.git_staged } else { theme.git_conflicted });
                     match look {
                         L::Plain => bg_rect.push_rect(gpu, x, y, size, size, color),
                         L::Log => {
@@ -20261,10 +20320,11 @@ impl App {
                     }
                 };
                 match mark {
-                    debug_host::DebugMark::Breakpoint(look) => breakpoint(look, &mut *bg_rect),
+                    debug_host::DebugMark::Breakpoint(look) => breakpoint(look, false, &mut *bg_rect),
+                    debug_host::DebugMark::AgentBreakpoint(look) => breakpoint(look, true, &mut *bg_rect),
                     debug_host::DebugMark::Stop => bg_rect.push_rect(gpu, x, top + 2.0, size * 0.6, line_height - 4.0, stop),
                     debug_host::DebugMark::StopOnBreakpoint(look) => {
-                        breakpoint(look, &mut *bg_rect);
+                        breakpoint(look, false, &mut *bg_rect);
                         bg_rect.push_rect(gpu, x + size * 0.25, y + size * 0.25, size * 0.5, size * 0.5, stop);
                     }
                 }

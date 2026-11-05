@@ -1049,15 +1049,22 @@ Built as planned, with these differences:
 - **Review's drafts** are 1.1.0 of the extension, not 2.x: nothing
   breaks for those who have it.
 
-Not built in 1.1, for later:
+Not built in 1.1.0, built since for 1.1.x:
 
-- ACP elicitation (§5.10): ACP's shape for it isn't settled.
-- `SPC c i` / `SPC c h` as Fenix's own commands (the agent tools exist).
+- ACP elicitation (§5.10), now that ACP's shape for it is stable: forms
+  as cards answered in a compose pane, and links opened in the browser.
+- `SPC c i` / `SPC c h` as Fenix's own commands.
 - In a pipeline: findings shown beside their hunks in Agent changes, the
   dock's step strip and `[s`/`]s`, and editing at a gate (`e`).
-- The modeline saying an MCP client over HTTP is connected (`SPC h a`
-  logs it).
-- Agents' breakpoints in a gutter shade of their own (`SPC u A` clears
-  them).
-- `cargo xtask validate` checking agent tools' classes and sizes in
-  `fenix-extensions` (Fenix's manifest check does, for API 1.2).
+- The modeline naming the MCP clients connected over HTTP.
+- Agents' breakpoints in a gutter shade of their own, kept across
+  restarts (`SPC u A` clears them).
+- `cargo xtask validate` checking agent tools' classes, permissions and
+  sizes in `fenix-extensions`.
+
+Still for later:
+
+- "For this thread" allows lasting across restarts.
+- A plan step's agent asks its own approval of its plan (Claude's
+  `ExitPlanMode`) before the pipeline's gate; Fenix could answer it
+  itself, once what a real agent does with each answer is checked.

@@ -147,9 +147,34 @@ struct Session {
     mcp: crate::mcp::Session,
     client: String,
     streams: Vec<TcpStream>,
+    /// When the client last asked for anything.
+    seen: std::time::Instant,
 }
 
 type Sessions = Arc<Mutex<HashMap<String, Session>>>;
+
+/// The sessions of the server this process runs, for the modeline.
+static SERVED: std::sync::OnceLock<Sessions> = std::sync::OnceLock::new();
+
+/// How long a client that keeps no stream open counts as connected after
+/// its last request.
+const LINGER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The names of the clients connected over HTTP to the server this
+/// process runs: those with a notification stream open, or that asked for
+/// something lately. Each name once.
+pub fn connected_clients() -> Vec<String> {
+    let Some(sessions) = SERVED.get() else { return Vec::new() };
+    let Ok(sessions) = sessions.lock() else { return Vec::new() };
+    live(&sessions, std::time::Instant::now())
+}
+
+fn live(sessions: &HashMap<String, Session>, now: std::time::Instant) -> Vec<String> {
+    let mut names: Vec<String> = sessions.values().filter(|s| !s.streams.is_empty() || now.duration_since(s.seen) < LINGER).map(|s| s.client.clone()).collect();
+    names.sort();
+    names.dedup();
+    names
+}
 
 /// Serves MCP over HTTP at `address` (loopback only) until the process
 /// ends.
@@ -161,7 +186,7 @@ pub fn serve(address: &str) -> Result<(), String> {
     let token = token()?;
     let listener = TcpListener::bind(address).map_err(|e| format!("{address}: {e}"))?;
     eprintln!("fenix: MCP over HTTP at http://{}/mcp (token: fenix mcp token)", listener.local_addr().map(|a| a.to_string()).unwrap_or_default());
-    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+    let sessions: Sessions = Arc::clone(SERVED.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))));
     for stream in listener.incoming().flatten() {
         let (token, sessions) = (token.clone(), Arc::clone(&sessions));
         std::thread::spawn(move || connection(stream, &token, &sessions));
@@ -207,6 +232,7 @@ fn connection(stream: TcpStream, token: &str, sessions: &Sessions) {
                 if stream.write_all(head.as_bytes()).is_ok() {
                     if let (Ok(kept), Some(session)) = (stream.try_clone(), sessions.lock().unwrap().get_mut(&id)) {
                         session.streams.push(kept);
+                        session.seen = std::time::Instant::now();
                     }
                 }
                 return;
@@ -233,7 +259,7 @@ fn post(stream: &mut TcpStream, request: Request, id: Option<String>, sessions: 
         (_, true) => {
             let id = fresh_token()[..32].to_string();
             let client = message.pointer("/params/clientInfo/name").and_then(Value::as_str).unwrap_or("mcp-http").to_string();
-            sessions.lock().unwrap().insert(id.clone(), Session { mcp: crate::mcp::Session::default(), client, streams: Vec::new() });
+            sessions.lock().unwrap().insert(id.clone(), Session { mcp: crate::mcp::Session::default(), client, streams: Vec::new(), seen: std::time::Instant::now() });
             start_watching(id.clone(), Arc::clone(sessions));
             id
         }
@@ -242,7 +268,10 @@ fn post(stream: &mut TcpStream, request: Request, id: Option<String>, sessions: 
             return;
         }
     };
-    let client = sessions.lock().unwrap().get(&id).map(|s| s.client.clone()).unwrap_or_default();
+    let client = sessions.lock().unwrap().get_mut(&id).map(|s| {
+        s.seen = std::time::Instant::now();
+        s.client.clone()
+    }).unwrap_or_default();
     let mut session = sessions.lock().unwrap().get(&id).map(|s| crate::mcp::Session { protocol: s.mcp.protocol }).unwrap_or_default();
     let mut call = |method: &str, params: Value| control_call(&client, method, params);
     let output = crate::mcp::handle(&mut session, &message, &mut call);
@@ -297,6 +326,14 @@ fn start_watching(id: String, sessions: Sessions) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_client_counts_as_connected_while_its_stream_is_open_or_it_asked_lately() {
+        let now = std::time::Instant::now();
+        let session = |client: &str, ago: u64| Session { mcp: crate::mcp::Session::default(), client: client.into(), streams: Vec::new(), seen: now - std::time::Duration::from_secs(ago) };
+        let sessions: HashMap<String, Session> = [("a".into(), session("cursor", 10)), ("b".into(), session("cursor", 20)), ("c".into(), session("old", 3600))].into_iter().collect();
+        assert_eq!(live(&sessions, now), vec!["cursor".to_string()]);
+    }
 
     #[test]
     fn a_request_is_read_with_its_headers_and_body() {

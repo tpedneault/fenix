@@ -48,6 +48,9 @@ pub(super) struct Waiting {
     reply: Sender<Reply>,
     caller: AgentCaller,
     until: Instant,
+    /// Asked from the keys (`SPC c h`), not by an agent: the answer is
+    /// shown, not sent.
+    for_user: bool,
 }
 
 /// The servers' code actions an agent was shown, to apply by id.
@@ -140,7 +143,7 @@ impl App {
     fn agent_lsp_send<R: lsp_types::request::Request>(&mut self, key: LspKey, params: R::Params, step: Step, caller: &AgentCaller, reply: Sender<Reply>) {
         self.agent_lsp.next += 1;
         let id = self.agent_lsp.next;
-        self.agent_lsp.waiting.insert(id, Waiting { key: key.clone(), step, reply, caller: caller.clone(), until: Instant::now() + AGENT_LSP_TIMEOUT });
+        self.agent_lsp.waiting.insert(id, Waiting { key: key.clone(), step, reply, caller: caller.clone(), until: Instant::now() + AGENT_LSP_TIMEOUT, for_user: false });
         self.send_lsp_fanout_request::<R>(&key, params, PendingLspRequest::Agent { id });
     }
 
@@ -256,9 +259,33 @@ impl App {
         Ok(changed(&files))
     }
 
+    /// `SPC c h`: who calls the function under the cursor, listed as `gr`
+    /// lists references.
+    pub(crate) fn request_callers(&mut self) {
+        let Some((keys, text_document, position)) = self.focused_lsp_context() else {
+            self.set_error("no language server is running for this file");
+            return;
+        };
+        let mut ready: Vec<LspKey> = keys.into_iter().filter(|k| self.lsp_sessions.get(k).and_then(|s| s.capabilities.as_ref()).is_some_and(|c| c.call_hierarchy_provider.is_some())).collect();
+        ready.sort_by_key(|k| !k.is_primary());
+        let Some(key) = ready.into_iter().next() else {
+            self.set_error("no language server here knows who calls what");
+            return;
+        };
+        let params = lsp_types::CallHierarchyPrepareParams { text_document_position_params: lsp_types::TextDocumentPositionParams { text_document, position }, work_done_progress_params: Default::default() };
+        let (reply, _) = std::sync::mpsc::channel();
+        self.agent_lsp.next += 1;
+        let id = self.agent_lsp.next;
+        self.agent_lsp.waiting.insert(id, Waiting { key: key.clone(), step: Step::Prepare(Hierarchy::CallsIn), reply, caller: AgentCaller::default(), until: Instant::now() + AGENT_LSP_TIMEOUT, for_user: true });
+        self.send_lsp_fanout_request::<lsp_types::request::CallHierarchyPrepare>(&key, params, PendingLspRequest::Agent { id });
+    }
+
     /// A server answered an agent's request (`PendingLspRequest::Agent`).
     pub(super) fn agent_lsp_answered(&mut self, id: u64, result: Result<Value, String>) {
         let Some(waiting) = self.agent_lsp.waiting.remove(&id) else { return };
+        if waiting.for_user {
+            return self.callers_answered(waiting, result);
+        }
         let Waiting { key, step, reply, caller, .. } = waiting;
         let value = match result {
             Ok(value) => value,
@@ -376,6 +403,36 @@ impl App {
         let _ = reply.send(answer);
     }
 
+    /// `SPC c h`'s answers: the prepared item asked for its callers, then
+    /// the callers listed.
+    fn callers_answered(&mut self, waiting: Waiting, result: Result<Value, String>) {
+        let value = match result {
+            Ok(v) => v,
+            Err(why) => return self.set_error(format!("the language server said: {why}")),
+        };
+        match waiting.step {
+            Step::Prepare(_) => {
+                let items: Vec<lsp_types::CallHierarchyItem> = serde_json::from_value::<Option<Vec<_>>>(value).ok().flatten().unwrap_or_default();
+                let Some(item) = items.into_iter().next() else { return self.set_message("nothing callable under the cursor") };
+                let params = lsp_types::CallHierarchyIncomingCallsParams { item, work_done_progress_params: Default::default(), partial_result_params: Default::default() };
+                self.agent_lsp.next += 1;
+                let id = self.agent_lsp.next;
+                let key = waiting.key.clone();
+                self.agent_lsp.waiting.insert(id, Waiting { step: Step::Hierarchy(Hierarchy::CallsIn), until: Instant::now() + AGENT_LSP_TIMEOUT, ..waiting });
+                self.send_lsp_fanout_request::<lsp_types::request::CallHierarchyIncomingCalls>(&key, params, PendingLspRequest::Agent { id });
+            }
+            _ => {
+                let calls: Vec<lsp_types::CallHierarchyIncomingCall> = serde_json::from_value::<Option<Vec<_>>>(value).ok().flatten().unwrap_or_default();
+                if calls.is_empty() {
+                    return self.set_message("nothing calls it");
+                }
+                // Each call site, where it is in its caller.
+                let locations: Vec<lsp_types::Location> = calls.iter().flat_map(|c| c.from_ranges.iter().map(move |r| lsp_types::Location { uri: c.from.uri.clone(), range: *r })).collect();
+                self.apply_lsp_references(locations);
+            }
+        }
+    }
+
     /// The soonest a request runs out of time.
     pub(super) fn agent_lsp_next(&self) -> Option<Instant> {
         self.agent_lsp.waiting.values().map(|w| w.until).min()
@@ -402,7 +459,7 @@ mod tests {
         app.agent_lsp.next += 1;
         let id = app.agent_lsp.next;
         let key = LspKey::primary(fenix_syntax::LanguageId::Rust, std::env::temp_dir());
-        app.agent_lsp.waiting.insert(id, Waiting { key, step, reply, caller: caller.clone(), until: Instant::now() + AGENT_LSP_TIMEOUT });
+        app.agent_lsp.waiting.insert(id, Waiting { key, step, reply, caller: caller.clone(), until: Instant::now() + AGENT_LSP_TIMEOUT, for_user: false });
         (id, answer)
     }
 
@@ -469,6 +526,20 @@ mod tests {
         let (id, answer) = waiting(&mut app, Step::Format { path: file.clone(), before }, &caller);
         app.agent_lsp_answered(id, Ok(json!([{ "range": range(0, 0, 0), "newText": "x" }])));
         assert!(answer.try_recv().unwrap().unwrap_err().message.contains("changed while"), "the buffer moved on: nothing overwritten");
+    }
+
+    #[test]
+    fn spc_c_h_lists_each_call_site() {
+        let (_dir, file, mut app, _caller) = project();
+        let (reply, _) = std::sync::mpsc::channel();
+        app.agent_lsp.next += 1;
+        let id = app.agent_lsp.next;
+        let key = LspKey::primary(fenix_syntax::LanguageId::Rust, std::env::temp_dir());
+        app.agent_lsp.waiting.insert(id, Waiting { key, step: Step::Hierarchy(Hierarchy::CallsIn), reply, caller: AgentCaller::default(), until: Instant::now() + AGENT_LSP_TIMEOUT, for_user: true });
+        let uri = fenix_lsp::path_to_uri(&fenix_lsp::normalize(std::fs::canonicalize(&file).unwrap())).unwrap();
+        let item = json!({ "name": "main", "kind": 12, "uri": uri.as_str(), "range": range(1, 0, 20), "selectionRange": range(1, 3, 7) });
+        app.agent_lsp_answered(id, Ok(json!([{ "from": item, "fromRanges": [range(1, 12, 15)] }])));
+        assert_eq!(app.quickfix.len(), 1, "the call site, listed as gr lists");
     }
 
     #[test]
