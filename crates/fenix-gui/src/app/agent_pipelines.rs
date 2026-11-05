@@ -398,7 +398,7 @@ mod tests {
         let key = app.pipelines.gates.keys().next().cloned().unwrap();
         let card = app.agents.hub.view(&first).unwrap().thread.entries.iter().rev().find_map(|e| if let fenix_acp::thread::Entry::Permission(c) = e { Some(c.clone()) } else { None }).unwrap();
         assert!(card.options.iter().any(|o| o.id == "edit"), "e edits");
-        assert_eq!(crate::agent_page::answer_for(&app.agents.hub.view(&first).unwrap().thread, crate::page::Key::Char('e')), Some(crate::agent_page::Action::Permission { key: key.clone(), option: "edit".into() }));
+        assert_eq!(crate::agent_page::answer_for(app.agents.hub.view(&first).unwrap().thread, crate::page::Key::Char('e')), Some(crate::agent_page::Action::Permission { key: key.clone(), option: "edit".into() }));
         assert!(app.pipeline_gate_answered(&key, Some("edit")));
         let compose = app.compose.as_ref().map(|c| c.buffer).expect("the passing text, to edit");
         app.replace_buffer_from_disk(compose, "the edited plan");
