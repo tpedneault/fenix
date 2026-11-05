@@ -210,9 +210,21 @@ pub trait Extension: Default + 'static {
     fn socket_accepted(&mut self, _listener: u64, _socket: u64, _peer: &str) {}
 
     /// A coding agent's turn ended, in any of your threads, when
-    /// its manifest asks (`contributes.events = ["agents"]`, with
-    /// `permissions.agents`).
+    /// its manifest asks (`contributes.events = ["agents"]`). What the
+    /// agent said, and the thread's title, come only with
+    /// `permissions.agents`.
     fn agent_turn_ended(&mut self, _turn: AgentTurn) {}
+
+    /// Service call `call` (one [`Extension::serve`] answered `None` to)
+    /// was given up on -- its caller cancelled it, or its time ran out
+    /// (an agent tool's `timeout_ms`) -- so what it does for it can stop.
+    /// An answer given after goes nowhere. 1.2.
+    fn service_cancelled(&mut self, _call: u64) {}
+
+    /// The answer to its ask `call` ([`agents::ask_with`],
+    /// [`agents::AskHandle::id`]) so far, all of it, while the agent
+    /// writes it -- when it asked with [`agents::Ask::stream`]. 1.2.
+    fn agent_ask_progress(&mut self, _call: u64, _text: &str) {}
 }
 
 thread_local! {
@@ -310,6 +322,12 @@ macro_rules! export {
             }
             fn agent_turn_ended(turn: $crate::AgentTurn) {
                 $crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::agent_turn_ended(e, turn))
+            }
+            fn service_cancelled(call: u64) {
+                $crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::service_cancelled(e, call))
+            }
+            fn agent_ask_progress(call: u64, text: String) {
+                $crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::agent_ask_progress(e, call, &text))
             }
         }
 
@@ -793,6 +811,13 @@ pub fn home(section: Option<&HomeSection>) {
 /// would come later.
 pub fn answer(call: u64, result: Result<String, String>) {
     host::service_answer(call, result.as_deref().map_err(String::as_str))
+}
+
+/// How far service call `call` has got, before [`answer`]: what it's
+/// doing, and how much is done (0 to 1) when it knows. An agent calling
+/// it as a tool is shown it. 1.2.
+pub fn progress(call: u64, message: &str, fraction: Option<f32>) {
+    host::service_progress(call, message, fraction)
 }
 
 /// Asks another extension's, or Fenix's, service `name`; the answer comes
@@ -1626,8 +1651,38 @@ pub mod tools {
 ///     }
 /// });
 /// ```
+///
+/// With options (1.2): what to attach, the shape of the answer, and its
+/// draft as it's written.
+///
+/// ```no_run
+/// use fenix_extension_api::agents::{self, Ask, Attach, DiffOf};
+/// use fenix_extension_api::{run, serde_json};
+/// use std::time::Duration;
+///
+/// run::spawn(async {
+///     let schema = serde_json::json!({"type": "object", "required": ["title", "body"],
+///         "properties": {"title": {"type": "string"}, "body": {"type": "string"}}});
+///     let ask = Ask::new("Write this pull request's description.")
+///         .attach(Attach::diff(DiffOf::range("origin/main", "HEAD")))
+///         .attach(Attach::commits("origin/main..HEAD"))
+///         .attach(Attach::file(".github/pull_request_template.md"))
+///         .answer_as(schema)
+///         .stream(true)
+///         .timeout(Duration::from_secs(120));
+///     let Ok(handle) = agents::ask_with(ask) else { return };
+///     match handle.await {
+///         Ok(answer) => fenix_extension_api::notify(&answer.json["title"].to_string()),
+///         Err(e) => fenix_extension_api::notify(&e),
+///     }
+/// });
+/// ```
 pub mod agents {
     use super::{host, Command};
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use std::time::Duration;
 
     /// The agent its manifest names `id` (`contributes.agents`), started
     /// by `command`: an ACP server on stdio, often one it installed in its
@@ -1637,39 +1692,240 @@ pub mod agents {
     }
 
     /// What an agent answered (`agents.ask`).
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
     pub struct Answer {
         /// What it said, as text.
         pub text: String,
+        /// The JSON block it answered with, held to [`Ask::answer_as`]'s
+        /// schema; `Null` when the ask gave none.
+        pub json: serde_json::Value,
         /// Why its turn ended: `end_turn`, `cancelled`, `max_tokens`,
         /// `max_turn_requests`, `refusal`.
         pub stop_reason: String,
         /// The agent that answered.
         pub agent: String,
+        /// Fenix's id for the thread it was asked in.
+        pub thread: String,
+        /// Files the agent changed anyway, put back as they were: their
+        /// paths under the project.
+        pub reverted: Vec<String>,
+    }
+
+    /// Which changes a diff is of.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum DiffOf {
+        /// What's staged (`git diff --cached`).
+        Staged,
+        /// What's changed and not staged (`git diff`).
+        Unstaged,
+        /// What `head` adds since it left `base` (`git diff base...head`).
+        Range { base: String, head: String },
+    }
+
+    impl DiffOf {
+        pub fn range(base: &str, head: &str) -> DiffOf {
+            DiffOf::Range { base: base.into(), head: head.into() }
+        }
+    }
+
+    /// Something that goes with an ask, read by Fenix -- so it needs no
+    /// permission of its own -- and given the agent as a block of its own.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Attach(serde_json::Value);
+
+    impl Attach {
+        /// The project's changes. Code: the first ask that sends some
+        /// asks you, once for the extension and the agent.
+        pub fn diff(of: DiffOf) -> Attach {
+            Attach(match of {
+                DiffOf::Staged => serde_json::json!({"kind": "diff", "of": "staged"}),
+                DiffOf::Unstaged => serde_json::json!({"kind": "diff", "of": "unstaged"}),
+                DiffOf::Range { base, head } => serde_json::json!({"kind": "diff", "of": "range", "base": base, "head": head}),
+            })
+        }
+
+        /// The messages of a range's commits (`origin/main..HEAD`).
+        pub fn commits(range: &str) -> Attach {
+            Attach(serde_json::json!({"kind": "commits", "range": range}))
+        }
+
+        /// A file of the project, by its path in it, with your unsaved
+        /// edits. Code, as a diff is.
+        pub fn file(path: &str) -> Attach {
+            Attach(serde_json::json!({"kind": "file", "path": path}))
+        }
+
+        /// What you've selected (or the cursor's line). Code, as a diff is.
+        pub fn selection() -> Attach {
+            Attach(serde_json::json!({"kind": "selection"}))
+        }
+
+        /// The problems the language servers found in the open files.
+        pub fn diagnostics() -> Attach {
+            Attach(serde_json::json!({"kind": "diagnostics"}))
+        }
+
+        /// Text it has already, by a name the agent sees.
+        pub fn text(name: &str, text: &str) -> Attach {
+            Attach(serde_json::json!({"kind": "text", "name": name, "text": text}))
+        }
+    }
+
+    /// Whether the ask's thread stays on `SPC a t`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Show {
+        /// Kept, as a thread you can open.
+        Thread,
+        /// Gone once it's answered.
+        Hidden,
+    }
+
+    /// A question for an agent, with what goes with it.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Ask {
+        prompt: String,
+        agent: Option<String>,
+        attach: Vec<Attach>,
+        answer_as: Option<serde_json::Value>,
+        stream: bool,
+        show: Option<Show>,
+        timeout: Option<Duration>,
+    }
+
+    impl Ask {
+        pub fn new(prompt: &str) -> Ask {
+            Ask { prompt: prompt.into(), agent: None, attach: Vec::new(), answer_as: None, stream: false, show: None, timeout: None }
+        }
+
+        /// The agent, by id; `None` for `agents.ask.agent`, else the
+        /// project's default one (`agents.default`).
+        pub fn agent(mut self, agent: Option<&str>) -> Ask {
+            self.agent = agent.map(str::to_string);
+            self
+        }
+
+        pub fn attach(mut self, attach: Attach) -> Ask {
+            self.attach.push(attach);
+            self
+        }
+
+        /// The answer as one JSON value matching `schema` (a JSON Schema):
+        /// Fenix finds it in what the agent says, and asks again once when
+        /// it doesn't match. [`Answer::json`] is then that value, or the
+        /// ask fails.
+        pub fn answer_as(mut self, schema: serde_json::Value) -> Ask {
+            self.answer_as = Some(schema);
+            self
+        }
+
+        /// The answer so far told to [`crate::Extension::agent_ask_progress`]
+        /// as the agent writes it.
+        pub fn stream(mut self, stream: bool) -> Ask {
+            self.stream = stream;
+            self
+        }
+
+        /// Whether its thread stays (`agents.ask.show` when it doesn't say).
+        pub fn show(mut self, show: Show) -> Ask {
+            self.show = Some(show);
+            self
+        }
+
+        /// How long it may take: 10 minutes when it doesn't say, at most 30.
+        pub fn timeout(mut self, timeout: Duration) -> Ask {
+            self.timeout = Some(timeout);
+            self
+        }
+
+        /// `agents.ask`'s payload.
+        pub fn payload(&self) -> String {
+            let mut p = serde_json::json!({ "prompt": self.prompt });
+            if let Some(agent) = &self.agent {
+                p["agent"] = serde_json::Value::from(agent.as_str());
+            }
+            if !self.attach.is_empty() {
+                p["attach"] = serde_json::Value::Array(self.attach.iter().map(|a| a.0.clone()).collect());
+            }
+            if let Some(schema) = &self.answer_as {
+                p["answerAs"] = schema.clone();
+            }
+            if self.stream {
+                p["stream"] = serde_json::Value::Bool(true);
+            }
+            if let Some(show) = self.show {
+                p["show"] = serde_json::Value::from(match show {
+                    Show::Thread => "thread",
+                    Show::Hidden => "hidden",
+                });
+            }
+            if let Some(timeout) = self.timeout {
+                p["timeoutMs"] = serde_json::Value::from(timeout.as_millis() as u64);
+            }
+            p.to_string()
+        }
     }
 
     /// `agents.ask`'s payload: the prompt, and the agent by id (`None`
     /// for the project's default one, `agents.default`).
     pub fn payload(prompt: &str, agent: Option<&str>) -> String {
-        let mut p = serde_json::json!({ "prompt": prompt });
-        if let Some(agent) = agent {
-            p["agent"] = serde_json::Value::from(agent);
-        }
-        p.to_string()
+        Ask::new(prompt).agent(agent).payload()
     }
 
     /// `agents.ask`'s answer, read.
     pub fn answer(text: &str) -> Result<Answer, String> {
         let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("agents.ask: {e}"))?;
         let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
-        Ok(Answer { text: field("text"), stop_reason: field("stopReason"), agent: field("agent") })
+        let reverted = v.get("reverted").and_then(|r| r.as_array()).map(|r| r.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        Ok(Answer { text: field("text"), json: v.get("json").cloned().unwrap_or_default(), stop_reason: field("stopReason"), agent: field("agent"), thread: field("thread"), reverted })
     }
 
-    /// Asks an agent once, in a thread of its own in the project, and
-    /// waits for its answer (needs `permissions.agents`). It may read the
-    /// project, not change it: whatever it asks permission for is refused.
+    /// An ask under way: await it for the answer, or [`AskHandle::cancel`]
+    /// it.
+    pub struct AskHandle {
+        id: u64,
+        wait: Pin<Box<dyn Future<Output = Result<String, String>>>>,
+    }
+
+    impl AskHandle {
+        /// Its call's id: what [`crate::Extension::agent_ask_progress`]
+        /// is told with.
+        pub fn id(&self) -> u64 {
+            self.id
+        }
+
+        /// Gives it up: the agent's turn is cancelled, its thread closed,
+        /// and the ask ends with an error ("cancelled").
+        pub fn cancel(&self) {
+            host::call_service("agents.cancel", &serde_json::json!({ "call": self.id }).to_string());
+        }
+    }
+
+    impl Future for AskHandle {
+        type Output = Result<Answer, String>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            match self.wait.as_mut().poll(cx) {
+                Poll::Ready(Ok(text)) => Poll::Ready(answer(&text)),
+                Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    /// Asks an agent, in a thread of its own in the project (needs
+    /// `permissions.agents`): sent now, answered when the handle's
+    /// awaited. It may read the project, not change it -- it runs in the
+    /// agent's most restrictive mode when it has one, whatever it asks
+    /// permission for is refused, and a file it changes anyway is put
+    /// back ([`Answer::reverted`]).
+    pub fn ask_with(ask: Ask) -> Result<AskHandle, String> {
+        let id = host::call_service("agents.ask", &ask.payload());
+        Ok(AskHandle { id, wait: Box::pin(crate::run::service_reply(id)) })
+    }
+
+    /// Asks an agent once and waits for its answer: `ask_with(Ask::new(prompt).agent(agent))`.
     pub async fn ask(prompt: &str, agent: Option<&str>) -> Result<Answer, String> {
-        answer(&crate::run::call("agents.ask", &payload(prompt, agent)).await?)
+        ask_with(Ask::new(prompt).agent(agent))?.await
     }
 }
 
@@ -1727,8 +1983,38 @@ mod tests {
         assert_eq!(agents::payload("hi", None), r#"{"prompt":"hi"}"#);
         assert!(agents::payload("hi", Some("codex")).contains(r#""agent":"codex""#));
         let a = agents::answer(r#"{"text":"Done.","stopReason":"end_turn","agent":"claude","thread":"t1"}"#).unwrap();
-        assert_eq!((a.text.as_str(), a.stop_reason.as_str(), a.agent.as_str()), ("Done.", "end_turn", "claude"));
+        assert_eq!((a.text.as_str(), a.stop_reason.as_str(), a.agent.as_str(), a.thread.as_str()), ("Done.", "end_turn", "claude", "t1"));
+        assert!(a.json.is_null() && a.reverted.is_empty());
+        let a = agents::answer(r#"{"text":"x","json":{"title":"T"},"stopReason":"end_turn","agent":"claude","thread":"t2","reverted":["a.txt"]}"#).unwrap();
+        assert_eq!((a.json["title"].as_str(), a.reverted.as_slice()), (Some("T"), &["a.txt".to_string()][..]));
         assert!(agents::answer("nope").is_err());
+    }
+
+    /// 1.2's ask, with what it attaches and how it's answered, as its
+    /// payload.
+    #[test]
+    fn an_ask_with_options_is_its_payload() {
+        use agents::{Ask, Attach, DiffOf, Show};
+        let ask = Ask::new("Describe it.")
+            .agent(Some("claude"))
+            .attach(Attach::diff(DiffOf::range("origin/main", "HEAD")))
+            .attach(Attach::diff(DiffOf::Staged))
+            .attach(Attach::commits("origin/main..HEAD"))
+            .attach(Attach::file("README.md"))
+            .attach(Attach::selection())
+            .attach(Attach::diagnostics())
+            .attach(Attach::text("ticket", "FEN-1: it breaks"))
+            .answer_as(serde_json::json!({"type": "object"}))
+            .stream(true)
+            .show(Show::Hidden)
+            .timeout(std::time::Duration::from_secs(120));
+        let p: serde_json::Value = serde_json::from_str(&ask.payload()).unwrap();
+        assert_eq!((p["prompt"].as_str(), p["agent"].as_str(), p["stream"].as_bool(), p["show"].as_str(), p["timeoutMs"].as_u64()), (Some("Describe it."), Some("claude"), Some(true), Some("hidden"), Some(120_000)));
+        let kinds: Vec<&str> = p["attach"].as_array().unwrap().iter().map(|a| a["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["diff", "diff", "commits", "file", "selection", "diagnostics", "text"]);
+        assert_eq!((p["attach"][0]["of"].as_str(), p["attach"][0]["base"].as_str(), p["attach"][1]["of"].as_str()), (Some("range"), Some("origin/main"), Some("staged")));
+        assert_eq!(p["answerAs"]["type"], "object");
+        assert_eq!(Ask::new("hi").payload(), agents::payload("hi", None), "the plain ask is the same");
     }
 
     #[test]

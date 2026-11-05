@@ -1,4 +1,4 @@
-// Fenix's extension API, 1.1. An extension is a component of the
+// Fenix's extension API, 1.2. An extension is a component of the
 // `extension` world: Fenix calls its exports, and it calls Fenix through
 // `host`, each call checked against the permissions its manifest asks
 // for (`[permissions]`).
@@ -8,7 +8,12 @@
 // -- returns an id at once, and its result comes later, as an `event`
 // given to `handle`. Every call into the extension has a deadline: 5
 // seconds, or what its manifest's `limits.call_ms` says, up to a minute;
-// laying out a page, a second.
+// laying out a page, a second. That's how long its code may run before it
+// returns: a service that answers later (`serve` returning none, then
+// `service-answer`) has as long as its caller waits -- an agent tool's
+// `timeout_ms`, 30 seconds unless its manifest says, up to 10 minutes.
+// Laying out pages, their keys and pastes, and surface input go before
+// the rest of what waits for it.
 //
 // Files: the extension's own folder is `/data`, always. With
 // `filesystem = "project-read"` (or `-write`) the open project is
@@ -36,7 +41,14 @@
 // (docs/adr/0001-wasm-runtime.md). What it can ask of Fenix is a new
 // import, which one built for 1.0 never calls.
 //
-// 1.1 added `git-state` and `last-task`.
+// 1.1 added `git-state` and `last-task`. 1.2 added `service-progress`, and
+// the exports `service-cancelled` and `agent-ask-progress` (world
+// `extension`; `extension-base` is what every 1.x extension has).
+//
+// The package keeps version 1.0.0 across 1.x: what a 1.x adds is in the
+// same package, so a guest built for 1.0 still names the interfaces it
+// imports as Fenix offers them. The API's version is the comments' and
+// the manifest's `engine.api`.
 package fenix:extension@1.0.0;
 
 interface types {
@@ -1218,6 +1230,10 @@ interface host {
     /// The answer to service call `call`, which `serve` said would come
     /// later.
     service-answer: func(call: u64, answer: result<string, string>);
+    /// How far service call `call` has got, while its answer is to come
+    /// later: a line saying what it's doing, and how much is done (0 to
+    /// 1) when it knows. An agent calling its tool is shown it. 1.2.
+    service-progress: func(call: u64, message: string, fraction: option<f32>);
 
     /// A picture it made (PNG, JPEG, GIF, WebP; at most 16 MiB), as an
     /// image for its canvases.
@@ -1550,8 +1566,8 @@ interface host {
     agent-provide: func(id: string, cmd: option<command>) -> result<_, string>;
 }
 
-/// An extension: what Fenix calls in it.
-world extension {
+/// What every 1.x extension has: Fenix calls these in it.
+world extension-base {
     use types.{event, page, key, surface-input, changed, focus, key-press, mouse-event, http-part, text-view, text-buffer, debug-state, agent-turn};
     import host;
 
@@ -1646,6 +1662,24 @@ world extension {
     export socket-accepted: func(listener: u64, socket: u64, peer: string);
 
     /// A coding agent's turn ended, in any of your threads (when it
-    /// asks, `contributes.events` `agents`, which needs `permissions.agents`).
+    /// asks, `contributes.events` `agents`). What the agent said, and the
+    /// thread's title, are given only with `permissions.agents`; without
+    /// it they're empty.
     export agent-turn-ended: func(turn: agent-turn);
+}
+
+/// An extension: what Fenix calls in it. What 1.2 added is called only
+/// when the extension has it, so one built before still runs.
+world extension {
+    include extension-base;
+
+    /// Service call `call` was given up on -- its caller cancelled it, or
+    /// its time ran out -- so whatever it was doing for it can stop. An
+    /// answer given after this goes nowhere. 1.2.
+    export service-cancelled: func(call: u64);
+
+    /// The answer to its `agents.ask` call `call` so far, while the agent
+    /// writes it, when it asked with `"stream": true`: all of it each
+    /// time, not what's new. 1.2.
+    export agent-ask-progress: func(call: u64, text: string);
 }

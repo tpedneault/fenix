@@ -1606,3 +1606,58 @@ fn an_agent_is_brought_asked_and_heard() {
     let (_, seen) = ext.call(Call::AgentTurnEnded(turn));
     assert!(said(&seen, Level::Info, "turn ended: claude t1 end_turn Done."), "{seen:?}");
 }
+
+/// 1.2: a service that answers later says how far it's got
+/// (`service-progress`), and hears when it's given up on
+/// (`service-cancelled`); an ask's answer so far comes to
+/// `agent-ask-progress`.
+#[test]
+fn a_service_says_how_far_it_got_and_hears_its_cancellation() {
+    let mut ext = start();
+    let (result, seen) = ext.call(Call::Serve { call: 41, name: "hello.forever".into(), payload: String::new() });
+    assert_eq!(result, Ok(Reply::Served(None)), "answered later, or never");
+    assert!(seen.contains(&Event::Asked(Request::ServiceProgress { call: 41, message: "working".into(), fraction: Some(0.5) })), "{seen:?}");
+    assert!(seen.contains(&Event::Asked(Request::ServiceProgress { call: 41, message: "still working".into(), fraction: None })), "{seen:?}");
+    let (result, seen) = ext.call(Call::ServiceCancelled(41));
+    assert_eq!(result, Ok(Reply::Done));
+    assert!(said(&seen, Level::Info, "service 41 cancelled"), "{seen:?}");
+    let (_, seen) = ext.call(Call::AgentAskProgress { call: 9, text: "Fix the".into() });
+    assert!(said(&seen, Level::Info, "ask 9 so far: Fix the"), "{seen:?}");
+}
+
+/// An extension built before 1.2 has neither export: telling it is
+/// nothing, not a trap.
+#[test]
+fn an_extension_built_before_1_2_is_told_nothing_it_lacks() {
+    let engine = engine(&Options::default()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/guests/counter.wasm");
+    let (tx, events) = mpsc::channel();
+    let worker = Worker::start(&engine, Spec::new("test.counter", wasm, dir.path()), move |e| {
+        let _ = tx.send(e);
+    });
+    let mut ext = Running { worker, events, dir, _ticker: Ticker::start(&engine) };
+    ext.until(|e| *e == Event::Ready);
+    assert_eq!(ext.call(Call::ServiceCancelled(3)).0, Ok(Reply::Done));
+    assert_eq!(ext.call(Call::AgentAskProgress { call: 3, text: "x".into() }).0, Ok(Reply::Done));
+    assert_eq!(ext.call(Call::Serve { call: 1, name: "counter.count".into(), payload: String::new() }).0, Ok(Reply::Served(Some(Ok("0".into())))), "still running");
+}
+
+/// Pages first: a page laid out while service calls wait goes before
+/// them, behind at most the one under way.
+#[test]
+fn a_page_goes_before_the_service_calls_waiting() {
+    let mut ext = start();
+    let serves: Vec<u64> = (0..4).map(|n| ext.worker.call(Call::Serve { call: n, name: "hello.busy".into(), payload: String::new() }, 0)).collect();
+    let render = ext.worker.call(Call::Render { page: 1, width: 40, height: 10 }, 0);
+    let mut order = Vec::new();
+    while order.len() < 5 {
+        if let Event::Finished { call, result } = ext.next() {
+            assert!(result.is_ok(), "{result:?}");
+            order.push(call);
+        }
+    }
+    let at = |call: u64| order.iter().position(|c| *c == call).unwrap();
+    assert!(at(render) <= 1, "behind at most the call under way: {order:?}");
+    assert!(at(serves[1]) < at(serves[2]) && at(serves[2]) < at(serves[3]), "the rest in the order they came: {order:?}");
+}
