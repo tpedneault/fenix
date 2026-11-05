@@ -51,3 +51,10 @@ pub use verbs::{
     default_remote, merge_base, merges_cleanly, pull_merge, push_args, push_tags, push_with, remotes, rename_branch, resolve_base, shortstat, stash_args, stash_with, tag,
     CommitFlags, CommitKind, PushOptions, StashOptions,
 };
+
+/// `git <args>` in `repo`, for a read the other functions don't cover
+/// (an agent's `git_log` over a range, a diff of one path between
+/// refs): its output, or what git said on failure.
+pub fn run_args(repo: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    process::run_action(repo, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+}

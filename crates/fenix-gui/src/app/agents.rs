@@ -1207,7 +1207,7 @@ impl App {
 
     /// Writes an agent's file: into its buffer when it's open (one undo
     /// step), saved unless `agents.write = "buffer"`; else to disk.
-    fn agents_write(&mut self, thread: &ThreadId, path: &Path, content: &str) -> Result<Value, RpcError> {
+    pub(super) fn agents_write(&mut self, thread: &ThreadId, path: &Path, content: &str) -> Result<Value, RpcError> {
         let failed = |e: std::io::Error| RpcError::new(code::INTERNAL_ERROR, format!("{}: {e}", path.display()));
         let open = self.buffers.id_for_path(path);
         let before = match open.and_then(|id| self.buffers.get(id)) {

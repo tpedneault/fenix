@@ -1,5 +1,6 @@
 mod agents;
 mod agent_calls;
+mod agent_toolsets;
 mod control_agent;
 mod refactor;
 mod snippets;
@@ -9771,6 +9772,8 @@ impl App {
                     session.runner = None;
                     session.run_id = None;
                 }
+                // An agent waiting for it (`run_task`) hears how it went.
+                self.agent_task_ended();
             }
         }
     }

@@ -277,7 +277,7 @@ impl App {
     }
 
     /// The tint on lines agents changed, in every open buffer.
-    pub(super) fn agents_refresh_marks(&mut self) {
+    pub(in crate::app) fn agents_refresh_marks(&mut self) {
         let mut marks: HashMap<BufferId, Vec<crate::decorations::Decoration>> = HashMap::new();
         for baselines in self.agents.baselines.values() {
             for (path, before) in baselines {

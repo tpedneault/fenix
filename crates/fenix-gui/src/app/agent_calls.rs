@@ -86,6 +86,8 @@ pub(crate) struct AgentCalls {
     /// The project and the extensions' tools at the last look: when they
     /// change, so do the lists bridges were given.
     seen: Option<(Option<PathBuf>, Vec<String>)>,
+    /// Agents waiting for a task to end (`run_task`).
+    pub(super) task_waits: Vec<super::agent_toolsets::TaskWait>,
 }
 
 /// The key a caller's toolsets and news are kept under.
@@ -292,6 +294,7 @@ impl App {
             }
             self.agent_calls.seen = seen;
         }
+        self.agent_task_waits_tick(now);
         let revision = self.agent_calls.revision;
         self.agent_calls.waiters.retain(|w| {
             if now >= w.until {
@@ -301,7 +304,7 @@ impl App {
                 true
             }
         });
-        self.agent_calls.waiters.iter().map(|w| w.until).min()
+        self.agent_calls.waiters.iter().map(|w| w.until).chain(self.agent_calls.task_waits.iter().map(|w| w.until)).min()
     }
 
     /// The tool list may be different now (an extension came or went, a
@@ -534,11 +537,15 @@ impl App {
             },
             kind @ ("definition" | "references" | "hover" | "document_symbols" | "workspace_symbols") => lsp(kind, arguments),
             "tasks" => Call::Tasks,
-            "run_task" => Call::TasksRun(arguments),
             "run_command" => Call::AgentCommand(arguments),
             "debug_state" => Call::DebugState,
             "debug_evaluate" => Call::DebugEvaluate(arguments),
-            _ => return Err((None, reply)),
+            name => {
+                return match self.agent_toolset_call(_caller, name, arguments, reply) {
+                    Ok(()) => Ok(()),
+                    Err(reply) => Err((None, reply)),
+                };
+            }
         };
         Err((Some(call), reply))
     }

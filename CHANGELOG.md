@@ -33,6 +33,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   about, Fenix asks you itself, as a card in the agent's thread, whatever
   mode the agent is in: once or for the thread. MCP clients Fenix didn't
   start may only read and show unless `client:` rules say otherwise.
+- Agents get Git through Fenix (`git_status`, `git_diff`, `git_log`,
+  `git_show`, `git_blame`, `git_stage`), a project search that sees
+  unsaved text and a replace whose edits you review, the syntax tree
+  (`syntax_node`, `syntax_query`), and tasks they can wait for:
+  `run_task` answers with the task's problems, tests and output
+  (`task_output` for the rest).
 - `SPC h a` lists every call agents made to Fenix's tools, with the rule
   that applied.
 - `fenix --mcp` tells its client when its tool list changes, passes

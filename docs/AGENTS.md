@@ -165,6 +165,27 @@ Every session gets Fenix itself as an MCP server (`fenix --mcp`,
 It can show you a file too, run the project's tasks, evaluate in the
 debugger, and call the extensions' tools, as your rules let it.
 
+Beyond those, Fenix's toolsets give an agent:
+
+- **git**: `git_status`, `git_diff` (unstaged, staged, or a branch
+  against its base), `git_log` (of a branch, a path, a range or a few
+  lines), `git_show`, `git_blame` (unsaved lines say so), and
+  `git_stage`. Nothing commits or pushes: you do.
+- **search**: `search` sees unsaved text and the project's ignores,
+  which the agent's own `rg` doesn't; `replace` changes every match, as
+  edits you review.
+- **syntax**: `syntax_node` says what function, class or block a place
+  is in, and `syntax_query` runs a tree-sitter query, in any language
+  Fenix has a grammar for.
+- **tasks**: `run_task` waits for its task and answers how it went: its
+  problems with their lines, its tests, the end of its output;
+  `task_output` reads the rest.
+
+Edits made through Fenix's tools go to Agent changes (`SPC a r`) like
+the agent's own, kept or rejected hunk by hunk; a file with your
+unsaved edits gets the change unsaved too. Long answers are cut at
+`agents.mcp.max_answer_kib`, saying how to ask for the rest.
+
 **Toolsets.** Fenix's tools come in toolsets, and an agent is shown
 the ones that fit the project, so its list stays short:
 

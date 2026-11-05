@@ -10,6 +10,7 @@
 mod agent_page;
 mod agent_review;
 mod agent_tools;
+mod agent_work;
 mod app;
 mod cli;
 mod clipboard;
