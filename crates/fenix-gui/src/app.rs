@@ -116,6 +116,9 @@ const LAYER_TICK: Duration = Duration::from_millis(33);
 /// The longest the loop sleeps with nothing due: other deadlines (the
 /// disk check) come sooner anyway.
 const IDLE_WAIT: Duration = Duration::from_secs(60);
+/// How long after the splash hands over the editor's first frame may
+/// take before the window is taken to be stuck on the splash (#65).
+const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(10);
 /// How long the caret takes to fade in/out at each blink toggle, instead
 /// of flipping instantly.
 const BLINK_FADE: Duration = Duration::from_millis(120);
@@ -5343,6 +5346,11 @@ pub struct App {
     motion: motion_host::MotionState,
     /// The launch splash, fading out over the first frames.
     splash_fade: Option<crate::splash::SplashFade>,
+    /// When the editor's first frame is overdue, from the splash's hand-off:
+    /// past it with nothing presented, the window is still showing the
+    /// splash, so its surface is made again and why it's stuck is said
+    /// (#65). Cleared by the first frame presented.
+    first_frame_due: Option<Instant>,
     /// The most recent status/error message, if any and not yet expired
     /// -- see `StatusMessage`'s own doc comment. Set via `set_message`/
     /// `set_error`; read (and its expiry checked) by `modeline_pieces`.
@@ -6000,6 +6008,7 @@ impl App {
             pulse: None,
             motion: motion_host::MotionState::default(),
             splash_fade: None,
+            first_frame_due: None,
             status_message: None,
             quit_confirm: false,
         }
@@ -15486,6 +15495,38 @@ impl App {
         }
     }
 
+    /// The editor's first frame, if it's overdue: what's in the way is
+    /// said on stderr -- no surface, no size, a hidden or minimised
+    /// window -- the surface made again and a frame asked for, every
+    /// `FIRST_FRAME_WITHIN` until one is presented (#65). When it's next
+    /// due, while it's awaited.
+    fn first_frame_tick(&mut self, now: Instant) -> Option<Instant> {
+        let due = self.first_frame_due?;
+        if now < due {
+            return Some(due);
+        }
+        let window = self.window.clone();
+        let surface = self.gpu.as_ref().map(|g| (g.surface.is_some(), g.size.width, g.size.height, g.health.failures()));
+        let (visible, minimized) = window.as_ref().map_or((None, None), |w| (w.is_visible(), w.is_minimized()));
+        let next = now + FIRST_FRAME_WITHIN;
+        // Minimised, there's nothing to draw into: wait for it.
+        if minimized == Some(true) {
+            self.first_frame_due = Some(next);
+            return Some(next);
+        }
+        eprintln!("fenix: no frame drawn {FIRST_FRAME_WITHIN:?} after the splash handed over (surface, width, height, failures: {surface:?}; visible {visible:?}, minimised {minimized:?}); making the window's surface again");
+        if let (Some(context), Some(gpu), Some(window)) = (&self.gpu_context, self.gpu.as_mut(), window.as_ref()) {
+            context.recreate_surface(gpu, Arc::clone(window));
+        }
+        for frame in 0..self.frames.len() {
+            if let Some(window) = self.frame_window(frame) {
+                window.request_redraw();
+            }
+        }
+        self.first_frame_due = Some(next);
+        Some(next)
+    }
+
     /// The caret's blink, if it's due: true when it changed and is to be
     /// drawn. Past `CARET_BLINKS_FOR` without a key it stays lit (#74).
     fn blink_tick(&mut self, now: Instant) -> bool {
@@ -21263,6 +21304,9 @@ impl App {
         if gpu.health.presented() {
             eprintln!("fenix: the window's surface is drawing again");
         }
+        if self.first_frame_due.take().is_some_and(|due| Instant::now() > due) {
+            eprintln!("fenix: the first frame came late, {:?} after the splash handed over", FIRST_FRAME_WITHIN);
+        }
         static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
         FIRST_FRAME.call_once(|| crate::profile::launch_mark("first frame"));
         text.trim();
@@ -21298,6 +21342,7 @@ impl App {
             None => self.gpu.as_mut(),
             Some(f) => self.frames[f].as_mut().and_then(|state| state.gpu.as_mut()),
         };
+        self.first_frame_due = Some(Instant::now() + FIRST_FRAME_WITHIN);
         let Some(gpu) = gpu else { return };
         match splash {
             Some(back) => {
@@ -21705,6 +21750,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // The agents: cancels that never ended, restarts after a crash,
         // idle agents stopped, files they're changing looked at.
         let wait_until = match self.agents_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // The first frame, still not drawn: the window is stuck on the
+        // splash (#65).
+        let wait_until = match self.first_frame_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
@@ -23456,6 +23507,19 @@ index 0000000..1111111 100644
     fn fresh_app_caret_is_immediately_fully_visible_no_fade_in_delay() {
         let app = App::with_file(None);
         assert_eq!(app.caret_alpha(), 1.0);
+    }
+
+    /// The first frame overdue after the splash: the loop wakes for it,
+    /// tries again, and keeps waking until one is drawn (#65).
+    #[test]
+    fn an_overdue_first_frame_is_tried_again() {
+        let mut app = App::with_file(None);
+        let now = Instant::now();
+        assert_eq!(app.first_frame_tick(now), None, "nothing awaited");
+        app.first_frame_due = Some(now + FIRST_FRAME_WITHIN);
+        assert_eq!(app.first_frame_tick(now), Some(now + FIRST_FRAME_WITHIN), "not yet");
+        let late = now + FIRST_FRAME_WITHIN + Duration::from_millis(1);
+        assert_eq!(app.first_frame_tick(late), Some(late + FIRST_FRAME_WITHIN), "tried, and awaited again");
     }
 
     /// The caret blinks for a while after a key, then stays lit and

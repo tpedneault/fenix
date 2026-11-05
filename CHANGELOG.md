@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A window that hasn't drawn the editor 10 seconds after the splash
+  handed over, still showing the splash, makes its surface again and
+  asks for a frame, and says on stderr what was in the way (`fenix
+  --console` on Windows shows it). (#65)
 - Tool Status (`SPC l m`) agrees with the doctor and the sessions: it
   resolves each server and debug adapter as they do, an extension's
   included (the Rust extension's `lldb-dap`); a server installed off
