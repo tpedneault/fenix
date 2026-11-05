@@ -11,6 +11,7 @@ mod agent_page;
 mod agent_review;
 mod agent_tools;
 mod agent_work;
+mod mcp_http;
 mod app;
 mod cli;
 mod clipboard;
@@ -83,7 +84,27 @@ fn main() -> anyhow::Result<()> {
     // `--mcp`: an MCP server on stdio for a coding agent, talking to the
     // Fenix that's running. Before anything that opens a console or a
     // window: its stdio is the protocol.
+    // `fenix mcp token`: what an MCP client over HTTP presents.
+    if args.first().map(String::as_str) == Some("mcp") && args.get(1).map(String::as_str) == Some("token") {
+        match mcp_http::token() {
+            Ok(token) => {
+                println!("{token}");
+                std::process::exit(0);
+            }
+            Err(why) => {
+                eprintln!("fenix: {why}");
+                std::process::exit(1);
+            }
+        }
+    }
     if mcp::requested(&args) {
+        if let Some(address) = args.iter().position(|a| a == "--http").and_then(|i| args.get(i + 1)) {
+            if let Err(why) = mcp_http::serve(address) {
+                eprintln!("fenix: {why}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         mcp::run(&args);
     }
     if console::requested(&args) {

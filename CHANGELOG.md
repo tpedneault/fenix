@@ -48,6 +48,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`syntax_node`, `syntax_query`), and tasks they can wait for:
   `run_task` answers with the task's problems, tests and output
   (`task_output` for the rest).
+- `fenix --mcp` offers MCP resources (an open file as it stands, the
+  problems, the selection, the debugger's stop, the repository's state,
+  the last task's output, and extensions' `agent_resources`), with
+  subscriptions that say when one changes, and prompts (`fix_diagnostic`,
+  `explain`, `review_changes`, `write_tests`, and extensions'
+  `agent_prompts`). An extension's tool tells the agent its progress,
+  and an agent's cancelling reaches the extension.
+- Fenix's MCP server over HTTP, for clients that only speak HTTP:
+  `agents.mcp.http` keeps one running on this machine, or
+  `fenix --mcp --http <address>`. Clients present the token
+  `fenix mcp token` prints, and follow the `client:` rules.
 - `SPC h a` lists every call agents made to Fenix's tools, with the rule
   that applied.
 - `fenix --mcp` tells its client when its tool list changes, passes

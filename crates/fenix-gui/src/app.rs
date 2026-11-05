@@ -3,6 +3,7 @@ mod agent_calls;
 mod agent_toolsets;
 mod agent_lsp;
 mod agent_debug;
+mod agent_context;
 mod control_agent;
 mod refactor;
 mod snippets;
@@ -4743,6 +4744,8 @@ pub struct App {
     agent_calls: agent_calls::AgentCalls,
     /// Agents' requests to the language servers (`lsp`, `refactor`).
     agent_lsp: agent_lsp::AgentLsp,
+    /// Resources MCP clients subscribed to (`agent_context`).
+    agent_subscriptions: agent_context::Subscriptions,
     refactor_undo: Option<refactor::Undo>,
     /// `SPC TAB r`'s new-name prompt, when in progress -- pre-seeded
     /// with the active workspace's current name, same capturing-prompt
@@ -5586,6 +5589,16 @@ impl App {
         };
         let config_existed = config_path.exists();
         let mut config = fenix_config::Config::load_at_or_default(config_path, state_dir);
+        // `agents.mcp.http`: Fenix's MCP server over HTTP, kept running
+        // beside the editor for clients that only speak HTTP.
+        if let Some(address) = config.text_value("agents.mcp.http").map(str::trim).filter(|a| !a.is_empty() && !cfg!(test)) {
+            let address = address.to_string();
+            std::thread::spawn(move || {
+                if let Err(why) = crate::mcp_http::serve(&address) {
+                    eprintln!("fenix: agents.mcp.http: {why}");
+                }
+            });
+        }
         // Secrets kept as plain text from before move to the keychain
         //, the first time Fenix reads them; the keychain is looked
         // for only when there's one to move.
@@ -5819,6 +5832,7 @@ impl App {
             agents: agents::AgentHost::new(),
             agent_calls: agent_calls::AgentCalls::default(),
             agent_lsp: agent_lsp::AgentLsp::default(),
+            agent_subscriptions: agent_context::Subscriptions::default(),
             refactor_undo: None,
             workspace_rename_prompt: None,
             delete_file_confirm: false,

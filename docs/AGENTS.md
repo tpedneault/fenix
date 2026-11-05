@@ -194,6 +194,15 @@ Beyond those, Fenix's toolsets give an agent:
   problems with their lines, its tests, the end of its output;
   `task_output` reads the rest.
 
+An agent whose client reads MCP **resources** finds what the read tools
+give there too: `fenix://buffer/<path>` (an open file as it stands),
+`fenix://diagnostics`, `fenix://selection`, `fenix://open_files`,
+`fenix://debug/state`, `fenix://git/status`, `fenix://task/output`, and
+the extensions'. One it subscribes to is looked at every second, and
+it's told when it changes. Fenix's **prompts** are commands its client
+may offer (Claude Code shows them with `/`): `fix_diagnostic`,
+`explain`, `review_changes` and `write_tests`, and the extensions'.
+
 Edits made through Fenix's tools go to Agent changes (`SPC a r`) like
 the agent's own, kept or rejected hunk by hunk; a file with your
 unsaved edits gets the change unsaved too. Long answers are cut at
@@ -256,6 +265,24 @@ A note before a new session's first prompt tells the agent to prefer
 Fenix's tools to searching text, and that more toolsets can be turned on.
 You don't see it in the thread (`agents.mcp.fenix_brief`). The agent
 still decides, and can use its own tools when it prefers.
+
+### Using Fenix from other MCP clients
+
+Any MCP client can use Fenix's tools while Fenix runs: Claude Desktop,
+Claude Code in a terminal (`claude mcp add fenix -- fenix --mcp`), an
+in-house tool. Give it `fenix --mcp` to start. A client that only speaks
+HTTP, or runs where it can't start a program here, can use Fenix's
+server over HTTP instead:
+
+- `agents.mcp.http = "127.0.0.1:7357"` keeps one running beside Fenix,
+  or `fenix --mcp --http 127.0.0.1:7357` runs one yourself.
+- It listens on this machine only, refuses pages from other sites, and
+  wants `Authorization: Bearer <token>`: `fenix mcp token` prints it.
+- The address is `http://127.0.0.1:7357/mcp` (Streamable HTTP).
+
+These clients aren't agents Fenix started: they may only read and show
+unless you write `client:` rules for them (`"client:toolset:git" =
+"allow"`). Their calls are in `SPC h a` under their names.
 
 Your own MCP servers (`agents.mcp.servers`) go to every session too: the
 command line that starts one, or the address of one that's running.
