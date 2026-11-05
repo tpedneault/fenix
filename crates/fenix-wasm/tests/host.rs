@@ -132,6 +132,32 @@ fn it_activates_and_what_it_says_and_asks_comes_back() {
     assert_eq!(ext.run("hello.greet").0, Ok(()));
 }
 
+/// Let go while it's still loading, it's not waited for: `detach`
+/// returns at once, and what it says once it's up -- that it's ready, what
+/// it logs -- goes nowhere. Fenix's UI thread let go of forty of them as
+/// you moved to another project, waiting out each one's loading.
+#[cfg(unix)]
+#[test]
+fn let_go_while_it_loads_it_isnt_waited_for_and_isnt_heard() {
+    let engine = engine(&Options::default()).unwrap();
+    let _ticker = Ticker::start(&engine);
+    let dir = tempfile::tempdir().unwrap();
+    // Its code from a pipe: it's loading until the pipe is written.
+    let fifo = dir.path().join("extension.wasm");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let (tx, rx) = mpsc::channel();
+    let worker = Worker::start(&engine, Spec::new("test.hello", fifo.clone(), dir.path()), move |e| {
+        let _ = tx.send(e);
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    worker.detach();
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    // Now it loads, and activates.
+    std::fs::write(&fifo, std::fs::read(hello()).unwrap()).unwrap();
+    assert!(rx.recv_timeout(Duration::from_secs(10)).is_err(), "nothing is heard of it");
+}
+
 /// A trap stops the extension, says why, and refuses what follows.
 /// Returns how long the call took, from after the extension was up.
 fn stops_on(command: &str, why: &str) -> Duration {

@@ -9,8 +9,10 @@
 //! file of exactly that name exists (a Linux file may end in `:12`).
 //! `--goto` always reads one, and so suits a tool that builds the
 //! argument (a `git difftool`, a terminal's link handler). Anything else
-//! that starts with `-` is ignored, never taken for a file; `--` ends
-//! the flags, for a file that starts with a dash.
+//! that starts with `-` is never taken for a file: an option Fenix
+//! doesn't know is warned of (`unknown_flags`) and otherwise ignored;
+//! `--` ends the flags, for a file that starts with a dash. `--help` and
+//! `--version` print and exit (`info_request`).
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +21,100 @@ use fenix_tasks::{parse_path_position, PathPosition};
 pub const NEW_WINDOW_FLAG: &str = "--new-window";
 pub const GOTO_FLAG: &str = "--goto";
 pub const PROJECT_FLAG: &str = "--project";
+
+/// What `fenix --help` prints.
+pub fn help_text() -> String {
+    format!(
+        "Fenix {version}, a keyboard-first editor
+
+Usage:
+  fenix [options] [file[:line[:col]]...]
+
+Opening:
+  file[:line[:col]]          Open a file, with the cursor at a line and column
+  --goto <file:line[:col]>   Always read a position, even when a file has that name
+  --project <dir>            Switch to a project, as SPC p p does
+  --new-window               Open in another window of the running Fenix
+  --                         End the options: what follows is a file
+
+Running:
+  --disable-extensions       Start without extensions (safe mode), in a window of its own
+  --console                  Show what Fenix prints (Windows)
+  --mcp                      Be an MCP server on stdio for a coding agent, talking to the running Fenix
+
+Extensions:
+  --install-extension <file|folder|id>   Install one (an id comes from the registry)
+  --uninstall-extension <id>             Remove one
+  --list-extensions                      List what's installed
+  --machine                              With those: the machine's extensions, for every user
+
+  --version, -V              Print the version
+  --help, -h                 Print this
+
+A running Fenix gets what a later `fenix` asks for. docs/CONTROL.md has the rest.
+",
+        version = env!("CARGO_PKG_VERSION")
+    )
+}
+
+/// What `fenix --version` prints.
+pub fn version_text() -> String {
+    format!("fenix {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// `--help` or `--version`, when the command line asks for either before
+/// any `--`: printed, and Fenix exits.
+pub fn info_request(args: &[String]) -> Option<String> {
+    for arg in args.iter().take_while(|a| *a != "--") {
+        match arg.as_str() {
+            "--help" | "-h" | "-?" => return Some(help_text()),
+            "--version" | "-V" => return Some(version_text()),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Every option Fenix knows, those another part reads included.
+const KNOWN_FLAGS: &[&str] = &[
+    NEW_WINDOW_FLAG,
+    GOTO_FLAG,
+    PROJECT_FLAG,
+    "--console",
+    "--mcp",
+    "--disable-extensions",
+    "--install-extension",
+    "--uninstall-extension",
+    "--list-extensions",
+    "--machine",
+    "--help",
+    "--version",
+];
+
+/// The options in `args` Fenix doesn't know, as typed: `--projet` is
+/// warned of, not quietly dropped. A value after an option that takes
+/// one isn't an option.
+pub fn unknown_flags(args: &[String]) -> Vec<String> {
+    let takes_value = [GOTO_FLAG, PROJECT_FLAG, "--install-extension", "--uninstall-extension"];
+    let mut unknown = Vec::new();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        if !arg.starts_with('-') || arg == "-" {
+            continue;
+        }
+        let flag = arg.split_once('=').map_or(arg.as_str(), |(flag, _)| flag);
+        if takes_value.contains(&flag) && !arg.contains('=') {
+            args.next();
+        }
+        if !KNOWN_FLAGS.contains(&flag) && !matches!(flag, "-h" | "-V" | "-?") {
+            unknown.push(arg.clone());
+        }
+    }
+    unknown
+}
 
 /// One parsed command line.
 #[derive(Debug, Default, PartialEq)]
@@ -100,6 +196,25 @@ fn absolute(cwd: &Path, path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_and_version_are_printed_not_handed_on() {
+        let help = info_request(&args(&["--help"])).unwrap();
+        for flag in ["--mcp", "--install-extension", "--list-extensions", "--disable-extensions", "--goto", "--project", "--new-window", "--version"] {
+            assert!(help.contains(flag), "{flag} missing from:\n{help}");
+        }
+        assert_eq!(info_request(&args(&["-V"])).unwrap(), format!("fenix {}", env!("CARGO_PKG_VERSION")));
+        assert_eq!(info_request(&args(&["a.rs", "--version"])), Some(version_text()));
+        assert_eq!(info_request(&args(&["--", "--help"])), None, "after -- it's a file");
+        assert_eq!(info_request(&args(&["a.rs"])), None);
+    }
+
+    #[test]
+    fn an_option_fenix_doesnt_know_is_named() {
+        assert_eq!(unknown_flags(&args(&["--projet", "repo", "a.rs"])), ["--projet"]);
+        assert!(unknown_flags(&args(&["--project", "--odd-folder", "--goto=x:1", "--console", "--mcp", "--", "--file"])).is_empty());
+        assert!(unknown_flags(&args(&["--install-extension", "x.fenixext", "--machine"])).is_empty());
+    }
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()

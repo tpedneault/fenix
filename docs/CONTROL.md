@@ -34,7 +34,10 @@ fenix [--new-window] [--project <dir>] [--goto <file:line[:col]>] [file[:line[:c
 Lines and columns count from 1. A file argument is read as a position
 only when no file of exactly that name exists. Relative paths are taken
 from the directory `fenix` was started in. `--` ends the flags, for a
-file whose name starts with `-`; any other unknown flag is ignored.
+file whose name starts with `-`; any other unknown flag is ignored,
+with a warning on stderr. `fenix --help` lists the options and
+`fenix --version` prints the version; both print and exit, without
+reaching a running Fenix.
 
 ## Where Fenix listens
 
@@ -168,6 +171,11 @@ and the view scrolls to it; a position past the end lands on the last
 line. `newWindow` (default `false`) opens another OS window for them.
 `focus` (default `true`) brings Fenix forward, un-minimizing it. An
 empty `paths` with `focus` just brings Fenix forward.
+
+A file that isn't there yet, in a folder that is, opens as a new file
+named for it, created when it's saved, as `SPC f f` does. An empty
+`path`, a folder, or a file in a folder that doesn't exist answers
+`-32602` with the reason, and then none of the paths open.
 
 ### `fenix/openProject`
 

@@ -91,6 +91,7 @@ impl CommandRegistry {
         registry.register("edit.undo", "Undo the last edit", cmd_undo);
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
         registry.register("app.quit", "Quit Fenix (confirms first if there are unsaved buffers)", cmd_quit);
+        registry.register("app.restart", "Restart Fenix where you are, for extensions and settings read at start", cmd_restart);
         registry.register("app.quit_force", "Quit Fenix immediately, discarding any unsaved changes", cmd_quit_force);
         registry.register("app.save_all_and_quit", "Save every unsaved buffer, then quit Fenix", cmd_save_all_and_quit);
         registry.register(
@@ -155,6 +156,7 @@ impl CommandRegistry {
         registry.external("task.run", "Fuzzy-pick and run a discovered project task", |app| app.picker_tasks());
         registry.external("task.rerun_last", "Rerun the most recently run task", |app| app.rerun_last_task());
         registry.register("task.kill", "End the currently running task", cmd_task_kill);
+        registry.register("task.run_test_at_cursor", "Run the test the cursor is in", cmd_task_run_test_at_cursor);
         registry.external("dashboard.open", "Show Home, the start-up dashboard", |app| app.open_dashboard());
         registry.external("terminal.toggle", "Toggle the terminal panel", |app| app.toggle_terminal());
         registry.external("terminal.open_buffer", "Open a shell in the focused pane", |app| app.open_terminal_buffer());
@@ -194,6 +196,7 @@ impl CommandRegistry {
         registry.register("debug.breakpoint_on_off", "Turn the line's breakpoint off, or on again, keeping it", cmd_debug_breakpoint_on_off);
         registry.register("debug.exception_breakpoints", "Choose the exceptions the debugger stops on", cmd_debug_exception_breakpoints);
         registry.register("debug.pin", "Pin the value under the cursor to its line, or unpin it", cmd_debug_pin);
+        registry.register("debug.clear_agent_breakpoints", "Clear the breakpoints coding agents set (yours stay)", |ctx| ctx.app.agent_clear_breakpoints());
         registry.register("debug.pick_launch", "Start a debug session with a launch picked again", cmd_debug_pick_launch);
         registry.external("tools.status", "Show which LSP servers/DAP adapters are found on PATH and running", |app| app.open_tool_status_panel());
 
@@ -228,6 +231,7 @@ impl CommandRegistry {
         registry.register("agents.send", "Send the prompt to the agent", |ctx| ctx.app.agents_send());
         registry.external("agents.review", "What the agent's thread changed, hunk by hunk: keep or reject (SPC a r)", |app| app.agents_open_review());
         registry.register("agents.reject_all", "Reject every change the agent's thread made", |ctx| ctx.app.agents_reject_all());
+        registry.register("agents.pipeline", "Run the next prompt through a pipeline of agents (plan, build, review)", |ctx| ctx.app.pipeline_pick());
         registry.register("agents.accept_all", "Keep every change the agent's thread made", |ctx| ctx.app.agents_accept_all());
         registry.register("agents.forget_ask_consent", "Make extensions ask again before they send code to an agent", |ctx| ctx.app.agents_ask_forget_consent(None));
         registry.register("agents.keep_hunk", "Keep the agent's change under the cursor", |ctx| ctx.app.agents_keep_here());
@@ -436,6 +440,10 @@ fn cmd_quit(ctx: &mut CommandCtx) {
     ctx.app.request_quit(ctx.event_loop);
 }
 
+fn cmd_restart(ctx: &mut CommandCtx) {
+    ctx.app.request_restart(ctx.event_loop);
+}
+
 fn cmd_quit_force(ctx: &mut CommandCtx) {
     if ctx.app.discard_session_edits() { ctx.event_loop.exit(); }
 }
@@ -534,6 +542,10 @@ fn cmd_project_delete(ctx: &mut CommandCtx) {
 
 fn cmd_task_kill(ctx: &mut CommandCtx) {
     ctx.app.kill_running_task();
+}
+
+fn cmd_task_run_test_at_cursor(ctx: &mut CommandCtx) {
+    ctx.app.run_test_at_cursor();
 }
 
 fn cmd_explorer_dual_pane(ctx: &mut CommandCtx) {

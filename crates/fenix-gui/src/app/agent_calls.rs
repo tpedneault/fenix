@@ -86,10 +86,19 @@ pub(crate) struct AgentCalls {
     /// The project and the extensions' tools at the last look: when they
     /// change, so do the lists bridges were given.
     seen: Option<(Option<PathBuf>, Vec<String>)>,
+    /// Agents waiting for a task to end (`run_task`).
+    pub(super) task_waits: Vec<super::agent_toolsets::TaskWait>,
+    /// Agents waiting for the program to stop (`debug_step` and the rest).
+    pub(super) debug_waits: Vec<super::agent_debug::DebugWait>,
+    /// Stops so far, and when the last was.
+    pub(super) debug_stops: u64,
+    pub(super) debug_stopped_at: Option<Instant>,
+    /// The breakpoints agents set, which `agents.clear_breakpoints` takes.
+    pub(super) agent_breakpoints: std::collections::HashSet<(PathBuf, usize)>,
 }
 
 /// The key a caller's toolsets and news are kept under.
-fn caller_key(caller: &AgentCaller) -> String {
+pub(super) fn caller_key(caller: &AgentCaller) -> String {
     match &caller.thread {
         Some(thread) => format!("thread:{thread}"),
         None => format!("client:{}", caller.client),
@@ -274,7 +283,6 @@ impl App {
 
     /// Progress on call `call`, for the agent that made it, when it asked
     /// for progress.
-    #[allow(dead_code)] // Extensions' progress comes through here (extension API 1.2).
     pub(super) fn agent_progress(&mut self, call: &str, progress: f64, total: Option<f64>, message: Option<String>) {
         let Some((caller, token)) = self.agent_calls.progress.get(call).cloned() else { return };
         self.agent_news(Some(caller), json!({ "kind": "progress", "token": token, "progress": progress, "total": total, "message": message }));
@@ -292,6 +300,10 @@ impl App {
             }
             self.agent_calls.seen = seen;
         }
+        self.agent_task_waits_tick(now);
+        self.agent_lsp_tick(now);
+        self.agent_debug_tick(now);
+        let looked = self.agent_subscriptions_tick(now);
         let revision = self.agent_calls.revision;
         self.agent_calls.waiters.retain(|w| {
             if now >= w.until {
@@ -301,7 +313,7 @@ impl App {
                 true
             }
         });
-        self.agent_calls.waiters.iter().map(|w| w.until).min()
+        self.agent_calls.waiters.iter().map(|w| w.until).chain(self.agent_calls.task_waits.iter().map(|w| w.until)).chain(self.agent_lsp_next()).chain(self.agent_debug_next()).chain(looked).min()
     }
 
     /// The tool list may be different now (an extension came or went, a
@@ -424,7 +436,6 @@ impl App {
     }
 
     /// Registers what stops call `call` if the agent cancels it.
-    #[allow(dead_code)]
     pub(super) fn agent_on_cancel(&mut self, call: &str, stop: Box<dyn FnOnce(&mut App)>) {
         if !call.is_empty() {
             self.agent_calls.running.insert(call.to_string(), stop);
@@ -472,6 +483,16 @@ impl App {
         }
     }
 
+    /// The caller's toolsets are exactly `toolsets` (a pipeline step's),
+    /// `core` besides.
+    pub(super) fn agent_set_session_toolsets(&mut self, caller: &AgentCaller, toolsets: &[String]) {
+        let mut all: BTreeSet<String> = agent_tools::TOOLSETS.iter().map(|t| t.name.to_string()).collect();
+        all.extend(self.agent_extension_toolsets().into_iter().map(|(n, _, _)| n));
+        let enabled: BTreeSet<String> = toolsets.iter().cloned().collect();
+        let disabled = all.difference(&enabled).filter(|n| *n != "core").cloned().collect();
+        self.agent_calls.sessions.insert(caller_key(caller), SessionTools { enabled, disabled });
+    }
+
     /// `fenix_toolsets`: lists them, or turns one on or off for the caller.
     fn agent_toolsets(&mut self, caller: &AgentCaller, arguments: &Value) -> Reply {
         let extensions = self.agent_extension_toolsets();
@@ -514,7 +535,22 @@ impl App {
     #[allow(clippy::result_large_err)]
     fn agent_route(&mut self, _caller: &AgentCaller, _call: &str, known: &KnownTool, arguments: Value, reply: Sender<Reply>) -> Result<(), (Option<Call>, Sender<Reply>)> {
         if known.extension.is_some() {
-            return Err((Some(Call::ToolsCall(json!({ "name": known.name, "arguments": arguments }))), reply));
+            // The extension's progress goes to the agent, and the agent's
+            // cancelling to the extension.
+            let call = _call.to_string();
+            let progress: super::wasm_host::OnProgress = Box::new(move |app: &mut App, p: &super::wasm_host::Progress| {
+                let (progress, total) = match p.fraction {
+                    Some(f) => (f64::from(f.clamp(0.0, 1.0)) * 100.0, Some(100.0)),
+                    None => (0.0, None),
+                };
+                app.agent_progress(&call, progress, total, Some(p.message.clone()).filter(|m| !m.is_empty()));
+            });
+            if let Some(serving) = self.control_tools_call_with(json!({ "name": known.name, "arguments": arguments }), reply, Some(progress)) {
+                self.agent_on_cancel(_call, Box::new(move |app: &mut App| {
+                    app.code_serve_cancel(&serving, "cancelled by the agent");
+                }));
+            }
+            return Ok(());
         }
         let lsp = |kind: &str, mut arguments: Value| {
             arguments["kind"] = json!(kind);
@@ -534,25 +570,29 @@ impl App {
             },
             kind @ ("definition" | "references" | "hover" | "document_symbols" | "workspace_symbols") => lsp(kind, arguments),
             "tasks" => Call::Tasks,
-            "run_task" => Call::TasksRun(arguments),
             "run_command" => Call::AgentCommand(arguments),
             "debug_state" => Call::DebugState,
+            name if name.starts_with("debug_") && name != "debug_evaluate" || matches!(name, "breakpoints" | "set_breakpoint" | "clear_breakpoint") => {
+                return match self.agent_debug_call(name, arguments, reply) {
+                    Ok(()) => Ok(()),
+                    Err(reply) => Err((None, reply)),
+                };
+            }
             "debug_evaluate" => Call::DebugEvaluate(arguments),
-            _ => return Err((None, reply)),
+            name => {
+                return match self.agent_toolset_call(_caller, name, arguments, reply) {
+                    Ok(()) => Ok(()),
+                    Err(reply) => Err((None, reply)),
+                };
+            }
         };
         Err((Some(call), reply))
     }
 
-    /// Resources and prompts (`fenix/agent.resources`, `read`,
-    /// `subscribe`, `prompts`, `prompt`).
-    fn agent_context(&mut self, method: &str, _caller: AgentCaller, _params: Value, reply: Sender<Reply>) {
-        let answer = match method {
-            "resources" => Ok(json!({ "resources": [], "resourceTemplates": [] })),
-            "prompts" => Ok(json!({ "prompts": [] })),
-            "subscribe" => Ok(json!({})),
-            _ => Err(RpcError::invalid_params("Fenix has no such resource or prompt")),
-        };
-        let _ = reply.send(answer);
+    /// Whether news of `kind` is waiting (for tests).
+    #[cfg(test)]
+    pub(super) fn agent_calls_news_has(&self, kind: &str) -> bool {
+        self.agent_calls.news.iter().any(|n| n.event["kind"] == kind)
     }
 
     /// The log of Fenix's tools, as `SPC h a` shows it.

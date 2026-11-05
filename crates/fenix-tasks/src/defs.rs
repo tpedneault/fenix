@@ -36,8 +36,14 @@ pub fn default_tasks(root: &Path) -> Vec<TaskDef> {
         tasks.push(TaskDef::new("cargo clippy", "cargo", &["clippy", "--message-format=json"]));
     }
     if root.join("pyproject.toml").is_file() || root.join("setup.py").is_file() {
-        tasks.push(TaskDef::new("pytest", "pytest", &[]));
-        tasks.push(TaskDef::new("ruff check", "ruff", &["check"]));
+        // A uv project's tools are in its `.venv`, not on `PATH`.
+        if root.join("uv.lock").is_file() {
+            tasks.push(TaskDef::new("pytest", "uv", &["run", "pytest"]));
+            tasks.push(TaskDef::new("ruff check", "uv", &["run", "ruff", "check"]));
+        } else {
+            tasks.push(TaskDef::new("pytest", "pytest", &[]));
+            tasks.push(TaskDef::new("ruff check", "ruff", &["check"]));
+        }
     }
     if root.join("CMakeLists.txt").is_file() {
         tasks.push(TaskDef::new("cmake configure", "cmake", &["-B", "build"]));
@@ -51,8 +57,40 @@ pub fn default_tasks(root: &Path) -> Vec<TaskDef> {
     tasks
 }
 
+/// `first`, then those of `then` it doesn't already have: one task per
+/// name, and per command line -- an extension's `build` and the same
+/// `build` again, or core's default beside an extension's for the same
+/// command, are one row. What comes first wins.
+pub fn merge(first: Vec<TaskDef>, then: Vec<TaskDef>) -> Vec<TaskDef> {
+    let mut out: Vec<TaskDef> = Vec::new();
+    for task in first.into_iter().chain(then) {
+        if !out.iter().any(|t| t.name == task.name || (t.command == task.command && t.args == task.args)) {
+            out.push(task);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn merged_tasks_are_one_per_name_and_command() {
+        let t = |name: &str, command: &str, args: &[&str]| TaskDef::new(name, command, args);
+        let extension = vec![t("build", "cargo", &["build"]), t("test", "cargo", &["test"]), t("build", "cargo", &["build"])];
+        let core = vec![t("cargo build", "cargo", &["build"]), t("cargo test", "cargo", &["test", "--message-format=json"]), t("test", "make", &["test"])];
+        let names: Vec<String> = merge(extension, core).into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["build", "test", "cargo test"]);
+    }
+
+    #[test]
+    fn a_uv_project_runs_its_tools_through_uv() {
+        let dir = TempDir::new("uv");
+        std::fs::write(dir.path().join("pyproject.toml"), "").unwrap();
+        std::fs::write(dir.path().join("uv.lock"), "").unwrap();
+        let tasks = default_tasks(dir.path());
+        assert_eq!((tasks[0].command.as_str(), tasks[0].args.clone()), ("uv", vec!["run".to_string(), "pytest".to_string()]));
+    }
+
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 

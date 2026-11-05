@@ -70,6 +70,17 @@ pub fn in_progress(repo: &Path) -> Option<InProgress> {
     None
 }
 
+/// The message git prepared for the merge in progress (`.git/MERGE_MSG`:
+/// `Merge branch 'feature'`, and the conflicts it had), without the
+/// `#` lines `git commit` would strip. `None` when there's none, or
+/// nothing but comments.
+pub fn merge_message(repo: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(repo.join(".git").join("MERGE_MSG")).ok()?;
+    let kept: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).map(str::trim_end).collect();
+    let message = kept.join("\n").trim().to_string();
+    (!message.is_empty()).then_some(message)
+}
+
 /// Who "ours" and "theirs" actually are in the conflict markers, in
 /// terms of branches rather than git's own point of view.
 ///
@@ -247,6 +258,20 @@ v=FEATURE
         assert_eq!(sides.ours, "develop", "the branch you are on");
         assert_eq!(sides.theirs, "myfeature", "the one being merged in");
         assert_eq!(sides.theirs_role, "the branch being merged in");
+    }
+
+    /// Finishing a merge commits with git's message, not "Merge".
+    #[test]
+    fn a_conflicted_merge_has_git_s_prepared_message() {
+        let dir = diverged("merge_msg");
+        git(dir.path(), &["checkout", "-q", "develop"]);
+        git_expecting_conflict(dir.path(), &["merge", "myfeature"]);
+        let message = merge_message(dir.path()).expect("git wrote MERGE_MSG");
+        assert!(message.starts_with("Merge branch 'myfeature'"), "{message}");
+        assert!(!message.lines().any(|l| l.starts_with('#')), "{message}");
+        let clean = TempDir::new("merge_msg_clean");
+        init_repo(clean.path());
+        assert_eq!(merge_message(clean.path()), None);
     }
 
     #[test]

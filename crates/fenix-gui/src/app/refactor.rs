@@ -2,8 +2,11 @@ use super::*;
 use fenix_lsp::workspace_edit::{Document, PlannedDocument};
 use std::time::SystemTime;
 
+/// One file's one spelling, to compare by and to show: canonical (no
+/// `..`, symlinks followed) and plain (no `\\?\`, one kind of
+/// separator), as a language server spells it.
 pub(super) fn identity(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+    fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
 #[derive(Debug, Clone)]

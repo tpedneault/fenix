@@ -19,10 +19,11 @@
 // `filesystem = "project-read"` (or `-write`) the open project is
 // `/project`: the one you're in. When you move to another, Fenix starts
 // the extension again there, its pages saved and put back
-// (`page-state`, `page-restore`). Its tools folder is `/tools`, when its
-// manifest names a program there (`permissions.process`, `/tools/*`): a
-// folder of Fenix's tools folder for it, never synced, for the servers
-// and adapters it downloads and runs. Nothing else is there.
+// (`page-state`, `page-restore`): a language pack for it at once, any
+// other the next time it's used there. Its tools folder is `/tools`,
+// when its manifest names a program there (`permissions.process`,
+// `/tools/*`): a folder of Fenix's tools folder for it, never synced, for
+// the servers and adapters it downloads and runs. Nothing else is there.
 //
 // What Fenix reads or writes for it there stays there: a link it made
 // that leads out (WASI lets it, with `..`) isn't followed.

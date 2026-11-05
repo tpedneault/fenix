@@ -53,7 +53,7 @@ impl LspQuestion {
 /// The zero-based character in `line` that `params` means: `column`
 /// (from 1), or where `symbol` starts as a whole word, or the line's
 /// first non-blank.
-fn column_in(line: &str, params: &Value) -> Result<usize, RpcError> {
+pub(super) fn column_in(line: &str, params: &Value) -> Result<usize, RpcError> {
     if let Some(symbol) = params.get("symbol").and_then(Value::as_str) {
         return word_at(line, symbol).ok_or_else(|| RpcError::invalid_params(format!("{symbol} isn't on that line: {}", line.trim_end())));
     }
@@ -174,7 +174,7 @@ fn var_value(var: &debug_drawer::DebugVar) -> Value {
 
 impl App {
     /// `path` from `params`, against the project when relative.
-    fn control_path(&self, params: &Value) -> Result<PathBuf, RpcError> {
+    pub(super) fn control_path(&self, params: &Value) -> Result<PathBuf, RpcError> {
         let path = params.get("path").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("path: which file"))?;
         let path = PathBuf::from(path);
         Ok(if path.is_absolute() { path } else { self.integration_root().join(path) })

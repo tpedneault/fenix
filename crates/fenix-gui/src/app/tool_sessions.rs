@@ -48,6 +48,18 @@ pub(super) fn lsp_root_for_path(path: &Path) -> PathBuf {
     fenix_lsp::normalize(fenix_project::workspace::language_root(&root))
 }
 
+/// Language server sessions that are done with, shut down on a thread of
+/// their own: a server is asked to exit and given a moment before it's
+/// killed, and its readers end once it has -- a second or more, which
+/// the UI thread mustn't wait out (an extension starting and setting its
+/// server had it stop others in turn).
+pub(super) fn let_go(sessions: Vec<LspSession>) {
+    if sessions.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("fenix-lsp-stopping".into()).spawn(move || drop(sessions));
+}
+
 pub(super) fn generation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -100,6 +112,7 @@ impl App {
         }
         for key in &unavailable {
             self.lsp_unavailable.remove(key);
+            self.lsp_failures.remove(key);
         }
         if name.is_empty() {
             // The list of additional servers is re-read too.
@@ -117,14 +130,38 @@ impl App {
         }
     }
 
+    /// Gives up on each language server that hasn't answered `initialize`
+    /// within `LSP_INITIALIZE_TIMEOUT`: it's stopped, said to be failing
+    /// with the last it wrote to stderr, shown so in Tool Status, and left
+    /// until `:lsp-restart`. The next time one is due, if any is starting.
+    pub(super) fn lsp_initialize_tick(&mut self, now: Instant) -> Option<Instant> {
+        let late: Vec<LspKey> = self
+            .lsp_sessions
+            .iter()
+            .filter(|(_, s)| s.capabilities.is_none() && now.duration_since(s.started) >= LSP_INITIALIZE_TIMEOUT)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in late {
+            let name = self.lsp_server_name(&key);
+            let said = self.lsp_sessions.get(&key).map(|s| s.client.stderr_tail()).unwrap_or_default();
+            self.stop_lsp_session(&key);
+            let secs = LSP_INITIALIZE_TIMEOUT.as_secs();
+            self.set_error(format!("{name} didn't start: no answer to initialize in {secs} s{} -- SPC l m shows more, :lsp-restart tries again", last_line_of(&said)));
+            self.lsp_failures.insert(key.clone(), failure_text(&format!("didn't answer initialize in {secs} s"), &said));
+            self.lsp_unavailable.insert(key);
+        }
+        self.lsp_sessions.values().filter(|s| s.capabilities.is_none()).map(|s| s.started + LSP_INITIALIZE_TIMEOUT).min()
+    }
+
     /// Stops one server: its process, its diagnostics, and anything still
     /// waiting on its answers.
     pub(super) fn stop_lsp_session(&mut self, key: &LspKey) {
-        if let Some(session) = self.lsp_sessions.remove(key) {
+        if let Some(mut session) = self.lsp_sessions.remove(key) {
             self.diagnostics.forget_server(key);
-            for pending in session.pending.into_values() {
+            for pending in std::mem::take(&mut session.pending).into_values() {
                 self.lsp_request_failed(key, pending);
             }
+            let_go(vec![session]);
         }
     }
 

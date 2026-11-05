@@ -375,6 +375,46 @@ pub(crate) fn store(doc: &mut toml_edit::DocumentMut, key: &str, item: Option<to
     }
 }
 
+/// `header` (comments that had nothing after them) before the first
+/// thing in `doc`, or back as its trailing text when it's still empty.
+fn put_header_first(doc: &mut toml_edit::DocumentMut, header: String) {
+    if header.is_empty() {
+        return;
+    }
+    let first = doc.as_table().iter().map(|(k, _)| k.to_string()).next();
+    let table = doc.as_table_mut();
+    let Some(first) = first else {
+        doc.set_trailing(header);
+        return;
+    };
+    match table.get_mut(&first) {
+        // `[rust]`, or `[lsp]` above `[lsp.servers]`: its first header.
+        Some(toml_edit::Item::Table(t)) => prefix_first_header(t, &header),
+        // A plain `key = value` at the top.
+        _ => {
+            if let Some(mut key) = table.key_mut(&first) {
+                let mine = key.leaf_decor().prefix().and_then(|p| p.as_str()).unwrap_or_default().to_string();
+                key.leaf_decor_mut().set_prefix(format!("{header}{mine}"));
+            }
+        }
+    }
+}
+
+/// `header` before `table`'s own `[header]`, or, for an implicit table
+/// with none of its own, before its first table's.
+fn prefix_first_header(table: &mut toml_edit::Table, header: &str) {
+    if table.is_implicit() {
+        let next = table.iter().map(|(k, _)| k.to_string()).next();
+        if let Some(next) = next {
+            if let Some(toml_edit::Item::Table(inner)) = table.get_mut(&next) {
+                return prefix_first_header(inner, header);
+            }
+        }
+    }
+    let mine = table.decor().prefix().and_then(|p| p.as_str()).unwrap_or_default().to_string();
+    table.decor_mut().set_prefix(format!("{header}{mine}"));
+}
+
 /// The 1-based line `offset` falls on in `text`.
 pub(crate) fn line_of(text: &str, offset: usize) -> usize {
     text[..offset.min(text.len())].matches('\n').count() + 1
@@ -577,9 +617,20 @@ impl Config {
             Some(Err(_)) => return Err(io::Error::new(io::ErrorKind::InvalidData, "settings.toml was changed into something that can't be read, so it wasn't written over")),
             None => {
                 let mut doc = toml_edit::DocumentMut::new();
-                doc.decor_mut().set_prefix(HEADER);
+                doc.set_trailing(HEADER);
                 doc
             }
+        };
+        // A file of nothing but comments (the header a new one is written
+        // with) keeps them as its trailing text, which toml_edit writes
+        // after any table added: they're taken here and put back before
+        // the first setting, where they were.
+        let header = if doc.as_table().is_empty() {
+            let text = doc.trailing().as_str().unwrap_or_default().to_string();
+            doc.set_trailing("");
+            text
+        } else {
+            String::new()
         };
         let mut baseline = self.baseline.borrow_mut();
         for setting in schema::settings() {
@@ -593,6 +644,7 @@ impl Config {
             }
             baseline.insert(setting.key, now);
         }
+        put_header_first(&mut doc, header);
         let text = doc.to_string();
         if on_disk.as_deref() != Some(text.as_str()) {
             if let Some(parent) = self.path.parent() {
@@ -755,6 +807,30 @@ mod tests {
         dir.join("settings.toml")
     }
 
+
+    /// The first setting saved goes below the header comment a new
+    /// settings.toml starts with, not above it.
+    #[test]
+    fn a_first_setting_goes_after_the_header_comment() {
+        for on_disk in [None, Some(HEADER)] {
+            let path = temp_path("header_first");
+            if let Some(text) = on_disk {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, text).unwrap();
+            }
+            let mut config = Config::load_or_default(path.clone());
+            config.restore_session = Some(false);
+            config.save().unwrap();
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.starts_with("# Fenix settings."), "{text}");
+            assert_eq!(text.matches("# Fenix settings.").count(), 1, "{text}");
+            let header_end = text.find("needs to be here.").unwrap();
+            let setting = text.find("restore").unwrap();
+            assert!(setting > header_end, "{text}");
+            assert_eq!(Config::load(path.clone()).unwrap().restore_session, Some(false));
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
+    }
 
     #[test]
     fn windows_round_trip_through_save_and_load() {

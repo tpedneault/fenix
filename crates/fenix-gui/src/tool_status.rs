@@ -197,9 +197,35 @@ pub fn render_additional(entries: &[AdditionalEntry]) -> String {
     out
 }
 
+/// The language servers that failed in this project, each with why and
+/// the last lines it wrote to stderr -- empty when none has.
+pub fn render_failures(failures: &[(String, String)]) -> String {
+    if failures.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nLanguage servers that failed (:lsp-restart tries again)\n");
+    for (name, why) in failures {
+        let mut lines = why.lines();
+        out.push_str(&format!("{name}: {}\n", lines.next().unwrap_or_default()));
+        for line in lines {
+            out.push_str(&format!("    {line}\n"));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_servers_say_why_and_what_they_wrote() {
+        assert_eq!(render_failures(&[]), "");
+        let text = render_failures(&[("typescript-language-server".into(), "didn't answer initialize in 30 s\n  | Could not find a valid TypeScript installation".into())]);
+        assert!(text.contains("Language servers that failed"), "{text}");
+        assert!(text.contains("typescript-language-server: didn't answer initialize in 30 s\n"), "{text}");
+        assert!(text.contains("    | Could not find a valid TypeScript installation"), "{text}");
+    }
 
     #[test]
     fn additional_servers_are_listed_with_what_they_serve_and_how_they_are() {

@@ -135,6 +135,25 @@ fn push_todo_captures<'a>(source: &str, raw: &mut Vec<RawCapture<'a>>) {
     }
 }
 
+/// A syntax node, as a tool reports it: its kind, where it is (rows and
+/// columns from 0), the field its parent holds it in, and its first line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NodeInfo {
+    pub kind: String,
+    pub start: (usize, usize),
+    pub end: (usize, usize),
+    pub field: Option<String>,
+    pub first_line: String,
+}
+
+impl NodeInfo {
+    fn of(node: Node<'_>, source: &str, field: Option<String>) -> Self {
+        let text = source.get(node.start_byte()..node.end_byte()).unwrap_or("");
+        let first: String = text.lines().next().unwrap_or("").chars().take(160).collect();
+        NodeInfo { kind: node.kind().to_string(), start: (node.start_position().row, node.start_position().column), end: (node.end_position().row, node.end_position().column), field, first_line: first }
+    }
+}
+
 /// Per-buffer incremental parse + highlight state for one language.
 pub struct SyntaxState {
     lang: LanguageId,
@@ -380,6 +399,63 @@ impl SyntaxState {
     /// The language this state parses.
     pub fn language(&self) -> LanguageId {
         self.lang
+    }
+
+    /// The named node at `byte` and each of its parents, innermost first:
+    /// what "where am I" asks (a coding agent's `syntax_node`). Empty
+    /// without a tree.
+    pub fn node_chain(&self, source: &str, byte: usize) -> Vec<NodeInfo> {
+        let Some(tree) = &self.tree else { return Vec::new() };
+        let root = tree.root_node();
+        let byte = byte.min(root.end_byte());
+        let Some(mut node) = root.named_descendant_for_byte_range(byte, byte) else { return Vec::new() };
+        let mut chain = Vec::new();
+        loop {
+            chain.push(NodeInfo::of(node, source, self.field_of(node)));
+            match node.parent() {
+                Some(parent) => node = parent,
+                None => return chain,
+            }
+        }
+    }
+
+    fn field_of(&self, node: Node<'_>) -> Option<String> {
+        let parent = node.parent()?;
+        let mut cursor = parent.walk();
+        if !cursor.goto_first_child() {
+            return None;
+        }
+        loop {
+            if cursor.node() == node {
+                return cursor.field_name().map(str::to_string);
+            }
+            if !cursor.goto_next_sibling() {
+                return None;
+            }
+        }
+    }
+
+    /// Runs a tree-sitter query (`(function_item name: (identifier) @name)`)
+    /// over the tree: each capture's name and node, in order, at most
+    /// `max`. An error says why the query doesn't compile.
+    pub fn query(&self, source: &str, query: &str, max: usize) -> Result<Vec<(String, NodeInfo)>, String> {
+        let tree = self.tree.as_ref().ok_or("this file has no syntax tree")?;
+        let language = self.parser.language().ok_or("no grammar for this file")?;
+        let query = Query::new(&language, query).map_err(|e| format!("the query doesn't compile: {e}"))?;
+        let names = query.capture_names();
+        let mut cursor = QueryCursor::new();
+        // A query that matches everything is stopped, not left to run.
+        cursor.set_match_limit(10_000);
+        let mut found = Vec::new();
+        let mut captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
+        while let Some((m, ix)) = captures.next() {
+            let capture = m.captures[*ix];
+            found.push((names[capture.index as usize].to_string(), NodeInfo::of(capture.node, source, None)));
+            if found.len() >= max {
+                break;
+            }
+        }
+        Ok(found)
     }
 
     /// XML only: every element in document order, for an outline. Empty
@@ -1072,5 +1148,35 @@ puts hi
         assert_eq!(SyntaxState::todo_items_of(lang, "{}"), Vec::new());
         // Fenix's own have no indents query: the bracket decides.
         assert_eq!(SyntaxState::new(LanguageId::Json, "{}").indents_after("{}", 1), None);
+    }
+}
+
+#[cfg(test)]
+mod tool_tests {
+    use super::*;
+
+    #[test]
+    fn the_node_at_a_place_and_its_parents() {
+        let source = "fn main() {\n    let x = 1;\n}\n";
+        let state = SyntaxState::new(LanguageId::Rust, source);
+        let chain = state.node_chain(source, source.find('x').unwrap());
+        let kinds: Vec<&str> = chain.iter().map(|n| n.kind.as_str()).collect();
+        assert_eq!(kinds.first(), Some(&"identifier"));
+        assert!(kinds.contains(&"let_declaration") && kinds.contains(&"function_item"), "{kinds:?}");
+        assert_eq!(chain[0].field.as_deref(), Some("pattern"));
+        assert_eq!(chain.last().unwrap().kind, "source_file");
+        let function = chain.iter().find(|n| n.kind == "function_item").unwrap();
+        assert_eq!((function.start, function.first_line.as_str()), ((0, 0), "fn main() {"));
+    }
+
+    #[test]
+    fn a_query_gives_its_captures_and_a_bad_one_says_why() {
+        let source = "fn a() {}\nfn b() {}\n";
+        let state = SyntaxState::new(LanguageId::Rust, source);
+        let found = state.query(source, "(function_item name: (identifier) @name)", 10).unwrap();
+        let names: Vec<&str> = found.iter().map(|(c, n)| { assert_eq!(c, "name"); n.first_line.as_str() }).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(state.query(source, "(function_item) @f", 1).unwrap().len(), 1, "at most max");
+        assert!(state.query(source, "(nope", 10).unwrap_err().contains("doesn't compile"));
     }
 }

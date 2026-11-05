@@ -947,7 +947,7 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         _ if page.safe_mode => "Safe mode: none of these runs this time. What's below is what your settings switch on when Fenix next starts without --disable-extensions.".to_string(),
         (true, 0) => "The core is yours already: editing, files, projects, Git, language servers, debugging, the terminal. Add what else you'll use.".to_string(),
         (false, 0) => "Enter switches one on or off, or installs it. What's off isn't loaded: no commands, keys, settings or pages.".to_string(),
-        (_, n) => format!("{n} change{} -- restart Fenix to apply", if n == 1 { "" } else { "s" }),
+        (_, n) => format!("{n} change{} -- restart Fenix to apply: SPC q r restarts it where you are", if n == 1 { "" } else { "s" }),
     };
     let note_role = if pending == 0 || page.safe_mode { Role::Muted } else { Role::Warn };
     // The welcome has the room to say it all, and offers the tutorial.

@@ -191,7 +191,7 @@ and its answer comes to `handle` as an `Event` with that id.
 | `host::git_state()` | API 1.1. The open project's repository (`GitSummary { branch, head, upstream, ahead, behind, conflicts }`), with `contributes.events = ["git"]`: none outside a repository. Read again at most every two seconds; ask that often to notice a commit (a new `head` on the same branch), a push (`ahead` back to 0) or a conflict. |
 | `host::last_task()` | API 1.1. The task that ended last (`TaskResult { name, ok, tests }`), with `contributes.events = ["tasks"]`: `tests` is `Some((passed, failed))` when its output gives them (cargo, pytest, Jest, Vitest, `go test -v`). Call it when `task-ended` comes. |
 | `forge::call`, `forge::branch_answer`, `forge::refresh` | Being a code-review forge for Fenix's Git pages. See [Forges](#forges). |
-| `std::fs` | Its own folder, `/data`, kept between runs; its tools folder, `/tools`, when its manifest names a program there; and the project, `/project`, if its permissions say: the one you're in. Open a file in another project and Fenix starts the extension again there, its pages saved and opened again (`page_state`, `page_restore`), so keep in a page's state what it needs. |
+| `std::fs` | Its own folder, `/data`, kept between runs; its tools folder, `/tools`, when its manifest names a program there; and the project, `/project`, if its permissions say: the one you're in. Open a file in another project and Fenix starts the extension again there, its pages saved and opened again (`page_state`, `page_restore`), so keep in a page's state what it needs: a language pack for that project at once, any other the next time it's used there (a command, a page, a service, its language server). Until then it runs on in the project it started in, and isn't told what you do in the other (`focus_moved`, `file_saved`, `buffer_changed` of a file, `view_changed`); come back first and it carries on. |
 
 ## Drawing over the editor
 
@@ -878,6 +878,9 @@ api = "1.2"                    # fenix-extension-api's API
 [activation]                   # nothing loads until one of these
 on_startup = false
 commands = ["counter.*"]
+languages = ["markdown"]       # a file of one of these opened, or at the
+                               # project's top or in src/ (Fenix 1.1)
+markers = ["counter.toml"]     # a project holding one of these (Fenix 1.1)
 
 [permissions]                  # nothing, unless it says
 process = ["git", "${setting:counter.git}", "/data/tools/*", "/tools/*"]
@@ -965,6 +968,15 @@ id = "counter"                 # its own name, or one starting counter.
 name = "Counter Agent"
 login = "counter login"        # how to log in, for the agents page
 ```
+
+An extension that starts with Fenix (`on_startup = true`) and has a
+context naming markers or languages -- a language pack -- waits for
+them as `[activation]`'s `languages` and `markers` do: it loads when a
+file of one of its languages is opened, or a project of its is, not
+when Fenix starts. One whose contexts name only pages starts with Fenix.
+Either way, a command, a page, a service or its language server starts
+it when it's used. Fenix 1.0 starts a pack with Fenix, and loads one that
+only names `languages` or `markers` when it's used.
 
 A context's menu is its keymaps' `[[local.<name>]]` entries
 (`keymaps/*.toml`), keys after `SPC m`:

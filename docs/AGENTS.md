@@ -142,11 +142,57 @@ crashes is started again (after 1, 2, then 4 seconds) and its thread
 resumed; after three crashes in a minute it stays down until
 `SPC a R`.
 
+## Pipelines
+
+`SPC a P` runs your next prompt through several agents in turn. Fenix's
+own, *Plan, build, review*:
+
+1. **plan**: the default agent, in its plan mode, plans the change. You
+   see the plan and say `y` to go on or `n` to stop.
+2. **build**: carries it out and runs the tests.
+3. **review**: in plan mode again, reviews the changes against the plan
+   and answers with findings. While there are any, they go back to
+   build, at most twice.
+
+Each step is a thread of its own, shown in the dock as it runs. What the
+steps change goes into one review, so `SPC a r` shows the outcome once.
+A step in a plan or read-only mode can't change files: anything it
+writes anyway is put back. `SPC a k` stops the step, and the pipeline.
+
+Pipelines are files: `pipelines/<name>.toml` in Fenix's settings folder,
+or a project's `.fenix/pipelines/<name>.toml`, with a step per
+`[[steps]]`:
+
+```toml
+title = "Plan, then build"
+
+[[steps]]
+name = "plan"
+agent = "claude"              # leave out for agents.default
+mode = "plan"                 # an id, or a word in a mode's name
+prompt = "Plan this:\n\n{input}"
+passes = "plan"               # answer, plan, changes or transcript
+gate = true                   # you approve what goes on
+
+[[steps]]
+name = "build"
+agent = "codex"
+prompt = "Carry out this plan:\n\n{previous}"
+toolsets = ["core", "refactor", "tasks"]
+```
+
+`{input}` is what you wrote, `{previous}` what the step before passed,
+`{<step>}` what that step passed. A step with `findings = true` answers
+with a JSON list of findings, sent back to its `on_findings` step for up
+to `max_rounds` rounds.
+
 ## Shortcuts
 
 - `SPC a d` asks the agent to fix the problem on the cursor's line.
-- `SPC a c` has it write a commit message for what's staged, onto the
-  clipboard.
+- `SPC a c` has it write a commit message for what's staged, in the
+  project's style (its last commits, a commit template, what
+  CONTRIBUTING.md says of commits): into the commit composer as it
+  writes, when one is open, else onto the clipboard.
 - `SPC a e` asks about the selection.
 
 ## Fenix as a tool
@@ -164,6 +210,50 @@ Every session gets Fenix itself as an MCP server (`fenix --mcp`,
 
 It can show you a file too, run the project's tasks, evaluate in the
 debugger, and call the extensions' tools, as your rules let it.
+
+Beyond those, Fenix's toolsets give an agent:
+
+- **lsp**: `implementations`, `call_hierarchy` (who calls it, or what it
+  calls), `type_hierarchy`, `signature_help`, and `code_actions`, each
+  with an id.
+- **refactor**: `rename` by the language server, `apply_code_action`,
+  and `format` (a file or some lines). These edit, so they're asked
+  about unless you allow them.
+- **git**: `git_status`, `git_diff` (unstaged, staged, or a branch
+  against its base), `git_log` (of a branch, a path, a range or a few
+  lines), `git_show`, `git_blame` (unsaved lines say so), and
+  `git_stage`. Nothing commits or pushes: you do.
+- **search**: `search` sees unsaved text and the project's ignores,
+  which the agent's own `rg` doesn't; `replace` changes every match, as
+  edits you review.
+- **syntax**: `syntax_node` says what function, class or block a place
+  is in, and `syntax_query` runs a tree-sitter query, in any language
+  Fenix has a grammar for.
+- **debug**: `debug_launches`, `debug_start`, `breakpoints`,
+  `set_breakpoint` (with a condition or a log message),
+  `clear_breakpoint`, `debug_continue`, `debug_step` (over, into, out),
+  `debug_run_to` a line, `debug_pause`, `debug_stop`, `debug_state` and
+  `debug_evaluate`. Whatever moves the program answers at its next stop,
+  with the stack and variables, so an agent steps as you would.
+  `SPC u A` clears the breakpoints agents set; yours stay.
+- **tasks**: `run_task` waits for its task and answers how it went: its
+  problems with their lines, its tests, the end of its output;
+  `run_test` does the same for the test at a line (`SPC p r`'s);
+  `task_output` reads the rest.
+
+An agent whose client reads MCP **resources** finds what the read tools
+give there too: `fenix://buffer/<path>` (an open file as it stands),
+`fenix://diagnostics`, `fenix://selection`, `fenix://open_files`,
+`fenix://debug/state`, `fenix://git/status`, `fenix://task/output`, and
+the extensions'. One it subscribes to is looked at every second, and
+it's told when it changes. Fenix's **prompts** are commands its client
+may offer (Claude Code shows them with `/`): `fix_diagnostic`,
+`explain`, `review_changes` and `write_tests`, and the extensions'.
+
+Edits made through Fenix's tools go to Agent changes (`SPC a r`) like
+the agent's own, kept or rejected hunk by hunk; a file with your
+unsaved edits gets the change unsaved too. Long answers are cut at
+`agents.mcp.max_answer_kib`, saying how to ask for the rest.
 
 **Toolsets.** Fenix's tools come in toolsets, and an agent is shown
 the ones that fit the project, so its list stays short:
@@ -222,6 +312,24 @@ A note before a new session's first prompt tells the agent to prefer
 Fenix's tools to searching text, and that more toolsets can be turned on.
 You don't see it in the thread (`agents.mcp.fenix_brief`). The agent
 still decides, and can use its own tools when it prefers.
+
+### Using Fenix from other MCP clients
+
+Any MCP client can use Fenix's tools while Fenix runs: Claude Desktop,
+Claude Code in a terminal (`claude mcp add fenix -- fenix --mcp`), an
+in-house tool. Give it `fenix --mcp` to start. A client that only speaks
+HTTP, or runs where it can't start a program here, can use Fenix's
+server over HTTP instead:
+
+- `agents.mcp.http = "127.0.0.1:7357"` keeps one running beside Fenix,
+  or `fenix --mcp --http 127.0.0.1:7357` runs one yourself.
+- It listens on this machine only, refuses pages from other sites, and
+  wants `Authorization: Bearer <token>`: `fenix mcp token` prints it.
+- The address is `http://127.0.0.1:7357/mcp` (Streamable HTTP).
+
+These clients aren't agents Fenix started: they may only read and show
+unless you write `client:` rules for them (`"client:toolset:git" =
+"allow"`). Their calls are in `SPC h a` under their names.
 
 Your own MCP servers (`agents.mcp.servers`) go to every session too: the
 command line that starts one, or the address of one that's running.

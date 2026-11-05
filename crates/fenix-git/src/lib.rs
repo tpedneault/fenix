@@ -43,7 +43,7 @@ pub use practice::practice_repository;
 pub use log::{checkout_detached, commit_file_diff, commit_files, line_log, log, reachable, LogQuery};
 pub use rebase::{rebase_interactive, replayed, todo as rebase_todo, Planned, Replayed, Step};
 pub use stash::{list_stashes, Stash};
-pub use state::{conflict_sides, in_progress, ConflictSides, InProgress};
+pub use state::{conflict_sides, in_progress, merge_message, ConflictSides, InProgress};
 pub use status::{status, status_and_files, summary, RepoStatus, Summary};
 pub use worktree::{add_worktree, checked_out_elsewhere, default_worktree_path, list_worktrees, prune_worktrees, remove_worktree, Worktree};
 pub use verbs::{
@@ -51,3 +51,10 @@ pub use verbs::{
     default_remote, merge_base, merges_cleanly, pull_merge, push_args, push_tags, push_with, remotes, rename_branch, resolve_base, shortstat, stash_args, stash_with, tag,
     CommitFlags, CommitKind, PushOptions, StashOptions,
 };
+
+/// `git <args>` in `repo`, for a read the other functions don't cover
+/// (an agent's `git_log` over a range, a diff of one path between
+/// refs): its output, or what git said on failure.
+pub fn run_args(repo: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    process::run_action(repo, &args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+}

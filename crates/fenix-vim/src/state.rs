@@ -1810,7 +1810,9 @@ impl VimState {
         }
         match pending {
             PendingPrefixKey::Register => {
-                if name.is_ascii_alphabetic() {
+                // `"a`-`"z` (`"A`-`"Z` append), `"0` the last yank, and
+                // `"_` the black hole.
+                if name.is_ascii_alphabetic() || name == '0' || name == '_' {
                     self.active_register = Some((name.to_ascii_lowercase(), name.is_ascii_uppercase()));
                 }
             }
@@ -2430,7 +2432,7 @@ impl VimState {
             Operator::Yank => {
                 let text = buffer.text_range(range.start, range.end);
                 self.pending_pulse = Some(range.clone());
-                self.write_register(text, linewise);
+                self.write_yank(text, linewise);
                 cursor.char_idx = range.start.min(buffer.len_chars());
                 let (_, col) = buffer.line_col(cursor);
                 cursor.sticky_col = col;
@@ -2643,9 +2645,24 @@ impl VimState {
     /// explicitly targeted.
     fn write_register(&mut self, text: String, linewise: bool) {
         if let Some((name, append)) = self.active_register.take() {
+            // `"_`: gone, and every register (the clipboard too) as it was.
+            if name == '_' {
+                return;
+            }
             self.store_in_register(name, &text, linewise, append);
         }
         self.register = Register { text, linewise };
+    }
+
+    /// `write_register` for a yank: also into `"0`, which keeps the last
+    /// yank through the deletes after it (`yy` `j` `dd` `"0p`) -- unless
+    /// the yank went to a register named for it, as in Vim.
+    fn write_yank(&mut self, text: String, linewise: bool) {
+        let named = self.active_register.is_some();
+        if !named {
+            self.registers.insert('0', Register { text: text.clone(), linewise });
+        }
+        self.write_register(text, linewise);
     }
 
     /// Writes (or, if `append`, appends -- joined by a newline for a
@@ -3147,7 +3164,11 @@ impl VimState {
         }
 
         let text = pieces.join("\n");
-        self.write_register(text.clone(), false);
+        if op == Operator::Yank {
+            self.write_yank(text.clone(), false);
+        } else {
+            self.write_register(text.clone(), false);
+        }
         self.block_register = Some(text);
         cursor.char_idx = buffer.line_start_char(line_lo) + col_lo.min(buffer.line_len(line_lo));
         let (_, col) = buffer.line_col(cursor);
@@ -5107,6 +5128,39 @@ two
         assert_eq!(b.text(), "xhi");
     }
 
+    /// `"0` keeps the last yank through the deletes after it.
+    #[test]
+    fn the_yank_register_keeps_the_last_yank() {
+        let mut b = buf("one\ntwo\nthree\n");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "yyjdd\"0p");
+        assert_eq!(b.text(), "one\nthree\none\n");
+        // A yank into a named register leaves `"0` as it was.
+        keys(&mut vim, &mut b, &mut c, "gg\"ayy");
+        assert_eq!(vim.registers.get(&'0').map(|r| r.text.as_str()), Some("one\n"));
+        keys(&mut vim, &mut b, &mut c, "jyy");
+        assert_eq!(vim.registers.get(&'0').map(|r| r.text.as_str()), Some("three\n"));
+    }
+
+    /// `"_` deletes without touching any register, so `p` still pastes
+    /// what was yanked.
+    #[test]
+    fn the_black_hole_register_keeps_every_register_as_it_was() {
+        let mut b = buf("keep\ngone\n");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "yyj\"_dd");
+        assert_eq!(b.text(), "keep\n");
+        assert_eq!(vim.register(), ("keep\n", true));
+        assert!(!vim.registers.contains_key(&'_'));
+        keys(&mut vim, &mut b, &mut c, "p");
+        assert_eq!(b.text(), "keep\nkeep\n");
+        // Pasting from it pastes nothing.
+        keys(&mut vim, &mut b, &mut c, "\"_p");
+        assert_eq!(b.text(), "keep\nkeep\n");
+    }
+
     // -- Named registers (`"a`-`"z`/`"A`-`"Z`) ------------------------
 
     #[test]
@@ -5271,7 +5325,7 @@ two
         vim.handle_key(&mut b, &mut c, KeyPress::char('"'));
         named(&mut vim, &mut b, &mut c, NamedKey::Escape);
         keys(&mut vim, &mut b, &mut c, "yl");
-        assert!(vim.registers.is_empty(), "register prefix should have been cancelled");
+        assert!(!vim.registers.keys().any(|k| k.is_ascii_alphabetic()), "register prefix should have been cancelled");
 
         vim.handle_key(&mut b, &mut c, KeyPress::char('q'));
         named(&mut vim, &mut b, &mut c, NamedKey::Escape);

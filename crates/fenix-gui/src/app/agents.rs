@@ -64,6 +64,10 @@ pub(crate) enum Pick {
     Secret(String),
     /// An extension's ask that sends code: may it?
     AskConsent { ext: String, call: u64, allow: bool },
+    /// `SPC a P`: this pipeline, for the next prompt.
+    Pipeline(fenix_acp::pipeline::PipelineSpec),
+    /// A code extension you said may do what it asks: installed.
+    InstallExtension(String),
 }
 
 /// An agent's write over unsaved edits of yours, waiting for your
@@ -86,7 +90,7 @@ pub(crate) struct AgentHost {
     store: Option<Store>,
     /// Threads read from the store, by id (the rest aren't loaded yet).
     loaded: HashSet<ThreadId>,
-    dirty: HashSet<ThreadId>,
+    pub(super) dirty: HashSet<ThreadId>,
     last_save: Instant,
     /// The panel: its page and its prompt.
     pub(super) page: Option<BufferId>,
@@ -137,6 +141,8 @@ pub(crate) struct AgentHost {
     pub(super) recalled: Option<(usize, String)>,
     /// The thread writing a commit message (`SPC a c`).
     pub(super) commit_message: Option<ThreadId>,
+    /// The commit composer the message goes into, when one was open.
+    pub(super) commit_into: Option<BufferId>,
     /// Commands agents run through Fenix, by terminal id.
     pub(super) terminals: HashMap<String, terminals::AgentTerminal>,
     pub(super) next_terminal: u64,
@@ -195,6 +201,7 @@ impl AgentHost {
             sent: Vec::new(),
             recalled: None,
             commit_message: None,
+            commit_into: None,
             terminals: HashMap::new(),
             next_terminal: 1,
             logins: Vec::new(),
@@ -346,7 +353,7 @@ impl App {
 
     /// The hub learns the agents, the MCP servers and the idle time from
     /// the settings, as they are now.
-    fn agents_configure(&mut self) -> Vec<CatalogEntry> {
+    pub(super) fn agents_configure(&mut self) -> Vec<CatalogEntry> {
         let entries = self.agents_catalog();
         self.agents.hub.set_agents(entries.iter().map(|e| e.spec.clone()).collect());
         let mut servers = Vec::new();
@@ -372,6 +379,10 @@ impl App {
 
     /// The agent a new thread talks to: `agents.default`, else the first
     /// one found.
+    pub(super) fn agents_default_of(&self, entries: &[CatalogEntry]) -> Option<String> {
+        self.agents_default(entries)
+    }
+
     fn agents_default(&self, entries: &[CatalogEntry]) -> Option<String> {
         let wanted = self.config.text_value("agents.default").map(str::trim).filter(|s| !s.is_empty()).map(catalog::slug);
         match wanted {
@@ -382,7 +393,7 @@ impl App {
 
     /// The project agents work in: the shown thread's, else the
     /// project's (the panel's page has no file of its own to tell it by).
-    fn agents_root(&self) -> PathBuf {
+    pub(super) fn agents_root(&self) -> PathBuf {
         let focused = Some(self.focused_buffer_id());
         if focused == self.agents.page || focused == self.agents.composer {
             if let Some(root) = self.agents.shown(&self.pages).and_then(|t| self.agents.hub.meta(&t).map(|m| m.root.clone())) {
@@ -431,7 +442,7 @@ impl App {
         self.agents_focus_composer();
     }
 
-    fn agents_none_found(&mut self, entries: &[CatalogEntry]) {
+    pub(super) fn agents_none_found(&mut self, entries: &[CatalogEntry]) {
         let names: Vec<&str> = entries.iter().map(|e| e.spec.program.as_str()).collect();
         self.set_error(format!("no agent found: install one ({}), or name yours in agents.servers", names.join(", ")));
     }
@@ -684,6 +695,8 @@ impl App {
                 let id = self.agents.hub.import(&agent, &root, &session);
                 self.agents_show(id);
             }
+            Pick::Pipeline(spec) => self.pipeline_armed(spec),
+            Pick::InstallExtension(ext) => self.install_from_registry_now(ext),
             Pick::Send { save } => {
                 if let Some((thread, blocks)) = self.agents.held.take() {
                     if save {
@@ -879,6 +892,10 @@ impl App {
             return;
         }
         self.replace_buffer_from_disk(composer, "");
+        // A pipeline picked (`SPC a P`) takes it, to run.
+        if self.pipeline_take_prompt(text.trim_end()) {
+            return;
+        }
         let said = text.trim_end().to_string();
         self.agents.sent.retain(|p| *p != said);
         self.agents.sent.push(said);
@@ -1064,6 +1081,8 @@ impl App {
                         self.agents_commit_message_done(&thread);
                     }
                     self.agents_ask_changed(&thread);
+                    self.pipeline_changed(&thread);
+                    self.agents_commit_message_streamed(&thread);
                     if self.agents.shown(&self.pages).as_ref() == Some(&thread) {
                         changed = true;
                         self.agents_follow(&thread);
@@ -1075,8 +1094,15 @@ impl App {
                         self.agents_attention(&thread, why);
                     }
                 }
-                Effect::TurnEnded { thread, stop } => self.agents_turn_done(&thread, &stop),
-                Effect::FenixAnswered { key, option, .. } => self.agent_question_answered(&key, option.as_deref()),
+                Effect::TurnEnded { thread, stop } => {
+                    self.agents_turn_done(&thread, &stop);
+                    self.pipeline_turn_ended(&thread, &stop);
+                }
+                Effect::FenixAnswered { key, option, .. } => {
+                    if !self.pipeline_gate_answered(&key, option.as_deref()) {
+                        self.agent_question_answered(&key, option.as_deref());
+                    }
+                }
             }
         }
         if changed {
@@ -1217,7 +1243,7 @@ impl App {
 
     /// Writes an agent's file: into its buffer when it's open (one undo
     /// step), saved unless `agents.write = "buffer"`; else to disk.
-    fn agents_write(&mut self, thread: &ThreadId, path: &Path, content: &str) -> Result<Value, RpcError> {
+    pub(super) fn agents_write(&mut self, thread: &ThreadId, path: &Path, content: &str) -> Result<Value, RpcError> {
         let failed = |e: std::io::Error| RpcError::new(code::INTERNAL_ERROR, format!("{}: {e}", path.display()));
         let open = self.buffers.id_for_path(path);
         let before = match open.and_then(|id| self.buffers.get(id)) {
@@ -1262,7 +1288,7 @@ impl App {
         }
         self.agents_fetched_tick();
         self.agents_asks_tick(now);
-        self.agent_calls_tick(now);
+        let calls_next = self.agent_calls_tick(now);
         let running = self.agents_terminals_tick();
         self.agents_logins_tick();
         let status = self.agents.hub.status();
@@ -1283,13 +1309,15 @@ impl App {
                 self.agents.save(&id);
             }
         }
-        if busy || !self.agents.inbox.lock().unwrap().is_empty() {
+        let next = if busy || !self.agents.inbox.lock().unwrap().is_empty() {
             Some(now + WATCH_EVERY)
         } else if self.agents.hub.connections().next().is_some() {
             Some(now + Duration::from_secs(1))
         } else {
             None
-        }
+        };
+        // What Fenix's tools wait for (a long poll, a task, a stop).
+        next.into_iter().chain(calls_next).min()
     }
 
     /// Files announced for change: an open, clean buffer follows the
