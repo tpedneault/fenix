@@ -64,6 +64,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Enter` ends the line when there's nothing to complete, rather than a
   completion popup opened on a trigger character taking it. `Tab` and
   `Ctrl-Y` still accept. (#71)
+- The debugger says why an adapter refused: lldb-dap's reason for a
+  failed `SPC u e` (`error: use of undeclared identifier ...`), from the
+  error's details, instead of "the adapter refused, without saying why".
+  (#32)
 
 ## [1.0.1] - 2026-11-03
 
