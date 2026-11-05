@@ -2873,6 +2873,7 @@ impl VimState {
 
         if key.code == KeyCode::Named(NamedKey::Escape) {
             self.visual_matcher.cancel();
+            self.count = None;
             self.last_visual = Some((self.visual_kind, self.visual_anchor, cursor.char_idx));
             self.mode = Mode::Normal;
             return VimEvent::None;
@@ -2891,12 +2892,30 @@ impl VimState {
             return VimEvent::None;
         }
 
-        if let Step::Matched(action) = self.visual_matcher.feed(key) {
+        // A count (`3l`), read as in Normal mode. It only applies to the
+        // motion it comes before.
+        if !self.visual_matcher.is_pending() && key.mods == Mods::default() {
+            if let KeyCode::Char(c) = key.code {
+                if let Some(d) = c.to_digit(10) {
+                    if d != 0 || self.count.is_some() {
+                        self.count = Some(self.count.unwrap_or(0).saturating_mul(10).saturating_add(d));
+                        return VimEvent::None;
+                    }
+                }
+            }
+        }
+
+        let step = self.visual_matcher.feed(key);
+        let raw_count = if matches!(step, Step::Pending(_)) { self.count } else { self.count.take() };
+        if let Step::Matched(action) = step {
             match *action {
-                // Counts aren't supported in Visual mode -- the selection
-                // is already explicit, unlike Normal mode's motions.
                 VisualAction::Motion(m) => {
-                    apply_motion(buffer, cursor, m, 1, &self.iskeyword_extra);
+                    if matches!(m, Motion::BufferTop | Motion::BufferBottom) {
+                        cursor.char_idx = motion::buffer_line_target(buffer, m, raw_count);
+                        cursor.sticky_col = buffer.line_col(cursor).1;
+                    } else {
+                        apply_motion(buffer, cursor, m, raw_count.unwrap_or(1).max(1), &self.iskeyword_extra);
+                    }
                     self.block_to_line_end = m == Motion::LineEnd || (self.block_to_line_end && matches!(m, Motion::Up | Motion::Down));
                 }
                 VisualAction::TextObject(object) => {
@@ -3419,6 +3438,35 @@ mod tests {
     #[test]
     fn a_text_object_replaces_a_visual_selection_by_paste() {
         assert_eq!(after("alpha beta gamma\n", "yiwwviwp"), "alpha alpha gamma\n");
+    }
+
+    #[test]
+    fn counts_apply_to_visual_motions() {
+        assert_eq!(after("call me
+", "v3ld"), " me
+");
+        assert_eq!(after("a
+b
+c
+d
+", "V2jd"), "d
+");
+        assert_eq!(after("a
+b
+c
+d
+", "V3Gd"), "d
+");
+        assert_eq!(after("one
+", "$v0d"), "
+", "a lone 0 is still the motion");
+    }
+
+    #[test]
+    fn a_visual_count_is_only_for_the_motion_after_it() {
+        assert_eq!(after("abcdef
+", "v2lld"), "ef
+");
     }
 
     #[test]
