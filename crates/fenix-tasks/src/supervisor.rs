@@ -442,16 +442,28 @@ mod tests {
             }
             Ok("sleep") => {
                 println!("READY {}", std::process::id());
+                std::io::stdout().flush().unwrap();
+                if let Ok(flag) = std::env::var("FENIX_PROCESS_READY_FLAG") {
+                    std::fs::write(flag, b"").unwrap();
+                }
                 std::thread::sleep(Duration::from_secs(30));
             }
             Ok(mode @ ("tree" | "orphan")) => {
+                let flag = std::env::temp_dir().join(format!("fenix-fixture-{}", std::process::id()));
                 let mut child = fixture_command("sleep")
+                    .env("FENIX_PROCESS_READY_FLAG", &flag)
                     .stdout(Stdio::inherit())
                     .stderr(Stdio::inherit())
                     .spawn()
                     .unwrap();
                 if mode == "orphan" {
-                    std::thread::sleep(Duration::from_millis(500));
+                    // Leaving only once the child has said READY: a busy
+                    // machine can take longer than any fixed wait to start it.
+                    let deadline = Instant::now() + Duration::from_secs(30);
+                    while !flag.exists() && Instant::now() < deadline {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    let _ = std::fs::remove_file(&flag);
                     std::process::exit(0);
                 }
                 let _ = child.wait();
