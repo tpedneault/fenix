@@ -1173,8 +1173,11 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   configure/build/`ctest` for a `CMakeLists.txt`, `npm run build`/`test`
   for a `package.json` -- every matching ecosystem contributes its own
   set, not just the first one found), plus the project's own
-  tasks from `.fenix/tools.json` (`SPC p ,` edits them).
-  Runs in a live-streamed single-pane Task Output panel (`SPC p T`
+  tasks from `.fenix/tools.json` (`SPC p ,` edits them). Each row says
+  its command line, when the name doesn't already, and where the task
+  comes from: `[Fenix]`, the extension that gave it, or `[tools.json]`.
+  Runs in a live-streamed single-pane Task Output panel, in a workspace
+  of its own that closes with it (`q` or `SPC b d`) (`SPC p T`
   reruns the last task, `SPC p k` ends it early); `cargo build`/`test`/
   `clippy` specifically run with `--message-format=json` so each
   diagnostic's recovered file/line/column feeds the same quickfix list
@@ -1265,7 +1268,10 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   a language server starting) shows in the modeline beside the mark's
   blades lighting in turn; the mode colour blends between modes; the
   active tab's accent slides to the next tab; sideways scrolling eases;
-  a theme change cross-fades. `full` adds the caret gliding along a
+  a theme change cross-fades. The caret blinks for 30 seconds after the
+  last key or click, then stays lit, so an idle window draws nothing; an
+  extension's layer that moves (a pet walking) is drawn at most 30 times
+  a second. `full` adds the caret gliding along a
   motion, unfolded rows opening downwards, and panes moving to a split
   or close. Popups get rounded corners and soft shadows; problems from
   language servers are underlined with a wave, with the cursor line's
@@ -1291,7 +1297,8 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   doesn't have. A language server that failed -- couldn't start, crashed,
   or didn't answer `initialize` within 30 seconds -- is listed with why
   and the last lines it wrote to stderr, until `:lsp-restart` tries it
-  again.
+  again. A server is looked for and started on a thread of its own, so a
+  slow `PATH` or a server slow to start never holds up the window.
 - **Symbol picker**: with the Tcl extension, `SPC m s` in a Tcl file opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
@@ -1543,7 +1550,9 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   (or a click into the pane) takes it back, and running `exit` hands it
   back on its own. A pane terminal only receives what you type while its
   own pane is focused, so a keystroke meant for the file next door never
-  lands in a shell.
+  lands in a shell. While a shell has the keyboard the modeline's mode says
+  `TERMINAL`, with `Ctrl-\ back to the editor` beside the file name, and
+  the editor's caret is hidden behind the panel.
 
   A terminal buffer holds no text of its own -- what you see is the
   shell's screen grid, rendered directly -- so there is nothing there
@@ -1593,9 +1602,14 @@ primary server, plus any additional servers a project declares, which can serve
 several languages from one process and share a buffer with its primary.
 Configure literal executables, argument arrays, working directories, and child
 environment values in `.fenix/tools.json` for LSP, DAP, and tasks.
+An extension installed, switched on or off, or removed is put in use
+at once, in the running editor: its code starts or stops (its pages,
+language servers, tasks and checks with it), and its commands, keys,
+snippets, templates and launches come and go. Only its themes and
+languages wait for the next start, and the Extensions page says so.
 `SPC q r` restarts Fenix where you are -- the session, unsaved text
-included, comes back -- so an extension installed, switched on or off,
-or a setting only read at start, is used without quitting yourself.
+included, comes back -- for those, and for a setting only read at start
+(the settings page marks it).
 `:lsp-restart` reloads language services for the current project;
 `:lsp-restart NAME` restarts one server. Task rerun history is per project; debugger
 and task controls guard against operating on another project's active process.

@@ -293,6 +293,62 @@ it did.
   dock, not over a thread and its cards.
 - `SPC c i` and `SPC c h` say so when no language server runs for the
   file, instead of doing nothing.
+- A window that hasn't drawn the editor 10 seconds after the splash
+  handed over, still showing the splash, makes its surface again and
+  asks for a frame, and says on stderr what was in the way (`fenix
+  --console` on Windows shows it). (#65)
+- Tool Status (`SPC l m`) agrees with the doctor and the sessions: it
+  resolves each server and debug adapter as they do, an extension's
+  included (the Rust extension's `lldb-dap`); a server installed off
+  `PATH` (pyright in `~/.local/bin`) says where, not `[missing]`; one
+  that's running is found, not `[missing, running]`; and Go's and Lua's
+  servers have install hints. (#43)
+- The project doctor names a project Fenix has no kind of its own for
+  -- Zig, Ruby, PHP, Swift, Java, Kotlin, C#, Ada, Lua -- as the
+  language pack whose markers it has calls it (`zig (Zig)`), not
+  `(Project)`, on the page and in the copied report. (#52)
+- `q` closes Tool Status (`SPC l m`) and Task Output, as it closes the
+  other pages, rather than starting a macro; closing either (`q`,
+  `SPC b d`) closes the workspace it opened in, and its title strip. With
+  Task Output's workspace removed (`SPC TAB d`), the next task opens it
+  again rather than running with its output shown nowhere; the Git,
+  History and Merge views keep track of their workspaces as others are
+  removed. (#29)
+- With more tabs than fit, a pane's tab strip scrolls to keep the
+  active tab in view, rather than leaving it past the right edge; and
+  `SPC b b` lists a page by its title, as its tab does, not as
+  `*scratch*`. (#50)
+- While a terminal has the keyboard (`SPC o t`, or one in a pane), the
+  modeline's mode says `TERMINAL` with `Ctrl-\ back to the editor`
+  beside it, and the editor's caret is hidden behind the panel, so it's
+  plain that keys, `SPC` included, go to the shell. (#42)
+- An extension's page that couldn't be shown -- a `bad.pdf` that isn't
+  a PDF -- says so on the page, with what went wrong, rather than going
+  blank once the red message fades. (#75)
+- An extension installed, switched on or off, or removed from the
+  Extensions page is put in use at once, without a restart: its code
+  starts or stops (its pages, language servers, tasks and checks with
+  it), and its commands and keys come and go. Only its themes and
+  languages wait for the next start, and the page and its messages say
+  so. A setting read only at start (`agents.mcp.http`) is marked so, and
+  saving it says `SPC q r` restarts now. (#40)
+- An idle window stops drawing: the caret blinks for 30 seconds after
+  the last key or click, then stays lit, rather than waking the window
+  for every blink and fade forever; and an extension's moving layer (the
+  Pets extension's pet walking) is drawn at most 30 times a second, not
+  every frame the display can show. (#74)
+- `SPC p t` says where each task comes from (`[Fenix]`, the extension
+  that gave it, or `[tools.json]`) and its command line, so two of one
+  name can be told apart. The project doctor (`SPC p h`) lists each tool
+  once: where an extension checks what Fenix does (`rust-analyzer`,
+  `Rust`), its row takes Fenix's place, and the summary counts it once.
+  (#35)
+- A language server is looked for and started off the UI thread,
+  Windows' search of `PATH` included: a slow `PATH` (a network drive on
+  it) or a server slow to start no longer freezes the window as a file
+  opens. (#33)
+- The explorer's `x` on an archive named in capitals (`Backup.TAR.GZ`)
+  unpacks into a folder spelled as it is (`Backup`), not lowercased.
 
 ## [1.0.1] - 2026-11-03
 

@@ -214,7 +214,10 @@ impl App {
             }),
             RegistryEvent::Installed(result) => {
                 match result {
-                    Ok(said) => self.set_message(format!("{} SPC q r restarts now, where you are.", said.replace('\n', " "))),
+                    Ok(said) => {
+                        let waiting = self.extensions_switched();
+                        self.set_message(format!("{} {}", said.replace('\n', " "), in_use_said(&waiting)));
+                    }
                     Err(e) => self.set_error(e),
                 }
                 let rows = crate::installed::rows();
@@ -236,6 +239,30 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The installed extensions changed (installed, switched, removed):
+    /// what they bring put in use without a restart -- code started or
+    /// stopped, keys, commands; snippets, templates, launches and lessons
+    /// are read when they're used (#40). Those whose themes or languages
+    /// wait for the next start, by id.
+    pub(super) fn extensions_switched(&mut self) -> Vec<String> {
+        if crate::installed::safe_mode() {
+            return Vec::new();
+        }
+        self.code_extensions_now(crate::installed::code_extensions());
+        let problems = crate::keymap::reload_leader();
+        self.leader_matcher = crate::keymap::leader_trie().matcher();
+        if !problems.is_empty() {
+            self.set_error(format!("keybindings: {}", problems.join("; ")));
+        }
+        crate::installed::settle_switches()
+    }
+
+    /// Where installed extension `id` was, as it was read last: the
+    /// Extensions page's row, else nowhere.
+    fn extension_dir_of(&self, id: &str) -> PathBuf {
+        crate::installed::find(id).map(|(e, _)| e.dir).unwrap_or_default()
     }
 
     /// Page `id`'s installed rows read again, after one was switched or
@@ -282,15 +309,37 @@ impl App {
             }
             Action::SwitchInstalled(ext, on) => {
                 match crate::installed::store().map(|store| store.set_enabled(&ext, on)) {
-                    Some(Ok(())) => self.set_message(format!("{ext}: {} from the next start -- SPC q r restarts now, where you are", if on { "on" } else { "off" })),
+                    Some(Ok(())) => {
+                        let waiting = self.extensions_switched();
+                        let state = if on { "on" } else { "off" };
+                        if waiting.contains(&ext) {
+                            self.set_message(format!("{ext}: {state} from the next start, for its themes and languages -- SPC q r restarts now, where you are"));
+                        } else {
+                            self.set_message(format!("{ext}: {state} now"));
+                        }
+                    }
                     Some(Err(e)) => self.set_error(e),
                     None => self.set_error("no folder to keep extensions in"),
                 }
                 self.refresh_extensions_page(id);
             }
             Action::Uninstall(ext) => {
+                // What each brought that's read only at start, looked at
+                // while it's still there.
+                let at_start: Vec<String> = crate::installed::rows().into_iter().map(|r| r.id).filter(|id| !crate::installed::read_at_start(&self.extension_dir_of(id)).is_empty()).collect();
                 match crate::installed::store().map(|store| store.uninstall_unneeded(&ext)) {
-                    Some(Ok(removed)) => self.set_message(format!("Removed {} -- what they brought stays until Fenix next starts (SPC q r restarts now)", crate::installed::said_removed(&removed))),
+                    Some(Ok(removed)) => {
+                        let read_at_start = removed.iter().any(|id| at_start.contains(id));
+                        self.extensions_switched();
+                        for id in &removed {
+                            crate::installed::now_in_use(id, false);
+                        }
+                        if read_at_start {
+                            self.set_message(format!("Removed {} -- its themes and languages stay until Fenix next starts (SPC q r restarts now)", crate::installed::said_removed(&removed)));
+                        } else {
+                            self.set_message(format!("Removed {}", crate::installed::said_removed(&removed)));
+                        }
+                    }
                     Some(Err(e)) => self.set_error(e),
                     None => self.set_error("no folder to keep extensions in"),
                 }
@@ -318,9 +367,25 @@ impl App {
     }
 }
 
+/// What an install says of when it's in use: now, or -- for themes and
+/// languages, read only at start -- after `SPC q r`.
+fn in_use_said(waiting: &[String]) -> String {
+    if waiting.is_empty() {
+        "In use now.".to_string()
+    } else {
+        format!("{}'s themes and languages come with the next start: SPC q r restarts now, where you are.", waiting.join(", "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_install_says_when_it_is_in_use() {
+        assert_eq!(in_use_said(&[]), "In use now.");
+        assert!(in_use_said(&["acme.dusk".into()]).starts_with("acme.dusk's themes and languages come with the next start"));
+    }
 
     fn registry_of(app: &App) -> &Registry {
         let id = app.find_page(|m| matches!(m, PageModel::Extensions(_))).expect("the page");

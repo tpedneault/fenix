@@ -265,8 +265,9 @@ The Extensions page (`SPC h x`) does the same from inside Fenix, in
 four tabs (`Tab`, or `1`-`4`): Installed, Updates (the installed ones the
 registry has a newer version of: `u` updates one, `U` all), Browse (what
 the registry has that you haven't installed, in a version for this
-Fenix) and Bundles. Enter switches an installed one on or off -- one
-that's off isn't loaded at all from the next start -- or installs one,
+Fenix) and Bundles. Enter switches an installed one on or off -- at
+once, in the running editor; only its themes and languages wait for the
+next start (`SPC q r`) -- or installs one,
 and `x x` removes an installed one. The categories down the left (`h`,
 and `l` back to the list) keep a tab to one kind; `/` searches by name,
 id and description, and `category:tools`, `runtime:data` (or `code`,
@@ -290,8 +291,10 @@ Reading -- and Fenix knows them too, for a first start before the
 registry can be read.
 
 An install replaces any other version of the same extension, and
-needs its dependencies installed first. It's used from the next start.
-A package is checked before anything is written: its manifest, the Fenix
+needs its dependencies installed first. From the Extensions page it's
+used at once, but for its themes and languages, which come with the
+next start; installed with `fenix --install-extension`, a running Fenix
+uses it from its next start. A package is checked before anything is written: its manifest, the Fenix
 it's for, and that none of its files would land outside its own folder.
 
 ### Extensions that run code
@@ -514,7 +517,7 @@ when it's out of date).
 | `agents.mcp.fenix_brief` | true / false | on | Agents Fenix starts are told to prefer its tools, in a note before a new session's first prompt, which isn't shown in the thread. |
 | `agents.mcp.allow` | class, toolset:name or tool = allow, ask or deny | – | Rules for the tools agents call through Fenix: a class (read, show, edit, run, external), toolset:<name>, or a tool's name, each allow, ask or deny; the most specific wins. By default reading and showing are allowed, edits and running are asked about, external is refused. client:<rule> is for MCP clients Fenix didn't start. A project's rules can only be stricter. *A project can set it.* |
 | `agents.mcp.toolsets` | a list | – | Fenix's toolsets agents are shown, beyond those that fit the project: +name adds one (+commands, +debug, an extension's), -name takes one away. Agents can turn on the others themselves (fenix_toolsets). *A project can set it.* |
-| `agents.mcp.http` | text | – | An address on this machine (127.0.0.1:7357) where Fenix serves its MCP tools over HTTP, for MCP clients that don't start fenix --mcp themselves. They present the token fenix mcp token prints, and follow the client: rules. Empty: off. Read at start. |
+| `agents.mcp.http` | text | – | An address on this machine (127.0.0.1:7357) where Fenix serves its MCP tools over HTTP, for MCP clients that don't start fenix --mcp themselves. They present the token fenix mcp token prints, and follow the client: rules. Empty: off. *Needs a restart.* |
 | `agents.mcp.max_answer_kib` | 4–1024 | 64 | The most a Fenix tool answers an agent, in KiB: a longer diff, log or output is cut, saying how to get the rest. |
 | `agents.mcp.fenix_auto_read` | true / false | on | Fenix 1.0's switch, still read: off makes agents ask to read (read = ask in agents.mcp.allow). Use agents.mcp.allow instead. |
 | `agents.mcp.fenix_write` | true / false | off | Fenix 1.0's switch, still read: on lets agents edit and run without asking (edit = allow, run = allow in agents.mcp.allow), and lets other control clients run tasks and commands. Use agents.mcp.allow instead. |

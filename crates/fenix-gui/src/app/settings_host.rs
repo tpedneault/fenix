@@ -196,7 +196,7 @@ impl App {
                     match result {
                         Ok(()) => {
                             page.refused = None;
-                            page.note = restart.then(|| ("saved -- it takes effect when Fenix restarts".to_string(), false));
+                            page.note = restart.then(|| ("saved -- it takes effect when Fenix restarts: SPC q r restarts now, where you are".to_string(), false));
                         }
                         Err(why) => page.refused = Some((key, why)),
                     }

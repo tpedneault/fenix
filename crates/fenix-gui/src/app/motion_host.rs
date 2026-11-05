@@ -763,7 +763,8 @@ impl App {
     }
 
     /// Whether anything is moving -- what keeps frames coming at
-    /// animation speed.
+    /// animation speed. Not an extension's layer: that's drawn at its own,
+    /// lower cadence (`layer_frame_tick`).
     pub(super) fn motion_animating(&self, now: Instant) -> bool {
         let m = &self.motion;
         m.beacon.is_some_and(|b| b.anim.running(now))
@@ -780,7 +781,6 @@ impl App {
             || m.theme_fade.is_some_and(|a| a.running(now))
             || self.splash_fade.is_some()
             || self.message_fading(now)
-            || self.layers_moving(now)
     }
 
     fn message_fading(&self, now: Instant) -> bool {

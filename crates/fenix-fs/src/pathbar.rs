@@ -238,7 +238,7 @@ mod tests {
     #[test]
     fn a_trailing_separator_offers_everything_inside() {
         let dir = dir_with_children("complete_trailing_sep");
-        let candidates = complete(&format!("{}\\", dir.path().display()));
+        let candidates = complete(&format!("{}{}", dir.path().display(), std::path::MAIN_SEPARATOR));
         assert_eq!(candidates.len(), 3, "got {candidates:?}");
     }
 

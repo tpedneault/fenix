@@ -80,6 +80,7 @@ the other way round after `\v`.
 | `SPC p k` | End the currently running task |
 | `SPC p r` | Run the test the cursor is in (Rust, pytest, Go), alone, in Task Output |
 | `Enter` in Task Output | Go to the `path:line:col` the line names: a compiler's error, a panic, a test's stack |
+| `q` in Task Output or Tool Status | Close it, with the workspace it opened in (a running task is cancelled) |
 | `SPC u u` | Start a debug session, or continue one that's stopped |
 | `SPC u b` | Toggle a breakpoint on the focused buffer's current line |
 | `SPC u n` / `SPC u i` / `SPC u o` | Step over / into / out |
