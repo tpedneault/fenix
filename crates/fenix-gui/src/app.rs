@@ -9745,6 +9745,16 @@ impl App {
             }
         }
 
+        // Task Output and Tool Status go with the workspace they opened
+        // in (#29).
+        if self.tool_status_session.as_ref().is_some_and(|s| s.buffer == id) {
+            self.tool_status_close();
+            return;
+        }
+        if self.task_session.as_ref().is_some_and(|s| s.buffer == id) {
+            self.task_output_close();
+            return;
+        }
         // A pane-resident terminal's shell dies with its buffer -- see
         // `close_terminal_buffer` for why this, and not navigating away
         // from the pane, is what ends it.
@@ -13190,7 +13200,9 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        if self.workspaces.remove_active() {
+            self.workspace_removed(session.workspace_index);
+        }
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -13717,7 +13729,9 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        if self.workspaces.remove_active() {
+            self.workspace_removed(session.workspace_index);
+        }
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -13792,7 +13806,9 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        if self.workspaces.remove_active() {
+            self.workspace_removed(session.workspace_index);
+        }
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -14958,7 +14974,106 @@ impl App {
     /// last one -- same safety posture as `close_window` refusing the
     /// last window.
     pub(crate) fn remove_workspace(&mut self) {
-        self.workspaces.remove_active();
+        let removed = self.workspaces.active_index();
+        if self.workspaces.remove_active() {
+            self.workspace_removed(removed);
+        }
+        self.wake_caret();
+    }
+
+    /// Workspace `removed` went: the views that were on it are let go --
+    /// Task Output and Tool Status open again in a workspace of their own
+    /// next time (#29) -- and those on the workspaces after it are one
+    /// further left.
+    fn workspace_removed(&mut self, removed: usize) {
+        // Whether a view on `index` stays, and where it is now.
+        let stays = |index: &mut usize| match (*index).cmp(&removed) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Equal => false,
+            std::cmp::Ordering::Greater => {
+                *index -= 1;
+                true
+            }
+        };
+        if self.task_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            if let Some(session) = self.task_session.take() {
+                self.pane_titles.remove(&session.pane);
+            }
+        }
+        if self.tool_status_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            if let Some(session) = self.tool_status_session.take() {
+                self.pane_titles.remove(&session.pane);
+            }
+        }
+        if self.history_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            self.history_session = None;
+        }
+        if self.merge_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            self.merge_session = None;
+        }
+        if self.git_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            self.git_session = None;
+        }
+    }
+
+    /// `q` closes Tool Status and Task Output, as it closes the other
+    /// pages, rather than starting a macro in a buffer that's only read
+    /// (#29). Whether it did.
+    fn view_closed_by_q(&mut self, keypress: KeyPress) -> bool {
+        if keypress != KeyPress::char('q') || self.vim.mode() != Mode::Normal || !self.vim.is_idle() || self.leader_matcher.is_pending() || self.vim.is_recording() {
+            return false;
+        }
+        let id = self.focused_buffer_id();
+        if self.tool_status_session.as_ref().is_some_and(|s| s.buffer == id) {
+            self.tool_status_close();
+            return true;
+        }
+        if self.task_session.as_ref().is_some_and(|s| s.buffer == id) {
+            self.task_output_close();
+            return true;
+        }
+        false
+    }
+
+    /// Closes Tool Status (`q`, `SPC b d`): its buffer, and the workspace
+    /// it opened in, when there's another to go to (#29).
+    fn tool_status_close(&mut self) {
+        let Some(session) = self.tool_status_session.take() else { return };
+        self.close_view_workspace(session.workspace_index, session.pane, session.buffer);
+    }
+
+    /// Closes Task Output (`q`, `SPC b d`): a task still running is
+    /// cancelled, as `SPC p k` does; its buffer, and the workspace it
+    /// opened in, go. The next task opens it again (#29).
+    fn task_output_close(&mut self) {
+        let Some(session) = self.task_session.take() else { return };
+        if let Some(runner) = &session.runner {
+            runner.cancel();
+        }
+        self.close_view_workspace(session.workspace_index, session.pane, session.buffer);
+    }
+
+    /// A view's buffer closed, with the workspace it was opened in when
+    /// another is left to go to, and its pane's title strip.
+    fn close_view_workspace(&mut self, workspace_index: usize, pane: fenix_window::WindowId, buffer: BufferId) {
+        self.pane_titles.remove(&pane);
+        self.buffers.close(buffer);
+        self.drop_buffer_from_every_strip(buffer);
+        if workspace_index < self.workspaces.len() {
+            self.workspaces.switch_to_index(workspace_index);
+            if self.workspaces.remove_active() {
+                self.workspace_removed(workspace_index);
+            } else {
+                // The last workspace: Home in the pane instead.
+                let home = self.ensure_workspace_home();
+                for p in self.windows().windows() {
+                    if self.windows().content(p) == Some(&buffer) {
+                        self.set_pane_content(p, home);
+                    }
+                }
+            }
+        }
+        self.refresh_project_root();
         self.wake_caret();
     }
 
@@ -15968,6 +16083,9 @@ impl App {
         // is nothing to record a macro in.
         if keypress == KeyPress::char('q') && self.vim.mode() == Mode::Normal && self.focused_is_side_by_side_ref() {
             self.side_by_side_close();
+            return;
+        }
+        if self.view_closed_by_q(keypress) {
             return;
         }
 
@@ -33277,6 +33395,40 @@ configure_board stm32
         let text = app.open().buffer.text();
         assert!(text.contains("Rust"), "expected a Rust row in:\n{text}");
         assert!(text.contains("rust-analyzer"), "expected the resolved command in:\n{text}");
+    }
+
+    /// `q` closes Tool Status, and `SPC b d` Task Output, each with the
+    /// workspace it opened in, leaving no title strip behind; removing
+    /// Task Output's workspace doesn't stop the next task showing (#29).
+    #[test]
+    fn tool_status_and_task_output_close_with_their_workspaces() {
+        let mut app = App::with_file(None);
+        let workspaces = app.workspaces.len();
+        app.open_tool_status_panel();
+        assert_eq!(app.workspaces.len(), workspaces + 1);
+        let pane = app.focused_pane_id();
+        assert!(app.view_closed_by_q(KeyPress::char('q')));
+        assert!(app.tool_status_session.is_none() && !app.pane_titles.contains_key(&pane));
+        assert_eq!(app.workspaces.len(), workspaces, "its workspace went with it");
+        assert!(!app.view_closed_by_q(KeyPress::char('q')), "elsewhere q is Vim's");
+
+        let dir = TempDir::new("task_output_close");
+        let (program, args): (&str, Vec<String>) = if cfg!(windows) { ("cmd", vec!["/c".into(), "exit".into(), "0".into()]) } else { ("true", Vec::new()) };
+        let task = fenix_tasks::TaskDef { name: "t".to_string(), command: program.to_string(), args };
+        app.run_task(task.clone(), dir.path().to_path_buf());
+        assert_eq!(app.open().kind, BufferKind::TaskOutput);
+        app.kill_buffer();
+        assert!(app.task_session.is_none());
+        assert_eq!(app.workspaces.len(), workspaces);
+        // Its workspace removed with SPC TAB d instead: the next run
+        // opens it again rather than writing nowhere.
+        app.run_task(task.clone(), dir.path().to_path_buf());
+        app.remove_workspace();
+        assert!(app.task_session.is_none());
+        app.run_task(task, dir.path().to_path_buf());
+        assert_eq!(app.open().kind, BufferKind::TaskOutput, "shown again");
+        let session = app.task_session.as_ref().unwrap();
+        assert_eq!(session.workspace_index, app.workspaces.active_index());
     }
 
     #[test]

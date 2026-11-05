@@ -8,6 +8,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `q` closes Tool Status (`SPC l m`) and Task Output, as it closes the
+  other pages, rather than starting a macro; closing either (`q`,
+  `SPC b d`) closes the workspace it opened in, and its title strip. With
+  Task Output's workspace removed (`SPC TAB d`), the next task opens it
+  again rather than running with its output shown nowhere; the Git,
+  History and Merge views keep track of their workspaces as others are
+  removed. (#29)
 - With more tabs than fit, a pane's tab strip scrolls to keep the
   active tab in view, rather than leaving it past the right edge; and
   `SPC b b` lists a page by its title, as its tab does, not as

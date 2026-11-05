@@ -1176,7 +1176,8 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   tasks from `.fenix/tools.json` (`SPC p ,` edits them). Each row says
   its command line, when the name doesn't already, and where the task
   comes from: `[Fenix]`, the extension that gave it, or `[tools.json]`.
-  Runs in a live-streamed single-pane Task Output panel (`SPC p T`
+  Runs in a live-streamed single-pane Task Output panel, in a workspace
+  of its own that closes with it (`q` or `SPC b d`) (`SPC p T`
   reruns the last task, `SPC p k` ends it early); `cargo build`/`test`/
   `clippy` specifically run with `--message-format=json` so each
   diagnostic's recovered file/line/column feeds the same quickfix list
