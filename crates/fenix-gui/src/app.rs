@@ -8052,7 +8052,7 @@ impl App {
     fn completion_candidates(&mut self) -> Vec<fenix_picker::Candidate<completion::Item>> {
         let mut candidates = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut words: Vec<_> = completion::buffer_words(&self.open().buffer).into_iter().collect();
+        let mut words: Vec<_> = completion::buffer_words_besides_cursor(&self.open().buffer, &self.cursor()).into_iter().collect();
         words.sort();
         for word in words {
             if seen.insert(word.clone()) {
@@ -23749,6 +23749,20 @@ configure_board stm32
     // special while the menu is up and does not list Escape.
 
     /// A Tcl buffer in Insert mode with the popup open on "se".
+    /// Moves the open popup's selection to a plain word (not a snippet,
+    /// which expands to more than its label), and gives its label.
+    fn select_a_word(app: &mut App) -> String {
+        let completion = app.completion.as_mut().expect("the popup is open");
+        for _ in 0..50 {
+            let item = &completion.picker.selected().expect("something to pick").payload;
+            if !matches!(item.source, completion::Source::Snippet) {
+                return item.label.clone();
+            }
+            completion.picker.move_selection(1);
+        }
+        panic!("no word among the matches")
+    }
+
     fn app_with_an_open_completion_popup(name: &str) -> (TempDir, App) {
         let dir = TempDir::new(name);
         let file = dir.write("foo.tcl", "");
@@ -23805,12 +23819,17 @@ configure_board stm32
         // Vim's own accept key, beside the Tab/Enter every other editor
         // uses -- all three do the same thing rather than one of them
         // meaning something subtly different.
-        let (_dir, mut app) = app_with_an_open_completion_popup("ctrl_y_accept");
-        let selected = app.completion.as_ref().unwrap().picker.selected().unwrap().label.clone();
+        let dir = TempDir::new("ctrl_y_accept");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("seek se");
+        app.sync_completion();
+        let selected = select_a_word(&mut app);
 
         app.test_completion_key(KeyPress::char('y').with_ctrl());
 
-        assert_eq!(app.open().buffer.text(), selected);
+        assert_eq!(app.open().buffer.text(), format!("seek {selected}"));
         assert_eq!(app.vim.mode(), Mode::Insert, "accepting a completion keeps you typing");
     }
 
@@ -24216,15 +24235,16 @@ configure_board stm32
         let file = dir.write("foo.tcl", "");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         app.test_vim_key(KeyPress::char('i'));
-        app.test_insert_str("se");
+        // A word to complete to: the one being typed isn't offered (#73).
+        app.test_insert_str("seek se");
         app.sync_completion();
-        let expected_label = app.completion.as_ref().unwrap().picker.selected().unwrap().payload.label.clone();
+        let expected_label = select_a_word(&mut app);
 
         app.accept_completion();
 
         assert!(app.completion.is_none());
-        assert_eq!(app.open().buffer.text(), expected_label);
-        assert_eq!(app.test_cursor().char_idx, expected_label.chars().count());
+        assert_eq!(app.open().buffer.text(), format!("seek {expected_label}"));
+        assert_eq!(app.test_cursor().char_idx, 5 + expected_label.chars().count());
     }
 
     #[test]

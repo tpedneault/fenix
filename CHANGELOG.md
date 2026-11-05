@@ -113,6 +113,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - "no known debug adapter" says where to look: the project's
   `tools.json`, an extension's tool on `PATH` (`SPC p h`), or a restart
   (`SPC q r`) for one installed since Fenix started. (#40)
+- Completion no longer offers the word being typed (`clas` beside
+  `class`), unless it's written elsewhere in the file too, so `Enter`
+  accepts the word you meant. (#73)
 
 ## [1.0.1] - 2026-11-03
 
