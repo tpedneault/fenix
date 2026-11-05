@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- With more tabs than fit, a pane's tab strip scrolls to keep the
+  active tab in view, rather than leaving it past the right edge; and
+  `SPC b b` lists a page by its title, as its tab does, not as
+  `*scratch*`. (#50)
 - While a terminal has the keyboard (`SPC o t`, or one in a pane), the
   modeline's mode says `TERMINAL` with `Ctrl-\ back to the editor`
   beside it, and the editor's caret is hidden behind the panel, so it's

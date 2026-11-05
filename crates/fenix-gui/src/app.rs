@@ -5475,8 +5475,8 @@ const TAB_CLOSE_CHARS: usize = 3;
 /// drifts every tab's background/hit-test rect right of its own actually-
 /// narrower rendered text, worse with each subsequent tab. `tabs` is
 /// `(buffer, filename char count)` pairs, left to right; tabs that would
-/// run past the strip's right edge are simply omitted (clipped, not
-/// scrolled) -- a disclosed v1 simplification.
+/// run past the strip's right edge are omitted. The strip starts where
+/// it keeps the active tab in view (`first_tab_shown`).
 #[cfg(test)]
 fn pane_tab_layout(rect: fenix_window::Rect, char_width: f32, tabs: &[(BufferId, usize)]) -> Vec<TabRect> {
     pane_tab_layout_iter(rect, char_width, tabs.iter().copied())
@@ -5494,8 +5494,7 @@ where
     let mut out = Vec::new();
     let mut x = rect.x;
     for (buffer, name_chars) in tabs {
-        let chars = name_chars.clamp(TAB_MIN_NAME_CHARS, TAB_MAX_NAME_CHARS) + TAB_CHROME_CHARS;
-        let w = chars as f32 * char_width;
+        let w = tab_width(name_chars, char_width);
         if x + w > rect.x + rect.w {
             break;
         }
@@ -5506,6 +5505,28 @@ where
         x += w;
     }
     out
+}
+
+/// How wide a tab whose name is `name_chars` long is drawn.
+fn tab_width(name_chars: usize, char_width: f32) -> f32 {
+    (name_chars.clamp(TAB_MIN_NAME_CHARS, TAB_MAX_NAME_CHARS) + TAB_CHROME_CHARS) as f32 * char_width
+}
+
+/// The first tab a strip `room` wide shows so that tab `active` is in
+/// view: 0 while it fits from the start, else as few tabs before it as
+/// leave it whole at the right edge. `width` is a tab's width, asked only
+/// of the tabs from `active` back to the first shown.
+fn first_tab_shown(active: usize, room: f32, width: impl Fn(usize) -> f32) -> usize {
+    let mut used = 0.0;
+    let mut start = active;
+    for i in (0..=active).rev() {
+        used += width(i);
+        if used > room {
+            break;
+        }
+        start = i;
+    }
+    start
 }
 
 /// Clamps `name` to at most `max_chars`, replacing the tail with `…` when
@@ -9568,8 +9589,9 @@ impl App {
 
     /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
     /// (most-recently-touched first, matching Doom's own buffer switcher),
-    /// each labeled with its path (or `*scratch*` for an unnamed buffer)
-    /// and a leading `+` marker for unsaved changes.
+    /// each labeled with its path (a page, terminal or Home by what its
+    /// tab says, `*scratch*` for a plain unnamed buffer) and a leading `+`
+    /// marker for unsaved changes.
     pub(crate) fn picker_switch_buffer(&mut self) {
         let candidates = self
             .buffers
@@ -9577,7 +9599,12 @@ impl App {
             .iter()
             .map(|&id| {
                 let ob = self.buffers.get(id).expect("mru only lists open buffers");
-                let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| "*scratch*".to_string());
+                // A page, a terminal, Home... by what it shows, as its tab
+                // says; a plain unnamed buffer is the scratch (#50).
+                let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| match self.buffer_display_name(id) {
+                    unnamed if unnamed == "[No Name]" => "*scratch*".to_string(),
+                    shown => shown,
+                });
                 let marker = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { "+ " } else { "" };
                 fenix_picker::Candidate::new(format!("{marker}{name}"), id)
             })
@@ -18402,9 +18429,17 @@ impl App {
             // visible tabs. Lazily resolve names so repeated redraws
             // while moving do work proportional to tabs that fit, not
             // all files ever visited in that pane.
-            let tabs = self.pane_tab_order(pane).into_iter().map(|id| (id, self.tab_label(id).chars().count()));
-            let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
             let active_buffer = self.windows().content(pane).copied();
+            // From the first tab that keeps the active one in view: with
+            // more tabs than fit, the strip scrolls to it rather than
+            // leaving it past the right edge (#50).
+            let order = self.pane_tab_order(pane);
+            let start = match active_buffer.and_then(|b| order.iter().position(|&id| id == b)) {
+                Some(active) => first_tab_shown(active, strip_rect.w, |i| tab_width(self.tab_label(order[i]).chars().count(), title_char_width)),
+                None => 0,
+            };
+            let tabs = order[start..].iter().map(|&id| (id, self.tab_label(id).chars().count()));
+            let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
             let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
             let mut active_flags: Vec<bool> = Vec::new();
             let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
@@ -21983,6 +22018,18 @@ mod tests {
         assert_eq!(visible_document_end_line(&[0, 1, 2], 40), 2);
         assert_eq!(visible_document_end_line(&[7, 8, 9, 10], 2), 9);
         assert_eq!(visible_document_end_line(&[], 40), 0);
+    }
+
+    /// With more tabs than fit, the strip starts where the active tab is
+    /// whole at its right edge; while it fits from the start, at the start
+    /// (#50).
+    #[test]
+    fn the_tab_strip_scrolls_to_keep_the_active_tab_in_view() {
+        let width = |_| 10.0;
+        assert_eq!(first_tab_shown(2, 45.0, width), 0, "fits from the start");
+        assert_eq!(first_tab_shown(19, 45.0, width), 16, "the last four, the active one last");
+        assert_eq!(first_tab_shown(19, 5.0, width), 19, "too narrow for one: still the active one");
+        assert_eq!(first_tab_shown(0, 45.0, width), 0);
     }
 
     #[test]
@@ -29172,6 +29219,18 @@ configure_board stm32
             }
             _ => panic!("expected picker_switch_buffer to open a SwitchBuffer picker"),
         }
+    }
+
+    /// A page is listed by its title, not as `*scratch*` (#50).
+    #[test]
+    fn picker_switch_buffer_names_pages_by_their_titles() {
+        let mut app = App::with_file(None);
+        app.cmd_project_new();
+        app.picker_switch_buffer();
+        let Some(ActivePicker::SwitchBuffer(state)) = &app.active_picker else { panic!("expected a SwitchBuffer picker") };
+        let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+        assert!(labels.contains(&"*new project*"), "{labels:?}");
+        assert!(!labels.contains(&"*scratch*"), "{labels:?}");
     }
 
     #[test]
