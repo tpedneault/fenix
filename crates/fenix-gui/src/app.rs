@@ -105,6 +105,17 @@ use crate::theme::{self, Theme};
 use crate::surface::{Blend, SurfacePipeline};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+/// How long the caret blinks after the last key or click, before it
+/// stays lit: as Emacs stops after its tenth blink, so an idle window
+/// stops drawing.
+const CARET_BLINKS_FOR: Duration = Duration::from_secs(30);
+/// The shortest time between two frames drawn only because an
+/// extension's layer moves (a pet walking): 30 frames a second, rather
+/// than every frame the display shows.
+const LAYER_TICK: Duration = Duration::from_millis(33);
+/// The longest the loop sleeps with nothing due: other deadlines (the
+/// disk check) come sooner anyway.
+const IDLE_WAIT: Duration = Duration::from_secs(60);
 /// How long the caret takes to fade in/out at each blink toggle, instead
 /// of flipping instantly.
 const BLINK_FADE: Duration = Duration::from_millis(120);
@@ -5320,6 +5331,13 @@ pub struct App {
     /// When the current fade started; `caret_alpha` eases from this.
     blink_transition_start: Instant,
     next_blink: Instant,
+    /// When the caret was last woken (`wake_caret`: a key, a click):
+    /// it blinks for `CARET_BLINKS_FOR` after, then stays lit, so an
+    /// idle window stops drawing twice a second (#74).
+    caret_woken: Instant,
+    /// When an extension's moving layer may next be drawn: at most every
+    /// `LAYER_TICK`, however fast the display could go (#74).
+    next_layer_frame: Instant,
     pulse: Option<Pulse>,
     /// Everything else that's animating -- see `motion_host`.
     motion: motion_host::MotionState,
@@ -5956,6 +5974,8 @@ impl App {
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
             next_blink: Instant::now() + BLINK_INTERVAL,
+            caret_woken: Instant::now(),
+            next_layer_frame: Instant::now(),
             pulse: None,
             motion: motion_host::MotionState::default(),
             splash_fade: None,
@@ -15302,9 +15322,42 @@ impl App {
         // a keypress.
         self.blink_transition_start = now - BLINK_FADE;
         self.next_blink = now + BLINK_INTERVAL;
+        self.caret_woken = now;
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// The caret's blink, if it's due: true when it changed and is to be
+    /// drawn. Past `CARET_BLINKS_FOR` without a key it stays lit (#74).
+    fn blink_tick(&mut self, now: Instant) -> bool {
+        if now < self.next_blink || self.caret_settled(now) {
+            return false;
+        }
+        self.blink_visible = !self.blink_visible;
+        self.blink_transition_start = now;
+        self.next_blink = now + BLINK_INTERVAL;
+        true
+    }
+
+    /// Whether the caret has stopped blinking: lit, done fading, and long
+    /// enough since the last key or click.
+    fn caret_settled(&self, now: Instant) -> bool {
+        self.blink_visible && now.duration_since(self.caret_woken) >= CARET_BLINKS_FOR && now.duration_since(self.blink_transition_start) >= BLINK_FADE.max(self.motion().blink_fade_d)
+    }
+
+    /// When a moving layer is next to be drawn, if one moves: now, at
+    /// most every `LAYER_TICK` -- what was due is taken, and the next
+    /// time set.
+    fn layer_frame_tick(&mut self, now: Instant) -> Option<Instant> {
+        if !self.layers_moving(now) {
+            return None;
+        }
+        if now >= self.next_layer_frame {
+            self.next_layer_frame = now + LAYER_TICK;
+            return Some(now);
+        }
+        Some(self.next_layer_frame)
     }
 
     /// 0.0 (hidden) to 1.0 (fully visible), eased across `BLINK_FADE` from
@@ -21342,10 +21395,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             needs_redraw = true;
         }
 
-        if now >= self.next_blink {
-            self.blink_visible = !self.blink_visible;
-            self.blink_transition_start = now;
-            self.next_blink = now + BLINK_INTERVAL;
+        if self.blink_tick(now) {
             needs_redraw = true;
         }
 
@@ -21374,6 +21424,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.prune_motion(now);
         let animating = blink_transitioning || pulse_active || scroll_animating || self.motion_animating(now);
         if animating {
+            needs_redraw = true;
+        }
+        // A layer moving on its own (a pet walking) is drawn at most every
+        // `LAYER_TICK`, not every frame the display can show.
+        let layer_wake = self.layer_frame_tick(now);
+        if layer_wake.is_some_and(|due| due <= now) {
             needs_redraw = true;
         }
 
@@ -21417,7 +21473,9 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // on, not just something that happens when a redraw was already
         // due -- an idle editor whose terminal panel just rewrote a file
         // has no other reason to wake up.
-        let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
+        // A caret that has stopped blinking has nothing to wake for.
+        let wait_until = if animating { now + ANIM_TICK } else if self.caret_settled(now) { now + IDLE_WAIT } else { self.next_blink };
+        let wait_until = if layer_wake.is_some() { wait_until.min(self.next_layer_frame) } else { wait_until };
         let wait_until = wait_until.min(self.next_disk_check);
         let wait_until = changes_told_at.map_or(wait_until, |at| wait_until.min(at));
         // An extension's layer whose next frame the loop just woke for.
@@ -23204,6 +23262,26 @@ index 0000000..1111111 100644
     fn fresh_app_caret_is_immediately_fully_visible_no_fade_in_delay() {
         let app = App::with_file(None);
         assert_eq!(app.caret_alpha(), 1.0);
+    }
+
+    /// The caret blinks for a while after a key, then stays lit and
+    /// stops waking the loop; the next key starts it again (#74).
+    #[test]
+    fn the_caret_stops_blinking_once_the_window_is_idle() {
+        let mut app = App::with_file(None);
+        app.wake_caret();
+        let woken = app.caret_woken;
+        assert!(app.blink_tick(woken + BLINK_INTERVAL), "blinks at first");
+        assert!(!app.blink_visible);
+        let idle = woken + CARET_BLINKS_FOR + Duration::from_secs(1);
+        assert!(!app.caret_settled(idle), "not while it's out");
+        assert!(app.blink_tick(idle), "comes back on");
+        assert!(app.blink_visible);
+        let later = idle + Duration::from_secs(1);
+        assert!(app.caret_settled(later));
+        assert!(!app.blink_tick(later), "and stays");
+        app.wake_caret();
+        assert!(!app.caret_settled(Instant::now()), "a key starts it again");
     }
 
     #[test]

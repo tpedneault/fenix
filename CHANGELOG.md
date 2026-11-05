@@ -8,6 +8,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An idle window stops drawing: the caret blinks for 30 seconds after
+  the last key or click, then stays lit, rather than waking the window
+  for every blink and fade forever; and an extension's moving layer (the
+  Pets extension's pet walking) is drawn at most 30 times a second, not
+  every frame the display can show. (#74)
 - `SPC p t` says where each task comes from (`[Fenix]`, the extension
   that gave it, or `[tools.json]`) and its command line, so two of one
   name can be told apart. The project doctor (`SPC p h`) lists each tool

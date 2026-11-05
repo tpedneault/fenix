@@ -378,7 +378,8 @@ impl Layers {
                 if live.item.fps == 0 || !cycling {
                     continue;
                 }
-                let step = Duration::from_secs(1) / live.item.fps as u32;
+                // However fast it asks, no more often than `LAYER_TICK` (#74).
+                let step = (Duration::from_secs(1) / live.item.fps as u32).max(super::LAYER_TICK);
                 let since = now.saturating_duration_since(live.frames_since);
                 let next = live.frames_since + step * (since.as_nanos() / step.as_nanos().max(1) + 1) as u32;
                 wake = Some(wake.map_or(next, |w| w.min(next)));
@@ -711,6 +712,10 @@ mod tests {
         assert_eq!(layers.next_wake(t0 + Duration::from_millis(130), true), Some(t0 + Duration::from_millis(200)));
         let live = &layers.layers[&("x".into(), 1)].items[0];
         assert_eq!(sampled(live, t0 + Duration::from_millis(130), true), t0 + Duration::from_millis(100));
+        // However fast it asks, no more often than `LAYER_TICK` (#74).
+        pet.fps = 120;
+        layers.set("x", 1, vec![pet.clone()], t0);
+        assert_eq!(layers.next_wake(t0, true), Some(t0 + super::super::LAYER_TICK));
         pet.fps = 0;
         layers.set("x", 1, vec![pet], t0);
         assert!(layers.moving(t0, true), "every frame");

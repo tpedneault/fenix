@@ -1267,7 +1267,10 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   a language server starting) shows in the modeline beside the mark's
   blades lighting in turn; the mode colour blends between modes; the
   active tab's accent slides to the next tab; sideways scrolling eases;
-  a theme change cross-fades. `full` adds the caret gliding along a
+  a theme change cross-fades. The caret blinks for 30 seconds after the
+  last key or click, then stays lit, so an idle window draws nothing; an
+  extension's layer that moves (a pet walking) is drawn at most 30 times
+  a second. `full` adds the caret gliding along a
   motion, unfolded rows opening downwards, and panes moving to a split
   or close. Popups get rounded corners and soft shadows; problems from
   language servers are underlined with a wave, with the cursor line's
