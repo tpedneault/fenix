@@ -139,6 +139,8 @@ pub(crate) struct AgentHost {
     pub(super) recalled: Option<(usize, String)>,
     /// The thread writing a commit message (`SPC a c`).
     pub(super) commit_message: Option<ThreadId>,
+    /// The commit composer the message goes into, when one was open.
+    pub(super) commit_into: Option<BufferId>,
     /// Commands agents run through Fenix, by terminal id.
     pub(super) terminals: HashMap<String, terminals::AgentTerminal>,
     pub(super) next_terminal: u64,
@@ -197,6 +199,7 @@ impl AgentHost {
             sent: Vec::new(),
             recalled: None,
             commit_message: None,
+            commit_into: None,
             terminals: HashMap::new(),
             next_terminal: 1,
             logins: Vec::new(),
@@ -1076,6 +1079,7 @@ impl App {
                     }
                     self.agents_ask_changed(&thread);
                     self.pipeline_changed(&thread);
+                    self.agents_commit_message_streamed(&thread);
                     if self.agents.shown(&self.pages).as_ref() == Some(&thread) {
                         changed = true;
                         self.agents_follow(&thread);

@@ -189,8 +189,10 @@ to `max_rounds` rounds.
 ## Shortcuts
 
 - `SPC a d` asks the agent to fix the problem on the cursor's line.
-- `SPC a c` has it write a commit message for what's staged, onto the
-  clipboard.
+- `SPC a c` has it write a commit message for what's staged, in the
+  project's style (its last commits, a commit template, what
+  CONTRIBUTING.md says of commits): into the commit composer as it
+  writes, when one is open, else onto the clipboard.
 - `SPC a e` asks about the selection.
 
 ## Fenix as a tool

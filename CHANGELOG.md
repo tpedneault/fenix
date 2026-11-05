@@ -65,6 +65,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a thread with its own agent, mode and toolsets; their changes are one
   review. Your own go in `pipelines/*.toml`, or a project's
   `.fenix/pipelines/`.
+- `SPC a c` with the commit composer open writes the agent's message
+  into it as it comes, in the project's style: its recent commits, a
+  commit template, and CONTRIBUTING.md's rules on commits go along.
 - `SPC h a` lists every call agents made to Fenix's tools, with the rule
   that applied.
 - `fenix --mcp` tells its client when its tool list changes, passes
