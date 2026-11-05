@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 const VERSION: u32 = 1;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
+/// How much unsaved text goes in the session file, in characters, which
+/// keeps it under `MAX_BYTES`. What doesn't fit stays in its recovery file.
+const MAX_UNSAVED_CHARS: usize = 16 * 1024 * 1024;
 
 #[derive(Default)]
 pub(super) struct State {
@@ -13,6 +16,8 @@ pub(super) struct State {
     blocked: bool,
     discard: bool,
     pub(super) error: Option<String>,
+    /// The documents `session_left_out` last named, each said once.
+    left_out: HashSet<BufferId>,
     pub(super) pending: Option<(Vec<WorkspaceList>, usize)>,
 }
 
@@ -26,6 +31,9 @@ struct Document {
     conflict: bool,
     #[serde(default)]
     recovery: Option<String>,
+    /// Too large for this file: its unsaved text is in its recovery file.
+    #[serde(default)]
+    in_recovery: bool,
     cursor: usize,
     /// A code extension's page, opened again by it from its state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,7 +99,7 @@ impl Session {
         if self.documents.len() > 4096 || self.frames.is_empty() || self.frames.len() > 16 || self.focused_frame >= self.frames.len() { return Err("invalid session dimensions".into()); }
         for doc in &self.documents {
             if doc.path.as_ref().is_some_and(|p| !p.is_absolute()) { return Err("session document path must be absolute".into()); }
-            if doc.dirty && doc.text.is_none() { return Err("unsaved document has no contents".into()); }
+            if doc.dirty && doc.text.is_none() && !doc.in_recovery { return Err("unsaved document has no contents".into()); }
         }
         for frame in &self.frames {
             if frame.workspaces.is_empty() || frame.workspaces.len() > 128 || frame.active >= frame.workspaces.len() { return Err("invalid workspace selection".into()); }
@@ -167,7 +175,22 @@ fn remap_focus(layout: &Layout<Pane>, focused: usize) -> usize {
 }
 
 impl App {
+    /// The unsaved documents the session file can't hold, largest first
+    /// to go, so that one huge file doesn't stop the others being kept.
+    fn session_left_out(&self) -> HashSet<BufferId> {
+        if self.session.discard { return HashSet::new(); }
+        let mut unsaved: Vec<(usize, BufferId)> = self.buffers.ids_sorted_by_path().into_iter()
+            .filter_map(|id| self.buffers.get(id).map(|ob| (id, ob)))
+            .filter(|(_, ob)| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty())
+            .map(|(id, ob)| (ob.buffer.len_chars(), id))
+            .collect();
+        unsaved.sort_by_key(|(chars, _)| *chars);
+        let mut total = 0usize;
+        unsaved.into_iter().filter(|(chars, _)| { total = total.saturating_add(*chars); total > MAX_UNSAVED_CHARS }).map(|(_, id)| id).collect()
+    }
+
     fn capture_session(&self) -> Session {
+        let left_out = self.session_left_out();
         let mut documents = Vec::new();
         let mut ids = HashMap::new();
         for id in self.buffers.ids_sorted_by_path() {
@@ -182,18 +205,20 @@ impl App {
             let path = ob.buffer.path().map(|p| std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf()));
             let dirty = ob.buffer.is_dirty() && !self.session.discard;
             ids.insert(id, documents.len());
+            let in_recovery = left_out.contains(&id);
             documents.push(Document {
+                in_recovery,
                 conflict: dirty && self.externally_changed.contains(&id),
                 recovery: self.unnamed_snapshots.get(&id).and_then(|p| p.file_name()).and_then(|n| n.to_str()).map(str::to_string),
                 disk: self.disk_state.get(&id).copied().or_else(|| path.as_ref().and_then(|p| DiskFingerprint::of(p))),
-                path: path.clone(), text: (dirty || path.is_none()).then(|| ob.buffer.text()), dirty, cursor: ob.cursor.char_idx, code_page: None,
+                path: path.clone(), text: (!in_recovery && (dirty || path.is_none())).then(|| ob.buffer.text()), dirty, cursor: ob.cursor.char_idx, code_page: None,
             });
         }
         // Code extensions' pages, by what each needs to open again.
         for page in self.code_pages_to_save().into_iter().chain(self.agents_pages_to_save()) {
             ids.insert(page.buffer, documents.len());
             let saved = SavedCodePage { ext: page.ext, kind: page.kind, title: page.title, state: page.state, file: page.file, given: page.given };
-            documents.push(Document { path: None, text: None, dirty: false, disk: None, conflict: false, recovery: None, cursor: 0, code_page: Some(saved) });
+            documents.push(Document { path: None, text: None, dirty: false, disk: None, conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: Some(saved) });
         }
         let frames = (0..self.frames.len()).map(|frame| {
             let list = if frame == self.active_frame { &self.workspaces } else { &self.frames[frame].as_ref().unwrap().workspaces };
@@ -287,7 +312,17 @@ impl App {
             Ok(bytes)
         })();
         match result {
-            Ok(bytes) => { self.session.last = bytes; self.session.error = None; true }
+            Ok(bytes) => {
+                self.session.last = bytes;
+                self.session.error = None;
+                let left_out = self.session_left_out();
+                if let Some(id) = left_out.difference(&self.session.left_out).next() {
+                    let name = self.buffers.get(*id).and_then(|ob| ob.buffer.path()).and_then(Path::file_name).map_or("A document".to_string(), |n| n.to_string_lossy().into_owned());
+                    self.set_message(format!("{name} is too large for the session: its unsaved edits are kept in a recovery file"));
+                }
+                self.session.left_out = left_out;
+                true
+            }
             Err(error) => { self.session.error = Some(error.clone()); self.set_error(format!("Session save failed: {error}")); false }
         }
     }
@@ -344,10 +379,15 @@ impl App {
                     (None, None) => doc.recovery.is_some() && snapshot.snapshot.file_name().and_then(|n| n.to_str()) == doc.recovery.as_deref(),
                     _ => false,
                 };
-                matches && modified.is_some_and(|time| std::fs::metadata(&snapshot.snapshot).and_then(|meta| meta.modified()).unwrap_or(snapshot.saved_at) > time)
+                matches && (doc.in_recovery || modified.is_some_and(|time| std::fs::metadata(&snapshot.snapshot).and_then(|meta| meta.modified()).unwrap_or(snapshot.saved_at) > time))
             }) {
                 doc.text = Some(snapshot.contents.clone());
                 doc.dirty = true;
+            }
+            if doc.in_recovery && doc.text.is_none() {
+                doc.dirty = false;
+                let name = doc.path.as_ref().map_or("An unnamed document".to_string(), |p| p.display().to_string());
+                warnings.push(format!("{name}: its unsaved edits were too large for the session, and their recovery file is gone"));
             }
             let existing = doc.path.as_ref().and_then(|p| self.buffer_id_for_lsp_path(p));
             let buffer = match doc.path.as_ref() {
@@ -689,7 +729,7 @@ mod tests {
             version: VERSION,
             documents: vec![Document {
                 path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, cursor: 0, code_page: None,
+                conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: None,
             }],
             frames: vec![SavedFrame {
                 active: 1,
@@ -741,7 +781,7 @@ mod tests {
             version: VERSION,
             documents: vec![Document {
                 path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, cursor: 0, code_page: None,
+                conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: None,
             }],
             frames: vec![SavedFrame {
                 active: 0,
@@ -1002,6 +1042,56 @@ mod tests {
         let mut saved = app.capture_session();
         saved.frames[0].workspaces[0].layout = Layout::Leaf(Pane { document: Some(999), cursor: 0, sticky_col: 0, scroll_line: 0, scroll_col: 0 });
         assert!(saved.validate().is_err());
+    }
+
+    /// One small and one huge unsaved file, checkpointed, with the huge
+    /// one's edits in `recovery` when `snapshot`.
+    fn huge_unsaved_session(temp: &Temp, snapshot: bool) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf, String) {
+        let (small, huge) = (temp.0.join("small.txt"), temp.0.join("huge.log"));
+        std::fs::write(&small, "small").unwrap();
+        std::fs::write(&huge, "huge").unwrap();
+        let recovery = temp.0.join("recovery");
+        let text = "x".repeat(MAX_UNSAVED_CHARS + 1);
+        let mut app = temp.app();
+        app.open_startup_file(&small);
+        let id = app.focused_buffer_id();
+        dirty(&mut app, id, "small, edited");
+        app.open_startup_file(&huge);
+        let id = app.focused_buffer_id();
+        dirty(&mut app, id, &text);
+        if snapshot {
+            fenix_recovery::write(&recovery, &huge, &text).unwrap();
+        }
+        assert!(app.checkpoint_session(), "{:?}", app.session.error);
+        (small, huge, recovery, text)
+    }
+
+    #[test]
+    fn a_huge_unsaved_file_stays_in_recovery_and_the_others_are_kept() {
+        let temp = Temp::new();
+        let (small, huge, recovery, text) = huge_unsaved_session(&temp, true);
+        assert!(std::fs::metadata(temp.0.join("session.json")).unwrap().len() < 1024 * 1024, "the huge file's text isn't in it");
+        let mut restored = temp.app();
+        restored.recovery_dir = Some(recovery);
+        restored.restore_session(false);
+        restored.session.pending.take();
+        let buffer = |path: &Path| &restored.buffers.get(restored.buffers.id_for_path(path).unwrap()).unwrap().buffer;
+        assert_eq!(buffer(&small).text(), "small, edited");
+        assert_eq!(buffer(&huge).len_chars(), text.len(), "back from its recovery file");
+        assert!(buffer(&huge).is_dirty());
+    }
+
+    #[test]
+    fn a_huge_file_whose_recovery_is_gone_comes_back_as_it_is_on_disk() {
+        let temp = Temp::new();
+        let (_, huge, recovery, _) = huge_unsaved_session(&temp, false);
+        let mut restored = temp.app();
+        restored.recovery_dir = Some(recovery);
+        restored.restore_session(false);
+        restored.session.pending.take();
+        let buffer = &restored.buffers.get(restored.buffers.id_for_path(&huge).unwrap()).unwrap().buffer;
+        assert_eq!(buffer.text(), "huge");
+        assert!(!buffer.is_dirty(), "nothing to save over the file");
     }
 
     #[test]
