@@ -11,7 +11,7 @@
 use crate::page::{fit, frame, wrap, Filter, Grid, Key, Page, Role};
 use fenix_acp::hub::{Link, ThreadId, Turn};
 use fenix_acp::protocol::{ContentBlock, PermissionKind, PlanStatus, ToolContent, ToolKind, ToolStatus};
-use fenix_acp::thread::{Entry, NoticeKind, PermissionState, Thread};
+use fenix_acp::thread::{ElicitationState, Entry, NoticeKind, PermissionState, Thread};
 use std::collections::HashSet;
 
 pub struct AgentPage {
@@ -101,6 +101,8 @@ pub enum Action {
     Compose,
     Cancel,
     Permission { key: String, option: String },
+    /// An agent's question (`elicitation/create`), answered.
+    Elicit { key: String, how: ElicitAnswer },
     /// Open a file at a line (from 1).
     Open { path: String, line: Option<u32> },
     Yank(String),
@@ -254,14 +256,36 @@ impl AgentPage {
     }
 }
 
+/// How a card asking for something (`elicitation/create`) was answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ElicitAnswer {
+    /// Fill the form in (or open the link): `y`.
+    Fill,
+    /// Send the form's defaults as they are: `Y`.
+    Defaults,
+    /// `n`.
+    Decline,
+    /// `x`.
+    Cancel,
+}
+
 /// The answer `key` gives the question waiting in `thread`, if one is and
 /// it's one of its keys: `y`/`Y` yes (always), `n`/`N` no (always), `1`-`9`
 /// by its place. The thread's keys and the prompt's (empty) both answer.
 pub fn answer_for(thread: &Thread, key: Key) -> Option<Action> {
-    let card = thread.entries.iter().rev().find_map(|e| match e {
-        Entry::Permission(c) if c.state == PermissionState::Pending => Some(c),
-        _ => None,
-    })?;
+    // The newest question waiting, of either kind.
+    let waiting = thread.entries.iter().rev().find(|e| matches!(e, Entry::Permission(c) if c.state == PermissionState::Pending) || matches!(e, Entry::Elicitation(c) if c.state == ElicitationState::Pending))?;
+    if let Entry::Elicitation(card) = waiting {
+        let how = match key {
+            Key::Char('y') => ElicitAnswer::Fill,
+            Key::Char('Y') if card.request.mode == fenix_acp::protocol::ElicitMode::Form => ElicitAnswer::Defaults,
+            Key::Char('n') => ElicitAnswer::Decline,
+            Key::Char('x') => ElicitAnswer::Cancel,
+            _ => return None,
+        };
+        return Some(Action::Elicit { key: card.key.clone(), how });
+    }
+    let Entry::Permission(card) = waiting else { return None };
     let by_kind = |kind: PermissionKind| card.options.iter().find(|o| o.kind == kind).map(|o| o.id.clone());
     let option = match key {
         Key::Char('y') => by_kind(PermissionKind::AllowOnce).or_else(|| by_kind(PermissionKind::AllowAlways)),
@@ -292,6 +316,7 @@ pub fn entry_text(entry: &Entry) -> String {
             out
         }
         Entry::Permission(card) => card.tool_call.title.clone().unwrap_or_default(),
+        Entry::Elicitation(card) => card.request.message.clone(),
         Entry::Notice(n) => n.text.clone(),
     }
 }
@@ -578,6 +603,50 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                     }
                     PermissionState::Withdrawn => {
                         g.put(y, left, &fit(&format!("– {title} — not answered"), width), Role::Muted);
+                        y += 1;
+                    }
+                }
+            }
+            Entry::Elicitation(card) => {
+                let e = &card.request;
+                let url = e.mode == fenix_acp::protocol::ElicitMode::Url;
+                match &card.state {
+                    ElicitationState::Pending => {
+                        for (i, line) in wrap(&format!("? The agent asks: {}", e.message), width).into_iter().enumerate() {
+                            g.put(y, if i == 0 { left } else { left + 2 }, &line, Role::Warn);
+                            y += 1;
+                        }
+                        if url {
+                            g.put(y, left + 2, &fit(e.url.as_deref().unwrap_or(""), inner), Role::Accent);
+                            y += 1;
+                        }
+                        for f in &e.fields {
+                            let mut what = format!("{}{}", f.title, if f.required { " *" } else { "" });
+                            if let Some(d) = &f.default {
+                                what.push_str(&format!(" = {}", d.as_str().map(str::to_string).unwrap_or_else(|| d.to_string())));
+                            }
+                            g.put(y, left + 2, &fit(&what, inner), Role::Text);
+                            y += 1;
+                        }
+                        let keys: &[(&str, &str)] = if url { &[("y", "open the link"), ("n", "decline"), ("x", "cancel")] } else { &[("y", "fill it in"), ("Y", "the defaults"), ("n", "decline"), ("x", "cancel")] };
+                        let mut x = left + 2;
+                        for (k, what) in keys {
+                            x = g.put(y, x, k, Role::Accent) + 1;
+                            x = g.put(y, x, what, Role::Text) + 3;
+                        }
+                        y += 1;
+                    }
+                    ElicitationState::Answered { action, summary } => {
+                        let said = if summary.is_empty() { action.clone() } else { format!("{action}: {summary}") };
+                        g.put(y, left, &fit(&format!("✓ {} — {said}", e.message), width), Role::Muted);
+                        y += 1;
+                    }
+                    ElicitationState::Completed => {
+                        g.put(y, left, &fit(&format!("✓ {} — done", e.message), width), Role::Muted);
+                        y += 1;
+                    }
+                    ElicitationState::Withdrawn => {
+                        g.put(y, left, &fit(&format!("– {} — not answered", e.message), width), Role::Muted);
                         y += 1;
                     }
                 }

@@ -49,7 +49,28 @@ pub enum Entry {
     Thought { text: String, message_id: Option<String> },
     Tool(ToolCall),
     Permission(PermissionCard),
+    /// The agent asks the user for something: a form, or a link to open.
+    Elicitation(ElicitationCard),
     Notice(Notice),
+}
+
+/// An `elicitation/create`, as a card in the thread.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ElicitationCard {
+    /// The request's JSON-RPC id, as text.
+    pub key: String,
+    pub request: crate::protocol::Elicitation,
+    pub state: ElicitationState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ElicitationState {
+    Pending,
+    /// Answered: `accept`, `decline` or `cancel`, and what was sent.
+    Answered { action: String, summary: String },
+    /// A link's flow, which the agent says is done (`elicitation/complete`).
+    Completed,
+    Withdrawn,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -341,6 +362,45 @@ impl Thread {
         self.revision += 1;
     }
 
+    pub fn push_elicitation(&mut self, card: ElicitationCard) {
+        self.entries.push(Entry::Elicitation(card));
+        self.revision += 1;
+    }
+
+    pub fn elicitation(&self, key: &str) -> Option<&ElicitationCard> {
+        self.entries.iter().rev().find_map(|e| match e {
+            Entry::Elicitation(card) if card.key == key => Some(card),
+            _ => None,
+        })
+    }
+
+    pub fn set_elicitation_state(&mut self, key: &str, state: ElicitationState) {
+        for entry in self.entries.iter_mut().rev() {
+            if let Entry::Elicitation(card) = entry {
+                if card.key == key {
+                    card.state = state;
+                    self.revision += 1;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// A link's flow done: the card of that `elicitationId`, when one
+    /// answered is waiting for it. False for one unknown or done already.
+    pub fn complete_elicitation(&mut self, elicitation_id: &str) -> bool {
+        for entry in self.entries.iter_mut().rev() {
+            if let Entry::Elicitation(card) = entry {
+                if card.request.elicitation_id.as_deref() == Some(elicitation_id) && matches!(card.state, ElicitationState::Pending | ElicitationState::Answered { .. }) {
+                    card.state = ElicitationState::Completed;
+                    self.revision += 1;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn permission_mut(&mut self, key: &str) -> Option<&mut PermissionCard> {
         self.entries.iter_mut().rev().find_map(|e| match e {
             Entry::Permission(card) if card.key == key => Some(card),
@@ -360,11 +420,16 @@ impl Thread {
     pub fn withdraw_permissions(&mut self) -> Vec<String> {
         let mut keys = Vec::new();
         for entry in &mut self.entries {
-            if let Entry::Permission(card) = entry {
-                if card.state == PermissionState::Pending {
+            match entry {
+                Entry::Permission(card) if card.state == PermissionState::Pending => {
                     card.state = PermissionState::Withdrawn;
                     keys.push(card.key.clone());
                 }
+                Entry::Elicitation(card) if card.state == ElicitationState::Pending => {
+                    card.state = ElicitationState::Withdrawn;
+                    keys.push(card.key.clone());
+                }
+                _ => {}
             }
         }
         if !keys.is_empty() {
@@ -391,7 +456,7 @@ impl Thread {
     }
 
     pub fn pending_permissions(&self) -> usize {
-        self.entries.iter().filter(|e| matches!(e, Entry::Permission(c) if c.state == PermissionState::Pending)).count()
+        self.entries.iter().filter(|e| matches!(e, Entry::Permission(c) if c.state == PermissionState::Pending) || matches!(e, Entry::Elicitation(c) if c.state == ElicitationState::Pending)).count()
     }
 
     /// The first prompt's text, cut short: a title until the agent sends one.

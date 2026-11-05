@@ -173,6 +173,7 @@ fn print_entry(entry: &Entry) {
         Entry::Thought { text, .. } => println!("  (thinking) {}", text.lines().next().unwrap_or("")),
         Entry::Tool(call) => println!("  [{:?}] {} — {:?}", call.kind, call.title, call.status),
         Entry::Permission(_) => {}
+        Entry::Elicitation(card) => println!("  (asks) {} -- this example can't answer it", card.request.message),
         Entry::Notice(n) => println!("  ({:?}) {}", n.kind, n.text),
     }
 }

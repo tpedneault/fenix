@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [Unreleased]
+
+### Added
+
+- An agent can ask you for something as it works (ACP's
+  `elicitation/create`): a form, shown as a card in its thread. `y` opens
+  it in a compose pane, a line per field saying what it takes, checked
+  before it's sent; `Y` sends its defaults, `n` declines, `x` cancels.
+  One that asks you to sign in somewhere gives a link: `y` opens it in
+  your browser, and the card says when the agent hears it's done.
+
 ## [1.1.0] - 2026-11-05
 
 The agents and MCP release: Fenix's tools for coding agents in toolsets,

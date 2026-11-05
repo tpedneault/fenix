@@ -227,6 +227,57 @@ impl Turn {
                 self.say(&["I can't help with that."])?;
                 Ok(Flow::Stop("refusal"))
             }
+            Step::Ask => {
+                let params = json!({
+                    "sessionId": self.session,
+                    "mode": "form",
+                    "message": "How should I approach this?",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {
+                            "strategy": { "type": "string", "title": "Strategy", "oneOf": [
+                                { "const": "careful", "title": "Careful" },
+                                { "const": "quick", "title": "Quick" }
+                            ], "default": "careful" },
+                            "files": { "type": "integer", "title": "Files to touch", "minimum": 1, "maximum": 20 },
+                            "tests": { "type": "boolean", "title": "Run the tests", "default": true }
+                        },
+                        "required": ["strategy", "files"]
+                    }
+                });
+                match self.call("elicitation/create", params)? {
+                    Ok(Ok(answer)) => {
+                        let said = format!("You answered: {}", answer);
+                        self.say(&[&said])?;
+                        Ok(Flow::Next)
+                    }
+                    Ok(Err(error)) => {
+                        let said = format!("Asking failed: {error}");
+                        self.say(&[&said])?;
+                        Ok(Flow::Next)
+                    }
+                    Err(Interrupted) => Ok(Flow::Stop("cancelled")),
+                }
+            }
+            Step::Link => {
+                let params = json!({ "sessionId": self.session, "mode": "url", "message": "Sign in to the example service", "url": "https://example.com/connect?elicitationId=mock-1", "elicitationId": "mock-1" });
+                match self.call("elicitation/create", params)? {
+                    Ok(Ok(answer)) => {
+                        if answer["action"] == "accept" {
+                            self.agent.notify("elicitation/complete", json!({ "elicitationId": "mock-1" }))?;
+                        }
+                        let said = format!("The link: {}", answer["action"].as_str().unwrap_or("?"));
+                        self.say(&[&said])?;
+                        Ok(Flow::Next)
+                    }
+                    Ok(Err(error)) => {
+                        let said = format!("Asking failed: {error}");
+                        self.say(&[&said])?;
+                        Ok(Flow::Next)
+                    }
+                    Err(Interrupted) => Ok(Flow::Stop("cancelled")),
+                }
+            }
             Step::Long => {
                 for _ in 0..5 {
                     self.say(&[

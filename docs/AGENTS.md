@@ -80,6 +80,13 @@ prompt goes to and in which mode.
   it asks for your attention (`agents.notify`).
 - A command's card says what ran (`$ rg -n session`) when the agent's
   own title for it doesn't ("Ran command").
+- When the agent asks you for something as it works -- a choice, a
+  few values, a sign-in -- its question is a card too. A form: `y` opens
+  it in a compose pane, each field a line with its default and what it
+  takes; send it (`Esc`, `Enter`) and it's checked first, `q` declines.
+  `Y` sends the defaults as they are, `n` declines, `x` cancels. A link
+  (a sign-in elsewhere): `y` opens it in your browser; the card says when
+  the agent hears it's done.
 - `SPC a m` picks the agent's mode (Claude Code's *plan*, *accept
   edits*…), `SPC a M` its model and other settings.
 
