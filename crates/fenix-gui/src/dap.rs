@@ -343,7 +343,8 @@ impl Template {
     /// `${file}`, `${fileDir}`, `${module}` and `${project}` in `text`,
     /// filled in, and the variables picked or given (`filled`).
     fn fill(&self, text: &str, file: Option<&Path>, root: &Path) -> String {
-        let shown = |p: &Path| p.to_string_lossy().into_owned();
+        // Plain (no `\\?\`): an extension's launch is handed these.
+        let shown = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().into_owned();
         let dir = file.and_then(Path::parent).map(shown).unwrap_or_else(|| shown(root));
         let text = if text.contains("${module}") { text.replace("${module}", &file.map(|f| module_of(f, root)).unwrap_or_default()) } else { text.to_string() };
         let mut text = text.replace("${fileDir}", &dir).replace("${file}", &file.map(shown).unwrap_or_default()).replace("${project}", &shown(root));

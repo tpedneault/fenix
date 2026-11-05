@@ -24,6 +24,28 @@ fn to_value(value: impl serde::Serialize) -> Value {
 type ByExtension = (&'static str, Value, fn(String) -> Result<Value, RpcError>);
 
 /// What a service's answer is to a caller that wants `{}` back.
+/// Why `fenix/open` can't open `path`, or `None` when it can: a file, or
+/// one not there yet in a folder that is (a new file, created when it's
+/// saved, as `SPC f f` opens it).
+pub(crate) fn unopenable(path: &Path) -> Option<String> {
+    if path.as_os_str().is_empty() {
+        return Some("an empty path names no file".into());
+    }
+    let shown = fenix_lsp::normalize(path.to_path_buf()).display().to_string();
+    if path.is_dir() {
+        return Some(format!("{shown} is a folder: fenix/openProject opens one as the project"));
+    }
+    if path.exists() {
+        return None;
+    }
+    let absolute = if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir().map(|d| d.join(path)).unwrap_or_else(|_| path.to_path_buf()) };
+    match absolute.parent() {
+        Some(parent) if parent.is_dir() => None,
+        Some(parent) => Some(format!("{shown}: no folder {}", fenix_lsp::normalize(parent.to_path_buf()).display())),
+        None => Some(format!("{shown} names no file")),
+    }
+}
+
 fn done(_: String) -> Result<Value, RpcError> {
     Ok(json!({}))
 }
@@ -90,6 +112,11 @@ impl App {
         match call {
             Call::Open(params) => {
                 let files = crate::ipc::positions(&params.paths);
+                // Nothing opens unless every path can: an answer of `{}`
+                // means each one is in a tab.
+                if let Some(why) = files.iter().find_map(|file| unopenable(&file.path)) {
+                    return Err(RpcError::invalid_params(why));
+                }
                 if params.new_window {
                     // Opened by `about_to_wait`, which has the event loop
                     // a window needs; the answer doesn't wait for it.
@@ -448,10 +475,12 @@ mod tests {
 
     #[test]
     fn open_in_a_new_window_waits_for_the_event_loop() {
+        let dir = TempDir::new("control-new-window");
+        let file = dir.write("x.rs", "a\nb\n");
         let mut app = App::with_file(None);
         let params = OpenParams {
             paths: vec![OpenPath {
-                path: "C:/x.rs".into(),
+                path: file.display().to_string(),
                 line: Some(2),
                 column: None,
             }],
@@ -461,8 +490,59 @@ mod tests {
         app.apply_control(Call::Open(params)).unwrap();
         assert_eq!(
             app.pending_frames,
-            vec![(vec![at(Path::new("C:/x.rs"), Some(2), None)], false)]
+            vec![(vec![at(&file, Some(2), None)], false)]
         );
+    }
+
+    fn open_one(app: &mut App, path: &str) -> Result<Value, RpcError> {
+        app.apply_control(Call::Open(OpenParams {
+            paths: vec![OpenPath { path: path.into(), line: None, column: None }],
+            new_window: false,
+            focus: false,
+        }))
+    }
+
+    /// An empty path, a folder, or a file in a folder that isn't there:
+    /// `-32602` with the reason, and no `[No Name]` tab.
+    #[test]
+    fn open_refuses_what_it_cant_open() {
+        let dir = TempDir::new("control-open-refused");
+        let good = dir.write("good.txt", "x");
+        let mut app = App::with_file(None);
+        let before = app.focused_buffer_id();
+        let missing_folder = dir.path().join("no").join("such").join("file.txt");
+        for (path, says) in [
+            (String::new(), "empty path"),
+            (dir.path().display().to_string(), "is a folder"),
+            (missing_folder.display().to_string(), "no folder"),
+        ] {
+            let err = open_one(&mut app, &path).unwrap_err();
+            assert_eq!(err.code, -32602, "{path}");
+            assert!(err.message.contains(says), "{path}: {}", err.message);
+        }
+        // One bad path among good ones: none of them open.
+        let err = app.apply_control(Call::Open(OpenParams {
+            paths: vec![
+                OpenPath { path: good.display().to_string(), line: None, column: None },
+                OpenPath { path: String::new(), line: None, column: None },
+            ],
+            new_window: false,
+            focus: false,
+        }));
+        assert!(err.is_err());
+        assert_eq!(app.focused_buffer_id(), before);
+    }
+
+    /// A file not there yet, in a folder that is: a tab named for it, to
+    /// be created when it's saved.
+    #[test]
+    fn open_of_a_new_file_names_its_tab() {
+        let dir = TempDir::new("control-open-new");
+        let new = dir.path().join("new.rs");
+        let mut app = App::with_file(None);
+        assert_eq!(open_one(&mut app, &new.display().to_string()).unwrap(), json!({}));
+        assert_eq!(app.open().buffer.path(), Some(new.as_path()));
+        assert!(!new.exists());
     }
 
     #[test]

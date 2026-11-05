@@ -167,6 +167,20 @@ impl App {
             "syntax_query" => answer(reply, self.agent_syntax_query(&arguments)),
             // -- tasks --
             "run_task" => self.agent_run_task(arguments, reply),
+            "run_test" => {
+                let started = (|| {
+                    let path = self.agent_path(&arguments)?;
+                    let line = arguments.get("line").and_then(Value::as_u64).filter(|l| *l > 0).ok_or_else(|| invalid("line: which line, from 1"))? as usize;
+                    self.run_test_at(&path, line).map_err(invalid)
+                })();
+                match started {
+                    Ok(name) => {
+                        let secs = arguments.get("timeout").and_then(Value::as_u64).unwrap_or(TASK_WAIT.as_secs()).clamp(1, 3600);
+                        self.agent_calls.task_waits.push(TaskWait { reply, until: Instant::now() + Duration::from_secs(secs), name });
+                    }
+                    Err(e) => answer(reply, Err(e)),
+                }
+            }
             "task_output" => answer(reply, self.agent_task_output(&arguments, max)),
             other => return self.agent_lsp_call(caller, other, arguments, reply),
         }

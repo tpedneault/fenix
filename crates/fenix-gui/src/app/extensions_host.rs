@@ -189,7 +189,7 @@ impl App {
             }),
             RegistryEvent::Installed(result) => {
                 match result {
-                    Ok(said) => self.set_message(said.replace('\n', " ")),
+                    Ok(said) => self.set_message(format!("{} SPC q r restarts now, where you are.", said.replace('\n', " "))),
                     Err(e) => self.set_error(e),
                 }
                 let rows = crate::installed::rows();
@@ -257,7 +257,7 @@ impl App {
             }
             Action::SwitchInstalled(ext, on) => {
                 match crate::installed::store().map(|store| store.set_enabled(&ext, on)) {
-                    Some(Ok(())) => self.set_message(format!("{ext}: {} from the next start", if on { "on" } else { "off" })),
+                    Some(Ok(())) => self.set_message(format!("{ext}: {} from the next start -- SPC q r restarts now, where you are", if on { "on" } else { "off" })),
                     Some(Err(e)) => self.set_error(e),
                     None => self.set_error("no folder to keep extensions in"),
                 }
@@ -265,7 +265,7 @@ impl App {
             }
             Action::Uninstall(ext) => {
                 match crate::installed::store().map(|store| store.uninstall_unneeded(&ext)) {
-                    Some(Ok(removed)) => self.set_message(format!("Removed {} -- what they brought stays until Fenix next starts", crate::installed::said_removed(&removed))),
+                    Some(Ok(removed)) => self.set_message(format!("Removed {} -- what they brought stays until Fenix next starts (SPC q r restarts now)", crate::installed::said_removed(&removed))),
                     Some(Err(e)) => self.set_error(e),
                     None => self.set_error("no folder to keep extensions in"),
                 }

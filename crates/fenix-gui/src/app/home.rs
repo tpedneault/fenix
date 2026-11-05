@@ -361,7 +361,10 @@ impl App {
             ob.buffer.mark_saved();
             ob.buffer.drain_edits();
         }
-        let target = selected.and_then(|entry| view.find(&entry)).or_else(|| view.find(&HomeEntry::Find)).map(|i| view.slots[i].cursor());
+        // First on what there is to resume, which its `Enter` hint
+        // promises; else the find field.
+        let resume = view.slots.iter().position(|slot| matches!(slot.entry, HomeEntry::Resume(_)));
+        let target = selected.and_then(|entry| view.find(&entry)).or(resume).or_else(|| view.find(&HomeEntry::Find)).map(|i| view.slots[i].cursor());
         self.home_views.insert(id, view);
         if let Some((line, col)) = target {
             self.home_place_cursor(id, pane, line, col);

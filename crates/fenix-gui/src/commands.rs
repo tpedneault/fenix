@@ -91,6 +91,7 @@ impl CommandRegistry {
         registry.register("edit.undo", "Undo the last edit", cmd_undo);
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
         registry.register("app.quit", "Quit Fenix (confirms first if there are unsaved buffers)", cmd_quit);
+        registry.register("app.restart", "Restart Fenix where you are, for extensions and settings read at start", cmd_restart);
         registry.register("app.quit_force", "Quit Fenix immediately, discarding any unsaved changes", cmd_quit_force);
         registry.register("app.save_all_and_quit", "Save every unsaved buffer, then quit Fenix", cmd_save_all_and_quit);
         registry.register(
@@ -155,6 +156,7 @@ impl CommandRegistry {
         registry.external("task.run", "Fuzzy-pick and run a discovered project task", |app| app.picker_tasks());
         registry.external("task.rerun_last", "Rerun the most recently run task", |app| app.rerun_last_task());
         registry.register("task.kill", "End the currently running task", cmd_task_kill);
+        registry.register("task.run_test_at_cursor", "Run the test the cursor is in", cmd_task_run_test_at_cursor);
         registry.external("dashboard.open", "Show Home, the start-up dashboard", |app| app.open_dashboard());
         registry.external("terminal.toggle", "Toggle the terminal panel", |app| app.toggle_terminal());
         registry.external("terminal.open_buffer", "Open a shell in the focused pane", |app| app.open_terminal_buffer());
@@ -438,6 +440,10 @@ fn cmd_quit(ctx: &mut CommandCtx) {
     ctx.app.request_quit(ctx.event_loop);
 }
 
+fn cmd_restart(ctx: &mut CommandCtx) {
+    ctx.app.request_restart(ctx.event_loop);
+}
+
 fn cmd_quit_force(ctx: &mut CommandCtx) {
     if ctx.app.discard_session_edits() { ctx.event_loop.exit(); }
 }
@@ -536,6 +542,10 @@ fn cmd_project_delete(ctx: &mut CommandCtx) {
 
 fn cmd_task_kill(ctx: &mut CommandCtx) {
     ctx.app.kill_running_task();
+}
+
+fn cmd_task_run_test_at_cursor(ctx: &mut CommandCtx) {
+    ctx.app.run_test_at_cursor();
 }
 
 fn cmd_explorer_dual_pane(ctx: &mut CommandCtx) {

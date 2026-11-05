@@ -191,6 +191,7 @@ pub const TOOLS: &[Tool] = &[
     // tasks
     Tool { name: "tasks", toolset: "tasks", class: Class::Read, description: "The project's tasks (build, test, lint...), by name.", schema: none },
     Tool { name: "run_task", toolset: "tasks", class: Class::Run, description: "Runs a project task in Fenix's task pane, where the user sees it, and (unless wait is false) answers when it ends: success, problems found, tests, the end of its output.", schema: || json!({ "type": "object", "properties": { "name": { "type": "string" }, "wait": { "type": "boolean" }, "timeout": { "type": "integer", "description": "Seconds" } }, "required": ["name"] }) },
+    Tool { name: "run_test", toolset: "tasks", class: Class::Run, description: "Runs the test at a line (Rust, pytest, Go) in Fenix's task pane and answers when it ends, as run_task does.", schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer" }, "timeout": { "type": "integer" } }, "required": ["path", "line"] }) },
     Tool { name: "task_output", toolset: "tasks", class: Class::Read, description: "The last task's output, or startLine to endLine of it.", schema: || json!({ "type": "object", "properties": { "startLine": { "type": "integer" }, "endLine": { "type": "integer" } } }) },
     // debug
     Tool { name: "debug_state", toolset: "debug", class: Class::Read, description: "Where the debugger is stopped: the stack, the selected frame's variables, watches, the program's latest output.", schema: none },

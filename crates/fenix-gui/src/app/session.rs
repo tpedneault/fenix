@@ -558,6 +558,25 @@ impl App {
         saved
     }
 
+    /// `SPC q r`: Fenix quits and starts again where you were -- its
+    /// windows, files and unsaved text kept by the session -- so what
+    /// changed since it started (an extension installed or switched on,
+    /// a setting read only at start) is used. Why not, when the session
+    /// can't be kept to come back to; `None` once it's saved and the
+    /// restart can go ahead.
+    pub(crate) fn prepare_restart(&mut self) -> Option<String> {
+        if self.session.path.is_none() || self.config.restore_session == Some(false) {
+            return Some("restarting needs the session kept (session.restore is off) -- quit and start Fenix yourself".into());
+        }
+        self.session.blocked = false;
+        self.snapshot_dirty_buffers();
+        if !self.checkpoint_session() {
+            return Some("couldn't save the session to come back to, so Fenix keeps running -- SPC q q quits".into());
+        }
+        self.restart_requested = true;
+        None
+    }
+
     pub(super) fn save_session_explicit(&mut self) -> bool {
         self.session.blocked = false;
         if self.session.path.is_none() || self.config.restore_session == Some(false) { self.set_error("session persistence is disabled"); return false; }

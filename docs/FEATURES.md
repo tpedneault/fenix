@@ -20,7 +20,8 @@ its extension. The rest is built into Fenix.
   just works; in Visual mode `p` replaces the selection with it, leaving
   the replaced text on the clipboard as Vim does, and `P` replaces it
   while keeping the clipboard as it was), named registers (`"a`-`"z`/`"A`-`"Z` to select one for the
-  next `y`/`d`/`c`/`x`/`s`/`p`/`P`, uppercase appends), undo/redo, search
+  next `y`/`d`/`c`/`x`/`s`/`p`/`P`, uppercase appends; `"0` the last
+  yank, kept through deletes; `"_` the black hole), undo/redo, search
   (`/`, `?`, `n`, `N`, `*`, `#`) with every match lit as you type, a
   `[3/12]` count in the prompt and the modeline, smart-case (`\c`/`\C`
   force it; `search.smart_case`), and the highlight kept through edits
@@ -1156,7 +1157,17 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   cargo's own human-readable output (its `rendered` field), not raw
   JSON -- every other tool's plain `file:line:col: message` convention
   (gcc/clang/`pytest`/`ctest`) is recovered the same way without
-  needing `--message-format=json` at all.
+  needing `--message-format=json` at all, and so are Rust's panics
+  (`thread 'x' panicked at src/lib.rs:89:9:`) and rustc's own
+  `--> file:line:col`. `Enter` on a line of Task Output that names a
+  place -- one of those, or a `path:line:col` anywhere in it, such as a
+  test's stack -- goes there.
+  `SPC p r` runs just the test the cursor is in: a Rust `#[test]`
+  (`cargo test -p <package> -- <module::path::name> --exact`, with
+  `--test`/`--bin` for an integration test or a binary's), a pytest
+  function or `Test` class (`pytest file::Class::test`), or a Go
+  `TestXxx` (`go test -run '^TestXxx$' ./dir`), read from the buffer as
+  it is, unsaved edits included. `SPC p T` runs it again.
   Task cancellation terminates the process tree on Windows, including children
   holding output pipes. Closing or rerunning a task never waits for reader
   threads. Windows also cleans up tasks when the editor exits abruptly. Output
@@ -1251,7 +1262,10 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   typescript-language-server typescript`, ...). Detect and guide only --
   Fenix never downloads or manages a tool binary itself, the same
   posture the debugger bullet above already takes for adapters it
-  doesn't have.
+  doesn't have. A language server that failed -- couldn't start, crashed,
+  or didn't answer `initialize` within 30 seconds -- is listed with why
+  and the last lines it wrote to stderr, until `:lsp-restart` tries it
+  again.
 - **Symbol picker**: with the Tcl extension, `SPC m s` in a Tcl file opens a fuzzy-find popup listing every
   known Tcl definition (`proc`/`namespace`) by its fully-qualified name,
   sourced from the same [Universal Ctags](https://ctags.io/) scan
@@ -1553,6 +1567,9 @@ primary server, plus any additional servers a project declares, which can serve
 several languages from one process and share a buffer with its primary.
 Configure literal executables, argument arrays, working directories, and child
 environment values in `.fenix/tools.json` for LSP, DAP, and tasks.
+`SPC q r` restarts Fenix where you are -- the session, unsaved text
+included, comes back -- so an extension installed, switched on or off,
+or a setting only read at start, is used without quitting yourself.
 `:lsp-restart` reloads language services for the current project;
 `:lsp-restart NAME` restarts one server. Task rerun history is per project; debugger
 and task controls guard against operating on another project's active process.

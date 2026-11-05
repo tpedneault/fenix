@@ -1109,6 +1109,9 @@ struct LspSession {
     /// spec (a server hasn't necessarily finished setting up its own
     /// state to answer anything else yet).
     capabilities: Option<lsp_types::ServerCapabilities>,
+    /// When it was started: one that hasn't answered `initialize`
+    /// `LSP_INITIALIZE_TIMEOUT` later is given up on.
+    started: Instant,
     /// Canonicalized paths that have had `textDocument/didOpen` sent to
     /// this server, each mapped to `(last_synced_edit_count, next_
     /// version)` -- `last_synced_edit_count` is `Buffer::edit_count()`'s
@@ -1143,6 +1146,40 @@ struct LspSession {
     /// (`textDocument/diagnostic`), each document's: its last
     /// result id, and whether an ask is out and another is due after it.
     pulls: HashMap<PathBuf, LspPull>,
+}
+
+/// Why `SPC u u` can't debug a `language` file: no adapter from the
+/// project, an extension or Fenix -- and where to look, since the usual
+/// reasons are a tool not on `PATH` or something changed since start.
+fn no_debug_adapter(language: fenix_syntax::LanguageId) -> String {
+    let name = crate::lsp::language_config_name(language);
+    format!(
+        "no debug adapter for {name}: the project's .fenix/tools.json names none, no extension running gives one, and Fenix has none built in \
+         -- an extension's adapter needs its tool on PATH (SPC p h checks), and one installed or set up since Fenix started needs SPC q r"
+    )
+}
+
+/// How long a language server has to answer `initialize` before it's
+/// given up on, said to be failing, and stopped: one that never will
+/// (typescript-language-server with no `tsserver.js`) otherwise shows
+/// "starting" for good.
+const LSP_INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `, last said: <its last line>` of what a server wrote to stderr, for
+/// a one-line message; empty when it said nothing.
+fn last_line_of(said: &str) -> String {
+    said.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(|l| format!(" -- it said: {l}")).unwrap_or_default()
+}
+
+/// A failed server's row in Tool Status: why, then the last lines it
+/// wrote to stderr.
+fn failure_text(why: &str, said: &str) -> String {
+    let lines: Vec<&str> = said.lines().filter(|l| !l.trim().is_empty()).collect();
+    let last = &lines[lines.len().saturating_sub(8)..];
+    if last.is_empty() {
+        return format!("{why} (it wrote nothing to stderr)");
+    }
+    format!("{why}\n{}", last.iter().map(|l| format!("  | {l}")).collect::<Vec<_>>().join("\n"))
 }
 
 /// One document's diagnostics asked of a server (`LspSession::pulls`).
@@ -2637,13 +2674,9 @@ fn default_recent_dirs_path() -> PathBuf {
 /// shows up wearing it. It means nothing to a reader and makes an
 /// otherwise familiar path unrecognisable at a glance.
 fn readable_path(path: &Path) -> String {
-    let text = path.display().to_string();
-    // The UNC form is `\\?\UNC\server\share`, which unwraps back to
-    // `\\server\share` rather than to `UNC\server\share`.
-    match text.strip_prefix(r"\\?\UNC\") {
-        Some(rest) => format!(r"\\{rest}"),
-        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
-    }
+    // `normalize` unwraps the UNC form, `\\?\UNC\server\share`, back to
+    // `\\server\share`, and on Windows makes the separators one kind.
+    fenix_lsp::normalize(path.to_path_buf()).display().to_string()
 }
 
 /// A path's own name, for a message that has already said where.
@@ -5037,6 +5070,16 @@ pub struct App {
     /// `lsp_workspace_names` its calls are colored by.
     tcl_name_servers: HashMap<BufferId, (Instant, Vec<LspKey>)>,
     lsp_unavailable: std::collections::HashSet<LspKey>,
+    /// `SPC q r` asked for Fenix to start again once it has quit
+    /// (`prepare_restart`); `main` starts the new one.
+    pub(crate) restart_requested: bool,
+    /// What the last frame's language-server sync saw
+    /// (`sync_lsp_if_changed`): the focused buffer, its edit count, the
+    /// servers, those ready, and those given up on.
+    lsp_frame_synced: Option<(BufferId, u64, usize, usize, usize)>,
+    /// Why each of `lsp_unavailable` stopped, with the last it wrote to
+    /// stderr: what Tool Status shows.
+    lsp_failures: HashMap<LspKey, String>,
     /// Each project root's additional servers (`tools.json`'s
     /// `lsp.additional`), read once and again on `:lsp-restart`.
     lsp_additional: HashMap<PathBuf, Vec<fenix_project::tools::AdditionalServer>>,
@@ -5802,6 +5845,9 @@ impl App {
             lsp_workspace_names: HashMap::new(),
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
+            restart_requested: false,
+            lsp_frame_synced: None,
+            lsp_failures: HashMap::new(),
             lsp_additional: HashMap::new(),
             lsp_fanouts: HashMap::new(),
             next_lsp_fanout: 1,
@@ -6623,6 +6669,20 @@ impl App {
     /// would send `didOpen` but then never notice an edit made while
     /// staying on the same buffer, since nothing else marks "this
     /// buffer changed" the way switching away/back does.
+    /// `sync_lsp_for_focused_buffer`, each frame: skipped while the
+    /// focused buffer, its edit count, and the servers running and ready
+    /// are what they were the last time.
+    fn sync_lsp_if_changed(&mut self) {
+        let ready = self.lsp_sessions.values().filter(|s| s.capabilities.is_some()).count();
+        let now = (self.focused_buffer_id(), self.open().buffer.edit_count(), self.lsp_sessions.len(), ready, self.lsp_unavailable.len());
+        if self.lsp_frame_synced == Some(now) {
+            return;
+        }
+        self.sync_lsp_for_focused_buffer();
+        let ready = self.lsp_sessions.values().filter(|s| s.capabilities.is_some()).count();
+        self.lsp_frame_synced = Some((self.focused_buffer_id(), self.open().buffer.edit_count(), self.lsp_sessions.len(), ready, self.lsp_unavailable.len()));
+    }
+
     fn sync_lsp_for_focused_buffer(&mut self) {
         let _profile = crate::profile::Scope::new("sync LSP");
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
@@ -6745,7 +6805,7 @@ impl App {
         let generation = tool_sessions::generation();
         let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
         self.lsp_sessions.insert(key.clone(), LspSession {
-            generation, client, name: name.to_string(), languages, root: key.root.clone(), reader, capabilities: None,
+            generation, client, name: name.to_string(), languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
             open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         });
         self.send_lsp_initialize(key, cwd);
@@ -6817,12 +6877,13 @@ impl App {
                 let generation = tool_sessions::generation();
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
                 self.lsp_sessions.insert(key.clone(), LspSession {
-                    generation, client, name, languages, root: key.root.clone(), reader, capabilities: None,
+                    generation, client, name, languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
                     open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
                 });
                 self.send_lsp_initialize(key, cwd);
             }
             Err(err) => {
+                self.lsp_failures.insert(key.clone(), format!("couldn't start {}: {err}", spec.executable));
                 self.lsp_unavailable.insert(key);
                 self.set_error(format!("couldn't start {name} ({}) for {}: {err}", spec.executable, cwd.display()));
             }
@@ -6893,8 +6954,10 @@ impl App {
                 // Only this server goes: the buffer's other servers keep
                 // their sessions, diagnostics and requests.
                 let name = self.lsp_server_name(&key);
+                let said = self.lsp_sessions.get(&key).map(|s| s.client.stderr_tail()).unwrap_or_default();
                 self.stop_lsp_session(&key);
-                self.set_error(format!("{name} disconnected: {reason}"));
+                self.set_error(format!("{name} disconnected: {reason}{}", last_line_of(&said)));
+                self.lsp_failures.insert(key.clone(), failure_text(&format!("disconnected: {reason}"), &said));
                 self.lsp_unavailable.insert(key);
             }
         }
@@ -6947,6 +7010,8 @@ impl App {
                 Err(err) => {
                     let name = self.lsp_server_name(&key);
                     self.set_error(format!("{name} failed to initialize: {}", err.message));
+                    let said = self.lsp_sessions.get(&key).map(|s| s.client.stderr_tail()).unwrap_or_default();
+                    self.lsp_failures.insert(key, failure_text(&format!("failed to initialize: {}", err.message), &said));
                 }
             },
             PendingLspRequest::Control { fanout } => {
@@ -8041,7 +8106,7 @@ impl App {
     fn completion_candidates(&mut self) -> Vec<fenix_picker::Candidate<completion::Item>> {
         let mut candidates = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        let mut words: Vec<_> = completion::buffer_words(&self.open().buffer).into_iter().collect();
+        let mut words: Vec<_> = completion::buffer_words_besides_cursor(&self.open().buffer, &self.cursor()).into_iter().collect();
         words.sort();
         for word in words {
             if seen.insert(word.clone()) {
@@ -8478,6 +8543,15 @@ impl App {
         // An extension's formatter first, when you've asked for that; one
         // that fails says so, and the text is saved as it is.
         let unformatted = if self.config.format_on_save == Some(true) { self.run_extension_formatter().and_then(Result::err) } else { None };
+        // A new file (`SPC f f src/new/mod.rs`) in folders that aren't
+        // there yet: they're made.
+        if let Some(parent) = self.open().buffer.path().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                self.set_error(format!("save failed: couldn't create {}: {err}", fenix_core::plain_path(parent).display()));
+                self.wake_caret();
+                return;
+            }
+        }
         let ob = self.open_mut();
         match ob.buffer.save() {
             Ok(()) => {
@@ -8599,6 +8673,15 @@ impl App {
     /// anyway." Note this is no longer reachable from a bare `:q`/
     /// `SPC b k` -- those only close the focused buffer now, see
     /// `App::kill_buffer`.
+    /// `SPC q r` (`app.restart`): quits and starts again, the session
+    /// restored -- unsaved text and all -- for what only a start reads.
+    pub(crate) fn request_restart(&mut self, event_loop: &ActiveEventLoop) {
+        match self.prepare_restart() {
+            Some(why) => self.set_error(why),
+            None => event_loop.exit(),
+        }
+    }
+
     pub(crate) fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
         if !self.arm_quit_confirm_if_dirty() {
             event_loop.exit();
@@ -9605,12 +9688,59 @@ impl App {
         self.enter_picker(ActivePicker::Task(fenix_picker::PickerState::new(candidates)));
     }
 
+    /// `SPC p r`: the test the cursor is in, run in Task Output.
+    pub(crate) fn run_test_at_cursor(&mut self) {
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
+            self.set_error("no file here -- SPC p r runs the test the cursor is in");
+            return;
+        };
+        let line = self.open().buffer.line_col(&self.cursor()).0 + 1;
+        // A refusal has already been said.
+        let _ = self.run_test_at(&path, line);
+    }
+
+    /// Runs the test that line `line` (1-based) of the file at `path` is
+    /// in, alone, in Task Output, as `SPC p r` does there: a Rust
+    /// `#[test]`, a pytest test or a Go `TestXxx` (`fenix_tasks::test_at`),
+    /// read from the file's open buffer when it has one, unsaved edits and
+    /// all. The task's name (`test ledger::tests::adds`) when it started;
+    /// why not when it didn't, also shown in the modeline. `SPC p T` runs
+    /// it again.
+    pub(crate) fn run_test_at(&mut self, path: &Path, line: usize) -> Result<String, String> {
+        let text = match self.buffer_id_for_lsp_path(path).and_then(|id| self.buffers.get(id)) {
+            Some(ob) => ob.buffer.text(),
+            None => match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(err) => {
+                    let why = format!("{}: {err}", readable_path(path));
+                    self.set_error(why.clone());
+                    return Err(why);
+                }
+            },
+        };
+        let root = tool_sessions::root_for_path(path);
+        let task = match fenix_tasks::test_at(path, &text, line, &root) {
+            Ok(task) => task,
+            Err(why) => {
+                self.set_error(why.clone());
+                return Err(why);
+            }
+        };
+        let name = task.name.clone();
+        if self.run_task_as(task, root, None) {
+            Ok(name)
+        } else {
+            Err(self.modeline_pieces().1)
+        }
+    }
+
     /// The tasks the project at `root` has, as `SPC t t` offers them: the
     /// extensions', those found from its files, and its own
     /// (`tools.json`'s), which win by name.
     fn tasks_for(&self, root: &Path) -> Result<Vec<fenix_tasks::TaskDef>, String> {
-        let mut tasks: Vec<fenix_tasks::TaskDef> = self.wasm.tasks(root);
-        tasks.extend(fenix_tasks::discover_tasks(root));
+        // An extension's first; core's defaults only where they add a
+        // name and a command line it doesn't have (#35).
+        let mut tasks = fenix_tasks::merge_tasks(self.wasm.tasks(root), fenix_tasks::discover_tasks(root));
         let tools = fenix_project::tools::ProjectTools::read(root)?;
         for (name, spec) in tools.tasks {
             tasks.retain(|task| task.name != name);
@@ -9839,6 +9969,33 @@ impl App {
         }
     }
 
+    /// `Enter` in Task Output: the place the cursor's line names, opened
+    /// as `SPC p n` would, relative to where the task ran. False, and
+    /// nothing done, when the line names none.
+    pub(crate) fn task_output_open_location_at_cursor(&mut self) -> bool {
+        let (line, _) = self.open().buffer.line_col(&self.cursor());
+        let text = self.open().buffer.line(line).to_string();
+        let Some(found) = fenix_tasks::find_location(text.trim_end()) else { return false };
+        let buffer = self.focused_buffer_id();
+        let base = self
+            .task_session
+            .as_ref()
+            .filter(|s| s.buffer == buffer)
+            .map(|s| s.cwd.clone())
+            .unwrap_or_else(|| self.integration_root());
+        let path = base.join(&found.path);
+        if !path.is_file() {
+            self.set_error(format!("{} isn't a file", readable_path(&path)));
+            return true;
+        }
+        let from = JumpEntry { buffer, char_idx: self.cursor().char_idx };
+        let m = fenix_project::GrepMatch { path, line: found.line, col: found.col, text: found.message };
+        self.open_file_as_preview(&m.path);
+        self.jump_to_grep_match(&m);
+        self.record_jump(from);
+        true
+    }
+
     /// Appends `text` (verbatim, split on any internal `\n` -- a decoded
     /// cargo compiler message's own `rendered` block is often several
     /// lines) to the Task Output buffer, auto-following the same way
@@ -9908,9 +10065,10 @@ impl App {
     /// if one is running but not currently stopped (nothing useful to
     /// do -- it's already going).
     pub(crate) fn debug_start_or_continue(&mut self) {
-        if !self.debug_scope_matches() { return; }
-        // One that's over gives way to a new one.
+        // One that's over gives way to a new one, whichever project it
+        // was in.
         self.debug_clear_ended();
+        if !self.debug_scope_matches() { return; }
         if let Some(session) = &self.debug_session {
             let Some(thread_id) = session.stopped_thread else {
                 // Already running -- nothing to continue, but its dock
@@ -9937,7 +10095,7 @@ impl App {
             Ok(tools) => tools,
             Err(error) => { self.set_error(error); return; }
         };
-        let Some(spec) = self.debug_adapter_command(&root, language, &tools) else { self.set_error(format!("no known debug adapter for {language:?}")); return; };
+        let Some(spec) = self.debug_adapter_command(&root, language, &tools) else { let why = no_debug_adapter(language); self.set_error(why); return; };
         // No launch configuration of its own: the extensions' (their
         // `launch/*.toml`, and those they give as they run), to pick from.
         if tools.launch.is_empty() {
@@ -10003,7 +10161,12 @@ impl App {
     /// from this machine's processes -- then its `preLaunchTask`
     /// runs, and the session starts once that succeeds.
     pub(crate) fn debug_start_from(&mut self, mut template: crate::dap::Template) {
-        if !self.debug_scope_matches() || !self.debug_clear_ended() { return; }
+        // One that's over gives way, whichever project it was in; one
+        // still running doesn't.
+        if !self.debug_clear_ended() {
+            self.debug_scope_matches();
+            return;
+        }
         let Some(language) = self.focused_language() else {
             self.set_error("no recognized language for the focused buffer".to_string());
             return;
@@ -10018,7 +10181,7 @@ impl App {
             Some(port) => crate::dap::Adapter { command: None, port: Some(port) },
             None => match self.debug_adapter_command(&root, language, &tools) {
                 Some(spec) => spec,
-                None => return self.set_error(format!("no known debug adapter for {language:?}")),
+                None => return self.set_error(no_debug_adapter(language)),
             },
         };
         for name in template.variables() {
@@ -10838,7 +11001,14 @@ impl App {
                 }
             })
             .collect();
-        let text = crate::tool_status::render(&entries) + &crate::tool_status::render_additional(&additional);
+        let mut failures: Vec<(String, String)> = self
+            .lsp_failures
+            .iter()
+            .filter(|(key, _)| key.root == root && self.lsp_unavailable.contains(key))
+            .map(|(key, why)| (self.lsp_server_name(key), why.clone()))
+            .collect();
+        failures.sort();
+        let text = crate::tool_status::render(&entries) + &crate::tool_status::render_additional(&additional) + &crate::tool_status::render_failures(&failures);
 
         if let Some(session) = &self.tool_status_session {
             let (workspace_index, pane, buffer) = (session.workspace_index, session.pane, session.buffer);
@@ -12382,7 +12552,17 @@ impl App {
         self.pane_titles.insert(pane, purpose.title());
         self.windows_mut().focus(pane);
         self.compose = Some(ComposeSession { pane, buffer, purpose, returning_to, seed: seed.to_string() });
-        self.set_message("write (i to insert), then Esc and Enter to send -- q discards");
+        // A blank one is there to be typed into: it opens in Insert, so
+        // the first word written isn't run as commands (`P` pasting).
+        // One with text to edit (an amend, a description) opens in Normal.
+        if seed.is_empty() && self.vim.mode() == Mode::Normal {
+            if let (Some(ob), Some(state)) = (self.buffers.get_mut(buffer), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+                self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('i'));
+            }
+            self.set_message("write, then Esc and Enter to send -- q discards");
+        } else {
+            self.set_message("write (i to insert), then Esc and Enter to send -- q discards");
+        }
         self.wake_caret();
     }
 
@@ -12426,6 +12606,13 @@ impl App {
     /// Tears the compose pane down and puts focus back where it was.
     fn close_compose(&mut self) {
         let Some(compose) = self.compose.take() else { return };
+        // Closed while still typing (it opens in Insert): back to Normal
+        // for wherever focus goes.
+        if self.vim.mode() == Mode::Insert {
+            if let (Some(ob), Some(state)) = (self.buffers.get_mut(compose.buffer), self.workspaces.active_pane_states_mut().get_mut(&compose.pane)) {
+                self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::named(FenixNamedKey::Escape));
+            }
+        }
         self.pane_titles.remove(&compose.pane);
         self.windows_mut().focus(compose.pane);
         if self.windows_mut().close_focused() {
@@ -12638,9 +12825,22 @@ impl App {
         }
     }
 
+    /// The conflicted file the Conflicts pane's cursor is on -- or, on
+    /// its header row with only one file listed, that one, which is what
+    /// the hints above it offer to act on.
+    fn merge_file_at_cursor(&self) -> Option<String> {
+        if let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() {
+            return Some(path);
+        }
+        match self.merge_session.as_ref().map(|s| s.files.as_slice()) {
+            Some([only]) => Some(only.clone()),
+            _ => None,
+        }
+    }
+
     /// `Enter` on the Conflicts pane: show that file in the right pane.
     pub(crate) fn merge_select_at_cursor(&mut self) {
-        let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() else {
+        let Some(path) = self.merge_file_at_cursor() else {
             self.set_message("put the cursor on a conflicted file");
             return;
         };
@@ -12662,7 +12862,7 @@ impl App {
         let Some(session) = self.merge_session.as_ref() else { return };
         let repo_root = session.repo_root.clone();
         let labels = session.labels.clone();
-        let Some(git_panel::GitEntry::File(path)) = self.git_entry_at_cursor() else {
+        let Some(path) = self.merge_file_at_cursor() else {
             self.set_message("put the cursor on a conflicted file");
             return;
         };
@@ -12876,7 +13076,13 @@ impl App {
         }
         let result = match op {
             fenix_git::InProgress::Rebase { .. } => fenix_git::rebase_continue(&repo_root),
-            fenix_git::InProgress::Merge => fenix_git::commit(&repo_root, "Merge"),
+            // Git's prepared message, in the composer to be edited, as
+            // `git commit` opens it in an editor.
+            fenix_git::InProgress::Merge => {
+                let message = fenix_git::merge_message(&repo_root).unwrap_or_else(|| "Merge".to_string());
+                self.open_compose_seeded(ComposePurpose::CommitMessage { repo_root }, &message);
+                return;
+            }
             fenix_git::InProgress::CherryPick | fenix_git::InProgress::Revert | fenix_git::InProgress::Bisect => {
                 self.set_error(format!("{} can't be continued from here -- finish it with git", op.label()));
                 return;
@@ -13560,6 +13766,16 @@ impl App {
     /// per picker kind. A no-op (stays open) if the filtered list is
     /// currently empty -- nothing to confirm.
     fn picker_confirm(&mut self) {
+        self.picker_confirm_inner();
+        // A picker that closed leaves its page: what's drawn is where the
+        // keys go. A command it ran that opens a view of its own (another
+        // picker, a page) sets that view when it runs.
+        if self.active_picker.is_none() && self.main_view == MainView::Picker {
+            self.main_view = MainView::Editor;
+        }
+    }
+
+    fn picker_confirm_inner(&mut self) {
         match &self.active_picker {
             Some(ActivePicker::Commands(state)) => {
                 let Some(id) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -13975,7 +14191,11 @@ impl App {
             let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             root.join(expanded)
         };
+        let new = !resolved.exists();
         self.open_file_from_picker(&resolved);
+        if new && self.open().buffer.path().is_some() {
+            self.set_message(format!("{} is a new file -- SPC f s creates it", fenix_core::plain_path(&resolved).display()));
+        }
     }
 
     /// What to show in place of the modeline while `find_file_prompt` is
@@ -14270,6 +14490,7 @@ impl App {
     /// call site (`dashboard_activate_selected`), which isn't already
     /// mid-picker when it calls this.
     fn switch_to_project(&mut self, root: PathBuf) {
+        let root = fenix_lsp::normalize(root);
         self.project_root = Some(root.clone());
         self.known_projects.add(root.clone());
         if let Err(err) = self.known_projects.save() {
@@ -14309,7 +14530,15 @@ impl App {
             self.wake_caret();
             return;
         }
-        let Some(picker) = &mut self.active_picker else { return };
+        let Some(picker) = &mut self.active_picker else {
+            // No picker left to take the key: its page goes, rather than
+            // staying up blank while keys reach nothing.
+            if self.main_view == MainView::Picker {
+                self.main_view = MainView::Editor;
+                self.wake_caret();
+            }
+            return;
+        };
         match key.code {
             KeyCode::Named(FenixNamedKey::Escape) => self.picker_cancel(),
             KeyCode::Named(FenixNamedKey::Enter) => self.picker_confirm(),
@@ -15507,6 +15736,16 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        // `Enter` on a line of a task's output that names a place --
+        // `src/lib.rs:89:9`, a panic, a test's stack -- goes there.
+        if keypress == KeyPress::named(FenixNamedKey::Enter)
+            && self.vim.mode() == Mode::Normal
+            && !self.leader_matcher.is_pending()
+            && self.open().kind == BufferKind::TaskOutput
+            && self.task_output_open_location_at_cursor()
+        {
+            return;
         }
         // `q` in a side-by-side's read-only pane closes it -- that pane
         // is nothing to record a macro in.
@@ -18481,8 +18720,10 @@ impl App {
         // server needs a `textDocument/didChange` -- editing doesn't
         // otherwise have a dedicated "something changed" hook the way
         // focus changes do (`refresh_project_root`), so this is checked
-        // here instead, once per rendered frame.
-        self.sync_lsp_for_focused_buffer();
+        // here instead, once per rendered frame -- and only when the
+        // buffer, its edits or the servers have moved since the last, as
+        // the sync itself copies the text and looks at the disk (#74).
+        self.sync_lsp_if_changed();
         self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
@@ -21074,6 +21315,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             .filter(|r| !r.done)
             .map(|r| r.started + SLOW_LISTING_AFTER)
             .fold(wait_until, |acc, deadline| acc.min(deadline));
+        // A language server that never answered `initialize`, given up.
+        let wait_until = match self.lsp_initialize_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
         // The Search page's typing, once it pauses.
         let wait_until = match self.search_fire_due(now) {
             Some(due) => wait_until.min(due),
@@ -23600,6 +23846,20 @@ configure_board stm32
     // special while the menu is up and does not list Escape.
 
     /// A Tcl buffer in Insert mode with the popup open on "se".
+    /// Moves the open popup's selection to a plain word (not a snippet,
+    /// which expands to more than its label), and gives its label.
+    fn select_a_word(app: &mut App) -> String {
+        let completion = app.completion.as_mut().expect("the popup is open");
+        for _ in 0..50 {
+            let item = &completion.picker.selected().expect("something to pick").payload;
+            if !matches!(item.source, completion::Source::Snippet) {
+                return item.label.clone();
+            }
+            completion.picker.move_selection(1);
+        }
+        panic!("no word among the matches")
+    }
+
     fn app_with_an_open_completion_popup(name: &str) -> (TempDir, App) {
         let dir = TempDir::new(name);
         let file = dir.write("foo.tcl", "");
@@ -23656,12 +23916,17 @@ configure_board stm32
         // Vim's own accept key, beside the Tab/Enter every other editor
         // uses -- all three do the same thing rather than one of them
         // meaning something subtly different.
-        let (_dir, mut app) = app_with_an_open_completion_popup("ctrl_y_accept");
-        let selected = app.completion.as_ref().unwrap().picker.selected().unwrap().label.clone();
+        let dir = TempDir::new("ctrl_y_accept");
+        let file = dir.write("foo.tcl", "");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.test_vim_key(KeyPress::char('i'));
+        app.test_insert_str("seek se");
+        app.sync_completion();
+        let selected = select_a_word(&mut app);
 
         app.test_completion_key(KeyPress::char('y').with_ctrl());
 
-        assert_eq!(app.open().buffer.text(), selected);
+        assert_eq!(app.open().buffer.text(), format!("seek {selected}"));
         assert_eq!(app.vim.mode(), Mode::Insert, "accepting a completion keeps you typing");
     }
 
@@ -24067,15 +24332,16 @@ configure_board stm32
         let file = dir.write("foo.tcl", "");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         app.test_vim_key(KeyPress::char('i'));
-        app.test_insert_str("se");
+        // A word to complete to: the one being typed isn't offered (#73).
+        app.test_insert_str("seek se");
         app.sync_completion();
-        let expected_label = app.completion.as_ref().unwrap().picker.selected().unwrap().payload.label.clone();
+        let expected_label = select_a_word(&mut app);
 
         app.accept_completion();
 
         assert!(app.completion.is_none());
-        assert_eq!(app.open().buffer.text(), expected_label);
-        assert_eq!(app.test_cursor().char_idx, expected_label.chars().count());
+        assert_eq!(app.open().buffer.text(), format!("seek {expected_label}"));
+        assert_eq!(app.test_cursor().char_idx, 5 + expected_label.chars().count());
     }
 
     #[test]
@@ -28119,6 +28385,27 @@ configure_board stm32
         assert_eq!(labels, vec!["a.txt".to_string(), "sub/b.txt".to_string()]);
     }
 
+    /// `SPC :` and a command that opens nothing of its own: Enter runs it
+    /// and the PICKER page goes, rather than staying up blank.
+    #[test]
+    fn a_command_picked_in_the_palette_leaves_the_picker_page() {
+        let mut app = App::with_file(None);
+        let candidates = vec![fenix_picker::Candidate::new("toggle line numbers".to_string(), "editor.cycle_line_numbers".to_string())];
+        app.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::new(candidates)));
+        app.picker_confirm();
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.queued_command.as_deref(), Some("editor.cycle_line_numbers"));
+        // With no match, Enter does nothing and keeps the query.
+        app.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::new(Vec::new())));
+        app.picker_confirm();
+        assert!(app.active_picker.is_some() && app.main_view == MainView::Picker);
+        // A picker page left with no picker: the next key clears it.
+        app.active_picker = None;
+        app.picker_key(KeyPress::named(FenixNamedKey::Escape));
+        assert_eq!(app.main_view, MainView::Editor);
+    }
+
     #[test]
     fn enter_picker_and_picker_cancel_leave_the_buffer_untouched() {
         let dir = TempDir::new("picker_enter_cancel");
@@ -28920,6 +29207,23 @@ configure_board stm32
         assert_eq!(app.home_views[&id].slots[selected].entry, entry);
     }
 
+    /// With a file to resume, Home opens on it: the `Enter` its column
+    /// shows resumes it, rather than opening the finder.
+    #[test]
+    fn home_opens_on_the_file_to_resume() {
+        let dir = TempDir::new("home_resume_first");
+        let file = dir.write("app.rs", "fn main() {}\n");
+        let mut app = App::with_file(None);
+        app.recent_files = fenix_project::RecentFiles::load_or_default(dir.path().join("recent_files.txt"));
+        app.recent_files.add(file.clone());
+        app.test_home();
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        let at = app.home_views[&id].slots[app.home_selected_slot(id, pane).unwrap()].entry.clone();
+        assert!(matches!(at, dashboard::HomeEntry::Resume(_)), "{at:?}");
+        assert!(app.home_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(app.open().buffer.path().map(fenix_core::path_key), Some(fenix_core::path_key(&file)));
+    }
+
     #[test]
     fn home_keys_move_between_slots_and_numbers_activate() {
         let dir = TempDir::new("home_keys");
@@ -29274,6 +29578,29 @@ configure_board stm32
         app.handle_user_event(FenixUserEvent::TaskEvent(app.focused_buffer_id(), fenix_tasks::RunId::next(), fenix_tasks::TaskEvent::Finished(fenix_tasks::TaskOutcome::Cancelled)));
     }
 
+    /// `SPC p r`, and what `run_test {path, line}` calls: the test a line
+    /// is in, alone, in Task Output -- from the buffer's text, unsaved
+    /// edits and all.
+    #[test]
+    fn run_test_at_runs_the_test_a_line_is_in() {
+        let dir = TempDir::new("run_test_at");
+        dir.write("pyproject.toml", "[project]\nname = \"ledger\"\n");
+        let path = dir.write("test_ledger.py", "def helper():\n    pass\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let err = app.run_test_at(&path, 2).unwrap_err();
+        assert!(err.contains("isn't in a test"), "{err}");
+        assert!(app.modeline_pieces().1.contains("isn't in a test"));
+        // Typed, not saved.
+        let end = app.open().buffer.len_chars();
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        buffer.replace_range(cursor, end, end, "\ndef test_totals():\n    assert 1 == 1\n");
+        assert_eq!(app.run_test_at(&path, 5).unwrap(), "test test_totals");
+        let session = app.task_session.as_ref().expect("Task Output opened");
+        let header = app.buffers.get(session.buffer).unwrap().buffer.text();
+        assert!(header.starts_with("$ pytest test_ledger.py::test_totals"), "{header}");
+        assert_eq!(app.project_last_tasks.values().next().map(|t| t.name.as_str()), Some("test test_totals"), "SPC p T runs it again");
+    }
+
     #[test]
     fn picker_tasks_errors_with_no_project_root() {
         let mut app = App::with_file(None);
@@ -29446,6 +29773,16 @@ configure_board stm32
         assert!(app.modeline_pieces().1.contains("no file to set a breakpoint"));
     }
 
+    /// `SPC q r` with nowhere to keep the session (a test's App, or
+    /// `session.restore = false`): it says so, and Fenix keeps running.
+    #[test]
+    fn a_restart_without_a_session_to_come_back_to_is_refused() {
+        let mut app = App::with_file(None);
+        let why = app.prepare_restart().expect("refused");
+        assert!(why.contains("session"), "{why}");
+        assert!(!app.restart_requested);
+    }
+
     #[test]
     fn debug_start_or_continue_errors_for_an_unrecognized_language() {
         let dir = TempDir::new("debug_no_language");
@@ -29461,7 +29798,9 @@ configure_board stm32
         let file = dir.write("main.rs", "fn main() {}\n");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         app.debug_start_or_continue();
-        assert!(app.modeline_pieces().1.contains("no known debug adapter"));
+        let said = app.modeline_pieces().1;
+        assert!(said.contains("no debug adapter for rust"), "{said}");
+        assert!(said.contains("SPC p h") && said.contains("SPC q r"), "says where to look: {said}");
     }
 
     #[test]
@@ -29611,6 +29950,30 @@ configure_board stm32
         let s = app.debug_session.as_ref().unwrap();
         let text = render_call_stack_text(s);
         assert!(s.ended && text.contains("configurationDone: Failed command") && text.contains("hostpolicy.dll"), "{text}");
+    }
+
+    /// A session that ended in another project doesn't block starting one
+    /// here: it gives way, as one in this project does. One still running
+    /// there still does.
+    #[test]
+    fn an_ended_session_in_another_project_gives_way() {
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+        {
+            let s = app.debug_session.as_mut().unwrap();
+            s.root = PathBuf::from("/some/other/project");
+            s.ended = true;
+        }
+        app.debug_start_or_continue();
+        assert!(!app.modeline_pieces().1.contains("another project"), "{}", app.modeline_pieces().1);
+        assert!(app.debug_session.as_ref().is_none_or(|s| s.root != Path::new("/some/other/project")));
+
+        debug_test_session(&mut app);
+        app.debug_session.as_mut().unwrap().root = PathBuf::from("/some/other/project");
+        app.debug_start_or_continue();
+        assert!(app.modeline_pieces().1.contains("another project"), "{}", app.modeline_pieces().1);
+        app.debug_start_from(crate::dap::Template::from_project(&Default::default(), "python").unwrap());
+        assert!(app.debug_session.as_ref().is_some_and(|s| s.root == Path::new("/some/other/project")));
     }
 
     /// `SPC u q`: the adapter goes, the panel says "stopped", and the next
@@ -30304,6 +30667,60 @@ configure_board stm32
         }
     }
 
+    /// A server that never answers `initialize` doesn't say "starting"
+    /// for good: past `LSP_INITIALIZE_TIMEOUT` it's stopped, said to have
+    /// failed, and shown so in Tool Status until `:lsp-restart`.
+    #[test]
+    fn a_server_that_never_initializes_is_given_up_on() {
+        let mut app = App::with_file(None);
+        let key = LspKey::primary(fenix_syntax::LanguageId::TypeScript, PathBuf::from("/project"));
+        let (client, _rx) = fenix_lsp::LspClient::connect(std::io::empty(), std::io::sink());
+        let started = Instant::now();
+        app.lsp_sessions.insert(key.clone(), LspSession {
+            generation: tool_sessions::generation(), client, name: "typescript-language-server".into(), languages: vec!["typescript".into()], root: key.root.clone(), reader: None,
+            started, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+        });
+        assert!(app.background_jobs().iter().any(|j| j == "starting typescript-language-server"));
+        // Not yet: when it's due is said.
+        assert_eq!(app.lsp_initialize_tick(started + Duration::from_secs(1)), Some(started + LSP_INITIALIZE_TIMEOUT));
+        assert!(app.lsp_sessions.contains_key(&key));
+
+        assert_eq!(app.lsp_initialize_tick(started + LSP_INITIALIZE_TIMEOUT), None);
+        assert!(!app.lsp_sessions.contains_key(&key));
+        assert!(app.lsp_unavailable.contains(&key), "not started again every frame");
+        assert!(app.background_jobs().is_empty());
+        let said = app.modeline_pieces().1;
+        assert!(said.contains("typescript-language-server didn't start") && said.contains(":lsp-restart"), "{said}");
+        assert!(app.lsp_failures[&key].contains("didn't answer initialize in 30 s"));
+    }
+
+    #[test]
+    fn a_failure_shows_the_last_lines_a_server_wrote() {
+        assert_eq!(last_line_of(""), "");
+        assert_eq!(last_line_of("starting\nError: no tsserver.js\n\n"), " -- it said: Error: no tsserver.js");
+        let text = failure_text("didn't answer", &(0..20).map(|n| format!("line {n}")).collect::<Vec<_>>().join("\n"));
+        assert!(text.starts_with("didn't answer\n  | line 12"), "{text}");
+        assert!(text.ends_with("  | line 19"));
+        assert_eq!(failure_text("gone", ""), "gone (it wrote nothing to stderr)");
+    }
+
+    /// A frame with nothing new to tell a server doesn't copy the text or
+    /// look at the disk again; one after an edit does.
+    #[test]
+    fn a_frame_only_syncs_the_language_servers_when_something_moved() {
+        let dir = TempDir::new("lsp_frame_sync");
+        let file = dir.write("notes.txt", "one\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.sync_lsp_if_changed();
+        let first = app.lsp_frame_synced;
+        assert!(first.is_some());
+        app.sync_lsp_if_changed();
+        assert_eq!(app.lsp_frame_synced, first);
+        app.test_insert_str("x");
+        app.sync_lsp_if_changed();
+        assert_ne!(app.lsp_frame_synced, first, "an edit is synced");
+    }
+
     #[test]
     fn apply_lsp_diagnostics_stores_and_then_clears_them_by_path() {
         let mut app = App::with_file(None);
@@ -30345,6 +30762,37 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.ensure_lsp_session(fenix_syntax::LanguageId::Batch, &std::env::temp_dir());
         assert!(!app.lsp_sessions.keys().any(|key| key.is_primary_for(fenix_syntax::LanguageId::Batch)));
+    }
+
+    /// A Rust panic in Task Output: `SPC p n` goes to its file, not to
+    /// one named for the whole line, and `Enter` on the line goes there
+    /// too.
+    #[test]
+    fn a_panic_in_task_output_is_a_place_to_go() {
+        let dir = TempDir::new("task_panic_place");
+        let target = dir.write("lib.rs", "one\ntwo\nthree three\n");
+        let mut app = App::with_file(None);
+        let (program, args) = echo_command("noop");
+        app.run_task(fenix_tasks::TaskDef { name: "t".to_string(), command: program, args }, dir.path().to_path_buf());
+        let buffer = app.task_session.as_ref().unwrap().buffer;
+        let cwd = app.task_session.as_ref().unwrap().cwd.clone();
+        app.quickfix.clear();
+        app.append_task_output_line(buffer, "thread 'tests::amounts' (16816) panicked at lib.rs:3:7:".to_string());
+        match app.quickfix.last() {
+            Some(QuickfixEntry::Task(m)) => assert_eq!((m.path.clone(), m.line, m.col), (cwd.join("lib.rs"), 3, 7)),
+            _ => panic!("no quickfix entry for the panic"),
+        }
+        // Enter on the line, in the Task Output pane.
+        assert_eq!(app.focused_buffer_id(), buffer);
+        let last = app.open().buffer.visual_line_count().saturating_sub(1);
+        let line = (0..=last).rev().find(|&l| app.open().buffer.line(l).to_string().contains("panicked")).expect("the line is shown");
+        let start = app.open().buffer.line_start_char(line);
+        app.focused_buffer_and_cursor_mut().1.char_idx = start;
+        // What `Enter` there does (`route_keypress` needs a live event loop).
+        assert!(app.task_output_open_location_at_cursor());
+        assert_eq!(app.open().buffer.path().map(fenix_core::path_key), Some(fenix_core::path_key(&cwd.join("lib.rs"))));
+        assert_eq!(app.open().buffer.line_col(&app.cursor()), (2, 6));
+        let _ = target;
     }
 
     #[test]
@@ -30729,6 +31177,8 @@ configure_board stm32
         assert!(app.git_prompt.is_none(), "and not the single-line prompt");
         assert!(app.pane_titles.get(&compose.pane).unwrap().contains("Commit message"));
         assert!(app.pane_titles.get(&compose.pane).unwrap().contains("Enter to commit"));
+        // Ready to type: what's typed first isn't run as commands.
+        assert_eq!(app.vim.mode(), Mode::Insert);
 
         app.test_insert_str("Add a.txt");
         app.compose_submit();
@@ -30737,6 +31187,42 @@ configure_board stm32
         assert!(app.modeline_pieces().1.contains("committed: Add a.txt"), "got: {}", app.modeline_pieces().1);
         let log = std::process::Command::new("git").current_dir(dir.path()).args(["log", "--format=%s", "-1"]).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Add a.txt");
+    }
+
+    /// `SPC g x c` on a merge: Git's prepared message, in the composer
+    /// to edit, and the merge commit carries it -- not "Merge".
+    #[test]
+    fn finishing_a_merge_commits_git_s_message() {
+        let dir = TempDir::new("merge_continue");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@e.st"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("a.txt", "one\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["checkout", "-q", "-b", "feature"]);
+        dir.write("a.txt", "feature\n");
+        git(&["commit", "-q", "-am", "feature"]);
+        git(&["checkout", "-q", "main"]);
+        dir.write("a.txt", "main\n");
+        git(&["commit", "-q", "-am", "main"]);
+        git(&["merge", "feature"]);
+        dir.write("a.txt", "both\n");
+        git(&["add", "a.txt"]);
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.git_operation_continue();
+
+        let compose = app.compose.as_ref().expect("the message, to edit first");
+        let text = app.buffers.get(compose.buffer).unwrap().buffer.text();
+        assert!(text.starts_with("Merge branch 'feature'"), "{text}");
+        app.compose_submit();
+        let log = std::process::Command::new("git").current_dir(dir.path()).args(["log", "--format=%s", "-1"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Merge branch 'feature'");
     }
 
     #[test]
@@ -31465,6 +31951,27 @@ configure_board stm32
         assert_eq!(on_disk, "shared\nvalue = DEVELOP\nfooter\n", "ours during a rebase is develop's version");
         assert!(app.modeline_pieces().1.contains("kept develop"), "got: {}", app.modeline_pieces().1);
         assert_eq!(fenix_git::list_files(dir.path()).iter().filter(|f| f.index_status == 'U').count(), 0, "and it's staged");
+    }
+
+    /// `o` on the header row, where the view opens, with one file listed:
+    /// that file, as the hints above it say -- not nothing.
+    #[test]
+    fn taking_a_side_on_the_header_row_takes_the_only_file() {
+        let dir = rebase_conflict_repo("merge_view_header");
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.open_git_panel();
+        app.git_rebase_onto("develop");
+        app.open_merge_view();
+        let session = app.merge_session.as_ref().unwrap();
+        let files_pane = session.files_pane;
+        app.windows_mut().focus(files_pane);
+        app.pane_state_mut(files_pane).cursor = Cursor::at_start();
+
+        app.merge_take_whole_file(fenix_git::Resolution::Ours);
+
+        assert!(app.modeline_pieces().1.contains("kept develop"), "got: {}", app.modeline_pieces().1);
+        assert_eq!(fenix_git::list_files(dir.path()).iter().filter(|f| f.index_status == 'U').count(), 0);
     }
 
     #[test]
@@ -33483,7 +33990,7 @@ name = \"orbit\"
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let mut session = LspSession {
             generation: tool_sessions::generation(), client, name: "pyright-langserver".into(), languages: vec!["python".into()], root: key.root.clone(), reader: None,
-            capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         };
         push_python_environment(&mut session);
         app.lsp_sessions.insert(key.clone(), session);
@@ -33516,7 +34023,7 @@ name = \"orbit\"
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
-            capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         });
         key
     }
@@ -33709,7 +34216,7 @@ name = \"orbit\"
         }
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client: sink_client(&key.root), name: name.into(), languages: languages.iter().map(|l| l.to_string()).collect(),
-            root: key.root.clone(), reader: None, capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            root: key.root.clone(), reader: None, started: Instant::now(), capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         });
         key
     }

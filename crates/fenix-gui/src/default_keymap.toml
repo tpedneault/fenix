@@ -121,6 +121,11 @@ label = "quit"
 command = "app.quit"
 
 [[leader]]
+keys = "SPC q r"
+label = "restart, keeping your place"
+command = "app.restart"
+
+[[leader]]
 keys = "SPC t"
 group = "toggle"
 
@@ -408,6 +413,11 @@ command = "task.rerun_last"
 keys = "SPC p k"
 label = "kill running task"
 command = "task.kill"
+
+[[leader]]
+keys = "SPC p r"
+label = "run test at cursor"
+command = "task.run_test_at_cursor"
 
 [[leader]]
 keys = "SPC s"

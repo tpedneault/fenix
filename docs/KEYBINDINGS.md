@@ -32,7 +32,7 @@ the other way round after `\v`.
 | `SPC f e` | Open the file explorer at your home directory; open a file directly, or `S` fuzzy-searches recursively from wherever you navigate to |
 | `SPC f t` | Toggle the focused buffer between plain text and table view |
 | `SPC f o` | Switch between an extension's page for a file (a picture, a PDF) and the file's text |
-| `SPC f f` | Open a file by typing its path (bypasses `.gitignore`) |
+| `SPC f f` | Open a file by typing its path (bypasses `.gitignore`); a path that doesn't exist yet is a new file, created with its folders on save |
 | `SPC f n` | Create a new Arduino sketch (the Arduino extension) |
 | `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
 | `SPC f r` | Fuzzy-find a recently-opened file |
@@ -41,6 +41,7 @@ the other way round after `\v`.
 | `SPC f y` | Copy the current file's path to the clipboard |
 | `SPC f E` | Read this file again as another encoding (`file.save_with_encoding` in `SPC :` saves it in one) |
 | `SPC q q` | Quit |
+| `SPC q r` | Restart where you are (windows, files, unsaved text): extensions installed or switched on since start are loaded |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
@@ -77,6 +78,8 @@ the other way round after `\v`.
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |
 | `SPC p k` | End the currently running task |
+| `SPC p r` | Run the test the cursor is in (Rust, pytest, Go), alone, in Task Output |
+| `Enter` in Task Output | Go to the `path:line:col` the line names: a compiler's error, a panic, a test's stack |
 | `SPC u u` | Start a debug session, or continue one that's stopped |
 | `SPC u b` | Toggle a breakpoint on the focused buffer's current line |
 | `SPC u n` / `SPC u i` / `SPC u o` | Step over / into / out |

@@ -236,6 +236,7 @@ Beyond those, Fenix's toolsets give an agent:
   `SPC u A` clears the breakpoints agents set; yours stay.
 - **tasks**: `run_task` waits for its task and answers how it went: its
   problems with their lines, its tests, the end of its output;
+  `run_test` does the same for the test at a line (`SPC p r`'s);
   `task_output` reads the rest.
 
 An agent whose client reads MCP **resources** finds what the read tools
