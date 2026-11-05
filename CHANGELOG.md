@@ -132,6 +132,9 @@ it did.
 
 ### Fixed
 
+- Installing a code extension that asks for more than its sandbox
+  (network, programs, secrets, your coding agents...) shows what it
+  asks for and waits for your yes (#41).
 - A file is open once, however its path is spelled: on Windows a file
   reached as `\\?\C:\a.rs` (from Home, the recent files or a restored
   session) and as `C:\a.rs` (from the finder or a language server) opened

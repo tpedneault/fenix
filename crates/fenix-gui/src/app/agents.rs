@@ -66,6 +66,8 @@ pub(crate) enum Pick {
     AskConsent { ext: String, call: u64, allow: bool },
     /// `SPC a P`: this pipeline, for the next prompt.
     Pipeline(fenix_acp::pipeline::PipelineSpec),
+    /// A code extension you said may do what it asks: installed.
+    InstallExtension(String),
 }
 
 /// An agent's write over unsaved edits of yours, waiting for your
@@ -694,6 +696,7 @@ impl App {
                 self.agents_show(id);
             }
             Pick::Pipeline(spec) => self.pipeline_armed(spec),
+            Pick::InstallExtension(ext) => self.install_from_registry_now(ext),
             Pick::Send { save } => {
                 if let Some((thread, blocks)) = self.agents.held.take() {
                     if save {
