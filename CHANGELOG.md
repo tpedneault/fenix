@@ -120,6 +120,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   command that opens nothing of its own left a blank PICKER page, with
   keys going to the buffer behind it. With nothing matching, Enter keeps
   the query. (#30)
+- A first setting saved to a new `settings.toml` goes after its header
+  comment, not above it. (#51)
 
 ## [1.0.1] - 2026-11-03
 
