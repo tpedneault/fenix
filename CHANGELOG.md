@@ -125,6 +125,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The `"0` register holds the last yank (`yyjdd"0p` pastes the yanked
   line), and `"_` deletes without touching any register or the
   clipboard. (#26)
+- Home opens on the file to resume when there is one, so the `Enter`
+  its column shows resumes it rather than opening the file finder. (#49)
 
 ## [1.0.1] - 2026-11-03
 

@@ -29128,6 +29128,23 @@ configure_board stm32
         assert_eq!(app.home_views[&id].slots[selected].entry, entry);
     }
 
+    /// With a file to resume, Home opens on it: the `Enter` its column
+    /// shows resumes it, rather than opening the finder.
+    #[test]
+    fn home_opens_on_the_file_to_resume() {
+        let dir = TempDir::new("home_resume_first");
+        let file = dir.write("app.rs", "fn main() {}\n");
+        let mut app = App::with_file(None);
+        app.recent_files = fenix_project::RecentFiles::load_or_default(dir.path().join("recent_files.txt"));
+        app.recent_files.add(file.clone());
+        app.test_home();
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        let at = app.home_views[&id].slots[app.home_selected_slot(id, pane).unwrap()].entry.clone();
+        assert!(matches!(at, dashboard::HomeEntry::Resume(_)), "{at:?}");
+        assert!(app.home_key(KeyPress::named(FenixNamedKey::Enter)));
+        assert_eq!(app.open().buffer.path().map(fenix_core::path_key), Some(fenix_core::path_key(&file)));
+    }
+
     #[test]
     fn home_keys_move_between_slots_and_numbers_activate() {
         let dir = TempDir::new("home_keys");
