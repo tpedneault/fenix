@@ -493,30 +493,35 @@ impl Writer {
         }
         let total: usize = widths.iter().sum::<usize>() + 3 * (ncols - 1);
         let write_row = |me: &mut Writer, cells: &[Vec<Span>], head: bool| {
-            me.bars(quote);
-            let mut x = x0;
-            for (i, w) in widths.iter().enumerate() {
-                let cell = cells.get(i).cloned().unwrap_or_default();
-                let t = fit(&text(&cell), *w);
-                let pad = w.saturating_sub(t.chars().count());
-                let start = match align.get(i) {
-                    Some(pulldown_cmark::Alignment::Right) => x + pad,
-                    Some(pulldown_cmark::Alignment::Center) => x + pad / 2,
-                    _ => x,
-                };
-                // One role per cell: its first span's (a link keeps its target).
-                let role = if head { Role::Title } else { cell.first().map(|s| role_of(s, ctx)).unwrap_or(Role::Text) };
-                let end = me.g.put(me.y, start, &t, role);
-                if let Some(link) = cell.iter().find_map(|s| s.link.clone()) {
-                    me.targets.push(Target { line: me.y, cols: start..end, action: Action::Link(link) });
+            // A row is as tall as its longest cell, wrapped to its column.
+            let wrapped: Vec<Vec<String>> = widths.iter().enumerate().map(|(i, w)| wrap_cell(&cells.get(i).map(text).unwrap_or_default(), *w)).collect();
+            let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+            for row_line in 0..height {
+                me.bars(quote);
+                let mut x = x0;
+                for (i, w) in widths.iter().enumerate() {
+                    let cell = cells.get(i).cloned().unwrap_or_default();
+                    let t = wrapped[i].get(row_line).map_or("", String::as_str);
+                    let pad = w.saturating_sub(t.chars().count());
+                    let start = match align.get(i) {
+                        Some(pulldown_cmark::Alignment::Right) => x + pad,
+                        Some(pulldown_cmark::Alignment::Center) => x + pad / 2,
+                        _ => x,
+                    };
+                    // One role per cell: its first span's (a link keeps its target).
+                    let role = if head { Role::Title } else { cell.first().map(|s| role_of(s, ctx)).unwrap_or(Role::Text) };
+                    let end = me.g.put(me.y, start, t, role);
+                    if let Some(link) = cell.iter().find_map(|s| s.link.clone()).filter(|_| !t.is_empty()) {
+                        me.targets.push(Target { line: me.y, cols: start..end, action: Action::Link(link) });
+                    }
+                    x += w;
+                    if i + 1 < ncols {
+                        me.g.put(me.y, x + 1, "│", Role::Muted);
+                        x += 3;
+                    }
                 }
-                x += w;
-                if i + 1 < ncols {
-                    me.g.put(me.y, x + 1, "│", Role::Muted);
-                    x += 3;
-                }
+                me.y += 1;
             }
-            me.y += 1;
         };
         write_row(self, header, true);
         // The rule under the header gets a row of its own: hairlines are
@@ -528,6 +533,32 @@ impl Writer {
             write_row(self, row, false);
         }
     }
+}
+
+/// `text` in lines of at most `width` characters, broken between words,
+/// and inside one too long for a line.
+fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let mut word: Vec<char> = word.chars().collect();
+        let used = line.chars().count();
+        if used > 0 && used + 1 + word.len() <= width {
+            line.push(' ');
+            line.extend(&word);
+            continue;
+        }
+        if used > 0 {
+            lines.push(std::mem::take(&mut line));
+        }
+        while word.len() > width {
+            lines.push(word.drain(..width).collect());
+        }
+        line = word.into_iter().collect();
+    }
+    lines.push(line);
+    lines
 }
 
 #[cfg(test)]
@@ -549,6 +580,26 @@ mod tests {
         assert_eq!(r.source_line_of(6), Some(5));
         assert_eq!(r.page_line_of(4), 5);
         assert!(r.page.rules.iter().any(|(l, _)| *l == 0));
+    }
+
+    #[test]
+    fn a_long_table_cell_wraps_instead_of_being_cut() {
+        let text = "| Tool | Result |\n|---|---|\n| hover | the whole of this long answer stays readable |\n| x | y |\n";
+        let r = layout(text, 26, &Ctx::plain());
+        let lines: Vec<&str> = r.page.text.lines().collect();
+        assert_eq!(lines[0].trim_end(), "Tool  │ Result");
+        assert!(!r.page.text.contains('\u{2026}'), "nothing's cut: {}", r.page.text);
+        let joined = lines[2..lines.len() - 1].iter().map(|l| l.split('│').nth(1).unwrap().trim()).collect::<Vec<_>>().join(" ");
+        assert_eq!(joined, "the whole of this long answer stays readable");
+        assert!(lines[2].starts_with("hover"));
+        assert!(lines[3].starts_with("      │"), "the other columns stay in line: {}", lines[3]);
+        assert!(lines.last().unwrap().starts_with('x'), "the next row follows");
+    }
+
+    #[test]
+    fn a_word_longer_than_its_cell_is_broken() {
+        assert_eq!(wrap_cell("abcdefgh ij", 3), ["abc", "def", "gh", "ij"]);
+        assert_eq!(wrap_cell("", 3), [""]);
     }
 
     #[test]
