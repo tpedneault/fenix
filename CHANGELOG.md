@@ -122,6 +122,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the query. (#30)
 - A first setting saved to a new `settings.toml` goes after its header
   comment, not above it. (#51)
+- The `"0` register holds the last yank (`yyjdd"0p` pastes the yanked
+  line), and `"_` deletes without touching any register or the
+  clipboard. (#26)
 
 ## [1.0.1] - 2026-11-03
 

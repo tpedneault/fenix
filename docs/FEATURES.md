@@ -20,7 +20,8 @@ its extension. The rest is built into Fenix.
   just works; in Visual mode `p` replaces the selection with it, leaving
   the replaced text on the clipboard as Vim does, and `P` replaces it
   while keeping the clipboard as it was), named registers (`"a`-`"z`/`"A`-`"Z` to select one for the
-  next `y`/`d`/`c`/`x`/`s`/`p`/`P`, uppercase appends), undo/redo, search
+  next `y`/`d`/`c`/`x`/`s`/`p`/`P`, uppercase appends; `"0` the last
+  yank, kept through deletes; `"_` the black hole), undo/redo, search
   (`/`, `?`, `n`, `N`, `*`, `#`) with every match lit as you type, a
   `[3/12]` count in the prompt and the modeline, smart-case (`\c`/`\C`
   force it; `search.smart_case`), and the highlight kept through edits
