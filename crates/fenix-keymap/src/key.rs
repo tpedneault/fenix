@@ -41,17 +41,11 @@ pub struct Mods {
 
 impl KeyPress {
     pub fn char(c: char) -> Self {
-        Self {
-            code: KeyCode::Char(c),
-            mods: Mods::default(),
-        }
+        Self { code: KeyCode::Char(c), mods: Mods::default() }
     }
 
     pub fn named(n: NamedKey) -> Self {
-        Self {
-            code: KeyCode::Named(n),
-            mods: Mods::default(),
-        }
+        Self { code: KeyCode::Named(n), mods: Mods::default() }
     }
 
     #[must_use]

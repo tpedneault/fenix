@@ -34,9 +34,7 @@ pub enum EntryKind {
     /// A symlink, or on Windows any reparse point -- junctions and
     /// directory links included. They behave the same way for every
     /// purpose here, and Windows itself blurs them.
-    Link {
-        to_dir: bool,
-    },
+    Link { to_dir: bool },
 }
 
 impl EntryKind {
@@ -136,37 +134,19 @@ fn describe(dirent: &fs::DirEntry) -> DirEntryInfo {
     // a real entry that should be listed and deletable.
     let metadata = fs::symlink_metadata(&path).ok();
     let kind = if is_link {
-        EntryKind::Link {
-            to_dir: fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false),
-        }
-    } else if file_type.is_some_and(|t| t.is_dir()) || metadata.as_ref().is_some_and(|m| m.is_dir())
-    {
+        EntryKind::Link { to_dir: fs::metadata(&path).map(|m| m.is_dir()).unwrap_or(false) }
+    } else if file_type.is_some_and(|t| t.is_dir()) || metadata.as_ref().is_some_and(|m| m.is_dir()) {
         EntryKind::Dir
     } else {
         EntryKind::File
     };
 
     let readable = metadata.is_some();
-    let size = metadata
-        .as_ref()
-        .filter(|_| !kind.is_dir_like())
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size = metadata.as_ref().filter(|_| !kind.is_dir_like()).map(|m| m.len()).unwrap_or(0);
     let modified = metadata.as_ref().and_then(|m| m.modified().ok());
-    let attributes = metadata
-        .as_ref()
-        .map(|m| attributes_for(m, &name))
-        .unwrap_or_default();
+    let attributes = metadata.as_ref().map(|m| attributes_for(m, &name)).unwrap_or_default();
 
-    DirEntryInfo {
-        name,
-        path,
-        kind,
-        size,
-        modified,
-        attributes,
-        readable,
-    }
+    DirEntryInfo { name, path, kind, size, modified, attributes, readable }
 }
 
 #[cfg(windows)]
@@ -190,11 +170,7 @@ pub(crate) fn attributes_for(metadata: &fs::Metadata, _name: &str) -> Attributes
 pub(crate) fn attributes_for(metadata: &fs::Metadata, name: &str) -> Attributes {
     // No attribute bits here: the leading dot genuinely is the
     // convention, and read-only is a permission rather than a flag.
-    Attributes {
-        hidden: name.starts_with('.'),
-        readonly: metadata.permissions().readonly(),
-        system: false,
-    }
+    Attributes { hidden: name.starts_with('.'), readonly: metadata.permissions().readonly(), system: false }
 }
 
 #[cfg(test)]
@@ -203,10 +179,7 @@ mod tests {
     use crate::test_util::TempDir;
 
     fn find<'a>(entries: &'a [DirEntryInfo], name: &str) -> &'a DirEntryInfo {
-        entries
-            .iter()
-            .find(|e| e.name == name)
-            .unwrap_or_else(|| panic!("no entry named {name:?}"))
+        entries.iter().find(|e| e.name == name).unwrap_or_else(|| panic!("no entry named {name:?}"))
     }
 
     #[test]
@@ -273,28 +246,15 @@ mod tests {
         let dir = TempDir::new("list_hidden_attr");
         let dotted = dir.touch(".gitignore");
         let marked = dir.touch("secret.txt");
-        std::process::Command::new("attrib")
-            .arg("+H")
-            .arg(&marked)
-            .output()
-            .expect("attrib");
+        std::process::Command::new("attrib").arg("+H").arg(&marked).output().expect("attrib");
 
         let entries = list_dir(dir.path()).unwrap();
 
-        assert!(
-            !find(&entries, ".gitignore").attributes.hidden,
-            "a dot is not what makes a file hidden here"
-        );
-        assert!(
-            find(&entries, "secret.txt").attributes.hidden,
-            "the attribute is"
-        );
+        assert!(!find(&entries, ".gitignore").attributes.hidden, "a dot is not what makes a file hidden here");
+        assert!(find(&entries, "secret.txt").attributes.hidden, "the attribute is");
         // Sanity: the flag really was set, so a failure above is about
         // our reading of it rather than about `attrib` not running.
-        assert_ne!(
-            std::fs::metadata(&dotted).unwrap().file_attributes() & 0x2,
-            0x2
-        );
+        assert_ne!(std::fs::metadata(&dotted).unwrap().file_attributes() & 0x2, 0x2);
     }
 
     #[cfg(not(windows))]

@@ -38,13 +38,7 @@ pub(crate) struct Canvas {
 impl Canvas {
     pub(crate) fn new(width: u32, height: u32) -> Self {
         let n = (width * height) as usize;
-        Self {
-            width,
-            height,
-            color: vec![[0.0; 3]; n],
-            alpha: vec![0.0; n],
-            coverage: vec![0.0; n],
-        }
+        Self { width, height, color: vec![[0.0; 3]; n], alpha: vec![0.0; n], coverage: vec![0.0; n] }
     }
 
     /// Fills the shape the closed `contours` enclose, in pixel
@@ -120,11 +114,7 @@ impl Canvas {
             let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
             rgba.extend_from_slice(&[to_u8(c[0]), to_u8(c[1]), to_u8(c[2]), to_u8(*a)]);
         }
-        Image {
-            width: self.width,
-            height: self.height,
-            rgba,
-        }
+        Image { width: self.width, height: self.height, rgba }
     }
 }
 
@@ -132,12 +122,7 @@ impl Canvas {
 /// segments at each corner).
 pub(crate) fn rounded_rect(x: f32, y: f32, w: f32, h: f32, r: f32) -> Vec<(f32, f32)> {
     let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
-    let corners = [
-        (x + w - r, y + r, -90.0f32),
-        (x + w - r, y + h - r, 0.0),
-        (x + r, y + h - r, 90.0),
-        (x + r, y + r, 180.0),
-    ];
+    let corners = [(x + w - r, y + r, -90.0f32), (x + w - r, y + h - r, 0.0), (x + r, y + h - r, 90.0), (x + r, y + r, 180.0)];
     let mut points = Vec::with_capacity(4 * 17);
     for (cx, cy, start) in corners {
         for i in 0..=16 {
@@ -155,11 +140,7 @@ mod tests {
     #[test]
     fn a_pixel_aligned_square_is_fully_covered_and_crisp() {
         let mut canvas = Canvas::new(8, 8);
-        canvas.fill(
-            &[vec![(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0)]],
-            [255, 0, 0],
-            1.0,
-        );
+        canvas.fill(&[vec![(2.0, 2.0), (6.0, 2.0), (6.0, 6.0), (2.0, 6.0)]], [255, 0, 0], 1.0);
         let image = canvas.into_image();
         let alpha = |x: u32, y: u32| image.rgba[((y * 8 + x) * 4 + 3) as usize];
         assert_eq!(alpha(3, 3), 255);
@@ -182,11 +163,7 @@ mod tests {
 
     #[test]
     fn bgra_swaps_red_and_blue() {
-        let image = Image {
-            width: 1,
-            height: 1,
-            rgba: vec![1, 2, 3, 4],
-        };
+        let image = Image { width: 1, height: 1, rgba: vec![1, 2, 3, 4] };
         assert_eq!(image.to_bgra(), vec![3, 2, 1, 4]);
     }
 }

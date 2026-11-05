@@ -40,14 +40,8 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, String
         return Ok(None);
     }
     let mut parts = line.split_whitespace();
-    let (Some(method), Some(path)) = (parts.next(), parts.next()) else {
-        return Err("not an HTTP request".into());
-    };
-    let mut request = Request {
-        method: method.to_string(),
-        path: path.to_string(),
-        ..Default::default()
-    };
+    let (Some(method), Some(path)) = (parts.next(), parts.next()) else { return Err("not an HTTP request".into()) };
+    let mut request = Request { method: method.to_string(), path: path.to_string(), ..Default::default() };
     loop {
         let mut header = String::new();
         reader.read_line(&mut header).map_err(|e| e.to_string())?;
@@ -59,16 +53,10 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, String
             return Err("too many headers".into());
         }
         if let Some((name, value)) = header.split_once(':') {
-            request
-                .headers
-                .insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+            request.headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
         }
     }
-    let length: usize = request
-        .headers
-        .get("content-length")
-        .and_then(|l| l.parse().ok())
-        .unwrap_or(0);
+    let length: usize = request.headers.get("content-length").and_then(|l| l.parse().ok()).unwrap_or(0);
     if length > MAX_BODY {
         return Err("the body is too big".into());
     }
@@ -84,23 +72,8 @@ pub fn origin_allowed(origin: Option<&str>) -> bool {
     match origin {
         None => true,
         Some(origin) => {
-            let host = origin
-                .split("://")
-                .nth(1)
-                .unwrap_or("")
-                .split('/')
-                .next()
-                .unwrap_or("");
-            let host = host
-                .rsplit_once(':')
-                .map(|(h, port)| {
-                    if port.chars().all(|c| c.is_ascii_digit()) {
-                        h
-                    } else {
-                        host
-                    }
-                })
-                .unwrap_or(host);
+            let host = origin.split("://").nth(1).unwrap_or("").split('/').next().unwrap_or("");
+            let host = host.rsplit_once(':').map(|(h, port)| if port.chars().all(|c| c.is_ascii_digit()) { h } else { host }).unwrap_or(host);
             matches!(host, "localhost" | "127.0.0.1" | "[::1]")
         }
     }
@@ -108,18 +81,9 @@ pub fn origin_allowed(origin: Option<&str>) -> bool {
 
 /// Whether the request carries `token`.
 pub fn authorized(request: &Request, token: &str) -> bool {
-    let given = request
-        .headers
-        .get("authorization")
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .unwrap_or("");
+    let given = request.headers.get("authorization").and_then(|h| h.strip_prefix("Bearer ")).unwrap_or("");
     // Compared in full whatever matches first: no early way out.
-    given.len() == token.len()
-        && given
-            .bytes()
-            .zip(token.bytes())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0
+    given.len() == token.len() && given.bytes().zip(token.bytes()).fold(0u8, |acc, (a, b)| acc | (a ^ b)) == 0
 }
 
 /// The token clients present, made the first time: in Fenix's data
@@ -161,12 +125,7 @@ fn fresh_token() -> String {
         .map(|i| {
             let mut h = std::collections::hash_map::RandomState::new().build_hasher();
             h.write_u64(i);
-            h.write_u128(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0),
-            );
+            h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
             format!("{:016x}", h.finish())
         })
         .collect()
@@ -205,21 +164,13 @@ const LINGER: std::time::Duration = std::time::Duration::from_secs(300);
 /// process runs: those with a notification stream open, or that asked for
 /// something lately. Each name once.
 pub fn connected_clients() -> Vec<String> {
-    let Some(sessions) = SERVED.get() else {
-        return Vec::new();
-    };
-    let Ok(sessions) = sessions.lock() else {
-        return Vec::new();
-    };
+    let Some(sessions) = SERVED.get() else { return Vec::new() };
+    let Ok(sessions) = sessions.lock() else { return Vec::new() };
     live(&sessions, std::time::Instant::now())
 }
 
 fn live(sessions: &HashMap<String, Session>, now: std::time::Instant) -> Vec<String> {
-    let mut names: Vec<String> = sessions
-        .values()
-        .filter(|s| !s.streams.is_empty() || now.duration_since(s.seen) < LINGER)
-        .map(|s| s.client.clone())
-        .collect();
+    let mut names: Vec<String> = sessions.values().filter(|s| !s.streams.is_empty() || now.duration_since(s.seen) < LINGER).map(|s| s.client.clone()).collect();
     names.sort();
     names.dedup();
     names
@@ -230,21 +181,12 @@ fn live(sessions: &HashMap<String, Session>, now: std::time::Instant) -> Vec<Str
 pub fn serve(address: &str) -> Result<(), String> {
     let address: SocketAddr = address.parse().map_err(|e| format!("{address}: {e}"))?;
     if !address.ip().is_loopback() {
-        return Err(format!(
-            "{address} isn't a loopback address: Fenix's MCP server only listens on this machine"
-        ));
+        return Err(format!("{address} isn't a loopback address: Fenix's MCP server only listens on this machine"));
     }
     let token = token()?;
     let listener = TcpListener::bind(address).map_err(|e| format!("{address}: {e}"))?;
-    eprintln!(
-        "fenix: MCP over HTTP at http://{}/mcp (token: fenix mcp token)",
-        listener
-            .local_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_default()
-    );
-    let sessions: Sessions =
-        Arc::clone(SERVED.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))));
+    eprintln!("fenix: MCP over HTTP at http://{}/mcp (token: fenix mcp token)", listener.local_addr().map(|a| a.to_string()).unwrap_or_default());
+    let sessions: Sessions = Arc::clone(SERVED.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))));
     for stream in listener.incoming().flatten() {
         let (token, sessions) = (token.clone(), Arc::clone(&sessions));
         std::thread::spawn(move || connection(stream, &token, &sessions));
@@ -266,21 +208,11 @@ fn connection(stream: TcpStream, token: &str, sessions: &Sessions) {
             }
         };
         if !origin_allowed(request.headers.get("origin").map(String::as_str)) {
-            respond(
-                &mut stream,
-                "403 Forbidden",
-                &[],
-                b"not from a page on another site",
-            );
+            respond(&mut stream, "403 Forbidden", &[], b"not from a page on another site");
             return;
         }
         if !authorized(&request, token) {
-            respond(
-                &mut stream,
-                "401 Unauthorized",
-                &[("WWW-Authenticate", "Bearer".into())],
-                b"Authorization: Bearer <the token fenix mcp token prints>",
-            );
+            respond(&mut stream, "401 Unauthorized", &[("WWW-Authenticate", "Bearer".into())], b"Authorization: Bearer <the token fenix mcp token prints>");
             continue;
         }
         if request.path.split('?').next() != Some("/mcp") {
@@ -298,9 +230,7 @@ fn connection(stream: TcpStream, token: &str, sessions: &Sessions) {
                 };
                 let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\n\r\n";
                 if stream.write_all(head.as_bytes()).is_ok() {
-                    if let (Ok(kept), Some(session)) =
-                        (stream.try_clone(), sessions.lock().unwrap().get_mut(&id))
-                    {
+                    if let (Ok(kept), Some(session)) = (stream.try_clone(), sessions.lock().unwrap().get_mut(&id)) {
                         session.streams.push(kept);
                         session.seen = std::time::Instant::now();
                     }
@@ -313,12 +243,7 @@ fn connection(stream: TcpStream, token: &str, sessions: &Sessions) {
                 }
                 respond(&mut stream, "200 OK", &[], b"");
             }
-            _ => respond(
-                &mut stream,
-                "405 Method Not Allowed",
-                &[("Allow", "GET, POST, DELETE".into())],
-                b"",
-            ),
+            _ => respond(&mut stream, "405 Method Not Allowed", &[("Allow", "GET, POST, DELETE".into())], b""),
         }
     }
 }
@@ -333,50 +258,21 @@ fn post(stream: &mut TcpStream, request: Request, id: Option<String>, sessions: 
         (Some(id), _) if sessions.lock().unwrap().contains_key(&id) => id,
         (_, true) => {
             let id = fresh_token()[..32].to_string();
-            let client = message
-                .pointer("/params/clientInfo/name")
-                .and_then(Value::as_str)
-                .unwrap_or("mcp-http")
-                .to_string();
-            sessions.lock().unwrap().insert(
-                id.clone(),
-                Session {
-                    mcp: crate::mcp::Session::default(),
-                    client,
-                    streams: Vec::new(),
-                    seen: std::time::Instant::now(),
-                },
-            );
+            let client = message.pointer("/params/clientInfo/name").and_then(Value::as_str).unwrap_or("mcp-http").to_string();
+            sessions.lock().unwrap().insert(id.clone(), Session { mcp: crate::mcp::Session::default(), client, streams: Vec::new(), seen: std::time::Instant::now() });
             start_watching(id.clone(), Arc::clone(sessions));
             id
         }
         _ => {
-            respond(
-                stream,
-                "404 Not Found",
-                &[],
-                b"no such session: initialize first",
-            );
+            respond(stream, "404 Not Found", &[], b"no such session: initialize first");
             return;
         }
     };
-    let client = sessions
-        .lock()
-        .unwrap()
-        .get_mut(&id)
-        .map(|s| {
-            s.seen = std::time::Instant::now();
-            s.client.clone()
-        })
-        .unwrap_or_default();
-    let mut session = sessions
-        .lock()
-        .unwrap()
-        .get(&id)
-        .map(|s| crate::mcp::Session {
-            protocol: s.mcp.protocol,
-        })
-        .unwrap_or_default();
+    let client = sessions.lock().unwrap().get_mut(&id).map(|s| {
+        s.seen = std::time::Instant::now();
+        s.client.clone()
+    }).unwrap_or_default();
+    let mut session = sessions.lock().unwrap().get(&id).map(|s| crate::mcp::Session { protocol: s.mcp.protocol }).unwrap_or_default();
     let mut call = |method: &str, params: Value| control_call(&client, method, params);
     let output = crate::mcp::handle(&mut session, &message, &mut call);
     if initialize {
@@ -386,15 +282,7 @@ fn post(stream: &mut TcpStream, request: Request, id: Option<String>, sessions: 
     }
     notify(sessions, &id, &output.after);
     match output.reply {
-        Some(reply) => respond(
-            stream,
-            "200 OK",
-            &[
-                ("Content-Type", "application/json".into()),
-                ("Mcp-Session-Id", id),
-            ],
-            serde_json::to_string(&reply).unwrap_or_default().as_bytes(),
-        ),
+        Some(reply) => respond(stream, "200 OK", &[("Content-Type", "application/json".into()), ("Mcp-Session-Id", id)], serde_json::to_string(&reply).unwrap_or_default().as_bytes()),
         None => respond(stream, "202 Accepted", &[("Mcp-Session-Id", id)], b""),
     }
 }
@@ -402,13 +290,9 @@ fn post(stream: &mut TcpStream, request: Request, id: Option<String>, sessions: 
 /// A control call for an HTTP client: a connection of its own, said
 /// hello to with the client's name and no thread.
 fn control_call(client: &str, method: &str, params: Value) -> Result<Value, String> {
-    let mut c = fenix_control::Client::connect(&fenix_control::Endpoint::current())
-        .map_err(|e| e.to_string())?
-        .ok_or("Fenix isn't running")?;
-    c.hello_for(client, env!("CARGO_PKG_VERSION"), None)
-        .map_err(|e| e.to_string())?;
-    c.request::<Value>(method, params)
-        .map_err(|e| e.to_string())
+    let mut c = fenix_control::Client::connect(&fenix_control::Endpoint::current()).map_err(|e| e.to_string())?.ok_or("Fenix isn't running")?;
+    c.hello_for(client, env!("CARGO_PKG_VERSION"), None).map_err(|e| e.to_string())?;
+    c.request::<Value>(method, params).map_err(|e| e.to_string())
 }
 
 /// Sends `messages` down the session's notification streams.
@@ -417,16 +301,8 @@ fn notify(sessions: &Sessions, id: &str, messages: &[Value]) {
         return;
     }
     let mut sessions = sessions.lock().unwrap();
-    let Some(session) = sessions.get_mut(id) else {
-        return;
-    };
-    session.streams.retain_mut(|stream| {
-        messages.iter().all(|m| {
-            stream
-                .write_all(format!("event: message\ndata: {m}\n\n").as_bytes())
-                .is_ok()
-        })
-    });
+    let Some(session) = sessions.get_mut(id) else { return };
+    session.streams.retain_mut(|stream| messages.iter().all(|m| stream.write_all(format!("event: message\ndata: {m}\n\n").as_bytes()).is_ok()));
 }
 
 /// Fenix's news for the session, waited on while it lasts.
@@ -434,24 +310,11 @@ fn start_watching(id: String, sessions: Sessions) {
     std::thread::spawn(move || {
         let mut since = 0u64;
         loop {
-            let Some(client) = sessions.lock().unwrap().get(&id).map(|s| s.client.clone()) else {
-                return;
-            };
-            match control_call(
-                &client,
-                fenix_control::protocol::method::AGENT_WAIT,
-                json!({ "since": since }),
-            ) {
+            let Some(client) = sessions.lock().unwrap().get(&id).map(|s| s.client.clone()) else { return };
+            match control_call(&client, fenix_control::protocol::method::AGENT_WAIT, json!({ "since": since })) {
                 Ok(news) => {
-                    since = news
-                        .get("revision")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(since);
-                    let events = news
-                        .get("events")
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default();
+                    since = news.get("revision").and_then(Value::as_u64).unwrap_or(since);
+                    let events = news.get("events").and_then(Value::as_array).cloned().unwrap_or_default();
                     notify(&sessions, &id, &crate::mcp::notifications_for(&events));
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_secs(2)),
@@ -467,19 +330,8 @@ mod tests {
     #[test]
     fn a_client_counts_as_connected_while_its_stream_is_open_or_it_asked_lately() {
         let now = std::time::Instant::now();
-        let session = |client: &str, ago: u64| Session {
-            mcp: crate::mcp::Session::default(),
-            client: client.into(),
-            streams: Vec::new(),
-            seen: now - std::time::Duration::from_secs(ago),
-        };
-        let sessions: HashMap<String, Session> = [
-            ("a".into(), session("cursor", 10)),
-            ("b".into(), session("cursor", 20)),
-            ("c".into(), session("old", 3600)),
-        ]
-        .into_iter()
-        .collect();
+        let session = |client: &str, ago: u64| Session { mcp: crate::mcp::Session::default(), client: client.into(), streams: Vec::new(), seen: now - std::time::Duration::from_secs(ago) };
+        let sessions: HashMap<String, Session> = [("a".into(), session("cursor", 10)), ("b".into(), session("cursor", 20)), ("c".into(), session("old", 3600))].into_iter().collect();
         assert_eq!(live(&sessions, now), vec!["cursor".to_string()]);
     }
 
@@ -487,21 +339,11 @@ mod tests {
     fn a_request_is_read_with_its_headers_and_body() {
         let raw = b"POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\nContent-Length: 2\r\n\r\n{}";
         let request = read_request(&mut &raw[..]).unwrap().unwrap();
-        assert_eq!(
-            (
-                request.method.as_str(),
-                request.path.as_str(),
-                request.body.as_slice()
-            ),
-            ("POST", "/mcp", &b"{}"[..])
-        );
+        assert_eq!((request.method.as_str(), request.path.as_str(), request.body.as_slice()), ("POST", "/mcp", &b"{}"[..]));
         assert!(authorized(&request, "abc"));
         assert!(!authorized(&request, "abd") && !authorized(&request, "ab"));
         assert_eq!(read_request(&mut &b""[..]).unwrap(), None);
-        let big = format!(
-            "POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
-            MAX_BODY + 1
-        );
+        let big = format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", MAX_BODY + 1);
         assert!(read_request(&mut big.as_bytes()).is_err());
     }
 

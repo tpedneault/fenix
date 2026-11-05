@@ -21,16 +21,14 @@ mod transfer;
 mod test_util;
 
 pub use archive::{
-    archiver, create as create_archive, extract as extract_archive, looks_like_archive,
-    suggested_destination, suggested_name,
+    archiver, create as create_archive, extract as extract_archive, looks_like_archive, suggested_destination, suggested_name,
 };
 pub use listing::{list_dir, Attributes, DirEntryInfo, EntryKind};
+pub use properties::{measure_tree, properties, set_readonly, Properties, Total};
+pub use shell::{open_url, open_with_default, reveal};
+pub use recycle::{permanently, to_recycle_bin, Outcome};
 pub use pathbar::{common_prefix, complete, expand};
 pub use places::{shares, volumes, Volume, VolumeKind};
-pub use properties::{measure_tree, properties, set_readonly, Properties, Total};
-pub use recycle::{permanently, to_recycle_bin, Outcome};
-pub use shell::{open_url, open_with_default, reveal};
 pub use transfer::{
-    conflicts_in, copy_into, copy_into_reporting, measure, move_into, move_into_reporting,
-    rename_all, OnConflict, Progress,
+    conflicts_in, copy_into, copy_into_reporting, measure, move_into, move_into_reporting, rename_all, OnConflict, Progress,
 };

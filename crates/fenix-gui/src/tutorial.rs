@@ -49,58 +49,19 @@ use crate::page::{fit, frame, wrap, Grid, Key, Page, Role};
 
 /// The lessons built in, in the order their tracks are listed.
 pub const BUILT_IN: &[(&str, &str)] = &[
-    (
-        "editing-1-modes.toml",
-        include_str!("../tutorial/editing-1-modes.toml"),
-    ),
-    (
-        "editing-2-words.toml",
-        include_str!("../tutorial/editing-2-words.toml"),
-    ),
-    (
-        "editing-3-objects.toml",
-        include_str!("../tutorial/editing-3-objects.toml"),
-    ),
-    (
-        "editing-4-visual.toml",
-        include_str!("../tutorial/editing-4-visual.toml"),
-    ),
-    (
-        "editing-5-search.toml",
-        include_str!("../tutorial/editing-5-search.toml"),
-    ),
-    (
-        "editing-6-macros.toml",
-        include_str!("../tutorial/editing-6-macros.toml"),
-    ),
-    (
-        "fenix-1-leader.toml",
-        include_str!("../tutorial/fenix-1-leader.toml"),
-    ),
-    (
-        "fenix-2-find.toml",
-        include_str!("../tutorial/fenix-2-find.toml"),
-    ),
-    (
-        "fenix-3-windows.toml",
-        include_str!("../tutorial/fenix-3-windows.toml"),
-    ),
-    (
-        "fenix-4-pages.toml",
-        include_str!("../tutorial/fenix-4-pages.toml"),
-    ),
-    (
-        "fenix-5-terminals.toml",
-        include_str!("../tutorial/fenix-5-terminals.toml"),
-    ),
-    (
-        "fenix-6-settings.toml",
-        include_str!("../tutorial/fenix-6-settings.toml"),
-    ),
-    (
-        "git-1-basics.toml",
-        include_str!("../tutorial/git-1-basics.toml"),
-    ),
+    ("editing-1-modes.toml", include_str!("../tutorial/editing-1-modes.toml")),
+    ("editing-2-words.toml", include_str!("../tutorial/editing-2-words.toml")),
+    ("editing-3-objects.toml", include_str!("../tutorial/editing-3-objects.toml")),
+    ("editing-4-visual.toml", include_str!("../tutorial/editing-4-visual.toml")),
+    ("editing-5-search.toml", include_str!("../tutorial/editing-5-search.toml")),
+    ("editing-6-macros.toml", include_str!("../tutorial/editing-6-macros.toml")),
+    ("fenix-1-leader.toml", include_str!("../tutorial/fenix-1-leader.toml")),
+    ("fenix-2-find.toml", include_str!("../tutorial/fenix-2-find.toml")),
+    ("fenix-3-windows.toml", include_str!("../tutorial/fenix-3-windows.toml")),
+    ("fenix-4-pages.toml", include_str!("../tutorial/fenix-4-pages.toml")),
+    ("fenix-5-terminals.toml", include_str!("../tutorial/fenix-5-terminals.toml")),
+    ("fenix-6-settings.toml", include_str!("../tutorial/fenix-6-settings.toml")),
+    ("git-1-basics.toml", include_str!("../tutorial/git-1-basics.toml")),
 ];
 
 /// The keybindings doc, shown when you're done.
@@ -109,9 +70,7 @@ pub const KEYBINDINGS: &str = include_str!("../../../docs/KEYBINDINGS.md");
 /// What `mode` takes.
 pub const MODES: &[&str] = &["normal", "insert", "visual", "replace", "command", "search"];
 /// What `picker` takes: one of a kind, any, or none open.
-pub const PICKERS: &[&str] = &[
-    "files", "commands", "bindings", "lines", "buffers", "tasks", "any", "none",
-];
+pub const PICKERS: &[&str] = &["files", "commands", "bindings", "lines", "buffers", "tasks", "any", "none"];
 /// What `terminal` takes: the panel open, a terminal in the focused
 /// pane, one with the keyboard, one open without it, none in front.
 pub const TERMINALS: &[&str] = &["panel", "pane", "focused", "unfocused", "closed"];
@@ -209,22 +168,10 @@ impl Windows {
 
 impl Step {
     fn checks(&self) -> usize {
-        [
-            self.text.is_some(),
-            self.cursor.is_some(),
-            self.line.is_some(),
-            self.mode.is_some(),
-            self.windows.is_some(),
-            self.moved.is_some(),
-            self.page.is_some(),
-            self.closed.is_some(),
-            self.picker.is_some(),
-            self.leader.is_some(),
-            self.terminal.is_some(),
-        ]
-        .iter()
-        .filter(|c| **c)
-        .count()
+        [self.text.is_some(), self.cursor.is_some(), self.line.is_some(), self.mode.is_some(), self.windows.is_some(), self.moved.is_some(), self.page.is_some(), self.closed.is_some(), self.picker.is_some(), self.leader.is_some(), self.terminal.is_some()]
+            .iter()
+            .filter(|c| **c)
+            .count()
     }
 
     /// Whether it looks at the practice buffer.
@@ -235,10 +182,7 @@ impl Step {
 
 /// What's wrong with `lesson`, if anything.
 pub fn validate(lesson: &Lesson) -> Result<(), String> {
-    if lesson.id.trim().is_empty()
-        || lesson.track.trim().is_empty()
-        || lesson.title.trim().is_empty()
-    {
+    if lesson.id.trim().is_empty() || lesson.track.trim().is_empty() || lesson.title.trim().is_empty() {
         return Err("id, track and title are needed".into());
     }
     if lesson.steps.is_empty() {
@@ -250,19 +194,14 @@ pub fn validate(lesson: &Lesson) -> Result<(), String> {
             return Err(format!("step {n} checks nothing"));
         }
         let one_of = |what: &str, value: &Option<String>, of: &[&str]| match value {
-            Some(v) if !of.contains(&v.as_str()) => Err(format!(
-                "step {n}: {what} = \"{v}\" isn't one of {}",
-                of.join(", ")
-            )),
+            Some(v) if !of.contains(&v.as_str()) => Err(format!("step {n}: {what} = \"{v}\" isn't one of {}", of.join(", "))),
             _ => Ok(()),
         };
         one_of("mode", &step.mode, MODES)?;
         one_of("picker", &step.picker, PICKERS)?;
         one_of("terminal", &step.terminal, TERMINALS)?;
         if let Some(w) = &step.windows {
-            Windows::parse(w).ok_or_else(|| {
-                format!("step {n}: windows = \"{w}\" isn't a count (\"2\") or a change (\"+1\")")
-            })?;
+            Windows::parse(w).ok_or_else(|| format!("step {n}: windows = \"{w}\" isn't a count (\"2\") or a change (\"+1\")"))?;
         }
         if step.cursor.is_some_and(|[l, c]| l == 0 || c == 0) || step.line == Some(0) {
             return Err(format!("step {n}: lines and columns count from 1"));
@@ -292,22 +231,13 @@ pub fn load(dirs: &[PathBuf]) -> (Vec<Lesson>, Vec<String>) {
         }
     }
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
-        };
-        let mut files: Vec<PathBuf> = entries
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-            .collect();
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let mut files: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "toml")).collect();
         files.sort();
         for file in files {
-            let read = std::fs::read_to_string(&file)
-                .map_err(|e| e.to_string())
-                .and_then(|text| parse(&text));
+            let read = std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|text| parse(&text));
             match read {
-                Ok(lesson) if lessons.iter().any(|l: &Lesson| l.id == lesson.id) => problems.push(
-                    format!("{}: there's a lesson {} already", file.display(), lesson.id),
-                ),
+                Ok(lesson) if lessons.iter().any(|l: &Lesson| l.id == lesson.id) => problems.push(format!("{}: there's a lesson {} already", file.display(), lesson.id)),
                 Ok(mut lesson) => {
                     lesson.file = Some(file);
                     lessons.push(lesson);
@@ -328,19 +258,8 @@ pub fn load(dirs: &[PathBuf]) -> (Vec<Lesson>, Vec<String>) {
     // Built-in tracks in their order, then the rest by name.
     let rank = |l: &Lesson| {
         let at = tracks.iter().position(|t| *t == l.track).unwrap_or(0);
-        let built_in = lessons
-            .iter()
-            .any(|b| b.file.is_none() && b.track == l.track);
-        (
-            !built_in,
-            if built_in {
-                String::new()
-            } else {
-                l.track.clone()
-            },
-            at,
-            l.order,
-        )
+        let built_in = lessons.iter().any(|b| b.file.is_none() && b.track == l.track);
+        (!built_in, if built_in { String::new() } else { l.track.clone() }, at, l.order)
     };
     let mut ranked: Vec<_> = lessons.iter().map(|l| (rank(l), l.clone())).collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.title.cmp(&b.1.title)));
@@ -349,10 +268,7 @@ pub fn load(dirs: &[PathBuf]) -> (Vec<Lesson>, Vec<String>) {
 
 /// The lessons done, as kept in `path`.
 pub fn load_done(path: &Path) -> BTreeSet<String> {
-    fenix_storage::state::read::<BTreeSet<String>>(path, "done")
-        .ok()
-        .flatten()
-        .unwrap_or_default()
+    fenix_storage::state::read::<BTreeSet<String>>(path, "done").ok().flatten().unwrap_or_default()
 }
 
 pub fn save_done(path: &Path, done: &BTreeSet<String>) -> std::io::Result<()> {
@@ -402,32 +318,19 @@ pub struct Start {
 
 /// `text` as a step compares it: trailing spaces and blank lines aside.
 fn plain(text: &str) -> String {
-    text.lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim_end_matches('\n')
-        .to_string()
+    text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim_end_matches('\n').to_string()
 }
 
 /// The practice text step `step` of `lesson` starts from, as the lesson
 /// means it: its text with every earlier step's change made.
 pub fn text_before(lesson: &Lesson, step: usize) -> &str {
-    lesson.steps[..step.min(lesson.steps.len())]
-        .iter()
-        .rev()
-        .find_map(|s| s.text.as_deref())
-        .unwrap_or(&lesson.text)
+    lesson.steps[..step.min(lesson.steps.len())].iter().rev().find_map(|s| s.text.as_deref()).unwrap_or(&lesson.text)
 }
 
 /// How many times each line that isn't blank is in `text`.
 fn line_counts(text: &str) -> std::collections::HashMap<&str, usize> {
     let mut counts = std::collections::HashMap::new();
-    for line in text
-        .lines()
-        .map(str::trim_end)
-        .filter(|l| !l.trim().is_empty())
-    {
+    for line in text.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
         *counts.entry(line).or_insert(0) += 1;
     }
     counts
@@ -439,12 +342,7 @@ fn line_counts(text: &str) -> std::collections::HashMap<&str, usize> {
 /// way, skipped, not done yet -- and doesn't stop this one passing.
 fn has_change(before: &str, want: &str, text: &str) -> bool {
     let (before, want_counts, now) = (line_counts(before), line_counts(want), line_counts(text));
-    let touched: Vec<&str> = before
-        .keys()
-        .chain(want_counts.keys())
-        .copied()
-        .filter(|l| before.get(l) != want_counts.get(l))
-        .collect();
+    let touched: Vec<&str> = before.keys().chain(want_counts.keys()).copied().filter(|l| before.get(l) != want_counts.get(l)).collect();
     if touched.is_empty() {
         // Only blank lines change: the whole text says.
         return plain(want) == plain(text);
@@ -469,11 +367,7 @@ fn word_at(line: &str, col: usize) -> Option<(String, usize, usize)> {
     let mut i = 0;
     while i < start {
         if word(&chars[i]) && (i == 0 || !word(&chars[i - 1])) {
-            let e = (i..chars.len())
-                .take_while(|j| word(&chars[*j]))
-                .last()
-                .unwrap_or(i)
-                + 1;
+            let e = (i..chars.len()).take_while(|j| word(&chars[*j])).last().unwrap_or(i) + 1;
             if chars[i..e].iter().collect::<String>() == text {
                 nth += 1;
             }
@@ -505,25 +399,15 @@ fn at_spot(before: &str, [l, c]: [usize; 2], text: &str, (line, col): (usize, us
 /// practice text the step starts from (`text_before`).
 pub fn passes(step: &Step, before: &str, seen: &Seen, start: Start) -> bool {
     if step.on_practice() {
-        let Some((text, (line, col))) = &seen.practice else {
-            return false;
-        };
+        let Some((text, (line, col))) = &seen.practice else { return false };
         // A change counts once it's done: back in Normal mode.
         if step.mode.is_none() && !seen.idle {
             return false;
         }
-        if step
-            .text
-            .as_ref()
-            .is_some_and(|want| !has_change(before, want, text))
-        {
+        if step.text.as_ref().is_some_and(|want| !has_change(before, want, text)) {
             return false;
         }
-        if step
-            .cursor
-            .is_some_and(|spot| !at_spot(before, spot, text, (*line, *col)))
-            || step.line.is_some_and(|l| l != *line)
-        {
+        if step.cursor.is_some_and(|spot| !at_spot(before, spot, text, (*line, *col))) || step.line.is_some_and(|l| l != *line) {
             return false;
         }
     }
@@ -543,20 +427,12 @@ pub fn passes(step: &Step, before: &str, seen: &Seen, start: Start) -> bool {
         return false;
     }
     if let Some(want) = &step.page {
-        let here = seen
-            .page
-            .as_ref()
-            .is_some_and(|(kind, detail)| kind == want || detail.as_ref() == Some(want))
-            || seen.facts.contains(want);
+        let here = seen.page.as_ref().is_some_and(|(kind, detail)| kind == want || detail.as_ref() == Some(want)) || seen.facts.contains(want);
         if !here {
             return false;
         }
     }
-    if step
-        .closed
-        .as_ref()
-        .is_some_and(|kind| seen.pages.contains(kind))
-    {
+    if step.closed.as_ref().is_some_and(|kind| seen.pages.contains(kind)) {
         return false;
     }
     if let Some(want) = step.picker.as_deref() {
@@ -653,17 +529,8 @@ pub struct TutorialPage {
 impl TutorialPage {
     pub fn new(lessons: Vec<Lesson>, problems: Vec<String>, done: BTreeSet<String>) -> Self {
         // The first not done yet.
-        let focus = lessons
-            .iter()
-            .position(|l| !done.contains(&l.id))
-            .unwrap_or(0);
-        TutorialPage {
-            lessons,
-            problems,
-            done,
-            focus,
-            run: None,
-        }
+        let focus = lessons.iter().position(|l| !done.contains(&l.id)).unwrap_or(0);
+        TutorialPage { lessons, problems, done, focus, run: None }
     }
 
     /// The step under way, while a lesson is.
@@ -679,9 +546,7 @@ impl TutorialPage {
     /// On to the next step, `start` as things stand; the lesson is done
     /// after its last. Returns whether it just finished.
     pub fn advance(&mut self, start: Start, edits: u64, skipped: bool) -> bool {
-        let Some(run) = self.run.as_mut().filter(|r| !r.finished) else {
-            return false;
-        };
+        let Some(run) = self.run.as_mut().filter(|r| !r.finished) else { return false };
         let steps = self.lessons.get(run.lesson).map_or(0, |l| l.steps.len());
         run.skipped += usize::from(skipped);
         run.step += 1;
@@ -699,10 +564,7 @@ impl TutorialPage {
             self.done.insert(l.id.clone());
         }
         // The cursor to the next lesson not done, for Enter.
-        self.focus = (lesson + 1..self.lessons.len())
-            .chain(0..lesson)
-            .find(|i| !self.done.contains(&self.lessons[*i].id))
-            .unwrap_or(lesson);
+        self.focus = (lesson + 1..self.lessons.len()).chain(0..lesson).find(|i| !self.done.contains(&self.lessons[*i].id)).unwrap_or(lesson);
         true
     }
 
@@ -735,27 +597,10 @@ pub fn layout(page: &TutorialPage, cols: usize) -> Page {
     let (left, width) = frame(cols, 100);
     let mut g = Grid::new();
     let end = g.put(1, left, "Tutorial", Role::Title);
-    g.put(
-        1,
-        end + 2,
-        "· Fenix's keys, a lesson at a time",
-        Role::Muted,
-    );
+    g.put(1, end + 2, "· Fenix's keys, a lesson at a time", Role::Muted);
     let built_in = page.lessons.iter().filter(|l| l.file.is_none());
-    let count = format!(
-        "{} of {} done",
-        built_in
-            .clone()
-            .filter(|l| page.done.contains(&l.id))
-            .count(),
-        built_in.count()
-    );
-    g.put(
-        1,
-        (left + width).saturating_sub(count.chars().count()),
-        &count,
-        Role::Muted,
-    );
+    let count = format!("{} of {} done", built_in.clone().filter(|l| page.done.contains(&l.id)).count(), built_in.count());
+    g.put(1, (left + width).saturating_sub(count.chars().count()), &count, Role::Muted);
     g.rule(2, left..left + width);
     let mut y = 3;
     let intro = if page.all_done() {
@@ -764,26 +609,12 @@ pub fn layout(page: &TutorialPage, cols: usize) -> Page {
         "Each lesson opens a practice buffer beside this page with a task, a step at a time. Do it any way you like: it's what comes of it that's checked. Stuck? A hint shows after a try, or a pause."
     };
     for line in wrap(intro, width) {
-        g.put(
-            y,
-            left,
-            &line,
-            if page.all_done() {
-                Role::Good
-            } else {
-                Role::Muted
-            },
-        );
+        g.put(y, left, &line, if page.all_done() { Role::Good } else { Role::Muted });
         y += 1;
     }
     for problem in &page.problems {
         y += 1;
-        g.put(
-            y,
-            left,
-            &fit(&format!("couldn't read {problem}"), width),
-            Role::Bad,
-        );
+        g.put(y, left, &fit(&format!("couldn't read {problem}"), width), Role::Bad);
     }
 
     let running = page.run.as_ref().map(|r| r.lesson);
@@ -809,30 +640,14 @@ pub fn layout(page: &TutorialPage, cols: usize) -> Page {
         };
         g.put(y, left + 1, mark, role);
         g.put(y, left + 3, &format!("{number:>2}"), Role::Muted);
-        let end = g.put(
-            y,
-            left + 7,
-            &fit(&lesson.title, width.saturating_sub(30)),
-            Role::Text,
-        );
+        let end = g.put(y, left + 7, &fit(&lesson.title, width.saturating_sub(30)), Role::Text);
         let status = match page.run.as_ref().filter(|r| r.lesson == i) {
             Some(r) if r.finished => "done just now".to_string(),
             Some(r) => format!("step {} of {}", r.step + 1, lesson.steps.len()),
             None => format!("{} steps", lesson.steps.len()),
         };
-        let x = (left + width)
-            .saturating_sub(status.chars().count())
-            .max(end + 2);
-        g.put(
-            y,
-            x,
-            &status,
-            if running == Some(i) {
-                Role::Accent
-            } else {
-                Role::Muted
-            },
-        );
+        let x = (left + width).saturating_sub(status.chars().count()).max(end + 2);
+        g.put(y, x, &status, if running == Some(i) { Role::Accent } else { Role::Muted });
         y += 1;
     }
 
@@ -856,21 +671,13 @@ pub fn layout(page: &TutorialPage, cols: usize) -> Page {
                 } else {
                     (" ", Role::Muted)
                 };
-                g.put(
-                    y,
-                    left + 1,
-                    mark,
-                    if mark == "›" { Role::Accent } else { role },
-                );
+                g.put(y, left + 1, mark, if mark == "›" { Role::Accent } else { role });
                 for line in wrap(&step.say, text_w) {
                     g.put(y, left + 4, &line, role);
                     y += 1;
                 }
                 if i == run.step && run.hint && !run.finished && !step.hint.is_empty() {
-                    for (j, line) in wrap(&format!("hint: {}", step.hint), text_w)
-                        .iter()
-                        .enumerate()
-                    {
+                    for (j, line) in wrap(&format!("hint: {}", step.hint), text_w).iter().enumerate() {
                         g.put(y, left + 4 + if j > 0 { 6 } else { 0 }, line, Role::Warn);
                         y += 1;
                     }
@@ -878,10 +685,7 @@ pub fn layout(page: &TutorialPage, cols: usize) -> Page {
             }
             if run.finished {
                 y += 1;
-                let next = page
-                    .lessons
-                    .get(page.focus)
-                    .filter(|l| !page.done.contains(&l.id));
+                let next = page.lessons.get(page.focus).filter(|l| !page.done.contains(&l.id));
                 let said = match (next, run.skipped) {
                     _ if page.all_done() => "Lesson done, and with it every lesson. d opens the keybindings doc, everything Fenix binds.".to_string(),
                     (Some(n), 0) => format!("Lesson done. Enter starts the next one, {}.", n.title),
@@ -895,14 +699,7 @@ pub fn layout(page: &TutorialPage, cols: usize) -> Page {
             }
         }
     }
-    let mut keys = vec![(
-        "Enter",
-        if running.is_some_and(|l| l == page.focus) && page.step().is_some() {
-            "back to it"
-        } else {
-            "start"
-        },
-    )];
+    let mut keys = vec![("Enter", if running.is_some_and(|l| l == page.focus) && page.step().is_some() { "back to it" } else { "start" })];
     if page.step().is_some() {
         keys.extend([("s", "skip a step"), ("r", "restart")]);
     }
@@ -920,19 +717,7 @@ mod tests {
     }
 
     fn seen(text: &str, cursor: (usize, usize)) -> Seen {
-        Seen {
-            practice: Some((text.into(), cursor)),
-            mode: "normal",
-            idle: true,
-            windows: 2,
-            pane: pane(),
-            page: None,
-            pages: Vec::new(),
-            picker: None,
-            leader: false,
-            term: Term::default(),
-            facts: Vec::new(),
-        }
+        Seen { practice: Some((text.into(), cursor)), mode: "normal", idle: true, windows: 2, pane: pane(), page: None, pages: Vec::new(), picker: None, leader: false, term: Term::default(), facts: Vec::new() }
     }
 
     #[test]
@@ -946,28 +731,17 @@ mod tests {
         assert_eq!(tracks[12], "Git", "a section of its own, after Fenix");
         let ids: BTreeSet<&str> = lessons.iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids.len(), 13, "ids are each their own");
-        assert!(
-            lessons.iter().all(|l| l.steps.len() >= 3),
-            "several steps each"
-        );
+        assert!(lessons.iter().all(|l| l.steps.len() >= 3), "several steps each");
     }
 
     #[test]
     fn a_lesson_that_checks_nothing_or_names_what_isnt_is_refused() {
-        let bad = |steps: &str| {
-            parse(&format!(
-                "id = \"x\"\ntrack = \"T\"\ntitle = \"X\"\n{steps}"
-            ))
-            .unwrap_err()
-        };
+        let bad = |steps: &str| parse(&format!("id = \"x\"\ntrack = \"T\"\ntitle = \"X\"\n{steps}")).unwrap_err();
         assert!(bad("[[step]]\nsay = \"do\"\n").contains("checks nothing"));
         assert!(bad("[[step]]\nsay = \"do\"\nmode = \"sideways\"\n").contains("isn't one of"));
         assert!(bad("[[step]]\nsay = \"do\"\nwindows = \"two\"\n").contains("isn't a count"));
         assert!(bad("[[step]]\nsay = \"do\"\ncursor = [0, 1]\n").contains("from 1"));
-        assert!(
-            bad("[[step]]\nsay = \"do\"\ntxet = \"a\"\n").contains("txet"),
-            "a misspelt check isn't ignored"
-        );
+        assert!(bad("[[step]]\nsay = \"do\"\ntxet = \"a\"\n").contains("txet"), "a misspelt check isn't ignored");
         assert!(bad("").contains("step"));
     }
 
@@ -977,173 +751,43 @@ mod tests {
         let lesson = "id = \"tcl.procs\"\ntrack = \"Tcl\"\ntitle = \"Procs\"\ntext = \"proc a {} {}\"\n[[step]]\nsay = \"Delete it\"\ntext = \"\"\n";
         std::fs::write(dir.path().join("procs.toml"), lesson).unwrap();
         std::fs::write(dir.path().join("broken.toml"), "id = ").unwrap();
-        std::fs::write(
-            dir.path().join("zz-again.toml"),
-            lesson.replace("Procs", "Again"),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("zz-again.toml"), lesson.replace("Procs", "Again")).unwrap();
         let (lessons, problems) = load(&[dir.path().to_path_buf()]);
         assert_eq!(lessons.len(), 14);
         assert_eq!(lessons[13].id, "tcl.procs");
-        assert_eq!(
-            lessons[13].file.as_deref(),
-            Some(dir.path().join("procs.toml").as_path())
-        );
+        assert_eq!(lessons[13].file.as_deref(), Some(dir.path().join("procs.toml").as_path()));
         assert_eq!(problems.len(), 2, "{problems:?}");
-        assert!(
-            problems.iter().any(|p| p.contains("broken.toml"))
-                && problems.iter().any(|p| p.contains("already")),
-            "{problems:?}"
-        );
+        assert!(problems.iter().any(|p| p.contains("broken.toml")) && problems.iter().any(|p| p.contains("already")), "{problems:?}");
     }
 
     #[test]
     fn a_step_passes_on_what_came_of_it() {
-        let start = Start {
-            windows: 2,
-            pane: pane(),
-        };
-        let step = Step {
-            say: "x".into(),
-            text: Some("one\ntwo\n".into()),
-            ..Step::default()
-        };
-        assert!(
-            passes(&step, "", &seen("one  \ntwo\n\n", (1, 1)), start),
-            "trailing spaces and lines aside"
-        );
+        let start = Start { windows: 2, pane: pane() };
+        let step = Step { say: "x".into(), text: Some("one\ntwo\n".into()), ..Step::default() };
+        assert!(passes(&step, "", &seen("one  \ntwo\n\n", (1, 1)), start), "trailing spaces and lines aside");
         assert!(!passes(&step, "", &seen("one\n", (1, 1)), start));
         let mut typing = seen("one\ntwo", (1, 1));
         typing.idle = false;
         typing.mode = "insert";
         assert!(!passes(&step, "", &typing, start), "not while still typing");
-        let cursor = Step {
-            say: "x".into(),
-            cursor: Some([2, 3]),
-            ..Step::default()
-        };
+        let cursor = Step { say: "x".into(), cursor: Some([2, 3]), ..Step::default() };
         assert!(passes(&cursor, "", &seen("", (2, 3)), start));
-        assert!(
-            !passes(
-                &cursor,
-                "",
-                &Seen {
-                    practice: None,
-                    ..seen("", (2, 3))
-                },
-                start
-            ),
-            "in the practice buffer"
-        );
-        let split = Step {
-            say: "x".into(),
-            windows: Some("+1".into()),
-            ..Step::default()
-        };
+        assert!(!passes(&cursor, "", &Seen { practice: None, ..seen("", (2, 3)) }, start), "in the practice buffer");
+        let split = Step { say: "x".into(), windows: Some("+1".into()), ..Step::default() };
         assert!(!passes(&split, "", &seen("", (1, 1)), start));
-        assert!(passes(
-            &split,
-            "",
-            &Seen {
-                windows: 3,
-                ..seen("", (1, 1))
-            },
-            start
-        ));
-        let only = Step {
-            windows: Some("1".into()),
-            ..split
-        };
-        assert!(passes(
-            &only,
-            "",
-            &Seen {
-                windows: 1,
-                ..seen("", (1, 1))
-            },
-            start
-        ));
-        let browse = Step {
-            say: "x".into(),
-            page: Some("extensions/browse".into()),
-            ..Step::default()
-        };
-        assert!(passes(
-            &browse,
-            "",
-            &Seen {
-                page: Some(("extensions".into(), Some("extensions/browse".into()))),
-                ..seen("", (1, 1))
-            },
-            start
-        ));
-        assert!(!passes(
-            &browse,
-            "",
-            &Seen {
-                page: Some(("extensions".into(), Some("extensions/installed".into()))),
-                ..seen("", (1, 1))
-            },
-            start
-        ));
-        let closed = Step {
-            say: "x".into(),
-            closed: Some("git".into()),
-            ..Step::default()
-        };
-        assert!(!passes(
-            &closed,
-            "",
-            &Seen {
-                pages: vec!["git".into()],
-                ..seen("", (1, 1))
-            },
-            start
-        ));
-        let none = Step {
-            say: "x".into(),
-            picker: Some("none".into()),
-            ..Step::default()
-        };
-        assert!(!passes(
-            &none,
-            "",
-            &Seen {
-                picker: Some("files"),
-                ..seen("", (1, 1))
-            },
-            start
-        ));
-        let unfocused = Step {
-            say: "x".into(),
-            terminal: Some("unfocused".into()),
-            ..Step::default()
-        };
-        assert!(passes(
-            &unfocused,
-            "",
-            &Seen {
-                term: Term {
-                    panel: true,
-                    ..Term::default()
-                },
-                ..seen("", (1, 1))
-            },
-            start
-        ));
-        assert!(!passes(
-            &unfocused,
-            "",
-            &Seen {
-                term: Term {
-                    panel: true,
-                    keyboard: true,
-                    pane: false
-                },
-                ..seen("", (1, 1))
-            },
-            start
-        ));
+        assert!(passes(&split, "", &Seen { windows: 3, ..seen("", (1, 1)) }, start));
+        let only = Step { windows: Some("1".into()), ..split };
+        assert!(passes(&only, "", &Seen { windows: 1, ..seen("", (1, 1)) }, start));
+        let browse = Step { say: "x".into(), page: Some("extensions/browse".into()), ..Step::default() };
+        assert!(passes(&browse, "", &Seen { page: Some(("extensions".into(), Some("extensions/browse".into()))), ..seen("", (1, 1)) }, start));
+        assert!(!passes(&browse, "", &Seen { page: Some(("extensions".into(), Some("extensions/installed".into()))), ..seen("", (1, 1)) }, start));
+        let closed = Step { say: "x".into(), closed: Some("git".into()), ..Step::default() };
+        assert!(!passes(&closed, "", &Seen { pages: vec!["git".into()], ..seen("", (1, 1)) }, start));
+        let none = Step { say: "x".into(), picker: Some("none".into()), ..Step::default() };
+        assert!(!passes(&none, "", &Seen { picker: Some("files"), ..seen("", (1, 1)) }, start));
+        let unfocused = Step { say: "x".into(), terminal: Some("unfocused".into()), ..Step::default() };
+        assert!(passes(&unfocused, "", &Seen { term: Term { panel: true, ..Term::default() }, ..seen("", (1, 1)) }, start));
+        assert!(!passes(&unfocused, "", &Seen { term: Term { panel: true, keyboard: true, pane: false }, ..seen("", (1, 1)) }, start));
     }
 
     /// A step is checked on its own change: another step's -- skipped,
@@ -1151,10 +795,7 @@ mod tests {
     /// skipping one step of a lesson made every later one impossible.
     #[test]
     fn a_text_step_is_checked_on_its_own_change_not_on_every_earlier_one() {
-        let start = Start {
-            windows: 1,
-            pane: pane(),
-        };
+        let start = Start { windows: 1, pane: pane() };
         let lesson = parse(
             "id = \"t\"\ntrack = \"T\"\ntitle = \"T\"\ntext = \"\"\"\nthis is is a sentence.\nKeep this part. Remove this part.\nCopy me.\n\"\"\"\n\
              [[step]]\nsay = \"dw\"\ntext = \"\"\"\nthis is a sentence.\nKeep this part. Remove this part.\nCopy me.\n\"\"\"\n\
@@ -1162,65 +803,30 @@ mod tests {
              [[step]]\nsay = \"yyp\"\ntext = \"\"\"\nthis is a sentence.\nKeep this part.\nCopy me.\nCopy me.\n\"\"\"\n",
         )
         .unwrap();
-        let check = |n: usize, text: &str| {
-            passes(
-                &lesson.steps[n],
-                text_before(&lesson, n),
-                &seen(text, (1, 1)),
-                start,
-            )
-        };
+        let check = |n: usize, text: &str| passes(&lesson.steps[n], text_before(&lesson, n), &seen(text, (1, 1)), start);
         // Step 1 skipped: step 2 still passes on its own line.
-        assert!(check(
-            1,
-            "this is is a sentence.\nKeep this part.\nCopy me.\n"
-        ));
-        assert!(
-            !check(
-                1,
-                "this is is a sentence.\nKeep this part. Remove this part.\nCopy me.\n"
-            ),
-            "not before it's done"
-        );
+        assert!(check(1, "this is is a sentence.\nKeep this part.\nCopy me.\n"));
+        assert!(!check(1, "this is is a sentence.\nKeep this part. Remove this part.\nCopy me.\n"), "not before it's done");
         // Done a step early: the one before still passes when it comes.
         assert!(check(0, "this is a sentence.\nKeep this part.\nCopy me.\n"));
         // A line put twice: as many times as it should be, no more.
-        assert!(check(
-            2,
-            "this is a sentence.\nKeep this part.\nCopy me.\nCopy me.\n"
-        ));
-        assert!(!check(
-            2,
-            "this is a sentence.\nKeep this part.\nCopy me.\nCopy me.\nCopy me.\n"
-        ));
+        assert!(check(2, "this is a sentence.\nKeep this part.\nCopy me.\nCopy me.\n"));
+        assert!(!check(2, "this is a sentence.\nKeep this part.\nCopy me.\nCopy me.\nCopy me.\n"));
     }
 
     #[test]
     fn a_cursor_step_takes_the_same_word_where_an_earlier_change_moved_it() {
-        let start = Start {
-            windows: 1,
-            pane: pane(),
-        };
+        let start = Start { windows: 1, pane: pane() };
         let before = "intro\nthe cat and the dog and the dog\n";
-        let step = Step {
-            say: "x".into(),
-            cursor: Some([2, 29]),
-            ..Step::default()
-        };
+        let step = Step { say: "x".into(), cursor: Some([2, 29]), ..Step::default() };
         // As the lesson has it: the second dog.
         assert!(passes(&step, before, &seen(before, (2, 29)), start));
         // A step before was done another way (cat -> bird): the second dog
         // is a column later, and is still the second dog.
         let moved = "intro\nthe bird and the dog and the dog\n";
         assert!(passes(&step, before, &seen(moved, (2, 30)), start));
-        assert!(
-            !passes(&step, before, &seen(moved, (2, 18)), start),
-            "the first dog isn't the second"
-        );
-        assert!(
-            !passes(&step, before, &seen(moved, (2, 31)), start),
-            "the same word, but not its start"
-        );
+        assert!(!passes(&step, before, &seen(moved, (2, 18)), start), "the first dog isn't the second");
+        assert!(!passes(&step, before, &seen(moved, (2, 31)), start), "the same word, but not its start");
     }
 
     #[test]
@@ -1229,30 +835,12 @@ mod tests {
         let path = dir.path().join("state").join("tutorial.json");
         assert!(load_done(&path).is_empty());
         let (lessons, _) = load(&[]);
-        let mut page = TutorialPage::new(
-            lessons,
-            Vec::new(),
-            BTreeSet::from(["editing.modes".to_string()]),
-        );
+        let mut page = TutorialPage::new(lessons, Vec::new(), BTreeSet::from(["editing.modes".to_string()]));
         assert_eq!(page.focus, 1, "the first not done");
         assert_eq!(page.key(Key::Enter), Action::Start(1));
-        let start = Start {
-            windows: 2,
-            pane: pane(),
-        };
+        let start = Start { windows: 2, pane: pane() };
         let practice = fenix_buffers::BufferList::new().open_scratch();
-        page.run = Some(Run {
-            lesson: 1,
-            step: 0,
-            practice,
-            start,
-            since: Instant::now(),
-            hint: false,
-            edits: 0,
-            skipped: 0,
-            there: false,
-            finished: false,
-        });
+        page.run = Some(Run { lesson: 1, step: 0, practice, start, since: Instant::now(), hint: false, edits: 0, skipped: 0, there: false, finished: false });
         assert_eq!(page.key(Key::Enter), Action::Practice);
         assert_eq!(page.key(Key::Char('s')), Action::Skip);
         let steps = page.lessons[1].steps.len();
@@ -1262,12 +850,7 @@ mod tests {
         assert!(page.done.contains("editing.words"));
         assert_eq!(page.focus, 2, "on to the next");
         let text = layout(&page, 100).all_text();
-        assert!(
-            text.contains(
-                "Lesson done (1 skipped). Enter starts the next one, Operators and text objects."
-            ),
-            "{text}"
-        );
+        assert!(text.contains("Lesson done (1 skipped). Enter starts the next one, Operators and text objects."), "{text}");
         assert!(text.contains("2 of 13 done"), "{text}");
         save_done(&path, &page.done).unwrap();
         assert_eq!(load_done(&path), page.done);
@@ -1279,14 +862,8 @@ mod tests {
         let done = lessons.iter().map(|l| l.id.clone()).collect();
         let mut page = TutorialPage::new(lessons, Vec::new(), done);
         let text = layout(&page, 100).all_text();
-        assert!(
-            text.contains("Every lesson done") && text.contains("keybindings doc (d opens"),
-            "{text}"
-        );
+        assert!(text.contains("Every lesson done") && text.contains("keybindings doc (d opens"), "{text}");
         assert_eq!(page.key(Key::Char('d')), Action::Keybindings);
-        assert!(
-            KEYBINDINGS.contains("SPC h T"),
-            "the doc has the tutorial's key"
-        );
+        assert!(KEYBINDINGS.contains("SPC h T"), "the doc has the tutorial's key");
     }
 }

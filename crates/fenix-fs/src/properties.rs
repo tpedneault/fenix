@@ -43,9 +43,7 @@ pub fn properties(path: &Path) -> io::Result<Properties> {
     let metadata = std::fs::symlink_metadata(path)?;
     let file_type = metadata.file_type();
     let kind = if file_type.is_symlink() {
-        EntryKind::Link {
-            to_dir: std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false),
-        }
+        EntryKind::Link { to_dir: std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false) }
     } else if metadata.is_dir() {
         EntryKind::Dir
     } else {
@@ -60,15 +58,9 @@ pub fn properties(path: &Path) -> io::Result<Properties> {
         accessed: metadata.accessed().ok(),
         attributes: crate::listing::attributes_for(
             &metadata,
-            &path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+            &path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
         ),
-        link_target: file_type
-            .is_symlink()
-            .then(|| std::fs::read_link(path).ok())
-            .flatten(),
+        link_target: file_type.is_symlink().then(|| std::fs::read_link(path).ok()).flatten(),
     })
 }
 
@@ -120,9 +112,7 @@ fn walk(path: &Path, cancel: &impl Fn() -> bool, total: &mut Total) {
         total.partial = true;
         return;
     }
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return;
-    };
+    let Ok(metadata) = std::fs::symlink_metadata(path) else { return };
     if metadata.file_type().is_symlink() {
         // Counted as the one entry it is, not as what it points at.
         total.files += 1;
@@ -130,9 +120,7 @@ fn walk(path: &Path, cancel: &impl Fn() -> bool, total: &mut Total) {
     }
     if metadata.is_dir() {
         total.directories += 1;
-        let Ok(entries) = std::fs::read_dir(path) else {
-            return;
-        };
+        let Ok(entries) = std::fs::read_dir(path) else { return };
         for entry in entries.flatten() {
             walk(&entry.path(), cancel, total);
         }

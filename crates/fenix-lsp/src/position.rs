@@ -23,15 +23,8 @@ pub fn char_offset_to_position(rope: &ropey::Rope, char_offset: usize) -> lsp_ty
     let line_start_char = rope.line_to_char(line);
     let col_chars = char_offset - line_start_char;
     let line_slice = rope.line(line);
-    let utf16_col: usize = line_slice
-        .chars()
-        .take(col_chars)
-        .map(char::len_utf16)
-        .sum();
-    lsp_types::Position {
-        line: line as u32,
-        character: utf16_col as u32,
-    }
+    let utf16_col: usize = line_slice.chars().take(col_chars).map(char::len_utf16).sum();
+    lsp_types::Position { line: line as u32, character: utf16_col as u32 }
 }
 
 /// The inverse: an LSP `Position` to a char offset into `rope`. Clamps
@@ -97,23 +90,8 @@ mod tests {
     fn ascii_only_column_matches_char_offset_exactly() {
         let rope = Rope::from_str("hello\nworld");
         // char offset 8 is the 'r' in "world" (line 1, col 2)
-        assert_eq!(
-            char_offset_to_position(&rope, 8),
-            lsp_types::Position {
-                line: 1,
-                character: 2
-            }
-        );
-        assert_eq!(
-            position_to_char_offset(
-                &rope,
-                lsp_types::Position {
-                    line: 1,
-                    character: 2
-                }
-            ),
-            8
-        );
+        assert_eq!(char_offset_to_position(&rope, 8), lsp_types::Position { line: 1, character: 2 });
+        assert_eq!(position_to_char_offset(&rope, lsp_types::Position { line: 1, character: 2 }), 8);
     }
 
     #[test]
@@ -122,30 +100,9 @@ mod tests {
         // in the BMP) -- the LSP column right after it should be 1, not
         // 2, and not byte-length-dependent at all.
         let rope = Rope::from_str("éx");
-        assert_eq!(
-            char_offset_to_position(&rope, 1),
-            lsp_types::Position {
-                line: 0,
-                character: 1
-            }
-        );
-        assert_eq!(
-            char_offset_to_position(&rope, 2),
-            lsp_types::Position {
-                line: 0,
-                character: 2
-            }
-        );
-        assert_eq!(
-            position_to_char_offset(
-                &rope,
-                lsp_types::Position {
-                    line: 0,
-                    character: 1
-                }
-            ),
-            1
-        );
+        assert_eq!(char_offset_to_position(&rope, 1), lsp_types::Position { line: 0, character: 1 });
+        assert_eq!(char_offset_to_position(&rope, 2), lsp_types::Position { line: 0, character: 2 });
+        assert_eq!(position_to_char_offset(&rope, lsp_types::Position { line: 0, character: 1 }), 1);
     }
 
     #[test]
@@ -155,41 +112,11 @@ mod tests {
         let rope = Rope::from_str("😀x");
         assert_eq!('😀'.len_utf16(), 2);
         // char offset 1 is right after the emoji -- LSP column 2, not 1.
-        assert_eq!(
-            char_offset_to_position(&rope, 1),
-            lsp_types::Position {
-                line: 0,
-                character: 2
-            }
-        );
+        assert_eq!(char_offset_to_position(&rope, 1), lsp_types::Position { line: 0, character: 2 });
         // char offset 2 is right after the 'x' that follows it.
-        assert_eq!(
-            char_offset_to_position(&rope, 2),
-            lsp_types::Position {
-                line: 0,
-                character: 3
-            }
-        );
-        assert_eq!(
-            position_to_char_offset(
-                &rope,
-                lsp_types::Position {
-                    line: 0,
-                    character: 2
-                }
-            ),
-            1
-        );
-        assert_eq!(
-            position_to_char_offset(
-                &rope,
-                lsp_types::Position {
-                    line: 0,
-                    character: 3
-                }
-            ),
-            2
-        );
+        assert_eq!(char_offset_to_position(&rope, 2), lsp_types::Position { line: 0, character: 3 });
+        assert_eq!(position_to_char_offset(&rope, lsp_types::Position { line: 0, character: 2 }), 1);
+        assert_eq!(position_to_char_offset(&rope, lsp_types::Position { line: 0, character: 3 }), 2);
     }
 
     #[test]
@@ -197,21 +124,14 @@ mod tests {
         let rope = Rope::from_str("plain\ncafé 😀 done\nlast");
         for char_offset in 0..rope.len_chars() {
             let pos = char_offset_to_position(&rope, char_offset);
-            assert_eq!(
-                position_to_char_offset(&rope, pos),
-                char_offset,
-                "round-trip failed for char_offset {char_offset}"
-            );
+            assert_eq!(position_to_char_offset(&rope, pos), char_offset, "round-trip failed for char_offset {char_offset}");
         }
     }
 
     #[test]
     fn a_position_on_a_line_past_the_end_of_the_rope_clamps_to_the_last_line() {
         let rope = Rope::from_str("only line");
-        let pos = lsp_types::Position {
-            line: 50,
-            character: 0,
-        };
+        let pos = lsp_types::Position { line: 50, character: 0 };
         // Clamps to the start of the only real line rather than
         // panicking on an out-of-range line index.
         assert_eq!(position_to_char_offset(&rope, pos), 0);
@@ -220,10 +140,7 @@ mod tests {
     #[test]
     fn a_character_column_past_the_lines_real_content_clamps_to_the_lines_end() {
         let rope = Rope::from_str("hi\nmore");
-        let pos = lsp_types::Position {
-            line: 0,
-            character: 999,
-        };
+        let pos = lsp_types::Position { line: 0, character: 999 };
         // Clamps to right before the newline (char offset 2), not past
         // it into the next line.
         assert_eq!(position_to_char_offset(&rope, pos), 2);
@@ -232,53 +149,17 @@ mod tests {
     #[test]
     fn handles_crlf_line_endings_without_counting_the_carriage_return_as_content() {
         let rope = Rope::from_str("one\r\ntwo");
-        assert_eq!(
-            char_offset_to_position(&rope, 5),
-            lsp_types::Position {
-                line: 1,
-                character: 0
-            }
-        );
-        assert_eq!(
-            position_to_char_offset(
-                &rope,
-                lsp_types::Position {
-                    line: 1,
-                    character: 0
-                }
-            ),
-            5
-        );
+        assert_eq!(char_offset_to_position(&rope, 5), lsp_types::Position { line: 1, character: 0 });
+        assert_eq!(position_to_char_offset(&rope, lsp_types::Position { line: 1, character: 0 }), 5);
         // Overrunning line 0's real content (3 chars: "one") still
         // clamps before the \r\n, not into it.
-        assert_eq!(
-            position_to_char_offset(
-                &rope,
-                lsp_types::Position {
-                    line: 0,
-                    character: 999
-                }
-            ),
-            3
-        );
+        assert_eq!(position_to_char_offset(&rope, lsp_types::Position { line: 0, character: 999 }), 3);
     }
 
     #[test]
     fn the_very_first_and_last_char_offsets_convert_correctly() {
         let rope = Rope::from_str("abc");
-        assert_eq!(
-            char_offset_to_position(&rope, 0),
-            lsp_types::Position {
-                line: 0,
-                character: 0
-            }
-        );
-        assert_eq!(
-            char_offset_to_position(&rope, 3),
-            lsp_types::Position {
-                line: 0,
-                character: 3
-            }
-        );
+        assert_eq!(char_offset_to_position(&rope, 0), lsp_types::Position { line: 0, character: 0 });
+        assert_eq!(char_offset_to_position(&rope, 3), lsp_types::Position { line: 0, character: 3 });
     }
 }

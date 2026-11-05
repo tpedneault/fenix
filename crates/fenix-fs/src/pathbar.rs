@@ -26,15 +26,11 @@ pub fn expand(input: &str) -> PathBuf {
 /// `~`, or `~/rest`, or `~\rest` -- but not `~something`, which is a
 /// perfectly ordinary filename and not a home directory reference.
 fn expand_home(input: &str) -> String {
-    let Some(rest) = input.strip_prefix('~') else {
-        return input.to_string();
-    };
+    let Some(rest) = input.strip_prefix('~') else { return input.to_string() };
     if !(rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\')) {
         return input.to_string();
     }
-    let Some(home) = home_dir() else {
-        return input.to_string();
-    };
+    let Some(home) = home_dir() else { return input.to_string() };
     format!("{}{}", home.display(), rest)
 }
 
@@ -63,9 +59,7 @@ fn expand_vars(input: &str) -> String {
 }
 
 fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
+    std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from)
 }
 
 /// How a partially-typed path splits for completion: everything that is
@@ -83,11 +77,7 @@ fn split_for_completion(input: &str) -> (PathBuf, String) {
             let (dir, name) = text.split_at(at);
             // `C:\foo` splits to `C:` + `\foo`; the parent of a
             // top-level entry is the drive *root*, not the drive.
-            let dir = if dir.is_empty() || dir.ends_with(':') {
-                format!("{dir}\\")
-            } else {
-                dir.to_string()
-            };
+            let dir = if dir.is_empty() || dir.ends_with(':') { format!("{dir}\\") } else { dir.to_string() };
             (PathBuf::from(dir), name[1..].to_string())
         }
         None => (PathBuf::from("."), text),
@@ -105,9 +95,7 @@ fn split_for_completion(input: &str) -> (PathBuf, String) {
 /// and typing `c:\us` should find `C:\Users`.
 pub fn complete(input: &str) -> Vec<String> {
     let (dir, partial) = split_for_completion(input);
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
     let needle = fold_case(&partial);
     let mut out: Vec<String> = entries
         .flatten()
@@ -127,12 +115,7 @@ pub fn common_prefix(candidates: &[String]) -> Option<String> {
     let first = candidates.first()?;
     let mut len = first.chars().count();
     for candidate in &candidates[1..] {
-        len = first
-            .chars()
-            .zip(candidate.chars())
-            .take(len)
-            .take_while(|(a, b)| fold_char(*a) == fold_char(*b))
-            .count();
+        len = first.chars().zip(candidate.chars()).take(len).take_while(|(a, b)| fold_char(*a) == fold_char(*b)).count();
     }
     Some(first.chars().take(len).collect())
 }
@@ -177,10 +160,7 @@ mod tests {
 
     #[test]
     fn a_path_copied_out_of_explorer_arrives_wrapped_in_quotes() {
-        assert_eq!(
-            expand("\"C:\\Program Files\""),
-            PathBuf::from(r"C:\Program Files")
-        );
+        assert_eq!(expand("\"C:\\Program Files\""), PathBuf::from(r"C:\Program Files"));
     }
 
     #[test]
@@ -192,32 +172,17 @@ mod tests {
     fn tilde_means_home_only_when_it_stands_alone_or_starts_a_path() {
         let home = home_dir().expect("a home directory");
         assert_eq!(expand("~"), home);
-        assert_eq!(
-            expand("~/Downloads"),
-            PathBuf::from(format!("{}/Downloads", home.display()))
-        );
-        assert_eq!(
-            expand(r"~\Downloads"),
-            PathBuf::from(format!("{}\\Downloads", home.display()))
-        );
+        assert_eq!(expand("~/Downloads"), PathBuf::from(format!("{}/Downloads", home.display())));
+        assert_eq!(expand(r"~\Downloads"), PathBuf::from(format!("{}\\Downloads", home.display())));
         // `~notes.txt` is a filename, not somebody's home directory.
         assert_eq!(expand("~notes.txt"), PathBuf::from("~notes.txt"));
     }
 
     #[test]
     fn an_environment_variable_is_replaced_by_its_value() {
-        let home = std::env::var("USERPROFILE")
-            .or_else(|_| std::env::var("HOME"))
-            .expect("a home variable");
-        let expanded = if cfg!(windows) {
-            expand(r"%USERPROFILE%\Documents")
-        } else {
-            expand("%HOME%/Documents")
-        };
-        assert!(
-            expanded.to_string_lossy().starts_with(&home),
-            "got {expanded:?}"
-        );
+        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).expect("a home variable");
+        let expanded = if cfg!(windows) { expand(r"%USERPROFILE%\Documents") } else { expand("%HOME%/Documents") };
+        assert!(expanded.to_string_lossy().starts_with(&home), "got {expanded:?}");
         assert!(expanded.to_string_lossy().ends_with("Documents"));
     }
 
@@ -225,10 +190,7 @@ mod tests {
     fn an_unset_variable_is_left_as_typed_rather_than_erased() {
         // Erasing it would turn `%TYPO%\notes` into `\notes`, which is a
         // real place, just not the one that was meant.
-        assert_eq!(
-            expand(r"%NO_SUCH_VARIABLE_HERE%\notes"),
-            PathBuf::from(r"%NO_SUCH_VARIABLE_HERE%\notes")
-        );
+        assert_eq!(expand(r"%NO_SUCH_VARIABLE_HERE%\notes"), PathBuf::from(r"%NO_SUCH_VARIABLE_HERE%\notes"));
     }
 
     #[test]
@@ -240,10 +202,7 @@ mod tests {
     fn a_unc_path_survives_expansion_unchanged() {
         // The one shape most likely to be mangled by path handling, and
         // the whole reason this feature exists.
-        assert_eq!(
-            expand(r"\\nas\media\projects"),
-            PathBuf::from(r"\\nas\media\projects")
-        );
+        assert_eq!(expand(r"\\nas\media\projects"), PathBuf::from(r"\\nas\media\projects"));
     }
 
     // -- Completion ------------------------------------------------------
@@ -264,10 +223,7 @@ mod tests {
 
         let candidates = complete(&typed);
 
-        let names: Vec<String> = candidates
-            .iter()
-            .map(|c| c.rsplit('\\').next().unwrap().to_string())
-            .collect();
+        let names: Vec<String> = candidates.iter().map(|c| c.rsplit('\\').next().unwrap().to_string()).collect();
         assert_eq!(names, vec!["alpha", "alpine"]);
     }
 
@@ -276,10 +232,7 @@ mod tests {
         // A path bar gets you somewhere; a file is not somewhere.
         let dir = dir_with_children("complete_dirs_only");
         let candidates = complete(&format!("{}\\alpha", dir.path().display()));
-        assert!(
-            candidates.iter().all(|c| !c.ends_with(".txt")),
-            "got {candidates:?}"
-        );
+        assert!(candidates.iter().all(|c| !c.ends_with(".txt")), "got {candidates:?}");
     }
 
     #[test]

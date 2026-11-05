@@ -22,10 +22,7 @@ use std::process::Command;
 /// open a folder means everywhere else too.
 pub fn open_with_default(path: &Path) -> io::Result<()> {
     if !path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{} is not there", path.display()),
-        ));
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not there", path.display())));
     }
     #[cfg(windows)]
     {
@@ -47,20 +44,14 @@ pub fn open_with_default(path: &Path) -> io::Result<()> {
 /// with the wrong thing highlighted is half an answer.
 pub fn reveal(path: &Path) -> io::Result<()> {
     if !path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("{} is not there", path.display()),
-        ));
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} is not there", path.display())));
     }
     #[cfg(windows)]
     {
         // `/select,` takes its argument glued on with no space, which is
         // why this is one argument and not two -- passed separately,
         // Explorer opens the *parent* and selects nothing.
-        no_window("explorer.exe")
-            .arg(format!("/select,{}", path.display()))
-            .spawn()
-            .map(|_| ())
+        no_window("explorer.exe").arg(format!("/select,{}", path.display())).spawn().map(|_| ())
     }
     #[cfg(not(windows))]
     {
@@ -78,21 +69,12 @@ pub fn reveal(path: &Path) -> io::Result<()> {
 /// unknown scheme could run something.
 pub fn open_url(url: &str) -> io::Result<()> {
     let lower = url.trim().to_ascii_lowercase();
-    if !["http://", "https://", "mailto:"]
-        .iter()
-        .any(|scheme| lower.starts_with(scheme))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("{url} isn't a web or mail link"),
-        ));
+    if !["http://", "https://", "mailto:"].iter().any(|scheme| lower.starts_with(scheme)) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{url} isn't a web or mail link")));
     }
     #[cfg(windows)]
     {
-        no_window("explorer.exe")
-            .arg(url.trim())
-            .spawn()
-            .map(|_| ())
+        no_window("explorer.exe").arg(url.trim()).spawn().map(|_| ())
     }
     #[cfg(not(windows))]
     {
@@ -122,17 +104,8 @@ mod tests {
 
     #[test]
     fn only_web_and_mail_links_are_opened() {
-        for url in [
-            "file:///C:/Windows/System32/calc.exe",
-            "C:/tools/x.exe",
-            "javascript:alert(1)",
-            "ms-settings:",
-        ] {
-            assert_eq!(
-                open_url(url).unwrap_err().kind(),
-                io::ErrorKind::InvalidInput,
-                "{url}"
-            );
+        for url in ["file:///C:/Windows/System32/calc.exe", "C:/tools/x.exe", "javascript:alert(1)", "ms-settings:"] {
+            assert_eq!(open_url(url).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{url}");
         }
     }
 
@@ -141,18 +114,12 @@ mod tests {
         let dir = TempDir::new("shell_open_missing");
         let err = open_with_default(&dir.path().join("nope.txt")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
-        assert!(
-            err.to_string().contains("nope.txt"),
-            "the message names it: {err}"
-        );
+        assert!(err.to_string().contains("nope.txt"), "the message names it: {err}");
     }
 
     #[test]
     fn revealing_something_that_is_not_there_is_refused_too() {
         let dir = TempDir::new("shell_reveal_missing");
-        assert_eq!(
-            reveal(&dir.path().join("nope.txt")).unwrap_err().kind(),
-            io::ErrorKind::NotFound
-        );
+        assert_eq!(reveal(&dir.path().join("nope.txt")).unwrap_err().kind(), io::ErrorKind::NotFound);
     }
 }

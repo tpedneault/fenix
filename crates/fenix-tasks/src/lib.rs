@@ -45,13 +45,7 @@ pub fn discover_tasks(root: &Path) -> Vec<TaskDef> {
 /// see `fenix-gui`'s own task-runner session for the thread/kill
 /// lifecycle).
 pub fn spawn(task: &TaskDef, root: &Path) -> Option<Child> {
-    Command::new(&task.command)
-        .args(&task.args)
-        .current_dir(root)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .ok()
+    Command::new(&task.command).args(&task.args).current_dir(root).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()
 }
 
 #[cfg(test)]
@@ -64,10 +58,7 @@ mod tests {
         fn new(name: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "fenix-tasks-lib-test-{name}-{}-{n}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir().join(format!("fenix-tasks-lib-test-{name}-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
@@ -99,11 +90,7 @@ mod tests {
     #[test]
     fn spawn_never_panics_for_a_nonexistent_binary() {
         let dir = TempDir::new("spawn_missing");
-        let task = TaskDef {
-            name: "nope".to_string(),
-            command: "definitely-not-a-real-binary-xyz".to_string(),
-            args: Vec::new(),
-        };
+        let task = TaskDef { name: "nope".to_string(), command: "definitely-not-a-real-binary-xyz".to_string(), args: Vec::new() };
         assert!(spawn(&task, dir.path()).is_none());
     }
 
@@ -111,18 +98,9 @@ mod tests {
     fn spawn_launches_a_real_command_with_its_working_directory_and_args() {
         let dir = TempDir::new("spawn_real");
         let program = if cfg!(windows) { "cmd" } else { "echo" };
-        let args = if cfg!(windows) {
-            vec!["/c".to_string(), "echo".to_string(), "hi".to_string()]
-        } else {
-            vec!["hi".to_string()]
-        };
-        let task = TaskDef {
-            name: "echo".to_string(),
-            command: program.to_string(),
-            args,
-        };
-        let mut child = spawn(&task, dir.path())
-            .expect("echo/cmd should be launchable in any test environment");
+        let args = if cfg!(windows) { vec!["/c".to_string(), "echo".to_string(), "hi".to_string()] } else { vec!["hi".to_string()] };
+        let task = TaskDef { name: "echo".to_string(), command: program.to_string(), args };
+        let mut child = spawn(&task, dir.path()).expect("echo/cmd should be launchable in any test environment");
         let status = child.wait().expect("child should exit");
         assert!(status.success());
     }

@@ -20,9 +20,7 @@ pub(crate) fn git_command(repo: &Path, args: &[&str]) -> Command {
     // - `GIT_TERMINAL_PROMPT=0`: makes `fetch`/`push` against a repo
     //   needing credentials fail with a real error instead of blocking
     //   on a username prompt nobody can see.
-    cmd.env("GIT_EDITOR", "true")
-        .env("GIT_SEQUENCE_EDITOR", "true")
-        .env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_EDITOR", "true").env("GIT_SEQUENCE_EDITOR", "true").env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -39,16 +37,11 @@ pub(crate) fn git_command(repo: &Path, args: &[&str]) -> Command {
 /// into lines on success, or empty on any failure (missing binary,
 /// non-zero exit, not a repo) -- never a hard error.
 pub(crate) fn run_lines(repo: &Path, args: &[&str]) -> Vec<String> {
-    let Ok(output) = git_command(repo, args).output() else {
-        return Vec::new();
-    };
+    let Ok(output) = git_command(repo, args).output() else { return Vec::new() };
     if !output.status.success() {
         return Vec::new();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
+    String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect()
 }
 
 /// Runs `git args...` in `repo`, returning stdout on success or stderr
@@ -62,11 +55,7 @@ pub(crate) fn run_action(repo: &Path, args: &[String]) -> Result<String, String>
 
 /// `run_action` with some environment variables set over the defaults --
 /// an interactive rebase's own `GIT_SEQUENCE_EDITOR`, say.
-pub(crate) fn run_action_env(
-    repo: &Path,
-    args: &[String],
-    env: &[(&str, &str)],
-) -> Result<String, String> {
+pub(crate) fn run_action_env(repo: &Path, args: &[String], env: &[(&str, &str)]) -> Result<String, String> {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut command = git_command(repo, &args);
     for (key, value) in env {
@@ -91,9 +80,7 @@ pub(crate) fn run_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
 /// Whether `git args...` exits 0 -- for the commands whose answer *is*
 /// the exit status (`merge-base --is-ancestor`).
 pub(crate) fn run_status(repo: &Path, args: &[&str]) -> bool {
-    git_command(repo, args)
-        .output()
-        .is_ok_and(|out| out.status.success())
+    git_command(repo, args).output().is_ok_and(|out| out.status.success())
 }
 
 /// `run_action`, but with `stdin` piped into the child -- what `git
@@ -103,19 +90,13 @@ pub(crate) fn run_status(repo: &Path, args: &[&str]) -> bool {
 /// `run_action`; a write failure on the pipe is reported the same way a
 /// non-zero exit is, since from the caller's point of view both mean
 /// "the patch didn't apply."
-pub(crate) fn run_action_stdin(
-    repo: &Path,
-    args: &[String],
-    stdin: &str,
-) -> Result<String, String> {
+pub(crate) fn run_action_stdin(repo: &Path, args: &[String], stdin: &str) -> Result<String, String> {
     use std::io::Write;
     use std::process::Stdio;
 
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut cmd = git_command(repo, &args);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(err) => return Err(format!("couldn't run git: {err}")),
@@ -140,11 +121,7 @@ mod tests {
 
     #[test]
     fn run_action_stdin_reports_an_error_for_an_unrecognized_subcommand() {
-        let result = run_action_stdin(
-            &std::env::temp_dir(),
-            &["not-a-real-subcommand".to_string()],
-            "payload\n",
-        );
+        let result = run_action_stdin(&std::env::temp_dir(), &["not-a-real-subcommand".to_string()], "payload\n");
         assert!(result.is_err());
     }
 
@@ -156,10 +133,7 @@ mod tests {
 
     #[test]
     fn run_action_reports_an_error_for_an_unrecognized_subcommand() {
-        let result = run_action(
-            &std::env::temp_dir(),
-            &["not-a-real-subcommand".to_string()],
-        );
+        let result = run_action(&std::env::temp_dir(), &["not-a-real-subcommand".to_string()]);
         assert!(result.is_err());
     }
 }

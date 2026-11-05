@@ -11,27 +11,19 @@ use crate::git_status::{Action, Compose, DiffState};
 /// Commits read for a page.
 const LIMIT: usize = 300;
 
-fn read_log(
-    root: &Path,
-    scope: &Scope,
-    words: Option<String>,
-    author: Option<String>,
-    style: crate::graph_view::GraphStyle,
-) -> LogData {
+fn read_log(root: &Path, scope: &Scope, words: Option<String>, author: Option<String>, style: crate::graph_view::GraphStyle) -> LogData {
     let mut patches = HashMap::new();
     let commits = match scope {
-        Scope::Lines { path, start, end } => {
-            match fenix_git::line_log(root, path, *start, *end, LIMIT) {
-                Ok(entries) => entries
-                    .into_iter()
-                    .map(|(commit, patch)| {
-                        patches.insert(commit.hash.clone(), fenix_diff::parse(&patch));
-                        commit
-                    })
-                    .collect(),
-                Err(_) => Vec::new(),
-            }
-        }
+        Scope::Lines { path, start, end } => match fenix_git::line_log(root, path, *start, *end, LIMIT) {
+            Ok(entries) => entries
+                .into_iter()
+                .map(|(commit, patch)| {
+                    patches.insert(commit.hash.clone(), fenix_diff::parse(&patch));
+                    commit
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        },
         _ => {
             let query = fenix_git::LogQuery {
                 all: *scope == Scope::All,
@@ -54,20 +46,13 @@ fn read_log(
         .zip(panel.lines)
         .map(|(text, line)| {
             let (spans, commit) = line.map(|l| (l.spans, l.commit)).unwrap_or_default();
-            GraphLine {
-                text: text.to_string(),
-                spans,
-                commit,
-            }
+            GraphLine { text: text.to_string(), spans, commit }
         })
         .collect();
     LogData {
-        on_head: fenix_git::reachable(root, "HEAD", LIMIT * 4)
-            .into_iter()
-            .collect(),
+        on_head: fenix_git::reachable(root, "HEAD", LIMIT * 4).into_iter().collect(),
         head: Some(fenix_git::oplog::rev(root, "HEAD")).filter(|h| !h.is_empty()),
-        branch: fenix_git::oplog::current_branch(root)
-            .unwrap_or_else(|| "HEAD (detached)".to_string()),
+        branch: fenix_git::oplog::current_branch(root).unwrap_or_else(|| "HEAD (detached)".to_string()),
         lines,
         commits,
         patches,
@@ -89,23 +74,15 @@ impl App {
     /// the one already showing it, or a new one.
     pub(crate) fn open_git_log(&mut self, scope: Scope) {
         let start = match self.open().buffer.path() {
-            Some(path) if self.focused_git_page_root().is_none() => path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| self.git_action_repo_root()),
+            Some(path) if self.focused_git_page_root().is_none() => path.parent().map(Path::to_path_buf).unwrap_or_else(|| self.git_action_repo_root()),
             _ => self.git_action_repo_root(),
         };
         let Some(root) = super::git_editor::repository_of(&start) else {
-            self.set_error(format!(
-                "{} isn't in a git repository",
-                readable_path(&start)
-            ));
+            self.set_error(format!("{} isn't in a git repository", readable_path(&start)));
             return;
         };
         let root = fenix_lsp::normalize(root);
-        let id = match self
-            .find_page(|m| matches!(m, PageModel::Log(l) if l.root == root && l.scope == scope))
-        {
+        let id = match self.find_page(|m| matches!(m, PageModel::Log(l) if l.root == root && l.scope == scope)) {
             Some(id) => {
                 self.show_page(id);
                 id
@@ -142,74 +119,39 @@ impl App {
         };
         let cursor = self.cursor().char_idx;
         let buffer = &self.open().buffer;
-        let (a, b) = self
-            .vim
-            .last_visual_range()
-            .filter(|(a, b)| (*a..=*b).contains(&cursor))
-            .unwrap_or((cursor, cursor));
-        let start = buffer
-            .line_col(&Cursor {
-                char_idx: a,
-                sticky_col: 0,
-            })
-            .0
-            + 1;
-        let end = buffer
-            .line_col(&Cursor {
-                char_idx: b,
-                sticky_col: 0,
-            })
-            .0
-            + 1;
+        let (a, b) = self.vim.last_visual_range().filter(|(a, b)| (*a..=*b).contains(&cursor)).unwrap_or((cursor, cursor));
+        let start = buffer.line_col(&Cursor { char_idx: a, sticky_col: 0 }).0 + 1;
+        let end = buffer.line_col(&Cursor { char_idx: b, sticky_col: 0 }).0 + 1;
         let relative = super::git_editor::relative_to(&path, &root);
-        self.open_git_log(Scope::Lines {
-            path: relative,
-            start,
-            end,
-        });
+        self.open_git_log(Scope::Lines { path: relative, start, end });
     }
 
     pub(super) fn git_log_refresh(&mut self, id: BufferId) {
-        let style =
-            crate::graph_view::GraphStyle::from_config(self.config.git_graph_style.as_deref());
+        let style = crate::graph_view::GraphStyle::from_config(self.config.git_graph_style.as_deref());
         let Some(log) = self.git_log(id) else { return };
         log.loading = true;
         let (root, scope) = (log.root.clone(), log.scope.clone());
         let (words, author) = log.query();
         self.page_spawn(move |send| {
             let data = read_log(&root, &scope, words, author, style);
-            send(PageEvent::GitLogData {
-                buffer: id,
-                data: Box::new(data),
-            });
+            send(PageEvent::GitLogData { buffer: id, data: Box::new(data) });
         });
     }
 
     /// Reads every Log page again -- after an operation changed history.
     pub(super) fn refresh_git_logs(&mut self) {
-        let ids: Vec<BufferId> = self
-            .pages
-            .iter()
-            .filter(|(_, s)| matches!(s.model, PageModel::Log(_)))
-            .map(|(id, _)| *id)
-            .collect();
+        let ids: Vec<BufferId> = self.pages.iter().filter(|(_, s)| matches!(s.model, PageModel::Log(_))).map(|(id, _)| *id).collect();
         for id in ids {
             self.git_log_refresh(id);
         }
     }
 
     pub(super) fn git_log_action(&mut self, id: BufferId, action: LogAction) {
-        let Some(root) = self.git_log(id).map(|l| l.root.clone()) else {
-            return;
-        };
+        let Some(root) = self.git_log(id).map(|l| l.root.clone()) else { return };
         match action {
             LogAction::LoadCommit(hash) => self.page_spawn(move |send| {
                 let files = fenix_git::commit_files(&root, &hash);
-                send(PageEvent::GitLogFiles {
-                    buffer: id,
-                    hash,
-                    files,
-                });
+                send(PageEvent::GitLogFiles { buffer: id, hash, files });
             }),
             LogAction::LoadFile { hash, path } => self.page_spawn(move |send| {
                 let diff = match fenix_git::commit_file_diff(&root, &hash, &path) {
@@ -220,12 +162,7 @@ impl App {
                     },
                     Err(e) => DiffState::Empty(e.lines().next().unwrap_or("").to_string()),
                 };
-                send(PageEvent::GitLogDiff {
-                    buffer: id,
-                    hash,
-                    path,
-                    diff,
-                });
+                send(PageEvent::GitLogDiff { buffer: id, hash, path, diff });
             }),
             LogAction::Git(Action::Refresh) => self.git_log_refresh(id),
             LogAction::Git(Action::Close) => self.close_page(id),
@@ -240,22 +177,12 @@ impl App {
                 log.message = None;
                 self.page_spawn(move |send| {
                     let result = super::git_page::run_logged(&root, &job);
-                    send(PageEvent::GitDone {
-                        buffer: id,
-                        label,
-                        result,
-                    });
+                    send(PageEvent::GitDone { buffer: id, label, result });
                 });
             }
             LogAction::Git(Action::Compose(compose @ Compose::Reword(_))) => {
                 let seed = fenix_git::commit_message(&root, "HEAD").unwrap_or_default();
-                self.open_compose_seeded(
-                    ComposePurpose::GitCommit {
-                        repo_root: root,
-                        compose,
-                    },
-                    &seed,
-                );
+                self.open_compose_seeded(ComposePurpose::GitCommit { repo_root: root, compose }, &seed);
             }
             LogAction::Git(Action::OpenFile { path, line }) => {
                 let full = root.join(&path);
@@ -265,12 +192,7 @@ impl App {
                 }
                 self.open_file_from_picker(&full);
                 if let Some(line) = line {
-                    self.jump_to_grep_match(&fenix_project::GrepMatch {
-                        path: full,
-                        line,
-                        col: 1,
-                        text: String::new(),
-                    });
+                    self.jump_to_grep_match(&fenix_project::GrepMatch { path: full, line, col: 1, text: String::new() });
                 }
             }
             LogAction::Git(Action::Copy(text)) => {
@@ -278,17 +200,12 @@ impl App {
                     let _ = clipboard.set_text(text.clone());
                 }
                 if let Some(log) = self.git_log(id) {
-                    log.message =
-                        Some((format!("copied {}", crate::git_status::short(&text)), false));
+                    log.message = Some((format!("copied {}", crate::git_status::short(&text)), false));
                 }
             }
             LogAction::Git(Action::ShowOutput) => {
                 let Some(log) = self.git_log(id) else { return };
-                let text = if log.output.is_empty() {
-                    "(nothing has run yet)".to_string()
-                } else {
-                    log.output.join("\n")
-                };
+                let text = if log.output.is_empty() { "(nothing has run yet)".to_string() } else { log.output.join("\n") };
                 let buffer = self.buffers.open_text_view(&text);
                 self.open_buffer_in_focused_pane(buffer);
             }
@@ -304,55 +221,26 @@ impl App {
                     log.set_data(*data);
                 }
             }
-            PageEvent::GitLogFiles {
-                buffer,
-                hash,
-                files,
-            } => {
+            PageEvent::GitLogFiles { buffer, hash, files } => {
                 if let Some(log) = self.git_log(buffer) {
                     log.set_files(hash, files);
                 }
             }
-            PageEvent::GitLogDiff {
-                buffer,
-                hash,
-                path,
-                diff,
-            } => {
+            PageEvent::GitLogDiff { buffer, hash, path, diff } => {
                 if let Some(log) = self.git_log(buffer) {
                     log.set_diff(hash, path, diff);
                 }
             }
-            PageEvent::GitDone {
-                buffer,
-                label,
-                result,
-            } => {
-                let Some(log) = self.git_log(buffer) else {
-                    return;
-                };
+            PageEvent::GitDone { buffer, label, result } => {
+                let Some(log) = self.git_log(buffer) else { return };
                 log.busy = None;
                 let (text, failed) = match &result {
                     Ok(out) => (out.clone(), false),
                     Err(err) => (err.clone(), true),
                 };
-                log.output = std::iter::once(format!("$ {label}"))
-                    .chain(text.lines().map(str::to_string))
-                    .collect();
-                let first = text
-                    .lines()
-                    .map(str::trim)
-                    .find(|l| !l.is_empty() && !l.starts_with("hint:"))
-                    .unwrap_or("")
-                    .to_string();
-                log.message = Some(if failed {
-                    (
-                        format!("{label} failed: {first}  ($ shows everything)"),
-                        true,
-                    )
-                } else {
-                    (format!("{label} ✓ -- U on the Git page undoes it"), false)
-                });
+                log.output = std::iter::once(format!("$ {label}")).chain(text.lines().map(str::to_string)).collect();
+                let first = text.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with("hint:")).unwrap_or("").to_string();
+                log.message = Some(if failed { (format!("{label} failed: {first}  ($ shows everything)"), true) } else { (format!("{label} ✓ -- U on the Git page undoes it"), false) });
                 // A commit opened before may not exist any more.
                 log.open.retain(|_, d| *d != Detail::Loading);
                 self.git_refresh_all_views();
@@ -368,33 +256,19 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim_end().to_string()
     }
 
     struct Repo(PathBuf);
     impl Repo {
         fn new(name: &str) -> Self {
-            let dir =
-                std::env::temp_dir().join(format!("fenix-git-log-{name}-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("fenix-git-log-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             let dir = fenix_lsp::normalize(std::fs::canonicalize(&dir).unwrap());
-            for args in [
-                &["init", "-q", "-b", "main"][..],
-                &["config", "user.email", "t@e.com"],
-                &["config", "user.name", "Tess"],
-                &["config", "core.autocrlf", "false"],
-            ] {
+            for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@e.com"], &["config", "user.name", "Tess"], &["config", "core.autocrlf", "false"]] {
                 git(&dir, args);
             }
             std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
@@ -447,32 +321,16 @@ mod tests {
         let mut app = App::with_file(Some(repo.0.join("a.txt").to_string_lossy().into_owned()));
         app.open_git_log(Scope::Branch);
         let shown = text(&mut app);
-        assert!(
-            shown.contains("History of main")
-                && shown.contains("second")
-                && !shown.contains("side work"),
-            "{shown}"
-        );
+        assert!(shown.contains("History of main") && shown.contains("second") && !shown.contains("side work"), "{shown}");
         press(&mut app, "a");
         assert!(text(&mut app).contains("side work"));
         let side = git(&repo.0, &["rev-parse", "side"]);
         let log = log_page(&mut app);
-        log.cursor = log
-            .rows()
-            .iter()
-            .position(|r| *r == crate::git_log::Row::Commit(side.clone()))
-            .unwrap();
+        log.cursor = log.rows().iter().position(|r| *r == crate::git_log::Row::Commit(side.clone())).unwrap();
         press(&mut app, "\nc");
-        assert_eq!(
-            git(&repo.0, &["log", "-1", "--format=%s"]),
-            "side work",
-            "picked onto main"
-        );
+        assert_eq!(git(&repo.0, &["log", "-1", "--format=%s"]), "side work", "picked onto main");
         assert!(text(&mut app).contains("cherry-pick"));
-        assert!(
-            fenix_git::oplog::entries(&repo.0, 1)[0].undo.possible(),
-            "logged, undoable"
-        );
+        assert!(fenix_git::oplog::entries(&repo.0, 1)[0].undo.possible(), "logged, undoable");
     }
 
     #[test]
@@ -481,18 +339,10 @@ mod tests {
         let mut app = App::with_file(Some(repo.0.join("a.txt").to_string_lossy().into_owned()));
         app.open_file_history();
         let shown = text(&mut app);
-        assert!(
-            shown.contains("History of a.txt")
-                && shown.contains("second")
-                && shown.contains("first"),
-            "{shown}"
-        );
+        assert!(shown.contains("History of a.txt") && shown.contains("second") && shown.contains("first"), "{shown}");
         press(&mut app, "\tj\t");
         let shown = text(&mut app);
-        assert!(
-            shown.contains("a.txt") && shown.contains("+TWO") && shown.contains("-two"),
-            "{shown}"
-        );
+        assert!(shown.contains("a.txt") && shown.contains("+TWO") && shown.contains("-two"), "{shown}");
     }
 
     #[test]
@@ -503,9 +353,6 @@ mod tests {
         cursor.char_idx = buffer.line_start_char(1);
         app.open_line_history();
         let shown = text(&mut app);
-        assert!(
-            shown.contains("History of line 2 of a.txt") && shown.contains("+TWO"),
-            "{shown}"
-        );
+        assert!(shown.contains("History of line 2 of a.txt") && shown.contains("+TWO"), "{shown}");
     }
 }

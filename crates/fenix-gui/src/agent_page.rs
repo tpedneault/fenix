@@ -10,9 +10,7 @@
 
 use crate::page::{fit, frame, wrap, Filter, Grid, Key, Page, Role};
 use fenix_acp::hub::{Link, ThreadId, Turn};
-use fenix_acp::protocol::{
-    ContentBlock, PermissionKind, PlanStatus, ToolContent, ToolKind, ToolStatus,
-};
+use fenix_acp::protocol::{ContentBlock, PermissionKind, PlanStatus, ToolContent, ToolKind, ToolStatus};
 use fenix_acp::thread::{ElicitationState, Entry, NoticeKind, PermissionState, Thread};
 use std::collections::HashSet;
 
@@ -104,20 +102,11 @@ pub enum Action {
     /// To the prompt.
     Compose,
     Cancel,
-    Permission {
-        key: String,
-        option: String,
-    },
+    Permission { key: String, option: String },
     /// An agent's question (`elicitation/create`), answered.
-    Elicit {
-        key: String,
-        how: ElicitAnswer,
-    },
+    Elicit { key: String, how: ElicitAnswer },
     /// Open a file at a line (from 1).
-    Open {
-        path: String,
-        line: Option<u32>,
-    },
+    Open { path: String, line: Option<u32> },
     Yank(String),
     /// A card's text, read-only in a buffer (`v`).
     View(String),
@@ -131,15 +120,7 @@ pub enum Action {
 
 impl AgentPage {
     pub fn new(thread: ThreadId) -> Self {
-        AgentPage {
-            thread,
-            focus: 0,
-            open: HashSet::new(),
-            closed: HashSet::new(),
-            filter: Filter::default(),
-            follow: true,
-            bracket: None,
-        }
+        AgentPage { thread, focus: 0, open: HashSet::new(), closed: HashSet::new(), filter: Filter::default(), follow: true, bracket: None }
     }
 
     pub fn typing(&self) -> bool {
@@ -198,10 +179,7 @@ impl AgentPage {
             return Action::None;
         }
         let visible = self.visible(thread);
-        let at = visible
-            .iter()
-            .position(|&i| i == self.focus)
-            .unwrap_or(visible.len().saturating_sub(1));
+        let at = visible.iter().position(|&i| i == self.focus).unwrap_or(visible.len().saturating_sub(1));
         let go = |page: &mut Self, to: usize| {
             if let Some(&i) = visible.get(to) {
                 page.focus = i;
@@ -232,14 +210,7 @@ impl AgentPage {
                 let forward = key == Key::Char(']');
                 self.bracket = Some(forward);
                 let is_turn = |i: usize| matches!(thread.entries[i], Entry::User { .. });
-                let next = if forward {
-                    visible[at + 1..]
-                        .iter()
-                        .position(|&i| is_turn(i))
-                        .map(|p| at + 1 + p)
-                } else {
-                    visible[..at].iter().rposition(|&i| is_turn(i))
-                };
+                let next = if forward { visible[at + 1..].iter().position(|&i| is_turn(i)).map(|p| at + 1 + p) } else { visible[..at].iter().rposition(|&i| is_turn(i)) };
                 if let Some(to) = next {
                     go(self, to);
                 }
@@ -261,33 +232,17 @@ impl AgentPage {
             Key::Enter => match thread.entries.get(self.focus) {
                 Some(Entry::Tool(call)) => {
                     if let Some(l) = call.locations.first() {
-                        return Action::Open {
-                            path: l.path.clone(),
-                            line: l.line,
-                        };
+                        return Action::Open { path: l.path.clone(), line: l.line };
                     }
-                    if let Some(ToolContent::Diff { path, .. }) = call
-                        .content
-                        .iter()
-                        .find(|c| matches!(c, ToolContent::Diff { .. }))
-                    {
-                        return Action::Open {
-                            path: path.clone(),
-                            line: None,
-                        };
+                    if let Some(ToolContent::Diff { path, .. }) = call.content.iter().find(|c| matches!(c, ToolContent::Diff { .. })) {
+                        return Action::Open { path: path.clone(), line: None };
                     }
                 }
                 _ => return Action::Compose,
             },
             Key::Char('i') | Key::Char('a') | Key::Char('c') => return Action::Compose,
             Key::CtrlC => return Action::Cancel,
-            Key::Char('y') => {
-                return thread
-                    .entries
-                    .get(self.focus)
-                    .map(|e| Action::Yank(entry_text(e)))
-                    .unwrap_or(Action::None)
-            }
+            Key::Char('y') => return thread.entries.get(self.focus).map(|e| Action::Yank(entry_text(e))).unwrap_or(Action::None),
             Key::Char('Y') => {
                 // The answer the cursor is in, else the whole thread.
                 return match thread.entries.get(self.focus) {
@@ -295,13 +250,7 @@ impl AgentPage {
                     _ => Action::Yank(thread.transcript()),
                 };
             }
-            Key::Char('v') => {
-                return thread
-                    .entries
-                    .get(self.focus)
-                    .map(|e| Action::View(entry_text(e)))
-                    .unwrap_or(Action::None)
-            }
+            Key::Char('v') => return thread.entries.get(self.focus).map(|e| Action::View(entry_text(e))).unwrap_or(Action::None),
             Key::Char('/') => self.filter.start(),
             _ => {}
         }
@@ -337,69 +286,36 @@ pub enum ElicitAnswer {
 /// by its place. The thread's keys and the prompt's (empty) both answer.
 pub fn answer_for(thread: &Thread, key: Key) -> Option<Action> {
     // The newest question waiting, of either kind.
-    let waiting = thread.entries.iter().rev().find(|e| {
-        matches!(e, Entry::Permission(c) if c.state == PermissionState::Pending)
-            || matches!(e, Entry::Elicitation(c) if c.state == ElicitationState::Pending)
-    })?;
+    let waiting = thread.entries.iter().rev().find(|e| matches!(e, Entry::Permission(c) if c.state == PermissionState::Pending) || matches!(e, Entry::Elicitation(c) if c.state == ElicitationState::Pending))?;
     if let Entry::Elicitation(card) = waiting {
         let how = match key {
             Key::Char('y') => ElicitAnswer::Fill,
-            Key::Char('Y') if card.request.mode == fenix_acp::protocol::ElicitMode::Form => {
-                ElicitAnswer::Defaults
-            }
+            Key::Char('Y') if card.request.mode == fenix_acp::protocol::ElicitMode::Form => ElicitAnswer::Defaults,
             Key::Char('n') => ElicitAnswer::Decline,
             Key::Char('x') => ElicitAnswer::Cancel,
             _ => return None,
         };
-        return Some(Action::Elicit {
-            key: card.key.clone(),
-            how,
-        });
+        return Some(Action::Elicit { key: card.key.clone(), how });
     }
-    let Entry::Permission(card) = waiting else {
-        return None;
-    };
-    let by_kind = |kind: PermissionKind| {
-        card.options
-            .iter()
-            .find(|o| o.kind == kind)
-            .map(|o| o.id.clone())
-    };
+    let Entry::Permission(card) = waiting else { return None };
+    let by_kind = |kind: PermissionKind| card.options.iter().find(|o| o.kind == kind).map(|o| o.id.clone());
     let option = match key {
-        Key::Char('y') => {
-            by_kind(PermissionKind::AllowOnce).or_else(|| by_kind(PermissionKind::AllowAlways))
-        }
+        Key::Char('y') => by_kind(PermissionKind::AllowOnce).or_else(|| by_kind(PermissionKind::AllowAlways)),
         Key::Char('Y') => by_kind(PermissionKind::AllowAlways),
-        Key::Char('n') => {
-            by_kind(PermissionKind::RejectOnce).or_else(|| by_kind(PermissionKind::RejectAlways))
-        }
+        Key::Char('n') => by_kind(PermissionKind::RejectOnce).or_else(|| by_kind(PermissionKind::RejectAlways)),
         Key::Char('N') => by_kind(PermissionKind::RejectAlways),
-        Key::Char(c @ '1'..='9') => card
-            .options
-            .get(c as usize - '1' as usize)
-            .map(|o| o.id.clone()),
+        Key::Char(c @ '1'..='9') => card.options.get(c as usize - '1' as usize).map(|o| o.id.clone()),
         // A pipeline's gate: edit what's passed on.
-        Key::Char('e') => card
-            .options
-            .iter()
-            .find(|o| o.id == "edit")
-            .map(|o| o.id.clone()),
+        Key::Char('e') => card.options.iter().find(|o| o.id == "edit").map(|o| o.id.clone()),
         _ => None,
     }?;
-    Some(Action::Permission {
-        key: card.key.clone(),
-        option,
-    })
+    Some(Action::Permission { key: card.key.clone(), option })
 }
 
 /// A card's text, for `y` and `v`.
 pub fn entry_text(entry: &Entry) -> String {
     match entry {
-        Entry::User { blocks, .. } => blocks
-            .iter()
-            .map(ContentBlock::as_text)
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Entry::User { blocks, .. } => blocks.iter().map(ContentBlock::as_text).collect::<Vec<_>>().join("\n"),
         Entry::Agent { text, .. } | Entry::Thought { text, .. } => text.clone(),
         Entry::Tool(call) => {
             let mut out = call.title.clone();
@@ -407,11 +323,7 @@ pub fn entry_text(entry: &Entry) -> String {
                 out.push('\n');
                 match content {
                     ToolContent::Content(block) => out.push_str(&block.as_text()),
-                    ToolContent::Diff {
-                        path,
-                        old_text,
-                        new_text,
-                    } => out.push_str(&unified(path, old_text.as_deref().unwrap_or(""), new_text)),
+                    ToolContent::Diff { path, old_text, new_text } => out.push_str(&unified(path, old_text.as_deref().unwrap_or(""), new_text)),
                     ToolContent::Terminal(id) => out.push_str(&format!("[terminal {id}]")),
                 }
             }
@@ -440,20 +352,12 @@ fn diff_lines(old: &str, new: &str) -> Vec<String> {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
     if a.len() * b.len() > 4_000_000 {
-        return a
-            .iter()
-            .map(|l| format!("-{l}"))
-            .chain(b.iter().map(|l| format!("+{l}")))
-            .collect();
+        return a.iter().map(|l| format!("-{l}")).chain(b.iter().map(|l| format!("+{l}"))).collect();
     }
     let mut lcs = vec![vec![0u32; b.len() + 1]; a.len() + 1];
     for i in (0..a.len()).rev() {
         for j in (0..b.len()).rev() {
-            lcs[i][j] = if a[i] == b[j] {
-                lcs[i + 1][j + 1] + 1
-            } else {
-                lcs[i + 1][j].max(lcs[i][j + 1])
-            };
+            lcs[i][j] = if a[i] == b[j] { lcs[i + 1][j + 1] + 1 } else { lcs[i + 1][j].max(lcs[i][j + 1]) };
         }
     }
     let (mut i, mut j, mut out) = (0, 0, Vec::new());
@@ -475,11 +379,7 @@ fn diff_lines(old: &str, new: &str) -> Vec<String> {
     let changed: Vec<bool> = out.iter().map(|l| !l.starts_with(' ')).collect();
     out.into_iter()
         .enumerate()
-        .filter(|(k, l)| {
-            !l.starts_with(' ')
-                || changed.get(k.wrapping_sub(1)).copied().unwrap_or(false)
-                || changed.get(k + 1).copied().unwrap_or(false)
-        })
+        .filter(|(k, l)| !l.starts_with(' ') || changed.get(k.wrapping_sub(1)).copied().unwrap_or(false) || changed.get(k + 1).copied().unwrap_or(false))
         .map(|(_, l)| l)
         .collect()
 }
@@ -509,14 +409,7 @@ fn status_mark(status: ToolStatus) -> (&'static str, Role) {
 }
 
 /// The page: the header, the cards, the plan, the keys.
-pub fn layout(
-    page: &AgentPage,
-    thread: &Thread,
-    link: &Link,
-    turn: &Turn,
-    status: &Status,
-    cols: usize,
-) -> Page {
+pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, status: &Status, cols: usize) -> Page {
     let (left, width) = frame(cols, 110);
     let mut g = Grid::new();
     let mut y = 1;
@@ -530,26 +423,12 @@ pub fn layout(
         *x = g.put(y, *x, " · ", Role::Muted);
         *x = g.put(y, *x, text, role);
     };
-    piece(
-        &mut g,
-        &mut x,
-        &status.state,
-        status.state_role.unwrap_or(Role::Muted),
-    );
+    piece(&mut g, &mut x, &status.state, status.state_role.unwrap_or(Role::Muted));
     if let Some(modes) = &thread.modes {
-        let name = modes
-            .available
-            .iter()
-            .find(|m| m.id == modes.current)
-            .map(|m| m.name.as_str())
-            .unwrap_or(modes.current.as_str());
+        let name = modes.available.iter().find(|m| m.id == modes.current).map(|m| m.name.as_str()).unwrap_or(modes.current.as_str());
         piece(&mut g, &mut x, name, Role::Text);
     }
-    if let Some(model) = thread
-        .config_options
-        .iter()
-        .find(|o| o.category.as_deref() == Some("model"))
-    {
+    if let Some(model) = thread.config_options.iter().find(|o| o.category.as_deref() == Some("model")) {
         piece(&mut g, &mut x, &model.current_label(), Role::Text);
     }
     if let Some(usage) = &thread.usage {
@@ -575,11 +454,7 @@ pub fn layout(
 
     let visible = page.visible(thread);
     if visible.is_empty() {
-        let hint = if thread.entries.is_empty() {
-            "Write a prompt below (i), and Enter in Normal mode sends it."
-        } else {
-            "Nothing matches the filter."
-        };
+        let hint = if thread.entries.is_empty() { "Write a prompt below (i), and Enter in Normal mode sends it." } else { "Nothing matches the filter." };
         g.put(y, left, hint, Role::Muted);
         y += 2;
     }
@@ -625,19 +500,9 @@ pub fn layout(
             }
             Entry::Thought { text, .. } => {
                 let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-                let x = g.put(
-                    y,
-                    left,
-                    if open { "▾ thinking" } else { "▸ thinking" },
-                    Role::Muted,
-                );
+                let x = g.put(y, left, if open { "▾ thinking" } else { "▸ thinking" }, Role::Muted);
                 if !open {
-                    g.put(
-                        y,
-                        x + 2,
-                        &fit(first, width.saturating_sub(x - left + 2)),
-                        Role::Muted,
-                    );
+                    g.put(y, x + 2, &fit(first, width.saturating_sub(x - left + 2)), Role::Muted);
                 }
                 y += 1;
                 if open {
@@ -651,20 +516,10 @@ pub fn layout(
                 let (mark, role) = status_mark(call.status);
                 let mut x = g.put(y, left, mark, role) + 1;
                 x = g.put(y, x, kind_mark(call.kind), Role::Muted) + 1;
-                g.put(
-                    y,
-                    x,
-                    &fit(&call.title, (left + width).saturating_sub(x)),
-                    Role::Text,
-                );
+                g.put(y, x, &fit(&call.title, (left + width).saturating_sub(x)), Role::Text);
                 y += 1;
                 if let Some(command) = command_shown(call, status) {
-                    g.put(
-                        y,
-                        left + 2,
-                        &fit(&format!("$ {command}"), inner),
-                        Role::Accent,
-                    );
+                    g.put(y, left + 2, &fit(&format!("$ {command}"), inner), Role::Accent);
                     y += 1;
                 }
                 if let Some(l) = call.locations.first() {
@@ -678,17 +533,10 @@ pub fn layout(
                 if open {
                     for content in &call.content {
                         match content {
-                            ToolContent::Diff {
-                                path,
-                                old_text,
-                                new_text,
-                            } => {
+                            ToolContent::Diff { path, old_text, new_text } => {
                                 g.put(y, left + 2, &fit(path, inner), Role::Muted);
                                 y += 1;
-                                for line in diff_lines(old_text.as_deref().unwrap_or(""), new_text)
-                                    .iter()
-                                    .take(60)
-                                {
+                                for line in diff_lines(old_text.as_deref().unwrap_or(""), new_text).iter().take(60) {
                                     let role = match line.chars().next() {
                                         Some('+') => Role::Good,
                                         Some('-') => Role::Bad,
@@ -700,25 +548,14 @@ pub fn layout(
                             }
                             ToolContent::Content(block) => {
                                 let text = block.as_text();
-                                let lines: Vec<&str> = text
-                                    .lines()
-                                    .filter(|l| !l.trim_start().starts_with("```"))
-                                    .collect();
+                                let lines: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with("```")).collect();
                                 let shown = lines.len().min(40);
                                 for line in &lines[lines.len() - shown..] {
                                     g.put(y, left + 2, &fit(line, inner), Role::Muted);
                                     y += 1;
                                 }
                                 if lines.len() > shown {
-                                    g.put(
-                                        y,
-                                        left + 2,
-                                        &format!(
-                                            "({} lines above; v shows all)",
-                                            lines.len() - shown
-                                        ),
-                                        Role::Muted,
-                                    );
+                                    g.put(y, left + 2, &format!("({} lines above; v shows all)", lines.len() - shown), Role::Muted);
                                     y += 1;
                                 }
                             }
@@ -730,17 +567,12 @@ pub fn layout(
                                     }
                                     let (text, role) = match exit {
                                         None => ("running…".to_string(), Role::Accent),
-                                        Some(e) if e.code == Some(0) => {
-                                            ("exited 0".to_string(), Role::Good)
-                                        }
-                                        Some(e) => (
-                                            match (&e.code, &e.signal) {
-                                                (Some(c), _) => format!("exited {c}"),
-                                                (None, Some(s)) => format!("stopped ({s})"),
-                                                _ => "ended".to_string(),
-                                            },
-                                            Role::Bad,
-                                        ),
+                                        Some(e) if e.code == Some(0) => ("exited 0".to_string(), Role::Good),
+                                        Some(e) => (match (&e.code, &e.signal) {
+                                            (Some(c), _) => format!("exited {c}"),
+                                            (None, Some(s)) => format!("stopped ({s})"),
+                                            _ => "ended".to_string(),
+                                        }, Role::Bad),
                                     };
                                     g.put(y, left + 2, &text, role);
                                     y += 1;
@@ -755,26 +587,10 @@ pub fn layout(
                 }
             }
             Entry::Permission(card) => {
-                let title = card
-                    .tool_call
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "a tool".into());
+                let title = card.tool_call.title.clone().unwrap_or_else(|| "a tool".into());
                 match &card.state {
                     PermissionState::Pending => {
-                        g.put(
-                            y,
-                            left,
-                            &fit(
-                                &if card.tool_call.id.starts_with("fenix-pipeline-") {
-                                    format!("? Fenix asks: {title}")
-                                } else {
-                                    format!("? The agent asks to: {title}")
-                                },
-                                width,
-                            ),
-                            Role::Warn,
-                        );
+                        g.put(y, left, &fit(&if card.tool_call.id.starts_with("fenix-pipeline-") { format!("? Fenix asks: {title}") } else { format!("? The agent asks to: {title}") }, width), Role::Warn);
                         y += 1;
                         let mut x = left + 2;
                         for (n, option) in card.options.iter().enumerate() {
@@ -797,21 +613,11 @@ pub fn layout(
                         y += 1;
                     }
                     PermissionState::Answered(name) => {
-                        g.put(
-                            y,
-                            left,
-                            &fit(&format!("✓ {title} — {name}"), width),
-                            Role::Muted,
-                        );
+                        g.put(y, left, &fit(&format!("✓ {title} — {name}"), width), Role::Muted);
                         y += 1;
                     }
                     PermissionState::Withdrawn => {
-                        g.put(
-                            y,
-                            left,
-                            &fit(&format!("– {title} — not answered"), width),
-                            Role::Muted,
-                        );
+                        g.put(y, left, &fit(&format!("– {title} — not answered"), width), Role::Muted);
                         y += 1;
                     }
                 }
@@ -821,46 +627,23 @@ pub fn layout(
                 let url = e.mode == fenix_acp::protocol::ElicitMode::Url;
                 match &card.state {
                     ElicitationState::Pending => {
-                        for (i, line) in wrap(&format!("? The agent asks: {}", e.message), width)
-                            .into_iter()
-                            .enumerate()
-                        {
+                        for (i, line) in wrap(&format!("? The agent asks: {}", e.message), width).into_iter().enumerate() {
                             g.put(y, if i == 0 { left } else { left + 2 }, &line, Role::Warn);
                             y += 1;
                         }
                         if url {
-                            g.put(
-                                y,
-                                left + 2,
-                                &fit(e.url.as_deref().unwrap_or(""), inner),
-                                Role::Accent,
-                            );
+                            g.put(y, left + 2, &fit(e.url.as_deref().unwrap_or(""), inner), Role::Accent);
                             y += 1;
                         }
                         for f in &e.fields {
-                            let mut what =
-                                format!("{}{}", f.title, if f.required { " *" } else { "" });
+                            let mut what = format!("{}{}", f.title, if f.required { " *" } else { "" });
                             if let Some(d) = &f.default {
-                                what.push_str(&format!(
-                                    " = {}",
-                                    d.as_str()
-                                        .map(str::to_string)
-                                        .unwrap_or_else(|| d.to_string())
-                                ));
+                                what.push_str(&format!(" = {}", d.as_str().map(str::to_string).unwrap_or_else(|| d.to_string())));
                             }
                             g.put(y, left + 2, &fit(&what, inner), Role::Text);
                             y += 1;
                         }
-                        let keys: &[(&str, &str)] = if url {
-                            &[("y", "open the link"), ("n", "decline"), ("x", "cancel")]
-                        } else {
-                            &[
-                                ("y", "fill it in"),
-                                ("Y", "the defaults"),
-                                ("n", "decline"),
-                                ("x", "cancel"),
-                            ]
-                        };
+                        let keys: &[(&str, &str)] = if url { &[("y", "open the link"), ("n", "decline"), ("x", "cancel")] } else { &[("y", "fill it in"), ("Y", "the defaults"), ("n", "decline"), ("x", "cancel")] };
                         let mut x = left + 2;
                         for (k, what) in keys {
                             x = g.put(y, x, k, Role::Accent) + 1;
@@ -869,35 +652,16 @@ pub fn layout(
                         y += 1;
                     }
                     ElicitationState::Answered { action, summary } => {
-                        let said = if summary.is_empty() {
-                            action.clone()
-                        } else {
-                            format!("{action}: {summary}")
-                        };
-                        g.put(
-                            y,
-                            left,
-                            &fit(&format!("✓ {} — {said}", e.message), width),
-                            Role::Muted,
-                        );
+                        let said = if summary.is_empty() { action.clone() } else { format!("{action}: {summary}") };
+                        g.put(y, left, &fit(&format!("✓ {} — {said}", e.message), width), Role::Muted);
                         y += 1;
                     }
                     ElicitationState::Completed => {
-                        g.put(
-                            y,
-                            left,
-                            &fit(&format!("✓ {} — done", e.message), width),
-                            Role::Muted,
-                        );
+                        g.put(y, left, &fit(&format!("✓ {} — done", e.message), width), Role::Muted);
                         y += 1;
                     }
                     ElicitationState::Withdrawn => {
-                        g.put(
-                            y,
-                            left,
-                            &fit(&format!("– {} — not answered", e.message), width),
-                            Role::Muted,
-                        );
+                        g.put(y, left, &fit(&format!("– {} — not answered", e.message), width), Role::Muted);
                         y += 1;
                     }
                 }
@@ -914,21 +678,8 @@ pub fn layout(
                     y += 1;
                 }
                 if n.kind == NoticeKind::Login && !status.logins.is_empty() {
-                    let names: Vec<String> = status
-                        .logins
-                        .iter()
-                        .enumerate()
-                        .map(|(k, (_, name))| format!("{}: {name}", k + 1))
-                        .collect();
-                    g.put(
-                        y,
-                        left + 2,
-                        &fit(
-                            &format!("Log in with SPC a p ({})", names.join(", ")),
-                            inner,
-                        ),
-                        Role::Accent,
-                    );
+                    let names: Vec<String> = status.logins.iter().enumerate().map(|(k, (_, name))| format!("{}: {name}", k + 1)).collect();
+                    g.put(y, left + 2, &fit(&format!("Log in with SPC a p ({})", names.join(", ")), inner), Role::Accent);
                     y += 1;
                 }
             }
@@ -940,20 +691,7 @@ pub fn layout(
     }
 
     if !thread.plan.is_empty() {
-        g.heading(
-            y,
-            left,
-            width,
-            &format!(
-                "plan · {}/{}",
-                thread
-                    .plan
-                    .iter()
-                    .filter(|p| p.status == PlanStatus::Completed)
-                    .count(),
-                thread.plan.len()
-            ),
-        );
+        g.heading(y, left, width, &format!("plan · {}/{}", thread.plan.iter().filter(|p| p.status == PlanStatus::Completed).count(), thread.plan.len()));
         y += 1;
         for entry in &thread.plan {
             let (mark, role) = match entry.status {
@@ -962,41 +700,14 @@ pub fn layout(
                 PlanStatus::Pending => ("☐", Role::Muted),
             };
             let x = g.put(y, left, mark, role) + 1;
-            g.put(
-                y,
-                x,
-                &fit(&entry.content, width.saturating_sub(2)),
-                if entry.status == PlanStatus::Completed {
-                    Role::Muted
-                } else {
-                    Role::Text
-                },
-            );
+            g.put(y, x, &fit(&entry.content, width.saturating_sub(2)), if entry.status == PlanStatus::Completed { Role::Muted } else { Role::Text });
             y += 1;
         }
     }
     if status.queued > 0 {
-        g.put(
-            y,
-            left,
-            &format!("{} prompt(s) queued", status.queued),
-            Role::Muted,
-        );
+        g.put(y, left, &format!("{} prompt(s) queued", status.queued), Role::Muted);
     }
-    g.keys(
-        left,
-        width,
-        &[
-            ("i", "prompt"),
-            ("j k", "cards"),
-            ("Tab", "fold"),
-            ("Enter", "open"),
-            ("y Y", "yank"),
-            ("C-c", "cancel"),
-            ("/", "filter"),
-            ("q", "close"),
-        ],
-    );
+    g.keys(left, width, &[("i", "prompt"), ("j k", "cards"), ("Tab", "fold"), ("Enter", "open"), ("y Y", "yank"), ("C-c", "cancel"), ("/", "filter"), ("q", "close")]);
     g.finish()
 }
 
@@ -1023,11 +734,7 @@ mod tests {
     }
 
     fn status() -> Status {
-        Status {
-            agent: "Claude Code".into(),
-            state: "ready".into(),
-            ..Status::default()
-        }
+        Status { agent: "Claude Code".into(), state: "ready".into(), ..Status::default() }
     }
 
     #[test]
@@ -1036,22 +743,7 @@ mod tests {
         let mut page = AgentPage::new(ThreadId("x".into()));
         page.follow_up(&t);
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
-        for want in [
-            "Fix the parser",
-            "Claude Code · ready",
-            "› You",
-            "▸ thinking  Look at parse.rs first.",
-            "✓ edit Edit src/parse.rs",
-            "/p/src/parse.rs:2",
-            "-b",
-            "+B",
-            "✓ run cargo test",
-            "Fixed it.",
-            "fn x() {}",
-            "PLAN · 1/2",
-            "☑ Fix",
-            "◐ Test",
-        ] {
+        for want in ["Fix the parser", "Claude Code · ready", "› You", "▸ thinking  Look at parse.rs first.", "✓ edit Edit src/parse.rs", "/p/src/parse.rs:2", "-b", "+B", "✓ run cargo test", "Fixed it.", "fn x() {}", "PLAN · 1/2", "☑ Fix", "◐ Test"] {
             assert!(text.contains(want), "missing {want:?} in\n{text}");
         }
         assert!(!text.contains("test ok"), "a command's output is folded");
@@ -1071,42 +763,18 @@ mod tests {
         let page = AgentPage::new(ThreadId("x".into()));
         let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100);
         let text = laid.all_text();
-        for want in [
-            "The fix",
-            "The parser skipped \\r\\n endings:",
-            "read the line",
-            "trim both",
-            "parse.rs",
-            "fn trim() {}",
-            "the docs",
-        ] {
+        for want in ["The fix", "The parser skipped \\r\\n endings:", "read the line", "trim both", "parse.rs", "fn trim() {}", "the docs"] {
             assert!(text.contains(want), "missing {want:?} in\n{text}");
         }
         for gone in ["##", "**", "`", "```", "|---|", "](https://"] {
             assert!(!text.contains(gone), "{gone:?} left in\n{text}");
         }
         let line = |needle: &str| text.lines().position(|l| l.contains(needle)).unwrap();
-        let roles = |n: usize| {
-            laid.spans
-                .iter()
-                .filter(|s| s.line == n)
-                .map(|s| s.role)
-                .collect::<Vec<_>>()
-        };
-        assert!(
-            roles(line("The fix")).iter().any(|r| *r != Role::Text),
-            "the heading has a style of its own"
-        );
-        assert!(
-            roles(line("The parser")).len() > 1,
-            "emphasis and inline code are styled apart from the text"
-        );
+        let roles = |n: usize| laid.spans.iter().filter(|s| s.line == n).map(|s| s.role).collect::<Vec<_>>();
+        assert!(roles(line("The fix")).iter().any(|r| *r != Role::Text), "the heading has a style of its own");
+        assert!(roles(line("The parser")).len() > 1, "emphasis and inline code are styled apart from the text");
         let mut page = page;
-        assert_eq!(
-            page.key(&t, Key::Char('y')),
-            Action::Yank(said.to_string()),
-            "yanked as Markdown"
-        );
+        assert_eq!(page.key(&t, Key::Char('y')), Action::Yank(said.to_string()), "yanked as Markdown");
     }
 
     /// A card titled only "Ran command" says which: from the call's input,
@@ -1123,13 +791,7 @@ mod tests {
             t.apply(SessionUpdate::parse(&u), false);
         }
         let mut status = status();
-        status.terminals.insert(
-            "term-1".into(),
-            TermView {
-                line: "Get-Content 'a b.tcl'".into(),
-                ..TermView::default()
-            },
-        );
+        status.terminals.insert("term-1".into(), TermView { line: "Get-Content 'a b.tcl'".into(), ..TermView::default() });
         let page = AgentPage::new(ThreadId("x".into()));
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status, 100).all_text();
         assert!(text.contains("$ rg -n session *.tcl"), "{text}");
@@ -1149,19 +811,10 @@ mod tests {
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
         assert!(text.contains("Then the tests."), "opened");
         page.key(&t, Key::Char('j'));
-        assert_eq!(
-            page.key(&t, Key::Enter),
-            Action::Open {
-                path: "/p/src/parse.rs".into(),
-                line: Some(2)
-            }
-        );
+        assert_eq!(page.key(&t, Key::Enter), Action::Open { path: "/p/src/parse.rs".into(), line: Some(2) });
         assert!(matches!(page.key(&t, Key::Char('y')), Action::Yank(s) if s.contains("+B")));
         page.key(&t, Key::Char('G'));
-        assert_eq!(
-            page.key(&t, Key::Char('Y')),
-            Action::Yank("Fixed it.\n\n```rust\nfn x() {}\n```".into())
-        );
+        assert_eq!(page.key(&t, Key::Char('Y')), Action::Yank("Fixed it.\n\n```rust\nfn x() {}\n```".into()));
         assert!(page.follow);
         page.key(&t, Key::Char('['));
         assert_eq!(page.focus, 0, "back to the prompt");
@@ -1175,60 +828,21 @@ mod tests {
         let mut t = thread();
         t.push_permission(PermissionCard {
             key: "7".into(),
-            tool_call: ToolCallFields {
-                id: "t3".into(),
-                title: Some("rm -rf build".into()),
-                ..Default::default()
-            },
+            tool_call: ToolCallFields { id: "t3".into(), title: Some("rm -rf build".into()), ..Default::default() },
             options: vec![
-                PermissionOption {
-                    id: "allow-once".into(),
-                    name: "Yes".into(),
-                    kind: PermissionKind::AllowOnce,
-                },
-                PermissionOption {
-                    id: "allow-always".into(),
-                    name: "Yes, and don't ask again".into(),
-                    kind: PermissionKind::AllowAlways,
-                },
-                PermissionOption {
-                    id: "reject".into(),
-                    name: "No".into(),
-                    kind: PermissionKind::RejectOnce,
-                },
+                PermissionOption { id: "allow-once".into(), name: "Yes".into(), kind: PermissionKind::AllowOnce },
+                PermissionOption { id: "allow-always".into(), name: "Yes, and don't ask again".into(), kind: PermissionKind::AllowAlways },
+                PermissionOption { id: "reject".into(), name: "No".into(), kind: PermissionKind::RejectOnce },
             ],
             state: PermissionState::Pending,
         });
         let mut page = AgentPage::new(ThreadId("x".into()));
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
-        assert!(
-            text.contains("? The agent asks to: rm -rf build")
-                && text.contains("y/1 Yes")
-                && text.contains("n/3 No"),
-            "{text}"
-        );
+        assert!(text.contains("? The agent asks to: rm -rf build") && text.contains("y/1 Yes") && text.contains("n/3 No"), "{text}");
         page.key(&t, Key::Char('g'));
-        assert_eq!(
-            page.key(&t, Key::Char('n')),
-            Action::Permission {
-                key: "7".into(),
-                option: "reject".into()
-            }
-        );
-        assert_eq!(
-            page.key(&t, Key::Char('Y')),
-            Action::Permission {
-                key: "7".into(),
-                option: "allow-always".into()
-            }
-        );
-        assert_eq!(
-            page.key(&t, Key::Char('2')),
-            Action::Permission {
-                key: "7".into(),
-                option: "allow-always".into()
-            }
-        );
+        assert_eq!(page.key(&t, Key::Char('n')), Action::Permission { key: "7".into(), option: "reject".into() });
+        assert_eq!(page.key(&t, Key::Char('Y')), Action::Permission { key: "7".into(), option: "allow-always".into() });
+        assert_eq!(page.key(&t, Key::Char('2')), Action::Permission { key: "7".into(), option: "allow-always".into() });
     }
 
     #[test]
@@ -1241,18 +855,12 @@ mod tests {
         }
         page.key(&t, Key::Enter);
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
-        assert!(
-            text.contains("cargo test") && !text.contains("Fixed it."),
-            "{text}"
-        );
+        assert!(text.contains("cargo test") && !text.contains("Fixed it."), "{text}");
     }
 
     #[test]
     fn diffs_show_changes_with_a_line_of_context() {
-        assert_eq!(
-            diff_lines("a\nb\nc\nd\ne", "a\nb\nC\nd\ne"),
-            vec![" b", "-c", "+C", " d"]
-        );
+        assert_eq!(diff_lines("a\nb\nc\nd\ne", "a\nb\nC\nd\ne"), vec![" b", "-c", "+C", " d"]);
         assert_eq!(diff_lines("", "new"), vec!["+new"]);
     }
 }

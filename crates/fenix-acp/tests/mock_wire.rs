@@ -340,10 +340,7 @@ fn a_briefing_note_is_read_past() {
     );
     client.response(id);
     let updates = client.updates_since(from, &session);
-    let title = updates
-        .iter()
-        .find(|u| u["sessionUpdate"] == "session_info_update")
-        .expect("a title");
+    let title = updates.iter().find(|u| u["sessionUpdate"] == "session_info_update").expect("a title");
     assert_eq!(title["title"], "hello there");
 }
 
@@ -538,10 +535,7 @@ fn edit_asks_then_writes_to_disk() {
         .unwrap();
     assert_eq!(call["content"][0]["oldText"], Value::Null);
     // The path as the platform writes it, as Claude's adapter does.
-    let shown = format!(
-        "Write {}",
-        std::path::Path::new("sub").join("new.txt").display()
-    );
+    let shown = format!("Write {}", std::path::Path::new("sub").join("new.txt").display());
     assert_eq!(call["title"], shown.as_str());
 
     // A refusal fails the tool and ends the turn without writing.

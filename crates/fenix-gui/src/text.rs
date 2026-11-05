@@ -81,8 +81,7 @@ pub const TERMINAL_ROWS: usize = 12;
 /// -- it's meant to sit as a fallback alongside a real body font, exactly
 /// how `ICON_FONT_FAMILY` is only ever selected for icon-flagged spans,
 /// never body text.
-static SYMBOLS_NERD_FONT_MONO_BYTES: &[u8] =
-    include_bytes!("../assets/fonts/symbols_nerd_font_mono.ttf");
+static SYMBOLS_NERD_FONT_MONO_BYTES: &[u8] = include_bytes!("../assets/fonts/symbols_nerd_font_mono.ttf");
 
 /// The letter spacing, in em, that makes a glyph `natural` pixels wide
 /// take the cells a page counts for `c` (`page::char_cells`), cells being
@@ -128,10 +127,7 @@ fn span_bounds(
 /// into a `Family::Name(_)` used for real shaping/measurement checks this
 /// first rather than trusting the name.
 fn is_monospace_installed(font_system: &FontSystem, family: &str) -> bool {
-    font_system
-        .db()
-        .faces()
-        .any(|face| face.monospaced && face.families.iter().any(|(name, _)| name == family))
+    font_system.db().faces().any(|face| face.monospaced && face.families.iter().any(|(name, _)| name == family))
 }
 
 /// Every monospace font family installed, by name -- what the settings
@@ -177,11 +173,7 @@ fn default_monospace_family(font_system: &FontSystem) -> String {
         .filter(|name| *name != ICON_FONT_FAMILY)
         .collect();
     families.sort_unstable();
-    families
-        .first()
-        .copied()
-        .unwrap_or(db.family_name(&Family::Monospace))
-        .to_owned()
+    families.first().copied().unwrap_or(db.family_name(&Family::Monospace)).to_owned()
 }
 
 /// Shapes and rasterizes buffer text into the wgpu glyph atlas via glyphon.
@@ -233,20 +225,12 @@ pub struct FontContext {
 impl FontContext {
     pub fn new(gpu: &GpuState) -> Self {
         let mut font_system = FontSystem::new();
-        font_system
-            .db_mut()
-            .load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        font_system.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         let default_family: &'static str =
             Box::leak(default_monospace_family(&font_system).into_boxed_str());
         let cache = Cache::new(&gpu.device);
         let atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.config.format);
-        Self {
-            font_system,
-            swash_cache: SwashCache::new(),
-            atlas,
-            cache,
-            default_family,
-        }
+        Self { font_system, swash_cache: SwashCache::new(), atlas, cache, default_family }
     }
 }
 
@@ -406,74 +390,37 @@ impl TextPipeline {
         let ctx = &mut *guard;
         let default_family = ctx.default_family;
         let viewport = Viewport::new(&gpu.device, &ctx.cache);
-        let renderer = TextRenderer::new(
-            &mut ctx.atlas,
-            &gpu.device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
-        let popup_renderer = TextRenderer::new(
-            &mut ctx.atlas,
-            &gpu.device,
-            wgpu::MultisampleState::default(),
-            None,
-        );
+        let renderer =
+            TextRenderer::new(&mut ctx.atlas, &gpu.device, wgpu::MultisampleState::default(), None);
+        let popup_renderer =
+            TextRenderer::new(&mut ctx.atlas, &gpu.device, wgpu::MultisampleState::default(), None);
         let font_system = &mut ctx.font_system;
 
-        let mut modeline = GlyphBuffer::new(
-            font_system,
-            Metrics::new(FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT),
-        );
+        let mut modeline = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT));
         modeline.set_wrap(Wrap::None);
         modeline.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT));
 
-        let mut clock = GlyphBuffer::new(
-            font_system,
-            Metrics::new(FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT),
-        );
+        let mut clock = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT));
         clock.set_wrap(Wrap::None);
         clock.set_size(Some(gpu.size.width as f32), Some(LINE_HEIGHT));
 
         let mut sidebar = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         sidebar.set_wrap(Wrap::None);
-        sidebar.set_size(
-            Some(SIDEBAR_WIDTH),
-            Some(content_height(gpu.size.height as f32, LINE_HEIGHT)),
-        );
+        sidebar.set_size(Some(SIDEBAR_WIDTH), Some(content_height(gpu.size.height as f32, LINE_HEIGHT)));
 
         let mut terminal = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         terminal.set_wrap(Wrap::None);
-        terminal.set_size(
-            Some(gpu.size.width as f32),
-            Some(terminal_height(LINE_HEIGHT)),
-        );
+        terminal.set_size(Some(gpu.size.width as f32), Some(terminal_height(LINE_HEIGHT)));
         let mut debug_dock = GlyphBuffer::new(font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         debug_dock.set_wrap(Wrap::None);
-        debug_dock.set_size(
-            Some(gpu.size.width as f32),
-            Some(crate::app::debug_dock_height(LINE_HEIGHT)),
-        );
+        debug_dock.set_size(Some(gpu.size.width as f32), Some(crate::app::debug_dock_height(LINE_HEIGHT)));
 
-        let char_width = Self::measure_char_width(
-            font_system,
-            Family::Name(default_family),
-            FONT_SIZE,
-            LINE_HEIGHT,
-        );
-        let icon_spacing =
-            Self::measure_icon_spacing(font_system, char_width, FONT_SIZE, LINE_HEIGHT);
-        let title_char_width = Self::measure_char_width(
-            font_system,
-            Family::Name(default_family),
-            FONT_SIZE * TITLE_FONT_SCALE,
-            LINE_HEIGHT,
-        );
-        let modeline_char_width = Self::measure_char_width(
-            font_system,
-            Family::Name(default_family),
-            FONT_SIZE * MODELINE_FONT_SCALE,
-            LINE_HEIGHT,
-        );
+        let char_width = Self::measure_char_width(font_system, Family::Name(default_family), FONT_SIZE, LINE_HEIGHT);
+        let icon_spacing = Self::measure_icon_spacing(font_system, char_width, FONT_SIZE, LINE_HEIGHT);
+        let title_char_width =
+            Self::measure_char_width(font_system, Family::Name(default_family), FONT_SIZE * TITLE_FONT_SCALE, LINE_HEIGHT);
+        let modeline_char_width =
+            Self::measure_char_width(font_system, Family::Name(default_family), FONT_SIZE * MODELINE_FONT_SCALE, LINE_HEIGHT);
         // The borrow has to end before `fonts` is moved into `Self`.
         drop(guard);
 
@@ -541,30 +488,13 @@ impl TextPipeline {
         if self.requested_family == family {
             return;
         }
-        self.requested_family =
-            family.map(|f| -> &'static str { Box::leak(f.to_string().into_boxed_str()) });
-        self.content_family = self
-            .requested_family
-            .filter(|f| is_monospace_installed(&self.fonts.borrow().font_system, f));
+        self.requested_family = family.map(|f| -> &'static str { Box::leak(f.to_string().into_boxed_str()) });
+        self.content_family = self.requested_family.filter(|f| is_monospace_installed(&self.fonts.borrow().font_system, f));
         let family = self.content_family();
-        self.char_width = Self::measure_char_width(
-            &mut self.fonts.borrow_mut().font_system,
-            family,
-            self.font_size,
-            self.line_height,
-        );
-        self.icon_spacing = Self::measure_icon_spacing(
-            &mut self.fonts.borrow_mut().font_system,
-            self.char_width,
-            self.font_size,
-            self.line_height,
-        );
-        self.title_char_width = Self::measure_char_width(
-            &mut self.fonts.borrow_mut().font_system,
-            family,
-            self.font_size * TITLE_FONT_SCALE,
-            self.line_height,
-        );
+        self.char_width = Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size, self.line_height);
+        self.icon_spacing = Self::measure_icon_spacing(&mut self.fonts.borrow_mut().font_system, self.char_width, self.font_size, self.line_height);
+        self.title_char_width =
+            Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size * TITLE_FONT_SCALE, self.line_height);
         self.modeline_char_width = Self::measure_char_width(
             &mut self.fonts.borrow_mut().font_system,
             family,
@@ -614,9 +544,7 @@ impl TextPipeline {
         self.clock
             .layout_runs()
             .flat_map(|run| run.glyphs.iter())
-            .fold(None, |acc: Option<f32>, glyph| {
-                Some(acc.map_or(glyph.x, |left| left.min(glyph.x)))
-            })
+            .fold(None, |acc: Option<f32>, glyph| Some(acc.map_or(glyph.x, |left| left.min(glyph.x))))
     }
 
     pub fn line_height(&self) -> f32 {
@@ -678,24 +606,16 @@ impl TextPipeline {
 
         let modeline_metrics = self.modeline_metrics();
         self.modeline.set_metrics(modeline_metrics);
-        self.modeline
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.modeline.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.clock.set_metrics(modeline_metrics);
-        self.clock
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.clock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.sidebar.set_metrics(metrics);
-        self.sidebar
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.terminal.set_metrics(metrics);
-        self.terminal
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         self.debug_dock.set_metrics(metrics);
-        self.debug_dock.set_size(
-            self.debug_dock.size().0,
-            Some(crate::app::debug_dock_height(self.line_height)),
-        );
-        self.debug_dock
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.debug_dock.set_size(self.debug_dock.size().0, Some(crate::app::debug_dock_height(self.line_height)));
+        self.debug_dock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         let title_metrics = Metrics::new(self.font_size * TITLE_FONT_SCALE, self.line_height);
         for buf in self.titles.values_mut() {
             buf.set_metrics(title_metrics);
@@ -715,24 +635,10 @@ impl TextPipeline {
         }
 
         let family = self.content_family();
-        self.char_width = Self::measure_char_width(
-            &mut self.fonts.borrow_mut().font_system,
-            family,
-            self.font_size,
-            self.line_height,
-        );
-        self.icon_spacing = Self::measure_icon_spacing(
-            &mut self.fonts.borrow_mut().font_system,
-            self.char_width,
-            self.font_size,
-            self.line_height,
-        );
-        self.title_char_width = Self::measure_char_width(
-            &mut self.fonts.borrow_mut().font_system,
-            family,
-            self.font_size * TITLE_FONT_SCALE,
-            self.line_height,
-        );
+        self.char_width = Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size, self.line_height);
+        self.icon_spacing = Self::measure_icon_spacing(&mut self.fonts.borrow_mut().font_system, self.char_width, self.font_size, self.line_height);
+        self.title_char_width =
+            Self::measure_char_width(&mut self.fonts.borrow_mut().font_system, family, self.font_size * TITLE_FONT_SCALE, self.line_height);
         self.modeline_char_width = Self::measure_char_width(
             &mut self.fonts.borrow_mut().font_system,
             family,
@@ -743,19 +649,8 @@ impl TextPipeline {
 
     /// The letter spacing (em) that brings an icon's advance at
     /// `font_size` down to `cell` pixels.
-    fn measure_icon_spacing(
-        font_system: &mut FontSystem,
-        cell: f32,
-        font_size: f32,
-        line_height: f32,
-    ) -> f32 {
-        let advance = Self::measure_char_width_of(
-            font_system,
-            Family::Name(ICON_FONT_FAMILY),
-            "\u{f15b}\u{f15b}",
-            font_size,
-            line_height,
-        );
+    fn measure_icon_spacing(font_system: &mut FontSystem, cell: f32, font_size: f32, line_height: f32) -> f32 {
+        let advance = Self::measure_char_width_of(font_system, Family::Name(ICON_FONT_FAMILY), "\u{f15b}\u{f15b}", font_size, line_height);
         (cell - advance) / font_size
     }
 
@@ -767,23 +662,12 @@ impl TextPipeline {
     /// ratio only if shaping somehow produces fewer than two glyphs
     /// (should not happen for two ordinary ASCII letters, but a shaping
     /// failure shouldn't be able to divide-by-zero or panic downstream).
-    fn measure_char_width(
-        font_system: &mut FontSystem,
-        family: Family<'static>,
-        font_size: f32,
-        line_height: f32,
-    ) -> f32 {
+    fn measure_char_width(font_system: &mut FontSystem, family: Family<'static>, font_size: f32, line_height: f32) -> f32 {
         Self::measure_char_width_of(font_system, family, "MM", font_size, line_height)
     }
 
     /// The pixel distance between the two glyphs of `pair`.
-    fn measure_char_width_of(
-        font_system: &mut FontSystem,
-        family: Family<'static>,
-        pair: &str,
-        font_size: f32,
-        line_height: f32,
-    ) -> f32 {
+    fn measure_char_width_of(font_system: &mut FontSystem, family: Family<'static>, pair: &str, font_size: f32, line_height: f32) -> f32 {
         let mut probe = GlyphBuffer::new(font_system, Metrics::new(font_size, line_height));
         probe.set_wrap(Wrap::None);
         probe.set_size(Some(1000.0), Some(line_height));
@@ -825,11 +709,7 @@ impl TextPipeline {
         segments
             .iter()
             .map(|(text, color, is_icon)| {
-                let family = if *is_icon {
-                    Family::Name(ICON_FONT_FAMILY)
-                } else {
-                    body_family
-                };
+                let family = if *is_icon { Family::Name(ICON_FONT_FAMILY) } else { body_family };
                 (*text, Attrs::new().family(family).color(*color))
             })
             .collect()
@@ -847,34 +727,17 @@ impl TextPipeline {
     /// `grid`: each character kept to the cells a page counts for it
     /// (`page::char_cells`) -- a wide one two, its fallback glyph's own
     /// advance made up to that -- so what follows stays on its columns.
-    pub fn set_pane_rich(
-        &mut self,
-        pane: PaneId,
-        w: f32,
-        h: f32,
-        segments: &[(&str, Color, bool)],
-        grid: bool,
-    ) {
+    pub fn set_pane_rich(&mut self, pane: PaneId, w: f32, h: f32, segments: &[(&str, Color, bool)], grid: bool) {
         let _profile = crate::profile::Scope::new("shape pane");
-        let spans = if grid {
-            self.grid_spans(segments)
-        } else {
-            self.cell_spans(segments)
-        };
+        let spans = if grid { self.grid_spans(segments) } else { self.cell_spans(segments) };
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.content_buffers.contains_key(&pane) {
-            let mut buf = GlyphBuffer::new(
-                &mut self.fonts.borrow_mut().font_system,
-                Metrics::new(self.font_size, self.line_height),
-            );
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, Metrics::new(self.font_size, self.line_height));
             buf.set_wrap(Wrap::None);
             self.content_buffers.insert(pane, buf);
         }
-        let buf = self
-            .content_buffers
-            .get_mut(&pane)
-            .expect("just inserted if missing");
+        let buf = self.content_buffers.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), Some(h));
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
@@ -892,13 +755,7 @@ impl TextPipeline {
         }
         let mut out = Vec::new();
         for &(text, color, is_icon) in segments {
-            let attrs = Attrs::new()
-                .family(if is_icon {
-                    Family::Name(ICON_FONT_FAMILY)
-                } else {
-                    body
-                })
-                .color(color);
+            let attrs = Attrs::new().family(if is_icon { Family::Name(ICON_FONT_FAMILY) } else { body }).color(color);
             if is_icon {
                 out.push((text, attrs.letter_spacing(self.icon_spacing)));
                 continue;
@@ -910,13 +767,7 @@ impl TextPipeline {
             let mut spacing = |c: char| {
                 let natural = *advances.1.entry(c).or_insert_with(|| {
                     let mut fonts = self.fonts.borrow_mut();
-                    Self::advance_of(
-                        &mut fonts.font_system,
-                        body,
-                        self.font_size,
-                        self.line_height,
-                        c,
-                    )
+                    Self::advance_of(&mut fonts.font_system, body, self.font_size, self.line_height, c)
                 });
                 grid_spacing(c, natural, self.char_width, self.font_size)
             };
@@ -941,27 +792,13 @@ impl TextPipeline {
     }
 
     /// How wide `c`'s glyph is in `family` (or the font that has it).
-    fn advance_of(
-        font_system: &mut FontSystem,
-        family: Family<'static>,
-        font_size: f32,
-        line_height: f32,
-        c: char,
-    ) -> f32 {
+    fn advance_of(font_system: &mut FontSystem, family: Family<'static>, font_size: f32, line_height: f32, c: char) -> f32 {
         let mut probe = GlyphBuffer::new(font_system, Metrics::new(font_size, line_height));
         probe.set_wrap(Wrap::None);
         probe.set_size(Some(4000.0), Some(line_height));
-        probe.set_text(
-            &c.to_string(),
-            &Attrs::new().family(family),
-            Shaping::Advanced,
-            None,
-        );
+        probe.set_text(&c.to_string(), &Attrs::new().family(family), Shaping::Advanced, None);
         probe.shape_until_scroll(font_system, false);
-        probe
-            .layout_runs()
-            .flat_map(|r| r.glyphs.iter().map(|g| g.w))
-            .sum()
+        probe.layout_runs().flat_map(|r| r.glyphs.iter().map(|g| g.w)).sum()
     }
 
     /// Drops every pane `GlyphBuffer` not in `keep` -- splits/closes churn
@@ -979,13 +816,7 @@ impl TextPipeline {
     /// give the two rows independent on-screen heights).
     /// `italic` lists the segments drawn in italics -- a preview tab's
     /// name.
-    pub fn set_pane_title_rich(
-        &mut self,
-        pane: PaneId,
-        w: f32,
-        segments: &[(&str, Color, bool)],
-        italic: &[usize],
-    ) {
+    pub fn set_pane_title_rich(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)], italic: &[usize]) {
         let _profile = crate::profile::Scope::new("shape title");
         let mut spans = self.rich_spans(segments);
         for &i in italic {
@@ -996,17 +827,11 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.titles.contains_key(&pane) {
-            let mut buf = GlyphBuffer::new(
-                &mut self.fonts.borrow_mut().font_system,
-                self.title_metrics(),
-            );
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, self.title_metrics());
             buf.set_wrap(Wrap::None);
             self.titles.insert(pane, buf);
         }
-        let buf = self
-            .titles
-            .get_mut(&pane)
-            .expect("just inserted if missing");
+        let buf = self.titles.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), Some(self.line_height));
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
@@ -1015,28 +840,17 @@ impl TextPipeline {
     /// Sets one pane's breadcrumb-bar text -- `set_pane_title_rich`'s
     /// sibling, same mechanism, own buffer (`self.breadcrumbs`) so it can
     /// be positioned and sized independently of the tab row above it.
-    pub fn set_pane_breadcrumb_rich(
-        &mut self,
-        pane: PaneId,
-        w: f32,
-        segments: &[(&str, Color, bool)],
-    ) {
+    pub fn set_pane_breadcrumb_rich(&mut self, pane: PaneId, w: f32, segments: &[(&str, Color, bool)]) {
         let _profile = crate::profile::Scope::new("shape breadcrumb");
         let spans = self.rich_spans(segments);
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.breadcrumbs.contains_key(&pane) {
-            let mut buf = GlyphBuffer::new(
-                &mut self.fonts.borrow_mut().font_system,
-                self.title_metrics(),
-            );
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, self.title_metrics());
             buf.set_wrap(Wrap::None);
             self.breadcrumbs.insert(pane, buf);
         }
-        let buf = self
-            .breadcrumbs
-            .get_mut(&pane)
-            .expect("just inserted if missing");
+        let buf = self.breadcrumbs.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), Some(self.line_height));
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
@@ -1055,18 +869,9 @@ impl TextPipeline {
     /// A range with no glyphs (an empty or fully-clipped span) yields
     /// `None` rather than a degenerate rect. Ranges are matched by glyph
     /// `start`, which is a byte offset into that same string.
-    pub fn title_span_bounds(
-        &self,
-        pane: PaneId,
-        ranges: &[(usize, usize)],
-    ) -> Vec<Option<(f32, f32)>> {
-        let Some(buffer) = self.titles.get(&pane) else {
-            return vec![None; ranges.len()];
-        };
-        let glyphs = buffer
-            .layout_runs()
-            .flat_map(|run| run.glyphs.iter())
-            .map(|g| (g.start, g.x, g.w));
+    pub fn title_span_bounds(&self, pane: PaneId, ranges: &[(usize, usize)]) -> Vec<Option<(f32, f32)>> {
+        let Some(buffer) = self.titles.get(&pane) else { return vec![None; ranges.len()] };
+        let glyphs = buffer.layout_runs().flat_map(|run| run.glyphs.iter()).map(|g| (g.start, g.x, g.w));
         span_bounds(glyphs, ranges)
     }
 
@@ -1084,17 +889,11 @@ impl TextPipeline {
         let spans = self.rich_spans(segments);
         let default_attrs = Attrs::new().family(self.content_family());
         if !self.sticky.contains_key(&pane) {
-            let mut buf = GlyphBuffer::new(
-                &mut self.fonts.borrow_mut().font_system,
-                Metrics::new(self.font_size, self.line_height),
-            );
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, Metrics::new(self.font_size, self.line_height));
             buf.set_wrap(Wrap::None);
             self.sticky.insert(pane, buf);
         }
-        let buf = self
-            .sticky
-            .get_mut(&pane)
-            .expect("just inserted if missing");
+        let buf = self.sticky.get_mut(&pane).expect("just inserted if missing");
         buf.set_size(Some(w), None);
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
@@ -1113,14 +912,10 @@ impl TextPipeline {
     pub fn set_modeline_text(&mut self, segments: &[(&str, Color)]) {
         let body_family = self.content_family();
         let default_attrs = Attrs::new().family(body_family);
-        let spans: Vec<(&str, Attrs)> = segments
-            .iter()
-            .map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color)))
-            .collect();
-        self.modeline
-            .set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.modeline
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        let spans: Vec<(&str, Attrs)> =
+            segments.iter().map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color))).collect();
+        self.modeline.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.modeline.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Sets the modeline clock's text, right-aligned within a `box_width`-
@@ -1135,22 +930,13 @@ impl TextPipeline {
     /// clock this frame" (not enough room); `box_width` is irrelevant
     /// in that case.
     pub fn set_clock_rich(&mut self, box_width: f32, segments: &[(&str, Color)]) {
-        self.clock
-            .set_size(Some(box_width.max(0.0)), Some(self.line_height));
+        self.clock.set_size(Some(box_width.max(0.0)), Some(self.line_height));
         let body_family = self.content_family();
         let default_attrs = Attrs::new().family(body_family);
-        let spans: Vec<(&str, Attrs)> = segments
-            .iter()
-            .map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color)))
-            .collect();
-        self.clock.set_rich_text(
-            spans,
-            &default_attrs,
-            Shaping::Advanced,
-            Some(glyphon::cosmic_text::Align::Right),
-        );
-        self.clock
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        let spans: Vec<(&str, Attrs)> =
+            segments.iter().map(|(text, color)| (*text, Attrs::new().family(body_family).color(*color))).collect();
+        self.clock.set_rich_text(spans, &default_attrs, Shaping::Advanced, Some(glyphon::cosmic_text::Align::Right));
+        self.clock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Sets one popup's content (rich, icon-aware spans, same shape as
@@ -1166,10 +952,7 @@ impl TextPipeline {
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.popups.contains_key(&id) {
-            let mut buf = GlyphBuffer::new(
-                &mut self.fonts.borrow_mut().font_system,
-                Metrics::new(self.font_size, self.line_height),
-            );
+            let mut buf = GlyphBuffer::new(&mut self.fonts.borrow_mut().font_system, Metrics::new(self.font_size, self.line_height));
             buf.set_wrap(Wrap::None);
             self.popups.insert(id, buf);
         }
@@ -1195,20 +978,15 @@ impl TextPipeline {
     pub fn set_sidebar_width(&mut self, width: f32, height: f32) {
         if width != self.sidebar_width {
             self.sidebar_width = width;
-            self.sidebar.set_size(
-                Some(width),
-                Some(content_height(height, self.modeline_height())),
-            );
+            self.sidebar.set_size(Some(width), Some(content_height(height, self.modeline_height())));
         }
     }
 
     pub fn set_sidebar_rich(&mut self, segments: &[(&str, Color, bool)]) {
         let default_attrs = Attrs::new().family(self.content_family());
         let spans = self.cell_spans(segments);
-        self.sidebar
-            .set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.sidebar
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.sidebar.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// Sets the terminal panel's rows -- same mechanism as `set_sidebar_
@@ -1217,19 +995,15 @@ impl TextPipeline {
     pub fn set_debug_dock_rich(&mut self, segments: &[(&str, Color, bool)]) {
         let default_attrs = Attrs::new().family(self.content_family());
         let spans = self.rich_spans(segments);
-        self.debug_dock
-            .set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.debug_dock
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.debug_dock.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.debug_dock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     pub fn set_terminal_rich(&mut self, segments: &[(&str, Color, bool)]) {
         let default_attrs = Attrs::new().family(self.content_family());
         let spans = self.rich_spans(segments);
-        self.terminal
-            .set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
-        self.terminal
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.terminal.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
+        self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     pub fn resize(&mut self, width: f32, height: f32) {
@@ -1241,29 +1015,17 @@ impl TextPipeline {
         // resize, since it also depends on how much of the modeline's
         // left side is occupied) -- so only the two remaining fixed
         // panels need handling here.
-        self.modeline
-            .set_size(Some(width), Some(self.modeline_height()));
-        self.modeline
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
-        self.sidebar.set_size(
-            Some(self.sidebar_width),
-            Some(content_height(height, self.modeline_height())),
-        );
-        self.sidebar
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.modeline.set_size(Some(width), Some(self.modeline_height()));
+        self.modeline.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.sidebar.set_size(Some(self.sidebar_width), Some(content_height(height, self.modeline_height())));
+        self.sidebar.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
         // The width-vs-height mirror of the sidebar's own resize just
         // above: fixed height (`TERMINAL_ROWS`), full width instead of
         // fixed width/remaining height.
-        self.terminal
-            .set_size(Some(width), Some(terminal_height(self.line_height)));
-        self.terminal
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
-        self.debug_dock.set_size(
-            Some(width),
-            Some(crate::app::debug_dock_height(self.line_height)),
-        );
-        self.debug_dock
-            .shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.terminal.set_size(Some(width), Some(terminal_height(self.line_height)));
+        self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
+        self.debug_dock.set_size(Some(width), Some(crate::app::debug_dock_height(self.line_height)));
+        self.debug_dock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
     /// One pane's render info for `prepare`: its id (to look up the right
@@ -1295,26 +1057,17 @@ impl TextPipeline {
     ) {
         self.viewport.update(
             &gpu.queue,
-            Resolution {
-                width: gpu.config.width,
-                height: gpu.config.height,
-            },
+            Resolution { width: gpu.config.width, height: gpu.config.height },
         );
 
         let modeline_top = gpu.size.height as f32 - self.modeline_height();
 
         let mut areas = Vec::with_capacity(panes.len() + titles.len() + breadcrumbs.len() + 2);
         for &(pane, rect, content_frac, sticky_rows) in panes {
-            let Some(buffer) = self.content_buffers.get(&pane) else {
-                continue;
-            };
+            let Some(buffer) = self.content_buffers.get(&pane) else { continue };
             // Sticky rows cover the pane's top; its own text is cut off
             // under them rather than showing through.
-            let sticky_bottom = if sticky_rows > 0 {
-                rect.y + PAD_TOP + sticky_rows as f32 * self.line_height
-            } else {
-                rect.y
-            };
+            let sticky_bottom = if sticky_rows > 0 { rect.y + PAD_TOP + sticky_rows as f32 * self.line_height } else { rect.y };
             areas.push(TextArea {
                 buffer,
                 left: rect.x + PAD_LEFT,
@@ -1355,9 +1108,7 @@ impl TextPipeline {
         // single line of text is vertically centered within it rather
         // than pinned to its top.
         for &(pane, rect) in titles {
-            let Some(buffer) = self.titles.get(&pane) else {
-                continue;
-            };
+            let Some(buffer) = self.titles.get(&pane) else { continue };
             // Glyph rasterization lands one pixel low of true center;
             // the `- 1.0` compensates for that optical offset.
             let top = rect.y + (rect.h - self.line_height) / 2.0 - 1.0;
@@ -1381,9 +1132,7 @@ impl TextPipeline {
         // same centering as the tab strip above, just against its own
         // (shorter) `app::breadcrumb_strip_height` bar.
         for &(pane, rect) in breadcrumbs {
-            let Some(buffer) = self.breadcrumbs.get(&pane) else {
-                continue;
-            };
+            let Some(buffer) = self.breadcrumbs.get(&pane) else { continue };
             let top = rect.y + (rect.h - self.line_height) / 2.0 - 1.0;
             areas.push(TextArea {
                 buffer,
@@ -1436,12 +1185,7 @@ impl TextPipeline {
                 left: PAD_LEFT,
                 top: PAD_TOP,
                 scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: self.sidebar_width as i32,
-                    bottom: modeline_top as i32,
-                },
+                bounds: TextBounds { left: 0, top: 0, right: self.sidebar_width as i32, bottom: modeline_top as i32 },
                 default_color: theme.fg,
                 custom_glyphs: &[],
             });
@@ -1455,12 +1199,7 @@ impl TextPipeline {
                 left: PAD_LEFT,
                 top: dock_top + PAD_TOP,
                 scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: dock_top as i32,
-                    right: gpu.config.width as i32,
-                    bottom: modeline_top as i32,
-                },
+                bounds: TextBounds { left: 0, top: dock_top as i32, right: gpu.config.width as i32, bottom: modeline_top as i32 },
                 default_color: theme.fg,
                 custom_glyphs: &[],
             });
@@ -1472,12 +1211,7 @@ impl TextPipeline {
                 left: PAD_LEFT,
                 top: top + PAD_TOP,
                 scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: top as i32,
-                    right: gpu.config.width as i32,
-                    bottom: dock_top as i32,
-                },
+                bounds: TextBounds { left: 0, top: top as i32, right: gpu.config.width as i32, bottom: dock_top as i32 },
                 default_color: theme.fg,
                 custom_glyphs: &[],
             });
@@ -1506,25 +1240,15 @@ impl TextPipeline {
     /// Each popup comes with where its text starts inside it (`inset`:
     /// left, top) and the line below which nothing of it shows (`clip`) --
     /// the which-key drawer slides up from behind the modeline.
-    pub fn prepare_popups(
-        &mut self,
-        gpu: &GpuState,
-        theme: &Theme,
-        popups: &[(PopupId, Rect, (f32, f32), f32)],
-    ) {
+    pub fn prepare_popups(&mut self, gpu: &GpuState, theme: &Theme, popups: &[(PopupId, Rect, (f32, f32), f32)]) {
         self.viewport.update(
             &gpu.queue,
-            Resolution {
-                width: gpu.config.width,
-                height: gpu.config.height,
-            },
+            Resolution { width: gpu.config.width, height: gpu.config.height },
         );
 
         let mut areas = Vec::with_capacity(popups.len());
         for &(id, rect, (inset_x, inset_y), clip) in popups {
-            let Some(buffer) = self.popups.get(&id) else {
-                continue;
-            };
+            let Some(buffer) = self.popups.get(&id) else { continue };
             areas.push(TextArea {
                 buffer,
                 left: rect.x + inset_x,
@@ -1559,9 +1283,7 @@ impl TextPipeline {
     }
 
     pub fn render<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        self.renderer
-            .render(&self.fonts.borrow().atlas, &self.viewport, pass)
-            .expect("glyphon render failed");
+        self.renderer.render(&self.fonts.borrow().atlas, &self.viewport, pass).expect("glyphon render failed");
     }
 
     /// Draws whatever `prepare_popups` most recently prepared -- the
@@ -1569,9 +1291,7 @@ impl TextPipeline {
     /// `popup_renderer` (see its field doc comment for why this can't
     /// just be another call to `render`).
     pub fn render_popups<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        self.popup_renderer
-            .render(&self.fonts.borrow().atlas, &self.viewport, pass)
-            .expect("glyphon render failed");
+        self.popup_renderer.render(&self.fonts.borrow().atlas, &self.viewport, pass).expect("glyphon render failed");
     }
 
     pub fn trim(&mut self) {
@@ -1664,25 +1384,14 @@ mod tests {
     #[ignore = "manual shaping latency benchmark"]
     fn profile_icon_shaping() {
         let mut fonts = FontSystem::new();
-        fonts
-            .db_mut()
-            .load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         for text in [" \u{f15b} ", "\u{f15b}", "main.rs ×"] {
-            let family = if text.starts_with("main") {
-                "Consolas"
-            } else {
-                ICON_FONT_FAMILY
-            };
+            let family = if text.starts_with("main") { "Consolas" } else { ICON_FONT_FAMILY };
             let mut buffer = GlyphBuffer::new(&mut fonts, Metrics::new(16.0, 20.0));
             buffer.set_size(Some(1000.0), Some(40.0));
             let start = std::time::Instant::now();
             for _ in 0..30 {
-                buffer.set_text(
-                    text,
-                    &Attrs::new().family(Family::Name(family)),
-                    Shaping::Advanced,
-                    None,
-                );
+                buffer.set_text(text, &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
                 buffer.shape_until_scroll(&mut fonts, false);
             }
             eprintln!("shape {text:?}: {:?} per frame", start.elapsed() / 30);
@@ -1697,26 +1406,18 @@ mod tests {
         // name drifting, for the icon font every sidebar/tab/explorer icon
         // glyph (`icon::icon_for`) depends on.
         let mut font_system = FontSystem::new();
-        font_system
+        font_system.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        let found = font_system
             .db_mut()
-            .load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
-        let found = font_system.db_mut().faces().any(|face| {
-            face.families
-                .iter()
-                .any(|(name, _)| name == ICON_FONT_FAMILY)
-        });
-        assert!(
-            found,
-            "expected the embedded font to register under the family name {ICON_FONT_FAMILY:?}"
-        );
+            .faces()
+            .any(|face| face.families.iter().any(|(name, _)| name == ICON_FONT_FAMILY));
+        assert!(found, "expected the embedded font to register under the family name {ICON_FONT_FAMILY:?}");
     }
 
     #[test]
     fn the_font_list_is_the_monospace_families_without_the_icon_font() {
         let mut fonts = FontSystem::new();
-        fonts
-            .db_mut()
-            .load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         let names = monospace_families(&fonts);
         let default = default_monospace_family(&fonts);
         assert!(names.contains(&default), "{default} missing from {names:?}");
@@ -1730,35 +1431,25 @@ mod tests {
     #[test]
     fn is_monospace_installed_rejects_a_name_absent_from_the_database() {
         let fonts = FontSystem::new();
-        assert!(!is_monospace_installed(
-            &fonts,
-            "Fenix deliberately missing monospace"
-        ));
+        assert!(!is_monospace_installed(&fonts, "Fenix deliberately missing monospace"));
     }
 
     #[test]
     fn is_monospace_installed_accepts_a_real_embedded_monospace_face() {
         let mut fonts = FontSystem::new();
-        fonts
-            .db_mut()
-            .load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         assert!(is_monospace_installed(&fonts, ICON_FONT_FAMILY));
     }
 
     #[test]
     fn missing_generic_alias_resolves_to_an_installed_fixed_width_font() {
         let mut fonts = FontSystem::new();
-        fonts
-            .db_mut()
-            .set_monospace_family("Fenix deliberately missing monospace");
+        fonts.db_mut().set_monospace_family("Fenix deliberately missing monospace");
         let name = default_monospace_family(&fonts);
-        assert!(
-            fonts
-                .db()
-                .faces()
-                .any(|face| face.monospaced
-                    && face.families.iter().any(|(family, _)| family == &name))
-        );
+        assert!(fonts
+            .db()
+            .faces()
+            .any(|face| face.monospaced && face.families.iter().any(|(family, _)| family == &name)));
         assert_fixed_grid(&mut fonts, &name);
     }
 
@@ -1769,12 +1460,7 @@ mod tests {
             let mut buffer = GlyphBuffer::new(fonts, Metrics::new(size, size * 1.25));
             buffer.set_wrap(Wrap::None);
             buffer.set_size(Some(4000.0), Some(size * 1.25));
-            buffer.set_text(
-                sample,
-                &Attrs::new().family(Family::Name(family)),
-                Shaping::Advanced,
-                None,
-            );
+            buffer.set_text(sample, &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
             buffer.shape_until_scroll(fonts, false);
             let run = buffer.layout_runs().next().expect("shaped ASCII");
             let cell = run.glyphs[0].w;
@@ -1902,20 +1588,11 @@ mod tests {
         // Three tabs' worth of glyphs laid end to end, the shape the tab
         // strip actually produces: every glyph belongs to exactly one
         // range, and each range's span must stop where the next begins.
-        let glyphs = [
-            (0, 0.0, 10.0),
-            (1, 10.0, 4.0),
-            (2, 14.0, 4.0),
-            (3, 18.0, 10.0),
-            (4, 28.0, 4.0),
-        ];
+        let glyphs = [(0, 0.0, 10.0), (1, 10.0, 4.0), (2, 14.0, 4.0), (3, 18.0, 10.0), (4, 28.0, 4.0)];
         let bounds = span_bounds(glyphs.into_iter(), &[(0, 3), (3, 5)]);
         assert_eq!(bounds, vec![Some((0.0, 18.0)), Some((18.0, 32.0))]);
         let (first, second) = (bounds[0].unwrap(), bounds[1].unwrap());
-        assert_eq!(
-            first.1, second.0,
-            "a tab's right edge must be the next tab's left edge, with no gap or overlap"
-        );
+        assert_eq!(first.1, second.0, "a tab's right edge must be the next tab's left edge, with no gap or overlap");
     }
 
     #[test]
@@ -1927,10 +1604,7 @@ mod tests {
     #[test]
     fn span_bounds_takes_the_extremes_regardless_of_glyph_order() {
         let glyphs = [(2, 30.0, 5.0), (0, 10.0, 5.0), (1, 20.0, 5.0)];
-        assert_eq!(
-            span_bounds(glyphs.into_iter(), &[(0, 3)]),
-            vec![Some((10.0, 35.0))]
-        );
+        assert_eq!(span_bounds(glyphs.into_iter(), &[(0, 3)]), vec![Some((10.0, 35.0))]);
     }
 
     /// The reason tab geometry is measured from shaped glyphs instead of
@@ -1944,9 +1618,7 @@ mod tests {
     #[test]
     fn the_icon_fonts_cell_is_not_the_body_fonts_cell() {
         let mut fonts = FontSystem::new();
-        fonts
-            .db_mut()
-            .load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         let body = default_monospace_family(&fonts);
         let size = FONT_SIZE * TITLE_FONT_SCALE;
 
@@ -1954,29 +1626,14 @@ mod tests {
             let mut buffer = GlyphBuffer::new(fonts, Metrics::new(size, size * 1.25));
             buffer.set_wrap(Wrap::None);
             buffer.set_size(Some(4000.0), Some(size * 1.25));
-            buffer.set_text(
-                s,
-                &Attrs::new().family(Family::Name(family)),
-                Shaping::Advanced,
-                None,
-            );
+            buffer.set_text(s, &Attrs::new().family(Family::Name(family)), Shaping::Advanced, None);
             buffer.shape_until_scroll(fonts, false);
-            buffer
-                .layout_runs()
-                .next()
-                .expect("shaped")
-                .glyphs
-                .iter()
-                .map(|g| g.w)
-                .sum()
+            buffer.layout_runs().next().expect("shaped").glyphs.iter().map(|g| g.w).sum()
         };
 
         let body_cell = advance(&mut fonts, &body, "M");
         let icon_cell = advance(&mut fonts, crate::icon::ICON_FONT_FAMILY, "\u{f15b}");
-        assert!(
-            body_cell > 0.0 && icon_cell > 0.0,
-            "both faces must actually shape"
-        );
+        assert!(body_cell > 0.0 && icon_cell > 0.0, "both faces must actually shape");
         assert!(
             (icon_cell - body_cell).abs() > 0.5,
             "icon cell {icon_cell} vs body cell {body_cell}: if these really matched, this test is the thing to \
@@ -2010,23 +1667,11 @@ mod tests {
         buffer.set_size(Some(4000.0), Some(LINE_HEIGHT));
         buffer.set_rich_text(spans, &attrs, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut fonts, false);
-        let at: Vec<(usize, f32)> = buffer
-            .layout_runs()
-            .flat_map(|r| r.glyphs.iter().map(|g| (g.start, g.x / cell)))
-            .collect();
+        let at: Vec<(usize, f32)> = buffer.layout_runs().flat_map(|r| r.glyphs.iter().map(|g| (g.start, g.x / cell))).collect();
         // a, 日 at 1, 本 at 3, 😀 at 5, b at 7.
-        let x_of = |byte: usize| {
-            at.iter()
-                .find(|(s, _)| *s == byte)
-                .map(|(_, x)| *x)
-                .unwrap_or(f32::NAN)
-        };
+        let x_of = |byte: usize| at.iter().find(|(s, _)| *s == byte).map(|(_, x)| *x).unwrap_or(f32::NAN);
         for (byte, want) in [(0, 0.0), (1, 1.0), (4, 3.0), (7, 5.0), (11, 7.0)] {
-            assert!(
-                (x_of(byte) - want).abs() < 0.05,
-                "at byte {byte}: cell {} not {want} ({at:?})",
-                x_of(byte)
-            );
+            assert!((x_of(byte) - want).abs() < 0.05, "at byte {byte}: cell {} not {want} ({at:?})", x_of(byte));
         }
         assert_eq!(grid_spacing('a', cell, cell, FONT_SIZE), None);
     }
@@ -2034,47 +1679,24 @@ mod tests {
     #[test]
     fn an_icon_spaced_for_cells_advances_one_cell() {
         let mut fonts = FontSystem::new();
-        fonts
-            .db_mut()
-            .load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
+        fonts.db_mut().load_font_data(SYMBOLS_NERD_FONT_MONO_BYTES.to_vec());
         let body: &'static str = Box::leak(default_monospace_family(&fonts).into_boxed_str());
-        let cell = TextPipeline::measure_char_width(
-            &mut fonts,
-            Family::Name(body),
-            FONT_SIZE,
-            LINE_HEIGHT,
-        );
+        let cell = TextPipeline::measure_char_width(&mut fonts, Family::Name(body), FONT_SIZE, LINE_HEIGHT);
         let spacing = TextPipeline::measure_icon_spacing(&mut fonts, cell, FONT_SIZE, LINE_HEIGHT);
         let mut buffer = GlyphBuffer::new(&mut fonts, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         buffer.set_wrap(Wrap::None);
         buffer.set_size(Some(4000.0), Some(LINE_HEIGHT));
-        let icon = Attrs::new()
-            .family(Family::Name(crate::icon::ICON_FONT_FAMILY))
-            .letter_spacing(spacing);
+        let icon = Attrs::new().family(Family::Name(crate::icon::ICON_FONT_FAMILY)).letter_spacing(spacing);
         let text = Attrs::new().family(Family::Name(body));
-        buffer.set_rich_text(
-            [("\u{f15b}", icon), (" name", text.clone())],
-            &text,
-            Shaping::Advanced,
-            None,
-        );
+        buffer.set_rich_text([("\u{f15b}", icon), (" name", text.clone())], &text, Shaping::Advanced, None);
         buffer.shape_until_scroll(&mut fonts, false);
-        let glyphs: Vec<f32> = buffer
-            .layout_runs()
-            .next()
-            .unwrap()
-            .glyphs
-            .iter()
-            .map(|g| g.x)
-            .collect();
-        assert!(
-            (glyphs[2] - 2.0 * cell).abs() < 0.5,
-            "the name starts two cells in: {glyphs:?}, cell {cell}"
-        );
+        let glyphs: Vec<f32> = buffer.layout_runs().next().unwrap().glyphs.iter().map(|g| g.x).collect();
+        assert!((glyphs[2] - 2.0 * cell).abs() < 0.5, "the name starts two cells in: {glyphs:?}, cell {cell}");
     }
 
     #[test]
     fn resolve_font_size_at_the_default_matches_the_default_constants() {
         assert_eq!(resolve_font_size(FONT_SIZE), (FONT_SIZE, LINE_HEIGHT));
     }
+
 }

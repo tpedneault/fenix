@@ -104,29 +104,21 @@ impl LanguageId {
     /// Every language there's a grammar for: Fenix's, then the
     /// extensions'.
     pub fn all() -> Vec<LanguageId> {
-        LanguageId::ALL
-            .into_iter()
-            .chain((0..crate::grammar::count()).map(|i| LanguageId::Grammar(i as u16)))
-            .collect()
+        LanguageId::ALL.into_iter().chain((0..crate::grammar::count()).map(|i| LanguageId::Grammar(i as u16))).collect()
     }
 
     /// The name settings and language files call it by: `rust`, `cpp`,
     /// `csharp`, `javascript`; a grammar's as its language file names it.
     pub fn name(self) -> String {
         match self {
-            LanguageId::Grammar(i) => crate::grammar::grammar(i)
-                .map(|g| g.name.clone())
-                .unwrap_or_default(),
+            LanguageId::Grammar(i) => crate::grammar::grammar(i).map(|g| g.name.clone()).unwrap_or_default(),
             _ => format!("{self:?}").to_lowercase(),
         }
     }
 
     /// The language called `name` (any case), if there's a grammar for it.
     pub fn from_name(name: &str) -> Option<LanguageId> {
-        LanguageId::ALL
-            .into_iter()
-            .find(|l| l.name().eq_ignore_ascii_case(name.trim()))
-            .or_else(|| crate::grammar::find(name).map(LanguageId::Grammar))
+        LanguageId::ALL.into_iter().find(|l| l.name().eq_ignore_ascii_case(name.trim())).or_else(|| crate::grammar::find(name).map(LanguageId::Grammar))
     }
 
     /// Whether it's a grammar an extension brought.
@@ -192,9 +184,7 @@ impl LanguageId {
             LanguageId::Sql => tree_sitter_sequel::HIGHLIGHTS_QUERY,
             LanguageId::Lua => tree_sitter_lua::HIGHLIGHTS_QUERY,
             LanguageId::Mermaid => tree_sitter_mermaid::HIGHLIGHTS_QUERY,
-            LanguageId::Grammar(i) => crate::grammar::grammar(i)
-                .map(|g| g.highlights.as_str())
-                .unwrap_or(""),
+            LanguageId::Grammar(i) => crate::grammar::grammar(i).map(|g| g.highlights.as_str()).unwrap_or(""),
         }
     }
 }
@@ -204,13 +194,7 @@ impl LanguageId {
 /// comments stay uncoloured. Layer C underneath, once.
 fn cpp_highlights_query() -> &'static str {
     static QUERY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    QUERY.get_or_init(|| {
-        format!(
-            "{}\n{}",
-            tree_sitter_c::HIGHLIGHT_QUERY,
-            tree_sitter_cpp::HIGHLIGHT_QUERY
-        )
-    })
+    QUERY.get_or_init(|| format!("{}\n{}", tree_sitter_c::HIGHLIGHT_QUERY, tree_sitter_cpp::HIGHLIGHT_QUERY))
 }
 
 /// More file types for the languages here, from language files (an
@@ -250,10 +234,7 @@ pub fn set_file_types(types: FileTypes) {
 /// anything not in the registry, which callers treat as "no highlighting
 /// for this file," not an error.
 pub fn detect_language(extension: &str) -> Option<LanguageId> {
-    if let Some(language) = FILE_TYPES
-        .get()
-        .and_then(|t| t.extensions.get(&extension.to_ascii_lowercase()))
-    {
+    if let Some(language) = FILE_TYPES.get().and_then(|t| t.extensions.get(&extension.to_ascii_lowercase())) {
         return Some(*language);
     }
     match extension {
@@ -269,9 +250,7 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         "c" | "h" => Some(LanguageId::C),
         // `.ino`/`.pde` are Arduino sketches: C++ with a few prototypes
         // the Arduino builder adds for you.
-        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl" | "ino" | "pde" => {
-            Some(LanguageId::Cpp)
-        }
+        "cpp" | "cc" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "inl" | "ino" | "pde" => Some(LanguageId::Cpp),
         "sh" | "bash" => Some(LanguageId::Bash),
         "tcl" | "tm" => Some(LanguageId::Tcl),
         "dockerfile" => Some(LanguageId::Dockerfile),
@@ -280,14 +259,11 @@ pub fn detect_language(extension: &str) -> Option<LanguageId> {
         // built on it: schemas and transforms, SVG, MSBuild/.NET project
         // and resource files, Apple property lists, WiX, Qt Designer,
         // feeds, GPS/map data, localization, Android/Maven configs.
-        "xml" | "xsd" | "xsl" | "xslt" | "xsl-fo" | "fo" | "rng" | "wsdl" | "svg" | "xhtml"
-        | "xul" | "csproj" | "vbproj" | "fsproj" | "vcxproj" | "filters" | "proj" | "props"
-        | "targets" | "wixproj" | "wxs" | "wxi" | "nuspec" | "resx" | "xaml" | "axaml"
-        | "config" | "manifest" | "plist" | "ui" | "qrc" | "rss" | "atom" | "kml" | "gpx"
-        | "tcx" | "gml" | "graphml" | "xliff" | "xlf" | "tmx" | "dita" | "ditamap" | "xmi"
-        | "bpmn" | "dae" | "fxml" | "mxml" | "jrxml" | "urdf" | "launch" | "storyboard" | "xib" => {
-            Some(LanguageId::Xml)
-        }
+        "xml" | "xsd" | "xsl" | "xslt" | "xsl-fo" | "fo" | "rng" | "wsdl" | "svg" | "xhtml" | "xul" | "csproj" | "vbproj"
+        | "fsproj" | "vcxproj" | "filters" | "proj" | "props" | "targets" | "wixproj" | "wxs" | "wxi" | "nuspec" | "resx"
+        | "xaml" | "axaml" | "config" | "manifest" | "plist" | "ui" | "qrc" | "rss" | "atom" | "kml" | "gpx" | "tcx"
+        | "gml" | "graphml" | "xliff" | "xlf" | "tmx" | "dita" | "ditamap" | "xmi" | "bpmn" | "dae" | "fxml" | "mxml"
+        | "jrxml" | "urdf" | "launch" | "storyboard" | "xib" => Some(LanguageId::Xml),
         "dtd" | "ent" => Some(LanguageId::Dtd),
         "go" => Some(LanguageId::Go),
         "java" => Some(LanguageId::Java),
@@ -318,12 +294,7 @@ pub fn detect_language_from_path(path: &std::path::Path) -> Option<LanguageId> {
                 return Some(*language);
             }
             let chars: Vec<char> = lower.chars().collect();
-            if let Some((_, language)) = types
-                .patterns
-                .iter()
-                .rev()
-                .find(|(p, _)| name_matches(&p.chars().collect::<Vec<_>>(), &chars))
-            {
+            if let Some((_, language)) = types.patterns.iter().rev().find(|(p, _)| name_matches(&p.chars().collect::<Vec<_>>(), &chars)) {
                 return Some(*language);
             }
         }
@@ -335,9 +306,7 @@ pub fn detect_language_from_path(path: &std::path::Path) -> Option<LanguageId> {
             return Some(LanguageId::Dockerfile);
         }
     }
-    path.extension()
-        .and_then(|e| e.to_str())
-        .and_then(detect_language)
+    path.extension().and_then(|e| e.to_str()).and_then(detect_language)
 }
 
 #[cfg(test)]
@@ -364,12 +333,7 @@ mod tests {
 
     #[test]
     fn a_name_is_matched_by_its_pattern() {
-        let m = |p: &str, n: &str| {
-            name_matches(
-                &p.chars().collect::<Vec<_>>(),
-                &n.chars().collect::<Vec<_>>(),
-            )
-        };
+        let m = |p: &str, n: &str| name_matches(&p.chars().collect::<Vec<_>>(), &n.chars().collect::<Vec<_>>());
         assert!(m(".env.*", ".env.local") && m(".env.*", ".env.") && m("*.conf?", "a.confx"));
         assert!(!m(".env.*", ".env") && !m(".env.*", "x.env.local") && !m("*.conf?", "a.conf"));
     }
@@ -429,26 +393,11 @@ mod tests {
 
     #[test]
     fn detects_dockerfile_and_containerfile_by_bare_filename() {
-        assert_eq!(
-            detect_language_from_path(std::path::Path::new("Dockerfile")),
-            Some(LanguageId::Dockerfile)
-        );
-        assert_eq!(
-            detect_language_from_path(std::path::Path::new("dockerfile")),
-            Some(LanguageId::Dockerfile)
-        );
-        assert_eq!(
-            detect_language_from_path(std::path::Path::new("DOCKERFILE")),
-            Some(LanguageId::Dockerfile)
-        );
-        assert_eq!(
-            detect_language_from_path(std::path::Path::new("Dockerfile.dev")),
-            Some(LanguageId::Dockerfile)
-        );
-        assert_eq!(
-            detect_language_from_path(std::path::Path::new("Containerfile")),
-            Some(LanguageId::Dockerfile)
-        );
+        assert_eq!(detect_language_from_path(std::path::Path::new("Dockerfile")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("dockerfile")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("DOCKERFILE")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("Dockerfile.dev")), Some(LanguageId::Dockerfile));
+        assert_eq!(detect_language_from_path(std::path::Path::new("Containerfile")), Some(LanguageId::Dockerfile));
         assert_eq!(
             detect_language_from_path(std::path::Path::new("/some/dir/Dockerfile.prod")),
             Some(LanguageId::Dockerfile)
@@ -457,17 +406,8 @@ mod tests {
 
     #[test]
     fn detect_language_from_path_falls_back_to_extension() {
-        assert_eq!(
-            detect_language_from_path(std::path::Path::new("main.rs")),
-            Some(LanguageId::Rust)
-        );
-        assert_eq!(
-            detect_language_from_path(std::path::Path::new("script.bat")),
-            Some(LanguageId::Batch)
-        );
-        assert_eq!(
-            detect_language_from_path(std::path::Path::new("no_extension_or_match")),
-            None
-        );
+        assert_eq!(detect_language_from_path(std::path::Path::new("main.rs")), Some(LanguageId::Rust));
+        assert_eq!(detect_language_from_path(std::path::Path::new("script.bat")), Some(LanguageId::Batch));
+        assert_eq!(detect_language_from_path(std::path::Path::new("no_extension_or_match")), None);
     }
 }

@@ -5,17 +5,7 @@ use std::sync::RwLock;
 /// no particular priority order -- any one of them is enough. `.git` and
 /// `.projectile` are ecosystem-agnostic; the rest are the common
 /// per-language "this is the top of a package" manifest.
-const MARKERS: &[&str] = &[
-    ".git",
-    ".projectile",
-    "Cargo.toml",
-    "package.json",
-    "pyproject.toml",
-    "go.mod",
-    "CMakeLists.txt",
-    "library.properties",
-    "pkgIndex.tcl",
-];
+const MARKERS: &[&str] = &[".git", ".projectile", "Cargo.toml", "package.json", "pyproject.toml", "go.mod", "CMakeLists.txt", "library.properties", "pkgIndex.tcl"];
 
 /// An Arduino sketch folder: `sketch.yaml`, or a main `.ino`/`.pde` named
 /// after the folder itself -- the one rule the Arduino tools hold every
@@ -25,9 +15,7 @@ pub fn is_sketch(dir: &Path) -> bool {
     if dir.join("sketch.yaml").is_file() {
         return true;
     }
-    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
-        return false;
-    };
+    let Some(name) = dir.file_name().and_then(|n| n.to_str()) else { return false };
     dir.join(format!("{name}.ino")).is_file() || dir.join(format!("{name}.pde")).is_file()
 }
 
@@ -49,11 +37,7 @@ pub fn set_extension_markers(markers: Vec<String>) {
 /// project," not an error. With none, the closest holding a language
 /// pack's marker (`set_extension_markers`).
 pub fn find_project_root(start: &Path) -> Option<PathBuf> {
-    let first = if start.is_dir() {
-        start
-    } else {
-        start.parent()?
-    };
+    let first = if start.is_dir() { start } else { start.parent()? };
     let found = first.ancestors().find(|dir| {
         dir.join(".fenix/tools.json").is_file()
             || dir.join(".fenix/settings.toml").is_file()
@@ -69,13 +53,8 @@ pub fn find_project_root(start: &Path) -> Option<PathBuf> {
     first
         .ancestors()
         .find(|dir| {
-            let folder = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            markers
-                .iter()
-                .any(|m| dir.join(m.replace("{folder}", &folder)).is_file())
+            let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            markers.iter().any(|m| dir.join(m.replace("{folder}", &folder)).is_file())
         })
         .map(Path::to_path_buf)
 }
@@ -103,35 +82,21 @@ mod tests {
         let sketch = dir.path().join("Lab1");
         fs::create_dir_all(sketch.join("src")).unwrap();
         fs::write(sketch.join("Lab1.ino"), b"void setup() {}").unwrap();
-        assert_eq!(
-            find_project_root(&sketch.join("src").join("pins.h")),
-            Some(sketch.clone())
-        );
+        assert_eq!(find_project_root(&sketch.join("src").join("pins.h")), Some(sketch.clone()));
         assert_eq!(find_project_root(&sketch.join("Lab1.ino")), Some(sketch));
 
         let stray = dir.path().join("notes");
         fs::create_dir_all(&stray).unwrap();
         fs::write(stray.join("scratch.ino"), b"").unwrap();
-        assert_eq!(
-            find_project_root(&stray.join("scratch.ino")),
-            Some(dir.path().to_path_buf()),
-            "an .ino not named after its folder isn't a sketch"
-        );
+        assert_eq!(find_project_root(&stray.join("scratch.ino")), Some(dir.path().to_path_buf()), "an .ino not named after its folder isn't a sketch");
     }
 
     #[test]
     fn a_folder_of_mib_tables_is_a_project() {
         let dir = TempDir::new("mib_marker");
-        fs::write(
-            dir.path().join("vdf.dat"),
-            b"M	m
-",
-        )
-        .unwrap();
-        assert_eq!(
-            find_project_root(&dir.path().join("vdf.dat")),
-            Some(dir.path().to_path_buf())
-        );
+        fs::write(dir.path().join("vdf.dat"), b"M	m
+").unwrap();
+        assert_eq!(find_project_root(&dir.path().join("vdf.dat")), Some(dir.path().to_path_buf()));
     }
 
     /// A language pack's marker is a root only where nothing of Fenix's own
@@ -144,25 +109,15 @@ mod tests {
         let app = dir.path().join("hello");
         fs::create_dir_all(app.join("Models")).unwrap();
         fs::write(app.join("hello.csproj"), b"<Project/>").unwrap();
-        assert_eq!(
-            find_project_root(&app.join("Models").join("User.cs")),
-            Some(app.clone())
-        );
+        assert_eq!(find_project_root(&app.join("Models").join("User.cs")), Some(app.clone()));
         fs::write(app.join("other.csproj"), b"").unwrap();
         let stray = dir.path().join("stray");
         fs::create_dir_all(&stray).unwrap();
         fs::write(stray.join("x.csproj"), b"").unwrap();
-        assert_eq!(
-            find_project_root(&stray.join("a.cs")),
-            None,
-            "{{folder}} is the folder's own name"
-        );
+        assert_eq!(find_project_root(&stray.join("a.cs")), None, "{{folder}} is the folder's own name");
         // In a repository, the repository is still the project.
         fs::create_dir_all(dir.path().join(".git")).unwrap();
-        assert_eq!(
-            find_project_root(&app.join("Program.cs")),
-            Some(dir.path().to_path_buf())
-        );
+        assert_eq!(find_project_root(&app.join("Program.cs")), Some(dir.path().to_path_buf()));
         set_extension_markers(Vec::new());
     }
 
@@ -170,30 +125,21 @@ mod tests {
     fn finds_a_cargo_toml_marker() {
         let dir = TempDir::new("cargo_marker");
         fs::write(dir.path().join("Cargo.toml"), b"[package]").unwrap();
-        assert_eq!(
-            find_project_root(dir.path()),
-            Some(dir.path().to_path_buf())
-        );
+        assert_eq!(find_project_root(dir.path()), Some(dir.path().to_path_buf()));
     }
 
     #[test]
     fn finds_a_cmakelists_txt_marker() {
         let dir = TempDir::new("cmake_marker");
         fs::write(dir.path().join("CMakeLists.txt"), b"project(x)").unwrap();
-        assert_eq!(
-            find_project_root(dir.path()),
-            Some(dir.path().to_path_buf())
-        );
+        assert_eq!(find_project_root(dir.path()), Some(dir.path().to_path_buf()));
     }
 
     #[test]
     fn finds_the_explicit_projectile_marker() {
         let dir = TempDir::new("projectile_marker");
         fs::write(dir.path().join(".projectile"), b"").unwrap();
-        assert_eq!(
-            find_project_root(dir.path()),
-            Some(dir.path().to_path_buf())
-        );
+        assert_eq!(find_project_root(dir.path()), Some(dir.path().to_path_buf()));
     }
 
     #[test]

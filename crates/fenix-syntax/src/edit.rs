@@ -78,11 +78,7 @@ mod tests {
     #[test]
     fn pure_insertion_at_start() {
         // "hi" -> "xhi": inserted "x" at char 0, nothing removed.
-        let edit = RawEdit {
-            start_char: 0,
-            new_end_char: 1,
-            removed: String::new(),
-        };
+        let edit = RawEdit { start_char: 0, new_end_char: 1, removed: String::new() };
         let result = to_input_edit("xhi", &edit);
         assert_eq!(result.start_byte, 0);
         assert_eq!(result.old_end_byte, 0); // nothing removed
@@ -95,11 +91,7 @@ mod tests {
     #[test]
     fn pure_deletion() {
         // "hello" -> "ho": removed "ell" (chars 1..4).
-        let edit = RawEdit {
-            start_char: 1,
-            new_end_char: 1,
-            removed: "ell".to_string(),
-        };
+        let edit = RawEdit { start_char: 1, new_end_char: 1, removed: "ell".to_string() };
         let result = to_input_edit("ho", &edit);
         assert_eq!(result.start_byte, 1);
         assert_eq!(result.old_end_byte, 4); // 1 + "ell".len()
@@ -109,11 +101,7 @@ mod tests {
     #[test]
     fn replacement_spanning_a_newline_in_the_removed_text() {
         // "a\nb\nc" -> "aXc": removed "\nb\n" (chars 1..4), inserted "X".
-        let edit = RawEdit {
-            start_char: 1,
-            new_end_char: 2,
-            removed: "\nb\n".to_string(),
-        };
+        let edit = RawEdit { start_char: 1, new_end_char: 2, removed: "\nb\n".to_string() };
         let result = to_input_edit("aXc", &edit);
         assert_eq!(result.start_position, Point { row: 0, column: 1 });
         // removed text crosses two newlines -> old end is row 2, column 0
@@ -126,11 +114,7 @@ mod tests {
         // "café" -> "café!": 'é' is 2 bytes in UTF-8. Appending "!" after
         // it (char index 4) must land at byte column 5 (c=1,a=1,f=1,é=2),
         // not char column 4 -- tree-sitter's Point.column is byte-based.
-        let edit = RawEdit {
-            start_char: 4,
-            new_end_char: 5,
-            removed: String::new(),
-        };
+        let edit = RawEdit { start_char: 4, new_end_char: 5, removed: String::new() };
         let result = to_input_edit("café!", &edit);
         assert_eq!(result.start_byte, 5);
         assert_eq!(result.start_position, Point { row: 0, column: 5 });
@@ -139,11 +123,7 @@ mod tests {
 
     #[test]
     fn insertion_at_end_of_file() {
-        let edit = RawEdit {
-            start_char: 2,
-            new_end_char: 3,
-            removed: String::new(),
-        };
+        let edit = RawEdit { start_char: 2, new_end_char: 3, removed: String::new() };
         let result = to_input_edit("hi!", &edit);
         assert_eq!(result.start_byte, 2);
         assert_eq!(result.new_end_byte, 3);

@@ -93,14 +93,7 @@ pub fn volumes() -> Vec<Volume> {
         // One root, and nothing useful to say about it without parsing
         // `/proc/mounts` -- which is a different feature for a different
         // platform, and this one is Windows-first by design.
-        vec![Volume {
-            root: PathBuf::from("/"),
-            name: String::new(),
-            kind: VolumeKind::Fixed,
-            remote: None,
-            free: None,
-            total: None,
-        }]
+        vec![Volume { root: PathBuf::from("/"), name: String::new(), kind: VolumeKind::Fixed, remote: None, free: None, total: None }]
     }
 }
 
@@ -116,24 +109,14 @@ pub fn volumes() -> Vec<Volume> {
 /// timeouts, measured in tens of seconds. Call it where that is
 /// survivable.
 pub fn shares(server: &str) -> io::Result<Vec<String>> {
-    let host = server
-        .trim_start_matches(['\\', '/'])
-        .trim_end_matches(['\\', '/']);
+    let host = server.trim_start_matches(['\\', '/']).trim_end_matches(['\\', '/']);
     if host.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "no server name",
-        ));
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "no server name"));
     }
-    let output = command("net")
-        .args(["view", &format!("\\\\{host}")])
-        .output()?;
+    let output = command("net").args(["view", &format!("\\\\{host}")]).output()?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);
-        let message = message
-            .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("the server did not answer");
+        let message = message.lines().find(|l| !l.trim().is_empty()).unwrap_or("the server did not answer");
         return Err(io::Error::other(message.trim().to_string()));
     }
     Ok(parse_shares(&String::from_utf8_lossy(&output.stdout)))
@@ -158,9 +141,7 @@ fn parse_shares(stdout: &str) -> Vec<String> {
         if line.trim().is_empty() {
             break;
         }
-        let Some(name) = line.split_whitespace().next() else {
-            continue;
-        };
+        let Some(name) = line.split_whitespace().next() else { continue };
         // The closing message is a sentence, not a table row -- it has
         // no second column and usually ends in a period.
         if line.split_whitespace().count() > 4 || name.ends_with('.') {
@@ -179,19 +160,13 @@ fn query_windows_volumes() -> Vec<Volume> {
     // nothing to contribute here.
     const SCRIPT: &str = "Get-CimInstance Win32_LogicalDisk | ForEach-Object { \
          $_.DeviceID + '|' + $_.DriveType + '|' + $_.VolumeName + '|' + $_.FreeSpace + '|' + $_.Size + '|' + $_.ProviderName }";
-    let Ok(output) = command("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
-        .output()
-    else {
+    let Ok(output) = command("powershell").args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT]).output() else {
         return Vec::new();
     };
     if !output.status.success() {
         return Vec::new();
     }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(parse_volume_row)
-        .collect()
+    String::from_utf8_lossy(&output.stdout).lines().filter_map(parse_volume_row).collect()
 }
 
 /// `C:|3|Windows|123456|999999|` -> a `Volume`.
@@ -206,21 +181,10 @@ fn parse_volume_row(line: &str) -> Option<Volume> {
     let name = fields.next().unwrap_or("").trim().to_string();
     let free = fields.next().and_then(|v| v.trim().parse().ok());
     let total = fields.next().and_then(|v| v.trim().parse().ok());
-    let remote = fields
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
+    let remote = fields.next().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     // `C:` is a drive; `C:\` is its root directory, and the root is
     // what anything opening it actually wants.
-    Some(Volume {
-        root: PathBuf::from(format!("{device}\\")),
-        name,
-        kind,
-        remote,
-        free,
-        total,
-    })
+    Some(Volume { root: PathBuf::from(format!("{device}\\")), name, kind, remote, free, total })
 }
 
 /// What is left when the query is unavailable: every drive letter that
@@ -230,14 +194,7 @@ fn probe_drive_letters() -> Vec<Volume> {
     (b'A'..=b'Z')
         .map(|letter| PathBuf::from(format!("{}:\\", letter as char)))
         .filter(|root| root.exists())
-        .map(|root| Volume {
-            root,
-            name: String::new(),
-            kind: VolumeKind::Other,
-            remote: None,
-            free: None,
-            total: None,
-        })
+        .map(|root| Volume { root, name: String::new(), kind: VolumeKind::Other, remote: None, free: None, total: None })
         .collect()
 }
 
@@ -374,11 +331,7 @@ mod tests {
         let volumes = volumes();
         assert!(!volumes.is_empty(), "a machine with no drives at all");
         for volume in &volumes {
-            assert!(
-                volume.root.is_absolute(),
-                "not somewhere you could open: {:?}",
-                volume.root
-            );
+            assert!(volume.root.is_absolute(), "not somewhere you could open: {:?}", volume.root);
         }
     }
 }

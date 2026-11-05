@@ -21,11 +21,7 @@ pub struct CommandSpec {
 
 impl CommandSpec {
     pub fn new(executable: String, args: Vec<String>) -> Self {
-        Self {
-            executable,
-            args,
-            ..Default::default()
-        }
+        Self { executable, args, ..Default::default() }
     }
 
     pub fn validate(&self) -> Result<(), String> {
@@ -43,11 +39,7 @@ impl CommandSpec {
         #[cfg(windows)]
         {
             let mut keys = std::collections::HashSet::new();
-            if self
-                .env
-                .keys()
-                .any(|key| !keys.insert(key.to_ascii_uppercase()))
-            {
+            if self.env.keys().any(|key| !keys.insert(key.to_ascii_uppercase())) {
                 return Err("duplicate case-insensitive Windows environment key".into());
             }
         }
@@ -55,21 +47,11 @@ impl CommandSpec {
     }
 
     pub fn working_directory(&self, root: &Path) -> PathBuf {
-        self.cwd
-            .as_ref()
-            .map(|cwd| {
-                if cwd.is_absolute() {
-                    cwd.clone()
-                } else {
-                    root.join(cwd)
-                }
-            })
-            .unwrap_or_else(|| root.into())
+        self.cwd.as_ref().map(|cwd| if cwd.is_absolute() { cwd.clone() } else { root.join(cwd) }).unwrap_or_else(|| root.into())
     }
 
     pub fn command(&self, root: &Path) -> io::Result<Command> {
-        self.validate()
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        self.validate().map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let cwd = self.working_directory(root);
         let path = Path::new(&self.executable);
         // Relative executable paths are relative to the project, not the editor's cwd.
@@ -83,31 +65,13 @@ impl CommandSpec {
         };
         #[cfg(windows)]
         if !path.is_absolute() && !self.executable.contains(['/', '\\']) {
-            let env_value = |name: &str| {
-                self.env
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case(name))
-                    .map(|(_, v)| std::ffi::OsString::from(v))
-                    .or_else(|| std::env::var_os(name))
-            };
+            let env_value = |name: &str| self.env.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| std::ffi::OsString::from(v)).or_else(|| std::env::var_os(name));
             let extensions = env_value("PATHEXT").unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
-            let extensions: Vec<String> = if path.extension().is_some() {
-                vec![String::new()]
-            } else {
-                extensions
-                    .to_string_lossy()
-                    .split(';')
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect()
-            };
+            let extensions: Vec<String> =
+                if path.extension().is_some() { vec![String::new()] } else { extensions.to_string_lossy().split(';').filter(|s| !s.is_empty()).map(str::to_owned).collect() };
             if let Some(paths) = env_value("PATH") {
                 'search: for directory in std::env::split_paths(&paths) {
-                    let directory = if directory.is_absolute() {
-                        directory
-                    } else {
-                        cwd.join(directory)
-                    };
+                    let directory = if directory.is_absolute() { directory } else { cwd.join(directory) };
                     for extension in &extensions {
                         let candidate = directory.join(format!("{}{extension}", self.executable));
                         if candidate.is_file() {
@@ -119,15 +83,8 @@ impl CommandSpec {
             }
         }
         #[cfg(windows)]
-        if executable == path
-            && !path.is_absolute()
-            && !self.executable.contains(['/', '\\'])
-            && self.env.keys().any(|k| k.eq_ignore_ascii_case("PATH"))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("{} was not found in the configured PATH", self.executable),
-            ));
+        if executable == path && !path.is_absolute() && !self.executable.contains(['/', '\\']) && self.env.keys().any(|k| k.eq_ignore_ascii_case("PATH")) {
+            return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} was not found in the configured PATH", self.executable)));
         }
         let mut command = Command::new(executable);
         command.args(&self.args).current_dir(cwd).envs(&self.env);
@@ -168,11 +125,7 @@ struct LaunchFile {
     cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
-    #[serde(
-        default,
-        rename = "preLaunchTask",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, rename = "preLaunchTask", skip_serializing_if = "Option::is_none")]
     pre_launch_task: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request: Option<String>,
@@ -193,30 +146,15 @@ impl TryFrom<LaunchFile> for Launch {
         let (program, no_program) = match file.program {
             Some(ProgramOrFalse::Path(p)) => (Some(p), false),
             Some(ProgramOrFalse::Sent(false)) => (None, true),
-            Some(ProgramOrFalse::Sent(true)) => {
-                return Err("launch: program is a path, or false for none".into())
-            }
+            Some(ProgramOrFalse::Sent(true)) => return Err("launch: program is a path, or false for none".into()),
             None => (None, false),
         };
         let attach = match file.request.as_deref() {
             None | Some("launch") => false,
             Some("attach") => true,
-            Some(other) => {
-                return Err(format!(
-                    "launch: request is \"launch\" or \"attach\", not {other:?}"
-                ))
-            }
+            Some(other) => return Err(format!("launch: request is \"launch\" or \"attach\", not {other:?}")),
         };
-        Ok(Launch {
-            program,
-            no_program,
-            args: file.args,
-            cwd: file.cwd,
-            env: file.env,
-            pre_launch_task: file.pre_launch_task,
-            attach,
-            attributes: file.attributes,
-        })
+        Ok(Launch { program, no_program, args: file.args, cwd: file.cwd, env: file.env, pre_launch_task: file.pre_launch_task, attach, attributes: file.attributes })
     }
 }
 
@@ -227,15 +165,7 @@ impl From<Launch> for LaunchFile {
             (None, true) => Some(ProgramOrFalse::Sent(false)),
             (None, false) => None,
         };
-        LaunchFile {
-            program,
-            args: launch.args,
-            cwd: launch.cwd,
-            env: launch.env,
-            pre_launch_task: launch.pre_launch_task,
-            request: launch.attach.then(|| "attach".to_string()),
-            attributes: launch.attributes,
-        }
+        LaunchFile { program, args: launch.args, cwd: launch.cwd, env: launch.env, pre_launch_task: launch.pre_launch_task, request: launch.attach.then(|| "attach".to_string()), attributes: launch.attributes }
     }
 }
 
@@ -268,12 +198,7 @@ pub struct AdditionalServer {
 impl AdditionalServer {
     /// The process to start, with the same rules as a primary server's.
     pub fn command(&self) -> CommandSpec {
-        CommandSpec {
-            executable: self.executable.clone(),
-            args: self.args.clone(),
-            cwd: self.cwd.clone(),
-            env: self.env.clone(),
-        }
+        CommandSpec { executable: self.executable.clone(), args: self.args.clone(), cwd: self.cwd.clone(), env: self.env.clone() }
     }
 
     pub fn serves(&self, language: &str) -> bool {
@@ -289,14 +214,8 @@ impl AdditionalServer {
             return Err(at("it needs at least one language".to_string()));
         }
         for language in &self.languages {
-            if language.is_empty()
-                || language
-                    .chars()
-                    .any(|c| c.is_uppercase() || c.is_whitespace())
-            {
-                return Err(at(format!(
-                    "language names are lowercase, like rust or markdown, not {language:?}"
-                )));
+            if language.is_empty() || language.chars().any(|c| c.is_uppercase() || c.is_whitespace()) {
+                return Err(at(format!("language names are lowercase, like rust or markdown, not {language:?}")));
             }
         }
         self.command().validate().map_err(at)
@@ -319,13 +238,8 @@ impl LspTools {
     }
 
     /// The additional servers for `language`, in the order they're written.
-    pub fn additional_for<'a>(
-        &'a self,
-        language: &'a str,
-    ) -> impl Iterator<Item = &'a AdditionalServer> + 'a {
-        self.additional
-            .iter()
-            .filter(move |server| server.serves(language))
+    pub fn additional_for<'a>(&'a self, language: &'a str) -> impl Iterator<Item = &'a AdditionalServer> + 'a {
+        self.additional.iter().filter(move |server| server.serves(language))
     }
 }
 
@@ -393,33 +307,18 @@ impl ProjectTools {
         for server in &result.lsp.additional {
             server.validate()?;
             if !names.insert(server.name.as_str()) {
-                return Err(format!(
-                    "(lsp.additional): two servers are called {}",
-                    server.name
-                ));
+                return Err(format!("(lsp.additional): two servers are called {}", server.name));
             }
         }
-        for (name, command) in result
-            .lsp
-            .languages
-            .iter()
-            .chain(&result.dap)
-            .chain(&result.tasks)
-        {
+        for (name, command) in result.lsp.languages.iter().chain(&result.dap).chain(&result.tasks) {
             if name.trim().is_empty() {
                 return Err("empty tool name".to_string());
             }
             command.validate().map_err(|e| format!("({name}): {e}"))?;
         }
-        let launch_check = CommandSpec {
-            executable: "launch".into(),
-            args: result.launch.args.clone().unwrap_or_default(),
-            cwd: result.launch.cwd.clone(),
-            env: result.launch.env.clone(),
-        };
-        launch_check
-            .validate()
-            .map_err(|e| format!("(launch): {e}"))?;
+        let launch_check =
+            CommandSpec { executable: "launch".into(), args: result.launch.args.clone().unwrap_or_default(), cwd: result.launch.cwd.clone(), env: result.launch.env.clone() };
+        launch_check.validate().map_err(|e| format!("(launch): {e}"))?;
         Ok(result)
     }
 }
@@ -487,22 +386,11 @@ mod tests {
 
     #[test]
     fn command_lines_split_on_spaces_and_group_on_quotes() {
-        assert_eq!(
-            split_command_line("uv run pytest -q").unwrap(),
-            ["uv", "run", "pytest", "-q"]
-        );
-        assert_eq!(
-            split_command_line(r#""C:\My Tools\x.exe" "a b" "" c"#).unwrap(),
-            [r"C:\My Tools\x.exe", "a b", "", "c"]
-        );
-        assert_eq!(
-            split_command_line(r#"say "he said \"hi\"""#).unwrap(),
-            ["say", r#"he said "hi""#]
-        );
+        assert_eq!(split_command_line("uv run pytest -q").unwrap(), ["uv", "run", "pytest", "-q"]);
+        assert_eq!(split_command_line(r#""C:\My Tools\x.exe" "a b" "" c"#).unwrap(), [r"C:\My Tools\x.exe", "a b", "", "c"]);
+        assert_eq!(split_command_line(r#"say "he said \"hi\"""#).unwrap(), ["say", r#"he said "hi""#]);
         assert!(split_command_line(r#"open "never closed"#).is_err());
-        let args: Vec<String> = ["a", "b c", "", r#"q"t"#, r"C:\x"]
-            .map(String::from)
-            .to_vec();
+        let args: Vec<String> = ["a", "b c", "", r#"q"t"#, r"C:\x"].map(String::from).to_vec();
         assert_eq!(split_command_line(&join_command_line(&args)).unwrap(), args);
     }
 
@@ -510,25 +398,14 @@ mod tests {
     fn tools_write_and_read_back_the_same() {
         let dir = tempfile::tempdir().unwrap();
         let mut tools = ProjectTools::default();
-        tools.tasks.insert(
-            "test".into(),
-            CommandSpec::new("uv".into(), vec!["run".into(), "pytest".into()]),
-        );
+        tools.tasks.insert("test".into(), CommandSpec::new("uv".into(), vec!["run".into(), "pytest".into()]));
         tools.launch.program = Some(PathBuf::from("src/main.py"));
         tools.write(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join(".fenix/tools.json")).unwrap();
-        assert!(
-            !text.contains("lsp") && !text.contains("env"),
-            "empty sections aren't written: {text}"
-        );
+        assert!(!text.contains("lsp") && !text.contains("env"), "empty sections aren't written: {text}");
         assert_eq!(ProjectTools::read(dir.path()).unwrap(), tools);
-        tools
-            .tasks
-            .insert("bad".into(), CommandSpec::new(String::new(), vec![]));
-        assert!(
-            tools.write(dir.path()).is_err(),
-            "an invalid setting is refused, not written"
-        );
+        tools.tasks.insert("bad".into(), CommandSpec::new(String::new(), vec![]));
+        assert!(tools.write(dir.path()).is_err(), "an invalid setting is refused, not written");
         assert_eq!(ProjectTools::read(dir.path()).unwrap().tasks.len(), 1);
     }
 
@@ -539,17 +416,8 @@ mod tests {
         let root = std::env::current_dir().unwrap();
         let command = spec.command(&root).unwrap();
         assert_eq!(command.get_program(), root.join("bin/my tool.exe"));
-        assert_eq!(
-            command
-                .get_args()
-                .map(|s| s.to_str().unwrap())
-                .collect::<Vec<_>>(),
-            ["hello world", "", "a&b", r"C:\My Work\file"]
-        );
-        assert_eq!(
-            command.get_current_dir(),
-            Some(root.join("build dir").as_path())
-        );
+        assert_eq!(command.get_args().map(|s| s.to_str().unwrap()).collect::<Vec<_>>(), ["hello world", "", "a&b", r"C:\My Work\file"]);
+        assert_eq!(command.get_current_dir(), Some(root.join("build dir").as_path()));
         assert_eq!(command.get_envs().next().unwrap().1.unwrap(), "a b");
     }
     #[test]
@@ -557,11 +425,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(ProjectTools::read(dir.path()).unwrap().lsp.is_empty());
         std::fs::create_dir(dir.path().join(".fenix")).unwrap();
-        for text in [
-            "{",
-            r#"{"typo":{}}"#,
-            r#"{"lsp":{"rust":{"executable":""}}}"#,
-        ] {
+        for text in ["{", r#"{"typo":{}}"#, r#"{"lsp":{"rust":{"executable":""}}}"#] {
             std::fs::write(dir.path().join(".fenix/tools.json"), text).unwrap();
             assert!(ProjectTools::read(dir.path()).is_err());
         }
@@ -571,55 +435,26 @@ mod tests {
         let text = r#"{"lsp":{"rust":{"executable":"rust-analyzer"},
             "additional":[{"name":"kiln","executable":"kiln","args":["lsp"],"languages":["rust","markdown"]}]}}"#;
         let tools = ProjectTools::parse(text).unwrap();
-        assert_eq!(
-            tools.lsp.get("rust").unwrap().executable,
-            "rust-analyzer",
-            "the primary reads as before"
-        );
+        assert_eq!(tools.lsp.get("rust").unwrap().executable, "rust-analyzer", "the primary reads as before");
         assert_eq!(tools.lsp.len(), 1, "additional isn't a language");
         let kiln: Vec<_> = tools.lsp.additional_for("markdown").collect();
         assert_eq!(kiln.len(), 1);
         assert_eq!(kiln[0].command().args, ["lsp"]);
         assert_eq!(tools.lsp.additional_for("tcl").count(), 0);
-        assert_eq!(
-            ProjectTools::parse(&tools.to_json().unwrap()).unwrap(),
-            tools,
-            "round-trips"
-        );
-        let only_additional = ProjectTools::parse(
-            r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["tcl"]}]}}"#,
-        )
-        .unwrap();
+        assert_eq!(ProjectTools::parse(&tools.to_json().unwrap()).unwrap(), tools, "round-trips");
+        let only_additional = ProjectTools::parse(r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["tcl"]}]}}"#).unwrap();
         assert!(only_additional.lsp.languages.is_empty());
     }
 
     #[test]
     fn bad_additional_servers_are_refused_with_a_reason() {
         for (text, why) in [
-            (
-                r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":[]}]}}"#,
-                "at least one language",
-            ),
-            (
-                r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["Rust"]}]}}"#,
-                "lowercase",
-            ),
-            (
-                r#"{"lsp":{"additional":[{"name":"","executable":"k","languages":["rust"]}]}}"#,
-                "name",
-            ),
-            (
-                r#"{"lsp":{"additional":[{"name":"k","executable":"","languages":["rust"]}]}}"#,
-                "executable",
-            ),
-            (
-                r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["rust"]},{"name":"k","executable":"j","languages":["tcl"]}]}}"#,
-                "two servers",
-            ),
-            (
-                r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["rust"],"typo":1}]}}"#,
-                "typo",
-            ),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":[]}]}}"#, "at least one language"),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["Rust"]}]}}"#, "lowercase"),
+            (r#"{"lsp":{"additional":[{"name":"","executable":"k","languages":["rust"]}]}}"#, "name"),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"","languages":["rust"]}]}}"#, "executable"),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["rust"]},{"name":"k","executable":"j","languages":["tcl"]}]}}"#, "two servers"),
+            (r#"{"lsp":{"additional":[{"name":"k","executable":"k","languages":["rust"],"typo":1}]}}"#, "typo"),
             (r#"{"lsp":{"additional":{"name":"k"}}}"#, ""),
         ] {
             let error = ProjectTools::parse(text).unwrap_err();
@@ -635,8 +470,7 @@ mod tests {
         std::fs::write(&exe, "@exit /b 0").unwrap();
         let before = std::env::var_os("PATH");
         let mut spec = CommandSpec::new("fenix-local-tool".into(), vec![]);
-        spec.env
-            .insert("Path".into(), dir.path().to_string_lossy().into_owned());
+        spec.env.insert("Path".into(), dir.path().to_string_lossy().into_owned());
         spec.env.insert("PATHEXT".into(), ".CMD".into());
         assert_eq!(spec.command(dir.path()).unwrap().get_program(), exe);
         assert_eq!(std::env::var_os("PATH"), before);
@@ -645,27 +479,15 @@ mod tests {
     /// task to run first; both written back as they were read.
     #[test]
     fn a_project_launch_may_send_no_program_and_run_a_task_first() {
-        let tools =
-            ProjectTools::parse(r#"{"launch":{"program":false,"preLaunchTask":"build"}}"#).unwrap();
+        let tools = ProjectTools::parse(r#"{"launch":{"program":false,"preLaunchTask":"build"}}"#).unwrap();
         assert!(tools.launch.no_program && tools.launch.program.is_none());
         assert_eq!(tools.launch.pre_launch_task.as_deref(), Some("build"));
-        assert_eq!(
-            ProjectTools::parse(&tools.to_json().unwrap()).unwrap(),
-            tools
-        );
+        assert_eq!(ProjectTools::parse(&tools.to_json().unwrap()).unwrap(), tools);
         assert!(tools.to_json().unwrap().contains("\"program\": false"));
         let path = ProjectTools::parse(r#"{"launch":{"program":"main.py"}}"#).unwrap();
-        assert_eq!(
-            (path.launch.program, path.launch.no_program),
-            (Some(PathBuf::from("main.py")), false)
-        );
-        assert!(
-            ProjectTools::parse(r#"{"launch":{"progam":"typo"}}"#).is_err(),
-            "an unknown key is still a mistake"
-        );
-        assert!(ProjectTools::parse(r#"{"launch":{"program":true}}"#)
-            .unwrap_err()
-            .contains("false for none"));
+        assert_eq!((path.launch.program, path.launch.no_program), (Some(PathBuf::from("main.py")), false));
+        assert!(ProjectTools::parse(r#"{"launch":{"progam":"typo"}}"#).is_err(), "an unknown key is still a mistake");
+        assert!(ProjectTools::parse(r#"{"launch":{"program":true}}"#).unwrap_err().contains("false for none"));
     }
 
     /// an attach, and the adapter's own attributes (a process to
@@ -675,23 +497,15 @@ mod tests {
         let tools = ProjectTools::parse(r#"{"launch":{"program":false,"request":"attach","attributes":{"processId":"${pickProcess}"}}}"#).unwrap();
         assert!(tools.launch.attach && !tools.launch.is_empty());
         assert_eq!(tools.launch.attributes["processId"], "${pickProcess}");
-        assert_eq!(
-            ProjectTools::parse(&tools.to_json().unwrap()).unwrap(),
-            tools
-        );
-        assert!(ProjectTools::parse(r#"{"launch":{"request":"run"}}"#)
-            .unwrap_err()
-            .contains("\"launch\" or \"attach\""));
+        assert_eq!(ProjectTools::parse(&tools.to_json().unwrap()).unwrap(), tools);
+        assert!(ProjectTools::parse(r#"{"launch":{"request":"run"}}"#).unwrap_err().contains("\"launch\" or \"attach\""));
     }
 
     #[test]
     fn project_launch_rejects_invalid_environment_and_arguments() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(".fenix")).unwrap();
-        for text in [
-            r#"{"launch":{"env":{"BAD=NAME":"x"}}}"#,
-            r#"{"launch":{"args":["\u0000"]}}"#,
-        ] {
+        for text in [r#"{"launch":{"env":{"BAD=NAME":"x"}}}"#, r#"{"launch":{"args":["\u0000"]}}"#] {
             std::fs::write(dir.path().join(".fenix/tools.json"), text).unwrap();
             assert!(ProjectTools::read(dir.path()).is_err());
         }
@@ -701,8 +515,7 @@ mod tests {
     fn missing_program_in_explicit_path_cannot_fall_back_to_parent_path() {
         let dir = tempfile::tempdir().unwrap();
         let mut spec = CommandSpec::new("cmd.exe".into(), vec![]);
-        spec.env
-            .insert("PATH".into(), dir.path().to_string_lossy().into_owned());
+        spec.env.insert("PATH".into(), dir.path().to_string_lossy().into_owned());
         assert!(spec.command(dir.path()).is_err());
         spec.env.insert("Path".into(), "duplicate".into());
         assert!(spec.validate().is_err());

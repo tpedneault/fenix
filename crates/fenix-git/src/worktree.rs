@@ -21,22 +21,12 @@ pub fn list_worktrees(repo: &Path) -> Vec<Worktree> {
     let mut out: Vec<Worktree> = Vec::new();
     for line in run_lines(repo, &["worktree", "list", "--porcelain"]) {
         if let Some(path) = line.strip_prefix("worktree ") {
-            out.push(Worktree {
-                path: PathBuf::from(path),
-                branch: None,
-                head: String::new(),
-                prunable: false,
-            });
+            out.push(Worktree { path: PathBuf::from(path), branch: None, head: String::new(), prunable: false });
         } else if let Some(last) = out.last_mut() {
             if let Some(head) = line.strip_prefix("HEAD ") {
                 last.head = head.to_string();
             } else if let Some(branch) = line.strip_prefix("branch ") {
-                last.branch = Some(
-                    branch
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(branch)
-                        .to_string(),
-                );
+                last.branch = Some(branch.strip_prefix("refs/heads/").unwrap_or(branch).to_string());
             } else if line.starts_with("prunable") {
                 last.prunable = true;
             }
@@ -48,34 +38,15 @@ pub fn list_worktrees(repo: &Path) -> Vec<Worktree> {
 /// Where a new worktree for `branch` goes by default: beside the
 /// repository, named after both -- `fenix.feature-x` next to `fenix`.
 pub fn default_worktree_path(repo: &Path, branch: &str) -> PathBuf {
-    let name = repo
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "repo".to_string());
+    let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "repo".to_string());
     let folder = format!("{name}.{}", branch.replace(['/', '\\', ':'], "-"));
-    repo.parent()
-        .map(|p| p.join(&folder))
-        .unwrap_or_else(|| PathBuf::from(folder))
+    repo.parent().map(|p| p.join(&folder)).unwrap_or_else(|| PathBuf::from(folder))
 }
 
 /// Checks `branch` out at `path` -- creating the branch from `start` (HEAD
 /// when `None`) if it doesn't exist yet.
-pub fn add_worktree(
-    repo: &Path,
-    path: &Path,
-    branch: &str,
-    start: Option<&str>,
-) -> Result<String, String> {
-    let exists = !run_lines(
-        repo,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ],
-    )
-    .is_empty();
+pub fn add_worktree(repo: &Path, path: &Path, branch: &str, start: Option<&str>) -> Result<String, String> {
+    let exists = !run_lines(repo, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{branch}")]).is_empty();
     let path = path.to_string_lossy().to_string();
     let mut args = vec!["worktree".to_string(), "add".to_string()];
     if exists {
@@ -92,14 +63,7 @@ pub fn add_worktree(
 /// Removes a worktree's folder and forgets it -- refused while it has
 /// uncommitted changes, rather than forced.
 pub fn remove_worktree(repo: &Path, path: &Path) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "worktree".into(),
-            "remove".into(),
-            path.to_string_lossy().to_string(),
-        ],
-    )
+    run_action(repo, &["worktree".into(), "remove".into(), path.to_string_lossy().to_string()])
 }
 
 pub fn prune_worktrees(repo: &Path) -> Result<String, String> {
@@ -108,8 +72,7 @@ pub fn prune_worktrees(repo: &Path) -> Result<String, String> {
 
 /// The folder a failed checkout says `branch` is already checked out in.
 pub fn checked_out_elsewhere(error: &str) -> Option<PathBuf> {
-    if !(error.contains("already checked out at") || error.contains("already used by worktree at"))
-    {
+    if !(error.contains("already checked out at") || error.contains("already used by worktree at")) {
         return None;
     }
     let end = error.rfind('\'')?;
@@ -130,11 +93,7 @@ mod tests {
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "first"]);
         let path = default_worktree_path(dir.path(), "feature/x");
-        assert!(path
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .ends_with(".feature-x"));
+        assert!(path.file_name().unwrap().to_string_lossy().ends_with(".feature-x"));
         let _ = std::fs::remove_dir_all(&path);
         add_worktree(dir.path(), &path, "feature/x", None).unwrap();
         let list = list_worktrees(dir.path());
@@ -145,10 +104,7 @@ mod tests {
 
         let error = crate::actions::checkout_branch(dir.path(), "feature/x").unwrap_err();
         let elsewhere = checked_out_elsewhere(&error).expect(&error);
-        assert_eq!(
-            std::fs::canonicalize(elsewhere).unwrap(),
-            std::fs::canonicalize(&path).unwrap()
-        );
+        assert_eq!(std::fs::canonicalize(elsewhere).unwrap(), std::fs::canonicalize(&path).unwrap());
 
         remove_worktree(dir.path(), &path).unwrap();
         assert_eq!(list_worktrees(dir.path()).len(), 1);

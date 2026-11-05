@@ -56,27 +56,16 @@ pub(crate) fn resolve_overlaps(captures: Vec<RawCapture<'_>>) -> Vec<(Range<usiz
         let (start, end) = (window[0], window[1]);
         while let Some(i) = started.next_if(|&i| captures[i].range.start <= start) {
             let c = &captures[i];
-            covering.push(Reverse((
-                c.range.end - c.range.start,
-                usize::MAX - c.pattern_index,
-                i,
-            )));
+            covering.push(Reverse((c.range.end - c.range.start, usize::MAX - c.pattern_index, i)));
         }
-        while covering
-            .peek()
-            .is_some_and(|&Reverse((_, _, i))| captures[i].range.end <= start)
-        {
+        while covering.peek().is_some_and(|&Reverse((_, _, i))| captures[i].range.end <= start) {
             covering.pop();
         }
-        let Some(&Reverse((_, _, winner))) = covering.peek() else {
-            continue;
-        };
+        let Some(&Reverse((_, _, winner))) = covering.peek() else { continue };
         let winner = &captures[winner];
 
         match result.last_mut() {
-            Some((last_range, last_name))
-                if *last_name == winner.name && last_range.end == start =>
-            {
+            Some((last_range, last_name)) if *last_name == winner.name && last_range.end == start => {
                 last_range.end = end;
             }
             _ => result.push((start..end, winner.name)),
@@ -90,11 +79,7 @@ mod tests {
     use super::*;
 
     fn cap<'a>(range: Range<usize>, pattern_index: usize, name: &'a str) -> RawCapture<'a> {
-        RawCapture {
-            range,
-            pattern_index,
-            name,
-        }
+        RawCapture { range, pattern_index, name }
     }
 
     #[test]
@@ -118,26 +103,13 @@ mod tests {
 
     #[test]
     fn narrower_capture_nested_in_the_middle_splits_the_broader_one() {
-        let out = resolve_overlaps(vec![
-            cap(0..20, 0, "string"),
-            cap(8..10, 1, "string.escape"),
-        ]);
-        assert_eq!(
-            out,
-            vec![
-                (0..8, "string"),
-                (8..10, "string.escape"),
-                (10..20, "string")
-            ]
-        );
+        let out = resolve_overlaps(vec![cap(0..20, 0, "string"), cap(8..10, 1, "string.escape")]);
+        assert_eq!(out, vec![(0..8, "string"), (8..10, "string.escape"), (10..20, "string")]);
     }
 
     #[test]
     fn equal_width_tie_broken_by_higher_pattern_index() {
-        let out = resolve_overlaps(vec![
-            cap(0..5, 0, "keyword"),
-            cap(0..5, 3, "keyword.function"),
-        ]);
+        let out = resolve_overlaps(vec![cap(0..5, 0, "keyword"), cap(0..5, 3, "keyword.function")]);
         assert_eq!(out, vec![(0..5, "keyword.function")]);
     }
 
@@ -157,24 +129,8 @@ mod tests {
 
     #[test]
     fn a_broad_capture_shows_again_after_a_narrow_one_ends() {
-        let out = resolve_overlaps(vec![
-            cap(0..30, 0, "a"),
-            cap(5..20, 0, "b"),
-            cap(8..10, 0, "c"),
-            cap(25..26, 0, "c"),
-        ]);
-        assert_eq!(
-            out,
-            vec![
-                (0..5, "a"),
-                (5..8, "b"),
-                (8..10, "c"),
-                (10..20, "b"),
-                (20..25, "a"),
-                (25..26, "c"),
-                (26..30, "a")
-            ]
-        );
+        let out = resolve_overlaps(vec![cap(0..30, 0, "a"), cap(5..20, 0, "b"), cap(8..10, 0, "c"), cap(25..26, 0, "c")]);
+        assert_eq!(out, vec![(0..5, "a"), (5..8, "b"), (8..10, "c"), (10..20, "b"), (20..25, "a"), (25..26, "c"), (26..30, "a")]);
     }
 
     #[test]

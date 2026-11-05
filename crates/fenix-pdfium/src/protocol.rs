@@ -28,56 +28,23 @@ pub const MAX_FRAME: usize = 4096 * 4096 * 4 + 4096;
 pub enum Request {
     /// Opens the file at `path` as document `doc`: [`Reply::Opened`], or
     /// [`Reply::OpenFailed`].
-    Open {
-        doc: u64,
-        path: String,
-    },
-    Close {
-        doc: u64,
-    },
+    Open { doc: u64, path: String },
+    Close { doc: u64 },
     /// Part of a page: [`Reply::Rendered`], or [`Reply::RenderFailed`].
-    Render {
-        doc: u64,
-        view: u64,
-        id: u64,
-        page: u32,
-        page_w: u32,
-        page_h: u32,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-    },
+    Render { doc: u64, view: u64, id: u64, page: u32, page_w: u32, page_h: u32, x: u32, y: u32, w: u32, h: u32 },
     /// Drops the renders of `view` still waiting that were asked before
     /// request `before`.
-    CancelBefore {
-        doc: u64,
-        view: u64,
-        before: u64,
-    },
+    CancelBefore { doc: u64, view: u64, before: u64 },
     /// Its bookmarks: [`Reply::Outline`].
-    Outline {
-        doc: u64,
-    },
+    Outline { doc: u64 },
     /// A page's characters and their boxes: [`Reply::Text`].
-    Text {
-        doc: u64,
-        page: u32,
-    },
+    Text { doc: u64, page: u32 },
     /// A page's links: [`Reply::Links`].
-    Links {
-        doc: u64,
-        page: u32,
-    },
+    Links { doc: u64, page: u32 },
     /// Every page searched for `query`, a few at a time: one
     /// [`Reply::Found`] a batch, the last `done`. A newer search of the
     /// document drops what's left of an older one.
-    Search {
-        doc: u64,
-        id: u64,
-        query: String,
-        match_case: bool,
-    },
+    Search { doc: u64, id: u64, query: String, match_case: bool },
 }
 
 /// Where a link goes.
@@ -118,62 +85,22 @@ pub struct Heading {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     /// First, once: the protocol it speaks.
-    Hello {
-        version: u32,
-    },
+    Hello { version: u32 },
     /// Every page's size in points.
-    Opened {
-        doc: u64,
-        pages: Vec<(f32, f32)>,
-    },
+    Opened { doc: u64, pages: Vec<(f32, f32)> },
     /// Why it couldn't: no PDFium (the message says where it looked), or
     /// not a PDF it can read.
-    OpenFailed {
-        doc: u64,
-        message: String,
-    },
-    Rendered {
-        doc: u64,
-        view: u64,
-        id: u64,
-        page: u32,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        bgra: Vec<u8>,
-    },
-    RenderFailed {
-        doc: u64,
-        id: u64,
-        message: String,
-    },
-    Outline {
-        doc: u64,
-        headings: Vec<Heading>,
-    },
+    OpenFailed { doc: u64, message: String },
+    Rendered { doc: u64, view: u64, id: u64, page: u32, x: u32, y: u32, w: u32, h: u32, bgra: Vec<u8> },
+    RenderFailed { doc: u64, id: u64, message: String },
+    Outline { doc: u64, headings: Vec<Heading> },
     /// A page's characters in reading order, each with its box; a line
     /// break is `'\n'`, with an empty box.
-    Text {
-        doc: u64,
-        page: u32,
-        chars: Vec<(char, [f32; 4])>,
-    },
-    Links {
-        doc: u64,
-        page: u32,
-        links: Vec<Link>,
-    },
-    Found {
-        doc: u64,
-        id: u64,
-        done: bool,
-        matches: Vec<Match>,
-    },
+    Text { doc: u64, page: u32, chars: Vec<(char, [f32; 4])> },
+    Links { doc: u64, page: u32, links: Vec<Link> },
+    Found { doc: u64, id: u64, done: bool, matches: Vec<Match> },
     /// Its file was written again: open it again to see it.
-    Changed {
-        doc: u64,
-    },
+    Changed { doc: u64 },
 }
 
 /// Fields written into a frame's body.
@@ -272,41 +199,12 @@ impl Request {
         match self {
             Request::Open { doc, path } => w.u8(1).u64(*doc).str(path),
             Request::Close { doc } => w.u8(2).u64(*doc),
-            Request::Render {
-                doc,
-                view,
-                id,
-                page,
-                page_w,
-                page_h,
-                x,
-                y,
-                w: width,
-                h,
-            } => w
-                .u8(3)
-                .u64(*doc)
-                .u64(*view)
-                .u64(*id)
-                .u32(*page)
-                .u32(*page_w)
-                .u32(*page_h)
-                .u32(*x)
-                .u32(*y)
-                .u32(*width)
-                .u32(*h),
-            Request::CancelBefore { doc, view, before } => {
-                w.u8(4).u64(*doc).u64(*view).u64(*before)
-            }
+            Request::Render { doc, view, id, page, page_w, page_h, x, y, w: width, h } => w.u8(3).u64(*doc).u64(*view).u64(*id).u32(*page).u32(*page_w).u32(*page_h).u32(*x).u32(*y).u32(*width).u32(*h),
+            Request::CancelBefore { doc, view, before } => w.u8(4).u64(*doc).u64(*view).u64(*before),
             Request::Outline { doc } => w.u8(5).u64(*doc),
             Request::Text { doc, page } => w.u8(6).u64(*doc).u32(*page),
             Request::Links { doc, page } => w.u8(7).u64(*doc).u32(*page),
-            Request::Search {
-                doc,
-                id,
-                query,
-                match_case,
-            } => w.u8(8).u64(*doc).u64(*id).str(query).u8(*match_case as u8),
+            Request::Search { doc, id, query, match_case } => w.u8(8).u64(*doc).u64(*id).str(query).u8(*match_case as u8),
         };
         w.frame()
     }
@@ -315,43 +213,14 @@ impl Request {
     pub fn decode(body: &[u8]) -> Result<Request, String> {
         let mut r = Reader(body);
         Ok(match r.u8()? {
-            1 => Request::Open {
-                doc: r.u64()?,
-                path: r.str()?,
-            },
+            1 => Request::Open { doc: r.u64()?, path: r.str()? },
             2 => Request::Close { doc: r.u64()? },
-            3 => Request::Render {
-                doc: r.u64()?,
-                view: r.u64()?,
-                id: r.u64()?,
-                page: r.u32()?,
-                page_w: r.u32()?,
-                page_h: r.u32()?,
-                x: r.u32()?,
-                y: r.u32()?,
-                w: r.u32()?,
-                h: r.u32()?,
-            },
-            4 => Request::CancelBefore {
-                doc: r.u64()?,
-                view: r.u64()?,
-                before: r.u64()?,
-            },
+            3 => Request::Render { doc: r.u64()?, view: r.u64()?, id: r.u64()?, page: r.u32()?, page_w: r.u32()?, page_h: r.u32()?, x: r.u32()?, y: r.u32()?, w: r.u32()?, h: r.u32()? },
+            4 => Request::CancelBefore { doc: r.u64()?, view: r.u64()?, before: r.u64()? },
             5 => Request::Outline { doc: r.u64()? },
-            6 => Request::Text {
-                doc: r.u64()?,
-                page: r.u32()?,
-            },
-            7 => Request::Links {
-                doc: r.u64()?,
-                page: r.u32()?,
-            },
-            8 => Request::Search {
-                doc: r.u64()?,
-                id: r.u64()?,
-                query: r.str()?,
-                match_case: r.u8()? != 0,
-            },
+            6 => Request::Text { doc: r.u64()?, page: r.u32()? },
+            7 => Request::Links { doc: r.u64()?, page: r.u32()? },
+            8 => Request::Search { doc: r.u64()?, id: r.u64()?, query: r.str()?, match_case: r.u8()? != 0 },
             tag => return Err(format!("no request {tag}")),
         })
     }
@@ -374,27 +243,8 @@ impl Reply {
             Reply::OpenFailed { doc, message } => {
                 w.u8(0x82).u64(*doc).str(message);
             }
-            Reply::Rendered {
-                doc,
-                view,
-                id,
-                page,
-                x,
-                y,
-                w: width,
-                h,
-                bgra,
-            } => {
-                w.u8(0x83)
-                    .u64(*doc)
-                    .u64(*view)
-                    .u64(*id)
-                    .u32(*page)
-                    .u32(*x)
-                    .u32(*y)
-                    .u32(*width)
-                    .u32(*h)
-                    .bytes(bgra);
+            Reply::Rendered { doc, view, id, page, x, y, w: width, h, bgra } => {
+                w.u8(0x83).u64(*doc).u64(*view).u64(*id).u32(*page).u32(*x).u32(*y).u32(*width).u32(*h).bytes(bgra);
             }
             Reply::RenderFailed { doc, id, message } => {
                 w.u8(0x84).u64(*doc).u64(*id).str(message);
@@ -417,10 +267,7 @@ impl Reply {
                     w.rect(&link.rect);
                     match &link.to {
                         Target::Page { page, y } => {
-                            w.u8(0)
-                                .u32(*page)
-                                .u8(y.is_some() as u8)
-                                .f32(y.unwrap_or(0.0));
+                            w.u8(0).u32(*page).u8(y.is_some() as u8).f32(y.unwrap_or(0.0));
                         }
                         Target::Uri(uri) => {
                             w.u8(1).str(uri);
@@ -428,17 +275,8 @@ impl Reply {
                     }
                 }
             }
-            Reply::Found {
-                doc,
-                id,
-                done,
-                matches,
-            } => {
-                w.u8(0x88)
-                    .u64(*doc)
-                    .u64(*id)
-                    .u8(*done as u8)
-                    .u32(matches.len() as u32);
+            Reply::Found { doc, id, done, matches } => {
+                w.u8(0x88).u64(*doc).u64(*id).u8(*done as u8).u32(matches.len() as u32);
                 for m in matches {
                     w.u32(m.page).str(&m.context).u32(m.rects.len() as u32);
                     for r in &m.rects {
@@ -461,55 +299,20 @@ impl Reply {
             0x81 => {
                 let doc = r.u64()?;
                 let n = r.count(8)?;
-                Reply::Opened {
-                    doc,
-                    pages: (0..n)
-                        .map(|_| Ok((r.f32()?, r.f32()?)))
-                        .collect::<Result<_, String>>()?,
-                }
+                Reply::Opened { doc, pages: (0..n).map(|_| Ok((r.f32()?, r.f32()?))).collect::<Result<_, String>>()? }
             }
-            0x82 => Reply::OpenFailed {
-                doc: r.u64()?,
-                message: r.str()?,
-            },
-            0x83 => Reply::Rendered {
-                doc: r.u64()?,
-                view: r.u64()?,
-                id: r.u64()?,
-                page: r.u32()?,
-                x: r.u32()?,
-                y: r.u32()?,
-                w: r.u32()?,
-                h: r.u32()?,
-                bgra: r.bytes()?,
-            },
-            0x84 => Reply::RenderFailed {
-                doc: r.u64()?,
-                id: r.u64()?,
-                message: r.str()?,
-            },
+            0x82 => Reply::OpenFailed { doc: r.u64()?, message: r.str()? },
+            0x83 => Reply::Rendered { doc: r.u64()?, view: r.u64()?, id: r.u64()?, page: r.u32()?, x: r.u32()?, y: r.u32()?, w: r.u32()?, h: r.u32()?, bgra: r.bytes()? },
+            0x84 => Reply::RenderFailed { doc: r.u64()?, id: r.u64()?, message: r.str()? },
             0x85 => {
                 let doc = r.u64()?;
                 let n = r.count(12)?;
-                Reply::Outline {
-                    doc,
-                    headings: (0..n)
-                        .map(|_| {
-                            Ok(Heading {
-                                title: r.str()?,
-                                page: r.u32()?,
-                                depth: r.u32()?,
-                            })
-                        })
-                        .collect::<Result<_, String>>()?,
-                }
+                Reply::Outline { doc, headings: (0..n).map(|_| Ok(Heading { title: r.str()?, page: r.u32()?, depth: r.u32()? })).collect::<Result<_, String>>()? }
             }
             0x86 => {
                 let (doc, page) = (r.u64()?, r.u32()?);
                 let n = r.count(20)?;
-                let chars = (0..n)
-                    .map(|_| Ok((char::from_u32(r.u32()?).unwrap_or('\u{fffd}'), r.rect()?)))
-                    .collect::<Result<_, String>>()?;
+                let chars = (0..n).map(|_| Ok((char::from_u32(r.u32()?).unwrap_or('\u{fffd}'), r.rect()?))).collect::<Result<_, String>>()?;
                 Reply::Text { doc, page, chars }
             }
             0x87 => {
@@ -523,10 +326,7 @@ impl Reply {
                                 let page = r.u32()?;
                                 let has = r.u8()? != 0;
                                 let y = r.f32()?;
-                                Target::Page {
-                                    page,
-                                    y: has.then_some(y),
-                                }
+                                Target::Page { page, y: has.then_some(y) }
                             }
                             1 => Target::Uri(r.str()?),
                             other => return Err(format!("no link kind {other}")),
@@ -544,19 +344,10 @@ impl Reply {
                         let page = r.u32()?;
                         let context = r.str()?;
                         let k = r.count(16)?;
-                        Ok(Match {
-                            page,
-                            context,
-                            rects: (0..k).map(|_| r.rect()).collect::<Result<_, String>>()?,
-                        })
+                        Ok(Match { page, context, rects: (0..k).map(|_| r.rect()).collect::<Result<_, String>>()? })
                     })
                     .collect::<Result<_, String>>()?;
-                Reply::Found {
-                    doc,
-                    id,
-                    done,
-                    matches,
-                }
+                Reply::Found { doc, id, done, matches }
             }
             0x89 => Reply::Changed { doc: r.u64()? },
             tag => return Err(format!("no reply {tag:#x}")),
@@ -607,44 +398,17 @@ mod tests {
     #[test]
     fn every_request_reads_back_as_written() {
         let all = [
-            Request::Open {
-                doc: 7,
-                path: "C:/refs/a b.pdf".into(),
-            },
+            Request::Open { doc: 7, path: "C:/refs/a b.pdf".into() },
             Request::Close { doc: 7 },
-            Request::Render {
-                doc: 7,
-                view: 2,
-                id: 99,
-                page: 3,
-                page_w: 1224,
-                page_h: 1584,
-                x: 0,
-                y: 400,
-                w: 1224,
-                h: 60,
-            },
-            Request::CancelBefore {
-                doc: 7,
-                view: 2,
-                before: 99,
-            },
+            Request::Render { doc: 7, view: 2, id: 99, page: 3, page_w: 1224, page_h: 1584, x: 0, y: 400, w: 1224, h: 60 },
+            Request::CancelBefore { doc: 7, view: 2, before: 99 },
             Request::Outline { doc: 7 },
             Request::Text { doc: 7, page: 1 },
             Request::Links { doc: 7, page: 1 },
-            Request::Search {
-                doc: 7,
-                id: 5,
-                query: "Packet Länge".into(),
-                match_case: true,
-            },
+            Request::Search { doc: 7, id: 5, query: "Packet Länge".into(), match_case: true },
         ];
         for request in all {
-            assert_eq!(
-                Request::decode(body(&request.encode())),
-                Ok(request.clone()),
-                "{request:?}"
-            );
+            assert_eq!(Request::decode(body(&request.encode())), Ok(request.clone()), "{request:?}");
         }
         assert!(Request::decode(&[42]).is_err());
         assert!(Request::decode(&[1, 0, 0]).is_err(), "cut short");
@@ -654,114 +418,31 @@ mod tests {
     fn every_reply_reads_back_as_written() {
         let all = [
             Reply::Hello { version: VERSION },
-            Reply::Opened {
-                doc: 1,
-                pages: vec![(612.0, 792.0), (595.0, 842.0)],
-            },
-            Reply::OpenFailed {
-                doc: 1,
-                message: "pdfium library not found".into(),
-            },
-            Reply::Rendered {
-                doc: 1,
-                view: 2,
-                id: 3,
-                page: 0,
-                x: 4,
-                y: 5,
-                w: 1,
-                h: 2,
-                bgra: vec![1, 2, 3, 255, 4, 5, 6, 255],
-            },
-            Reply::RenderFailed {
-                doc: 1,
-                id: 3,
-                message: "no page".into(),
-            },
-            Reply::Outline {
-                doc: 1,
-                headings: vec![
-                    Heading {
-                        title: "Chapter 1".into(),
-                        page: 0,
-                        depth: 0,
-                    },
-                    Heading {
-                        title: "1.1".into(),
-                        page: 2,
-                        depth: 1,
-                    },
-                ],
-            },
-            Reply::Text {
-                doc: 1,
-                page: 0,
-                chars: vec![('H', [1.0, 2.0, 3.0, 4.0]), ('\n', [0.0; 4])],
-            },
-            Reply::Links {
-                doc: 1,
-                page: 0,
-                links: vec![
-                    Link {
-                        rect: [1.0, 2.0, 3.0, 4.0],
-                        to: Target::Page {
-                            page: 1,
-                            y: Some(10.5),
-                        },
-                    },
-                    Link {
-                        rect: [0.0; 4],
-                        to: Target::Page { page: 0, y: None },
-                    },
-                    Link {
-                        rect: [0.0; 4],
-                        to: Target::Uri("https://example.com/".into()),
-                    },
-                ],
-            },
-            Reply::Found {
-                doc: 1,
-                id: 8,
-                done: true,
-                matches: vec![Match {
-                    page: 3,
-                    context: "a packet here".into(),
-                    rects: vec![[1.0, 2.0, 3.0, 4.0]],
-                }],
-            },
+            Reply::Opened { doc: 1, pages: vec![(612.0, 792.0), (595.0, 842.0)] },
+            Reply::OpenFailed { doc: 1, message: "pdfium library not found".into() },
+            Reply::Rendered { doc: 1, view: 2, id: 3, page: 0, x: 4, y: 5, w: 1, h: 2, bgra: vec![1, 2, 3, 255, 4, 5, 6, 255] },
+            Reply::RenderFailed { doc: 1, id: 3, message: "no page".into() },
+            Reply::Outline { doc: 1, headings: vec![Heading { title: "Chapter 1".into(), page: 0, depth: 0 }, Heading { title: "1.1".into(), page: 2, depth: 1 }] },
+            Reply::Text { doc: 1, page: 0, chars: vec![('H', [1.0, 2.0, 3.0, 4.0]), ('\n', [0.0; 4])] },
+            Reply::Links { doc: 1, page: 0, links: vec![Link { rect: [1.0, 2.0, 3.0, 4.0], to: Target::Page { page: 1, y: Some(10.5) } }, Link { rect: [0.0; 4], to: Target::Page { page: 0, y: None } }, Link { rect: [0.0; 4], to: Target::Uri("https://example.com/".into()) }] },
+            Reply::Found { doc: 1, id: 8, done: true, matches: vec![Match { page: 3, context: "a packet here".into(), rects: vec![[1.0, 2.0, 3.0, 4.0]] }] },
             Reply::Changed { doc: 1 },
         ];
         for reply in all {
-            assert_eq!(
-                Reply::decode(body(&reply.encode())),
-                Ok(reply.clone()),
-                "{reply:?}"
-            );
+            assert_eq!(Reply::decode(body(&reply.encode())), Ok(reply.clone()), "{reply:?}");
         }
     }
 
     #[test]
     fn frames_come_whole_however_the_bytes_are_cut() {
-        let stream: Vec<u8> = [
-            Reply::Hello { version: 1 }.encode(),
-            Reply::Changed { doc: 9 }.encode(),
-        ]
-        .concat();
+        let stream: Vec<u8> = [Reply::Hello { version: 1 }.encode(), Reply::Changed { doc: 9 }.encode()].concat();
         let mut frames = Frames::default();
         let mut got = Vec::new();
         for b in &stream {
             got.extend(frames.push(&[*b]).unwrap());
         }
-        assert_eq!(
-            got.iter()
-                .map(|b| Reply::decode(b).unwrap())
-                .collect::<Vec<_>>(),
-            vec![Reply::Hello { version: 1 }, Reply::Changed { doc: 9 }]
-        );
-        assert!(
-            Frames::default().push(&u32::MAX.to_le_bytes()).is_err(),
-            "a length no message has"
-        );
+        assert_eq!(got.iter().map(|b| Reply::decode(b).unwrap()).collect::<Vec<_>>(), vec![Reply::Hello { version: 1 }, Reply::Changed { doc: 9 }]);
+        assert!(Frames::default().push(&u32::MAX.to_le_bytes()).is_err(), "a length no message has");
     }
 
     #[test]

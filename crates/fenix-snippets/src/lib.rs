@@ -67,11 +67,7 @@ pub fn escape_body(text: &str) -> String {
 
 /// A new snippet file's text: the header, then `body`.
 pub fn file_text(name: &str, trigger: &str, scopes: &[String], body: &str) -> String {
-    let scope = if scopes.is_empty() {
-        "*".to_string()
-    } else {
-        scopes.join(", ")
-    };
+    let scope = if scopes.is_empty() { "*".to_string() } else { scopes.join(", ") };
     let mut body = body.to_string();
     // The cursor ends up where the text ends. Nothing after `$0`: a
     // newline there would be inserted too.
@@ -163,17 +159,8 @@ impl Catalog {
 
     /// `layers`, with the installed extensions' snippet folders between
     /// the built-in ones and yours.
-    pub fn layers_with(
-        builtin: bool,
-        extensions: &[std::path::PathBuf],
-        user: Option<&Path>,
-        project: Option<&Path>,
-    ) -> Self {
-        let mut catalog = if builtin {
-            Self::bundled()
-        } else {
-            Self::default()
-        };
+    pub fn layers_with(builtin: bool, extensions: &[std::path::PathBuf], user: Option<&Path>, project: Option<&Path>) -> Self {
+        let mut catalog = if builtin { Self::bundled() } else { Self::default() };
         for dir in extensions {
             catalog.read_layer(dir, Source::Extension);
         }
@@ -204,9 +191,7 @@ impl Catalog {
                 for entry in entries {
                     match entry {
                         Ok(entry) if entry.path().is_dir() => next.push(entry.path()),
-                        Ok(entry) if entry.path().extension().is_some_and(|e| e == "snippet") => {
-                            paths.push(entry.path())
-                        }
+                        Ok(entry) if entry.path().extension().is_some_and(|e| e == "snippet") => paths.push(entry.path()),
                         Ok(_) => {}
                         Err(e) => self.errors.push(e.to_string()),
                     }

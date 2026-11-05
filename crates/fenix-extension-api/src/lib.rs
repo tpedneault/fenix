@@ -60,17 +60,17 @@ pub mod bindings {
 
 pub use bindings::fenix::extension::host;
 pub use bindings::fenix::extension::types::{
-    AgentTurn, Anchor, Canvas, CanvasPopup, CellColor, CellSpan, CellStyle, Cells, Changed, Check,
-    ClientCert, Command, CursorImage, CursorInfo, Datagram, DebugSession, DebugState, Decoration,
-    DecorationLook, DecorationRule, Ease, EditorTheme, Focus, FocusedPage, FolderEntry, GitSummary,
-    Glide, Health, Here, HomeMark, HomeRow, HomeSection, HttpOptions, HttpPart, HttpRequest,
-    HttpResponse, HttpTiming, ImageInfo, Item, KeyEvent, KeyHint, KeyMods, KeyPress, LaunchConfig,
-    LaunchRequest, LayerLevel, Layout, Level, Line, Mark, ModelInfo, Modifiers, MouseAction,
-    MouseButton, MouseEvent, MousePress, NamedKey, PaneBox, PickerItem, Picture, Place,
-    PlatformInfo, PointerEvent, Popup, Pose, Problem, ProcessOutput, ProjectInfo, QuickFix, Rgb,
-    Role, Section, Severity, Shade, Span, Style, SurfaceKey, SurfaceMark, SurfaceOptions,
-    SurfaceScale, SurfaceSize, Task, TaskResult, TextBuffer, TextEdit, TextView, TlsOptions,
-    VerticalRule, VirtualText, WheelEvent,
+    Anchor, Canvas, CanvasPopup, CellSpan, Cells, Check, Command, Ease, EditorTheme, Glide, Health, Here, HomeMark, HomeRow, HomeSection, HttpRequest, HttpResponse, ImageInfo, Item, KeyHint,
+    LayerLevel, Layout, Level, Line, Mark, ModelInfo, PaneBox, PickerItem, Picture, Place, Popup, Pose, ProcessOutput, ProjectInfo, Role, Section, Span, Style, Task, TextEdit,
+    CursorImage, Datagram, KeyEvent, Modifiers, NamedKey, PointerEvent, SurfaceKey, SurfaceMark, SurfaceOptions, SurfaceScale, SurfaceSize, WheelEvent,
+    Changed, CursorInfo, Focus, FocusedPage, FolderEntry,
+    CellStyle, Decoration, DecorationLook, KeyMods, KeyPress, MouseAction, MouseButton, MouseEvent, MousePress, Rgb, Shade, TextBuffer, VerticalRule, VirtualText,
+    Problem, Severity,
+    ClientCert, DecorationRule, HttpOptions, HttpPart, HttpTiming, PlatformInfo, TlsOptions,
+    CellColor, TextView,
+    DebugSession, DebugState, LaunchConfig, LaunchRequest, QuickFix,
+    AgentTurn,
+    GitSummary, TaskResult,
 };
 pub use bindings::{Event, Key, Page, SurfaceInput};
 
@@ -237,9 +237,7 @@ pub fn with<T: Extension, R>(f: impl FnOnce(&mut T) -> R) -> R {
     INSTANCE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let any = slot.get_or_insert_with(|| Box::new(T::default()));
-        f(any
-            .downcast_mut::<T>()
-            .expect("one extension type per component"))
+        f(any.downcast_mut::<T>().expect("one extension type per component"))
     })
 }
 
@@ -393,10 +391,7 @@ pub mod page {
     }
 
     fn span(text: impl Into<String>, role: Role) -> Span {
-        Span {
-            text: text.into(),
-            role,
-        }
+        Span { text: text.into(), role }
     }
 
     /// A run of text in the page's title colour.
@@ -451,10 +446,7 @@ pub mod page {
         /// A page laid out cell by cell ([`crate::grid::Grid`]): drawn as it
         /// is, with no title, frame or key line of Fenix's.
         pub fn canvas(canvas: super::Canvas) -> Page {
-            Page {
-                canvas: Some(canvas),
-                ..Page::new()
-            }
+            Page { canvas: Some(canvas), ..Page::new() }
         }
 
         /// A field on it has the keyboard: Space, `q`, Esc and pastes are
@@ -473,19 +465,13 @@ pub mod page {
         /// A box over the page beside line `line` -- a menu, a question --
         /// of `rows`, each a run of spans. Keys still come to the page.
         pub fn popup(mut self, line: u32, rows: impl IntoIterator<Item = Vec<Span>>) -> Page {
-            self.popup = Some(super::Popup {
-                line,
-                rows: rows.into_iter().collect(),
-            });
+            self.popup = Some(super::Popup { line, rows: rows.into_iter().collect() });
             self
         }
 
         /// A line of runs, left to right.
         pub fn line(mut self, spans: impl IntoIterator<Item = Span>) -> Page {
-            self.lines.push(Line {
-                spans: spans.into_iter().collect(),
-                rule: false,
-            });
+            self.lines.push(Line { spans: spans.into_iter().collect(), rule: false });
             self
         }
 
@@ -496,10 +482,7 @@ pub mod page {
 
         /// A hairline across the page.
         pub fn rule(mut self) -> Page {
-            self.lines.push(Line {
-                spans: Vec::new(),
-                rule: true,
-            });
+            self.lines.push(Line { spans: Vec::new(), rule: true });
             self
         }
 
@@ -511,10 +494,7 @@ pub mod page {
 
         /// A key and what it does, at the page's foot.
         pub fn key(mut self, keys: &str, what: &str) -> Page {
-            self.keys.push(super::KeyHint {
-                keys: keys.into(),
-                what: what.into(),
-            });
+            self.keys.push(super::KeyHint { keys: keys.into(), what: what.into() });
             self
         }
 
@@ -537,32 +517,20 @@ pub mod page {
     impl Page {
         /// `cells`' background, as `shade`.
         pub fn background(mut self, cells: super::Cells, shade: super::Shade) -> Page {
-            self.styles.push(super::CellStyle {
-                cells,
-                background: Some(shade),
-                underline: None,
-            });
+            self.styles.push(super::CellStyle { cells, background: Some(shade), underline: None });
             self
         }
 
         /// `cells` underlined, in `role`'s colour.
         pub fn underline(mut self, cells: super::Cells, role: super::Role) -> Page {
-            self.styles.push(super::CellStyle {
-                cells,
-                background: None,
-                underline: Some(role),
-            });
+            self.styles.push(super::CellStyle { cells, background: None, underline: Some(role) });
             self
         }
 
         /// A hairline down cell column `column` (a wide character two),
         /// from line `top` up to `bottom`.
         pub fn vertical_rule(mut self, column: u32, top: u32, bottom: u32) -> Page {
-            self.vertical_rules.push(super::VerticalRule {
-                column,
-                top,
-                bottom,
-            });
+            self.vertical_rules.push(super::VerticalRule { column, top, bottom });
             self
         }
 
@@ -592,18 +560,14 @@ pub mod page {
             self
         }
     }
+
 }
 
 impl Command {
     /// `program` (by name: its manifest's `permissions.process` lists it),
     /// with no arguments.
     pub fn new(program: &str) -> Command {
-        Command {
-            program: program.into(),
-            args: Vec::new(),
-            cwd: None,
-            env: Vec::new(),
-        }
+        Command { program: program.into(), args: Vec::new(), cwd: None, env: Vec::new() }
     }
 
     pub fn arg(mut self, arg: impl Into<String>) -> Command {
@@ -686,24 +650,12 @@ pub mod task {
 impl HttpRequest {
     /// A `GET` of `url`: a host its manifest's `permissions.network` names.
     pub fn get(url: &str) -> HttpRequest {
-        HttpRequest {
-            method: "GET".into(),
-            url: url.into(),
-            headers: Vec::new(),
-            body: Vec::new(),
-            options: HttpOptions::default(),
-        }
+        HttpRequest { method: "GET".into(), url: url.into(), headers: Vec::new(), body: Vec::new(), options: HttpOptions::default() }
     }
 
     /// A `POST` of `body` to `url`.
     pub fn post(url: &str, body: impl Into<Vec<u8>>) -> HttpRequest {
-        HttpRequest {
-            method: "POST".into(),
-            url: url.into(),
-            headers: Vec::new(),
-            body: body.into(),
-            options: HttpOptions::default(),
-        }
+        HttpRequest { method: "POST".into(), url: url.into(), headers: Vec::new(), body: body.into(), options: HttpOptions::default() }
     }
 
     pub fn header(mut self, name: &str, value: &str) -> HttpRequest {
@@ -753,14 +705,7 @@ impl Default for HttpOptions {
     /// 30 seconds, redirects followed, certificates checked, no proxy, the
     /// body at its end.
     fn default() -> HttpOptions {
-        HttpOptions {
-            timeout: None,
-            follow_redirects: true,
-            accept_invalid_certs: false,
-            client_cert: None,
-            proxy: None,
-            stream: false,
-        }
+        HttpOptions { timeout: None, follow_redirects: true, accept_invalid_certs: false, client_cert: None, proxy: None, stream: false }
     }
 }
 
@@ -789,10 +734,7 @@ impl HttpOptions {
 
     /// A client certificate and its key, PEM.
     pub fn client_cert(mut self, cert: &str, key: &str) -> HttpOptions {
-        self.client_cert = Some(ClientCert {
-            cert: cert.into(),
-            key: key.into(),
-        });
+        self.client_cert = Some(ClientCert { cert: cert.into(), key: key.into() });
         self
     }
 
@@ -813,19 +755,7 @@ impl HttpResponse {
     /// An answer of `status` with `body`, no headers and no timing: what
     /// a test, or a fake of Fenix, gives an extension.
     pub fn new(status: u16, body: impl Into<Vec<u8>>) -> HttpResponse {
-        HttpResponse {
-            status,
-            headers: Vec::new(),
-            body: body.into(),
-            url: String::new(),
-            timing: HttpTiming {
-                dns: None,
-                connect: None,
-                tls: None,
-                first_byte: 0,
-                total: 0,
-            },
-        }
+        HttpResponse { status, headers: Vec::new(), body: body.into(), url: String::new(), timing: HttpTiming { dns: None, connect: None, tls: None, first_byte: 0, total: 0 } }
     }
 
     /// Its body as text.
@@ -837,11 +767,7 @@ impl HttpResponse {
 impl PickerItem {
     /// An item shown as `label`, giving back `value` when picked.
     pub fn new(label: impl Into<String>, value: impl Into<String>) -> PickerItem {
-        PickerItem {
-            label: label.into(),
-            detail: String::new(),
-            value: value.into(),
-        }
+        PickerItem { label: label.into(), detail: String::new(), value: value.into() }
     }
 
     /// With a second, quieter column.
@@ -1005,11 +931,7 @@ pub mod project {
     /// others rather than in place of them -- ruff beside basedpyright --
     /// their answers merged; set again, it starts again; `None` takes it
     /// away.
-    pub fn add_language_server(
-        name: &str,
-        languages: &[&str],
-        command: Option<&Command>,
-    ) -> Result<(), String> {
+    pub fn add_language_server(name: &str, languages: &[&str], command: Option<&Command>) -> Result<(), String> {
         let languages: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
         host::language_server_add(name, &languages, command)
     }
@@ -1034,10 +956,7 @@ pub mod project {
     /// [`formatter`], what it wrote taken even when it exits with a
     /// failure, if it wrote anything: ktlint, which fails when it found
     /// what it can't fix.
-    pub fn formatter_keeping_output(
-        languages: &[&str],
-        command: Option<&Command>,
-    ) -> Result<(), String> {
+    pub fn formatter_keeping_output(languages: &[&str], command: Option<&Command>) -> Result<(), String> {
         let languages: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
         host::formatter_set(&languages, command, true)
     }
@@ -1048,11 +967,7 @@ pub mod project {
     /// With no command, one already listening there, which its manifest
     /// lets it reach (`permissions.sockets`). [`debug_adapter`] with
     /// `None` gives them back.
-    pub fn debug_adapter_connect(
-        languages: &[&str],
-        command: Option<&Command>,
-        port: u16,
-    ) -> Result<(), String> {
+    pub fn debug_adapter_connect(languages: &[&str], command: Option<&Command>, port: u16) -> Result<(), String> {
         let languages: Vec<String> = languages.iter().map(|l| l.to_string()).collect();
         host::debug_adapter_connect(&languages, command, port)
     }
@@ -1063,10 +978,7 @@ pub mod project {
     /// (`eslint`, `tailwindCSS`) taken from it, over the project's
     /// `.fenix/lsp/<name>.json`. `None` takes them away. Servers running
     /// are told.
-    pub fn language_server_settings(
-        name: &str,
-        settings: Option<&serde_json::Value>,
-    ) -> Result<(), String> {
+    pub fn language_server_settings(name: &str, settings: Option<&serde_json::Value>) -> Result<(), String> {
         host::language_server_settings(name, settings.map(|s| s.to_string()).as_deref())
     }
 
@@ -1086,19 +998,8 @@ pub mod project {
     }
 
     impl Check {
-        pub fn new(
-            section: Section,
-            label: impl Into<String>,
-            health: Health,
-            detail: impl Into<String>,
-        ) -> Check {
-            Check {
-                section,
-                label: label.into(),
-                health,
-                detail: detail.into(),
-                fix: None,
-            }
+        pub fn new(section: Section, label: impl Into<String>, health: Health, detail: impl Into<String>) -> Check {
+            Check { section, label: label.into(), health, detail: detail.into(), fix: None }
         }
 
         /// With a fix row saying `label`, which runs its command `command`.
@@ -1152,10 +1053,7 @@ pub mod debug {
 
         /// One that attaches to a running program (`processId`, a port).
         pub fn attach(name: &str, languages: &[&str]) -> LaunchConfig {
-            LaunchConfig {
-                request: LaunchRequest::Attach,
-                ..LaunchConfig::launch(name, languages)
-            }
+            LaunchConfig { request: LaunchRequest::Attach, ..LaunchConfig::launch(name, languages) }
         }
 
         /// The program it runs: a path, `${file}`, `/project/build/app`.
@@ -1248,17 +1146,7 @@ pub mod layer {
     impl Pose {
         /// Model `model` playing `clip` round, facing you.
         pub fn new(model: u32, clip: &str) -> Pose {
-            Pose {
-                model,
-                clip: clip.into(),
-                once: false,
-                speed: 1.0,
-                yaw: 0.0,
-                style: Style::Smooth,
-                parts: Vec::new(),
-                tint: (1.0, 1.0, 1.0),
-                glow: 0.0,
-            }
+            Pose { model, clip: clip.into(), once: false, speed: 1.0, yaw: 0.0, style: Style::Smooth, parts: Vec::new(), tint: (1.0, 1.0, 1.0), glow: 0.0 }
         }
 
         /// Played once, then held on its last frame.
@@ -1306,39 +1194,13 @@ pub mod layer {
         /// Item `id`: frame `frame` of `sheet`, a line tall, its foot at
         /// `at`.
         pub fn new(id: u32, sheet: u32, frame: u32, at: Place) -> Item {
-            Item {
-                id,
-                sheet,
-                frames: vec![frame],
-                fps: 0,
-                at,
-                size: 1.0,
-                glide: None,
-                flip: false,
-                opacity: 1.0,
-                clickable: false,
-                keep_clear: false,
-                pose: None,
-            }
+            Item { id, sheet, frames: vec![frame], fps: 0, at, size: 1.0, glide: None, flip: false, opacity: 1.0, clickable: false, keep_clear: false, pose: None }
         }
 
         /// Item `id`: a model posed by `pose`, a line tall, standing at
         /// `at`, drawn again every frame.
         pub fn model(id: u32, pose: Pose, at: Place) -> Item {
-            Item {
-                id,
-                sheet: 0,
-                frames: Vec::new(),
-                fps: 0,
-                at,
-                size: 1.0,
-                glide: None,
-                flip: false,
-                opacity: 1.0,
-                clickable: false,
-                keep_clear: false,
-                pose: Some(pose),
-            }
+            Item { id, sheet: 0, frames: Vec::new(), fps: 0, at, size: 1.0, glide: None, flip: false, opacity: 1.0, clickable: false, keep_clear: false, pose: Some(pose) }
         }
 
         /// A model's pose drawn again `fps` times a second (0, every
@@ -1363,12 +1225,7 @@ pub mod layer {
 
         /// Gliding to `to` over `millis`, at one speed.
         pub fn glide(mut self, to: Place, millis: u32) -> Item {
-            self.glide = Some(Glide {
-                to,
-                millis,
-                ease: Ease::Linear,
-                arc: 0.0,
-            });
+            self.glide = Some(Glide { to, millis, ease: Ease::Linear, arc: 0.0 });
             self
         }
 
@@ -1423,11 +1280,7 @@ pub mod terminal {
 
     /// Starts it again: with `command` in place of what ran before, and
     /// `title`, when given.
-    pub fn restart(
-        terminal: u64,
-        command: Option<&Command>,
-        title: Option<&str>,
-    ) -> Result<(), String> {
+    pub fn restart(terminal: u64, command: Option<&Command>, title: Option<&str>) -> Result<(), String> {
         host::terminal_restart(terminal, command, title)
     }
 }
@@ -1442,11 +1295,7 @@ pub mod clock {
         #[cfg(target_arch = "wasm32")]
         let east = super::host::utc_offset(utc.timestamp());
         #[cfg(not(target_arch = "wasm32"))]
-        let east = chrono::Local
-            .timestamp_opt(utc.timestamp(), 0)
-            .earliest()
-            .map(|t| chrono::Offset::fix(t.offset()).local_minus_utc())
-            .unwrap_or(0);
+        let east = chrono::Local.timestamp_opt(utc.timestamp(), 0).earliest().map(|t| chrono::Offset::fix(t.offset()).local_minus_utc()).unwrap_or(0);
         FixedOffset::east_opt(east).unwrap_or(FixedOffset::east_opt(0).unwrap())
     }
 
@@ -1465,13 +1314,8 @@ pub mod clock {
         // The offset at about that time: right but within an hour of a
         // change of clocks.
         let guess = offset_at(naive.and_utc());
-        let offset = offset_at(
-            naive.and_utc() - chrono::Duration::seconds(i64::from(guess.local_minus_utc())),
-        );
-        offset
-            .from_local_datetime(&naive)
-            .earliest()
-            .unwrap_or_else(|| guess.from_utc_datetime(&naive))
+        let offset = offset_at(naive.and_utc() - chrono::Duration::seconds(i64::from(guess.local_minus_utc())));
+        offset.from_local_datetime(&naive).earliest().unwrap_or_else(|| guess.from_utc_datetime(&naive))
     }
 }
 
@@ -1539,20 +1383,12 @@ pub mod buffer {
         /// `text` in place of what's from `start` to `end`, each a (line,
         /// column) from 0, in characters.
         pub fn new(start: (u32, u32), end: (u32, u32), text: impl Into<String>) -> TextEdit {
-            TextEdit {
-                start,
-                end,
-                text: text.into(),
-            }
+            TextEdit { start, end, text: text.into() }
         }
 
         /// `text` put in at `at`.
         pub fn insert(at: (u32, u32), text: impl Into<String>) -> TextEdit {
-            TextEdit {
-                start: at,
-                end: at,
-                text: text.into(),
-            }
+            TextEdit { start: at, end: at, text: text.into() }
         }
     }
 }
@@ -1577,9 +1413,7 @@ pub fn read_file(path: &str) -> Result<Vec<u8>, String> {
 /// Its decorations of a buffer's text: inlays, swatches, hidden text,
 /// tints, underlines, drawn with it and moved with it as it's edited.
 pub mod decorations {
-    use super::{
-        host, Decoration, DecorationLook, DecorationRule, Rgb, Role, Shade, TextBuffer, VirtualText,
-    };
+    use super::{host, Decoration, DecorationLook, DecorationRule, Rgb, Role, Shade, TextBuffer, VirtualText};
 
     /// Its decorations of `buffer`, in place of those it set before; none
     /// takes them away. A file's needs `editor = "read"`; one of its
@@ -1606,12 +1440,7 @@ pub mod decorations {
         /// named as one of `files` (`.env`, `.env.*`), all of the match
         /// looks like `look`.
         pub fn new(files: &[&str], pattern: &str, look: DecorationLook) -> DecorationRule {
-            DecorationRule {
-                files: files.iter().map(|f| f.to_string()).collect(),
-                pattern: pattern.into(),
-                group: 0,
-                look,
-            }
+            DecorationRule { files: files.iter().map(|f| f.to_string()).collect(), pattern: pattern.into(), group: 0, look }
         }
 
         /// Only group `group` of the match.
@@ -1625,40 +1454,17 @@ pub mod decorations {
         /// `text` drawn before the character at `at` (a (line, column)
         /// from 0, in characters), in `role`'s colour, taking room.
         pub fn before(at: (u32, u32), text: impl Into<String>, role: Role) -> Decoration {
-            Decoration {
-                start: at,
-                end: at,
-                look: DecorationLook::Text(VirtualText {
-                    text: text.into(),
-                    role,
-                    after: false,
-                }),
-                id: None,
-            }
+            Decoration { start: at, end: at, look: DecorationLook::Text(VirtualText { text: text.into(), role, after: false }), id: None }
         }
 
         /// The same, after the character at `at`.
         pub fn after(at: (u32, u32), text: impl Into<String>, role: Role) -> Decoration {
-            Decoration {
-                start: at,
-                end: at,
-                look: DecorationLook::Text(VirtualText {
-                    text: text.into(),
-                    role,
-                    after: true,
-                }),
-                id: None,
-            }
+            Decoration { start: at, end: at, look: DecorationLook::Text(VirtualText { text: text.into(), role, after: true }), id: None }
         }
 
         /// A block of `color` before the character at `at`.
         pub fn swatch(at: (u32, u32), color: Rgb) -> Decoration {
-            Decoration {
-                start: at,
-                end: at,
-                look: DecorationLook::Swatch(color),
-                id: None,
-            }
+            Decoration { start: at, end: at, look: DecorationLook::Swatch(color), id: None }
         }
 
         /// It, a click on it coming back to
@@ -1671,32 +1477,17 @@ pub mod decorations {
         /// The text from `start` to `end` drawn as `with`, but as it is
         /// while the cursor is on its line.
         pub fn hide(start: (u32, u32), end: (u32, u32), with: impl Into<String>) -> Decoration {
-            Decoration {
-                start,
-                end,
-                look: DecorationLook::Hide(with.into()),
-                id: None,
-            }
+            Decoration { start, end, look: DecorationLook::Hide(with.into()), id: None }
         }
 
         /// The text from `start` to `end` on `shade`.
         pub fn tint(start: (u32, u32), end: (u32, u32), shade: Shade) -> Decoration {
-            Decoration {
-                start,
-                end,
-                look: DecorationLook::Tint(shade),
-                id: None,
-            }
+            Decoration { start, end, look: DecorationLook::Tint(shade), id: None }
         }
 
         /// The text from `start` to `end` underlined in `role`'s colour.
         pub fn underline(start: (u32, u32), end: (u32, u32), role: Role) -> Decoration {
-            Decoration {
-                start,
-                end,
-                look: DecorationLook::Underline(role),
-                id: None,
-            }
+            Decoration { start, end, look: DecorationLook::Underline(role), id: None }
         }
     }
 }
@@ -1803,21 +1594,8 @@ pub mod diagnostics {
 
     impl Problem {
         /// From (line, column) up to another, from 0 and in characters.
-        pub fn new(
-            severity: Severity,
-            start: (u32, u32),
-            end: (u32, u32),
-            message: impl Into<String>,
-        ) -> Problem {
-            Problem {
-                start,
-                end,
-                severity,
-                message: message.into(),
-                source: None,
-                code: None,
-                fixes: Vec::new(),
-            }
+        pub fn new(severity: Severity, start: (u32, u32), end: (u32, u32), message: impl Into<String>) -> Problem {
+            Problem { start, end, severity, message: message.into(), source: None, code: None, fixes: Vec::new() }
         }
 
         pub fn error(start: (u32, u32), end: (u32, u32), message: impl Into<String>) -> Problem {
@@ -1842,10 +1620,7 @@ pub mod diagnostics {
 
         /// A fix, `title`, its `edits` to the problem's file.
         pub fn fix(mut self, title: &str, edits: Vec<TextEdit>) -> Problem {
-            self.fixes.push(QuickFix {
-                title: title.into(),
-                edits,
-            });
+            self.fixes.push(QuickFix { title: title.into(), edits });
             self
         }
     }
@@ -1949,10 +1724,7 @@ pub mod agents {
 
     impl DiffOf {
         pub fn range(base: &str, head: &str) -> DiffOf {
-            DiffOf::Range {
-                base: base.into(),
-                head: head.into(),
-            }
+            DiffOf::Range { base: base.into(), head: head.into() }
         }
     }
 
@@ -1968,9 +1740,7 @@ pub mod agents {
             Attach(match of {
                 DiffOf::Staged => serde_json::json!({"kind": "diff", "of": "staged"}),
                 DiffOf::Unstaged => serde_json::json!({"kind": "diff", "of": "unstaged"}),
-                DiffOf::Range { base, head } => {
-                    serde_json::json!({"kind": "diff", "of": "range", "base": base, "head": head})
-                }
+                DiffOf::Range { base, head } => serde_json::json!({"kind": "diff", "of": "range", "base": base, "head": head}),
             })
         }
 
@@ -2024,15 +1794,7 @@ pub mod agents {
 
     impl Ask {
         pub fn new(prompt: &str) -> Ask {
-            Ask {
-                prompt: prompt.into(),
-                agent: None,
-                attach: Vec::new(),
-                answer_as: None,
-                stream: false,
-                show: None,
-                timeout: None,
-            }
+            Ask { prompt: prompt.into(), agent: None, attach: Vec::new(), answer_as: None, stream: false, show: None, timeout: None }
         }
 
         /// The agent, by id; `None` for `agents.ask.agent`, else the
@@ -2082,8 +1844,7 @@ pub mod agents {
                 p["agent"] = serde_json::Value::from(agent.as_str());
             }
             if !self.attach.is_empty() {
-                p["attach"] =
-                    serde_json::Value::Array(self.attach.iter().map(|a| a.0.clone()).collect());
+                p["attach"] = serde_json::Value::Array(self.attach.iter().map(|a| a.0.clone()).collect());
             }
             if let Some(schema) = &self.answer_as {
                 p["answerAs"] = schema.clone();
@@ -2112,31 +1873,10 @@ pub mod agents {
 
     /// `agents.ask`'s answer, read.
     pub fn answer(text: &str) -> Result<Answer, String> {
-        let v: serde_json::Value =
-            serde_json::from_str(text).map_err(|e| format!("agents.ask: {e}"))?;
-        let field = |k: &str| {
-            v.get(k)
-                .and_then(|x| x.as_str())
-                .unwrap_or_default()
-                .to_string()
-        };
-        let reverted = v
-            .get("reverted")
-            .and_then(|r| r.as_array())
-            .map(|r| {
-                r.iter()
-                    .filter_map(|p| p.as_str().map(str::to_string))
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(Answer {
-            text: field("text"),
-            json: v.get("json").cloned().unwrap_or_default(),
-            stop_reason: field("stopReason"),
-            agent: field("agent"),
-            thread: field("thread"),
-            reverted,
-        })
+        let v: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("agents.ask: {e}"))?;
+        let field = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or_default().to_string();
+        let reverted = v.get("reverted").and_then(|r| r.as_array()).map(|r| r.iter().filter_map(|p| p.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        Ok(Answer { text: field("text"), json: v.get("json").cloned().unwrap_or_default(), stop_reason: field("stopReason"), agent: field("agent"), thread: field("thread"), reverted })
     }
 
     /// An ask under way: await it for the answer, or [`AskHandle::cancel`]
@@ -2156,10 +1896,7 @@ pub mod agents {
         /// Gives it up: the agent's turn is cancelled, its thread closed,
         /// and the ask ends with an error ("cancelled").
         pub fn cancel(&self) {
-            host::call_service(
-                "agents.cancel",
-                &serde_json::json!({ "call": self.id }).to_string(),
-            );
+            host::call_service("agents.cancel", &serde_json::json!({ "call": self.id }).to_string());
         }
     }
 
@@ -2183,10 +1920,7 @@ pub mod agents {
     /// back ([`Answer::reverted`]).
     pub fn ask_with(ask: Ask) -> Result<AskHandle, String> {
         let id = host::call_service("agents.ask", &ask.payload());
-        Ok(AskHandle {
-            id,
-            wait: Box::pin(crate::run::service_reply(id)),
-        })
+        Ok(AskHandle { id, wait: Box::pin(crate::run::service_reply(id)) })
     }
 
     /// Asks an agent once and waits for its answer: `ask_with(Ask::new(prompt).agent(agent))`.
@@ -2201,107 +1935,38 @@ mod tests {
 
     #[test]
     fn a_problem_is_built() {
-        let p = Problem::warning((1, 0), (1, 4), "unused")
-            .source("ruff")
-            .code("F401");
-        assert_eq!(
-            (p.severity, p.start, p.source.as_deref(), p.code.as_deref()),
-            (Severity::Warning, (1, 0), Some("ruff"), Some("F401"))
-        );
+        let p = Problem::warning((1, 0), (1, 4), "unused").source("ruff").code("F401");
+        assert_eq!((p.severity, p.start, p.source.as_deref(), p.code.as_deref()), (Severity::Warning, (1, 0), Some("ruff"), Some("F401")));
     }
 
     #[test]
     fn a_problem_takes_fixes_and_a_launch_is_built() {
-        let edit = TextEdit {
-            start: (1, 0),
-            end: (1, 4),
-            text: String::new(),
-        };
-        let p = Problem::warning((1, 0), (1, 4), "unused")
-            .code("F401")
-            .fix("Remove the import", vec![edit.clone()])
-            .fix("Ignore", vec![edit]);
-        assert_eq!(
-            (p.code.as_deref(), p.fixes.len(), p.fixes[0].title.as_str()),
-            (Some("F401"), 2, "Remove the import")
-        );
-        let l = LaunchConfig::launch("app", &["cpp"])
-            .program("/project/build/app")
-            .arg("-v")
-            .env("X", "1")
-            .attributes(&serde_json::json!({"type": "lldb"}))
-            .pre_launch_task("cmake: build app");
-        assert_eq!(
-            (
-                l.request,
-                l.program.as_deref(),
-                l.args.len(),
-                l.attributes.as_str(),
-                l.pre_launch_task.as_deref()
-            ),
-            (
-                LaunchRequest::Launch,
-                Some("/project/build/app"),
-                1,
-                r#"{"type":"lldb"}"#,
-                Some("cmake: build app")
-            )
-        );
-        assert_eq!(
-            LaunchConfig::attach("pid", &["go"]).request,
-            LaunchRequest::Attach
-        );
+        let edit = TextEdit { start: (1, 0), end: (1, 4), text: String::new() };
+        let p = Problem::warning((1, 0), (1, 4), "unused").code("F401").fix("Remove the import", vec![edit.clone()]).fix("Ignore", vec![edit]);
+        assert_eq!((p.code.as_deref(), p.fixes.len(), p.fixes[0].title.as_str()), (Some("F401"), 2, "Remove the import"));
+        let l = LaunchConfig::launch("app", &["cpp"]).program("/project/build/app").arg("-v").env("X", "1").attributes(&serde_json::json!({"type": "lldb"})).pre_launch_task("cmake: build app");
+        assert_eq!((l.request, l.program.as_deref(), l.args.len(), l.attributes.as_str(), l.pre_launch_task.as_deref()), (LaunchRequest::Launch, Some("/project/build/app"), 1, r#"{"type":"lldb"}"#, Some("cmake: build app")));
+        assert_eq!(LaunchConfig::attach("pid", &["go"]).request, LaunchRequest::Attach);
     }
 
     #[test]
     fn a_page_is_built_a_line_at_a_time() {
-        let p = Page::new()
-            .line([page::title("Containers"), page::muted("  2")])
-            .rule()
-            .line([page::good("web")])
-            .focus(2)
-            .key("s", "stop");
+        let p = Page::new().line([page::title("Containers"), page::muted("  2")]).rule().line([page::good("web")]).focus(2).key("s", "stop");
         assert_eq!(p.len(), 3);
-        assert_eq!(
-            p.lines[0].spans[1],
-            Span {
-                text: "  2".into(),
-                role: Role::Muted
-            }
-        );
+        assert_eq!(p.lines[0].spans[1], Span { text: "  2".into(), role: Role::Muted });
         assert!(p.lines[1].rule);
         assert_eq!(p.focus, Some(2));
-        assert_eq!(
-            p.keys,
-            [KeyHint {
-                keys: "s".into(),
-                what: "stop".into()
-            }]
-        );
+        assert_eq!(p.keys, [KeyHint { keys: "s".into(), what: "stop".into() }]);
         let p = p.popup(2, [vec![page::accent("s"), page::text(" stop")]]);
-        assert_eq!(
-            p.popup.as_ref().map(|m| (m.line, m.rows[0].len())),
-            Some((2, 2))
-        );
+        assert_eq!(p.popup.as_ref().map(|m| (m.line, m.rows[0].len())), Some((2, 2)));
     }
 
     #[test]
     fn commands_and_requests_are_built() {
-        let c = Command::new("docker")
-            .arg("ps")
-            .args(["-a", "--format", "json"])
-            .cwd("/project")
-            .env("X", "1");
-        assert_eq!(
-            (c.program.as_str(), c.args.len(), c.cwd.as_deref()),
-            ("docker", 4, Some("/project"))
-        );
-        let r = HttpRequest::post("https://api.example.com/x", "{}")
-            .header("Content-Type", "application/json");
-        assert_eq!(
-            (r.method.as_str(), r.body.as_slice(), r.headers.len()),
-            ("POST", &b"{}"[..], 1)
-        );
+        let c = Command::new("docker").arg("ps").args(["-a", "--format", "json"]).cwd("/project").env("X", "1");
+        assert_eq!((c.program.as_str(), c.args.len(), c.cwd.as_deref()), ("docker", 4, Some("/project")));
+        let r = HttpRequest::post("https://api.example.com/x", "{}").header("Content-Type", "application/json");
+        assert_eq!((r.method.as_str(), r.body.as_slice(), r.headers.len()), ("POST", &b"{}"[..], 1));
         assert_eq!(PickerItem::new("Red", "red").detail("#f00").detail, "#f00");
     }
 
@@ -2317,25 +1982,11 @@ mod tests {
     fn an_agents_question_and_its_answer_are_json() {
         assert_eq!(agents::payload("hi", None), r#"{"prompt":"hi"}"#);
         assert!(agents::payload("hi", Some("codex")).contains(r#""agent":"codex""#));
-        let a = agents::answer(
-            r#"{"text":"Done.","stopReason":"end_turn","agent":"claude","thread":"t1"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            (
-                a.text.as_str(),
-                a.stop_reason.as_str(),
-                a.agent.as_str(),
-                a.thread.as_str()
-            ),
-            ("Done.", "end_turn", "claude", "t1")
-        );
+        let a = agents::answer(r#"{"text":"Done.","stopReason":"end_turn","agent":"claude","thread":"t1"}"#).unwrap();
+        assert_eq!((a.text.as_str(), a.stop_reason.as_str(), a.agent.as_str(), a.thread.as_str()), ("Done.", "end_turn", "claude", "t1"));
         assert!(a.json.is_null() && a.reverted.is_empty());
         let a = agents::answer(r#"{"text":"x","json":{"title":"T"},"stopReason":"end_turn","agent":"claude","thread":"t2","reverted":["a.txt"]}"#).unwrap();
-        assert_eq!(
-            (a.json["title"].as_str(), a.reverted.as_slice()),
-            (Some("T"), &["a.txt".to_string()][..])
-        );
+        assert_eq!((a.json["title"].as_str(), a.reverted.as_slice()), (Some("T"), &["a.txt".to_string()][..]));
         assert!(agents::answer("nope").is_err());
     }
 
@@ -2358,54 +2009,12 @@ mod tests {
             .show(Show::Hidden)
             .timeout(std::time::Duration::from_secs(120));
         let p: serde_json::Value = serde_json::from_str(&ask.payload()).unwrap();
-        assert_eq!(
-            (
-                p["prompt"].as_str(),
-                p["agent"].as_str(),
-                p["stream"].as_bool(),
-                p["show"].as_str(),
-                p["timeoutMs"].as_u64()
-            ),
-            (
-                Some("Describe it."),
-                Some("claude"),
-                Some(true),
-                Some("hidden"),
-                Some(120_000)
-            )
-        );
-        let kinds: Vec<&str> = p["attach"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|a| a["kind"].as_str().unwrap())
-            .collect();
-        assert_eq!(
-            kinds,
-            [
-                "diff",
-                "diff",
-                "commits",
-                "file",
-                "selection",
-                "diagnostics",
-                "text"
-            ]
-        );
-        assert_eq!(
-            (
-                p["attach"][0]["of"].as_str(),
-                p["attach"][0]["base"].as_str(),
-                p["attach"][1]["of"].as_str()
-            ),
-            (Some("range"), Some("origin/main"), Some("staged"))
-        );
+        assert_eq!((p["prompt"].as_str(), p["agent"].as_str(), p["stream"].as_bool(), p["show"].as_str(), p["timeoutMs"].as_u64()), (Some("Describe it."), Some("claude"), Some(true), Some("hidden"), Some(120_000)));
+        let kinds: Vec<&str> = p["attach"].as_array().unwrap().iter().map(|a| a["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["diff", "diff", "commits", "file", "selection", "diagnostics", "text"]);
+        assert_eq!((p["attach"][0]["of"].as_str(), p["attach"][0]["base"].as_str(), p["attach"][1]["of"].as_str()), (Some("range"), Some("origin/main"), Some("staged")));
         assert_eq!(p["answerAs"]["type"], "object");
-        assert_eq!(
-            Ask::new("hi").payload(),
-            agents::payload("hi", None),
-            "the plain ask is the same"
-        );
+        assert_eq!(Ask::new("hi").payload(), agents::payload("hi", None), "the plain ask is the same");
     }
 
     #[test]
@@ -2413,9 +2022,6 @@ mod tests {
         with::<Counting, _>(|c| c.n += 1);
         with::<Counting, _>(|c| c.n += 1);
         assert_eq!(with::<Counting, _>(|c| c.n), 2);
-        assert_eq!(
-            with::<Counting, _>(|c| c.run_command("x")),
-            Err("no command x".into())
-        );
+        assert_eq!(with::<Counting, _>(|c| c.run_command("x")), Err("no command x".into()));
     }
 }

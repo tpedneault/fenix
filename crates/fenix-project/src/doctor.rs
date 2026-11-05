@@ -51,11 +51,7 @@ impl Section {
 pub enum EditorFix {
     /// Point this project's `tools.json` at a language server Fenix can't
     /// find on PATH.
-    UseLanguageServer {
-        language: String,
-        executable: PathBuf,
-        args: Vec<String>,
-    },
+    UseLanguageServer { language: String, executable: PathBuf, args: Vec<String> },
     /// Run a command, by id: an extension's fix.
     RunCommand(String),
 }
@@ -90,28 +86,12 @@ pub struct Check {
 }
 
 impl Check {
-    pub fn new(
-        section: Section,
-        label: impl Into<String>,
-        health: Health,
-        detail: impl Into<String>,
-    ) -> Self {
-        Check {
-            section,
-            label: label.into(),
-            detail: detail.into(),
-            health,
-            fix: None,
-            location: None,
-        }
+    pub fn new(section: Section, label: impl Into<String>, health: Health, detail: impl Into<String>) -> Self {
+        Check { section, label: label.into(), detail: detail.into(), health, fix: None, location: None }
     }
 
     pub fn fix(mut self, label: &str, action: FixAction, safe: bool) -> Self {
-        self.fix = Some(Fix {
-            label: label.to_string(),
-            action,
-            safe,
-        });
+        self.fix = Some(Fix { label: label.to_string(), action, safe });
         self
     }
 
@@ -153,18 +133,8 @@ pub trait Probe {
 
 /// `program` in one of `dirs`, with Windows' executable extensions.
 fn find_in(dirs: &[PathBuf], program: &str) -> Option<PathBuf> {
-    let extensions: &[&str] = if cfg!(windows) {
-        &[".exe", ".cmd", ".bat", ""]
-    } else {
-        &[""]
-    };
-    dirs.iter()
-        .flat_map(|dir| {
-            extensions
-                .iter()
-                .map(move |ext| dir.join(format!("{program}{ext}")))
-        })
-        .find(|p| p.is_file())
+    let extensions: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
+    dirs.iter().flat_map(|dir| extensions.iter().map(move |ext| dir.join(format!("{program}{ext}")))).find(|p| p.is_file())
 }
 
 /// Looks for `program` on PATH (with Windows' PATHEXT), for a `Probe`
@@ -175,31 +145,19 @@ pub fn which(program: &str) -> Option<PathBuf> {
         return path.is_file().then(|| path.to_path_buf());
     }
     let extensions: Vec<String> = if cfg!(windows) {
-        std::env::var("PATHEXT")
-            .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string())
-            .split(';')
-            .filter(|e| !e.is_empty())
-            .map(str::to_string)
-            .collect()
+        std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string()).split(';').filter(|e| !e.is_empty()).map(str::to_string).collect()
     } else {
         vec![String::new()]
     };
     std::env::split_paths(&std::env::var_os("PATH")?)
-        .flat_map(|dir| {
-            extensions
-                .iter()
-                .map(move |ext| dir.join(format!("{program}{ext}")))
-        })
+        .flat_map(|dir| extensions.iter().map(move |ext| dir.join(format!("{program}{ext}"))))
         .find(|candidate| candidate.is_file())
 }
 
 /// Runs `program` with no console window and returns (success, output).
 pub fn run_program(program: &Path, args: &[&str], dir: &Path) -> Option<(bool, String)> {
     let mut command = std::process::Command::new(program);
-    command
-        .args(args)
-        .current_dir(dir)
-        .stdin(std::process::Stdio::null());
+    command.args(args).current_dir(dir).stdin(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -221,9 +179,7 @@ fn version_in(text: &str) -> Option<String> {
             let mut parts = w.split('.');
             let major = parts.next().unwrap_or_default();
             let minor = parts.next().unwrap_or_default();
-            !major.is_empty()
-                && major.chars().all(|c| c.is_ascii_digit())
-                && minor.starts_with(|c: char| c.is_ascii_digit())
+            !major.is_empty() && major.chars().all(|c| c.is_ascii_digit()) && minor.starts_with(|c: char| c.is_ascii_digit())
         })
         .map(str::to_string)
 }
@@ -262,44 +218,21 @@ impl<'a> Doctor<'a> {
 
     /// A program's check: found (with its version on a deep pass) or
     /// `missing` with `hint`.
-    pub fn program(
-        &mut self,
-        section: Section,
-        program: &str,
-        missing: Health,
-        hint: &str,
-    ) -> Option<PathBuf> {
+    pub fn program(&mut self, section: Section, program: &str, missing: Health, hint: &str) -> Option<PathBuf> {
         match self.probe.locate(program) {
             Some(path) => {
                 // Nearly everything answers `--version`; Arduino CLI wants
                 // a subcommand.
-                let args: &[&str] = if program == "arduino-cli" {
-                    &["version"]
-                } else {
-                    &["--version"]
-                };
+                let args: &[&str] = if program == "arduino-cli" { &["version"] } else { &["--version"] };
                 // A tool that doesn't know the flag prints its usage and
                 // fails; nothing in that is its version.
-                let version = if self.deep {
-                    self.probe
-                        .run(&path, args, self.root)
-                        .filter(|(ok, _)| *ok)
-                        .and_then(|(_, out)| version_in(&out))
-                } else {
-                    None
-                };
+                let version = if self.deep { self.probe.run(&path, args, self.root).filter(|(ok, _)| *ok).and_then(|(_, out)| version_in(&out)) } else { None };
                 let detail = version.unwrap_or_else(|| path.display().to_string());
-                self.checks
-                    .push(Check::new(section, program, Health::Ok, detail));
+                self.checks.push(Check::new(section, program, Health::Ok, detail));
                 Some(path)
             }
             None => {
-                self.checks.push(Check::new(
-                    section,
-                    program,
-                    missing,
-                    format!("not found -- {hint}"),
-                ));
+                self.checks.push(Check::new(section, program, missing, format!("not found -- {hint}")));
                 None
             }
         }
@@ -321,93 +254,34 @@ pub fn diagnose(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bool) -
 
 /// `diagnose`, with the checks features add (`features`) after the
 /// language's own and before the project's.
-pub fn diagnose_with(
-    root: &Path,
-    kind: ProjectKind,
-    probe: &dyn Probe,
-    deep: bool,
-    features: &[FeatureCheck],
-) -> Vec<Check> {
-    let mut d = Doctor {
-        root,
-        probe,
-        deep,
-        kind,
-        checks: Vec::new(),
-    };
+pub fn diagnose_with(root: &Path, kind: ProjectKind, probe: &dyn Probe, deep: bool, features: &[FeatureCheck]) -> Vec<Check> {
+    let mut d = Doctor { root, probe, deep, kind, checks: Vec::new() };
     let tools = ProjectTools::read(root);
     match kind {
         ProjectKind::Python => python(&mut d, tools.as_ref().ok()),
         ProjectKind::Rust => {
-            d.program(
-                Section::Toolchain,
-                "cargo",
-                Health::Bad,
-                "install Rust from https://rustup.rs",
-            );
+            d.program(Section::Toolchain, "cargo", Health::Bad, "install Rust from https://rustup.rs");
             if d.probe.locate("rust-analyzer").is_none() {
-                d.push(
-                    Check::new(
-                        Section::Toolchain,
-                        "rust-analyzer",
-                        Health::Warn,
-                        "not found -- no completion or errors as you type",
-                    )
-                    .run(
-                        "rustup component add rust-analyzer",
-                        "rustup",
-                        &["component", "add", "rust-analyzer"],
-                        false,
-                    ),
-                );
+                d.push(Check::new(Section::Toolchain, "rust-analyzer", Health::Warn, "not found -- no completion or errors as you type").run("rustup component add rust-analyzer", "rustup", &["component", "add", "rust-analyzer"], false));
             } else {
                 d.program(Section::Toolchain, "rust-analyzer", Health::Warn, "");
             }
             rust_src(&mut d);
         }
         ProjectKind::Cpp => {
-            d.program(
-                Section::Toolchain,
-                "cmake",
-                Health::Warn,
-                "install CMake to configure and build",
-            );
-            d.program(
-                Section::Toolchain,
-                "clangd",
-                Health::Warn,
-                "no completion or errors as you type",
-            );
+            d.program(Section::Toolchain, "cmake", Health::Warn, "install CMake to configure and build");
+            d.program(Section::Toolchain, "clangd", Health::Warn, "no completion or errors as you type");
         }
         ProjectKind::Go => {
-            d.program(
-                Section::Toolchain,
-                "go",
-                Health::Bad,
-                "install Go from https://go.dev",
-            );
-            d.program(
-                Section::Toolchain,
-                "gopls",
-                Health::Warn,
-                "go install golang.org/x/tools/gopls@latest",
-            );
+            d.program(Section::Toolchain, "go", Health::Bad, "install Go from https://go.dev");
+            d.program(Section::Toolchain, "gopls", Health::Warn, "go install golang.org/x/tools/gopls@latest");
         }
         ProjectKind::Node => {
             d.program(Section::Toolchain, "node", Health::Bad, "install Node.js");
-            d.program(
-                Section::Toolchain,
-                "typescript-language-server",
-                Health::Warn,
-                "npm install -g typescript-language-server typescript",
-            );
+            d.program(Section::Toolchain, "typescript-language-server", Health::Warn, "npm install -g typescript-language-server typescript");
         }
         // Their features' (`features`).
-        ProjectKind::Arduino
-        | ProjectKind::Mib
-        | ProjectKind::Tcl
-        | ProjectKind::Monorepo
-        | ProjectKind::Other => {}
+        ProjectKind::Arduino | ProjectKind::Mib | ProjectKind::Tcl | ProjectKind::Monorepo | ProjectKind::Other => {}
     }
     for check in features {
         check(&mut d);
@@ -424,27 +298,15 @@ fn rust_src(d: &mut Doctor) {
     if !d.deep {
         return;
     }
-    let Some(rustc) = d.probe.locate("rustc") else {
-        return;
-    };
-    let Some((true, out)) = d.probe.run(&rustc, &["--print", "sysroot"], d.root) else {
-        return;
-    };
+    let Some(rustc) = d.probe.locate("rustc") else { return };
+    let Some((true, out)) = d.probe.run(&rustc, &["--print", "sysroot"], d.root) else { return };
     let sysroot = PathBuf::from(out.trim());
-    if sysroot
-        .join("lib")
-        .join("rustlib")
-        .join("src")
-        .join("rust")
-        .join("library")
-        .is_dir()
-    {
+    if sysroot.join("lib").join("rustlib").join("src").join("rust").join("library").is_dir() {
         return;
     }
     // rustup's rustc is a proxy in ~/.cargo/bin; a component fixes it.
     // Another install's (a standalone one in Program Files) it doesn't.
-    let rustup = rustc.components().any(|c| c.as_os_str() == ".cargo")
-        || sysroot.components().any(|c| c.as_os_str() == ".rustup");
+    let rustup = rustc.components().any(|c| c.as_os_str() == ".cargo") || sysroot.components().any(|c| c.as_os_str() == ".rustup");
     let check = if rustup {
         Check::new(Section::Toolchain, "rust-src", Health::Warn, "the standard library's source isn't installed -- rust-analyzer reports errors that aren't there")
             .run("rustup component add rust-src", "rustup", &["component", "add", "rust-src"], false)
@@ -464,190 +326,63 @@ fn rust_src(d: &mut Doctor) {
 
 fn python(d: &mut Doctor, tools: Option<&ProjectTools>) {
     let root = d.root;
-    let uv_project = root.join("uv.lock").is_file()
-        || std::fs::read_to_string(root.join("pyproject.toml"))
-            .is_ok_and(|t| t.contains("[tool.uv"));
+    let uv_project = root.join("uv.lock").is_file() || std::fs::read_to_string(root.join("pyproject.toml")).is_ok_and(|t| t.contains("[tool.uv"));
     let venv = root.join(".venv");
-    let venv_python = if cfg!(windows) {
-        venv.join("Scripts").join("python.exe")
-    } else {
-        venv.join("bin").join("python")
-    };
+    let venv_python = if cfg!(windows) { venv.join("Scripts").join("python.exe") } else { venv.join("bin").join("python") };
     if uv_project {
-        let uv = d.program(
-            Section::Toolchain,
-            "uv",
-            Health::Bad,
-            "install it from https://docs.astral.sh/uv",
-        );
+        let uv = d.program(Section::Toolchain, "uv", Health::Bad, "install it from https://docs.astral.sh/uv");
         if !venv_python.is_file() {
-            d.push(
-                Check::new(Section::Toolchain, ".venv", Health::Warn, "not created yet").run(
-                    "uv sync",
-                    "uv",
-                    &["sync"],
-                    true,
-                ),
-            );
+            d.push(Check::new(Section::Toolchain, ".venv", Health::Warn, "not created yet").run("uv sync", "uv", &["sync"], true));
         } else if let (true, Some(uv)) = (d.deep, uv) {
             match d.probe.run(&uv, &["sync", "--dry-run"], root) {
-                Some((true, out)) if out.contains("Would make no changes") => d.push(Check::new(
-                    Section::Toolchain,
-                    ".venv",
-                    Health::Ok,
-                    "in sync with uv.lock",
-                )),
+                Some((true, out)) if out.contains("Would make no changes") => d.push(Check::new(Section::Toolchain, ".venv", Health::Ok, "in sync with uv.lock")),
                 Some((_, out)) => {
-                    let changes = out
-                        .lines()
-                        .filter(|l| l.trim_start().starts_with(['+', '-']))
-                        .count();
-                    d.push(
-                        Check::new(
-                            Section::Toolchain,
-                            ".venv",
-                            Health::Warn,
-                            format!(
-                                "behind uv.lock -- {changes} package change{}",
-                                if changes == 1 { "" } else { "s" }
-                            ),
-                        )
-                        .run("uv sync", "uv", &["sync"], true),
-                    );
+                    let changes = out.lines().filter(|l| l.trim_start().starts_with(['+', '-'])).count();
+                    d.push(Check::new(Section::Toolchain, ".venv", Health::Warn, format!("behind uv.lock -- {changes} package change{}", if changes == 1 { "" } else { "s" })).run("uv sync", "uv", &["sync"], true));
                 }
-                None => d.push(Check::new(
-                    Section::Toolchain,
-                    ".venv",
-                    Health::Info,
-                    "uv couldn't check it",
-                )),
+                None => d.push(Check::new(Section::Toolchain, ".venv", Health::Info, "uv couldn't check it")),
             }
         } else {
-            d.push(Check::new(
-                Section::Toolchain,
-                ".venv",
-                Health::Ok,
-                "present",
-            ));
+            d.push(Check::new(Section::Toolchain, ".venv", Health::Ok, "present"));
         }
     } else {
-        d.program(
-            Section::Toolchain,
-            if cfg!(windows) { "python" } else { "python3" },
-            Health::Bad,
-            "install Python from https://python.org",
-        );
+        d.program(Section::Toolchain, if cfg!(windows) { "python" } else { "python3" }, Health::Bad, "install Python from https://python.org");
     }
     if venv_python.is_file() && d.deep {
-        if let Some(version) = d
-            .probe
-            .run(&venv_python, &["--version"], root)
-            .and_then(|(_, out)| version_in(&out))
-        {
-            d.push(Check::new(
-                Section::Toolchain,
-                "python",
-                Health::Ok,
-                format!("{version} · .venv"),
-            ));
+        if let Some(version) = d.probe.run(&venv_python, &["--version"], root).and_then(|(_, out)| version_in(&out)) {
+            d.push(Check::new(Section::Toolchain, "python", Health::Ok, format!("{version} · .venv")));
         }
     }
     // The language server Fenix starts: the project's own, else pyright.
-    let server = tools
-        .and_then(|t| t.lsp.get("python"))
-        .map(|c| c.executable.clone())
-        .unwrap_or_else(|| "pyright-langserver".to_string());
-    if d.probe.locate(&server).is_some()
-        || Path::new(&server).is_absolute() && Path::new(&server).is_file()
-    {
+    let server = tools.and_then(|t| t.lsp.get("python")).map(|c| c.executable.clone()).unwrap_or_else(|| "pyright-langserver".to_string());
+    if d.probe.locate(&server).is_some() || Path::new(&server).is_absolute() && Path::new(&server).is_file() {
         // A configured full path reads as the program's name, with where
         // it lives beside it.
         let path = Path::new(&server);
         let (label, detail) = match (path.is_absolute(), path.file_stem(), path.parent()) {
-            (true, Some(stem), Some(dir)) => (
-                stem.to_string_lossy().into_owned(),
-                format!("language server · {}", dir.display()),
-            ),
+            (true, Some(stem), Some(dir)) => (stem.to_string_lossy().into_owned(), format!("language server · {}", dir.display())),
             _ => (server.clone(), "language server".to_string()),
         };
         d.push(Check::new(Section::Toolchain, label, Health::Ok, detail));
     } else if let Some(found) = find_in(&d.probe.tool_dirs(), &server) {
         // Installed, just not where Fenix looks: uv puts tools in a folder
         // that often isn't on PATH until a new login.
-        let dir = found
-            .parent()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
+        let dir = found.parent().map(|p| p.display().to_string()).unwrap_or_default();
         d.push(
-            Check::new(
-                Section::Toolchain,
-                &server,
-                Health::Warn,
-                format!("installed in {dir}, which isn't on Fenix's PATH"),
-            )
-            .fix(
-                "use it for this project",
-                FixAction::Editor(EditorFix::UseLanguageServer {
-                    language: "python".into(),
-                    executable: found,
-                    args: vec!["--stdio".into()],
-                }),
-                true,
-            ),
+            Check::new(Section::Toolchain, &server, Health::Warn, format!("installed in {dir}, which isn't on Fenix's PATH"))
+                .fix("use it for this project", FixAction::Editor(EditorFix::UseLanguageServer { language: "python".into(), executable: found, args: vec!["--stdio".into()] }), true),
         );
     } else {
-        let check = Check::new(
-            Section::Toolchain,
-            &server,
-            Health::Bad,
-            "not found -- no completion or errors as you type",
-        );
-        d.push(if server == "pyright-langserver" {
-            check.run(
-                "uv tool install pyright",
-                "uv",
-                &["tool", "install", "pyright"],
-                false,
-            )
-        } else {
-            check
-        });
+        let check = Check::new(Section::Toolchain, &server, Health::Bad, "not found -- no completion or errors as you type");
+        d.push(if server == "pyright-langserver" { check.run("uv tool install pyright", "uv", &["tool", "install", "pyright"], false) } else { check });
     }
     if venv.is_dir() {
         let has_debugpy = [venv.join("Lib").join("site-packages").join("debugpy")]
             .into_iter()
-            .chain(
-                std::fs::read_dir(venv.join("lib"))
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|e| e.path().join("site-packages").join("debugpy")),
-            )
+            .chain(std::fs::read_dir(venv.join("lib")).into_iter().flatten().flatten().map(|e| e.path().join("site-packages").join("debugpy")))
             .any(|p| p.is_dir());
-        let check = Check::new(
-            Section::Toolchain,
-            "debugpy",
-            if has_debugpy {
-                Health::Ok
-            } else {
-                Health::Info
-            },
-            if has_debugpy {
-                "in .venv"
-            } else {
-                "not installed -- needed to debug"
-            },
-        );
-        d.push(if !has_debugpy && uv_project {
-            check.run(
-                "uv add --dev debugpy",
-                "uv",
-                &["add", "--dev", "debugpy"],
-                false,
-            )
-        } else {
-            check
-        });
+        let check = Check::new(Section::Toolchain, "debugpy", if has_debugpy { Health::Ok } else { Health::Info }, if has_debugpy { "in .venv" } else { "not installed -- needed to debug" });
+        d.push(if !has_debugpy && uv_project { check.run("uv add --dev debugpy", "uv", &["add", "--dev", "debugpy"], false) } else { check });
     }
 }
 
@@ -658,15 +393,7 @@ fn project(d: &mut Doctor, tools: Result<ProjectTools, String>) {
         match tools {
             Ok(tools) => {
                 let n = tools.tasks.len();
-                d.push(
-                    Check::new(
-                        Section::Project,
-                        "tools.json",
-                        Health::Ok,
-                        format!("valid · {n} task{}", if n == 1 { "" } else { "s" }),
-                    )
-                    .at(tools_path.clone(), 1),
-                );
+                d.push(Check::new(Section::Project, "tools.json", Health::Ok, format!("valid · {n} task{}", if n == 1 { "" } else { "s" })).at(tools_path.clone(), 1));
                 for server in &tools.lsp.additional {
                     additional_server(d, server, &tools_path);
                 }
@@ -674,9 +401,7 @@ fn project(d: &mut Doctor, tools: Result<ProjectTools, String>) {
                     debug_adapter(d, language, adapter, &tools_path);
                 }
             }
-            Err(e) => {
-                d.push(Check::new(Section::Project, "tools.json", Health::Bad, e).at(tools_path, 1))
-            }
+            Err(e) => d.push(Check::new(Section::Project, "tools.json", Health::Bad, e).at(tools_path, 1)),
         }
     }
     let repository = crate::vcs::repository_root(root);
@@ -687,22 +412,12 @@ fn project(d: &mut Doctor, tools: Result<ProjectTools, String>) {
         let detail = if repo == root {
             branch
         } else {
-            let name = repo
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| repo.display().to_string());
+            let name = repo.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| repo.display().to_string());
             format!("{branch} · part of the {name} repository")
         };
         d.push(Check::new(Section::Project, "git", Health::Ok, detail));
     } else {
-        d.push(
-            Check::new(Section::Project, "git", Health::Info, "not a repository").run(
-                "git init",
-                "git",
-                &["init"],
-                true,
-            ),
-        );
+        d.push(Check::new(Section::Project, "git", Health::Info, "not a repository").run("git init", "git", &["init"], true));
     }
 }
 
@@ -713,71 +428,32 @@ fn additional_server(d: &mut Doctor, server: &crate::tools::AdditionalServer, to
     let languages = server.languages.join(", ");
     let path = Path::new(&server.executable);
     let found = if path.is_absolute() || server.executable.contains(['/', '\\']) {
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            d.root.join(path)
-        };
+        let path = if path.is_absolute() { path.to_path_buf() } else { d.root.join(path) };
         path.is_file().then_some(path)
     } else {
         d.probe.locate(&server.executable)
     };
     let check = match found {
-        Some(path) => Check::new(
-            Section::Toolchain,
-            label,
-            Health::Ok,
-            format!("{languages} · {}", path.display()),
-        ),
-        None => Check::new(
-            Section::Toolchain,
-            label,
-            Health::Warn,
-            format!(
-                "{} not found -- {languages} buffers get only their primary server",
-                server.executable
-            ),
-        ),
+        Some(path) => Check::new(Section::Toolchain, label, Health::Ok, format!("{languages} · {}", path.display())),
+        None => Check::new(Section::Toolchain, label, Health::Warn, format!("{} not found -- {languages} buffers get only their primary server", server.executable)),
     };
     d.push(check.at(tools_path.to_path_buf(), 1));
 }
 
 /// The check of a debug adapter `tools.json` names for `language`: its
 /// program found, as an additional server's is.
-fn debug_adapter(
-    d: &mut Doctor,
-    language: &str,
-    adapter: &crate::tools::CommandSpec,
-    tools_path: &Path,
-) {
+fn debug_adapter(d: &mut Doctor, language: &str, adapter: &crate::tools::CommandSpec, tools_path: &Path) {
     let path = Path::new(&adapter.executable);
-    let label = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| adapter.executable.clone());
+    let label = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| adapter.executable.clone());
     let found = if path.is_absolute() || adapter.executable.contains(['/', '\\']) {
-        let path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            d.root.join(path)
-        };
+        let path = if path.is_absolute() { path.to_path_buf() } else { d.root.join(path) };
         path.is_file().then_some(path)
     } else {
         d.probe.locate(&adapter.executable)
     };
     let check = match found {
-        Some(path) => Check::new(
-            Section::Toolchain,
-            label,
-            Health::Ok,
-            format!("debug adapter for {language} · {}", path.display()),
-        ),
-        None => Check::new(
-            Section::Toolchain,
-            label,
-            Health::Warn,
-            format!("debug adapter for {language} · not found -- SPC u u can't start it"),
-        ),
+        Some(path) => Check::new(Section::Toolchain, label, Health::Ok, format!("debug adapter for {language} · {}", path.display())),
+        None => Check::new(Section::Toolchain, label, Health::Warn, format!("debug adapter for {language} · not found -- SPC u u can't start it")),
     };
     d.push(check.at(tools_path.to_path_buf(), 1));
 }
@@ -798,20 +474,11 @@ mod tests {
 
     impl Probe for FakeProbe {
         fn locate(&self, program: &str) -> Option<PathBuf> {
-            self.programs
-                .contains(&program)
-                .then(|| PathBuf::from(format!("/bin/{program}")))
+            self.programs.contains(&program).then(|| PathBuf::from(format!("/bin/{program}")))
         }
         fn run(&self, program: &Path, args: &[&str], _dir: &Path) -> Option<(bool, String)> {
             let name = program.file_name()?.to_string_lossy().into_owned();
-            self.outputs
-                .get(&format!("{name} {}", args.join(" ")))
-                .cloned()
-                .or_else(|| {
-                    args.first()
-                        .filter(|a| ["--version", "version"].contains(*a))
-                        .map(|_| (true, format!("{name} 1.2.3")))
-                })
+            self.outputs.get(&format!("{name} {}", args.join(" "))).cloned().or_else(|| args.first().filter(|a| ["--version", "version"].contains(*a)).map(|_| (true, format!("{name} 1.2.3"))))
         }
         fn tool_dirs(&self) -> Vec<PathBuf> {
             self.tool_dirs.clone()
@@ -819,12 +486,7 @@ mod tests {
     }
 
     fn find<'a>(checks: &'a [Check], label: &str) -> &'a Check {
-        checks.iter().find(|c| c.label == label).unwrap_or_else(|| {
-            panic!(
-                "no {label} check in {:?}",
-                checks.iter().map(|c| &c.label).collect::<Vec<_>>()
-            )
-        })
+        checks.iter().find(|c| c.label == label).unwrap_or_else(|| panic!("no {label} check in {:?}", checks.iter().map(|c| &c.label).collect::<Vec<_>>()))
     }
 
     /// A sysroot with the standard library's source passes; one without
@@ -837,59 +499,21 @@ mod tests {
         let sysroot = dir.path().join("sysroot");
         let probe = |sysroot: &Path, rustc: &'static str| FakeProbe {
             programs: vec!["cargo", "rust-analyzer", rustc],
-            outputs: HashMap::from([(
-                format!("{rustc} --print sysroot"),
-                (true, format!("{}\n", sysroot.display())),
-            )]),
+            outputs: HashMap::from([(format!("{rustc} --print sysroot"), (true, format!("{}\n", sysroot.display())))]),
             ..Default::default()
         };
         // FakeProbe locates programs at /bin/<name>: not rustup's.
-        let checks = diagnose(
-            dir.path(),
-            ProjectKind::Rust,
-            &probe(&sysroot, "rustc"),
-            true,
-        );
+        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&sysroot, "rustc"), true);
         let src = find(&checks, "rust-src");
         assert_eq!(src.health, Health::Warn);
-        assert!(
-            src.fix.is_none() && src.detail.contains("put rustup's toolchain"),
-            "{}",
-            src.detail
-        );
+        assert!(src.fix.is_none() && src.detail.contains("put rustup's toolchain"), "{}", src.detail);
         let rustup_sysroot = dir.path().join(".rustup").join("toolchains").join("stable");
-        let checks = diagnose(
-            dir.path(),
-            ProjectKind::Rust,
-            &probe(&rustup_sysroot, "rustc"),
-            true,
-        );
-        assert!(find(&checks, "rust-src")
-            .fix
-            .as_ref()
-            .is_some_and(|f| f.label == "rustup component add rust-src"));
+        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&rustup_sysroot, "rustc"), true);
+        assert!(find(&checks, "rust-src").fix.as_ref().is_some_and(|f| f.label == "rustup component add rust-src"));
         dir.write("sysroot/lib/rustlib/src/rust/library/core/lib.rs", "");
-        let checks = diagnose(
-            dir.path(),
-            ProjectKind::Rust,
-            &probe(&sysroot, "rustc"),
-            true,
-        );
-        assert!(
-            !checks.iter().any(|c| c.label == "rust-src"),
-            "the source is there"
-        );
-        assert!(
-            !diagnose(
-                dir.path(),
-                ProjectKind::Rust,
-                &probe(&rustup_sysroot, "rustc"),
-                false
-            )
-            .iter()
-            .any(|c| c.label == "rust-src"),
-            "a quick pass runs nothing"
-        );
+        let checks = diagnose(dir.path(), ProjectKind::Rust, &probe(&sysroot, "rustc"), true);
+        assert!(!checks.iter().any(|c| c.label == "rust-src"), "the source is there");
+        assert!(!diagnose(dir.path(), ProjectKind::Rust, &probe(&rustup_sysroot, "rustc"), false).iter().any(|c| c.label == "rust-src"), "a quick pass runs nothing");
     }
 
     #[test]
@@ -897,24 +521,15 @@ mod tests {
         let dir = TempDir::new("doctor_py");
         dir.write("pyproject.toml", "[project]\nname='x'\n");
         dir.write("uv.lock", "");
-        let probe = FakeProbe {
-            programs: vec!["uv"],
-            ..Default::default()
-        };
+        let probe = FakeProbe { programs: vec!["uv"], ..Default::default() };
         let checks = diagnose(dir.path(), ProjectKind::Python, &probe, true);
         assert_eq!(find(&checks, "uv").detail, "1.2.3");
         let venv = find(&checks, ".venv");
         assert_eq!(venv.health, Health::Warn);
-        assert!(venv
-            .fix
-            .as_ref()
-            .is_some_and(|f| f.safe && f.label == "uv sync"));
+        assert!(venv.fix.as_ref().is_some_and(|f| f.safe && f.label == "uv sync"));
         let lsp = find(&checks, "pyright-langserver");
         assert_eq!(lsp.health, Health::Bad);
-        assert!(
-            lsp.fix.as_ref().is_some_and(|f| !f.safe),
-            "installing is never safe"
-        );
+        assert!(lsp.fix.as_ref().is_some_and(|f| !f.safe), "installing is never safe");
         assert_eq!(find(&checks, "git").health, Health::Info);
         assert_eq!(worst(&checks), Health::Bad);
     }
@@ -923,35 +538,17 @@ mod tests {
     fn a_server_installed_off_path_is_found_and_can_be_pointed_at() {
         let dir = TempDir::new("doctor_offpath");
         dir.write("uv.lock", "");
-        let exe = if cfg!(windows) {
-            "bin/pyright-langserver.exe"
-        } else {
-            "bin/pyright-langserver"
-        };
+        let exe = if cfg!(windows) { "bin/pyright-langserver.exe" } else { "bin/pyright-langserver" };
         dir.write(exe, "");
-        let probe = FakeProbe {
-            programs: vec!["uv"],
-            tool_dirs: vec![dir.path().join("bin")],
-            ..Default::default()
-        };
+        let probe = FakeProbe { programs: vec!["uv"], tool_dirs: vec![dir.path().join("bin")], ..Default::default() };
         let checks = diagnose(dir.path(), ProjectKind::Python, &probe, false);
         let lsp = find(&checks, "pyright-langserver");
         assert_eq!(lsp.health, Health::Warn);
-        assert!(
-            lsp.detail.contains("isn't on Fenix's PATH"),
-            "{}",
-            lsp.detail
-        );
+        assert!(lsp.detail.contains("isn't on Fenix's PATH"), "{}", lsp.detail);
         let fix = lsp.fix.as_ref().unwrap();
         assert!(fix.safe, "it only writes this project's tools.json");
-        assert!(
-            matches!(&fix.action, FixAction::Editor(EditorFix::UseLanguageServer { executable, .. }) if executable == &dir.path().join(exe))
-        );
-        dir.write(
-            ".fenix/tools.json",
-            &serde_json::json!({"lsp": {"python": {"executable": dir.path().join(exe)}}})
-                .to_string(),
-        );
+        assert!(matches!(&fix.action, FixAction::Editor(EditorFix::UseLanguageServer { executable, .. }) if executable == &dir.path().join(exe)));
+        dir.write(".fenix/tools.json", &serde_json::json!({"lsp": {"python": {"executable": dir.path().join(exe)}}}).to_string());
         let checks = diagnose(dir.path(), ProjectKind::Python, &probe, false);
         let lsp = find(&checks, "pyright-langserver");
         assert_eq!(lsp.health, Health::Ok, "once pointed at, it's found");
@@ -962,29 +559,13 @@ mod tests {
     fn a_venv_behind_its_lock_is_reported_from_uv_itself() {
         let dir = TempDir::new("doctor_venv");
         dir.write("uv.lock", "");
-        let python = if cfg!(windows) {
-            ".venv/Scripts/python.exe"
-        } else {
-            ".venv/bin/python"
-        };
+        let python = if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" };
         dir.write(python, "");
-        let mut probe = FakeProbe {
-            programs: vec!["uv", "pyright-langserver"],
-            ..Default::default()
-        };
-        probe.outputs.insert(
-            "uv sync --dry-run".into(),
-            (true, "Resolved 3\n + rich==15.0\n - old==1\n".into()),
-        );
+        let mut probe = FakeProbe { programs: vec!["uv", "pyright-langserver"], ..Default::default() };
+        probe.outputs.insert("uv sync --dry-run".into(), (true, "Resolved 3\n + rich==15.0\n - old==1\n".into()));
         let checks = diagnose(dir.path(), ProjectKind::Python, &probe, true);
-        assert_eq!(
-            find(&checks, ".venv").detail,
-            "behind uv.lock -- 2 package changes"
-        );
-        probe.outputs.insert(
-            "uv sync --dry-run".into(),
-            (true, "Would make no changes\n".into()),
-        );
+        assert_eq!(find(&checks, ".venv").detail, "behind uv.lock -- 2 package changes");
+        probe.outputs.insert("uv sync --dry-run".into(), (true, "Would make no changes\n".into()));
         let checks = diagnose(dir.path(), ProjectKind::Python, &probe, true);
         assert_eq!(find(&checks, ".venv").health, Health::Ok);
         // A quick pass runs nothing.
@@ -995,41 +576,23 @@ mod tests {
     #[test]
     fn a_subproject_is_in_its_repository_and_never_offered_git_init() {
         let dir = TempDir::new("doctor_nested");
-        dir.write(
-            ".git/HEAD",
-            "ref: refs/heads/trunk
-",
-        );
+        dir.write(".git/HEAD", "ref: refs/heads/trunk
+");
         dir.write("crates/core/Cargo.toml", "[package]");
-        let checks = diagnose(
-            &dir.path().join("crates/core"),
-            ProjectKind::Rust,
-            &FakeProbe::default(),
-            false,
-        );
+        let checks = diagnose(&dir.path().join("crates/core"), ProjectKind::Rust, &FakeProbe::default(), false);
         let git = find(&checks, "git");
         assert_eq!(git.health, Health::Ok);
-        assert!(
-            git.detail.starts_with("trunk · part of the "),
-            "{}",
-            git.detail
-        );
+        assert!(git.detail.starts_with("trunk · part of the "), "{}", git.detail);
         assert!(git.fix.is_none());
     }
 
     #[test]
     fn additional_servers_are_checked_by_name() {
         let dir = TempDir::new("doctor_additional");
-        dir.write(
-            ".fenix/tools.json",
-            r#"{"lsp":{"additional":[
+        dir.write(".fenix/tools.json", r#"{"lsp":{"additional":[
             {"name":"kiln","executable":"kiln","args":["lsp"],"languages":["rust","markdown"]},
-            {"name":"spell","executable":"bin/spell-ls","languages":["markdown"]}]}}"#,
-        );
-        let probe = FakeProbe {
-            programs: vec!["kiln"],
-            ..Default::default()
-        };
+            {"name":"spell","executable":"bin/spell-ls","languages":["markdown"]}]}}"#);
+        let probe = FakeProbe { programs: vec!["kiln"], ..Default::default() };
         let checks = diagnose(dir.path(), ProjectKind::Other, &probe, false);
         let kiln = find(&checks, "kiln (additional server)");
         assert_eq!(kiln.health, Health::Ok);
@@ -1039,29 +602,18 @@ mod tests {
         assert!(spell.detail.contains("not found"), "{}", spell.detail);
         dir.write("bin/spell-ls", "");
         let checks = diagnose(dir.path(), ProjectKind::Other, &probe, false);
-        assert_eq!(
-            find(&checks, "spell (additional server)").health,
-            Health::Ok,
-            "a project-relative program is looked for in the project"
-        );
+        assert_eq!(find(&checks, "spell (additional server)").health, Health::Ok, "a project-relative program is looked for in the project");
     }
 
     #[test]
     fn debug_adapters_are_checked_as_servers_are() {
         let dir = TempDir::new("doctor_adapters");
         dir.write(".fenix/tools.json", r#"{"dap":{"go":{"executable":"dlv","args":["dap"]},"rust":{"executable":"bin/codelldb"}}}"#);
-        let probe = FakeProbe {
-            programs: vec!["dlv"],
-            ..Default::default()
-        };
+        let probe = FakeProbe { programs: vec!["dlv"], ..Default::default() };
         let checks = diagnose(dir.path(), ProjectKind::Other, &probe, false);
         let dlv = find(&checks, "dlv");
         assert_eq!(dlv.health, Health::Ok);
-        assert!(
-            dlv.detail.starts_with("debug adapter for go"),
-            "{}",
-            dlv.detail
-        );
+        assert!(dlv.detail.starts_with("debug adapter for go"), "{}", dlv.detail);
         let lldb = find(&checks, "codelldb");
         assert_eq!(lldb.health, Health::Warn);
         assert!(lldb.detail.contains("not found"), "{}", lldb.detail);
@@ -1075,34 +627,18 @@ mod tests {
         let checks = diagnose(dir.path(), ProjectKind::Other, &FakeProbe::default(), false);
         let tools = find(&checks, "tools.json");
         assert_eq!(tools.health, Health::Bad);
-        assert_eq!(
-            tools
-                .location
-                .as_ref()
-                .map(|(p, _)| p.ends_with("tools.json")),
-            Some(true)
-        );
+        assert_eq!(tools.location.as_ref().map(|(p, _)| p.ends_with("tools.json")), Some(true));
         assert_eq!(find(&checks, "git").detail, "main");
     }
 
     #[test]
     fn versions_are_picked_out_of_whatever_a_tool_prints() {
-        assert_eq!(
-            version_in("uv 0.12.5 (210d1f678 2026-08-14)").as_deref(),
-            Some("0.12.5")
-        );
-        assert_eq!(
-            version_in("arduino-cli  Version: 1.5.1 Commit: x").as_deref(),
-            Some("1.5.1")
-        );
+        assert_eq!(version_in("uv 0.12.5 (210d1f678 2026-08-14)").as_deref(), Some("0.12.5"));
+        assert_eq!(version_in("arduino-cli  Version: 1.5.1 Commit: x").as_deref(), Some("1.5.1"));
         assert_eq!(version_in("Python 3.12.14").as_deref(), Some("3.12.14"));
         assert_eq!(version_in("rust-analyzer v0.3.2"), Some("0.3.2".into()));
         assert_eq!(version_in("nothing here"), None);
-        assert_eq!(
-            version_in("Usage: -board-name string  1. the board"),
-            None,
-            "a stray `1.` isn't a version"
-        );
+        assert_eq!(version_in("Usage: -board-name string  1. the board"), None, "a stray `1.` isn't a version");
         assert_eq!(version_in("clangd version 22.1.8."), Some("22.1.8".into()));
     }
 }

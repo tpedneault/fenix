@@ -38,10 +38,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options {
-            backend: Backend::Native,
-            max_stack: 512 * 1024,
-        }
+        Options { backend: Backend::Native, max_stack: 512 * 1024 }
     }
 }
 
@@ -69,13 +66,7 @@ pub fn engine(options: &Options) -> wasmtime::Result<wasmtime::Engine> {
 /// What one extension may use: `memory` bytes of linear memory, and a
 /// handful of instances, tables and memories.
 pub fn limits(memory: usize) -> wasmtime::StoreLimits {
-    wasmtime::StoreLimitsBuilder::new()
-        .memory_size(memory)
-        .instances(16)
-        .tables(16)
-        .memories(4)
-        .trap_on_grow_failure(true)
-        .build()
+    wasmtime::StoreLimitsBuilder::new().memory_size(memory).instances(16).tables(16).memories(4).trap_on_grow_failure(true).build()
 }
 
 /// Moves `engine`'s epoch on every `TICK` until dropped, so a call given
@@ -107,10 +98,7 @@ impl Ticker {
                 }
             })
             .expect("a thread for the epoch");
-        Ticker {
-            stop,
-            thread: Some(thread),
-        }
+        Ticker { stop, thread: Some(thread) }
     }
 }
 
@@ -128,20 +116,13 @@ mod tests {
     use super::*;
     use wasmtime::{Instance, Module, Store};
 
-    fn run(
-        engine: &wasmtime::Engine,
-        wat: &str,
-        export: &str,
-        deadline: u64,
-    ) -> wasmtime::Result<i32> {
+    fn run(engine: &wasmtime::Engine, wat: &str, export: &str, deadline: u64) -> wasmtime::Result<i32> {
         let module = Module::new(engine, wat)?;
         let mut store = Store::new(engine, limits(16 << 20));
         store.limiter(|l| l);
         store.set_epoch_deadline(deadline);
         let instance = Instance::new(&mut store, &module, &[])?;
-        instance
-            .get_typed_func::<(), i32>(&mut store, export)?
-            .call(&mut store, ())
+        instance.get_typed_func::<(), i32>(&mut store, export)?.call(&mut store, ())
     }
 
     /// A call that never returns traps at its deadline; Fenix goes on.
@@ -150,23 +131,9 @@ mod tests {
         let engine = engine(&Options::default()).unwrap();
         let _ticker = Ticker::start(&engine);
         let started = std::time::Instant::now();
-        let err = run(
-            &engine,
-            r#"(module (func (export "spin") (result i32) (loop $l (br $l)) (i32.const 0)))"#,
-            "spin",
-            5,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.downcast_ref::<wasmtime::Trap>(),
-            Some(&wasmtime::Trap::Interrupt),
-            "{err:?}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
-        );
+        let err = run(&engine, r#"(module (func (export "spin") (result i32) (loop $l (br $l)) (i32.const 0)))"#, "spin", 5).unwrap_err();
+        assert_eq!(err.downcast_ref::<wasmtime::Trap>(), Some(&wasmtime::Trap::Interrupt), "{err:?}");
+        assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
     }
 
     /// Recursion with no end traps on the stack bound instead of
@@ -174,18 +141,8 @@ mod tests {
     #[test]
     fn runaway_recursion_traps_on_the_stack_bound() {
         let engine = engine(&Options::default()).unwrap();
-        let err = run(
-            &engine,
-            r#"(module (func $f (export "down") (result i32) (i32.add (call $f) (i32.const 1))))"#,
-            "down",
-            u64::MAX,
-        )
-        .unwrap_err();
-        assert_eq!(
-            err.downcast_ref::<wasmtime::Trap>(),
-            Some(&wasmtime::Trap::StackOverflow),
-            "{err:?}"
-        );
+        let err = run(&engine, r#"(module (func $f (export "down") (result i32) (i32.add (call $f) (i32.const 1))))"#, "down", u64::MAX).unwrap_err();
+        assert_eq!(err.downcast_ref::<wasmtime::Trap>(), Some(&wasmtime::Trap::StackOverflow), "{err:?}");
     }
 
     /// Memory past the limit can't be had: growing it traps.
@@ -201,11 +158,7 @@ mod tests {
     #[cfg(feature = "pulley")]
     #[test]
     fn pulley_runs_the_same_code() {
-        let engine = engine(&Options {
-            backend: Backend::Pulley,
-            ..Options::default()
-        })
-        .unwrap();
+        let engine = engine(&Options { backend: Backend::Pulley, ..Options::default() }).unwrap();
         assert_eq!(run(&engine, r#"(module (func (export "answer") (result i32) (i32.mul (i32.const 6) (i32.const 7))))"#, "answer", u64::MAX).unwrap(), 42);
     }
 }

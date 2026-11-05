@@ -266,13 +266,9 @@ impl Turn {
                 match self.call("elicitation/create", params)? {
                     Ok(Ok(answer)) => {
                         if answer["action"] == "accept" {
-                            self.agent.notify(
-                                "elicitation/complete",
-                                json!({ "elicitationId": "mock-1" }),
-                            )?;
+                            self.agent.notify("elicitation/complete", json!({ "elicitationId": "mock-1" }))?;
                         }
-                        let said =
-                            format!("The link: {}", answer["action"].as_str().unwrap_or("?"));
+                        let said = format!("The link: {}", answer["action"].as_str().unwrap_or("?"));
                         self.say(&[&said])?;
                         Ok(Flow::Next)
                     }

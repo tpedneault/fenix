@@ -54,9 +54,7 @@ pub fn language_root(root: &Path) -> PathBuf {
         return root.to_path_buf();
     };
     let boundary = crate::vcs::repository_root(root);
-    root.parent()
-        .and_then(|parent| search(parent, kind, boundary.as_deref()))
-        .unwrap_or_else(|| root.to_path_buf())
+    root.parent().and_then(|parent| search(parent, kind, boundary.as_deref())).unwrap_or_else(|| root.to_path_buf())
 }
 
 /// The workspace a new project of `kind` created in `dir` would join --
@@ -79,9 +77,7 @@ fn search(start: &Path, kind: ProjectKind, boundary: Option<&Path>) -> Option<Pa
             let path = dir.join(file);
             let found = match *file {
                 "go.work" | "pnpm-workspace.yaml" => path.is_file(),
-                _ => {
-                    std::fs::read_to_string(&path).is_ok_and(|text| declares_workspace(file, &text))
-                }
+                _ => std::fs::read_to_string(&path).is_ok_and(|text| declares_workspace(file, &text)),
             };
             if found {
                 return Some(dir.to_path_buf());
@@ -93,18 +89,7 @@ fn search(start: &Path, kind: ProjectKind, boundary: Option<&Path>) -> Option<Pa
 
 /// Folders never worth looking inside for projects: build output,
 /// dependencies, environments, tool state.
-const SKIP: &[&str] = &[
-    "node_modules",
-    "target",
-    "build",
-    "dist",
-    "out",
-    "venv",
-    "__pycache__",
-    "vendor",
-    "third_party",
-    "external",
-];
+const SKIP: &[&str] = &["node_modules", "target", "build", "dist", "out", "venv", "__pycache__", "vendor", "third_party", "external"];
 
 /// How deep `subprojects` looks, and how many it reports at most.
 const MAX_DEPTH: usize = 4;
@@ -121,18 +106,12 @@ pub fn subprojects(root: &Path) -> Vec<(PathBuf, ProjectKind)> {
     for _ in 0..MAX_DEPTH {
         let mut next = Vec::new();
         for dir in &level {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
-            };
+            let Ok(entries) = std::fs::read_dir(dir) else { continue };
             let mut children: Vec<PathBuf> = entries
                 .flatten()
                 .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
                 .map(|e| e.path())
-                .filter(|p| {
-                    p.file_name()
-                        .map(|n| n.to_string_lossy())
-                        .is_some_and(|n| !n.starts_with('.') && !SKIP.contains(&n.as_ref()))
-                })
+                .filter(|p| p.file_name().map(|n| n.to_string_lossy()).is_some_and(|n| !n.starts_with('.') && !SKIP.contains(&n.as_ref())))
                 .collect();
             children.sort();
             for child in children {
@@ -162,14 +141,8 @@ mod tests {
         dir.write("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
         dir.write("crates/core/Cargo.toml", "[package]\nname = \"core\"\n");
         dir.write("crates/cli/Cargo.toml", "[package]\nname = \"cli\"\n");
-        dir.write(
-            "tools/pyproject.toml",
-            "[project]\nname='tools'\n[tool.uv.workspace]\nmembers = ['pkgs/*']\n",
-        );
-        dir.write(
-            "tools/pkgs/decode/pyproject.toml",
-            "[project]\nname='decode'\n",
-        );
+        dir.write("tools/pyproject.toml", "[project]\nname='tools'\n[tool.uv.workspace]\nmembers = ['pkgs/*']\n");
+        dir.write("tools/pkgs/decode/pyproject.toml", "[project]\nname='decode'\n");
         dir.write("labs/Blink/Blink.ino", "");
         dir.write("web/package.json", "{\"name\": \"web\"}");
         dir.write("web/node_modules/left-pad/package.json", "{}");
@@ -181,41 +154,19 @@ mod tests {
     fn members_share_their_workspace_as_language_root() {
         let dir = monorepo();
         assert_eq!(language_root(&dir.path().join("crates/core")), dir.path());
-        assert_eq!(
-            language_root(&dir.path().join("tools/pkgs/decode")),
-            dir.path().join("tools")
-        );
-        assert_eq!(
-            language_root(&dir.path().join("web")),
-            dir.path().join("web"),
-            "no npm workspace above it"
-        );
-        assert_eq!(
-            language_root(&dir.path().join("labs/Blink")),
-            dir.path().join("labs/Blink")
-        );
+        assert_eq!(language_root(&dir.path().join("tools/pkgs/decode")), dir.path().join("tools"));
+        assert_eq!(language_root(&dir.path().join("web")), dir.path().join("web"), "no npm workspace above it");
+        assert_eq!(language_root(&dir.path().join("labs/Blink")), dir.path().join("labs/Blink"));
         assert_eq!(language_root(dir.path()), dir.path());
     }
 
     #[test]
     fn a_new_project_knows_the_workspace_it_would_join() {
         let dir = monorepo();
-        assert_eq!(
-            workspace_above(&dir.path().join("crates"), ProjectKind::Rust).as_deref(),
-            Some(dir.path())
-        );
-        assert_eq!(
-            workspace_above(&dir.path().join("tools/pkgs"), ProjectKind::Python).as_deref(),
-            Some(dir.path().join("tools").as_path())
-        );
-        assert_eq!(
-            workspace_above(&dir.path().join("labs"), ProjectKind::Arduino),
-            None
-        );
-        assert_eq!(
-            workspace_above(&dir.path().join("crates"), ProjectKind::Python),
-            None
-        );
+        assert_eq!(workspace_above(&dir.path().join("crates"), ProjectKind::Rust).as_deref(), Some(dir.path()));
+        assert_eq!(workspace_above(&dir.path().join("tools/pkgs"), ProjectKind::Python).as_deref(), Some(dir.path().join("tools").as_path()));
+        assert_eq!(workspace_above(&dir.path().join("labs"), ProjectKind::Arduino), None);
+        assert_eq!(workspace_above(&dir.path().join("crates"), ProjectKind::Python), None);
     }
 
     #[test]
@@ -224,10 +175,7 @@ mod tests {
         outer.write("Cargo.toml", "[workspace]\n");
         outer.write("repo/.git/HEAD", "ref: refs/heads/main\n");
         outer.write("repo/Cargo.toml", "[package]\nname = \"alone\"\n");
-        assert_eq!(
-            language_root(&outer.path().join("repo")),
-            outer.path().join("repo")
-        );
+        assert_eq!(language_root(&outer.path().join("repo")), outer.path().join("repo"));
     }
 
     #[test]
@@ -235,15 +183,7 @@ mod tests {
         let dir = monorepo();
         let found: Vec<(String, ProjectKind)> = subprojects(dir.path())
             .into_iter()
-            .map(|(p, k)| {
-                (
-                    p.strip_prefix(dir.path())
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/"),
-                    k,
-                )
-            })
+            .map(|(p, k)| (p.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/"), k))
             .collect();
         assert_eq!(
             found,

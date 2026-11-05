@@ -102,9 +102,7 @@ struct Rails {
 
 impl Rails {
     fn new(lanes: usize) -> Self {
-        Self {
-            cells: vec![' '; lanes * 2],
-        }
+        Self { cells: vec![' '; lanes * 2] }
     }
 
     fn set(&mut self, col: usize, ch: char) {
@@ -124,10 +122,7 @@ impl Rails {
         // Padded rather than trimmed: every row has to occupy the same
         // width or the hash column after it wanders.
         let pad = width.saturating_sub(self.cells.len());
-        self.cells
-            .into_iter()
-            .chain(std::iter::repeat_n(' ', pad))
-            .collect()
+        self.cells.into_iter().chain(std::iter::repeat_n(' ', pad)).collect()
     }
 }
 
@@ -148,10 +143,7 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyl
     let mut lines = Vec::new();
     if commits.is_empty() {
         text.push_str("    (no commits)\n");
-        lines.push(Some(GraphLine {
-            spans: vec![(0, GraphSpan::Meta)],
-            commit: None,
-        }));
+        lines.push(Some(GraphLine { spans: vec![(0, GraphSpan::Meta)], commit: None }));
         return GraphPanel { text, lines };
     }
 
@@ -159,23 +151,13 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyl
     let lane_count = rows
         .iter()
         .map(|r| {
-            let widest = r
-                .live_before
-                .iter()
-                .chain(r.live_after.iter())
-                .copied()
-                .max()
-                .unwrap_or(0);
+            let widest = r.live_before.iter().chain(r.live_after.iter()).copied().max().unwrap_or(0);
             r.lane.max(widest) + 1
         })
         .max()
         .unwrap_or(1);
     let rail_width = lane_count * 2;
-    let hash_width = commits
-        .iter()
-        .map(|c| c.short_hash.chars().count())
-        .max()
-        .unwrap_or(7);
+    let hash_width = commits.iter().map(|c| c.short_hash.chars().count()).max().unwrap_or(7);
 
     let push_edge = |text: &mut String, lines: &mut Vec<Option<GraphLine>>, rails: Rails| {
         let row = rails.finish(rail_width);
@@ -183,10 +165,7 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyl
         // the leading rails must keep their columns.
         text.push_str(row.trim_end());
         text.push('\n');
-        lines.push(Some(GraphLine {
-            spans: vec![(0, GraphSpan::Rails)],
-            commit: None,
-        }));
+        lines.push(Some(GraphLine { spans: vec![(0, GraphSpan::Rails)], commit: None }));
     };
 
     for (commit, row) in commits.iter().zip(rows) {
@@ -194,20 +173,10 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyl
         // toward its own lane.
         if !row.closing.is_empty() {
             let mut rails = Rails::new(lane_count);
-            rails.rails_at(
-                row.live_before
-                    .iter()
-                    .copied()
-                    .filter(|l| !row.closing.contains(l)),
-                rail_g,
-            );
+            rails.rails_at(row.live_before.iter().copied().filter(|l| !row.closing.contains(l)), rail_g);
             rails.set(lane_col(row.lane), rail_g);
             for &c in &row.closing {
-                let (col, glyph) = if c > row.lane {
-                    (lane_col(c) - 1, close_g)
-                } else {
-                    (lane_col(c) + 1, branch_g)
-                };
+                let (col, glyph) = if c > row.lane { (lane_col(c) - 1, close_g) } else { (lane_col(c) + 1, branch_g) };
                 rails.set(col, glyph);
             }
             push_edge(&mut text, &mut lines, rails);
@@ -216,17 +185,8 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyl
         // The commit itself: a rail for every lane that was already live
         // and isn't converging here, and the node in its own lane.
         let mut rails = Rails::new(lane_count);
-        rails.rails_at(
-            row.live_before
-                .iter()
-                .copied()
-                .filter(|l| !row.closing.contains(l) && *l != row.lane),
-            rail_g,
-        );
-        rails.set(
-            lane_col(row.lane),
-            if row.is_merge { merge_g } else { node_g },
-        );
+        rails.rails_at(row.live_before.iter().copied().filter(|l| !row.closing.contains(l) && *l != row.lane), rail_g);
+        rails.set(lane_col(row.lane), if row.is_merge { merge_g } else { node_g });
 
         let rail = rails.finish(rail_width);
         let mut line = format!("{rail} {:<hash_width$} ", commit.short_hash);
@@ -248,27 +208,14 @@ pub fn render_graph(commits: &[GraphCommit], rows: &[GraphRow], style: GraphStyl
         line.push_str(&commit.subject);
         text.push_str(&line);
         text.push('\n');
-        lines.push(Some(GraphLine {
-            spans,
-            commit: Some(commit.hash.clone()),
-        }));
+        lines.push(Some(GraphLine { spans, commit: Some(commit.hash.clone()) }));
 
         // Below the commit: the lane(s) a merge opened, fanning out.
         if !row.branching.is_empty() {
             let mut rails = Rails::new(lane_count);
-            rails.rails_at(
-                row.live_after
-                    .iter()
-                    .copied()
-                    .filter(|l| !row.branching.contains(l)),
-                rail_g,
-            );
+            rails.rails_at(row.live_after.iter().copied().filter(|l| !row.branching.contains(l)), rail_g);
             for &b in &row.branching {
-                let (col, glyph) = if b > row.lane {
-                    (lane_col(b) - 1, branch_g)
-                } else {
-                    (lane_col(b) + 1, close_g)
-                };
+                let (col, glyph) = if b > row.lane { (lane_col(b) - 1, branch_g) } else { (lane_col(b) + 1, close_g) };
                 rails.set(col, glyph);
             }
             push_edge(&mut text, &mut lines, rails);
@@ -305,17 +252,7 @@ fn push(text: &mut String, lines: &mut Vec<Option<GitLine>>, row: &str, meta: Op
 }
 
 fn header(text: &mut String, lines: &mut Vec<Option<GitLine>>, title: &str) {
-    push(
-        text,
-        lines,
-        title,
-        Some(GitLine {
-            style: GitLineStyle::Header,
-            entry: None,
-            dim_from: None,
-            badge: None,
-        }),
-    );
+    push(text, lines, title, Some(GitLine { style: GitLineStyle::Header, entry: None, dim_from: None, badge: None }));
 }
 
 /// Formats a fetch age as something a person reads at a glance --
@@ -335,12 +272,7 @@ fn fetch_age_text(seconds: Option<u64>) -> String {
 /// its upstream), Remotes, Tags -- led by how stale the whole picture
 /// is, since every sync badge below is only as current as the last
 /// fetch.
-pub fn render_refs(
-    branches: &[Branch],
-    remotes: &[String],
-    tags: &[String],
-    fetch_age: Option<u64>,
-) -> GitPanel {
+pub fn render_refs(branches: &[Branch], remotes: &[String], tags: &[String], fetch_age: Option<u64>) -> GitPanel {
     let mut text = String::new();
     let mut lines: Vec<Option<GitLine>> = Vec::new();
 
@@ -348,27 +280,12 @@ pub fn render_refs(
         &mut text,
         &mut lines,
         &format!("  {}", fetch_age_text(fetch_age)),
-        Some(GitLine {
-            style: GitLineStyle::Detail,
-            entry: None,
-            dim_from: Some(0),
-            badge: None,
-        }),
+        Some(GitLine { style: GitLineStyle::Detail, entry: None, dim_from: Some(0), badge: None }),
     );
 
     header(&mut text, &mut lines, "Local");
     if branches.is_empty() {
-        push(
-            &mut text,
-            &mut lines,
-            "    (none)",
-            Some(GitLine {
-                style: GitLineStyle::Empty,
-                entry: None,
-                dim_from: None,
-                badge: None,
-            }),
-        );
+        push(&mut text, &mut lines, "    (none)", Some(GitLine { style: GitLineStyle::Empty, entry: None, dim_from: None, badge: None }));
     }
     for branch in branches {
         let (badge, color) = sync_badge(branch);
@@ -383,11 +300,7 @@ pub fn render_refs(
         };
         // The `-> upstream` half is supporting detail, dimmed like every
         // other secondary column in these panels.
-        let dim_from = if upstream.is_empty() {
-            None
-        } else {
-            Some(prefix.chars().count() + branch.name.chars().count())
-        };
+        let dim_from = if upstream.is_empty() { None } else { Some(prefix.chars().count() + branch.name.chars().count()) };
         push(
             &mut text,
             &mut lines,
@@ -403,57 +316,27 @@ pub fn render_refs(
 
     header(&mut text, &mut lines, "Remotes");
     if remotes.is_empty() {
-        push(
-            &mut text,
-            &mut lines,
-            "    (none)",
-            Some(GitLine {
-                style: GitLineStyle::Empty,
-                entry: None,
-                dim_from: None,
-                badge: None,
-            }),
-        );
+        push(&mut text, &mut lines, "    (none)", Some(GitLine { style: GitLineStyle::Empty, entry: None, dim_from: None, badge: None }));
     }
     for name in remotes {
         push(
             &mut text,
             &mut lines,
             &format!("    {name}"),
-            Some(GitLine {
-                style: GitLineStyle::Branch,
-                entry: Some(GitEntry::Branch(name.clone())),
-                dim_from: None,
-                badge: None,
-            }),
+            Some(GitLine { style: GitLineStyle::Branch, entry: Some(GitEntry::Branch(name.clone())), dim_from: None, badge: None }),
         );
     }
 
     header(&mut text, &mut lines, "Tags");
     if tags.is_empty() {
-        push(
-            &mut text,
-            &mut lines,
-            "    (none)",
-            Some(GitLine {
-                style: GitLineStyle::Empty,
-                entry: None,
-                dim_from: None,
-                badge: None,
-            }),
-        );
+        push(&mut text, &mut lines, "    (none)", Some(GitLine { style: GitLineStyle::Empty, entry: None, dim_from: None, badge: None }));
     }
     for name in tags {
         push(
             &mut text,
             &mut lines,
             &format!("    {name}"),
-            Some(GitLine {
-                style: GitLineStyle::Branch,
-                entry: Some(GitEntry::Branch(name.clone())),
-                dim_from: None,
-                badge: None,
-            }),
+            Some(GitLine { style: GitLineStyle::Branch, entry: Some(GitEntry::Branch(name.clone())), dim_from: None, badge: None }),
         );
     }
 
@@ -476,13 +359,7 @@ mod tests {
         }
     }
 
-    fn branch(
-        name: &str,
-        upstream: Option<&str>,
-        ahead: usize,
-        behind: usize,
-        gone: bool,
-    ) -> Branch {
+    fn branch(name: &str, upstream: Option<&str>, ahead: usize, behind: usize, gone: bool) -> Branch {
         Branch {
             name: name.to_string(),
             current: false,
@@ -507,23 +384,13 @@ mod tests {
 
     #[test]
     fn a_linear_history_draws_one_rail_of_nodes_and_no_connector_rows() {
-        let commits = vec![
-            commit("aaa1111", "third", &[], &["bbb2222"]),
-            commit("bbb2222", "second", &[], &["ccc3333"]),
-            commit("ccc3333", "first", &[], &[]),
-        ];
+        let commits =
+            vec![commit("aaa1111", "third", &[], &["bbb2222"]), commit("bbb2222", "second", &[], &["ccc3333"]), commit("ccc3333", "first", &[], &[])];
         let rows = fenix_git::assign_lanes(&commits);
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
-        assert_eq!(
-            panel.text.lines().count(),
-            3,
-            "nothing branches, so there is nothing to connect"
-        );
+        assert_eq!(panel.text.lines().count(), 3, "nothing branches, so there is nothing to connect");
         for line in panel.text.lines() {
-            assert!(
-                line.starts_with('*'),
-                "every row is a node on the single rail: {line:?}"
-            );
+            assert!(line.starts_with('*'), "every row is a node on the single rail: {line:?}");
         }
     }
 
@@ -541,17 +408,10 @@ mod tests {
         let rows = fenix_git::assign_lanes(&commits);
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
 
-        let hash_columns: Vec<usize> = commit_rows(&panel)
-            .iter()
-            .zip(&commits)
-            .map(|(line, c)| line.find(c.short_hash.as_str()).unwrap())
-            .collect();
-        assert!(
-            hash_columns.windows(2).all(|w| w[0] == w[1]),
-            "hash columns must all match: {hash_columns:?}
-{}",
-            panel.text
-        );
+        let hash_columns: Vec<usize> =
+            commit_rows(&panel).iter().zip(&commits).map(|(line, c)| line.find(c.short_hash.as_str()).unwrap()).collect();
+        assert!(hash_columns.windows(2).all(|w| w[0] == w[1]), "hash columns must all match: {hash_columns:?}
+{}", panel.text);
     }
 
     #[test]
@@ -566,17 +426,10 @@ mod tests {
         let rows = fenix_git::assign_lanes(&commits);
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
 
-        let subject_columns: Vec<usize> = commit_rows(&panel)
-            .iter()
-            .zip(&commits)
-            .map(|(line, c)| line.find(c.subject.as_str()).unwrap())
-            .collect();
-        assert_eq!(
-            subject_columns[0], subject_columns[1],
-            "subjects must line up despite differing hash lengths:
-{}",
-            panel.text
-        );
+        let subject_columns: Vec<usize> =
+            commit_rows(&panel).iter().zip(&commits).map(|(line, c)| line.find(c.subject.as_str()).unwrap()).collect();
+        assert_eq!(subject_columns[0], subject_columns[1], "subjects must line up despite differing hash lengths:
+{}", panel.text);
     }
 
     #[test]
@@ -591,19 +444,9 @@ mod tests {
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         let lines: Vec<&str> = panel.text.lines().collect();
 
-        assert!(
-            lines[0].starts_with('*'),
-            "the merge commit's own row: {:?}",
-            lines[0]
-        );
-        assert_eq!(
-            lines[1], "|\\",
-            "a connector row fans the merged branch out, exactly as git draws it"
-        );
-        assert!(
-            panel.lines[1].as_ref().unwrap().commit.is_none(),
-            "a connector row draws no commit"
-        );
+        assert!(lines[0].starts_with('*'), "the merge commit's own row: {:?}", lines[0]);
+        assert_eq!(lines[1], "|\\", "a connector row fans the merged branch out, exactly as git draws it");
+        assert!(panel.lines[1].as_ref().unwrap().commit.is_none(), "a connector row draws no commit");
     }
 
     #[test]
@@ -619,27 +462,17 @@ mod tests {
         let lines: Vec<&str> = panel.text.lines().collect();
         let root = lines.iter().position(|l| l.contains("initial")).unwrap();
 
-        assert_eq!(
-            lines[root - 1],
-            "|/",
-            "the side lane collapses in just above the shared ancestor"
-        );
+        assert_eq!(lines[root - 1], "|/", "the side lane collapses in just above the shared ancestor");
     }
 
     #[test]
     fn a_rail_passing_a_row_it_is_unrelated_to_is_drawn_through_it() {
-        let commits = vec![
-            commit("xxx1111", "tip x", &[], &["aaa3333"]),
-            commit("yyy2222", "tip y", &[], &["aaa3333"]),
-            commit("aaa3333", "root", &[], &[]),
-        ];
+        let commits =
+            vec![commit("xxx1111", "tip x", &[], &["aaa3333"]), commit("yyy2222", "tip y", &[], &["aaa3333"]), commit("aaa3333", "root", &[], &[])];
         let rows = fenix_git::assign_lanes(&commits);
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         let second = commit_rows(&panel)[1].clone();
-        assert!(
-            second.starts_with("| *"),
-            "lane 0 passes by while `y` is drawn: {second:?}"
-        );
+        assert!(second.starts_with("| *"), "lane 0 passes by while `y` is drawn: {second:?}");
     }
 
     #[test]
@@ -661,36 +494,20 @@ mod tests {
 
     #[test]
     fn the_unicode_style_swaps_the_glyphs_without_changing_the_layout() {
-        let commits = vec![
-            commit("mmm1111", "merge", &[], &["ppp2222", "sss3333"]),
-            commit("ppp2222", "a", &[], &[]),
-            commit("sss3333", "b", &[], &[]),
-        ];
+        let commits = vec![commit("mmm1111", "merge", &[], &["ppp2222", "sss3333"]), commit("ppp2222", "a", &[], &[]), commit("sss3333", "b", &[], &[])];
         let rows = fenix_git::assign_lanes(&commits);
         let ascii = render_graph(&commits, &rows, GraphStyle::Ascii);
         let unicode = render_graph(&commits, &rows, GraphStyle::Unicode);
-        assert!(
-            unicode.text.contains('◆'),
-            "a merge reads differently in unicode:
-{}",
-            unicode.text
-        );
+        assert!(unicode.text.contains('◆'), "a merge reads differently in unicode:
+{}", unicode.text);
         assert_eq!(
             ascii.text.lines().count(),
             unicode.text.lines().count(),
             "the styles differ only in glyphs, never in structure"
         );
         assert_eq!(
-            ascii
-                .text
-                .lines()
-                .map(|l| l.chars().count())
-                .collect::<Vec<_>>(),
-            unicode
-                .text
-                .lines()
-                .map(|l| l.chars().count())
-                .collect::<Vec<_>>()
+            ascii.text.lines().map(|l| l.chars().count()).collect::<Vec<_>>(),
+            unicode.text.lines().map(|l| l.chars().count()).collect::<Vec<_>>()
         );
     }
 
@@ -698,24 +515,13 @@ mod tests {
     fn the_graph_style_defaults_to_ascii_for_anything_unconfigured_or_unknown() {
         assert_eq!(GraphStyle::from_config(None), GraphStyle::Ascii);
         assert_eq!(GraphStyle::from_config(Some("nonsense")), GraphStyle::Ascii);
-        assert_eq!(
-            GraphStyle::from_config(Some("unicode")),
-            GraphStyle::Unicode
-        );
-        assert_eq!(
-            GraphStyle::from_config(Some(" unicode ")),
-            GraphStyle::Unicode
-        );
+        assert_eq!(GraphStyle::from_config(Some("unicode")), GraphStyle::Unicode);
+        assert_eq!(GraphStyle::from_config(Some(" unicode ")), GraphStyle::Unicode);
     }
 
     #[test]
     fn a_row_shows_its_hash_ref_decorations_and_subject_in_that_order() {
-        let commits = vec![commit(
-            "abc1234",
-            "Fix the thing",
-            &["HEAD -> main", "origin/main"],
-            &[],
-        )];
+        let commits = vec![commit("abc1234", "Fix the thing", &["HEAD -> main", "origin/main"], &[])];
         let rows = fenix_git::assign_lanes(&commits);
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         let row = panel.text.lines().next().unwrap();
@@ -732,21 +538,8 @@ mod tests {
         let meta = panel.lines[0].as_ref().unwrap();
         assert_eq!(meta.commit.as_deref(), Some("abc1234"));
         let kinds: Vec<GraphSpan> = meta.spans.iter().map(|(_, k)| *k).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                GraphSpan::Node,
-                GraphSpan::Rails,
-                GraphSpan::Hash,
-                GraphSpan::Refs,
-                GraphSpan::Subject
-            ]
-        );
-        assert!(
-            meta.spans.windows(2).all(|w| w[0].0 < w[1].0),
-            "span starts must ascend: {:?}",
-            meta.spans
-        );
+        assert_eq!(kinds, vec![GraphSpan::Node, GraphSpan::Rails, GraphSpan::Hash, GraphSpan::Refs, GraphSpan::Subject]);
+        assert!(meta.spans.windows(2).all(|w| w[0].0 < w[1].0), "span starts must ascend: {:?}", meta.spans);
     }
 
     #[test]
@@ -754,22 +547,8 @@ mod tests {
         let commits = vec![commit("abc1234", "plain", &[], &[])];
         let rows = fenix_git::assign_lanes(&commits);
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
-        let kinds: Vec<GraphSpan> = panel.lines[0]
-            .as_ref()
-            .unwrap()
-            .spans
-            .iter()
-            .map(|(_, k)| *k)
-            .collect();
-        assert_eq!(
-            kinds,
-            vec![
-                GraphSpan::Node,
-                GraphSpan::Rails,
-                GraphSpan::Hash,
-                GraphSpan::Subject
-            ]
-        );
+        let kinds: Vec<GraphSpan> = panel.lines[0].as_ref().unwrap().spans.iter().map(|(_, k)| *k).collect();
+        assert_eq!(kinds, vec![GraphSpan::Node, GraphSpan::Rails, GraphSpan::Hash, GraphSpan::Subject]);
     }
 
     #[test]
@@ -781,10 +560,7 @@ mod tests {
 
     #[test]
     fn text_and_lines_stay_the_same_length() {
-        let commits = vec![
-            commit("aaa1111", "a", &[], &["bbb2222"]),
-            commit("bbb2222", "b", &[], &[]),
-        ];
+        let commits = vec![commit("aaa1111", "a", &[], &["bbb2222"]), commit("bbb2222", "b", &[], &[])];
         let rows = fenix_git::assign_lanes(&commits);
         let panel = render_graph(&commits, &rows, GraphStyle::Ascii);
         assert_eq!(panel.text.lines().count(), panel.lines.len());
@@ -792,26 +568,11 @@ mod tests {
 
     #[test]
     fn the_sync_badge_tells_the_four_upstream_states_apart() {
-        assert_eq!(
-            sync_badge(&branch("a", Some("origin/a"), 0, 0, false)).0,
-            "[=]"
-        );
-        assert_eq!(
-            sync_badge(&branch("a", Some("origin/a"), 2, 0, false)).0,
-            "[^2]"
-        );
-        assert_eq!(
-            sync_badge(&branch("a", Some("origin/a"), 0, 3, false)).0,
-            "[v3]"
-        );
-        assert_eq!(
-            sync_badge(&branch("a", Some("origin/a"), 2, 3, false)).0,
-            "[^2 v3]"
-        );
-        assert_eq!(
-            sync_badge(&branch("a", Some("origin/a"), 0, 0, true)).0,
-            "[gone]"
-        );
+        assert_eq!(sync_badge(&branch("a", Some("origin/a"), 0, 0, false)).0, "[=]");
+        assert_eq!(sync_badge(&branch("a", Some("origin/a"), 2, 0, false)).0, "[^2]");
+        assert_eq!(sync_badge(&branch("a", Some("origin/a"), 0, 3, false)).0, "[v3]");
+        assert_eq!(sync_badge(&branch("a", Some("origin/a"), 2, 3, false)).0, "[^2 v3]");
+        assert_eq!(sync_badge(&branch("a", Some("origin/a"), 0, 0, true)).0, "[gone]");
         assert_eq!(sync_badge(&branch("a", None, 0, 0, false)).0, "[--]");
     }
 
@@ -826,12 +587,7 @@ mod tests {
     #[test]
     fn the_refs_tree_lists_all_three_sections_with_their_entries() {
         let branches = vec![branch("main", Some("origin/main"), 0, 0, false)];
-        let panel = render_refs(
-            &branches,
-            &["origin/main".to_string()],
-            &["v1.0".to_string()],
-            Some(120),
-        );
+        let panel = render_refs(&branches, &["origin/main".to_string()], &["v1.0".to_string()], Some(120));
         assert!(panel.text.contains("Local"));
         assert!(panel.text.contains("Remotes"));
         assert!(panel.text.contains("Tags"));
@@ -844,12 +600,7 @@ mod tests {
     fn a_local_branch_row_carries_a_branch_entry_so_it_can_be_acted_on() {
         let branches = vec![branch("feature", Some("origin/feature"), 1, 0, false)];
         let panel = render_refs(&branches, &[], &[], None);
-        let entries: Vec<&GitEntry> = panel
-            .lines
-            .iter()
-            .flatten()
-            .filter_map(|l| l.entry.as_ref())
-            .collect();
+        let entries: Vec<&GitEntry> = panel.lines.iter().flatten().filter_map(|l| l.entry.as_ref()).collect();
         assert_eq!(entries[0], &GitEntry::Branch("feature".to_string()));
     }
 
@@ -876,3 +627,4 @@ mod tests {
         assert_eq!(fetch_age_text(Some(200_000)), "fetched 2d ago");
     }
 }
+

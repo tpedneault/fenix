@@ -46,20 +46,10 @@ pub fn hunk_patch(file: &FileDiff, hunk: &Hunk) -> String {
 /// Applied with `--reverse` (unstaging from the staged diff, discarding
 /// from the working-tree diff) the target holds the new side, so it's
 /// the other way round. The same rule `git add -p`'s line editing uses.
-pub fn lines_patch(
-    file: &FileDiff,
-    hunk: &Hunk,
-    selected: &[usize],
-    reverse: bool,
-) -> Option<String> {
+pub fn lines_patch(file: &FileDiff, hunk: &Hunk, selected: &[usize], reverse: bool) -> Option<String> {
     use crate::LineKind;
     let picked = |i: usize| selected.contains(&i);
-    if !hunk
-        .lines
-        .iter()
-        .enumerate()
-        .any(|(i, l)| picked(i) && matches!(l.kind, LineKind::Added | LineKind::Removed))
-    {
+    if !hunk.lines.iter().enumerate().any(|(i, l)| picked(i) && matches!(l.kind, LineKind::Added | LineKind::Removed)) {
         return None;
     }
     let mut body: Vec<String> = Vec::new();
@@ -108,9 +98,7 @@ pub fn lines_patch(
         out.push_str(line);
         out.push('\n');
     }
-    out.push_str(&format!(
-        "@@ -{old_start},{old_len} +{new_start},{new_len} @@{heading}\n"
-    ));
+    out.push_str(&format!("@@ -{old_start},{old_len} +{new_start},{new_len} @@{heading}\n"));
     for line in body {
         out.push_str(&line);
         out.push('\n');
@@ -143,10 +131,7 @@ mod tests {
     #[test]
     fn a_selection_of_only_context_is_no_patch() {
         let files = parse(THREE_ADDED);
-        assert_eq!(
-            lines_patch(&files[0], &files[0].hunks[0], &[0, 4], false),
-            None
-        );
+        assert_eq!(lines_patch(&files[0], &files[0].hunks[0], &[0, 4], false), None);
     }
 
     /// The patch is only right if git takes it: stage one added line of
@@ -158,76 +143,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let git = |args: &[&str]| {
-            let out = Command::new("git")
-                .current_dir(&dir)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            let out = Command::new("git").current_dir(&dir).args(args).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
         git(&["init", "-q"]);
         git(&["config", "core.autocrlf", "false"]);
         std::fs::write(dir.join("f"), "one\ntwo\nthree\n").unwrap();
         git(&["add", "f"]);
-        git(&[
-            "-c",
-            "user.name=t",
-            "-c",
-            "user.email=t@t",
-            "commit",
-            "-q",
-            "-m",
-            "init",
-        ]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
         std::fs::write(dir.join("f"), "one\nTWO\nextra\nthree\n").unwrap();
         let files = parse(&git(&["diff", "--no-color"]));
         let hunk = &files[0].hunks[0];
         let extra = hunk.lines.iter().position(|l| l.text == "extra").unwrap();
         let patch = lines_patch(&files[0], hunk, &[extra], false).unwrap();
-        let mut child = Command::new("git")
-            .current_dir(&dir)
-            .args(["apply", "--cached", "-"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new("git").current_dir(&dir).args(["apply", "--cached", "-"]).stdin(std::process::Stdio::piped()).spawn().unwrap();
         std::io::Write::write_all(child.stdin.as_mut().unwrap(), patch.as_bytes()).unwrap();
         assert!(child.wait().unwrap().success(), "git refused:\n{patch}");
-        assert_eq!(
-            git(&["show", ":f"]),
-            "one\ntwo\nextra\nthree\n",
-            "only the chosen line is staged"
-        );
+        assert_eq!(git(&["show", ":f"]), "one\ntwo\nextra\nthree\n", "only the chosen line is staged");
 
         // And back out: stage everything, then unstage just TWO.
         git(&["add", "f"]);
         let files = parse(&git(&["diff", "--cached", "--no-color"]));
         let hunk = &files[0].hunks[0];
-        let pick: Vec<usize> = hunk
-            .lines
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| l.text.eq_ignore_ascii_case("two"))
-            .map(|(i, _)| i)
-            .collect();
+        let pick: Vec<usize> = hunk.lines.iter().enumerate().filter(|(_, l)| l.text.eq_ignore_ascii_case("two")).map(|(i, _)| i).collect();
         let patch = lines_patch(&files[0], hunk, &pick, true).unwrap();
-        let mut child = Command::new("git")
-            .current_dir(&dir)
-            .args(["apply", "--cached", "--reverse", "-"])
-            .stdin(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child =
+            Command::new("git").current_dir(&dir).args(["apply", "--cached", "--reverse", "-"]).stdin(std::process::Stdio::piped()).spawn().unwrap();
         std::io::Write::write_all(child.stdin.as_mut().unwrap(), patch.as_bytes()).unwrap();
         assert!(child.wait().unwrap().success(), "git refused:\n{patch}");
-        assert_eq!(
-            git(&["show", ":f"]),
-            "one\ntwo\nextra\nthree\n",
-            "TWO unstaged, extra still staged"
-        );
+        assert_eq!(git(&["show", ":f"]), "one\ntwo\nextra\nthree\n", "TWO unstaged, extra still staged");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -241,10 +186,7 @@ mod tests {
             patch,
             "diff --git a/foo.txt b/foo.txt\nindex 83db48f..bf269f4 100644\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1,3 +1,3 @@\n first\n-second\n+two\n third\n"
         );
-        assert!(
-            !patch.contains("twentieth"),
-            "the other hunk must not be in this patch"
-        );
+        assert!(!patch.contains("twentieth"), "the other hunk must not be in this patch");
     }
 
     #[test]
@@ -253,10 +195,7 @@ mod tests {
         let patch = hunk_patch(&files[0], &files[0].hunks[1]);
         assert!(patch.contains("@@ -20,3 +20,3 @@ fn later() {"));
         assert!(patch.contains("+new"));
-        assert!(
-            !patch.contains("+two"),
-            "the first hunk must not be in this patch"
-        );
+        assert!(!patch.contains("+two"), "the first hunk must not be in this patch");
         assert!(!patch.contains("@@ -1,3"), "...nor its header");
     }
 
@@ -286,8 +225,7 @@ mod tests {
         // The corruption this crate is built to avoid: every `\r` has to
         // still be there, in the right place, after a full parse ->
         // patch -> parse cycle.
-        let text =
-            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,2 +1,2 @@\n keep\r\n-old\r\n+new\r\n";
+        let text = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1,2 +1,2 @@\n keep\r\n-old\r\n+new\r\n";
         let files = parse(text);
         let patch = hunk_patch(&files[0], &files[0].hunks[0]);
         assert_eq!(patch, text);

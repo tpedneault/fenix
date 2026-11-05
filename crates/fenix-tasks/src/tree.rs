@@ -28,9 +28,7 @@ impl ProcessTree {
         {
             use process_wrap::std::{CreationFlags, JobObject};
             use windows::Win32::System::Threading::CREATE_NO_WINDOW;
-            command
-                .wrap(CreationFlags(CREATE_NO_WINDOW))
-                .wrap(JobObject);
+            command.wrap(CreationFlags(CREATE_NO_WINDOW)).wrap(JobObject);
         }
         #[cfg(unix)]
         {
@@ -100,10 +98,7 @@ mod tests {
         let mut tree = ProcessTree::spawn(command).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let grandchild = loop {
-            if let Some(pid) = std::fs::read_to_string(&pid_file)
-                .ok()
-                .and_then(|s| s.trim().parse::<i32>().ok())
-            {
+            if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|s| s.trim().parse::<i32>().ok()) {
                 break pid;
             }
             assert!(Instant::now() < deadline, "the grandchild never started");
@@ -114,10 +109,7 @@ mod tests {
         // kill(pid, 0) fails once the grandchild is gone (or a zombie
         // reaped by init).
         while unsafe { libc::kill(grandchild, 0) } == 0 {
-            assert!(
-                Instant::now() < deadline,
-                "the grandchild outlived its tree"
-            );
+            assert!(Instant::now() < deadline, "the grandchild outlived its tree");
             std::thread::sleep(Duration::from_millis(20));
         }
         let _ = std::fs::remove_dir_all(&dir);

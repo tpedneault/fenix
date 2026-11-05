@@ -23,20 +23,13 @@ impl App {
 
     /// The focused project's snippets folder, `.fenix/snippets`.
     fn project_snippets_dir(&self) -> Option<PathBuf> {
-        self.project_root
-            .as_ref()
-            .map(|r| r.join(".fenix").join("snippets"))
+        self.project_root.as_ref().map(|r| r.join(".fenix").join("snippets"))
     }
 
     /// Every layer: the built-in snippets (unless they're turned off),
     /// yours, and the focused project's.
     pub(super) fn snippet_layers(&self, project: Option<&Path>) -> Catalog {
-        Catalog::layers_with(
-            self.config.snippets_builtin.unwrap_or(true),
-            &crate::installed::data_dirs("snippets"),
-            Some(&self.snippets_dir),
-            project,
-        )
+        Catalog::layers_with(self.config.snippets_builtin.unwrap_or(true), &crate::installed::data_dirs("snippets"), Some(&self.snippets_dir), project)
     }
 
     /// The page's rows, from `catalog`, previewed for the file at `path`.
@@ -47,11 +40,7 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, s)| {
-                let overridden = catalog.snippets[i + 1..].iter().any(|later| {
-                    later.trigger == s.trigger
-                        && later.scopes.first() == s.scopes.first()
-                        && later.source > s.source
-                });
+                let overridden = catalog.snippets[i + 1..].iter().any(|later| later.trigger == s.trigger && later.scopes.first() == s.scopes.first() && later.source > s.source);
                 Item {
                     name: s.name.clone(),
                     trigger: s.trigger.clone(),
@@ -89,12 +78,7 @@ impl App {
                 }
                 id
             }
-            None => self.open_page(PageModel::Snippets(Box::new(SnippetsPage::new(
-                items,
-                catalog.errors.clone(),
-                scope,
-                project.is_some(),
-            )))),
+            None => self.open_page(PageModel::Snippets(Box::new(SnippetsPage::new(items, catalog.errors.clone(), scope, project.is_some())))),
         };
         if let (Some(body), Some(page)) = (body, self.snippets_page(id)) {
             page.new_from(body);
@@ -102,15 +86,8 @@ impl App {
     }
 
     fn refresh_snippets_page(&mut self, id: BufferId) {
-        let project = self
-            .snippets_project
-            .clone()
-            .or_else(|| self.project_snippets_dir());
-        let path = self
-            .snippets_origin
-            .and_then(|(b, _)| self.buffers.get(b))
-            .and_then(|ob| ob.buffer.path())
-            .map(Path::to_path_buf);
+        let project = self.snippets_project.clone().or_else(|| self.project_snippets_dir());
+        let path = self.snippets_origin.and_then(|(b, _)| self.buffers.get(b)).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf);
         let catalog = self.snippet_layers(project.as_deref());
         let items = Self::snippet_items(&catalog, path.as_deref());
         if let Some(page) = self.snippets_page(id) {
@@ -120,24 +97,14 @@ impl App {
 
     /// Writes `text` as a new snippet file under `dir`, in its language's
     /// folder; refuses to replace one that's there.
-    fn write_snippet(
-        dir: &Path,
-        trigger: &str,
-        scopes: &[String],
-        text: &str,
-    ) -> Result<PathBuf, String> {
+    fn write_snippet(dir: &Path, trigger: &str, scopes: &[String], text: &str) -> Result<PathBuf, String> {
         let folder = dir.join(fenix_snippets::folder_for(scopes));
         let file = folder.join(format!("{trigger}.snippet"));
         if file.exists() {
-            return Err(format!(
-                "{} is there already -- Enter on it edits it",
-                file.display()
-            ));
+            return Err(format!("{} is there already -- Enter on it edits it", file.display()));
         }
-        std::fs::create_dir_all(&folder)
-            .map_err(|e| format!("couldn't make {}: {e}", folder.display()))?;
-        std::fs::write(&file, text)
-            .map_err(|e| format!("couldn't write {}: {e}", file.display()))?;
+        std::fs::create_dir_all(&folder).map_err(|e| format!("couldn't make {}: {e}", folder.display()))?;
+        std::fs::write(&file, text).map_err(|e| format!("couldn't write {}: {e}", file.display()))?;
         Ok(file)
     }
 
@@ -159,64 +126,27 @@ impl App {
                 self.close_page(id);
             }
             SnippetsAction::Edit(file) => self.open_file_from_picker(&file),
-            SnippetsAction::Create {
-                trigger,
-                name,
-                scopes,
-                body,
-                project,
-            } => {
-                let dir = if project {
-                    project_dir
-                } else {
-                    Some(self.snippets_dir.clone())
-                };
-                let Some(dir) = dir else {
-                    return note(self, "no project open".into(), true);
-                };
-                let body = if body.is_empty() {
-                    String::new()
-                } else {
-                    fenix_snippets::escape_body(&body)
-                };
-                match Self::write_snippet(
-                    &dir,
-                    &trigger,
-                    &scopes,
-                    &fenix_snippets::file_text(&name, &trigger, &scopes, &body),
-                ) {
+            SnippetsAction::Create { trigger, name, scopes, body, project } => {
+                let dir = if project { project_dir } else { Some(self.snippets_dir.clone()) };
+                let Some(dir) = dir else { return note(self, "no project open".into(), true) };
+                let body = if body.is_empty() { String::new() } else { fenix_snippets::escape_body(&body) };
+                match Self::write_snippet(&dir, &trigger, &scopes, &fenix_snippets::file_text(&name, &trigger, &scopes, &body)) {
                     Ok(file) => {
                         self.refresh_snippets_page(id);
                         self.open_file_from_picker(&file);
-                        self.set_message(format!(
-                            "{} -- write what it inserts under # --; :w and it's live",
-                            file.display()
-                        ));
+                        self.set_message(format!("{} -- write what it inserts under # --; :w and it's live", file.display()));
                     }
                     Err(why) => note(self, why, true),
                 }
             }
             SnippetsAction::Copy { item, project } => {
-                let dir = if project {
-                    project_dir
-                } else {
-                    Some(self.snippets_dir.clone())
-                };
-                let Some(dir) = dir else {
-                    return note(self, "no project open".into(), true);
-                };
+                let dir = if project { project_dir } else { Some(self.snippets_dir.clone()) };
+                let Some(dir) = dir else { return note(self, "no project open".into(), true) };
                 match Self::write_snippet(&dir, &item.trigger, &item.scopes, &item.text) {
                     Ok(file) => {
                         self.refresh_snippets_page(id);
                         let whose = if project { "the project's" } else { "yours" };
-                        note(
-                            self,
-                            format!(
-                                "copied to {whose}: {} -- it's the one used now",
-                                file.display()
-                            ),
-                            false,
-                        );
+                        note(self, format!("copied to {whose}: {} -- it's the one used now", file.display()), false);
                     }
                     Err(why) => note(self, why, true),
                 }
@@ -226,34 +156,17 @@ impl App {
                 match outcome.first() {
                     Some(o) if o.error.is_none() => {
                         self.refresh_snippets_page(id);
-                        note(
-                            self,
-                            format!("{} is in the Recycle Bin", file.display()),
-                            false,
-                        );
+                        note(self, format!("{} is in the Recycle Bin", file.display()), false);
                     }
-                    Some(o) => note(
-                        self,
-                        format!(
-                            "couldn't delete it: {}",
-                            o.error.clone().unwrap_or_default()
-                        ),
-                        true,
-                    ),
+                    Some(o) => note(self, format!("couldn't delete it: {}", o.error.clone().unwrap_or_default()), true),
                     None => {}
                 }
             }
             SnippetsAction::Try(item) => {
                 let Some((buffer, pane)) = self.snippets_origin else {
-                    return note(
-                        self,
-                        "open the snippets from a file to try one in it".into(),
-                        true,
-                    );
+                    return note(self, "open the snippets from a file to try one in it".into(), true);
                 };
-                let Ok(snippet) = fenix_snippets::Snippet::parse(&item.text) else {
-                    return;
-                };
+                let Ok(snippet) = fenix_snippets::Snippet::parse(&item.text) else { return };
                 if !self.windows().windows().contains(&pane) || self.buffers.get(buffer).is_none() {
                     return note(self, "the file you came from is closed".into(), true);
                 }
@@ -264,12 +177,8 @@ impl App {
                 if self.vim.mode() != Mode::Insert {
                     let pane = self.focused_pane_id();
                     let id = self.focused_buffer_id();
-                    if let (Some(ob), Some(state)) = (
-                        self.buffers.get_mut(id),
-                        self.workspaces.active_pane_states_mut().get_mut(&pane),
-                    ) {
-                        self.vim
-                            .handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('i'));
+                    if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+                        self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('i'));
                     }
                 }
                 let at = self.cursor().char_idx;
@@ -285,22 +194,11 @@ impl App {
         let text: Vec<char> = self.open().buffer.text().chars().collect();
         // The selection while it's there; after it (the leader isn't a
         // Visual-mode key), the whole lines it covered.
-        let range = match self
-            .vim
-            .visual_selection_range(&self.open().buffer, &cursor)
-        {
+        let range = match self.vim.visual_selection_range(&self.open().buffer, &cursor) {
             Some((range, _)) => Some(range),
             None => self.vim.last_visual_range().map(|(a, b)| {
-                let start = text[..a.min(text.len())]
-                    .iter()
-                    .rposition(|c| *c == '\n')
-                    .map(|i| i + 1)
-                    .unwrap_or(0);
-                let end = text[b.min(text.len())..]
-                    .iter()
-                    .position(|c| *c == '\n')
-                    .map(|i| b + i + 1)
-                    .unwrap_or(text.len());
+                let start = text[..a.min(text.len())].iter().rposition(|c| *c == '\n').map(|i| i + 1).unwrap_or(0);
+                let end = text[b.min(text.len())..].iter().position(|c| *c == '\n').map(|i| b + i + 1).unwrap_or(text.len());
                 start..end
             }),
         };
@@ -308,9 +206,7 @@ impl App {
             self.set_error("select what the snippet should insert first (v or V), then SPC i n");
             return;
         };
-        let body: String = text[range.start.min(text.len())..range.end.min(text.len())]
-            .iter()
-            .collect();
+        let body: String = text[range.start.min(text.len())..range.end.min(text.len())].iter().collect();
         self.vim.exit_visual_mode(&cursor);
         self.open_snippets_page(Some(body));
     }
@@ -322,18 +218,12 @@ impl App {
         }
         let text = std::fs::read_to_string(path).ok()?;
         Some(match fenix_snippets::Snippet::parse(&text) {
-            Ok(s) => Ok(format!(
-                "snippet \"{}\" works -- {}; it's live now",
-                s.trigger,
-                match s.template.field_count() {
-                    0 => "no fields".to_string(),
-                    1 => "1 field".to_string(),
-                    n => format!("{n} fields"),
-                }
-            )),
-            Err(why) => Err(format!(
-                "this snippet won't be offered until it's fixed: {why}"
-            )),
+            Ok(s) => Ok(format!("snippet \"{}\" works -- {}; it's live now", s.trigger, match s.template.field_count() {
+                0 => "no fields".to_string(),
+                1 => "1 field".to_string(),
+                n => format!("{n} fields"),
+            })),
+            Err(why) => Err(format!("this snippet won't be offered until it's fixed: {why}")),
         })
     }
 }
@@ -370,31 +260,13 @@ mod tests {
         for _ in 0..3 {
             app.page_key(KeyPress::named(FenixNamedKey::Enter));
         }
-        let file = dir
-            .path()
-            .join("my-snippets")
-            .join("tcl")
-            .join("hello.snippet");
+        let file = dir.path().join("my-snippets").join("tcl").join("hello.snippet");
         let text = std::fs::read_to_string(&file).unwrap();
-        assert!(
-            text.starts_with("# name: hello\n# key: hello\n# scope: tcl\n# --\n"),
-            "{text}"
-        );
-        assert_eq!(
-            app.open().buffer.path(),
-            Some(file.as_path()),
-            "opened to edit"
-        );
+        assert!(text.starts_with("# name: hello\n# key: hello\n# scope: tcl\n# --\n"), "{text}");
+        assert_eq!(app.open().buffer.path(), Some(file.as_path()), "opened to edit");
         let catalog = app.snippet_layers(None);
         let snippet = catalog.matching("hello", "tcl").expect("offered now");
-        assert_eq!(
-            snippet
-                .template
-                .render(&Default::default(), &Default::default(), "")
-                .text,
-            "puts \"hello $name\"\n",
-            "inserts what was selected"
-        );
+        assert_eq!(snippet.template.render(&Default::default(), &Default::default(), "").text, "puts \"hello $name\"\n", "inserts what was selected");
     }
 
     #[test]
@@ -404,25 +276,11 @@ mod tests {
         // The built-in Tcl `proc`.
         assert!(page(&mut app).select(|i| i.trigger == "proc" && i.source == Source::BuiltIn));
         assert!(app.page_key(KeyPress::char('c')));
-        let copy = dir
-            .path()
-            .join("my-snippets")
-            .join("tcl")
-            .join("proc.snippet");
+        let copy = dir.path().join("my-snippets").join("tcl").join("proc.snippet");
         assert!(copy.is_file());
         let catalog = app.snippet_layers(None);
-        assert_eq!(
-            catalog.matching("proc", "tcl").unwrap().source,
-            Source::User,
-            "yours is the one used"
-        );
-        assert!(
-            page(&mut app)
-                .items
-                .iter()
-                .any(|i| i.trigger == "proc" && i.overridden),
-            "the built-in one says so"
-        );
+        assert_eq!(catalog.matching("proc", "tcl").unwrap().source, Source::User, "yours is the one used");
+        assert!(page(&mut app).items.iter().any(|i| i.trigger == "proc" && i.overridden), "the built-in one says so");
     }
 
     #[test]
@@ -430,16 +288,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let good = dir.path().join("good.snippet");
         std::fs::write(&good, "# key: g\n# --\n${1:a} ${2:b}$0").unwrap();
-        assert_eq!(
-            App::snippet_save_note(&good),
-            Some(Ok("snippet \"g\" works -- 2 fields; it's live now".into()))
-        );
+        assert_eq!(App::snippet_save_note(&good), Some(Ok("snippet \"g\" works -- 2 fields; it's live now".into())));
         let bad = dir.path().join("bad.snippet");
         std::fs::write(&bad, "# --\nno key").unwrap();
-        assert!(App::snippet_save_note(&bad)
-            .unwrap()
-            .unwrap_err()
-            .contains("missing # key:"));
+        assert!(App::snippet_save_note(&bad).unwrap().unwrap_err().contains("missing # key:"));
         assert_eq!(App::snippet_save_note(&dir.path().join("x.rs")), None);
     }
 }

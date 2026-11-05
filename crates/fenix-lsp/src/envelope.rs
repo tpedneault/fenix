@@ -31,25 +31,11 @@ pub(crate) struct RawMessage {
 
 impl RawMessage {
     pub(crate) fn request(id: i64, method: &str, params: Value) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: Some(Value::from(id)),
-            method: Some(method.to_string()),
-            params: Some(params),
-            result: None,
-            error: None,
-        }
+        Self { jsonrpc: JSONRPC_VERSION.to_string(), id: Some(Value::from(id)), method: Some(method.to_string()), params: Some(params), result: None, error: None }
     }
 
     pub(crate) fn notification(method: &str, params: Value) -> Self {
-        Self {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: None,
-            method: Some(method.to_string()),
-            params: Some(params),
-            result: None,
-            error: None,
-        }
+        Self { jsonrpc: JSONRPC_VERSION.to_string(), id: None, method: Some(method.to_string()), params: Some(params), result: None, error: None }
     }
 
     pub(crate) fn response(id: Value, result: Result<Value, ResponseError>) -> Self {
@@ -57,14 +43,7 @@ impl RawMessage {
             Ok(v) => (Some(v), None),
             Err(e) => (None, Some(e)),
         };
-        Self {
-            jsonrpc: JSONRPC_VERSION.to_string(),
-            id: Some(id),
-            method: None,
-            params: None,
-            result,
-            error,
-        }
+        Self { jsonrpc: JSONRPC_VERSION.to_string(), id: Some(id), method: None, params: None, result, error }
     }
 }
 
@@ -85,15 +64,8 @@ pub struct ResponseError {
 /// "method not found", so a spec-compliant server isn't left waiting.
 pub fn server_request_reply(method: &str) -> Result<Value, ResponseError> {
     match method {
-        "window/workDoneProgress/create"
-        | "client/registerCapability"
-        | "client/unregisterCapability"
-        | "workspace/diagnostic/refresh" => Ok(Value::Null),
-        _ => Err(ResponseError {
-            code: -32601,
-            message: format!("not implemented: {method}"),
-            data: None,
-        }),
+        "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" | "workspace/diagnostic/refresh" => Ok(Value::Null),
+        _ => Err(ResponseError { code: -32601, message: format!("not implemented: {method}"), data: None }),
     }
 }
 
@@ -129,14 +101,7 @@ mod tests {
 
     #[test]
     fn a_failed_response_carries_error_not_result() {
-        let msg = RawMessage::response(
-            Value::from(2),
-            Err(ResponseError {
-                code: -32600,
-                message: "bad".to_string(),
-                data: None,
-            }),
-        );
+        let msg = RawMessage::response(Value::from(2), Err(ResponseError { code: -32600, message: "bad".to_string(), data: None }));
         let json = serde_json::to_value(&msg).unwrap();
         assert!(json.get("result").is_none());
         assert_eq!(json["error"]["code"], Value::from(-32600));
@@ -153,19 +118,8 @@ mod tests {
 
     #[test]
     fn progress_and_registration_requests_succeed_and_the_rest_are_refused() {
-        assert_eq!(
-            server_request_reply("window/workDoneProgress/create"),
-            Ok(Value::Null)
-        );
-        assert_eq!(
-            server_request_reply("client/registerCapability"),
-            Ok(Value::Null)
-        );
-        assert_eq!(
-            server_request_reply("workspace/applyEdit")
-                .unwrap_err()
-                .code,
-            -32601
-        );
+        assert_eq!(server_request_reply("window/workDoneProgress/create"), Ok(Value::Null));
+        assert_eq!(server_request_reply("client/registerCapability"), Ok(Value::Null));
+        assert_eq!(server_request_reply("workspace/applyEdit").unwrap_err().code, -32601);
     }
 }

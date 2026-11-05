@@ -17,10 +17,7 @@ fn object(path: &Path) -> io::Result<Map<String, Value>> {
     match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
             Ok(Value::Object(map)) => Ok(map),
-            Ok(_) | Err(_) => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{} isn't a JSON object", path.display()),
-            )),
+            Ok(_) | Err(_) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} isn't a JSON object", path.display()))),
         },
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Map::new()),
         Err(e) => Err(e),
@@ -31,12 +28,7 @@ fn object(path: &Path) -> io::Result<Map<String, Value>> {
 /// isn't there, an error when it is but can't be read as a `T`.
 pub fn read<T: DeserializeOwned>(path: &Path, key: &str) -> io::Result<Option<T>> {
     match object(path)?.remove(key) {
-        Some(value) => serde_json::from_value(value).map(Some).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("{}: {key}: {e}", path.display()),
-            )
-        }),
+        Some(value) => serde_json::from_value(value).map(Some).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {key}: {e}", path.display()))),
         None => Ok(None),
     }
 }
@@ -45,10 +37,7 @@ pub fn read<T: DeserializeOwned>(path: &Path, key: &str) -> io::Result<Option<T>
 /// keys as they are. A file that isn't a JSON object is replaced.
 pub fn write<T: Serialize>(path: &Path, key: &str, value: &T) -> io::Result<()> {
     let mut map = object(path).unwrap_or_default();
-    map.insert(
-        key.to_string(),
-        serde_json::to_value(value).map_err(io::Error::other)?,
-    );
+    map.insert(key.to_string(), serde_json::to_value(value).map_err(io::Error::other)?);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -64,22 +53,12 @@ mod tests {
     fn two_owners_share_a_file_without_undoing_each_other() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("state").join("recent.json");
-        assert_eq!(
-            read::<Vec<String>>(&path, "files").unwrap(),
-            None,
-            "nothing yet"
-        );
+        assert_eq!(read::<Vec<String>>(&path, "files").unwrap(), None, "nothing yet");
         write(&path, "files", &vec!["a.rs"]).unwrap();
         write(&path, "dirs", &vec!["/src"]).unwrap();
         write(&path, "files", &vec!["b.rs", "a.rs"]).unwrap();
-        assert_eq!(
-            read::<Vec<String>>(&path, "files").unwrap().unwrap(),
-            ["b.rs", "a.rs"]
-        );
-        assert_eq!(
-            read::<Vec<String>>(&path, "dirs").unwrap().unwrap(),
-            ["/src"]
-        );
+        assert_eq!(read::<Vec<String>>(&path, "files").unwrap().unwrap(), ["b.rs", "a.rs"]);
+        assert_eq!(read::<Vec<String>>(&path, "dirs").unwrap().unwrap(), ["/src"]);
     }
 
     #[test]

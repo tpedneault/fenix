@@ -30,8 +30,8 @@ pub fn open() {
     use std::os::windows::io::IntoRawHandle;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::System::Console::{
-        AllocConsole, AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS,
-        STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+        AllocConsole, AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS, STD_ERROR_HANDLE,
+        STD_OUTPUT_HANDLE,
     };
 
     // SAFETY: plain Win32 calls with no pointer arguments.
@@ -43,11 +43,7 @@ pub fn open() {
     // attaching a console doesn't give it any: open the console's
     // output buffer ourselves. `std` looks the handle up on every
     // write, so `println!`/`eprintln!` use it from here on.
-    let Ok(conout) = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("CONOUT$")
-    else {
+    let Ok(conout) = std::fs::OpenOptions::new().read(true).write(true).open("CONOUT$") else {
         return;
     };
     // Deliberately never closed: it's stdout and stderr for the rest of

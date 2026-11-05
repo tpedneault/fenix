@@ -21,13 +21,9 @@ pub fn client_capabilities() -> lsp_types::ClientCapabilities {
             // Its settings, asked for: an extension's for it, else
             // `.fenix/lsp/<server>.json`, else nothing.
             configuration: Some(true),
-            did_change_configuration: Some(lsp_types::DynamicRegistrationClientCapabilities {
-                dynamic_registration: Some(false),
-            }),
+            did_change_configuration: Some(lsp_types::DynamicRegistrationClientCapabilities { dynamic_registration: Some(false) }),
             // `workspace/diagnostic/refresh`: asked again for what it says.
-            diagnostic: Some(lsp_types::DiagnosticWorkspaceClientCapabilities {
-                refresh_support: Some(true),
-            }),
+            diagnostic: Some(lsp_types::DiagnosticWorkspaceClientCapabilities { refresh_support: Some(true) }),
             workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
                 document_changes: Some(true),
                 resource_operations: Some(vec![]),
@@ -63,14 +59,9 @@ pub fn client_capabilities() -> lsp_types::ClientCapabilities {
                 }),
                 ..Default::default()
             }),
-            publish_diagnostics: Some(lsp_types::PublishDiagnosticsClientCapabilities {
-                ..Default::default()
-            }),
+            publish_diagnostics: Some(lsp_types::PublishDiagnosticsClientCapabilities { ..Default::default() }),
             // Asked for, from a server that answers that way.
-            diagnostic: Some(lsp_types::DiagnosticClientCapabilities {
-                dynamic_registration: Some(false),
-                related_document_support: Some(true),
-            }),
+            diagnostic: Some(lsp_types::DiagnosticClientCapabilities { dynamic_registration: Some(false), related_document_support: Some(true) }),
             ..Default::default()
         }),
         ..Default::default()
@@ -83,10 +74,7 @@ pub fn client_capabilities() -> lsp_types::ClientCapabilities {
 /// this language; see `resolve_server_command`.
 pub fn default_server_command(language: LanguageId) -> Option<(String, Vec<String>)> {
     match language {
-        LanguageId::Python => Some((
-            "pyright-langserver".to_string(),
-            vec!["--stdio".to_string()],
-        )),
+        LanguageId::Python => Some(("pyright-langserver".to_string(), vec!["--stdio".to_string()])),
         // No `--stdio`/equivalent flag needed -- rust-analyzer speaks
         // LSP over stdio by default with no arguments at all.
         LanguageId::Rust => Some(("rust-analyzer".to_string(), Vec::new())),
@@ -96,14 +84,10 @@ pub fn default_server_command(language: LanguageId) -> Option<(String, Vec<Strin
         // (clangd discovers one on its own, walking up from each
         // opened file -- nothing this app needs to point it at).
         LanguageId::C | LanguageId::Cpp => Some(("clangd".to_string(), Vec::new())),
-        LanguageId::Bash => Some((
-            "bash-language-server".to_string(),
-            vec!["start".to_string()],
-        )),
-        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => Some((
-            "typescript-language-server".to_string(),
-            vec!["--stdio".to_string()],
-        )),
+        LanguageId::Bash => Some(("bash-language-server".to_string(), vec!["start".to_string()])),
+        LanguageId::JavaScript | LanguageId::TypeScript | LanguageId::Tsx => {
+            Some(("typescript-language-server".to_string(), vec!["--stdio".to_string()]))
+        }
         // gopls and lua-language-server speak LSP over stdio with no
         // arguments, as rust-analyzer does.
         LanguageId::Go => Some(("gopls".to_string(), Vec::new())),
@@ -141,10 +125,7 @@ pub fn language_config_name(language: LanguageId) -> String {
 /// command line into program + args on whitespace (no shell-quoting
 /// support -- see `Config::lsp_servers`'s own doc comment for why
 /// that's an acceptable limitation).
-pub fn resolve_server_command(
-    language: LanguageId,
-    configured: &[(String, String)],
-) -> Option<(String, Vec<String>)> {
+pub fn resolve_server_command(language: LanguageId, configured: &[(String, String)]) -> Option<(String, Vec<String>)> {
     let name = language_config_name(language);
     for (configured_language, command_line) in configured {
         if *configured_language == name {
@@ -173,11 +154,7 @@ pub fn resolve_server_command(
 pub fn hover_contents_text(contents: lsp_types::HoverContents) -> String {
     match contents {
         lsp_types::HoverContents::Scalar(marked) => marked_string_text(marked),
-        lsp_types::HoverContents::Array(items) => items
-            .into_iter()
-            .map(marked_string_text)
-            .collect::<Vec<_>>()
-            .join("\n\n"),
+        lsp_types::HoverContents::Array(items) => items.into_iter().map(marked_string_text).collect::<Vec<_>>().join("\n\n"),
         lsp_types::HoverContents::Markup(content) => content.value,
     }
 }
@@ -195,52 +172,28 @@ mod tests {
 
     #[test]
     fn python_has_a_built_in_default_command() {
-        assert_eq!(
-            default_server_command(LanguageId::Python),
-            Some((
-                "pyright-langserver".to_string(),
-                vec!["--stdio".to_string()]
-            ))
-        );
+        assert_eq!(default_server_command(LanguageId::Python), Some(("pyright-langserver".to_string(), vec!["--stdio".to_string()])));
     }
 
     #[test]
     fn rust_has_a_built_in_default_command_with_no_arguments() {
-        assert_eq!(
-            default_server_command(LanguageId::Rust),
-            Some(("rust-analyzer".to_string(), Vec::new()))
-        );
+        assert_eq!(default_server_command(LanguageId::Rust), Some(("rust-analyzer".to_string(), Vec::new())));
     }
 
     #[test]
     fn c_and_cpp_both_default_to_clangd() {
-        assert_eq!(
-            default_server_command(LanguageId::C),
-            Some(("clangd".to_string(), Vec::new()))
-        );
-        assert_eq!(
-            default_server_command(LanguageId::Cpp),
-            Some(("clangd".to_string(), Vec::new()))
-        );
+        assert_eq!(default_server_command(LanguageId::C), Some(("clangd".to_string(), Vec::new())));
+        assert_eq!(default_server_command(LanguageId::Cpp), Some(("clangd".to_string(), Vec::new())));
     }
 
     #[test]
     fn bash_has_a_built_in_default_command() {
-        assert_eq!(
-            default_server_command(LanguageId::Bash),
-            Some((
-                "bash-language-server".to_string(),
-                vec!["start".to_string()]
-            ))
-        );
+        assert_eq!(default_server_command(LanguageId::Bash), Some(("bash-language-server".to_string(), vec!["start".to_string()])));
     }
 
     #[test]
     fn javascript_typescript_and_tsx_all_default_to_typescript_language_server() {
-        let expected = Some((
-            "typescript-language-server".to_string(),
-            vec!["--stdio".to_string()],
-        ));
+        let expected = Some(("typescript-language-server".to_string(), vec!["--stdio".to_string()]));
         assert_eq!(default_server_command(LanguageId::JavaScript), expected);
         assert_eq!(default_server_command(LanguageId::TypeScript), expected);
         assert_eq!(default_server_command(LanguageId::Tsx), expected);
@@ -254,27 +207,18 @@ mod tests {
     #[test]
     fn a_configured_override_wins_over_the_built_in_default() {
         let configured = vec![("python".to_string(), "custom-pyright --flag".to_string())];
-        assert_eq!(
-            resolve_server_command(LanguageId::Python, &configured),
-            Some(("custom-pyright".to_string(), vec!["--flag".to_string()]))
-        );
+        assert_eq!(resolve_server_command(LanguageId::Python, &configured), Some(("custom-pyright".to_string(), vec!["--flag".to_string()])));
     }
 
     #[test]
     fn config_for_a_different_language_does_not_affect_this_ones_resolution() {
         let configured = vec![("rust".to_string(), "rust-analyzer".to_string())];
-        assert_eq!(
-            resolve_server_command(LanguageId::Python, &configured),
-            default_server_command(LanguageId::Python)
-        );
+        assert_eq!(resolve_server_command(LanguageId::Python, &configured), default_server_command(LanguageId::Python));
     }
 
     #[test]
     fn a_configured_command_with_no_arguments_still_resolves() {
         let configured = vec![("python".to_string(), "my-pyright".to_string())];
-        assert_eq!(
-            resolve_server_command(LanguageId::Python, &configured),
-            Some(("my-pyright".to_string(), Vec::new()))
-        );
+        assert_eq!(resolve_server_command(LanguageId::Python, &configured), Some(("my-pyright".to_string(), Vec::new())));
     }
 }

@@ -273,68 +273,35 @@ fn layers_read_language_folders_and_a_closer_layer_wins() {
     let user = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(user.path().join("tcl")).unwrap();
-    std::fs::write(
-        user.path().join("tcl").join("proc.snippet"),
-        "# name: Mine\n# key: proc\n# scope: tcl\n# --\nproc mine {} {}\n",
-    )
-    .unwrap();
+    std::fs::write(user.path().join("tcl").join("proc.snippet"), "# name: Mine\n# key: proc\n# scope: tcl\n# --\nproc mine {} {}\n").unwrap();
     std::fs::write(user.path().join("loose.snippet"), "# key: loose\n# --\nx\n").unwrap();
     std::fs::create_dir_all(project.path().join("tcl")).unwrap();
-    std::fs::write(
-        project.path().join("tcl").join("proc.snippet"),
-        "# name: Team\n# key: proc\n# scope: tcl\n# --\nproc team {} {}\n",
-    )
-    .unwrap();
+    std::fs::write(project.path().join("tcl").join("proc.snippet"), "# name: Team\n# key: proc\n# scope: tcl\n# --\nproc team {} {}\n").unwrap();
 
     let catalog = fenix_snippets::Catalog::layers(true, Some(user.path()), Some(project.path()));
     assert!(catalog.errors.is_empty(), "{:?}", catalog.errors);
     let proc = catalog.matching("proc", "tcl").unwrap();
-    assert_eq!(
-        (proc.name.as_str(), proc.source),
-        ("Team", fenix_snippets::Source::Project)
-    );
-    assert!(
-        catalog.matching("loose", "text").is_some(),
-        "loose files still count"
-    );
+    assert_eq!((proc.name.as_str(), proc.source), ("Team", fenix_snippets::Source::Project));
+    assert!(catalog.matching("loose", "text").is_some(), "loose files still count");
     let mine = catalog.snippets.iter().find(|s| s.name == "Mine").unwrap();
-    assert_eq!(
-        mine.file.as_deref(),
-        Some(user.path().join("tcl").join("proc.snippet").as_path())
-    );
+    assert_eq!(mine.file.as_deref(), Some(user.path().join("tcl").join("proc.snippet").as_path()));
     assert!(mine.text.starts_with("# name: Mine"));
 
     let without = fenix_snippets::Catalog::layers(false, Some(user.path()), None);
-    assert!(without
-        .snippets
-        .iter()
-        .all(|s| s.source != fenix_snippets::Source::BuiltIn));
+    assert!(without.snippets.iter().all(|s| s.source != fenix_snippets::Source::BuiltIn));
 }
 
 #[test]
 fn a_selection_becomes_a_snippet_that_inserts_it_as_it_was() {
     let selected = "total = ${price} \\ 2\n";
-    let text = fenix_snippets::file_text(
-        "Half",
-        "half",
-        &["python".to_string()],
-        &fenix_snippets::escape_body(selected),
-    );
-    assert!(
-        text.starts_with("# name: Half\n# key: half\n# scope: python\n# --\n"),
-        "{text}"
-    );
+    let text = fenix_snippets::file_text("Half", "half", &["python".to_string()], &fenix_snippets::escape_body(selected));
+    assert!(text.starts_with("# name: Half\n# key: half\n# scope: python\n# --\n"), "{text}");
     let snippet = fenix_snippets::Snippet::parse(&text).unwrap();
-    let rendered = snippet
-        .template
-        .render(&Default::default(), &Default::default(), "");
+    let rendered = snippet.template.render(&Default::default(), &Default::default(), "");
     assert_eq!(rendered.text, selected);
     assert_eq!(snippet.template.field_count(), 0);
     assert_eq!(fenix_snippets::folder_for(&["*".to_string()]), "all");
-    assert_eq!(
-        fenix_snippets::folder_for(&["tcl".to_string(), "c".to_string()]),
-        "tcl"
-    );
+    assert_eq!(fenix_snippets::folder_for(&["tcl".to_string(), "c".to_string()]), "tcl");
 }
 
 /// An installed extension's snippets sit between the built-in ones and
@@ -344,26 +311,11 @@ fn an_extensions_snippets_sit_between_the_builtin_ones_and_yours() {
     use fenix_snippets::{Catalog, Source};
     let ext = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(ext.path().join("tcl")).unwrap();
-    std::fs::write(
-        ext.path().join("tcl").join("acme.snippet"),
-        "# key: acmeproc\n# --\nproc acme {} {}\n",
-    )
-    .unwrap();
+    std::fs::write(ext.path().join("tcl").join("acme.snippet"), "# key: acmeproc\n# --\nproc acme {} {}\n").unwrap();
     let catalog = Catalog::layers_with(true, &[ext.path().to_path_buf()], None, None);
-    assert_eq!(
-        catalog.matching("acmeproc", "tcl").map(|s| s.source),
-        Some(Source::Extension)
-    );
+    assert_eq!(catalog.matching("acmeproc", "tcl").map(|s| s.source), Some(Source::Extension));
     let user = tempfile::tempdir().unwrap();
-    std::fs::write(
-        user.path().join("acme.snippet"),
-        "# key: acmeproc\n# scope: tcl\n# --\nmine\n",
-    )
-    .unwrap();
+    std::fs::write(user.path().join("acme.snippet"), "# key: acmeproc\n# scope: tcl\n# --\nmine\n").unwrap();
     let catalog = Catalog::layers_with(true, &[ext.path().to_path_buf()], Some(user.path()), None);
-    assert_eq!(
-        catalog.matching("acmeproc", "tcl").map(|s| s.source),
-        Some(Source::User),
-        "yours wins"
-    );
+    assert_eq!(catalog.matching("acmeproc", "tcl").map(|s| s.source), Some(Source::User), "yours wins");
 }

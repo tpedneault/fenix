@@ -108,9 +108,7 @@ impl Origin {
     pub fn describe(&self) -> String {
         match self {
             Origin::BuiltIn => "built-in".to_string(),
-            Origin::Extension(path) | Origin::User(path) | Origin::Project(path) => {
-                path.display().to_string()
-            }
+            Origin::Extension(path) | Origin::User(path) | Origin::Project(path) => path.display().to_string(),
         }
     }
 }
@@ -131,20 +129,10 @@ pub enum NameRule {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AskKind {
-    Text {
-        default: String,
-    },
-    Choice {
-        choices: Vec<String>,
-        default: String,
-    },
-    Toggle {
-        default: bool,
-    },
-    Many {
-        options: Vec<String>,
-        default: Vec<String>,
-    },
+    Text { default: String },
+    Choice { choices: Vec<String>, default: String },
+    Toggle { default: bool },
+    Many { options: Vec<String>, default: Vec<String> },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -334,27 +322,14 @@ struct RawHook {
     when: Option<RawWhen>,
 }
 
-const NAME_VARS: [&str; 5] = [
-    "name",
-    "name_snake",
-    "name_kebab",
-    "name_pascal",
-    "name_upper",
-];
+const NAME_VARS: [&str; 5] = ["name", "name_snake", "name_kebab", "name_pascal", "name_upper"];
 
 impl Template {
     /// Parses and fully validates one template: its `template.toml` text
     /// and its `files/` tree as (forward-slash relative path, contents).
-    pub fn parse(
-        id: &str,
-        toml_text: &str,
-        files: &[(String, String)],
-        origin: Origin,
-    ) -> Result<Self, String> {
-        let raw: RawTemplate =
-            toml::from_str(toml_text).map_err(|e| format!("template.toml: {e}"))?;
-        let kind = ProjectKind::from_id(&raw.template.kind)
-            .ok_or_else(|| format!("unknown kind \"{}\"", raw.template.kind))?;
+    pub fn parse(id: &str, toml_text: &str, files: &[(String, String)], origin: Origin) -> Result<Self, String> {
+        let raw: RawTemplate = toml::from_str(toml_text).map_err(|e| format!("template.toml: {e}"))?;
+        let kind = ProjectKind::from_id(&raw.template.kind).ok_or_else(|| format!("unknown kind \"{}\"", raw.template.kind))?;
         let name_rule = match raw.template.name_rule.as_deref() {
             None | Some("any") => NameRule::Any,
             Some("sketch") => NameRule::Sketch,
@@ -366,22 +341,14 @@ impl Template {
         let mut ask_whens = Vec::new();
         for raw_ask in raw.ask {
             let key = raw_ask.key.trim().to_string();
-            if key.is_empty()
-                || !key
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-            {
-                return Err(format!(
-                    "ask key \"{key}\" must be lowercase letters, digits and _"
-                ));
+            if key.is_empty() || !key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                return Err(format!("ask key \"{key}\" must be lowercase letters, digits and _"));
             }
             if NAME_VARS.contains(&key.as_str()) || asks.iter().any(|a: &Ask| a.key == key) {
                 return Err(format!("ask key \"{key}\" is used twice"));
             }
             let kind = match (raw_ask.choices, raw_ask.many, raw_ask.default) {
-                (Some(_), Some(_), _) => {
-                    return Err(format!("ask \"{key}\" has both choices and many"))
-                }
+                (Some(_), Some(_), _) => return Err(format!("ask \"{key}\" has both choices and many")),
                 (Some(choices), None, default) => {
                     if choices.is_empty() {
                         return Err(format!("ask \"{key}\" has no choices"));
@@ -389,11 +356,7 @@ impl Template {
                     let default = match default {
                         None => choices[0].clone(),
                         Some(toml::Value::String(s)) if choices.contains(&s) => s,
-                        Some(_) => {
-                            return Err(format!(
-                                "ask \"{key}\": default must be one of its choices"
-                            ))
-                        }
+                        Some(_) => return Err(format!("ask \"{key}\": default must be one of its choices")),
                     };
                     AskKind::Choice { choices, default }
                 }
@@ -404,9 +367,7 @@ impl Template {
                             .into_iter()
                             .map(|item| match item {
                                 toml::Value::String(s) if options.contains(&s) => Ok(s),
-                                _ => Err(format!(
-                                    "ask \"{key}\": every default must be one of its options"
-                                )),
+                                _ => Err(format!("ask \"{key}\": every default must be one of its options")),
                             })
                             .collect::<Result<_, _>>()?,
                         Some(_) => return Err(format!("ask \"{key}\": default must be a list")),
@@ -415,20 +376,10 @@ impl Template {
                 }
                 (None, None, Some(toml::Value::Boolean(b))) => AskKind::Toggle { default: b },
                 (None, None, Some(toml::Value::String(s))) => AskKind::Text { default: s },
-                (None, None, None) => AskKind::Text {
-                    default: String::new(),
-                },
-                (None, None, Some(_)) => {
-                    return Err(format!("ask \"{key}\": default must be text or true/false"))
-                }
+                (None, None, None) => AskKind::Text { default: String::new() },
+                (None, None, Some(_)) => return Err(format!("ask \"{key}\": default must be text or true/false")),
             };
-            asks.push(Ask {
-                key,
-                label: raw_ask.label,
-                hint: raw_ask.hint,
-                kind,
-                when: None,
-            });
+            asks.push(Ask { key, label: raw_ask.label, hint: raw_ask.hint, kind, when: None });
             ask_whens.push(raw_ask.when);
         }
 
@@ -453,14 +404,8 @@ impl Template {
         // An ask's `when` can name any ask, so it's read once they all are.
         for (i, when) in ask_whens.into_iter().enumerate() {
             let cond = template.parse_when(when.as_ref())?;
-            if cond
-                .as_ref()
-                .is_some_and(|c| c.mentions(&template.asks[i].key))
-            {
-                return Err(format!(
-                    "ask \"{}\" can't depend on itself",
-                    template.asks[i].key
-                ));
+            if cond.as_ref().is_some_and(|c| c.mentions(&template.asks[i].key)) {
+                return Err(format!("ask \"{}\" can't depend on itself", template.asks[i].key));
             }
             template.asks[i].when = cond;
         }
@@ -472,18 +417,11 @@ impl Template {
         // where an entry says; every other file under `files/` is copied.
         let referenced: Vec<&str> = raw.file.iter().filter_map(|f| f.from.as_deref()).collect();
         for (path, body) in files {
-            template
-                .check_blocks(body)
-                .map_err(|e| format!("files/{path}: {e}"))?;
+            template.check_blocks(body).map_err(|e| format!("files/{path}: {e}"))?;
             if !referenced.contains(&path.as_str()) {
                 template.check_relative(path)?;
                 template.check_vars(path, false)?;
-                template.files.push(FileEntry {
-                    path: path.clone(),
-                    body: body.clone(),
-                    when: None,
-                    after: false,
-                });
+                template.files.push(FileEntry { path: path.clone(), body: body.clone(), when: None, after: false });
             }
         }
         for raw_file in raw.file {
@@ -494,29 +432,15 @@ impl Template {
                     .iter()
                     .find(|(path, _)| *path == from)
                     .map(|(_, body)| body.clone())
-                    .ok_or_else(|| {
-                        format!("file \"{}\": files/{from} doesn't exist", raw_file.path)
-                    })?,
+                    .ok_or_else(|| format!("file \"{}\": files/{from} doesn't exist", raw_file.path))?,
                 (None, Some(content)) => {
-                    template
-                        .check_blocks(&content)
-                        .map_err(|e| format!("file \"{}\": {e}", raw_file.path))?;
+                    template.check_blocks(&content).map_err(|e| format!("file \"{}\": {e}", raw_file.path))?;
                     content
                 }
-                _ => {
-                    return Err(format!(
-                        "file \"{}\" needs exactly one of from or content",
-                        raw_file.path
-                    ))
-                }
+                _ => return Err(format!("file \"{}\" needs exactly one of from or content", raw_file.path)),
             };
             let when = template.parse_when(raw_file.when.as_ref())?;
-            template.files.push(FileEntry {
-                path: raw_file.path,
-                body,
-                when,
-                after: raw_file.after,
-            });
+            template.files.push(FileEntry { path: raw_file.path, body, when, after: raw_file.after });
         }
         for raw_run in raw.run {
             template.check_vars(&raw_run.exec, false)?;
@@ -528,12 +452,7 @@ impl Template {
                 template.check_vars(cwd, false)?;
             }
             let when = template.parse_when(raw_run.when.as_ref())?;
-            template.runs.push(RunEntry {
-                exec: raw_run.exec,
-                args: raw_run.args,
-                cwd: raw_run.cwd,
-                when,
-            });
+            template.runs.push(RunEntry { exec: raw_run.exec, args: raw_run.args, cwd: raw_run.cwd, when });
         }
         for raw_task in raw.task {
             template.check_vars(&raw_task.name, false)?;
@@ -542,12 +461,7 @@ impl Template {
                 template.check_vars(arg, true)?;
             }
             let when = template.parse_when(raw_task.when.as_ref())?;
-            template.tasks.push(TaskEntry {
-                name: raw_task.name,
-                exec: raw_task.exec,
-                args: raw_task.args,
-                when,
-            });
+            template.tasks.push(TaskEntry { name: raw_task.name, exec: raw_task.exec, args: raw_task.args, when });
         }
         for raw_hook in raw.hook {
             let kind = match raw_hook.kind.as_str() {
@@ -559,12 +473,7 @@ impl Template {
             let label = raw_hook.label.unwrap_or_else(|| "{{name}}".to_string());
             template.check_vars(&label, false)?;
             let when = template.parse_when(raw_hook.when.as_ref())?;
-            template.hooks.push(HookEntry {
-                kind,
-                path: raw_hook.path,
-                label,
-                when,
-            });
+            template.hooks.push(HookEntry { kind, path: raw_hook.path, label, when });
         }
         if let Some(tools) = raw.tools {
             let json = serde_json::to_value(tools).map_err(|e| format!("[tools]: {e}"))?;
@@ -581,10 +490,7 @@ impl Template {
                 // not another answer -- those aren't known yet.
                 for var in variables(default) {
                     if !NAME_VARS.contains(&var.name.as_str()) {
-                        return Err(format!(
-                            "ask \"{}\": a default can only use the name variables",
-                            ask.key
-                        ));
+                        return Err(format!("ask \"{}\": a default can only use the name variables", ask.key));
                     }
                 }
             }
@@ -599,18 +505,12 @@ impl Template {
         for (n, line) in body.lines().enumerate() {
             match directive(line) {
                 Some(Directive::If(expr)) => {
-                    self.parse_one_when(expr)
-                        .map_err(|e| format!("line {}: {e}", n + 1))?;
+                    self.parse_one_when(expr).map_err(|e| format!("line {}: {e}", n + 1))?;
                     depth.push(false);
                 }
                 Some(Directive::Else) => match depth.last_mut() {
                     Some(seen) if !*seen => *seen = true,
-                    Some(_) => {
-                        return Err(format!(
-                            "line {}: a second {{{{else}}}} in one block",
-                            n + 1
-                        ))
-                    }
+                    Some(_) => return Err(format!("line {}: a second {{{{else}}}} in one block", n + 1)),
                     None => return Err(format!("line {}: {{{{else}}}} outside a block", n + 1)),
                 },
                 Some(Directive::End) if depth.pop().is_none() => {
@@ -619,18 +519,12 @@ impl Template {
                 Some(Directive::End) | None => {}
             }
         }
-        if depth.is_empty() {
-            Ok(())
-        } else {
-            Err("a {{#if}} isn't closed".to_string())
-        }
+        if depth.is_empty() { Ok(()) } else { Err("a {{#if}} isn't closed".to_string()) }
     }
 
     /// Whether ask `i` should be asked, given the answers so far.
     pub fn asks_now(&self, i: usize, answers: &Answers) -> bool {
-        self.asks
-            .get(i)
-            .is_some_and(|ask| cond_holds(ask.when.as_ref(), answers))
+        self.asks.get(i).is_some_and(|ask| cond_holds(ask.when.as_ref(), answers))
     }
 
     fn ask(&self, key: &str) -> Option<&Ask> {
@@ -642,16 +536,9 @@ impl Template {
         if path.is_empty()
             || p.is_absolute()
             || path.starts_with(['/', '\\'])
-            || p.components().any(|c| {
-                matches!(
-                    c,
-                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
-                )
-            })
+            || p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
         {
-            return Err(format!(
-                "\"{path}\" must be a relative path inside the project"
-            ));
+            return Err(format!("\"{path}\" must be a relative path inside the project"));
         }
         Ok(())
     }
@@ -663,25 +550,14 @@ impl Template {
         for var in variables(text) {
             let known = NAME_VARS.contains(&var.name.as_str()) || self.ask(&var.name).is_some();
             if !known {
-                return Err(format!(
-                    "\"{text}\" uses {{{{{}}}}}, which isn't a variable",
-                    var.name
-                ));
+                return Err(format!("\"{text}\" uses {{{{{}}}}}, which isn't a variable", var.name));
             }
             if var.splat {
                 if !splat_ok || var.whole != text {
-                    return Err(format!(
-                        "\"{text}\": {{{{{}...}}}} must be a whole argument on its own",
-                        var.name
-                    ));
+                    return Err(format!("\"{text}\": {{{{{}...}}}} must be a whole argument on its own", var.name));
                 }
-                if !matches!(
-                    self.ask(&var.name).map(|a| &a.kind),
-                    Some(AskKind::Text { .. } | AskKind::Many { .. })
-                ) {
-                    return Err(format!(
-                        "\"{text}\": only a text or many answer can be splatted"
-                    ));
+                if !matches!(self.ask(&var.name).map(|a| &a.kind), Some(AskKind::Text { .. } | AskKind::Many { .. })) {
+                    return Err(format!("\"{text}\": only a text or many answer can be splatted"));
                 }
             }
         }
@@ -693,10 +569,7 @@ impl Template {
             None => Ok(None),
             Some(RawWhen::One(one)) => self.parse_one_when(one),
             Some(RawWhen::All(all)) => {
-                let conds = all
-                    .iter()
-                    .map(|w| self.parse_one_when(w))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let conds = all.iter().map(|w| self.parse_one_when(w)).collect::<Result<Vec<_>, _>>()?;
                 Ok(Some(Cond::All(conds.into_iter().flatten().collect())))
             }
         }
@@ -707,25 +580,15 @@ impl Template {
         let Some(cond) = parse_cond(when) else {
             return Ok(None);
         };
-        let (Cond::Truthy(key) | Cond::Falsy(key) | Cond::Eq(key, _) | Cond::Ne(key, _)) = &cond
-        else {
+        let (Cond::Truthy(key) | Cond::Falsy(key) | Cond::Eq(key, _) | Cond::Ne(key, _)) = &cond else {
             return Ok(Some(cond));
         };
         let Some(ask) = self.ask(key) else {
             return Err(format!("when \"{when}\": \"{key}\" isn't an ask"));
         };
-        if let (
-            Cond::Eq(_, value) | Cond::Ne(_, value),
-            AskKind::Choice {
-                choices: options, ..
-            }
-            | AskKind::Many { options, .. },
-        ) = (&cond, &ask.kind)
-        {
+        if let (Cond::Eq(_, value) | Cond::Ne(_, value), AskKind::Choice { choices: options, .. } | AskKind::Many { options, .. }) = (&cond, &ask.kind) {
             if !options.contains(value) {
-                return Err(format!(
-                    "when \"{when}\": \"{value}\" isn't one of {key}'s options"
-                ));
+                return Err(format!("when \"{when}\": \"{value}\" isn't one of {key}'s options"));
             }
         }
         Ok(Some(cond))
@@ -738,9 +601,7 @@ impl Template {
             .iter()
             .map(|ask| {
                 let answer = match &ask.kind {
-                    AskKind::Text { default } => {
-                        Answer::Text(substitute_known(default, &|v| names.get(v).cloned()))
-                    }
+                    AskKind::Text { default } => Answer::Text(substitute_known(default, &|v| names.get(v).cloned())),
                     AskKind::Choice { default, .. } => Answer::Text(default.clone()),
                     AskKind::Toggle { default } => Answer::Bool(*default),
                     AskKind::Many { default, .. } => Answer::Many(default.clone()),
@@ -759,10 +620,7 @@ impl Template {
         for (key, answer) in self.default_answers(name) {
             answers.entry(key).or_insert(answer);
         }
-        let ctx = Context {
-            names: name_vars(name),
-            answers: &answers,
-        };
+        let ctx = Context { names: name_vars(name), answers: &answers };
 
         let mut files: Vec<PlannedFile> = Vec::new();
         let mut after_files: Vec<PlannedFile> = Vec::new();
@@ -774,55 +632,26 @@ impl Template {
             if files.iter().chain(&after_files).any(|f| f.path == path) {
                 return Err(format!("two files would both be written to {path}"));
             }
-            let planned = PlannedFile {
-                path,
-                contents: ctx.contents(&entry.body),
-            };
-            if entry.after {
-                after_files.push(planned)
-            } else {
-                files.push(planned)
-            }
+            let planned = PlannedFile { path, contents: ctx.contents(&entry.body) };
+            if entry.after { after_files.push(planned) } else { files.push(planned) }
         }
 
-        let mut tools = self
-            .tools
-            .clone()
-            .map(|t| ctx.json(t))
-            .transpose()?
-            .unwrap_or_else(|| serde_json::json!({}));
+        let mut tools = self.tools.clone().map(|t| ctx.json(t)).transpose()?.unwrap_or_else(|| serde_json::json!({}));
         for task in &self.tasks {
             if !ctx.holds(task.when.as_ref()) {
                 continue;
             }
             let spec = serde_json::json!({ "executable": ctx.text(&task.exec)?, "args": ctx.args(&task.args)? });
-            let tasks = tools
-                .as_object_mut()
-                .ok_or("[tools] must be a table")?
-                .entry("tasks")
-                .or_insert_with(|| serde_json::json!({}));
-            tasks
-                .as_object_mut()
-                .ok_or("[tools.tasks] must be a table")?
-                .insert(ctx.text(&task.name)?, spec);
+            let tasks = tools.as_object_mut().ok_or("[tools] must be a table")?.entry("tasks").or_insert_with(|| serde_json::json!({}));
+            tasks.as_object_mut().ok_or("[tools.tasks] must be a table")?.insert(ctx.text(&task.name)?, spec);
         }
         if tools.as_object().is_some_and(|o| !o.is_empty()) {
-            if files
-                .iter()
-                .chain(&after_files)
-                .any(|f| f.path == ".fenix/tools.json")
-            {
-                return Err(
-                    "both files/ and the template's tasks write .fenix/tools.json".to_string(),
-                );
+            if files.iter().chain(&after_files).any(|f| f.path == ".fenix/tools.json") {
+                return Err("both files/ and the template's tasks write .fenix/tools.json".to_string());
             }
             let text = serde_json::to_string_pretty(&tools).map_err(|e| e.to_string())? + "\n";
-            ProjectTools::parse(&text)
-                .map_err(|e| format!("the generated .fenix/tools.json is invalid: {e}"))?;
-            after_files.push(PlannedFile {
-                path: ".fenix/tools.json".to_string(),
-                contents: text,
-            });
+            ProjectTools::parse(&text).map_err(|e| format!("the generated .fenix/tools.json is invalid: {e}"))?;
+            after_files.push(PlannedFile { path: ".fenix/tools.json".to_string(), contents: text });
         }
 
         let mut steps = Vec::new();
@@ -831,12 +660,7 @@ impl Template {
                 continue;
             }
             let mut spec = CommandSpec::new(ctx.text(&run.exec)?, ctx.args(&run.args)?);
-            spec.cwd = run
-                .cwd
-                .as_deref()
-                .map(|c| ctx.text(c))
-                .transpose()?
-                .map(PathBuf::from);
+            spec.cwd = run.cwd.as_deref().map(|c| ctx.text(c)).transpose()?.map(PathBuf::from);
             spec.validate()?;
             steps.push(Step { spec });
         }
@@ -847,27 +671,12 @@ impl Template {
                 continue;
             }
             match hook.kind {
-                HookKind::MibRoot => hooks.push(Hook::MibRoot {
-                    path: ctx.text(&hook.path)?,
-                    label: ctx.text(&hook.label)?,
-                }),
+                HookKind::MibRoot => hooks.push(Hook::MibRoot { path: ctx.text(&hook.path)?, label: ctx.text(&hook.label)? }),
             }
         }
 
-        let open = self
-            .open
-            .iter()
-            .map(|p| ctx.text(p))
-            .collect::<Result<_, _>>()?;
-        Ok(Plan {
-            dir: parent.join(name),
-            kind: self.kind,
-            files,
-            after_files,
-            steps,
-            hooks,
-            open,
-        })
+        let open = self.open.iter().map(|p| ctx.text(p)).collect::<Result<_, _>>()?;
+        Ok(Plan { dir: parent.join(name), kind: self.kind, files, after_files, steps, hooks, open })
     }
 }
 
@@ -907,16 +716,8 @@ fn variables(text: &str) -> Vec<Var> {
             Some(name) => (name, true),
             None => (inner, false),
         };
-        if !name.is_empty()
-            && name
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-        {
-            vars.push(Var {
-                name: name.to_string(),
-                splat,
-                whole: format!("{{{{{inner}}}}}"),
-            });
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+            vars.push(Var { name: name.to_string(), splat, whole: format!("{{{{{inner}}}}}") });
             rest = &after[end + 2..];
         } else {
             rest = &rest[start + 2..];
@@ -968,9 +769,7 @@ impl Context<'_> {
     fn text(&self, text: &str) -> Result<String, String> {
         let mut out = text.to_string();
         for var in variables(text) {
-            let value = self
-                .scalar(&var.name)
-                .ok_or_else(|| format!("no value for {{{{{}}}}}", var.name))?;
+            let value = self.scalar(&var.name).ok_or_else(|| format!("no value for {{{{{}}}}}", var.name))?;
             out = out.replace(&var.whole, &value);
         }
         Ok(out)
@@ -1025,12 +824,7 @@ impl Context<'_> {
     fn json(&self, value: serde_json::Value) -> Result<serde_json::Value, String> {
         Ok(match value {
             serde_json::Value::String(s) => serde_json::Value::String(self.text(&s)?),
-            serde_json::Value::Array(items) => serde_json::Value::Array(
-                items
-                    .into_iter()
-                    .map(|v| self.json(v))
-                    .collect::<Result<_, _>>()?,
-            ),
+            serde_json::Value::Array(items) => serde_json::Value::Array(items.into_iter().map(|v| self.json(v)).collect::<Result<_, _>>()?),
             serde_json::Value::Object(map) => {
                 let mut out = serde_json::Map::new();
                 for (k, v) in map {
@@ -1117,11 +911,7 @@ fn cond_holds(cond: Option<&Cond>, answers: &Answers) -> bool {
 /// name with spaces, "Adafruit NeoPixel", survives), else whitespace.
 pub fn split_list(text: &str) -> Vec<String> {
     if text.contains(',') {
-        text.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect()
+        text.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect()
     } else {
         text.split_whitespace().map(str::to_string).collect()
     }
@@ -1167,20 +957,11 @@ fn name_vars(name: &str) -> BTreeMap<&'static str, String> {
         .iter()
         .map(|w| {
             let mut chars = w.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().chain(chars).collect::<String>())
-                .unwrap_or_default()
+            chars.next().map(|first| first.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
         })
         .collect();
     let upper = snake.to_uppercase();
-    BTreeMap::from([
-        ("name", name.to_string()),
-        ("name_snake", snake),
-        ("name_kebab", words.join("-")),
-        ("name_pascal", pascal),
-        ("name_upper", upper),
-    ])
+    BTreeMap::from([("name", name.to_string()), ("name_snake", snake), ("name_kebab", words.join("-")), ("name_pascal", pascal), ("name_upper", upper)])
 }
 
 /// Whether `name` can be a project folder: never a path, never one of
@@ -1195,16 +976,12 @@ pub fn validate_name(name: &str, rule: NameRule) -> Result<(), String> {
     if name == "." || name == ".." || name.ends_with('.') {
         return Err("a name can't end with a dot".to_string());
     }
-    if let Some(c) = name.chars().find(|c| {
-        matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()
-    }) {
+    if let Some(c) = name.chars().find(|c| matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control()) {
         return Err(format!("a name can't contain '{c}'"));
     }
     let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
     let reserved = ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
-        || ((stem.starts_with("COM") || stem.starts_with("LPT"))
-            && stem.len() == 4
-            && stem.as_bytes()[3].is_ascii_digit());
+        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit());
     if reserved {
         return Err(format!("{name} is a reserved name on Windows"));
     }
@@ -1212,25 +989,16 @@ pub fn validate_name(name: &str, rule: NameRule) -> Result<(), String> {
         if !name.starts_with(|c: char| c.is_ascii_lowercase() || c.is_ascii_digit()) {
             return Err("a package name starts with a lowercase letter or digit".to_string());
         }
-        if let Some(c) = name.chars().find(|c| {
-            !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_'))
-        }) {
-            return Err(format!(
-                "a package name can't contain '{c}' -- lowercase letters, digits, - . _ only"
-            ));
+        if let Some(c) = name.chars().find(|c| !(c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '.' | '_'))) {
+            return Err(format!("a package name can't contain '{c}' -- lowercase letters, digits, - . _ only"));
         }
     }
     if rule == NameRule::Sketch {
         if !name.starts_with(|c: char| c.is_ascii_alphanumeric()) {
             return Err("a sketch name starts with a letter or digit".to_string());
         }
-        if let Some(c) = name
-            .chars()
-            .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.')))
-        {
-            return Err(format!(
-                "a sketch name can't contain '{c}' -- letters, digits, _ - . only"
-            ));
+        if let Some(c) = name.chars().find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))) {
+            return Err(format!("a sketch name can't contain '{c}' -- letters, digits, _ - . only"));
         }
         if name.len() > 63 {
             return Err("a sketch name is at most 63 characters".to_string());
@@ -1257,32 +1025,20 @@ pub struct Step {
 
 impl Step {
     pub fn new(executable: &str, args: &[&str]) -> Self {
-        Step {
-            spec: CommandSpec::new(
-                executable.to_string(),
-                args.iter().map(|a| a.to_string()).collect(),
-            ),
-        }
+        Step { spec: CommandSpec::new(executable.to_string(), args.iter().map(|a| a.to_string()).collect()) }
     }
 
     /// The command line as the review page shows it: each argument that
     /// needs it quoted, so what you read is what runs.
     pub fn display(&self) -> String {
-        std::iter::once(&self.spec.executable)
-            .chain(&self.spec.args)
-            .map(|a| quote_for_display(a))
-            .collect::<Vec<_>>()
-            .join(" ")
+        std::iter::once(&self.spec.executable).chain(&self.spec.args).map(|a| quote_for_display(a)).collect::<Vec<_>>().join(" ")
     }
 
     /// The process, ready to spawn in `dir`: no shell, no console window,
     /// no stdin, both outputs piped.
     pub fn command(&self, dir: &Path) -> io::Result<Command> {
         let mut command = self.spec.command(dir)?;
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -1327,12 +1083,7 @@ pub struct Plan {
 impl Plan {
     /// The first of `open` that exists now, else a README, else `None`.
     pub fn file_to_open(&self) -> Option<PathBuf> {
-        self.open
-            .iter()
-            .map(String::as_str)
-            .chain(["README.md"])
-            .map(|p| self.dir.join(p))
-            .find(|p| p.is_file())
+        self.open.iter().map(String::as_str).chain(["README.md"]).map(|p| self.dir.join(p)).find(|p| p.is_file())
     }
 }
 
@@ -1343,16 +1094,8 @@ impl Plan {
         if self.dir.is_file() {
             return Some(format!("{} is a file", self.dir.display()));
         }
-        let count = std::fs::read_dir(&self.dir)
-            .map(|entries| entries.count())
-            .unwrap_or(0);
-        (count > 0).then(|| {
-            format!(
-                "{} already exists and has {count} item{}",
-                self.dir.display(),
-                if count == 1 { "" } else { "s" }
-            )
-        })
+        let count = std::fs::read_dir(&self.dir).map(|entries| entries.count()).unwrap_or(0);
+        (count > 0).then(|| format!("{} already exists and has {count} item{}", self.dir.display(), if count == 1 { "" } else { "s" }))
     }
 
     /// Creates the folder and writes every planned file. Never
@@ -1377,16 +1120,10 @@ impl Plan {
         for file in files {
             let path = self.dir.join(&file.path);
             if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| format!("{}: {e}", parent.display()))?;
+                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
             }
-            let mut out = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-                .map_err(|e| format!("{}: {e}", path.display()))?;
-            io::Write::write_all(&mut out, file.contents.as_bytes())
-                .map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut out = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            io::Write::write_all(&mut out, file.contents.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
         }
         Ok(files.len())
     }
@@ -1407,133 +1144,24 @@ macro_rules! builtin {
 }
 
 /// (folder name, `template.toml`, `files/` as (path, contents)).
-type Builtin = (
-    &'static str,
-    &'static str,
-    &'static [(&'static str, &'static str)],
-);
+type Builtin = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
 
 const BUILTINS: &[Builtin] = &[
-    builtin!(
-        "python-uv",
-        [".gitignore", "README.md", "tests/test_smoke.py"]
-    ),
-    builtin!(
-        "python-data",
-        [
-            ".gitignore",
-            "README.md",
-            "data/processed/.gitkeep",
-            "data/raw/.gitkeep",
-            "notebooks/explore.ipynb",
-            "src/{{name_snake}}/analysis.py",
-            "src/{{name_snake}}/io.py",
-            "tests/test_io.py"
-        ]
-    ),
-    builtin!(
-        "python-gui",
-        [
-            ".gitignore",
-            "README.md",
-            "src/{{name_snake}}/__init__.py",
-            "src/{{name_snake}}/__main__.py",
-            "src/{{name_snake}}/window.py",
-            "tests/test_window.py"
-        ]
-    ),
-    builtin!(
-        "python-cli",
-        [
-            ".gitignore",
-            "README.md",
-            "src/{{name_snake}}/__init__.py",
-            "src/{{name_snake}}/__main__.py",
-            "src/{{name_snake}}/cli.py",
-            "tests/test_cli.py"
-        ]
-    ),
-    builtin!(
-        "python-api",
-        [
-            ".gitignore",
-            "Dockerfile",
-            "README.md",
-            "dockerignore",
-            "src/{{name_snake}}/__init__.py",
-            "src/{{name_snake}}/main.py",
-            "tests/test_api.py"
-        ]
-    ),
+    builtin!("python-uv", [".gitignore", "README.md", "tests/test_smoke.py"]),
+    builtin!("python-data", [".gitignore", "README.md", "data/processed/.gitkeep", "data/raw/.gitkeep", "notebooks/explore.ipynb", "src/{{name_snake}}/analysis.py", "src/{{name_snake}}/io.py", "tests/test_io.py"]),
+    builtin!("python-gui", [".gitignore", "README.md", "src/{{name_snake}}/__init__.py", "src/{{name_snake}}/__main__.py", "src/{{name_snake}}/window.py", "tests/test_window.py"]),
+    builtin!("python-cli", [".gitignore", "README.md", "src/{{name_snake}}/__init__.py", "src/{{name_snake}}/__main__.py", "src/{{name_snake}}/cli.py", "tests/test_cli.py"]),
+    builtin!("python-api", [".gitignore", "Dockerfile", "README.md", "dockerignore", "src/{{name_snake}}/__init__.py", "src/{{name_snake}}/main.py", "tests/test_api.py"]),
     builtin!("rust-cargo", [".gitignore", "main_clap.rs"]),
     builtin!("rust-workspace", [".gitignore", "Cargo.toml", "README.md"]),
-    builtin!(
-        "fenix-extension",
-        [
-            ".gitignore",
-            "Cargo.toml.in",
-            "README.md",
-            "extension.toml",
-            "package.ps1",
-            "src/lib.rs"
-        ]
-    ),
-    builtin!(
-        "cmake",
-        [
-            ".clangd",
-            ".gitignore",
-            "CMakeLists.txt",
-            "CMakePresets.json",
-            "README.md",
-            "c/header.h",
-            "c/library.c",
-            "c/main.c",
-            "c/test.c",
-            "c/tests.cmake",
-            "cpp/header.hpp",
-            "cpp/library.cpp",
-            "cpp/main.cpp",
-            "cpp/test.cpp",
-            "cpp/tests.cmake"
-        ]
-    ),
+    builtin!("fenix-extension", [".gitignore", "Cargo.toml.in", "README.md", "extension.toml", "package.ps1", "src/lib.rs"]),
+    builtin!("cmake", [".clangd", ".gitignore", "CMakeLists.txt", "CMakePresets.json", "README.md", "c/header.h", "c/library.c", "c/main.c", "c/test.c", "c/tests.cmake", "cpp/header.hpp", "cpp/library.cpp", "cpp/main.cpp", "cpp/test.cpp", "cpp/tests.cmake"]),
     builtin!("web-vite", []),
-    builtin!(
-        "arduino-sketch",
-        [".gitignore", "blink.ino", "echo.ino", "empty.ino"]
-    ),
-    builtin!(
-        "arduino-library",
-        [
-            "README.md",
-            "examples/Basic/Basic.ino",
-            "keywords.txt",
-            "library.properties",
-            "src/{{name}}.cpp",
-            "src/{{name}}.h"
-        ]
-    ),
+    builtin!("arduino-sketch", [".gitignore", "blink.ino", "echo.ino", "empty.ino"]),
+    builtin!("arduino-library", ["README.md", "examples/Basic/Basic.ino", "keywords.txt", "library.properties", "src/{{name}}.cpp", "src/{{name}}.h"]),
     builtin!("scos-mib", []),
-    builtin!(
-        "tcl-package",
-        [
-            "README.md",
-            "pkgIndex.tcl",
-            "tests/all.tcl",
-            "tests/{{name_snake}}.test",
-            "{{name_snake}}.tcl"
-        ]
-    ),
-    builtin!(
-        "monorepo",
-        [
-            ".editorconfig",
-            ".fenix/project.ini",
-            ".gitignore",
-            "README.md"
-        ]
-    ),
+    builtin!("tcl-package", ["README.md", "pkgIndex.tcl", "tests/all.tcl", "tests/{{name_snake}}.test", "{{name_snake}}.tcl"]),
+    builtin!("monorepo", [".editorconfig", ".fenix/project.ini", ".gitignore", "README.md"]),
     builtin!("empty", ["README.md"]),
 ];
 
@@ -1542,12 +1170,8 @@ pub fn builtin_templates() -> Vec<Template> {
     BUILTINS
         .iter()
         .map(|(id, toml_text, files)| {
-            let files: Vec<(String, String)> = files
-                .iter()
-                .map(|(p, c)| (p.to_string(), c.to_string()))
-                .collect();
-            Template::parse(id, toml_text, &files, Origin::BuiltIn)
-                .unwrap_or_else(|e| panic!("built-in template {id}: {e}"))
+            let files: Vec<(String, String)> = files.iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
+            Template::parse(id, toml_text, &files, Origin::BuiltIn).unwrap_or_else(|e| panic!("built-in template {id}: {e}"))
         })
         .collect()
 }
@@ -1559,12 +1183,8 @@ pub fn user_templates_dir() -> Option<PathBuf> {
 
 /// Reads one template folder.
 pub fn load_template_dir(dir: &Path, origin: Origin) -> Result<Template, String> {
-    let id = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let toml_text = std::fs::read_to_string(dir.join("template.toml"))
-        .map_err(|e| format!("{id}: template.toml: {e}"))?;
+    let id = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let toml_text = std::fs::read_to_string(dir.join("template.toml")).map_err(|e| format!("{id}: template.toml: {e}"))?;
     let mut files = Vec::new();
     collect_files(&dir.join("files"), "", &mut files).map_err(|e| format!("{id}: {e}"))?;
     Template::parse(&id, &toml_text, &files, origin).map_err(|e| format!("{id}: {e}"))
@@ -1578,17 +1198,12 @@ fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) -> R
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
         let name = entry.file_name().to_string_lossy().into_owned();
-        let rel = if prefix.is_empty() {
-            name
-        } else {
-            format!("{prefix}/{name}")
-        };
+        let rel = if prefix.is_empty() { name } else { format!("{prefix}/{name}") };
         let path = entry.path();
         if path.is_dir() {
             collect_files(&path, &rel, out)?;
         } else {
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| format!("files/{rel}: {e} (templates hold text files only)"))?;
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("files/{rel}: {e} (templates hold text files only)"))?;
             out.push((rel, text));
         }
     }
@@ -1597,41 +1212,25 @@ fn collect_files(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) -> R
 
 /// Every template folder directly under `dir`, each parsed on its own so
 /// one broken template doesn't hide the rest.
-pub fn load_templates_in(
-    dir: &Path,
-    origin: impl Fn(PathBuf) -> Origin,
-) -> Vec<Result<Template, String>> {
+pub fn load_templates_in(dir: &Path, origin: impl Fn(PathBuf) -> Origin) -> Vec<Result<Template, String>> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut dirs: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.join("template.toml").is_file())
-        .collect();
+    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.join("template.toml").is_file()).collect();
     dirs.sort();
-    dirs.into_iter()
-        .map(|d| load_template_dir(&d, origin(d.clone())))
-        .collect()
+    dirs.into_iter().map(|d| load_template_dir(&d, origin(d.clone()))).collect()
 }
 
 /// Built-ins, then yours (shadowing a built-in of the same id), then the
 /// current project's own `.fenix/templates/`. Broken templates come back
 /// as messages, not a failure of the whole list.
-pub fn available_templates(
-    user_dir: Option<&Path>,
-    project_root: Option<&Path>,
-) -> (Vec<Template>, Vec<String>) {
+pub fn available_templates(user_dir: Option<&Path>, project_root: Option<&Path>) -> (Vec<Template>, Vec<String>) {
     available_templates_with(&[], user_dir, project_root)
 }
 
 /// `available_templates`, with the installed extensions' template folders
 /// between the built-in ones and yours.
-pub fn available_templates_with(
-    extension_dirs: &[PathBuf],
-    user_dir: Option<&Path>,
-    project_root: Option<&Path>,
-) -> (Vec<Template>, Vec<String>) {
+pub fn available_templates_with(extension_dirs: &[PathBuf], user_dir: Option<&Path>, project_root: Option<&Path>) -> (Vec<Template>, Vec<String>) {
     let mut templates = builtin_templates();
     let mut errors = Vec::new();
     let mut add = |result: Result<Template, String>, templates: &mut Vec<Template>| match result {
@@ -1687,15 +1286,9 @@ mod tests {
         let templates = builtin_templates();
         assert_eq!(templates.len(), BUILTINS.len());
         for template in templates {
-            let name = if template.name_rule == NameRule::Sketch {
-                "ServoSweep"
-            } else {
-                "orbit-tools"
-            };
+            let name = if template.name_rule == NameRule::Sketch { "ServoSweep" } else { "orbit-tools" };
             let answers = template.default_answers(name);
-            let plan = template
-                .plan(name, Path::new("parent"), &answers)
-                .unwrap_or_else(|e| panic!("{}: {e}", template.id));
+            let plan = template.plan(name, Path::new("parent"), &answers).unwrap_or_else(|e| panic!("{}: {e}", template.id));
             assert_eq!(plan.dir, Path::new("parent").join(name));
         }
     }
@@ -1704,12 +1297,8 @@ mod tests {
     /// toggle, and for a list none, each one alone, and all of them.
     fn every_answer(ask: &Ask) -> Vec<Answer> {
         match &ask.kind {
-            AskKind::Text { default } => {
-                vec![Answer::Text(default.clone()), Answer::Text("a, b".into())]
-            }
-            AskKind::Choice { choices, .. } => {
-                choices.iter().map(|c| Answer::Text(c.clone())).collect()
-            }
+            AskKind::Text { default } => vec![Answer::Text(default.clone()), Answer::Text("a, b".into())],
+            AskKind::Choice { choices, .. } => choices.iter().map(|c| Answer::Text(c.clone())).collect(),
             AskKind::Toggle { .. } => vec![Answer::Bool(true), Answer::Bool(false)],
             AskKind::Many { options, .. } => {
                 let mut all = vec![Answer::Many(Vec::new()), Answer::Many(options.clone())];
@@ -1722,11 +1311,7 @@ mod tests {
     #[test]
     fn every_builtin_plans_cleanly_for_every_combination_of_answers() {
         for template in builtin_templates() {
-            let name = if template.name_rule == NameRule::Sketch {
-                "ServoSweep"
-            } else {
-                "orbit-tools"
-            };
+            let name = if template.name_rule == NameRule::Sketch { "ServoSweep" } else { "orbit-tools" };
             let mut combinations: Vec<Answers> = vec![template.default_answers(name)];
             for ask in &template.asks {
                 combinations = combinations
@@ -1741,28 +1326,15 @@ mod tests {
                     .collect();
             }
             for answers in &combinations {
-                let plan = template
-                    .plan(name, Path::new("parent"), answers)
-                    .unwrap_or_else(|e| panic!("{} with {answers:?}: {e}", template.id));
+                let plan = template.plan(name, Path::new("parent"), answers).unwrap_or_else(|e| panic!("{} with {answers:?}: {e}", template.id));
                 for file in plan.files.iter().chain(&plan.after_files) {
                     for leftover in ["{{#if", "{{else}}", "{{/if}}", "{{name", "{{#"] {
-                        assert!(
-                            !file.contents.contains(leftover),
-                            "{}: {} keeps {leftover:?} with {answers:?}:
-{}",
-                            template.id,
-                            file.path,
-                            file.contents
-                        );
+                        assert!(!file.contents.contains(leftover), "{}: {} keeps {leftover:?} with {answers:?}:
+{}", template.id, file.path, file.contents);
                     }
                     for ask in &template.asks {
                         let var = format!("{{{{{}}}}}", ask.key);
-                        assert!(
-                            !file.contents.contains(&var),
-                            "{}: {} keeps {var}",
-                            template.id,
-                            file.path
-                        );
+                        assert!(!file.contents.contains(&var), "{}: {} keeps {var}", template.id, file.path);
                     }
                 }
             }
@@ -1772,19 +1344,9 @@ mod tests {
     #[test]
     fn name_variables_follow_separators_and_case() {
         let vars = name_vars("orbit-tools");
-        assert_eq!(
-            (
-                vars["name_snake"].as_str(),
-                vars["name_kebab"].as_str(),
-                vars["name_pascal"].as_str()
-            ),
-            ("orbit_tools", "orbit-tools", "OrbitTools")
-        );
+        assert_eq!((vars["name_snake"].as_str(), vars["name_kebab"].as_str(), vars["name_pascal"].as_str()), ("orbit_tools", "orbit-tools", "OrbitTools"));
         let vars = name_vars("ServoSweep");
-        assert_eq!(
-            (vars["name_snake"].as_str(), vars["name_kebab"].as_str()),
-            ("servo_sweep", "servo-sweep")
-        );
+        assert_eq!((vars["name_snake"].as_str(), vars["name_kebab"].as_str()), ("servo_sweep", "servo-sweep"));
         assert_eq!(name_vars("2024 lab")["name_snake"], "_2024_lab");
     }
 
@@ -1792,68 +1354,24 @@ mod tests {
     /// commands named after it, and a crate named the same.
     #[test]
     fn the_extension_template_writes_an_extension_fenix_reads() {
-        let template = builtin_templates()
-            .into_iter()
-            .find(|t| t.id == "fenix-extension")
-            .unwrap();
+        let template = builtin_templates().into_iter().find(|t| t.id == "fenix-extension").unwrap();
         let mut answers = template.default_answers("Word Count");
         answers.insert("publisher".into(), Answer::Text("acme".into()));
-        let plan = template
-            .plan("Word Count", Path::new("p"), &answers)
-            .unwrap();
-        let file = |path: &str| {
-            plan.files
-                .iter()
-                .find(|f| f.path == path)
-                .map(|f| f.contents.clone())
-                .unwrap_or_else(|| panic!("no {path}"))
-        };
+        let plan = template.plan("Word Count", Path::new("p"), &answers).unwrap();
+        let file = |path: &str| plan.files.iter().find(|f| f.path == path).map(|f| f.contents.clone()).unwrap_or_else(|| panic!("no {path}"));
         let manifest = fenix_extensions::Manifest::parse(&file("extension.toml")).unwrap();
         assert_eq!(manifest.extension.id, "acme.word-count");
         assert_eq!(manifest.extension.runtime, fenix_extensions::Runtime::Wasm);
-        assert!(
-            manifest.runs_in(&semver_v("1.0.0")).is_ok(),
-            "built for the API this Fenix offers"
-        );
-        assert_eq!(
-            manifest
-                .contributes
-                .commands
-                .iter()
-                .map(|c| c.id.as_str())
-                .collect::<Vec<_>>(),
-            ["word-count.hello", "word-count.open"]
-        );
-        assert!(
-            manifest.permissions.none(),
-            "asks for nothing until its author says"
-        );
+        assert!(manifest.runs_in(&semver_v("1.0.0")).is_ok(), "built for the API this Fenix offers");
+        assert_eq!(manifest.contributes.commands.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["word-count.hello", "word-count.open"]);
+        assert!(manifest.permissions.none(), "asks for nothing until its author says");
         let lib = file("src/lib.rs");
-        assert!(
-            lib.contains("struct WordCount {")
-                && lib.contains("export!(WordCount);")
-                && lib.contains("\"word-count.open\""),
-            "{lib}"
-        );
+        assert!(lib.contains("struct WordCount {") && lib.contains("export!(WordCount);") && lib.contains("\"word-count.open\""), "{lib}");
         assert!(file("Cargo.toml").contains("name = \"word_count\""));
-        assert!(
-            !plan.files.iter().any(|f| f.path.ends_with(".in")),
-            "written as Cargo.toml, not also as itself"
-        );
+        assert!(!plan.files.iter().any(|f| f.path.ends_with(".in")), "written as Cargo.toml, not also as itself");
         assert!(file("package.ps1").contains("target/wasm32-wasip2/release/word_count.wasm"));
-        let tools = plan
-            .after_files
-            .iter()
-            .find(|f| f.path == ".fenix/tools.json")
-            .unwrap();
-        assert_eq!(
-            ProjectTools::parse(&tools.contents)
-                .unwrap()
-                .tasks
-                .keys()
-                .collect::<Vec<_>>(),
-            ["build", "install", "package"]
-        );
+        let tools = plan.after_files.iter().find(|f| f.path == ".fenix/tools.json").unwrap();
+        assert_eq!(ProjectTools::parse(&tools.contents).unwrap().tasks.keys().collect::<Vec<_>>(), ["build", "install", "package"]);
     }
 
     fn semver_v(v: &str) -> fenix_extensions::semver::Version {
@@ -1862,170 +1380,69 @@ mod tests {
 
     #[test]
     fn the_python_plan_runs_uv_with_the_answers_and_writes_matching_tasks() {
-        let template = builtin_templates()
-            .into_iter()
-            .find(|t| t.id == "python-uv")
-            .unwrap();
+        let template = builtin_templates().into_iter().find(|t| t.id == "python-uv").unwrap();
         let mut answers = template.default_answers("orbit-tools");
         answers.insert("deps".into(), Answer::Text("requests rich".into()));
         answers.insert("dev".into(), Answer::Many(vec!["pytest".into()]));
-        let plan = template
-            .plan("orbit-tools", Path::new("p"), &answers)
-            .unwrap();
+        let plan = template.plan("orbit-tools", Path::new("p"), &answers).unwrap();
         let lines: Vec<String> = plan.steps.iter().map(Step::display).collect();
-        assert_eq!(
-            lines,
-            [
-                "uv init --app --package --python 3.12 --name orbit-tools --vcs none --no-readme",
-                "uv add requests rich",
-                "uv add --dev pytest",
-            ]
-        );
-        assert!(
-            !plan.files.iter().any(|f| f.path == ".fenix/tools.json"),
-            "written after the commands"
-        );
-        let tools = plan
-            .after_files
-            .iter()
-            .find(|f| f.path == ".fenix/tools.json")
-            .unwrap();
+        assert_eq!(lines, ["uv init --app --package --python 3.12 --name orbit-tools --vcs none --no-readme", "uv add requests rich", "uv add --dev pytest",]);
+        assert!(!plan.files.iter().any(|f| f.path == ".fenix/tools.json"), "written after the commands");
+        let tools = plan.after_files.iter().find(|f| f.path == ".fenix/tools.json").unwrap();
         let parsed = ProjectTools::parse(&tools.contents).unwrap();
-        assert_eq!(
-            parsed.tasks.keys().collect::<Vec<_>>(),
-            ["run", "test"],
-            "no lint task without ruff"
-        );
+        assert_eq!(parsed.tasks.keys().collect::<Vec<_>>(), ["run", "test"], "no lint task without ruff");
         assert!(plan.files.iter().any(|f| f.path == "tests/test_smoke.py"));
-        assert!(plan
-            .files
-            .iter()
-            .any(|f| f.path == "README.md" && f.contents.starts_with("# orbit-tools")));
+        assert!(plan.files.iter().any(|f| f.path == "README.md" && f.contents.starts_with("# orbit-tools")));
     }
 
     #[test]
     fn the_arduino_plan_picks_one_sketch_body_and_names_it_after_the_folder() {
-        let template = builtin_templates()
-            .into_iter()
-            .find(|t| t.id == "arduino-sketch")
-            .unwrap();
+        let template = builtin_templates().into_iter().find(|t| t.id == "arduino-sketch").unwrap();
         let mut answers = template.default_answers("ServoSweep");
         answers.insert("start".into(), Answer::Text("serial echo".into()));
         answers.insert("port".into(), Answer::Text("COM4".into()));
-        answers.insert(
-            "libraries".into(),
-            Answer::Text("Servo, Adafruit NeoPixel".into()),
-        );
-        let plan = template
-            .plan("ServoSweep", Path::new("labs"), &answers)
-            .unwrap();
-        let ino: Vec<_> = plan
-            .files
-            .iter()
-            .filter(|f| f.path.ends_with(".ino"))
-            .collect();
+        answers.insert("libraries".into(), Answer::Text("Servo, Adafruit NeoPixel".into()));
+        let plan = template.plan("ServoSweep", Path::new("labs"), &answers).unwrap();
+        let ino: Vec<_> = plan.files.iter().filter(|f| f.path.ends_with(".ino")).collect();
         assert_eq!(ino.len(), 1);
         assert_eq!(ino[0].path, "ServoSweep.ino");
-        assert!(
-            ino[0].contents.contains("Serial.begin(9600)")
-                && ino[0].contents.contains("readStringUntil")
-        );
+        assert!(ino[0].contents.contains("Serial.begin(9600)") && ino[0].contents.contains("readStringUntil"));
         let yaml = plan.files.iter().find(|f| f.path == "sketch.yaml").unwrap();
-        assert_eq!(
-            yaml.contents,
-            "default_fqbn: arduino:avr:uno\ndefault_port: COM4\n"
-        );
-        assert_eq!(
-            plan.steps[0].spec.args,
-            ["lib", "install", "Servo", "Adafruit NeoPixel"]
-        );
-        assert!(
-            template
-                .plan("Servo Sweep", Path::new("labs"), &answers)
-                .is_err(),
-            "sketch names have no spaces"
-        );
+        assert_eq!(yaml.contents, "default_fqbn: arduino:avr:uno\ndefault_port: COM4\n");
+        assert_eq!(plan.steps[0].spec.args, ["lib", "install", "Servo", "Adafruit NeoPixel"]);
+        assert!(template.plan("Servo Sweep", Path::new("labs"), &answers).is_err(), "sketch names have no spaces");
     }
 
     #[test]
     fn the_mib_plan_writes_the_chosen_tables_a_profile_and_a_recordings_folder() {
-        let template = builtin_templates()
-            .into_iter()
-            .find(|t| t.id == "scos-mib")
-            .unwrap();
+        let template = builtin_templates().into_iter().find(|t| t.id == "scos-mib").unwrap();
         let mut answers = template.default_answers("mission-c");
         answers.insert("tables".into(), Answer::Many(vec!["telecommands".into()]));
-        let plan = template
-            .plan("mission-c", Path::new("p"), &answers)
-            .unwrap();
+        let plan = template.plan("mission-c", Path::new("p"), &answers).unwrap();
         let paths: Vec<&str> = plan.files.iter().map(|f| f.path.as_str()).collect();
-        let tables: Vec<&&str> = paths
-            .iter()
-            .filter(|p| !p.starts_with(".fenix/") && !p.starts_with("recordings/"))
-            .collect();
-        assert!(
-            tables
-                .iter()
-                .all(|p| p.ends_with(".dat") && !p.contains('/')),
-            "tables at the top: {paths:?}"
-        );
-        let profile = &plan
-            .files
-            .iter()
-            .find(|f| f.path == ".fenix/settings.toml")
-            .unwrap()
-            .contents;
-        assert!(
-            profile.contains(
-                "[ccsds]
+        let tables: Vec<&&str> = paths.iter().filter(|p| !p.starts_with(".fenix/") && !p.starts_with("recordings/")).collect();
+        assert!(tables.iter().all(|p| p.ends_with(".dat") && !p.contains('/')), "tables at the top: {paths:?}");
+        let profile = &plan.files.iter().find(|f| f.path == ".fenix/settings.toml").unwrap().contents;
+        assert!(profile.contains("[ccsds]
 pus = \"c\"
-tm_time = \"cuc 4.2\""
-            ),
-            "{profile}"
-        );
+tm_time = \"cuc 4.2\""), "{profile}");
         assert!(paths.contains(&"recordings/README.md"));
         answers.insert("recordings".into(), Answer::Bool(false));
         answers.insert("pus".into(), Answer::Text("a".into()));
-        let plan = template
-            .plan("mission-c", Path::new("p"), &answers)
-            .unwrap();
+        let plan = template.plan("mission-c", Path::new("p"), &answers).unwrap();
         assert!(!plan.files.iter().any(|f| f.path.starts_with("recordings/")));
-        assert!(plan
-            .files
-            .iter()
-            .any(|f| f.contents.contains("pus = \"a\"")));
+        assert!(plan.files.iter().any(|f| f.contents.contains("pus = \"a\"")));
         assert!(paths.contains(&"ccf.dat") && !paths.contains(&"pcf.dat"));
-        assert_eq!(
-            plan.files
-                .iter()
-                .find(|f| f.path == "vdf.dat")
-                .unwrap()
-                .contents,
-            "mission-c\tmission-c\n"
-        );
+        assert_eq!(plan.files.iter().find(|f| f.path == "vdf.dat").unwrap().contents, "mission-c\tmission-c\n");
         assert!(plan.steps.is_empty());
-        assert_eq!(
-            plan.hooks,
-            [Hook::MibRoot {
-                path: ".".into(),
-                label: "mission-c".into()
-            }]
-        );
+        assert_eq!(plan.hooks, [Hook::MibRoot { path: ".".into(), label: "mission-c".into() }]);
         assert_eq!(plan.kind, ProjectKind::Mib);
     }
 
     #[test]
     fn braces_in_file_contents_that_are_not_variables_survive() {
-        let template = Template::parse(
-            "t",
-            HEAD,
-            &[("a.tcl".into(), "dict set d {{x}} {{name}} {{ y }}".into())],
-            Origin::BuiltIn,
-        )
-        .unwrap();
-        let plan = template
-            .plan("demo", Path::new("p"), &Answers::new())
-            .unwrap();
+        let template = Template::parse("t", HEAD, &[("a.tcl".into(), "dict set d {{x}} {{name}} {{ y }}".into())], Origin::BuiltIn).unwrap();
+        let plan = template.plan("demo", Path::new("p"), &Answers::new()).unwrap();
         assert_eq!(plan.files[0].contents, "dict set d {{x}} demo {{ y }}");
     }
 
@@ -2043,10 +1460,7 @@ tm_time = \"cuc 4.2\""
         ];
         for (text, expected) in cases {
             let error = parse(&text).unwrap_err();
-            assert!(
-                error.contains(expected),
-                "{error:?} should mention {expected:?}"
-            );
+            assert!(error.contains(expected), "{error:?} should mention {expected:?}");
         }
     }
 
@@ -2058,9 +1472,7 @@ tm_time = \"cuc 4.2\""
              [[file]]\npath = \"b\"\ncontent = \"\"\nwhen = \"pick != a\"\n[[file]]\npath = \"y\"\ncontent = \"\"\nwhen = \"many == y\"\n[[file]]\npath = \"x\"\ncontent = \"\"\nwhen = \"many == x\"\n"
         );
         let template = parse(&text).unwrap();
-        let plan = template
-            .plan("demo", Path::new("p"), &Answers::new())
-            .unwrap();
+        let plan = template.plan("demo", Path::new("p"), &Answers::new()).unwrap();
         let paths: Vec<&str> = plan.files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["off", "y"]);
     }
@@ -2071,13 +1483,7 @@ tm_time = \"cuc 4.2\""
             "{HEAD}[[ask]]\nkey = \"lang\"\nlabel = \"L\"\nchoices = [\"c\", \"cpp\"]\n[[ask]]\nkey = \"tests\"\nlabel = \"T\"\ndefault = true\n[[ask]]\nkey = \"std\"\nlabel = \"S\"\nchoices = [\"17\", \"20\"]\nwhen = \"lang == cpp\"\n"
         );
         let body = "top\n{{#if lang == cpp}}\nC++{{std}}\n  {{#if tests}}\ngtest\n  {{/if}}\n{{else}}\nC\n{{/if}}\nend {{name_upper}}\n";
-        let template = Template::parse(
-            "t",
-            &text,
-            &[("f.txt".into(), body.into())],
-            Origin::BuiltIn,
-        )
-        .unwrap();
+        let template = Template::parse("t", &text, &[("f.txt".into(), body.into())], Origin::BuiltIn).unwrap();
         let mut answers = template.default_answers("my-lib");
         let plan = template.plan("my-lib", Path::new("p"), &answers).unwrap();
         assert_eq!(plan.files[0].contents, "top\nC\nend MY_LIB\n");
@@ -2105,35 +1511,16 @@ tm_time = \"cuc 4.2\""
         let mut answers = template.default_answers("demo");
         let plan = template.plan("demo", Path::new("p"), &answers).unwrap();
         assert!(plan.files.is_empty(), "b is x, so `both` isn't written");
-        assert_eq!(
-            plan.after_files
-                .iter()
-                .map(|f| f.path.as_str())
-                .collect::<Vec<_>>(),
-            ["late"]
-        );
+        assert_eq!(plan.after_files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["late"]);
         answers.insert("b".into(), Answer::Text("y".into()));
-        assert_eq!(
-            template
-                .plan("demo", Path::new("p"), &answers)
-                .unwrap()
-                .files[0]
-                .path,
-            "both"
-        );
+        assert_eq!(template.plan("demo", Path::new("p"), &answers).unwrap().files[0].path, "both");
     }
 
     #[test]
     fn broken_blocks_are_refused_when_the_template_loads() {
-        for (body, why) in [
-            ("{{#if nope}}\nx\n{{/if}}\n", "isn't an ask"),
-            ("{{#if on}}\nx\n", "isn't closed"),
-            ("x\n{{/if}}\n", "no {{#if}}"),
-            ("{{#if on}}\n{{else}}\n{{else}}\n{{/if}}\n", "second"),
-        ] {
+        for (body, why) in [("{{#if nope}}\nx\n{{/if}}\n", "isn't an ask"), ("{{#if on}}\nx\n", "isn't closed"), ("x\n{{/if}}\n", "no {{#if}}"), ("{{#if on}}\n{{else}}\n{{else}}\n{{/if}}\n", "second")] {
             let text = format!("{HEAD}[[ask]]\nkey = \"on\"\nlabel = \"O\"\ndefault = true\n");
-            let error = Template::parse("t", &text, &[("f".into(), body.into())], Origin::BuiltIn)
-                .unwrap_err();
+            let error = Template::parse("t", &text, &[("f".into(), body.into())], Origin::BuiltIn).unwrap_err();
             assert!(error.contains(why), "{body:?}: {error}");
         }
         let text = format!("{HEAD}[[ask]]\nkey = \"a\"\nlabel = \"A\"\nwhen = \"a\"\n");
@@ -2154,16 +1541,10 @@ tm_time = \"cuc 4.2\""
     #[test]
     fn writing_a_plan_creates_the_files_and_never_overwrites() {
         let dir = TempDir::new("template_write");
-        let template = builtin_templates()
-            .into_iter()
-            .find(|t| t.id == "empty")
-            .unwrap();
+        let template = builtin_templates().into_iter().find(|t| t.id == "empty").unwrap();
         let plan = template.plan("fresh", dir.path(), &Answers::new()).unwrap();
         assert_eq!(plan.write_files().unwrap(), 1);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("fresh/README.md")).unwrap(),
-            "# fresh\n"
-        );
+        assert_eq!(std::fs::read_to_string(dir.path().join("fresh/README.md")).unwrap(), "# fresh\n");
         let problem = plan.write_files().unwrap_err();
         assert!(problem.contains("already exists"), "{problem}");
     }
@@ -2171,10 +1552,7 @@ tm_time = \"cuc 4.2\""
     #[test]
     fn a_user_template_shadows_the_builtin_and_a_broken_one_is_reported() {
         let dir = TempDir::new("template_user");
-        dir.write(
-            "empty/template.toml",
-            "[template]\nname = \"My empty\"\nkind = \"other\"\n",
-        );
+        dir.write("empty/template.toml", "[template]\nname = \"My empty\"\nkind = \"other\"\n");
         dir.write("empty/files/NOTES.md", "{{name}}");
         dir.write("broken/template.toml", "[template]\n");
         let (templates, errors) = available_templates(Some(dir.path()), None);
@@ -2191,36 +1569,15 @@ tm_time = \"cuc 4.2\""
     #[test]
     fn an_extensions_template_sits_between_the_builtin_ones_and_yours() {
         let ext = TempDir::new("template_ext");
-        ext.write(
-            "empty/template.toml",
-            "[template]\nname = \"Acme empty\"\nkind = \"other\"\n",
-        );
-        ext.write(
-            "acme/template.toml",
-            "[template]\nname = \"Acme\"\nkind = \"other\"\n",
-        );
+        ext.write("empty/template.toml", "[template]\nname = \"Acme empty\"\nkind = \"other\"\n");
+        ext.write("acme/template.toml", "[template]\nname = \"Acme\"\nkind = \"other\"\n");
         let (templates, _) = available_templates_with(&[ext.path().to_path_buf()], None, None);
-        let found = |id: &str| {
-            templates
-                .iter()
-                .find(|t| t.id == id)
-                .map(|t| (t.name.clone(), matches!(t.origin, Origin::Extension(_))))
-        };
+        let found = |id: &str| templates.iter().find(|t| t.id == id).map(|t| (t.name.clone(), matches!(t.origin, Origin::Extension(_))));
         assert_eq!(found("empty"), Some(("Acme empty".to_string(), true)));
         assert_eq!(found("acme"), Some(("Acme".to_string(), true)));
         let user = TempDir::new("template_ext_user");
-        user.write(
-            "empty/template.toml",
-            "[template]\nname = \"Mine\"\nkind = \"other\"\n",
-        );
-        let (templates, _) =
-            available_templates_with(&[ext.path().to_path_buf()], Some(user.path()), None);
-        assert_eq!(
-            templates
-                .iter()
-                .find(|t| t.id == "empty")
-                .map(|t| t.name.as_str()),
-            Some("Mine")
-        );
+        user.write("empty/template.toml", "[template]\nname = \"Mine\"\nkind = \"other\"\n");
+        let (templates, _) = available_templates_with(&[ext.path().to_path_buf()], Some(user.path()), None);
+        assert_eq!(templates.iter().find(|t| t.id == "empty").map(|t| t.name.as_str()), Some("Mine"));
     }
 }

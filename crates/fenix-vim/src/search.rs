@@ -19,12 +19,7 @@ use crate::textobject::{self, TextObject};
 /// qualifies past the cursor -- Vim's own default `wrapscan` behavior.
 /// Backward search is the mirror: strictly before the cursor, wrapping
 /// to the last match in the buffer.
-pub fn find_next(
-    buffer: &Buffer,
-    cursor: &Cursor,
-    pattern: &str,
-    forward: bool,
-) -> Result<Option<usize>, regex::Error> {
+pub fn find_next(buffer: &Buffer, cursor: &Cursor, pattern: &str, forward: bool) -> Result<Option<usize>, regex::Error> {
     let re = Regex::new(pattern)?;
     let text = buffer.text();
     let cursor_byte = buffer.char_to_byte(cursor.char_idx);
@@ -57,11 +52,7 @@ pub fn find_next(
 /// whole-buffer scan. `byte_range` is clamped to the text's actual
 /// length; an out-of-order or empty range after clamping yields an
 /// empty `Vec` rather than a panic.
-pub fn all_matches_in_range(
-    buffer: &Buffer,
-    pattern: &str,
-    byte_range: Range<usize>,
-) -> Result<Vec<Range<usize>>, regex::Error> {
+pub fn all_matches_in_range(buffer: &Buffer, pattern: &str, byte_range: Range<usize>) -> Result<Vec<Range<usize>>, regex::Error> {
     let re = Regex::new(pattern)?;
     let text = buffer.text();
     let start = byte_range.start.min(text.len());
@@ -69,10 +60,7 @@ pub fn all_matches_in_range(
     if start >= end {
         return Ok(Vec::new());
     }
-    Ok(re
-        .find_iter(&text[start..end])
-        .map(|m| (start + m.start())..(start + m.end()))
-        .collect())
+    Ok(re.find_iter(&text[start..end]).map(|m| (start + m.start())..(start + m.end())).collect())
 }
 
 /// The word under the cursor, as a whole-word regex pattern (`\b...\b`,
@@ -95,12 +83,7 @@ pub fn all_matches_in_range(
 /// searching for the whole underscore-inclusive identifier regardless
 /// of `iskeyword`, same as before this option existed.
 pub fn word_under_cursor_pattern(buffer: &Buffer, cursor: &Cursor) -> Option<String> {
-    let range = textobject::span(
-        buffer,
-        cursor,
-        TextObject::InnerWord,
-        crate::charclass::DEFAULT_ISKEYWORD_EXTRA,
-    );
+    let range = textobject::span(buffer, cursor, TextObject::InnerWord, crate::charclass::DEFAULT_ISKEYWORD_EXTRA);
     if range.is_empty() {
         return None;
     }

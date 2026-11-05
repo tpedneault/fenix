@@ -45,22 +45,12 @@ impl Range {
     /// which diffs from the merge base.
     fn diff_args(&self, repo: &Path) -> Result<Vec<String>, String> {
         let merge_base = match (&self.head, self.three_dot) {
-            (Side::WorkTree, true) => {
-                Some(crate::merge_base(repo, &self.base, "HEAD").ok_or_else(|| {
-                    format!(
-                        "{} and HEAD share no history (or {} isn't a ref)",
-                        self.base, self.base
-                    )
-                })?)
-            }
+            (Side::WorkTree, true) => Some(
+                crate::merge_base(repo, &self.base, "HEAD").ok_or_else(|| format!("{} and HEAD share no history (or {} isn't a ref)", self.base, self.base))?,
+            ),
             _ => None,
         };
-        Ok(range_args(
-            &self.base,
-            &self.head,
-            self.three_dot,
-            merge_base.as_deref(),
-        ))
+        Ok(range_args(&self.base, &self.head, self.three_dot, merge_base.as_deref()))
     }
 }
 
@@ -94,11 +84,7 @@ pub struct ChangedFile {
 pub fn changed_files(repo: &Path, range: &Range) -> Result<Vec<ChangedFile>, String> {
     let args = range.diff_args(repo)?;
     let with = |flags: &[&str]| {
-        let mut all: Vec<String> = ["diff", "--no-color", "-M", "-z"]
-            .iter()
-            .chain(flags)
-            .map(|s| s.to_string())
-            .collect();
+        let mut all: Vec<String> = ["diff", "--no-color", "-M", "-z"].iter().chain(flags).map(|s| s.to_string()).collect();
         all.extend(args.iter().cloned());
         all.push("--".to_string());
         run_action(repo, &all)
@@ -106,11 +92,7 @@ pub fn changed_files(repo: &Path, range: &Range) -> Result<Vec<ChangedFile>, Str
     let mut files = parse_name_status(&with(&["--name-status"])?);
     let stats = parse_numstat(&with(&["--numstat"])?);
     for file in &mut files {
-        if let Some((added, removed)) = stats
-            .iter()
-            .find(|(path, ..)| *path == file.path)
-            .map(|(_, a, r)| (*a, *r))
-        {
+        if let Some((added, removed)) = stats.iter().find(|(path, ..)| *path == file.path).map(|(_, a, r)| (*a, *r)) {
             file.added = added;
             file.removed = removed;
         }
@@ -121,13 +103,7 @@ pub fn changed_files(repo: &Path, range: &Range) -> Result<Vec<ChangedFile>, Str
                 Ok(text) => (Some(line_count(&text)), Some(0)),
                 Err(_) => (None, None),
             };
-            files.push(ChangedFile {
-                letter: '?',
-                path,
-                old_path: None,
-                added,
-                removed,
-            });
+            files.push(ChangedFile { letter: '?', path, old_path: None, added, removed });
         }
     }
     Ok(files)
@@ -138,10 +114,7 @@ pub fn changed_file_diff(repo: &Path, range: &Range, file: &ChangedFile) -> Resu
     if file.letter == '?' {
         return untracked_diff(repo, &file.path);
     }
-    let mut args: Vec<String> = ["diff", "--no-color", "-M"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let mut args: Vec<String> = ["diff", "--no-color", "-M"].iter().map(|s| s.to_string()).collect();
     args.extend(range.diff_args(repo)?);
     args.push("--".to_string());
     if let Some(old) = &file.old_path {
@@ -154,20 +127,8 @@ pub fn changed_file_diff(repo: &Path, range: &Range, file: &ChangedFile) -> Resu
 /// Untracked files, as `git status` would list them (ignored ones left
 /// out), with forward slashes.
 fn untracked(repo: &Path) -> Vec<String> {
-    let out = run_action(
-        repo,
-        &[
-            "ls-files".into(),
-            "--others".into(),
-            "--exclude-standard".into(),
-            "-z".into(),
-        ],
-    )
-    .unwrap_or_default();
-    out.split('\0')
-        .filter(|p| !p.is_empty())
-        .map(str::to_string)
-        .collect()
+    let out = run_action(repo, &["ls-files".into(), "--others".into(), "--exclude-standard".into(), "-z".into()]).unwrap_or_default();
+    out.split('\0').filter(|p| !p.is_empty()).map(str::to_string).collect()
 }
 
 /// Above this an untracked file isn't turned into a diff.
@@ -202,9 +163,7 @@ pub fn untracked_diff(repo: &Path, path: &str) -> Result<String, String> {
 }
 
 fn added_file_diff(path: &str, text: &str) -> String {
-    let mut out = format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n"
-    );
+    let mut out = format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n");
     let lines: Vec<&str> = text.lines().collect();
     if lines.is_empty() {
         return out;
@@ -224,8 +183,7 @@ fn added_file_diff(path: &str, text: &str) -> String {
 /// `path` as it is at `rev` (`git show rev:path`).
 pub fn show_at(repo: &Path, rev: &str, path: &str) -> Result<String, String> {
     let path = path.replace('\\', "/");
-    run_bytes(repo, &["show", &format!("{rev}:{path}")])
-        .map(|b| String::from_utf8_lossy(&b).into_owned())
+    run_bytes(repo, &["show", &format!("{rev}:{path}")]).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 /// The remote a remote-tracking ref belongs to -- `origin` for
@@ -237,23 +195,12 @@ pub fn remote_of(repo: &Path, rev: &str) -> Option<String> {
 
 fn remote_among(remotes: &[String], rev: &str) -> Option<String> {
     let rev = rev.strip_prefix("refs/remotes/").unwrap_or(rev);
-    remotes
-        .iter()
-        .filter(|r| rev.starts_with(&format!("{r}/")))
-        .max_by_key(|r| r.len())
-        .cloned()
+    remotes.iter().filter(|r| rev.starts_with(&format!("{r}/"))).max_by_key(|r| r.len()).cloned()
 }
 
 /// Fetches one remote, pruning what it deleted.
 pub fn fetch_remote(repo: &Path, remote: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "fetch".to_string(),
-            "--prune".to_string(),
-            remote.to_string(),
-        ],
-    )
+    run_action(repo, &["fetch".to_string(), "--prune".to_string(), remote.to_string()])
 }
 
 /// `--name-status -z`: `M\0path\0`, `R100\0old\0new\0`.
@@ -269,13 +216,7 @@ fn parse_name_status(out: &str) -> Vec<ChangedFile> {
             (None, parts.next().unwrap_or_default().to_string())
         };
         if !path.is_empty() {
-            files.push(ChangedFile {
-                letter,
-                path,
-                old_path,
-                added: None,
-                removed: None,
-            });
+            files.push(ChangedFile { letter, path, old_path, added: None, removed: None });
         }
     }
     files
@@ -317,10 +258,7 @@ mod tests {
         let dir = TempDir::new(name);
         init_repo(dir.path());
         dir.write("shared.txt", "one\ntwo\nthree\n");
-        dir.write(
-            "old_name.txt",
-            "a fairly long line so the rename is detected\nand another\nand a third\n",
-        );
+        dir.write("old_name.txt", "a fairly long line so the rename is detected\nand another\nand a third\n");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "initial"]);
         git(dir.path(), &["checkout", "-q", "-b", "side"]);
@@ -336,11 +274,7 @@ mod tests {
     }
 
     fn range(head: Side, three_dot: bool) -> Range {
-        Range {
-            base: "main".to_string(),
-            head,
-            three_dot,
-        }
+        Range { base: "main".to_string(), head, three_dot }
     }
 
     fn paths(files: &[ChangedFile]) -> Vec<(char, &str)> {
@@ -352,14 +286,8 @@ mod tests {
         let head = Side::Rev("HEAD".to_string());
         assert_eq!(range_args("main", &head, true, None), vec!["main...HEAD"]);
         assert_eq!(range_args("main", &head, false, None), vec!["main", "HEAD"]);
-        assert_eq!(
-            range_args("main", &Side::WorkTree, true, Some("abc")),
-            vec!["abc"]
-        );
-        assert_eq!(
-            range_args("main", &Side::WorkTree, false, None),
-            vec!["main"]
-        );
+        assert_eq!(range_args("main", &Side::WorkTree, true, Some("abc")), vec!["abc"]);
+        assert_eq!(range_args("main", &Side::WorkTree, false, None), vec!["main"]);
     }
 
     #[test]
@@ -372,10 +300,7 @@ mod tests {
     fn three_dot_lists_only_what_head_did_with_counts_and_renames() {
         let dir = diverged("cmp_three_dot");
         let files = changed_files(dir.path(), &range(Side::Rev("HEAD".into()), true)).unwrap();
-        assert_eq!(
-            paths(&files),
-            vec![('R', "new_name.txt"), ('M', "shared.txt")]
-        );
+        assert_eq!(paths(&files), vec![('R', "new_name.txt"), ('M', "shared.txt")]);
         assert_eq!(files[0].old_path.as_deref(), Some("old_name.txt"));
         assert_eq!((files[1].added, files[1].removed), (Some(2), Some(1)));
     }
@@ -384,12 +309,7 @@ mod tests {
     fn two_dot_also_lists_what_the_base_gained() {
         let dir = diverged("cmp_two_dot");
         let files = changed_files(dir.path(), &range(Side::Rev("HEAD".into()), false)).unwrap();
-        assert!(
-            files
-                .iter()
-                .any(|f| f.path == "from_main.txt" && f.letter == 'D'),
-            "{files:?}"
-        );
+        assert!(files.iter().any(|f| f.path == "from_main.txt" && f.letter == 'D'), "{files:?}");
     }
 
     #[test]
@@ -399,22 +319,12 @@ mod tests {
         dir.write("scratch.txt", "a\nb\n");
         let committed = changed_files(dir.path(), &range(Side::Rev("HEAD".into()), true)).unwrap();
         assert!(!committed.iter().any(|f| f.path == "scratch.txt"));
-        assert_eq!(
-            committed
-                .iter()
-                .find(|f| f.path == "shared.txt")
-                .unwrap()
-                .added,
-            Some(2)
-        );
+        assert_eq!(committed.iter().find(|f| f.path == "shared.txt").unwrap().added, Some(2));
 
         let worktree = changed_files(dir.path(), &range(Side::WorkTree, true)).unwrap();
         let shared = worktree.iter().find(|f| f.path == "shared.txt").unwrap();
         assert_eq!(shared.added, Some(3), "the unsaved-to-git line counts too");
-        assert!(
-            !worktree.iter().any(|f| f.path == "from_main.txt"),
-            "three-dot: main's own work isn't ours"
-        );
+        assert!(!worktree.iter().any(|f| f.path == "from_main.txt"), "three-dot: main's own work isn't ours");
         let scratch = worktree.iter().find(|f| f.path == "scratch.txt").unwrap();
         assert_eq!((scratch.letter, scratch.added), ('?', Some(2)));
         let diff = changed_file_diff(dir.path(), &range(Side::WorkTree, true), scratch).unwrap();
@@ -446,59 +356,32 @@ mod tests {
     #[test]
     fn an_unknown_ref_is_gits_error() {
         let dir = diverged("cmp_unknown");
-        let r = Range {
-            base: "no-such-branch".into(),
-            head: Side::Rev("HEAD".into()),
-            three_dot: true,
-        };
+        let r = Range { base: "no-such-branch".into(), head: Side::Rev("HEAD".into()), three_dot: true };
         assert!(changed_files(dir.path(), &r).is_err());
-        let r = Range {
-            base: "no-such-branch".into(),
-            head: Side::WorkTree,
-            three_dot: true,
-        };
+        let r = Range { base: "no-such-branch".into(), head: Side::WorkTree, three_dot: true };
         assert!(changed_files(dir.path(), &r).is_err());
     }
 
     #[test]
     fn show_at_reads_a_file_at_a_ref() {
         let dir = diverged("cmp_show_at");
-        assert_eq!(
-            show_at(dir.path(), "main", "shared.txt").unwrap(),
-            "one\ntwo\nthree\n"
-        );
+        assert_eq!(show_at(dir.path(), "main", "shared.txt").unwrap(), "one\ntwo\nthree\n");
         assert!(show_at(dir.path(), "main", "new_name.txt").is_err());
     }
 
     #[test]
     fn an_added_file_diff_without_a_final_newline_says_so() {
         let diff = added_file_diff("x.txt", "a\r\nb");
-        assert!(
-            diff.ends_with("+a\n+b\n\\ No newline at end of file\n"),
-            "{diff}"
-        );
+        assert!(diff.ends_with("+a\n+b\n\\ No newline at end of file\n"), "{diff}");
         assert!(diff.contains("@@ -0,0 +1,2 @@"));
     }
 
     #[test]
     fn a_remote_is_matched_by_its_whole_name() {
-        let remotes = vec![
-            "origin".to_string(),
-            "team/fork".to_string(),
-            "team".to_string(),
-        ];
-        assert_eq!(
-            remote_among(&remotes, "origin/main").as_deref(),
-            Some("origin")
-        );
-        assert_eq!(
-            remote_among(&remotes, "team/fork/main").as_deref(),
-            Some("team/fork")
-        );
-        assert_eq!(
-            remote_among(&remotes, "refs/remotes/team/x").as_deref(),
-            Some("team")
-        );
+        let remotes = vec!["origin".to_string(), "team/fork".to_string(), "team".to_string()];
+        assert_eq!(remote_among(&remotes, "origin/main").as_deref(), Some("origin"));
+        assert_eq!(remote_among(&remotes, "team/fork/main").as_deref(), Some("team/fork"));
+        assert_eq!(remote_among(&remotes, "refs/remotes/team/x").as_deref(), Some("team"));
         assert_eq!(remote_among(&remotes, "main"), None);
     }
 
@@ -507,15 +390,9 @@ mod tests {
         let files = parse_name_status("M\0a.txt\0R087\0old.rs\0new.rs\0");
         assert_eq!(files[1].old_path.as_deref(), Some("old.rs"));
         assert_eq!(files[1].path, "new.rs");
-        let stats = parse_numstat("1\t2\ta.txt\0".to_string().as_str());
+        let stats = parse_numstat("1\t2\ta.txt\0" .to_string().as_str());
         assert_eq!(stats, vec![("a.txt".to_string(), Some(1), Some(2))]);
         let stats = parse_numstat("3\t0\t\0old.rs\0new.rs\0-\t-\tbin\0");
-        assert_eq!(
-            stats,
-            vec![
-                ("new.rs".to_string(), Some(3), Some(0)),
-                ("bin".to_string(), None, None)
-            ]
-        );
+        assert_eq!(stats, vec![("new.rs".to_string(), Some(3), Some(0)), ("bin".to_string(), None, None)]);
     }
 }

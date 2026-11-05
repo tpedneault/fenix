@@ -13,18 +13,8 @@ impl App {
     pub(super) fn local_contexts(&self) -> Vec<LocalContext> {
         let mut contexts: Vec<LocalContext> = Vec::new();
         // The code extensions' contexts, by their markers.
-        let here = self
-            .open()
-            .buffer
-            .path()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.integration_root());
-        let language = self
-            .open()
-            .buffer
-            .path()
-            .and_then(fenix_syntax::detect_language_from_path)
-            .map(crate::lsp::language_config_name);
+        let here = self.open().buffer.path().map(Path::to_path_buf).unwrap_or_else(|| self.integration_root());
+        let language = self.open().buffer.path().and_then(fenix_syntax::detect_language_from_path).map(crate::lsp::language_config_name);
         // One of an extension's own pages, by its kind.
         let page = match self.pages.get(&self.focused_buffer_id()).map(|s| &s.model) {
             Some(super::pages::PageModel::Code(p)) => Some((p.ext.as_str(), p.kind.as_str())),
@@ -32,29 +22,16 @@ impl App {
         };
         for ext in &self.wasm.installed {
             for context in &ext.manifest.contributes.contexts {
-                let by_language = language
-                    .as_ref()
-                    .is_some_and(|l| context.languages.contains(l));
+                let by_language = language.as_ref().is_some_and(|l| context.languages.contains(l));
                 let by_markers = !context.markers.is_empty() && context.root_of(&here).is_some();
-                let by_page = page.is_some_and(|(owner, kind)| {
-                    owner == ext.id && context.pages.iter().any(|k| k == kind)
-                });
-                if !contexts.iter().any(|c| c.name() == context.name)
-                    && (by_language || by_markers || by_page)
-                {
+                let by_page = page.is_some_and(|(owner, kind)| owner == ext.id && context.pages.iter().any(|k| k == kind));
+                if !contexts.iter().any(|c| c.name() == context.name) && (by_language || by_markers || by_page) {
                     contexts.push(LocalContext::named(&context.name));
                 }
             }
         }
-        let language = self
-            .open()
-            .buffer
-            .path()
-            .and_then(fenix_syntax::detect_language_from_path);
-        let reading = matches!(
-            self.pages.get(&self.focused_buffer_id()).map(|s| &s.model),
-            Some(super::pages::PageModel::Reading(_))
-        );
+        let language = self.open().buffer.path().and_then(fenix_syntax::detect_language_from_path);
+        let reading = matches!(self.pages.get(&self.focused_buffer_id()).map(|s| &s.model), Some(super::pages::PageModel::Reading(_)));
         if language == Some(fenix_syntax::LanguageId::Markdown) || reading {
             contexts.push(LocalContext::Markdown);
         }
@@ -91,10 +68,7 @@ impl App {
             Step::NoMatch => {
                 self.local_matcher = None;
                 if keypress.code != KeyCode::Named(FenixNamedKey::Escape) {
-                    self.set_message(format!(
-                        "SPC m {} isn't bound here",
-                        keymap::describe_keypress(&keypress)
-                    ));
+                    self.set_message(format!("SPC m {} isn't bound here", keymap::describe_keypress(&keypress)));
                 }
                 None
             }
@@ -112,10 +86,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "fenix-gui-local-leader-{name}-{}-{n}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fenix-gui-local-leader-{name}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -136,37 +107,21 @@ mod tests {
         app.start_local_leader();
         assert!(app.local_matcher.is_none());
         assert!(app.which_key_pending().is_none());
-        assert!(app
-            .status_message
-            .as_ref()
-            .unwrap()
-            .text
-            .contains("nothing for this buffer"));
+        assert!(app.status_message.as_ref().unwrap().text.contains("nothing for this buffer"));
     }
 
     #[test]
     fn an_unbound_key_closes_the_menu_and_says_which_key() {
         let dir = temp("unbound");
         let file = dir.join("notes.md");
-        std::fs::write(
-            &file, "# Notes
-",
-        )
-        .unwrap();
+        std::fs::write(&file, "# Notes
+").unwrap();
         let mut app = open(&file);
         app.start_local_leader();
         assert_eq!(app.local_leader_key(KeyPress::char('z')), Some(None));
         assert!(app.local_matcher.is_none());
-        assert!(app
-            .status_message
-            .as_ref()
-            .unwrap()
-            .text
-            .contains("SPC m z isn't bound here"));
-        assert_eq!(
-            app.local_leader_key(KeyPress::char('z')),
-            None,
-            "closed menus consume nothing"
-        );
+        assert!(app.status_message.as_ref().unwrap().text.contains("SPC m z isn't bound here"));
+        assert_eq!(app.local_leader_key(KeyPress::char('z')), None, "closed menus consume nothing");
     }
+
 }

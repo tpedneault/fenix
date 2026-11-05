@@ -3,8 +3,8 @@ use std::ops::Range;
 use fenix_core::{Buffer, Cursor};
 
 use crate::bracket;
-use crate::charclass::{classify, CharClass};
 use crate::tag;
+use crate::charclass::{classify, CharClass};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextObject {
@@ -48,12 +48,7 @@ pub fn is_linewise(obj: TextObject) -> bool {
 /// comment) -- only `InnerWord`/`AWord` (`iw`/`aw`) consult it; every
 /// other object kind's boundaries (quotes, brackets, paragraphs) don't
 /// involve word-class characters at all.
-pub fn span(
-    buffer: &Buffer,
-    cursor: &Cursor,
-    obj: TextObject,
-    iskeyword_extra: &[char],
-) -> Range<usize> {
+pub fn span(buffer: &Buffer, cursor: &Cursor, obj: TextObject, iskeyword_extra: &[char]) -> Range<usize> {
     match obj {
         TextObject::InnerWord => word_span(buffer, cursor, false, iskeyword_extra),
         TextObject::AWord => word_span(buffer, cursor, true, iskeyword_extra),
@@ -75,11 +70,7 @@ fn tag_span(buffer: &Buffer, cursor: &Cursor, around: bool) -> Range<usize> {
     let at = cursor.char_idx.min(buffer.len_chars().saturating_sub(1));
     match tag::enclosing(&text, buffer.char_to_byte(at)) {
         Some(pair) => {
-            let (start, end) = if around {
-                (pair.open_start, pair.close_end)
-            } else {
-                (pair.open_end, pair.close_start)
-            };
+            let (start, end) = if around { (pair.open_start, pair.close_end) } else { (pair.open_end, pair.close_start) };
             buffer.byte_to_char(start)..buffer.byte_to_char(end)
         }
         None => at..at,
@@ -89,12 +80,7 @@ fn tag_span(buffer: &Buffer, cursor: &Cursor, around: bool) -> Range<usize> {
 /// If the cursor sits on whitespace, `iw`/`aw` select that whitespace run
 /// itself (matching real Vim: whitespace is its own kind of "word" for
 /// this purpose).
-fn word_span(
-    buffer: &Buffer,
-    cursor: &Cursor,
-    around: bool,
-    iskeyword_extra: &[char],
-) -> Range<usize> {
+fn word_span(buffer: &Buffer, cursor: &Cursor, around: bool, iskeyword_extra: &[char]) -> Range<usize> {
     let len = buffer.len_chars();
     if len == 0 {
         return 0..0;
@@ -116,9 +102,7 @@ fn word_span(
     }
     let mut a_end = end;
     let mut took_trailing = false;
-    while a_end < len
-        && classify(buffer.char_at(a_end).unwrap(), iskeyword_extra) == CharClass::Space
-    {
+    while a_end < len && classify(buffer.char_at(a_end).unwrap(), iskeyword_extra) == CharClass::Space {
         a_end += 1;
         took_trailing = true;
     }
@@ -126,9 +110,7 @@ fn word_span(
         start..a_end
     } else {
         let mut a_start = start;
-        while a_start > 0
-            && classify(buffer.char_at(a_start - 1).unwrap(), iskeyword_extra) == CharClass::Space
-        {
+        while a_start > 0 && classify(buffer.char_at(a_start - 1).unwrap(), iskeyword_extra) == CharClass::Space {
             a_start -= 1;
         }
         a_start..end
@@ -149,31 +131,17 @@ fn word_span(
 /// line has no complete pair at or after the cursor. Shared by
 /// `quote_span` and `state.rs`'s surround (`ds`/`cs`) support, which
 /// needs the delimiter positions themselves, not the inner span.
-pub(crate) fn quote_positions(
-    buffer: &Buffer,
-    cursor: &Cursor,
-    quote: char,
-) -> Option<(usize, usize)> {
+pub(crate) fn quote_positions(buffer: &Buffer, cursor: &Cursor, quote: char) -> Option<(usize, usize)> {
     let len = buffer.len_chars();
     if len == 0 {
         return None;
     }
     let at = cursor.char_idx.min(len - 1);
-    let (line, _) = buffer.line_col(&Cursor {
-        char_idx: at,
-        sticky_col: 0,
-    });
+    let (line, _) = buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 });
     let line_start = buffer.line_start_char(line);
     let line_end = line_start + buffer.line_len(line);
-    let positions: Vec<usize> = (line_start..line_end)
-        .filter(|&i| buffer.char_at(i) == Some(quote))
-        .collect();
-    positions
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|&[open, close]| (open, close))
-        .find(|&(_, close)| close >= at)
+    let positions: Vec<usize> = (line_start..line_end).filter(|&i| buffer.char_at(i) == Some(quote)).collect();
+    positions.as_chunks::<2>().0.iter().map(|&[open, close]| (open, close)).find(|&(_, close)| close >= at)
 }
 
 /// `AQuote` includes both delimiters; no whitespace-eating refinement
@@ -285,11 +253,7 @@ fn paragraph_span(buffer: &Buffer, cursor: &Cursor, around: bool) -> Range<usize
 /// caller.
 fn linewise_char_range(buffer: &Buffer, line_a: usize, line_b: usize) -> Range<usize> {
     let start = buffer.line_start_char(line_a);
-    let end = if line_b + 1 < buffer.line_count() {
-        buffer.line_start_char(line_b + 1)
-    } else {
-        buffer.len_chars()
-    };
+    let end = if line_b + 1 < buffer.line_count() { buffer.line_start_char(line_b + 1) } else { buffer.len_chars() };
     start..end
 }
 
@@ -302,161 +266,82 @@ mod tests {
     #[test]
     fn inner_word_selects_just_the_word() {
         let b = buf("foo bar baz");
-        assert_eq!(
-            span(&b, &cur(5), TextObject::InnerWord, DEFAULT_ISKEYWORD_EXTRA),
-            4..7
-        ); // "bar"
+        assert_eq!(span(&b, &cur(5), TextObject::InnerWord, DEFAULT_ISKEYWORD_EXTRA), 4..7); // "bar"
     }
 
     #[test]
     fn a_word_prefers_trailing_whitespace() {
         let b = buf("foo bar baz");
-        assert_eq!(
-            span(&b, &cur(5), TextObject::AWord, DEFAULT_ISKEYWORD_EXTRA),
-            4..8
-        ); // "bar "
+        assert_eq!(span(&b, &cur(5), TextObject::AWord, DEFAULT_ISKEYWORD_EXTRA), 4..8); // "bar "
     }
 
     #[test]
     fn a_word_falls_back_to_leading_whitespace_at_end_of_buffer() {
         let b = buf("foo bar");
-        assert_eq!(
-            span(&b, &cur(5), TextObject::AWord, DEFAULT_ISKEYWORD_EXTRA),
-            3..7
-        ); // " bar"
+        assert_eq!(span(&b, &cur(5), TextObject::AWord, DEFAULT_ISKEYWORD_EXTRA), 3..7); // " bar"
     }
 
     #[test]
     fn text_object_on_punctuation_selects_the_punctuation_run() {
         let b = buf("foo.bar");
-        assert_eq!(
-            span(&b, &cur(3), TextObject::InnerWord, DEFAULT_ISKEYWORD_EXTRA),
-            3..4
-        ); // "."
+        assert_eq!(span(&b, &cur(3), TextObject::InnerWord, DEFAULT_ISKEYWORD_EXTRA), 3..4); // "."
     }
 
     #[test]
     fn text_object_on_whitespace_selects_the_whitespace_run() {
         let b = buf("foo   bar");
-        assert_eq!(
-            span(&b, &cur(4), TextObject::InnerWord, DEFAULT_ISKEYWORD_EXTRA),
-            3..6
-        );
+        assert_eq!(span(&b, &cur(4), TextObject::InnerWord, DEFAULT_ISKEYWORD_EXTRA), 3..6);
     }
 
     #[test]
     fn inner_quote_selects_the_text_between_the_nearest_pair() {
         let b = buf(r#"say "hello world" now"#);
-        assert_eq!(
-            span(
-                &b,
-                &cur(8),
-                TextObject::InnerQuote('"'),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            5..16
-        ); // "hello world"
+        assert_eq!(span(&b, &cur(8), TextObject::InnerQuote('"'), DEFAULT_ISKEYWORD_EXTRA), 5..16); // "hello world"
     }
 
     #[test]
     fn a_quote_includes_both_delimiters() {
         let b = buf(r#"say "hello world" now"#);
-        assert_eq!(
-            span(
-                &b,
-                &cur(8),
-                TextObject::AQuote('"'),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            4..17
-        ); // "\"hello world\""
+        assert_eq!(span(&b, &cur(8), TextObject::AQuote('"'), DEFAULT_ISKEYWORD_EXTRA), 4..17); // "\"hello world\""
     }
 
     #[test]
     fn quote_object_before_any_quote_on_the_line_selects_the_upcoming_pair() {
         let b = buf(r#"x = "y""#);
-        assert_eq!(
-            span(
-                &b,
-                &cur(0),
-                TextObject::InnerQuote('"'),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            5..6
-        ); // "y"
+        assert_eq!(span(&b, &cur(0), TextObject::InnerQuote('"'), DEFAULT_ISKEYWORD_EXTRA), 5..6); // "y"
     }
 
     #[test]
     fn quote_object_with_no_pair_on_the_line_is_a_no_op() {
         let b = buf("no quotes here");
         let at = cur(3);
-        assert_eq!(
-            span(
-                &b,
-                &at,
-                TextObject::InnerQuote('"'),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            3..3
-        );
+        assert_eq!(span(&b, &at, TextObject::InnerQuote('"'), DEFAULT_ISKEYWORD_EXTRA), 3..3);
     }
 
     #[test]
     fn inner_bracket_selects_the_innermost_enclosing_pair() {
         let b = buf("outer(a, inner(b, c), d)");
         // cursor on 'b' (char index 15), inside the inner parens
-        assert_eq!(
-            span(
-                &b,
-                &cur(15),
-                TextObject::InnerBracket('('),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            15..19
-        ); // "b, c"
+        assert_eq!(span(&b, &cur(15), TextObject::InnerBracket('('), DEFAULT_ISKEYWORD_EXTRA), 15..19); // "b, c"
     }
 
     #[test]
     fn a_bracket_includes_both_delimiters() {
         let b = buf("(hello)");
-        assert_eq!(
-            span(
-                &b,
-                &cur(3),
-                TextObject::ABracket('('),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            0..7
-        );
+        assert_eq!(span(&b, &cur(3), TextObject::ABracket('('), DEFAULT_ISKEYWORD_EXTRA), 0..7);
     }
 
     #[test]
     fn bracket_object_works_when_the_cursor_sits_on_the_open_delimiter() {
         let b = buf("(hello)");
-        assert_eq!(
-            span(
-                &b,
-                &cur(0),
-                TextObject::InnerBracket('('),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            1..6
-        );
+        assert_eq!(span(&b, &cur(0), TextObject::InnerBracket('('), DEFAULT_ISKEYWORD_EXTRA), 1..6);
     }
 
     #[test]
     fn bracket_object_with_no_enclosing_pair_is_a_no_op() {
         let b = buf("no brackets here");
         let at = cur(3);
-        assert_eq!(
-            span(
-                &b,
-                &at,
-                TextObject::InnerBracket('('),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            3..3
-        );
+        assert_eq!(span(&b, &at, TextObject::InnerBracket('('), DEFAULT_ISKEYWORD_EXTRA), 3..3);
     }
 
     #[test]
@@ -464,29 +349,13 @@ mod tests {
         // targets.vim-style forward search -- the same forgiveness
         // `di"` already has for quotes, now extended to brackets.
         let b = buf("x = (hello)");
-        assert_eq!(
-            span(
-                &b,
-                &cur(0),
-                TextObject::InnerBracket('('),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            5..10
-        ); // "hello"
+        assert_eq!(span(&b, &cur(0), TextObject::InnerBracket('('), DEFAULT_ISKEYWORD_EXTRA), 5..10); // "hello"
     }
 
     #[test]
     fn inner_paragraph_selects_the_contiguous_non_blank_lines() {
         let b = buf("a\nb\n\nc\nd\n");
-        assert_eq!(
-            span(
-                &b,
-                &cur(0),
-                TextObject::InnerParagraph,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            0..4
-        ); // "a\nb\n"
+        assert_eq!(span(&b, &cur(0), TextObject::InnerParagraph, DEFAULT_ISKEYWORD_EXTRA), 0..4); // "a\nb\n"
         assert!(!is_linewise(TextObject::InnerWord));
         assert!(is_linewise(TextObject::InnerParagraph));
     }
@@ -496,28 +365,14 @@ mod tests {
         let b = buf("a\nb\n\n\nc\n");
         // cursor on "a" (line 0): paragraph is lines 0-1, "ap" should
         // also eat the two blank lines that follow (2-3).
-        assert_eq!(
-            span(&b, &cur(0), TextObject::AParagraph, DEFAULT_ISKEYWORD_EXTRA),
-            0..b.line_start_char(4)
-        );
+        assert_eq!(span(&b, &cur(0), TextObject::AParagraph, DEFAULT_ISKEYWORD_EXTRA), 0..b.line_start_char(4));
     }
 
     #[test]
     fn paragraph_object_on_a_blank_line_selects_the_blank_run() {
         let b = buf("a\n\n\nb\n");
-        let (line, _) = b.line_col(&Cursor {
-            char_idx: b.line_start_char(1),
-            sticky_col: 0,
-        });
+        let (line, _) = b.line_col(&Cursor { char_idx: b.line_start_char(1), sticky_col: 0 });
         assert_eq!(line, 1);
-        assert_eq!(
-            span(
-                &b,
-                &cur(b.line_start_char(1)),
-                TextObject::InnerParagraph,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            b.line_start_char(1)..b.line_start_char(3)
-        );
+        assert_eq!(span(&b, &cur(b.line_start_char(1)), TextObject::InnerParagraph, DEFAULT_ISKEYWORD_EXTRA), b.line_start_char(1)..b.line_start_char(3));
     }
 }

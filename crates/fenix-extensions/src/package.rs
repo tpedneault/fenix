@@ -23,17 +23,12 @@ pub struct Package {
 impl Package {
     /// A `.fenixext` file, or a folder with `extension.toml` in it.
     pub fn open(path: &Path) -> Result<Package, String> {
-        let files = if path.is_dir() {
-            read_dir(path)?
-        } else {
-            read_zip(path)?
-        };
+        let files = if path.is_dir() { read_dir(path)? } else { read_zip(path)? };
         let manifest = files
             .iter()
             .find(|(p, _)| p == Path::new("extension.toml"))
             .ok_or_else(|| format!("{} has no extension.toml at its root", path.display()))?;
-        let text = std::str::from_utf8(&manifest.1)
-            .map_err(|_| "extension.toml isn't UTF-8".to_string())?;
+        let text = std::str::from_utf8(&manifest.1).map_err(|_| "extension.toml isn't UTF-8".to_string())?;
         let manifest = Manifest::parse(text)?;
         Ok(Package { manifest, files })
     }
@@ -54,48 +49,31 @@ fn safe_relative(name: &Path) -> Option<PathBuf> {
 }
 
 fn read_zip(path: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
-    let file =
-        std::fs::File::open(path).map_err(|e| format!("couldn't open {}: {e}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|e| format!("{} isn't a .fenixext (a zip): {e}", path.display()))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("couldn't open {}: {e}", path.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("{} isn't a .fenixext (a zip): {e}", path.display()))?;
     if zip.len() > MAX_FILES {
-        return Err(format!(
-            "{} holds more than {MAX_FILES} files",
-            path.display()
-        ));
+        return Err(format!("{} holds more than {MAX_FILES} files", path.display()));
     }
     let mut files = Vec::new();
     let mut total = 0u64;
     for i in 0..zip.len() {
-        let mut entry = zip
-            .by_index(i)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut entry = zip.by_index(i).map_err(|e| format!("{}: {e}", path.display()))?;
         if entry.is_dir() {
             continue;
         }
         let name = entry.name().map(|n| n.to_string()).unwrap_or_default();
         let Some(rel) = entry.enclosed_name().and_then(|p| safe_relative(&p)) else {
-            return Err(format!(
-                "{} has a file named {name:?}, outside the extension's own folder",
-                path.display()
-            ));
+            return Err(format!("{} has a file named {name:?}, outside the extension's own folder", path.display()));
         };
         let claimed = entry.size();
         total += claimed;
         if total > MAX_UNPACKED {
-            return Err(format!(
-                "{} unpacks to more than {} MB",
-                path.display(),
-                MAX_UNPACKED / 1024 / 1024
-            ));
+            return Err(format!("{} unpacks to more than {} MB", path.display(), MAX_UNPACKED / 1024 / 1024));
         }
         let mut bytes = Vec::with_capacity(claimed as usize);
         // The size a zip claims isn't trusted: read no more than one byte
         // past it, which is enough to tell it lied.
-        (&mut entry)
-            .take(claimed + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|e| format!("{}: {name}: {e}", path.display()))?;
+        (&mut entry).take(claimed + 1).read_to_end(&mut bytes).map_err(|e| format!("{}: {name}: {e}", path.display()))?;
         if bytes.len() as u64 > claimed {
             return Err(format!("{}: {name} is bigger than it says", path.display()));
         }
@@ -120,17 +98,11 @@ fn read_dir(root: &Path) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
                 stack.push(path);
                 continue;
             }
-            let rel = path
-                .strip_prefix(root)
-                .map(Path::to_path_buf)
-                .map_err(|e| e.to_string())?;
+            let rel = path.strip_prefix(root).map(Path::to_path_buf).map_err(|e| e.to_string())?;
             let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             total += bytes.len() as u64;
             if total > MAX_UNPACKED || files.len() >= MAX_FILES {
-                return Err(format!(
-                    "{} is more than an extension can hold",
-                    root.display()
-                ));
+                return Err(format!("{} is more than an extension can hold", root.display()));
             }
             files.push((rel, bytes));
         }
@@ -144,8 +116,7 @@ pub(crate) fn zip_of(path: &Path, files: &[(&str, &str)]) {
     use std::io::Write;
     let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
     for (name, text) in files {
-        zip.start_file(*name, zip::write::SimpleFileOptions::default())
-            .unwrap();
+        zip.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
         zip.write_all(text.as_bytes()).unwrap();
     }
     zip.finish().unwrap();
@@ -161,20 +132,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let manifest = sample("acme.themes", "1.0.0", "none");
         let zip = dir.path().join("acme.fenixext");
-        zip_of(
-            &zip,
-            &[
-                ("extension.toml", &manifest),
-                ("themes/dusk.toml", "name = \"Dusk\""),
-                ("README.md", "# Acme"),
-            ],
-        );
+        zip_of(&zip, &[("extension.toml", &manifest), ("themes/dusk.toml", "name = \"Dusk\""), ("README.md", "# Acme")]);
         let p = Package::open(&zip).unwrap();
         assert_eq!(p.manifest.extension.id, "acme.themes");
-        assert!(p
-            .files
-            .iter()
-            .any(|(f, b)| f == Path::new("themes/dusk.toml") && b == b"name = \"Dusk\""));
+        assert!(p.files.iter().any(|(f, b)| f == Path::new("themes/dusk.toml") && b == b"name = \"Dusk\""));
 
         let folder = dir.path().join("acme");
         std::fs::create_dir_all(folder.join("themes")).unwrap();
@@ -189,36 +150,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let none = dir.path().join("none.fenixext");
         zip_of(&none, &[("themes/x.toml", "")]);
-        assert!(Package::open(&none)
-            .err()
-            .unwrap()
-            .contains("no extension.toml"));
+        assert!(Package::open(&none).err().unwrap().contains("no extension.toml"));
         let out = dir.path().join("out.fenixext");
-        zip_of(
-            &out,
-            &[
-                ("extension.toml", &sample("acme.x", "1.0.0", "none")),
-                ("../../evil.txt", "x"),
-            ],
-        );
-        assert!(Package::open(&out)
-            .err()
-            .unwrap()
-            .contains("outside the extension's own folder"));
+        zip_of(&out, &[("extension.toml", &sample("acme.x", "1.0.0", "none")), ("../../evil.txt", "x")]);
+        assert!(Package::open(&out).err().unwrap().contains("outside the extension's own folder"));
         let junk = dir.path().join("junk.fenixext");
         std::fs::write(&junk, "not a zip").unwrap();
-        assert!(Package::open(&junk)
-            .err()
-            .unwrap()
-            .contains("isn't a .fenixext"));
+        assert!(Package::open(&junk).err().unwrap().contains("isn't a .fenixext"));
     }
 
     #[test]
     fn paths_that_climb_out_are_not_safe() {
-        assert_eq!(
-            safe_relative(Path::new("themes/a.toml")),
-            Some(PathBuf::from("themes/a.toml"))
-        );
+        assert_eq!(safe_relative(Path::new("themes/a.toml")), Some(PathBuf::from("themes/a.toml")));
         assert_eq!(safe_relative(Path::new("./a")), Some(PathBuf::from("a")));
         assert_eq!(safe_relative(Path::new("../a")), None);
         assert_eq!(safe_relative(Path::new("a/../../b")), None);

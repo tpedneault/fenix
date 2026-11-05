@@ -65,12 +65,7 @@ fn parse_status(lines: &[String]) -> Option<RepoStatus> {
             }
         }
     }
-    branch.map(|branch| RepoStatus {
-        branch,
-        upstream,
-        ahead,
-        behind,
-    })
+    branch.map(|branch| RepoStatus { branch, upstream, ahead, behind })
 }
 
 /// What an extension may know of a repository (`git-state`): the branch,
@@ -96,21 +91,10 @@ pub fn summary(repo: &Path) -> Option<Summary> {
 
 fn parse_summary(lines: &[String]) -> Option<Summary> {
     let status = parse_status(lines)?;
-    let head = lines
-        .iter()
-        .find_map(|l| l.strip_prefix("# branch.oid "))
-        .filter(|oid| *oid != "(initial)")
-        .map(str::to_string);
+    let head = lines.iter().find_map(|l| l.strip_prefix("# branch.oid ")).filter(|oid| *oid != "(initial)").map(str::to_string);
     let branch = Some(status.branch).filter(|b| b != "(detached)" && b != "(initial)");
     let conflicts = lines.iter().filter(|l| l.starts_with("u ")).count();
-    Some(Summary {
-        branch,
-        head,
-        upstream: status.upstream,
-        ahead: status.ahead,
-        behind: status.behind,
-        conflicts,
-    })
+    Some(Summary { branch, head, upstream: status.upstream, ahead: status.ahead, behind: status.behind, conflicts })
 }
 
 #[cfg(test)]
@@ -131,24 +115,10 @@ mod tests {
         .map(String::from)
         .into();
         let s = parse_summary(&lines).unwrap();
-        assert_eq!(
-            s,
-            Summary {
-                branch: Some("main".into()),
-                head: Some("1234abcd".into()),
-                upstream: Some("origin/main".into()),
-                ahead: 2,
-                behind: 1,
-                conflicts: 1
-            }
-        );
-        let fresh: Vec<String> = ["# branch.oid (initial)", "# branch.head main"]
-            .map(String::from)
-            .into();
+        assert_eq!(s, Summary { branch: Some("main".into()), head: Some("1234abcd".into()), upstream: Some("origin/main".into()), ahead: 2, behind: 1, conflicts: 1 });
+        let fresh: Vec<String> = ["# branch.oid (initial)", "# branch.head main"].map(String::from).into();
         assert_eq!(parse_summary(&fresh).unwrap().head, None);
-        let detached: Vec<String> = ["# branch.oid 99", "# branch.head (detached)"]
-            .map(String::from)
-            .into();
+        let detached: Vec<String> = ["# branch.oid 99", "# branch.head (detached)"].map(String::from).into();
         assert_eq!(parse_summary(&detached).unwrap().branch, None);
         assert_eq!(parse_summary(&[]), None);
     }
@@ -192,19 +162,8 @@ mod tests {
 
     #[test]
     fn parse_status_handles_no_upstream() {
-        let lines: Vec<String> = ["# branch.oid abc123", "# branch.head main"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(
-            parse_status(&lines),
-            Some(RepoStatus {
-                branch: "main".to_string(),
-                upstream: None,
-                ahead: 0,
-                behind: 0
-            })
-        );
+        let lines: Vec<String> = ["# branch.oid abc123", "# branch.head main"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(parse_status(&lines), Some(RepoStatus { branch: "main".to_string(), upstream: None, ahead: 0, behind: 0 }));
     }
 
     #[test]
@@ -220,12 +179,7 @@ mod tests {
         .collect();
         assert_eq!(
             parse_status(&lines),
-            Some(RepoStatus {
-                branch: "main".to_string(),
-                upstream: Some("origin/main".to_string()),
-                ahead: 2,
-                behind: 3
-            })
+            Some(RepoStatus { branch: "main".to_string(), upstream: Some("origin/main".to_string()), ahead: 2, behind: 3 })
         );
     }
 
@@ -249,10 +203,7 @@ mod tests {
 
         let dir = TempDir::new("status_ahead_clone");
         init_repo(dir.path());
-        git(
-            dir.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
+        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
         dir.write("a.txt", "v1");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "first"]);

@@ -23,8 +23,8 @@ pub mod server;
 pub use client::{Client, ClientError};
 pub use endpoint::{BindError, Endpoint, Listener, Stream};
 pub use protocol::{
-    AgendaTask, AgendaTimer, AgentCaller, Call, CaptureParams, CaptureResult, CaptureTarget,
-    ClockInParams, CommandInfo, CommandsResult, OpenParams, OpenPath, RpcError, RunCommandParams,
-    StateResult, TaskStatus, TasksParams, TasksResult,
+    AgendaTask, AgendaTimer, AgentCaller, Call, CaptureParams, CaptureResult, CaptureTarget, ClockInParams,
+    CommandInfo, CommandsResult, OpenParams, OpenPath, RpcError, RunCommandParams, StateResult,
+    TaskStatus, TasksParams, TasksResult,
 };
 pub use server::{serve, ServerInfo};

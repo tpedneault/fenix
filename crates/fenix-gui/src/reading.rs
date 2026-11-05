@@ -17,14 +17,8 @@ use crate::page::{fit, Grid, ImageKey, Page, Role};
 
 /// What an `![[embed]]` turned out to be.
 pub enum Embedded {
-    Diagram {
-        name: String,
-        source: String,
-    },
-    Note {
-        name: String,
-        text: String,
-    },
+    Diagram { name: String, source: String },
+    Note { name: String, text: String },
     Missing(String),
     /// Not known (yet): asked of the notebook extension, or there's none.
     Unresolved(String),
@@ -76,15 +70,9 @@ impl Ctx<'_> {
 pub enum Action {
     Link(LinkTo),
     /// The checkbox on this source line.
-    Checkbox {
-        line: usize,
-        done: bool,
-    },
+    Checkbox { line: usize, done: bool },
     /// A diagram: in a ```mermaid block on this line, or an embed.
-    Diagram {
-        line: usize,
-        embed: Option<Link>,
-    },
+    Diagram { line: usize, embed: Option<Link> },
     Image(PathBuf),
 }
 
@@ -123,32 +111,19 @@ impl Rendered {
 
     /// The source line a page line came from.
     pub fn source_line_of(&self, page_line: usize) -> Option<usize> {
-        self.source
-            .iter()
-            .take(page_line + 1)
-            .rev()
-            .flatten()
-            .next()
-            .copied()
+        self.source.iter().take(page_line + 1).rev().flatten().next().copied()
     }
 }
 
 /// Lays `text` out `width` cells wide.
 pub fn layout(text: &str, width: usize, ctx: &Ctx) -> Rendered {
     let blocks = blocks::parse(text);
-    let mut w = Writer {
-        g: Grid::new(),
-        y: 0,
-        width: width.max(20),
-        targets: Vec::new(),
-        source: Vec::new(),
-    };
+    let mut w = Writer { g: Grid::new(), y: 0, width: width.max(20), targets: Vec::new(), source: Vec::new() };
     let mut prev: Option<&Blk> = None;
     for b in &blocks {
         // A blank line between blocks, not between a list's items.
         if let Some(p) = prev {
-            let both_items =
-                matches!(p.block, Block::Item { .. }) && matches!(b.block, Block::Item { .. });
+            let both_items = matches!(p.block, Block::Item { .. }) && matches!(b.block, Block::Item { .. });
             let callout_body = matches!(p.block, Block::Callout { .. });
             if !both_items && !callout_body {
                 w.blank(b.quote.min(p.quote));
@@ -159,11 +134,7 @@ pub fn layout(text: &str, width: usize, ctx: &Ctx) -> Rendered {
     }
     let lines = w.g.height();
     w.source.resize(lines, None);
-    Rendered {
-        page: w.g.finish(),
-        targets: w.targets,
-        source: w.source,
-    }
+    Rendered { page: w.g.finish(), targets: w.targets, source: w.source }
 }
 
 struct Writer {
@@ -212,15 +183,7 @@ impl Writer {
 
     /// Writes `spans` wrapped into columns `x..width`, the first line
     /// starting at `first_x`; returns the lines used.
-    fn spans(
-        &mut self,
-        spans: &[Span],
-        x: usize,
-        first_x: usize,
-        quote: usize,
-        ctx: &Ctx,
-        muted: bool,
-    ) -> usize {
+    fn spans(&mut self, spans: &[Span], x: usize, first_x: usize, quote: usize, ctx: &Ctx, muted: bool) -> usize {
         // Words (and the spaces after them), each char with its role and
         // the link it belongs to.
         let mut pieces: Vec<(String, Role, Option<LinkTo>)> = Vec::new();
@@ -264,29 +227,15 @@ impl Writer {
                 }
             }
             // A word longer than the line is cut to it.
-            let shown: String = if len > right.saturating_sub(x) {
-                piece.chars().take(right.saturating_sub(x).max(1)).collect()
-            } else {
-                piece.clone()
-            };
+            let shown: String = if len > right.saturating_sub(x) { piece.chars().take(right.saturating_sub(x).max(1)).collect() } else { piece.clone() };
             let start = col;
             let trimmed = shown.trim_end();
             let end = self.g.put(self.y, col, trimmed, role);
             if let Some(link) = link {
                 // Joined onto the previous piece of the same link.
                 match self.targets.last_mut() {
-                    Some(t)
-                        if t.line == self.y
-                            && t.cols.end + 1 >= start
-                            && t.action == Action::Link(link.clone()) =>
-                    {
-                        t.cols.end = end
-                    }
-                    _ => self.targets.push(Target {
-                        line: self.y,
-                        cols: start..end,
-                        action: Action::Link(link),
-                    }),
+                    Some(t) if t.line == self.y && t.cols.end + 1 >= start && t.action == Action::Link(link.clone()) => t.cols.end = end,
+                    _ => self.targets.push(Target { line: self.y, cols: start..end, action: Action::Link(link) }),
                 }
             }
             col = start + shown.chars().count();
@@ -303,60 +252,26 @@ impl Writer {
                 self.bars(b.quote);
                 let mut col = x0;
                 for t in tags {
-                    col = self.g.put(
-                        self.y,
-                        col,
-                        &format!("#{t}"),
-                        Role::Syntax("text.reference"),
-                    ) + 1;
+                    col = self.g.put(self.y, col, &format!("#{t}"), Role::Syntax("text.reference")) + 1;
                 }
                 if let Some(a) = about {
-                    let text = if tags.is_empty() {
-                        format!("about {a}")
-                    } else {
-                        format!("· about {a}")
-                    };
+                    let text = if tags.is_empty() { format!("about {a}") } else { format!("· about {a}") };
                     self.g.put(self.y, col, &text, Role::Muted);
                 }
                 self.y += 1;
             }
             Block::Heading { level, spans } => {
                 let title: String = blocks::plain(spans);
-                let role = if *level <= 2 {
-                    Role::Syntax("text.title")
-                } else {
-                    Role::Title
-                };
-                let prefix = if *level >= 3 {
-                    "#".repeat(*level - 2) + " "
-                } else {
-                    String::new()
-                };
+                let role = if *level <= 2 { Role::Syntax("text.title") } else { Role::Title };
+                let prefix = if *level >= 3 { "#".repeat(*level - 2) + " " } else { String::new() };
                 self.bars(b.quote);
-                let col = if prefix.is_empty() {
-                    x0
-                } else {
-                    self.g.put(self.y, x0, &prefix, Role::Muted)
-                };
-                let shown = if *level == 1 {
-                    title.to_uppercase()
-                } else {
-                    title
-                };
-                let end = self.g.put(
-                    self.y,
-                    col,
-                    &fit(&shown, self.width.saturating_sub(col)),
-                    role,
-                );
+                let col = if prefix.is_empty() { x0 } else { self.g.put(self.y, x0, &prefix, Role::Muted) };
+                let shown = if *level == 1 { title.to_uppercase() } else { title };
+                let end = self.g.put(self.y, col, &fit(&shown, self.width.saturating_sub(col)), role);
                 // A hairline after the title: to the edge for a chapter,
                 // a short one for a section.
                 if *level <= 2 {
-                    let stop = if *level == 1 {
-                        self.width
-                    } else {
-                        (end + 12).min(self.width)
-                    };
+                    let stop = if *level == 1 { self.width } else { (end + 12).min(self.width) };
                     if end + 2 < stop {
                         self.g.rule(self.y, end + 1..stop);
                     }
@@ -366,11 +281,7 @@ impl Writer {
             Block::Paragraph { spans } => {
                 self.spans(spans, x0, x0, b.quote, ctx, false);
             }
-            Block::Item {
-                depth,
-                marker,
-                spans,
-            } => {
+            Block::Item { depth, marker, spans } => {
                 let indent = x0 + depth * 3;
                 self.bars(b.quote);
                 let (mark, role) = match marker {
@@ -381,14 +292,7 @@ impl Writer {
                 };
                 let end = self.g.put(self.y, indent, &mark, role);
                 if let Marker::Task(done) = marker {
-                    self.targets.push(Target {
-                        line: self.y,
-                        cols: indent..end,
-                        action: Action::Checkbox {
-                            line: b.line,
-                            done: *done,
-                        },
-                    });
+                    self.targets.push(Target { line: self.y, cols: indent..end, action: Action::Checkbox { line: b.line, done: *done } });
                 }
                 let text_x = end + 1;
                 let done = matches!(marker, Marker::Task(true));
@@ -406,19 +310,10 @@ impl Writer {
                 let bar_x = x0.saturating_sub(2);
                 self.g.put(self.y, bar_x, "┃", role);
                 let label = title.to_string();
-                self.g.put(
-                    self.y,
-                    x0,
-                    &fit(&label, self.width.saturating_sub(x0)),
-                    role,
-                );
+                self.g.put(self.y, x0, &fit(&label, self.width.saturating_sub(x0)), role);
                 self.y += 1;
             }
-            Block::Table {
-                align,
-                header,
-                rows,
-            } => self.table(align, header, rows, b.quote, ctx),
+            Block::Table { align, header, rows } => self.table(align, header, rows, b.quote, ctx),
             Block::Rule => {
                 self.bars(b.quote);
                 self.g.rule(self.y, x0..self.width);
@@ -430,26 +325,13 @@ impl Writer {
                     self.picture(key, x0, b.quote, ctx, Action::Image(path));
                     if !alt.is_empty() {
                         self.bars(b.quote);
-                        self.g.put(
-                            self.y,
-                            x0,
-                            &fit(alt, self.width.saturating_sub(x0)),
-                            Role::Muted,
-                        );
+                        self.g.put(self.y, x0, &fit(alt, self.width.saturating_sub(x0)), Role::Muted);
                         self.y += 1;
                     }
                 }
                 None => {
                     self.bars(b.quote);
-                    self.g.put(
-                        self.y,
-                        x0,
-                        &fit(
-                            &format!("[image {src} isn't there]"),
-                            self.width.saturating_sub(x0),
-                        ),
-                        Role::Warn,
-                    );
+                    self.g.put(self.y, x0, &fit(&format!("[image {src} isn't there]"), self.width.saturating_sub(x0)), Role::Warn);
                     self.y += 1;
                 }
             },
@@ -461,28 +343,19 @@ impl Writer {
                     self.bars(b.quote);
                     let end = self.g.put(self.y, x0, "↳ ", Role::Muted);
                     let end2 = self.g.put(self.y, end, &name, Role::Syntax("text.uri"));
-                    self.targets.push(Target {
-                        line: self.y,
-                        cols: end..end2,
-                        action: Action::Link(LinkTo::Wiki(link.clone())),
-                    });
+                    self.targets.push(Target { line: self.y, cols: end..end2, action: Action::Link(LinkTo::Wiki(link.clone())) });
                     self.y += 1;
                     // Its first lines, quoted.
                     let inner = layout(&text, self.width.saturating_sub(x0 + 2), ctx);
                     for (i, line) in inner.page.text.lines().take(8).enumerate() {
                         self.bars(b.quote + 1);
-                        let row: Vec<&crate::page::Span> =
-                            inner.page.spans.iter().filter(|s| s.line == i).collect();
+                        let row: Vec<&crate::page::Span> = inner.page.spans.iter().filter(|s| s.line == i).collect();
                         let plain = line.to_string();
                         if row.is_empty() {
                             self.g.put(self.y, x0 + 2, &plain, Role::Muted);
                         }
                         for s in row {
-                            let piece: String = plain
-                                .chars()
-                                .skip(s.cols.start)
-                                .take(s.cols.len())
-                                .collect();
+                            let piece: String = plain.chars().skip(s.cols.start).take(s.cols.len()).collect();
                             self.g.put(self.y, x0 + 2 + s.cols.start, &piece, s.role);
                         }
                         self.y += 1;
@@ -490,31 +363,14 @@ impl Writer {
                 }
                 Embedded::Missing(name) => {
                     self.bars(b.quote);
-                    self.g.put(
-                        self.y,
-                        x0,
-                        &fit(
-                            &format!("![[{name}]] -- nothing by that name yet"),
-                            self.width.saturating_sub(x0),
-                        ),
-                        Role::Warn,
-                    );
+                    self.g.put(self.y, x0, &fit(&format!("![[{name}]] -- nothing by that name yet"), self.width.saturating_sub(x0)), Role::Warn);
                     self.y += 1;
                 }
                 Embedded::Unresolved(name) => {
                     self.bars(b.quote);
                     let end = self.g.put(self.y, x0, "↳ ", Role::Muted);
-                    let end2 = self.g.put(
-                        self.y,
-                        end,
-                        &fit(&name, self.width.saturating_sub(end)),
-                        Role::Muted,
-                    );
-                    self.targets.push(Target {
-                        line: self.y,
-                        cols: end..end2,
-                        action: Action::Link(LinkTo::Wiki(link.clone())),
-                    });
+                    let end2 = self.g.put(self.y, end, &fit(&name, self.width.saturating_sub(end)), Role::Muted);
+                    self.targets.push(Target { line: self.y, cols: end..end2, action: Action::Link(LinkTo::Wiki(link.clone())) });
                     self.y += 1;
                 }
             },
@@ -529,63 +385,33 @@ impl Writer {
     fn code(&mut self, lang: &str, text: &str, quote: usize, ctx: &Ctx) {
         let x0 = quote * 2;
         let colours = (ctx.highlight)(lang, text);
-        let lines: Vec<&str> = if text.is_empty() {
-            vec![""]
-        } else {
-            text.lines().collect()
-        };
+        let lines: Vec<&str> = if text.is_empty() { vec![""] } else { text.lines().collect() };
         for (i, line) in lines.iter().enumerate() {
             self.bars(quote);
-            let shown: String = line
-                .chars()
-                .take(self.width.saturating_sub(x0 + 2))
-                .collect();
+            let shown: String = line.chars().take(self.width.saturating_sub(x0 + 2)).collect();
             self.g.panel(self.y, x0..self.width);
             // Coloured pieces and plain gaps, never overlapping: a run
             // of text is one colour.
             let chars: Vec<char> = shown.chars().collect();
             let mut at = 0;
-            let mut spans: Vec<(Range<usize>, &'static str)> =
-                colours.get(i).cloned().unwrap_or_default();
+            let mut spans: Vec<(Range<usize>, &'static str)> = colours.get(i).cloned().unwrap_or_default();
             spans.sort_by_key(|(r, _)| r.start);
             for (cols, name) in spans {
-                let (start, end) = (
-                    cols.start.max(at).min(chars.len()),
-                    cols.end.min(chars.len()),
-                );
+                let (start, end) = (cols.start.max(at).min(chars.len()), cols.end.min(chars.len()));
                 if start >= end {
                     continue;
                 }
                 if start > at {
-                    self.g.put(
-                        self.y,
-                        x0 + 1 + at,
-                        &chars[at..start].iter().collect::<String>(),
-                        Role::Text,
-                    );
+                    self.g.put(self.y, x0 + 1 + at, &chars[at..start].iter().collect::<String>(), Role::Text);
                 }
-                self.g.put(
-                    self.y,
-                    x0 + 1 + start,
-                    &chars[start..end].iter().collect::<String>(),
-                    Role::Syntax(name),
-                );
+                self.g.put(self.y, x0 + 1 + start, &chars[start..end].iter().collect::<String>(), Role::Syntax(name));
                 at = end;
             }
             if at < chars.len() {
-                self.g.put(
-                    self.y,
-                    x0 + 1 + at,
-                    &chars[at..].iter().collect::<String>(),
-                    Role::Text,
-                );
+                self.g.put(self.y, x0 + 1 + at, &chars[at..].iter().collect::<String>(), Role::Text);
             }
-            if i == 0
-                && !lang.is_empty()
-                && shown.chars().count() + lang.len() + 3 < self.width - x0
-            {
-                self.g
-                    .put(self.y, self.width - lang.len(), lang, Role::Muted);
+            if i == 0 && !lang.is_empty() && shown.chars().count() + lang.len() + 3 < self.width - x0 {
+                self.g.put(self.y, self.width - lang.len(), lang, Role::Muted);
             }
             self.y += 1;
         }
@@ -611,22 +437,11 @@ impl Writer {
             self.g.put(start + r, x0, "", Role::Text);
         }
         self.g.image(start, x0, rows, cols, key);
-        self.targets.push(Target {
-            line: start,
-            cols: x0..x0 + cols,
-            action,
-        });
+        self.targets.push(Target { line: start, cols: x0..x0 + cols, action });
         self.y = start + rows;
     }
 
-    fn diagram(
-        &mut self,
-        source: &str,
-        embed: Option<(String, Link)>,
-        line: usize,
-        quote: usize,
-        ctx: &Ctx,
-    ) {
+    fn diagram(&mut self, source: &str, embed: Option<(String, Link)>, line: usize, quote: usize, ctx: &Ctx) {
         let x0 = quote * 2;
         if !(ctx.drawn)(source) {
             self.code("mermaid", source, quote, ctx);
@@ -634,48 +449,26 @@ impl Writer {
         }
         if let Some(err) = (ctx.diagram_error)(source) {
             self.bars(quote);
-            self.g.put(
-                self.y,
-                x0,
-                &fit(&format!("diagram: {err}"), self.width.saturating_sub(x0)),
-                Role::Bad,
-            );
+            self.g.put(self.y, x0, &fit(&format!("diagram: {err}"), self.width.saturating_sub(x0)), Role::Bad);
             self.y += 1;
             self.code("mermaid", source, quote, ctx);
             return;
         }
         let key = (ctx.diagram_key)(source);
-        let action = Action::Diagram {
-            line,
-            embed: embed.as_ref().map(|(_, l)| l.clone()),
-        };
+        let action = Action::Diagram { line, embed: embed.as_ref().map(|(_, l)| l.clone()) };
         self.picture(key, x0, quote, ctx, action);
         self.bars(quote);
         let caption = match &embed {
             Some((name, _)) => format!("{name} · diagram"),
             None => "diagram".to_string(),
         };
-        self.g.put(
-            self.y,
-            x0,
-            &fit(&caption, self.width.saturating_sub(x0)),
-            Role::Muted,
-        );
+        self.g.put(self.y, x0, &fit(&caption, self.width.saturating_sub(x0)), Role::Muted);
         self.y += 1;
     }
 
-    fn table(
-        &mut self,
-        align: &[pulldown_cmark::Alignment],
-        header: &[Vec<Span>],
-        rows: &[Vec<Vec<Span>>],
-        quote: usize,
-        ctx: &Ctx,
-    ) {
+    fn table(&mut self, align: &[pulldown_cmark::Alignment], header: &[Vec<Span>], rows: &[Vec<Vec<Span>>], quote: usize, ctx: &Ctx) {
         let x0 = quote * 2;
-        let ncols = header
-            .len()
-            .max(rows.iter().map(Vec::len).max().unwrap_or(0));
+        let ncols = header.len().max(rows.iter().map(Vec::len).max().unwrap_or(0));
         if ncols == 0 {
             return;
         }
@@ -701,11 +494,7 @@ impl Writer {
         let total: usize = widths.iter().sum::<usize>() + 3 * (ncols - 1);
         let write_row = |me: &mut Writer, cells: &[Vec<Span>], head: bool| {
             // A row is as tall as its longest cell, wrapped to its column.
-            let wrapped: Vec<Vec<String>> = widths
-                .iter()
-                .enumerate()
-                .map(|(i, w)| wrap_cell(&cells.get(i).map(text).unwrap_or_default(), *w))
-                .collect();
+            let wrapped: Vec<Vec<String>> = widths.iter().enumerate().map(|(i, w)| wrap_cell(&cells.get(i).map(text).unwrap_or_default(), *w)).collect();
             let height = wrapped.iter().map(Vec::len).max().unwrap_or(1);
             for row_line in 0..height {
                 me.bars(quote);
@@ -720,22 +509,10 @@ impl Writer {
                         _ => x,
                     };
                     // One role per cell: its first span's (a link keeps its target).
-                    let role = if head {
-                        Role::Title
-                    } else {
-                        cell.first().map(|s| role_of(s, ctx)).unwrap_or(Role::Text)
-                    };
+                    let role = if head { Role::Title } else { cell.first().map(|s| role_of(s, ctx)).unwrap_or(Role::Text) };
                     let end = me.g.put(me.y, start, t, role);
-                    if let Some(link) = cell
-                        .iter()
-                        .find_map(|s| s.link.clone())
-                        .filter(|_| !t.is_empty())
-                    {
-                        me.targets.push(Target {
-                            line: me.y,
-                            cols: start..end,
-                            action: Action::Link(link),
-                        });
+                    if let Some(link) = cell.iter().find_map(|s| s.link.clone()).filter(|_| !t.is_empty()) {
+                        me.targets.push(Target { line: me.y, cols: start..end, action: Action::Link(link) });
                     }
                     x += w;
                     if i + 1 < ncols {
@@ -798,15 +575,8 @@ mod tests {
         assert_eq!(lines[3], "wraps when the line is narrow.");
         assert_eq!(lines[5], "[ ] open");
         assert_eq!(lines[6], "[x] done");
-        assert!(r.targets.iter().any(|t| t.line == 2
-            && t.cols == (21..25)
-            && matches!(&t.action, Action::Link(LinkTo::Wiki(l)) if l.target == "Link")));
-        assert!(r.targets.iter().any(|t| t.line == 5
-            && t.action
-                == Action::Checkbox {
-                    line: 4,
-                    done: false
-                }));
+        assert!(r.targets.iter().any(|t| t.line == 2 && t.cols == (21..25) && matches!(&t.action, Action::Link(LinkTo::Wiki(l)) if l.target == "Link")));
+        assert!(r.targets.iter().any(|t| t.line == 5 && t.action == Action::Checkbox { line: 4, done: false }));
         assert_eq!(r.source_line_of(6), Some(5));
         assert_eq!(r.page_line_of(4), 5);
         assert!(r.page.rules.iter().any(|(l, _)| *l == 0));
@@ -818,27 +588,12 @@ mod tests {
         let r = layout(text, 26, &Ctx::plain());
         let lines: Vec<&str> = r.page.text.lines().collect();
         assert_eq!(lines[0].trim_end(), "Tool  │ Result");
-        assert!(
-            !r.page.text.contains('\u{2026}'),
-            "nothing's cut: {}",
-            r.page.text
-        );
-        let joined = lines[2..lines.len() - 1]
-            .iter()
-            .map(|l| l.split('│').nth(1).unwrap().trim())
-            .collect::<Vec<_>>()
-            .join(" ");
+        assert!(!r.page.text.contains('\u{2026}'), "nothing's cut: {}", r.page.text);
+        let joined = lines[2..lines.len() - 1].iter().map(|l| l.split('│').nth(1).unwrap().trim()).collect::<Vec<_>>().join(" ");
         assert_eq!(joined, "the whole of this long answer stays readable");
         assert!(lines[2].starts_with("hover"));
-        assert!(
-            lines[3].starts_with("      │"),
-            "the other columns stay in line: {}",
-            lines[3]
-        );
-        assert!(
-            lines.last().unwrap().starts_with('x'),
-            "the next row follows"
-        );
+        assert!(lines[3].starts_with("      │"), "the other columns stay in line: {}", lines[3]);
+        assert!(lines.last().unwrap().starts_with('x'), "the next row follows");
     }
 
     #[test]
@@ -864,18 +619,11 @@ mod tests {
 
     #[test]
     fn quotes_callouts_and_missing_links() {
-        let ctx = Ctx {
-            link_exists: &|l| l.target != "Nope",
-            ..Ctx::plain()
-        };
+        let ctx = Ctx { link_exists: &|l| l.target != "Nope", ..Ctx::plain() };
         let r = layout("> [!warning] Careful\n> body [[Nope]]\n", 40, &ctx);
         let lines: Vec<&str> = r.page.text.lines().collect();
         assert_eq!(lines[0], "┃ Careful");
         assert_eq!(lines[1], "│ body Nope");
-        assert!(r
-            .page
-            .spans
-            .iter()
-            .any(|s| s.line == 1 && s.role == Role::Warn));
+        assert!(r.page.spans.iter().any(|s| s.line == 1 && s.role == Role::Warn));
     }
 }

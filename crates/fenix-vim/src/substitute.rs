@@ -53,11 +53,7 @@ pub fn run_ex_command(
         return VimEvent::RequestProjectNew(cmd["project-new".len()..].trim().to_string());
     }
 
-    if let Some(path) = cmd
-        .strip_prefix("w ")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
+    if let Some(path) = cmd.strip_prefix("w ").map(str::trim).filter(|p| !p.is_empty()) {
         return VimEvent::RequestSaveAs(path.to_string());
     }
 
@@ -72,10 +68,7 @@ pub fn run_ex_command(
 
     // A delimiter follows `:g` and `:v`; a letter means some other
     // command (`:garbage`, `:vs`), which isn't this one.
-    let global_rest = |prefix: &str| {
-        cmd.strip_prefix(prefix)
-            .filter(|rest| rest.chars().next().is_some_and(|c| !c.is_alphanumeric()))
-    };
+    let global_rest = |prefix: &str| cmd.strip_prefix(prefix).filter(|rest| rest.chars().next().is_some_and(|c| !c.is_alphanumeric()));
     // `:g!`/`:v` before bare `:g` -- otherwise the `!`/`v` would be
     // swallowed as part of the pattern delimiter by the plain `g`
     // branch. Unlike `:s`, `:g` defaults to the *whole buffer* with no
@@ -92,15 +85,8 @@ pub fn run_ex_command(
     let last_line = motion::last_line(buffer);
     let (cur_line, _) = buffer.line_col(cursor);
     let (range, rest) = crate::ex::parse_range(cmd, cur_line, last_line);
-    if let Some(spec) = rest.strip_prefix('s').filter(|spec| {
-        spec.chars()
-            .next()
-            .is_some_and(|c| !c.is_alphanumeric() && !c.is_whitespace())
-    }) {
-        let Some((start_line, end_line)) = lines_in_buffer(
-            range.unwrap_or((cur_line as isize, cur_line as isize)),
-            last_line,
-        ) else {
+    if let Some(spec) = rest.strip_prefix('s').filter(|spec| spec.chars().next().is_some_and(|c| !c.is_alphanumeric() && !c.is_whitespace())) {
+        let Some((start_line, end_line)) = lines_in_buffer(range.unwrap_or((cur_line as isize, cur_line as isize)), last_line) else {
             return VimEvent::Error("Invalid range".to_string());
         };
         return run_substitute(buffer, cursor, start_line, end_line, spec, last_search);
@@ -109,10 +95,7 @@ pub fn run_ex_command(
 }
 
 /// A range that was read, as lines of the buffer: `None` past its end.
-pub(crate) fn lines_in_buffer(
-    (first, last): (isize, isize),
-    last_line: usize,
-) -> Option<(usize, usize)> {
+pub(crate) fn lines_in_buffer((first, last): (isize, isize), last_line: usize) -> Option<(usize, usize)> {
     (first >= 0 && last <= last_line as isize).then_some((first as usize, last as usize))
 }
 
@@ -121,16 +104,9 @@ pub(crate) fn lines_in_buffer(
 pub(crate) fn substitute_spec(cmd: &str, here: usize, last_line: usize) -> Option<String> {
     let (_, rest) = crate::ex::parse_range(cmd.trim(), here, last_line);
     let spec = rest.strip_prefix('s')?;
-    let delim = spec
-        .chars()
-        .next()
-        .filter(|c| !c.is_alphanumeric() && !c.is_whitespace())?;
+    let delim = spec.chars().next().filter(|c| !c.is_alphanumeric() && !c.is_whitespace())?;
     let parts: Vec<&str> = spec[delim.len_utf8()..].splitn(3, delim).collect();
-    Some(format!(
-        "{delim}{}{delim}{}{delim}",
-        parts.first()?,
-        parts.get(1).copied().unwrap_or("")
-    ))
+    Some(format!("{delim}{}{delim}{}{delim}", parts.first()?, parts.get(1).copied().unwrap_or("")))
 }
 
 /// `:g/pattern/subcommand` (`invert` -- `:g!`/`:v` -- keeps the
@@ -150,23 +126,11 @@ pub(crate) fn substitute_spec(cmd: &str, here: usize, last_line: usize) -> Optio
 /// there's no line-listing UI to print into) -- is a silent no-op, not
 /// a default to `d`: an unrecognized subcommand silently deleting the
 /// user's lines would be a dangerous surprise.
-fn run_global(
-    buffer: &mut Buffer,
-    cursor: &mut Cursor,
-    rest: &str,
-    invert: bool,
-    last_search: Option<&str>,
-) -> VimEvent {
-    let Some(delim) = rest.chars().next() else {
-        return VimEvent::None;
-    };
+fn run_global(buffer: &mut Buffer, cursor: &mut Cursor, rest: &str, invert: bool, last_search: Option<&str>) -> VimEvent {
+    let Some(delim) = rest.chars().next() else { return VimEvent::None };
     let parts: Vec<&str> = rest[delim.len_utf8()..].splitn(2, delim).collect();
     let pattern = parts.first().copied().unwrap_or("");
-    let pattern = if pattern.is_empty() {
-        last_search.unwrap_or("")
-    } else {
-        pattern
-    };
+    let pattern = if pattern.is_empty() { last_search.unwrap_or("") } else { pattern };
     if pattern.is_empty() {
         return VimEvent::None;
     }
@@ -196,11 +160,7 @@ fn run_global(
         // before the loop started.
         for &line in matching.iter().rev() {
             let start = buffer.line_start_char(line);
-            let end = if line + 1 < buffer.line_count() {
-                buffer.line_start_char(line + 1)
-            } else {
-                buffer.len_chars()
-            };
+            let end = if line + 1 < buffer.line_count() { buffer.line_start_char(line + 1) } else { buffer.len_chars() };
             buffer.delete_range(cursor, start, end);
         }
         cursor.char_idx = cursor.char_idx.min(buffer.len_chars().saturating_sub(1));
@@ -242,10 +202,7 @@ fn apply_set_command(rest: &str, width: &mut usize, iskeyword_extra: &mut Vec<ch
     let mut shiftwidth_changed = false;
     let mut iskeyword_changed = false;
     for token in rest.split_whitespace() {
-        if let Some(value) = token
-            .strip_prefix("shiftwidth=")
-            .or_else(|| token.strip_prefix("sw="))
-        {
+        if let Some(value) = token.strip_prefix("shiftwidth=").or_else(|| token.strip_prefix("sw=")) {
             if let Ok(new_width) = value.parse::<usize>() {
                 if new_width > 0 && new_width != *width {
                     *width = new_width;
@@ -283,33 +240,18 @@ fn apply_set_command(rest: &str, width: &mut usize, iskeyword_extra: &mut Vec<ch
 /// named); `Some(bool)` for one that is, reporting whether the set
 /// actually differed afterward.
 fn apply_iskeyword_token(token: &str, extra: &mut Vec<char>) -> Option<bool> {
-    let (op, value) = if let Some(v) = token
-        .strip_prefix("iskeyword+=")
-        .or_else(|| token.strip_prefix("isk+="))
-    {
+    let (op, value) = if let Some(v) = token.strip_prefix("iskeyword+=").or_else(|| token.strip_prefix("isk+=")) {
         ('+', v)
-    } else if let Some(v) = token
-        .strip_prefix("iskeyword-=")
-        .or_else(|| token.strip_prefix("isk-="))
-    {
+    } else if let Some(v) = token.strip_prefix("iskeyword-=").or_else(|| token.strip_prefix("isk-=")) {
         ('-', v)
     } else {
-        (
-            '=',
-            token
-                .strip_prefix("iskeyword=")
-                .or_else(|| token.strip_prefix("isk="))?,
-        )
+        ('=', token.strip_prefix("iskeyword=").or_else(|| token.strip_prefix("isk="))?)
     };
-    let chars: Vec<char> = value
-        .split(',')
-        .filter(|s| !s.is_empty())
-        .filter_map(|s| {
-            let mut it = s.chars();
-            let c = it.next()?;
-            it.next().is_none().then_some(c)
-        })
-        .collect();
+    let chars: Vec<char> = value.split(',').filter(|s| !s.is_empty()).filter_map(|s| {
+        let mut it = s.chars();
+        let c = it.next()?;
+        it.next().is_none().then_some(c)
+    }).collect();
     let before = extra.clone();
     match op {
         '=' => *extra = chars,
@@ -340,16 +282,10 @@ fn run_substitute(
     spec: &str,
     last_search: Option<&str>,
 ) -> VimEvent {
-    let Some(delim) = spec.chars().next() else {
-        return VimEvent::None;
-    };
+    let Some(delim) = spec.chars().next() else { return VimEvent::None };
     let parts: Vec<&str> = spec[delim.len_utf8()..].splitn(3, delim).collect();
     let pattern = parts.first().copied().unwrap_or("");
-    let pattern = if pattern.is_empty() {
-        last_search.unwrap_or("")
-    } else {
-        pattern
-    };
+    let pattern = if pattern.is_empty() { last_search.unwrap_or("") } else { pattern };
     if pattern.is_empty() {
         return VimEvent::None;
     }
@@ -392,29 +328,16 @@ struct SubstituteSpec<'a> {
 /// work against a plain string and only touching the real rope once
 /// sidesteps every incremental-offset-drift issue that editing line by
 /// line in place would create.
-fn substitute(
-    buffer: &mut Buffer,
-    cursor: &mut Cursor,
-    spec: &SubstituteSpec,
-) -> Result<(), regex::Error> {
+fn substitute(buffer: &mut Buffer, cursor: &mut Cursor, spec: &SubstituteSpec) -> Result<(), regex::Error> {
     let end_line = spec.end_line.min(motion::last_line(buffer));
-    let (start_line, end_line) = if spec.start_line <= end_line {
-        (spec.start_line, end_line)
-    } else {
-        (end_line, spec.start_line)
-    };
+    let (start_line, end_line) =
+        if spec.start_line <= end_line { (spec.start_line, end_line) } else { (end_line, spec.start_line) };
 
     let start_char = buffer.line_start_char(start_line);
     let end_char = buffer.line_start_char(end_line) + buffer.line_len(end_line);
     let original = buffer.text_range(start_char, end_char);
 
-    let (new_text, count) = replace_in_text(
-        &original,
-        spec.pattern,
-        spec.replacement,
-        spec.ignore_case,
-        spec.global,
-    )?;
+    let (new_text, count) = replace_in_text(&original, spec.pattern, spec.replacement, spec.ignore_case, spec.global)?;
 
     if count > 0 {
         buffer.replace_range(cursor, start_char, end_char, &new_text);
@@ -449,11 +372,7 @@ pub fn replace_in_text(
     ignore_case: bool,
     global: bool,
 ) -> Result<(String, usize), regex::Error> {
-    let pattern_src = if ignore_case {
-        format!("(?i){pattern}")
-    } else {
-        pattern.to_string()
-    };
+    let pattern_src = if ignore_case { format!("(?i){pattern}") } else { pattern.to_string() };
     let re = Regex::new(&pattern_src)?;
     let translated = translate_replacement(replacement);
 
@@ -530,25 +449,13 @@ pub struct SubstitutePlan {
 impl SubstitutePlan {
     /// The pattern as compiled, with `i`'s case folded in.
     pub fn regex(&self) -> Result<Regex, regex::Error> {
-        Regex::new(&if self.ignore_case {
-            format!("(?i){}", self.pattern)
-        } else {
-            self.pattern.clone()
-        })
+        Regex::new(&if self.ignore_case { format!("(?i){}", self.pattern) } else { self.pattern.clone() })
     }
 
     /// What the match at byte `range` of `line` becomes.
-    pub fn replace_match(
-        &self,
-        regex: &Regex,
-        line: &str,
-        range: std::ops::Range<usize>,
-    ) -> String {
+    pub fn replace_match(&self, regex: &Regex, line: &str, range: std::ops::Range<usize>) -> String {
         let translated = translate_replacement(&self.replacement);
-        match regex
-            .captures_at(line, range.start)
-            .filter(|c| c.get(0).is_some_and(|m| m.range() == range))
-        {
+        match regex.captures_at(line, range.start).filter(|c| c.get(0).is_some_and(|m| m.range() == range)) {
             Some(caps) => {
                 let mut out = String::new();
                 caps.expand(&translated, &mut out);
@@ -562,37 +469,22 @@ impl SubstitutePlan {
 /// `cmd` as a substitute, if it is one: its range (the cursor's line
 /// when it has none), its parts and flags. An empty pattern is
 /// `last_search`'s, as `:s//new/` is in Vim.
-pub fn parse_substitute(
-    cmd: &str,
-    buffer: &Buffer,
-    cursor: &Cursor,
-    last_search: Option<&str>,
-) -> Option<SubstitutePlan> {
+pub fn parse_substitute(cmd: &str, buffer: &Buffer, cursor: &Cursor, last_search: Option<&str>) -> Option<SubstitutePlan> {
     let cmd = cmd.trim();
     let (cur_line, _) = buffer.line_col(cursor);
     let last = motion::last_line(buffer);
     let (range, rest) = crate::ex::parse_range(cmd, cur_line, last);
     let spec = rest.strip_prefix('s')?;
     // `:set`, `:sort` and friends aren't substitutes.
-    let delim = spec
-        .chars()
-        .next()
-        .filter(|c| !c.is_alphanumeric() && !c.is_whitespace())?;
+    let delim = spec.chars().next().filter(|c| !c.is_alphanumeric() && !c.is_whitespace())?;
     let parts: Vec<&str> = spec[delim.len_utf8()..].splitn(3, delim).collect();
     let pattern = parts.first().copied().unwrap_or("");
-    let pattern = if pattern.is_empty() {
-        last_search.unwrap_or("")
-    } else {
-        pattern
-    };
+    let pattern = if pattern.is_empty() { last_search.unwrap_or("") } else { pattern };
     if pattern.is_empty() {
         return None;
     }
     let flags = parts.get(2).copied().unwrap_or("");
-    let (a, b) = lines_in_buffer(
-        range.unwrap_or((cur_line as isize, cur_line as isize)),
-        last,
-    )?;
+    let (a, b) = lines_in_buffer(range.unwrap_or((cur_line as isize, cur_line as isize)), last)?;
     Some(SubstitutePlan {
         start_line: a,
         end_line: b,
@@ -617,20 +509,13 @@ pub struct SubstitutePreview {
 /// Lines a preview looks at, at most: a `:%s` on a huge file stays quick.
 const PREVIEW_LINES: usize = 20_000;
 
-pub fn preview_substitute(
-    plan: &SubstitutePlan,
-    buffer: &Buffer,
-) -> Result<SubstitutePreview, regex::Error> {
+pub fn preview_substitute(plan: &SubstitutePlan, buffer: &Buffer) -> Result<SubstitutePreview, regex::Error> {
     let regex = plan.regex()?;
     let mut out = SubstitutePreview::default();
     for line in plan.start_line..=plan.end_line.min(plan.start_line + PREVIEW_LINES) {
         let start = buffer.line_start_char(line);
         let text = buffer.text_range(start, start + buffer.line_len(line));
-        let mut found: Vec<std::ops::Range<usize>> = regex
-            .find_iter(&text)
-            .map(|m| m.range())
-            .filter(|r| !r.is_empty())
-            .collect();
+        let mut found: Vec<std::ops::Range<usize>> = regex.find_iter(&text).map(|m| m.range()).filter(|r| !r.is_empty()).collect();
         if !plan.global {
             found.truncate(1);
         }
@@ -660,29 +545,15 @@ pub fn preview_substitute(
 /// The first match at or after char `from`, on lines up to `end_line`
 /// -- one per line unless `global` (`skip_line` then moves past the rest
 /// of a line already dealt with). Char range.
-pub fn next_substitute_match(
-    plan: &SubstitutePlan,
-    regex: &Regex,
-    buffer: &Buffer,
-    from: usize,
-) -> Option<std::ops::Range<usize>> {
+pub fn next_substitute_match(plan: &SubstitutePlan, regex: &Regex, buffer: &Buffer, from: usize) -> Option<std::ops::Range<usize>> {
     let from = from.min(buffer.len_chars());
-    let mut line = buffer
-        .line_col(&Cursor {
-            char_idx: from,
-            sticky_col: 0,
-        })
-        .0
-        .max(plan.start_line);
+    let mut line = buffer.line_col(&Cursor { char_idx: from, sticky_col: 0 }).0.max(plan.start_line);
     while line <= plan.end_line && line < buffer.line_count() {
         let start = buffer.line_start_char(line);
         let text = buffer.text_range(start, start + buffer.line_len(line));
         let skip_chars = from.saturating_sub(start);
         let skip_bytes: usize = text.chars().take(skip_chars).map(char::len_utf8).sum();
-        if let Some(m) = regex
-            .find_iter(&text)
-            .find(|m| m.start() >= skip_bytes && !m.range().is_empty())
-        {
+        if let Some(m) = regex.find_iter(&text).find(|m| m.start() >= skip_bytes && !m.range().is_empty()) {
             let a = start + text[..m.start()].chars().count();
             return Some(a..a + text[m.range()].chars().count());
         }
@@ -704,85 +575,34 @@ mod tests {
     fn write_path_keeps_windows_spaces() {
         let mut buffer = Buffer::empty();
         let mut cursor = Cursor::at_start();
-        assert_eq!(
-            run_ex_command(
-                r"w C:\My Work\notes.txt",
-                &mut buffer,
-                &mut cursor,
-                &mut 4,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::RequestSaveAs(r"C:\My Work\notes.txt".to_string())
-        );
+        assert_eq!(run_ex_command(r"w C:\My Work\notes.txt", &mut buffer, &mut cursor, &mut 4, &mut vec!['_'], None),
+            VimEvent::RequestSaveAs(r"C:\My Work\notes.txt".to_string()));
     }
 
     #[test]
     fn w_q_wq_x_close_the_buffer_not_the_app() {
         let (mut b, mut c) = cmd("hi");
-        assert_eq!(
-            run_ex_command("w", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestSave
-        );
-        assert_eq!(
-            run_ex_command("q", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestCloseBuffer
-        );
-        assert_eq!(
-            run_ex_command("q!", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestForceCloseBuffer
-        );
+        assert_eq!(run_ex_command("w", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestSave);
+        assert_eq!(run_ex_command("q", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestCloseBuffer);
+        assert_eq!(run_ex_command("q!", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestForceCloseBuffer);
         // The two answers to "this file changed underneath you": keep
         // mine, or keep theirs.
-        assert_eq!(
-            run_ex_command("w!", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestForceSave
-        );
-        assert_eq!(
-            run_ex_command("e!", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestReloadFile
-        );
-        assert_eq!(
-            run_ex_command("edit!", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestReloadFile
-        );
-        assert_eq!(
-            run_ex_command("wq", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestSaveAndCloseBuffer
-        );
-        assert_eq!(
-            run_ex_command("x", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestSaveAndCloseBuffer
-        );
+        assert_eq!(run_ex_command("w!", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestForceSave);
+        assert_eq!(run_ex_command("e!", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestReloadFile);
+        assert_eq!(run_ex_command("edit!", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestReloadFile);
+        assert_eq!(run_ex_command("wq", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestSaveAndCloseBuffer);
+        assert_eq!(run_ex_command("x", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestSaveAndCloseBuffer);
     }
 
     #[test]
     fn qa_wqa_and_variants_target_the_whole_app() {
         let (mut b, mut c) = cmd("hi");
-        assert_eq!(
-            run_ex_command("qa", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestQuitAll
-        );
-        assert_eq!(
-            run_ex_command("quitall", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestQuitAll
-        );
-        assert_eq!(
-            run_ex_command("qa!", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestForceQuitAll
-        );
-        assert_eq!(
-            run_ex_command("quitall!", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestForceQuitAll
-        );
-        assert_eq!(
-            run_ex_command("wqa", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestSaveAllAndQuit
-        );
-        assert_eq!(
-            run_ex_command("xa", &mut b, &mut c, &mut 4, &mut vec!['_'], None),
-            VimEvent::RequestSaveAllAndQuit
-        );
+        assert_eq!(run_ex_command("qa", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestQuitAll);
+        assert_eq!(run_ex_command("quitall", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestQuitAll);
+        assert_eq!(run_ex_command("qa!", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestForceQuitAll);
+        assert_eq!(run_ex_command("quitall!", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestForceQuitAll);
+        assert_eq!(run_ex_command("wqa", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestSaveAllAndQuit);
+        assert_eq!(run_ex_command("xa", &mut b, &mut c, &mut 4, &mut vec!['_'], None), VimEvent::RequestSaveAllAndQuit);
     }
 
     #[test]
@@ -803,14 +623,7 @@ mod tests {
     #[test]
     fn substitute_with_a_numeric_range_affects_only_those_lines() {
         let (mut b, mut c) = cmd("foo\nfoo\nfoo\nfoo");
-        run_ex_command(
-            "2,3s/foo/bar/",
-            &mut b,
-            &mut c,
-            &mut 4,
-            &mut vec!['_'],
-            None,
-        );
+        run_ex_command("2,3s/foo/bar/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
         assert_eq!(b.text(), "foo\nbar\nbar\nfoo");
     }
 
@@ -846,14 +659,7 @@ mod tests {
     fn substitute_supports_ampersand_and_backreferences() {
         // Vim's own escaping, which `ex::pattern_to_regex` translates.
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command(
-            r"s/\(\w\+\) \(\w\+\)/\2 \1: [&]/",
-            &mut b,
-            &mut c,
-            &mut 4,
-            &mut vec!['_'],
-            None,
-        );
+        run_ex_command(r"s/\(\w\+\) \(\w\+\)/\2 \1: [&]/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
         assert_eq!(b.text(), "world hello: [hello world]");
     }
 
@@ -883,14 +689,7 @@ mod tests {
     #[test]
     fn substitute_with_an_empty_pattern_reuses_the_last_search_pattern() {
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command(
-            "s//bye/",
-            &mut b,
-            &mut c,
-            &mut 4,
-            &mut vec!['_'],
-            Some("hello"),
-        );
+        run_ex_command("s//bye/", &mut b, &mut c, &mut 4, &mut vec!['_'], Some("hello"));
         assert_eq!(b.text(), "bye world");
     }
 
@@ -920,14 +719,7 @@ mod tests {
     #[test]
     fn g_s_substitutes_on_every_matching_line_only() {
         let (mut b, mut c) = cmd("foo one\nbar two\nfoo three\n");
-        run_ex_command(
-            "g/foo/s/foo/baz/",
-            &mut b,
-            &mut c,
-            &mut 4,
-            &mut vec!['_'],
-            None,
-        );
+        run_ex_command("g/foo/s/foo/baz/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
         assert_eq!(b.text(), "baz one\nbar two\nbaz three\n");
     }
 
@@ -959,49 +751,22 @@ mod tests {
     #[test]
     fn g_with_an_invalid_pattern_raises_an_error_event() {
         let (mut b, mut c) = cmd("a\nb\n");
-        let event = run_ex_command(
-            r"g/\(unclosed/d",
-            &mut b,
-            &mut c,
-            &mut 4,
-            &mut vec!['_'],
-            None,
-        );
-        assert!(
-            matches!(event, VimEvent::Error(_)),
-            "expected an Error event, got {event:?}"
-        );
+        let event = run_ex_command(r"g/\(unclosed/d", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
+        assert!(matches!(event, VimEvent::Error(_)), "expected an Error event, got {event:?}");
     }
 
     #[test]
     fn substitute_with_an_invalid_pattern_does_not_panic_or_change_the_buffer() {
         let (mut b, mut c) = cmd("hello world");
-        run_ex_command(
-            r"s/\(unclosed/x/",
-            &mut b,
-            &mut c,
-            &mut 4,
-            &mut vec!['_'],
-            None,
-        );
+        run_ex_command(r"s/\(unclosed/x/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
         assert_eq!(b.text(), "hello world");
     }
 
     #[test]
     fn substitute_with_an_invalid_pattern_raises_an_error_event() {
         let (mut b, mut c) = cmd("hello world");
-        let event = run_ex_command(
-            r"s/\(unclosed/x/",
-            &mut b,
-            &mut c,
-            &mut 4,
-            &mut vec!['_'],
-            None,
-        );
-        assert!(
-            matches!(event, VimEvent::Error(_)),
-            "expected an Error event, got {event:?}"
-        );
+        let event = run_ex_command(r"s/\(unclosed/x/", &mut b, &mut c, &mut 4, &mut vec!['_'], None);
+        assert!(matches!(event, VimEvent::Error(_)), "expected an Error event, got {event:?}");
     }
 
     #[test]
@@ -1013,8 +778,7 @@ mod tests {
 
     #[test]
     fn replace_in_text_non_global_replaces_only_the_first_match_per_line() {
-        let (new_text, count) =
-            replace_in_text("foo foo\nfoo foo", "foo", "bar", false, false).unwrap();
+        let (new_text, count) = replace_in_text("foo foo\nfoo foo", "foo", "bar", false, false).unwrap();
         assert_eq!(new_text, "bar foo\nbar foo");
         assert_eq!(count, 2); // one per line, not per match
     }
@@ -1028,8 +792,7 @@ mod tests {
 
     #[test]
     fn replace_in_text_supports_ampersand_and_backreferences() {
-        let (new_text, count) =
-            replace_in_text("hello world", r"(\w+) (\w+)", r"\2 \1: [&]", false, false).unwrap();
+        let (new_text, count) = replace_in_text("hello world", r"(\w+) (\w+)", r"\2 \1: [&]", false, false).unwrap();
         assert_eq!(new_text, "world hello: [hello world]");
         assert_eq!(count, 1);
     }
@@ -1060,17 +823,7 @@ mod tests {
     fn set_shiftwidth_changes_the_indent_width_and_reports_it() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(
-            run_ex_command(
-                "set shiftwidth=3",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::IndentWidthChanged(3)
-        );
+        assert_eq!(run_ex_command("set shiftwidth=3", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::IndentWidthChanged(3));
         assert_eq!(width, 3);
     }
 
@@ -1078,10 +831,7 @@ mod tests {
     fn set_sw_is_an_accepted_alias_for_shiftwidth() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(
-            run_ex_command("set sw=8", &mut b, &mut c, &mut width, &mut vec!['_'], None),
-            VimEvent::IndentWidthChanged(8)
-        );
+        assert_eq!(run_ex_command("set sw=8", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::IndentWidthChanged(8));
         assert_eq!(width, 8);
     }
 
@@ -1089,10 +839,7 @@ mod tests {
     fn set_to_the_same_width_reports_no_change() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(
-            run_ex_command("set sw=4", &mut b, &mut c, &mut width, &mut vec!['_'], None),
-            VimEvent::None
-        );
+        assert_eq!(run_ex_command("set sw=4", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::None);
         assert_eq!(width, 4);
     }
 
@@ -1100,22 +847,9 @@ mod tests {
     fn set_with_a_zero_or_unparsable_width_is_ignored() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(
-            run_ex_command("set sw=0", &mut b, &mut c, &mut width, &mut vec!['_'], None),
-            VimEvent::None
-        );
+        assert_eq!(run_ex_command("set sw=0", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::None);
         assert_eq!(width, 4);
-        assert_eq!(
-            run_ex_command(
-                "set sw=nope",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::None
-        );
+        assert_eq!(run_ex_command("set sw=nope", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::None);
         assert_eq!(width, 4);
     }
 
@@ -1123,17 +857,7 @@ mod tests {
     fn set_with_an_unrecognized_option_is_ignored() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(
-            run_ex_command(
-                "set number",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::None
-        );
+        assert_eq!(run_ex_command("set number", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::None);
         assert_eq!(width, 4);
     }
 
@@ -1141,27 +865,14 @@ mod tests {
     fn bare_set_with_no_arguments_is_a_no_op() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(
-            run_ex_command("set", &mut b, &mut c, &mut width, &mut vec!['_'], None),
-            VimEvent::None
-        );
+        assert_eq!(run_ex_command("set", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::None);
         assert_eq!(width, 4);
     }
     #[test]
     fn undo_refactor_dispatches_to_the_host() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
-        assert_eq!(
-            run_ex_command(
-                "undo-refactor",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::RequestUndoRefactor
-        );
+        assert_eq!(run_ex_command("undo-refactor", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestUndoRefactor);
         assert_eq!(b.text(), "hi");
     }
 
@@ -1169,71 +880,15 @@ mod tests {
     fn lsp_restart_dispatches_to_the_project_host() {
         let (mut b, mut c) = cmd("hi");
         let mut width = 4;
+        assert_eq!(run_ex_command("lsp-restart", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestRestartLsp(String::new()));
+        assert_eq!(run_ex_command("lsp-restart kiln", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestRestartLsp("kiln".to_string()));
+        assert_eq!(run_ex_command("session-save", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestSessionSave);
+        assert_eq!(run_ex_command("project-new", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestProjectNew(String::new()));
         assert_eq!(
-            run_ex_command(
-                "lsp-restart",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::RequestRestartLsp(String::new())
-        );
-        assert_eq!(
-            run_ex_command(
-                "lsp-restart kiln",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::RequestRestartLsp("kiln".to_string())
-        );
-        assert_eq!(
-            run_ex_command(
-                "session-save",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::RequestSessionSave
-        );
-        assert_eq!(
-            run_ex_command(
-                "project-new",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::RequestProjectNew(String::new())
-        );
-        assert_eq!(
-            run_ex_command(
-                "project-new  python-uv orbit python=3.13",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
+            run_ex_command("project-new  python-uv orbit python=3.13", &mut b, &mut c, &mut width, &mut vec!['_'], None),
             VimEvent::RequestProjectNew("python-uv orbit python=3.13".into())
         );
-        assert_eq!(
-            run_ex_command(
-                "session-quit",
-                &mut b,
-                &mut c,
-                &mut width,
-                &mut vec!['_'],
-                None
-            ),
-            VimEvent::RequestSessionQuit
-        );
+        assert_eq!(run_ex_command("session-quit", &mut b, &mut c, &mut width, &mut vec!['_'], None), VimEvent::RequestSessionQuit);
     }
+
 }

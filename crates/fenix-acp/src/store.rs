@@ -11,13 +11,8 @@
 //! Fenix skips what it doesn't know.
 
 use crate::hub::{ThreadId, ThreadMeta};
-use crate::protocol::{
-    ConfigOption, ContentBlock, Mode, Modes, PermissionKind, PermissionOption, PlanStatus,
-    ToolCallFields, ToolContent, ToolKind, ToolStatus,
-};
-use crate::thread::{
-    Entry, Notice, NoticeKind, PermissionCard, PermissionState, Thread, ToolCall, Usage,
-};
+use crate::protocol::{ConfigOption, ContentBlock, Mode, Modes, PermissionKind, PermissionOption, PlanStatus, ToolCallFields, ToolContent, ToolKind, ToolStatus};
+use crate::thread::{Entry, Notice, NoticeKind, PermissionCard, PermissionState, Thread, ToolCall, Usage};
 use serde_json::{json, Value};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -60,16 +55,7 @@ impl Store {
 
     fn thread_path(&self, id: &ThreadId) -> PathBuf {
         // Ids are Fenix's own (`<prefix>-<n>`); anything else is made safe.
-        let name: String =
-            id.0.chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect();
+        let name: String = id.0.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
         self.dir.join("threads").join(format!("{name}.json"))
     }
 
@@ -77,25 +63,12 @@ impl Store {
         self.dir.join("index.json")
     }
 
-    pub fn save(
-        &self,
-        meta: &ThreadMeta,
-        thread: &Thread,
-        extra: &Value,
-        updated: u64,
-    ) -> io::Result<()> {
+    pub fn save(&self, meta: &ThreadMeta, thread: &Thread, extra: &Value, updated: u64) -> io::Result<()> {
         std::fs::create_dir_all(self.dir.join("threads"))?;
         let body = json!({ "version": VERSION, "meta": meta_value(meta), "updated": updated, "thread": thread_value(thread), "extra": extra });
         fenix_storage::write(&self.thread_path(&meta.id), &serde_json::to_vec(&body)?)?;
         let mut index = self.index();
-        let line = IndexEntry {
-            id: meta.id.clone(),
-            agent: meta.agent.clone(),
-            root: meta.root.clone(),
-            session_id: meta.session_id.clone(),
-            title: thread.display_title(),
-            updated,
-        };
+        let line = IndexEntry { id: meta.id.clone(), agent: meta.agent.clone(), root: meta.root.clone(), session_id: meta.session_id.clone(), title: thread.display_title(), updated };
         match index.iter_mut().find(|e| e.id == meta.id) {
             Some(e) => *e = line,
             None => index.push(line),
@@ -105,30 +78,19 @@ impl Store {
 
     pub fn load(&self, id: &ThreadId) -> io::Result<Saved> {
         let body: Value = serde_json::from_slice(&std::fs::read(self.thread_path(id))?)?;
-        let invalid =
-            |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("thread {id}: {what}"));
+        let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("thread {id}: {what}"));
         if body.get("version").and_then(Value::as_u64).unwrap_or(0) > VERSION {
             return Err(invalid("written by a newer Fenix"));
         }
-        let meta = parse_meta(body.get("meta").ok_or_else(|| invalid("no meta"))?)
-            .ok_or_else(|| invalid("bad meta"))?;
-        Ok(Saved {
-            meta,
-            thread: parse_thread(body.get("thread").unwrap_or(&Value::Null)),
-            extra: body.get("extra").cloned().unwrap_or(Value::Null),
-            updated: body.get("updated").and_then(Value::as_u64).unwrap_or(0),
-        })
+        let meta = parse_meta(body.get("meta").ok_or_else(|| invalid("no meta"))?).ok_or_else(|| invalid("bad meta"))?;
+        Ok(Saved { meta, thread: parse_thread(body.get("thread").unwrap_or(&Value::Null)), extra: body.get("extra").cloned().unwrap_or(Value::Null), updated: body.get("updated").and_then(Value::as_u64).unwrap_or(0) })
     }
 
     /// Every thread's line, newest first. An index that can't be read is
     /// empty (the threads are still there, and the next save rewrites it).
     pub fn index(&self) -> Vec<IndexEntry> {
-        let Ok(bytes) = std::fs::read(self.index_path()) else {
-            return Vec::new();
-        };
-        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
-            return Vec::new();
-        };
+        let Ok(bytes) = std::fs::read(self.index_path()) else { return Vec::new() };
+        let Ok(body) = serde_json::from_slice::<Value>(&bytes) else { return Vec::new() };
         let mut entries: Vec<IndexEntry> = body
             .get("threads")
             .and_then(Value::as_array)
@@ -139,15 +101,8 @@ impl Store {
                             id: ThreadId(t.get("id")?.as_str()?.to_string()),
                             agent: t.get("agent")?.as_str()?.to_string(),
                             root: PathBuf::from(t.get("root")?.as_str()?),
-                            session_id: t
-                                .get("sessionId")
-                                .and_then(Value::as_str)
-                                .map(str::to_string),
-                            title: t
-                                .get("title")
-                                .and_then(Value::as_str)
-                                .unwrap_or("")
-                                .to_string(),
+                            session_id: t.get("sessionId").and_then(Value::as_str).map(str::to_string),
+                            title: t.get("title").and_then(Value::as_str).unwrap_or("").to_string(),
                             updated: t.get("updated").and_then(Value::as_u64).unwrap_or(0),
                         })
                     })
@@ -174,10 +129,7 @@ impl Store {
             .iter()
             .map(|e| json!({ "id": e.id.0, "agent": e.agent, "root": e.root.to_string_lossy(), "sessionId": e.session_id, "title": e.title, "updated": e.updated }))
             .collect();
-        fenix_storage::write(
-            &self.index_path(),
-            &serde_json::to_vec_pretty(&json!({ "version": VERSION, "threads": threads }))?,
-        )
+        fenix_storage::write(&self.index_path(), &serde_json::to_vec_pretty(&json!({ "version": VERSION, "threads": threads }))?)
     }
 }
 
@@ -190,14 +142,8 @@ fn parse_meta(v: &Value) -> Option<ThreadMeta> {
         id: ThreadId(v.get("id")?.as_str()?.to_string()),
         agent: v.get("agent")?.as_str()?.to_string(),
         root: PathBuf::from(v.get("root")?.as_str()?),
-        session_id: v
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        handed_off_from: v
-            .get("handedOffFrom")
-            .and_then(Value::as_str)
-            .map(|s| ThreadId(s.to_string())),
+        session_id: v.get("sessionId").and_then(Value::as_str).map(str::to_string),
+        handed_off_from: v.get("handedOffFrom").and_then(Value::as_str).map(|s| ThreadId(s.to_string())),
     })
 }
 
@@ -214,27 +160,13 @@ fn thread_value(t: &Thread) -> Value {
 }
 
 fn parse_thread(v: &Value) -> Thread {
-    let array = |key: &str| {
-        v.get(key)
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default()
-    };
-    let mut t = Thread {
-        title: v.get("title").and_then(Value::as_str).map(str::to_string),
-        ..Thread::default()
-    };
+    let array = |key: &str| v.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut t = Thread { title: v.get("title").and_then(Value::as_str).map(str::to_string), ..Thread::default() };
     t.entries = array("entries").iter().filter_map(parse_entry).collect();
-    if let crate::protocol::SessionUpdate::Plan(plan) = crate::protocol::SessionUpdate::parse(
-        &json!({ "sessionUpdate": "plan", "entries": array("plan") }),
-    ) {
+    if let crate::protocol::SessionUpdate::Plan(plan) = crate::protocol::SessionUpdate::parse(&json!({ "sessionUpdate": "plan", "entries": array("plan") })) {
         t.plan = plan;
     }
-    if let crate::protocol::SessionUpdate::AvailableCommands(commands) =
-        crate::protocol::SessionUpdate::parse(
-            &json!({ "sessionUpdate": "available_commands_update", "availableCommands": array("commands") }),
-        )
-    {
+    if let crate::protocol::SessionUpdate::AvailableCommands(commands) = crate::protocol::SessionUpdate::parse(&json!({ "sessionUpdate": "available_commands_update", "availableCommands": array("commands") })) {
         t.commands = commands;
     }
     t.modes = v.get("modes").filter(|m| !m.is_null()).and_then(|m| {
@@ -244,39 +176,21 @@ fn parse_thread(v: &Value) -> Thread {
                 .get("availableModes")?
                 .as_array()?
                 .iter()
-                .filter_map(|x| {
-                    Some(Mode {
-                        id: x.get("id")?.as_str()?.to_string(),
-                        name: x.get("name")?.as_str()?.to_string(),
-                        description: x
-                            .get("description")
-                            .and_then(Value::as_str)
-                            .map(str::to_string),
-                    })
-                })
+                .filter_map(|x| Some(Mode { id: x.get("id")?.as_str()?.to_string(), name: x.get("name")?.as_str()?.to_string(), description: x.get("description").and_then(Value::as_str).map(str::to_string) }))
                 .collect(),
         })
     });
-    t.config_options = array("configOptions")
-        .iter()
-        .filter_map(ConfigOption::parse)
-        .collect();
+    t.config_options = array("configOptions").iter().filter_map(ConfigOption::parse).collect();
     t.usage = v.get("usage").filter(|u| !u.is_null()).map(|u| Usage {
         used: u.get("used").and_then(Value::as_u64).unwrap_or(0),
         size: u.get("size").and_then(Value::as_u64).unwrap_or(0),
-        cost: u.get("cost").and_then(|c| {
-            Some((
-                c.get("amount")?.as_f64()?,
-                c.get("currency")?.as_str()?.to_string(),
-            ))
-        }),
+        cost: u.get("cost").and_then(|c| Some((c.get("amount")?.as_f64()?, c.get("currency")?.as_str()?.to_string()))),
     });
     t
 }
 
 fn config_value(o: &ConfigOption) -> Value {
-    let mut v =
-        json!({ "id": o.id, "name": o.name, "description": o.description, "category": o.category });
+    let mut v = json!({ "id": o.id, "name": o.name, "description": o.description, "category": o.category });
     match &o.value {
         crate::protocol::ConfigValue::Boolean(on) => {
             v["type"] = json!("boolean");
@@ -285,10 +199,7 @@ fn config_value(o: &ConfigOption) -> Value {
         crate::protocol::ConfigValue::Select { current, choices } => {
             v["type"] = json!("select");
             v["currentValue"] = json!(current);
-            v["options"] = choices
-                .iter()
-                .map(|c| json!({ "value": c.value, "name": c.name, "description": c.description }))
-                .collect();
+            v["options"] = choices.iter().map(|c| json!({ "value": c.value, "name": c.name, "description": c.description })).collect();
         }
     }
     v
@@ -341,10 +252,7 @@ pub fn tool_call_value(c: &ToolCallFields) -> Value {
             .collect();
     }
     if let Some(locations) = &c.locations {
-        v["locations"] = locations
-            .iter()
-            .map(|l| json!({ "path": l.path, "line": l.line }))
-            .collect();
+        v["locations"] = locations.iter().map(|l| json!({ "path": l.path, "line": l.line })).collect();
     }
     if let Some(input) = &c.raw_input {
         v["rawInput"] = input.clone();
@@ -357,19 +265,9 @@ pub fn tool_call_value(c: &ToolCallFields) -> Value {
 
 fn entry_value(e: &Entry) -> Value {
     match e {
-        Entry::User { blocks, queued } => {
-            json!({ "type": "user", "blocks": blocks.iter().map(ContentBlock::to_value).collect::<Vec<_>>(), "queued": queued })
-        }
-        Entry::Agent {
-            text,
-            extra,
-            message_id,
-        } => {
-            json!({ "type": "agent", "text": text, "extra": extra.iter().map(ContentBlock::to_value).collect::<Vec<_>>(), "messageId": message_id })
-        }
-        Entry::Thought { text, message_id } => {
-            json!({ "type": "thought", "text": text, "messageId": message_id })
-        }
+        Entry::User { blocks, queued } => json!({ "type": "user", "blocks": blocks.iter().map(ContentBlock::to_value).collect::<Vec<_>>(), "queued": queued }),
+        Entry::Agent { text, extra, message_id } => json!({ "type": "agent", "text": text, "extra": extra.iter().map(ContentBlock::to_value).collect::<Vec<_>>(), "messageId": message_id }),
+        Entry::Thought { text, message_id } => json!({ "type": "thought", "text": text, "messageId": message_id }),
         Entry::Tool(call) => json!({ "type": "tool", "call": tool_call_value(&call.fields()) }),
         Entry::Permission(card) => json!({
             "type": "permission",
@@ -378,21 +276,13 @@ fn entry_value(e: &Entry) -> Value {
             "options": card.options.iter().map(|o| json!({ "optionId": o.id, "name": o.name, "kind": match o.kind { PermissionKind::AllowOnce => "allow_once", PermissionKind::AllowAlways => "allow_always", PermissionKind::RejectOnce => "reject_once", PermissionKind::RejectAlways => "reject_always", PermissionKind::Other => "other" } })).collect::<Vec<_>>(),
             "state": match &card.state { PermissionState::Answered(name) => json!({ "answered": name }), _ => json!("withdrawn") },
         }),
-        Entry::Notice(n) => {
-            json!({ "type": "notice", "kind": notice_name(n.kind), "text": n.text })
-        }
+        Entry::Notice(n) => json!({ "type": "notice", "kind": notice_name(n.kind), "text": n.text }),
         // Kept as what was asked and answered: nothing waits on it after a
         // restart.
         Entry::Elicitation(card) => {
             let how = match &card.state {
-                crate::thread::ElicitationState::Answered { action, summary }
-                    if summary.is_empty() =>
-                {
-                    action.clone()
-                }
-                crate::thread::ElicitationState::Answered { action, summary } => {
-                    format!("{action}: {summary}")
-                }
+                crate::thread::ElicitationState::Answered { action, summary } if summary.is_empty() => action.clone(),
+                crate::thread::ElicitationState::Answered { action, summary } => format!("{action}: {summary}"),
                 crate::thread::ElicitationState::Completed => "done".into(),
                 _ => "not answered".into(),
             };
@@ -414,40 +304,16 @@ fn notice_name(kind: NoticeKind) -> &'static str {
 
 fn parse_entry(v: &Value) -> Option<Entry> {
     let s = |key: &str| v.get(key).and_then(Value::as_str).map(str::to_string);
-    let blocks = |key: &str| {
-        v.get(key)
-            .and_then(Value::as_array)
-            .map(|a| a.iter().map(ContentBlock::parse).collect())
-            .unwrap_or_default()
-    };
+    let blocks = |key: &str| v.get(key).and_then(Value::as_array).map(|a| a.iter().map(ContentBlock::parse).collect()).unwrap_or_default();
     Some(match v.get("type")?.as_str()? {
         // A prompt still queued when Fenix stopped never went out: it's
         // kept as text the user sees, not sent again on its own.
-        "user" => Entry::User {
-            blocks: blocks("blocks"),
-            queued: false,
-        },
-        "agent" => Entry::Agent {
-            text: s("text").unwrap_or_default(),
-            extra: blocks("extra"),
-            message_id: s("messageId"),
-        },
-        "thought" => Entry::Thought {
-            text: s("text").unwrap_or_default(),
-            message_id: s("messageId"),
-        },
+        "user" => Entry::User { blocks: blocks("blocks"), queued: false },
+        "agent" => Entry::Agent { text: s("text").unwrap_or_default(), extra: blocks("extra"), message_id: s("messageId") },
+        "thought" => Entry::Thought { text: s("text").unwrap_or_default(), message_id: s("messageId") },
         "tool" => {
             let fields = ToolCallFields::parse(v.get("call")?)?;
-            let mut call = ToolCall {
-                id: fields.id.clone(),
-                title: String::new(),
-                kind: ToolKind::Other,
-                status: ToolStatus::Completed,
-                content: vec![],
-                locations: vec![],
-                raw_input: None,
-                raw_output: None,
-            };
+            let mut call = ToolCall { id: fields.id.clone(), title: String::new(), kind: ToolKind::Other, status: ToolStatus::Completed, content: vec![], locations: vec![], raw_input: None, raw_output: None };
             call.title = fields.title.unwrap_or_default();
             call.kind = fields.kind.unwrap_or(ToolKind::Other);
             // A call still running when Fenix stopped never finished.
@@ -463,22 +329,13 @@ fn parse_entry(v: &Value) -> Option<Entry> {
         }
         "permission" => {
             let request = crate::protocol::ClientRequest::parse("session/request_permission", &json!({ "sessionId": "", "toolCall": v.get("toolCall")?, "options": v.get("options")? })).ok()?;
-            let crate::protocol::ClientRequest::RequestPermission {
-                tool_call, options, ..
-            } = request
-            else {
-                return None;
-            };
+            let crate::protocol::ClientRequest::RequestPermission { tool_call, options, .. } = request else { return None };
             let options: Vec<PermissionOption> = options;
             Entry::Permission(PermissionCard {
                 key: s("key").unwrap_or_default(),
                 tool_call,
                 options,
-                state: match v
-                    .get("state")
-                    .and_then(|s| s.get("answered"))
-                    .and_then(Value::as_str)
-                {
+                state: match v.get("state").and_then(|s| s.get("answered")).and_then(Value::as_str) {
                     Some(name) => PermissionState::Answered(name.to_string()),
                     None => PermissionState::Withdrawn,
                 },
@@ -505,35 +362,15 @@ mod tests {
     use crate::protocol::SessionUpdate;
 
     fn temp() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "fenix-acp-store-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
+        let dir = std::env::temp_dir().join(format!("fenix-acp-store-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
 
     fn sample() -> (ThreadMeta, Thread) {
-        let meta = ThreadMeta {
-            id: ThreadId("t-1".into()),
-            agent: "claude".into(),
-            root: PathBuf::from("/work/p"),
-            session_id: Some("s1".into()),
-            handed_off_from: None,
-        };
+        let meta = ThreadMeta { id: ThreadId("t-1".into()), agent: "claude".into(), root: PathBuf::from("/work/p"), session_id: Some("s1".into()), handed_off_from: None };
         let mut t = Thread::default();
-        t.push_user(
-            vec![
-                ContentBlock::text("fix it"),
-                ContentBlock::ResourceLink {
-                    uri: "file:///work/p/a.rs".into(),
-                    name: "a.rs".into(),
-                    mime_type: None,
-                },
-            ],
-            false,
-        );
+        t.push_user(vec![ContentBlock::text("fix it"), ContentBlock::ResourceLink { uri: "file:///work/p/a.rs".into(), name: "a.rs".into(), mime_type: None }], false);
         t.push_user(vec![ContentBlock::text("and then")], true);
         for u in [
             json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": "hmm" } }),
@@ -548,26 +385,11 @@ mod tests {
         ] {
             t.apply(SessionUpdate::parse(&u), false);
         }
-        t.set_modes(Some(Modes {
-            current: "plan".into(),
-            available: vec![Mode {
-                id: "plan".into(),
-                name: "Plan".into(),
-                description: None,
-            }],
-        }));
+        t.set_modes(Some(Modes { current: "plan".into(), available: vec![Mode { id: "plan".into(), name: "Plan".into(), description: None }] }));
         t.push_permission(PermissionCard {
             key: "7".into(),
-            tool_call: ToolCallFields {
-                id: "t1".into(),
-                title: Some("Edit a.rs".into()),
-                ..Default::default()
-            },
-            options: vec![PermissionOption {
-                id: "allow-once".into(),
-                name: "Yes".into(),
-                kind: PermissionKind::AllowOnce,
-            }],
+            tool_call: ToolCallFields { id: "t1".into(), title: Some("Edit a.rs".into()), ..Default::default() },
+            options: vec![PermissionOption { id: "allow-once".into(), name: "Yes".into(), kind: PermissionKind::AllowOnce }],
             state: PermissionState::Answered("Yes".into()),
         });
         t.notice(NoticeKind::Interrupted, "Cancelled.");
@@ -578,9 +400,7 @@ mod tests {
     fn a_thread_reads_back_as_it_was_saved() {
         let store = Store::new(temp());
         let (meta, thread) = sample();
-        store
-            .save(&meta, &thread, &json!({ "ledger": [1, 2] }), 100)
-            .unwrap();
+        store.save(&meta, &thread, &json!({ "ledger": [1, 2] }), 100).unwrap();
         let saved = store.load(&meta.id).unwrap();
         assert_eq!(saved.meta, meta);
         assert_eq!(saved.extra, json!({ "ledger": [1, 2] }));
@@ -590,11 +410,7 @@ mod tests {
         if let Entry::User { queued, .. } = &mut expected.entries[1] {
             *queued = false;
         }
-        if let Some(Entry::Tool(c)) = expected
-            .entries
-            .iter_mut()
-            .find(|e| matches!(e, Entry::Tool(c) if c.id == "t2"))
-        {
+        if let Some(Entry::Tool(c)) = expected.entries.iter_mut().find(|e| matches!(e, Entry::Tool(c) if c.id == "t2")) {
             c.status = ToolStatus::Failed;
         }
         expected.revision = 0;
@@ -610,17 +426,10 @@ mod tests {
         let (mut meta, thread) = sample();
         store.save(&meta, &thread, &Value::Null, 100).unwrap();
         meta.id = ThreadId("t-2".into());
-        store
-            .save(&meta, &Thread::default(), &Value::Null, 200)
-            .unwrap();
-        store
-            .save(&meta, &Thread::default(), &Value::Null, 300)
-            .unwrap();
+        store.save(&meta, &Thread::default(), &Value::Null, 200).unwrap();
+        store.save(&meta, &Thread::default(), &Value::Null, 300).unwrap();
         let index = store.index();
-        assert_eq!(
-            index.iter().map(|e| e.id.0.as_str()).collect::<Vec<_>>(),
-            vec!["t-2", "t-1"]
-        );
+        assert_eq!(index.iter().map(|e| e.id.0.as_str()).collect::<Vec<_>>(), vec!["t-2", "t-1"]);
         assert_eq!(index[1].title, "Fixing");
         assert_eq!(index[0].title, "New thread");
         store.forget(&meta.id).unwrap();
@@ -633,11 +442,7 @@ mod tests {
     fn a_thread_from_a_newer_fenix_is_refused_not_misread() {
         let store = Store::new(temp());
         std::fs::create_dir_all(store.dir().join("threads")).unwrap();
-        std::fs::write(
-            store.dir().join("threads/t-9.json"),
-            br#"{"version": 99, "meta": {}}"#,
-        )
-        .unwrap();
+        std::fs::write(store.dir().join("threads/t-9.json"), br#"{"version": 99, "meta": {}}"#).unwrap();
         assert!(store.load(&ThreadId("t-9".into())).is_err());
         let _ = std::fs::remove_dir_all(store.dir());
     }

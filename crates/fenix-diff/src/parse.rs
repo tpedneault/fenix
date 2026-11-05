@@ -57,13 +57,7 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
             // the path from the header line itself; a later `+++` still
             // overwrites it with the authoritative value.
             if combined {
-                let path = line
-                    .split_once(char::is_whitespace)
-                    .map(|(_, r)| {
-                        r.trim_start_matches("--cc ")
-                            .trim_start_matches("--combined ")
-                    })
-                    .unwrap_or("");
+                let path = line.split_once(char::is_whitespace).map(|(_, r)| r.trim_start_matches("--cc ").trim_start_matches("--combined ")).unwrap_or("");
                 let path = path.trim();
                 if let Some(file) = files.last_mut() {
                     file.old_path = path.to_string();
@@ -73,9 +67,7 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
             continue;
         }
 
-        let Some(file) = files.last_mut() else {
-            continue;
-        };
+        let Some(file) = files.last_mut() else { continue };
         // A combined hunk can't be counted down the way a two-sided one
         // is: its `-a,b` ranges are per-parent, and a line removed
         // relative to one parent consumes none of the result's own
@@ -92,27 +84,13 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
                 // `old_*` describe the first parent only; nothing reads
                 // them for a combined file (it's never staged), but they
                 // are the least misleading thing to put there.
-                file.hunks.push(Hunk {
-                    old_start: new_start,
-                    old_len: 0,
-                    new_start,
-                    new_len,
-                    header: line.to_string(),
-                    lines: Vec::new(),
-                });
+                file.hunks.push(Hunk { old_start: new_start, old_len: 0, new_start, new_len, header: line.to_string(), lines: Vec::new() });
                 combined_width = parents;
                 new_line = new_start;
                 continue;
             }
             if let Some((old_start, old_len, new_start, new_len)) = parse_hunk_header(line) {
-                file.hunks.push(Hunk {
-                    old_start,
-                    old_len,
-                    new_start,
-                    new_len,
-                    header: line.to_string(),
-                    lines: Vec::new(),
-                });
+                file.hunks.push(Hunk { old_start, old_len, new_start, new_len, header: line.to_string(), lines: Vec::new() });
                 old_remaining = old_len;
                 new_remaining = new_len;
                 old_line = old_start;
@@ -129,12 +107,7 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
             // outright as "patch with only garbage".
             if let Some(rest) = line.strip_prefix('\\') {
                 if let Some(hunk) = file.hunks.last_mut() {
-                    hunk.lines.push(DiffLine {
-                        kind: LineKind::NoNewline,
-                        old_line: None,
-                        new_line: None,
-                        text: rest.to_string(),
-                    });
+                    hunk.lines.push(DiffLine { kind: LineKind::NoNewline, old_line: None, new_line: None, text: rest.to_string() });
                     continue;
                 }
             }
@@ -175,9 +148,7 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
         }
 
         // Inside a hunk: classify by the one marker character.
-        let Some(hunk) = file.hunks.last_mut() else {
-            continue;
-        };
+        let Some(hunk) = file.hunks.last_mut() else { continue };
 
         if combined_width > 0 {
             // One column per parent. A line the result gained relative
@@ -209,12 +180,7 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
                 }
                 LineKind::Removed | LineKind::NoNewline => None,
             };
-            hunk.lines.push(DiffLine {
-                kind,
-                old_line: None,
-                new_line: new_no,
-                text: text.to_string(),
-            });
+            hunk.lines.push(DiffLine { kind, old_line: None, new_line: new_no, text: text.to_string() });
             continue;
         }
 
@@ -267,12 +233,7 @@ pub fn parse(text: &str) -> Vec<FileDiff> {
             LineKind::NoNewline => (None, None),
         };
 
-        hunk.lines.push(DiffLine {
-            kind,
-            old_line: old_no,
-            new_line: new_no,
-            text: text.to_string(),
-        });
+        hunk.lines.push(DiffLine { kind, old_line: old_no, new_line: new_no, text: text.to_string() });
     }
 
     files
@@ -300,10 +261,7 @@ fn strip_path_prefix(path: &str) -> String {
     // non-git unified diffs; git's own output doesn't, but a diff from
     // elsewhere might, and keeping it would corrupt the path.
     let path = path.split('\t').next().unwrap_or(path);
-    path.strip_prefix("a/")
-        .or_else(|| path.strip_prefix("b/"))
-        .unwrap_or(path)
-        .to_string()
+    path.strip_prefix("a/").or_else(|| path.strip_prefix("b/")).unwrap_or(path).to_string()
 }
 
 /// `@@ -old_start[,old_len] +new_start[,new_len] @@[ heading]` -> the
@@ -348,11 +306,7 @@ fn is_combined_body(line: &str, width: usize) -> bool {
     if line.starts_with('\\') {
         return true;
     }
-    line.len() >= width
-        && line
-            .chars()
-            .take(width)
-            .all(|c| matches!(c, ' ' | '+' | '-'))
+    line.len() >= width && line.chars().take(width).all(|c| matches!(c, ' ' | '+' | '-'))
 }
 
 fn parse_range(range: &str) -> Option<(usize, usize)> {
@@ -395,11 +349,8 @@ index 0f76a0f,3220423..35c5ba7
     #[test]
     fn combined_columns_collapse_to_one_added_removed_context_reading() {
         let files = parse(COMBINED);
-        let got: Vec<(LineKind, Option<usize>, &str)> = files[0].hunks[0]
-            .lines
-            .iter()
-            .map(|l| (l.kind, l.new_line, l.text.as_str()))
-            .collect();
+        let got: Vec<(LineKind, Option<usize>, &str)> =
+            files[0].hunks[0].lines.iter().map(|l| (l.kind, l.new_line, l.text.as_str())).collect();
         assert_eq!(
             got,
             vec![
@@ -419,22 +370,16 @@ index 0f76a0f,3220423..35c5ba7
     fn a_combined_hunk_ends_at_the_first_line_that_is_not_body() {
         // `git show` puts the next file's header straight after the
         // last body line, with no blank line and no count to stop on.
-        let text = format!(
-            "{COMBINED}diff --git a/b.txt b/b.txt
+        let text = format!("{COMBINED}diff --git a/b.txt b/b.txt
 --- a/b.txt
 +++ b/b.txt
 @@ -1 +1 @@
 -x
 +y
-"
-        );
+");
         let files = parse(&text);
         assert_eq!(files.len(), 2);
-        assert_eq!(
-            files[0].hunks[0].lines.len(),
-            4,
-            "the trailer must not be swallowed into the combined hunk"
-        );
+        assert_eq!(files[0].hunks[0].lines.len(), 4, "the trailer must not be swallowed into the combined hunk");
         assert!(!files[1].is_combined);
         assert_eq!(files[1].hunks[0].lines.len(), 2);
     }
@@ -452,27 +397,15 @@ index 0f76a0f,3220423..35c5ba7
         let files = parse(text);
         assert_eq!(files[0].hunks.len(), 1);
         let lines = &files[0].hunks[0].lines;
-        assert_eq!(
-            (lines[0].kind, lines[0].text.as_str()),
-            (LineKind::Context, "kept")
-        );
-        assert_eq!(
-            (lines[1].kind, lines[1].text.as_str()),
-            (LineKind::Added, "-added with a leading dash")
-        );
+        assert_eq!((lines[0].kind, lines[0].text.as_str()), (LineKind::Context, "kept"));
+        assert_eq!((lines[1].kind, lines[1].text.as_str()), (LineKind::Added, "-added with a leading dash"));
     }
 
     #[test]
     fn an_ordinary_hunk_header_is_not_read_as_a_combined_one() {
         assert_eq!(parse_combined_hunk_header("@@ -1,2 +1,2 @@"), None);
-        assert_eq!(
-            parse_combined_hunk_header("@@@ -1,2 -1,2 +1,3 @@@"),
-            Some((2, 1, 3))
-        );
-        assert_eq!(
-            parse_combined_hunk_header("@@@@ -1 -1 -1 +5,9 @@@@"),
-            Some((3, 5, 9))
-        );
+        assert_eq!(parse_combined_hunk_header("@@@ -1,2 -1,2 +1,3 @@@"), Some((2, 1, 3)));
+        assert_eq!(parse_combined_hunk_header("@@@@ -1 -1 -1 +5,9 @@@@"), Some((3, 5, 9)));
     }
 
     const SIMPLE: &str = "diff --git a/foo.txt b/foo.txt\nindex 83db48f..bf269f4 100644\n--- a/foo.txt\n+++ b/foo.txt\n@@ -1,3 +1,4 @@\n first\n-second\n+two\n+extra\n third\n";
@@ -504,21 +437,15 @@ index 0f76a0f,3220423..35c5ba7
     #[test]
     fn parses_the_hunk_header_numbers_and_keeps_the_line_verbatim() {
         let hunk = &parse(SIMPLE)[0].hunks[0];
-        assert_eq!(
-            (hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len),
-            (1, 3, 1, 4)
-        );
+        assert_eq!((hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len), (1, 3, 1, 4));
         assert_eq!(hunk.header, "@@ -1,3 +1,4 @@");
     }
 
     #[test]
     fn classifies_every_line_and_numbers_both_sides() {
         let hunk = &parse(SIMPLE)[0].hunks[0];
-        let got: Vec<(LineKind, Option<usize>, Option<usize>, &str)> = hunk
-            .lines
-            .iter()
-            .map(|l| (l.kind, l.old_line, l.new_line, l.text.as_str()))
-            .collect();
+        let got: Vec<(LineKind, Option<usize>, Option<usize>, &str)> =
+            hunk.lines.iter().map(|l| (l.kind, l.old_line, l.new_line, l.text.as_str())).collect();
         assert_eq!(
             got,
             vec![
@@ -535,10 +462,7 @@ index 0f76a0f,3220423..35c5ba7
     fn a_hunk_header_with_no_lengths_means_one_line_each_side() {
         let files = parse("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+new\n");
         let hunk = &files[0].hunks[0];
-        assert_eq!(
-            (hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len),
-            (1, 1, 1, 1)
-        );
+        assert_eq!((hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len), (1, 1, 1, 1));
         assert_eq!(hunk.lines.len(), 2);
     }
 
@@ -551,9 +475,7 @@ index 0f76a0f,3220423..35c5ba7
 
     #[test]
     fn line_numbers_start_from_the_hunks_own_offsets_not_from_one() {
-        let files = parse(
-            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -40,2 +50,2 @@\n context\n-gone\n+here\n",
-        );
+        let files = parse("diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -40,2 +50,2 @@\n context\n-gone\n+here\n");
         let lines = &files[0].hunks[0].lines;
         assert_eq!((lines[0].old_line, lines[0].new_line), (Some(40), Some(50)));
         assert_eq!((lines[1].old_line, lines[1].new_line), (Some(41), None));
@@ -637,21 +559,13 @@ index 0f76a0f,3220423..35c5ba7
     fn stops_reading_a_hunk_once_its_declared_line_counts_are_satisfied() {
         // `git show` puts a commit trailer after the diff; none of it
         // should end up inside the last hunk.
-        let text =
-            "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\nnot part of the hunk\n";
+        let text = "diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\nnot part of the hunk\n";
         let file = &parse(text)[0];
         assert_eq!(file.hunks[0].lines.len(), 2);
         // ...nor in the file's header, which is re-emitted verbatim into
         // every patch built from it -- a stray line there is a patch
         // `git apply` rejects.
-        assert_eq!(
-            file.header,
-            vec![
-                "diff --git a/a b/a".to_string(),
-                "--- a/a".to_string(),
-                "+++ b/a".to_string()
-            ]
-        );
+        assert_eq!(file.header, vec!["diff --git a/a b/a".to_string(), "--- a/a".to_string(), "+++ b/a".to_string()]);
     }
 
     #[test]
@@ -662,12 +576,7 @@ index 0f76a0f,3220423..35c5ba7
         // resulting patch as "patch with only garbage at <stdin>:5".
         let text = "diff --git a/n.txt b/n.txt\n--- a/n.txt\n+++ b/n.txt\n@@ -1,2 +1,2 @@\n alpha\n-beta\n\\ No newline at end of file\n+BETA\n\\ No newline at end of file\n";
         let file = &parse(text)[0];
-        assert_eq!(
-            file.header.len(),
-            3,
-            "the trailing marker must not land in the header: {:?}",
-            file.header
-        );
+        assert_eq!(file.header.len(), 3, "the trailing marker must not land in the header: {:?}", file.header);
         let lines = &file.hunks[0].lines;
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[4].kind, LineKind::NoNewline);

@@ -36,38 +36,14 @@ pub(super) struct MotionGpu {
 
 impl MotionGpu {
     pub fn new(gpu: &GpuState) -> Self {
-        let sprites = SpriteRenderer::new(
-            Arc::clone(&gpu.device),
-            Arc::clone(&gpu.queue),
-            gpu.config.format,
-        );
-        let top = SpriteRenderer::new(
-            Arc::clone(&gpu.device),
-            Arc::clone(&gpu.queue),
-            gpu.config.format,
-        );
-        let nearest = || {
-            SpriteRenderer::with_filter(
-                Arc::clone(&gpu.device),
-                Arc::clone(&gpu.queue),
-                gpu.config.format,
-                wgpu::FilterMode::Nearest,
-            )
-        };
-        MotionGpu {
-            overlay: RectRenderer::new(gpu),
-            sprites,
-            top,
-            blades: None,
-            snapshot: None,
-            layers_below: nearest(),
+        let sprites = SpriteRenderer::new(Arc::clone(&gpu.device), Arc::clone(&gpu.queue), gpu.config.format);
+        let top = SpriteRenderer::new(Arc::clone(&gpu.device), Arc::clone(&gpu.queue), gpu.config.format);
+        let nearest = || SpriteRenderer::with_filter(Arc::clone(&gpu.device), Arc::clone(&gpu.queue), gpu.config.format, wgpu::FilterMode::Nearest);
+        MotionGpu { overlay: RectRenderer::new(gpu), sprites, top, blades: None, snapshot: None, layers_below: nearest(),
             layers_above: nearest(),
             layers_top: nearest(),
             layer_sheets: HashMap::new(),
-            layer_models: crate::model3d::ModelRenderer::new(
-                Arc::clone(&gpu.device),
-                Arc::clone(&gpu.queue),
-            ),
+            layer_models: crate::model3d::ModelRenderer::new(Arc::clone(&gpu.device), Arc::clone(&gpu.queue)),
         }
     }
 
@@ -89,31 +65,20 @@ impl MotionGpu {
     /// bright and the others faint.
     pub fn push_spinner(&mut self, x: f32, y: f32, size: f32, lit: usize) {
         self.blades(size as u32);
-        let Some((_, blades)) = &self.blades else {
-            return;
-        };
+        let Some((_, blades)) = &self.blades else { return };
         for (i, blade) in blades.iter().enumerate() {
             let alpha = if i == lit { 1.0 } else { 0.28 };
-            self.sprites
-                .push(blade, x, y, size, size, [1.0, 1.0, 1.0, alpha]);
+            self.sprites.push(blade, x, y, size, size, [1.0, 1.0, 1.0, alpha]);
         }
     }
 
     /// A texture the size of the surface to copy a frame into.
     pub fn snapshot_target(&mut self, gpu: &GpuState) -> &wgpu::Texture {
         let (w, h) = (gpu.config.width, gpu.config.height);
-        if self
-            .snapshot
-            .as_ref()
-            .is_none_or(|(t, _)| t.width() != w || t.height() != h)
-        {
+        if self.snapshot.as_ref().is_none_or(|(t, _)| t.width() != w || t.height() != h) {
             let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("theme-fade-snapshot"),
-                size: wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -308,11 +273,7 @@ pub(super) struct MotionState {
     pub which_key_path: Vec<KeyPress>,
     pub which_key_drawer: Option<super::which_key::Drawer>,
     pub layout: HashMap<fenix_window::WindowId, Tween<fenix_window::Rect>>,
-    pub layout_last: Option<(
-        (usize, usize),
-        fenix_window::Rect,
-        Vec<(fenix_window::WindowId, fenix_window::Rect)>,
-    )>,
+    pub layout_last: Option<((usize, usize), fenix_window::Rect, Vec<(fenix_window::WindowId, fenix_window::Rect)>)>,
     pub reveals: Vec<Reveal>,
     /// The sidebar's root and length last frame, to notice a folder
     /// opening.
@@ -342,31 +303,14 @@ pub(super) struct MotionState {
 impl MotionState {
     /// The popups this frame draws: the ones open now, fading in, and the
     /// ones just closed, fading out.
-    pub(super) fn popup_draws(
-        &mut self,
-        prefs: Prefs,
-        open: Vec<(popup::PopupId, fenix_window::Rect, RowSpans, Option<usize>)>,
-        now: Instant,
-    ) -> Vec<PopupDraw> {
+    pub(super) fn popup_draws(&mut self, prefs: Prefs, open: Vec<(popup::PopupId, fenix_window::Rect, RowSpans, Option<usize>)>, now: Instant) -> Vec<PopupDraw> {
         let mut draws = Vec::new();
         let open_ids: Vec<popup::PopupId> = open.iter().map(|(id, ..)| *id).collect();
         for (id, rect, spans, selected) in open {
-            let life = self.popups.entry(id).or_insert_with(|| PopupLife {
-                shown: now,
-                rect,
-                spans: Vec::new(),
-                selected: None,
-                closing: None,
-            });
+            let life = self.popups.entry(id).or_insert_with(|| PopupLife { shown: now, rect, spans: Vec::new(), selected: None, closing: None });
             if life.closing.is_some() {
                 // Reopened while fading out: carry on from here.
-                *life = PopupLife {
-                    shown: now,
-                    rect,
-                    spans: Vec::new(),
-                    selected: None,
-                    closing: None,
-                };
+                *life = PopupLife { shown: now, rect, spans: Vec::new(), selected: None, closing: None };
             }
             life.rect = rect;
             life.spans = spans.clone();
@@ -375,34 +319,14 @@ impl MotionState {
             let (alpha, rise) = if prefs.popups {
                 // The which-key drawer slides up from behind the modeline,
                 // opaque; every other popup fades in rising a few pixels.
-                let length = if drawer {
-                    prefs.popup_in_d.mul_f32(1.6)
-                } else {
-                    prefs.popup_in_d
-                };
-                let t = motion::ease_out_cubic(
-                    now.saturating_duration_since(life.shown).as_secs_f32()
-                        / length.as_secs_f32().max(1e-3),
-                );
-                if drawer {
-                    (1.0, (1.0 - t) * rect.h)
-                } else {
-                    (t, (1.0 - t) * 4.0)
-                }
+                let length = if drawer { prefs.popup_in_d.mul_f32(1.6) } else { prefs.popup_in_d };
+                let t = motion::ease_out_cubic(now.saturating_duration_since(life.shown).as_secs_f32() / length.as_secs_f32().max(1e-3));
+                if drawer { (1.0, (1.0 - t) * rect.h) } else { (t, (1.0 - t) * 4.0) }
             } else {
                 (1.0, 0.0)
             };
-            let rect = fenix_window::Rect {
-                y: (rect.y + rise).round(),
-                ..rect
-            };
-            draws.push(PopupDraw {
-                id,
-                rect,
-                spans,
-                selected,
-                alpha,
-            });
+            let rect = fenix_window::Rect { y: (rect.y + rise).round(), ..rect };
+            draws.push(PopupDraw { id, rect, spans, selected, alpha });
         }
         for (id, life) in self.popups.iter_mut() {
             if open_ids.contains(id) {
@@ -414,59 +338,27 @@ impl MotionState {
             }
             let closing = *life.closing.get_or_insert(now);
             let drawer = *id == popup::PopupId::WhichKey;
-            let length = if drawer {
-                prefs.popup_out_d.mul_f32(1.6)
-            } else {
-                prefs.popup_out_d
-            };
-            let t = now.saturating_duration_since(closing).as_secs_f32()
-                / length.as_secs_f32().max(1e-3);
+            let length = if drawer { prefs.popup_out_d.mul_f32(1.6) } else { prefs.popup_out_d };
+            let t = now.saturating_duration_since(closing).as_secs_f32() / length.as_secs_f32().max(1e-3);
             if t < 1.0 {
                 let eased = motion::ease_out_cubic(t);
                 let (rect, alpha) = if drawer {
-                    (
-                        fenix_window::Rect {
-                            y: life.rect.y + eased * life.rect.h,
-                            ..life.rect
-                        },
-                        1.0,
-                    )
+                    (fenix_window::Rect { y: life.rect.y + eased * life.rect.h, ..life.rect }, 1.0)
                 } else {
                     (life.rect, 1.0 - eased)
                 };
-                draws.push(PopupDraw {
-                    id: *id,
-                    rect,
-                    spans: life.spans.clone(),
-                    selected: life.selected,
-                    alpha,
-                });
+                draws.push(PopupDraw { id: *id, rect, spans: life.spans.clone(), selected: life.selected, alpha });
             }
         }
-        self.popups.retain(|id, life| {
-            open_ids.contains(id)
-                || life.closing.is_some_and(|c| {
-                    now.saturating_duration_since(c) < prefs.popup_out_d.mul_f32(1.6)
-                })
-        });
+        self.popups.retain(|id, life| open_ids.contains(id) || life.closing.is_some_and(|c| now.saturating_duration_since(c) < prefs.popup_out_d.mul_f32(1.6)));
         draws
     }
 
     /// The active tab accent's `(x, width)` this frame, sliding from where
     /// it was to `target`.
-    pub(super) fn tab_accent(
-        &mut self,
-        prefs: Prefs,
-        key: PaneKey,
-        target: (f32, f32),
-        now: Instant,
-    ) -> (f32, f32) {
+    pub(super) fn tab_accent(&mut self, prefs: Prefs, key: PaneKey, target: (f32, f32), now: Instant) -> (f32, f32) {
         let lerp2 = |a: (f32, f32), b: (f32, f32), t: f32| (lerp(a.0, b.0, t), lerp(a.1, b.1, t));
-        let tween = self.tab_accents.entry(key).or_insert(Tween {
-            from: target,
-            to: target,
-            anim: None,
-        });
+        let tween = self.tab_accents.entry(key).or_insert(Tween { from: target, to: target, anim: None });
         if tween.to != target {
             let from = match tween.anim {
                 Some(anim) if anim.running(now) => lerp2(tween.from, tween.to, anim.eased(now)),
@@ -474,11 +366,7 @@ impl MotionState {
             };
             // Small moves (the strip re-measured by a pixel) snap.
             let far = (from.0 - target.0).abs() > 2.0 || (from.1 - target.1).abs() > 2.0;
-            *tween = Tween {
-                from,
-                to: target,
-                anim: (prefs.tabs && far).then(|| Anim::new(now, prefs.tab_d)),
-            };
+            *tween = Tween { from, to: target, anim: (prefs.tabs && far).then(|| Anim::new(now, prefs.tab_d)) };
         }
         match tween.anim {
             Some(anim) if anim.running(now) => lerp2(tween.from, tween.to, anim.eased(now)),
@@ -488,25 +376,13 @@ impl MotionState {
 
     /// Where to draw the focused caret, in document space (display row,
     /// visual column): gliding from the last place after a motion key.
-    pub(super) fn caret_spot(
-        &mut self,
-        prefs: Prefs,
-        spot: CaretSpot,
-        visible_rows: usize,
-        now: Instant,
-    ) -> (f32, f32) {
+    pub(super) fn caret_spot(&mut self, prefs: Prefs, spot: CaretSpot, visible_rows: usize, now: Instant) -> (f32, f32) {
         let armed = std::mem::take(&mut self.glide_armed);
-        let current = |glide: &Option<(CaretSpot, Tween<(f32, f32)>)>, last: CaretSpot| match glide
-        {
-            Some((key, tween)) if key.pane == last.pane && key.buffer == last.buffer => {
-                match tween.anim {
-                    Some(anim) if anim.running(now) => (
-                        lerp(tween.from.0, tween.to.0, anim.eased(now)),
-                        lerp(tween.from.1, tween.to.1, anim.eased(now)),
-                    ),
-                    _ => (last.row, last.col),
-                }
-            }
+        let current = |glide: &Option<(CaretSpot, Tween<(f32, f32)>)>, last: CaretSpot| match glide {
+            Some((key, tween)) if key.pane == last.pane && key.buffer == last.buffer => match tween.anim {
+                Some(anim) if anim.running(now) => (lerp(tween.from.0, tween.to.0, anim.eased(now)), lerp(tween.from.1, tween.to.1, anim.eased(now))),
+                _ => (last.row, last.col),
+            },
             _ => (last.row, last.col),
         };
         if let Some(last) = self.last_caret {
@@ -516,14 +392,7 @@ impl MotionState {
                 let near = (last.row - spot.row).abs() <= visible_rows as f32;
                 if armed && prefs.caret_glide && same_place && near {
                     let from = current(&self.glide, last);
-                    self.glide = Some((
-                        spot,
-                        Tween {
-                            from,
-                            to: (spot.row, spot.col),
-                            anim: Some(Anim::new(now, prefs.glide_d)),
-                        },
-                    ));
+                    self.glide = Some((spot, Tween { from, to: (spot.row, spot.col), anim: Some(Anim::new(now, prefs.glide_d)) }));
                 } else {
                     self.glide = None;
                 }
@@ -531,18 +400,14 @@ impl MotionState {
         }
         self.last_caret = Some(spot);
         match &self.glide {
-            Some((key, tween)) if key.pane == spot.pane && key.buffer == spot.buffer => {
-                match tween.anim {
-                    Some(anim) if anim.running(now) => (
-                        lerp(tween.from.0, tween.to.0, anim.eased(now)),
-                        lerp(tween.from.1, tween.to.1, anim.eased(now)),
-                    ),
-                    _ => (spot.row, spot.col),
-                }
-            }
+            Some((key, tween)) if key.pane == spot.pane && key.buffer == spot.buffer => match tween.anim {
+                Some(anim) if anim.running(now) => (lerp(tween.from.0, tween.to.0, anim.eased(now)), lerp(tween.from.1, tween.to.1, anim.eased(now))),
+                _ => (spot.row, spot.col),
+            },
             _ => (spot.row, spot.col),
         }
     }
+
 }
 
 impl App {
@@ -615,11 +480,7 @@ impl App {
     }
 
     fn jump_signature(&self) -> (usize, usize, Option<(BufferId, usize)>) {
-        (
-            self.jump_back_stack.len(),
-            self.jump_forward_stack.len(),
-            self.jump_back_stack.last().map(|j| (j.buffer, j.char_idx)),
-        )
+        (self.jump_back_stack.len(), self.jump_forward_stack.len(), self.jump_back_stack.last().map(|j| (j.buffer, j.char_idx)))
     }
 
     pub(super) fn motion_after_key(&mut self, before: KeySnapshot, key: KeyPress) {
@@ -629,20 +490,13 @@ impl App {
         if mode == Mode::Insert || before.mode == Mode::Insert {
             self.motion.last_typed = Some(now);
             // Typing, for the extensions told of it: twice a second at most.
-            if self
-                .wasm
-                .told_typing
-                .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_millis(500))
-            {
+            if self.wasm.told_typing.is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_millis(500)) {
                 self.wasm.told_typing = Some(now);
                 self.editor_event("typing", fenix_wasm::host::Notice::Typing);
             }
         }
-        self.motion.glide_armed = prefs.caret_glide
-            && !self.motion.key_repeat
-            && before.mode != Mode::Insert
-            && mode != Mode::Insert
-            && before.mode != Mode::Command;
+        self.motion.glide_armed =
+            prefs.caret_glide && !self.motion.key_repeat && before.mode != Mode::Insert && mode != Mode::Insert && before.mode != Mode::Command;
 
         let plain = key.mods == Mods::default();
         let changed_text = matches!(before.mode, Mode::Normal | Mode::Visual)
@@ -650,11 +504,7 @@ impl App {
                 || key.code == KeyCode::Char('r') && key.mods.ctrl)
             || before.mode == Mode::Command && key.code == KeyCode::Named(FenixNamedKey::Enter);
         let pulsed = self.pulse.as_ref().map(|p| p.started) != before.pulse;
-        if changed_text
-            && prefs.change_pulse
-            && !pulsed
-            && self.focused_buffer_id() == before.buffer
-        {
+        if changed_text && prefs.change_pulse && !pulsed && self.focused_buffer_id() == before.buffer {
             self.pulse_changes(before.buffer, now, prefs.pulse_d);
         }
 
@@ -662,9 +512,7 @@ impl App {
             let pane = self.focused_pane_id();
             let buffer = self.focused_buffer_id();
             let line = self.open().buffer.line_col(&self.cursor()).0;
-            let searched = before.mode == Mode::Normal
-                && plain_or_shift(key)
-                && matches!(key.code, KeyCode::Char('n' | 'N' | '*' | '#'));
+            let searched = before.mode == Mode::Normal && plain_or_shift(key) && matches!(key.code, KeyCode::Char('n' | 'N' | '*' | '#'));
             let jumped = self.jump_signature() != before.jumps || searched && line != before.line;
             let switched = pane != before.pane && prefs.beacon_on_focus;
             if jumped || switched || (buffer != before.buffer && pane == before.pane && line != 0) {
@@ -674,18 +522,8 @@ impl App {
     }
 
     /// Flashes `line` of `buffer` once.
-    pub(super) fn start_beacon(
-        &mut self,
-        buffer: BufferId,
-        line: usize,
-        now: Instant,
-        duration: Duration,
-    ) {
-        self.motion.beacon = Some(Beacon {
-            buffer,
-            line,
-            anim: Anim::new(now, duration),
-        });
+    pub(super) fn start_beacon(&mut self, buffer: BufferId, line: usize, now: Instant, duration: Duration) {
+        self.motion.beacon = Some(Beacon { buffer, line, anim: Anim::new(now, duration) });
     }
 
     /// Flashes the line the cursor just landed on, if the beacon is on --
@@ -702,70 +540,33 @@ impl App {
     /// Turns `buffer`'s logged edits into pulses: added text flashes,
     /// and where text went, a seam does.
     pub(super) fn pulse_changes(&mut self, buffer: BufferId, now: Instant, duration: Duration) {
-        let Some(ob) = self.buffers.get_mut(buffer) else {
-            return;
-        };
-        let Some(deltas) = ob.buffer.take_changes() else {
-            return;
-        };
+        let Some(ob) = self.buffers.get_mut(buffer) else { return };
+        let Some(deltas) = ob.buffer.take_changes() else { return };
         let anim = Anim::new(now, duration);
         let changes = settle_changes(&deltas);
         self.motion.changes.retain(|c| c.buffer != buffer);
-        self.motion
-            .changes
-            .extend(changes.into_iter().map(|change| ChangeMark {
-                buffer,
-                change,
-                anim,
-            }));
+        self.motion.changes.extend(changes.into_iter().map(|change| ChangeMark { buffer, change, anim }));
     }
 
     // -- What a frame draws ------------------------------------------------
 
     /// The beacon's row and colour in a pane showing `buffer`, if it's
     /// flashing there.
-    pub(super) fn beacon_row(
-        &self,
-        buffer: BufferId,
-        visible_document_lines: &[usize],
-        visible: usize,
-        now: Instant,
-    ) -> Option<(usize, [f32; 4])> {
-        let beacon = self
-            .motion
-            .beacon
-            .filter(|b| b.buffer == buffer && b.anim.running(now))?;
-        let row = visible_document_lines
-            .iter()
-            .position(|&l| l == beacon.line)
-            .filter(|&r| r <= visible)?;
+    pub(super) fn beacon_row(&self, buffer: BufferId, visible_document_lines: &[usize], visible: usize, now: Instant) -> Option<(usize, [f32; 4])> {
+        let beacon = self.motion.beacon.filter(|b| b.buffer == buffer && b.anim.running(now))?;
+        let row = visible_document_lines.iter().position(|&l| l == beacon.line).filter(|&r| r <= visible)?;
         let [r, g, b, _] = self.theme.caret;
         Some((row, [r, g, b, 0.45 * (1.0 - beacon.anim.eased(now))]))
     }
 
     /// The change pulses in the focused pane: added text as segments,
     /// removals as seams `(row, col, whole_lines)`, each with its alpha.
-    pub(super) fn change_overlays(
-        &self,
-        buffer: BufferId,
-        visible: usize,
-        now: Instant,
-    ) -> (
-        Vec<(usize, usize, usize, f32)>,
-        Vec<(usize, usize, bool, f32)>,
-    ) {
+    pub(super) fn change_overlays(&self, buffer: BufferId, visible: usize, now: Instant) -> (Vec<(usize, usize, usize, f32)>, Vec<(usize, usize, bool, f32)>) {
         let mut added = Vec::new();
         let mut seams = Vec::new();
-        let Some(ob) = self.buffers.get(buffer) else {
-            return (added, seams);
-        };
+        let Some(ob) = self.buffers.get(buffer) else { return (added, seams) };
         let len = ob.buffer.len_chars();
-        for mark in self
-            .motion
-            .changes
-            .iter()
-            .filter(|m| m.buffer == buffer && m.anim.running(now))
-        {
+        for mark in self.motion.changes.iter().filter(|m| m.buffer == buffer && m.anim.running(now)) {
             let alpha = 1.0 - mark.anim.eased(now);
             match &mark.change {
                 Change::Added(range) => {
@@ -776,16 +577,8 @@ impl App {
                 }
                 Change::Removed { at, lines } => {
                     let at = (*at).min(len);
-                    let (line, col) = ob.buffer.line_col(&Cursor {
-                        char_idx: at,
-                        sticky_col: 0,
-                    });
-                    let Some(row) = line
-                        .checked_sub(self.render_base_line())
-                        .filter(|&r| r <= visible)
-                    else {
-                        continue;
-                    };
+                    let (line, col) = ob.buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 });
+                    let Some(row) = line.checked_sub(self.render_base_line()).filter(|&r| r <= visible) else { continue };
                     seams.push((row, if *lines { 0 } else { col }, *lines, alpha));
                 }
             }
@@ -804,39 +597,22 @@ impl App {
             },
             slot => {
                 let from = match slot {
-                    Some(Tween {
-                        from,
-                        to,
-                        anim: Some(anim),
-                    }) if anim.running(now) => lerp_rgba(*from, *to, anim.eased(now)),
+                    Some(Tween { from, to, anim: Some(anim) }) if anim.running(now) => lerp_rgba(*from, *to, anim.eased(now)),
                     Some(tween) => tween.to,
                     None => target,
                 };
-                let anim =
-                    (prefs.mode_fade && from != target).then(|| Anim::new(now, prefs.mode_d));
-                *slot = Some(Tween {
-                    from,
-                    to: target,
-                    anim,
-                });
+                let anim = (prefs.mode_fade && from != target).then(|| Anim::new(now, prefs.mode_d));
+                *slot = Some(Tween { from, to: target, anim });
                 from
             }
         };
-        let error_at = self
-            .status_message
-            .as_ref()
-            .filter(|m| m.is_error)
-            .map(|m| m.set_at);
+        let error_at = self.status_message.as_ref().filter(|m| m.is_error).map(|m| m.set_at);
         if error_at.is_some() && error_at != self.motion.last_error {
             self.motion.last_error = error_at;
             self.motion.error_flash = prefs.error_flash.then(|| Anim::new(now, prefs.error_d));
         }
         match self.motion.error_flash.filter(|a| a.running(now)) {
-            Some(anim) => lerp_rgba(
-                glyphon_to_rgba(self.theme.git_conflicted),
-                color,
-                anim.eased(now),
-            ),
+            Some(anim) => lerp_rgba(glyphon_to_rgba(self.theme.git_conflicted), color, anim.eased(now)),
             None => color,
         }
     }
@@ -845,18 +621,14 @@ impl App {
     /// at the end of its time.
     pub(super) fn message_alpha(&self, now: Instant) -> f32 {
         let prefs = self.motion();
-        let Some(message) = &self.status_message else {
-            return 1.0;
-        };
+        let Some(message) = &self.status_message else { return 1.0 };
         if !prefs.messages {
             return 1.0;
         }
         let age = now.saturating_duration_since(message.set_at);
-        let fade_in =
-            (age.as_secs_f32() / prefs.message_in_d.as_secs_f32().max(1e-3)).clamp(0.0, 1.0);
+        let fade_in = (age.as_secs_f32() / prefs.message_in_d.as_secs_f32().max(1e-3)).clamp(0.0, 1.0);
         let left = MESSAGE_DURATION.saturating_sub(age);
-        let fade_out =
-            (left.as_secs_f32() / prefs.message_out_d.as_secs_f32().max(1e-3)).clamp(0.0, 1.0);
+        let fade_out = (left.as_secs_f32() / prefs.message_out_d.as_secs_f32().max(1e-3)).clamp(0.0, 1.0);
         fade_in.min(fade_out)
     }
 
@@ -867,11 +639,7 @@ impl App {
         if self.motion.git_fetching {
             jobs.push("fetching".to_string());
         }
-        if self
-            .task_session
-            .as_ref()
-            .is_some_and(|s| s.runner.is_some())
-        {
+        if self.task_session.as_ref().is_some_and(|s| s.runner.is_some()) {
             jobs.push("running task".to_string());
         }
         for session in self.lsp_sessions.values() {
@@ -884,35 +652,20 @@ impl App {
 
     /// The first visual column to draw in a pane this frame, easing to
     /// `target` a column at a time.
-    pub(super) fn scroll_col(
-        &mut self,
-        pane: fenix_window::WindowId,
-        target: usize,
-        now: Instant,
-    ) -> usize {
+    pub(super) fn scroll_col(&mut self, pane: fenix_window::WindowId, target: usize, now: Instant) -> usize {
         let prefs = self.motion();
         let key = self.pane_key(pane);
         let target_f = target as f32;
-        let tween = self.motion.scroll_cols.entry(key).or_insert(Tween {
-            from: target_f,
-            to: target_f,
-            anim: None,
-        });
+        let tween = self.motion.scroll_cols.entry(key).or_insert(Tween { from: target_f, to: target_f, anim: None });
         if tween.to != target_f {
             let from = match tween.anim {
                 Some(anim) if anim.running(now) => lerp(tween.from, tween.to, anim.eased(now)),
                 _ => tween.to,
             };
-            *tween = Tween {
-                from,
-                to: target_f,
-                anim: prefs.smooth_scroll.then(|| Anim::new(now, prefs.scroll_d)),
-            };
+            *tween = Tween { from, to: target_f, anim: prefs.smooth_scroll.then(|| Anim::new(now, prefs.scroll_d)) };
         }
         match tween.anim {
-            Some(anim) if anim.running(now) => {
-                lerp(tween.from, tween.to, anim.eased(now)).round().max(0.0) as usize
-            }
+            Some(anim) if anim.running(now) => lerp(tween.from, tween.to, anim.eased(now)).round().max(0.0) as usize,
             _ => target,
         }
     }
@@ -920,18 +673,11 @@ impl App {
     /// The panes' rects this frame: easing to `layout` after a split, a
     /// close or a resize by key. A window resize or a workspace switch
     /// snaps.
-    pub(super) fn motion_layout(
-        &mut self,
-        layout: Vec<(fenix_window::WindowId, fenix_window::Rect)>,
-        area: fenix_window::Rect,
-        now: Instant,
-    ) -> Vec<(fenix_window::WindowId, fenix_window::Rect)> {
+    pub(super) fn motion_layout(&mut self, layout: Vec<(fenix_window::WindowId, fenix_window::Rect)>, area: fenix_window::Rect, now: Instant) -> Vec<(fenix_window::WindowId, fenix_window::Rect)> {
         let prefs = self.motion();
         let key = (self.active_frame, self.workspaces.active);
         let previous = self.motion.layout_last.take();
-        let same_place = previous
-            .as_ref()
-            .is_some_and(|(k, a, _)| *k == key && rect_eq(*a, area));
+        let same_place = previous.as_ref().is_some_and(|(k, a, _)| *k == key && rect_eq(*a, area));
         let mut out = Vec::with_capacity(layout.len());
         match previous {
             Some((_, _, old)) if same_place && prefs.layout && old != layout => {
@@ -939,11 +685,7 @@ impl App {
                 let drawn = |pane: fenix_window::WindowId| -> Option<fenix_window::Rect> {
                     let target = old.iter().find(|(p, _)| *p == pane).map(|(_, r)| *r)?;
                     Some(match self.motion.layout.get(&pane) {
-                        Some(Tween {
-                            from,
-                            to,
-                            anim: Some(anim),
-                        }) if anim.running(now) => lerp_rect(*from, *to, anim.eased(now)),
+                        Some(Tween { from, to, anim: Some(anim) }) if anim.running(now) => lerp_rect(*from, *to, anim.eased(now)),
                         _ => target,
                     })
                 };
@@ -951,34 +693,19 @@ impl App {
                 for &(pane, rect) in &layout {
                     let from = drawn(pane).unwrap_or_else(|| collapsed_from(rect, area));
                     if !rect_eq(from, rect) {
-                        tweens.insert(
-                            pane,
-                            Tween {
-                                from,
-                                to: rect,
-                                anim: Some(Anim::new(now, prefs.layout_d)),
-                            },
-                        );
+                        tweens.insert(pane, Tween { from, to: rect, anim: Some(Anim::new(now, prefs.layout_d)) });
                     }
                 }
                 self.motion.layout = tweens;
             }
             Some(_) if same_place => {
-                self.motion
-                    .layout
-                    .retain(|pane, t| layout.iter().any(|(p, r)| p == pane && rect_eq(*r, t.to)));
+                self.motion.layout.retain(|pane, t| layout.iter().any(|(p, r)| p == pane && rect_eq(*r, t.to)));
             }
             _ => self.motion.layout.clear(),
         }
         for &(pane, rect) in &layout {
             let shown = match self.motion.layout.get(&pane) {
-                Some(Tween {
-                    from,
-                    to,
-                    anim: Some(anim),
-                }) if anim.running(now) && rect_eq(*to, rect) => {
-                    lerp_rect(*from, *to, anim.eased(now))
-                }
+                Some(Tween { from, to, anim: Some(anim) }) if anim.running(now) && rect_eq(*to, rect) => lerp_rect(*from, *to, anim.eased(now)),
                 _ => rect,
             };
             out.push((pane, shown));
@@ -999,21 +726,12 @@ impl App {
         let len = explorer.entries.len();
         let selected = explorer.selected;
         let depth = explorer.entries.get(selected).map(|e| e.depth);
-        let grew_under = explorer
-            .entries
-            .get(selected + 1)
-            .zip(depth)
-            .is_some_and(|(next, depth)| next.depth > depth);
+        let grew_under = explorer.entries.get(selected + 1).zip(depth).is_some_and(|(next, depth)| next.depth > depth);
         if let Some((old_root, old_len)) = &self.motion.explorer_len {
             if *old_root == root && len > *old_len && grew_under && prefs.folds {
                 let target = RevealTarget::Sidebar;
                 self.motion.reveals.retain(|r| r.target != target);
-                self.motion.reveals.push(Reveal {
-                    target,
-                    first: selected + 1,
-                    count: len - old_len,
-                    anim: Anim::new(now, prefs.fold_d),
-                });
+                self.motion.reveals.push(Reveal { target, first: selected + 1, count: len - old_len, anim: Anim::new(now, prefs.fold_d) });
             }
         }
         self.motion.explorer_len = Some((root, len));
@@ -1024,38 +742,22 @@ impl App {
     pub(super) fn reveal_lines(&mut self, buffer: BufferId, first: usize, count: usize) {
         let prefs = self.motion();
         if prefs.folds && count > 0 {
-            self.motion
-                .reveals
-                .retain(|r| r.target != RevealTarget::Buffer(buffer));
-            self.motion.reveals.push(Reveal {
-                target: RevealTarget::Buffer(buffer),
-                first,
-                count,
-                anim: Anim::new(Instant::now(), prefs.fold_d),
-            });
+            self.motion.reveals.retain(|r| r.target != RevealTarget::Buffer(buffer));
+            self.motion.reveals.push(Reveal { target: RevealTarget::Buffer(buffer), first, count, anim: Anim::new(Instant::now(), prefs.fold_d) });
         }
     }
 
     /// How much of a reveal is still covered: the rows from
     /// `first + count * shown` down are hidden.
-    pub(super) fn reveal_cover(
-        &self,
-        target: RevealTarget,
-        now: Instant,
-    ) -> Option<(usize, usize, f32)> {
-        let reveal = self
-            .motion
-            .reveals
-            .iter()
-            .find(|r| r.target == target && r.anim.running(now))?;
+    pub(super) fn reveal_cover(&self, target: RevealTarget, now: Instant) -> Option<(usize, usize, f32)> {
+        let reveal = self.motion.reveals.iter().find(|r| r.target == target && r.anim.running(now))?;
         Some((reveal.first, reveal.count, reveal.anim.eased(now)))
     }
 
     /// Starts a theme change's fade from `old` -- the next frame copies
     /// the old theme's picture first.
     pub(super) fn fade_theme_from(&mut self, old: &'static Theme) {
-        if self.motion().theme_fade && !std::ptr::eq(old, self.theme) && old.name != self.theme.name
-        {
+        if self.motion().theme_fade && !std::ptr::eq(old, self.theme) && old.name != self.theme.name {
             self.motion.theme_from.get_or_insert(old);
         }
     }
@@ -1066,27 +768,13 @@ impl App {
         let m = &self.motion;
         m.beacon.is_some_and(|b| b.anim.running(now))
             || m.changes.iter().any(|c| c.anim.running(now))
-            || m.popups.values().any(|p| {
-                p.closing.is_some()
-                    || now.saturating_duration_since(p.shown) < Duration::from_millis(400)
-            })
-            || m.mode
-                .as_ref()
-                .and_then(|t| t.anim)
-                .is_some_and(|a| a.running(now))
+            || m.popups.values().any(|p| p.closing.is_some() || now.saturating_duration_since(p.shown) < Duration::from_millis(400))
+            || m.mode.as_ref().and_then(|t| t.anim).is_some_and(|a| a.running(now))
             || m.error_flash.is_some_and(|a| a.running(now))
-            || m.tab_accents
-                .values()
-                .any(|t| t.anim.is_some_and(|a| a.running(now)))
-            || m.scroll_cols
-                .values()
-                .any(|t| t.anim.is_some_and(|a| a.running(now)))
-            || m.glide
-                .as_ref()
-                .is_some_and(|(_, t)| t.anim.is_some_and(|a| a.running(now)))
-            || m.layout
-                .values()
-                .any(|t| t.anim.is_some_and(|a| a.running(now)))
+            || m.tab_accents.values().any(|t| t.anim.is_some_and(|a| a.running(now)))
+            || m.scroll_cols.values().any(|t| t.anim.is_some_and(|a| a.running(now)))
+            || m.glide.as_ref().is_some_and(|(_, t)| t.anim.is_some_and(|a| a.running(now)))
+            || m.layout.values().any(|t| t.anim.is_some_and(|a| a.running(now)))
             || m.reveals.iter().any(|r| r.anim.running(now))
             || m.theme_from.is_some()
             || m.theme_fade.is_some_and(|a| a.running(now))
@@ -1097,13 +785,9 @@ impl App {
 
     fn message_fading(&self, now: Instant) -> bool {
         let prefs = self.motion();
-        let Some(message) = &self.status_message else {
-            return false;
-        };
+        let Some(message) = &self.status_message else { return false };
         let age = now.saturating_duration_since(message.set_at);
-        prefs.messages
-            && (age < prefs.message_in_d
-                || (age < MESSAGE_DURATION && MESSAGE_DURATION - age < prefs.message_out_d))
+        prefs.messages && (age < prefs.message_in_d || (age < MESSAGE_DURATION && MESSAGE_DURATION - age < prefs.message_out_d))
     }
 
     /// The next time something needs a frame without anything moving
@@ -1176,27 +860,16 @@ fn plain_or_shift(key: KeyPress) -> bool {
 }
 
 fn rect_eq(a: fenix_window::Rect, b: fenix_window::Rect) -> bool {
-    (a.x - b.x).abs() < 0.5
-        && (a.y - b.y).abs() < 0.5
-        && (a.w - b.w).abs() < 0.5
-        && (a.h - b.h).abs() < 0.5
+    (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5 && (a.w - b.w).abs() < 0.5 && (a.h - b.h).abs() < 0.5
 }
 
 /// Where a new pane grows from: its own far edge, so the divider slides
 /// across towards it.
 fn collapsed_from(rect: fenix_window::Rect, area: fenix_window::Rect) -> fenix_window::Rect {
     if rect.x > area.x + 0.5 {
-        fenix_window::Rect {
-            x: rect.x + rect.w,
-            w: 0.0,
-            ..rect
-        }
+        fenix_window::Rect { x: rect.x + rect.w, w: 0.0, ..rect }
     } else if rect.y > area.y + 0.5 {
-        fenix_window::Rect {
-            y: rect.y + rect.h,
-            h: 0.0,
-            ..rect
-        }
+        fenix_window::Rect { y: rect.y + rect.h, h: 0.0, ..rect }
     } else if rect.w < area.w - 0.5 {
         fenix_window::Rect { w: 0.0, ..rect }
     } else {
@@ -1223,19 +896,14 @@ pub(super) fn settle_changes(deltas: &[fenix_core::EditDelta]) -> Vec<Change> {
         };
         for change in &mut changes {
             match change {
-                Change::Added(range) => {
-                    *range = map(range.start)..map(range.end).max(map(range.start))
-                }
+                Change::Added(range) => *range = map(range.start)..map(range.end).max(map(range.start)),
                 Change::Removed { at, .. } => *at = map(*at),
             }
         }
         if inserted > 0 {
             changes.push(Change::Added(d.start_char..d.new_end_char));
         } else if removed > 0 {
-            changes.push(Change::Removed {
-                at: d.start_char,
-                lines: d.removed.contains('\n'),
-            });
+            changes.push(Change::Removed { at: d.start_char, lines: d.removed.contains('\n') });
         }
     }
     changes.retain(|c| !matches!(c, Change::Added(r) if r.is_empty()));
@@ -1263,11 +931,7 @@ mod tests {
     use fenix_core::EditDelta;
 
     fn delta(start: usize, new_end: usize, removed: &str) -> EditDelta {
-        EditDelta {
-            start_char: start,
-            new_end_char: new_end,
-            removed: removed.to_string(),
-        }
+        EditDelta { start_char: start, new_end_char: new_end, removed: removed.to_string() }
     }
 
     #[test]
@@ -1279,32 +943,15 @@ mod tests {
     #[test]
     fn a_deleted_line_is_a_seam_where_it_was() {
         let changes = settle_changes(&[delta(10, 10, "gone\n")]);
-        assert!(matches!(
-            changes.as_slice(),
-            [Change::Removed {
-                at: 10,
-                lines: true
-            }]
-        ));
+        assert!(matches!(changes.as_slice(), [Change::Removed { at: 10, lines: true }]));
     }
 
     #[test]
     fn later_edits_move_what_earlier_ones_marked() {
         // Add "abc" at 20, then delete 5 chars at 0: the addition moves to 15.
         let changes = settle_changes(&[delta(20, 23, ""), delta(0, 0, "12345")]);
-        assert!(
-            changes
-                .iter()
-                .any(|c| matches!(c, Change::Added(r) if *r == (15..18))),
-            "{changes:?}"
-        );
-        assert!(changes.iter().any(|c| matches!(
-            c,
-            Change::Removed {
-                at: 0,
-                lines: false
-            }
-        )));
+        assert!(changes.iter().any(|c| matches!(c, Change::Added(r) if *r == (15..18))), "{changes:?}");
+        assert!(changes.iter().any(|c| matches!(c, Change::Removed { at: 0, lines: false })));
     }
 
     #[test]
@@ -1322,9 +969,7 @@ three
 four
 five
 six
-"
-        .chars()
-        {
+".chars() {
             app.test_insert(ch);
         }
         app.test_set_cursor(Cursor::at_start());
@@ -1335,10 +980,7 @@ six
     fn a_jump_flashes_the_line_it_lands_on() {
         let mut app = motion_app();
         let before = app.motion_before_key();
-        let from = JumpEntry {
-            buffer: app.focused_buffer_id(),
-            char_idx: 0,
-        };
+        let from = JumpEntry { buffer: app.focused_buffer_id(), char_idx: 0 };
         app.test_vim_key(KeyPress::char('G'));
         app.record_jump(from);
         app.motion_after_key(before, KeyPress::char('G'));
@@ -1361,10 +1003,7 @@ six
         let mut app = motion_app();
         app.config.motion.beacon = Some(false);
         let before = app.motion_before_key();
-        let from = JumpEntry {
-            buffer: app.focused_buffer_id(),
-            char_idx: 0,
-        };
+        let from = JumpEntry { buffer: app.focused_buffer_id(), char_idx: 0 };
         app.test_vim_key(KeyPress::char('G'));
         app.record_jump(from);
         app.motion_after_key(before, KeyPress::char('G'));
@@ -1383,12 +1022,7 @@ six
             Change::Added(range) => Some(range.clone()),
             _ => None,
         });
-        assert_eq!(
-            added,
-            Some(0..4),
-            "the restored \"one\n\" flashes: {:?}",
-            app.motion.changes
-        );
+        assert_eq!(added, Some(0..4), "the restored \"one\n\" flashes: {:?}", app.motion.changes);
     }
 
     #[test]
@@ -1397,26 +1031,11 @@ six
         let mut c = fenix_config::Config::empty("s.toml".into(), "state".into());
         c.motion.level = Some("subtle".into());
         let prefs = Prefs::from_config(&c);
-        let rect = fenix_window::Rect {
-            x: 10.0,
-            y: 10.0,
-            w: 100.0,
-            h: 40.0,
-        };
+        let rect = fenix_window::Rect { x: 10.0, y: 10.0, w: 100.0, h: 40.0 };
         let now = Instant::now();
-        let open = |_now| {
-            vec![(
-                popup::PopupId::Hover,
-                rect,
-                vec![("x".to_string(), glyphon::Color::rgb(1, 1, 1), false)],
-                None,
-            )]
-        };
+        let open = |_now| vec![(popup::PopupId::Hover, rect, vec![("x".to_string(), glyphon::Color::rgb(1, 1, 1), false)], None)];
         let first = state.popup_draws(prefs, open(now), now);
-        assert!(
-            first[0].alpha < 0.1 && first[0].rect.y > rect.y,
-            "starts faint and low"
-        );
+        assert!(first[0].alpha < 0.1 && first[0].rect.y > rect.y, "starts faint and low");
         let later = state.popup_draws(prefs, open(now), now + Duration::from_millis(500));
         assert_eq!((later[0].alpha, later[0].rect.y), (1.0, rect.y));
         let closing = state.popup_draws(prefs, Vec::new(), now + Duration::from_millis(510));
@@ -1431,20 +1050,12 @@ six
         let mut c = fenix_config::Config::empty("s.toml".into(), "state".into());
         c.motion.level = Some("subtle".into());
         let prefs = Prefs::from_config(&c);
-        let rect = fenix_window::Rect {
-            x: 0.0,
-            y: 600.0,
-            w: 1000.0,
-            h: 120.0,
-        };
+        let rect = fenix_window::Rect { x: 0.0, y: 600.0, w: 1000.0, h: 120.0 };
         let now = Instant::now();
         let open = || vec![(popup::PopupId::WhichKey, rect, Vec::new(), None)];
         let first = state.popup_draws(prefs, open(), now);
         assert_eq!(first[0].alpha, 1.0, "opaque while it slides");
-        assert!(
-            (first[0].rect.y - (rect.y + rect.h)).abs() < 0.01,
-            "starts fully below its place"
-        );
+        assert!((first[0].rect.y - (rect.y + rect.h)).abs() < 0.01, "starts fully below its place");
         let settled = state.popup_draws(prefs, open(), now + Duration::from_secs(1));
         assert_eq!(settled[0].rect.y, rect.y);
         let closed_at = now + Duration::from_secs(1);
@@ -1457,34 +1068,18 @@ six
     fn a_split_moves_the_divider_instead_of_jumping() {
         let mut app = App::with_file(None);
         app.config.motion.layout = Some(true);
-        let area = fenix_window::Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 200.0,
-            h: 100.0,
-        };
+        let area = fenix_window::Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
         let a = app.focused_pane_id();
         let now = Instant::now();
         app.motion_layout(vec![(a, area)], area, now);
         let buffer = app.focused_buffer_id();
         let b = app.windows_mut().split(SplitKind::Vertical, buffer);
         let left = fenix_window::Rect { w: 100.0, ..area };
-        let right = fenix_window::Rect {
-            x: 100.0,
-            w: 100.0,
-            ..area
-        };
+        let right = fenix_window::Rect { x: 100.0, w: 100.0, ..area };
         let shown = app.motion_layout(vec![(a, left), (b, right)], area, now);
         assert_eq!(shown[0].1.w, 200.0, "the old pane starts at its old size");
-        assert_eq!(
-            shown[1].1.w, 0.0,
-            "the new one starts closed at its far edge"
-        );
-        let settled = app.motion_layout(
-            vec![(a, left), (b, right)],
-            area,
-            now + Duration::from_secs(1),
-        );
+        assert_eq!(shown[1].1.w, 0.0, "the new one starts closed at its far edge");
+        let settled = app.motion_layout(vec![(a, left), (b, right)], area, now + Duration::from_secs(1));
         assert_eq!((settled[0].1.w, settled[1].1.w), (100.0, 100.0));
     }
 
@@ -1494,12 +1089,7 @@ six
         app.config.motion.layout = Some(true);
         let a = app.focused_pane_id();
         let now = Instant::now();
-        let small = fenix_window::Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 200.0,
-            h: 100.0,
-        };
+        let small = fenix_window::Rect { x: 0.0, y: 0.0, w: 200.0, h: 100.0 };
         let big = fenix_window::Rect { w: 400.0, ..small };
         app.motion_layout(vec![(a, small)], small, now);
         let shown = app.motion_layout(vec![(a, big)], big, now);
@@ -1515,12 +1105,7 @@ six
         let app = App::with_file(None);
         let pane = (0, 0, app.focused_pane_id());
         let buffer = app.focused_buffer_id();
-        let spot = |col: f32| CaretSpot {
-            pane,
-            buffer,
-            row: 0.0,
-            col,
-        };
+        let spot = |col: f32| CaretSpot { pane, buffer, row: 0.0, col };
         let now = Instant::now();
         state.caret_spot(prefs, spot(0.0), 40, now);
         state.glide_armed = true;
@@ -1535,26 +1120,11 @@ six
 
     #[test]
     fn a_new_pane_grows_from_its_far_edge() {
-        let area = fenix_window::Rect {
-            x: 0.0,
-            y: 0.0,
-            w: 100.0,
-            h: 50.0,
-        };
-        let right = fenix_window::Rect {
-            x: 50.0,
-            y: 0.0,
-            w: 50.0,
-            h: 50.0,
-        };
+        let area = fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 };
+        let right = fenix_window::Rect { x: 50.0, y: 0.0, w: 50.0, h: 50.0 };
         let from = collapsed_from(right, area);
         assert_eq!((from.x, from.w), (100.0, 0.0));
-        let below = fenix_window::Rect {
-            x: 0.0,
-            y: 25.0,
-            w: 100.0,
-            h: 25.0,
-        };
+        let below = fenix_window::Rect { x: 0.0, y: 25.0, w: 100.0, h: 25.0 };
         let from = collapsed_from(below, area);
         assert_eq!((from.y, from.h), (50.0, 0.0));
     }

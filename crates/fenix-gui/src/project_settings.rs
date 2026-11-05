@@ -8,9 +8,7 @@
 
 use std::path::PathBuf;
 
-use fenix_project::tools::{
-    join_command_line, split_command_line, AdditionalServer, CommandSpec, ProjectTools,
-};
+use fenix_project::tools::{join_command_line, split_command_line, AdditionalServer, CommandSpec, ProjectTools};
 use fenix_project::ProjectKind;
 
 use crate::page::{edit_line, fit, insert_at, with_caret, Grid, Key, Page, Role};
@@ -50,10 +48,7 @@ pub enum Action {
     OpenRaw,
     /// Pick a path in the explorer for the field being typed, starting
     /// from `start`; it comes back through `Settings::browsed`.
-    Browse {
-        start: Option<PathBuf>,
-        folder: bool,
-    },
+    Browse { start: Option<PathBuf>, folder: bool },
 }
 
 pub struct Settings {
@@ -114,13 +109,7 @@ impl Settings {
         fields.push(Field::AddTask);
         fields.extend(self.tools.lsp.keys().cloned().map(Field::Lsp));
         fields.push(Field::AddLsp);
-        fields.extend(
-            self.tools
-                .lsp
-                .additional
-                .iter()
-                .map(|server| Field::Extra(server.name.clone())),
-        );
+        fields.extend(self.tools.lsp.additional.iter().map(|server| Field::Extra(server.name.clone())));
         fields.push(Field::AddExtra);
         fields.extend([Field::Program, Field::Args, Field::Cwd]);
         fields.extend(self.tools.launch.env.keys().cloned().map(Field::Env));
@@ -137,60 +126,19 @@ impl Settings {
         match field {
             Field::Group => self.group.clone(),
             Field::Jira => self.jira.clone(),
-            Field::Task(name) => self
-                .tools
-                .tasks
-                .get(name)
-                .map(command_line)
-                .unwrap_or_default(),
-            Field::Lsp(lang) => self
-                .tools
-                .lsp
-                .get(lang)
-                .map(command_line)
-                .unwrap_or_default(),
-            Field::Extra(name) => self
-                .extra(name)
-                .map(|server| {
-                    format!(
-                        "{} = {}",
-                        server.languages.join(", "),
-                        command_line(&server.command())
-                    )
-                })
-                .unwrap_or_default(),
-            Field::Program => self
-                .tools
-                .launch
-                .program
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
-            Field::Args => self
-                .tools
-                .launch
-                .args
-                .as_deref()
-                .map(join_command_line)
-                .unwrap_or_default(),
-            Field::Cwd => self
-                .tools
-                .launch
-                .cwd
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
+            Field::Task(name) => self.tools.tasks.get(name).map(command_line).unwrap_or_default(),
+            Field::Lsp(lang) => self.tools.lsp.get(lang).map(command_line).unwrap_or_default(),
+            Field::Extra(name) => self.extra(name).map(|server| format!("{} = {}", server.languages.join(", "), command_line(&server.command()))).unwrap_or_default(),
+            Field::Program => self.tools.launch.program.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+            Field::Args => self.tools.launch.args.as_deref().map(join_command_line).unwrap_or_default(),
+            Field::Cwd => self.tools.launch.cwd.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
             Field::Env(key) => self.tools.launch.env.get(key).cloned().unwrap_or_default(),
             _ => String::new(),
         }
     }
 
     fn extra(&self, name: &str) -> Option<&AdditionalServer> {
-        self.tools
-            .lsp
-            .additional
-            .iter()
-            .find(|server| server.name == name)
+        self.tools.lsp.additional.iter().find(|server| server.name == name)
     }
 
     fn is_text(field: &Field) -> bool {
@@ -213,10 +161,7 @@ impl Settings {
                 Key::CtrlO => match field {
                     Field::Program | Field::Cwd => {
                         let start = (!text.trim().is_empty()).then(|| self.root.join(text.trim()));
-                        return Action::Browse {
-                            start,
-                            folder: *field == Field::Cwd,
-                        };
+                        return Action::Browse { start, folder: *field == Field::Cwd };
                     }
                     _ => self.note = Some("Ctrl-O browses for the program or the cwd".to_string()),
                 },
@@ -234,9 +179,7 @@ impl Settings {
         let field = self.focused();
         match key {
             Key::Char('q') | Key::Escape => return Action::Close,
-            Key::Char('j') | Key::Down | Key::Tab => {
-                self.focus = (self.focus + 1).min(count.saturating_sub(1))
-            }
+            Key::Char('j') | Key::Down | Key::Tab => self.focus = (self.focus + 1).min(count.saturating_sub(1)),
             Key::Char('k') | Key::Up | Key::BackTab => self.focus = self.focus.saturating_sub(1),
             Key::Char('g') => self.focus = 0,
             Key::Char('G') => self.focus = count.saturating_sub(1),
@@ -252,9 +195,7 @@ impl Settings {
                     Some(Field::Task(_) | Field::AddTask) => Some(Field::AddTask),
                     Some(Field::Lsp(_) | Field::AddLsp) => Some(Field::AddLsp),
                     Some(Field::Extra(_) | Field::AddExtra) => Some(Field::AddExtra),
-                    Some(
-                        Field::Env(_) | Field::AddEnv | Field::Program | Field::Args | Field::Cwd,
-                    ) => Some(Field::AddEnv),
+                    Some(Field::Env(_) | Field::AddEnv | Field::Program | Field::Args | Field::Cwd) => Some(Field::AddEnv),
                     _ => None,
                 };
                 if let Some(add) = add {
@@ -263,10 +204,7 @@ impl Settings {
                 }
             }
             Key::Char('d') => {
-                if let Some(
-                    field @ (Field::Task(_) | Field::Lsp(_) | Field::Extra(_) | Field::Env(_)),
-                ) = field
-                {
+                if let Some(field @ (Field::Task(_) | Field::Lsp(_) | Field::Extra(_) | Field::Env(_))) = field {
                     if pending_delete.as_ref() == Some(&field) {
                         return self.delete(&field);
                     }
@@ -290,15 +228,7 @@ impl Settings {
                 }
                 Some(Field::Kind) => return self.cycle_kind(true),
                 Some(field) if Self::is_text(&field) => {
-                    let text = if key == Key::Char('c')
-                        || matches!(
-                            field,
-                            Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv
-                        ) {
-                        String::new()
-                    } else {
-                        self.value(&field)
-                    };
+                    let text = if key == Key::Char('c') || matches!(field, Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv) { String::new() } else { self.value(&field) };
                     self.editing = Some((field, text));
                 }
                 _ => {}
@@ -320,12 +250,7 @@ impl Settings {
     /// relative to the project when it's inside it.
     pub fn browsed(&mut self, path: &std::path::Path) {
         if let Some((_, text)) = &mut self.editing {
-            let path = path
-                .strip_prefix(&self.root)
-                .ok()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| path.to_path_buf());
+            let path = path.strip_prefix(&self.root).ok().filter(|p| !p.as_os_str().is_empty()).map(|p| p.to_path_buf()).unwrap_or_else(|| path.to_path_buf());
             *text = path.display().to_string();
             self.caret = None;
         }
@@ -339,18 +264,9 @@ impl Settings {
 
     fn cycle_kind(&mut self, forward: bool) -> Action {
         // "detect", then each kind.
-        let options: Vec<Option<ProjectKind>> = std::iter::once(None)
-            .chain(ProjectKind::ALL.into_iter().map(Some))
-            .collect();
-        let at = options
-            .iter()
-            .position(|o| *o == self.declared)
-            .unwrap_or(0);
-        let next = if forward {
-            (at + 1) % options.len()
-        } else {
-            (at + options.len() - 1) % options.len()
-        };
+        let options: Vec<Option<ProjectKind>> = std::iter::once(None).chain(ProjectKind::ALL.into_iter().map(Some)).collect();
+        let at = options.iter().position(|o| *o == self.declared).unwrap_or(0);
+        let next = if forward { (at + 1) % options.len() } else { (at + options.len() - 1) % options.len() };
         self.declared = options[next];
         Action::SetKind(self.declared)
     }
@@ -367,14 +283,8 @@ impl Settings {
             Ok(_) => {
                 self.tools = tools.clone();
                 self.problem = None;
-                if matches!(
-                    field,
-                    Field::Lsp(_) | Field::AddLsp | Field::Extra(_) | Field::AddExtra
-                ) {
-                    self.note = Some(
-                        "language servers read their settings once -- :lsp-restart to use this"
-                            .to_string(),
-                    );
+                if matches!(field, Field::Lsp(_) | Field::AddLsp | Field::Extra(_) | Field::AddExtra) {
+                    self.note = Some("language servers read their settings once -- :lsp-restart to use this".to_string());
                 }
                 Action::SaveTools(tools)
             }
@@ -383,9 +293,7 @@ impl Settings {
     }
 
     fn commit(&mut self) -> Action {
-        let Some((field, text)) = self.editing.take() else {
-            return Action::None;
-        };
+        let Some((field, text)) = self.editing.take() else { return Action::None };
         let text_trimmed = text.trim().to_string();
         let mut tools = self.tools.clone();
         match &field {
@@ -396,20 +304,13 @@ impl Settings {
             Field::Jira => {
                 let key = text_trimmed.to_uppercase();
                 if !key.is_empty() && !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-                    return self.refuse(
-                        field,
-                        "a Jira key is letters and digits, like FNX".to_string(),
-                    );
+                    return self.refuse(field, "a Jira key is letters and digits, like FNX".to_string());
                 }
                 self.jira = key.clone();
                 Action::SetJira(key)
             }
             Field::Task(name) | Field::Lsp(name) => {
-                let map = if matches!(field, Field::Task(_)) {
-                    &mut tools.tasks
-                } else {
-                    &mut tools.lsp
-                };
+                let map = if matches!(field, Field::Task(_)) { &mut tools.tasks } else { &mut tools.lsp };
                 match parse_command(&text_trimmed, map.get(name)) {
                     Ok(spec) => {
                         map.insert(name.clone(), spec);
@@ -420,21 +321,14 @@ impl Settings {
             }
             Field::AddTask | Field::AddLsp => {
                 let Some((name, command)) = text_trimmed.split_once('=') else {
-                    return self.refuse(
-                        field,
-                        "write it as name = command, e.g. test = uv run pytest".to_string(),
-                    );
+                    return self.refuse(field, "write it as name = command, e.g. test = uv run pytest".to_string());
                 };
                 let name = name.trim().to_string();
                 if name.is_empty() {
                     return self.refuse(field, "it needs a name before the =".to_string());
                 }
                 let is_task = field == Field::AddTask;
-                let map = if is_task {
-                    &mut tools.tasks
-                } else {
-                    &mut tools.lsp
-                };
+                let map = if is_task { &mut tools.tasks } else { &mut tools.lsp };
                 if map.contains_key(&name) {
                     return self.refuse(field, format!("there's already one called {name}"));
                 }
@@ -443,11 +337,7 @@ impl Settings {
                         map.insert(name.clone(), spec);
                         let action = self.save(field, tools);
                         if matches!(action, Action::SaveTools(_)) {
-                            self.focus_on(&if is_task {
-                                Field::Task(name)
-                            } else {
-                                Field::Lsp(name)
-                            });
+                            self.focus_on(&if is_task { Field::Task(name) } else { Field::Lsp(name) });
                         }
                         action
                     }
@@ -455,14 +345,7 @@ impl Settings {
                 }
             }
             Field::Extra(name) => {
-                let Some(at) = tools
-                    .lsp
-                    .additional
-                    .iter()
-                    .position(|server| server.name == *name)
-                else {
-                    return Action::None;
-                };
+                let Some(at) = tools.lsp.additional.iter().position(|server| server.name == *name) else { return Action::None };
                 match parse_additional(name, &text_trimmed, Some(&tools.lsp.additional[at])) {
                     Ok(server) => {
                         tools.lsp.additional[at] = server;
@@ -479,12 +362,7 @@ impl Settings {
                 if name.is_empty() {
                     return self.refuse(field, "it needs a name before the :".to_string());
                 }
-                if tools
-                    .lsp
-                    .additional
-                    .iter()
-                    .any(|server| server.name == name)
-                {
+                if tools.lsp.additional.iter().any(|server| server.name == name) {
                     return self.refuse(field, format!("there's already one called {name}"));
                 }
                 match parse_additional(&name, rest.trim(), None) {
@@ -500,8 +378,7 @@ impl Settings {
                 }
             }
             Field::Program => {
-                tools.launch.program =
-                    (!text_trimmed.is_empty()).then(|| PathBuf::from(&text_trimmed));
+                tools.launch.program = (!text_trimmed.is_empty()).then(|| PathBuf::from(&text_trimmed));
                 self.save(field, tools)
             }
             Field::Cwd => {
@@ -524,10 +401,7 @@ impl Settings {
                     return self.refuse(field, "write it as NAME = value".to_string());
                 };
                 let key = key.trim().to_string();
-                tools
-                    .launch
-                    .env
-                    .insert(key.clone(), value.trim().to_string());
+                tools.launch.env.insert(key.clone(), value.trim().to_string());
                 let action = self.save(field, tools);
                 if matches!(action, Action::SaveTools(_)) {
                     self.focus_on(&Field::Env(key));
@@ -584,31 +458,13 @@ fn parse_command(line: &str, existing: Option<&CommandSpec>) -> Result<CommandSp
 
 /// An additional server from `languages = command line`, keeping
 /// `existing`'s working directory and environment.
-fn parse_additional(
-    name: &str,
-    text: &str,
-    existing: Option<&AdditionalServer>,
-) -> Result<AdditionalServer, String> {
+fn parse_additional(name: &str, text: &str, existing: Option<&AdditionalServer>) -> Result<AdditionalServer, String> {
     let Some((languages, command)) = text.split_once('=') else {
         return Err("write it as languages = command, e.g. rust, markdown = kiln lsp".to_string());
     };
-    let languages: Vec<String> = languages
-        .split([',', ' '])
-        .map(|l| l.trim().to_lowercase())
-        .filter(|l| !l.is_empty())
-        .collect();
-    let spec = parse_command(
-        command.trim(),
-        existing.map(AdditionalServer::command).as_ref(),
-    )?;
-    Ok(AdditionalServer {
-        name: name.to_string(),
-        languages,
-        executable: spec.executable,
-        args: spec.args,
-        cwd: spec.cwd,
-        env: spec.env,
-    })
+    let languages: Vec<String> = languages.split([',', ' ']).map(|l| l.trim().to_lowercase()).filter(|l| !l.is_empty()).collect();
+    let spec = parse_command(command.trim(), existing.map(AdditionalServer::command).as_ref())?;
+    Ok(AdditionalServer { name: name.to_string(), languages, executable: spec.executable, args: spec.args, cwd: spec.cwd, env: spec.env })
 }
 
 /// The page as the settings page's "Project & tasks" section shows it:
@@ -657,36 +513,18 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
             Field::Group => "Group".to_string(),
             Field::Pinned => "Pinned".to_string(),
             Field::Jira => "Jira".to_string(),
-            Field::Task(name) | Field::Lsp(name) | Field::Extra(name) | Field::Env(name) => {
-                name.clone()
-            }
+            Field::Task(name) | Field::Lsp(name) | Field::Extra(name) | Field::Env(name) => name.clone(),
             Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv => "+ add".to_string(),
             Field::Program => "program".to_string(),
             Field::Args => "args".to_string(),
             Field::Cwd => "cwd".to_string(),
         };
-        let add_row = matches!(
-            field,
-            Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv
-        );
-        g.put(
-            y,
-            label_x,
-            &fit(&label, 15),
-            if add_row { Role::Accent } else { Role::Muted },
-        );
+        let add_row = matches!(field, Field::AddTask | Field::AddLsp | Field::AddExtra | Field::AddEnv);
+        g.put(y, label_x, &fit(&label, 15), if add_row { Role::Accent } else { Role::Muted });
         let editing = settings.editing.as_ref().filter(|(f, _)| *f == field);
         if let Some((_, text)) = editing {
-            let caret = settings
-                .caret
-                .unwrap_or(usize::MAX)
-                .min(text.chars().count());
-            let end = g.put(
-                y,
-                value_x,
-                &with_caret(text, caret, value_room),
-                Role::Title,
-            );
+            let caret = settings.caret.unwrap_or(usize::MAX).min(text.chars().count());
+            let end = g.put(y, value_x, &with_caret(text, caret, value_room), Role::Title);
             g.panels.push((y, value_x - 1..end + 1));
             if add_row && text.is_empty() {
                 let hint = match field {
@@ -707,25 +545,12 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
                     g.put(y, value_x, &text, Role::Title);
                 }
                 Field::Pinned => {
-                    g.put(
-                        y,
-                        value_x,
-                        if settings.pinned { "[x]" } else { "[ ]" },
-                        if settings.pinned {
-                            Role::Good
-                        } else {
-                            Role::Muted
-                        },
-                    );
+                    g.put(y, value_x, if settings.pinned { "[x]" } else { "[ ]" }, if settings.pinned { Role::Good } else { Role::Muted });
                 }
                 _ if add_row => {}
                 _ => {
                     let value = settings.value(&field);
-                    let shown = if value.is_empty() {
-                        "—".to_string()
-                    } else {
-                        value
-                    };
+                    let shown = if value.is_empty() { "—".to_string() } else { value };
                     let end = g.put(y, value_x, &fit(&shown, value_room), Role::Text);
                     // A cwd or program that isn't there is worth saying.
                     let missing = match &field {
@@ -747,12 +572,7 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
             y += 1;
         }
         if settings.confirm_delete.as_ref() == Some(&field) {
-            g.put(
-                y,
-                value_x,
-                &fit(&format!("d again deletes {label}"), value_room),
-                Role::Warn,
-            );
+            g.put(y, value_x, &fit(&format!("d again deletes {label}"), value_room), Role::Warn);
             y += 1;
         }
     }
@@ -764,12 +584,7 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
             g.put(y, left + 2, &line, Role::Bad);
             y += 1;
         }
-        g.put(
-            y,
-            left + 2,
-            "It isn't changed from here until it's valid -- e opens it.",
-            Role::Muted,
-        );
+        g.put(y, left + 2, "It isn't changed from here until it's valid -- e opens it.", Role::Muted);
     }
     // No key strip: the settings page this sits in shows the keys.
     let _ = (left, width);
@@ -781,8 +596,7 @@ mod tests {
     use super::*;
 
     fn settings(name: &str, tools_json: Option<&str>) -> (Settings, PathBuf) {
-        let root =
-            std::env::temp_dir().join(format!("fenix-settings-{name}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("fenix-settings-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".fenix")).unwrap();
         if let Some(json) = tools_json {
@@ -799,25 +613,9 @@ mod tests {
 
     #[test]
     fn tasks_servers_and_launch_are_listed_from_tools_json() {
-        let (s, root) = settings(
-            "list",
-            Some(
-                r#"{"tasks":{"test":{"executable":"uv","args":["run","pytest"]}},"lsp":{"python":{"executable":"basedpyright-langserver","args":["--stdio"]}},"launch":{"program":"src/main.py","cwd":"nowhere","env":{"MODE":"dev"}}}"#,
-            ),
-        );
+        let (s, root) = settings("list", Some(r#"{"tasks":{"test":{"executable":"uv","args":["run","pytest"]}},"lsp":{"python":{"executable":"basedpyright-langserver","args":["--stdio"]}},"launch":{"program":"src/main.py","cwd":"nowhere","env":{"MODE":"dev"}}}"#));
         let text = layout(&s, 100).text;
-        for needle in [
-            "TASKS · 1",
-            "uv run pytest",
-            "LANGUAGE SERVERS",
-            "basedpyright-langserver --stdio",
-            "DEBUG LAUNCH",
-            "src/main.py",
-            "not found",
-            "MODE",
-            "dev",
-            "detect: Python",
-        ] {
+        for needle in ["TASKS · 1", "uv run pytest", "LANGUAGE SERVERS", "basedpyright-langserver --stdio", "DEBUG LAUNCH", "src/main.py", "not found", "MODE", "dev", "detect: Python"] {
             assert!(text.contains(needle), "{needle:?} missing:\n{text}");
         }
         let _ = std::fs::remove_dir_all(root);
@@ -825,17 +623,12 @@ mod tests {
 
     #[test]
     fn editing_a_task_keeps_its_cwd_and_saves_valid_tools() {
-        let (mut s, root) = settings(
-            "edit",
-            Some(r#"{"tasks":{"test":{"executable":"uv","args":["run","pytest"],"cwd":"sub"}}}"#),
-        );
+        let (mut s, root) = settings("edit", Some(r#"{"tasks":{"test":{"executable":"uv","args":["run","pytest"],"cwd":"sub"}}}"#));
         s.focus_on(&Field::Task("test".into()));
         s.key(Key::Char('c'));
         type_in(&mut s, r#"uv run pytest -q "tests dir""#);
         let action = s.key(Key::Enter);
-        let Action::SaveTools(tools) = action else {
-            panic!("{action:?}")
-        };
+        let Action::SaveTools(tools) = action else { panic!("{action:?}") };
         let task = &tools.tasks["test"];
         assert_eq!(task.args, ["run", "pytest", "-q", "tests dir"]);
         assert_eq!(task.cwd.as_deref(), Some(std::path::Path::new("sub")));
@@ -844,10 +637,7 @@ mod tests {
 
     #[test]
     fn a_field_is_edited_at_its_caret_and_ctrl_o_browses_for_a_path() {
-        let (mut s, root) = settings(
-            "caret",
-            Some(r#"{"tasks":{"test":{"executable":"uv","args":["run","pytest"]}}}"#),
-        );
+        let (mut s, root) = settings("caret", Some(r#"{"tasks":{"test":{"executable":"uv","args":["run","pytest"]}}}"#));
         s.focus_on(&Field::Task("test".into()));
         s.key(Key::Enter);
         s.key(Key::WordLeft);
@@ -856,31 +646,16 @@ mod tests {
         s.key(Key::Delete);
         s.key(Key::Delete);
         type_in(&mut s, "p");
-        assert_eq!(
-            s.editing.as_ref().map(|(_, t)| t.as_str()),
-            Some("p run -q pytest")
-        );
+        assert_eq!(s.editing.as_ref().map(|(_, t)| t.as_str()), Some("p run -q pytest"));
         assert!(layout(&s, 100).text.contains("p▏ run -q pytest"));
         assert_eq!(s.key(Key::CtrlO), Action::None, "a task isn't a path");
         s.key(Key::Escape);
         s.focus_on(&Field::Cwd);
         s.key(Key::Enter);
-        assert_eq!(
-            s.key(Key::CtrlO),
-            Action::Browse {
-                start: None,
-                folder: true
-            }
-        );
+        assert_eq!(s.key(Key::CtrlO), Action::Browse { start: None, folder: true });
         s.browsed(&root.join("sub").join("dir"));
-        assert_eq!(
-            s.editing.as_ref().map(|(_, t)| t.replace('\\', "/")),
-            Some("sub/dir".to_string()),
-            "relative to the project"
-        );
-        assert!(
-            matches!(s.key(Key::Enter), Action::SaveTools(t) if t.launch.cwd == Some(PathBuf::from("sub").join("dir")))
-        );
+        assert_eq!(s.editing.as_ref().map(|(_, t)| t.replace('\\', "/")), Some("sub/dir".to_string()), "relative to the project");
+        assert!(matches!(s.key(Key::Enter), Action::SaveTools(t) if t.launch.cwd == Some(PathBuf::from("sub").join("dir"))));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -894,26 +669,13 @@ mod tests {
         assert!(layout(&s, 100).text.contains("write it as name = command"));
         s.key(Key::Enter);
         type_in(&mut s, "lint = uv run ruff check");
-        assert!(
-            matches!(s.key(Key::Enter), Action::SaveTools(t) if t.tasks["lint"].executable == "uv")
-        );
-        assert_eq!(
-            s.focused(),
-            Some(Field::Task("lint".into())),
-            "the new task is selected"
-        );
+        assert!(matches!(s.key(Key::Enter), Action::SaveTools(t) if t.tasks["lint"].executable == "uv"));
+        assert_eq!(s.focused(), Some(Field::Task("lint".into())), "the new task is selected");
         s.key(Key::Char('c'));
         type_in(&mut s, r#"open "unclosed"#);
         assert_eq!(s.key(Key::Enter), Action::None);
-        assert!(s
-            .problem
-            .as_ref()
-            .is_some_and(|(_, why)| why.contains("quote")));
-        assert_eq!(
-            s.tools.tasks["lint"].args,
-            ["run", "ruff", "check"],
-            "the refused edit changed nothing"
-        );
+        assert!(s.problem.as_ref().is_some_and(|(_, why)| why.contains("quote")));
+        assert_eq!(s.tools.tasks["lint"].args, ["run", "ruff", "check"], "the refused edit changed nothing");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -926,10 +688,7 @@ mod tests {
         s.focus_on(&Field::Pinned);
         assert_eq!(s.key(Key::Space), Action::SetPinned(true));
         s.focus_on(&Field::Kind);
-        assert_eq!(
-            s.key(Key::Char('l')),
-            Action::SetKind(Some(ProjectKind::Python))
-        );
+        assert_eq!(s.key(Key::Char('l')), Action::SetKind(Some(ProjectKind::Python)));
         assert_eq!(s.key(Key::Char('h')), Action::SetKind(None));
         s.focus_on(&Field::Jira);
         s.key(Key::Enter);
@@ -944,61 +703,35 @@ mod tests {
 
     #[test]
     fn additional_servers_are_listed_added_edited_and_deleted() {
-        let (mut s, root) = settings(
-            "extra",
-            Some(
-                r#"{"lsp":{"rust":{"executable":"rust-analyzer"},"additional":[{"name":"kiln","executable":"kiln","args":["lsp"],"languages":["rust","markdown"],"env":{"K":"1"}}]}}"#,
-            ),
-        );
+        let (mut s, root) = settings("extra", Some(r#"{"lsp":{"rust":{"executable":"rust-analyzer"},"additional":[{"name":"kiln","executable":"kiln","args":["lsp"],"languages":["rust","markdown"],"env":{"K":"1"}}]}}"#));
         let text = layout(&s, 100).text;
-        for needle in [
-            "ADDITIONAL LANGUAGE SERVERS",
-            "kiln",
-            "rust, markdown = kiln lsp",
-        ] {
+        for needle in ["ADDITIONAL LANGUAGE SERVERS", "kiln", "rust, markdown = kiln lsp"] {
             assert!(text.contains(needle), "{needle:?} missing:\n{text}");
         }
         s.focus_on(&Field::Extra("kiln".into()));
         s.key(Key::Char('c'));
         type_in(&mut s, "rust tcl = kiln lsp --stdio");
-        let Action::SaveTools(tools) = s.key(Key::Enter) else {
-            panic!()
-        };
+        let Action::SaveTools(tools) = s.key(Key::Enter) else { panic!() };
         assert_eq!(tools.lsp.additional[0].languages, ["rust", "tcl"]);
         assert_eq!(tools.lsp.additional[0].args, ["lsp", "--stdio"]);
-        assert_eq!(
-            tools.lsp.additional[0].env["K"], "1",
-            "the environment is kept"
-        );
+        assert_eq!(tools.lsp.additional[0].env["K"], "1", "the environment is kept");
         assert!(s.note.as_ref().is_some_and(|n| n.contains(":lsp-restart")));
 
         s.focus_on(&Field::AddExtra);
         s.key(Key::Enter);
         type_in(&mut s, "spell = spell-ls");
-        assert_eq!(
-            s.key(Key::Enter),
-            Action::None,
-            "it needs a name and languages"
-        );
+        assert_eq!(s.key(Key::Enter), Action::None, "it needs a name and languages");
         s.key(Key::Enter);
         type_in(&mut s, "spell: = spell-ls");
         assert_eq!(s.key(Key::Enter), Action::None);
-        assert!(
-            s.problem
-                .as_ref()
-                .is_some_and(|(_, why)| why.contains("language")),
-            "{:?}",
-            s.problem
-        );
+        assert!(s.problem.as_ref().is_some_and(|(_, why)| why.contains("language")), "{:?}", s.problem);
         s.key(Key::Enter);
         type_in(&mut s, "spell: markdown = spell-ls --stdio");
         assert!(matches!(s.key(Key::Enter), Action::SaveTools(t) if t.lsp.additional.len() == 2));
         assert_eq!(s.focused(), Some(Field::Extra("spell".into())));
 
         s.key(Key::Char('d'));
-        assert!(
-            matches!(s.key(Key::Char('d')), Action::SaveTools(t) if t.lsp.additional.len() == 1 && t.lsp.additional[0].name == "kiln")
-        );
+        assert!(matches!(s.key(Key::Char('d')), Action::SaveTools(t) if t.lsp.additional.len() == 1 && t.lsp.additional[0].name == "kiln"));
         let _ = std::fs::remove_dir_all(root);
     }
 

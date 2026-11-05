@@ -33,12 +33,7 @@ fn parse(line: &str) -> Option<GraphCommit> {
         hash,
         short_hash: f.next()?.to_string(),
         parents: f.next()?.split_whitespace().map(str::to_string).collect(),
-        refs: f
-            .next()?
-            .split(", ")
-            .filter(|r| !r.is_empty())
-            .map(str::to_string)
-            .collect(),
+        refs: f.next()?.split(", ").filter(|r| !r.is_empty()).map(str::to_string).collect(),
         author: f.next()?.to_string(),
         relative_date: f.next()?.to_string(),
         subject: f.next().unwrap_or("").to_string(),
@@ -48,12 +43,7 @@ fn parse(line: &str) -> Option<GraphCommit> {
 /// A filtered list is drawn as one straight line: each commit's parent is
 /// the next one listed, whatever it really was.
 fn linear(mut commits: Vec<GraphCommit>) -> Vec<GraphCommit> {
-    let next: Vec<Option<String>> = commits
-        .iter()
-        .skip(1)
-        .map(|c| Some(c.hash.clone()))
-        .chain(std::iter::once(None))
-        .collect();
+    let next: Vec<Option<String>> = commits.iter().skip(1).map(|c| Some(c.hash.clone())).chain(std::iter::once(None)).collect();
     for (commit, parent) in commits.iter_mut().zip(next) {
         commit.parents = parent.into_iter().collect();
     }
@@ -78,37 +68,16 @@ pub fn log(repo: &Path, query: &LogQuery) -> Vec<GraphCommit> {
         args.extend(["--follow".into(), "--".into(), path.clone()]);
     }
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let commits: Vec<GraphCommit> = run_lines(repo, &refs)
-        .iter()
-        .filter_map(|l| parse(l))
-        .collect();
+    let commits: Vec<GraphCommit> = run_lines(repo, &refs).iter().filter_map(|l| parse(l)).collect();
     let filtered = query.path.is_some() || query.grep.is_some() || query.author.is_some();
-    if filtered {
-        linear(commits)
-    } else {
-        children_first(commits)
-    }
+    if filtered { linear(commits) } else { children_first(commits) }
 }
 
 /// `git log -L start,end:path`: the commits that changed those lines, each
 /// with the patch showing how.
-pub fn line_log(
-    repo: &Path,
-    path: &str,
-    start: usize,
-    end: usize,
-    limit: usize,
-) -> Result<Vec<(GraphCommit, String)>, String> {
+pub fn line_log(repo: &Path, path: &str, start: usize, end: usize, limit: usize) -> Result<Vec<(GraphCommit, String)>, String> {
     let range = format!("-L{start},{end}:{path}");
-    let out = run_action(
-        repo,
-        &[
-            "log".into(),
-            format!("-n{}", limit.max(1)),
-            FORMAT.into(),
-            range,
-        ],
-    )?;
+    let out = run_action(repo, &["log".into(), format!("-n{}", limit.max(1)), FORMAT.into(), range])?;
     let mut entries: Vec<(GraphCommit, String)> = Vec::new();
     for line in out.lines() {
         if let Some(commit) = line.contains('\x1f').then(|| parse(line)).flatten() {
@@ -124,42 +93,21 @@ pub fn line_log(
 
 /// What `hash` changed: each file's status letter and path.
 pub fn commit_files(repo: &Path, hash: &str) -> Vec<(char, String)> {
-    run_lines(
-        repo,
-        &[
-            "show",
-            "--no-color",
-            "--name-status",
-            "--format=",
-            "--first-parent",
-            hash,
-        ],
-    )
-    .into_iter()
-    .filter_map(|l| {
-        let mut f = l.split('\t');
-        let status = f.next()?.chars().next()?;
-        // A rename lists old then new; the new one is what's there.
-        let path = f.next_back()?.to_string();
-        Some((status, path))
-    })
-    .collect()
+    run_lines(repo, &["show", "--no-color", "--name-status", "--format=", "--first-parent", hash])
+        .into_iter()
+        .filter_map(|l| {
+            let mut f = l.split('\t');
+            let status = f.next()?.chars().next()?;
+            // A rename lists old then new; the new one is what's there.
+            let path = f.next_back()?.to_string();
+            Some((status, path))
+        })
+        .collect()
 }
 
 /// The diff `hash` made to one file.
 pub fn commit_file_diff(repo: &Path, hash: &str, path: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "show".into(),
-            "--no-color".into(),
-            "--format=".into(),
-            "--first-parent".into(),
-            hash.into(),
-            "--".into(),
-            path.into(),
-        ],
-    )
+    run_action(repo, &["show".into(), "--no-color".into(), "--format=".into(), "--first-parent".into(), hash.into(), "--".into(), path.into()])
 }
 
 /// The commits of `rev`'s history among the most recent `limit` -- to
@@ -196,42 +144,12 @@ mod tests {
     #[test]
     fn a_files_history_lists_only_its_commits_as_one_line() {
         let dir = repo("log_file");
-        let all = log(
-            dir.path(),
-            &LogQuery {
-                limit: 10,
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            all.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(),
-            ["third: b", "second: a", "first"]
-        );
-        let a = log(
-            dir.path(),
-            &LogQuery {
-                path: Some("a.txt".into()),
-                limit: 10,
-                ..Default::default()
-            },
-        );
-        assert_eq!(
-            a.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(),
-            ["second: a", "first"]
-        );
-        assert_eq!(
-            a[0].parents,
-            [a[1].hash.clone()],
-            "drawn as a straight line"
-        );
-        let grep = log(
-            dir.path(),
-            &LogQuery {
-                grep: Some("THIRD".into()),
-                limit: 10,
-                ..Default::default()
-            },
-        );
+        let all = log(dir.path(), &LogQuery { limit: 10, ..Default::default() });
+        assert_eq!(all.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(), ["third: b", "second: a", "first"]);
+        let a = log(dir.path(), &LogQuery { path: Some("a.txt".into()), limit: 10, ..Default::default() });
+        assert_eq!(a.iter().map(|c| c.subject.as_str()).collect::<Vec<_>>(), ["second: a", "first"]);
+        assert_eq!(a[0].parents, [a[1].hash.clone()], "drawn as a straight line");
+        let grep = log(dir.path(), &LogQuery { grep: Some("THIRD".into()), limit: 10, ..Default::default() });
         assert_eq!(grep.len(), 1);
     }
 
@@ -239,31 +157,16 @@ mod tests {
     fn a_line_range_history_comes_with_its_patches() {
         let dir = repo("log_lines");
         let entries = line_log(dir.path(), "a.txt", 2, 2, 10).unwrap();
-        assert_eq!(
-            entries
-                .iter()
-                .map(|(c, _)| c.subject.as_str())
-                .collect::<Vec<_>>(),
-            ["second: a", "first"]
-        );
-        assert!(
-            entries[0].1.contains("+TWO") && entries[0].1.contains("-two"),
-            "{}",
-            entries[0].1
-        );
+        assert_eq!(entries.iter().map(|(c, _)| c.subject.as_str()).collect::<Vec<_>>(), ["second: a", "first"]);
+        assert!(entries[0].1.contains("+TWO") && entries[0].1.contains("-two"), "{}", entries[0].1);
     }
 
     #[test]
     fn a_commit_lists_its_files_and_their_diffs() {
         let dir = repo("log_files");
         let head = run_lines(dir.path(), &["rev-parse", "HEAD~1"]).remove(0);
-        assert_eq!(
-            commit_files(dir.path(), &head),
-            [('M', "a.txt".to_string())]
-        );
-        assert!(commit_file_diff(dir.path(), &head, "a.txt")
-            .unwrap()
-            .contains("+TWO"));
+        assert_eq!(commit_files(dir.path(), &head), [('M', "a.txt".to_string())]);
+        assert!(commit_file_diff(dir.path(), &head, "a.txt").unwrap().contains("+TWO"));
         assert_eq!(reachable(dir.path(), "HEAD", 10).len(), 3);
     }
 }

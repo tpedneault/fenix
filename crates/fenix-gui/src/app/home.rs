@@ -30,14 +30,7 @@ pub(super) struct HomeOverlay {
     pub(super) rule_color: [f32; 4],
     /// Pictures a page shows: (first row, which may be above the pane
     /// when it's partly scrolled off; cell; rows; cells; which picture).
-    pub(super) images: Vec<(
-        isize,
-        usize,
-        usize,
-        usize,
-        crate::page::ImageKey,
-        Option<(f32, f32, f32)>,
-    )>,
+    pub(super) images: Vec<(isize, usize, usize, usize, crate::page::ImageKey, Option<(f32, f32, f32)>)>,
     /// Boxes outlined on a picture: (which of `images`, the box as
     /// fractions of the picture, whether it's the selected one).
     pub(super) marks: Vec<(usize, (f32, f32, f32, f32), bool)>,
@@ -55,9 +48,7 @@ pub(super) type BgSegments = Vec<(usize, usize, usize, [f32; 4])>;
 
 /// "now", "5 min", "3 h", "2 d", "6 w".
 fn age(modified: Option<std::time::SystemTime>) -> String {
-    let Some(elapsed) = modified.and_then(|m| m.elapsed().ok()) else {
-        return String::new();
-    };
+    let Some(elapsed) = modified.and_then(|m| m.elapsed().ok()) else { return String::new() };
     let mins = elapsed.as_secs() / 60;
     match mins {
         0 => "now".to_string(),
@@ -90,20 +81,14 @@ fn probe_recent(paths: Vec<PathBuf>) -> HashMap<PathBuf, RecentSeen> {
     let _profile = crate::profile::Scope::new("probe recent files");
     let mut seen = HashMap::new();
     for path in paths {
-        let Some(meta) = super::disk_probe::stat(&path) else {
-            continue;
-        };
+        let Some(meta) = super::disk_probe::stat(&path) else { continue };
         let meta = meta.ok().filter(|m| m.is_file());
         let project = meta.as_ref().and_then(|_| {
             let root = fenix_project::find_project_root(&path)?;
             let name = root.file_name()?.to_string_lossy().into_owned();
             Some((name, git_branch(&root)))
         });
-        let entry = RecentSeen {
-            is_file: meta.is_some(),
-            modified: meta.and_then(|m| m.modified().ok()),
-            project,
-        };
+        let entry = RecentSeen { is_file: meta.is_some(), modified: meta.and_then(|m| m.modified().ok()), project };
         seen.insert(path, entry);
     }
     seen
@@ -118,16 +103,8 @@ fn home_todo_items(root: &Path, unsaved: &HashMap<PathBuf, String>) -> Vec<dashb
                 .into_iter()
                 .map(|(kind, m)| dashboard::TodoItem {
                     kind,
-                    message: m
-                        .text
-                        .split_once(' ')
-                        .map_or("", |(_, rest)| rest)
-                        .to_string(),
-                    file: m
-                        .path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
+                    message: m.text.split_once(' ').map_or("", |(_, rest)| rest).to_string(),
+                    file: m.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                     path: m.path,
                     line: m.line,
                     col: m.col,
@@ -160,21 +137,9 @@ impl App {
         let probe = self.app_probe();
         for root in self.known_projects.roots().iter().take(5) {
             if !self.project_health.contains_key(root) && root.is_dir() {
-                let mut checks = fenix_project::doctor::diagnose_with(
-                    root,
-                    self.project_kind_of(root),
-                    &probe,
-                    false,
-                    &[],
-                );
+                let mut checks = fenix_project::doctor::diagnose_with(root, self.project_kind_of(root), &probe, false, &[]);
                 checks.extend(self.wasm.doctor_checks(root));
-                let health = (
-                    fenix_project::doctor::worst(&checks),
-                    checks
-                        .iter()
-                        .filter(|c| c.health >= fenix_project::doctor::Health::Warn)
-                        .count(),
-                );
+                let health = (fenix_project::doctor::worst(&checks), checks.iter().filter(|c| c.health >= fenix_project::doctor::Health::Warn).count());
                 self.project_health.insert(root.clone(), health);
             }
         }
@@ -185,35 +150,24 @@ impl App {
             .take(5)
             .map(|root| dashboard::ProjectItem {
                 root: root.clone(),
-                name: root
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| root.display().to_string()),
+                name: root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string()),
                 branch: git_branch(root),
                 kind: self.project_kind_of(root),
                 health: None,
             })
             .collect();
         for item in &mut projects {
-            item.health = self
-                .project_health
-                .get(&item.root)
-                .map(|(health, _)| *health);
+            item.health = self.project_health.get(&item.root).map(|(health, _)| *health);
         }
 
-        let todo_root = self
-            .project_root
-            .clone()
-            .or_else(|| self.known_projects.roots().first().cloned());
+        let todo_root = self.project_root.clone().or_else(|| self.known_projects.roots().first().cloned());
         let scoped_roots = self.home_projects();
         if with_todos {
             for root in todo_root.iter().chain(&scoped_roots) {
                 self.request_home_todos(root);
             }
         }
-        let todos = todo_root
-            .and_then(|root| self.home_todos.get(&root).cloned())
-            .unwrap_or_default();
+        let todos = todo_root.and_then(|root| self.home_todos.get(&root).cloned()).unwrap_or_default();
 
         let date = now.format("%A %-d %B · %H:%M").to_string();
         let recovery = self.unclaimed_snapshot_names().len();
@@ -224,10 +178,7 @@ impl App {
             let (resume, recent) = self.home_recent_files(Some(&root));
             let sections = self.home_sections(Some(&root));
             let todos = self.home_todos.get(&root).cloned().unwrap_or_default();
-            let name = root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| root.display().to_string());
+            let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
             let data = HomeData {
                 date: format!("{name} · {date}"),
                 resume,
@@ -239,31 +190,19 @@ impl App {
             };
             scoped.insert(root, data);
         }
-        let data = HomeData {
-            date,
-            resume,
-            recent,
-            projects,
-            todos,
-            recovery,
-            sections,
-        };
+        let data = HomeData { date, resume, recent, projects, todos, recovery, sections };
         if data != self.home_data || scoped != self.home_project_data {
             self.home_data = data;
             self.home_project_data = scoped;
             // Every Home re-lays itself out on its next frame.
-            self.home_views
-                .values_mut()
-                .for_each(|view| view.size = (0, 0));
+            self.home_views.values_mut().for_each(|view| view.size = (0, 0));
         }
     }
 
     /// What Home `id` shows: its project's page for a project
     /// workspace's Home, the everything page otherwise.
     pub(super) fn home_data_for(&self, id: BufferId) -> &HomeData {
-        self.home_project_of(id)
-            .and_then(|root| self.home_project_data.get(&root))
-            .unwrap_or(&self.home_data)
+        self.home_project_of(id).and_then(|root| self.home_project_data.get(&root)).unwrap_or(&self.home_data)
     }
 
     /// Looks at the recent files again, on another thread, when what
@@ -271,22 +210,16 @@ impl App {
     /// froze the window for as long as a share took to answer -- twenty
     /// seconds a file for one whose server was gone.
     fn request_recent_probe(&mut self) {
-        let fresh = self
-            .recent_probed
-            .is_some_and(|at| at.elapsed() < RECENT_FRESH_FOR);
-        let out = self
-            .recent_probe_out
-            .is_some_and(|at| at.elapsed() < Duration::from_secs(300));
+        let fresh = self.recent_probed.is_some_and(|at| at.elapsed() < RECENT_FRESH_FOR);
+        let out = self.recent_probe_out.is_some_and(|at| at.elapsed() < Duration::from_secs(300));
         let paths: Vec<PathBuf> = self.recent_files.paths().to_vec();
         match self.event_proxy.clone() {
             Some(_) if fresh || out => {}
             Some(proxy) => {
                 self.recent_probe_out = Some(Instant::now());
-                let _ = std::thread::Builder::new()
-                    .name("fenix-recent-files".into())
-                    .spawn(move || {
-                        let _ = proxy.send_event(FenixUserEvent::RecentProbed(probe_recent(paths)));
-                    });
+                let _ = std::thread::Builder::new().name("fenix-recent-files".into()).spawn(move || {
+                    let _ = proxy.send_event(FenixUserEvent::RecentProbed(probe_recent(paths)));
+                });
             }
             // No event loop (every test): looked at every time, inline.
             None => {
@@ -325,43 +258,24 @@ impl App {
 
     /// The resume slot and the recent files, from anywhere or only from
     /// under `scope`.
-    fn home_recent_files(
-        &self,
-        scope: Option<&Path>,
-    ) -> (Option<dashboard::FileItem>, Vec<dashboard::FileItem>) {
+    fn home_recent_files(&self, scope: Option<&Path>) -> (Option<dashboard::FileItem>, Vec<dashboard::FileItem>) {
         // Recent files are stored canonical (with Windows' `\\?\` prefix), project
         // roots normalized, so both are compared normalized.
-        let under = |p: &PathBuf| {
-            scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root))
-        };
+        let under = |p: &PathBuf| scope.is_none_or(|root| fenix_lsp::normalize(p.clone()).starts_with(root));
         // The files an extension opens itself (PDFs, with the PDF reader)
         // are in its own section, not in Recent too.
-        let mut recent_files = self
-            .recent_files
-            .paths()
-            .iter()
-            .filter(|p| self.recent_shown(p) && under(p) && self.opener_for(p).is_none());
-        let project_of = |path: &Path| {
-            self.recent_seen
-                .get(path)
-                .and_then(|seen| seen.project.clone())
-        };
+        let mut recent_files = self.recent_files.paths().iter().filter(|p| self.recent_shown(p) && under(p) && self.opener_for(p).is_none());
+        let project_of = |path: &Path| self.recent_seen.get(path).and_then(|seen| seen.project.clone());
         let modified = |path: &Path| self.recent_seen.get(path).and_then(|seen| seen.modified);
         let resume = recent_files.next().map(|path| {
             let detail = match project_of(path) {
                 Some((name, Some(branch))) => format!("{name} · {branch}"),
                 Some((name, None)) => name,
-                None => path
-                    .parent()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_default(),
+                None => path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
             };
             dashboard::FileItem {
                 path: path.clone(),
-                name: path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 detail,
                 age: age(modified(path)),
             }
@@ -370,10 +284,7 @@ impl App {
             .take(5)
             .map(|path| dashboard::FileItem {
                 path: path.clone(),
-                name: path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default(),
+                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 detail: String::new(),
                 age: age(modified(path)),
             })
@@ -392,12 +303,10 @@ impl App {
         let root = root.to_path_buf();
         match self.event_proxy.clone() {
             Some(proxy) => {
-                let _ = std::thread::Builder::new()
-                    .name("fenix-home-todos".into())
-                    .spawn(move || {
-                        let items = home_todo_items(&root, &unsaved);
-                        let _ = proxy.send_event(FenixUserEvent::HomeTodos { root, items });
-                    });
+                let _ = std::thread::Builder::new().name("fenix-home-todos".into()).spawn(move || {
+                    let items = home_todo_items(&root, &unsaved);
+                    let _ = proxy.send_event(FenixUserEvent::HomeTodos { root, items });
+                });
             }
             None => {
                 let items = home_todo_items(&root, &unsaved);
@@ -438,27 +347,13 @@ impl App {
     /// Lays buffer `id`'s Home out for a pane `cols` × `rows` cells in
     /// size, unless it already is. The text is rewritten in place and the
     /// cursor put back on whatever it had selected.
-    pub(super) fn ensure_home_layout(
-        &mut self,
-        id: BufferId,
-        pane: fenix_window::WindowId,
-        cols: usize,
-        rows: usize,
-    ) {
-        if self
-            .home_views
-            .get(&id)
-            .is_some_and(|view| view.size == (cols, rows))
-        {
+    pub(super) fn ensure_home_layout(&mut self, id: BufferId, pane: fenix_window::WindowId, cols: usize, rows: usize) {
+        if self.home_views.get(&id).is_some_and(|view| view.size == (cols, rows)) {
             return;
         }
-        let selected = self
-            .home_selected_slot(id, pane)
-            .and_then(|i| self.home_views.get(&id).map(|v| v.slots[i].entry.clone()));
+        let selected = self.home_selected_slot(id, pane).and_then(|i| self.home_views.get(&id).map(|v| v.slots[i].entry.clone()));
         let view = dashboard::layout(self.home_data_for(id), cols, rows);
-        let Some(ob) = self.buffers.get_mut(id) else {
-            return;
-        };
+        let Some(ob) = self.buffers.get_mut(id) else { return };
         if ob.buffer.text() != view.text {
             let end = ob.buffer.len_chars();
             let mut scratch = Cursor::at_start();
@@ -468,47 +363,25 @@ impl App {
         }
         // First on what there is to resume, which its `Enter` hint
         // promises; else the find field.
-        let resume = view
-            .slots
-            .iter()
-            .position(|slot| matches!(slot.entry, HomeEntry::Resume(_)));
-        let target = selected
-            .and_then(|entry| view.find(&entry))
-            .or(resume)
-            .or_else(|| view.find(&HomeEntry::Find))
-            .map(|i| view.slots[i].cursor());
+        let resume = view.slots.iter().position(|slot| matches!(slot.entry, HomeEntry::Resume(_)));
+        let target = selected.and_then(|entry| view.find(&entry)).or(resume).or_else(|| view.find(&HomeEntry::Find)).map(|i| view.slots[i].cursor());
         self.home_views.insert(id, view);
         if let Some((line, col)) = target {
             self.home_place_cursor(id, pane, line, col);
         }
     }
 
-    pub(super) fn home_place_cursor(
-        &mut self,
-        id: BufferId,
-        pane: fenix_window::WindowId,
-        line: usize,
-        col: usize,
-    ) {
-        let Some(ob) = self.buffers.get(id) else {
-            return;
-        };
+    pub(super) fn home_place_cursor(&mut self, id: BufferId, pane: fenix_window::WindowId, line: usize, col: usize) {
+        let Some(ob) = self.buffers.get(id) else { return };
         let line = line.min(ob.buffer.line_count().saturating_sub(1));
         let char_idx = ob.buffer.line_start_char(line) + col.min(ob.buffer.line_len(line));
         if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
-            state.cursor = Cursor {
-                char_idx,
-                sticky_col: col,
-            };
+            state.cursor = Cursor { char_idx, sticky_col: col };
         }
     }
 
     /// The slot the cursor in `pane` has selected on Home buffer `id`.
-    pub(super) fn home_selected_slot(
-        &self,
-        id: BufferId,
-        pane: fenix_window::WindowId,
-    ) -> Option<usize> {
+    pub(super) fn home_selected_slot(&self, id: BufferId, pane: fenix_window::WindowId) -> Option<usize> {
         let view = self.home_views.get(&id)?;
         let ob = self.buffers.get(id)?;
         let cursor = self.workspaces.active_pane_states().get(&pane)?.cursor;
@@ -522,19 +395,12 @@ impl App {
     /// (the leader, `:`, `/`) reaches Vim as usual.
     pub(super) fn home_key(&mut self, key: KeyPress) -> bool {
         let id = self.focused_buffer_id();
-        if self.open().kind != BufferKind::Dashboard
-            || !self.vim.is_idle()
-            || key.mods != Mods::default()
-        {
+        if self.open().kind != BufferKind::Dashboard || !self.vim.is_idle() || key.mods != Mods::default() {
             return false;
         }
         let pane = self.focused_pane_id();
-        let Some(view) = self.home_views.get(&id) else {
-            return false;
-        };
-        let current = self
-            .home_selected_slot(id, pane)
-            .or_else(|| view.find(&HomeEntry::Find));
+        let Some(view) = self.home_views.get(&id) else { return false };
+        let current = self.home_selected_slot(id, pane).or_else(|| view.find(&HomeEntry::Find));
         let target = match key.code {
             KeyCode::Named(FenixNamedKey::Enter) => {
                 if let Some(i) = current {
@@ -544,26 +410,15 @@ impl App {
                 return true;
             }
             KeyCode::Char(c @ '1'..='9') => {
-                if let Some(entry) = view
-                    .numbered(c as u8 - b'0')
-                    .map(|i| view.slots[i].entry.clone())
-                {
+                if let Some(entry) = view.numbered(c as u8 - b'0').map(|i| view.slots[i].entry.clone()) {
                     self.activate_home_entry(entry);
                 }
                 return true;
             }
-            KeyCode::Char('j') | KeyCode::Named(FenixNamedKey::Down) => {
-                current.and_then(|i| view.step(i, true))
-            }
-            KeyCode::Char('k') | KeyCode::Named(FenixNamedKey::Up) => {
-                current.and_then(|i| view.step(i, false))
-            }
-            KeyCode::Char('l') | KeyCode::Named(FenixNamedKey::Right) => {
-                current.and_then(|i| view.across(i, true))
-            }
-            KeyCode::Char('h') | KeyCode::Named(FenixNamedKey::Left) => {
-                current.and_then(|i| view.across(i, false))
-            }
+            KeyCode::Char('j') | KeyCode::Named(FenixNamedKey::Down) => current.and_then(|i| view.step(i, true)),
+            KeyCode::Char('k') | KeyCode::Named(FenixNamedKey::Up) => current.and_then(|i| view.step(i, false)),
+            KeyCode::Char('l') | KeyCode::Named(FenixNamedKey::Right) => current.and_then(|i| view.across(i, true)),
+            KeyCode::Char('h') | KeyCode::Named(FenixNamedKey::Left) => current.and_then(|i| view.across(i, false)),
             _ => return false,
         };
         if let Some((line, col)) = target.map(|i| view.slots[i].cursor()) {
@@ -576,22 +431,13 @@ impl App {
     pub(super) fn activate_home_entry(&mut self, entry: HomeEntry) {
         match entry {
             HomeEntry::Find => self.picker_find_file(),
-            HomeEntry::Resume(path) | HomeEntry::RecentFile(path) => {
-                self.open_file_from_picker(&path)
-            }
+            HomeEntry::Resume(path) | HomeEntry::RecentFile(path) => self.open_file_from_picker(&path),
             HomeEntry::Project(root) => self.switch_to_project(root),
             HomeEntry::NewProject => self.cmd_project_new(),
-            HomeEntry::Code { ext, value } => {
-                self.code_deliver(&ext, fenix_wasm::host::Notice::HomePicked(value))
-            }
+            HomeEntry::Code { ext, value } => self.code_deliver(&ext, fenix_wasm::host::Notice::HomePicked(value)),
             HomeEntry::Todo { path, line, col } => {
                 self.open_file_from_picker(&path);
-                self.jump_to_grep_match(&fenix_project::GrepMatch {
-                    path,
-                    line,
-                    col,
-                    text: String::new(),
-                });
+                self.jump_to_grep_match(&fenix_project::GrepMatch { path, line, col, text: String::new() });
             }
             HomeEntry::Recover => self.picker_recovery(),
         }
@@ -599,26 +445,15 @@ impl App {
 
     /// Home's colours for the visible lines, in the same shape syntax
     /// highlighting hands the renderer.
-    pub(super) fn home_highlights(
-        &self,
-        id: BufferId,
-        first_line: usize,
-        rows: usize,
-    ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
-        let (Some(view), Some(ob)) = (self.home_views.get(&id), self.buffers.get(id)) else {
-            return Vec::new();
-        };
+    pub(super) fn home_highlights(&self, id: BufferId, first_line: usize, rows: usize) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        let (Some(view), Some(ob)) = (self.home_views.get(&id), self.buffers.get(id)) else { return Vec::new() };
         let theme = self.theme;
         let color = |role: Role| match role {
             Role::Title => theme.fg,
             Role::Text => theme.fg,
             Role::Muted => theme.gutter_fg,
             Role::Focus => rgba_to_glyphon(theme.caret),
-            Role::Ember => glyphon::Color::rgb(
-                fenix_brand::EMBER[0],
-                fenix_brand::EMBER[1],
-                fenix_brand::EMBER[2],
-            ),
+            Role::Ember => glyphon::Color::rgb(fenix_brand::EMBER[0], fenix_brand::EMBER[1], fenix_brand::EMBER[2]),
             Role::Warn => theme.git_modified,
             Role::Todo(kind) => theme.todo_color(kind),
             Role::Kind(kind) => super::projects::kind_color(kind, theme),
@@ -650,30 +485,12 @@ impl App {
     /// Home's backgrounds for a pane whose first visible line is
     /// `first_line`: panels and keycaps, the selected slot's tint, and
     /// where the focus rail and logo go.
-    pub(super) fn home_backgrounds(
-        &self,
-        id: BufferId,
-        pane: fenix_window::WindowId,
-        first_line: usize,
-        rows: usize,
-    ) -> (BgSegments, HomeOverlay) {
-        let Some(view) = self.home_views.get(&id) else {
-            return (Vec::new(), HomeOverlay::default());
-        };
+    pub(super) fn home_backgrounds(&self, id: BufferId, pane: fenix_window::WindowId, first_line: usize, rows: usize) -> (BgSegments, HomeOverlay) {
+        let Some(view) = self.home_views.get(&id) else { return (Vec::new(), HomeOverlay::default()) };
         let theme = self.theme;
-        let panel = if theme.sidebar_bg != theme.bg {
-            theme.sidebar_bg
-        } else {
-            theme.bg_modeline
-        };
-        let key = if theme.bg_modeline != panel {
-            theme.bg_modeline
-        } else {
-            home_rule(theme)
-        };
-        let visible = |line: usize| {
-            (line >= first_line && line <= first_line + rows).then(|| line - first_line)
-        };
+        let panel = if theme.sidebar_bg != theme.bg { theme.sidebar_bg } else { theme.bg_modeline };
+        let key = if theme.bg_modeline != panel { theme.bg_modeline } else { home_rule(theme) };
+        let visible = |line: usize| (line >= first_line && line <= first_line + rows).then(|| line - first_line);
         let mut segments = Vec::new();
         let selected = self.home_selected_slot(id, pane);
         let mut overlay = HomeOverlay::default();
@@ -700,14 +517,8 @@ impl App {
         }
         // Keycaps sit on top of their panel.
         segments.sort_by_key(|s| (s.3 == key) as u8);
-        overlay.logo = view
-            .logo
-            .and_then(|logo| visible(logo.line).map(|row| (row, logo.col, logo.lines)));
-        overlay.rules = view
-            .rules
-            .iter()
-            .filter_map(|r| visible(r.line).map(|row| (row, r.cols.start, r.cols.end)))
-            .collect();
+        overlay.logo = view.logo.and_then(|logo| visible(logo.line).map(|row| (row, logo.col, logo.lines)));
+        overlay.rules = view.rules.iter().filter_map(|r| visible(r.line).map(|row| (row, r.cols.start, r.cols.end))).collect();
         overlay.rule_color = home_rule(theme);
         (segments, overlay)
     }
@@ -723,12 +534,7 @@ pub(super) fn home_rule(theme: &Theme) -> [f32; 4] {
     }
     let fg = glyphon_to_rgba(theme.fg);
     let mix = |a: f32, b: f32| a * 0.75 + b * 0.25;
-    [
-        mix(theme.bg[0], fg[0]),
-        mix(theme.bg[1], fg[1]),
-        mix(theme.bg[2], fg[2]),
-        1.0,
-    ]
+    [mix(theme.bg[0], fg[0]), mix(theme.bg[1], fg[1]), mix(theme.bg[2], fg[2]), 1.0]
 }
 
 #[cfg(test)]
@@ -737,12 +543,12 @@ mod tests {
 
     #[test]
     fn ages_read_the_way_the_design_writes_them() {
-        let ago =
-            |secs: u64| Some(std::time::SystemTime::now() - std::time::Duration::from_secs(secs));
+        let ago = |secs: u64| Some(std::time::SystemTime::now() - std::time::Duration::from_secs(secs));
         assert_eq!(age(ago(5)), "now");
         assert_eq!(age(ago(5 * 60)), "5 min");
         assert_eq!(age(ago(3 * 3600)), "3 h");
         assert_eq!(age(ago(2 * 86400)), "2 d");
         assert_eq!(age(None), "");
     }
+
 }

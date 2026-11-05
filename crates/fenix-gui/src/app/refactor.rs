@@ -57,50 +57,23 @@ impl App {
         let mut revisions = HashMap::new();
         for id in self.buffers.ids_sorted_by_path() {
             let ob = self.buffers.get(id).unwrap();
-            let Some(path) = ob.buffer.path() else {
-                continue;
-            };
+            let Some(path) = ob.buffer.path() else { continue };
             let version = self.lsp_sessions.get(key).and_then(|session| {
-                session
-                    .open_documents
-                    .iter()
-                    .find_map(|(known, (edits, next))| {
-                        (identity(known) == identity(path) && *edits == ob.buffer.edit_count())
-                            .then_some(next - 1)
-                    })
+                session.open_documents.iter().find_map(|(known, (edits, next))| (identity(known) == identity(path) && *edits == ob.buffer.edit_count()).then_some(next - 1))
             });
-            revisions.insert(
-                identity(path),
-                Revision {
-                    buffer: id,
-                    edits: ob.buffer.edit_count(),
-                    version,
-                },
-            );
+            revisions.insert(identity(path), Revision { buffer: id, edits: ob.buffer.edit_count(), version });
         }
         // The language server's root -- a whole Cargo/uv workspace in a
         // monorepo -- since that's what a rename can reach across.
-        let root = self
-            .open()
-            .buffer
-            .path()
-            .map(tool_sessions::lsp_root_for_path)
-            .unwrap_or_else(|| self.integration_root());
-        Context {
-            started: SystemTime::now(),
-            root,
-            revisions,
-        }
+        let root = self.open().buffer.path().map(tool_sessions::lsp_root_for_path).unwrap_or_else(|| self.integration_root());
+        Context { started: SystemTime::now(), root, revisions }
     }
 
     /// The documents as an extension's fix for a problem in `path` takes
     /// them (`diagnostics-set-ex`): as they are, the file's text the one it
     /// fixed -- the fix is only offered while it hasn't been edited since.
     pub(super) fn code_fix_context(&self, path: &Path) -> Context {
-        let mut context = self.refactor_context(&LspKey {
-            server: LspServer::Additional(String::new()),
-            root: PathBuf::new(),
-        });
+        let mut context = self.refactor_context(&LspKey { server: LspServer::Additional(String::new()), root: PathBuf::new() });
         if let Some(revision) = context.revisions.get_mut(&identity(path)) {
             revision.version = Some(0);
         }
@@ -115,57 +88,31 @@ impl App {
         let mut targets = HashMap::new();
         let plan = fenix_lsp::workspace_edit::prepare(edit, |path| {
             let path = identity(path);
-            if tool_sessions::lsp_root_for_path(&path) != context.root {
-                return Err(format!("{} belongs to another project", path.display()));
-            }
-            let metadata =
-                std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if tool_sessions::lsp_root_for_path(&path) != context.root { return Err(format!("{} belongs to another project", path.display())); }
+            let metadata = std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             if !metadata.is_file() || metadata.permissions().readonly() {
                 return Err(format!("{} is not a writable file", path.display()));
             }
             if metadata.modified().map_err(|e| e.to_string())? > context.started {
-                return Err(format!(
-                    "{} changed on disk after the request",
-                    path.display()
-                ));
+                return Err(format!("{} changed on disk after the request", path.display()));
             }
-            let disk =
-                std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let disk = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let buffer = self.buffer_id_for_lsp_path(&path);
             let (text, revision, version) = if let Some(id) = buffer {
                 let ob = self.buffers.get(id).unwrap();
                 if !ob.kind.tracks_unsaved_changes() || self.externally_changed.contains(&id) {
-                    return Err(format!(
-                        "{} is read-only or has an external conflict",
-                        path.display()
-                    ));
+                    return Err(format!("{} is read-only or has an external conflict", path.display()));
                 }
-                if self
-                    .disk_state
-                    .get(&id)
-                    .is_some_and(|known| Some(*known) != DiskFingerprint::of(&path))
-                {
-                    return Err(format!(
-                        "{} changed on disk since it was loaded or saved",
-                        path.display()
-                    ));
+                if self.disk_state.get(&id).is_some_and(|known| Some(*known) != DiskFingerprint::of(&path)) {
+                    return Err(format!("{} changed on disk since it was loaded or saved", path.display()));
                 }
-                let snapshot = context
-                    .revisions
-                    .get(&path)
-                    .ok_or_else(|| format!("{} was opened after the request", path.display()))?;
+                let snapshot = context.revisions.get(&path).ok_or_else(|| format!("{} was opened after the request", path.display()))?;
                 if snapshot.buffer != id || snapshot.edits != ob.buffer.edit_count() {
-                    return Err(format!(
-                        "{} changed while waiting for the server",
-                        path.display()
-                    ));
+                    return Err(format!("{} changed while waiting for the server", path.display()));
                 }
                 let text = ob.buffer.text();
                 if text != disk && (!ob.buffer.is_dirty() || snapshot.version.is_none()) {
-                    return Err(format!(
-                        "{} has changes the server has not seen",
-                        path.display()
-                    ));
+                    return Err(format!("{} has changes the server has not seen", path.display()));
                 }
                 (text, Some(snapshot.edits), snapshot.version)
             } else {
@@ -174,19 +121,8 @@ impl App {
                 }
                 (disk.clone(), None, None)
             };
-            targets.insert(
-                path.clone(),
-                Target {
-                    buffer,
-                    revision,
-                    disk,
-                },
-            );
-            Ok(Document {
-                path,
-                text,
-                version,
-            })
+            targets.insert(path.clone(), Target { buffer, revision, disk });
+            Ok(Document { path, text, version })
         });
         match plan {
             Err(error) => self.set_error(format!("Refactor rejected: {error}")),
@@ -203,21 +139,14 @@ impl App {
         let buffer = self.buffers.open_text_view(text);
         self.buffers.get_mut(buffer).unwrap().kind = BufferKind::WorkspaceEdit;
         self.open_buffer_in_focused_pane(buffer);
-        self.refactor_preview = Some(Preview {
-            buffer,
-            origin,
-            contents,
-        });
+        self.refactor_preview = Some(Preview { buffer, origin, contents });
         self.wake_caret();
     }
 
     /// Every server's code actions in one list -- each with the context of
     /// the server that offered it, and that server's name (`Some` when
     /// more than one answered) in front of its title.
-    pub(super) fn preview_lsp_actions(
-        &mut self,
-        actions: Vec<(lsp_types::CodeActionOrCommand, Context, Option<String>)>,
-    ) {
+    pub(super) fn preview_lsp_actions(&mut self, actions: Vec<(lsp_types::CodeActionOrCommand, Context, Option<String>)>) {
         if self.refactor_preview.is_some() {
             self.set_error("finish or cancel the current refactor preview first");
             return;
@@ -226,20 +155,12 @@ impl App {
         let actions: Vec<_> = actions
             .into_iter()
             .filter_map(|(action, context, server)| match action {
-                lsp_types::CodeActionOrCommand::CodeAction(action)
-                    if action.disabled.is_none()
-                        && action.command.is_none()
-                        && action.edit.is_some() =>
-                {
-                    Some((action, context, server))
-                }
+                lsp_types::CodeActionOrCommand::CodeAction(action) if action.disabled.is_none() && action.command.is_none() && action.edit.is_some() => Some((action, context, server)),
                 _ => None,
             })
             .collect();
         if actions.is_empty() {
-            self.set_error(
-                "no supported code action (commands and disabled actions are not applied)",
-            );
+            self.set_error("no supported code action (commands and disabled actions are not applied)");
             return;
         }
         if actions.len() == 1 {
@@ -247,8 +168,7 @@ impl App {
             self.preview_lsp_edit(action.edit.unwrap(), context);
             return;
         }
-        let mut text =
-            "Code actions — Enter previews the action under the cursor; q cancels\n\n".to_string();
+        let mut text = "Code actions — Enter previews the action under the cursor; q cancels\n\n".to_string();
         for (action, _, server) in &actions {
             if let Some(server) = server {
                 text.push_str(&format!("[{server}] "));
@@ -256,16 +176,10 @@ impl App {
             text.push_str(&action.title.replace(['\n', '\r'], " "));
             text.push('\n');
         }
-        let actions = actions
-            .into_iter()
-            .map(|(action, context, _)| (action, context))
-            .collect();
+        let actions = actions.into_iter().map(|(action, context, _)| (action, context)).collect();
         self.open_refactor_preview(&text, Contents::Actions(actions));
         let line = self.open().buffer.line_start_char(2);
-        self.pane_state_mut(self.focused_pane_id()).cursor = Cursor {
-            char_idx: line,
-            sticky_col: 0,
-        };
+        self.pane_state_mut(self.focused_pane_id()).cursor = Cursor { char_idx: line, sticky_col: 0 };
     }
 
     pub(super) fn refactor_key(&mut self, key: KeyPress) -> bool {
@@ -278,24 +192,14 @@ impl App {
         }
         if key == KeyPress::char('a') || key == KeyPress::named(FenixNamedKey::Enter) {
             let row = self.open().buffer.line_col(&self.cursor()).0;
-            let selection = self
-                .refactor_preview
-                .as_ref()
-                .and_then(|p| match &p.contents {
-                    Contents::Actions(actions) => row
-                        .checked_sub(2)
-                        .and_then(|index| actions.get(index))
-                        .map(|(a, context)| (a.edit.clone().unwrap(), context.clone())),
-                    _ => None,
-                });
+            let selection = self.refactor_preview.as_ref().and_then(|p| match &p.contents {
+                Contents::Actions(actions) => row.checked_sub(2).and_then(|index| actions.get(index)).map(|(a, context)| (a.edit.clone().unwrap(), context.clone())),
+                _ => None,
+            });
             if let Some((edit, context)) = selection {
                 self.close_refactor_preview();
                 self.preview_lsp_edit(edit, context);
-            } else if self
-                .refactor_preview
-                .as_ref()
-                .is_some_and(|p| matches!(p.contents, Contents::Edits(..)))
-            {
+            } else if self.refactor_preview.as_ref().is_some_and(|p| matches!(p.contents, Contents::Edits(..))) {
                 self.commit_refactor();
             }
             return true;
@@ -315,12 +219,8 @@ impl App {
     }
 
     pub(super) fn commit_refactor(&mut self) {
-        let Some(preview) = self.refactor_preview.as_ref() else {
-            return;
-        };
-        let Contents::Edits(plan, targets) = &preview.contents else {
-            return;
-        };
+        let Some(preview) = self.refactor_preview.as_ref() else { return };
+        let Contents::Edits(plan, targets) = &preview.contents else { return };
         let mut loaded = HashMap::new();
         let validation = (|| -> Result<(), String> {
             for change in plan {
@@ -329,17 +229,11 @@ impl App {
                 if !metadata.is_file() || metadata.permissions().readonly() {
                     return Err(format!("{} is no longer writable", change.path.display()));
                 }
-                if std::fs::read_to_string(&change.path).map_err(|e| e.to_string())? != target.disk
-                {
-                    return Err(format!(
-                        "{} changed on disk during preview",
-                        change.path.display()
-                    ));
+                if std::fs::read_to_string(&change.path).map_err(|e| e.to_string())? != target.disk {
+                    return Err(format!("{} changed on disk during preview", change.path.display()));
                 }
                 if self.buffer_id_for_lsp_path(&change.path) != target.buffer {
-                    return Err(
-                        "open documents changed during preview; request the refactor again".into(),
-                    );
+                    return Err("open documents changed during preview; request the refactor again".into());
                 }
                 if let Some(id) = target.buffer {
                     let ob = self.buffers.get(id).ok_or("a target buffer was closed")?;
@@ -367,16 +261,10 @@ impl App {
         // From here through commit, only infallible in-memory operations occur.
         // No file is saved automatically; normal save/recovery protections apply.
         let plan = plan.clone();
-        let existing: HashMap<_, _> = targets
-            .iter()
-            .map(|(path, target)| (path.clone(), target.buffer))
-            .collect();
+        let existing: HashMap<_, _> = targets.iter().map(|(path, target)| (path.clone(), target.buffer)).collect();
         let mut files = Vec::new();
         for change in plan {
-            let id = existing[&change.path].unwrap_or_else(|| {
-                self.buffers
-                    .insert_loaded_document(loaded.remove(&change.path).unwrap())
-            });
+            let id = existing[&change.path].unwrap_or_else(|| self.buffers.insert_loaded_document(loaded.remove(&change.path).unwrap()));
             if existing[&change.path].is_none() {
                 self.note_disk_state(id);
             }
@@ -384,24 +272,14 @@ impl App {
             self.replace_buffer_from_disk(id, &change.after);
             let ob = self.buffers.get_mut(id).unwrap();
             ob.buffer.mark_unsaved();
-            files.push(UndoFile {
-                path: change.path,
-                buffer: id,
-                revision: ob.buffer.edit_count(),
-                before: change.before,
-                after: change.after,
-                was_dirty,
-            });
+            files.push(UndoFile { path: change.path, buffer: id, revision: ob.buffer.edit_count(), before: change.before, after: change.after, was_dirty });
         }
         let ids: Vec<_> = files.iter().map(|f| f.buffer).collect();
         self.refactor_undo = Some(Undo { files });
         self.close_refactor_preview();
         self.sync_refactor_buffers(&ids);
         self.snapshot_dirty_buffers();
-        self.set_message(format!(
-            "refactor applied to {} file(s), left unsaved — :undo-refactor reverses all",
-            ids.len()
-        ));
+        self.set_message(format!("refactor applied to {} file(s), left unsaved — :undo-refactor reverses all", ids.len()));
         self.wake_caret();
     }
 
@@ -422,9 +300,7 @@ impl App {
                     && ob.buffer.edit_count() == file.revision
                     && ob.buffer.text() == file.after
             }) {
-                self.set_error(
-                    "cannot undo refactor: a target was edited or closed; no buffers changed",
-                );
+                self.set_error("cannot undo refactor: a target was edited or closed; no buffers changed");
                 return;
             }
         }
@@ -433,14 +309,7 @@ impl App {
         for file in undo.files {
             let ob = self.buffers.get_mut(file.buffer).unwrap();
             ob.buffer.undo(&mut ob.cursor);
-            if !file.was_dirty
-                && ob
-                    .buffer
-                    .path()
-                    .and_then(|p| std::fs::read_to_string(p).ok())
-                    .as_deref()
-                    == Some(file.before.as_str())
-            {
+            if !file.was_dirty && ob.buffer.path().and_then(|p| std::fs::read_to_string(p).ok()).as_deref() == Some(file.before.as_str()) {
                 ob.buffer.mark_saved();
             }
         }
@@ -462,13 +331,9 @@ impl App {
     fn sync_refactor_buffers(&mut self, ids: &[BufferId]) {
         for id in ids {
             let ob = self.buffers.get(*id).unwrap();
-            let Some(path) = ob.buffer.path() else {
-                continue;
-            };
+            let Some(path) = ob.buffer.path() else { continue };
             let canonical = fenix_lsp::normalize(identity(path));
-            let Some(uri) = fenix_lsp::path_to_uri(&canonical) else {
-                continue;
-            };
+            let Some(uri) = fenix_lsp::path_to_uri(&canonical) else { continue };
             let language = fenix_syntax::detect_language_from_path(path);
             let text = ob.buffer.text();
             let revision = ob.buffer.edit_count();
@@ -479,52 +344,32 @@ impl App {
                 }
                 let result = if let Some((_, version)) = session.open_documents.get(&canonical) {
                     let version = *version;
-                    let incremental = session
-                        .capabilities
-                        .as_ref()
-                        .is_some_and(fenix_lsp::wants_incremental);
-                    let change = fenix_lsp::change_event(
-                        session.synced_text.get(&canonical).map(String::as_str),
-                        &text,
-                        incremental,
-                    );
+                    let incremental = session.capabilities.as_ref().is_some_and(fenix_lsp::wants_incremental);
+                    let change = fenix_lsp::change_event(session.synced_text.get(&canonical).map(String::as_str), &text, incremental);
                     session
                         .client
-                        .notify::<lsp_types::notification::DidChangeTextDocument>(
-                            lsp_types::DidChangeTextDocumentParams {
-                                text_document: lsp_types::VersionedTextDocumentIdentifier {
-                                    uri: uri.clone(),
-                                    version,
-                                },
-                                content_changes: vec![change],
-                            },
-                        )
+                        .notify::<lsp_types::notification::DidChangeTextDocument>(lsp_types::DidChangeTextDocumentParams {
+                            text_document: lsp_types::VersionedTextDocumentIdentifier { uri: uri.clone(), version },
+                            content_changes: vec![change],
+                        })
                         .map(|_| version + 1)
-                } else if language_name
-                    .as_ref()
-                    .is_some_and(|name| session.languages.contains(name))
-                    && tool_sessions::lsp_root_for_path(path) == key.root
-                {
+                } else if language_name.as_ref().is_some_and(|name| session.languages.contains(name)) && tool_sessions::lsp_root_for_path(path) == key.root {
                     session
                         .client
-                        .notify::<lsp_types::notification::DidOpenTextDocument>(
-                            lsp_types::DidOpenTextDocumentParams {
-                                text_document: lsp_types::TextDocumentItem {
-                                    uri: uri.clone(),
-                                    language_id: language_name.clone().unwrap_or_default(),
-                                    version: 0,
-                                    text: text.clone(),
-                                },
+                        .notify::<lsp_types::notification::DidOpenTextDocument>(lsp_types::DidOpenTextDocumentParams {
+                            text_document: lsp_types::TextDocumentItem {
+                                uri: uri.clone(),
+                                language_id: language_name.clone().unwrap_or_default(),
+                                version: 0,
+                                text: text.clone(),
                             },
-                        )
+                        })
                         .map(|_| 1)
                 } else {
                     continue;
                 };
                 if let Ok(next) = result {
-                    session
-                        .open_documents
-                        .insert(canonical.clone(), (revision, next));
+                    session.open_documents.insert(canonical.clone(), (revision, next));
                     session.synced_text.insert(canonical.clone(), text.clone());
                 }
             }
@@ -538,11 +383,7 @@ fn render(plan: &[PlannedDocument]) -> String {
         plan.len()
     );
     for change in plan {
-        out.push_str(&format!(
-            "\n--- {}\n+++ {}\n",
-            change.path.display(),
-            change.path.display()
-        ));
+        out.push_str(&format!("\n--- {}\n+++ {}\n", change.path.display(), change.path.display()));
         let visible = |text: &str| -> Vec<String> {
             text.split_inclusive('\n')
                 .map(|line| {
@@ -559,12 +400,7 @@ fn render(plan: &[PlannedDocument]) -> String {
         let old = visible(&change.before);
         let new = visible(&change.after);
         let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-        let suffix = old[prefix..]
-            .iter()
-            .rev()
-            .zip(new[prefix..].iter().rev())
-            .take_while(|(a, b)| a == b)
-            .count();
+        let suffix = old[prefix..].iter().rev().zip(new[prefix..].iter().rev()).take_while(|(a, b)| a == b).count();
         out.push_str(&format!("@@ line {} @@\n", prefix + 1));
         for line in &old[prefix.saturating_sub(2)..prefix] {
             out.push_str(&format!(" {line}\n"));
@@ -602,13 +438,7 @@ mod tests {
                     .map(|p| {
                         (
                             fenix_lsp::path_to_uri(p).unwrap(),
-                            vec![lsp_types::TextEdit {
-                                range: lsp_types::Range::new(
-                                    lsp_types::Position::new(0, 0),
-                                    lsp_types::Position::new(0, 3),
-                                ),
-                                new_text: "new".into(),
-                            }],
+                            vec![lsp_types::TextEdit { range: lsp_types::Range::new(lsp_types::Position::new(0, 0), lsp_types::Position::new(0, 3)), new_text: "new".into() }],
                         )
                     })
                     .collect(),
@@ -619,11 +449,7 @@ mod tests {
     fn preview(app: &mut App, paths: &[&Path]) {
         let context = app.refactor_context(&app.lsp_key(fenix_syntax::LanguageId::Rust));
         app.preview_lsp_edit(proposal(paths), context);
-        assert!(
-            app.refactor_preview.is_some(),
-            "{:?}",
-            app.status_message.as_ref().map(|m| &m.text)
-        );
+        assert!(app.refactor_preview.is_some(), "{:?}", app.status_message.as_ref().map(|m| &m.text));
     }
     #[test]
     fn multi_file_preview_commit_and_logical_undo() {
@@ -641,10 +467,7 @@ mod tests {
         }
         app.undo_refactor();
         for path in [&a, &b] {
-            let ob = app
-                .buffers
-                .get(app.buffer_id_for_lsp_path(path).unwrap())
-                .unwrap();
+            let ob = app.buffers.get(app.buffer_id_for_lsp_path(path).unwrap()).unwrap();
             assert_eq!(ob.buffer.text(), "old\n");
             assert!(!ob.buffer.is_dirty());
         }
@@ -656,14 +479,7 @@ mod tests {
         std::fs::write(&b, "external\n").unwrap();
         app.commit_refactor();
         assert!(app.refactor_undo.is_none());
-        assert_eq!(
-            app.buffers
-                .get(app.buffer_id_for_lsp_path(&a).unwrap())
-                .unwrap()
-                .buffer
-                .text(),
-            "old\n"
-        );
+        assert_eq!(app.buffers.get(app.buffer_id_for_lsp_path(&a).unwrap()).unwrap().buffer.text(), "old\n");
         assert!(app.buffer_id_for_lsp_path(&b).is_none());
     }
     #[test]
@@ -678,14 +494,7 @@ mod tests {
         app.commit_refactor();
         app.test_insert_str("x");
         app.undo_refactor();
-        assert_eq!(
-            app.buffers
-                .get(app.buffer_id_for_lsp_path(&b).unwrap())
-                .unwrap()
-                .buffer
-                .text(),
-            "new\n"
-        );
+        assert_eq!(app.buffers.get(app.buffer_id_for_lsp_path(&b).unwrap()).unwrap().buffer.text(), "new\n");
         assert!(app.status_message.as_ref().unwrap().is_error);
     }
     #[test]
@@ -705,36 +514,16 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, path)| {
-                let action = lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction {
-                    title: format!("action {index}"),
-                    edit: Some(proposal(&[path])),
-                    ..Default::default()
-                });
+                let action = lsp_types::CodeActionOrCommand::CodeAction(lsp_types::CodeAction { title: format!("action {index}"), edit: Some(proposal(&[path])), ..Default::default() });
                 (action, context.clone(), Some(format!("server {index}")))
             })
             .collect();
         app.preview_lsp_actions(actions);
-        assert!(
-            app.open().buffer.text().contains("[server 1] action 1"),
-            "with several servers, each action names its own"
-        );
-        assert!(matches!(
-            app.refactor_preview.as_ref().unwrap().contents,
-            Contents::Actions(..)
-        ));
+        assert!(app.open().buffer.text().contains("[server 1] action 1"), "with several servers, each action names its own");
+        assert!(matches!(app.refactor_preview.as_ref().unwrap().contents, Contents::Actions(..)));
         app.refactor_key(KeyPress::named(FenixNamedKey::Enter));
-        assert!(matches!(
-            app.refactor_preview.as_ref().unwrap().contents,
-            Contents::Edits(..)
-        ));
-        assert_eq!(
-            app.buffers
-                .get(app.buffer_id_for_lsp_path(&a).unwrap())
-                .unwrap()
-                .buffer
-                .text(),
-            "old\n"
-        );
+        assert!(matches!(app.refactor_preview.as_ref().unwrap().contents, Contents::Edits(..)));
+        assert_eq!(app.buffers.get(app.buffer_id_for_lsp_path(&a).unwrap()).unwrap().buffer.text(), "old\n");
         app.refactor_key(KeyPress::named(FenixNamedKey::Enter));
         assert_eq!(app.open().buffer.text(), "new\n");
         assert!(app.buffer_id_for_lsp_path(&b).is_none());
@@ -743,30 +532,11 @@ mod tests {
     fn formatting_rejects_invalid_batch_and_has_one_undo_step() {
         let (_dir, mut app, a, _) = fixture();
         let id = app.buffer_id_for_lsp_path(&a).unwrap();
-        let mut edits = proposal(&[&a])
-            .changes
-            .unwrap()
-            .into_values()
-            .next()
-            .unwrap();
-        edits.push(lsp_types::TextEdit {
-            range: lsp_types::Range::new(
-                lsp_types::Position::new(99, 0),
-                lsp_types::Position::new(99, 0),
-            ),
-            new_text: "oops".into(),
-        });
+        let mut edits = proposal(&[&a]).changes.unwrap().into_values().next().unwrap();
+        edits.push(lsp_types::TextEdit { range: lsp_types::Range::new(lsp_types::Position::new(99, 0), lsp_types::Position::new(99, 0)), new_text: "oops".into() });
         app.apply_lsp_text_edits(id, edits);
         assert_eq!(app.open().buffer.text(), "old\n");
-        app.apply_lsp_text_edits(
-            id,
-            proposal(&[&a])
-                .changes
-                .unwrap()
-                .into_values()
-                .next()
-                .unwrap(),
-        );
+        app.apply_lsp_text_edits(id, proposal(&[&a]).changes.unwrap().into_values().next().unwrap());
         let ob = app.buffers.get_mut(id).unwrap();
         assert_eq!(ob.buffer.text(), "new\n");
         assert!(ob.buffer.undo(&mut ob.cursor));
@@ -775,11 +545,7 @@ mod tests {
     }
     #[test]
     fn preview_exposes_newline_only_changes() {
-        let text = render(&[PlannedDocument {
-            path: "a.txt".into(),
-            before: "a\r\n".into(),
-            after: "a".into(),
-        }]);
+        let text = render(&[PlannedDocument { path: "a.txt".into(), before: "a\r\n".into(), after: "a".into() }]);
         assert!(text.contains("-a [CRLF]"));
         assert!(text.contains("+a [no final newline]"));
     }

@@ -20,10 +20,7 @@ pub struct LspKey {
 
 impl LspKey {
     pub fn primary(language: fenix_syntax::LanguageId, root: PathBuf) -> Self {
-        LspKey {
-            server: LspServer::Primary(language),
-            root,
-        }
+        LspKey { server: LspServer::Primary(language), root }
     }
 
     pub fn is_primary(&self) -> bool {
@@ -37,8 +34,7 @@ impl LspKey {
 
 pub(super) fn root_for_path(path: &Path) -> PathBuf {
     let path = refactor::identity(path);
-    let root = fenix_project::find_project_root(&path)
-        .unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")).to_path_buf());
+    let root = fenix_project::find_project_root(&path).unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")).to_path_buf());
     fenix_lsp::normalize(refactor::identity(&root))
 }
 
@@ -61,9 +57,7 @@ pub(super) fn let_go(sessions: Vec<LspSession>) {
     if sessions.is_empty() {
         return;
     }
-    let _ = std::thread::Builder::new()
-        .name("fenix-lsp-stopping".into())
-        .spawn(move || drop(sessions));
+    let _ = std::thread::Builder::new().name("fenix-lsp-stopping".into()).spawn(move || drop(sessions));
 }
 
 pub(super) fn generation() -> u64 {
@@ -86,12 +80,7 @@ impl App {
         if let Some(path) = self.open().buffer.path() {
             return root_for_path(path);
         }
-        fenix_lsp::normalize(refactor::identity(
-            &self
-                .project_root
-                .clone()
-                .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
-        ))
+        fenix_lsp::normalize(refactor::identity(&self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))))
     }
 
     #[cfg(test)]
@@ -111,29 +100,14 @@ impl App {
                 && (name.is_empty()
                     || app.lsp_server_name(key) == name
                     || match &key.server {
-                        LspServer::Primary(language) => {
-                            crate::lsp::language_config_name(*language) == name
-                        }
+                        LspServer::Primary(language) => crate::lsp::language_config_name(*language) == name,
                         LspServer::Additional(server) => server == name,
                     })
         };
-        let removed: Vec<_> = self
-            .lsp_sessions
-            .keys()
-            .filter(|key| matches(self, key))
-            .cloned()
-            .collect();
-        let unavailable: Vec<_> = self
-            .lsp_unavailable
-            .iter()
-            .filter(|key| matches(self, key))
-            .cloned()
-            .collect();
+        let removed: Vec<_> = self.lsp_sessions.keys().filter(|key| matches(self, key)).cloned().collect();
+        let unavailable: Vec<_> = self.lsp_unavailable.iter().filter(|key| matches(self, key)).cloned().collect();
         if !name.is_empty() && removed.is_empty() && unavailable.is_empty() {
-            self.set_error(format!(
-                "no language server called {name} in {}",
-                root.display()
-            ));
+            self.set_error(format!("no language server called {name} in {}", root.display()));
             return;
         }
         for key in &unavailable {
@@ -144,25 +118,14 @@ impl App {
             // The list of additional servers is re-read too.
             self.lsp_additional.remove(&root);
         }
-        let names: Vec<String> = removed
-            .iter()
-            .map(|key| self.lsp_server_name(key))
-            .collect();
+        let names: Vec<String> = removed.iter().map(|key| self.lsp_server_name(key)).collect();
         for key in removed {
             self.stop_lsp_session(&key);
         }
         self.sync_lsp_for_focused_buffer();
-        let failed = |app: &App| {
-            app.lsp_unavailable
-                .iter()
-                .any(|key| key.root == root && (name.is_empty() || matches(app, key)))
-        };
+        let failed = |app: &App| app.lsp_unavailable.iter().any(|key| key.root == root && (name.is_empty() || matches(app, key)));
         if !failed(self) {
-            let what = if name.is_empty() || names.is_empty() {
-                "language services".to_string()
-            } else {
-                names.join(", ")
-            };
+            let what = if name.is_empty() || names.is_empty() { "language services".to_string() } else { names.join(", ") };
             self.set_message(format!("restarted {what} for {}", root.display()));
         }
     }
@@ -175,32 +138,19 @@ impl App {
         let late: Vec<LspKey> = self
             .lsp_sessions
             .iter()
-            .filter(|(_, s)| {
-                s.capabilities.is_none() && now.duration_since(s.started) >= LSP_INITIALIZE_TIMEOUT
-            })
+            .filter(|(_, s)| s.capabilities.is_none() && now.duration_since(s.started) >= LSP_INITIALIZE_TIMEOUT)
             .map(|(key, _)| key.clone())
             .collect();
         for key in late {
             let name = self.lsp_server_name(&key);
-            let said = self
-                .lsp_sessions
-                .get(&key)
-                .map(|s| s.client.stderr_tail())
-                .unwrap_or_default();
+            let said = self.lsp_sessions.get(&key).map(|s| s.client.stderr_tail()).unwrap_or_default();
             self.stop_lsp_session(&key);
             let secs = LSP_INITIALIZE_TIMEOUT.as_secs();
             self.set_error(format!("{name} didn't start: no answer to initialize in {secs} s{} -- SPC l m shows more, :lsp-restart tries again", last_line_of(&said)));
-            self.lsp_failures.insert(
-                key.clone(),
-                failure_text(&format!("didn't answer initialize in {secs} s"), &said),
-            );
+            self.lsp_failures.insert(key.clone(), failure_text(&format!("didn't answer initialize in {secs} s"), &said));
             self.lsp_unavailable.insert(key);
         }
-        self.lsp_sessions
-            .values()
-            .filter(|s| s.capabilities.is_none())
-            .map(|s| s.started + LSP_INITIALIZE_TIMEOUT)
-            .min()
+        self.lsp_sessions.values().filter(|s| s.capabilities.is_none()).map(|s| s.started + LSP_INITIALIZE_TIMEOUT).min()
     }
 
     /// Stops one server: its process, its diagnostics, and anything still
@@ -221,10 +171,7 @@ impl App {
     pub(super) fn lsp_settings_name(key: &LspKey) -> String {
         match &key.server {
             LspServer::Primary(language) => crate::lsp::language_config_name(*language),
-            LspServer::Additional(name) => name
-                .split_once(':')
-                .map(|(_, n)| n.to_string())
-                .unwrap_or_else(|| name.clone()),
+            LspServer::Additional(name) => name.split_once(':').map(|(_, n)| n.to_string()).unwrap_or_else(|| name.clone()),
         }
     }
 
@@ -242,11 +189,7 @@ impl App {
             settings = serde_json::json!({ "python": { "pythonPath": env.interpreter.to_string_lossy() } });
         }
         let file = key.root.join(".fenix/lsp").join(format!("{name}.json"));
-        if let Some(own) = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .filter(|v| v.is_object())
-        {
+        if let Some(own) = std::fs::read_to_string(&file).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok()).filter(|v| v.is_object()) {
             settings = fenix_lsp::pull::merge(settings, own);
         }
         if let Some(given) = self.wasm.server_settings(&key.root, &name) {
@@ -264,21 +207,13 @@ impl App {
         let keys: Vec<LspKey> = self
             .lsp_sessions
             .iter()
-            .filter(|(key, session)| {
-                session.capabilities.is_some()
-                    && (key.root == at || at.starts_with(&key.root))
-                    && name.is_none_or(|n| Self::lsp_settings_name(key) == n)
-            })
+            .filter(|(key, session)| session.capabilities.is_some() && (key.root == at || at.starts_with(&key.root)) && name.is_none_or(|n| Self::lsp_settings_name(key) == n))
             .map(|(key, _)| key.clone())
             .collect();
         for key in keys {
             let settings = self.lsp_settings(&key);
             if let Some(session) = self.lsp_sessions.get(&key) {
-                let _ = session
-                    .client
-                    .notify::<lsp_types::notification::DidChangeConfiguration>(
-                        lsp_types::DidChangeConfigurationParams { settings },
-                    );
+                let _ = session.client.notify::<lsp_types::notification::DidChangeConfiguration>(lsp_types::DidChangeConfigurationParams { settings });
             }
         }
     }
@@ -290,20 +225,13 @@ impl App {
             return session.name.clone();
         }
         match &key.server {
-            LspServer::Primary(language) => format!(
-                "{} language server",
-                crate::lsp::language_config_name(*language)
-            ),
+            LspServer::Primary(language) => format!("{} language server", crate::lsp::language_config_name(*language)),
             LspServer::Additional(name) => name.clone(),
         }
     }
 
     pub(super) fn debug_scope_matches(&mut self) -> bool {
-        if self
-            .debug_session
-            .as_ref()
-            .is_some_and(|s| s.root != self.integration_root())
-        {
+        if self.debug_session.as_ref().is_some_and(|s| s.root != self.integration_root()) {
             self.set_error("debug session belongs to another project; switch to its debug panel to control or stop it");
             return false;
         }

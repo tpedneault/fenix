@@ -10,8 +10,5 @@ pub(crate) fn buf(s: &str) -> Buffer {
 }
 
 pub(crate) fn cur(idx: usize) -> Cursor {
-    Cursor {
-        char_idx: idx,
-        sticky_col: 0,
-    }
+    Cursor { char_idx: idx, sticky_col: 0 }
 }

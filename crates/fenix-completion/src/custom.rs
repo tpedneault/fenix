@@ -11,18 +11,12 @@ use crate::{CompletionItem, CompletionKind};
 /// The caller (`fenix-gui`) reads it again only when the file changes,
 /// not on every keystroke.
 pub fn load(path: &Path) -> Vec<CompletionItem> {
-    let Ok(contents) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
+    let Ok(contents) = std::fs::read_to_string(path) else { return Vec::new() };
     contents
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|label| CompletionItem {
-            label: label.to_string(),
-            kind: CompletionKind::Tag,
-            detail: String::new(),
-        })
+        .map(|label| CompletionItem { label: label.to_string(), kind: CompletionKind::Tag, detail: String::new() })
         .collect()
 }
 
@@ -34,10 +28,7 @@ mod tests {
     fn temp_file(name: &str, contents: &str) -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "fenix-completion-custom-test-{name}-{}-{n}.txt",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("fenix-completion-custom-test-{name}-{}-{n}.txt", std::process::id()));
         std::fs::write(&path, contents).unwrap();
         path
     }

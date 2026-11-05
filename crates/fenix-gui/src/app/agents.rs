@@ -18,10 +18,7 @@ use crate::agent_page::{self, AgentPage};
 use fenix_acp::catalog::{self, CatalogEntry};
 use fenix_acp::client::{AcpClient, AcpEvent, Launch, Log, LogSide, RpcError};
 use fenix_acp::hub::{Attention, ConnId, ConnState, Effect, Hub, Link, ThreadId, Turn};
-use fenix_acp::protocol::{
-    code, ClientCapabilities, ClientRequest, ConfigValue, ContentBlock, ListedSession, McpServer,
-    PermissionKind, PermissionOption, ToolCallFields,
-};
+use fenix_acp::protocol::{code, ClientCapabilities, ClientRequest, ConfigValue, ContentBlock, ListedSession, McpServer, PermissionKind, PermissionOption, ToolCallFields};
 use fenix_acp::store::Store;
 use fenix_acp::thread::{NoticeKind, PermissionCard, PermissionState};
 use serde_json::{json, Value};
@@ -44,24 +41,12 @@ pub(crate) enum Pick {
     /// Show this thread in the panel.
     Thread(ThreadId),
     Mode(String),
-    Config {
-        id: String,
-        value: ConfigValue,
-    },
-    Login {
-        conn: ConnId,
-        method: String,
-    },
+    Config { id: String, value: ConfigValue },
+    Login { conn: ConnId, method: String },
     /// A session the agent has that Fenix doesn't: make it a thread.
-    Import {
-        agent: String,
-        root: PathBuf,
-        session: ListedSession,
-    },
+    Import { agent: String, root: PathBuf, session: ListedSession },
     /// `agents.save_before_prompt = "ask"`: save first, or don't.
-    Send {
-        save: bool,
-    },
+    Send { save: bool },
     Restart(ConnId),
     /// `@` in the prompt: what follows the `@`.
     Mention(String),
@@ -78,11 +63,7 @@ pub(crate) enum Pick {
     /// `SPC a s`: an API key to keep in the keychain, by its variable.
     Secret(String),
     /// An extension's ask that sends code: may it?
-    AskConsent {
-        ext: String,
-        call: u64,
-        allow: bool,
-    },
+    AskConsent { ext: String, call: u64, allow: bool },
     /// `SPC a P`: this pipeline, for the next prompt.
     Pipeline(fenix_acp::pipeline::PipelineSpec),
     /// A code extension you said may do what it asks: installed.
@@ -185,10 +166,7 @@ pub(crate) struct AgentHost {
 
 impl AgentHost {
     pub(crate) fn new() -> Self {
-        let prefix = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| format!("{:x}", d.as_millis()))
-            .unwrap_or_else(|_| "t".into());
+        let prefix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| format!("{:x}", d.as_millis())).unwrap_or_else(|_| "t".into());
         let mut hub = Hub::new(prefix, env!("CARGO_PKG_VERSION"));
         hub.set_capabilities(ClientCapabilities::fenix());
         AgentHost {
@@ -231,11 +209,7 @@ impl AgentHost {
             brought: BTreeMap::new(),
             asks: HashMap::new(),
             consenting: Vec::new(),
-            consent_file: if cfg!(test) {
-                Some(super::isolated_test_path("ask-consent.json"))
-            } else {
-                fenix_storage::paths::state_file("ask-consent.json")
-            },
+            consent_file: if cfg!(test) { Some(super::isolated_test_path("ask-consent.json")) } else { fenix_storage::paths::state_file("ask-consent.json") },
             #[cfg(test)]
             replies: Vec::new(),
         }
@@ -252,119 +226,52 @@ impl AgentHost {
 
     /// Lays the panel's page out.
     pub(super) fn layout(&self, page: &AgentPage, cols: usize) -> crate::page::Page {
-        let Some(view) = self.hub.view(&page.thread) else {
-            return crate::page::Page::default();
-        };
+        let Some(view) = self.hub.view(&page.thread) else { return crate::page::Page::default() };
         let mut status = self.status_of(&page.thread);
-        status.terminals = self
-            .terminals
-            .iter()
-            .filter(|(_, t)| t.thread == page.thread)
-            .map(|(id, t)| {
-                let (tail, exit) = t.tail(12);
-                (
-                    id.clone(),
-                    agent_page::TermView {
-                        line: t.line.clone(),
-                        tail,
-                        exit,
-                    },
-                )
-            })
-            .collect();
+        status.terminals = self.terminals.iter().filter(|(_, t)| t.thread == page.thread).map(|(id, t)| {
+            let (tail, exit) = t.tail(12);
+            (id.clone(), agent_page::TermView { line: t.line.clone(), tail, exit })
+        }).collect();
         agent_page::layout(page, view.thread, view.link, view.turn, &status, cols)
     }
 
     fn status_of(&self, id: &ThreadId) -> agent_page::Status {
-        let Some(view) = self.hub.view(id) else {
-            return agent_page::Status::default();
-        };
+        let Some(view) = self.hub.view(id) else { return agent_page::Status::default() };
         let agent = view
             .connection
-            .and_then(|c| {
-                c.info
-                    .as_ref()
-                    .and_then(|i| i.display_name().map(str::to_string))
-                    .or_else(|| Some(c.agent.name.clone()))
-            })
+            .and_then(|c| c.info.as_ref().and_then(|i| i.display_name().map(str::to_string)).or_else(|| Some(c.agent.name.clone())))
             .or_else(|| self.hub.agent(&view.meta.agent).map(|a| a.name.clone()))
             .unwrap_or_else(|| view.meta.agent.clone());
         let (state, role) = match (view.link, view.turn, view.connection.map(|c| &c.state)) {
-            (Link::ReadOnly(why), ..) => {
-                (format!("read-only: {why}"), Some(crate::page::Role::Warn))
-            }
-            (_, _, Some(ConnState::NeedsAuth)) => {
-                ("wants a login".into(), Some(crate::page::Role::Warn))
-            }
-            (_, _, Some(ConnState::Dead { reason, .. })) => {
-                (format!("stopped: {reason}"), Some(crate::page::Role::Bad))
-            }
-            _ if view.thread.pending_permissions() > 0 => {
-                ("waiting on you".into(), Some(crate::page::Role::Warn))
-            }
-            (_, Turn::Cancelling { .. }, _) => {
-                ("cancelling…".into(), Some(crate::page::Role::Warn))
-            }
+            (Link::ReadOnly(why), ..) => (format!("read-only: {why}"), Some(crate::page::Role::Warn)),
+            (_, _, Some(ConnState::NeedsAuth)) => ("wants a login".into(), Some(crate::page::Role::Warn)),
+            (_, _, Some(ConnState::Dead { reason, .. })) => (format!("stopped: {reason}"), Some(crate::page::Role::Bad)),
+            _ if view.thread.pending_permissions() > 0 => ("waiting on you".into(), Some(crate::page::Role::Warn)),
+            (_, Turn::Cancelling { .. }, _) => ("cancelling…".into(), Some(crate::page::Role::Warn)),
             (_, Turn::Prompting { .. }, _) => ("working…".into(), Some(crate::page::Role::Accent)),
             (Link::Attaching { .. }, ..) => ("connecting…".into(), Some(crate::page::Role::Muted)),
             (Link::Live { .. }, ..) => ("ready".into(), Some(crate::page::Role::Good)),
             (Link::Detached, ..) => ("not started".into(), Some(crate::page::Role::Muted)),
         };
-        let logins = view
-            .connection
-            .filter(|c| c.state == ConnState::NeedsAuth)
-            .and_then(|c| c.info.as_ref())
-            .map(|i| {
-                i.auth_methods
-                    .iter()
-                    .map(|m| (m.id.clone(), m.name.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        agent_page::Status {
-            agent,
-            state,
-            state_role: role,
-            logins,
-            queued: view.queued,
-            terminals: HashMap::new(),
-            highlight: Some(super::reading_host::highlight_block),
-        }
+        let logins = view.connection.filter(|c| c.state == ConnState::NeedsAuth).and_then(|c| c.info.as_ref()).map(|i| i.auth_methods.iter().map(|m| (m.id.clone(), m.name.clone())).collect()).unwrap_or_default();
+        agent_page::Status { agent, state, state_role: role, logins, queued: view.queued, terminals: HashMap::new(), highlight: Some(super::reading_host::highlight_block) }
     }
 
     /// Reads the store's threads for `root` into the hub, newest first,
     /// at most `limit`.
     fn load_threads(&mut self, root: &Path, limit: usize) -> Vec<ThreadId> {
-        let Some(store) = &self.store else {
-            return Vec::new();
-        };
+        let Some(store) = &self.store else { return Vec::new() };
         let mut ids = Vec::new();
-        for entry in store
-            .index()
-            .into_iter()
-            .filter(|e| e.root == root)
-            .take(limit)
-        {
+        for entry in store.index().into_iter().filter(|e| e.root == root).take(limit) {
             if !self.loaded.contains(&entry.id) && self.hub.view(&entry.id).is_none() {
                 if let Ok(saved) = store.load(&entry.id) {
                     self.hub.restore(saved.meta, saved.thread);
-                    if let Some(baselines) = saved.extra.get("baselines").and_then(Value::as_object)
-                    {
-                        let map = baselines
-                            .iter()
-                            .map(|(k, v)| (PathBuf::from(k), v.as_str().map(str::to_string)))
-                            .collect();
+                    if let Some(baselines) = saved.extra.get("baselines").and_then(Value::as_object) {
+                        let map = baselines.iter().map(|(k, v)| (PathBuf::from(k), v.as_str().map(str::to_string))).collect();
                         self.baselines.insert(entry.id.clone(), map);
                     }
                     if let Some(unknown) = saved.extra.get("unknown").and_then(Value::as_array) {
-                        self.unknown.insert(
-                            entry.id.clone(),
-                            unknown
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(PathBuf::from)
-                                .collect(),
-                        );
+                        self.unknown.insert(entry.id.clone(), unknown.iter().filter_map(Value::as_str).map(PathBuf::from).collect());
                     }
                 }
                 self.loaded.insert(entry.id.clone());
@@ -378,36 +285,14 @@ impl AgentHost {
 
     fn save(&mut self, id: &ThreadId) {
         self.dirty.remove(id);
-        let (Some(store), Some(view)) = (&self.store, self.hub.view(id)) else {
-            return;
-        };
+        let (Some(store), Some(view)) = (&self.store, self.hub.view(id)) else { return };
         if view.thread.entries.is_empty() {
             return;
         }
-        let baselines: serde_json::Map<String, Value> = self
-            .baselines
-            .get(id)
-            .map(|b| {
-                b.iter()
-                    .map(|(p, t)| (p.to_string_lossy().into_owned(), json!(t)))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let updated = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let unknown: Vec<String> = self
-            .unknown
-            .get(id)
-            .map(|u| u.iter().map(|p| p.to_string_lossy().into_owned()).collect())
-            .unwrap_or_default();
-        if let Err(e) = store.save(
-            view.meta,
-            view.thread,
-            &json!({ "baselines": baselines, "unknown": unknown }),
-            updated,
-        ) {
+        let baselines: serde_json::Map<String, Value> = self.baselines.get(id).map(|b| b.iter().map(|(p, t)| (p.to_string_lossy().into_owned(), json!(t))).collect()).unwrap_or_default();
+        let updated = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let unknown: Vec<String> = self.unknown.get(id).map(|u| u.iter().map(|p| p.to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        if let Err(e) = store.save(view.meta, view.thread, &json!({ "baselines": baselines, "unknown": unknown }), updated) {
             eprintln!("fenix: couldn't save agent thread {id}: {e}");
         }
     }
@@ -428,40 +313,19 @@ fn mcp_server(name: &str, line: &str) -> Option<McpServer> {
         None => (false, first.as_str()),
     };
     if address.starts_with("http://") || address.starts_with("https://") {
-        let headers: Vec<(String, String)> = rest
-            .iter()
-            .filter_map(|h| h.split_once('='))
-            .map(|(n, v)| (n.to_string(), v.to_string()))
-            .collect();
+        let headers: Vec<(String, String)> = rest.iter().filter_map(|h| h.split_once('=')).map(|(n, v)| (n.to_string(), v.to_string())).collect();
         let (name, url) = (name.to_string(), address.to_string());
-        return Some(if sse {
-            McpServer::Sse { name, url, headers }
-        } else {
-            McpServer::Http { name, url, headers }
-        });
+        return Some(if sse { McpServer::Sse { name, url, headers } } else { McpServer::Http { name, url, headers } });
     }
-    Some(McpServer::Stdio {
-        name: name.to_string(),
-        command: first.clone(),
-        args: rest.to_vec(),
-        env: vec![],
-    })
+    Some(McpServer::Stdio { name: name.to_string(), command: first.clone(), args: rest.to_vec(), env: vec![] })
 }
 
 fn within(root: &Path, path: &Path) -> bool {
-    if path
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
+    if path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
         return false;
     }
     if cfg!(windows) {
-        let spelt = |p: &Path| {
-            p.to_string_lossy()
-                .replace('/', "\\")
-                .trim_start_matches(r"\\?\")
-                .to_lowercase()
-        };
+        let spelt = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_start_matches(r"\\?\").to_lowercase();
         let (root, path) = (spelt(root), spelt(path));
         let root = root.trim_end_matches('\\');
         path == root || path.starts_with(&format!("{root}\\"))
@@ -484,57 +348,32 @@ impl App {
                 env.push((name.clone(), value));
             }
         }
-        catalog::catalog(
-            &configured,
-            &Self::agents_installed(),
-            &self.agents_brought(),
-            &env,
-            &catalog::find_on_path,
-        )
+        catalog::catalog(&configured, &Self::agents_installed(), &self.agents_brought(), &env, &catalog::find_on_path)
     }
 
     /// The hub learns the agents, the MCP servers and the idle time from
     /// the settings, as they are now.
     pub(super) fn agents_configure(&mut self) -> Vec<CatalogEntry> {
         let entries = self.agents_catalog();
-        self.agents
-            .hub
-            .set_agents(entries.iter().map(|e| e.spec.clone()).collect());
+        self.agents.hub.set_agents(entries.iter().map(|e| e.spec.clone()).collect());
         let mut servers = Vec::new();
         let fenix = self.config.bool_value("agents.mcp.fenix").unwrap_or(true);
-        let brief = fenix
-            && self
-                .config
-                .bool_value("agents.mcp.fenix_brief")
-                .unwrap_or(true);
-        self.agents
-            .hub
-            .set_briefing(brief.then(|| crate::mcp::BRIEFING.to_string()));
+        let brief = fenix && self.config.bool_value("agents.mcp.fenix_brief").unwrap_or(true);
+        self.agents.hub.set_briefing(brief.then(|| crate::mcp::BRIEFING.to_string()));
         // Fenix asks about its own tools itself, by the rules
         // (`agents.mcp.allow`): the agent needn't ask too.
         self.agents.hub.set_fenix_tools_guarded(fenix);
         if fenix {
             if let Ok(exe) = std::env::current_exe() {
-                servers.push(McpServer::Stdio {
-                    name: "fenix".into(),
-                    command: exe.to_string_lossy().into_owned(),
-                    args: vec!["--mcp".into(), "--thread".into(), "{thread}".into()],
-                    env: vec![],
-                });
+                servers.push(McpServer::Stdio { name: "fenix".into(), command: exe.to_string_lossy().into_owned(), args: vec!["--mcp".into(), "--thread".into(), "{thread}".into()], env: vec![] });
             }
         }
         for (name, line) in self.config.map_value("agents.mcp.servers") {
             servers.extend(mcp_server(name, line));
         }
         self.agents.hub.set_mcp_servers(servers);
-        let minutes = self
-            .config
-            .int_value("agents.idle_minutes")
-            .unwrap_or(10)
-            .max(1) as u64;
-        self.agents
-            .hub
-            .set_idle_timeout(Duration::from_secs(minutes * 60));
+        let minutes = self.config.int_value("agents.idle_minutes").unwrap_or(10).max(1) as u64;
+        self.agents.hub.set_idle_timeout(Duration::from_secs(minutes * 60));
         entries
     }
 
@@ -545,12 +384,7 @@ impl App {
     }
 
     fn agents_default(&self, entries: &[CatalogEntry]) -> Option<String> {
-        let wanted = self
-            .config
-            .text_value("agents.default")
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(catalog::slug);
+        let wanted = self.config.text_value("agents.default").map(str::trim).filter(|s| !s.is_empty()).map(catalog::slug);
         match wanted {
             Some(id) if entries.iter().any(|e| e.spec.id == id) => Some(id),
             _ => entries.iter().find(|e| e.found).map(|e| e.spec.id.clone()),
@@ -562,18 +396,11 @@ impl App {
     pub(super) fn agents_root(&self) -> PathBuf {
         let focused = Some(self.focused_buffer_id());
         if focused == self.agents.page || focused == self.agents.composer {
-            if let Some(root) = self
-                .agents
-                .shown(&self.pages)
-                .and_then(|t| self.agents.hub.meta(&t).map(|m| m.root.clone()))
-            {
+            if let Some(root) = self.agents.shown(&self.pages).and_then(|t| self.agents.hub.meta(&t).map(|m| m.root.clone())) {
                 return root;
             }
         }
-        self.project_root
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."))
+        self.project_root.clone().or_else(|| std::env::current_dir().ok()).unwrap_or_else(|| PathBuf::from("."))
     }
 
     // -----------------------------------------------------------------
@@ -600,15 +427,7 @@ impl App {
         let entries = self.agents_configure();
         let root = self.agents_root();
         let existing = self.agents.load_threads(&root, 20);
-        let thread = existing.into_iter().next().or_else(|| {
-            self.agents
-                .hub
-                .thread_ids()
-                .iter()
-                .rev()
-                .find(|t| self.agents.hub.meta(t).is_some_and(|m| m.root == root))
-                .cloned()
-        });
+        let thread = existing.into_iter().next().or_else(|| self.agents.hub.thread_ids().iter().rev().find(|t| self.agents.hub.meta(t).is_some_and(|m| m.root == root)).cloned());
         let thread = match thread {
             Some(t) => t,
             None => {
@@ -625,10 +444,7 @@ impl App {
 
     pub(super) fn agents_none_found(&mut self, entries: &[CatalogEntry]) {
         let names: Vec<&str> = entries.iter().map(|e| e.spec.program.as_str()).collect();
-        self.set_error(format!(
-            "no agent found: install one ({}), or name yours in agents.servers",
-            names.join(", ")
-        ));
+        self.set_error(format!("no agent found: install one ({}), or name yours in agents.servers", names.join(", ")));
     }
 
     /// `SPC a n`: a new thread with the default agent (`agents.default`,
@@ -656,72 +472,30 @@ impl App {
             if !e.found {
                 continue;
             }
-            let mark = if Some(&e.spec.id) == default.as_ref() {
-                " (default)"
-            } else {
-                ""
-            };
-            candidates.push(fenix_picker::Candidate::new(
-                format!(
-                    "New thread with {}{mark}   {} {}",
-                    e.spec.name,
-                    e.spec.program,
-                    e.spec.args.join(" ")
-                ),
-                Pick::NewThread(e.spec.id.clone()),
-            ));
+            let mark = if Some(&e.spec.id) == default.as_ref() { " (default)" } else { "" };
+            candidates.push(fenix_picker::Candidate::new(format!("New thread with {}{mark}   {} {}", e.spec.name, e.spec.program, e.spec.args.join(" ")), Pick::NewThread(e.spec.id.clone())));
         }
         for (conn, c) in self.agents.hub.connections() {
             match &c.state {
                 ConnState::NeedsAuth => {
                     for m in c.info.iter().flat_map(|i| &i.auth_methods) {
-                        candidates.push(fenix_picker::Candidate::new(
-                            format!("Log in to {}: {}", c.agent.name, m.name),
-                            Pick::Login {
-                                conn,
-                                method: m.id.clone(),
-                            },
-                        ));
+                        candidates.push(fenix_picker::Candidate::new(format!("Log in to {}: {}", c.agent.name, m.name), Pick::Login { conn, method: m.id.clone() }));
                     }
                 }
-                ConnState::Dead { reason, .. } => candidates.push(fenix_picker::Candidate::new(
-                    format!("Restart {} (stopped: {reason})", c.agent.name),
-                    Pick::Restart(conn),
-                )),
+                ConnState::Dead { reason, .. } => candidates.push(fenix_picker::Candidate::new(format!("Restart {} (stopped: {reason})", c.agent.name), Pick::Restart(conn))),
                 _ => {}
             }
         }
         for e in entries.iter().filter(|e| !e.found) {
-            candidates.push(fenix_picker::Candidate::new(
-                format!(
-                    "(not found) {}: install {}, or set agents.servers",
-                    e.spec.name, e.spec.program
-                ),
-                Pick::NewThread(e.spec.id.clone()),
-            ));
+            candidates.push(fenix_picker::Candidate::new(format!("(not found) {}: install {}, or set agents.servers", e.spec.name, e.spec.program), Pick::NewThread(e.spec.id.clone())));
         }
-        if !self
-            .config
-            .text_value("agents.registry")
-            .is_some_and(|u| u.trim().is_empty())
-        {
-            candidates.push(fenix_picker::Candidate::new(
-                "Install an agent from the ACP registry…".to_string(),
-                Pick::Registry,
-            ));
+        if !self.config.text_value("agents.registry").is_some_and(|u| u.trim().is_empty()) {
+            candidates.push(fenix_picker::Candidate::new("Install an agent from the ACP registry…".to_string(), Pick::Registry));
         }
-        for e in entries
-            .iter()
-            .filter(|e| e.source == catalog::Source::Registry)
-        {
-            candidates.push(fenix_picker::Candidate::new(
-                format!("Uninstall {} (from the registry)", e.spec.name),
-                Pick::Uninstall(e.spec.id.clone()),
-            ));
+        for e in entries.iter().filter(|e| e.source == catalog::Source::Registry) {
+            candidates.push(fenix_picker::Candidate::new(format!("Uninstall {} (from the registry)", e.spec.name), Pick::Uninstall(e.spec.id.clone())));
         }
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
-            candidates,
-        )));
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
     /// `SPC a t`: the project's threads.
@@ -731,9 +505,7 @@ impl App {
         self.agents.load_threads(&root, 200);
         let mut candidates = Vec::new();
         for id in self.agents.hub.thread_ids().iter().rev() {
-            let Some(view) = self.agents.hub.view(id) else {
-                continue;
-            };
+            let Some(view) = self.agents.hub.view(id) else { continue };
             if view.meta.root != root {
                 continue;
             }
@@ -746,20 +518,8 @@ impl App {
             } else {
                 ""
             };
-            let label = format!(
-                "{}   {}{}",
-                view.thread.display_title(),
-                view.meta.agent,
-                if state.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {state}")
-                }
-            );
-            candidates.push(fenix_picker::Candidate::new(
-                label,
-                Pick::Thread(id.clone()),
-            ));
+            let label = format!("{}   {}{}", view.thread.display_title(), view.meta.agent, if state.is_empty() { String::new() } else { format!(" · {state}") });
+            candidates.push(fenix_picker::Candidate::new(label, Pick::Thread(id.clone())));
         }
         // Waiting threads first.
         candidates.sort_by_key(|c| !c.label.contains("waiting on you"));
@@ -767,19 +527,14 @@ impl App {
             self.set_message("no agent threads in this project yet: SPC a n starts one");
             return;
         }
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
-            candidates,
-        )));
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
     /// `SPC a i`: sessions the agent has for this project that Fenix
     /// doesn't (started in its own CLI): one picked becomes a thread.
     pub(crate) fn agents_import(&mut self) {
         let entries = self.agents_configure();
-        let Some(agent) = self
-            .agents_shown_agent()
-            .or_else(|| self.agents_default(&entries))
-        else {
+        let Some(agent) = self.agents_shown_agent().or_else(|| self.agents_default(&entries)) else {
             self.agents_none_found(&entries);
             return;
         };
@@ -791,9 +546,7 @@ impl App {
 
     /// `SPC a k`: cancels the turn (or takes back a queued prompt).
     pub(crate) fn agents_cancel(&mut self) {
-        let Some(thread) = self.agents.shown(&self.pages) else {
-            return;
-        };
+        let Some(thread) = self.agents.shown(&self.pages) else { return };
         let fx = self.agents.hub.cancel(&thread, Instant::now());
         self.agents_run(fx);
     }
@@ -804,12 +557,7 @@ impl App {
             self.set_message("no agent thread open: SPC a a");
             return;
         };
-        let Some(modes) = self
-            .agents
-            .hub
-            .view(&thread)
-            .and_then(|v| v.thread.modes.clone())
-        else {
+        let Some(modes) = self.agents.hub.view(&thread).and_then(|v| v.thread.modes.clone()) else {
             self.set_message("this agent has no modes");
             return;
         };
@@ -818,20 +566,11 @@ impl App {
             .iter()
             .map(|m| {
                 let current = if m.id == modes.current { " (now)" } else { "" };
-                let description = m
-                    .description
-                    .as_deref()
-                    .map(|d| format!("   {d}"))
-                    .unwrap_or_default();
-                fenix_picker::Candidate::new(
-                    format!("{}{current}{description}", m.name),
-                    Pick::Mode(m.id.clone()),
-                )
+                let description = m.description.as_deref().map(|d| format!("   {d}")).unwrap_or_default();
+                fenix_picker::Candidate::new(format!("{}{current}{description}", m.name), Pick::Mode(m.id.clone()))
             })
             .collect();
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
-            candidates,
-        )));
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
     /// `SPC a M`: the agent's other settings -- its model first.
@@ -840,48 +579,21 @@ impl App {
             self.set_message("no agent thread open: SPC a a");
             return;
         };
-        let options = self
-            .agents
-            .hub
-            .view(&thread)
-            .map(|v| v.thread.config_options.clone())
-            .unwrap_or_default();
+        let options = self.agents.hub.view(&thread).map(|v| v.thread.config_options.clone()).unwrap_or_default();
         let mut candidates = Vec::new();
-        let mut ordered: Vec<_> = options
-            .iter()
-            .filter(|o| o.category.as_deref() != Some("mode"))
-            .collect();
+        let mut ordered: Vec<_> = options.iter().filter(|o| o.category.as_deref() != Some("mode")).collect();
         ordered.sort_by_key(|o| o.category.as_deref() != Some("model"));
         for option in ordered {
             match &option.value {
                 ConfigValue::Select { current, choices } => {
                     for c in choices {
                         let now = if &c.value == current { " (now)" } else { "" };
-                        let group = c
-                            .group
-                            .as_deref()
-                            .map(|g| format!("{g} / "))
-                            .unwrap_or_default();
-                        candidates.push(fenix_picker::Candidate::new(
-                            format!("{}: {group}{}{now}", option.name, c.name),
-                            Pick::Config {
-                                id: option.id.clone(),
-                                value: ConfigValue::Select {
-                                    current: c.value.clone(),
-                                    choices: vec![],
-                                },
-                            },
-                        ));
+                        let group = c.group.as_deref().map(|g| format!("{g} / ")).unwrap_or_default();
+                        candidates.push(fenix_picker::Candidate::new(format!("{}: {group}{}{now}", option.name, c.name), Pick::Config { id: option.id.clone(), value: ConfigValue::Select { current: c.value.clone(), choices: vec![] } }));
                     }
                 }
                 ConfigValue::Boolean(on) => {
-                    candidates.push(fenix_picker::Candidate::new(
-                        format!("{}: turn {}", option.name, if *on { "off" } else { "on" }),
-                        Pick::Config {
-                            id: option.id.clone(),
-                            value: ConfigValue::Boolean(!on),
-                        },
-                    ));
+                    candidates.push(fenix_picker::Candidate::new(format!("{}: turn {}", option.name, if *on { "off" } else { "on" }), Pick::Config { id: option.id.clone(), value: ConfigValue::Boolean(!on) }));
                 }
             }
         }
@@ -889,16 +601,12 @@ impl App {
             self.set_message("this agent has no settings to change");
             return;
         }
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
-            candidates,
-        )));
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
     /// `SPC a R`: starts the shown thread's agent again.
     pub(crate) fn agents_restart(&mut self) {
-        let Some(thread) = self.agents.shown(&self.pages) else {
-            return;
-        };
+        let Some(thread) = self.agents.shown(&self.pages) else { return };
         let Some(conn) = self.agents.hub.connection_of(&thread) else {
             let fx = self.agents.hub.focus(&thread);
             self.agents_run(fx);
@@ -938,11 +646,7 @@ impl App {
         }
         // One view, named, in the code's pane, and not kept with the
         // session: it's a look at what's in memory now.
-        let existing = self
-            .ref_view_names
-            .iter()
-            .find(|(id, name)| name.as_str() == LOG_VIEW && self.buffers.get(**id).is_some())
-            .map(|(id, _)| *id);
+        let existing = self.ref_view_names.iter().find(|(id, name)| name.as_str() == LOG_VIEW && self.buffers.get(**id).is_some()).map(|(id, _)| *id);
         let buffer = match existing {
             Some(id) => {
                 self.replace_buffer_from_disk(id, &text);
@@ -963,14 +667,8 @@ impl App {
     pub(super) fn agents_picked(&mut self, pick: Pick) {
         match pick {
             Pick::NewThread(agent) => {
-                if !self
-                    .agents_catalog()
-                    .iter()
-                    .any(|e| e.spec.id == agent && e.found)
-                {
-                    self.set_error(format!(
-                        "{agent} isn't installed: install it, or set agents.servers"
-                    ));
+                if !self.agents_catalog().iter().any(|e| e.spec.id == agent && e.found) {
+                    self.set_error(format!("{agent} isn't installed: install it, or set agents.servers"));
                     return;
                 }
                 let id = self.agents.hub.new_thread(&agent, &self.agents_root());
@@ -993,11 +691,7 @@ impl App {
                 let fx = self.agents.hub.authenticate(conn, &method);
                 self.agents_run(fx);
             }
-            Pick::Import {
-                agent,
-                root,
-                session,
-            } => {
+            Pick::Import { agent, root, session } => {
                 let id = self.agents.hub.import(&agent, &root, &session);
                 self.agents_show(id);
             }
@@ -1054,8 +748,7 @@ impl App {
                 page
             }
             None => {
-                let page =
-                    self.add_page(PageModel::Agent(Box::new(AgentPage::new(thread.clone()))));
+                let page = self.add_page(PageModel::Agent(Box::new(AgentPage::new(thread.clone()))));
                 self.agents.page = Some(page);
                 page
             }
@@ -1085,25 +778,14 @@ impl App {
     /// A key for the panel's page.
     pub(super) fn agents_page_key(&mut self, id: BufferId, key: crate::page::Key) {
         let action = {
-            let Some(PageModel::Agent(page)) = self.pages.get_mut(&id).map(|s| &mut s.model) else {
-                return;
-            };
-            let Some(view) = self.agents.hub.view(&page.thread) else {
-                return;
-            };
+            let Some(PageModel::Agent(page)) = self.pages.get_mut(&id).map(|s| &mut s.model) else { return };
+            let Some(view) = self.agents.hub.view(&page.thread) else { return };
             page.key(view.thread, key)
         };
-        let Some(thread) = self.agents.shown(&self.pages) else {
-            return;
-        };
+        let Some(thread) = self.agents.shown(&self.pages) else { return };
         // A thread put back from the last session attaches once it's
         // looked at.
-        if self
-            .agents
-            .hub
-            .view(&thread)
-            .is_some_and(|v| matches!(v.link, Link::Detached))
-        {
+        if self.agents.hub.view(&thread).is_some_and(|v| matches!(v.link, Link::Detached)) {
             self.agents_configure();
             let fx = self.agents.hub.focus(&thread);
             self.agents_run(fx);
@@ -1114,14 +796,10 @@ impl App {
             agent_page::Action::Close => self.agents_close_panel(),
             agent_page::Action::Compose => self.agents_focus_composer(),
             agent_page::Action::Cancel => self.agents_cancel(),
-            agent_page::Action::Permission { key, option } => {
-                self.agents_answer(&thread, &key, Some(&option))
-            }
+            agent_page::Action::Permission { key, option } => self.agents_answer(&thread, &key, Some(&option)),
             agent_page::Action::Elicit { key, how } => self.agents_elicit(&thread, &key, how),
             agent_page::Action::OtherStep(forward) => self.pipeline_other_step(&thread, forward),
-            agent_page::Action::Open { path, line } => {
-                self.agents_open_location(&thread, &path, line)
-            }
+            agent_page::Action::Open { path, line } => self.agents_open_location(&thread, &path, line),
             agent_page::Action::Yank(text) => {
                 if let Some(clipboard) = &mut self.clipboard {
                     let _ = clipboard.set_text(text.clone());
@@ -1149,31 +827,18 @@ impl App {
 
     /// Opens a file the agent named, in the pane beside the panel.
     fn agents_open_location(&mut self, thread: &ThreadId, path: &str, line: Option<u32>) {
-        let root = self
-            .agents
-            .hub
-            .meta(thread)
-            .map(|m| m.root.clone())
-            .unwrap_or_else(|| self.agents_root());
+        let root = self.agents.hub.meta(thread).map(|m| m.root.clone()).unwrap_or_else(|| self.agents_root());
         let path = root.join(path);
         self.agents_focus_code();
         self.open_file_from_picker(&path);
         if let Some(line) = line {
-            self.jump_to_grep_match(&fenix_project::GrepMatch {
-                path,
-                line: line.max(1) as usize,
-                col: 1,
-                text: String::new(),
-            });
+            self.jump_to_grep_match(&fenix_project::GrepMatch { path, line: line.max(1) as usize, col: 1, text: String::new() });
         }
     }
 
     pub(super) fn agents_close_panel(&mut self) {
         let shown = self.agents.shown(&self.pages);
-        for buffer in [self.agents.composer, self.agents.page]
-            .into_iter()
-            .flatten()
-        {
+        for buffer in [self.agents.composer, self.agents.page].into_iter().flatten() {
             for pane in self.agents_panes_showing(buffer) {
                 self.agents_close_pane(pane);
             }
@@ -1197,9 +862,7 @@ impl App {
     /// back to the thread. Everything else is Vim's.
     pub(super) fn agents_composer_key(&mut self, keypress: KeyPress) -> bool {
         let id = self.focused_buffer_id();
-        if Some(id) != self.agents.composer
-            || self.buffers.get(id).map(|b| b.kind) != Some(BufferKind::Prompt)
-        {
+        if Some(id) != self.agents.composer || self.buffers.get(id).map(|b| b.kind) != Some(BufferKind::Prompt) {
             return false;
         }
         if self.leader_matcher.is_pending() || self.local_matcher.is_some() {
@@ -1221,18 +884,12 @@ impl App {
 
     /// Sends the prompt buffer's text to the shown thread, and clears it.
     pub(crate) fn agents_send(&mut self) {
-        let Some(composer) = self.agents.composer else {
-            return;
-        };
+        let Some(composer) = self.agents.composer else { return };
         let Some(thread) = self.agents.shown(&self.pages) else {
             self.set_message("no agent thread open: SPC a a");
             return;
         };
-        let text = self
-            .buffers
-            .get(composer)
-            .map(|b| b.buffer.text())
-            .unwrap_or_default();
+        let text = self.buffers.get(composer).map(|b| b.buffer.text()).unwrap_or_default();
         if text.trim().is_empty() {
             return;
         }
@@ -1246,44 +903,20 @@ impl App {
         self.agents.sent.push(said);
         self.agents.recalled = None;
         let blocks = self.agents_prompt_blocks(&thread, text.trim_end());
-        let root = self
-            .agents
-            .hub
-            .meta(&thread)
-            .map(|m| m.root.clone())
-            .unwrap_or_else(|| self.agents_root());
+        let root = self.agents.hub.meta(&thread).map(|m| m.root.clone()).unwrap_or_else(|| self.agents_root());
         let dirty = self.agents_dirty_buffers(&root);
-        let policy = self
-            .config
-            .text_value("agents.save_before_prompt")
-            .unwrap_or("ask")
-            .to_string();
+        let policy = self.config.text_value("agents.save_before_prompt").unwrap_or("ask").to_string();
         if !dirty.is_empty() && policy != "never" {
             if policy == "always" {
                 self.agents_save_project_buffers();
             } else {
                 self.agents.held = Some((thread, blocks));
-                let names: Vec<String> = dirty
-                    .iter()
-                    .map(|id| self.buffer_display_name(*id))
-                    .collect();
+                let names: Vec<String> = dirty.iter().map(|id| self.buffer_display_name(*id)).collect();
                 let candidates = vec![
-                    fenix_picker::Candidate::new(
-                        format!(
-                            "Save {} first, then send (the agent reads files from disk)",
-                            names.join(", ")
-                        ),
-                        Pick::Send { save: true },
-                    ),
-                    fenix_picker::Candidate::new(
-                        "Send without saving: the agent's own tools won't see those edits"
-                            .to_string(),
-                        Pick::Send { save: false },
-                    ),
+                    fenix_picker::Candidate::new(format!("Save {} first, then send (the agent reads files from disk)", names.join(", ")), Pick::Send { save: true }),
+                    fenix_picker::Candidate::new("Send without saving: the agent's own tools won't see those edits".to_string(), Pick::Send { save: false }),
                 ];
-                self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
-                    candidates,
-                )));
+                self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
                 return;
             }
         }
@@ -1294,15 +927,8 @@ impl App {
         if self.vim.mode() == Mode::Insert {
             let pane = self.focused_pane_id();
             let id = self.focused_buffer_id();
-            if let (Some(ob), Some(state)) = (
-                self.buffers.get_mut(id),
-                self.workspaces.active_pane_states_mut().get_mut(&pane),
-            ) {
-                self.vim.handle_key(
-                    &mut ob.buffer,
-                    &mut state.cursor,
-                    KeyPress::named(FenixNamedKey::Escape),
-                );
+            if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+                self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::named(FenixNamedKey::Escape));
             }
         }
         if let Some(page) = self.agents.page {
@@ -1320,13 +946,7 @@ impl App {
         self.buffers
             .ids_sorted_by_path()
             .into_iter()
-            .filter(|id| {
-                self.buffers.get(*id).is_some_and(|b| {
-                    b.kind.tracks_unsaved_changes()
-                        && b.buffer.is_dirty()
-                        && b.buffer.path().is_some_and(|p| p.starts_with(root))
-                })
-            })
+            .filter(|id| self.buffers.get(*id).is_some_and(|b| b.kind.tracks_unsaved_changes() && b.buffer.is_dirty() && b.buffer.path().is_some_and(|p| p.starts_with(root))))
             .collect()
     }
 
@@ -1339,9 +959,7 @@ impl App {
 
     /// Saves one buffer, as `:w` would, without it being focused.
     fn agents_save_buffer(&mut self, id: BufferId) -> bool {
-        let Some(ob) = self.buffers.get_mut(id) else {
-            return false;
-        };
+        let Some(ob) = self.buffers.get_mut(id) else { return false };
         match ob.buffer.save() {
             Ok(()) => {
                 self.note_disk_state(id);
@@ -1361,10 +979,7 @@ impl App {
     // Carrying out the hub's effects
 
     pub(super) fn apply_acp_event(&mut self, conn: ConnId, generation: u32, event: AcpEvent) {
-        let fx = self
-            .agents
-            .hub
-            .on_event(conn, generation, event, Instant::now());
+        let fx = self.agents.hub.on_event(conn, generation, event, Instant::now());
         self.agents_run(fx);
     }
 
@@ -1383,70 +998,35 @@ impl App {
         let mut changed = false;
         while let Some(effect) = queue.pop_front() {
             match effect {
-                Effect::Spawn {
-                    conn,
-                    generation,
-                    agent,
-                    root,
-                } => {
-                    let launch = Launch {
-                        program: agent.program.clone(),
-                        args: agent.args.clone(),
-                        env: agent.env.clone(),
-                        cwd: root,
+                Effect::Spawn { conn, generation, agent, root } => {
+                    let launch = Launch { program: agent.program.clone(), args: agent.args.clone(), env: agent.env.clone(), cwd: root };
+                    let send: Box<dyn FnMut(AcpEvent) -> bool + Send> = match self.event_proxy.clone() {
+                        Some(proxy) => Box::new(move |event| proxy.send_event(FenixUserEvent::Acp { conn, generation, event }).is_ok()),
+                        None => {
+                            let inbox = self.agents.inbox.clone();
+                            Box::new(move |event| {
+                                inbox.lock().unwrap().push_back((conn, generation, event));
+                                true
+                            })
+                        }
                     };
-                    let send: Box<dyn FnMut(AcpEvent) -> bool + Send> =
-                        match self.event_proxy.clone() {
-                            Some(proxy) => Box::new(move |event| {
-                                proxy
-                                    .send_event(FenixUserEvent::Acp {
-                                        conn,
-                                        generation,
-                                        event,
-                                    })
-                                    .is_ok()
-                            }),
-                            None => {
-                                let inbox = self.agents.inbox.clone();
-                                Box::new(move |event| {
-                                    inbox.lock().unwrap().push_back((conn, generation, event));
-                                    true
-                                })
-                            }
-                        };
                     let result = AcpClient::start(&launch, send).map(|client| {
-                        self.agents
-                            .logs
-                            .insert(conn, (agent.name.clone(), client.log()));
+                        self.agents.logs.insert(conn, (agent.name.clone(), client.log()));
                         self.agents.clients.insert(conn, client);
                     });
-                    queue.extend(self.agents.hub.on_spawned(
-                        conn,
-                        generation,
-                        result.map_err(|e| e.to_string()),
-                        Instant::now(),
-                    ));
+                    queue.extend(self.agents.hub.on_spawned(conn, generation, result.map_err(|e| e.to_string()), Instant::now()));
                 }
                 Effect::Stop { conn } => {
                     if let Some(client) = self.agents.clients.remove(&conn) {
                         client.note("stopped by Fenix");
                     }
                 }
-                Effect::Request {
-                    conn,
-                    id,
-                    method,
-                    params,
-                } => {
+                Effect::Request { conn, id, method, params } => {
                     if let Some(c) = self.agents.clients.get(&conn) {
                         let _ = c.request(id, method, params);
                     }
                 }
-                Effect::Notify {
-                    conn,
-                    method,
-                    params,
-                } => {
+                Effect::Notify { conn, method, params } => {
                     if let Some(c) = self.agents.clients.get(&conn) {
                         let _ = c.notify(method, params);
                     }
@@ -1456,12 +1036,7 @@ impl App {
                         let _ = c.respond(id, result);
                     }
                 }
-                Effect::Serve {
-                    conn,
-                    id,
-                    thread,
-                    request,
-                } => {
+                Effect::Serve { conn, id, thread, request } => {
                     if let Some(result) = self.agents_serve(conn, &thread, id.clone(), request) {
                         queue.extend(self.agents.hub.on_served(conn, &thread, id, result));
                     }
@@ -1471,49 +1046,22 @@ impl App {
                     self.agents.guards.retain(|g| g.thread != thread);
                     self.agents_kill_terminals(&thread);
                 }
-                Effect::TerminalLogin { conn, args, .. } => {
-                    self.agents_start_terminal_login(conn, &args)
-                }
-                Effect::Listed {
-                    agent,
-                    root,
-                    sessions,
-                } => {
+                Effect::TerminalLogin { conn, args, .. } => self.agents_start_terminal_login(conn, &args),
+                Effect::Listed { agent, root, sessions } => {
                     if std::mem::take(&mut self.agents.listing) {
-                        let known: HashSet<String> = self
-                            .agents
-                            .hub
-                            .thread_ids()
-                            .iter()
-                            .filter_map(|t| {
-                                self.agents.hub.meta(t).and_then(|m| m.session_id.clone())
-                            })
-                            .collect();
+                        let known: HashSet<String> = self.agents.hub.thread_ids().iter().filter_map(|t| self.agents.hub.meta(t).and_then(|m| m.session_id.clone())).collect();
                         let candidates: Vec<_> = sessions
                             .into_iter()
                             .filter(|s| !known.contains(&s.session_id))
                             .map(|s| {
-                                let label = format!(
-                                    "{}   {}",
-                                    s.title.clone().unwrap_or_else(|| s.session_id.clone()),
-                                    s.updated_at.clone().unwrap_or_default()
-                                );
-                                fenix_picker::Candidate::new(
-                                    label,
-                                    Pick::Import {
-                                        agent: agent.clone(),
-                                        root: root.clone(),
-                                        session: s,
-                                    },
-                                )
+                                let label = format!("{}   {}", s.title.clone().unwrap_or_else(|| s.session_id.clone()), s.updated_at.clone().unwrap_or_default());
+                                fenix_picker::Candidate::new(label, Pick::Import { agent: agent.clone(), root: root.clone(), session: s })
                             })
                             .collect();
                         if candidates.is_empty() {
                             self.set_message("the agent has no other sessions for this project");
                         } else {
-                            self.enter_picker(ActivePicker::Agents(
-                                fenix_picker::PickerState::new(candidates),
-                            ));
+                            self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
                         }
                     }
                 }
@@ -1526,11 +1074,7 @@ impl App {
                 }
                 Effect::Changed(thread) => {
                     self.agents.dirty.insert(thread.clone());
-                    let turning = self
-                        .agents
-                        .hub
-                        .view(&thread)
-                        .is_some_and(|v| !matches!(v.turn, Turn::Idle));
+                    let turning = self.agents.hub.view(&thread).is_some_and(|v| !matches!(v.turn, Turn::Idle));
                     if turning && !self.agents.turning.contains_key(&thread) {
                         self.agents.turning.insert(thread.clone(), Instant::now());
                         self.agents_turn_started(&thread);
@@ -1579,32 +1123,22 @@ impl App {
 
     fn agents_attention(&mut self, thread: &ThreadId, why: Attention) {
         let shown = self.agents.shown(&self.pages).as_ref() == Some(thread);
-        let title = self
-            .agents
-            .hub
-            .view(thread)
-            .map(|v| v.thread.display_title())
-            .unwrap_or_default();
+        let title = self.agents.hub.view(thread).map(|v| v.thread.display_title()).unwrap_or_default();
         match why {
-            Attention::Permission if !shown => {
-                self.set_message(format!("an agent asks permission in \"{title}\": SPC a t"))
-            }
+            Attention::Permission if !shown => self.set_message(format!("an agent asks permission in \"{title}\": SPC a t")),
             Attention::Login => self.set_message("an agent wants a login: SPC a p"),
             _ => {}
         }
         if self.config.bool_value("agents.notify").unwrap_or(true) && !self.window_focused() {
             if let Some(window) = self.frame_window(self.active_frame) {
-                window
-                    .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+                window.request_user_attention(Some(winit::window::UserAttentionType::Informational));
             }
         }
     }
 
     /// Whether a Fenix window has the keyboard.
     fn window_focused(&self) -> bool {
-        (0..self.frames.len())
-            .filter_map(|f| self.frame_window(f))
-            .any(|w| w.has_focus())
+        (0..self.frames.len()).filter_map(|f| self.frame_window(f)).any(|w| w.has_focus())
     }
 
     // -----------------------------------------------------------------
@@ -1612,9 +1146,7 @@ impl App {
 
     /// Snapshots what the agent is about to change, and watches it.
     fn agents_announced(&mut self, thread: &ThreadId, paths: &[String]) {
-        let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else {
-            return;
-        };
+        let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else { return };
         for p in paths {
             let path = root.join(p);
             if !within(&root, &path) {
@@ -1625,19 +1157,9 @@ impl App {
                 Some(ob) => Some(ob.buffer.text()),
                 None => std::fs::read_to_string(&path).ok(),
             };
-            self.agents
-                .baselines
-                .entry(thread.clone())
-                .or_default()
-                .entry(path.clone())
-                .or_insert(before);
-            self.agents
-                .watched
-                .entry(path.clone())
-                .or_insert_with(|| DiskFingerprint::of(&path));
-            if let Some(id) =
-                open.filter(|id| self.buffers.get(*id).is_some_and(|b| b.buffer.is_dirty()))
-            {
+            self.agents.baselines.entry(thread.clone()).or_default().entry(path.clone()).or_insert(before);
+            self.agents.watched.entry(path.clone()).or_insert_with(|| DiskFingerprint::of(&path));
+            if let Some(id) = open.filter(|id| self.buffers.get(*id).is_some_and(|b| b.buffer.is_dirty())) {
                 let name = self.buffer_display_name(id);
                 if let Some(t) = self.agents.hub.thread_mut(thread) {
                     t.notice(NoticeKind::Warning, format!("The agent is about to change {name}, which has unsaved edits of yours. They stay in the buffer: :w! keeps yours, :e! takes the agent's."));
@@ -1649,49 +1171,22 @@ impl App {
 
     /// Does what the agent asked of Fenix. `None`: answered later (a
     /// question to you first).
-    fn agents_serve(
-        &mut self,
-        conn: ConnId,
-        thread: &ThreadId,
-        id: Value,
-        request: ClientRequest,
-    ) -> Option<Result<Value, RpcError>> {
+    fn agents_serve(&mut self, conn: ConnId, thread: &ThreadId, id: Value, request: ClientRequest) -> Option<Result<Value, RpcError>> {
         let root = self.agents.hub.meta(thread).map(|m| m.root.clone())?;
-        let outside = |path: &Path| {
-            RpcError::new(
-                code::INVALID_PARAMS,
-                format!(
-                    "{} is outside the project ({})",
-                    path.display(),
-                    root.display()
-                ),
-            )
-        };
+        let outside = |path: &Path| RpcError::new(code::INVALID_PARAMS, format!("{} is outside the project ({})", path.display(), root.display()));
         match request {
-            ClientRequest::ReadTextFile {
-                path, line, limit, ..
-            } => {
+            ClientRequest::ReadTextFile { path, line, limit, .. } => {
                 let path = PathBuf::from(path);
                 if !within(&root, &path) {
                     return Some(Err(outside(&path)));
                 }
-                let text = match self
-                    .buffers
-                    .id_for_path(&path)
-                    .and_then(|id| self.buffers.get(id))
-                {
+                let text = match self.buffers.id_for_path(&path).and_then(|id| self.buffers.get(id)) {
                     Some(ob) => Ok(ob.buffer.text()),
-                    None => std::fs::read_to_string(&path).map_err(|e| {
-                        RpcError::new(code::INTERNAL_ERROR, format!("{}: {e}", path.display()))
-                    }),
+                    None => std::fs::read_to_string(&path).map_err(|e| RpcError::new(code::INTERNAL_ERROR, format!("{}: {e}", path.display()))),
                 };
                 Some(text.map(|text| {
                     let start = line.map_or(0, |l| l.saturating_sub(1) as usize);
-                    let lines: Vec<&str> = text
-                        .split_inclusive('\n')
-                        .skip(start)
-                        .take(limit.map_or(usize::MAX, |l| l as usize))
-                        .collect();
+                    let lines: Vec<&str> = text.split_inclusive('\n').skip(start).take(limit.map_or(usize::MAX, |l| l as usize)).collect();
                     json!({ "content": lines.concat() })
                 }))
             }
@@ -1701,9 +1196,7 @@ impl App {
                     return Some(Err(outside(&path)));
                 }
                 let open = self.buffers.id_for_path(&path);
-                if let Some(buffer) =
-                    open.filter(|id| self.buffers.get(*id).is_some_and(|b| b.buffer.is_dirty()))
-                {
+                if let Some(buffer) = open.filter(|id| self.buffers.get(*id).is_some_and(|b| b.buffer.is_dirty())) {
                     // Your unsaved edits: you're asked first.
                     let n = self.agents.next_guard;
                     self.agents.next_guard += 1;
@@ -1711,36 +1204,15 @@ impl App {
                     if let Some(t) = self.agents.hub.thread_mut(thread) {
                         t.push_permission(PermissionCard {
                             key: format!("fenix-guard:{n}"),
-                            tool_call: ToolCallFields {
-                                id: format!("fenix-guard-{n}"),
-                                title: Some(format!(
-                                    "overwrite {name}, which has unsaved edits of yours"
-                                )),
-                                ..Default::default()
-                            },
+                            tool_call: ToolCallFields { id: format!("fenix-guard-{n}"), title: Some(format!("overwrite {name}, which has unsaved edits of yours")), ..Default::default() },
                             options: vec![
-                                PermissionOption {
-                                    id: "allow".into(),
-                                    name: "Overwrite them".into(),
-                                    kind: PermissionKind::AllowOnce,
-                                },
-                                PermissionOption {
-                                    id: "reject".into(),
-                                    name: "Keep mine (the agent is told)".into(),
-                                    kind: PermissionKind::RejectOnce,
-                                },
+                                PermissionOption { id: "allow".into(), name: "Overwrite them".into(), kind: PermissionKind::AllowOnce },
+                                PermissionOption { id: "reject".into(), name: "Keep mine (the agent is told)".into(), kind: PermissionKind::RejectOnce },
                             ],
                             state: PermissionState::Pending,
                         });
                     }
-                    self.agents.guards.push(Guard {
-                        key: format!("fenix-guard:{n}"),
-                        conn,
-                        thread: thread.clone(),
-                        id,
-                        path,
-                        content,
-                    });
+                    self.agents.guards.push(Guard { key: format!("fenix-guard:{n}"), conn, thread: thread.clone(), id, path, content });
                     self.agents_attention(thread, Attention::Permission);
                     let fx = vec![Effect::Changed(thread.clone())];
                     self.agents_run(fx);
@@ -1749,86 +1221,38 @@ impl App {
                 Some(self.agents_write(thread, &path, &content))
             }
             ClientRequest::RequestPermission { .. } => None,
-            ClientRequest::CreateTerminal {
-                command,
-                args,
-                env,
-                cwd,
-                output_byte_limit,
-                ..
-            } => Some(self.agents_terminal_create(
-                thread,
-                command,
-                args,
-                env,
-                cwd,
-                output_byte_limit,
-            )),
+            ClientRequest::CreateTerminal { command, args, env, cwd, output_byte_limit, .. } => Some(self.agents_terminal_create(thread, command, args, env, cwd, output_byte_limit)),
             request => self.agents_terminal_request(conn, thread, id, request),
         }
     }
 
     fn agents_resolve_guard(&mut self, thread: &ThreadId, n: &str, allow: bool) {
         let key = format!("fenix-guard:{n}");
-        let Some(at) = self
-            .agents
-            .guards
-            .iter()
-            .position(|g| &g.thread == thread && g.key == key)
-        else {
-            return;
-        };
+        let Some(at) = self.agents.guards.iter().position(|g| &g.thread == thread && g.key == key) else { return };
         let guard = self.agents.guards.remove(at);
         let (state, result) = if allow {
-            (
-                "Overwrite them".to_string(),
-                self.agents_write(thread, &guard.path, &guard.content),
-            )
+            ("Overwrite them".to_string(), self.agents_write(thread, &guard.path, &guard.content))
         } else {
-            (
-                "Keep mine".to_string(),
-                Err(RpcError::new(
-                    code::INTERNAL_ERROR,
-                    format!(
-                        "{} has unsaved edits the user kept; it wasn't written",
-                        guard.path.display()
-                    ),
-                )),
-            )
+            ("Keep mine".to_string(), Err(RpcError::new(code::INTERNAL_ERROR, format!("{} has unsaved edits the user kept; it wasn't written", guard.path.display()))))
         };
         if let Some(t) = self.agents.hub.thread_mut(thread) {
             t.set_permission_state(&key, PermissionState::Answered(state));
         }
-        let mut fx = self
-            .agents
-            .hub
-            .on_served(guard.conn, thread, guard.id, result);
+        let mut fx = self.agents.hub.on_served(guard.conn, thread, guard.id, result);
         fx.push(Effect::Changed(thread.clone()));
         self.agents_run(fx);
     }
 
     /// Writes an agent's file: into its buffer when it's open (one undo
     /// step), saved unless `agents.write = "buffer"`; else to disk.
-    pub(super) fn agents_write(
-        &mut self,
-        thread: &ThreadId,
-        path: &Path,
-        content: &str,
-    ) -> Result<Value, RpcError> {
-        let failed = |e: std::io::Error| {
-            RpcError::new(code::INTERNAL_ERROR, format!("{}: {e}", path.display()))
-        };
+    pub(super) fn agents_write(&mut self, thread: &ThreadId, path: &Path, content: &str) -> Result<Value, RpcError> {
+        let failed = |e: std::io::Error| RpcError::new(code::INTERNAL_ERROR, format!("{}: {e}", path.display()));
         let open = self.buffers.id_for_path(path);
         let before = match open.and_then(|id| self.buffers.get(id)) {
             Some(ob) => Some(ob.buffer.text()),
             None => std::fs::read_to_string(path).ok(),
         };
-        self.agents
-            .baselines
-            .entry(thread.clone())
-            .or_default()
-            .entry(path.to_path_buf())
-            .or_insert(before);
+        self.agents.baselines.entry(thread.clone()).or_default().entry(path.to_path_buf()).or_insert(before);
         match open {
             Some(id) => {
                 self.replace_buffer_from_disk(id, content);
@@ -1837,10 +1261,7 @@ impl App {
                         ob.buffer.mark_unsaved();
                     }
                 } else if !self.agents_save_buffer(id) {
-                    return Err(RpcError::new(
-                        code::INTERNAL_ERROR,
-                        format!("couldn't save {}", path.display()),
-                    ));
+                    return Err(RpcError::new(code::INTERNAL_ERROR, format!("couldn't save {}", path.display())));
                 }
                 self.refresh_gutter_hunks(id);
             }
@@ -1884,9 +1305,7 @@ impl App {
             self.agents_check_watched();
             self.agents.watched.clear();
         }
-        if !self.agents.dirty.is_empty()
-            && (now.duration_since(self.agents.last_save) >= SAVE_EVERY || !busy)
-        {
+        if !self.agents.dirty.is_empty() && (now.duration_since(self.agents.last_save) >= SAVE_EVERY || !busy) {
             self.agents.last_save = now;
             for id in std::mem::take(&mut self.agents.dirty) {
                 self.agents.save(&id);
@@ -1947,21 +1366,13 @@ impl App {
         match (status.working, status.waiting) {
             (0, 0) if self.agents.to_review > 0 => {
                 let n = self.agents.to_review;
-                format!(
-                    "   ✓ agent changes: {n} file{} to review (SPC a r, ]a)",
-                    if n == 1 { "" } else { "s" }
-                )
+                format!("   ✓ agent changes: {n} file{} to review (SPC a r, ]a)", if n == 1 { "" } else { "s" })
             }
             (0, 0) => String::new(),
             (0, 1) if busy.len() == 1 => format!("   ? {} is waiting on you", name(busy[0])),
             (1, 0) if busy.len() == 1 => {
                 let secs = self.agents.turning[busy[0]].elapsed().as_secs();
-                format!(
-                    "   ● {} working {}:{:02}",
-                    name(busy[0]),
-                    secs / 60,
-                    secs % 60
-                )
+                format!("   ● {} working {}:{:02}", name(busy[0]), secs / 60, secs % 60)
             }
             (w, 0) => format!("   ● agents: {w} working"),
             (0, n) => format!("   ? agents: {n} waiting on you"),
@@ -1989,12 +1400,12 @@ impl App {
 }
 
 mod context;
-mod dock;
 mod elicit;
-mod install;
+mod dock;
 mod review;
 mod terminals;
 pub(crate) mod threads;
+mod install;
 pub(crate) use install::SECRET_PROMPT;
 mod answer;
 mod extensions;

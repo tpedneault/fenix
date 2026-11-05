@@ -21,9 +21,7 @@ pub enum InsertEntry {
 pub enum VimAction {
     /// `&`: the last `:s` again on this line, without its flags. `g&`: on
     /// every line, with them.
-    RepeatSubstitute {
-        whole_buffer: bool,
-    },
+    RepeatSubstitute { whole_buffer: bool },
     Motion(Motion),
     Operator(Operator),
     /// `D`/`C`/`Y`: the operator applied from the cursor to end of line in
@@ -61,38 +59,25 @@ pub enum VimAction {
     /// already use, since the char can't be a fixed trie leaf. `forward`
     /// picks `f`/`F` vs `t`/`T`, `till` picks `t`/`T` (stop just short)
     /// vs `f`/`F` (land on it).
-    FindCharPrompt {
-        forward: bool,
-        till: bool,
-    },
+    FindCharPrompt { forward: bool, till: bool },
     /// `;`/`,`: repeats the last `f`/`F`/`t`/`T`, same direction or
     /// reversed.
-    RepeatFind {
-        reverse: bool,
-    },
+    RepeatFind { reverse: bool },
     /// `/`/`?`: enters the search-query prompt (`Mode::Search`).
-    EnterSearch {
-        forward: bool,
-    },
+    EnterSearch { forward: bool },
     /// `n`/`N`: repeats the last confirmed search, same direction or
     /// reversed.
-    RepeatSearch {
-        reverse: bool,
-    },
+    RepeatSearch { reverse: bool },
     /// `*`/`#`: searches for the exact word under the cursor, forward or
     /// backward, with no prompt (the pattern's already known).
-    SearchWord {
-        forward: bool,
-    },
+    SearchWord { forward: bool },
     /// `m`: waits for exactly one more raw key (the mark's name) --
     /// same "next key is special" shape as `FindCharPrompt`.
     MarkSetPrompt,
     /// `` ` ``/`'`: waits for one more raw key (the mark to jump to).
     /// `linewise` picks which of the two forms: `` ` `` (exact position)
     /// or `'` (first non-blank of the mark's line).
-    MarkJumpPrompt {
-        linewise: bool,
-    },
+    MarkJumpPrompt { linewise: bool },
     /// `zz`/`zt`/`zb`: scroll the window so the cursor's line lands
     /// centered, at the top, or at the bottom -- resolved by the host
     /// (`VimEvent::ScrollWindow`), since only it knows pane geometry.
@@ -100,9 +85,7 @@ pub enum VimAction {
     /// `Ctrl-a`/`Ctrl-x`: increment/decrement the nearest number at or
     /// after the cursor on the current line, by `count` (already signed
     /// -- negative for `Ctrl-x`).
-    IncrementNumber {
-        delta: i64,
-    },
+    IncrementNumber { delta: i64 },
     /// `.`: replay the last change-producing command. Resolved by the
     /// host (`VimEvent::RepeatLastChange`), which owns the raw-keystroke
     /// capture this replays -- see `state.rs`'s `is_idle` doc comment.
@@ -120,10 +103,7 @@ pub enum VimAction {
     /// to go find out. Resolved into `VimEvent::RequestLsp`.
     RequestLsp(crate::state::LspRequestKind),
     /// `]t`/`[t` -- resolved into `VimEvent::BracketJump`.
-    BracketJump {
-        target: crate::state::BracketTarget,
-        forward: bool,
-    },
+    BracketJump { target: crate::state::BracketTarget, forward: bool },
     /// `gt`/`gT`/`g<Tab>`/`gh` -- resolved into `VimEvent::Tab`, the
     /// count folded in there.
     Tab(crate::state::TabMove),
@@ -162,9 +142,7 @@ pub enum VisualAction {
     /// place, so pasting again puts back what was just overwritten. `P`
     /// (`keep_register`) is Vim 9's `v_P`: the register is left alone, for
     /// pasting the same text over one selection after another.
-    Paste {
-        keep_register: bool,
-    },
+    Paste { keep_register: bool },
     /// `r`: waits for one more raw key (the replacement char), then
     /// overwrites every selected character with it -- same "next key is
     /// special" shape as Normal mode's own `r`, just resolved against
@@ -214,473 +192,114 @@ fn add_motions<A>(trie: &mut KeyTrie<A>, wrap: impl Fn(Motion) -> A) {
     trie.insert(&[KeyPress::char('l')], "right", wrap(Motion::Right));
     trie.insert(&[KeyPress::char('j')], "down", wrap(Motion::Down));
     trie.insert(&[KeyPress::char('k')], "up", wrap(Motion::Up));
-    trie.insert(
-        &[KeyPress::char('w')],
-        "word forward",
-        wrap(Motion::WordForward),
-    );
-    trie.insert(
-        &[KeyPress::char('b')],
-        "word backward",
-        wrap(Motion::WordBackward),
-    );
-    trie.insert(
-        &[KeyPress::char('e')],
-        "word end",
-        wrap(Motion::WordEndForward),
-    );
-    trie.insert(
-        &[KeyPress::char('W')],
-        "WORD forward",
-        wrap(Motion::BigWordForward),
-    );
-    trie.insert(
-        &[KeyPress::char('B')],
-        "WORD backward",
-        wrap(Motion::BigWordBackward),
-    );
-    trie.insert(
-        &[KeyPress::char('E')],
-        "WORD end",
-        wrap(Motion::BigWordEndForward),
-    );
-    trie.insert(
-        &[KeyPress::char('0')],
-        "line start",
-        wrap(Motion::LineStart),
-    );
-    trie.insert(
-        &[KeyPress::char('^')],
-        "first non-blank",
-        wrap(Motion::LineFirstNonBlank),
-    );
+    trie.insert(&[KeyPress::char('w')], "word forward", wrap(Motion::WordForward));
+    trie.insert(&[KeyPress::char('b')], "word backward", wrap(Motion::WordBackward));
+    trie.insert(&[KeyPress::char('e')], "word end", wrap(Motion::WordEndForward));
+    trie.insert(&[KeyPress::char('W')], "WORD forward", wrap(Motion::BigWordForward));
+    trie.insert(&[KeyPress::char('B')], "WORD backward", wrap(Motion::BigWordBackward));
+    trie.insert(&[KeyPress::char('E')], "WORD end", wrap(Motion::BigWordEndForward));
+    trie.insert(&[KeyPress::char('0')], "line start", wrap(Motion::LineStart));
+    trie.insert(&[KeyPress::char('^')], "first non-blank", wrap(Motion::LineFirstNonBlank));
     trie.insert(&[KeyPress::char('$')], "line end", wrap(Motion::LineEnd));
-    trie.insert(
-        &[KeyPress::char('g'), KeyPress::char('g')],
-        "buffer top",
-        wrap(Motion::BufferTop),
-    );
-    trie.insert(
-        &[KeyPress::char('G')],
-        "buffer bottom",
-        wrap(Motion::BufferBottom),
-    );
-    trie.insert(
-        &[KeyPress::char('%')],
-        "matching bracket",
-        wrap(Motion::MatchingBracket),
-    );
-    trie.insert(
-        &[KeyPress::char('{')],
-        "paragraph back",
-        wrap(Motion::ParagraphBackward),
-    );
-    trie.insert(
-        &[KeyPress::char('}')],
-        "paragraph forward",
-        wrap(Motion::ParagraphForward),
-    );
+    trie.insert(&[KeyPress::char('g'), KeyPress::char('g')], "buffer top", wrap(Motion::BufferTop));
+    trie.insert(&[KeyPress::char('G')], "buffer bottom", wrap(Motion::BufferBottom));
+    trie.insert(&[KeyPress::char('%')], "matching bracket", wrap(Motion::MatchingBracket));
+    trie.insert(&[KeyPress::char('{')], "paragraph back", wrap(Motion::ParagraphBackward));
+    trie.insert(&[KeyPress::char('}')], "paragraph forward", wrap(Motion::ParagraphForward));
 }
 
 fn build_normal_trie() -> KeyTrie<VimAction> {
     let mut t = KeyTrie::new();
     add_motions(&mut t, VimAction::Motion);
 
-    t.insert(
-        &[Operator::Delete.trigger_key()],
-        "delete...",
-        VimAction::Operator(Operator::Delete),
-    );
-    t.insert(
-        &[Operator::Change.trigger_key()],
-        "change...",
-        VimAction::Operator(Operator::Change),
-    );
-    t.insert(
-        &[Operator::Yank.trigger_key()],
-        "yank...",
-        VimAction::Operator(Operator::Yank),
-    );
+    t.insert(&[Operator::Delete.trigger_key()], "delete...", VimAction::Operator(Operator::Delete));
+    t.insert(&[Operator::Change.trigger_key()], "change...", VimAction::Operator(Operator::Change));
+    t.insert(&[Operator::Yank.trigger_key()], "yank...", VimAction::Operator(Operator::Yank));
 
-    t.insert(
-        &[KeyPress::char('x')],
-        "delete char",
-        VimAction::DeleteCharUnder,
-    );
-    t.insert(
-        &[KeyPress::char('X')],
-        "delete char before",
-        VimAction::DeleteCharBefore,
-    );
+    t.insert(&[KeyPress::char('x')], "delete char", VimAction::DeleteCharUnder);
+    t.insert(&[KeyPress::char('X')], "delete char before", VimAction::DeleteCharBefore);
     t.insert(&[KeyPress::char('p')], "paste after", VimAction::PasteAfter);
-    t.insert(
-        &[KeyPress::char('P')],
-        "paste before",
-        VimAction::PasteBefore,
-    );
+    t.insert(&[KeyPress::char('P')], "paste before", VimAction::PasteBefore);
 
-    t.insert(
-        &[KeyPress::char('i')],
-        "insert",
-        VimAction::EnterInsert(InsertEntry::Before),
-    );
-    t.insert(
-        &[KeyPress::char('a')],
-        "append",
-        VimAction::EnterInsert(InsertEntry::After),
-    );
-    t.insert(
-        &[KeyPress::char('I')],
-        "insert at line start",
-        VimAction::EnterInsert(InsertEntry::LineStart),
-    );
-    t.insert(
-        &[KeyPress::char('A')],
-        "append at line end",
-        VimAction::EnterInsert(InsertEntry::LineEnd),
-    );
-    t.insert(
-        &[KeyPress::char('o')],
-        "open line below",
-        VimAction::EnterInsert(InsertEntry::NewlineBelow),
-    );
-    t.insert(
-        &[KeyPress::char('O')],
-        "open line above",
-        VimAction::EnterInsert(InsertEntry::NewlineAbove),
-    );
+    t.insert(&[KeyPress::char('i')], "insert", VimAction::EnterInsert(InsertEntry::Before));
+    t.insert(&[KeyPress::char('a')], "append", VimAction::EnterInsert(InsertEntry::After));
+    t.insert(&[KeyPress::char('I')], "insert at line start", VimAction::EnterInsert(InsertEntry::LineStart));
+    t.insert(&[KeyPress::char('A')], "append at line end", VimAction::EnterInsert(InsertEntry::LineEnd));
+    t.insert(&[KeyPress::char('o')], "open line below", VimAction::EnterInsert(InsertEntry::NewlineBelow));
+    t.insert(&[KeyPress::char('O')], "open line above", VimAction::EnterInsert(InsertEntry::NewlineAbove));
 
-    t.insert(
-        &[KeyPress::char('v')],
-        "visual",
-        VimAction::EnterVisual(VisualKind::Char),
-    );
-    t.insert(
-        &[KeyPress::char('V')],
-        "visual line",
-        VimAction::EnterVisual(VisualKind::Line),
-    );
-    t.insert(
-        &[KeyPress::char('v').with_ctrl()],
-        "visual block",
-        VimAction::EnterVisual(VisualKind::Block),
-    );
-    t.insert(
-        &[KeyPress::char(':')],
-        "command line",
-        VimAction::EnterCommandLine,
-    );
+    t.insert(&[KeyPress::char('v')], "visual", VimAction::EnterVisual(VisualKind::Char));
+    t.insert(&[KeyPress::char('V')], "visual line", VimAction::EnterVisual(VisualKind::Line));
+    t.insert(&[KeyPress::char('v').with_ctrl()], "visual block", VimAction::EnterVisual(VisualKind::Block));
+    t.insert(&[KeyPress::char(':')], "command line", VimAction::EnterCommandLine);
 
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('v')],
-        "reselect visual",
-        VimAction::ReselectVisual,
-    );
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('c')],
-        "toggle comment...",
-        VimAction::ToggleCommentPrompt,
-    );
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('d')],
-        "go to definition",
-        VimAction::RequestLsp(crate::state::LspRequestKind::GoToDefinition),
-    );
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('r')],
-        "references",
-        VimAction::RequestLsp(crate::state::LspRequestKind::References),
-    );
-    t.insert(
-        &[KeyPress::char('K')],
-        "hover",
-        VimAction::RequestLsp(crate::state::LspRequestKind::Hover),
-    );
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('f')],
-        "file under cursor",
-        VimAction::RequestLsp(crate::state::LspRequestKind::FileUnderCursor),
-    );
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('t')],
-        "next tab",
-        VimAction::Tab(crate::state::TabMove::Next),
-    );
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('T')],
-        "previous tab",
-        VimAction::Tab(crate::state::TabMove::Prev(1)),
-    );
-    t.insert(
-        &[
-            KeyPress::char('g'),
-            KeyPress::named(fenix_keymap::NamedKey::Tab),
-        ],
-        "last tab",
-        VimAction::Tab(crate::state::TabMove::Last),
-    );
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('h')],
-        "Home",
-        VimAction::Tab(crate::state::TabMove::Home),
-    );
+    t.insert(&[KeyPress::char('g'), KeyPress::char('v')], "reselect visual", VimAction::ReselectVisual);
+    t.insert(&[KeyPress::char('g'), KeyPress::char('c')], "toggle comment...", VimAction::ToggleCommentPrompt);
+    t.insert(&[KeyPress::char('g'), KeyPress::char('d')], "go to definition", VimAction::RequestLsp(crate::state::LspRequestKind::GoToDefinition));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "references", VimAction::RequestLsp(crate::state::LspRequestKind::References));
+    t.insert(&[KeyPress::char('K')], "hover", VimAction::RequestLsp(crate::state::LspRequestKind::Hover));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('f')], "file under cursor", VimAction::RequestLsp(crate::state::LspRequestKind::FileUnderCursor));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('t')], "next tab", VimAction::Tab(crate::state::TabMove::Next));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('T')], "previous tab", VimAction::Tab(crate::state::TabMove::Prev(1)));
+    t.insert(&[KeyPress::char('g'), KeyPress::named(fenix_keymap::NamedKey::Tab)], "last tab", VimAction::Tab(crate::state::TabMove::Last));
+    t.insert(&[KeyPress::char('g'), KeyPress::char('h')], "Home", VimAction::Tab(crate::state::TabMove::Home));
     t.label_group(&[KeyPress::char(']')], "next...");
     t.label_group(&[KeyPress::char('[')], "previous...");
-    t.insert(
-        &[KeyPress::char(']'), KeyPress::char('t')],
-        "next TODO",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::Todo,
-            forward: true,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('['), KeyPress::char('t')],
-        "previous TODO",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::Todo,
-            forward: false,
-        },
-    );
-    t.insert(
-        &[KeyPress::char(']'), KeyPress::char('h')],
-        "next changed hunk",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::Hunk,
-            forward: true,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('['), KeyPress::char('h')],
-        "previous changed hunk",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::Hunk,
-            forward: false,
-        },
-    );
-    t.insert(
-        &[KeyPress::char(']'), KeyPress::char('c')],
-        "next change (side by side)",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::Change,
-            forward: true,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('['), KeyPress::char('c')],
-        "previous change (side by side)",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::Change,
-            forward: false,
-        },
-    );
-    t.insert(
-        &[KeyPress::char(']'), KeyPress::char('a')],
-        "next agent change",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::AgentHunk,
-            forward: true,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('['), KeyPress::char('a')],
-        "previous agent change",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::AgentHunk,
-            forward: false,
-        },
-    );
-    t.insert(
-        &[KeyPress::char(']'), KeyPress::char('d')],
-        "next problem",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::Diagnostic,
-            forward: true,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('['), KeyPress::char('d')],
-        "previous problem",
-        VimAction::BracketJump {
-            target: crate::state::BracketTarget::Diagnostic,
-            forward: false,
-        },
-    );
+    t.insert(&[KeyPress::char(']'), KeyPress::char('t')], "next TODO", VimAction::BracketJump { target: crate::state::BracketTarget::Todo, forward: true });
+    t.insert(&[KeyPress::char('['), KeyPress::char('t')], "previous TODO", VimAction::BracketJump { target: crate::state::BracketTarget::Todo, forward: false });
+    t.insert(&[KeyPress::char(']'), KeyPress::char('h')], "next changed hunk", VimAction::BracketJump { target: crate::state::BracketTarget::Hunk, forward: true });
+    t.insert(&[KeyPress::char('['), KeyPress::char('h')], "previous changed hunk", VimAction::BracketJump { target: crate::state::BracketTarget::Hunk, forward: false });
+    t.insert(&[KeyPress::char(']'), KeyPress::char('c')], "next change (side by side)", VimAction::BracketJump { target: crate::state::BracketTarget::Change, forward: true });
+    t.insert(&[KeyPress::char('['), KeyPress::char('c')], "previous change (side by side)", VimAction::BracketJump { target: crate::state::BracketTarget::Change, forward: false });
+    t.insert(&[KeyPress::char(']'), KeyPress::char('a')], "next agent change", VimAction::BracketJump { target: crate::state::BracketTarget::AgentHunk, forward: true });
+    t.insert(&[KeyPress::char('['), KeyPress::char('a')], "previous agent change", VimAction::BracketJump { target: crate::state::BracketTarget::AgentHunk, forward: false });
+    t.insert(&[KeyPress::char(']'), KeyPress::char('d')], "next problem", VimAction::BracketJump { target: crate::state::BracketTarget::Diagnostic, forward: true });
+    t.insert(&[KeyPress::char('['), KeyPress::char('d')], "previous problem", VimAction::BracketJump { target: crate::state::BracketTarget::Diagnostic, forward: false });
 
     t.insert(&[KeyPress::char('u')], "undo", VimAction::Undo);
     t.insert(&[KeyPress::char('r').with_ctrl()], "redo", VimAction::Redo);
 
-    t.insert(
-        &[KeyPress::char('D')],
-        "delete to eol",
-        VimAction::OperatorToLineEnd(Operator::Delete),
-    );
-    t.insert(
-        &[KeyPress::char('C')],
-        "change to eol",
-        VimAction::OperatorToLineEnd(Operator::Change),
-    );
-    t.insert(
-        &[KeyPress::char('Y')],
-        "yank to eol",
-        VimAction::OperatorToLineEnd(Operator::Yank),
-    );
+    t.insert(&[KeyPress::char('D')], "delete to eol", VimAction::OperatorToLineEnd(Operator::Delete));
+    t.insert(&[KeyPress::char('C')], "change to eol", VimAction::OperatorToLineEnd(Operator::Change));
+    t.insert(&[KeyPress::char('Y')], "yank to eol", VimAction::OperatorToLineEnd(Operator::Yank));
     t.insert(&[KeyPress::char('S')], "change line", VimAction::ChangeLine);
-    t.insert(
-        &[KeyPress::char('s')],
-        "substitute char",
-        VimAction::SubstituteChar,
-    );
+    t.insert(&[KeyPress::char('s')], "substitute char", VimAction::SubstituteChar);
     t.insert(&[KeyPress::char('J')], "join lines", VimAction::JoinLines);
     t.insert(&[KeyPress::char('~')], "toggle case", VimAction::ToggleCase);
-    t.insert(
-        &[KeyPress::char('r')],
-        "replace char",
-        VimAction::ReplaceChar,
-    );
+    t.insert(&[KeyPress::char('r')], "replace char", VimAction::ReplaceChar);
 
-    t.insert(
-        &[KeyPress::char('>'), KeyPress::char('>')],
-        "indent line",
-        VimAction::IndentLine,
-    );
-    t.insert(
-        &[KeyPress::char('<'), KeyPress::char('<')],
-        "dedent line",
-        VimAction::DedentLine,
-    );
+    t.insert(&[KeyPress::char('>'), KeyPress::char('>')], "indent line", VimAction::IndentLine);
+    t.insert(&[KeyPress::char('<'), KeyPress::char('<')], "dedent line", VimAction::DedentLine);
 
-    t.insert(
-        &[KeyPress::char('f')],
-        "find char",
-        VimAction::FindCharPrompt {
-            forward: true,
-            till: false,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('F')],
-        "find char back",
-        VimAction::FindCharPrompt {
-            forward: false,
-            till: false,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('t')],
-        "till char",
-        VimAction::FindCharPrompt {
-            forward: true,
-            till: true,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('T')],
-        "till char back",
-        VimAction::FindCharPrompt {
-            forward: false,
-            till: true,
-        },
-    );
-    t.insert(
-        &[KeyPress::char(';')],
-        "repeat find",
-        VimAction::RepeatFind { reverse: false },
-    );
-    t.insert(
-        &[KeyPress::char(',')],
-        "repeat find back",
-        VimAction::RepeatFind { reverse: true },
-    );
+    t.insert(&[KeyPress::char('f')], "find char", VimAction::FindCharPrompt { forward: true, till: false });
+    t.insert(&[KeyPress::char('F')], "find char back", VimAction::FindCharPrompt { forward: false, till: false });
+    t.insert(&[KeyPress::char('t')], "till char", VimAction::FindCharPrompt { forward: true, till: true });
+    t.insert(&[KeyPress::char('T')], "till char back", VimAction::FindCharPrompt { forward: false, till: true });
+    t.insert(&[KeyPress::char(';')], "repeat find", VimAction::RepeatFind { reverse: false });
+    t.insert(&[KeyPress::char(',')], "repeat find back", VimAction::RepeatFind { reverse: true });
 
-    t.insert(
-        &[KeyPress::char('/')],
-        "search",
-        VimAction::EnterSearch { forward: true },
-    );
-    t.insert(
-        &[KeyPress::char('?')],
-        "search back",
-        VimAction::EnterSearch { forward: false },
-    );
-    t.insert(
-        &[KeyPress::char('n')],
-        "repeat search",
-        VimAction::RepeatSearch { reverse: false },
-    );
-    t.insert(
-        &[KeyPress::char('N')],
-        "repeat search back",
-        VimAction::RepeatSearch { reverse: true },
-    );
-    t.insert(
-        &[KeyPress::char('*')],
-        "search word",
-        VimAction::SearchWord { forward: true },
-    );
-    t.insert(
-        &[KeyPress::char('#')],
-        "search word back",
-        VimAction::SearchWord { forward: false },
-    );
+    t.insert(&[KeyPress::char('/')], "search", VimAction::EnterSearch { forward: true });
+    t.insert(&[KeyPress::char('?')], "search back", VimAction::EnterSearch { forward: false });
+    t.insert(&[KeyPress::char('n')], "repeat search", VimAction::RepeatSearch { reverse: false });
+    t.insert(&[KeyPress::char('N')], "repeat search back", VimAction::RepeatSearch { reverse: true });
+    t.insert(&[KeyPress::char('*')], "search word", VimAction::SearchWord { forward: true });
+    t.insert(&[KeyPress::char('#')], "search word back", VimAction::SearchWord { forward: false });
 
     t.insert(&[KeyPress::char('m')], "set mark", VimAction::MarkSetPrompt);
-    t.insert(
-        &[KeyPress::char('`')],
-        "jump to mark",
-        VimAction::MarkJumpPrompt { linewise: false },
-    );
-    t.insert(
-        &[KeyPress::char('\'')],
-        "jump to mark (line)",
-        VimAction::MarkJumpPrompt { linewise: true },
-    );
+    t.insert(&[KeyPress::char('`')], "jump to mark", VimAction::MarkJumpPrompt { linewise: false });
+    t.insert(&[KeyPress::char('\'')], "jump to mark (line)", VimAction::MarkJumpPrompt { linewise: true });
 
     t.label_group(&[KeyPress::char('z')], "scroll...");
-    t.insert(
-        &[KeyPress::char('z'), KeyPress::char('z')],
-        "scroll center",
-        VimAction::ScrollWindow(ScrollTarget::Center),
-    );
-    t.insert(
-        &[KeyPress::char('z'), KeyPress::char('t')],
-        "scroll top",
-        VimAction::ScrollWindow(ScrollTarget::Top),
-    );
-    t.insert(
-        &[KeyPress::char('z'), KeyPress::char('b')],
-        "scroll bottom",
-        VimAction::ScrollWindow(ScrollTarget::Bottom),
-    );
+    t.insert(&[KeyPress::char('z'), KeyPress::char('z')], "scroll center", VimAction::ScrollWindow(ScrollTarget::Center));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('t')], "scroll top", VimAction::ScrollWindow(ScrollTarget::Top));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('b')], "scroll bottom", VimAction::ScrollWindow(ScrollTarget::Bottom));
 
-    t.insert(
-        &[KeyPress::char('a').with_ctrl()],
-        "increment number",
-        VimAction::IncrementNumber { delta: 1 },
-    );
-    t.insert(
-        &[KeyPress::char('x').with_ctrl()],
-        "decrement number",
-        VimAction::IncrementNumber { delta: -1 },
-    );
+    t.insert(&[KeyPress::char('a').with_ctrl()], "increment number", VimAction::IncrementNumber { delta: 1 });
+    t.insert(&[KeyPress::char('x').with_ctrl()], "decrement number", VimAction::IncrementNumber { delta: -1 });
 
-    t.insert(
-        &[KeyPress::char('.')],
-        "repeat last change",
-        VimAction::RepeatLastChange,
-    );
-    t.insert(
-        &[KeyPress::char('&')],
-        "repeat :s on this line",
-        VimAction::RepeatSubstitute {
-            whole_buffer: false,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('g'), KeyPress::char('&')],
-        "repeat :s everywhere",
-        VimAction::RepeatSubstitute { whole_buffer: true },
-    );
+    t.insert(&[KeyPress::char('.')], "repeat last change", VimAction::RepeatLastChange);
+    t.insert(&[KeyPress::char('&')], "repeat :s on this line", VimAction::RepeatSubstitute { whole_buffer: false });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('&')], "repeat :s everywhere", VimAction::RepeatSubstitute { whole_buffer: true });
 
     t
 }
@@ -688,98 +307,26 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
 fn build_visual_trie() -> KeyTrie<VisualAction> {
     let mut t = KeyTrie::new();
     add_motions(&mut t, VisualAction::Motion);
-    t.insert(
-        &[Operator::Delete.trigger_key()],
-        "delete selection",
-        VisualAction::Apply(Operator::Delete),
-    );
-    t.insert(
-        &[Operator::Change.trigger_key()],
-        "change selection",
-        VisualAction::Apply(Operator::Change),
-    );
-    t.insert(
-        &[Operator::Yank.trigger_key()],
-        "yank selection",
-        VisualAction::Apply(Operator::Yank),
-    );
-    t.insert(
-        &[KeyPress::char('v')],
-        "visual (char)",
-        VisualAction::SetKind(VisualKind::Char),
-    );
-    t.insert(
-        &[KeyPress::char('V')],
-        "visual (line)",
-        VisualAction::SetKind(VisualKind::Line),
-    );
-    t.insert(
-        &[KeyPress::char('v').with_ctrl()],
-        "visual (block)",
-        VisualAction::SetKind(VisualKind::Block),
-    );
-    t.insert(
-        &[KeyPress::char('I')],
-        "insert at block left",
-        VisualAction::BlockInsertLeft,
-    );
-    t.insert(
-        &[KeyPress::char('A')],
-        "append at block right",
-        VisualAction::BlockAppend,
-    );
+    t.insert(&[Operator::Delete.trigger_key()], "delete selection", VisualAction::Apply(Operator::Delete));
+    t.insert(&[Operator::Change.trigger_key()], "change selection", VisualAction::Apply(Operator::Change));
+    t.insert(&[Operator::Yank.trigger_key()], "yank selection", VisualAction::Apply(Operator::Yank));
+    t.insert(&[KeyPress::char('v')], "visual (char)", VisualAction::SetKind(VisualKind::Char));
+    t.insert(&[KeyPress::char('V')], "visual (line)", VisualAction::SetKind(VisualKind::Line));
+    t.insert(&[KeyPress::char('v').with_ctrl()], "visual (block)", VisualAction::SetKind(VisualKind::Block));
+    t.insert(&[KeyPress::char('I')], "insert at block left", VisualAction::BlockInsertLeft);
+    t.insert(&[KeyPress::char('A')], "append at block right", VisualAction::BlockAppend);
     t.insert(&[KeyPress::char('o')], "other end", VisualAction::OtherEnd);
     t.insert(&[KeyPress::char('J')], "join lines", VisualAction::Join);
     add_text_objects(&mut t, VisualAction::TextObject);
-    t.insert(
-        &[KeyPress::char('>')],
-        "indent selection",
-        VisualAction::Indent,
-    );
-    t.insert(
-        &[KeyPress::char('<')],
-        "dedent selection",
-        VisualAction::Dedent,
-    );
-    t.insert(
-        &[KeyPress::char('r')],
-        "replace selection",
-        VisualAction::ReplaceChar,
-    );
-    t.insert(
-        &[KeyPress::char('p')],
-        "paste over selection",
-        VisualAction::Paste {
-            keep_register: false,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('P')],
-        "paste over selection, keep register",
-        VisualAction::Paste {
-            keep_register: true,
-        },
-    );
-    t.insert(
-        &[KeyPress::char('S')],
-        "surround selection",
-        VisualAction::Surround,
-    );
-    t.insert(
-        &[KeyPress::char('~')],
-        "toggle case",
-        VisualAction::ChangeCase(CaseChange::Toggle),
-    );
-    t.insert(
-        &[KeyPress::char('u')],
-        "lowercase",
-        VisualAction::ChangeCase(CaseChange::Lower),
-    );
-    t.insert(
-        &[KeyPress::char('U')],
-        "uppercase",
-        VisualAction::ChangeCase(CaseChange::Upper),
-    );
+    t.insert(&[KeyPress::char('>')], "indent selection", VisualAction::Indent);
+    t.insert(&[KeyPress::char('<')], "dedent selection", VisualAction::Dedent);
+    t.insert(&[KeyPress::char('r')], "replace selection", VisualAction::ReplaceChar);
+    t.insert(&[KeyPress::char('p')], "paste over selection", VisualAction::Paste { keep_register: false });
+    t.insert(&[KeyPress::char('P')], "paste over selection, keep register", VisualAction::Paste { keep_register: true });
+    t.insert(&[KeyPress::char('S')], "surround selection", VisualAction::Surround);
+    t.insert(&[KeyPress::char('~')], "toggle case", VisualAction::ChangeCase(CaseChange::Toggle));
+    t.insert(&[KeyPress::char('u')], "lowercase", VisualAction::ChangeCase(CaseChange::Lower));
+    t.insert(&[KeyPress::char('U')], "uppercase", VisualAction::ChangeCase(CaseChange::Upper));
     t
 }
 
@@ -795,13 +342,7 @@ fn build_pending_trie() -> KeyTrie<PendingTarget> {
 fn add_text_objects<A>(t: &mut KeyTrie<A>, wrap: impl Fn(TextObject) -> A) {
     t.label_group(&[KeyPress::char('i')], "inner...");
     t.label_group(&[KeyPress::char('a')], "a...");
-    let mut add = |prefix: char, key: char, label: &'static str, object: TextObject| {
-        t.insert(
-            &[KeyPress::char(prefix), KeyPress::char(key)],
-            label,
-            wrap(object),
-        )
-    };
+    let mut add = |prefix: char, key: char, label: &'static str, object: TextObject| t.insert(&[KeyPress::char(prefix), KeyPress::char(key)], label, wrap(object));
     add('i', 'w', "inner word", TextObject::InnerWord);
     add('a', 'w', "a word", TextObject::AWord);
     for q in ['"', '\'', '`'] {
@@ -809,11 +350,7 @@ fn add_text_objects<A>(t: &mut KeyTrie<A>, wrap: impl Fn(TextObject) -> A) {
         add('a', q, "a quote", TextObject::AQuote(q));
     }
     // Each bracket with its aliases: `b` is `(`, `B` is `{`.
-    let brackets: &[(char, &[char])] = &[
-        ('(', &['(', ')', 'b']),
-        ('{', &['{', '}', 'B']),
-        ('[', &['[', ']']),
-    ];
+    let brackets: &[(char, &[char])] = &[('(', &['(', ')', 'b']), ('{', &['{', '}', 'B']), ('[', &['[', ']'])];
     for &(open, aliases) in brackets {
         for &key in aliases {
             add('i', key, "inner bracket", TextObject::InnerBracket(open));

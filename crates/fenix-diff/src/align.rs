@@ -61,10 +61,7 @@ impl Alignment {
             Side::Old => b.old.clone(),
             Side::New => b.new.clone(),
         };
-        self.blocks
-            .iter()
-            .find(|b| range(b).is_empty() && range(b).start == line)
-            .or_else(|| self.blocks.iter().find(|b| range(b).contains(&line)))
+        self.blocks.iter().find(|b| range(b).is_empty() && range(b).start == line).or_else(|| self.blocks.iter().find(|b| range(b).contains(&line)))
     }
 
     /// The line on the other side that matches `line` on `side` -- the
@@ -77,11 +74,7 @@ impl Alignment {
         }) else {
             // Past the end: the other side's end, as far past it.
             let (mine, theirs) = self.ends();
-            let (mine, theirs) = if side == Side::Old {
-                (mine, theirs)
-            } else {
-                (theirs, mine)
-            };
+            let (mine, theirs) = if side == Side::Old { (mine, theirs) } else { (theirs, mine) };
             return theirs + line.saturating_sub(mine);
         };
         let (from, to) = match side {
@@ -96,76 +89,33 @@ impl Alignment {
 
     /// How many lines each side has.
     fn ends(&self) -> (usize, usize) {
-        self.blocks
-            .last()
-            .map(|b| (b.old.end, b.new.end))
-            .unwrap_or((0, 0))
+        self.blocks.last().map(|b| (b.old.end, b.new.end)).unwrap_or((0, 0))
     }
 }
 
 /// Splits into lines the way an editor counts them, line endings
 /// dropped (so a CRLF file and its LF copy match).
 fn lines(text: &str) -> Vec<&str> {
-    text.split('\n')
-        .map(|l| l.strip_suffix('\r').unwrap_or(l))
-        .collect()
+    text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect()
 }
 
 /// Lines `old` and `new` up.
 pub fn align(old: &str, new: &str) -> Alignment {
     let (a, b) = (lines(old), lines(new));
-    let diff = TextDiff::configure()
-        .algorithm(Algorithm::Patience)
-        .diff_slices(&a, &b);
+    let diff = TextDiff::configure().algorithm(Algorithm::Patience).diff_slices(&a, &b);
     let mut blocks: Vec<Block> = Vec::new();
     for op in diff.ops() {
         let block = match *op {
-            DiffOp::Equal {
-                old_index,
-                new_index,
-                len,
-            } => Block {
-                kind: BlockKind::Equal,
-                old: old_index..old_index + len,
-                new: new_index..new_index + len,
-            },
-            DiffOp::Delete {
-                old_index,
-                old_len,
-                new_index,
-            } => Block {
-                kind: BlockKind::Removed,
-                old: old_index..old_index + old_len,
-                new: new_index..new_index,
-            },
-            DiffOp::Insert {
-                old_index,
-                new_index,
-                new_len,
-            } => Block {
-                kind: BlockKind::Added,
-                old: old_index..old_index,
-                new: new_index..new_index + new_len,
-            },
-            DiffOp::Replace {
-                old_index,
-                old_len,
-                new_index,
-                new_len,
-            } => Block {
-                kind: BlockKind::Changed,
-                old: old_index..old_index + old_len,
-                new: new_index..new_index + new_len,
-            },
+            DiffOp::Equal { old_index, new_index, len } => Block { kind: BlockKind::Equal, old: old_index..old_index + len, new: new_index..new_index + len },
+            DiffOp::Delete { old_index, old_len, new_index } => Block { kind: BlockKind::Removed, old: old_index..old_index + old_len, new: new_index..new_index },
+            DiffOp::Insert { old_index, new_index, new_len } => Block { kind: BlockKind::Added, old: old_index..old_index, new: new_index..new_index + new_len },
+            DiffOp::Replace { old_index, old_len, new_index, new_len } => {
+                Block { kind: BlockKind::Changed, old: old_index..old_index + old_len, new: new_index..new_index + new_len }
+            }
         };
         // A removal straight before an addition is one change.
         match blocks.last_mut() {
-            Some(last)
-                if last.kind != BlockKind::Equal
-                    && block.kind != BlockKind::Equal
-                    && last.old.end == block.old.start
-                    && last.new.end == block.new.start =>
-            {
+            Some(last) if last.kind != BlockKind::Equal && block.kind != BlockKind::Equal && last.old.end == block.old.start && last.new.end == block.new.start => {
                 last.old.end = block.old.end;
                 last.new.end = block.new.end;
                 last.kind = if last.old.is_empty() {
@@ -179,10 +129,7 @@ pub fn align(old: &str, new: &str) -> Alignment {
             _ => blocks.push(block),
         }
     }
-    let mut alignment = Alignment {
-        blocks,
-        ..Default::default()
-    };
+    let mut alignment = Alignment { blocks, ..Default::default() };
     for block in &alignment.blocks {
         let (o, n) = (block.old.len(), block.new.len());
         if o < n {
@@ -199,9 +146,7 @@ pub fn align(old: &str, new: &str) -> Alignment {
 /// marked whole rather than letter by letter.
 pub fn changed_spans(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usize>>) {
     let (a, b) = (tokens(old), tokens(new));
-    let diff = TextDiff::configure()
-        .algorithm(Algorithm::Patience)
-        .diff_slices(&a, &b);
+    let diff = TextDiff::configure().algorithm(Algorithm::Patience).diff_slices(&a, &b);
     let (mut olds, mut news) = (Vec::new(), Vec::new());
     let (mut at_old, mut at_new) = (0, 0);
     for change in diff.iter_all_changes() {
@@ -226,15 +171,7 @@ pub fn changed_spans(old: &str, new: &str) -> (Vec<Range<usize>>, Vec<Range<usiz
 
 /// A line as words, runs of spaces and single punctuation marks.
 fn tokens(line: &str) -> Vec<&str> {
-    let class = |c: char| {
-        if c.is_alphanumeric() || c == '_' {
-            0
-        } else if c.is_whitespace() {
-            1
-        } else {
-            2
-        }
-    };
+    let class = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
     let mut out = Vec::new();
     let mut start = 0;
     let mut prev: Option<u8> = None;
@@ -264,10 +201,7 @@ mod tests {
     use super::*;
 
     fn kinds(a: &Alignment) -> Vec<(BlockKind, Range<usize>, Range<usize>)> {
-        a.blocks
-            .iter()
-            .map(|b| (b.kind, b.old.clone(), b.new.clone()))
-            .collect()
+        a.blocks.iter().map(|b| (b.kind, b.old.clone(), b.new.clone())).collect()
     }
 
     #[test]
@@ -282,17 +216,9 @@ mod tests {
     fn an_added_block_pads_the_old_side() {
         let a = align("a\nb\nc\n", "a\nb\nX\nY\nZ\nc\n");
         assert_eq!(kinds(&a)[1], (BlockKind::Added, 2..2, 2..5));
-        assert_eq!(
-            a.old_fillers,
-            vec![(2, 3)],
-            "three blank rows before old line 2 (c)"
-        );
+        assert_eq!(a.old_fillers, vec![(2, 3)], "three blank rows before old line 2 (c)");
         assert!(a.new_fillers.is_empty());
-        assert_eq!(
-            a.counterpart(Side::New, 3),
-            2,
-            "an added line maps to the line its block sits before"
-        );
+        assert_eq!(a.counterpart(Side::New, 3), 2, "an added line maps to the line its block sits before");
         assert_eq!(a.counterpart(Side::New, 5), 2, "c to c");
     }
 
@@ -302,11 +228,7 @@ mod tests {
         assert_eq!(kinds(&a)[1], (BlockKind::Removed, 1..3, 1..1));
         assert_eq!(a.new_fillers, vec![(1, 2)]);
         assert_eq!(a.counterpart(Side::Old, 3), 1);
-        assert_eq!(
-            a.block_at(Side::New, 1).map(|b| b.kind),
-            Some(BlockKind::Removed),
-            "found from the side it isn't on"
-        );
+        assert_eq!(a.block_at(Side::New, 1).map(|b| b.kind), Some(BlockKind::Removed), "found from the side it isn't on");
     }
 
     #[test]
@@ -314,11 +236,7 @@ mod tests {
         let a = align("a\nold one\nz\n", "a\nnew one\nnew two\nz\n");
         assert_eq!(kinds(&a)[1], (BlockKind::Changed, 1..2, 1..3));
         assert_eq!(a.old_fillers, vec![(2, 1)]);
-        assert_eq!(
-            a.counterpart(Side::New, 2),
-            1,
-            "past the shorter side's end, its last line"
-        );
+        assert_eq!(a.counterpart(Side::New, 2), 1, "past the shorter side's end, its last line");
     }
 
     #[test]
@@ -332,10 +250,7 @@ mod tests {
     #[test]
     fn an_empty_side_is_all_filler() {
         let a = align("", "a\nb\n");
-        assert_eq!(
-            a.old_fillers.iter().map(|f| f.1).sum::<usize>() + 1,
-            lines("a\nb\n").len()
-        );
+        assert_eq!(a.old_fillers.iter().map(|f| f.1).sum::<usize>() + 1, lines("a\nb\n").len());
     }
 
     #[test]
@@ -347,18 +262,8 @@ mod tests {
     #[test]
     fn changed_spans_mark_whole_words() {
         let (old, new) = changed_spans("let hdr = parse(buf);", "let hdr = parse_header(buf)?;");
-        let pick =
-            |s: &str, r: &Range<usize>| s.chars().skip(r.start).take(r.len()).collect::<String>();
-        assert_eq!(
-            old.iter()
-                .map(|r| pick("let hdr = parse(buf);", r))
-                .collect::<Vec<_>>(),
-            vec!["parse"]
-        );
-        assert!(
-            new.iter()
-                .any(|r| pick("let hdr = parse_header(buf)?;", r) == "parse_header"),
-            "{new:?}"
-        );
+        let pick = |s: &str, r: &Range<usize>| s.chars().skip(r.start).take(r.len()).collect::<String>();
+        assert_eq!(old.iter().map(|r| pick("let hdr = parse(buf);", r)).collect::<Vec<_>>(), vec!["parse"]);
+        assert!(new.iter().any(|r| pick("let hdr = parse_header(buf)?;", r) == "parse_header"), "{new:?}");
     }
 }

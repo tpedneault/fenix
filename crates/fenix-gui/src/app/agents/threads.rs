@@ -16,21 +16,11 @@ impl AgentHost {
         if self.hub.view(id).is_some() {
             return true;
         }
-        let Some(store) = &self.store else {
-            return false;
-        };
-        let Ok(saved) = store.load(id) else {
-            return false;
-        };
+        let Some(store) = &self.store else { return false };
+        let Ok(saved) = store.load(id) else { return false };
         self.hub.restore(saved.meta, saved.thread);
         if let Some(baselines) = saved.extra.get("baselines").and_then(Value::as_object) {
-            self.baselines.insert(
-                id.clone(),
-                baselines
-                    .iter()
-                    .map(|(k, v)| (PathBuf::from(k), v.as_str().map(str::to_string)))
-                    .collect(),
-            );
+            self.baselines.insert(id.clone(), baselines.iter().map(|(k, v)| (PathBuf::from(k), v.as_str().map(str::to_string))).collect());
         }
         self.loaded.insert(id.clone());
         true
@@ -41,48 +31,17 @@ impl App {
     /// The panel's page and prompt, for the session.
     pub(in crate::app) fn agents_pages_to_save(&self) -> Vec<SavedPage> {
         let mut pages = Vec::new();
-        let Some(thread) = self.agents.shown(&self.pages) else {
-            return pages;
-        };
+        let Some(thread) = self.agents.shown(&self.pages) else { return pages };
         // A thread with nothing in it has nothing to come back to.
-        if self
-            .agents
-            .hub
-            .view(&thread)
-            .is_none_or(|v| v.thread.entries.is_empty())
-        {
+        if self.agents.hub.view(&thread).is_none_or(|v| v.thread.entries.is_empty()) {
             return pages;
         }
         if let Some(page) = self.agents.page {
-            pages.push(SavedPage {
-                buffer: page,
-                ext: PAGE_EXT.into(),
-                kind: "thread".into(),
-                title: self.page_title(page),
-                state: thread.0.clone(),
-                file: None,
-                given: Vec::new(),
-            });
+            pages.push(SavedPage { buffer: page, ext: PAGE_EXT.into(), kind: "thread".into(), title: self.page_title(page), state: thread.0.clone(), file: None, given: Vec::new() });
         }
-        if let Some(composer) = self
-            .agents
-            .composer
-            .filter(|c| self.buffers.get(*c).is_some())
-        {
-            let text = self
-                .buffers
-                .get(composer)
-                .map(|b| b.buffer.text())
-                .unwrap_or_default();
-            pages.push(SavedPage {
-                buffer: composer,
-                ext: PAGE_EXT.into(),
-                kind: "prompt".into(),
-                title: "prompt".into(),
-                state: text,
-                file: None,
-                given: Vec::new(),
-            });
+        if let Some(composer) = self.agents.composer.filter(|c| self.buffers.get(*c).is_some()) {
+            let text = self.buffers.get(composer).map(|b| b.buffer.text()).unwrap_or_default();
+            pages.push(SavedPage { buffer: composer, ext: PAGE_EXT.into(), kind: "prompt".into(), title: "prompt".into(), state: text, file: None, given: Vec::new() });
         }
         pages
     }
@@ -124,45 +83,25 @@ impl App {
             self.set_message("no agent thread open: SPC a a");
             return;
         };
-        let current = self
-            .agents
-            .hub
-            .meta(&thread)
-            .map(|m| m.agent.clone())
-            .unwrap_or_default();
+        let current = self.agents.hub.meta(&thread).map(|m| m.agent.clone()).unwrap_or_default();
         let entries = self.agents_configure();
         let candidates: Vec<_> = entries
             .iter()
             .filter(|e| e.found && e.spec.id != current)
-            .map(|e| {
-                fenix_picker::Candidate::new(
-                    format!("Continue with {}", e.spec.name),
-                    Pick::HandOff(e.spec.id.clone()),
-                )
-            })
+            .map(|e| fenix_picker::Candidate::new(format!("Continue with {}", e.spec.name), Pick::HandOff(e.spec.id.clone())))
             .collect();
         if candidates.is_empty() {
             self.set_message("no other agent found to hand this thread to");
             return;
         }
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
-            candidates,
-        )));
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
     pub(super) fn agents_hand_off(&mut self, agent: &str) {
-        let Some(from) = self.agents.shown(&self.pages) else {
-            return;
-        };
+        let Some(from) = self.agents.shown(&self.pages) else { return };
         self.agents_configure();
-        let kib = self
-            .config
-            .int_value("agents.handoff_kib")
-            .unwrap_or(64)
-            .clamp(4, 1024) as usize;
-        let Some(id) = self.agents.hub.hand_off(&from, agent, kib * 1024) else {
-            return;
-        };
+        let kib = self.config.int_value("agents.handoff_kib").unwrap_or(64).clamp(4, 1024) as usize;
+        let Some(id) = self.agents.hub.hand_off(&from, agent, kib * 1024) else { return };
         self.agents_show(id);
         self.set_message("handed off: your next prompt carries the conversation so far");
     }
@@ -170,14 +109,8 @@ impl App {
     /// The shown thread, read-only because its agent couldn't take it
     /// back, continued in a new session of the same agent.
     pub(crate) fn agents_continue_anew(&mut self) {
-        let Some(thread) = self.agents.shown(&self.pages) else {
-            return;
-        };
-        let kib = self
-            .config
-            .int_value("agents.handoff_kib")
-            .unwrap_or(64)
-            .clamp(4, 1024) as usize;
+        let Some(thread) = self.agents.shown(&self.pages) else { return };
+        let kib = self.config.int_value("agents.handoff_kib").unwrap_or(64).clamp(4, 1024) as usize;
         let fx = self.agents.hub.continue_in_new_session(&thread, kib * 1024);
         if fx.is_empty() {
             self.set_message("this thread isn't read-only: just write to it");
@@ -187,25 +120,13 @@ impl App {
 
     /// `agents.delete`: the shown thread, deleted -- asked first.
     pub(crate) fn agents_delete_thread(&mut self) {
-        let Some(thread) = self.agents.shown(&self.pages) else {
-            return;
-        };
-        let title = self
-            .agents
-            .hub
-            .view(&thread)
-            .map(|v| v.thread.display_title())
-            .unwrap_or_default();
+        let Some(thread) = self.agents.shown(&self.pages) else { return };
+        let title = self.agents.hub.view(&thread).map(|v| v.thread.display_title()).unwrap_or_default();
         let candidates = vec![
-            fenix_picker::Candidate::new(
-                format!("Delete \"{title}\" (and its session, when the agent can)"),
-                Pick::Delete(thread),
-            ),
+            fenix_picker::Candidate::new(format!("Delete \"{title}\" (and its session, when the agent can)"), Pick::Delete(thread)),
             fenix_picker::Candidate::new("Keep it".to_string(), Pick::Nothing),
         ];
-        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(
-            candidates,
-        )));
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
     pub(super) fn agents_delete(&mut self, thread: &ThreadId) {
@@ -215,14 +136,7 @@ impl App {
         self.agents.unknown.remove(thread);
         // The panel moves to the project's next thread, or closes.
         let root = self.agents_root();
-        let next = self
-            .agents
-            .hub
-            .thread_ids()
-            .iter()
-            .rev()
-            .find(|t| self.agents.hub.meta(t).is_some_and(|m| m.root == root))
-            .cloned();
+        let next = self.agents.hub.thread_ids().iter().rev().find(|t| self.agents.hub.meta(t).is_some_and(|m| m.root == root)).cloned();
         match next {
             Some(next) => self.agents_show(next),
             None => self.agents_close_panel(),

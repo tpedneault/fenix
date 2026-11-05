@@ -33,11 +33,7 @@ pub fn path_to_uri(path: &Path) -> Option<lsp_types::Uri> {
     // needs one more `/` there than a Unix path already has, so the
     // authority (empty, between the two `file://` slashes) is followed
     // by an absolute path starting with `/`.
-    let slash_path = if slash_path.starts_with('/') {
-        slash_path
-    } else {
-        format!("/{slash_path}")
-    };
+    let slash_path = if slash_path.starts_with('/') { slash_path } else { format!("/{slash_path}") };
 
     let mut encoded = String::from("file://");
     for segment in slash_path.split('/') {
@@ -88,21 +84,7 @@ fn percent_encode_segment(segment: &str) -> String {
     let mut out = String::with_capacity(segment.len());
     for byte in segment.bytes() {
         let unreserved = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~');
-        let sub_delims_etc = matches!(
-            byte,
-            b':' | b'@'
-                | b'!'
-                | b'$'
-                | b'&'
-                | b'\''
-                | b'('
-                | b')'
-                | b'*'
-                | b'+'
-                | b','
-                | b';'
-                | b'='
-        );
+        let sub_delims_etc = matches!(byte, b':' | b'@' | b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=');
         if unreserved || sub_delims_etc {
             out.push(byte as char);
         } else {
@@ -118,9 +100,7 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) =
-                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
-            {
+            if let Ok(byte) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
                 out.push(byte);
                 i += 3;
                 continue;
@@ -153,17 +133,10 @@ mod tests {
         let file = dir.join(format!("fenix-lsp-uri-test-{}.txt", std::process::id()));
         std::fs::write(&file, b"x").unwrap();
         let canonical = std::fs::canonicalize(&file).unwrap();
-        assert!(
-            canonical.to_string_lossy().starts_with(r"\\?\"),
-            "test assumption: canonicalize adds the verbatim prefix"
-        );
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"), "test assumption: canonicalize adds the verbatim prefix");
 
         let uri = path_to_uri(&canonical).unwrap();
-        assert!(
-            !uri.as_str().contains("?"),
-            "URI must not contain the verbatim-prefix marker: {}",
-            uri.as_str()
-        );
+        assert!(!uri.as_str().contains("?"), "URI must not contain the verbatim-prefix marker: {}", uri.as_str());
         assert_eq!(uri_to_path(&uri), Some(normalize(canonical)));
         std::fs::remove_file(&file).ok();
     }
@@ -205,22 +178,10 @@ mod tests {
 
     #[test]
     fn a_space_in_the_path_is_percent_encoded_and_decodes_back_correctly() {
-        let path = if cfg!(windows) {
-            PathBuf::from(r"C:\My Projects\a b.py")
-        } else {
-            PathBuf::from("/home/my user/a b.py")
-        };
+        let path = if cfg!(windows) { PathBuf::from(r"C:\My Projects\a b.py") } else { PathBuf::from("/home/my user/a b.py") };
         let uri = path_to_uri(&path).unwrap();
-        assert!(
-            uri.as_str().contains("%20"),
-            "expected percent-encoded space, got {}",
-            uri.as_str()
-        );
-        assert!(
-            !uri.as_str().contains(' '),
-            "URI must not contain a literal space: {}",
-            uri.as_str()
-        );
+        assert!(uri.as_str().contains("%20"), "expected percent-encoded space, got {}", uri.as_str());
+        assert!(!uri.as_str().contains(' '), "URI must not contain a literal space: {}", uri.as_str());
         assert_eq!(uri_to_path(&uri), Some(path));
     }
 
@@ -228,21 +189,13 @@ mod tests {
     fn a_windows_drive_letters_colon_is_not_percent_encoded() {
         if cfg!(windows) {
             let uri = path_to_uri(Path::new(r"C:\file.py")).unwrap();
-            assert!(
-                uri.as_str().contains("C:"),
-                "drive-letter colon should be preserved raw: {}",
-                uri.as_str()
-            );
+            assert!(uri.as_str().contains("C:"), "drive-letter colon should be preserved raw: {}", uri.as_str());
         }
     }
 
     #[test]
     fn a_non_ascii_character_round_trips_correctly() {
-        let path = if cfg!(windows) {
-            PathBuf::from(r"C:\café\résumé.py")
-        } else {
-            PathBuf::from("/home/café/résumé.py")
-        };
+        let path = if cfg!(windows) { PathBuf::from(r"C:\café\résumé.py") } else { PathBuf::from("/home/café/résumé.py") };
         let uri = path_to_uri(&path).unwrap();
         assert_eq!(uri_to_path(&uri), Some(path));
     }

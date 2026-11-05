@@ -46,10 +46,7 @@ fn role(line: &str) -> Role {
     let said = line.trim_start();
     if !line.starts_with(' ') {
         Role::Title
-    } else if said.starts_with("error")
-        || said.starts_with("stderr")
-        || said.starts_with("-- ") && said.contains("stopped")
-    {
+    } else if said.starts_with("error") || said.starts_with("stderr") || said.starts_with("-- ") && said.contains("stopped") {
         Role::Warn
     } else if said.starts_with("-- ") || said.starts_with("debug") {
         Role::Muted
@@ -62,12 +59,7 @@ pub fn layout(page: &OutputPage, cols: usize) -> Page {
     let (left, width) = frame(cols, 120);
     let mut g = Grid::new();
     g.put(1, left, "Extensions' output", Role::Title);
-    g.put(
-        1,
-        left + 20,
-        "· what the extensions that run code said",
-        Role::Muted,
-    );
+    g.put(1, left + 20, "· what the extensions that run code said", Role::Muted);
     g.rule(2, left..left + width);
     let top = 4;
     for (i, line) in page.text.lines().enumerate() {
@@ -88,12 +80,7 @@ mod tests {
     fn it_shows_the_text_and_moves_through_it() {
         let mut p = OutputPage::new("Hello 1.0.0 (test.hello): running\n  -- ready\n    info  hello, Fenix\n   error  hello.fail: asked to fail\n".into());
         let text = layout(&p, 120).all_text();
-        assert!(
-            text.contains("Extensions' output")
-                && text.contains("hello, Fenix")
-                && text.contains("asked to fail"),
-            "{text}"
-        );
+        assert!(text.contains("Extensions' output") && text.contains("hello, Fenix") && text.contains("asked to fail"), "{text}");
         p.key(Key::Char('G'));
         assert_eq!(p.focus, 3);
         p.key(Key::Char('j'));

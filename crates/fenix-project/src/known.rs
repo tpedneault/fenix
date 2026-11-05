@@ -39,10 +39,7 @@ impl KnownProjects {
     /// shouldn't have to special-case "couldn't read my project
     /// history" as a hard error.
     pub fn load_or_default(path: PathBuf) -> Self {
-        Self::load(path.clone()).unwrap_or_else(|_| Self {
-            path,
-            roots: Vec::new(),
-        })
+        Self::load(path.clone()).unwrap_or_else(|_| Self { path, roots: Vec::new() })
     }
 
     pub fn roots(&self) -> &[PathBuf] {
@@ -91,9 +88,7 @@ const KEY: &str = "known";
 /// Both spellings name the same directory but compare unequal -- which
 /// is how one project came to be listed twice.
 pub fn plain_path(path: PathBuf) -> PathBuf {
-    let Some(text) = path.to_str() else {
-        return path;
-    };
+    let Some(text) = path.to_str() else { return path };
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         PathBuf::from(format!(r"\\{rest}"))
     } else if let Some(rest) = text.strip_prefix(r"\\?\") {
@@ -107,12 +102,7 @@ pub fn plain_path(path: PathBuf) -> PathBuf {
 /// and `recent_dirs.txt` were kept before the state files. For moving
 /// them over.
 pub fn read_path_list(path: &Path) -> io::Result<Vec<PathBuf>> {
-    Ok(std::fs::read_to_string(path)?
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .collect())
+    Ok(std::fs::read_to_string(path)?.lines().map(str::trim).filter(|l| !l.is_empty()).map(PathBuf::from).collect())
 }
 
 #[cfg(test)]
@@ -152,10 +142,7 @@ mod tests {
         known.save().unwrap();
 
         let reloaded = KnownProjects::load(path).unwrap();
-        assert_eq!(
-            reloaded.roots(),
-            &[PathBuf::from("/repo/two"), PathBuf::from("/repo/one")]
-        );
+        assert_eq!(reloaded.roots(), &[PathBuf::from("/repo/two"), PathBuf::from("/repo/one")]);
     }
 
     #[test]
@@ -166,10 +153,7 @@ mod tests {
         known.add(PathBuf::from("/repo/two"));
         known.add(PathBuf::from("/repo/one")); // re-visit -- should move, not duplicate
 
-        assert_eq!(
-            known.roots(),
-            &[PathBuf::from("/repo/one"), PathBuf::from("/repo/two")]
-        );
+        assert_eq!(known.roots(), &[PathBuf::from("/repo/one"), PathBuf::from("/repo/two")]);
     }
 
     #[test]
@@ -195,22 +179,10 @@ mod tests {
 
     #[test]
     fn plain_path_drops_the_verbatim_prefix() {
-        assert_eq!(
-            plain_path(PathBuf::from(r"\\?\C:\Users\me\proj")),
-            PathBuf::from(r"C:\Users\me\proj")
-        );
-        assert_eq!(
-            plain_path(PathBuf::from(r"\\?\UNC\server\share\proj")),
-            PathBuf::from(r"\\server\share\proj")
-        );
-        assert_eq!(
-            plain_path(PathBuf::from(r"C:\Users\me\proj")),
-            PathBuf::from(r"C:\Users\me\proj")
-        );
-        assert_eq!(
-            plain_path(PathBuf::from("/repo/one")),
-            PathBuf::from("/repo/one")
-        );
+        assert_eq!(plain_path(PathBuf::from(r"\\?\C:\Users\me\proj")), PathBuf::from(r"C:\Users\me\proj"));
+        assert_eq!(plain_path(PathBuf::from(r"\\?\UNC\server\share\proj")), PathBuf::from(r"\\server\share\proj"));
+        assert_eq!(plain_path(PathBuf::from(r"C:\Users\me\proj")), PathBuf::from(r"C:\Users\me\proj"));
+        assert_eq!(plain_path(PathBuf::from("/repo/one")), PathBuf::from("/repo/one"));
     }
 
     #[test]
@@ -229,28 +201,17 @@ mod tests {
     fn duplicates_already_saved_collapse_on_load() {
         let dir = TempDir::new("known_duplicates_collapse");
         let path = dir.path().join("projects.json");
-        let saved = vec![
-            PathBuf::from(r"\\?\C:\repo\one"),
-            PathBuf::from(r"C:\repo\two"),
-            PathBuf::from(r"C:\repo\one"),
-        ];
+        let saved = vec![PathBuf::from(r"\\?\C:\repo\one"), PathBuf::from(r"C:\repo\two"), PathBuf::from(r"C:\repo\one")];
         fenix_storage::state::write(&path, KEY, &saved).unwrap();
 
         let known = KnownProjects::load(path).unwrap();
-        assert_eq!(
-            known.roots(),
-            &[PathBuf::from(r"C:\repo\one"), PathBuf::from(r"C:\repo\two")]
-        );
+        assert_eq!(known.roots(), &[PathBuf::from(r"C:\repo\one"), PathBuf::from(r"C:\repo\two")]);
     }
 
     #[test]
     fn save_creates_missing_parent_directories() {
         let dir = TempDir::new("known_creates_parents");
-        let path = dir
-            .path()
-            .join("nested")
-            .join("config")
-            .join("projects.txt");
+        let path = dir.path().join("nested").join("config").join("projects.txt");
         let mut known = KnownProjects::load(path.clone()).unwrap();
         known.add(PathBuf::from("/repo"));
         known.save().unwrap();

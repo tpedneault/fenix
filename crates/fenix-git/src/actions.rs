@@ -7,12 +7,7 @@ fn stage_args(path: &str) -> Vec<String> {
 }
 
 fn unstage_args(path: &str) -> Vec<String> {
-    vec![
-        "restore".to_string(),
-        "--staged".to_string(),
-        "--".to_string(),
-        path.to_string(),
-    ]
+    vec!["restore".to_string(), "--staged".to_string(), "--".to_string(), path.to_string()]
 }
 
 fn discard_tracked_args(path: &str) -> Vec<String> {
@@ -25,12 +20,7 @@ fn discard_tracked_args(path: &str) -> Vec<String> {
 /// `untracked` flag picks between the two rather than one command
 /// covering both.
 fn discard_untracked_args(path: &str) -> Vec<String> {
-    vec![
-        "clean".to_string(),
-        "-f".to_string(),
-        "--".to_string(),
-        path.to_string(),
-    ]
+    vec!["clean".to_string(), "-f".to_string(), "--".to_string(), path.to_string()]
 }
 
 fn commit_args(message: &str) -> Vec<String> {
@@ -38,11 +28,7 @@ fn commit_args(message: &str) -> Vec<String> {
 }
 
 fn delete_branch_args(name: &str, force: bool) -> Vec<String> {
-    vec![
-        "branch".to_string(),
-        if force { "-D" } else { "-d" }.to_string(),
-        name.to_string(),
-    ]
+    vec!["branch".to_string(), if force { "-D" } else { "-d" }.to_string(), name.to_string()]
 }
 
 fn stash_ref(index: usize) -> String {
@@ -64,11 +50,7 @@ pub fn unstage_file(repo: &Path, path: &str) -> Result<String, String> {
 /// `None` when there's no such remote, which is the ordinary state of a
 /// repo that was never cloned from anywhere.
 pub fn remote_url(repo: &Path, remote: &str) -> Option<String> {
-    run_lines(repo, &["remote", "get-url", remote])
-        .into_iter()
-        .next()
-        .map(|u| u.trim().to_string())
-        .filter(|u| !u.is_empty())
+    run_lines(repo, &["remote", "get-url", remote]).into_iter().next().map(|u| u.trim().to_string()).filter(|u| !u.is_empty())
 }
 
 /// Fetches one refspec from `remote` -- what checking out a merge
@@ -80,14 +62,7 @@ pub fn remote_url(repo: &Path, remote: &str) -> Option<String> {
 /// rebased fails as a non-fast-forward, which is exactly the case where
 /// you most want the new version.
 pub fn fetch_refspec(repo: &Path, remote: &str, refspec: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "fetch".to_string(),
-            remote.to_string(),
-            format!("+{refspec}"),
-        ],
-    )
+    run_action(repo, &["fetch".to_string(), remote.to_string(), format!("+{refspec}")])
 }
 
 /// Resolves a whole conflicted file by taking one side wholesale, then
@@ -107,21 +82,9 @@ pub fn checkout_side(repo: &Path, path: &str, side: crate::Resolution) -> Result
     let flag = match side {
         crate::Resolution::Ours => "--ours",
         crate::Resolution::Theirs => "--theirs",
-        crate::Resolution::Both => {
-            return Err(
-                "keeping both sides is a per-conflict choice, not a whole-file one".to_string(),
-            )
-        }
+        crate::Resolution::Both => return Err("keeping both sides is a per-conflict choice, not a whole-file one".to_string()),
     };
-    run_action(
-        repo,
-        &[
-            "checkout".to_string(),
-            flag.to_string(),
-            "--".to_string(),
-            path.to_string(),
-        ],
-    )?;
+    run_action(repo, &["checkout".to_string(), flag.to_string(), "--".to_string(), path.to_string()])?;
     // `checkout --ours` leaves the path still unmerged in the index;
     // without the `add` the file would look resolved on disk while git
     // still refuses to continue the rebase.
@@ -137,16 +100,8 @@ pub fn checkout_side(repo: &Path, path: &str, side: crate::Resolution) -> Result
 /// resolution has been staged, and says so rather than appearing to
 /// succeed when it can't.
 pub fn restore_conflict(repo: &Path, path: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "checkout".to_string(),
-            "--merge".to_string(),
-            "--".to_string(),
-            path.to_string(),
-        ],
-    )
-    .map_err(|e| format!("{e} (a conflict can only be restored before it's staged)"))
+    run_action(repo, &["checkout".to_string(), "--merge".to_string(), "--".to_string(), path.to_string()])
+        .map_err(|e| format!("{e} (a conflict can only be restored before it's staged)"))
 }
 
 pub fn stage_all(repo: &Path) -> Result<String, String> {
@@ -154,22 +109,11 @@ pub fn stage_all(repo: &Path) -> Result<String, String> {
 }
 
 pub fn unstage_all(repo: &Path) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "restore".to_string(),
-            "--staged".to_string(),
-            ".".to_string(),
-        ],
-    )
+    run_action(repo, &["restore".to_string(), "--staged".to_string(), ".".to_string()])
 }
 
 pub fn discard_file(repo: &Path, path: &str, untracked: bool) -> Result<String, String> {
-    let args = if untracked {
-        discard_untracked_args(path)
-    } else {
-        discard_tracked_args(path)
-    };
+    let args = if untracked { discard_untracked_args(path) } else { discard_tracked_args(path) };
     run_action(repo, &args)
 }
 
@@ -185,15 +129,7 @@ pub fn discard_file(repo: &Path, path: &str, untracked: bool) -> Result<String, 
 /// conditions and is the more useful thing to surface if it does.
 pub fn discard_dir(repo: &Path, path: &str) -> Result<String, String> {
     let _ = run_action(repo, &discard_tracked_args(path));
-    run_action(
-        repo,
-        &[
-            "clean".to_string(),
-            "-fd".to_string(),
-            "--".to_string(),
-            path.to_string(),
-        ],
-    )
+    run_action(repo, &["clean".to_string(), "-fd".to_string(), "--".to_string(), path.to_string()])
 }
 
 pub fn commit(repo: &Path, message: &str) -> Result<String, String> {
@@ -221,14 +157,7 @@ pub fn pull(repo: &Path) -> Result<String, String> {
 /// Touches the network, so callers run it off the input thread -- it's
 /// the one operation in this crate that can take seconds.
 pub fn fetch(repo: &Path) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "fetch".to_string(),
-            "--all".to_string(),
-            "--prune".to_string(),
-        ],
-    )
+    run_action(repo, &["fetch".to_string(), "--all".to_string(), "--prune".to_string()])
 }
 
 /// How long ago this repo last fetched, in seconds -- the mtime of
@@ -242,14 +171,8 @@ pub fn fetch(repo: &Path) -> Result<String, String> {
 /// future. Purely informational: it answers "is what I'm looking at
 /// current?", and answering "unknown" is fine.
 pub fn seconds_since_fetch(repo: &Path) -> Option<u64> {
-    let modified = std::fs::metadata(repo.join(".git").join("FETCH_HEAD"))
-        .ok()?
-        .modified()
-        .ok()?;
-    std::time::SystemTime::now()
-        .duration_since(modified)
-        .ok()
-        .map(|d| d.as_secs())
+    let modified = std::fs::metadata(repo.join(".git").join("FETCH_HEAD")).ok()?.modified().ok()?;
+    std::time::SystemTime::now().duration_since(modified).ok().map(|d| d.as_secs())
 }
 
 pub fn checkout_branch(repo: &Path, name: &str) -> Result<String, String> {
@@ -257,10 +180,7 @@ pub fn checkout_branch(repo: &Path, name: &str) -> Result<String, String> {
 }
 
 pub fn create_branch(repo: &Path, name: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &["checkout".to_string(), "-b".to_string(), name.to_string()],
-    )
+    run_action(repo, &["checkout".to_string(), "-b".to_string(), name.to_string()])
 }
 
 /// `force` (`-D`) is for the caller's confirmation prompt to gate on --
@@ -320,14 +240,7 @@ pub fn rebase_skip(repo: &Path) -> Result<String, String> {
 /// git_command` -- but being explicit here means the intent survives
 /// even if that ever changes).
 pub fn merge(repo: &Path, branch: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "merge".to_string(),
-            "--no-edit".to_string(),
-            branch.to_string(),
-        ],
-    )
+    run_action(repo, &["merge".to_string(), "--no-edit".to_string(), branch.to_string()])
 }
 
 pub fn merge_abort(repo: &Path) -> Result<String, String> {
@@ -347,24 +260,13 @@ pub fn pull_rebase(repo: &Path) -> Result<String, String> {
 /// can't silently discard someone else's commits. A bare force can, and
 /// this crate deliberately offers no way to do that.
 pub fn push_force_with_lease(repo: &Path) -> Result<String, String> {
-    run_action(
-        repo,
-        &["push".to_string(), "--force-with-lease".to_string()],
-    )
+    run_action(repo, &["push".to_string(), "--force-with-lease".to_string()])
 }
 
 /// Pushes a branch that has no upstream yet, setting one -- what a
 /// freshly created local branch needs before a plain `push` will work.
 pub fn push_set_upstream(repo: &Path, remote: &str, branch: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "push".to_string(),
-            "-u".to_string(),
-            remote.to_string(),
-            branch.to_string(),
-        ],
-    )
+    run_action(repo, &["push".to_string(), "-u".to_string(), remote.to_string(), branch.to_string()])
 }
 
 /// Rewrites the last commit. `message` `None` keeps the existing one
@@ -384,14 +286,7 @@ pub fn amend_commit(repo: &Path, message: Option<&str>) -> Result<String, String
 /// Creates a commit undoing `hash`. Like `rebase`, a conflict leaves the
 /// revert in progress rather than failing outright.
 pub fn revert(repo: &Path, hash: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "revert".to_string(),
-            "--no-edit".to_string(),
-            hash.to_string(),
-        ],
-    )
+    run_action(repo, &["revert".to_string(), "--no-edit".to_string(), hash.to_string()])
 }
 
 pub fn cherry_pick(repo: &Path, hash: &str) -> Result<String, String> {
@@ -403,14 +298,7 @@ pub fn cherry_pick(repo: &Path, hash: &str) -> Result<String, String> {
 /// from) -- callers gate it behind a confirmation, the same way
 /// `discard_file` is gated.
 pub fn reset(repo: &Path, target: &str, mode: ResetMode) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "reset".to_string(),
-            mode.flag().to_string(),
-            target.to_string(),
-        ],
-    )
+    run_action(repo, &["reset".to_string(), mode.flag().to_string(), target.to_string()])
 }
 
 pub fn stash_push(repo: &Path) -> Result<String, String> {
@@ -418,24 +306,15 @@ pub fn stash_push(repo: &Path) -> Result<String, String> {
 }
 
 pub fn stash_pop(repo: &Path, index: usize) -> Result<String, String> {
-    run_action(
-        repo,
-        &["stash".to_string(), "pop".to_string(), stash_ref(index)],
-    )
+    run_action(repo, &["stash".to_string(), "pop".to_string(), stash_ref(index)])
 }
 
 pub fn stash_apply(repo: &Path, index: usize) -> Result<String, String> {
-    run_action(
-        repo,
-        &["stash".to_string(), "apply".to_string(), stash_ref(index)],
-    )
+    run_action(repo, &["stash".to_string(), "apply".to_string(), stash_ref(index)])
 }
 
 pub fn stash_drop(repo: &Path, index: usize) -> Result<String, String> {
-    run_action(
-        repo,
-        &["stash".to_string(), "drop".to_string(), stash_ref(index)],
-    )
+    run_action(repo, &["stash".to_string(), "drop".to_string(), stash_ref(index)])
 }
 
 #[cfg(test)]
@@ -450,24 +329,9 @@ mod tests {
         // A forge client is built from this, so nothing has to be
         // configured per repo.
         let dir = committed_repo("remote_url");
-        assert_eq!(
-            remote_url(dir.path(), "origin"),
-            None,
-            "a repo that was never cloned has no origin"
-        );
-        git(
-            dir.path(),
-            &[
-                "remote",
-                "add",
-                "origin",
-                "git@gitlab.example.com:group/project.git",
-            ],
-        );
-        assert_eq!(
-            remote_url(dir.path(), "origin").as_deref(),
-            Some("git@gitlab.example.com:group/project.git")
-        );
+        assert_eq!(remote_url(dir.path(), "origin"), None, "a repo that was never cloned has no origin");
+        git(dir.path(), &["remote", "add", "origin", "git@gitlab.example.com:group/project.git"]);
+        assert_eq!(remote_url(dir.path(), "origin").as_deref(), Some("git@gitlab.example.com:group/project.git"));
         assert_eq!(remote_url(dir.path(), "upstream"), None);
     }
 
@@ -476,26 +340,16 @@ mod tests {
         let remote = committed_repo("refspec_source");
         // Stand in for a forge's published merge-request ref: an
         // ordinary ref outside `refs/heads` on the remote.
-        git(
-            remote.path(),
-            &["update-ref", "refs/merge-requests/7/head", "HEAD"],
-        );
+        git(remote.path(), &["update-ref", "refs/merge-requests/7/head", "HEAD"]);
 
         let dir = TempDir::new("refspec_fetch");
         init_repo(dir.path());
-        git(
-            dir.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
+        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
 
         fetch_refspec(dir.path(), "origin", "refs/merge-requests/7/head:mr-7").unwrap();
 
         let branches = crate::list_branches(dir.path());
-        assert!(
-            branches.iter().any(|b| b.name == "mr-7"),
-            "got: {:?}",
-            branches.iter().map(|b| &b.name).collect::<Vec<_>>()
-        );
+        assert!(branches.iter().any(|b| b.name == "mr-7"), "got: {:?}", branches.iter().map(|b| &b.name).collect::<Vec<_>>());
     }
 
     #[test]
@@ -504,34 +358,19 @@ mod tests {
         // when you most want the new version, and what an unforced
         // fetch refuses.
         let remote = committed_repo("refspec_moved_source");
-        git(
-            remote.path(),
-            &["update-ref", "refs/merge-requests/7/head", "HEAD"],
-        );
+        git(remote.path(), &["update-ref", "refs/merge-requests/7/head", "HEAD"]);
         let dir = TempDir::new("refspec_moved");
         init_repo(dir.path());
-        git(
-            dir.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
+        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
         fetch_refspec(dir.path(), "origin", "refs/merge-requests/7/head:mr-7").unwrap();
 
         // Rewrite the remote ref to an unrelated commit.
-        remote.write(
-            "a.txt", "amended
-",
-        );
-        git(
-            remote.path(),
-            &["commit", "-q", "--amend", "-a", "-m", "amended"],
-        );
-        git(
-            remote.path(),
-            &["update-ref", "refs/merge-requests/7/head", "HEAD"],
-        );
+        remote.write("a.txt", "amended
+");
+        git(remote.path(), &["commit", "-q", "--amend", "-a", "-m", "amended"]);
+        git(remote.path(), &["update-ref", "refs/merge-requests/7/head", "HEAD"]);
 
-        fetch_refspec(dir.path(), "origin", "refs/merge-requests/7/head:mr-7")
-            .expect("a moved ref still fetches");
+        fetch_refspec(dir.path(), "origin", "refs/merge-requests/7/head:mr-7").expect("a moved ref still fetches");
     }
 
     /// A file's contents with CRLF line endings normalized to LF.
@@ -579,14 +418,10 @@ mod tests {
         dir.write("b.txt", "new\n");
 
         stage_all(dir.path()).unwrap();
-        assert!(list_files(dir.path())
-            .iter()
-            .all(|f| f.index_status != '.' && f.index_status != '?'));
+        assert!(list_files(dir.path()).iter().all(|f| f.index_status != '.' && f.index_status != '?'));
 
         unstage_all(dir.path()).unwrap();
-        assert!(list_files(dir.path())
-            .iter()
-            .all(|f| f.index_status == '.' || f.index_status == '?'));
+        assert!(list_files(dir.path()).iter().all(|f| f.index_status == '.' || f.index_status == '?'));
     }
 
     #[test]
@@ -616,10 +451,7 @@ mod tests {
 
         stage_file(dir.path(), "sub").unwrap();
         let files = list_files(dir.path());
-        assert!(
-            files.iter().all(|f| f.index_status != '.'),
-            "every file under sub/ should be staged: {files:?}"
-        );
+        assert!(files.iter().all(|f| f.index_status != '.'), "every file under sub/ should be staged: {files:?}");
 
         unstage_file(dir.path(), "sub").unwrap();
         let files = list_files(dir.path());
@@ -627,9 +459,7 @@ mod tests {
         // the `?`/`?` pair (its own distinct porcelain entry kind), not
         // literally `.` -- both `.` and `?` mean "not currently staged."
         assert!(
-            files
-                .iter()
-                .all(|f| f.index_status == '.' || f.index_status == '?'),
+            files.iter().all(|f| f.index_status == '.' || f.index_status == '?'),
             "every file under sub/ should be unstaged: {files:?}"
         );
     }
@@ -662,32 +492,17 @@ mod tests {
         dir.write("a.txt", "v2\n");
         stage_file(dir.path(), "a.txt").unwrap();
         commit(dir.path(), "second commit").unwrap();
-        assert_eq!(
-            crate::commit::list_commits(dir.path(), 1)[0].message,
-            "second commit"
-        );
+        assert_eq!(crate::commit::list_commits(dir.path(), 1)[0].message, "second commit");
     }
 
     #[test]
     fn create_then_checkout_branches() {
         let dir = committed_repo("actions_branches");
         create_branch(dir.path(), "feature").unwrap();
-        assert!(
-            crate::branch::list_branches(dir.path())
-                .iter()
-                .find(|b| b.name == "feature")
-                .unwrap()
-                .current
-        );
+        assert!(crate::branch::list_branches(dir.path()).iter().find(|b| b.name == "feature").unwrap().current);
 
         checkout_branch(dir.path(), "main").unwrap();
-        assert!(
-            crate::branch::list_branches(dir.path())
-                .iter()
-                .find(|b| b.name == "main")
-                .unwrap()
-                .current
-        );
+        assert!(crate::branch::list_branches(dir.path()).iter().find(|b| b.name == "main").unwrap().current);
     }
 
     #[test]
@@ -696,9 +511,7 @@ mod tests {
         create_branch(dir.path(), "throwaway").unwrap();
         checkout_branch(dir.path(), "main").unwrap();
         delete_branch(dir.path(), "throwaway", false).unwrap();
-        assert!(crate::branch::list_branches(dir.path())
-            .iter()
-            .all(|b| b.name != "throwaway"));
+        assert!(crate::branch::list_branches(dir.path()).iter().all(|b| b.name != "throwaway"));
     }
 
     #[test]
@@ -710,10 +523,7 @@ mod tests {
         assert_eq!(crate::stash::list_stashes(dir.path()).len(), 1);
 
         stash_apply(dir.path(), 0).unwrap();
-        assert_eq!(
-            read_normalized(dir.path().join("a.txt")),
-            "stashed change\n"
-        );
+        assert_eq!(read_normalized(dir.path().join("a.txt")), "stashed change\n");
         assert_eq!(crate::stash::list_stashes(dir.path()).len(), 1); // apply keeps the entry
 
         stash_drop(dir.path(), 0).unwrap();
@@ -746,10 +556,7 @@ mod tests {
         git(remote.path(), &["init", "-q", "--bare"]);
         let dir = TempDir::new("fetch_age_clone");
         init_repo(dir.path());
-        git(
-            dir.path(),
-            &["remote", "add", "origin", remote.path().to_str().unwrap()],
-        );
+        git(dir.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
         dir.write("a.txt", "v1");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "first"]);
@@ -758,10 +565,7 @@ mod tests {
         assert_eq!(seconds_since_fetch(dir.path()), None, "nothing fetched yet");
         fetch(dir.path()).expect("fetching a real remote should succeed");
         let age = seconds_since_fetch(dir.path()).expect("FETCH_HEAD exists after a fetch");
-        assert!(
-            age < 60,
-            "a fetch that just happened should read as seconds old, got {age}"
-        );
+        assert!(age < 60, "a fetch that just happened should read as seconds old, got {age}");
     }
 
     #[test]

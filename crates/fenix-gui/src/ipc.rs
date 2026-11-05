@@ -115,9 +115,7 @@ fn wait_until_free_at(endpoint: &Endpoint, timeout: Duration) -> bool {
         // the old Fenix still holds it.
         match Client::connect(endpoint) {
             Ok(None) => return true,
-            _ if std::time::Instant::now() < until => {
-                std::thread::sleep(Duration::from_millis(100))
-            }
+            _ if std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
             _ => return false,
         }
     }
@@ -203,11 +201,7 @@ pub fn spawn_accept_loop(mut listener: Listener, proxy: EventLoopProxy<FenixUser
 
 /// Hands `call` to the UI thread and waits for its answer.
 fn ask_editor(proxy: &EventLoopProxy<FenixUserEvent>, call: Call) -> Reply {
-    let timeout = if matches!(call, Call::Agent { .. }) {
-        AGENT_TIMEOUT
-    } else {
-        ANSWER_TIMEOUT
-    };
+    let timeout = if matches!(call, Call::Agent { .. }) { AGENT_TIMEOUT } else { ANSWER_TIMEOUT };
     let (reply, answer) = mpsc::channel();
     proxy
         .send_event(FenixUserEvent::Control { call, reply })
@@ -270,17 +264,9 @@ mod tests {
     #[test]
     fn a_restart_waits_for_the_endpoint_to_be_free() {
         let endpoint = unique();
-        assert!(
-            wait_until_free_at(&endpoint, Duration::from_millis(10)),
-            "nobody serves it yet"
-        );
-        let Role::Server(listener) = negotiate_at(&endpoint, &Invocation::default()) else {
-            panic!("should serve")
-        };
-        assert!(
-            !wait_until_free_at(&endpoint, Duration::from_millis(300)),
-            "still served"
-        );
+        assert!(wait_until_free_at(&endpoint, Duration::from_millis(10)), "nobody serves it yet");
+        let Role::Server(listener) = negotiate_at(&endpoint, &Invocation::default()) else { panic!("should serve") };
+        assert!(!wait_until_free_at(&endpoint, Duration::from_millis(300)), "still served");
         drop(listener);
     }
 

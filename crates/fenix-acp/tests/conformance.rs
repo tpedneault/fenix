@@ -33,21 +33,9 @@ impl Target {
     fn mock() -> Self {
         // Its sessions kept on disk, as Claude keeps its own (~/.claude),
         // so they outlive the agent's process.
-        let store =
-            std::env::temp_dir().join(format!("fenix-acp-conf-store-{}", std::process::id()));
-        let args = ["--profile", "claude", "--store", &store.to_string_lossy()]
-            .map(String::from)
-            .to_vec();
-        Target {
-            spec: AgentSpec {
-                id: "mock".into(),
-                name: "Mock (Claude profile)".into(),
-                program: fenix_acp::client::MOCK_PROGRAM.into(),
-                args,
-                env: vec![],
-            },
-            live: false,
-        }
+        let store = std::env::temp_dir().join(format!("fenix-acp-conf-store-{}", std::process::id()));
+        let args = ["--profile", "claude", "--store", &store.to_string_lossy()].map(String::from).to_vec();
+        Target { spec: AgentSpec { id: "mock".into(), name: "Mock (Claude profile)".into(), program: fenix_acp::client::MOCK_PROGRAM.into(), args, env: vec![] }, live: false }
     }
 
     fn turn_timeout(&self) -> Duration {
@@ -66,19 +54,11 @@ impl Target {
 }
 
 fn workdir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "fenix-acp-conf-{}-{name}-{}",
-        std::process::id(),
-        Instant::now().elapsed().as_nanos()
-    ));
+    let dir = std::env::temp_dir().join(format!("fenix-acp-conf-{}-{name}-{}", std::process::id(), Instant::now().elapsed().as_nanos()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     // Some agents insist on a repository.
-    let _ = std::process::Command::new("git")
-        .arg("init")
-        .arg("-q")
-        .current_dir(&dir)
-        .status();
+    let _ = std::process::Command::new("git").arg("init").arg("-q").current_dir(&dir).status();
     dir
 }
 
@@ -90,30 +70,15 @@ fn driver_for(target: &Target, root: &Path) -> (Driver, ThreadId) {
 }
 
 fn idle(id: &ThreadId) -> impl Fn(&Hub) -> bool + '_ {
-    move |hub| {
-        hub.view(id).is_some_and(|v| {
-            matches!(
-                v.link,
-                Link::Live { .. } | Link::ReadOnly(_) | Link::Detached
-            ) && v.turn == &Turn::Idle
-                && v.queued == 0
-        })
-    }
+    move |hub| hub.view(id).is_some_and(|v| matches!(v.link, Link::Live { .. } | Link::ReadOnly(_) | Link::Detached) && v.turn == &Turn::Idle && v.queued == 0)
 }
 
 fn live(id: &ThreadId) -> impl Fn(&Hub) -> bool + '_ {
-    move |hub| {
-        hub.view(id)
-            .is_some_and(|v| matches!(v.link, Link::Live { .. }))
-    }
+    move |hub| hub.view(id).is_some_and(|v| matches!(v.link, Link::Live { .. }))
 }
 
 fn needs_login(id: &ThreadId) -> impl Fn(&Hub) -> bool + '_ {
-    move |hub| {
-        hub.view(id)
-            .and_then(|v| v.connection)
-            .is_some_and(|c| c.state == ConnState::NeedsAuth)
-    }
+    move |hub| hub.view(id).and_then(|v| v.connection).is_some_and(|c| c.state == ConnState::NeedsAuth)
 }
 
 /// Prompts and waits for the turn to end -- or for the agent to say it
@@ -122,60 +87,20 @@ fn needs_login(id: &ThreadId) -> impl Fn(&Hub) -> bool + '_ {
 fn turn(d: &mut Driver, id: &ThreadId, target: &Target, prompt: Vec<ContentBlock>) {
     let fx = d.hub.prompt(id, prompt);
     d.apply(fx);
-    let out = d.wait(target.turn_timeout(), |h| {
-        needs_login(id)(h)
-            || h.view(id)
-                .is_some_and(|v| v.queued == 0 && !matches!(v.turn, Turn::Idle))
-    });
-    assert!(
-        !needs_login(id)(&d.hub),
-        "the agent wants a login: log in to it in a terminal first"
-    );
-    assert!(
-        out || d.wait(Duration::ZERO, idle(id)),
-        "the prompt never went out"
-    );
+    let out = d.wait(target.turn_timeout(), |h| needs_login(id)(h) || h.view(id).is_some_and(|v| v.queued == 0 && !matches!(v.turn, Turn::Idle)));
+    assert!(!needs_login(id)(&d.hub), "the agent wants a login: log in to it in a terminal first");
+    assert!(out || d.wait(Duration::ZERO, idle(id)), "the prompt never went out");
     let ended = d.wait(target.turn_timeout(), |h| needs_login(id)(h) || idle(id)(h));
-    assert!(
-        !needs_login(id)(&d.hub),
-        "the agent wants a login: log in to it in a terminal first"
-    );
+    assert!(!needs_login(id)(&d.hub), "the agent wants a login: log in to it in a terminal first");
     assert!(ended, "the turn never ended");
 }
 
 fn answer(d: &Driver, id: &ThreadId) -> String {
-    d.hub
-        .view(id)
-        .unwrap()
-        .thread
-        .entries
-        .iter()
-        .filter_map(|e| {
-            if let Entry::Agent { text, .. } = e {
-                Some(text.as_str())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    d.hub.view(id).unwrap().thread.entries.iter().filter_map(|e| if let Entry::Agent { text, .. } = e { Some(text.as_str()) } else { None }).collect::<Vec<_>>().join("\n")
 }
 
 fn errors(d: &Driver, id: &ThreadId) -> Vec<String> {
-    d.hub
-        .view(id)
-        .unwrap()
-        .thread
-        .entries
-        .iter()
-        .filter_map(|e| {
-            if let Entry::Notice(n) = e {
-                matches!(n.kind, NoticeKind::Error | NoticeKind::Login).then(|| n.text.clone())
-            } else {
-                None
-            }
-        })
-        .collect()
+    d.hub.view(id).unwrap().thread.entries.iter().filter_map(|e| if let Entry::Notice(n) = e { matches!(n.kind, NoticeKind::Error | NoticeKind::Login).then(|| n.text.clone()) } else { None }).collect()
 }
 
 // ---------------------------------------------------------------------
@@ -188,30 +113,13 @@ fn handshake(target: &Target) {
     let (mut d, id) = driver_for(target, &root);
     let fx = d.hub.focus(&id);
     d.apply(fx);
-    let ok = d.wait(Duration::from_secs(60), |h| {
-        h.view(&id).is_some_and(|v| {
-            matches!(v.link, Link::Live { .. })
-                || v.connection.is_some_and(|c| {
-                    matches!(c.state, ConnState::NeedsAuth | ConnState::Dead { .. })
-                })
-        })
-    });
+    let ok = d.wait(Duration::from_secs(60), |h| h.view(&id).is_some_and(|v| matches!(v.link, Link::Live { .. }) || v.connection.is_some_and(|c| matches!(c.state, ConnState::NeedsAuth | ConnState::Dead { .. }))));
     assert!(ok, "no session and no answer");
     let view = d.hub.view(&id).unwrap();
     let conn = view.connection.expect("a connection");
     assert!(conn.info.is_some(), "initialize answered: {:?}", conn.state);
-    assert!(
-        matches!(view.link, Link::Live { .. }),
-        "no session: {:?} {:?}",
-        conn.state,
-        errors(&d, &id)
-    );
-    eprintln!(
-        "[{}] agent: {:?} {:?}",
-        target.spec.id,
-        conn.info.as_ref().unwrap().display_name(),
-        conn.info.as_ref().unwrap().version
-    );
+    assert!(matches!(view.link, Link::Live { .. }), "no session: {:?} {:?}", conn.state, errors(&d, &id));
+    eprintln!("[{}] agent: {:?} {:?}", target.spec.id, conn.info.as_ref().unwrap().display_name(), conn.info.as_ref().unwrap().version);
     d.shutdown();
 }
 
@@ -219,12 +127,7 @@ fn handshake(target: &Target) {
 fn prompt_and_answer(target: &Target) {
     let root = workdir("hello");
     let (mut d, id) = driver_for(target, &root);
-    turn(
-        &mut d,
-        &id,
-        target,
-        target.prompt("hello", "Reply with exactly the word: ready"),
-    );
+    turn(&mut d, &id, target, target.prompt("hello", "Reply with exactly the word: ready"));
     assert!(errors(&d, &id).is_empty(), "{:?}", errors(&d, &id));
     assert!(!answer(&d, &id).trim().is_empty(), "no answer");
     d.shutdown();
@@ -236,21 +139,10 @@ fn reads_the_file(target: &Target) {
     let root = workdir("read");
     std::fs::write(root.join("notes.txt"), "The secret word is pelican.\n").unwrap();
     let (mut d, id) = driver_for(target, &root);
-    turn(
-        &mut d,
-        &id,
-        target,
-        target.prompt(
-            "read notes.txt",
-            "Read the file notes.txt in the current directory and tell me the secret word in it.",
-        ),
-    );
+    turn(&mut d, &id, target, target.prompt("read notes.txt", "Read the file notes.txt in the current directory and tell me the secret word in it."));
     let view = d.hub.view(&id).unwrap();
     let read = view.thread.entries.iter().any(|e| matches!(e, Entry::Tool(c) if c.kind == ToolKind::Read && c.status == ToolStatus::Completed));
-    assert!(
-        read || answer(&d, &id).to_lowercase().contains("pelican"),
-        "the file was never read"
-    );
+    assert!(read || answer(&d, &id).to_lowercase().contains("pelican"), "the file was never read");
     d.shutdown();
 }
 
@@ -260,26 +152,10 @@ fn edits_a_file(target: &Target) {
     let file = root.join("fruit.txt");
     std::fs::write(&file, "apple\n").unwrap();
     let (mut d, id) = driver_for(target, &root);
-    turn(
-        &mut d,
-        &id,
-        target,
-        target.prompt(
-            "edit fruit.txt apple=>pear",
-            "In the file fruit.txt, replace the word apple with pear. Change nothing else.",
-        ),
-    );
+    turn(&mut d, &id, target, target.prompt("edit fruit.txt apple=>pear", "In the file fruit.txt, replace the word apple with pear. Change nothing else."));
     assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), "pear");
-    let named = d
-        .announced
-        .iter()
-        .flat_map(|(_, p)| p)
-        .any(|p| p.ends_with("fruit.txt"));
-    assert!(
-        named,
-        "the edit was never announced before it was made: {:?}",
-        d.announced
-    );
+    let named = d.announced.iter().flat_map(|(_, p)| p).any(|p| p.ends_with("fruit.txt"));
+    assert!(named, "the edit was never announced before it was made: {:?}", d.announced);
     d.shutdown();
 }
 
@@ -287,21 +163,8 @@ fn edits_a_file(target: &Target) {
 fn creates_a_file(target: &Target) {
     let root = workdir("create");
     let (mut d, id) = driver_for(target, &root);
-    turn(
-        &mut d,
-        &id,
-        target,
-        target.prompt(
-            "write hello.txt hi there",
-            "Create a file named hello.txt containing exactly: hi there",
-        ),
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.join("hello.txt"))
-            .unwrap()
-            .trim(),
-        "hi there"
-    );
+    turn(&mut d, &id, target, target.prompt("write hello.txt hi there", "Create a file named hello.txt containing exactly: hi there"));
+    assert_eq!(std::fs::read_to_string(root.join("hello.txt")).unwrap().trim(), "hi there");
     d.shutdown();
 }
 
@@ -309,26 +172,11 @@ fn creates_a_file(target: &Target) {
 fn runs_a_command(target: &Target) {
     let root = workdir("run");
     let (mut d, id) = driver_for(target, &root);
-    turn(
-        &mut d,
-        &id,
-        target,
-        target.prompt(
-            "run echo conformance-ok",
-            "Run the shell command `echo conformance-ok` and tell me what it printed.",
-        ),
-    );
+    turn(&mut d, &id, target, target.prompt("run echo conformance-ok", "Run the shell command `echo conformance-ok` and tell me what it printed."));
     let view = d.hub.view(&id).unwrap();
     let ran = view.thread.entries.iter().any(|e| matches!(e, Entry::Tool(c) if c.kind == ToolKind::Execute && c.status == ToolStatus::Completed));
     assert!(ran, "no command ran");
-    assert!(
-        view.thread
-            .entries
-            .iter()
-            .any(|e| matches!(e, Entry::Permission(_)))
-            || !target.live,
-        "the mock asks first"
-    );
+    assert!(view.thread.entries.iter().any(|e| matches!(e, Entry::Permission(_))) || !target.live, "the mock asks first");
     d.shutdown();
 }
 
@@ -336,39 +184,13 @@ fn runs_a_command(target: &Target) {
 fn cancels(target: &Target) {
     let root = workdir("cancel");
     let (mut d, id) = driver_for(target, &root);
-    let fx = d.hub.prompt(
-        &id,
-        target.prompt(
-            "slow",
-            "Count from 1 to 300, one number per line, with no other text.",
-        ),
-    );
+    let fx = d.hub.prompt(&id, target.prompt("slow", "Count from 1 to 300, one number per line, with no other text."));
     d.apply(fx);
-    assert!(
-        d.wait(target.turn_timeout(), |h| h.view(&id).is_some_and(|v| v
-            .thread
-            .entries
-            .iter()
-            .any(|e| matches!(
-                e,
-                Entry::Agent { .. } | Entry::Thought { .. } | Entry::Tool(_)
-            )))),
-        "nothing came"
-    );
+    assert!(d.wait(target.turn_timeout(), |h| h.view(&id).is_some_and(|v| v.thread.entries.iter().any(|e| matches!(e, Entry::Agent { .. } | Entry::Thought { .. } | Entry::Tool(_))))), "nothing came");
     let fx = d.hub.cancel(&id, Instant::now());
     d.apply(fx);
-    assert!(
-        d.wait(Duration::from_secs(30), idle(&id)),
-        "the turn didn't end"
-    );
-    let interrupted = d
-        .hub
-        .view(&id)
-        .unwrap()
-        .thread
-        .entries
-        .iter()
-        .any(|e| matches!(e, Entry::Notice(n) if n.kind == NoticeKind::Interrupted));
+    assert!(d.wait(Duration::from_secs(30), idle(&id)), "the turn didn't end");
+    let interrupted = d.hub.view(&id).unwrap().thread.entries.iter().any(|e| matches!(e, Entry::Notice(n) if n.kind == NoticeKind::Interrupted));
     assert!(interrupted, "not marked cancelled");
     d.shutdown();
 }
@@ -377,64 +199,23 @@ fn cancels(target: &Target) {
 fn resumes(target: &Target) {
     let root = workdir("resume");
     let (mut d, id) = driver_for(target, &root);
-    turn(
-        &mut d,
-        &id,
-        target,
-        target.prompt("hello", "Remember the number 4242. Reply with just: ok"),
-    );
-    let session = d
-        .hub
-        .view(&id)
-        .unwrap()
-        .meta
-        .session_id
-        .clone()
-        .expect("a session");
+    turn(&mut d, &id, target, target.prompt("hello", "Remember the number 4242. Reply with just: ok"));
+    let session = d.hub.view(&id).unwrap().meta.session_id.clone().expect("a session");
     let thread = d.hub.view(&id).unwrap().thread.clone();
     d.shutdown();
     drop(d);
     // A Fenix started again: the thread read back, detached.
     let mut hub = Hub::new("conf2", "test");
     hub.set_agents(vec![target.spec.clone()]);
-    hub.restore(
-        ThreadMeta {
-            id: id.clone(),
-            agent: target.spec.id.clone(),
-            root: root.clone(),
-            session_id: Some(session),
-            handed_off_from: None,
-        },
-        thread,
-    );
+    hub.restore(ThreadMeta { id: id.clone(), agent: target.spec.id.clone(), root: root.clone(), session_id: Some(session), handed_off_from: None }, thread);
     let mut d = Driver::new(hub);
     let fx = d.hub.focus(&id);
     d.apply(fx);
-    assert!(
-        d.wait(Duration::from_secs(60), |h| h.view(&id).is_some_and(
-            |v| matches!(v.link, Link::Live { .. } | Link::ReadOnly(_))
-        )),
-        "never attached"
-    );
-    assert!(
-        matches!(d.hub.view(&id).unwrap().link, Link::Live { .. }),
-        "the agent couldn't take the session back: {:?}",
-        d.hub.view(&id).unwrap().link
-    );
-    turn(
-        &mut d,
-        &id,
-        target,
-        target.prompt(
-            "hello",
-            "What number did I ask you to remember? Reply with just the number.",
-        ),
-    );
+    assert!(d.wait(Duration::from_secs(60), |h| h.view(&id).is_some_and(|v| matches!(v.link, Link::Live { .. } | Link::ReadOnly(_)))), "never attached");
+    assert!(matches!(d.hub.view(&id).unwrap().link, Link::Live { .. }), "the agent couldn't take the session back: {:?}", d.hub.view(&id).unwrap().link);
+    turn(&mut d, &id, target, target.prompt("hello", "What number did I ask you to remember? Reply with just the number."));
     if target.live {
-        assert!(
-            answer(&d, &id).contains("4242"),
-            "the session came back without its history"
-        );
+        assert!(answer(&d, &id).contains("4242"), "the session came back without its history");
     }
     d.shutdown();
 }
@@ -449,29 +230,11 @@ fn switches_mode(target: &Target) {
     let modes = d.hub.view(&id).unwrap().thread.modes.clone();
     match modes {
         Some(modes) if modes.available.len() > 1 => {
-            let other = modes
-                .available
-                .iter()
-                .find(|m| m.id != modes.current)
-                .unwrap()
-                .id
-                .clone();
+            let other = modes.available.iter().find(|m| m.id != modes.current).unwrap().id.clone();
             let fx = d.hub.set_mode(&id, &other);
             d.apply(fx);
             d.wait(Duration::from_secs(5), |_| false);
-            assert_eq!(
-                d.hub
-                    .view(&id)
-                    .unwrap()
-                    .thread
-                    .modes
-                    .as_ref()
-                    .unwrap()
-                    .current,
-                other,
-                "the agent refused: {:?}",
-                d.hub.view(&id).unwrap().thread.entries
-            );
+            assert_eq!(d.hub.view(&id).unwrap().thread.modes.as_ref().unwrap().current, other, "the agent refused: {:?}", d.hub.view(&id).unwrap().thread.entries);
         }
         _ => eprintln!("[{}] offers no modes", target.spec.id),
     }
@@ -518,21 +281,12 @@ fn live_agents_conform() {
         let spec = match std::env::var(format!("FENIX_ACP_{}", id.to_uppercase())) {
             Ok(line) => {
                 let words = catalog::split_command_line(&line);
-                AgentSpec {
-                    id: id.into(),
-                    name: id.into(),
-                    program: words[0].clone(),
-                    args: words[1..].to_vec(),
-                    env: vec![],
-                }
+                AgentSpec { id: id.into(), name: id.into(), program: words[0].clone(), args: words[1..].to_vec(), env: vec![] }
             }
             Err(_) => match entries.iter().find(|e| e.spec.id == id && e.found) {
                 Some(e) => e.spec.clone(),
                 None => {
-                    eprintln!(
-                        "[{id}] not found on PATH; set FENIX_ACP_{}",
-                        id.to_uppercase()
-                    );
+                    eprintln!("[{id}] not found on PATH; set FENIX_ACP_{}", id.to_uppercase());
                     failed.push(id.to_string());
                     continue;
                 }

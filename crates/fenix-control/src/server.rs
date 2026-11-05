@@ -12,8 +12,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    code, method, AgentCaller, Call, CaptureParams, HelloParams, HelloResult, OpenParams, OpenPath,
-    RpcError, CAPABILITIES, MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
+    code, method, AgentCaller, Call, CaptureParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError,
+    CAPABILITIES, MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
 };
 
 /// What the server says about itself in `fenix/hello`.

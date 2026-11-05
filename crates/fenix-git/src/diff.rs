@@ -21,14 +21,7 @@ pub fn file_diff(repo: &Path, path: &str, staged: bool) -> Result<String, String
 /// A commit's full message plus its diff -- `git show`'s own default
 /// output already includes both.
 pub fn commit_diff(repo: &Path, hash: &str) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "show".to_string(),
-            "--no-color".to_string(),
-            hash.to_string(),
-        ],
-    )
+    run_action(repo, &["show".to_string(), "--no-color".to_string(), hash.to_string()])
 }
 
 /// The diff between two refs.
@@ -41,25 +34,12 @@ pub fn commit_diff(repo: &Path, hash: &str) -> Result<String, String> {
 /// the default; two-dot stays available for the genuine "what is
 /// literally different between these two trees" question.
 pub fn diff_refs(repo: &Path, base: &str, head: &str, three_dot: bool) -> Result<String, String> {
-    let range = if three_dot {
-        format!("{base}...{head}")
-    } else {
-        format!("{base}..{head}")
-    };
+    let range = if three_dot { format!("{base}...{head}") } else { format!("{base}..{head}") };
     run_action(repo, &["diff".to_string(), "--no-color".to_string(), range])
 }
 
 pub fn stash_diff(repo: &Path, index: usize) -> Result<String, String> {
-    run_action(
-        repo,
-        &[
-            "stash".to_string(),
-            "show".to_string(),
-            "-p".to_string(),
-            "--no-color".to_string(),
-            format!("stash@{{{index}}}"),
-        ],
-    )
+    run_action(repo, &["stash".to_string(), "show".to_string(), "-p".to_string(), "--no-color".to_string(), format!("stash@{{{index}}}")])
 }
 
 #[cfg(test)]
@@ -91,9 +71,7 @@ mod tests {
         git(dir.path(), &["add", "."]);
 
         assert!(file_diff(dir.path(), "a.txt", false).unwrap().is_empty());
-        assert!(file_diff(dir.path(), "a.txt", true)
-            .unwrap()
-            .contains("line one changed"));
+        assert!(file_diff(dir.path(), "a.txt", true).unwrap().contains("line one changed"));
     }
 
     #[test]
@@ -133,14 +111,8 @@ mod tests {
     fn diff_refs_three_dot_shows_only_what_the_head_branch_added() {
         let dir = diverged_repo("diff_refs_three_dot");
         let diff = diff_refs(dir.path(), "main", "side", true).unwrap();
-        assert!(
-            diff.contains("from_side.txt"),
-            "side's own work is the point of the comparison:\n{diff}"
-        );
-        assert!(
-            !diff.contains("from_main.txt"),
-            "main's later work is not side's doing:\n{diff}"
-        );
+        assert!(diff.contains("from_side.txt"), "side's own work is the point of the comparison:\n{diff}");
+        assert!(!diff.contains("from_main.txt"), "main's later work is not side's doing:\n{diff}");
     }
 
     #[test]
@@ -150,19 +122,13 @@ mod tests {
         assert!(diff.contains("from_side.txt"));
         // Present as a *deletion*, because two-dot compares the trees
         // directly: `side` doesn't have main's newer file.
-        assert!(
-            diff.contains("from_main.txt"),
-            "two-dot sees the base's own newer work too:\n{diff}"
-        );
+        assert!(diff.contains("from_main.txt"), "two-dot sees the base's own newer work too:\n{diff}");
     }
 
     #[test]
     fn diff_refs_between_identical_refs_is_empty() {
         let dir = diverged_repo("diff_refs_same");
-        assert!(diff_refs(dir.path(), "main", "main", true)
-            .unwrap()
-            .trim()
-            .is_empty());
+        assert!(diff_refs(dir.path(), "main", "main", true).unwrap().trim().is_empty());
     }
 
     #[test]

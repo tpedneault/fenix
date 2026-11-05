@@ -64,14 +64,9 @@ pub enum RebaseAction {
     None,
     Close,
     /// Run it: onto `base` (the root when `None`), doing `plan`.
-    Start {
-        base: Option<String>,
-        plan: Vec<Planned>,
-    },
+    Start { base: Option<String>, plan: Vec<Planned> },
     /// Write a reword's message, starting from `seed`'s commit message.
-    EditMessage {
-        hash: String,
-    },
+    EditMessage { hash: String },
     ShowCommit(String),
 }
 
@@ -127,45 +122,18 @@ fn autosquash(mut items: Vec<Item>) -> Vec<Item> {
 }
 
 impl RebasePage {
-    pub fn new(
-        root: PathBuf,
-        branch: String,
-        base: Option<String>,
-        base_label: String,
-        commits: Vec<Replayed>,
-        pushed: usize,
-    ) -> Self {
+    pub fn new(root: PathBuf, branch: String, base: Option<String>, base_label: String, commits: Vec<Replayed>, pushed: usize) -> Self {
         let items: Vec<Item> = commits
             .into_iter()
-            .map(|c| Item {
-                hash: c.hash,
-                short: c.short_hash,
-                subject: c.subject,
-                verb: Verb::Pick,
-                message: None,
-                moved: false,
-            })
+            .map(|c| Item { hash: c.hash, short: c.short_hash, subject: c.subject, verb: Verb::Pick, message: None, moved: false })
             .collect();
         let items = autosquash(items);
-        RebasePage {
-            root,
-            branch,
-            base,
-            base_label,
-            original: items.clone(),
-            items,
-            pushed,
-            cursor: 0,
-            message: None,
-            busy: false,
-            armed: false,
-        }
+        RebasePage { root, branch, base, base_label, original: items.clone(), items, pushed, cursor: 0, message: None, busy: false, armed: false }
     }
 
     /// The item under the cursor's index in `items`.
     fn index(&self) -> Option<usize> {
-        (!self.items.is_empty())
-            .then(|| self.items.len() - 1 - self.cursor.min(self.items.len() - 1))
+        (!self.items.is_empty()).then(|| self.items.len() - 1 - self.cursor.min(self.items.len() - 1))
     }
 
     pub fn set_message(&mut self, hash: &str, message: String) {
@@ -183,9 +151,7 @@ impl RebasePage {
                 hash: i.hash.clone(),
                 step: match i.verb {
                     Verb::Pick => Step::Pick,
-                    Verb::Reword => {
-                        Step::Reword(i.message.clone().unwrap_or_else(|| i.subject.clone()))
-                    }
+                    Verb::Reword => Step::Reword(i.message.clone().unwrap_or_else(|| i.subject.clone())),
                     Verb::Edit => Step::Edit,
                     Verb::Squash => Step::Squash,
                     Verb::Fixup => Step::Fixup,
@@ -214,13 +180,7 @@ impl RebasePage {
 
     fn problem(&self) -> Option<String> {
         let first = self.items.iter().find(|i| i.verb != Verb::Drop)?;
-        first.verb.folds().then(|| {
-            format!(
-                "{} {} has nothing before it to fold into",
-                first.verb.name(),
-                first.short
-            )
-        })
+        first.verb.folds().then(|| format!("{} {} has nothing before it to fold into", first.verb.name(), first.short))
     }
 
     pub fn key(&mut self, key: Key) -> RebaseAction {
@@ -238,9 +198,7 @@ impl RebasePage {
             Key::Char('d') => self.set(Verb::Drop),
             Key::Char('r') => {
                 if let Some(i) = self.index() {
-                    return RebaseAction::EditMessage {
-                        hash: self.items[i].hash.clone(),
-                    };
+                    return RebaseAction::EditMessage { hash: self.items[i].hash.clone() };
                 }
             }
             // J moves the commit down the page (older), K up (newer).
@@ -266,10 +224,7 @@ impl RebasePage {
                     return RebaseAction::None;
                 }
                 self.armed = false;
-                return RebaseAction::Start {
-                    base: self.base.clone(),
-                    plan: self.plan(),
-                };
+                return RebaseAction::Start { base: self.base.clone(), plan: self.plan() };
             }
             _ => {}
         }
@@ -298,24 +253,14 @@ pub fn layout(page: &RebasePage, cols: usize) -> Page {
     let (left, width) = frame(cols, 120);
     let mut g = Grid::new();
     let mut y = 1;
-    let x = g.put(
-        y,
-        left,
-        &format!("Rebase {} onto {}", page.branch, page.base_label),
-        Role::Title,
-    ) + 2;
+    let x = g.put(y, left, &format!("Rebase {} onto {}", page.branch, page.base_label), Role::Title) + 2;
     g.put(y, x, &format!("{} commits", page.items.len()), Role::Muted);
     y += 1;
     if page.busy {
         g.put(y, left, "… rebasing", Role::Accent);
         y += 1;
     } else if let Some((text, failed)) = &page.message {
-        g.put(
-            y,
-            left,
-            &fit(text, width),
-            if *failed { Role::Bad } else { Role::Muted },
-        );
+        g.put(y, left, &fit(text, width), if *failed { Role::Bad } else { Role::Muted });
         y += 1;
     }
     y += 1;
@@ -328,17 +273,8 @@ pub fn layout(page: &RebasePage, cols: usize) -> Page {
             (Verb::Reword, Some(m)) => m.lines().next().unwrap_or("").to_string(),
             _ => item.subject.clone(),
         };
-        let role = if item.verb == Verb::Drop {
-            Role::Muted
-        } else {
-            Role::Text
-        };
-        g.put(
-            y,
-            x,
-            &fit(&subject, (left + width).saturating_sub(x + 10)),
-            role,
-        );
+        let role = if item.verb == Verb::Drop { Role::Muted } else { Role::Text };
+        g.put(y, x, &fit(&subject, (left + width).saturating_sub(x + 10)), role);
         if item.moved {
             g.put(y, (left + width).saturating_sub(5), "moved", Role::Muted);
         }
@@ -347,46 +283,19 @@ pub fn layout(page: &RebasePage, cols: usize) -> Page {
         }
         y += 1;
     }
-    let base = page
-        .base
-        .as_deref()
-        .map(|b| &b[..7.min(b.len())])
-        .unwrap_or("the root");
-    g.put(
-        y,
-        left + 2,
-        &format!("└ onto {} {base}", page.base_label),
-        Role::Muted,
-    );
+    let base = page.base.as_deref().map(|b| &b[..7.min(b.len())]).unwrap_or("the root");
+    g.put(y, left + 2, &format!("└ onto {} {base}", page.base_label), Role::Muted);
     y += 2;
 
     let result = page.result();
-    g.heading(
-        y,
-        left,
-        width,
-        &format!(
-            "Result · {} commits, was {}",
-            result.len(),
-            page.items.len()
-        ),
-    );
+    g.heading(y, left, width, &format!("Result · {} commits, was {}", result.len(), page.items.len()));
     y += 1;
     for (item, folded) in result.iter().rev() {
         let subject = match (&item.verb, &item.message) {
             (Verb::Reword, Some(m)) => m.lines().next().unwrap_or("").to_string(),
             _ => item.subject.clone(),
         };
-        let x = g.put(
-            y,
-            left + 2,
-            &fit(&subject, width.saturating_sub(20)),
-            if item.verb == Verb::Reword {
-                Role::Warn
-            } else {
-                Role::Text
-            },
-        ) + 2;
+        let x = g.put(y, left + 2, &fit(&subject, width.saturating_sub(20)), if item.verb == Verb::Reword { Role::Warn } else { Role::Text }) + 2;
         if *folded > 0 {
             g.put(y, x, &format!("+{folded} folded in"), Role::Muted);
         }
@@ -401,22 +310,12 @@ pub fn layout(page: &RebasePage, cols: usize) -> Page {
         g.heading(y, left, width, "Dropped");
         y += 1;
         for item in dropped {
-            g.put(
-                y,
-                left + 2,
-                &fit(&format!("{} {}", item.short, item.subject), width - 2),
-                Role::Muted,
-            );
+            g.put(y, left + 2, &fit(&format!("{} {}", item.short, item.subject), width - 2), Role::Muted);
             y += 1;
         }
     }
     y += 1;
-    g.put(
-        y,
-        left,
-        "Undo point recorded when it runs -- U on the Git page takes it back.",
-        Role::Muted,
-    );
+    g.put(y, left, "Undo point recorded when it runs -- U on the Git page takes it back.", Role::Muted);
     y += 1;
     if page.pushed > 0 {
         g.put(y, left, &format!("{} of these are already pushed -- the push afterwards will need --force-with-lease.", page.pushed), Role::Warn);
@@ -424,18 +323,7 @@ pub fn layout(page: &RebasePage, cols: usize) -> Page {
     let keys: &[(&str, &str)] = if page.armed {
         &[("C-c", "again to rebase"), ("any key", "back")]
     } else {
-        &[
-            ("p", "pick"),
-            ("r", "reword"),
-            ("e", "edit"),
-            ("s", "squash"),
-            ("f", "fixup"),
-            ("d", "drop"),
-            ("J/K", "move"),
-            ("Enter", "show"),
-            ("C-c C-c", "rebase"),
-            ("q", "cancel"),
-        ]
+        &[("p", "pick"), ("r", "reword"), ("e", "edit"), ("s", "squash"), ("f", "fixup"), ("d", "drop"), ("J/K", "move"), ("Enter", "show"), ("C-c C-c", "rebase"), ("q", "cancel")]
     };
     g.keys(left, width, keys);
     g.finish()
@@ -446,50 +334,18 @@ mod tests {
     use super::*;
 
     fn commits(subjects: &[&str]) -> Vec<Replayed> {
-        subjects
-            .iter()
-            .enumerate()
-            .map(|(i, s)| Replayed {
-                hash: format!("{i:0>40}"),
-                short_hash: format!("{i:0>7}"),
-                subject: s.to_string(),
-            })
-            .collect()
+        subjects.iter().enumerate().map(|(i, s)| Replayed { hash: format!("{i:0>40}"), short_hash: format!("{i:0>7}"), subject: s.to_string() }).collect()
     }
 
     fn page(subjects: &[&str]) -> RebasePage {
-        RebasePage::new(
-            PathBuf::from("/r"),
-            "topic".into(),
-            Some("base".into()),
-            "main".into(),
-            commits(subjects),
-            0,
-        )
+        RebasePage::new(PathBuf::from("/r"), "topic".into(), Some("base".into()), "main".into(), commits(subjects), 0)
     }
 
     #[test]
     fn fixups_start_next_to_their_commit() {
-        let p = page(&[
-            "status page",
-            "sections fold",
-            "fixup! status page",
-            "push plan",
-        ]);
-        let order: Vec<(&str, Verb)> = p
-            .items
-            .iter()
-            .map(|i| (i.subject.as_str(), i.verb))
-            .collect();
-        assert_eq!(
-            order,
-            [
-                ("status page", Verb::Pick),
-                ("fixup! status page", Verb::Fixup),
-                ("sections fold", Verb::Pick),
-                ("push plan", Verb::Pick)
-            ]
-        );
+        let p = page(&["status page", "sections fold", "fixup! status page", "push plan"]);
+        let order: Vec<(&str, Verb)> = p.items.iter().map(|i| (i.subject.as_str(), i.verb)).collect();
+        assert_eq!(order, [("status page", Verb::Pick), ("fixup! status page", Verb::Fixup), ("sections fold", Verb::Pick), ("push plan", Verb::Pick)]);
         assert!(p.items[1].moved);
         assert!(layout(&p, 100).text.contains("RESULT · 3 COMMITS, WAS 4"));
     }
@@ -501,19 +357,8 @@ mod tests {
         p.key(Key::Char('d'));
         p.key(Key::Char('j'));
         p.key(Key::Char('J'));
-        let plan: Vec<(String, Step)> = p
-            .plan()
-            .into_iter()
-            .map(|s| (s.hash[39..].to_string(), s.step))
-            .collect();
-        assert_eq!(
-            plan,
-            [
-                ("1".into(), Step::Pick),
-                ("0".into(), Step::Pick),
-                ("2".into(), Step::Drop)
-            ]
-        );
+        let plan: Vec<(String, Step)> = p.plan().into_iter().map(|s| (s.hash[39..].to_string(), s.step)).collect();
+        assert_eq!(plan, [("1".into(), Step::Pick), ("0".into(), Step::Pick), ("2".into(), Step::Drop)]);
         let text = layout(&p, 100).text;
         assert!(text.contains("DROPPED") && text.contains("moved"), "{text}");
     }
@@ -532,12 +377,7 @@ mod tests {
     #[test]
     fn a_reword_asks_for_the_message_and_shows_it() {
         let mut p = page(&["a", "b"]);
-        assert_eq!(
-            p.key(Key::Char('r')),
-            RebaseAction::EditMessage {
-                hash: format!("{:0>40}", 1)
-            }
-        );
+        assert_eq!(p.key(Key::Char('r')), RebaseAction::EditMessage { hash: format!("{:0>40}", 1) });
         p.set_message(&format!("{:0>40}", 1), "b, better\n\nbody".into());
         assert_eq!(p.plan()[1].step, Step::Reword("b, better\n\nbody".into()));
         assert!(layout(&p, 100).text.contains("b, better"));

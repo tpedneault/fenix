@@ -144,10 +144,7 @@ fn held_open(error: &io::Error) -> bool {
     const ERROR_SHARING_VIOLATION: i32 = 32;
     const ERROR_LOCK_VIOLATION: i32 = 33;
     const ERROR_UNABLE_TO_REMOVE_REPLACED: i32 = 1175;
-    matches!(
-        error.raw_os_error(),
-        Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_UNABLE_TO_REMOVE_REPLACED)
-    )
+    matches!(error.raw_os_error(), Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_UNABLE_TO_REMOVE_REPLACED))
 }
 
 #[cfg(test)]
@@ -162,11 +159,7 @@ mod tests {
         let path = dir.path().join("held.txt");
         fs::write(&path, "before").unwrap();
         // Open without letting anyone delete or rename it, as a scanner can.
-        let held = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(1)
-            .open(&path)
-            .unwrap();
+        let held = fs::OpenOptions::new().read(true).share_mode(1).open(&path).unwrap();
         let release = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(300));
             drop(held);

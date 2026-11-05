@@ -29,10 +29,7 @@ impl App {
         };
         let root = fenix_lsp::normalize(root);
         if let Some(op) = fenix_git::in_progress(&root) {
-            self.set_error(format!(
-                "{} is still going -- finish or abort it first (r on the Git page)",
-                op.label()
-            ));
+            self.set_error(format!("{} is still going -- finish or abort it first (r on the Git page)", op.label()));
             return;
         }
         let status = fenix_git::status(&root);
@@ -40,17 +37,11 @@ impl App {
         let (base, label) = match from {
             Some(hash) => {
                 let parent = fenix_git::oplog::rev(&root, &format!("{hash}^"));
-                let label = if parent.is_empty() {
-                    "the root".to_string()
-                } else {
-                    parent[..7.min(parent.len())].to_string()
-                };
+                let label = if parent.is_empty() { "the root".to_string() } else { parent[..7.min(parent.len())].to_string() };
                 (Some(parent).filter(|p| !p.is_empty()), label)
             }
             None => {
-                let target = upstream.clone().or_else(|| {
-                    fenix_git::resolve_base(&root, self.base_branch_for(&root).as_deref())
-                });
+                let target = upstream.clone().or_else(|| fenix_git::resolve_base(&root, self.base_branch_for(&root).as_deref()));
                 let Some(target) = target else {
                     self.set_error("no upstream or base branch to rebase from -- use i on a commit in the Log page (SPC g l)");
                     return;
@@ -71,28 +62,18 @@ impl App {
         };
         let pushed = match &upstream {
             Some(upstream) => {
-                let on_upstream: std::collections::HashSet<String> =
-                    fenix_git::reachable(&root, upstream, 2000)
-                        .into_iter()
-                        .collect();
-                commits
-                    .iter()
-                    .filter(|c| on_upstream.contains(&c.hash))
-                    .count()
+                let on_upstream: std::collections::HashSet<String> = fenix_git::reachable(&root, upstream, 2000).into_iter().collect();
+                commits.iter().filter(|c| on_upstream.contains(&c.hash)).count()
             }
             None => 0,
         };
-        let branch = status
-            .map(|s| s.branch)
-            .unwrap_or_else(|| "HEAD".to_string());
+        let branch = status.map(|s| s.branch).unwrap_or_else(|| "HEAD".to_string());
         let page = RebasePage::new(root, branch, base, label, commits, pushed);
         self.open_page(PageModel::Rebase(Box::new(page)));
     }
 
     pub(super) fn git_rebase_action(&mut self, id: BufferId, action: RebaseAction) {
-        let Some(root) = self.git_rebase_page(id).map(|r| r.root.clone()) else {
-            return;
-        };
+        let Some(root) = self.git_rebase_page(id).map(|r| r.root.clone()) else { return };
         match action {
             RebaseAction::None => {}
             RebaseAction::Close => self.close_page(id),
@@ -106,19 +87,13 @@ impl App {
                 self.open_buffer_in_focused_pane(buffer);
             }
             RebaseAction::Start { base, plan } => {
-                let Some(page) = self.git_rebase_page(id) else {
-                    return;
-                };
+                let Some(page) = self.git_rebase_page(id) else { return };
                 page.busy = true;
                 let job = crate::git_status::Job::RebasePlan { base, plan };
                 let label = job.label();
                 self.page_spawn(move |send| {
                     let result = super::git_page::run_logged(&root, &job);
-                    send(PageEvent::GitDone {
-                        buffer: id,
-                        label,
-                        result,
-                    });
+                    send(PageEvent::GitDone { buffer: id, label, result });
                 });
             }
         }
@@ -136,12 +111,7 @@ impl App {
     }
 
     /// The rebase ran: close the page and show where the branch is now.
-    pub(super) fn apply_git_rebase_done(
-        &mut self,
-        id: BufferId,
-        label: String,
-        result: Result<String, String>,
-    ) {
+    pub(super) fn apply_git_rebase_done(&mut self, id: BufferId, label: String, result: Result<String, String>) {
         let root = self.git_rebase_page(id).map(|r| r.root.clone());
         self.close_page(id);
         let Some(root) = root else { return };
@@ -162,16 +132,8 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) -> String {
-        let out = Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
         String::from_utf8_lossy(&out.stdout).trim_end().to_string()
     }
 
@@ -185,17 +147,11 @@ mod tests {
     /// `main` with one commit, and a `topic` branch on top: a change, an
     /// unrelated one, and a fixup for the first.
     fn repo(name: &str) -> Repo {
-        let dir =
-            std::env::temp_dir().join(format!("fenix-git-rebase-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fenix-git-rebase-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = fenix_lsp::normalize(std::fs::canonicalize(&dir).unwrap());
-        for args in [
-            &["init", "-q", "-b", "main"][..],
-            &["config", "user.email", "t@e.com"],
-            &["config", "user.name", "T"],
-            &["config", "core.autocrlf", "false"],
-        ] {
+        for args in [&["init", "-q", "-b", "main"][..], &["config", "user.email", "t@e.com"], &["config", "user.name", "T"], &["config", "core.autocrlf", "false"]] {
             git(&dir, args);
         }
         let commit = |file: &str, text: &str, message: &str| {
@@ -223,21 +179,13 @@ mod tests {
         let (pane, _) = (app.focused_pane_id(), ());
         app.ensure_page_layout(id, pane, 110);
         let text = app.open().buffer.text();
-        assert!(
-            text.contains("Rebase topic onto main")
-                && text.contains("fixup")
-                && text.contains("RESULT · 2 COMMITS, WAS 3"),
-            "{text}"
-        );
+        assert!(text.contains("Rebase topic onto main") && text.contains("fixup") && text.contains("RESULT · 2 COMMITS, WAS 3"), "{text}");
         let ctrl_c = KeyPress::char('c').with_ctrl();
         assert!(app.page_key(ctrl_c));
         assert!(app.page_key(ctrl_c));
         assert_eq!(git(&repo.0, &["log", "--format=%s"]), "add c\nadd b\nbase");
         assert_eq!(git(&repo.0, &["show", "HEAD~1:b.txt"]), "b, fixed");
-        assert!(
-            fenix_git::oplog::entries(&repo.0, 1)[0].undo.possible(),
-            "undoable"
-        );
+        assert!(fenix_git::oplog::entries(&repo.0, 1)[0].undo.possible(), "undoable");
     }
 
     #[test]
@@ -246,16 +194,9 @@ mod tests {
         let mut app = App::with_file(Some(repo.0.join("a.txt").to_string_lossy().into_owned()));
         let add_c = git(&repo.0, &["rev-parse", "HEAD~1"]);
         app.open_rebase(Some(add_c));
-        assert!(
-            app.page_key(KeyPress::char('j')),
-            "down to add c (the fixup is the newest)"
-        );
+        assert!(app.page_key(KeyPress::char('j')), "down to add c (the fixup is the newest)");
         assert!(app.page_key(KeyPress::char('r')));
-        let compose = app
-            .compose
-            .as_ref()
-            .expect("the message editor opened")
-            .buffer;
+        let compose = app.compose.as_ref().expect("the message editor opened").buffer;
         if let Some(ob) = app.buffers.get_mut(compose) {
             let end = ob.buffer.len_chars();
             let mut c = Cursor::at_start();
@@ -265,9 +206,6 @@ mod tests {
         let ctrl_c = KeyPress::char('c').with_ctrl();
         assert!(app.page_key(ctrl_c));
         assert!(app.page_key(ctrl_c));
-        assert_eq!(
-            git(&repo.0, &["log", "--format=%s", "-2"]),
-            "fixup! add b\nAdd c, properly"
-        );
+        assert_eq!(git(&repo.0, &["log", "--format=%s", "-2"]), "fixup! add b\nAdd c, properly");
     }
 }

@@ -18,23 +18,13 @@ pub enum Content {
     Nothing,
     /// A text file's first lines, with each line's colours as (columns,
     /// syntax capture); `cut` when there was more than was read.
-    Text {
-        lines: Vec<String>,
-        colours: Vec<Vec<(Range<usize>, &'static str)>>,
-        language: Option<String>,
-        cut: bool,
-    },
+    Text { lines: Vec<String>, colours: Vec<Vec<(Range<usize>, &'static str)>>, language: Option<String>, cut: bool },
     /// A picture the page can draw.
     Picture,
     /// A diagram an extension drew from the file, by its picture key.
     Diagram(u64),
     /// A folder: what's in it, folders first.
-    Folder {
-        folders: usize,
-        files: usize,
-        bytes: u64,
-        names: Vec<(String, bool)>,
-    },
+    Folder { folders: usize, files: usize, bytes: u64, names: Vec<(String, bool)> },
     /// Bytes that aren't text.
     Binary,
     /// On a share: not read on the UI thread.
@@ -56,13 +46,7 @@ pub struct PreviewPage {
 
 impl Default for PreviewPage {
     fn default() -> Self {
-        PreviewPage {
-            path: None,
-            content: Content::Nothing,
-            size: None,
-            modified: None,
-            scroll: 0,
-        }
+        PreviewPage { path: None, content: Content::Nothing, size: None, modified: None, scroll: 0 }
     }
 }
 
@@ -101,10 +85,7 @@ impl PreviewPage {
 
     /// Scrolls by `lines` (down when positive), within the content.
     pub fn scroll_by(&mut self, lines: isize) {
-        self.scroll = self
-            .scroll
-            .saturating_add_signed(lines)
-            .min(self.length().saturating_sub(1));
+        self.scroll = self.scroll.saturating_add_signed(lines).min(self.length().saturating_sub(1));
     }
 }
 
@@ -116,41 +97,17 @@ pub fn layout(page: &PreviewPage, cols: usize, height: Option<usize>) -> Page {
         g.put(1, left, "Nothing selected", Role::Muted);
         return g.finish();
     };
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
     g.put(0, left, &fit(&name, width), Role::Title);
     let mut facts: Vec<String> = Vec::new();
     match &page.content {
-        Content::Text {
-            lines,
-            language,
-            cut,
-            ..
-        } => {
+        Content::Text { lines, language, cut, .. } => {
             facts.extend(language.clone());
-            facts.push(format!(
-                "{}{} line{}",
-                if *cut { "first " } else { "" },
-                lines.len(),
-                if lines.len() == 1 { "" } else { "s" }
-            ));
+            facts.push(format!("{}{} line{}", if *cut { "first " } else { "" }, lines.len(), if lines.len() == 1 { "" } else { "s" }));
         }
-        Content::Folder {
-            folders,
-            files,
-            bytes,
-            ..
-        } => {
-            facts.push(format!(
-                "{folders} folder{}",
-                if *folders == 1 { "" } else { "s" }
-            ));
-            facts.push(format!(
-                "{files} file{}",
-                if *files == 1 { "" } else { "s" }
-            ));
+        Content::Folder { folders, files, bytes, .. } => {
+            facts.push(format!("{folders} folder{}", if *folders == 1 { "" } else { "s" }));
+            facts.push(format!("{files} file{}", if *files == 1 { "" } else { "s" }));
             if *files > 0 {
                 facts.push(size_text(*bytes));
             }
@@ -168,10 +125,7 @@ pub fn layout(page: &PreviewPage, cols: usize, height: Option<usize>) -> Page {
     g.rule(2, left..left + width);
     let top = 3;
     // The lines between the header and the key strip.
-    let room = height
-        .map(|h| h.saturating_sub(top + 3))
-        .unwrap_or(usize::MAX)
-        .max(1);
+    let room = height.map(|h| h.saturating_sub(top + 3)).unwrap_or(usize::MAX).max(1);
 
     match &page.content {
         Content::Nothing => {}
@@ -190,51 +144,27 @@ pub fn layout(page: &PreviewPage, cols: usize, height: Option<usize>) -> Page {
                 stretches.sort_by_key(|(cols, _)| cols.start);
                 let mut at = 0;
                 for (cols, capture) in stretches {
-                    let (a, b) = (
-                        cols.start.max(at).min(chars.len()),
-                        cols.end.min(chars.len()),
-                    );
+                    let (a, b) = (cols.start.max(at).min(chars.len()), cols.end.min(chars.len()));
                     if a >= b {
                         continue;
                     }
                     if a > at {
-                        g.put(
-                            y,
-                            x + at,
-                            &chars[at..a].iter().collect::<String>(),
-                            Role::Text,
-                        );
+                        g.put(y, x + at, &chars[at..a].iter().collect::<String>(), Role::Text);
                     }
-                    g.put(
-                        y,
-                        x + a,
-                        &chars[a..b].iter().collect::<String>(),
-                        Role::Syntax(capture),
-                    );
+                    g.put(y, x + a, &chars[a..b].iter().collect::<String>(), Role::Syntax(capture));
                     at = b;
                 }
                 if at < chars.len() {
-                    g.put(
-                        y,
-                        x + at,
-                        &chars[at..].iter().collect::<String>(),
-                        Role::Text,
-                    );
+                    g.put(y, x + at, &chars[at..].iter().collect::<String>(), Role::Text);
                 }
             }
         }
         Content::Picture => {
-            let rows = height
-                .map(|h| h.saturating_sub(top + 3))
-                .unwrap_or(20)
-                .max(1);
+            let rows = height.map(|h| h.saturating_sub(top + 3)).unwrap_or(20).max(1);
             g.image(top, left, rows, width, ImageKey::File(path.clone()));
         }
         Content::Diagram(key) => {
-            let rows = height
-                .map(|h| h.saturating_sub(top + 3))
-                .unwrap_or(20)
-                .max(1);
+            let rows = height.map(|h| h.saturating_sub(top + 3)).unwrap_or(20).max(1);
             g.image(top, left, rows, width, ImageKey::Diagram(*key));
         }
         Content::Folder { names, .. } => {
@@ -242,55 +172,24 @@ pub fn layout(page: &PreviewPage, cols: usize, height: Option<usize>) -> Page {
                 g.put(top, left, "empty", Role::Muted);
             }
             for (i, (name, dir)) in names.iter().skip(page.scroll).take(room).enumerate() {
-                let shown = if *dir {
-                    format!("{name}/")
-                } else {
-                    name.clone()
-                };
-                g.put(
-                    top + i,
-                    left,
-                    &fit(&shown, width),
-                    if *dir { Role::Title } else { Role::Text },
-                );
+                let shown = if *dir { format!("{name}/") } else { name.clone() };
+                g.put(top + i, left, &fit(&shown, width), if *dir { Role::Title } else { Role::Text });
             }
         }
         Content::Binary => {
-            g.put(
-                top,
-                left,
-                &fit(
-                    "Not text. P opens it as the editor would; SPC e o with the system.",
-                    width,
-                ),
-                Role::Muted,
-            );
+            g.put(top, left, &fit("Not text. P opens it as the editor would; SPC e o with the system.", width), Role::Muted);
         }
         Content::Remote => {
-            g.put(
-                top,
-                left,
-                &fit("On a share: not read ahead. P opens it.", width),
-                Role::Muted,
-            );
+            g.put(top, left, &fit("On a share: not read ahead. P opens it.", width), Role::Muted);
         }
         Content::Unreadable(why) => {
-            g.put(
-                top,
-                left,
-                &fit(&format!("Can't read it: {why}"), width),
-                Role::Bad,
-            );
+            g.put(top, left, &fit(&format!("Can't read it: {why}"), width), Role::Bad);
         }
     }
     if let Some(h) = height {
         g.reserve(h.saturating_sub(3));
     }
-    g.keys(
-        left,
-        width,
-        &[("J K", "scroll"), ("P", "open"), ("p", "close")],
-    );
+    g.keys(left, width, &[("J K", "scroll"), ("P", "open"), ("p", "close")]);
     g.finish()
 }
 
@@ -318,26 +217,14 @@ mod tests {
         let page = layout(&text(&["fn main() {}", "}"]), 60, Some(12));
         let lines: Vec<&str> = page.text.lines().collect();
         assert!(lines[0].contains("main.rs"));
-        assert!(
-            lines[1].contains("Rust") && lines[1].contains("2 lines") && lines[1].contains("1.1 K"),
-            "{}",
-            lines[1]
-        );
+        assert!(lines[1].contains("Rust") && lines[1].contains("2 lines") && lines[1].contains("1.1 K"), "{}", lines[1]);
         assert!(lines[3].contains("1 fn main() {}"), "{}", page.text);
-        assert!(page
-            .spans
-            .iter()
-            .any(|s| s.line == 3 && s.role == Role::Syntax("keyword")));
+        assert!(page.spans.iter().any(|s| s.line == 3 && s.role == Role::Syntax("keyword")));
         // No plain span under the colours: the renderer keeps the first of
         // two that overlap, so it would hide them.
         let row: Vec<_> = page.spans.iter().filter(|s| s.line == 3).collect();
         for (i, s) in row.iter().enumerate() {
-            assert!(
-                row[i + 1..]
-                    .iter()
-                    .all(|t| t.cols.start >= s.cols.end || t.cols.end <= s.cols.start),
-                "overlapping spans: {row:?}"
-            );
+            assert!(row[i + 1..].iter().all(|t| t.cols.start >= s.cols.end || t.cols.end <= s.cols.start), "overlapping spans: {row:?}");
         }
         assert!(page.text.lines().last().unwrap().contains("J K scroll"));
     }
@@ -350,44 +237,22 @@ mod tests {
         page.scroll_by(-10);
         assert_eq!(page.scroll, 0);
         page.scroll_by(1);
-        assert!(layout(&page, 40, Some(12))
-            .text
-            .lines()
-            .nth(3)
-            .unwrap()
-            .contains("2 b"));
+        assert!(layout(&page, 40, Some(12)).text.lines().nth(3).unwrap().contains("2 b"));
     }
 
     #[test]
     fn a_picture_and_a_folder_are_shown_for_what_they_are() {
-        let picture = PreviewPage {
-            path: Some(PathBuf::from("/x/a.png")),
-            content: Content::Picture,
-            ..Default::default()
-        };
+        let picture = PreviewPage { path: Some(PathBuf::from("/x/a.png")), content: Content::Picture, ..Default::default() };
         let page = layout(&picture, 40, Some(20));
         assert_eq!(page.images.len(), 1);
-        assert_eq!(
-            page.images[0].key,
-            ImageKey::File(PathBuf::from("/x/a.png"))
-        );
+        assert_eq!(page.images[0].key, ImageKey::File(PathBuf::from("/x/a.png")));
 
         let folder = PreviewPage {
             path: Some(PathBuf::from("/x/src")),
-            content: Content::Folder {
-                folders: 1,
-                files: 2,
-                bytes: 2048,
-                names: vec![("sub".into(), true), ("a.rs".into(), false)],
-            },
+            content: Content::Folder { folders: 1, files: 2, bytes: 2048, names: vec![("sub".into(), true), ("a.rs".into(), false)] },
             ..Default::default()
         };
         let text = layout(&folder, 40, Some(20)).text;
-        assert!(
-            text.contains("1 folder · 2 files · 2.0 K")
-                && text.contains("sub/")
-                && text.contains("a.rs"),
-            "{text}"
-        );
+        assert!(text.contains("1 folder · 2 files · 2.0 K") && text.contains("sub/") && text.contains("a.rs"), "{text}");
     }
 }

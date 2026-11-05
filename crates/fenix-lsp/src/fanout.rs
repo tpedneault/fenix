@@ -70,10 +70,7 @@ pub fn provides(capabilities: &ServerCapabilities, feature: Feature) -> bool {
         Feature::Rename => on(&capabilities.rename_provider),
         Feature::Formatting => on(&capabilities.document_formatting_provider),
         Feature::SignatureHelp => capabilities.signature_help_provider.is_some(),
-        Feature::Implementation => !matches!(
-            capabilities.implementation_provider,
-            None | Some(lsp_types::ImplementationProviderCapability::Simple(false))
-        ),
+        Feature::Implementation => !matches!(capabilities.implementation_provider, None | Some(lsp_types::ImplementationProviderCapability::Simple(false))),
     }
 }
 
@@ -348,13 +345,7 @@ impl<K> Default for Diagnostics<K> {
     }
 }
 
-fn replace<K: PartialEq>(
-    map: &mut ByPath<K>,
-    path: PathBuf,
-    server: K,
-    label: &str,
-    diagnostics: Vec<Diagnostic>,
-) {
+fn replace<K: PartialEq>(map: &mut ByPath<K>, path: PathBuf, server: K, label: &str, diagnostics: Vec<Diagnostic>) {
     let entries = map.entry(path.clone()).or_default();
     entries.retain(|(s, _, _)| *s != server);
     if !diagnostics.is_empty() {
@@ -491,21 +482,12 @@ mod tests {
     #[test]
     fn what_a_server_reported_is_forgotten_everywhere_and_the_others_kept() {
         let mut d: Diagnostics<&str> = Diagnostics::default();
-        let one = |m: &str| Diagnostic {
-            message: m.into(),
-            ..Default::default()
-        };
+        let one = |m: &str| Diagnostic { message: m.into(), ..Default::default() };
         d.publish(PathBuf::from("a"), "lint", "lint", vec![one("x")]);
         d.publish(PathBuf::from("b"), "lint", "lint", vec![one("y")]);
         d.publish(PathBuf::from("a"), "server", "server", vec![one("z")]);
         d.forget(|s| *s == "lint");
-        assert_eq!(
-            d.for_path(Path::new("a"))
-                .iter()
-                .map(|d| d.message.as_str())
-                .collect::<Vec<_>>(),
-            ["z"]
-        );
+        assert_eq!(d.for_path(Path::new("a")).iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["z"]);
         assert!(d.for_path(Path::new("b")).is_empty());
     }
 
@@ -782,27 +764,14 @@ mod tests {
     #[test]
     fn pulled_diagnostics_sit_beside_pushed_ones() {
         let path = PathBuf::from("/p/a.js");
-        let d = |message: &str| Diagnostic {
-            message: message.to_string(),
-            ..Default::default()
-        };
+        let d = |message: &str| Diagnostic { message: message.to_string(), ..Default::default() };
         let mut all: Diagnostics<&str> = Diagnostics::default();
         all.publish(path.clone(), "eslint", "eslint", vec![d("pushed")]);
         all.pulled(path.clone(), "eslint", "eslint", vec![d("pulled")]);
-        assert_eq!(
-            all.for_path(&path)
-                .iter()
-                .map(|d| d.message.as_str())
-                .collect::<Vec<_>>(),
-            ["pushed", "pulled"]
-        );
+        assert_eq!(all.for_path(&path).iter().map(|d| d.message.as_str()).collect::<Vec<_>>(), ["pushed", "pulled"]);
         assert_eq!(all.from_server(&path, &"eslint").len(), 2);
         all.pulled(path.clone(), "eslint", "eslint", Vec::new());
-        assert_eq!(
-            all.for_path(&path)[0].message,
-            "pushed",
-            "an empty answer clears only what was pulled"
-        );
+        assert_eq!(all.for_path(&path)[0].message, "pushed", "an empty answer clears only what was pulled");
         all.pulled(path.clone(), "eslint", "eslint", vec![d("again")]);
         all.forget_server(&"eslint");
         assert!(all.is_empty());

@@ -34,11 +34,8 @@ pub(crate) struct FileIndex {
 /// Every file under `root`, labelled relative to it.
 fn list(root: &Path, include_ignored: bool) -> Vec<fenix_picker::Candidate<PathBuf>> {
     let _profile = crate::profile::Scope::new("list project files");
-    let files = if include_ignored {
-        fenix_project::list_project_files_including_ignored(root)
-    } else {
-        fenix_project::list_project_files(root)
-    };
+    let files =
+        if include_ignored { fenix_project::list_project_files_including_ignored(root) } else { fenix_project::list_project_files(root) };
     files
         .into_iter()
         .map(|path| {
@@ -52,9 +49,7 @@ impl App {
     /// Where a find-file picker looks: the current project, else the
     /// folder Fenix was started in.
     pub(super) fn find_file_root(&self) -> PathBuf {
-        self.project_root
-            .clone()
-            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
     /// Opens the find-file picker over `root`'s files at once, listing
@@ -65,21 +60,14 @@ impl App {
 
     /// `open_find_file`, closing again with a message when `root` turns
     /// out to have no files at all.
-    pub(super) fn open_find_file_with(
-        &mut self,
-        root: &Path,
-        include_ignored: bool,
-        close_if_empty: bool,
-    ) {
+    pub(super) fn open_find_file_with(&mut self, root: &Path, include_ignored: bool, close_if_empty: bool) {
         self.file_index.close_if_empty = close_if_empty;
         let key = (root.to_path_buf(), include_ignored);
         let (candidates, fresh) = match self.file_index.listed.get(&key) {
             Some((files, at)) => (files.as_ref().clone(), at.elapsed() < FRESH_FOR),
             None => (Vec::new(), false),
         };
-        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(
-            candidates,
-        )));
+        self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
         self.file_index.waiting = None;
         if !fresh {
             // A refresh of a listing already shown goes into the picker
@@ -103,16 +91,10 @@ impl App {
         }
         match self.event_proxy.clone() {
             Some(proxy) => {
-                let _ = std::thread::Builder::new()
-                    .name("fenix-list-files".into())
-                    .spawn(move || {
-                        let files = list(&key.0, key.1);
-                        let _ = proxy.send_event(FenixUserEvent::FilesListed {
-                            root: key.0,
-                            include_ignored: key.1,
-                            files,
-                        });
-                    });
+                let _ = std::thread::Builder::new().name("fenix-list-files".into()).spawn(move || {
+                    let files = list(&key.0, key.1);
+                    let _ = proxy.send_event(FenixUserEvent::FilesListed { root: key.0, include_ignored: key.1, files });
+                });
             }
             // No event loop (every test): list inline.
             None => {
@@ -122,12 +104,7 @@ impl App {
         }
     }
 
-    pub(super) fn apply_files_listed(
-        &mut self,
-        root: PathBuf,
-        include_ignored: bool,
-        files: Vec<fenix_picker::Candidate<PathBuf>>,
-    ) {
+    pub(super) fn apply_files_listed(&mut self, root: PathBuf, include_ignored: bool, files: Vec<fenix_picker::Candidate<PathBuf>>) {
         let key = (root, include_ignored);
         self.file_index.pending.remove(&key);
         if self.file_index.waiting.as_ref() == Some(&key) {
@@ -143,9 +120,7 @@ impl App {
                 }
             }
         }
-        self.file_index
-            .listed
-            .insert(key.clone(), (Arc::new(files), Instant::now()));
+        self.file_index.listed.insert(key.clone(), (Arc::new(files), Instant::now()));
         // A listing's filter that was waiting for these files.
         self.explorer_index_arrived(&key.0);
         if let Some(window) = &self.window {
@@ -155,26 +130,15 @@ impl App {
 
     /// `root`'s files as last listed (what `.gitignore` hides left out),
     /// if they have been.
-    pub(super) fn listed_files(
-        &self,
-        root: &Path,
-    ) -> Option<Arc<Vec<fenix_picker::Candidate<PathBuf>>>> {
-        self.file_index
-            .listed
-            .get(&(root.to_path_buf(), false))
-            .map(|(files, _)| files.clone())
+    pub(super) fn listed_files(&self, root: &Path) -> Option<Arc<Vec<fenix_picker::Candidate<PathBuf>>>> {
+        self.file_index.listed.get(&(root.to_path_buf(), false)).map(|(files, _)| files.clone())
     }
 
     /// The find-file picker's modeline note while its files are listed.
     pub(super) fn file_listing_note(&self) -> Option<&'static str> {
         let key = self.file_index.waiting.as_ref()?;
-        let shown =
-            matches!(&self.active_picker, Some(ActivePicker::FindFile(state)) if state.total() > 0);
-        Some(if shown && self.file_index.listed.contains_key(key) {
-            "refreshing"
-        } else {
-            "listing the files…"
-        })
+        let shown = matches!(&self.active_picker, Some(ActivePicker::FindFile(state)) if state.total() > 0);
+        Some(if shown && self.file_index.listed.contains_key(key) { "refreshing" } else { "listing the files…" })
     }
 }
 
@@ -190,13 +154,8 @@ mod tests {
         std::fs::write(dir.join("beta.rs"), "").unwrap();
         let mut app = App::with_file(None);
         app.open_find_file(&dir, false);
-        assert!(
-            app.file_index.waiting.is_none(),
-            "listed inline, with no event loop"
-        );
-        let Some(ActivePicker::FindFile(state)) = &mut app.active_picker else {
-            panic!("a find-file picker")
-        };
+        assert!(app.file_index.waiting.is_none(), "listed inline, with no event loop");
+        let Some(ActivePicker::FindFile(state)) = &mut app.active_picker else { panic!("a find-file picker") };
         assert_eq!(state.total(), 2);
         state.push_char('b');
 
@@ -204,9 +163,7 @@ mod tests {
         std::fs::write(dir.join("bravo.rs"), "").unwrap();
         app.file_index.waiting = Some((dir.clone(), false));
         app.apply_files_listed(dir.clone(), false, list(&dir, false));
-        let Some(ActivePicker::FindFile(state)) = &app.active_picker else {
-            panic!()
-        };
+        let Some(ActivePicker::FindFile(state)) = &app.active_picker else { panic!() };
         assert_eq!(state.query(), "b");
         assert_eq!(state.len(), 2, "beta.rs and the new bravo.rs");
         assert!(app.file_listing_note().is_none());
@@ -214,9 +171,7 @@ mod tests {
         // Reopened straight away: the listing it has, no new one.
         app.picker_cancel();
         app.open_find_file(&dir, false);
-        assert!(
-            matches!(&app.active_picker, Some(ActivePicker::FindFile(state)) if state.total() == 3)
-        );
+        assert!(matches!(&app.active_picker, Some(ActivePicker::FindFile(state)) if state.total() == 3));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -105,12 +105,7 @@ pub fn resolve(anchor: Anchor, width: f32, height: f32, window_w: f32, avoid_bot
         }
         Anchor::BottomLeft { margin } => (margin, avoid_bottom - height - margin),
     };
-    Rect {
-        x: x.clamp(0.0, max_x),
-        y: y.clamp(0.0, max_y),
-        w: width,
-        h: height,
-    }
+    Rect { x: x.clamp(0.0, max_x), y: y.clamp(0.0, max_y), w: width, h: height }
 }
 
 /// How many `row_height`-tall rows can fit in a popup before it would run
@@ -145,13 +140,7 @@ mod tests {
         // instead of extending past it (the bug this module fixes: a
         // which-key panel with enough leader groups to overflow used to
         // just draw under/past the modeline).
-        let r = resolve(
-            Anchor::TopRight { margin: 10.0 },
-            200.0,
-            5000.0,
-            800.0,
-            600.0,
-        );
+        let r = resolve(Anchor::TopRight { margin: 10.0 }, 200.0, 5000.0, 800.0, 600.0);
         assert_eq!(r.y, 0.0); // max_y clamps to 0 since height alone exceeds avoid_bottom
         assert!(r.y + r.h >= 600.0); // still taller than available -- caller must shrink content, not just position
     }
@@ -164,50 +153,26 @@ mod tests {
 
     #[test]
     fn below_point_stays_below_when_there_is_room() {
-        let r = resolve(
-            Anchor::BelowPoint { x: 40.0, y: 100.0 },
-            150.0,
-            60.0,
-            800.0,
-            600.0,
-        );
+        let r = resolve(Anchor::BelowPoint { x: 40.0, y: 100.0 }, 150.0, 60.0, 800.0, 600.0);
         assert_eq!(r.x, 40.0);
         assert_eq!(r.y, 100.0);
     }
 
     #[test]
     fn below_point_flips_above_when_it_would_overflow_the_bottom() {
-        let r = resolve(
-            Anchor::BelowPoint { x: 40.0, y: 580.0 },
-            150.0,
-            60.0,
-            800.0,
-            600.0,
-        );
+        let r = resolve(Anchor::BelowPoint { x: 40.0, y: 580.0 }, 150.0, 60.0, 800.0, 600.0);
         assert_eq!(r.y, 580.0 - 60.0); // renders above the point instead
     }
 
     #[test]
     fn below_point_clamps_horizontally_to_the_window() {
-        let r = resolve(
-            Anchor::BelowPoint { x: 790.0, y: 100.0 },
-            150.0,
-            60.0,
-            800.0,
-            600.0,
-        );
+        let r = resolve(Anchor::BelowPoint { x: 790.0, y: 100.0 }, 150.0, 60.0, 800.0, 600.0);
         assert_eq!(r.x, 800.0 - 150.0);
     }
 
     #[test]
     fn bottom_left_places_the_popup_just_above_avoid_bottom_minus_its_margin() {
-        let r = resolve(
-            Anchor::BottomLeft { margin: 10.0 },
-            200.0,
-            50.0,
-            800.0,
-            600.0,
-        );
+        let r = resolve(Anchor::BottomLeft { margin: 10.0 }, 200.0, 50.0, 800.0, 600.0);
         assert_eq!(r.x, 10.0);
         assert_eq!(r.y, 600.0 - 50.0 - 10.0);
         assert_eq!(r.w, 200.0);
@@ -216,26 +181,14 @@ mod tests {
 
     #[test]
     fn bottom_left_clamps_when_content_is_taller_than_available_space() {
-        let r = resolve(
-            Anchor::BottomLeft { margin: 10.0 },
-            200.0,
-            5000.0,
-            800.0,
-            600.0,
-        );
+        let r = resolve(Anchor::BottomLeft { margin: 10.0 }, 200.0, 5000.0, 800.0, 600.0);
         assert_eq!(r.y, 0.0); // max_y clamps to 0 since height alone exceeds avoid_bottom
         assert!(r.y + r.h >= 600.0); // still taller than available -- caller must shrink content, not just position
     }
 
     #[test]
     fn bottom_left_clamps_when_the_window_is_narrower_than_the_popup_plus_margin() {
-        let r = resolve(
-            Anchor::BottomLeft { margin: 10.0 },
-            200.0,
-            50.0,
-            150.0,
-            600.0,
-        );
+        let r = resolve(Anchor::BottomLeft { margin: 10.0 }, 200.0, 50.0, 150.0, 600.0);
         assert_eq!(r.x, 0.0); // would otherwise sit past the window's own right edge
     }
 

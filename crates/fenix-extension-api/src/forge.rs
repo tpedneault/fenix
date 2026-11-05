@@ -97,11 +97,7 @@ pub fn call(name: &str, payload: &str) -> Option<Result<Call, String>> {
         REVIEWS => Call::Reviews,
         _ => return None,
     };
-    Some(
-        serde_json::from_str::<Repository>(payload)
-            .map(wrap)
-            .map_err(|e| format!("{name}: {e}")),
-    )
+    Some(serde_json::from_str::<Repository>(payload).map(wrap).map_err(|e| format!("{name}: {e}")))
 }
 
 /// `forge.branch`'s answer: the branch's request, or none.
@@ -121,22 +117,12 @@ mod tests {
     #[test]
     fn forge_calls_are_read_and_answered() {
         let payload = r#"{"root": "C:/src/fenix", "remote": "git@github.com:o/r.git", "branch": "main", "number": null}"#;
-        let Some(Ok(Call::Branch(repo))) = call(BRANCH, payload) else {
-            panic!()
-        };
+        let Some(Ok(Call::Branch(repo))) = call(BRANCH, payload) else { panic!() };
         assert_eq!((repo.branch.as_deref(), repo.number), (Some("main"), None));
         assert!(call("other.thing", payload).is_none());
         assert!(matches!(call(OPEN, "{}"), Some(Err(_))));
         assert_eq!(branch_answer(None), "null");
-        let request = Request {
-            number: 7,
-            reference: "#7".into(),
-            title: "x".into(),
-            draft: false,
-            checks: Some("passed".into()),
-            approved_by: vec![],
-            unresolved: 1,
-        };
+        let request = Request { number: 7, reference: "#7".into(), title: "x".into(), draft: false, checks: Some("passed".into()), approved_by: vec![], unresolved: 1 };
         assert!(branch_answer(Some(&request)).contains("\"reference\":\"#7\""));
     }
 }

@@ -29,8 +29,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(600);
 /// alone, and how long the next wait is. Shared by every thread that
 /// looks at files for a tick (the probe, Home's recent files).
 fn volumes() -> &'static Mutex<HashMap<PathBuf, (Instant, Duration)>> {
-    static VOLUMES: std::sync::OnceLock<Mutex<HashMap<PathBuf, (Instant, Duration)>>> =
-        std::sync::OnceLock::new();
+    static VOLUMES: std::sync::OnceLock<Mutex<HashMap<PathBuf, (Instant, Duration)>>> = std::sync::OnceLock::new();
     VOLUMES.get_or_init(Default::default)
 }
 
@@ -52,11 +51,7 @@ fn volume_of(path: &Path) -> PathBuf {
 /// the list for next time.
 pub(super) fn stat(path: &Path) -> Option<std::io::Result<std::fs::Metadata>> {
     let volume = volume_of(path);
-    if let Some((until, _)) = volumes()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&volume)
-    {
+    if let Some((until, _)) = volumes().lock().unwrap_or_else(|e| e.into_inner()).get(&volume) {
         if Instant::now() < *until {
             return None;
         }
@@ -66,10 +61,7 @@ pub(super) fn stat(path: &Path) -> Option<std::io::Result<std::fs::Metadata>> {
     let took = started.elapsed();
     let mut volumes = volumes().lock().unwrap_or_else(|e| e.into_inner());
     if took >= SLOW_STAT {
-        let wait = volumes
-            .get(&volume)
-            .map(|(_, wait)| (*wait * 2).min(MAX_BACKOFF))
-            .unwrap_or(FIRST_BACKOFF);
+        let wait = volumes.get(&volume).map(|(_, wait)| (*wait * 2).min(MAX_BACKOFF)).unwrap_or(FIRST_BACKOFF);
         volumes.insert(volume, (Instant::now() + wait, wait));
     } else {
         volumes.remove(&volume);
@@ -95,9 +87,7 @@ pub(crate) struct ProbeResult {
 // By hand: the project's settings have no `Debug` of their own.
 impl std::fmt::Debug for ProbeResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProbeResult")
-            .field("buffers", &self.buffers.len())
-            .finish()
+        f.debug_struct("ProbeResult").field("buffers", &self.buffers.len()).finish()
     }
 }
 
@@ -106,9 +96,7 @@ fn run(request: ProbeRequest) -> ProbeResult {
     let mut result = ProbeResult::default();
     for (id, path) in request.buffers {
         if let Some(meta) = stat(&path) {
-            result
-                .buffers
-                .insert(id, DiskFingerprint::from_meta(meta.ok()));
+            result.buffers.insert(id, DiskFingerprint::from_meta(meta.ok()));
         }
     }
     if let Some(root) = request.project {
@@ -127,19 +115,14 @@ impl App {
         // One probe at a time. One that never came back (its thread
         // stuck on a share that hasn't answered in minutes) stops holding
         // the others up after a while.
-        if self
-            .disk_probe_out
-            .is_some_and(|sent| sent.elapsed() < Duration::from_secs(300))
-        {
+        if self.disk_probe_out.is_some_and(|sent| sent.elapsed() < Duration::from_secs(300)) {
             return;
         }
         let watch = self.config.watch_files.unwrap_or(true);
         let mut request = ProbeRequest::default();
         if watch {
             for id in self.buffers.ids_sorted_by_path() {
-                let Some(ob) = self.buffers.get(id) else {
-                    continue;
-                };
+                let Some(ob) = self.buffers.get(id) else { continue };
                 if !ob.kind.tracks_unsaved_changes() {
                     continue;
                 }
@@ -153,12 +136,10 @@ impl App {
         self.disk_probe_basis = self.disk_state.clone();
         match self.event_proxy.clone() {
             Some(proxy) => {
-                let _ = std::thread::Builder::new()
-                    .name("fenix-disk-probe".into())
-                    .spawn(move || {
-                        let result = run(request);
-                        let _ = proxy.send_event(FenixUserEvent::DiskProbed(Box::new(result)));
-                    });
+                let _ = std::thread::Builder::new().name("fenix-disk-probe".into()).spawn(move || {
+                    let result = run(request);
+                    let _ = proxy.send_event(FenixUserEvent::DiskProbed(Box::new(result)));
+                });
             }
             // No event loop (every test): look and act straight away.
             None => {
@@ -180,9 +161,7 @@ impl App {
             return;
         }
         let sweep = self.reload_buffers_seen(&result.buffers);
-        let Some(message) = sweep.message() else {
-            return;
-        };
+        let Some(message) = sweep.message() else { return };
         if sweep.is_bad() {
             self.set_error(message);
         } else {
@@ -199,10 +178,7 @@ mod tests {
     #[test]
     fn a_volume_is_the_drive_or_the_share() {
         assert_eq!(volume_of(Path::new(r"C:\work\a.rs")), PathBuf::from(r"C:\"));
-        assert_eq!(
-            volume_of(Path::new(r"\\files\ops\mib\ccf.dat")),
-            PathBuf::from(r"\\files\ops\")
-        );
+        assert_eq!(volume_of(Path::new(r"\\files\ops\mib\ccf.dat")), PathBuf::from(r"\\files\ops\"));
     }
 
     #[test]
@@ -218,14 +194,10 @@ mod tests {
         app.disk_probe_basis = app.disk_state.clone();
         // ...then Fenix saves a longer version and goes on typing.
         std::fs::write(&file, "one, saved\n").unwrap();
-        app.disk_state
-            .insert(id, DiskFingerprint::of(&file).unwrap());
+        app.disk_state.insert(id, DiskFingerprint::of(&file).unwrap());
         app.test_insert_str("more ");
         let sweep = app.reload_buffers_seen(&HashMap::from([(id, Some(before))]));
-        assert!(
-            sweep.conflicted.is_empty() && !app.externally_changed.contains(&id),
-            "{sweep:?}"
-        );
+        assert!(sweep.conflicted.is_empty() && !app.externally_changed.contains(&id), "{sweep:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -233,15 +205,9 @@ mod tests {
     fn a_volume_that_was_slow_is_left_alone_for_a_while() {
         // A drive letter nothing else uses, so no other test sees it.
         let file = PathBuf::from(r"Q:\fenix-probe\a.txt");
-        assert!(
-            matches!(stat(&file), Some(Err(_))),
-            "looked at, and not there"
-        );
+        assert!(matches!(stat(&file), Some(Err(_))), "looked at, and not there");
         let volume = volume_of(&file);
-        volumes().lock().unwrap().insert(
-            volume.clone(),
-            (Instant::now() + Duration::from_secs(60), FIRST_BACKOFF),
-        );
+        volumes().lock().unwrap().insert(volume.clone(), (Instant::now() + Duration::from_secs(60), FIRST_BACKOFF));
         assert!(stat(&file).is_none(), "not looked at while it's left alone");
         volumes().lock().unwrap().remove(&volume);
         assert!(stat(&file).is_some());

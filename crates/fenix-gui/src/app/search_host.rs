@@ -88,16 +88,8 @@ impl App {
 
     /// Opens the Search page as `how` asks, beside the file you're in.
     pub(crate) fn search_open(&mut self, how: SearchOpen) {
-        let root = self
-            .project_root
-            .clone()
-            .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-        let file = self
-            .open()
-            .buffer
-            .path()
-            .map(Path::to_path_buf)
-            .filter(|_| self.open().kind == BufferKind::Text);
+        let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let file = self.open().buffer.path().map(Path::to_path_buf).filter(|_| self.open().kind == BufferKind::Text);
         // A buffer of no file -- a scratch, a lesson's practice -- isn't
         // on disk for the page to search: its lines are picked instead.
         if how == SearchOpen::InFile && file.is_none() {
@@ -108,36 +100,17 @@ impl App {
         let selection = if self.vim.mode() == Mode::Visual && file.is_some() {
             let cursor = self.cursor();
             let ob = self.open();
-            let lines = self
-                .vim
-                .visual_selection_range(&ob.buffer, &cursor)
-                .map(|(r, _)| {
-                    let lo = ob
-                        .buffer
-                        .line_col(&Cursor {
-                            char_idx: r.start,
-                            sticky_col: 0,
-                        })
-                        .0;
-                    let hi = ob
-                        .buffer
-                        .line_col(&Cursor {
-                            char_idx: r.end.saturating_sub(1).max(r.start),
-                            sticky_col: 0,
-                        })
-                        .0;
-                    (lo + 1, hi + 1)
-                });
+            let lines = self.vim.visual_selection_range(&ob.buffer, &cursor).map(|(r, _)| {
+                let lo = ob.buffer.line_col(&Cursor { char_idx: r.start, sticky_col: 0 }).0;
+                let hi = ob.buffer.line_col(&Cursor { char_idx: r.end.saturating_sub(1).max(r.start), sticky_col: 0 }).0;
+                (lo + 1, hi + 1)
+            });
             self.vim.exit_visual_mode(&cursor);
             lines
         } else {
             None
         };
-        let word = if how == SearchOpen::Word {
-            self.word_at_cursor()
-        } else {
-            None
-        };
+        let word = if how == SearchOpen::Word { self.word_at_cursor() } else { None };
         if how == SearchOpen::Word && word.is_none() {
             self.set_error("no word under the cursor");
             return;
@@ -159,13 +132,7 @@ impl App {
             // A new page keeps the toggles the last one had, else starts
             // as the settings say.
             (_, None) => match self.search.last.clone() {
-                Some(last) => SearchPage {
-                    options: last.options,
-                    preserve_case: last.preserve_case,
-                    globs: last.globs,
-                    following: last.following,
-                    ..Default::default()
-                },
+                Some(last) => SearchPage { options: last.options, preserve_case: last.preserve_case, globs: last.globs, following: last.following, ..Default::default() },
                 None => {
                     let options = Options {
                         match_case: self.config.search_smart_case == Some(false),
@@ -173,25 +140,8 @@ impl App {
                         context: self.config.search_context.unwrap_or(0),
                         ..Options::default()
                     };
-                    let globs = self
-                        .config
-                        .search_exclude
-                        .iter()
-                        .map(|g| {
-                            if g.starts_with('!') {
-                                g.clone()
-                            } else {
-                                format!("!{g}")
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    SearchPage {
-                        options,
-                        globs: Input::new(&globs),
-                        following: true,
-                        ..Default::default()
-                    }
+                    let globs = self.config.search_exclude.iter().map(|g| if g.starts_with('!') { g.clone() } else { format!("!{g}") }).collect::<Vec<_>>().join(" ");
+                    SearchPage { options, globs: Input::new(&globs), following: true, ..Default::default() }
                 }
             },
         };
@@ -215,9 +165,7 @@ impl App {
             page.scopes = scopes;
             page.scope = Some(match &how {
                 SearchOpen::Folder(_) => ScopeKind::Folder,
-                SearchOpen::InFile | SearchOpen::ThisFile if page.selection.is_some() => {
-                    ScopeKind::Selection
-                }
+                SearchOpen::InFile | SearchOpen::ThisFile if page.selection.is_some() => ScopeKind::Selection,
                 SearchOpen::InFile | SearchOpen::ThisFile => ScopeKind::ThisFile,
                 _ => ScopeKind::Project,
             });
@@ -276,25 +224,14 @@ impl App {
         let ob = self.open();
         let (line, col) = ob.buffer.line_col(&self.cursor());
         let start = ob.buffer.line_start_char(line);
-        let chars: Vec<char> = ob
-            .buffer
-            .text_range(start, start + ob.buffer.line_len(line))
-            .chars()
-            .collect();
+        let chars: Vec<char> = ob.buffer.text_range(start, start + ob.buffer.line_len(line)).chars().collect();
         let word = |c: char| c.is_alphanumeric() || c == '_';
         let at = col.min(chars.len());
         if !chars.get(at).is_some_and(|&c| word(c)) {
             return None;
         }
-        let from = (0..at)
-            .rev()
-            .take_while(|&i| word(chars[i]))
-            .last()
-            .unwrap_or(at);
-        let to = (at..chars.len())
-            .take_while(|&i| word(chars[i]))
-            .last()
-            .map_or(at, |i| i + 1);
+        let from = (0..at).rev().take_while(|&i| word(chars[i])).last().unwrap_or(at);
+        let to = (at..chars.len()).take_while(|&i| word(chars[i])).last().map_or(at, |i| i + 1);
         Some(chars[from..to].iter().collect())
     }
 
@@ -304,12 +241,7 @@ impl App {
             self.windows_mut().focus(pane);
         } else if self.windows().window_count() > 1 {
             let here = self.focused_pane_id();
-            let other = self
-                .windows()
-                .windows()
-                .into_iter()
-                .find(|&p| p != here)
-                .unwrap_or(here);
+            let other = self.windows().windows().into_iter().find(|&p| p != here).unwrap_or(here);
             self.windows_mut().focus(other);
             self.show_page(id);
         } else {
@@ -324,9 +256,7 @@ impl App {
     /// toggles. Whether it was one.
     pub(super) fn search_page_special_key(&mut self, id: BufferId, keypress: KeyPress) -> bool {
         if keypress == KeyPress::char('v').with_ctrl() {
-            let Some(text) = self.clipboard_text() else {
-                return true;
-            };
+            let Some(text) = self.clipboard_text() else { return true };
             if let Some(action) = self.search_page_mut(id).map(|p| p.paste(&text)) {
                 self.search_action(id, action);
             }
@@ -335,15 +265,8 @@ impl App {
         if !keypress.mods.alt || keypress.mods.ctrl {
             return false;
         }
-        let KeyCode::Char(c) = keypress.code else {
-            return false;
-        };
-        let Some(action) = self
-            .search_page_mut(id)
-            .map(|p| p.toggle(c.to_ascii_lowercase()))
-        else {
-            return false;
-        };
+        let KeyCode::Char(c) = keypress.code else { return false };
+        let Some(action) = self.search_page_mut(id).map(|p| p.toggle(c.to_ascii_lowercase())) else { return false };
         self.search_action(id, action);
         self.restale_page(id);
         self.wake_caret();
@@ -378,9 +301,7 @@ impl App {
             }
             SearchAction::Follow(on) => {
                 if on {
-                    if let Some((path, line, col)) =
-                        self.search_page(id).and_then(SearchPage::selected)
-                    {
+                    if let Some((path, line, col)) = self.search_page(id).and_then(SearchPage::selected) {
                         self.search_go_to(id, &path, line, col, false);
                     }
                 }
@@ -409,16 +330,10 @@ impl App {
         if let Some(cancel) = self.search.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
-        let Some(page) = self.search_page(id) else {
-            return;
-        };
+        let Some(page) = self.search_page(id) else { return };
         let options = page.search_options();
         let query = page.query.text.clone();
-        let pattern = if query.is_empty() {
-            Err(String::new())
-        } else {
-            Pattern::new(&query, &options)
-        };
+        let pattern = if query.is_empty() { Err(String::new()) } else { Pattern::new(&query, &options) };
         let pattern = match pattern {
             Ok(p) => p,
             Err(why) => {
@@ -439,17 +354,9 @@ impl App {
         let scope = match scope_kind {
             ScopeKind::Project => Some(Scope::Folders(vec![root.clone()])),
             ScopeKind::Folder => Some(Scope::Folders(page.folder.clone().into_iter().collect())),
-            ScopeKind::ThisFile | ScopeKind::Selection => {
-                Some(Scope::Files(page.file.clone().into_iter().collect()))
-            }
+            ScopeKind::ThisFile | ScopeKind::Selection => Some(Scope::Files(page.file.clone().into_iter().collect())),
             ScopeKind::OpenFiles => Some(Scope::Files(
-                self.buffers
-                    .ids_sorted_by_path()
-                    .into_iter()
-                    .filter_map(|b| self.buffers.get(b))
-                    .filter(|ob| ob.kind == BufferKind::Text)
-                    .filter_map(|ob| ob.buffer.path().map(Path::to_path_buf))
-                    .collect(),
+                self.buffers.ids_sorted_by_path().into_iter().filter_map(|b| self.buffers.get(b)).filter(|ob| ob.kind == BufferKind::Text).filter_map(|ob| ob.buffer.path().map(Path::to_path_buf)).collect(),
             )),
             // Asked of Git off the UI thread.
             ScopeKind::Changed => None,
@@ -461,11 +368,7 @@ impl App {
             .into_iter()
             .filter_map(|b| self.buffers.get(b))
             .filter(|ob| ob.kind == BufferKind::Text && ob.buffer.is_dirty())
-            .filter_map(|ob| {
-                ob.buffer
-                    .path()
-                    .map(|p| (p.to_path_buf(), ob.buffer.text()))
-            })
+            .filter_map(|ob| ob.buffer.path().map(|p| (p.to_path_buf(), ob.buffer.text())))
             .collect();
         let max = self.config.search_max_results.unwrap_or(10_000);
         if let Some(p) = self.search_page_mut(id) {
@@ -479,65 +382,36 @@ impl App {
         self.search.cancel = Some(cancel.clone());
         self.page_spawn(move |send| {
             let scope = scope.unwrap_or_else(|| {
-                let changed = fenix_explorer::status_for_dir(&root)
-                    .into_iter()
-                    .filter(|(_, s)| *s != fenix_explorer::GitStatus::Ignored)
-                    .map(|(p, _)| p)
-                    .collect::<Vec<_>>();
+                let changed = fenix_explorer::status_for_dir(&root).into_iter().filter(|(_, s)| *s != fenix_explorer::GitStatus::Ignored).map(|(p, _)| p).collect::<Vec<_>>();
                 let mut changed = changed;
                 changed.sort();
                 Scope::Files(changed)
             });
             let mut batch: Vec<FileResult> = Vec::new();
             let mut flushed = Instant::now();
-            let result = engine::search(
-                &scope,
-                &pattern,
-                &options,
-                &unsaved,
-                max,
-                &cancel,
-                |mut file| {
-                    if let Some((lo, hi)) = selection {
-                        file.lines.retain(|l| (lo..=hi).contains(&l.number));
-                        if file.match_count() == 0 {
-                            return ControlFlow::Continue(());
-                        }
+            let result = engine::search(&scope, &pattern, &options, &unsaved, max, &cancel, |mut file| {
+                if let Some((lo, hi)) = selection {
+                    file.lines.retain(|l| (lo..=hi).contains(&l.number));
+                    if file.match_count() == 0 {
+                        return ControlFlow::Continue(());
                     }
-                    batch.push(file);
-                    if batch.len() >= BATCH_FILES || flushed.elapsed() >= BATCH_EVERY {
-                        send(PageEvent::SearchFound {
-                            buffer: id,
-                            generation,
-                            files: std::mem::take(&mut batch),
-                        });
-                        flushed = Instant::now();
-                    }
-                    ControlFlow::Continue(())
-                },
-            );
-            if !batch.is_empty() {
-                send(PageEvent::SearchFound {
-                    buffer: id,
-                    generation,
-                    files: batch,
-                });
-            }
-            send(PageEvent::SearchDone {
-                buffer: id,
-                generation,
-                result,
+                }
+                batch.push(file);
+                if batch.len() >= BATCH_FILES || flushed.elapsed() >= BATCH_EVERY {
+                    send(PageEvent::SearchFound { buffer: id, generation, files: std::mem::take(&mut batch) });
+                    flushed = Instant::now();
+                }
+                ControlFlow::Continue(())
             });
+            if !batch.is_empty() {
+                send(PageEvent::SearchFound { buffer: id, generation, files: batch });
+            }
+            send(PageEvent::SearchDone { buffer: id, generation, result });
         });
     }
 
     /// Files the search under way found.
-    pub(super) fn apply_search_found(
-        &mut self,
-        id: BufferId,
-        generation: u64,
-        files: Vec<FileResult>,
-    ) {
+    pub(super) fn apply_search_found(&mut self, id: BufferId, generation: u64, files: Vec<FileResult>) {
         if generation != self.search.generation {
             return;
         }
@@ -550,32 +424,16 @@ impl App {
 
     /// The search under way finished: how it went, and its matches are
     /// the quickfix list.
-    pub(super) fn apply_search_done(
-        &mut self,
-        id: BufferId,
-        generation: u64,
-        result: Result<Summary, String>,
-    ) {
+    pub(super) fn apply_search_done(&mut self, id: BufferId, generation: u64, result: Result<Summary, String>) {
         if generation != self.search.generation {
             return;
         }
         self.search.cancel = None;
-        let ms = self
-            .search
-            .started
-            .map(|s| s.elapsed().as_millis())
-            .unwrap_or(0);
-        let Some(p) = self.search_page_mut(id) else {
-            return;
-        };
+        let ms = self.search.started.map(|s| s.elapsed().as_millis()).unwrap_or(0);
+        let Some(p) = self.search_page_mut(id) else { return };
         p.status = match result {
             Ok(summary) if summary.cancelled => return,
-            Ok(summary) => Status::Done {
-                files: summary.files_searched,
-                ms,
-                binary: summary.binary_skipped,
-                truncated: summary.truncated,
-            },
+            Ok(summary) => Status::Done { files: summary.files_searched, ms, binary: summary.binary_skipped, truncated: summary.truncated },
             Err(why) => Status::Failed(why),
         };
         let entries: Vec<QuickfixEntry> = p
@@ -583,17 +441,8 @@ impl App {
             .into_iter()
             .map(|(fi, li)| {
                 let (file, line) = (&p.files[fi], &p.files[fi].lines[li]);
-                let col = line
-                    .matches
-                    .first()
-                    .map(|m| line.text[..m.start].chars().count() + 1)
-                    .unwrap_or(1);
-                QuickfixEntry::Grep(fenix_project::GrepMatch {
-                    path: file.path.clone(),
-                    line: line.number,
-                    col,
-                    text: line.text.clone(),
-                })
+                let col = line.matches.first().map(|m| line.text[..m.start].chars().count() + 1).unwrap_or(1);
+                QuickfixEntry::Grep(fenix_project::GrepMatch { path: file.path.clone(), line: line.number, col, text: line.text.clone() })
             })
             .collect();
         self.quickfix = entries;
@@ -605,12 +454,8 @@ impl App {
 
     /// `SPC p n`/`N` stepped to quickfix entry `index`: the page lights it.
     pub(super) fn search_quickfix_moved(&mut self, index: usize) {
-        let Some(id) = self.search.quickfix_page else {
-            return;
-        };
-        let Some(p) = self.search_page_mut(id) else {
-            return;
-        };
+        let Some(id) = self.search.quickfix_page else { return };
+        let Some(p) = self.search_page_mut(id) else { return };
         if let Some(&at) = p.match_rows().get(index) {
             p.set_current(at);
             self.restale_page(id);
@@ -620,14 +465,8 @@ impl App {
     /// Shows a match in the pane beside the page -- as the preview tab,
     /// the keyboard staying on the page unless `focus`.
     fn search_go_to(&mut self, id: BufferId, path: &Path, line: usize, col: usize, focus: bool) {
-        let page_pane = self
-            .pane_showing(id)
-            .unwrap_or_else(|| self.focused_pane_id());
-        let other = self
-            .windows()
-            .windows()
-            .into_iter()
-            .find(|&p| p != page_pane);
+        let page_pane = self.pane_showing(id).unwrap_or_else(|| self.focused_pane_id());
+        let other = self.windows().windows().into_iter().find(|&p| p != page_pane);
         match other {
             Some(pane) => {
                 self.windows_mut().focus(pane);
@@ -637,17 +476,9 @@ impl App {
                 self.split_vertical();
             }
         }
-        let from = JumpEntry {
-            buffer: self.focused_buffer_id(),
-            char_idx: self.cursor().char_idx,
-        };
+        let from = JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx };
         self.open_file_as_preview(path);
-        self.jump_to_grep_match(&fenix_project::GrepMatch {
-            path: path.to_path_buf(),
-            line,
-            col,
-            text: String::new(),
-        });
+        self.jump_to_grep_match(&fenix_project::GrepMatch { path: path.to_path_buf(), line, col, text: String::new() });
         if focus {
             self.record_jump(from);
         } else if let Some(pane) = self.pane_showing(id) {
@@ -672,18 +503,10 @@ impl App {
             self.search.quickfix_page = None;
         }
         // Its pane goes with it when it has one of its own.
-        if let Some(pane) = self
-            .pane_showing(id)
-            .filter(|_| self.windows().window_count() > 1)
-        {
+        if let Some(pane) = self.pane_showing(id).filter(|_| self.windows().window_count() > 1) {
             self.windows_mut().focus(pane);
             self.close_page(id);
-            if self
-                .windows()
-                .content(pane)
-                .is_some_and(|b| self.search_page(*b).is_none())
-                && self.pane_tab_order(pane).len() <= 1
-            {
+            if self.windows().content(pane).is_some_and(|b| self.search_page(*b).is_none()) && self.pane_tab_order(pane).len() <= 1 {
                 self.close_window();
             }
         } else {
@@ -697,28 +520,14 @@ impl App {
     fn search_history(&mut self, root: &Path) -> Vec<String> {
         if self.search.history.is_none() {
             let path = self.config.state_dir().join(HISTORY_FILE);
-            self.search.history = Some(
-                fenix_storage::state::read(&path, "projects")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_default(),
-            );
+            self.search.history = Some(fenix_storage::state::read(&path, "projects").ok().flatten().unwrap_or_default());
         }
-        self.search
-            .history
-            .as_ref()
-            .and_then(|h| h.get(root).cloned())
-            .unwrap_or_default()
+        self.search.history.as_ref().and_then(|h| h.get(root).cloned()).unwrap_or_default()
     }
 
     /// The page's query goes to the front of its project's history.
     fn search_remember(&mut self, id: BufferId) {
-        let Some((root, query)) = self
-            .search_page(id)
-            .map(|p| (p.root.clone(), p.query.text.clone()))
-        else {
-            return;
-        };
+        let Some((root, query)) = self.search_page(id).map(|p| (p.root.clone(), p.query.text.clone())) else { return };
         if query.trim().is_empty() {
             return;
         }
@@ -743,59 +552,28 @@ impl App {
     /// since it was searched is left alone and searched again. Open
     /// files change in their buffers (unsaved); the rest are written.
     fn search_apply(&mut self, id: BufferId) {
-        let Some(page) = self.search_page(id) else {
-            return;
-        };
-        let Some(pattern) = page.pattern.clone() else {
-            return;
-        };
+        let Some(page) = self.search_page(id) else { return };
+        let Some(pattern) = page.pattern.clone() else { return };
         let (replacement, preserve) = (page.replace.text.clone(), page.preserve_case);
-        let files: Vec<_> = page
-            .files
-            .iter()
-            .filter(|f| f.included() > 0)
-            .cloned()
-            .collect();
+        let files: Vec<_> = page.files.iter().filter(|f| f.included() > 0).cloned().collect();
         let mut undo = Vec::new();
         let (mut changed, mut count, mut stale, mut unsaved) = (0usize, 0usize, 0usize, 0usize);
         for file in &files {
-            let open = self.buffers.id_for_path(&file.path).filter(|&b| {
-                self.buffers
-                    .get(b)
-                    .is_some_and(|ob| ob.kind == BufferKind::Text)
-            });
+            let open = self.buffers.id_for_path(&file.path).filter(|&b| self.buffers.get(b).is_some_and(|ob| ob.kind == BufferKind::Text));
             let text = match open.and_then(|b| self.buffers.get(b)) {
                 Some(ob) => ob.buffer.text(),
                 None => match std::fs::read_to_string(&file.path) {
                     Ok(text) => text,
                     Err(err) => {
-                        eprintln!(
-                            "fenix: replace couldn't read {}: {err}",
-                            file.path.display()
-                        );
+                        eprintln!("fenix: replace couldn't read {}: {err}", file.path.display());
                         stale += 1;
                         continue;
                     }
                 },
             };
             // Still as it was searched? Each matched line must be the same.
-            let lines: Vec<&str> = text
-                .split('\n')
-                .map(|l| l.strip_suffix('\r').unwrap_or(l))
-                .collect();
-            let same = file
-                .lines
-                .iter()
-                .filter(|l| !l.matches.is_empty())
-                .all(|l| {
-                    lines.get(l.number - 1).is_some_and(|now| {
-                        if l.cut.0 || l.cut.1 {
-                            now.contains(&l.text)
-                        } else {
-                            *now == l.text
-                        }
-                    })
-                });
+            let lines: Vec<&str> = text.split('\n').map(|l| l.strip_suffix('\r').unwrap_or(l)).collect();
+            let same = file.lines.iter().filter(|l| !l.matches.is_empty()).all(|l| lines.get(l.number - 1).is_some_and(|now| if l.cut.0 || l.cut.1 { now.contains(&l.text) } else { *now == l.text }));
             if !same {
                 stale += 1;
                 continue;
@@ -807,35 +585,20 @@ impl App {
             }
             match open {
                 Some(b) => {
-                    let Some(ob) = self.buffers.get_mut(b) else {
-                        continue;
-                    };
+                    let Some(ob) = self.buffers.get_mut(b) else { continue };
                     let mut scratch = Cursor::at_start();
                     let end = ob.buffer.len_chars();
                     ob.buffer.replace_range(&mut scratch, 0, end, &after);
-                    undo.push(UndoFile {
-                        path: file.path.clone(),
-                        before: text,
-                        after,
-                        buffer: Some((b, ob.buffer.edit_count())),
-                    });
+                    undo.push(UndoFile { path: file.path.clone(), before: text, after, buffer: Some((b, ob.buffer.edit_count())) });
                     unsaved += 1;
                 }
                 None => {
                     if let Err(err) = std::fs::write(&file.path, &after) {
-                        eprintln!(
-                            "fenix: replace couldn't write {}: {err}",
-                            file.path.display()
-                        );
+                        eprintln!("fenix: replace couldn't write {}: {err}", file.path.display());
                         stale += 1;
                         continue;
                     }
-                    undo.push(UndoFile {
-                        path: file.path.clone(),
-                        before: text,
-                        after,
-                        buffer: None,
-                    });
+                    undo.push(UndoFile { path: file.path.clone(), before: text, after, buffer: None });
                 }
             }
             changed += 1;
@@ -844,10 +607,7 @@ impl App {
         if !undo.is_empty() {
             self.search.undo = Some(undo);
         }
-        let mut message = format!(
-            "Replaced {count} in {changed} file{}",
-            if changed == 1 { "" } else { "s" }
-        );
+        let mut message = format!("Replaced {count} in {changed} file{}", if changed == 1 { "" } else { "s" });
         if unsaved > 0 {
             message.push_str(&format!(" ({unsaved} open, not saved yet)"));
         }
@@ -879,14 +639,8 @@ impl App {
         let (mut restored, mut kept) = (0usize, 0usize);
         for file in undo {
             match file.buffer {
-                Some((b, edits))
-                    if self.buffers.get(b).is_some_and(|ob| {
-                        ob.buffer.edit_count() == edits && ob.buffer.text() == file.after
-                    }) =>
-                {
-                    let Some(ob) = self.buffers.get_mut(b) else {
-                        continue;
-                    };
+                Some((b, edits)) if self.buffers.get(b).is_some_and(|ob| ob.buffer.edit_count() == edits && ob.buffer.text() == file.after) => {
+                    let Some(ob) = self.buffers.get_mut(b) else { continue };
                     let mut scratch = Cursor::at_start();
                     let end = ob.buffer.len_chars();
                     ob.buffer.replace_range(&mut scratch, 0, end, &file.before);
@@ -894,20 +648,15 @@ impl App {
                 }
                 Some(_) => kept += 1,
                 None => match std::fs::read_to_string(&file.path) {
-                    Ok(now) if now == file.after => {
-                        match std::fs::write(&file.path, &file.before) {
-                            Ok(()) => restored += 1,
-                            Err(_) => kept += 1,
-                        }
-                    }
+                    Ok(now) if now == file.after => match std::fs::write(&file.path, &file.before) {
+                        Ok(()) => restored += 1,
+                        Err(_) => kept += 1,
+                    },
                     _ => kept += 1,
                 },
             }
         }
-        let mut message = format!(
-            "Put back {restored} file{}",
-            if restored == 1 { "" } else { "s" }
-        );
+        let mut message = format!("Put back {restored} file{}", if restored == 1 { "" } else { "s" });
         if kept > 0 {
             message.push_str(&format!(" · {kept} edited since, left as they are"));
         }
@@ -933,8 +682,7 @@ mod tests {
             use std::sync::atomic::AtomicU64;
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir()
-                .join(format!("fenix-gui-test-{name}-{}-{n}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("fenix-gui-test-{name}-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
@@ -979,15 +727,9 @@ mod tests {
         let mut app = app_in(&dir);
         app.search_open(SearchOpen::Project);
         let id = app.search_page_id().expect("the page opened");
-        assert!(
-            app.search_page(id).unwrap().typing(),
-            "the field has the keyboard"
-        );
+        assert!(app.search_page(id).unwrap().typing(), "the field has the keyboard");
         type_into(&mut app, id, "helper");
-        assert!(
-            app.search.due.is_some(),
-            "waiting for a pause in the typing"
-        );
+        assert!(app.search.due.is_some(), "waiting for a pause in the typing");
         app.search_fire_due(Instant::now() + DEBOUNCE * 2);
         let page = app.search_page(id).unwrap();
         assert_eq!(page.files.len(), 1);
@@ -1018,10 +760,7 @@ mod tests {
         let mut app = App::with_file(None);
         app.search_open(SearchOpen::InFile);
         assert!(app.search_page_id().is_none());
-        assert!(matches!(
-            app.active_picker,
-            Some(ActivePicker::BufferSearch(_))
-        ));
+        assert!(matches!(app.active_picker, Some(ActivePicker::BufferSearch(_))));
     }
 
     #[test]
@@ -1040,32 +779,16 @@ mod tests {
         // files stay closed and are written to the disk.)
         let p = app.search_page_mut(id).unwrap();
         p.following = false;
-        p.cursor = p
-            .rows()
-            .iter()
-            .position(|r| *r == crate::search_page::Row::Line(0, 1))
-            .unwrap();
+        p.cursor = p.rows().iter().position(|r| *r == crate::search_page::Row::Line(0, 1)).unwrap();
         press(&mut app, id, Key::Char('x'));
         press(&mut app, id, Key::Char('R'));
         assert!(app.search_page(id).unwrap().confirm);
         press(&mut app, id, Key::Char('y'));
-        assert_eq!(
-            std::fs::read_to_string(&a).unwrap(),
-            "assist one\nhelper two\n"
-        );
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "assist one\nhelper two\n");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "assist three\n");
-        assert!(app
-            .search_page(id)
-            .unwrap()
-            .message
-            .as_deref()
-            .unwrap()
-            .contains("Replaced 2 in 2 files"));
+        assert!(app.search_page(id).unwrap().message.as_deref().unwrap().contains("Replaced 2 in 2 files"));
         app.search_undo();
-        assert_eq!(
-            std::fs::read_to_string(&a).unwrap(),
-            "helper one\nhelper two\n"
-        );
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "helper one\nhelper two\n");
         assert_eq!(std::fs::read_to_string(&b).unwrap(), "helper three\n");
     }
 
@@ -1081,17 +804,8 @@ mod tests {
         std::fs::write(&a, "someone else's helper\n").unwrap();
         press(&mut app, id, Key::Char('R'));
         press(&mut app, id, Key::Char('y'));
-        assert_eq!(
-            std::fs::read_to_string(&a).unwrap(),
-            "someone else's helper\n"
-        );
-        assert!(app
-            .search_page(id)
-            .unwrap()
-            .message
-            .as_deref()
-            .unwrap()
-            .contains("changed since the search"));
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "someone else's helper\n");
+        assert!(app.search_page(id).unwrap().message.as_deref().unwrap().contains("changed since the search"));
     }
 
     #[test]
@@ -1104,25 +818,12 @@ mod tests {
         type_into(&mut app, id, "a");
         press(&mut app, id, Key::Enter);
         assert_eq!(app.search_page(id).unwrap().total(), 1);
-        app.search_page_special_key(
-            id,
-            KeyPress {
-                code: KeyCode::Char('r'),
-                mods: Mods {
-                    alt: true,
-                    ..Mods::default()
-                },
-            },
-        );
+        app.search_page_special_key(id, KeyPress { code: KeyCode::Char('r'), mods: Mods { alt: true, ..Mods::default() } });
         press(&mut app, id, Key::Char('/'));
         type_into(&mut app, id, "(");
         press(&mut app, id, Key::Enter);
         let page = app.search_page(id).unwrap();
-        assert!(
-            page.error.as_deref().is_some_and(|e| !e.is_empty()),
-            "{:?}",
-            page.error
-        );
+        assert!(page.error.as_deref().is_some_and(|e| !e.is_empty()), "{:?}", page.error);
         assert_eq!(page.total(), 1, "the last good results stay");
     }
 

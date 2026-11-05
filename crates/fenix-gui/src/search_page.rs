@@ -22,10 +22,7 @@ pub struct Input {
 
 impl Input {
     pub fn new(text: &str) -> Self {
-        Input {
-            text: text.to_string(),
-            caret: text.chars().count(),
-        }
+        Input { text: text.to_string(), caret: text.chars().count() }
     }
 
     fn set(&mut self, text: &str) {
@@ -76,15 +73,8 @@ pub enum Status {
     /// Nothing typed yet.
     #[default]
     Idle,
-    Searching {
-        files: usize,
-    },
-    Done {
-        files: usize,
-        ms: u128,
-        binary: usize,
-        truncated: bool,
-    },
+    Searching { files: usize },
+    Done { files: usize, ms: u128, binary: usize, truncated: bool },
     Failed(String),
 }
 
@@ -104,20 +94,8 @@ pub struct ResultFile {
 
 impl ResultFile {
     pub fn new(file: FileResult, root: &Path) -> Self {
-        let rel = file
-            .path
-            .strip_prefix(root)
-            .unwrap_or(&file.path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        ResultFile {
-            path: file.path,
-            rel,
-            lines: file.lines,
-            folded: false,
-            left_out: false,
-            skipped: HashSet::new(),
-        }
+        let rel = file.path.strip_prefix(root).unwrap_or(&file.path).to_string_lossy().replace('\\', "/");
+        ResultFile { path: file.path, rel, lines: file.lines, folded: false, left_out: false, skipped: HashSet::new() }
     }
 
     pub fn matches(&self) -> usize {
@@ -129,20 +107,11 @@ impl ResultFile {
         if self.left_out {
             return 0;
         }
-        self.lines
-            .iter()
-            .map(|l| {
-                (0..l.matches.len())
-                    .filter(|&n| !self.skipped.contains(&(l.number, n)))
-                    .count()
-            })
-            .sum()
+        self.lines.iter().map(|l| (0..l.matches.len()).filter(|&n| !self.skipped.contains(&(l.number, n))).count()).sum()
     }
 
     fn line_left_out(&self, line: &Line) -> bool {
-        self.left_out
-            || (!line.matches.is_empty()
-                && (0..line.matches.len()).all(|n| self.skipped.contains(&(line.number, n))))
+        self.left_out || (!line.matches.is_empty() && (0..line.matches.len()).all(|n| self.skipped.contains(&(line.number, n))))
     }
 }
 
@@ -163,17 +132,9 @@ pub enum Action {
     /// The query is being typed: search again in a moment.
     SearchSoon,
     /// Go to this match, the keyboard with it.
-    Open {
-        path: PathBuf,
-        line: usize,
-        col: usize,
-    },
+    Open { path: PathBuf, line: usize, col: usize },
     /// The selection moved: what it's on, to show while following.
-    Show {
-        path: PathBuf,
-        line: usize,
-        col: usize,
-    },
+    Show { path: PathBuf, line: usize, col: usize },
     /// `p`: following the selection beside it, on or off.
     Follow(bool),
     /// `y` to the replace question: replace what's in.
@@ -226,13 +187,7 @@ pub struct SearchPage {
 impl SearchPage {
     #[cfg(test)]
     pub fn new(root: PathBuf, scopes: Vec<ScopeKind>, scope: ScopeKind) -> Self {
-        SearchPage {
-            root,
-            scope: Some(scope),
-            scopes,
-            following: true,
-            ..Default::default()
-        }
+        SearchPage { root, scope: Some(scope), scopes, following: true, ..Default::default() }
     }
 
     /// Whether a field has the keyboard (every key is the page's then).
@@ -255,15 +210,9 @@ impl SearchPage {
 
     /// The text pasted into the field being typed.
     pub fn paste(&mut self, text: &str) -> Action {
-        let Some(field) = self.editing else {
-            return Action::None;
-        };
+        let Some(field) = self.editing else { return Action::None };
         let input = self.input_mut(field);
-        insert_at(
-            &mut input.text,
-            &mut input.caret,
-            text.lines().next().unwrap_or(""),
-        );
+        insert_at(&mut input.text, &mut input.caret, text.lines().next().unwrap_or(""));
         self.changed(field)
     }
 
@@ -285,18 +234,8 @@ impl SearchPage {
 
     /// The options a search runs with: the toggles, and the globs typed.
     pub fn search_options(&self) -> Options {
-        let globs = self
-            .globs
-            .text
-            .split([' ', ','])
-            .map(str::trim)
-            .filter(|g| !g.is_empty())
-            .map(str::to_string)
-            .collect();
-        Options {
-            globs,
-            ..self.options.clone()
-        }
+        let globs = self.globs.text.split([' ', ',']).map(str::trim).filter(|g| !g.is_empty()).map(str::to_string).collect();
+        Options { globs, ..self.options.clone() }
     }
 
     /// `Alt-c`, `Alt-w`, `Alt-r`, `Alt-h`, `Alt-p`: a toggle flipped.
@@ -318,16 +257,8 @@ impl SearchPage {
 
     /// The scope after this one, of those the page can use.
     pub fn next_scope(&mut self) {
-        let at = self
-            .scopes
-            .iter()
-            .position(|&s| s == self.scope())
-            .unwrap_or(0);
-        self.scope = self
-            .scopes
-            .get((at + 1) % self.scopes.len().max(1))
-            .copied()
-            .or(self.scope);
+        let at = self.scopes.iter().position(|&s| s == self.scope()).unwrap_or(0);
+        self.scope = self.scopes.get((at + 1) % self.scopes.len().max(1)).copied().or(self.scope);
     }
 
     /// A new search began: the old results go.
@@ -337,11 +268,7 @@ impl SearchPage {
         self.cursor = 0;
         self.current = None;
         self.confirm = false;
-        self.status = if self.pattern.is_some() {
-            Status::Searching { files: 0 }
-        } else {
-            Status::Idle
-        };
+        self.status = if self.pattern.is_some() { Status::Searching { files: 0 } } else { Status::Idle };
     }
 
     /// Files found by the search under way. The first results put the
@@ -349,14 +276,9 @@ impl SearchPage {
     pub fn push(&mut self, found: Vec<FileResult>, searched: usize) {
         let root = self.root.clone();
         let first = self.files.is_empty();
-        self.files
-            .extend(found.into_iter().map(|f| ResultFile::new(f, &root)));
+        self.files.extend(found.into_iter().map(|f| ResultFile::new(f, &root)));
         if first && self.editing.is_none() && self.cursor == 0 {
-            self.cursor = self
-                .rows()
-                .iter()
-                .position(|&r| matches!(r, Row::Line(..)) && self.stops(r))
-                .unwrap_or(0);
+            self.cursor = self.rows().iter().position(|&r| matches!(r, Row::Line(..)) && self.stops(r)).unwrap_or(0);
         }
         if let Status::Searching { files } = &mut self.status {
             *files = searched;
@@ -396,21 +318,11 @@ impl SearchPage {
     pub fn selected(&self) -> Option<(PathBuf, usize, usize)> {
         let rows = self.rows();
         let (fi, li) = match rows.get(self.cursor)? {
-            Row::File(fi) => (
-                *fi,
-                self.files[*fi]
-                    .lines
-                    .iter()
-                    .position(|l| !l.matches.is_empty())?,
-            ),
+            Row::File(fi) => (*fi, self.files[*fi].lines.iter().position(|l| !l.matches.is_empty())?),
             Row::Line(fi, li) => (*fi, *li),
         };
         let line = &self.files[fi].lines[li];
-        let col = line
-            .matches
-            .first()
-            .map(|m| line.text[..m.start].chars().count() + 1)
-            .unwrap_or(1);
+        let col = line.matches.first().map(|m| line.text[..m.start].chars().count() + 1).unwrap_or(1);
         Some((self.files[fi].path.clone(), line.number, col))
     }
 
@@ -440,17 +352,7 @@ impl SearchPage {
     /// Every match, in order, as (file, line) indices -- what `SPC p
     /// n`/`N` step through.
     pub fn match_rows(&self) -> Vec<(usize, usize)> {
-        self.files
-            .iter()
-            .enumerate()
-            .flat_map(|(fi, f)| {
-                f.lines
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| !l.matches.is_empty())
-                    .map(move |(li, _)| (fi, li))
-            })
-            .collect()
+        self.files.iter().enumerate().flat_map(|(fi, f)| f.lines.iter().enumerate().filter(|(_, l)| !l.matches.is_empty()).map(move |(li, _)| (fi, li))).collect()
     }
 
     /// `SPC p n`/`N` moved to match `(fi, li)`: lit, the cursor on it.
@@ -468,11 +370,7 @@ impl SearchPage {
         self.message = None;
         if self.confirm {
             self.confirm = false;
-            return if key == Key::Char('y') {
-                Action::Apply
-            } else {
-                Action::None
-            };
+            return if key == Key::Char('y') { Action::Apply } else { Action::None };
         }
         if let Some(field) = self.editing {
             return self.field_key(field, key);
@@ -564,11 +462,7 @@ impl SearchPage {
         match key {
             Key::Enter => {
                 self.editing = None;
-                self.cursor = self
-                    .rows()
-                    .iter()
-                    .position(|&r| self.stops(r) && matches!(r, Row::Line(..)))
-                    .unwrap_or(0);
+                self.cursor = self.rows().iter().position(|&r| self.stops(r) && matches!(r, Row::Line(..))).unwrap_or(0);
                 Action::Search
             }
             Key::Escape => {
@@ -576,22 +470,10 @@ impl SearchPage {
                 Action::None
             }
             Key::Tab | Key::BackTab => {
-                let order: Vec<Field> = if self.replace_open {
-                    vec![Field::Query, Field::Replace, Field::Globs]
-                } else {
-                    vec![Field::Query, Field::Globs]
-                };
+                let order: Vec<Field> = if self.replace_open { vec![Field::Query, Field::Replace, Field::Globs] } else { vec![Field::Query, Field::Globs] };
                 let at = order.iter().position(|&f| f == field).unwrap_or(0);
-                let next = if key == Key::Tab {
-                    at + 1
-                } else {
-                    at + order.len() - 1
-                };
-                self.editing = if key == Key::Tab && next >= order.len() {
-                    None
-                } else {
-                    Some(order[next % order.len()])
-                };
+                let next = if key == Key::Tab { at + 1 } else { at + order.len() - 1 };
+                self.editing = if key == Key::Tab && next >= order.len() { None } else { Some(order[next % order.len()]) };
                 Action::None
             }
             Key::Up | Key::Down if field == Field::Query => {
@@ -629,11 +511,7 @@ impl SearchPage {
         };
         let file = &mut self.files[fi];
         file.folded = to.unwrap_or(!file.folded);
-        self.cursor = self
-            .rows()
-            .iter()
-            .position(|&r| r == Row::File(fi))
-            .unwrap_or(0);
+        self.cursor = self.rows().iter().position(|&r| r == Row::File(fi)).unwrap_or(0);
         Action::None
     }
 
@@ -645,9 +523,7 @@ impl SearchPage {
         for file in &mut self.files {
             file.folded = folded;
         }
-        self.cursor = fi
-            .and_then(|fi| self.rows().iter().position(|&r| r == Row::File(fi)))
-            .unwrap_or(0);
+        self.cursor = fi.and_then(|fi| self.rows().iter().position(|&r| r == Row::File(fi))).unwrap_or(0);
         Action::None
     }
 
@@ -656,14 +532,11 @@ impl SearchPage {
     fn leave_out(&mut self, rows: &[Row], whole_file: bool) -> Action {
         match rows.get(self.cursor).copied() {
             Some(Row::File(fi)) => self.files[fi].left_out = !self.files[fi].left_out,
-            Some(Row::Line(fi, _)) if whole_file => {
-                self.files[fi].left_out = !self.files[fi].left_out
-            }
+            Some(Row::Line(fi, _)) if whole_file => self.files[fi].left_out = !self.files[fi].left_out,
             Some(Row::Line(fi, li)) => {
                 let file = &mut self.files[fi];
                 let line = &file.lines[li];
-                let keys: Vec<MatchAt> =
-                    (0..line.matches.len()).map(|n| (line.number, n)).collect();
+                let keys: Vec<MatchAt> = (0..line.matches.len()).map(|n| (line.number, n)).collect();
                 if keys.iter().all(|k| file.skipped.contains(k)) {
                     for k in &keys {
                         file.skipped.remove(k);
@@ -689,56 +562,19 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
     let mut line = 0;
 
     // The fields.
-    let toggles: Vec<(&str, bool)> = vec![
-        ("Aa", page.options.match_case),
-        ("ab", page.options.whole_word),
-        (".*", page.options.regex),
-    ];
-    let toggles_w: usize = toggles
-        .iter()
-        .map(|(t, _)| t.chars().count() + 1)
-        .sum::<usize>()
-        + 1;
-    let field = |g: &mut Grid,
-                 line: usize,
-                 label: &str,
-                 input: &Input,
-                 editing: bool,
-                 hint: &str,
-                 room: usize| {
-        g.put(
-            line,
-            left,
-            label,
-            if editing { Role::Accent } else { Role::Muted },
-        );
+    let toggles: Vec<(&str, bool)> = vec![("Aa", page.options.match_case), ("ab", page.options.whole_word), (".*", page.options.regex)];
+    let toggles_w: usize = toggles.iter().map(|(t, _)| t.chars().count() + 1).sum::<usize>() + 1;
+    let field = |g: &mut Grid, line: usize, label: &str, input: &Input, editing: bool, hint: &str, room: usize| {
+        g.put(line, left, label, if editing { Role::Accent } else { Role::Muted });
         let x = left + label_w;
         let room = room.max(6);
-        let shown = if editing {
-            with_caret(&input.text, input.caret, room)
-        } else if input.text.is_empty() {
-            fit(hint, room)
-        } else {
-            fit(&input.text, room)
-        };
-        let role = if !editing && input.text.is_empty() {
-            Role::Muted
-        } else {
-            Role::Title
-        };
+        let shown = if editing { with_caret(&input.text, input.caret, room) } else if input.text.is_empty() { fit(hint, room) } else { fit(&input.text, room) };
+        let role = if !editing && input.text.is_empty() { Role::Muted } else { Role::Title };
         g.put(line, x, &shown, role);
         g.panel(line, x.saturating_sub(1)..x + room + 1);
     };
     let room = width.saturating_sub(label_w + toggles_w + 2);
-    field(
-        &mut g,
-        line,
-        "Search",
-        &page.query,
-        page.editing == Some(Field::Query),
-        "what to look for",
-        room,
-    );
+    field(&mut g, line, "Search", &page.query, page.editing == Some(Field::Query), "what to look for", room);
     let mut x = left + label_w + room + 2;
     for (text, on) in &toggles {
         g.put(line, x, text, if *on { Role::Accent } else { Role::Muted });
@@ -749,26 +585,9 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
     }
     line += 1;
     if page.replace_open {
-        field(
-            &mut g,
-            line,
-            "Replace",
-            &page.replace,
-            page.editing == Some(Field::Replace),
-            "what it becomes",
-            room,
-        );
+        field(&mut g, line, "Replace", &page.replace, page.editing == Some(Field::Replace), "what it becomes", room);
         let x = left + label_w + room + 2;
-        g.put(
-            line,
-            x,
-            "AB→",
-            if page.preserve_case {
-                Role::Accent
-            } else {
-                Role::Muted
-            },
-        );
+        g.put(line, x, "AB→", if page.preserve_case { Role::Accent } else { Role::Muted });
         if page.preserve_case {
             g.underline(line, x..x + 3);
         }
@@ -793,28 +612,9 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
     let editing_globs = page.editing == Some(Field::Globs);
     if editing_globs || !page.globs.text.is_empty() || width > 70 {
         let at = x;
-        g.put(
-            line,
-            at,
-            "files",
-            if editing_globs {
-                Role::Accent
-            } else {
-                Role::Muted
-            },
-        );
-        let shown = if editing_globs {
-            with_caret(&page.globs.text, page.globs.caret, globs_room)
-        } else if page.globs.text.is_empty() {
-            fit("*.rs !target", globs_room)
-        } else {
-            fit(&page.globs.text, globs_room)
-        };
-        let role = if !editing_globs && page.globs.text.is_empty() {
-            Role::Muted
-        } else {
-            Role::Title
-        };
+        g.put(line, at, "files", if editing_globs { Role::Accent } else { Role::Muted });
+        let shown = if editing_globs { with_caret(&page.globs.text, page.globs.caret, globs_room) } else if page.globs.text.is_empty() { fit("*.rs !target", globs_room) } else { fit(&page.globs.text, globs_room) };
+        let role = if !editing_globs && page.globs.text.is_empty() { Role::Muted } else { Role::Title };
         g.put(line, at + 6, &shown, role);
         if editing_globs || !page.globs.text.is_empty() {
             g.panel(line, at + 5..at + 6 + globs_room + 1);
@@ -842,32 +642,14 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
                 let name = file.rel.rsplit('/').next().unwrap_or(&file.rel);
                 let icon = crate::icon::file_icon(name);
                 x = g.put(y, x, &format!("{icon} "), Role::Muted);
-                let count = if file.left_out {
-                    "left out".to_string()
-                } else if replacing && file.included() != file.matches() {
-                    format!("{}/{}", file.included(), file.matches())
-                } else {
-                    file.matches().to_string()
-                };
+                let count = if file.left_out { "left out".to_string() } else if replacing && file.included() != file.matches() { format!("{}/{}", file.included(), file.matches()) } else { file.matches().to_string() };
                 let room = width.saturating_sub(x - left + count.chars().count() + 2);
                 let shown = fit_path(&file.rel, room);
-                let dir_len = shown
-                    .rfind('/')
-                    .map(|i| shown[..=i].chars().count())
-                    .unwrap_or(0);
+                let dir_len = shown.rfind('/').map(|i| shown[..=i].chars().count()).unwrap_or(0);
                 let dir: String = shown.chars().take(dir_len).collect();
                 let base: String = shown.chars().skip(dir_len).collect();
                 let x2 = g.put(y, x, &dir, Role::Muted);
-                g.put(
-                    y,
-                    x2,
-                    &base,
-                    if file.left_out {
-                        Role::Muted
-                    } else {
-                        Role::Title
-                    },
-                );
+                g.put(y, x2, &base, if file.left_out { Role::Muted } else { Role::Title });
                 g.put(y, left + width - count.chars().count(), &count, Role::Muted);
             }
             Row::Line(fi, li) => {
@@ -878,12 +660,7 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
                 let context = l.matches.is_empty();
                 let out = file.line_left_out(l);
                 let current = page.current == Some((fi, li));
-                g.put(
-                    y,
-                    left + gutter - 1 - num.len().min(gutter - 1),
-                    &num,
-                    if current { Role::Accent } else { Role::Muted },
-                );
+                g.put(y, left + gutter - 1 - num.len().min(gutter - 1), &num, if current { Role::Accent } else { Role::Muted });
                 let x = left + gutter;
                 let room = width.saturating_sub(gutter + if out { 10 } else { 0 });
                 let pieces = line_pieces(page, file, l, replacing && !out, room);
@@ -919,20 +696,8 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
             line: 0,
             col: left + label_w,
             rows: vec![
-                vec![(
-                    format!(
-                        "Replace {n} match{} in {files} file{}?",
-                        if n == 1 { "" } else { "es" },
-                        if files == 1 { "" } else { "s" }
-                    ),
-                    Role::Title,
-                )],
-                vec![
-                    ("y ".into(), Role::Accent),
-                    ("replace    ".into(), Role::Text),
-                    ("n ".into(), Role::Accent),
-                    ("not now".into(), Role::Text),
-                ],
+                vec![(format!("Replace {n} match{} in {files} file{}?", if n == 1 { "" } else { "es" }, if files == 1 { "" } else { "s" }), Role::Title)],
+                vec![("y ".into(), Role::Accent), ("replace    ".into(), Role::Text), ("n ".into(), Role::Accent), ("not now".into(), Role::Text)],
             ],
         });
     }
@@ -940,42 +705,9 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
         g.reserve(h.saturating_sub(3));
     }
     let keys: Vec<(&str, &str)> = match page.editing {
-        Some(_) => vec![
-            ("Enter", "results"),
-            ("Tab", "next field"),
-            ("Alt-c", "case"),
-            ("Alt-w", "word"),
-            ("Alt-r", "regex"),
-            ("Alt-s", "scope"),
-            ("↑ ↓", "history"),
-            ("Esc", "stop typing"),
-        ],
-        None if page.replace_open => vec![
-            ("x", "leave out"),
-            ("X", "the file"),
-            ("R", "replace all"),
-            ("Alt-p", "keep case"),
-            ("Enter", "open"),
-            ("r", "edit"),
-            ("Esc", "close replace"),
-        ],
-        None => vec![
-            ("Enter", "open"),
-            (
-                "p",
-                if page.following {
-                    "stop following"
-                } else {
-                    "follow"
-                },
-            ),
-            ("Tab", "fold"),
-            ("/", "search"),
-            ("r", "replace"),
-            ("f", "files"),
-            ("+ -", "context"),
-            ("q", "close"),
-        ],
+        Some(_) => vec![("Enter", "results"), ("Tab", "next field"), ("Alt-c", "case"), ("Alt-w", "word"), ("Alt-r", "regex"), ("Alt-s", "scope"), ("↑ ↓", "history"), ("Esc", "stop typing")],
+        None if page.replace_open => vec![("x", "leave out"), ("X", "the file"), ("R", "replace all"), ("Alt-p", "keep case"), ("Enter", "open"), ("r", "edit"), ("Esc", "close replace")],
+        None => vec![("Enter", "open"), ("p", if page.following { "stop following" } else { "follow" }), ("Tab", "fold"), ("/", "search"), ("r", "replace"), ("f", "files"), ("+ -", "context"), ("q", "close")],
     };
     g.keys(left, width, &keys);
     g.finish()
@@ -990,34 +722,17 @@ fn status_line(page: &SearchPage) -> (String, Role) {
     if let Some(message) = &page.message {
         return (message.clone(), Role::Good);
     }
-    let plural = |n: usize, one: &str, many: &str| {
-        format!("{} {}", group(n), if n == 1 { one } else { many })
-    };
+    let plural = |n: usize, one: &str, many: &str| format!("{} {}", group(n), if n == 1 { one } else { many });
     let found = plural(page.total(), "match", "matches");
     let files = plural(page.files.len(), "file", "files");
     match &page.status {
         Status::Idle => (String::new(), Role::Muted),
-        Status::Searching { files: searched } => (
-            format!(
-                "searching… {found} in {files} so far · {} searched",
-                plural(*searched, "file", "files")
-            ),
-            Role::Muted,
-        ),
+        Status::Searching { files: searched } => (format!("searching… {found} in {files} so far · {} searched", plural(*searched, "file", "files")), Role::Muted),
         Status::Failed(why) => (format!("✗ {why}"), Role::Bad),
-        Status::Done {
-            ms,
-            binary,
-            truncated,
-            ..
-        } => {
+        Status::Done { ms, binary, truncated, .. } => {
             let mut s = if page.replace_open && page.pattern.is_some() {
                 let (n, f) = page.included();
-                format!(
-                    "{} of {found} in {} will change",
-                    group(n),
-                    plural(f, "file", "files")
-                )
+                format!("{} of {found} in {} will change", group(n), plural(f, "file", "files"))
             } else {
                 format!("{found} in {files} · {ms} ms")
             };
@@ -1025,10 +740,7 @@ fn status_line(page: &SearchPage) -> (String, Role) {
                 s.push_str(" · stopped there (search.max_results)");
             }
             if *binary > 0 {
-                s.push_str(&format!(
-                    " · {} skipped",
-                    plural(*binary, "binary file", "binary files")
-                ));
+                s.push_str(&format!(" · {} skipped", plural(*binary, "binary file", "binary files")));
             }
             (s, if *truncated { Role::Warn } else { Role::Muted })
         }
@@ -1060,24 +772,13 @@ fn fit_path(path: &str, max: usize) -> String {
         return fit(name, max);
     }
     let keep = max - name_n - 1;
-    format!(
-        "{}…/{name}",
-        path.chars()
-            .take(keep.saturating_sub(1))
-            .collect::<String>()
-    )
+    format!("{}…/{name}", path.chars().take(keep.saturating_sub(1)).collect::<String>())
 }
 
 /// One result line as pieces (text, role, lit): the matches lit, and
 /// while replacing each followed by what it becomes. Cut to `room`
 /// columns around the first match.
-fn line_pieces(
-    page: &SearchPage,
-    file: &ResultFile,
-    line: &Line,
-    replacing: bool,
-    room: usize,
-) -> Vec<(String, Role, bool)> {
+fn line_pieces(page: &SearchPage, file: &ResultFile, line: &Line, replacing: bool, room: usize) -> Vec<(String, Role, bool)> {
     let text = &line.text;
     let mut pieces: Vec<(String, Role, bool)> = Vec::new();
     let mut at = 0;
@@ -1090,12 +791,7 @@ fn line_pieces(
         match (&page.pattern, replacing && !skipped) {
             (Some(pattern), true) => {
                 pieces.push((text[m.clone()].to_string(), Role::Bad, true));
-                let new = pattern.replacement_for(
-                    text,
-                    m.clone(),
-                    &page.replace.text,
-                    page.preserve_case,
-                );
+                let new = pattern.replacement_for(text, m.clone(), &page.replace.text, page.preserve_case);
                 pieces.push((new, Role::Good, false));
             }
             _ => pieces.push((text[m.clone()].to_string(), Role::Accent, true)),
@@ -1115,11 +811,7 @@ fn line_pieces(
     // Too wide: start a little before the first match.
     let total: usize = pieces.iter().map(|p| p.0.chars().count()).sum();
     if total > room {
-        let first_lit: usize = pieces
-            .iter()
-            .take_while(|p| !p.2)
-            .map(|p| p.0.chars().count())
-            .sum();
+        let first_lit: usize = pieces.iter().take_while(|p| !p.2).map(|p| p.0.chars().count()).sum();
         let mut skip = first_lit.saturating_sub(room / 4);
         if skip > 0 {
             let mut out = vec![("…".to_string(), Role::Muted, false)];
@@ -1160,57 +852,19 @@ mod tests {
     use super::*;
 
     fn found(path: &str, lines: &[(usize, &str, &str)]) -> FileResult {
-        let pattern = |needle: &str, text: &str| {
-            text.match_indices(needle)
-                .map(|(i, m)| i..i + m.len())
-                .collect()
-        };
+        let pattern = |needle: &str, text: &str| text.match_indices(needle).map(|(i, m)| i..i + m.len()).collect();
         FileResult {
             path: PathBuf::from("/p").join(path),
-            lines: lines
-                .iter()
-                .map(|(n, text, needle)| Line {
-                    number: *n,
-                    text: text.to_string(),
-                    matches: if needle.is_empty() {
-                        vec![]
-                    } else {
-                        pattern(needle, text)
-                    },
-                    cut: (false, false),
-                })
-                .collect(),
+            lines: lines.iter().map(|(n, text, needle)| Line { number: *n, text: text.to_string(), matches: if needle.is_empty() { vec![] } else { pattern(needle, text) }, cut: (false, false) }).collect(),
         }
     }
 
     fn page() -> SearchPage {
-        let mut p = SearchPage::new(
-            PathBuf::from("/p"),
-            vec![ScopeKind::Project, ScopeKind::OpenFiles],
-            ScopeKind::Project,
-        );
+        let mut p = SearchPage::new(PathBuf::from("/p"), vec![ScopeKind::Project, ScopeKind::OpenFiles], ScopeKind::Project);
         p.query = Input::new("helper");
         p.begin(Pattern::new("helper", &Options::default()).ok());
-        p.push(
-            vec![
-                found(
-                    "src/main.rs",
-                    &[
-                        (1, "fn helper() {", "helper"),
-                        (2, "    // context", ""),
-                        (7, "    let v = helper();", "helper"),
-                    ],
-                ),
-                found("docs/notes.md", &[(3, "The helper helps.", "helper")]),
-            ],
-            9,
-        );
-        p.status = Status::Done {
-            files: 9,
-            ms: 4,
-            binary: 0,
-            truncated: false,
-        };
+        p.push(vec![found("src/main.rs", &[(1, "fn helper() {", "helper"), (2, "    // context", ""), (7, "    let v = helper();", "helper")]), found("docs/notes.md", &[(3, "The helper helps.", "helper")])], 9);
+        p.status = Status::Done { files: 9, ms: 4, binary: 0, truncated: false };
         p
     }
 
@@ -1220,10 +874,7 @@ mod tests {
         let text = layout(&p, 80, Some(30)).text;
         assert!(text.contains("3 matches in 2 files"), "{text}");
         assert!(text.contains("src/main.rs") && text.contains("docs/notes.md"));
-        assert!(
-            text.contains("7 let v = helper();"),
-            "indentation trimmed, numbered:\n{text}"
-        );
+        assert!(text.contains("7 let v = helper();"), "indentation trimmed, numbered:\n{text}");
         assert!(text.lines().last().unwrap().contains("Enter open"));
     }
 
@@ -1237,26 +888,9 @@ mod tests {
     fn the_cursor_skips_context_and_enter_opens_the_match() {
         let mut p = page();
         p.cursor = 0;
-        assert_eq!(
-            p.key(Key::Char('j')),
-            Action::Show {
-                path: PathBuf::from("/p/src/main.rs"),
-                line: 1,
-                col: 4
-            }
-        );
-        assert!(
-            matches!(p.key(Key::Char('j')), Action::Show { line: 7, .. }),
-            "the context line is passed"
-        );
-        assert_eq!(
-            p.key(Key::Enter),
-            Action::Open {
-                path: PathBuf::from("/p/src/main.rs"),
-                line: 7,
-                col: 13
-            }
-        );
+        assert_eq!(p.key(Key::Char('j')), Action::Show { path: PathBuf::from("/p/src/main.rs"), line: 1, col: 4 });
+        assert!(matches!(p.key(Key::Char('j')), Action::Show { line: 7, .. }), "the context line is passed");
+        assert_eq!(p.key(Key::Enter), Action::Open { path: PathBuf::from("/p/src/main.rs"), line: 7, col: 13 });
     }
 
     #[test]
@@ -1277,22 +911,12 @@ mod tests {
         let mut p = page();
         p.key(Key::Char('r'));
         for c in "assist".chars() {
-            assert_eq!(
-                p.key(Key::Char(c)),
-                Action::None,
-                "the replacement only redraws"
-            );
+            assert_eq!(p.key(Key::Char(c)), Action::None, "the replacement only redraws");
         }
         p.key(Key::Escape);
         let text = layout(&p, 80, Some(30)).text;
-        assert!(
-            text.contains("fn helperassist() {"),
-            "old then new:\n{text}"
-        );
-        assert!(
-            text.contains("3 of 3 matches in 2 files will change"),
-            "{text}"
-        );
+        assert!(text.contains("fn helperassist() {"), "old then new:\n{text}");
+        assert!(text.contains("3 of 3 matches in 2 files will change"), "{text}");
         // The first match's line is left out, then the second file.
         p.key(Key::Char('j'));
         p.key(Key::Char('x'));
@@ -1303,12 +927,7 @@ mod tests {
         let text = layout(&p, 80, Some(30)).text;
         assert!(text.contains("left out"), "{text}");
         assert_eq!(p.key(Key::Char('R')), Action::None);
-        assert!(
-            p.confirm
-                && layout(&p, 80, Some(30))
-                    .all_text()
-                    .contains("Replace 1 match in 1 file?")
-        );
+        assert!(p.confirm && layout(&p, 80, Some(30)).all_text().contains("Replace 1 match in 1 file?"));
         assert_eq!(p.key(Key::Char('y')), Action::Apply);
     }
 
@@ -1316,11 +935,7 @@ mod tests {
     fn folding_and_the_current_match() {
         let mut p = page();
         p.key(Key::Tab);
-        assert_eq!(
-            p.rows().len(),
-            3,
-            "main.rs folded: its file row and notes.md's two"
-        );
+        assert_eq!(p.rows().len(), 3, "main.rs folded: its file row and notes.md's two");
         p.set_current((0, 2));
         assert!(!p.files[0].folded, "SPC p n opens the file it lands in");
         assert_eq!(p.rows()[p.cursor], Row::Line(0, 2));
@@ -1354,10 +969,7 @@ mod tests {
 
     #[test]
     fn long_paths_keep_their_file_name() {
-        assert_eq!(
-            fit_path("crates/fenix-gui/src/app/search_host.rs", 24),
-            "crates/f…/search_host.rs"
-        );
+        assert_eq!(fit_path("crates/fenix-gui/src/app/search_host.rs", 24), "crates/f…/search_host.rs");
         assert_eq!(group(1204), "1,204");
     }
 }

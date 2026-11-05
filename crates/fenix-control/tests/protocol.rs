@@ -696,27 +696,14 @@ fn agent_calls_carry_the_caller_from_hello_and_never_from_params() {
     input.extend(frame(
         r#"{"jsonrpc":"2.0","id":2,"method":"fenix/agent.call","params":{"tool":"rename","arguments":{},"caller":{"thread":"other"}}}"#,
     ));
-    input.extend(frame(
-        r#"{"jsonrpc":"2.0","id":3,"method":"fenix/agent.tools"}"#,
-    ));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":3,"method":"fenix/agent.tools"}"#));
     let (_, calls) = exchange(&input);
-    let caller = fenix_control::AgentCaller {
-        client: "fenix-mcp".into(),
-        thread: Some("t-7".into()),
-    };
+    let caller = fenix_control::AgentCaller { client: "fenix-mcp".into(), thread: Some("t-7".into()) };
     assert_eq!(
         calls,
         vec![
-            Call::Agent {
-                method: "call".into(),
-                caller: caller.clone(),
-                params: json!({ "tool": "rename", "arguments": {}, "caller": { "thread": "other" } })
-            },
-            Call::Agent {
-                method: "tools".into(),
-                caller,
-                params: Value::Null
-            },
+            Call::Agent { method: "call".into(), caller: caller.clone(), params: json!({ "tool": "rename", "arguments": {}, "caller": { "thread": "other" } }) },
+            Call::Agent { method: "tools".into(), caller, params: Value::Null },
         ]
     );
 }
@@ -724,19 +711,7 @@ fn agent_calls_carry_the_caller_from_hello_and_never_from_params() {
 #[test]
 fn a_client_without_a_thread_calls_as_itself() {
     let mut input = frame(HELLO);
-    input.extend(frame(
-        r#"{"jsonrpc":"2.0","id":2,"method":"fenix/agent.wait","params":{"since":0}}"#,
-    ));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":2,"method":"fenix/agent.wait","params":{"since":0}}"#));
     let (_, calls) = exchange(&input);
-    assert_eq!(
-        calls,
-        vec![Call::Agent {
-            method: "wait".into(),
-            caller: fenix_control::AgentCaller {
-                client: "t".into(),
-                thread: None
-            },
-            params: json!({ "since": 0 })
-        }]
-    );
+    assert_eq!(calls, vec![Call::Agent { method: "wait".into(), caller: fenix_control::AgentCaller { client: "t".into(), thread: None }, params: json!({ "since": 0 }) }]);
 }

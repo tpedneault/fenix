@@ -25,10 +25,7 @@ mod tests {
 
     #[test]
     fn trigger_keys_are_distinct() {
-        assert_ne!(
-            Operator::Delete.trigger_key(),
-            Operator::Change.trigger_key()
-        );
+        assert_ne!(Operator::Delete.trigger_key(), Operator::Change.trigger_key());
         assert_ne!(Operator::Change.trigger_key(), Operator::Yank.trigger_key());
     }
 }

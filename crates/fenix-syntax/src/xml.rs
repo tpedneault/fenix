@@ -36,9 +36,7 @@ pub struct XmlError {
 
 /// The attributes worth showing next to an element's name, in the order
 /// they're preferred when an element carries several.
-const LABEL_ATTRIBUTES: &[&str] = &[
-    "id", "name", "key", "ref", "type", "Include", "Name", "x:Name", "path", "href", "src",
-];
+const LABEL_ATTRIBUTES: &[&str] = &["id", "name", "key", "ref", "type", "Include", "Name", "x:Name", "path", "href", "src"];
 
 fn node_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
     source.get(node.start_byte()..node.end_byte()).unwrap_or("")
@@ -48,9 +46,7 @@ fn node_text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
 /// `<self-closing/>`.
 fn open_tag(element: Node<'_>) -> Option<Node<'_>> {
     let mut cursor = element.walk();
-    let found = element
-        .children(&mut cursor)
-        .find(|c| matches!(c.kind(), "STag" | "EmptyElemTag"));
+    let found = element.children(&mut cursor).find(|c| matches!(c.kind(), "STag" | "EmptyElemTag"));
     found
 }
 
@@ -69,23 +65,14 @@ fn tag_name<'a>(tag: Node<'_>, source: &'a str) -> Option<(&'a str, usize)> {
 fn label_attribute(tag: Node<'_>, source: &str) -> Option<(String, String)> {
     let mut cursor = tag.walk();
     let mut attributes: Vec<(String, String)> = Vec::new();
-    for attr in tag
-        .children(&mut cursor)
-        .filter(|c| c.kind() == "Attribute")
-    {
+    for attr in tag.children(&mut cursor).filter(|c| c.kind() == "Attribute") {
         let mut inner = attr.walk();
         let mut name = None;
         let mut value = None;
         for child in attr.children(&mut inner) {
             match child.kind() {
                 "Name" => name = Some(node_text(child, source).to_string()),
-                "AttValue" => {
-                    value = Some(
-                        node_text(child, source)
-                            .trim_matches(|c| c == '"' || c == '\'')
-                            .to_string(),
-                    )
-                }
+                "AttValue" => value = Some(node_text(child, source).trim_matches(|c| c == '"' || c == '\'').to_string()),
                 _ => {}
             }
         }
@@ -93,9 +80,7 @@ fn label_attribute(tag: Node<'_>, source: &str) -> Option<(String, String)> {
             attributes.push((name, value));
         }
     }
-    LABEL_ATTRIBUTES
-        .iter()
-        .find_map(|want| attributes.iter().find(|(n, _)| n == want).cloned())
+    LABEL_ATTRIBUTES.iter().find_map(|want| attributes.iter().find(|(n, _)| n == want).cloned())
 }
 
 /// Every element in the document, in document order.
@@ -162,11 +147,7 @@ fn element_by_tag_at(tree: &Tree, byte: usize) -> Option<(Node<'_>, bool)> {
 /// a parse too broken to have found its partner).
 pub(crate) fn matching_tag(tree: &Tree, source: &str, byte: usize) -> Option<usize> {
     let (element, on_start) = element_by_tag_at(tree, byte)?;
-    let other = if on_start {
-        close_tag(element)?
-    } else {
-        open_tag(element)?
-    };
+    let other = if on_start { close_tag(element)? } else { open_tag(element)? };
     tag_name(other, source).map(|(_, at)| at)
 }
 
@@ -178,19 +159,12 @@ pub(crate) fn element_path(tree: &Tree, source: &str, byte: usize) -> Option<Str
     let mut steps: Vec<String> = Vec::new();
     loop {
         if node.kind() == "element" {
-            let name = open_tag(node)
-                .and_then(|t| tag_name(t, source))
-                .map(|(n, _)| n.to_string())?;
+            let name = open_tag(node).and_then(|t| tag_name(t, source)).map(|(n, _)| n.to_string())?;
             let (mut index, mut total) = (0usize, 0usize);
             if let Some(parent) = node.parent() {
                 let mut cursor = parent.walk();
-                for sibling in parent
-                    .children(&mut cursor)
-                    .filter(|c| c.kind() == "element")
-                {
-                    let same = open_tag(sibling)
-                        .and_then(|t| tag_name(t, source))
-                        .is_some_and(|(n, _)| n == name);
+                for sibling in parent.children(&mut cursor).filter(|c| c.kind() == "element") {
+                    let same = open_tag(sibling).and_then(|t| tag_name(t, source)).is_some_and(|(n, _)| n == name);
                     if same {
                         total += 1;
                         if sibling.id() == node.id() {
@@ -199,11 +173,7 @@ pub(crate) fn element_path(tree: &Tree, source: &str, byte: usize) -> Option<Str
                     }
                 }
             }
-            steps.push(if total > 1 {
-                format!("{name}[{index}]")
-            } else {
-                name
-            });
+            steps.push(if total > 1 { format!("{name}[{index}]") } else { name });
         }
         match node.parent() {
             Some(parent) => node = parent,
@@ -333,10 +303,7 @@ fn tag_end(tag: &str) -> Option<(usize, bool)> {
 /// Checks `source` is well-formed XML (a DTD, if present, is read but
 /// not validated against). The first error found, if any.
 pub fn check_well_formed(source: &str) -> Result<(), XmlError> {
-    let options = roxmltree::ParsingOptions {
-        allow_dtd: true,
-        ..roxmltree::ParsingOptions::default()
-    };
+    let options = roxmltree::ParsingOptions { allow_dtd: true, ..roxmltree::ParsingOptions::default() };
     match roxmltree::Document::parse_with_options(source, options) {
         Ok(_) => Ok(()),
         Err(err) => {
@@ -361,26 +328,12 @@ mod tests {
     fn elements_come_back_in_document_order_with_depth_and_label() {
         let state = SyntaxState::new(LanguageId::Xml, DOC);
         let elements = state.xml_elements(DOC);
-        let summary: Vec<(usize, &str)> = elements
-            .iter()
-            .map(|e| (e.depth, e.name.as_str()))
-            .collect();
+        let summary: Vec<(usize, &str)> = elements.iter().map(|e| (e.depth, e.name.as_str())).collect();
         assert_eq!(
             summary,
-            vec![
-                (0, "project"),
-                (1, "dependencies"),
-                (2, "dependency"),
-                (3, "version"),
-                (2, "dependency"),
-                (3, "version"),
-                (1, "empty")
-            ]
+            vec![(0, "project"), (1, "dependencies"), (2, "dependency"), (3, "version"), (2, "dependency"), (3, "version"), (1, "empty")]
         );
-        assert_eq!(
-            elements[2].label_attribute,
-            Some(("id".to_string(), "a".to_string()))
-        );
+        assert_eq!(elements[2].label_attribute, Some(("id".to_string(), "a".to_string())));
         assert_eq!(elements[2].start_row, 3);
     }
 
@@ -390,55 +343,31 @@ mod tests {
         let start = DOC.find("<dependencies>").unwrap() + 3;
         let end_name = DOC.find("</dependencies>").unwrap() + 2;
         assert_eq!(state.xml_matching_tag(DOC, start), Some(end_name));
-        assert_eq!(
-            state.xml_matching_tag(DOC, end_name + 1),
-            Some(DOC.find("<dependencies>").unwrap() + 1)
-        );
+        assert_eq!(state.xml_matching_tag(DOC, end_name + 1), Some(DOC.find("<dependencies>").unwrap() + 1));
     }
 
     #[test]
     fn matching_tag_is_none_off_a_tag_or_on_a_self_closing_one() {
         let state = SyntaxState::new(LanguageId::Xml, DOC);
-        assert_eq!(
-            state.xml_matching_tag(DOC, DOC.find(">1<").unwrap() + 1),
-            None
-        );
-        assert_eq!(
-            state.xml_matching_tag(DOC, DOC.find("<empty/>").unwrap() + 2),
-            None
-        );
-        assert_eq!(
-            state.xml_matching_tag(DOC, DOC.find("id=\"a\"").unwrap() + 4),
-            None
-        );
+        assert_eq!(state.xml_matching_tag(DOC, DOC.find(">1<").unwrap() + 1), None);
+        assert_eq!(state.xml_matching_tag(DOC, DOC.find("<empty/>").unwrap() + 2), None);
+        assert_eq!(state.xml_matching_tag(DOC, DOC.find("id=\"a\"").unwrap() + 4), None);
     }
 
     #[test]
     fn element_path_numbers_same_named_siblings() {
         let state = SyntaxState::new(LanguageId::Xml, DOC);
         let at = DOC.find(">2<").unwrap() + 1;
-        assert_eq!(
-            state.xml_element_path(DOC, at).as_deref(),
-            Some("/project/dependencies/dependency[2]/version")
-        );
+        assert_eq!(state.xml_element_path(DOC, at).as_deref(), Some("/project/dependencies/dependency[2]/version"));
         let at = DOC.find("<empty").unwrap() + 2;
-        assert_eq!(
-            state.xml_element_path(DOC, at).as_deref(),
-            Some("/project/empty")
-        );
+        assert_eq!(state.xml_element_path(DOC, at).as_deref(), Some("/project/empty"));
     }
 
     #[test]
     fn close_tag_after_gt_completes_start_tags_only() {
         assert_eq!(close_tag_after_gt("<item>").as_deref(), Some("</item>"));
-        assert_eq!(
-            close_tag_after_gt("  <ns:item id=\"1\">").as_deref(),
-            Some("</ns:item>")
-        );
-        assert_eq!(
-            close_tag_after_gt("<a href=\"x>y\">").as_deref(),
-            Some("</a>")
-        );
+        assert_eq!(close_tag_after_gt("  <ns:item id=\"1\">").as_deref(), Some("</ns:item>"));
+        assert_eq!(close_tag_after_gt("<a href=\"x>y\">").as_deref(), Some("</a>"));
         assert_eq!(close_tag_after_gt("<item/>"), None);
         assert_eq!(close_tag_after_gt("</item>"), None);
         assert_eq!(close_tag_after_gt("<!-- c -->"), None);
@@ -451,19 +380,10 @@ mod tests {
     #[test]
     fn innermost_open_element_tracks_nesting() {
         assert_eq!(innermost_open_element("<a><b>text").as_deref(), Some("b"));
-        assert_eq!(
-            innermost_open_element("<a><b>text</b>").as_deref(),
-            Some("a")
-        );
+        assert_eq!(innermost_open_element("<a><b>text</b>").as_deref(), Some("a"));
         assert_eq!(innermost_open_element("<a><b/>").as_deref(), Some("a"));
-        assert_eq!(
-            innermost_open_element("<a><!-- <c> --><![CDATA[<d>]]><?pi <e>?>").as_deref(),
-            Some("a")
-        );
-        assert_eq!(
-            innermost_open_element("<!DOCTYPE r [<!ENTITY x \"y\">]><r attr='>'>").as_deref(),
-            Some("r")
-        );
+        assert_eq!(innermost_open_element("<a><!-- <c> --><![CDATA[<d>]]><?pi <e>?>").as_deref(), Some("a"));
+        assert_eq!(innermost_open_element("<!DOCTYPE r [<!ENTITY x \"y\">]><r attr='>'>").as_deref(), Some("r"));
         assert_eq!(innermost_open_element("<a></a>"), None);
         assert_eq!(innermost_open_element(""), None);
     }

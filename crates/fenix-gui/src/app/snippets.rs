@@ -22,10 +22,7 @@ impl App {
     /// Every snippet that applies here: the built-in ones, yours and the
     /// focused project's (`snippets_host`).
     pub(super) fn snippet_catalog(&self) -> Catalog {
-        let project = self
-            .project_root
-            .as_ref()
-            .map(|r| r.join(".fenix").join("snippets"));
+        let project = self.project_root.as_ref().map(|r| r.join(".fenix").join("snippets"));
         self.snippet_layers(project.as_deref())
     }
 
@@ -324,26 +321,15 @@ mod tests {
         let (dir, mut app) = app("zap");
         let folder = dir.path().join(".fenix").join("snippets").join("tcl");
         std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(
-            folder.join("zap.snippet"),
-            "# name: Zap\n# key: zap\n# scope: tcl\n# --\nputs ${1:zapped}\n",
-        )
-        .unwrap();
+        std::fs::write(folder.join("zap.snippet"), "# name: Zap\n# key: zap\n# scope: tcl\n# --\nputs ${1:zapped}\n").unwrap();
         app.project_root = Some(dir.path().to_path_buf());
         key(&mut app, KeyPress::named(FenixNamedKey::Tab));
-        assert!(
-            app.open().buffer.text().starts_with("puts zapped"),
-            "{:?}",
-            app.open().buffer.text()
-        );
+        assert!(app.open().buffer.text().starts_with("puts zapped"), "{:?}", app.open().buffer.text());
 
         let (_dir, mut app) = self::app("proc");
         app.config.snippets_builtin = Some(false);
         key(&mut app, KeyPress::named(FenixNamedKey::Tab));
-        assert!(
-            !app.open().buffer.text().starts_with("proc name"),
-            "built-in ones are off"
-        );
+        assert!(!app.open().buffer.text().starts_with("proc name"), "built-in ones are off");
     }
 
     #[test]
@@ -481,16 +467,8 @@ mod tests {
         let buffer = app.focused_buffer_id();
         let key = app.lsp_key(fenix_syntax::LanguageId::Tcl);
         let mut answers = fenix_lsp::fanout::CompletionSet::new(vec![key.clone()]);
-        answers.store(
-            key,
-            serde_json::from_value(serde_json::json!([{"label":"print","detail":"print(value)"}]))
-                .unwrap(),
-        );
-        app.lsp_completion = Some(LspCompletion {
-            buffer,
-            prefix_start: 0,
-            answers,
-        });
+        answers.store(key, serde_json::from_value(serde_json::json!([{"label":"print","detail":"print(value)"}])).unwrap());
+        app.lsp_completion = Some(LspCompletion { buffer, prefix_start: 0, answers });
         app.apply_lsp_completion(buffer, 0);
         assert_eq!(
             app.completion

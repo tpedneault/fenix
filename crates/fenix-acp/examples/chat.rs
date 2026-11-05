@@ -36,13 +36,7 @@ fn main() {
     };
     let cwd = std::env::current_dir().expect("a current directory");
     let mut hub = Hub::new("chat", env!("CARGO_PKG_VERSION"));
-    hub.set_agents(vec![AgentSpec {
-        id: "agent".into(),
-        name: program.clone(),
-        program,
-        args: args.collect(),
-        env: vec![],
-    }]);
+    hub.set_agents(vec![AgentSpec { id: "agent".into(), name: program.clone(), program, args: args.collect(), env: vec![] }]);
     let (tx, rx) = mpsc::channel::<Input>();
     let lines = tx.clone();
     std::thread::spawn(move || {
@@ -67,9 +61,7 @@ fn main() {
             Err(_) => break,
         };
         let fx = match input {
-            Some(Input::Agent(conn, generation, event)) => {
-                hub.on_event(conn, generation, event, Instant::now())
-            }
+            Some(Input::Agent(conn, generation, event)) => hub.on_event(conn, generation, event, Instant::now()),
             Some(Input::Line(line)) => {
                 let line = line.trim().to_string();
                 if let Some(key) = asked.take() {
@@ -78,11 +70,7 @@ fn main() {
                         Entry::Permission(c) if c.key == key => Some(c.clone()),
                         _ => None,
                     });
-                    let option = card.and_then(|c| {
-                        line.parse::<usize>()
-                            .ok()
-                            .and_then(|n| c.options.get(n.wrapping_sub(1)).map(|o| o.id.clone()))
-                    });
+                    let option = card.and_then(|c| line.parse::<usize>().ok().and_then(|n| c.options.get(n.wrapping_sub(1)).map(|o| o.id.clone())));
                     hub.answer_permission(&thread, &key, option.as_deref())
                 } else if line == "/quit" {
                     break;
@@ -109,11 +97,7 @@ fn main() {
                 Entry::Permission(c) if c.state == PermissionState::Pending => Some(c),
                 _ => None,
             }) {
-                println!(
-                    "? {} wants: {}",
-                    view.thread.display_title(),
-                    card.tool_call.title.clone().unwrap_or_default()
-                );
+                println!("? {} wants: {}", view.thread.display_title(), card.tool_call.title.clone().unwrap_or_default());
                 for (i, o) in card.options.iter().enumerate() {
                     println!("  {}. {}", i + 1, o.name);
                 }
@@ -126,62 +110,29 @@ fn main() {
     run(&mut hub, fx, &mut clients, &tx, &thread);
 }
 
-fn run(
-    hub: &mut Hub,
-    fx: Vec<Effect>,
-    clients: &mut HashMap<ConnId, AcpClient>,
-    tx: &mpsc::Sender<Input>,
-    _thread: &ThreadId,
-) {
+fn run(hub: &mut Hub, fx: Vec<Effect>, clients: &mut HashMap<ConnId, AcpClient>, tx: &mpsc::Sender<Input>, _thread: &ThreadId) {
     let mut queue: std::collections::VecDeque<Effect> = fx.into();
     while let Some(effect) = queue.pop_front() {
         let more = match effect {
-            Effect::Spawn {
-                conn,
-                generation,
-                agent,
-                root,
-            } => {
+            Effect::Spawn { conn, generation, agent, root } => {
                 let sender = tx.clone();
-                let launch = Launch {
-                    program: agent.program.clone(),
-                    args: agent.args.clone(),
-                    env: agent.env.clone(),
-                    cwd: root,
-                };
-                let result = AcpClient::start(&launch, move |event| {
-                    sender.send(Input::Agent(conn, generation, event)).is_ok()
-                })
-                .map(|client| {
+                let launch = Launch { program: agent.program.clone(), args: agent.args.clone(), env: agent.env.clone(), cwd: root };
+                let result = AcpClient::start(&launch, move |event| sender.send(Input::Agent(conn, generation, event)).is_ok()).map(|client| {
                     clients.insert(conn, client);
                 });
-                hub.on_spawned(
-                    conn,
-                    generation,
-                    result.map_err(|e| e.to_string()),
-                    Instant::now(),
-                )
+                hub.on_spawned(conn, generation, result.map_err(|e| e.to_string()), Instant::now())
             }
             Effect::Stop { conn } => {
                 clients.remove(&conn);
                 Vec::new()
             }
-            Effect::Request {
-                conn,
-                id,
-                method,
-                params,
-            } => {
+            Effect::Request { conn, id, method, params } => {
                 if let Some(c) = clients.get(&conn) {
                     let _ = c.request(id, method, params);
                 }
                 Vec::new()
             }
-            Effect::Notify {
-                conn,
-                method,
-                params,
-            } => {
+            Effect::Notify { conn, method, params } => {
                 if let Some(c) = clients.get(&conn) {
                     let _ = c.notify(method, params);
                 }
@@ -193,33 +144,16 @@ fn run(
                 }
                 Vec::new()
             }
-            Effect::Serve {
-                conn,
-                id,
-                thread: t,
-                request,
-            } => {
+            Effect::Serve { conn, id, thread: t, request } => {
                 let result = match request {
-                    ClientRequest::ReadTextFile { path, .. } => std::fs::read_to_string(&path)
-                        .map(|content| json!({ "content": content }))
-                        .map_err(|e| RpcError::new(code::INTERNAL_ERROR, e.to_string())),
-                    ClientRequest::WriteTextFile { path, content, .. } => {
-                        std::fs::write(&path, content)
-                            .map(|_| json!(null))
-                            .map_err(|e| RpcError::new(code::INTERNAL_ERROR, e.to_string()))
-                    }
-                    _ => Err(RpcError::new(
-                        code::METHOD_NOT_FOUND,
-                        "this example runs no terminals",
-                    )),
+                    ClientRequest::ReadTextFile { path, .. } => std::fs::read_to_string(&path).map(|content| json!({ "content": content })).map_err(|e| RpcError::new(code::INTERNAL_ERROR, e.to_string())),
+                    ClientRequest::WriteTextFile { path, content, .. } => std::fs::write(&path, content).map(|_| json!(null)).map_err(|e| RpcError::new(code::INTERNAL_ERROR, e.to_string())),
+                    _ => Err(RpcError::new(code::METHOD_NOT_FOUND, "this example runs no terminals")),
                 };
                 hub.on_served(conn, &t, id, result)
             }
             Effect::TerminalLogin { args, .. } => {
-                println!(
-                    "! log in by running the agent's program with: {}",
-                    args.join(" ")
-                );
+                println!("! log in by running the agent's program with: {}", args.join(" "));
                 Vec::new()
             }
             Effect::Announced { paths, .. } => {
@@ -234,25 +168,12 @@ fn run(
 
 fn print_entry(entry: &Entry) {
     match entry {
-        Entry::User { blocks, queued } => println!(
-            "> {}{}",
-            blocks
-                .iter()
-                .map(ContentBlock::as_text)
-                .collect::<Vec<_>>()
-                .join(" "),
-            if *queued { " (queued)" } else { "" }
-        ),
+        Entry::User { blocks, queued } => println!("> {}{}", blocks.iter().map(ContentBlock::as_text).collect::<Vec<_>>().join(" "), if *queued { " (queued)" } else { "" }),
         Entry::Agent { text, .. } => println!("{text}"),
-        Entry::Thought { text, .. } => {
-            println!("  (thinking) {}", text.lines().next().unwrap_or(""))
-        }
+        Entry::Thought { text, .. } => println!("  (thinking) {}", text.lines().next().unwrap_or("")),
         Entry::Tool(call) => println!("  [{:?}] {} — {:?}", call.kind, call.title, call.status),
         Entry::Permission(_) => {}
-        Entry::Elicitation(card) => println!(
-            "  (asks) {} -- this example can't answer it",
-            card.request.message
-        ),
+        Entry::Elicitation(card) => println!("  (asks) {} -- this example can't answer it", card.request.message),
         Entry::Notice(n) => println!("  ({:?}) {}", n.kind, n.text),
     }
 }

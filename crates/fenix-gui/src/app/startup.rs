@@ -9,10 +9,7 @@ static SAY_LATER: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new
 
 /// `what`, said in the window once it's up (`said_later`).
 pub(crate) fn say_later(what: String) {
-    SAY_LATER
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(what);
+    SAY_LATER.lock().unwrap_or_else(|e| e.into_inner()).push(what);
 }
 
 /// What `say_later` was given, taken.
@@ -28,18 +25,12 @@ pub(crate) fn first_run() -> bool {
         if cfg!(test) || crate::installed::safe_mode() {
             return false;
         }
-        let Some(settings) =
-            fenix_storage::paths::Roots::current().map(|roots| roots.settings_file())
-        else {
-            return false;
-        };
+        let Some(settings) = fenix_storage::paths::Roots::current().map(|roots| roots.settings_file()) else { return false };
         !settings.exists()
     })
 }
 
 /// Whether an extension opens `path` itself (`contributes.opens`).
 pub(crate) fn claims_file(path: &Path) -> bool {
-    crate::installed::code_extensions().iter().any(|e| {
-        fenix_extensions::manifest::file_matches(&e.manifest.contributes.opens, path, None)
-    })
+    crate::installed::code_extensions().iter().any(|e| fenix_extensions::manifest::file_matches(&e.manifest.contributes.opens, path, None))
 }

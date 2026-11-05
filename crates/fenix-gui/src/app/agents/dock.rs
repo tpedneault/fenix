@@ -14,23 +14,13 @@ impl App {
     /// Every pane showing `buffer`, in the window tree's order.
     pub(super) fn agents_panes_showing(&self, buffer: BufferId) -> Vec<WindowId> {
         let windows = self.windows();
-        windows
-            .windows()
-            .into_iter()
-            .filter(|w| windows.content(*w) == Some(&buffer))
-            .collect()
+        windows.windows().into_iter().filter(|w| windows.content(*w) == Some(&buffer)).collect()
     }
 
     /// The dock's panes: the thread's, the prompt's.
     pub(super) fn agents_dock_panes(&self) -> (Option<WindowId>, Option<WindowId>) {
-        let page = self
-            .agents
-            .page
-            .and_then(|p| self.agents_panes_showing(p).first().copied());
-        let composer = self
-            .agents
-            .composer
-            .and_then(|c| self.agents_panes_showing(c).first().copied());
+        let page = self.agents.page.and_then(|p| self.agents_panes_showing(p).first().copied());
+        let composer = self.agents.composer.and_then(|c| self.agents_panes_showing(c).first().copied());
         (page, composer)
     }
 
@@ -42,12 +32,8 @@ impl App {
 
     /// A new pane's own state: at the start, with `buffer` its one tab.
     fn agents_seed_pane(&mut self, pane: WindowId, buffer: BufferId) {
-        self.workspaces
-            .active_pane_states_mut()
-            .insert(pane, PaneState::seeded_at(Cursor::at_start()));
-        self.workspaces
-            .active_pane_tabs_mut()
-            .insert(pane, vec![buffer]);
+        self.workspaces.active_pane_states_mut().insert(pane, PaneState::seeded_at(Cursor::at_start()));
+        self.workspaces.active_pane_tabs_mut().insert(pane, vec![buffer]);
     }
 
     /// Closes `pane` and forgets what was kept for it.
@@ -67,11 +53,7 @@ impl App {
     /// thread's pane; the focus is left on it.
     pub(super) fn agents_dock_ensure(&mut self, page: BufferId) -> WindowId {
         let from = self.focused_pane_id();
-        let composer = match self
-            .agents
-            .composer
-            .filter(|c| self.buffers.get(*c).is_some())
-        {
+        let composer = match self.agents.composer.filter(|c| self.buffers.get(*c).is_some()) {
             Some(c) => c,
             None => self.buffers.open_prompt(),
         };
@@ -91,14 +73,8 @@ impl App {
                     self.windows_mut().split_before(SplitKind::Horizontal, page)
                 }
                 None => {
-                    let share = self
-                        .config
-                        .int_value("agents.panel_width")
-                        .unwrap_or(38)
-                        .clamp(20, 80) as f32
-                        / 100.0;
-                    self.windows_mut()
-                        .split_root(SplitKind::Vertical, page, 1.0 - share)
+                    let share = self.config.int_value("agents.panel_width").unwrap_or(38).clamp(20, 80) as f32 / 100.0;
+                    self.windows_mut().split_root(SplitKind::Vertical, page, 1.0 - share)
                 }
             };
             self.agents_seed_pane(pane, page);
@@ -114,10 +90,7 @@ impl App {
         self.windows_mut().set_split_near(page_pane, THREAD_SHARE);
         // Files the thread opens go to the pane you came from, unless that
         // was the dock itself.
-        if from != page_pane
-            && Some(from) != composer_pane
-            && self.windows().windows().contains(&from)
-        {
+        if from != page_pane && Some(from) != composer_pane && self.windows().windows().contains(&from) {
             self.agents.code_pane = Some(from);
         }
         self.windows_mut().focus(page_pane);
@@ -132,26 +105,13 @@ impl App {
         let (page_pane, composer_pane) = self.agents_dock_panes();
         let thread = self.agents.shown(&self.pages);
         let view = thread.as_ref().and_then(|t| self.agents.hub.view(t));
-        let title = view
-            .as_ref()
-            .map(|v| v.thread.display_title())
-            .unwrap_or_else(|| "New thread".into());
-        let agent = thread
-            .as_ref()
-            .map(|t| self.agents.status_of(t).agent)
-            .unwrap_or_else(|| "the agent".into());
+        let title = view.as_ref().map(|v| v.thread.display_title()).unwrap_or_else(|| "New thread".into());
+        let agent = thread.as_ref().map(|t| self.agents.status_of(t).agent).unwrap_or_else(|| "the agent".into());
         let mode = view
             .as_ref()
             .and_then(|v| v.thread.modes.as_ref())
-            .and_then(|m| {
-                m.available
-                    .iter()
-                    .find(|a| a.id == m.current)
-                    .map(|a| a.name.clone())
-            });
-        let waiting = view
-            .as_ref()
-            .is_some_and(|v| v.thread.pending_permissions() > 0);
+            .and_then(|m| m.available.iter().find(|a| a.id == m.current).map(|a| a.name.clone()));
+        let waiting = view.as_ref().is_some_and(|v| v.thread.pending_permissions() > 0);
         // A pane that was the dock's and shows something else now is an
         // ordinary pane again, tabs and all.
         for pane in std::mem::take(&mut self.agents.titled) {
@@ -174,11 +134,7 @@ impl App {
                 Some(mode) => format!("to {agent} · {mode}"),
                 None => format!("to {agent}"),
             };
-            let send = if waiting {
-                "waiting on you: y or n answers, here or in the thread"
-            } else {
-                "Ctrl-Enter sends (Enter in Normal), ↑ the last one"
-            };
+            let send = if waiting { "waiting on you: y or n answers, here or in the thread" } else { "Ctrl-Enter sends (Enter in Normal), ↑ the last one" };
             self.pane_titles.insert(pane, format!("{to}   ·   {send}"));
         }
     }
@@ -198,15 +154,8 @@ impl App {
         let was_in_prompt = std::mem::replace(&mut self.agents.in_prompt, in_prompt);
         if was_in_prompt && !in_prompt && self.vim.mode() == Mode::Insert {
             let id = self.focused_buffer_id();
-            if let (Some(ob), Some(state)) = (
-                self.buffers.get_mut(id),
-                self.workspaces.active_pane_states_mut().get_mut(&focused),
-            ) {
-                self.vim.handle_key(
-                    &mut ob.buffer,
-                    &mut state.cursor,
-                    KeyPress::named(FenixNamedKey::Escape),
-                );
+            if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&focused)) {
+                self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::named(FenixNamedKey::Escape));
             }
         }
         // And come into however -- a click, SPC w, a session put back
@@ -255,8 +204,7 @@ impl App {
                 // Back where you were -- or, that pane gone (a second
                 // prompt), the code: a file opened next (a file named on
                 // the command line) mustn't land in the dock.
-                if self.windows().windows().contains(&focused) && !self.agents_is_dock_pane(focused)
-                {
+                if self.windows().windows().contains(&focused) && !self.agents_is_dock_pane(focused) {
                     self.windows_mut().focus(focused);
                 } else {
                     self.agents_focus_code();
@@ -287,12 +235,7 @@ impl App {
             .agents
             .code_pane
             .filter(|p| panes.contains(p) && !self.agents_is_dock_pane(*p))
-            .or_else(|| {
-                panes
-                    .iter()
-                    .copied()
-                    .find(|p| !self.agents_is_dock_pane(*p))
-            });
+            .or_else(|| panes.iter().copied().find(|p| !self.agents_is_dock_pane(*p)));
         if let Some(pane) = pane {
             self.windows_mut().focus(pane);
             self.agents.code_pane = Some(pane);
@@ -301,21 +244,15 @@ impl App {
 
     /// The prompt, focused to write in: Insert mode, at the end.
     pub(in crate::app) fn agents_focus_composer(&mut self) {
-        let (_, Some(pane)) = self.agents_dock_panes() else {
-            return;
-        };
+        let (_, Some(pane)) = self.agents_dock_panes() else { return };
         self.windows_mut().focus(pane);
         let cursor = self.cursor();
         self.vim.exit_visual_mode(&cursor);
         if self.vim.mode() != Mode::Insert {
             let id = self.focused_buffer_id();
-            if let (Some(ob), Some(state)) = (
-                self.buffers.get_mut(id),
-                self.workspaces.active_pane_states_mut().get_mut(&pane),
-            ) {
+            if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
                 state.cursor.char_idx = ob.buffer.len_chars();
-                self.vim
-                    .handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('A'));
+                self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('A'));
             }
         }
         self.agents_dock_titles();

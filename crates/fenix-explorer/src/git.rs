@@ -19,11 +19,7 @@ pub fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         git.creation_flags(CREATE_NO_WINDOW);
     }
-    let Ok(output) = git
-        .args(["status", "--porcelain=v1", "--ignored", "--", "."])
-        .current_dir(dir)
-        .output()
-    else {
+    let Ok(output) = git.args(["status", "--porcelain=v1", "--ignored", "--", "."]).current_dir(dir).output() else {
         return HashMap::new();
     };
     if !output.status.success() {
@@ -36,15 +32,10 @@ pub fn status_for_dir(dir: &Path) -> HashMap<PathBuf, GitStatus> {
         if line.len() < 4 {
             continue;
         }
-        let Some(status) = parse_status(&line[0..2]) else {
-            continue;
-        };
+        let Some(status) = parse_status(&line[0..2]) else { continue };
         let rest = &line[3..];
         // Renames report "OLD -> NEW"; the path that exists now is what matters.
-        let rel = rest
-            .rsplit_once(" -> ")
-            .map_or(rest, |(_, new)| new)
-            .trim_matches('"');
+        let rel = rest.rsplit_once(" -> ").map_or(rest, |(_, new)| new).trim_matches('"');
         map.insert(dir.join(rel), status);
     }
     map
@@ -61,9 +52,7 @@ fn parse_status(xy: &str) -> Option<GitStatus> {
     match (x, y) {
         ('?', '?') => Some(GitStatus::Untracked),
         ('!', '!') => Some(GitStatus::Ignored),
-        _ if x == 'U' || y == 'U' || (x, y) == ('A', 'A') || (x, y) == ('D', 'D') => {
-            Some(GitStatus::Conflicted)
-        }
+        _ if x == 'U' || y == 'U' || (x, y) == ('A', 'A') || (x, y) == ('D', 'D') => Some(GitStatus::Conflicted),
         (' ', ' ') => None,
         (' ', _) => Some(GitStatus::Modified),
         _ => Some(GitStatus::Staged),
@@ -79,11 +68,7 @@ fn parse_status(xy: &str) -> Option<GitStatus> {
 pub(crate) fn annotate_entries(entries: &mut [Entry], statuses: &HashMap<PathBuf, GitStatus>) {
     for entry in entries.iter_mut() {
         entry.git_status = statuses.get(&entry.path).copied().or_else(|| {
-            if entry.is_dir()
-                && statuses.iter().any(|(p, s)| {
-                    *s != GitStatus::Ignored && p != &entry.path && p.starts_with(&entry.path)
-                })
-            {
+            if entry.is_dir() && statuses.iter().any(|(p, s)| *s != GitStatus::Ignored && p != &entry.path && p.starts_with(&entry.path)) {
                 Some(GitStatus::Modified)
             } else {
                 None
@@ -99,11 +84,7 @@ mod tests {
     use std::process::Command;
 
     fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .status()
-            .expect("run git");
+        let status = Command::new("git").args(args).current_dir(dir).status().expect("run git");
         assert!(status.success(), "git {args:?} failed");
     }
 
@@ -135,18 +116,9 @@ mod tests {
         dir.write("untracked.txt", "new"); // never added
 
         let statuses = status_for_dir(dir.path());
-        assert_eq!(
-            statuses.get(&dir.path().join("committed.txt")),
-            Some(&GitStatus::Modified)
-        );
-        assert_eq!(
-            statuses.get(&dir.path().join("staged.txt")),
-            Some(&GitStatus::Staged)
-        );
-        assert_eq!(
-            statuses.get(&dir.path().join("untracked.txt")),
-            Some(&GitStatus::Untracked)
-        );
+        assert_eq!(statuses.get(&dir.path().join("committed.txt")), Some(&GitStatus::Modified));
+        assert_eq!(statuses.get(&dir.path().join("staged.txt")), Some(&GitStatus::Staged));
+        assert_eq!(statuses.get(&dir.path().join("untracked.txt")), Some(&GitStatus::Untracked));
     }
 
     #[test]

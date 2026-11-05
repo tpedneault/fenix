@@ -32,11 +32,7 @@ pub struct Sort {
 
 impl Default for Sort {
     fn default() -> Self {
-        Self {
-            key: SortKey::Name,
-            descending: false,
-            dirs_first: true,
-        }
+        Self { key: SortKey::Name, descending: false, dirs_first: true }
     }
 }
 
@@ -47,16 +43,9 @@ impl Sort {
     /// do.
     pub fn toggled_to(self, key: SortKey) -> Self {
         if self.key == key {
-            Self {
-                descending: !self.descending,
-                ..self
-            }
+            Self { descending: !self.descending, ..self }
         } else {
-            Self {
-                key,
-                descending: false,
-                ..self
-            }
+            Self { key, descending: false, ..self }
         }
     }
 
@@ -102,11 +91,7 @@ pub struct Listing {
 /// exactly the rows the user can see. Nothing gets acted on that is not
 /// on screen.
 pub fn read_listing(path: &Path, show_hidden: bool) -> io::Result<Listing> {
-    Ok(Listing {
-        cwd: path.to_path_buf(),
-        entries: read_children(path, show_hidden)?,
-        folders: Vec::new(),
-    })
+    Ok(Listing { cwd: path.to_path_buf(), entries: read_children(path, show_hidden)?, folders: Vec::new() })
 }
 
 /// `read_listing`, plus each of the `open` folders under it. A folder
@@ -117,22 +102,15 @@ pub fn read_tree(path: &Path, open: &[PathBuf], show_hidden: bool) -> io::Result
     listing.folders = open
         .iter()
         .filter(|dir| dir.starts_with(path) && dir.as_path() != path)
-        .filter_map(|dir| {
-            read_children(dir, show_hidden)
-                .ok()
-                .map(|entries| (dir.clone(), entries))
-        })
+        .filter_map(|dir| read_children(dir, show_hidden).ok().map(|entries| (dir.clone(), entries)))
         .collect();
     Ok(listing)
 }
 
 /// One folder's entries, hidden ones left out unless asked for.
 pub fn read_children(path: &Path, show_hidden: bool) -> io::Result<Vec<Entry>> {
-    let mut entries: Vec<Entry> = fenix_fs::list_dir(path)?
-        .into_iter()
-        .map(|info| Entry::from_fs(info, 0))
-        .filter(|e| show_hidden || !e.is_hidden())
-        .collect();
+    let mut entries: Vec<Entry> =
+        fenix_fs::list_dir(path)?.into_iter().map(|info| Entry::from_fs(info, 0)).filter(|e| show_hidden || !e.is_hidden()).collect();
     sort_entries(&mut entries, Sort::default());
     Ok(entries)
 }
@@ -257,8 +235,7 @@ impl ExplorerState {
         }
         // The folders read with it are the open ones -- kept open, or
         // opened again (a session's).
-        self.expanded
-            .extend(listing.folders.iter().map(|(dir, _)| dir.clone()));
+        self.expanded.extend(listing.folders.iter().map(|(dir, _)| dir.clone()));
         self.children.extend(listing.folders);
         let children = &self.children;
         self.expanded.retain(|dir| children.contains_key(dir));
@@ -266,8 +243,7 @@ impl ExplorerState {
         if moved {
             self.selected = 0;
         }
-        self.marks
-            .retain(|p| self.entries.iter().any(|e| &e.path == p));
+        self.marks.retain(|p| self.entries.iter().any(|e| &e.path == p));
     }
 
     /// Applies a `git status` scan on top of whatever is currently
@@ -303,10 +279,7 @@ impl ExplorerState {
 
     /// How many paths under `cwd` git says changed (ignored ones aside).
     pub fn changed_count(&self) -> usize {
-        self.git_statuses
-            .values()
-            .filter(|s| **s != GitStatus::Ignored)
-            .count()
+        self.git_statuses.values().filter(|s| **s != GitStatus::Ignored).count()
     }
 
     /// Narrows the tree to names containing `filter`, with the folders
@@ -341,11 +314,7 @@ impl ExplorerState {
     /// Names not to list, as globs: `*` any run of characters, `?` any
     /// one, ignoring case.
     pub fn set_hide(&mut self, globs: &[String]) {
-        self.hide = globs
-            .iter()
-            .map(|g| g.trim().to_string())
-            .filter(|g| !g.is_empty())
-            .collect();
+        self.hide = globs.iter().map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect();
         self.rebuild();
     }
 
@@ -374,15 +343,7 @@ impl ExplorerState {
         let mut entries = Vec::new();
         let mut rows = Vec::new();
         let mut guides = Vec::new();
-        self.walk(
-            tree,
-            &self.cwd,
-            0,
-            &mut guides,
-            &needle,
-            &mut entries,
-            &mut rows,
-        );
+        self.walk(tree, &self.cwd, 0, &mut guides, &needle, &mut entries, &mut rows);
         git::annotate_entries(&mut entries, &self.git_statuses);
         // Nothing under an ignored folder is listed by git, and all of
         // it is just as ignored.
@@ -414,11 +375,7 @@ impl ExplorerState {
                 }
                 let list = tree.entry(parent.clone()).or_default();
                 if !list.iter().any(|e| e.path == child) {
-                    list.push(if child == entry.path {
-                        entry.clone()
-                    } else {
-                        Entry::folder(&child)
-                    });
+                    list.push(if child == entry.path { entry.clone() } else { Entry::folder(&child) });
                 }
                 if parent == self.cwd {
                     break;
@@ -430,19 +387,8 @@ impl ExplorerState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn walk(
-        &self,
-        tree: &HashMap<PathBuf, Vec<Entry>>,
-        dir: &Path,
-        depth: usize,
-        guides: &mut Vec<bool>,
-        needle: &str,
-        entries: &mut Vec<Entry>,
-        rows: &mut Vec<Row>,
-    ) {
-        let Some(children) = tree.get(dir) else {
-            return;
-        };
+    fn walk(&self, tree: &HashMap<PathBuf, Vec<Entry>>, dir: &Path, depth: usize, guides: &mut Vec<bool>, needle: &str, entries: &mut Vec<Entry>, rows: &mut Vec<Row>) {
+        let Some(children) = tree.get(dir) else { return };
         let mut children: Vec<&Entry> = children
             .iter()
             .filter(|c| !self.hide.iter().any(|g| glob_matches(g, &c.name)))
@@ -452,9 +398,7 @@ impl ExplorerState {
         let count = children.len();
         for (i, child) in children.into_iter().enumerate() {
             let last = i + 1 == count;
-            let hit = (!needle.is_empty())
-                .then(|| find_ignoring_case(&child.name, needle))
-                .flatten();
+            let hit = (!needle.is_empty()).then(|| find_ignoring_case(&child.name, needle)).flatten();
             let mut entry = child.clone();
             let mut label = child.name.clone();
             if self.compact && needle.is_empty() {
@@ -466,21 +410,10 @@ impl ExplorerState {
             entry.depth = depth;
             let expanded = entry.is_dir()
                 && tree.contains_key(&entry.path)
-                && if needle.is_empty() {
-                    self.expanded.contains(&entry.path)
-                } else {
-                    has_match_under(tree, &entry.path, needle)
-                };
+                && if needle.is_empty() { self.expanded.contains(&entry.path) } else { has_match_under(tree, &entry.path, needle) };
             let path = entry.path.clone();
             entries.push(entry);
-            rows.push(Row {
-                label,
-                expanded,
-                guides: guides.clone(),
-                last,
-                matched: hit.is_some(),
-                hit,
-            });
+            rows.push(Row { label, expanded, guides: guides.clone(), last, matched: hit.is_some(), hit });
             if expanded {
                 guides.push(!last);
                 self.walk(tree, &path, depth + 1, guides, needle, entries, rows);
@@ -510,11 +443,7 @@ impl ExplorerState {
         let cwd = self.cwd.clone();
         let show_hidden = self.show_hidden;
         let visible = |e: &Entry| {
-            show_hidden
-                || e.path.strip_prefix(&cwd).is_ok_and(|rel| {
-                    !rel.components()
-                        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
-                })
+            show_hidden || e.path.strip_prefix(&cwd).is_ok_and(|rel| !rel.components().any(|c| c.as_os_str().to_string_lossy().starts_with('.')))
         };
         self.found = Some(found.into_iter().filter(visible).collect());
         self.rebuild();
@@ -525,13 +454,7 @@ impl ExplorerState {
     pub fn next_match(&mut self, forward: bool) -> bool {
         let n = self.rows.len();
         let found = (1..=n)
-            .map(|step| {
-                if forward {
-                    (self.selected + step) % n
-                } else {
-                    (self.selected + n - step % n) % n
-                }
-            })
+            .map(|step| if forward { (self.selected + step) % n } else { (self.selected + n - step % n) % n })
             .find(|&i| self.rows[i].matched);
         if let Some(i) = found {
             self.selected = i;
@@ -574,9 +497,7 @@ impl ExplorerState {
 
     /// Toggles the mark on the entry at point.
     pub fn toggle_mark(&mut self) {
-        let Some(entry) = self.entries.get(self.selected) else {
-            return;
-        };
+        let Some(entry) = self.entries.get(self.selected) else { return };
         if !self.marks.remove(&entry.path) {
             self.marks.insert(entry.path.clone());
         }
@@ -609,10 +530,7 @@ impl ExplorerState {
         if self.marks.is_empty() {
             self.selected_entry().into_iter().collect()
         } else {
-            self.entries
-                .iter()
-                .filter(|e| self.marks.contains(&e.path))
-                .collect()
+            self.entries.iter().filter(|e| self.marks.contains(&e.path)).collect()
         }
     }
 
@@ -630,9 +548,7 @@ impl ExplorerState {
     /// Reads synchronously, so a host that cares about slow paths reads
     /// off-thread and calls `open_folder` instead.
     pub fn toggle_expand(&mut self) -> io::Result<()> {
-        let Some(entry) = self.entries.get(self.selected) else {
-            return Ok(());
-        };
+        let Some(entry) = self.entries.get(self.selected) else { return Ok(()) };
         if !entry.is_dir() {
             return Ok(());
         }
@@ -660,9 +576,7 @@ impl ExplorerState {
             return None;
         }
         match self.children.get(dir)?.as_slice() {
-            [only] if only.is_dir() && !self.expanded.contains(&only.path) => {
-                Some(only.path.clone())
-            }
+            [only] if only.is_dir() && !self.expanded.contains(&only.path) => Some(only.path.clone()),
             _ => None,
         }
     }
@@ -687,9 +601,7 @@ impl ExplorerState {
     /// `index` -- the half of `toggle_expand` that does no I/O, for a
     /// host that read the children off-thread.
     pub fn expand_with(&mut self, index: usize, children: Vec<Entry>) {
-        let Some(entry) = self.entries.get(index).filter(|e| e.is_dir()) else {
-            return;
-        };
+        let Some(entry) = self.entries.get(index).filter(|e| e.is_dir()) else { return };
         let path = entry.path.clone();
         self.open_folder(&path, children);
     }
@@ -706,9 +618,7 @@ impl ExplorerState {
     /// `reveal`. Empty when nothing needs opening, or `path` isn't under
     /// `cwd` at all.
     pub fn folders_to_reveal(&self, path: &Path) -> Vec<PathBuf> {
-        let Ok(rel) = path.strip_prefix(&self.cwd) else {
-            return Vec::new();
-        };
+        let Ok(rel) = path.strip_prefix(&self.cwd) else { return Vec::new() };
         let parts: Vec<_> = rel.components().collect();
         let mut dir = self.cwd.clone();
         let mut out = Vec::new();
@@ -751,10 +661,7 @@ impl ExplorerState {
         };
         let new_path = entry.path.parent().unwrap_or(&self.cwd).join(new_name);
         if new_path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("{} already exists", new_path.display()),
-            ));
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", new_path.display())));
         }
         if let Some(parent) = new_path.parent() {
             fs::create_dir_all(parent)?;
@@ -774,10 +681,7 @@ pub fn create_file_in(dir: &Path, name: &str) -> io::Result<PathBuf> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
+    fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
     Ok(path)
 }
 
@@ -786,10 +690,7 @@ pub fn create_file_in(dir: &Path, name: &str) -> io::Result<PathBuf> {
 pub fn create_dir_in(dir: &Path, name: &str) -> io::Result<PathBuf> {
     let path = dir.join(name);
     if path.exists() {
-        return Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("{} already exists", path.display()),
-        ));
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists", path.display())));
     }
     fs::create_dir_all(&path)?;
     Ok(path)
@@ -798,14 +699,12 @@ pub fn create_dir_in(dir: &Path, name: &str) -> io::Result<PathBuf> {
 /// Whether `entry` shows under the filter `needle`: it matches, or
 /// something under it does.
 fn shows_under_filter(tree: &HashMap<PathBuf, Vec<Entry>>, entry: &Entry, needle: &str) -> bool {
-    entry.name.to_lowercase().contains(needle)
-        || (entry.is_dir() && has_match_under(tree, &entry.path, needle))
+    entry.name.to_lowercase().contains(needle) || (entry.is_dir() && has_match_under(tree, &entry.path, needle))
 }
 
 /// Whether anything in `tree` under `dir` matches.
 fn has_match_under(tree: &HashMap<PathBuf, Vec<Entry>>, dir: &Path, needle: &str) -> bool {
-    tree.get(dir)
-        .is_some_and(|children| children.iter().any(|c| shows_under_filter(tree, c, needle)))
+    tree.get(dir).is_some_and(|children| children.iter().any(|c| shows_under_filter(tree, c, needle)))
 }
 
 /// Whether `name` matches `glob`, ignoring case: `*` is any run of
@@ -841,14 +740,9 @@ fn find_ignoring_case(name: &str, needle: &str) -> Option<std::ops::Range<usize>
     if needle.is_empty() || lower.len() != name.chars().count() {
         // A name whose lowercase changes length: matched, but where is
         // not worth guessing.
-        return name
-            .to_lowercase()
-            .contains(needle.iter().collect::<String>().as_str())
-            .then_some(0..0);
+        return name.to_lowercase().contains(needle.iter().collect::<String>().as_str()).then_some(0..0);
     }
-    let at = lower
-        .windows(needle.len())
-        .position(|w| w == needle.as_slice())?;
+    let at = lower.windows(needle.len()).position(|w| w == needle.as_slice())?;
     Some(at..at + needle.len())
 }
 
@@ -877,11 +771,7 @@ fn compare(a: &Entry, b: &Entry, sort: Sort) -> std::cmp::Ordering {
         SortKey::Modified => a.modified.cmp(&b.modified),
         SortKey::Extension => a.extension().cmp(&b.extension()),
     };
-    let by_key = if sort.descending {
-        by_key.reverse()
-    } else {
-        by_key
-    };
+    let by_key = if sort.descending { by_key.reverse() } else { by_key };
     if by_key != std::cmp::Ordering::Equal {
         return by_key;
     }
@@ -983,16 +873,13 @@ mod tests {
         dir.touch("c.txt");
         let mut state = ExplorerState::opened(dir.path()).unwrap();
 
-        assert_eq!(
-            state.target_paths().len(),
-            1,
-            "nothing marked -- just what's under the cursor"
-        );
+        assert_eq!(state.target_paths().len(), 1, "nothing marked -- just what's under the cursor");
 
         state.toggle_mark();
         state.move_selection(2);
         state.toggle_mark();
-        let names: Vec<String> = state.targets().iter().map(|e| e.name.clone()).collect();
+        let names: Vec<String> =
+            state.targets().iter().map(|e| e.name.clone()).collect();
         assert_eq!(names, vec!["a.txt", "c.txt"], "marked wins over the cursor");
     }
 
@@ -1011,24 +898,10 @@ mod tests {
         dir.write("small.txt", "x");
         dir.mkdir("adir");
 
-        let names = names_sorted_by(
-            &dir,
-            Sort {
-                key: SortKey::Size,
-                descending: false,
-                dirs_first: true,
-            },
-        );
+        let names = names_sorted_by(&dir, Sort { key: SortKey::Size, descending: false, dirs_first: true });
         assert_eq!(names, vec!["adir", "small.txt", "big.txt"]);
 
-        let names = names_sorted_by(
-            &dir,
-            Sort {
-                key: SortKey::Size,
-                descending: true,
-                dirs_first: true,
-            },
-        );
+        let names = names_sorted_by(&dir, Sort { key: SortKey::Size, descending: true, dirs_first: true });
         assert_eq!(names, vec!["adir", "big.txt", "small.txt"]);
     }
 
@@ -1037,14 +910,7 @@ mod tests {
         let dir = TempDir::new("sort_name_desc");
         dir.touch("a.txt");
         dir.touch("b.txt");
-        let names = names_sorted_by(
-            &dir,
-            Sort {
-                key: SortKey::Name,
-                descending: true,
-                dirs_first: true,
-            },
-        );
+        let names = names_sorted_by(&dir, Sort { key: SortKey::Name, descending: true, dirs_first: true });
         assert_eq!(names, vec!["b.txt", "a.txt"]);
     }
 
@@ -1055,14 +921,7 @@ mod tests {
         dir.touch("a.rs");
         dir.touch("c.md");
 
-        let names = names_sorted_by(
-            &dir,
-            Sort {
-                key: SortKey::Extension,
-                descending: false,
-                dirs_first: true,
-            },
-        );
+        let names = names_sorted_by(&dir, Sort { key: SortKey::Extension, descending: false, dirs_first: true });
         assert_eq!(names, vec!["c.md", "a.rs", "b.rs"]);
     }
 
@@ -1073,14 +932,7 @@ mod tests {
         dir.mkdir("m");
         dir.touch("z.txt");
 
-        let names = names_sorted_by(
-            &dir,
-            Sort {
-                key: SortKey::Name,
-                descending: false,
-                dirs_first: false,
-            },
-        );
+        let names = names_sorted_by(&dir, Sort { key: SortKey::Name, descending: false, dirs_first: false });
         assert_eq!(names, vec!["a.txt", "m", "z.txt"]);
     }
 
@@ -1094,11 +946,7 @@ mod tests {
         let mut state = ExplorerState::opened(dir.path()).unwrap();
         state.select_path(&dir.path().join("a.txt"));
 
-        state.set_sort(Sort {
-            key: SortKey::Size,
-            descending: false,
-            dirs_first: true,
-        });
+        state.set_sort(Sort { key: SortKey::Size, descending: false, dirs_first: true });
 
         assert_eq!(state.selected_entry().unwrap().name, "a.txt");
         assert_eq!(state.selected, 1, "it really did move rows");
@@ -1117,17 +965,9 @@ mod tests {
         state.select_path(&a);
         state.toggle_expand().unwrap();
 
-        state.set_sort(Sort {
-            key: SortKey::Name,
-            descending: true,
-            dirs_first: true,
-        });
+        state.set_sort(Sort { key: SortKey::Name, descending: true, dirs_first: true });
 
-        let rows: Vec<(String, usize)> = state
-            .entries
-            .iter()
-            .map(|e| (e.name.clone(), e.depth))
-            .collect();
+        let rows: Vec<(String, usize)> = state.entries.iter().map(|e| (e.name.clone(), e.depth)).collect();
         assert_eq!(
             rows,
             vec![
@@ -1307,12 +1147,8 @@ mod tests {
         let mut state = ExplorerState::opened(dir.path()).unwrap();
         state.toggle_expand().unwrap();
 
-        let rows: Vec<(&str, usize, Vec<bool>, bool)> = state
-            .entries
-            .iter()
-            .zip(&state.rows)
-            .map(|(e, r)| (r.label.as_str(), e.depth, r.guides.clone(), r.last))
-            .collect();
+        let rows: Vec<(&str, usize, Vec<bool>, bool)> =
+            state.entries.iter().zip(&state.rows).map(|(e, r)| (r.label.as_str(), e.depth, r.guides.clone(), r.last)).collect();
         assert_eq!(
             rows,
             vec![
@@ -1337,15 +1173,8 @@ mod tests {
         state.toggle_expand().unwrap();
 
         let labels: Vec<&str> = state.rows.iter().map(|r| r.label.as_str()).collect();
-        assert_eq!(
-            labels,
-            vec!["src/main/java", "App.java", "Util.java"],
-            "opened down to where it branches"
-        );
-        assert_eq!(
-            state.entries[0].path, deep,
-            "the row is the last folder of the run"
-        );
+        assert_eq!(labels, vec!["src/main/java", "App.java", "Util.java"], "opened down to where it branches");
+        assert_eq!(state.entries[0].path, deep, "the row is the last folder of the run");
 
         state.set_compact(false);
         let labels: Vec<&str> = state.rows.iter().map(|r| r.label.as_str()).collect();
@@ -1372,13 +1201,8 @@ mod tests {
 
         assert!(state.reveal(&file, read.collect()));
         assert_eq!(state.selected_entry().unwrap().path, file);
-        assert!(
-            state.folders_to_reveal(&file).is_empty(),
-            "nothing left to open"
-        );
-        assert!(state
-            .folders_to_reveal(Path::new("/elsewhere/x"))
-            .is_empty());
+        assert!(state.folders_to_reveal(&file).is_empty(), "nothing left to open");
+        assert!(state.folders_to_reveal(Path::new("/elsewhere/x")).is_empty());
     }
 
     #[test]
@@ -1395,11 +1219,7 @@ mod tests {
         state.set_filter("needle");
 
         let names: Vec<&str> = state.entries.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(
-            names,
-            vec!["sub", "needle.txt"],
-            "opened on the way down, though it was folded"
-        );
+        assert_eq!(names, vec!["sub", "needle.txt"], "opened on the way down, though it was folded");
         assert!(!state.rows[0].matched && state.rows[1].matched);
 
         state.set_filter("");
@@ -1433,38 +1253,17 @@ mod tests {
 
         state.set_filter("needle");
         assert!(state.entries.is_empty(), "nothing read matches yet");
-        state.set_found(crate::search(
-            [deep.join("needle.txt"), deep.join("hay.txt")]
-                .iter()
-                .map(PathBuf::as_path),
-            dir.path(),
-            "needle",
-            10,
-        ));
+        state.set_found(crate::search([deep.join("needle.txt"), deep.join("hay.txt")].iter().map(PathBuf::as_path), dir.path(), "needle", 10));
 
-        let rows: Vec<(String, usize)> = state
-            .entries
-            .iter()
-            .map(|e| (e.name.clone(), e.depth))
-            .collect();
-        assert_eq!(
-            rows,
-            [
-                ("a".to_string(), 0),
-                ("b".to_string(), 1),
-                ("needle.txt".to_string(), 2)
-            ]
-        );
+        let rows: Vec<(String, usize)> = state.entries.iter().map(|e| (e.name.clone(), e.depth)).collect();
+        assert_eq!(rows, [("a".to_string(), 0), ("b".to_string(), 1), ("needle.txt".to_string(), 2)]);
         assert_eq!(state.rows[2].hit, Some(0..6));
         assert!(!state.rows[0].matched);
 
         state.set_filter("");
         assert_eq!(state.entries.len(), 2, "the tree as it was");
         state.set_filter("needle");
-        assert!(
-            state.entries.is_empty(),
-            "a cleared filter drops what was found"
-        );
+        assert!(state.entries.is_empty(), "a cleared filter drops what was found");
     }
 
     #[test]
@@ -1528,10 +1327,7 @@ mod tests {
         let err = state.create_file("keep.txt").unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
-            "precious"
-        );
+        assert_eq!(std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(), "precious");
     }
 
     #[test]
@@ -1546,11 +1342,7 @@ mod tests {
 
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert!(err.to_string().contains("b.txt"), "got: {err}");
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
-            "two",
-            "untouched"
-        );
+        assert_eq!(std::fs::read_to_string(dir.path().join("b.txt")).unwrap(), "two", "untouched");
     }
 
     #[test]
@@ -1571,18 +1363,11 @@ mod tests {
     fn set_hidden(path: &Path) {
         #[cfg(windows)]
         {
-            std::process::Command::new("attrib")
-                .arg("+H")
-                .arg(path)
-                .output()
-                .expect("attrib");
+            std::process::Command::new("attrib").arg("+H").arg(path).output().expect("attrib");
         }
         #[cfg(not(windows))]
         {
-            let hidden = path
-                .parent()
-                .unwrap()
-                .join(format!(".{}", path.file_name().unwrap().to_string_lossy()));
+            let hidden = path.parent().unwrap().join(format!(".{}", path.file_name().unwrap().to_string_lossy()));
             std::fs::rename(path, hidden).unwrap();
         }
     }

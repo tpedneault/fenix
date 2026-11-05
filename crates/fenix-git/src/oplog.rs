@@ -21,11 +21,7 @@ pub enum Undo {
     /// changed, staged -- undoing a commit gives its changes back; else
     /// `reset --keep`, which refuses rather than overwrite uncommitted
     /// work.
-    Reset {
-        to: String,
-        soft: bool,
-        saved: Option<String>,
-    },
+    Reset { to: String, soft: bool, saved: Option<String> },
     /// Switch back to the branch that was checked out.
     Switch(String),
     /// Delete a branch the operation created.
@@ -34,10 +30,7 @@ pub enum Undo {
     CreateBranches(Vec<(String, String)>),
     /// Undo creating a branch: switch back first when the operation
     /// switched to it, then delete it.
-    Unbranch {
-        name: String,
-        back_to: Option<String>,
-    },
+    Unbranch { name: String, back_to: Option<String> },
     /// Rename a branch back.
     Rename { from: String, to: String },
     /// Delete a tag the operation created.
@@ -48,10 +41,7 @@ pub enum Undo {
     StoreStash { commit: String, message: String },
     /// Bring back discarded changes: tracked ones from a `stash create`
     /// commit, and whole files from their blobs.
-    Restore {
-        saved: Option<String>,
-        files: Vec<(String, String)>,
-    },
+    Restore { saved: Option<String>, files: Vec<(String, String)> },
     /// Put back lines a hunk or line discard took out: the patch that was
     /// reversed, saved as a blob, applied forward again -- so other edits
     /// to the same file since don't get in the way.
@@ -87,28 +77,15 @@ fn clean(s: &str) -> String {
 impl Undo {
     fn encode(&self) -> String {
         let parts: Vec<String> = match self {
-            Undo::Reset { to, soft, saved } => vec![
-                "reset".into(),
-                to.clone(),
-                saved.clone().unwrap_or_default(),
-                if *soft { "soft" } else { "keep" }.into(),
-            ],
+            Undo::Reset { to, soft, saved } => vec!["reset".into(), to.clone(), saved.clone().unwrap_or_default(), if *soft { "soft" } else { "keep" }.into()],
             Undo::Switch(b) => vec!["switch".into(), b.clone()],
             Undo::DeleteBranch(b) => vec!["delete-branch".into(), b.clone()],
-            Undo::CreateBranches(branches) => std::iter::once("create-branches".to_string())
-                .chain(branches.iter().flat_map(|(n, a)| [n.clone(), a.clone()]))
-                .collect(),
-            Undo::Unbranch { name, back_to } => vec![
-                "unbranch".into(),
-                name.clone(),
-                back_to.clone().unwrap_or_default(),
-            ],
+            Undo::CreateBranches(branches) => std::iter::once("create-branches".to_string()).chain(branches.iter().flat_map(|(n, a)| [n.clone(), a.clone()])).collect(),
+            Undo::Unbranch { name, back_to } => vec!["unbranch".into(), name.clone(), back_to.clone().unwrap_or_default()],
             Undo::Rename { from, to } => vec!["rename".into(), from.clone(), to.clone()],
             Undo::DeleteTag(t) => vec!["delete-tag".into(), t.clone()],
             Undo::PopStash(c) => vec!["pop-stash".into(), c.clone()],
-            Undo::StoreStash { commit, message } => {
-                vec!["store-stash".into(), commit.clone(), message.clone()]
-            }
+            Undo::StoreStash { commit, message } => vec!["store-stash".into(), commit.clone(), message.clone()],
             Undo::Restore { saved, files } => {
                 let mut v = vec!["restore".into(), saved.clone().unwrap_or_default()];
                 for (path, blob) in files {
@@ -120,11 +97,7 @@ impl Undo {
             Undo::ApplyPatch(blob) => vec!["apply-patch".into(), blob.clone()],
             Undo::Not(why) => vec!["not".into(), why.clone()],
         };
-        parts
-            .iter()
-            .map(|p| clean(p))
-            .collect::<Vec<_>>()
-            .join(&SUB.to_string())
+        parts.iter().map(|p| clean(p)).collect::<Vec<_>>().join(&SUB.to_string())
     }
 
     fn decode(text: &str) -> Option<Undo> {
@@ -132,42 +105,16 @@ impl Undo {
         let arg = |i: usize| parts.get(i).map(|s| s.to_string());
         let opt = |i: usize| arg(i).filter(|s| !s.is_empty());
         Some(match *parts.first()? {
-            "reset" => Undo::Reset {
-                to: arg(1)?,
-                saved: opt(2),
-                soft: arg(3).as_deref() == Some("soft"),
-            },
+            "reset" => Undo::Reset { to: arg(1)?, saved: opt(2), soft: arg(3).as_deref() == Some("soft") },
             "switch" => Undo::Switch(arg(1)?),
             "delete-branch" => Undo::DeleteBranch(arg(1)?),
-            "create-branches" => Undo::CreateBranches(
-                parts[1..]
-                    .chunks(2)
-                    .filter(|c| c.len() == 2)
-                    .map(|c| (c[0].to_string(), c[1].to_string()))
-                    .collect(),
-            ),
-            "unbranch" => Undo::Unbranch {
-                name: arg(1)?,
-                back_to: opt(2),
-            },
-            "rename" => Undo::Rename {
-                from: arg(1)?,
-                to: arg(2)?,
-            },
+            "create-branches" => Undo::CreateBranches(parts[1..].chunks(2).filter(|c| c.len() == 2).map(|c| (c[0].to_string(), c[1].to_string())).collect()),
+            "unbranch" => Undo::Unbranch { name: arg(1)?, back_to: opt(2) },
+            "rename" => Undo::Rename { from: arg(1)?, to: arg(2)? },
             "delete-tag" => Undo::DeleteTag(arg(1)?),
             "pop-stash" => Undo::PopStash(arg(1)?),
-            "store-stash" => Undo::StoreStash {
-                commit: arg(1)?,
-                message: arg(2).unwrap_or_default(),
-            },
-            "restore" => Undo::Restore {
-                saved: opt(1),
-                files: parts[2..]
-                    .chunks(2)
-                    .filter(|c| c.len() == 2)
-                    .map(|c| (c[0].to_string(), c[1].to_string()))
-                    .collect(),
-            },
+            "store-stash" => Undo::StoreStash { commit: arg(1)?, message: arg(2).unwrap_or_default() },
+            "restore" => Undo::Restore { saved: opt(1), files: parts[2..].chunks(2).filter(|c| c.len() == 2).map(|c| (c[0].to_string(), c[1].to_string())).collect() },
             "apply-patch" => Undo::ApplyPatch(arg(1)?),
             "not" => Undo::Not(arg(1).unwrap_or_default()),
             _ => return None,
@@ -203,23 +150,12 @@ impl Entry {
         let after = f.next()?.to_string();
         let ok = f.next()? == "ok";
         let undo = Undo::decode(f.next()?)?;
-        Some(Entry {
-            time,
-            label,
-            branch,
-            before,
-            after,
-            ok,
-            undo,
-        })
+        Some(Entry { time, label, branch, before, after, ok, undo })
     }
 }
 
 fn git_dir(repo: &Path) -> Option<PathBuf> {
-    run_lines(repo, &["rev-parse", "--absolute-git-dir"])
-        .into_iter()
-        .next()
-        .map(PathBuf::from)
+    run_lines(repo, &["rev-parse", "--absolute-git-dir"]).into_iter().next().map(PathBuf::from)
 }
 
 fn log_path(repo: &Path) -> Option<PathBuf> {
@@ -228,45 +164,28 @@ fn log_path(repo: &Path) -> Option<PathBuf> {
 
 /// The commit `rev` names, or empty.
 pub fn rev(repo: &Path, rev: &str) -> String {
-    run_lines(repo, &["rev-parse", "--verify", "--quiet", rev])
-        .into_iter()
-        .next()
-        .unwrap_or_default()
+    run_lines(repo, &["rev-parse", "--verify", "--quiet", rev]).into_iter().next().unwrap_or_default()
 }
 
 /// The checked-out branch, `None` when HEAD is detached.
 pub fn current_branch(repo: &Path) -> Option<String> {
-    run_lines(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .into_iter()
-        .next()
+    run_lines(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]).into_iter().next()
 }
 
 /// Tracked changes (index and working tree) saved as a commit without
 /// touching anything -- `None` when there are none.
 pub fn save_changes(repo: &Path) -> Option<String> {
-    run_lines(repo, &["stash", "create"])
-        .into_iter()
-        .next()
-        .filter(|s| !s.is_empty())
+    run_lines(repo, &["stash", "create"]).into_iter().next().filter(|s| !s.is_empty())
 }
 
 /// An untracked file's content saved as a blob.
 pub fn save_file(repo: &Path, path: &str) -> Option<String> {
-    run_lines(repo, &["hash-object", "-w", "--", path])
-        .into_iter()
-        .next()
+    run_lines(repo, &["hash-object", "-w", "--", path]).into_iter().next()
 }
 
 /// A patch saved as a blob, for `Undo::ApplyPatch`.
 pub fn save_patch(repo: &Path, patch: &str) -> Option<String> {
-    crate::process::run_action_stdin(
-        repo,
-        &["hash-object".into(), "-w".into(), "--stdin".into()],
-        patch,
-    )
-    .ok()
-    .map(|out| out.trim().to_string())
-    .filter(|h| !h.is_empty())
+    crate::process::run_action_stdin(repo, &["hash-object".into(), "-w".into(), "--stdin".into()], patch).ok().map(|out| out.trim().to_string()).filter(|h| !h.is_empty())
 }
 
 /// Appends `entry` to the log.
@@ -276,30 +195,18 @@ pub fn record(repo: &Path, entry: &Entry) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| e.to_string())?;
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path).map_err(|e| e.to_string())?;
     writeln!(file, "{}", entry.encode()).map_err(|e| e.to_string())
 }
 
 /// Runs an operation and logs it. `undo` is handed the result and says
 /// how to take it back -- worked out from whatever the caller saved
 /// before running (a `save_changes` commit, the branch it was on).
-pub fn logged(
-    repo: &Path,
-    label: &str,
-    run: impl FnOnce() -> Result<String, String>,
-    undo: impl FnOnce(&Result<String, String>) -> Undo,
-) -> Result<String, String> {
+pub fn logged(repo: &Path, label: &str, run: impl FnOnce() -> Result<String, String>, undo: impl FnOnce(&Result<String, String>) -> Undo) -> Result<String, String> {
     let before = rev(repo, "HEAD");
     let branch = current_branch(repo);
     let result = run();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
     // Two operations in the same millisecond still get their own ids.
     let last = entries(repo, 1).first().map(|e| e.time).unwrap_or(0);
     let entry = Entry {
@@ -318,51 +225,30 @@ pub fn logged(
 
 /// The log, newest first, at most `limit` entries.
 pub fn entries(repo: &Path, limit: usize) -> Vec<Entry> {
-    let Some(path) = log_path(repo) else {
-        return Vec::new();
-    };
+    let Some(path) = log_path(repo) else { return Vec::new() };
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    text.lines()
-        .rev()
-        .filter_map(Entry::decode)
-        .take(limit)
-        .collect()
+    text.lines().rev().filter_map(Entry::decode).take(limit).collect()
 }
 
 /// What undoing `undo` would do, in a few lines -- for the page to show
 /// before it happens.
 pub fn preview(repo: &Path, undo: &Undo) -> Vec<String> {
-    let subject = |c: &str| {
-        run_lines(repo, &["log", "-1", "--format=%h %s", c])
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| c.chars().take(7).collect())
-    };
+    let subject = |c: &str| run_lines(repo, &["log", "-1", "--format=%h %s", c]).into_iter().next().unwrap_or_else(|| c.chars().take(7).collect());
     let mut out = Vec::new();
     match undo {
         Undo::Reset { to, soft, saved } => {
             let branch = current_branch(repo).unwrap_or_else(|| "HEAD".to_string());
             out.push(format!("{branch} goes back to {}", subject(to)));
-            let back = run_lines(repo, &["rev-list", "--count", &format!("HEAD..{to}")])
-                .into_iter()
-                .next()
-                .unwrap_or_default();
-            let gone = run_lines(repo, &["rev-list", "--count", &format!("{to}..HEAD")])
-                .into_iter()
-                .next()
-                .unwrap_or_default();
+            let back = run_lines(repo, &["rev-list", "--count", &format!("HEAD..{to}")]).into_iter().next().unwrap_or_default();
+            let gone = run_lines(repo, &["rev-list", "--count", &format!("{to}..HEAD")]).into_iter().next().unwrap_or_default();
             if back != "0" && !back.is_empty() {
                 out.push(format!("+ brings back {back} commit(s)"));
             }
             if gone != "0" && !gone.is_empty() {
                 if *soft {
-                    out.push(format!(
-                        "- takes off {gone} commit(s); what they changed stays, staged"
-                    ));
+                    out.push(format!("- takes off {gone} commit(s); what they changed stays, staged"));
                 } else {
-                    out.push(format!(
-                        "- takes off {gone} commit(s) made since (still in the reflog)"
-                    ));
+                    out.push(format!("- takes off {gone} commit(s) made since (still in the reflog)"));
                 }
             }
             if saved.is_some() {
@@ -371,11 +257,7 @@ pub fn preview(repo: &Path, undo: &Undo) -> Vec<String> {
         }
         Undo::Switch(b) => out.push(format!("switch back to {b}")),
         Undo::DeleteBranch(b) => out.push(format!("delete the branch {b}")),
-        Undo::CreateBranches(branches) => out.extend(
-            branches
-                .iter()
-                .map(|(name, at)| format!("+ recreate {name} at {}", subject(at))),
-        ),
+        Undo::CreateBranches(branches) => out.extend(branches.iter().map(|(name, at)| format!("+ recreate {name} at {}", subject(at)))),
         Undo::Unbranch { name, back_to } => {
             if let Some(back) = back_to {
                 out.push(format!("switch back to {back}"));
@@ -405,15 +287,9 @@ pub fn apply(repo: &Path, undo: &Undo) -> Result<String, String> {
     let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     match undo {
         Undo::Reset { to, soft, saved } => {
-            let mut out = run_action(
-                repo,
-                &s(&["reset", if *soft { "--soft" } else { "--keep" }, to]),
-            )?;
+            let mut out = run_action(repo, &s(&["reset", if *soft { "--soft" } else { "--keep" }, to]))?;
             if let Some(saved) = saved {
-                out.push_str(&run_action(
-                    repo,
-                    &s(&["stash", "apply", "--index", saved]),
-                )?);
+                out.push_str(&run_action(repo, &s(&["stash", "apply", "--index", saved]))?);
             }
             Ok(out)
         }
@@ -437,18 +313,10 @@ pub fn apply(repo: &Path, undo: &Undo) -> Result<String, String> {
         Undo::Rename { from, to } => run_action(repo, &s(&["branch", "-m", from, to])),
         Undo::DeleteTag(t) => run_action(repo, &s(&["tag", "-d", t])),
         Undo::PopStash(commit) => {
-            let index = run_lines(repo, &["stash", "list", "--format=%H"])
-                .iter()
-                .position(|h| h == commit)
-                .ok_or("that stash isn't on the list any more")?;
-            run_action(
-                repo,
-                &s(&["stash", "pop", "--index", &format!("stash@{{{index}}}")]),
-            )
+            let index = run_lines(repo, &["stash", "list", "--format=%H"]).iter().position(|h| h == commit).ok_or("that stash isn't on the list any more")?;
+            run_action(repo, &s(&["stash", "pop", "--index", &format!("stash@{{{index}}}")]))
         }
-        Undo::StoreStash { commit, message } => {
-            run_action(repo, &s(&["stash", "store", "-m", message, commit]))
-        }
+        Undo::StoreStash { commit, message } => run_action(repo, &s(&["stash", "store", "-m", message, commit])),
         Undo::Restore { saved, files } => {
             let mut out = String::new();
             if let Some(saved) = saved {
@@ -465,13 +333,8 @@ pub fn apply(repo: &Path, undo: &Undo) -> Result<String, String> {
             Ok(out)
         }
         Undo::ApplyPatch(blob) => {
-            let patch =
-                String::from_utf8(run_action_bytes(repo, blob)?).map_err(|e| e.to_string())?;
-            crate::process::run_action_stdin(
-                repo,
-                &s(&["apply", "--whitespace=nowarn", "-"]),
-                &patch,
-            )
+            let patch = String::from_utf8(run_action_bytes(repo, blob)?).map_err(|e| e.to_string())?;
+            crate::process::run_action_stdin(repo, &s(&["apply", "--whitespace=nowarn", "-"]), &patch)
         }
         Undo::Not(why) => Err(why.clone()),
     }
@@ -500,45 +363,17 @@ mod tests {
     #[test]
     fn entries_round_trip_newest_first() {
         let dir = repo("oplog_round_trip");
-        let undo = Undo::Restore {
-            saved: Some("abc".into()),
-            files: vec![("new.txt".into(), "def".into())],
-        };
-        let entry = Entry {
-            time: 1,
-            label: "discard\u{1f}weird\nlabel".into(),
-            branch: Some("main".into()),
-            before: "x".into(),
-            after: "y".into(),
-            ok: true,
-            undo: undo.clone(),
-        };
+        let undo = Undo::Restore { saved: Some("abc".into()), files: vec![("new.txt".into(), "def".into())] };
+        let entry = Entry { time: 1, label: "discard\u{1f}weird\nlabel".into(), branch: Some("main".into()), before: "x".into(), after: "y".into(), ok: true, undo: undo.clone() };
         record(dir.path(), &entry).unwrap();
-        record(
-            dir.path(),
-            &Entry {
-                time: 2,
-                label: "second".into(),
-                undo: Undo::Not("pushed".into()),
-                ok: false,
-                branch: None,
-                ..entry.clone()
-            },
-        )
-        .unwrap();
+        record(dir.path(), &Entry { time: 2, label: "second".into(), undo: Undo::Not("pushed".into()), ok: false, branch: None, ..entry.clone() }).unwrap();
         let read = entries(dir.path(), 10);
         assert_eq!(read.len(), 2);
         assert_eq!(read[0].label, "second");
         assert!(!read[0].ok && read[0].branch.is_none());
         assert_eq!(read[1].undo, undo);
-        assert_eq!(
-            read[1].label, "discard weird label",
-            "separators can't break the line"
-        );
-        assert!(
-            !dir.path().join(".fenix").exists() && dir.path().join(".git/fenix/oplog").exists(),
-            "the log lives in the git dir"
-        );
+        assert_eq!(read[1].label, "discard weird label", "separators can't break the line");
+        assert!(!dir.path().join(".fenix").exists() && dir.path().join(".git/fenix/oplog").exists(), "the log lives in the git dir");
     }
 
     #[test]
@@ -551,27 +386,13 @@ mod tests {
         dir.write("a.txt", "one, edited\n");
 
         let before = rev(dir.path(), "HEAD");
-        let undo = Undo::Reset {
-            to: before.clone(),
-            soft: false,
-            saved: save_changes(dir.path()),
-        };
+        let undo = Undo::Reset { to: before.clone(), soft: false, saved: save_changes(dir.path()) };
         git(dir.path(), &["reset", "-q", "--hard", &first]);
-        assert!(
-            preview(dir.path(), &undo)
-                .iter()
-                .any(|l| l.contains("brings back 1 commit")),
-            "{:?}",
-            preview(dir.path(), &undo)
-        );
+        assert!(preview(dir.path(), &undo).iter().any(|l| l.contains("brings back 1 commit")), "{:?}", preview(dir.path(), &undo));
 
         apply(dir.path(), &undo).unwrap();
         assert_eq!(rev(dir.path(), "HEAD"), before);
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "one, edited\n",
-            "the edit came back"
-        );
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one, edited\n", "the edit came back");
     }
 
     #[test]
@@ -579,21 +400,12 @@ mod tests {
         let dir = repo("oplog_discard");
         dir.write("a.txt", "one, edited\n");
         dir.write("new.txt", "brand new\n");
-        let undo = Undo::Restore {
-            saved: save_changes(dir.path()),
-            files: vec![("new.txt".into(), save_file(dir.path(), "new.txt").unwrap())],
-        };
+        let undo = Undo::Restore { saved: save_changes(dir.path()), files: vec![("new.txt".into(), save_file(dir.path(), "new.txt").unwrap())] };
         git(dir.path(), &["checkout", "--", "a.txt"]);
         std::fs::remove_file(dir.path().join("new.txt")).unwrap();
         apply(dir.path(), &undo).unwrap();
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "one, edited\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("new.txt")).unwrap(),
-            "brand new\n"
-        );
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one, edited\n");
+        assert_eq!(std::fs::read_to_string(dir.path().join("new.txt")).unwrap(), "brand new\n");
     }
 
     #[test]
@@ -603,14 +415,7 @@ mod tests {
         git(dir.path(), &["stash", "push", "-q", "-m", "keep me"]);
         let commit = rev(dir.path(), "stash@{0}");
         git(dir.path(), &["stash", "drop", "-q"]);
-        apply(
-            dir.path(),
-            &Undo::StoreStash {
-                commit,
-                message: "keep me".into(),
-            },
-        )
-        .unwrap();
+        apply(dir.path(), &Undo::StoreStash { commit, message: "keep me".into() }).unwrap();
         assert!(run_lines(dir.path(), &["stash", "list"])[0].contains("keep me"));
     }
 
@@ -618,8 +423,7 @@ mod tests {
     fn branches_come_back_and_go_away() {
         let dir = repo("oplog_branch");
         let head = rev(dir.path(), "HEAD");
-        let undo =
-            Undo::CreateBranches(vec![("topic".into(), head.clone()), ("other".into(), head)]);
+        let undo = Undo::CreateBranches(vec![("topic".into(), head.clone()), ("other".into(), head)]);
         assert_eq!(Undo::decode(&undo.encode()), Some(undo.clone()));
         apply(dir.path(), &undo).unwrap();
         assert_eq!(rev(dir.path(), "topic"), rev(dir.path(), "HEAD"));
@@ -628,14 +432,7 @@ mod tests {
         assert!(rev(dir.path(), "topic").is_empty());
 
         git(dir.path(), &["switch", "-q", "-c", "made"]);
-        apply(
-            dir.path(),
-            &Undo::Unbranch {
-                name: "made".into(),
-                back_to: Some("main".into()),
-            },
-        )
-        .unwrap();
+        apply(dir.path(), &Undo::Unbranch { name: "made".into(), back_to: Some("main".into()) }).unwrap();
         assert_eq!(current_branch(dir.path()).as_deref(), Some("main"));
         assert!(rev(dir.path(), "made").is_empty());
     }
@@ -647,19 +444,10 @@ mod tests {
         dir.write("b.txt", "b\n");
         git(dir.path(), &["add", "."]);
         git(dir.path(), &["commit", "-q", "-m", "second"]);
-        let undo = Undo::Reset {
-            to: before.clone(),
-            soft: true,
-            saved: None,
-        };
-        assert!(preview(dir.path(), &undo)
-            .iter()
-            .any(|l| l.contains("stays, staged")));
+        let undo = Undo::Reset { to: before.clone(), soft: true, saved: None };
+        assert!(preview(dir.path(), &undo).iter().any(|l| l.contains("stays, staged")));
         apply(dir.path(), &undo).unwrap();
         assert_eq!(rev(dir.path(), "HEAD"), before);
-        assert_eq!(
-            run_lines(dir.path(), &["diff", "--cached", "--name-only"]),
-            ["b.txt"]
-        );
+        assert_eq!(run_lines(dir.path(), &["diff", "--cached", "--name-only"]), ["b.txt"]);
     }
 }

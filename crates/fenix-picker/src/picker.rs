@@ -15,10 +15,7 @@ pub struct Candidate<T> {
 
 impl<T> Candidate<T> {
     pub fn new(label: impl Into<String>, payload: T) -> Self {
-        Self {
-            label: label.into(),
-            payload,
-        }
+        Self { label: label.into(), payload }
     }
 }
 
@@ -43,13 +40,8 @@ pub struct PickerState<T> {
 
 impl<T> PickerState<T> {
     pub fn new(candidates: Vec<Candidate<T>>) -> Self {
-        let mut state = Self {
-            all: candidates,
-            query: String::new(),
-            filtered: Vec::new(),
-            selected: 0,
-            marks: HashSet::new(),
-        };
+        let mut state =
+            Self { all: candidates, query: String::new(), filtered: Vec::new(), selected: 0, marks: HashSet::new() };
         state.refilter();
         state
     }
@@ -58,10 +50,7 @@ impl<T> PickerState<T> {
     /// (original, unfiltered indices) -- for a multi-select picker that
     /// reopens over a set that's already partly chosen (e.g. the status
     /// filter's currently-excluded statuses).
-    pub fn new_with_marks(
-        candidates: Vec<Candidate<T>>,
-        marked_indices: impl IntoIterator<Item = usize>,
-    ) -> Self {
+    pub fn new_with_marks(candidates: Vec<Candidate<T>>, marked_indices: impl IntoIterator<Item = usize>) -> Self {
         let mut state = Self::new(candidates);
         state.marks = marked_indices.into_iter().collect();
         state
@@ -79,19 +68,13 @@ impl<T> PickerState<T> {
 
     /// Whether the candidate at filtered row `row` is marked.
     pub fn is_marked(&self, row: usize) -> bool {
-        self.filtered
-            .get(row)
-            .is_some_and(|s| self.marks.contains(&s.index))
+        self.filtered.get(row).is_some_and(|s| self.marks.contains(&s.index))
     }
 
     /// Every marked payload, in original candidate order (not filtered/
     /// ranked order -- stable regardless of the query at confirm time).
     pub fn marked(&self) -> impl Iterator<Item = &T> {
-        self.all
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| self.marks.contains(index))
-            .map(|(_, c)| &c.payload)
+        self.all.iter().enumerate().filter(|(index, _)| self.marks.contains(index)).map(|(_, c)| &c.payload)
     }
 
     pub fn query(&self) -> &str {
@@ -105,14 +88,13 @@ impl<T> PickerState<T> {
         // typed into a big list gets cheaper, not the same.
         let query: Vec<char> = self.query.chars().collect();
         let all = &self.all;
-        self.filtered
-            .retain_mut(|s| match fuzzy_match_chars(&query, &all[s.index].label) {
-                Some(score) => {
-                    s.score = score;
-                    true
-                }
-                None => false,
-            });
+        self.filtered.retain_mut(|s| match fuzzy_match_chars(&query, &all[s.index].label) {
+            Some(score) => {
+                s.score = score;
+                true
+            }
+            None => false,
+        });
         self.sort_filtered();
     }
 
@@ -125,11 +107,7 @@ impl<T> PickerState<T> {
         self.marks.clear();
         self.refilter();
         if let Some(label) = selected {
-            if let Some(row) = self
-                .filtered
-                .iter()
-                .position(|s| self.all[s.index].label == label)
-            {
+            if let Some(row) = self.filtered.iter().position(|s| self.all[s.index].label == label) {
                 self.selected = row;
             }
         }
@@ -160,9 +138,7 @@ impl<T> PickerState<T> {
             .all
             .iter()
             .enumerate()
-            .filter_map(|(index, c)| {
-                fuzzy_match_chars(&query, &c.label).map(|score| Scored { index, score })
-            })
+            .filter_map(|(index, c)| fuzzy_match_chars(&query, &c.label).map(|score| Scored { index, score }))
             .collect();
         self.sort_filtered();
     }
@@ -170,8 +146,7 @@ impl<T> PickerState<T> {
     fn sort_filtered(&mut self) {
         // Highest score first; stable tie-break by original order so
         // results don't jitter between keystrokes when scores are equal.
-        self.filtered
-            .sort_unstable_by(|a, b| b.score.cmp(&a.score).then(a.index.cmp(&b.index)));
+        self.filtered.sort_unstable_by(|a, b| b.score.cmp(&a.score).then(a.index.cmp(&b.index)));
         self.selected = 0;
     }
 
@@ -205,17 +180,10 @@ impl<T> PickerState<T> {
     /// caller windowing a possibly-long result list to what's actually on
     /// screen, the same shape `ExplorerState`'s rendering already windows
     /// a directory listing to.
-    pub fn visible_rows(
-        &self,
-        offset: usize,
-        count: usize,
-    ) -> impl Iterator<Item = (bool, &Candidate<T>)> {
+    pub fn visible_rows(&self, offset: usize, count: usize) -> impl Iterator<Item = (bool, &Candidate<T>)> {
         let end = (offset + count).min(self.filtered.len());
         let start = offset.min(end);
-        self.filtered[start..end]
-            .iter()
-            .enumerate()
-            .map(move |(i, s)| (start + i == self.selected, &self.all[s.index]))
+        self.filtered[start..end].iter().enumerate().map(move |(i, s)| (start + i == self.selected, &self.all[s.index]))
     }
 }
 
@@ -224,20 +192,13 @@ mod tests {
     use super::*;
 
     fn candidates(labels: &[&str]) -> Vec<Candidate<usize>> {
-        labels
-            .iter()
-            .enumerate()
-            .map(|(i, l)| Candidate::new(*l, i))
-            .collect()
+        labels.iter().enumerate().map(|(i, l)| Candidate::new(*l, i)).collect()
     }
 
     #[test]
     fn empty_query_shows_everything_in_original_order() {
         let picker = PickerState::new(candidates(&["b", "a", "c"]));
-        let labels: Vec<&str> = picker
-            .visible_rows(0, 10)
-            .map(|(_, c)| c.label.as_str())
-            .collect();
+        let labels: Vec<&str> = picker.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
         assert_eq!(labels, vec!["b", "a", "c"]);
     }
 
@@ -250,10 +211,7 @@ mod tests {
         // start); "banana" doesn't contain "ap" as a subsequence at all
         // in that order from position 0 the same way -- just check it's
         // excluded, and that both real matches are present.
-        let labels: Vec<&str> = picker
-            .visible_rows(0, 10)
-            .map(|(_, c)| c.label.as_str())
-            .collect();
+        let labels: Vec<&str> = picker.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
         assert!(labels.contains(&"apple"));
         assert!(labels.contains(&"apricot"));
         assert!(!labels.contains(&"banana"));
@@ -300,10 +258,7 @@ mod tests {
     fn visible_rows_flags_the_selected_row_within_the_window() {
         let mut picker = PickerState::new(candidates(&["a", "b", "c", "d"]));
         picker.move_selection(2); // select "c", index 2
-        let rows: Vec<(bool, &str)> = picker
-            .visible_rows(1, 2)
-            .map(|(sel, c)| (sel, c.label.as_str()))
-            .collect();
+        let rows: Vec<(bool, &str)> = picker.visible_rows(1, 2).map(|(sel, c)| (sel, c.label.as_str())).collect();
         assert_eq!(rows, vec![(false, "b"), (true, "c")]);
     }
 
@@ -317,20 +272,14 @@ mod tests {
     fn set_query_replaces_the_whole_query_and_refilters() {
         let mut picker = PickerState::new(candidates(&["apple", "banana", "apricot"]));
         picker.set_query("ap");
-        let labels: Vec<&str> = picker
-            .visible_rows(0, 10)
-            .map(|(_, c)| c.label.as_str())
-            .collect();
+        let labels: Vec<&str> = picker.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
         assert!(labels.contains(&"apple"));
         assert!(labels.contains(&"apricot"));
         assert!(!labels.contains(&"banana"));
         assert_eq!(picker.query(), "ap");
 
         picker.set_query("ban");
-        let labels: Vec<&str> = picker
-            .visible_rows(0, 10)
-            .map(|(_, c)| c.label.as_str())
-            .collect();
+        let labels: Vec<&str> = picker.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
         assert_eq!(labels, vec!["banana"]);
     }
 
@@ -363,17 +312,11 @@ mod tests {
         // Filter it out of view, then back in -- it should still be marked.
         picker.push_char('a');
         picker.push_char('p');
-        let labels: Vec<&str> = picker
-            .visible_rows(0, 10)
-            .map(|(_, c)| c.label.as_str())
-            .collect();
+        let labels: Vec<&str> = picker.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
         assert!(!labels.contains(&"banana"));
 
         picker.set_query("");
-        let row = picker
-            .visible_rows(0, 10)
-            .position(|(_, c)| c.label == "banana")
-            .unwrap();
+        let row = picker.visible_rows(0, 10).position(|(_, c)| c.label == "banana").unwrap();
         assert!(picker.is_marked(row));
     }
 
@@ -401,25 +344,14 @@ mod tests {
 
     #[test]
     fn typing_narrows_to_the_same_rows_a_fresh_filter_would() {
-        let labels = [
-            "src/app.rs",
-            "src/app/pages.rs",
-            "crates/picker/src/lib.rs",
-            "README.md",
-            "apps/a.rs",
-            "sap.rs",
-        ];
+        let labels = ["src/app.rs", "src/app/pages.rs", "crates/picker/src/lib.rs", "README.md", "apps/a.rs", "sap.rs"];
         let mut typed = PickerState::new(candidates(&labels));
         for c in "aps".chars() {
             typed.push_char(c);
         }
         let mut fresh = PickerState::new(candidates(&labels));
         fresh.set_query("aps");
-        let rows = |p: &PickerState<usize>| {
-            p.visible_rows(0, 10)
-                .map(|(_, c)| c.payload)
-                .collect::<Vec<_>>()
-        };
+        let rows = |p: &PickerState<usize>| p.visible_rows(0, 10).map(|(_, c)| c.payload).collect::<Vec<_>>();
         assert_eq!(rows(&typed), rows(&fresh));
     }
 

@@ -51,20 +51,8 @@ const OUTPUT_LINES: usize = 5;
 
 impl DoctorPage {
     pub fn new(root: PathBuf, kind: ProjectKind) -> Self {
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string());
-        DoctorPage {
-            root,
-            name,
-            kind,
-            checks: None,
-            focus: 0,
-            fixing: None,
-            queue: Vec::new(),
-            last_fix: None,
-        }
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
+        DoctorPage { root, name, kind, checks: None, focus: 0, fixing: None, queue: Vec::new(), last_fix: None }
     }
 
     /// Checks are in; keeps the cursor on the same row where it can.
@@ -88,29 +76,13 @@ impl DoctorPage {
 
     /// Indices of the checks with a safe fix.
     pub fn safe_fixes(&self) -> Vec<usize> {
-        self.checks
-            .iter()
-            .flatten()
-            .enumerate()
-            .filter(|(_, c)| c.fix.as_ref().is_some_and(|f| f.safe))
-            .map(|(i, _)| i)
-            .collect()
+        self.checks.iter().flatten().enumerate().filter(|(_, c)| c.fix.as_ref().is_some_and(|f| f.safe)).map(|(i, _)| i).collect()
     }
 
     /// Checks in display order: grouped by section, sections in a fixed
     /// order, checks as the doctor listed them within each.
     pub fn order(&self) -> Vec<usize> {
-        let rank = |s: Section| {
-            [
-                Section::Toolchain,
-                Section::Hardware,
-                Section::Database,
-                Section::Project,
-            ]
-            .iter()
-            .position(|x| *x == s)
-            .unwrap_or(9)
-        };
+        let rank = |s: Section| [Section::Toolchain, Section::Hardware, Section::Database, Section::Project].iter().position(|x| *x == s).unwrap_or(9);
         let mut order: Vec<usize> = (0..self.checks.as_ref().map_or(0, Vec::len)).collect();
         if let Some(checks) = &self.checks {
             order.sort_by_key(|&i| rank(checks[i].section));
@@ -168,12 +140,7 @@ impl DoctorPage {
 
     /// The checks as plain text, for the clipboard.
     pub fn report(&self) -> String {
-        let mut out = format!(
-            "{} ({}) -- {}\n",
-            self.name,
-            self.kind.label(),
-            self.root.display()
-        );
+        let mut out = format!("{} ({}) -- {}\n", self.name, self.kind.label(), self.root.display());
         for i in self.order() {
             let Some(c) = self.check(i) else { continue };
             let mark = match c.health {
@@ -182,12 +149,7 @@ impl DoctorPage {
                 Health::Warn => "warn",
                 Health::Bad => "BAD ",
             };
-            out.push_str(&format!(
-                "{mark} {:<9} {:<24} {}",
-                c.section.title(),
-                c.label,
-                c.detail
-            ));
+            out.push_str(&format!("{mark} {:<9} {:<24} {}", c.section.title(), c.label, c.detail));
             if let Some(fix) = &c.fix {
                 out.push_str(&format!("   [fix: {}]", fix.label));
             }
@@ -226,17 +188,8 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
         Some(checks) => health_role(worst(checks).max(Health::Ok)),
         None => Role::Muted,
     };
-    let role = if role == Role::Muted && doctor.checks.is_some() {
-        Role::Good
-    } else {
-        role
-    };
-    g.put(
-        1,
-        (left + width).saturating_sub(status.chars().count()),
-        &status,
-        role,
-    );
+    let role = if role == Role::Muted && doctor.checks.is_some() { Role::Good } else { role };
+    g.put(1, (left + width).saturating_sub(status.chars().count()), &status, role);
     g.rule(2, left..left + width);
     if let Some((label, result)) = &doctor.last_fix {
         let (text, role) = match result {
@@ -265,11 +218,7 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
             }
             g.put(y, left + 2, "●", health_role(c.health));
             g.put(y, left + 4, &fit(&c.label, label_width), Role::Text);
-            let fix_text = c
-                .fix
-                .as_ref()
-                .map(|f| format!("f  {}", f.label))
-                .unwrap_or_default();
+            let fix_text = c.fix.as_ref().map(|f| format!("f  {}", f.label)).unwrap_or_default();
             let detail_x = left + 5 + label_width;
             let room = (left + width).saturating_sub(detail_x + fix_text.chars().count() + 2);
             g.put(y, detail_x, &fit(&c.detail, room), Role::Muted);
@@ -287,21 +236,11 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
                 };
                 g.put(y, left + 6, mark, role);
                 if let Some(Err(e)) = &fixing.result {
-                    g.put(
-                        y,
-                        left + 6 + mark.len() + 2,
-                        &fit(e, width.saturating_sub(mark.len() + 10)),
-                        Role::Bad,
-                    );
+                    g.put(y, left + 6 + mark.len() + 2, &fit(e, width.saturating_sub(mark.len() + 10)), Role::Bad);
                 }
                 y += 1;
                 for line in &fixing.output {
-                    g.put(
-                        y,
-                        left + 6,
-                        &fit(line, width.saturating_sub(8)),
-                        Role::Muted,
-                    );
+                    g.put(y, left + 6, &fit(line, width.saturating_sub(8)), Role::Muted);
                     y += 1;
                 }
             }
@@ -309,34 +248,15 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
         let safe = doctor.safe_fixes().len();
         if safe > 0 {
             y += 1;
-            let text = format!(
-                "{safe} fix{} safe to run unasked -- ",
-                if safe == 1 { " is" } else { "es are" }
-            );
-            let end = g.put(
-                y,
-                left + 2,
-                &fit(&text, width.saturating_sub(16)),
-                Role::Muted,
-            );
+            let text = format!("{safe} fix{} safe to run unasked -- ", if safe == 1 { " is" } else { "es are" });
+            let end = g.put(y, left + 2, &fit(&text, width.saturating_sub(16)), Role::Muted);
             let end = g.put(y, end, "F", Role::Accent);
             g.put(y, end + 1, "runs them", Role::Muted);
         }
     } else {
         g.put(y, left + 2, "Looking at the toolchain…", Role::Muted);
     }
-    g.keys(
-        left,
-        width,
-        &[
-            ("f", "fix"),
-            ("F", "fix all safe"),
-            ("Enter", "open / fix"),
-            ("r", "recheck"),
-            ("y", "copy report"),
-            ("q", "close"),
-        ],
-    );
+    g.keys(left, width, &[("f", "fix"), ("F", "fix all safe"), ("Enter", "open / fix"), ("r", "recheck"), ("y", "copy report"), ("q", "close")]);
     g.finish()
 }
 
@@ -360,8 +280,7 @@ mod tests {
     }
 
     fn page(name: &str) -> (DoctorPage, PathBuf) {
-        let dir =
-            std::env::temp_dir().join(format!("fenix-doctor-page-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("fenix-doctor-page-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join(".fenix")).unwrap();
         std::fs::write(dir.join("uv.lock"), "").unwrap();
@@ -375,14 +294,8 @@ mod tests {
     fn checks_are_grouped_by_section_with_their_fixes() {
         let (doctor, dir) = page("grouped");
         let text = layout(&doctor, 100).text;
-        assert!(
-            text.contains("TOOLCHAIN") && text.contains("PROJECT"),
-            "{text}"
-        );
-        assert!(
-            text.contains("uv sync"),
-            "the venv's fix is offered:\n{text}"
-        );
+        assert!(text.contains("TOOLCHAIN") && text.contains("PROJECT"), "{text}");
+        assert!(text.contains("uv sync"), "the venv's fix is offered:\n{text}");
         assert!(text.contains("problems"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -391,28 +304,15 @@ mod tests {
     fn f_fixes_enter_opens_and_f_runs_only_safe_fixes() {
         let (mut doctor, dir) = page("keys");
         let order = doctor.order();
-        let venv = order
-            .iter()
-            .position(|&i| doctor.check(i).unwrap().label == ".venv")
-            .unwrap();
+        let venv = order.iter().position(|&i| doctor.check(i).unwrap().label == ".venv").unwrap();
         doctor.focus = venv;
         assert_eq!(doctor.key(Key::Char('f')), Action::Fix(order[venv]));
-        let tools = order
-            .iter()
-            .position(|&i| doctor.check(i).unwrap().label == "tools.json")
-            .unwrap();
+        let tools = order.iter().position(|&i| doctor.check(i).unwrap().label == "tools.json").unwrap();
         doctor.focus = tools;
         assert!(matches!(doctor.key(Key::Enter), Action::Open(p, 1) if p.ends_with("tools.json")));
         let safe = doctor.safe_fixes();
-        assert!(safe
-            .iter()
-            .all(|&i| doctor.check(i).unwrap().fix.as_ref().unwrap().safe));
-        assert!(
-            !safe
-                .iter()
-                .any(|&i| doctor.check(i).unwrap().label == "pyright-langserver"),
-            "installing isn't safe"
-        );
+        assert!(safe.iter().all(|&i| doctor.check(i).unwrap().fix.as_ref().unwrap().safe));
+        assert!(!safe.iter().any(|&i| doctor.check(i).unwrap().label == "pyright-langserver"), "installing isn't safe");
         assert_eq!(doctor.key(Key::Char('F')), Action::FixAllSafe);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -421,11 +321,7 @@ mod tests {
     fn a_running_fix_shows_its_output_and_blocks_other_fixes() {
         let (mut doctor, dir) = page("running");
         let i = doctor.safe_fixes()[0];
-        doctor.fixing = Some(Fixing {
-            check: i,
-            output: Vec::new(),
-            result: None,
-        });
+        doctor.fixing = Some(Fixing { check: i, output: Vec::new(), result: None });
         for n in 0..8 {
             doctor.push_output(format!("line {n}"));
         }
@@ -436,9 +332,7 @@ mod tests {
         assert!(doctor.report().contains("BAD "));
         doctor.fixing = None;
         doctor.last_fix = Some(("uv sync".into(), Err("exited with code 2".into())));
-        assert!(layout(&doctor, 100)
-            .text
-            .contains("uv sync: exited with code 2"));
+        assert!(layout(&doctor, 100).text.contains("uv sync: exited with code 2"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

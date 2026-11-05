@@ -33,26 +33,17 @@ pub struct Keychain {
 impl Keychain {
     /// No keychain: secrets stay in `settings.toml`.
     pub fn none() -> Keychain {
-        Keychain {
-            store: None,
-            read: Mutex::default(),
-        }
+        Keychain { store: None, read: Mutex::default() }
     }
 
     pub fn with(store: impl Store + 'static) -> Keychain {
-        Keychain {
-            store: Some(Box::new(store)),
-            read: Mutex::default(),
-        }
+        Keychain { store: Some(Box::new(store)), read: Mutex::default() }
     }
 
     /// This system's, when it has one that answers.
     pub fn system() -> Keychain {
         match native() {
-            Some(store) => Keychain {
-                store: Some(store),
-                read: Mutex::default(),
-            },
+            Some(store) => Keychain { store: Some(store), read: Mutex::default() },
             None => Keychain::none(),
         }
     }
@@ -83,10 +74,7 @@ impl Keychain {
             None => store.delete(key)?,
         }
         if let Ok(mut read) = self.read.lock() {
-            read.insert(
-                key.to_string(),
-                value.filter(|v| !v.is_empty()).map(str::to_string),
-            );
+            read.insert(key.to_string(), value.filter(|v| !v.is_empty()).map(str::to_string));
         }
         Ok(())
     }
@@ -100,13 +88,8 @@ pub fn migrate(config: &mut Config, keychain: &Keychain) -> (Vec<&'static str>, 
     if keychain.name().is_none() {
         return (moved, problems);
     }
-    for setting in schema::settings()
-        .into_iter()
-        .filter(|s| matches!(s.kind, Kind::Secret(_)))
-    {
-        let Some(Value::Text(text)) = setting.get(config) else {
-            continue;
-        };
+    for setting in schema::settings().into_iter().filter(|s| matches!(s.kind, Kind::Secret(_))) {
+        let Some(Value::Text(text)) = setting.get(config) else { continue };
         if text.trim().is_empty() {
             continue;
         }
@@ -115,10 +98,7 @@ pub fn migrate(config: &mut Config, keychain: &Keychain) -> (Vec<&'static str>, 
                 Ok(()) => moved.push(setting.key),
                 Err(e) => problems.push(format!("{}: {e}", setting.key)),
             },
-            Err(e) => problems.push(format!(
-                "{}: kept in settings.toml -- the keychain said {e}",
-                setting.key
-            )),
+            Err(e) => problems.push(format!("{}: kept in settings.toml -- the keychain said {e}", setting.key)),
         }
     }
     if !moved.is_empty() {
@@ -143,10 +123,7 @@ impl Store for Memory {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), String> {
-        self.0
-            .lock()
-            .map_err(|e| e.to_string())?
-            .insert(key.to_string(), value.to_string());
+        self.0.lock().map_err(|e| e.to_string())?.insert(key.to_string(), value.to_string());
         Ok(())
     }
 
@@ -163,11 +140,7 @@ struct Native;
 #[cfg(any(windows, target_os = "macos"))]
 impl Store for Native {
     fn name(&self) -> &str {
-        if cfg!(windows) {
-            "Windows Credential Manager"
-        } else {
-            "the macOS Keychain"
-        }
+        if cfg!(windows) { "Windows Credential Manager" } else { "the macOS Keychain" }
     }
 
     fn get(&self, key: &str) -> Result<Option<String>, String> {
@@ -179,9 +152,7 @@ impl Store for Native {
     }
 
     fn set(&self, key: &str, value: &str) -> Result<(), String> {
-        keyring::Entry::new(SERVICE, key)
-            .and_then(|e| e.set_password(value))
-            .map_err(|e| e.to_string())
+        keyring::Entry::new(SERVICE, key).and_then(|e| e.set_password(value)).map_err(|e| e.to_string())
     }
 
     fn delete(&self, key: &str) -> Result<(), String> {
@@ -210,13 +181,7 @@ impl SecretTool {
     fn run(args: &[&str], input: Option<&str>) -> Result<(bool, String), String> {
         use std::io::{Read, Write};
         use std::process::{Command, Stdio};
-        let mut child = Command::new("secret-tool")
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("secret-tool: {e}"))?;
+        let mut child = Command::new("secret-tool").args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("secret-tool: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
             if let Some(input) = input {
                 let _ = stdin.write_all(input.as_bytes());
@@ -226,9 +191,7 @@ impl SecretTool {
         let status = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() < std::time::Duration::from_secs(30) => {
-                    std::thread::sleep(std::time::Duration::from_millis(10))
-                }
+                Ok(None) if started.elapsed() < std::time::Duration::from_secs(30) => std::thread::sleep(std::time::Duration::from_millis(10)),
                 _ => {
                     let _ = child.kill();
                     let _ = child.wait();
@@ -264,10 +227,7 @@ impl Store for SecretTool {
 
     fn set(&self, key: &str, value: &str) -> Result<(), String> {
         let label = format!("--label=Fenix: {key}");
-        match SecretTool::run(
-            &["store", &label, "service", SERVICE, "key", key],
-            Some(value),
-        )? {
+        match SecretTool::run(&["store", &label, "service", SERVICE, "key", key], Some(value))? {
             (true, _) => Ok(()),
             (false, _) => Err("secret-tool couldn't keep it".into()),
         }
@@ -297,9 +257,7 @@ mod tests {
         assert_eq!(keychain.get("http.secret.api").as_deref(), Some("k3y"));
         keychain.set("http.secret.api", None).unwrap();
         assert_eq!(keychain.get("http.secret.api"), None);
-        assert!(
-            Keychain::none().set("x.y", Some("z")).is_err() && Keychain::none().name().is_none()
-        );
+        assert!(Keychain::none().set("x.y", Some("z")).is_err() && Keychain::none().name().is_none());
     }
 
     #[test]
@@ -310,30 +268,15 @@ mod tests {
         std::fs::write(&path, "[gitlab]\ntoken = \"glpat-plain\"\n").unwrap();
         let mut config = Config::load_at(path.clone(), dir.clone()).unwrap();
         // None: they stay.
-        assert_eq!(
-            migrate(&mut config, &Keychain::none()),
-            (Vec::new(), Vec::new())
-        );
-        assert!(std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("glpat-plain"));
+        assert_eq!(migrate(&mut config, &Keychain::none()), (Vec::new(), Vec::new()));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("glpat-plain"));
         let keychain = Keychain::with(Memory::default());
         let (moved, problems) = migrate(&mut config, &keychain);
-        assert_eq!(
-            (moved, problems),
-            (vec!["gitlab.token"], Vec::<String>::new())
-        );
+        assert_eq!((moved, problems), (vec!["gitlab.token"], Vec::<String>::new()));
         assert_eq!(keychain.get("gitlab.token").as_deref(), Some("glpat-plain"));
-        assert!(
-            !std::fs::read_to_string(&path).unwrap().contains("glpat"),
-            "gone from the file"
-        );
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("glpat"), "gone from the file");
         assert_eq!(config.gitlab_token, None);
-        assert_eq!(
-            migrate(&mut config, &keychain).0,
-            Vec::<&str>::new(),
-            "once"
-        );
+        assert_eq!(migrate(&mut config, &keychain).0, Vec::<&str>::new(), "once");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

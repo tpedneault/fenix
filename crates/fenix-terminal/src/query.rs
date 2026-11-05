@@ -53,14 +53,7 @@ impl vt100::Callbacks for QueryReplies {
     /// Every query this cares about arrives here: `vt100` handles the
     /// CSI sequences that *change the screen* itself and hands the rest
     /// on, and a query changes nothing -- it asks.
-    fn unhandled_csi(
-        &mut self,
-        screen: &mut vt100::Screen,
-        i1: Option<u8>,
-        _i2: Option<u8>,
-        params: &[&[u16]],
-        c: char,
-    ) {
+    fn unhandled_csi(&mut self, screen: &mut vt100::Screen, i1: Option<u8>, _i2: Option<u8>, params: &[&[u16]], c: char) {
         // Every one of these takes a single numeric argument, defaulting
         // to 0 when omitted (`ESC [ n` and `ESC [ 0 n` mean the same
         // thing) -- which is also what a bare `ESC [ c` relies on.
@@ -72,15 +65,13 @@ impl vt100::Callbacks for QueryReplies {
             // Reported 1-based, as the protocol counts rows and columns.
             (None, 'n', 6) => {
                 let (row, col) = screen.cursor_position();
-                self.pending
-                    .extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
+                self.pending.extend_from_slice(format!("\x1b[{};{}R", row + 1, col + 1).as_bytes());
             }
             // DECXCPR, the same question with the page number attached.
             // Always page 1: there is only ever one screen here.
             (Some(b'?'), 'n', 6) => {
                 let (row, col) = screen.cursor_position();
-                self.pending
-                    .extend_from_slice(format!("\x1b[?{};{};1R", row + 1, col + 1).as_bytes());
+                self.pending.extend_from_slice(format!("\x1b[?{};{};1R", row + 1, col + 1).as_bytes());
             }
             (None, 'c', 0) => self.pending.extend_from_slice(PRIMARY_DEVICE_ATTRIBUTES),
             (Some(b'>'), 'c', _) => self.pending.extend_from_slice(SECONDARY_DEVICE_ATTRIBUTES),
@@ -155,12 +146,7 @@ mod tests {
     #[test]
     fn several_queries_in_one_chunk_are_all_answered_in_order() {
         // A single read from the PTY can carry a whole handshake.
-        let expected = [
-            b"\x1b[1;1R".as_slice(),
-            b"\x1b[0n",
-            PRIMARY_DEVICE_ATTRIBUTES,
-        ]
-        .concat();
+        let expected = [b"\x1b[1;1R".as_slice(), b"\x1b[0n", PRIMARY_DEVICE_ATTRIBUTES].concat();
         assert_eq!(replies_to(b"\x1b[6n\x1b[5n\x1b[c"), expected);
     }
 
@@ -172,10 +158,7 @@ mod tests {
         // scanning each chunk on its own.
         let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, QueryReplies::default());
         parser.process(b"\x1b[");
-        assert!(
-            parser.callbacks_mut().take().is_empty(),
-            "nothing to answer yet -- the query isn't complete"
-        );
+        assert!(parser.callbacks_mut().take().is_empty(), "nothing to answer yet -- the query isn't complete");
         parser.process(b"6n");
         assert_eq!(parser.callbacks_mut().take(), b"\x1b[1;1R");
     }

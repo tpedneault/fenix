@@ -141,35 +141,17 @@ pub fn column_width_for(total: usize) -> usize {
 /// passing them in rather than recomputing keeps this view and the
 /// resolve actions working from one list, so "conflict 2" means the same
 /// thing to both.
-pub fn render(
-    path: &str,
-    text: &str,
-    conflicts: &[Conflict],
-    labels: &SideLabels,
-    width: usize,
-) -> MergeView {
+pub fn render(path: &str, text: &str, conflicts: &[Conflict], labels: &SideLabels, width: usize) -> MergeView {
     let mut out = Builder::new(width);
     let lines: Vec<&str> = text.split('\n').collect();
 
-    out.push(
-        &format!("  {path}"),
-        MergeStyle::Header,
-        Side::Both,
-        None,
-        None,
-    );
+    out.push(&format!("  {path}"), MergeStyle::Header, Side::Both, None, None);
     if conflicts.is_empty() {
         // Kept under 80 columns: these two hint rows are the only
         // fixed-width text here -- every other row sizes itself to the
         // pane, so they were the one thing that could still overflow a
         // narrow one.
-        out.push(
-            "  Nothing left to resolve  --  s stages it, u puts the conflict back",
-            MergeStyle::Meta,
-            Side::Both,
-            None,
-            None,
-        );
+        out.push("  Nothing left to resolve  --  s stages it, u puts the conflict back", MergeStyle::Meta, Side::Both, None, None);
         out.push("", MergeStyle::Meta, Side::Both, None, None);
         // The resolved file, not an empty pane: the last thing anyone
         // wants after choosing a side is to have to go somewhere else
@@ -178,13 +160,7 @@ pub fn render(
             if n + 1 == lines.len() && content.is_empty() {
                 break;
             }
-            out.push(
-                &format!("  {content}"),
-                MergeStyle::Context,
-                Side::Both,
-                None,
-                Some(n),
-            );
+            out.push(&format!("  {content}"), MergeStyle::Context, Side::Both, None, Some(n));
         }
         return out.finish();
     }
@@ -192,30 +168,10 @@ pub fn render(
     // The legend is the whole point of the view: it says which branch
     // each column is, and -- for a rebase, where git's own words are
     // actively misleading -- what that branch's role is.
+    out.push(&two_columns(&format!("<<< {} ", labels.ours), &format!(">>> {} ", labels.theirs), out.width), MergeStyle::Header, Side::Both, None, None);
+    out.push(&two_columns(&labels.ours_role, &labels.theirs_role, out.width), MergeStyle::Meta, Side::Both, None, None);
     out.push(
-        &two_columns(
-            &format!("<<< {} ", labels.ours),
-            &format!(">>> {} ", labels.theirs),
-            out.width,
-        ),
-        MergeStyle::Header,
-        Side::Both,
-        None,
-        None,
-    );
-    out.push(
-        &two_columns(&labels.ours_role, &labels.theirs_role, out.width),
-        MergeStyle::Meta,
-        Side::Both,
-        None,
-        None,
-    );
-    out.push(
-        &format!(
-            "  {} conflict{}  --  o left, t right, b both; n/p to move",
-            conflicts.len(),
-            if conflicts.len() == 1 { "" } else { "s" }
-        ),
+        &format!("  {} conflict{}  --  o left, t right, b both; n/p to move", conflicts.len(), if conflicts.len() == 1 { "" } else { "s" }),
         MergeStyle::Meta,
         Side::Both,
         None,
@@ -229,31 +185,13 @@ pub fn render(
         // shared: one column spanning the full width, because splitting
         // identical text into two identical columns is pure noise.
         while line < conflict.start {
-            out.push(
-                &format!("  {}", lines.get(line).copied().unwrap_or_default()),
-                MergeStyle::Context,
-                Side::Both,
-                None,
-                Some(line),
-            );
+            out.push(&format!("  {}", lines.get(line).copied().unwrap_or_default()), MergeStyle::Context, Side::Both, None, Some(line));
             line += 1;
         }
-        out.push(
-            &separator(index, conflicts.len(), out.width),
-            MergeStyle::Separator,
-            Side::Both,
-            Some(index),
-            Some(conflict.start),
-        );
+        out.push(&separator(index, conflicts.len(), out.width), MergeStyle::Separator, Side::Both, Some(index), Some(conflict.start));
 
-        let ours: Vec<&str> = lines
-            .get(conflict.ours.clone())
-            .unwrap_or_default()
-            .to_vec();
-        let theirs: Vec<&str> = lines
-            .get(conflict.theirs.clone())
-            .unwrap_or_default()
-            .to_vec();
+        let ours: Vec<&str> = lines.get(conflict.ours.clone()).unwrap_or_default().to_vec();
+        let theirs: Vec<&str> = lines.get(conflict.theirs.clone()).unwrap_or_default().to_vec();
         // Both columns get the taller side's height, so the two
         // versions start on the same row and stay comparable even when
         // one side is much longer.
@@ -265,23 +203,9 @@ pub fn render(
             // is the one the eye anchors on) but either side's own
             // colors come from the per-column highlight ranges the host
             // builds from `Side`.
-            let side = if row < ours.len() {
-                Side::Ours
-            } else {
-                Side::Theirs
-            };
-            let file_line = if row < ours.len() {
-                conflict.ours.start.checked_add(row)
-            } else {
-                conflict.theirs.start.checked_add(row - ours.len())
-            };
-            out.push(
-                &two_columns(left, right, out.width),
-                MergeStyle::Context,
-                side,
-                Some(index),
-                file_line,
-            );
+            let side = if row < ours.len() { Side::Ours } else { Side::Theirs };
+            let file_line = if row < ours.len() { conflict.ours.start.checked_add(row) } else { conflict.theirs.start.checked_add(row - ours.len()) };
+            out.push(&two_columns(left, right, out.width), MergeStyle::Context, side, Some(index), file_line);
         }
 
         // `diff3`/`zdiff3` records what both sides started from. It's
@@ -291,21 +215,9 @@ pub fn render(
         if let Some(base) = conflict.base.clone() {
             let base_lines: Vec<&str> = lines.get(base.clone()).unwrap_or_default().to_vec();
             if !base_lines.is_empty() {
-                out.push(
-                    "      both sides started from:",
-                    MergeStyle::Meta,
-                    Side::Base,
-                    Some(index),
-                    None,
-                );
+                out.push("      both sides started from:", MergeStyle::Meta, Side::Base, Some(index), None);
                 for (row, content) in base_lines.iter().enumerate() {
-                    out.push(
-                        &format!("      {content}"),
-                        MergeStyle::Base,
-                        Side::Base,
-                        Some(index),
-                        base.start.checked_add(row),
-                    );
+                    out.push(&format!("      {content}"), MergeStyle::Base, Side::Base, Some(index), base.start.checked_add(row));
                 }
             }
         }
@@ -318,13 +230,7 @@ pub fn render(
         if line + 1 == lines.len() && lines[line].is_empty() {
             break;
         }
-        out.push(
-            &format!("  {}", lines[line]),
-            MergeStyle::Context,
-            Side::Both,
-            None,
-            Some(line),
-        );
+        out.push(&format!("  {}", lines[line]), MergeStyle::Context, Side::Both, None, Some(line));
         line += 1;
     }
 
@@ -337,11 +243,7 @@ pub fn render(
 fn separator(index: usize, total: usize, width: usize) -> String {
     let label = format!(" conflict {} of {total} ", index + 1);
     let dashes = width.saturating_sub(label.chars().count() + 2);
-    format!(
-        "  {}{label}{}",
-        "-".repeat(4),
-        "-".repeat(dashes.saturating_sub(4))
-    )
+    format!("  {}{label}{}", "-".repeat(4), "-".repeat(dashes.saturating_sub(4)))
 }
 
 /// One row of the two columns, left padded out to the column width so
@@ -352,11 +254,7 @@ fn separator(index: usize, total: usize, width: usize) -> String {
 /// is the one thing this view exists to guarantee. The full text is
 /// always a keypress away in the real file.
 fn two_columns(left: &str, right: &str, width: usize) -> String {
-    format!(
-        "{}{GUTTER}{}",
-        fit(&format!("  {left}"), column_width_for(width)),
-        right
-    )
+    format!("{}{GUTTER}{}", fit(&format!("  {left}"), column_width_for(width)), right)
 }
 
 fn fit(text: &str, width: usize) -> String {
@@ -381,21 +279,10 @@ struct Builder {
 
 impl Builder {
     fn new(width: usize) -> Self {
-        Builder {
-            text: String::new(),
-            lines: Vec::new(),
-            width,
-        }
+        Builder { text: String::new(), lines: Vec::new(), width }
     }
 
-    fn push(
-        &mut self,
-        text: &str,
-        style: MergeStyle,
-        side: Side,
-        conflict: Option<usize>,
-        file_line: Option<usize>,
-    ) {
+    fn push(&mut self, text: &str, style: MergeStyle, side: Side, conflict: Option<usize>, file_line: Option<usize>) {
         if !self.lines.is_empty() {
             self.text.push('\n');
         }
@@ -403,25 +290,14 @@ impl Builder {
         // Only a genuine two-column row carries a divider: these rows
         // are built by `two_columns` and nothing else, so finding the
         // glyph is the same as asking whether this is one of them.
-        let gutter = trimmed
-            .find(DIVIDER)
-            .map(|byte| trimmed[..byte].chars().count());
+        let gutter = trimmed.find(DIVIDER).map(|byte| trimmed[..byte].chars().count());
         self.text.push_str(trimmed);
-        self.lines.push(Some(MergeViewLine {
-            style,
-            side,
-            conflict,
-            file_line,
-            gutter,
-        }));
+        self.lines.push(Some(MergeViewLine { style, side, conflict, file_line, gutter }));
     }
 
     fn finish(mut self) -> MergeView {
         self.text.push('\n');
-        MergeView {
-            text: self.text,
-            lines: self.lines,
-        }
+        MergeView { text: self.text, lines: self.lines }
     }
 }
 
@@ -441,49 +317,23 @@ mod tests {
     }
 
     fn render_conflicted(text: &str) -> MergeView {
-        render(
-            "app.conf",
-            text,
-            &fenix_git::find_conflicts(text),
-            &labels(),
-            DEFAULT_WIDTH,
-        )
+        render("app.conf", text, &fenix_git::find_conflicts(text), &labels(), DEFAULT_WIDTH)
     }
 
     #[test]
     fn the_columns_size_themselves_to_the_pane_they_are_going_into() {
-        let view = render(
-            "app.conf",
-            CONFLICTED,
-            &fenix_git::find_conflicts(CONFLICTED),
-            &labels(),
-            80,
-        );
-        let row = view
-            .text
-            .lines()
-            .find(|l| l.contains("from develop"))
-            .expect("ours is shown");
+        let view = render("app.conf", CONFLICTED, &fenix_git::find_conflicts(CONFLICTED), &labels(), 80);
+        let row = view.text.lines().find(|l| l.contains("from develop")).expect("ours is shown");
         let gutter = row.find('\u{2502}').expect("a gutter");
         assert_eq!(row[..gutter].chars().count(), column_width_for(80) + 1);
-        assert!(
-            view.text.lines().all(|l| l.chars().count() <= 80),
-            "nothing runs past the pane:\n{}",
-            view.text
-        );
+        assert!(view.text.lines().all(|l| l.chars().count() <= 80), "nothing runs past the pane:\n{}", view.text);
     }
 
     #[test]
     fn a_pane_too_narrow_to_split_gets_a_floor_rather_than_nothing() {
         // Truncating every line to a couple of characters would be
         // perfectly aligned and perfectly useless.
-        let view = render(
-            "app.conf",
-            CONFLICTED,
-            &fenix_git::find_conflicts(CONFLICTED),
-            &labels(),
-            10,
-        );
+        let view = render("app.conf", CONFLICTED, &fenix_git::find_conflicts(CONFLICTED), &labels(), 10);
         assert_eq!(column_width_for(10), column_width_for(48));
         assert!(view.text.contains("from develop"), "got:\n{}", view.text);
     }
@@ -496,37 +346,18 @@ mod tests {
         // The role line is the whole reason this view exists: git's own
         // "ours" is the rebase target, which is the opposite of what
         // the word suggests.
-        assert!(
-            view.text.contains("the branch you are rebasing onto"),
-            "got:\n{}",
-            view.text
-        );
-        assert!(
-            view.text.contains("your own commit being replayed"),
-            "got:\n{}",
-            view.text
-        );
+        assert!(view.text.contains("the branch you are rebasing onto"), "got:\n{}", view.text);
+        assert!(view.text.contains("your own commit being replayed"), "got:\n{}", view.text);
     }
 
     #[test]
     fn the_two_sides_sit_on_the_same_row() {
         let view = render_conflicted(CONFLICTED);
-        let row = view
-            .text
-            .lines()
-            .find(|l| l.contains("from develop"))
-            .expect("ours is shown");
-        assert!(
-            row.contains("from my branch"),
-            "both sides share a row so they can be compared:\n{row}"
-        );
+        let row = view.text.lines().find(|l| l.contains("from develop")).expect("ours is shown");
+        assert!(row.contains("from my branch"), "both sides share a row so they can be compared:\n{row}");
         // And the gutter is where the column width says it is.
         let gutter = row.find('│').expect("a gutter between the columns");
-        assert_eq!(
-            row[..gutter].chars().count(),
-            column_width_for(DEFAULT_WIDTH) + 1,
-            "every row's gutter lands in the same column"
-        );
+        assert_eq!(row[..gutter].chars().count(), column_width_for(DEFAULT_WIDTH) + 1, "every row's gutter lands in the same column");
     }
 
     #[test]
@@ -534,12 +365,7 @@ mod tests {
         let view = render_conflicted(CONFLICTED);
         assert_eq!(view.text.matches("shared line").count(), 1);
         assert_eq!(view.text.matches("footer").count(), 1);
-        let shared = view
-            .lines
-            .iter()
-            .flatten()
-            .find(|l| l.file_line == Some(0))
-            .unwrap();
+        let shared = view.lines.iter().flatten().find(|l| l.file_line == Some(0)).unwrap();
         assert_eq!(shared.side, Side::Both);
         assert_eq!(shared.conflict, None);
     }
@@ -550,12 +376,7 @@ mod tests {
         let view = render_conflicted(two);
         assert!(view.text.contains("conflict 1 of 2"));
         assert!(view.text.contains("conflict 2 of 2"));
-        let second = view
-            .lines
-            .iter()
-            .flatten()
-            .find(|l| l.conflict == Some(1) && l.style == MergeStyle::Context)
-            .unwrap();
+        let second = view.lines.iter().flatten().find(|l| l.conflict == Some(1) && l.style == MergeStyle::Context).unwrap();
         assert_eq!(second.conflict, Some(1));
     }
 
@@ -567,10 +388,7 @@ mod tests {
             .lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| {
-                l.as_ref()
-                    .is_some_and(|l| l.conflict.is_some() && l.style == MergeStyle::Context)
-            })
+            .filter(|(_, l)| l.as_ref().is_some_and(|l| l.conflict.is_some() && l.style == MergeStyle::Context))
             .map(|(i, _)| i)
             .collect();
         assert_eq!(rows.len(), 3, "the taller side sets the height");
@@ -580,28 +398,16 @@ mod tests {
         for row in &rows {
             let line = text[*row];
             let gutter = line.find('│').expect("every conflict row keeps its gutter");
-            assert_eq!(
-                line[..gutter].chars().count(),
-                column_width_for(DEFAULT_WIDTH) + 1
-            );
+            assert_eq!(line[..gutter].chars().count(), column_width_for(DEFAULT_WIDTH) + 1);
         }
-        assert!(
-            text[rows[1]].trim_end().ends_with('│'),
-            "the right column is empty here: {:?}",
-            text[rows[1]]
-        );
+        assert!(text[rows[1]].trim_end().ends_with('│'), "the right column is empty here: {:?}", text[rows[1]]);
     }
 
     #[test]
     fn the_common_ancestor_is_shown_when_the_merge_style_recorded_one() {
-        let diff3 =
-            "a\n<<<<<<< HEAD\nmine\n||||||| base\nstarted here\n=======\ntheirs\n>>>>>>> b\n";
+        let diff3 = "a\n<<<<<<< HEAD\nmine\n||||||| base\nstarted here\n=======\ntheirs\n>>>>>>> b\n";
         let view = render_conflicted(diff3);
-        assert!(
-            view.text.contains("both sides started from:"),
-            "got:\n{}",
-            view.text
-        );
+        assert!(view.text.contains("both sides started from:"), "got:\n{}", view.text);
         assert!(view.text.contains("started here"));
     }
 
@@ -616,21 +422,11 @@ mod tests {
     fn a_line_too_wide_for_its_column_is_cut_not_wrapped() {
         // Wrapping would push the right column down a row and break the
         // alignment this whole view is for.
-        let long = format!(
-            "a\n<<<<<<< HEAD\n{}\n=======\nshort\n>>>>>>> b\n",
-            "x".repeat(400)
-        );
+        let long = format!("a\n<<<<<<< HEAD\n{}\n=======\nshort\n>>>>>>> b\n", "x".repeat(400));
         let view = render_conflicted(&long);
-        let row = view
-            .text
-            .lines()
-            .find(|l| l.contains('…'))
-            .expect("the long line is truncated");
+        let row = view.text.lines().find(|l| l.contains('…')).expect("the long line is truncated");
         let gutter = row.find('│').unwrap();
-        assert_eq!(
-            row[..gutter].chars().count(),
-            column_width_for(DEFAULT_WIDTH) + 1
-        );
+        assert_eq!(row[..gutter].chars().count(), column_width_for(DEFAULT_WIDTH) + 1);
         assert!(row.ends_with("short"));
     }
 }

@@ -121,15 +121,8 @@ pub enum HomeEntry {
     NewProject,
     /// A row of a code extension's section, given back to it
     /// (`home-picked`) with its value.
-    Code {
-        ext: String,
-        value: String,
-    },
-    Todo {
-        path: PathBuf,
-        line: usize,
-        col: usize,
-    },
+    Code { ext: String, value: String },
+    Todo { path: PathBuf, line: usize, col: usize },
     Recover,
 }
 
@@ -269,11 +262,7 @@ impl Grid {
         for (i, c) in text.chars().enumerate() {
             row[col + i] = c;
         }
-        self.spans.push(Span {
-            line,
-            cols: col..col + len,
-            role,
-        });
+        self.spans.push(Span { line, cols: col..col + len, role });
     }
 
     fn panel(&mut self, line: usize, cols: Range<usize>, fill: Fill) {
@@ -288,15 +277,7 @@ impl Grid {
     }
 
     /// "name  3 ──────────── SPC p p" across `width` cells.
-    fn header(
-        &mut self,
-        line: usize,
-        x: usize,
-        width: usize,
-        name: &str,
-        count: Option<usize>,
-        key: &str,
-    ) {
+    fn header(&mut self, line: usize, x: usize, width: usize, name: &str, count: Option<usize>, key: &str) {
         self.put(line, x, name, Role::Title);
         let mut at = x + name.chars().count() + 1;
         if let Some(count) = count {
@@ -314,16 +295,7 @@ impl Grid {
     /// `left` at `x`, `right` right-aligned so it ends at `x + width`,
     /// `left` cut short so the two never touch.
     #[allow(clippy::too_many_arguments)]
-    fn row(
-        &mut self,
-        line: usize,
-        x: usize,
-        width: usize,
-        left: &str,
-        left_role: Role,
-        right: &str,
-        right_role: Role,
-    ) {
+    fn row(&mut self, line: usize, x: usize, width: usize, left: &str, left_role: Role, right: &str, right_role: Role) {
         let right_len = right.chars().count();
         let room = width.saturating_sub(right_len + if right_len > 0 { 2 } else { 0 });
         self.put(line, x, &fit(left, room), left_role);
@@ -353,21 +325,12 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
     let cols = cols.max(24);
     let width = cols.saturating_sub(4).clamp(24, MAX_WIDTH);
     let left = cols.saturating_sub(width) / 2;
-    let mut g = Grid {
-        lines: Vec::new(),
-        spans: Vec::new(),
-        panels: Vec::new(),
-        rules: Vec::new(),
-    };
+    let mut g = Grid { lines: Vec::new(), spans: Vec::new(), panels: Vec::new(), rules: Vec::new() };
     let mut slots = Vec::new();
 
     // Lockup and date.
     let top = if rows >= 30 { 3 } else { 1 };
-    let logo = Logo {
-        line: top,
-        col: left,
-        lines: 3,
-    };
+    let logo = Logo { line: top, col: left, lines: 3 };
     let date_len = data.date.chars().count();
     if width > date_len + 30 {
         g.put(top + 1, left + width - date_len, &data.date, Role::Muted);
@@ -381,25 +344,10 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
     g.put(find + 1, left + 2, "›", Role::Focus);
     let key = " SPC SPC ";
     let key_at = left + width - 2 - key.len();
-    g.row(
-        find + 1,
-        left + 5,
-        key_at.saturating_sub(left + 6),
-        "Find a file, a symbol, a command",
-        Role::Muted,
-        "",
-        Role::Muted,
-    );
+    g.row(find + 1, left + 5, key_at.saturating_sub(left + 6), "Find a file, a symbol, a command", Role::Muted, "", Role::Muted);
     g.put(find + 1, key_at, key, Role::Text);
     g.panel(find + 1, key_at..key_at + key.len(), Fill::Key);
-    slots.push(Slot {
-        line: find,
-        height: 3,
-        cols: left..left + width,
-        column: 0,
-        number: None,
-        entry: HomeEntry::Find,
-    });
+    slots.push(Slot { line: find, height: 3, cols: left..left + width, column: 0, number: None, entry: HomeEntry::Find });
 
     // Numbers go to projects first, then recent files, in reading order
     // within each -- assigned up front because the columns are drawn
@@ -408,34 +356,14 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
     let project_number = |i: usize| u8::try_from(i + 1).ok().filter(|n| *n <= 9);
     let recent_number = |i: usize| u8::try_from(project_count + i + 1).ok().filter(|n| *n <= 9);
 
-    let columns = if width >= 96 {
-        3
-    } else if width >= 60 {
-        2
-    } else {
-        1
-    };
+    let columns = if width >= 96 { 3 } else if width >= 60 { 2 } else { 1 };
     let col_width = (width - GAP * (columns - 1)) / columns;
     let files = Section::Features(HomeColumn::Files);
     let tasks = Section::Features(HomeColumn::Tasks);
     let groups: Vec<Vec<Section>> = match columns {
-        3 => vec![
-            vec![Section::Resume, files, Section::Recent],
-            vec![Section::Projects],
-            vec![tasks, Section::Todos],
-        ],
-        2 => vec![
-            vec![Section::Resume, files, Section::Recent],
-            vec![Section::Projects, tasks, Section::Todos],
-        ],
-        _ => vec![vec![
-            Section::Resume,
-            files,
-            Section::Recent,
-            Section::Projects,
-            tasks,
-            Section::Todos,
-        ]],
+        3 => vec![vec![Section::Resume, files, Section::Recent], vec![Section::Projects], vec![tasks, Section::Todos]],
+        2 => vec![vec![Section::Resume, files, Section::Recent], vec![Section::Projects, tasks, Section::Todos]],
+        _ => vec![vec![Section::Resume, files, Section::Recent, Section::Projects, tasks, Section::Todos]],
     };
     // Each column's features in rank order, where its placeholder was.
     let mut ranked: Vec<usize> = (0..data.sections.len()).collect();
@@ -446,11 +374,7 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
             sections
                 .into_iter()
                 .flat_map(|section| match section {
-                    Section::Features(column) => ranked
-                        .iter()
-                        .filter(|&&i| data.sections[i].column == column)
-                        .map(|&i| Section::Feature(i))
-                        .collect(),
+                    Section::Features(column) => ranked.iter().filter(|&&i| data.sections[i].column == column).map(|&i| Section::Feature(i)).collect(),
                     other => vec![other],
                 })
                 .collect()
@@ -471,14 +395,7 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                     y += 1;
                     g.put(y, x + 2, &fit(&item.name, col_width - 2), Role::Title);
                     g.put(y + 1, x + 2, &fit(&item.detail, col_width - 2), Role::Muted);
-                    slots.push(Slot {
-                        line: y,
-                        height: 2,
-                        cols: x..x + col_width,
-                        column,
-                        number: None,
-                        entry: HomeEntry::Resume(item.path.clone()),
-                    });
+                    slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number: None, entry: HomeEntry::Resume(item.path.clone()) });
                     y += 2;
                 }
                 Section::Recent => {
@@ -493,23 +410,8 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                         if let Some(n) = number {
                             g.put(y, x + 2, &n.to_string(), Role::Muted);
                         }
-                        g.row(
-                            y,
-                            x + 5,
-                            col_width - 5,
-                            &item.name,
-                            Role::Text,
-                            &item.age,
-                            Role::Muted,
-                        );
-                        slots.push(Slot {
-                            line: y,
-                            height: 1,
-                            cols: x..x + col_width,
-                            column,
-                            number,
-                            entry: HomeEntry::RecentFile(item.path.clone()),
-                        });
+                        g.row(y, x + 5, col_width - 5, &item.name, Role::Text, &item.age, Role::Muted);
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number, entry: HomeEntry::RecentFile(item.path.clone()) });
                         y += 1;
                     }
                 }
@@ -518,15 +420,7 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                     g.header(y, x, col_width, "projects", Some(shown.len()), "SPC p p");
                     y += 1;
                     if shown.is_empty() {
-                        g.row(
-                            y,
-                            x + 2,
-                            col_width - 2,
-                            "none yet",
-                            Role::Muted,
-                            "SPC p a",
-                            Role::Muted,
-                        );
+                        g.row(y, x + 2, col_width - 2, "none yet", Role::Muted, "SPC p a", Role::Muted);
                         y += 1;
                     }
                     for (i, item) in shown.iter().enumerate() {
@@ -537,53 +431,18 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                         // The kind tag in a fixed four-cell field, so names
                         // line up whatever the tag's length.
                         g.put(y, x + 5, item.kind.tag(), Role::Kind(item.kind));
-                        g.put(
-                            y,
-                            x + 9,
-                            &fit(&item.name, col_width.saturating_sub(12)),
-                            Role::Title,
-                        );
+                        g.put(y, x + 9, &fit(&item.name, col_width.saturating_sub(12)), Role::Title);
                         if let Some(health) = item.health {
                             g.put(y, x + col_width - 1, "●", Role::Health(health));
                         }
-                        let under = item
-                            .branch
-                            .clone()
-                            .unwrap_or_else(|| item.root.display().to_string());
-                        g.put(
-                            y + 1,
-                            x + 9,
-                            &fit(&under, col_width.saturating_sub(9)),
-                            Role::Muted,
-                        );
-                        slots.push(Slot {
-                            line: y,
-                            height: 2,
-                            cols: x..x + col_width,
-                            column,
-                            number,
-                            entry: HomeEntry::Project(item.root.clone()),
-                        });
+                        let under = item.branch.clone().unwrap_or_else(|| item.root.display().to_string());
+                        g.put(y + 1, x + 9, &fit(&under, col_width.saturating_sub(9)), Role::Muted);
+                        slots.push(Slot { line: y, height: 2, cols: x..x + col_width, column, number, entry: HomeEntry::Project(item.root.clone()) });
                         y += 2;
                     }
                     g.put(y, x + 2, "+", Role::Focus);
-                    g.row(
-                        y,
-                        x + 5,
-                        col_width - 5,
-                        "new project",
-                        Role::Text,
-                        "SPC p c",
-                        Role::Muted,
-                    );
-                    slots.push(Slot {
-                        line: y,
-                        height: 1,
-                        cols: x..x + col_width,
-                        column,
-                        number: None,
-                        entry: HomeEntry::NewProject,
-                    });
+                    g.row(y, x + 5, col_width - 5, "new project", Role::Text, "SPC p c", Role::Muted);
+                    slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: HomeEntry::NewProject });
                     y += 1;
                 }
                 Section::Feature(i) => {
@@ -591,59 +450,23 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                     if section.rows.is_empty() {
                         continue;
                     }
-                    let shown =
-                        &section.rows[..section.rows.len().min(section.max.unwrap_or(usize::MAX))];
-                    g.header(
-                        y,
-                        x,
-                        col_width,
-                        section.title,
-                        Some(section.rows.len()),
-                        section.key,
-                    );
+                    let shown = &section.rows[..section.rows.len().min(section.max.unwrap_or(usize::MAX))];
+                    g.header(y, x, col_width, section.title, Some(section.rows.len()), section.key);
                     y += 1;
                     for row in shown {
                         match &row.mark {
-                            RowMark::None => g.row(
-                                y,
-                                x + 2,
-                                col_width - 2,
-                                &row.name,
-                                Role::Text,
-                                &row.detail,
-                                Role::Muted,
-                            ),
+                            RowMark::None => g.row(y, x + 2, col_width - 2, &row.name, Role::Text, &row.detail, Role::Muted),
                             RowMark::Live(elapsed) => {
                                 g.panel(y, x..x + col_width, Fill::Panel);
                                 g.put(y, x + 2, "▶", Role::Ember);
-                                g.row(
-                                    y,
-                                    x + 4,
-                                    col_width - 6,
-                                    &row.name,
-                                    Role::Title,
-                                    elapsed.as_str(),
-                                    Role::Ember,
-                                );
+                                g.row(y, x + 4, col_width - 6, &row.name, Role::Title, elapsed.as_str(), Role::Ember);
                             }
                             RowMark::Task(pressing) => {
-                                g.put(
-                                    y,
-                                    x + 2,
-                                    "○",
-                                    if *pressing { Role::Warn } else { Role::Muted },
-                                );
+                                g.put(y, x + 2, "○", if *pressing { Role::Warn } else { Role::Muted });
                                 g.put(y, x + 4, &fit(&row.name, col_width - 4), Role::Text);
                             }
                         }
-                        slots.push(Slot {
-                            line: y,
-                            height: 1,
-                            cols: x..x + col_width,
-                            column,
-                            number: None,
-                            entry: row.entry.clone(),
-                        });
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry: row.entry.clone() });
                         y += 1;
                     }
                 }
@@ -657,28 +480,9 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
                     y += 1;
                     for todo in shown {
                         g.put(y, x + 2, todo.kind.label(), Role::Todo(todo.kind));
-                        g.row(
-                            y,
-                            x + 8,
-                            col_width - 8,
-                            &todo.message,
-                            Role::Text,
-                            &fit(&todo.file, col_width / 3),
-                            Role::Muted,
-                        );
-                        let entry = HomeEntry::Todo {
-                            path: todo.path.clone(),
-                            line: todo.line,
-                            col: todo.col,
-                        };
-                        slots.push(Slot {
-                            line: y,
-                            height: 1,
-                            cols: x..x + col_width,
-                            column,
-                            number: None,
-                            entry,
-                        });
+                        g.row(y, x + 8, col_width - 8, &todo.message, Role::Text, &fit(&todo.file, col_width / 3), Role::Muted);
+                        let entry = HomeEntry::Todo { path: todo.path.clone(), line: todo.line, col: todo.col };
+                        slots.push(Slot { line: y, height: 1, cols: x..x + col_width, column, number: None, entry });
                         y += 1;
                     }
                 }
@@ -695,11 +499,7 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
     g.rule(foot, left..left + width);
     let strip = foot + 1;
     let hints: [(&str, &str); 3] = [("1–9", "open"), ("j k", "move"), ("SPC", "everything")];
-    let hints_len: usize = hints
-        .iter()
-        .map(|(k, l)| k.chars().count() + 1 + l.len())
-        .sum::<usize>()
-        + 3 * (hints.len() - 1);
+    let hints_len: usize = hints.iter().map(|(k, l)| k.chars().count() + 1 + l.len()).sum::<usize>() + 3 * (hints.len() - 1);
     let mut at = (left + width).saturating_sub(hints_len);
     let hints_start = at;
     for (key, label) in hints {
@@ -709,11 +509,7 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
         at += label.len() + 3;
     }
     if data.recovery > 0 {
-        let noun = if data.recovery == 1 {
-            "buffer"
-        } else {
-            "buffers"
-        };
+        let noun = if data.recovery == 1 { "buffer" } else { "buffers" };
         let text = format!("{} unsaved {noun} can be recovered", data.recovery);
         let key = " SPC f v ";
         let room = hints_start.saturating_sub(left + 2 + key.len() + 4);
@@ -723,31 +519,11 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
         let key_at = left + 2 + text.chars().count() + 2;
         g.put(strip, key_at, key, Role::Text);
         g.panel(strip, key_at..key_at + key.len(), Fill::Key);
-        slots.push(Slot {
-            line: strip,
-            height: 1,
-            cols: left..key_at + key.len(),
-            column: 0,
-            number: None,
-            entry: HomeEntry::Recover,
-        });
+        slots.push(Slot { line: strip, height: 1, cols: left..key_at + key.len(), column: 0, number: None, entry: HomeEntry::Recover });
     }
 
-    let text = g
-        .lines
-        .iter()
-        .map(|row| row.iter().collect::<String>().trim_end().to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
-    HomeView {
-        size,
-        text,
-        spans: g.spans,
-        panels: g.panels,
-        rules: g.rules,
-        slots,
-        logo: Some(logo),
-    }
+    let text = g.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
+    HomeView { size, text, spans: g.spans, panels: g.panels, rules: g.rules, slots, logo: Some(logo) }
 }
 
 impl HomeView {
@@ -763,13 +539,7 @@ impl HomeView {
                     .iter()
                     .enumerate()
                     .filter(|(_, s)| on_line(s))
-                    .min_by_key(|(_, s)| {
-                        if col < s.cols.start {
-                            s.cols.start - col
-                        } else {
-                            col.saturating_sub(s.cols.end)
-                        }
-                    })
+                    .min_by_key(|(_, s)| if col < s.cols.start { s.cols.start - col } else { col.saturating_sub(s.cols.end) })
                     .map(|(i, _)| i)
             })
     }
@@ -787,46 +557,23 @@ impl HomeView {
         let current = &self.slots[from];
         // From a full-width row, the first column that has anything in it.
         let column = if current.column == 0 {
-            self.slots
-                .iter()
-                .map(|s| s.column)
-                .filter(|c| *c > 0)
-                .min()
-                .unwrap_or_default()
+            self.slots.iter().map(|s| s.column).filter(|c| *c > 0).min().unwrap_or_default()
         } else {
             current.column
         };
-        let mut candidates: Vec<(usize, &Slot)> = self
-            .slots
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| s.column == column)
-            .collect();
+        let mut candidates: Vec<(usize, &Slot)> = self.slots.iter().enumerate().filter(|(_, s)| s.column == column).collect();
         candidates.sort_by_key(|(_, s)| s.line);
         let found = if down {
-            candidates
-                .iter()
-                .find(|(_, s)| s.line > current.line)
-                .map(|(i, _)| *i)
+            candidates.iter().find(|(_, s)| s.line > current.line).map(|(i, _)| *i)
         } else {
-            candidates
-                .iter()
-                .rev()
-                .find(|(_, s)| s.line < current.line)
-                .map(|(i, _)| *i)
+            candidates.iter().rev().find(|(_, s)| s.line < current.line).map(|(i, _)| *i)
         };
         found.or_else(|| {
             let full_width = self.slots.iter().enumerate().filter(|(_, s)| s.column == 0);
             if down {
-                full_width
-                    .filter(|(_, s)| s.line > current.line)
-                    .min_by_key(|(_, s)| s.line)
-                    .map(|(i, _)| i)
+                full_width.filter(|(_, s)| s.line > current.line).min_by_key(|(_, s)| s.line).map(|(i, _)| i)
             } else {
-                full_width
-                    .filter(|(_, s)| s.line < current.line)
-                    .max_by_key(|(_, s)| s.line)
-                    .map(|(i, _)| i)
+                full_width.filter(|(_, s)| s.line < current.line).max_by_key(|(_, s)| s.line).map(|(i, _)| i)
             }
         })
     }
@@ -838,11 +585,7 @@ impl HomeView {
         if current.column == 0 {
             return None;
         }
-        let target = if right {
-            current.column + 1
-        } else {
-            current.column.checked_sub(1).filter(|c| *c > 0)?
-        };
+        let target = if right { current.column + 1 } else { current.column.checked_sub(1).filter(|c| *c > 0)? };
         self.slots
             .iter()
             .enumerate()
@@ -865,204 +608,67 @@ mod tests {
     fn sample() -> HomeData {
         HomeData {
             date: "Tuesday 22 September · 18:42".to_string(),
-            resume: Some(FileItem {
-                path: "/p/app.rs".into(),
-                name: "app.rs".into(),
-                detail: "fenix · main".into(),
-                age: "now".into(),
-            }),
+            resume: Some(FileItem { path: "/p/app.rs".into(), name: "app.rs".into(), detail: "fenix · main".into(), age: "now".into() }),
             recent: vec![
-                FileItem {
-                    path: "/p/a.rs".into(),
-                    name: "a.rs".into(),
-                    detail: String::new(),
-                    age: "2 h".into(),
-                },
-                FileItem {
-                    path: "/p/b.rs".into(),
-                    name: "b.rs".into(),
-                    detail: String::new(),
-                    age: "1 d".into(),
-                },
+                FileItem { path: "/p/a.rs".into(), name: "a.rs".into(), detail: String::new(), age: "2 h".into() },
+                FileItem { path: "/p/b.rs".into(), name: "b.rs".into(), detail: String::new(), age: "1 d".into() },
             ],
             projects: vec![
-                ProjectItem {
-                    root: "/p".into(),
-                    name: "fenix".into(),
-                    branch: Some("main".into()),
-                    kind: ProjectKind::Rust,
-                    health: Some(fenix_project::doctor::Health::Warn),
-                },
-                ProjectItem {
-                    root: "/q".into(),
-                    name: "test-tcl".into(),
-                    branch: None,
-                    kind: ProjectKind::Tcl,
-                    health: None,
-                },
+                ProjectItem { root: "/p".into(), name: "fenix".into(), branch: Some("main".into()), kind: ProjectKind::Rust, health: Some(fenix_project::doctor::Health::Warn) },
+                ProjectItem { root: "/q".into(), name: "test-tcl".into(), branch: None, kind: ProjectKind::Tcl, health: None },
             ],
-            sections: vec![today(vec![
-                ("Pick a dashboard", RowMark::Live("0:18".into())),
-                ("Review PR", RowMark::Task(true)),
-            ])],
-            todos: vec![TodoItem {
-                kind: TodoKind::Fix,
-                message: "group id is wrong".into(),
-                file: "pom.xml".into(),
-                path: "/p/pom.xml".into(),
-                line: 5,
-                col: 8,
-            }],
+            sections: vec![today(vec![("Pick a dashboard", RowMark::Live("0:18".into())), ("Review PR", RowMark::Task(true))])],
+            todos: vec![TodoItem { kind: TodoKind::Fix, message: "group id is wrong".into(), file: "pom.xml".into(), path: "/p/pom.xml".into(), line: 5, col: 8 }],
             recovery: 1,
         }
     }
 
     fn agenda() -> HomeEntry {
-        HomeEntry::Code {
-            ext: "fenix.agenda".into(),
-            value: "today".into(),
-        }
+        HomeEntry::Code { ext: "fenix.agenda".into(), value: "today".into() }
     }
 
     /// The agenda's section, as it gives it.
     fn today(tasks: Vec<(&str, RowMark)>) -> HomeSection {
-        let rows = tasks
-            .into_iter()
-            .map(|(name, mark)| HomeRow {
-                name: name.into(),
-                detail: String::new(),
-                mark,
-                entry: agenda(),
-            })
-            .collect();
-        HomeSection {
-            title: "today",
-            key: "SPC A a",
-            column: HomeColumn::Tasks,
-            rank: 10,
-            rows,
-            max: Some(4),
-        }
+        let rows = tasks.into_iter().map(|(name, mark)| HomeRow { name: name.into(), detail: String::new(), mark, entry: agenda() }).collect();
+        HomeSection { title: "today", key: "SPC A a", column: HomeColumn::Tasks, rank: 10, rows, max: Some(4) }
     }
 
     /// A section of files, as the PDF feature and the notebook give theirs.
-    fn files(
-        title: &'static str,
-        key: &'static str,
-        rank: u8,
-        items: Vec<(&str, &str, &str)>,
-    ) -> HomeSection {
-        let rows = items
-            .into_iter()
-            .map(|(path, name, detail)| HomeRow {
-                name: name.into(),
-                detail: detail.into(),
-                mark: RowMark::None,
-                entry: HomeEntry::RecentFile(path.into()),
-            })
-            .collect();
-        HomeSection {
-            title,
-            key,
-            column: HomeColumn::Files,
-            rank,
-            rows,
-            max: None,
-        }
+    fn files(title: &'static str, key: &'static str, rank: u8, items: Vec<(&str, &str, &str)>) -> HomeSection {
+        let rows = items.into_iter().map(|(path, name, detail)| HomeRow { name: name.into(), detail: detail.into(), mark: RowMark::None, entry: HomeEntry::RecentFile(path.into()) }).collect();
+        HomeSection { title, key, column: HomeColumn::Files, rank, rows, max: None }
     }
 
     fn line_of(view: &HomeView, needle: &str) -> usize {
-        view.text
-            .lines()
-            .position(|l| l.contains(needle))
-            .unwrap_or_else(|| panic!("{needle:?} not in:\n{}", view.text))
+        view.text.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle:?} not in:\n{}", view.text))
     }
 
     #[test]
     fn the_notebook_has_a_section_when_it_has_entries() {
-        let data = HomeData {
-            sections: vec![files(
-                "notebook",
-                "SPC n n",
-                20,
-                vec![("/nb/journal/2026/2026-09-30.md", "Today's journal", "today")],
-            )],
-            ..HomeData::default()
-        };
+        let data = HomeData { sections: vec![files("notebook", "SPC n n", 20, vec![("/nb/journal/2026/2026-09-30.md", "Today's journal", "today")])], ..HomeData::default() };
         let view = layout(&data, 140, 45);
-        assert!(
-            view.text.contains("notebook") && view.text.contains("Today's journal"),
-            "{}",
-            view.text
-        );
-        assert!(!layout(&HomeData::default(), 140, 45)
-            .text
-            .contains("notebook"));
+        assert!(view.text.contains("notebook") && view.text.contains("Today's journal"), "{}", view.text);
+        assert!(!layout(&HomeData::default(), 140, 45).text.contains("notebook"));
     }
 
     /// Features' sections in one column go by rank, whatever order they
     /// came in, and only as many rows as `max` says show.
     #[test]
     fn feature_sections_go_by_rank_and_show_at_most_max_rows() {
-        let notebook = files(
-            "notebook",
-            "SPC n n",
-            20,
-            vec![("/nb/a.md", "A note", "note")],
-        );
-        let reading = files(
-            "reading",
-            "SPC r f",
-            10,
-            vec![("/r/spec.pdf", "spec.pdf", "p. 1 / 2")],
-        );
-        let tasks = today(
-            (0..6)
-                .map(|i| {
-                    (
-                        ["one", "two", "three", "four", "five", "six"][i],
-                        RowMark::Task(false),
-                    )
-                })
-                .collect(),
-        );
-        let view = layout(
-            &HomeData {
-                sections: vec![notebook, tasks, reading],
-                ..sample()
-            },
-            140,
-            45,
-        );
-        assert!(
-            line_of(&view, "reading") < line_of(&view, "notebook"),
-            "rank, not the order given:\n{}",
-            view.text
-        );
-        assert!(
-            view.text.contains("four") && !view.text.contains("five"),
-            "four of six shown:\n{}",
-            view.text
-        );
-        assert!(
-            view.text
-                .lines()
-                .nth(line_of(&view, "today"))
-                .unwrap()
-                .contains('6'),
-            "the header counts them all"
-        );
+        let notebook = files("notebook", "SPC n n", 20, vec![("/nb/a.md", "A note", "note")]);
+        let reading = files("reading", "SPC r f", 10, vec![("/r/spec.pdf", "spec.pdf", "p. 1 / 2")]);
+        let tasks = today((0..6).map(|i| (["one", "two", "three", "four", "five", "six"][i], RowMark::Task(false))).collect());
+        let view = layout(&HomeData { sections: vec![notebook, tasks, reading], ..sample() }, 140, 45);
+        assert!(line_of(&view, "reading") < line_of(&view, "notebook"), "rank, not the order given:\n{}", view.text);
+        assert!(view.text.contains("four") && !view.text.contains("five"), "four of six shown:\n{}", view.text);
+        assert!(view.text.lines().nth(line_of(&view, "today")).unwrap().contains('6'), "the header counts them all");
     }
 
     #[test]
     fn a_wide_pane_gets_three_columns_side_by_side() {
         let view = layout(&sample(), 140, 45);
         let resume = line_of(&view, "resume");
-        assert_eq!(
-            line_of(&view, "projects"),
-            resume,
-            "projects sits beside resume"
-        );
+        assert_eq!(line_of(&view, "projects"), resume, "projects sits beside resume");
         assert_eq!(line_of(&view, "today"), resume, "and today beside both");
         assert_eq!(view.slots.iter().map(|s| s.column).max(), Some(3));
     }
@@ -1073,11 +679,7 @@ mod tests {
         assert!(line_of(&view, "projects") > line_of(&view, "resume"));
         assert!(line_of(&view, "today") > line_of(&view, "projects"));
         assert_eq!(view.slots.iter().map(|s| s.column).max(), Some(1));
-        assert!(
-            view.text.lines().all(|l| l.chars().count() <= 50),
-            "nothing runs past the pane:\n{}",
-            view.text
-        );
+        assert!(view.text.lines().all(|l| l.chars().count() <= 50), "nothing runs past the pane:\n{}", view.text);
     }
 
     #[test]
@@ -1092,18 +694,9 @@ mod tests {
     #[test]
     fn projects_are_numbered_before_recent_files() {
         let view = layout(&sample(), 140, 45);
-        assert_eq!(
-            view.slots[view.numbered(1).unwrap()].entry,
-            HomeEntry::Project("/p".into())
-        );
-        assert_eq!(
-            view.slots[view.numbered(2).unwrap()].entry,
-            HomeEntry::Project("/q".into())
-        );
-        assert_eq!(
-            view.slots[view.numbered(3).unwrap()].entry,
-            HomeEntry::RecentFile("/p/a.rs".into())
-        );
+        assert_eq!(view.slots[view.numbered(1).unwrap()].entry, HomeEntry::Project("/p".into()));
+        assert_eq!(view.slots[view.numbered(2).unwrap()].entry, HomeEntry::Project("/q".into()));
+        assert_eq!(view.slots[view.numbered(3).unwrap()].entry, HomeEntry::RecentFile("/p/a.rs".into()));
         assert!(view.numbered(9).is_none());
     }
 
@@ -1112,64 +705,27 @@ mod tests {
         let view = layout(&sample(), 140, 45);
         let strip = line_of(&view, "everything");
         assert_eq!(strip, 44);
-        assert!(view
-            .text
-            .lines()
-            .nth(strip)
-            .unwrap()
-            .contains("1 unsaved buffer can be recovered"));
+        assert!(view.text.lines().nth(strip).unwrap().contains("1 unsaved buffer can be recovered"));
     }
 
     #[test]
     fn only_the_live_task_is_ember() {
         let view = layout(&sample(), 140, 45);
-        let ember: Vec<&Span> = view
-            .spans
-            .iter()
-            .filter(|s| s.role == Role::Ember)
-            .collect();
+        let ember: Vec<&Span> = view.spans.iter().filter(|s| s.role == Role::Ember).collect();
         assert_eq!(ember.len(), 2, "the ▶ and the elapsed time");
         assert!(ember.iter().all(|s| s.line == ember[0].line));
     }
 
     #[test]
     fn empty_sections_are_left_out_and_projects_says_how_to_add_one() {
-        let data = HomeData {
-            date: "d".into(),
-            ..HomeData::default()
-        };
-        assert!(
-            !layout(&data, 140, 45).text.contains("reading"),
-            "no PDFs read, no section"
-        );
-        let reading = HomeData {
-            date: "d".into(),
-            sections: vec![files(
-                "reading",
-                "SPC r f",
-                10,
-                vec![("/r/spec.pdf", "spec.pdf", "p. 38 / 212")],
-            )],
-            ..HomeData::default()
-        };
+        let data = HomeData { date: "d".into(), ..HomeData::default() };
+        assert!(!layout(&data, 140, 45).text.contains("reading"), "no PDFs read, no section");
+        let reading = HomeData { date: "d".into(), sections: vec![files("reading", "SPC r f", 10, vec![("/r/spec.pdf", "spec.pdf", "p. 38 / 212")])], ..HomeData::default() };
         let view = layout(&reading, 140, 45);
-        assert!(
-            view.text.contains("reading")
-                && view.text.contains("spec.pdf")
-                && view.text.contains("p. 38 / 212"),
-            "{}",
-            view.text
-        );
-        assert!(view
-            .slots
-            .iter()
-            .any(|s| s.entry == HomeEntry::RecentFile("/r/spec.pdf".into())));
+        assert!(view.text.contains("reading") && view.text.contains("spec.pdf") && view.text.contains("p. 38 / 212"), "{}", view.text);
+        assert!(view.slots.iter().any(|s| s.entry == HomeEntry::RecentFile("/r/spec.pdf".into())));
         let view = layout(&data, 140, 45);
-        assert!(
-            !view.text.contains("recent")
-                && !view.text.contains("today")
-                && !view.text.contains("resume")
-        );
+        assert!(!view.text.contains("recent") && !view.text.contains("today") && !view.text.contains("resume"));
         assert!(view.text.contains("none yet"));
         assert!(!view.text.contains("recovered"));
     }
@@ -1179,46 +735,15 @@ mod tests {
         let view = layout(&sample(), 140, 45);
         let fenix = line_of(&view, "fenix");
         assert!(view.text.lines().nth(fenix).unwrap().contains("RS  fenix"));
-        assert!(view
-            .spans
-            .iter()
-            .any(|s| s.line == fenix && s.role == Role::Kind(ProjectKind::Rust)));
-        assert!(
-            view.spans
-                .iter()
-                .any(|s| s.line == fenix
-                    && s.role == Role::Health(fenix_project::doctor::Health::Warn)),
-            "a health dot"
-        );
+        assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Kind(ProjectKind::Rust)));
+        assert!(view.spans.iter().any(|s| s.line == fenix && s.role == Role::Health(fenix_project::doctor::Health::Warn)), "a health dot");
         let tcl = line_of(&view, "test-tcl");
-        assert!(
-            !view
-                .spans
-                .iter()
-                .any(|s| s.line == tcl && matches!(s.role, Role::Health(_))),
-            "no dot before the doctor has looked"
-        );
-        let new = view
-            .find(&HomeEntry::NewProject)
-            .expect("a new-project slot");
+        assert!(!view.spans.iter().any(|s| s.line == tcl && matches!(s.role, Role::Health(_))), "no dot before the doctor has looked");
+        let new = view.find(&HomeEntry::NewProject).expect("a new-project slot");
         let last_project = view.find(&HomeEntry::Project("/q".into())).unwrap();
-        assert_eq!(
-            view.step(last_project, true),
-            Some(new),
-            "j from the last project reaches it"
-        );
-        let empty = layout(
-            &HomeData {
-                date: "d".into(),
-                ..HomeData::default()
-            },
-            140,
-            45,
-        );
-        assert!(
-            empty.find(&HomeEntry::NewProject).is_some(),
-            "even with no projects yet"
-        );
+        assert_eq!(view.step(last_project, true), Some(new), "j from the last project reaches it");
+        let empty = layout(&HomeData { date: "d".into(), ..HomeData::default() }, 140, 45);
+        assert!(empty.find(&HomeEntry::NewProject).is_some(), "even with no projects yet");
     }
 
     #[test]
@@ -1226,30 +751,17 @@ mod tests {
         let view = layout(&sample(), 140, 45);
         let find = view.find(&HomeEntry::Find).unwrap();
         let resume = view.step(find, true).unwrap();
-        assert_eq!(
-            view.slots[resume].entry,
-            HomeEntry::Resume("/p/app.rs".into())
-        );
+        assert_eq!(view.slots[resume].entry, HomeEntry::Resume("/p/app.rs".into()));
         let first_recent = view.step(resume, true).unwrap();
-        assert_eq!(
-            view.slots[first_recent].entry,
-            HomeEntry::RecentFile("/p/a.rs".into())
-        );
-        assert_eq!(
-            view.step(resume, false),
-            Some(find),
-            "k from the top goes to find"
-        );
+        assert_eq!(view.slots[first_recent].entry, HomeEntry::RecentFile("/p/a.rs".into()));
+        assert_eq!(view.step(resume, false), Some(find), "k from the top goes to find");
         let project = view.across(resume, true).unwrap();
         assert_eq!(view.slots[project].entry, HomeEntry::Project("/p".into()));
         let today = view.across(project, true).unwrap();
         assert_eq!(view.slots[today].entry, agenda());
         assert_eq!(view.across(today, true), None, "no fourth column");
         let last_recent = view.find(&HomeEntry::RecentFile("/p/b.rs".into())).unwrap();
-        assert_eq!(
-            view.slots[view.step(last_recent, true).unwrap()].entry,
-            HomeEntry::Recover
-        );
+        assert_eq!(view.slots[view.step(last_recent, true).unwrap()].entry, HomeEntry::Recover);
     }
 
     #[test]
@@ -1258,11 +770,7 @@ mod tests {
         let project = &view.slots[view.numbered(1).unwrap()];
         let (line, col) = project.cursor();
         assert_eq!(view.slot_at(line, col), view.numbered(1));
-        assert_eq!(
-            view.slot_at(line + 1, col),
-            view.numbered(1),
-            "a two-line row covers both lines"
-        );
+        assert_eq!(view.slot_at(line + 1, col), view.numbered(1), "a two-line row covers both lines");
     }
 
     #[test]
@@ -1272,14 +780,8 @@ mod tests {
             let lines: Vec<&str> = view.text.lines().collect();
             for span in &view.spans {
                 let len = lines.get(span.line).map_or(0, |l| l.chars().count());
-                assert!(
-                    span.cols.end <= len.max(span.cols.end),
-                    "span past its line"
-                );
-                assert!(
-                    span.line < lines.len(),
-                    "span on a missing line at {cols}x{rows}"
-                );
+                assert!(span.cols.end <= len.max(span.cols.end), "span past its line");
+                assert!(span.line < lines.len(), "span on a missing line at {cols}x{rows}");
             }
         }
     }

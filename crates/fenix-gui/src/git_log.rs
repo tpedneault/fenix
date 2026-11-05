@@ -14,10 +14,7 @@ use std::path::PathBuf;
 use fenix_diff::{FileDiff, LineKind};
 use fenix_git::{CommitFlags, GraphCommit, ResetMode};
 
-use crate::git_status::{
-    count, danger, popup, short, verb, Action, Compose, Confirm, DiffState, Input, InputPurpose,
-    Job, Menu,
-};
+use crate::git_status::{count, danger, popup, short, verb, Action, Compose, Confirm, DiffState, Input, InputPurpose, Job, Menu};
 use crate::graph_view::GraphSpan;
 use crate::page::{fit, frame, Grid, Key, Page, Role};
 
@@ -29,11 +26,7 @@ pub enum Scope {
     /// One file, following renames.
     File(String),
     /// Lines `start..=end` (1-based) of a file.
-    Lines {
-        path: String,
-        start: usize,
-        end: usize,
-    },
+    Lines { path: String, start: usize, end: usize },
 }
 
 impl Scope {
@@ -42,12 +35,8 @@ impl Scope {
             Scope::Branch => format!("History of {branch}"),
             Scope::All => "History of every branch".to_string(),
             Scope::File(path) => format!("History of {path} · following renames"),
-            Scope::Lines { path, start, end } if start == end => {
-                format!("History of line {start} of {path}")
-            }
-            Scope::Lines { path, start, end } => {
-                format!("History of lines {start}–{end} of {path}")
-            }
+            Scope::Lines { path, start, end } if start == end => format!("History of line {start} of {path}"),
+            Scope::Lines { path, start, end } => format!("History of lines {start}–{end} of {path}"),
         }
     }
 }
@@ -87,21 +76,9 @@ pub enum Row {
     /// A connector line of the graph, by index -- drawn, never the cursor's.
     Rail(usize),
     Commit(String),
-    File {
-        hash: String,
-        path: String,
-    },
-    Hunk {
-        hash: String,
-        path: String,
-        hunk: usize,
-    },
-    Line {
-        hash: String,
-        path: String,
-        hunk: usize,
-        line: usize,
-    },
+    File { hash: String, path: String },
+    Hunk { hash: String, path: String, hunk: usize },
+    Line { hash: String, path: String, hunk: usize, line: usize },
 }
 
 impl Row {
@@ -112,10 +89,7 @@ impl Row {
     fn hash(&self) -> Option<&str> {
         match self {
             Row::Rail(_) => None,
-            Row::Commit(h)
-            | Row::File { hash: h, .. }
-            | Row::Hunk { hash: h, .. }
-            | Row::Line { hash: h, .. } => Some(h),
+            Row::Commit(h) | Row::File { hash: h, .. } | Row::Hunk { hash: h, .. } | Row::Line { hash: h, .. } => Some(h),
         }
     }
 }
@@ -157,10 +131,7 @@ pub struct GitLog {
 
 impl GitLog {
     pub fn new(root: PathBuf, scope: Scope) -> Self {
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         GitLog {
             root,
             name,
@@ -206,15 +177,10 @@ impl GitLog {
 
     pub fn set_data(&mut self, data: LogData) {
         self.loading = false;
-        let before = self
-            .rows()
-            .get(self.cursor)
-            .and_then(|r| r.hash().map(str::to_string));
+        let before = self.rows().get(self.cursor).and_then(|r| r.hash().map(str::to_string));
         // A line range's commits come with their patches: open them all.
         for hash in data.patches.keys() {
-            self.open
-                .entry(hash.clone())
-                .or_insert(Detail::Files(Vec::new()));
+            self.open.entry(hash.clone()).or_insert(Detail::Files(Vec::new()));
         }
         self.data = Some(data);
         let rows = self.rows();
@@ -254,18 +220,11 @@ impl GitLog {
         if let Some(DiffState::Loaded(d)) = self.diffs.get(&(hash.to_string(), path.to_string())) {
             return Some(d);
         }
-        self.data
-            .as_ref()?
-            .patches
-            .get(hash)?
-            .iter()
-            .find(|d| d.display_path() == path)
+        self.data.as_ref()?.patches.get(hash)?.iter().find(|d| d.display_path() == path)
     }
 
     pub fn rows(&self) -> Vec<Row> {
-        let Some(data) = &self.data else {
-            return Vec::new();
-        };
+        let Some(data) = &self.data else { return Vec::new() };
         let mut rows = Vec::new();
         for (i, line) in data.lines.iter().enumerate() {
             let Some(hash) = &line.commit else {
@@ -274,33 +233,17 @@ impl GitLog {
             };
             rows.push(Row::Commit(hash.clone()));
             let files: Vec<String> = match (self.open.get(hash), data.patches.get(hash)) {
-                (Some(_), Some(patches)) => patches
-                    .iter()
-                    .map(|d| d.display_path().to_string())
-                    .collect(),
+                (Some(_), Some(patches)) => patches.iter().map(|d| d.display_path().to_string()).collect(),
                 (Some(Detail::Files(files)), None) => files.iter().map(|f| f.1.clone()).collect(),
                 _ => Vec::new(),
             };
             for path in files {
-                rows.push(Row::File {
-                    hash: hash.clone(),
-                    path: path.clone(),
-                });
-                let shown = data.patches.contains_key(hash)
-                    || self.diffs.contains_key(&(hash.clone(), path.clone()));
+                rows.push(Row::File { hash: hash.clone(), path: path.clone() });
+                let shown = data.patches.contains_key(hash) || self.diffs.contains_key(&(hash.clone(), path.clone()));
                 if let (true, Some(diff)) = (shown, self.diff(hash, &path)) {
                     for (h, hunk) in diff.hunks.iter().enumerate() {
-                        rows.push(Row::Hunk {
-                            hash: hash.clone(),
-                            path: path.clone(),
-                            hunk: h,
-                        });
-                        rows.extend((0..hunk.lines.len()).map(|line| Row::Line {
-                            hash: hash.clone(),
-                            path: path.clone(),
-                            hunk: h,
-                            line,
-                        }));
+                        rows.push(Row::Hunk { hash: hash.clone(), path: path.clone(), hunk: h });
+                        rows.extend((0..hunk.lines.len()).map(|line| Row::Line { hash: hash.clone(), path: path.clone(), hunk: h, line }));
                     }
                 }
             }
@@ -360,29 +303,15 @@ impl GitLog {
                     self.menu = Some((MenuKind::Commit, String::new(), hash));
                     none
                 }
-                Some(Row::File { path, .. }) => {
-                    LogAction::Git(Action::OpenFile { path, line: None })
-                }
-                Some(Row::Line {
-                    hash,
-                    path,
-                    hunk,
-                    line,
-                }) => {
-                    let at = self
-                        .diff(&hash, &path)
-                        .and_then(|d| d.hunks.get(hunk))
-                        .and_then(|h| h.lines[..=line].iter().rev().find_map(|l| l.new_line));
+                Some(Row::File { path, .. }) => LogAction::Git(Action::OpenFile { path, line: None }),
+                Some(Row::Line { hash, path, hunk, line }) => {
+                    let at = self.diff(&hash, &path).and_then(|d| d.hunks.get(hunk)).and_then(|h| h.lines[..=line].iter().rev().find_map(|l| l.new_line));
                     LogAction::Git(Action::OpenFile { path, line: at })
                 }
                 _ => none,
             },
             Key::Char('/') => {
-                self.input = Some(Input {
-                    label: "Filter (words in messages, author:name)".to_string(),
-                    text: self.filter.clone(),
-                    purpose: InputPurpose::PushElsewhere,
-                });
+                self.input = Some(Input { label: "Filter (words in messages, author:name)".to_string(), text: self.filter.clone(), purpose: InputPurpose::PushElsewhere });
                 none
             }
             Key::Char('a') => match self.scope {
@@ -394,10 +323,7 @@ impl GitLog {
                     self.scope = Scope::Branch;
                     LogAction::Git(Action::Refresh)
                 }
-                _ => self.message(
-                    "a switches between this branch and every branch -- not for a file's history",
-                    false,
-                ),
+                _ => self.message("a switches between this branch and every branch -- not for a file's history", false),
             },
             Key::Char('y') => match rows.get(self.cursor).and_then(|r| r.hash()) {
                 Some(hash) => LogAction::Git(Action::Copy(hash.to_string())),
@@ -416,18 +342,9 @@ impl GitLog {
 
     fn step(&mut self, rows: &[Row], forward: bool) -> LogAction {
         let found = if forward {
-            rows.iter()
-                .enumerate()
-                .skip(self.cursor + 1)
-                .find(|(_, r)| r.focusable())
-                .map(|(i, _)| i)
+            rows.iter().enumerate().skip(self.cursor + 1).find(|(_, r)| r.focusable()).map(|(i, _)| i)
         } else {
-            rows.iter()
-                .enumerate()
-                .take(self.cursor)
-                .rev()
-                .find(|(_, r)| r.focusable())
-                .map(|(i, _)| i)
+            rows.iter().enumerate().take(self.cursor).rev().find(|(_, r)| r.focusable()).map(|(i, _)| i)
         };
         if let Some(i) = found {
             self.cursor = i;
@@ -459,16 +376,7 @@ impl GitLog {
             }
             Some(Row::Hunk { hash, path, .. } | Row::Line { hash, path, .. }) if !lines_scope => {
                 self.diffs.remove(&(hash.clone(), path.clone()));
-                self.cursor = self
-                    .rows()
-                    .iter()
-                    .position(|r| {
-                        *r == Row::File {
-                            hash: hash.clone(),
-                            path: path.clone(),
-                        }
-                    })
-                    .unwrap_or(self.cursor);
+                self.cursor = self.rows().iter().position(|r| *r == Row::File { hash: hash.clone(), path: path.clone() }).unwrap_or(self.cursor);
                 LogAction::Git(Action::None)
             }
             _ => LogAction::Git(Action::None),
@@ -481,21 +389,13 @@ impl GitLog {
         let branch = data.map(|d| d.branch.clone()).unwrap_or_default();
         let on_head = data.is_some_and(|d| d.on_head.contains(hash));
         let is_head = data.and_then(|d| d.head.as_deref()) == Some(hash);
-        let merge = self.commit(hash).is_some_and(|c| c.parents.len() > 1)
-            && !matches!(self.scope, Scope::File(_) | Scope::Lines { .. });
-        let subject = self
-            .commit(hash)
-            .map(|c| c.subject.clone())
-            .unwrap_or_default();
+        let merge = self.commit(hash).is_some_and(|c| c.parents.len() > 1) && !matches!(self.scope, Scope::File(_) | Scope::Lines { .. });
+        let subject = self.commit(hash).map(|c| c.subject.clone()).unwrap_or_default();
         match kind {
             MenuKind::Commit => {
                 let mut items = Vec::new();
                 if on_head && !merge {
-                    items.push(verb(
-                        "f",
-                        "fixup into this",
-                        "what's staged, squashed in now",
-                    ));
+                    items.push(verb("f", "fixup into this", "what's staged, squashed in now"));
                 }
                 if is_head {
                     items.push(verb("w", "reword", "the last commit's message"));
@@ -508,29 +408,15 @@ impl GitLog {
                 items.push(verb("b", "branch here…", ""));
                 items.push(verb("t", "tag here…", ""));
                 if on_head {
-                    items.push(verb(
-                        "i",
-                        "rebase from here…",
-                        "reorder, reword, squash, drop",
-                    ));
+                    items.push(verb("i", "rebase from here…", "reorder, reword, squash, drop"));
                     items.push(danger(verb("r", "reset to here…", "soft / mixed / hard")));
                 }
                 items.push(verb("y", "copy hash", ""));
-                Menu {
-                    title: format!("{} {}", short(hash), fit(&subject, 44)),
-                    groups: vec![(None, items)],
-                }
+                Menu { title: format!("{} {}", short(hash), fit(&subject, 44)), groups: vec![(None, items)] }
             }
             MenuKind::Reset => Menu {
                 title: format!("Reset {branch} to {}", short(hash)),
-                groups: vec![(
-                    None,
-                    vec![
-                        verb("s", "soft", "keep index and files"),
-                        verb("m", "mixed", "keep files"),
-                        danger(verb("h", "hard", "discard everything since")),
-                    ],
-                )],
+                groups: vec![(None, vec![verb("s", "soft", "keep index and files"), verb("m", "mixed", "keep files"), danger(verb("h", "hard", "discard everything since"))])],
             },
             MenuKind::Help => Menu {
                 title: "Log keys".to_string(),
@@ -551,9 +437,7 @@ impl GitLog {
     }
 
     fn menu_key(&mut self, key: Key) -> LogAction {
-        let Some((kind, _, hash)) = self.menu.clone() else {
-            return LogAction::Git(Action::None);
-        };
+        let Some((kind, _, hash)) = self.menu.clone() else { return LogAction::Git(Action::None) };
         let none = LogAction::Git(Action::None);
         let c = match key {
             Key::Escape | Key::Char('q') => {
@@ -564,11 +448,7 @@ impl GitLog {
             _ => return none,
         };
         let menu = self.menu(kind, &hash);
-        let offered = menu
-            .groups
-            .iter()
-            .flat_map(|(_, items)| items)
-            .any(|i| i.key == c.to_string());
+        let offered = menu.groups.iter().flat_map(|(_, items)| items).any(|i| i.key == c.to_string());
         if kind == MenuKind::Help {
             self.menu = None;
             return if c == '?' { none } else { self.key(key) };
@@ -579,30 +459,17 @@ impl GitLog {
         self.menu = None;
         let run = |job: Job| LogAction::Git(Action::Run(job));
         match (kind, c) {
-            (MenuKind::Commit, 'f') => run(Job::FixupNow {
-                hash,
-                flags: CommitFlags::default(),
-            }),
-            (MenuKind::Commit, 'w') => {
-                LogAction::Git(Action::Compose(Compose::Reword(CommitFlags::default())))
-            }
+            (MenuKind::Commit, 'f') => run(Job::FixupNow { hash, flags: CommitFlags::default() }),
+            (MenuKind::Commit, 'w') => LogAction::Git(Action::Compose(Compose::Reword(CommitFlags::default()))),
             (MenuKind::Commit, 'v') => run(Job::Revert(hash)),
             (MenuKind::Commit, 'c') => run(Job::CherryPick(hash)),
             (MenuKind::Commit, 'o') => run(Job::Checkout(hash)),
             (MenuKind::Commit, 'b') => {
-                self.input = Some(Input {
-                    label: format!("New branch at {}", short(&hash)),
-                    text: String::new(),
-                    purpose: InputPurpose::BranchAt(hash),
-                });
+                self.input = Some(Input { label: format!("New branch at {}", short(&hash)), text: String::new(), purpose: InputPurpose::BranchAt(hash) });
                 none
             }
             (MenuKind::Commit, 't') => {
-                self.input = Some(Input {
-                    label: format!("Tag {}", short(&hash)),
-                    text: String::new(),
-                    purpose: InputPurpose::TagAt(hash),
-                });
+                self.input = Some(Input { label: format!("Tag {}", short(&hash)), text: String::new(), purpose: InputPurpose::TagAt(hash) });
                 none
             }
             (MenuKind::Commit, 'r') => {
@@ -611,14 +478,8 @@ impl GitLog {
             }
             (MenuKind::Commit, 'y') => LogAction::Git(Action::Copy(hash)),
             (MenuKind::Commit, 'i') => LogAction::Git(Action::Rebase(Some(hash))),
-            (MenuKind::Reset, 's') => run(Job::Reset {
-                target: hash,
-                mode: ResetMode::Soft,
-            }),
-            (MenuKind::Reset, 'm') => run(Job::Reset {
-                target: hash,
-                mode: ResetMode::Mixed,
-            }),
+            (MenuKind::Reset, 's') => run(Job::Reset { target: hash, mode: ResetMode::Soft }),
+            (MenuKind::Reset, 'm') => run(Job::Reset { target: hash, mode: ResetMode::Mixed }),
             (MenuKind::Reset, 'h') => {
                 self.confirm = Some(Confirm {
                     question: format!("Reset --hard to {}? Uncommitted changes are saved first; U on the Git page brings them back.", short(&hash)),
@@ -633,9 +494,7 @@ impl GitLog {
 
     fn input_key(&mut self, key: Key) -> LogAction {
         let none = LogAction::Git(Action::None);
-        let Some(input) = &mut self.input else {
-            return none;
-        };
+        let Some(input) = &mut self.input else { return none };
         match key {
             Key::Escape => self.input = None,
             Key::Backspace => {
@@ -644,24 +503,11 @@ impl GitLog {
             Key::Char(c) => input.text.push(c),
             Key::Space => input.text.push(' '),
             Key::Enter => {
-                let Some(input) = self.input.take() else {
-                    return none;
-                };
+                let Some(input) = self.input.take() else { return none };
                 let text = input.text.trim().to_string();
                 return match input.purpose {
-                    InputPurpose::BranchAt(hash) if !text.is_empty() => {
-                        LogAction::Git(Action::Run(Job::Branch {
-                            name: text,
-                            start: Some(hash),
-                            switch: false,
-                        }))
-                    }
-                    InputPurpose::TagAt(hash) if !text.is_empty() => {
-                        LogAction::Git(Action::Run(Job::Tag {
-                            name: text,
-                            at: hash,
-                        }))
-                    }
+                    InputPurpose::BranchAt(hash) if !text.is_empty() => LogAction::Git(Action::Run(Job::Branch { name: text, start: Some(hash), switch: false })),
+                    InputPurpose::TagAt(hash) if !text.is_empty() => LogAction::Git(Action::Run(Job::Tag { name: text, at: hash })),
                     // The filter (reusing a purpose the log has no other use for).
                     InputPurpose::PushElsewhere => {
                         self.filter = text;
@@ -681,12 +527,7 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
     let mut g = Grid::new();
     let mut y = 1;
     let Some(data) = &page.data else {
-        g.put(
-            y,
-            left,
-            &format!("Reading the history of {}…", page.name),
-            Role::Muted,
-        );
+        g.put(y, left, &format!("Reading the history of {}…", page.name), Role::Muted);
         return g.finish();
     };
     let x = g.put(y, left, &page.scope.title(&data.branch), Role::Title) + 2;
@@ -702,12 +543,7 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
         g.put(y, left, &format!("… {busy}"), Role::Accent);
         y += 1;
     } else if let Some((text, failed)) = &page.message {
-        g.put(
-            y,
-            left,
-            &fit(text, width),
-            if *failed { Role::Bad } else { Role::Muted },
-        );
+        g.put(y, left, &fit(text, width), if *failed { Role::Bad } else { Role::Muted });
         y += 1;
     }
     y += 1;
@@ -717,14 +553,8 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
     let rows = page.rows();
     // Each commit's line and details, looked up once rather than scanned
     // for on every row: with every branch, a history runs to hundreds.
-    let line_of: HashMap<&str, usize> = data
-        .lines
-        .iter()
-        .enumerate()
-        .filter_map(|(n, l)| Some((l.commit.as_deref()?, n)))
-        .collect();
-    let commit_of: HashMap<&str, &GraphCommit> =
-        data.commits.iter().map(|c| (c.hash.as_str(), c)).collect();
+    let line_of: HashMap<&str, usize> = data.lines.iter().enumerate().filter_map(|(n, l)| Some((l.commit.as_deref()?, n))).collect();
+    let commit_of: HashMap<&str, &GraphCommit> = data.commits.iter().map(|c| (c.hash.as_str(), c)).collect();
     for (i, row) in rows.iter().enumerate() {
         let line_y = y;
         match row {
@@ -734,23 +564,13 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
                 }
             }
             Row::Commit(hash) => {
-                let Some(&n) = line_of.get(hash.as_str()) else {
-                    continue;
-                };
+                let Some(&n) = line_of.get(hash.as_str()) else { continue };
                 let line = &data.lines[n];
                 let chars: Vec<char> = line.text.chars().collect();
-                let age = commit_of
-                    .get(hash.as_str())
-                    .map(|c| format!("{} · {}", c.author, c.relative_date))
-                    .unwrap_or_default();
+                let age = commit_of.get(hash.as_str()).map(|c| format!("{} · {}", c.author, c.relative_date)).unwrap_or_default();
                 let room = width.saturating_sub(age.chars().count() + 2);
                 for (k, (start, span)) in line.spans.iter().enumerate() {
-                    let end = line
-                        .spans
-                        .get(k + 1)
-                        .map(|s| s.0)
-                        .unwrap_or(chars.len())
-                        .min(room);
+                    let end = line.spans.get(k + 1).map(|s| s.0).unwrap_or(chars.len()).min(room);
                     if *start >= end {
                         continue;
                     }
@@ -760,9 +580,7 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
                         GraphSpan::Node | GraphSpan::Hash => Role::Accent,
                         GraphSpan::Refs => Role::Good,
                         GraphSpan::Subject => {
-                            if data.on_head.contains(hash)
-                                || matches!(page.scope, Scope::File(_) | Scope::Lines { .. })
-                            {
+                            if data.on_head.contains(hash) || matches!(page.scope, Scope::File(_) | Scope::Lines { .. }) {
                                 Role::Text
                             } else {
                                 Role::Muted
@@ -772,20 +590,11 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
                     };
                     g.put(y, left + start, &text, role);
                 }
-                g.put(
-                    y,
-                    (left + width).saturating_sub(age.chars().count()),
-                    &age,
-                    Role::Muted,
-                );
+                g.put(y, (left + width).saturating_sub(age.chars().count()), &age, Role::Muted);
             }
             Row::File { hash, path } => {
                 let letter = match page.open.get(hash) {
-                    Some(Detail::Files(files)) => files
-                        .iter()
-                        .find(|f| &f.1 == path)
-                        .map(|f| f.0)
-                        .unwrap_or('M'),
+                    Some(Detail::Files(files)) => files.iter().find(|f| &f.1 == path).map(|f| f.0).unwrap_or('M'),
                     _ => 'M',
                 };
                 let role = match letter {
@@ -794,45 +603,17 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
                     _ => Role::Warn,
                 };
                 let x = g.put(y, left + 6, &letter.to_string(), role) + 2;
-                g.put(
-                    y,
-                    x,
-                    &fit(path, (left + width).saturating_sub(x)),
-                    Role::Text,
-                );
+                g.put(y, x, &fit(path, (left + width).saturating_sub(x)), Role::Text);
             }
             Row::Hunk { hash, path, hunk } => {
                 if let Some(h) = page.diff(hash, path).and_then(|d| d.hunks.get(*hunk)) {
-                    g.put(
-                        y,
-                        left + 8,
-                        &fit(&h.header, width.saturating_sub(8)),
-                        Role::Accent,
-                    );
+                    g.put(y, left + 8, &fit(&h.header, width.saturating_sub(8)), Role::Accent);
                 }
             }
-            Row::Line {
-                hash,
-                path,
-                hunk,
-                line,
-            } => {
-                if let Some(l) = page
-                    .diff(hash, path)
-                    .and_then(|d| d.hunks.get(*hunk))
-                    .and_then(|h| h.lines.get(*line))
-                {
-                    let number = l
-                        .new_line
-                        .or(l.old_line)
-                        .map(|n| n.to_string())
-                        .unwrap_or_default();
-                    g.put(
-                        y,
-                        left + 8 + 5usize.saturating_sub(number.len()),
-                        &number,
-                        Role::Muted,
-                    );
+            Row::Line { hash, path, hunk, line } => {
+                if let Some(l) = page.diff(hash, path).and_then(|d| d.hunks.get(*hunk)).and_then(|h| h.lines.get(*line)) {
+                    let number = l.new_line.or(l.old_line).map(|n| n.to_string()).unwrap_or_default();
+                    g.put(y, left + 8 + 5usize.saturating_sub(number.len()), &number, Role::Muted);
                     let role = match l.kind {
                         LineKind::Added => Role::Good,
                         LineKind::Removed => Role::Bad,
@@ -857,17 +638,8 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
         }
         if i == page.cursor {
             g.focus(line_y, left..left + width);
-            let menu = page
-                .menu
-                .as_ref()
-                .map(|(kind, typed, hash)| (page.menu(*kind, hash), typed.clone()));
-            g.popup = popup(
-                line_y,
-                left + 4,
-                menu.as_ref().map(|(m, t)| (m, t.as_str())),
-                page.input.as_ref(),
-                page.confirm.as_ref(),
-            );
+            let menu = page.menu.as_ref().map(|(kind, typed, hash)| (page.menu(*kind, hash), typed.clone()));
+            g.popup = popup(line_y, left + 4, menu.as_ref().map(|(m, t)| (m, t.as_str())), page.input.as_ref(), page.confirm.as_ref());
         }
         y += 1;
     }
@@ -876,16 +648,7 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
     } else if page.menu.is_some() || page.confirm.is_some() {
         vec![("Esc", "close")]
     } else {
-        vec![
-            ("Tab", "open"),
-            ("Enter", "commit menu"),
-            ("/", "filter"),
-            ("a", "all branches"),
-            ("y", "copy hash"),
-            ("u", "refresh"),
-            ("?", "keys"),
-            ("q", "close"),
-        ]
+        vec![("Tab", "open"), ("Enter", "commit menu"), ("/", "filter"), ("a", "all branches"), ("y", "copy hash"), ("u", "refresh"), ("?", "keys"), ("q", "close")]
     };
     g.keys(left, width, &keys);
     g.finish()
@@ -910,15 +673,10 @@ mod tests {
 
     fn data(commits: Vec<GraphCommit>, on_head: &[usize]) -> LogData {
         let rows = fenix_git::assign_lanes(&commits);
-        let panel =
-            crate::graph_view::render_graph(&commits, &rows, crate::graph_view::GraphStyle::Ascii);
+        let panel = crate::graph_view::render_graph(&commits, &rows, crate::graph_view::GraphStyle::Ascii);
         let lines = panel.text.lines().zip(panel.lines).map(|(text, line)| {
             let line = line.unwrap();
-            GraphLine {
-                text: text.to_string(),
-                spans: line.spans,
-                commit: line.commit,
-            }
+            GraphLine { text: text.to_string(), spans: line.spans, commit: line.commit }
         });
         LogData {
             head: commits.first().map(|c| c.hash.clone()),
@@ -932,14 +690,7 @@ mod tests {
 
     fn page() -> GitLog {
         let mut p = GitLog::new(PathBuf::from("/repo/fenix"), Scope::Branch);
-        p.set_data(data(
-            vec![
-                commit(3, &[2], "third"),
-                commit(2, &[1], "second"),
-                commit(1, &[], "first"),
-            ],
-            &[3, 2, 1],
-        ));
+        p.set_data(data(vec![commit(3, &[2], "third"), commit(2, &[1], "second"), commit(1, &[], "first")], &[3, 2, 1]));
         p
     }
 
@@ -956,27 +707,10 @@ mod tests {
         assert_eq!(p.key(Key::Tab), LogAction::LoadCommit(hash(2)));
         p.set_files(hash(2), vec![('M', "src/a.rs".into())]);
         p.key(Key::Char('j'));
-        assert_eq!(
-            p.rows()[p.cursor],
-            Row::File {
-                hash: hash(2),
-                path: "src/a.rs".into()
-            }
-        );
-        assert_eq!(
-            p.key(Key::Tab),
-            LogAction::LoadFile {
-                hash: hash(2),
-                path: "src/a.rs".into()
-            }
-        );
+        assert_eq!(p.rows()[p.cursor], Row::File { hash: hash(2), path: "src/a.rs".into() });
+        assert_eq!(p.key(Key::Tab), LogAction::LoadFile { hash: hash(2), path: "src/a.rs".into() });
         let text = layout(&p, 120).text;
-        assert!(
-            text.contains("History of main")
-                && text.contains("second")
-                && text.contains("src/a.rs"),
-            "{text}"
-        );
+        assert!(text.contains("History of main") && text.contains("second") && text.contains("src/a.rs"), "{text}");
     }
 
     #[test]
@@ -985,34 +719,17 @@ mod tests {
         p.key(Key::Char('j'));
         p.key(Key::Enter);
         let text = layout(&p, 120).all_text();
-        assert!(
-            text.contains("fixup into this")
-                && text.contains("revert")
-                && !text.contains("cherry-pick"),
-            "on this branch: no cherry-pick\n{text}"
-        );
-        assert!(
-            !text.contains("the last commit's message"),
-            "only the last commit can be reworded"
-        );
-        assert_eq!(
-            p.key(Key::Char('v')),
-            LogAction::Git(Action::Run(Job::Revert(hash(2))))
-        );
+        assert!(text.contains("fixup into this") && text.contains("revert") && !text.contains("cherry-pick"), "on this branch: no cherry-pick\n{text}");
+        assert!(!text.contains("the last commit's message"), "only the last commit can be reworded");
+        assert_eq!(p.key(Key::Char('v')), LogAction::Git(Action::Run(Job::Revert(hash(2)))));
         // A commit from elsewhere can be cherry-picked, not fixed up.
         let mut p = page();
         p.data.as_mut().unwrap().on_head.remove(&hash(2));
         p.key(Key::Char('j'));
         p.key(Key::Enter);
         let text = layout(&p, 120).all_text();
-        assert!(
-            text.contains("cherry-pick") && !text.contains("fixup into this"),
-            "{text}"
-        );
-        assert_eq!(
-            p.key(Key::Char('c')),
-            LogAction::Git(Action::Run(Job::CherryPick(hash(2))))
-        );
+        assert!(text.contains("cherry-pick") && !text.contains("fixup into this"), "{text}");
+        assert_eq!(p.key(Key::Char('c')), LogAction::Git(Action::Run(Job::CherryPick(hash(2)))));
     }
 
     #[test]
@@ -1022,13 +739,7 @@ mod tests {
         p.key(Key::Enter);
         p.key(Key::Char('r'));
         assert_eq!(p.key(Key::Char('h')), LogAction::Git(Action::None));
-        assert_eq!(
-            p.key(Key::Char('y')),
-            LogAction::Git(Action::Run(Job::Reset {
-                target: hash(1),
-                mode: ResetMode::Hard
-            }))
-        );
+        assert_eq!(p.key(Key::Char('y')), LogAction::Git(Action::Run(Job::Reset { target: hash(1), mode: ResetMode::Hard })));
     }
 
     #[test]
@@ -1038,35 +749,18 @@ mod tests {
         p.type_text("decoder author:ada");
         assert_eq!(p.key(Key::Enter), LogAction::Git(Action::Refresh));
         assert_eq!(p.query(), (Some("decoder".into()), Some("ada".into())));
-        assert!(layout(&p, 120)
-            .text
-            .contains("filtered by decoder author:ada"));
+        assert!(layout(&p, 120).text.contains("filtered by decoder author:ada"));
     }
 
     #[test]
     fn a_line_range_shows_each_commits_patch_already_open() {
-        let mut p = GitLog::new(
-            PathBuf::from("/repo"),
-            Scope::Lines {
-                path: "a.txt".into(),
-                start: 2,
-                end: 2,
-            },
-        );
-        let mut d = data(
-            vec![commit(2, &[1], "second"), commit(1, &[], "first")],
-            &[2, 1],
-        );
-        let patch = fenix_diff::parse(
-            "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -2 +2 @@\n-two\n+TWO\n",
-        );
+        let mut p = GitLog::new(PathBuf::from("/repo"), Scope::Lines { path: "a.txt".into(), start: 2, end: 2 });
+        let mut d = data(vec![commit(2, &[1], "second"), commit(1, &[], "first")], &[2, 1]);
+        let patch = fenix_diff::parse("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -2 +2 @@\n-two\n+TWO\n");
         d.patches.insert(hash(2), patch);
         p.set_data(d);
         let text = layout(&p, 120).text;
-        assert!(
-            text.contains("History of line 2 of a.txt") && text.contains("+TWO"),
-            "{text}"
-        );
+        assert!(text.contains("History of line 2 of a.txt") && text.contains("+TWO"), "{text}");
     }
 
     #[test]

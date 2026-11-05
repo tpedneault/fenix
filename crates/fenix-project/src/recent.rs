@@ -48,20 +48,12 @@ impl RecentFiles {
     /// with an empty list, the same "convenience cache, not critical
     /// data" posture as `KnownProjects::load_or_default`.
     pub fn load_or_default(path: PathBuf) -> Self {
-        Self::load_key(path.clone(), FILES).unwrap_or_else(|_| Self {
-            path,
-            key: FILES,
-            paths: Vec::new(),
-        })
+        Self::load_key(path.clone(), FILES).unwrap_or_else(|_| Self { path, key: FILES, paths: Vec::new() })
     }
 
     /// The explorer's recent folders, from the same file.
     pub fn dirs_or_default(path: PathBuf) -> Self {
-        Self::load_key(path.clone(), DIRS).unwrap_or_else(|_| Self {
-            path,
-            key: DIRS,
-            paths: Vec::new(),
-        })
+        Self::load_key(path.clone(), DIRS).unwrap_or_else(|_| Self { path, key: DIRS, paths: Vec::new() })
     }
 
     pub fn paths(&self) -> &[PathBuf] {
@@ -119,10 +111,7 @@ mod tests {
         recent.save().unwrap();
 
         let reloaded = RecentFiles::load(path).unwrap();
-        assert_eq!(
-            reloaded.paths(),
-            &[PathBuf::from("/repo/two.rs"), PathBuf::from("/repo/one.rs")]
-        );
+        assert_eq!(reloaded.paths(), &[PathBuf::from("/repo/two.rs"), PathBuf::from("/repo/one.rs")]);
     }
 
     #[test]
@@ -133,10 +122,7 @@ mod tests {
         recent.add(PathBuf::from("/repo/two.rs"));
         recent.add(PathBuf::from("/repo/one.rs")); // re-visit -- should move, not duplicate
 
-        assert_eq!(
-            recent.paths(),
-            &[PathBuf::from("/repo/one.rs"), PathBuf::from("/repo/two.rs")]
-        );
+        assert_eq!(recent.paths(), &[PathBuf::from("/repo/one.rs"), PathBuf::from("/repo/two.rs")]);
     }
 
     #[test]
@@ -148,20 +134,13 @@ mod tests {
         }
         assert_eq!(recent.paths().len(), MAX_RECENT_FILES);
         // Most recently added stays at the front, oldest ones fall off.
-        assert_eq!(
-            recent.paths()[0],
-            PathBuf::from(format!("/repo/file{}.rs", MAX_RECENT_FILES + 9))
-        );
+        assert_eq!(recent.paths()[0], PathBuf::from(format!("/repo/file{}.rs", MAX_RECENT_FILES + 9)));
     }
 
     #[test]
     fn save_creates_missing_parent_directories() {
         let dir = TempDir::new("recent_creates_parents");
-        let path = dir
-            .path()
-            .join("nested")
-            .join("config")
-            .join("recent_files.txt");
+        let path = dir.path().join("nested").join("config").join("recent_files.txt");
         let mut recent = RecentFiles::load(path.clone()).unwrap();
         recent.add(PathBuf::from("/repo/one.rs"));
         recent.save().unwrap();

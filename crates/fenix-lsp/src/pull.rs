@@ -3,9 +3,7 @@
 //! diagnostics -- ESLint's and csharp-ls's only way), and what a server asks
 //! the client: its settings (`workspace/configuration`).
 
-use lsp_types::{
-    Diagnostic, DocumentDiagnosticReport, DocumentDiagnosticReportResult, ServerCapabilities, Uri,
-};
+use lsp_types::{Diagnostic, DocumentDiagnosticReport, DocumentDiagnosticReportResult, ServerCapabilities, Uri};
 use serde_json::Value;
 
 /// Whether `caps` says the server answers `textDocument/diagnostic`.
@@ -18,9 +16,7 @@ pub fn pulls(caps: &ServerCapabilities) -> bool {
 pub fn inter_file(caps: &ServerCapabilities) -> bool {
     match &caps.diagnostic_provider {
         Some(lsp_types::DiagnosticServerCapabilities::Options(o)) => o.inter_file_dependencies,
-        Some(lsp_types::DiagnosticServerCapabilities::RegistrationOptions(o)) => {
-            o.diagnostic_options.inter_file_dependencies
-        }
+        Some(lsp_types::DiagnosticServerCapabilities::RegistrationOptions(o)) => o.diagnostic_options.inter_file_dependencies,
         None => false,
     }
 }
@@ -33,38 +29,19 @@ pub type Report = Vec<(Option<Uri>, Option<String>, Option<Vec<Diagnostic>>)>;
 /// The answer to `textDocument/diagnostic`, read: the document asked
 /// about first (`None` for its uri), then related documents'.
 pub fn report(answer: Value) -> Result<Report, String> {
-    let result: DocumentDiagnosticReportResult =
-        serde_json::from_value(answer).map_err(|e| e.to_string())?;
+    let result: DocumentDiagnosticReportResult = serde_json::from_value(answer).map_err(|e| e.to_string())?;
     let (main, related) = match result {
-        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) => (
-            (
-                None,
-                full.full_document_diagnostic_report.result_id,
-                Some(full.full_document_diagnostic_report.items),
-            ),
-            full.related_documents,
-        ),
-        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(same)) => (
-            (
-                None,
-                Some(same.unchanged_document_diagnostic_report.result_id),
-                None,
-            ),
-            same.related_documents,
-        ),
-        DocumentDiagnosticReportResult::Partial(partial) => {
-            ((None, None, None), partial.related_documents)
+        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(full)) => {
+            ((None, full.full_document_diagnostic_report.result_id, Some(full.full_document_diagnostic_report.items)), full.related_documents)
         }
+        DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Unchanged(same)) => ((None, Some(same.unchanged_document_diagnostic_report.result_id), None), same.related_documents),
+        DocumentDiagnosticReportResult::Partial(partial) => ((None, None, None), partial.related_documents),
     };
     let mut out = vec![main];
     for (uri, kind) in related.unwrap_or_default() {
         out.push(match kind {
-            lsp_types::DocumentDiagnosticReportKind::Full(full) => {
-                (Some(uri), full.result_id, Some(full.items))
-            }
-            lsp_types::DocumentDiagnosticReportKind::Unchanged(same) => {
-                (Some(uri), Some(same.result_id), None)
-            }
+            lsp_types::DocumentDiagnosticReportKind::Full(full) => (Some(uri), full.result_id, Some(full.items)),
+            lsp_types::DocumentDiagnosticReportKind::Unchanged(same) => (Some(uri), Some(same.result_id), None),
         });
     }
     Ok(out)
@@ -74,9 +51,7 @@ pub fn report(answer: Value) -> Result<Report, String> {
 /// in `settings`; the whole of it for none or `""`; null where there's
 /// nothing.
 pub fn section(settings: &Value, section: Option<&str>) -> Value {
-    let Some(section) = section.filter(|s| !s.is_empty()) else {
-        return settings.clone();
-    };
+    let Some(section) = section.filter(|s| !s.is_empty()) else { return settings.clone() };
     let mut at = settings;
     for part in section.split('.') {
         match at.get(part) {
@@ -90,17 +65,8 @@ pub fn section(settings: &Value, section: Option<&str>) -> Value {
 /// The answer to `workspace/configuration`'s `params`: for each item, its
 /// section of `settings` (or null).
 pub fn configuration(params: &Value, settings: &Value) -> Value {
-    let items = params
-        .get("items")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    Value::Array(
-        items
-            .iter()
-            .map(|item| section(settings, item.get("section").and_then(Value::as_str)))
-            .collect(),
-    )
+    let items = params.get("items").and_then(Value::as_array).cloned().unwrap_or_default();
+    Value::Array(items.iter().map(|item| section(settings, item.get("section").and_then(Value::as_str))).collect())
 }
 
 /// `over` laid over `base`: objects merged key by key, anything else
@@ -135,10 +101,7 @@ mod tests {
         assert_eq!(read[0].1.as_deref(), Some("7"));
         assert_eq!(read[0].2.as_ref().unwrap()[0].message, "Unexpected var");
         let same = report(json!({"kind": "unchanged", "resultId": "7"})).unwrap();
-        assert_eq!(
-            (same[0].1.as_deref(), same[0].2.is_none()),
-            (Some("7"), true)
-        );
+        assert_eq!((same[0].1.as_deref(), same[0].2.is_none()), (Some("7"), true));
         assert!(report(json!(42)).is_err());
     }
 
@@ -147,10 +110,7 @@ mod tests {
         let answer = json!({"kind": "full", "items": [], "relatedDocuments": {"file:///p/b.h": {"kind": "full", "items": [{"range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 1}}, "message": "in a header"}]}}});
         let read = report(answer).unwrap();
         assert_eq!(read.len(), 2);
-        assert_eq!(
-            read[1].0.as_ref().map(|u| u.as_str()),
-            Some("file:///p/b.h")
-        );
+        assert_eq!(read[1].0.as_ref().map(|u| u.as_str()), Some("file:///p/b.h"));
         assert_eq!(read[1].2.as_ref().unwrap()[0].message, "in a header");
     }
 
@@ -161,24 +121,15 @@ mod tests {
         let settings = json!({"tailwindCSS": {"emmetCompletions": true}, "python": {"analysis": {"typeCheckingMode": "strict"}}});
         let params = json!({"items": [{"section": "tailwindCSS", "scopeUri": "file:///p"}, {"section": "editor"}, {"section": "python.analysis.typeCheckingMode"}, {"section": ""}, {}]});
         let answer = configuration(&params, &settings);
-        assert_eq!(
-            answer,
-            json!([{"emmetCompletions": true}, null, "strict", settings, settings])
-        );
-        assert_eq!(
-            configuration(&json!({"items": [{"section": "x"}]}), &Value::Null),
-            json!([null])
-        );
+        assert_eq!(answer, json!([{"emmetCompletions": true}, null, "strict", settings, settings]));
+        assert_eq!(configuration(&json!({"items": [{"section": "x"}]}), &Value::Null), json!([null]));
     }
 
     #[test]
     fn settings_are_laid_over_each_other() {
         let base = json!({"python": {"pythonPath": "/v/bin/python", "analysis": {"a": 1}}});
         let over = json!({"python": {"analysis": {"b": 2}}, "x": true});
-        assert_eq!(
-            merge(base.clone(), over),
-            json!({"python": {"pythonPath": "/v/bin/python", "analysis": {"a": 1, "b": 2}}, "x": true})
-        );
+        assert_eq!(merge(base.clone(), over), json!({"python": {"pythonPath": "/v/bin/python", "analysis": {"a": 1, "b": 2}}, "x": true}));
         assert_eq!(merge(base.clone(), Value::Null), base);
     }
 }

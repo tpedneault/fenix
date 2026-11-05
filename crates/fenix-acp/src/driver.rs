@@ -28,23 +28,12 @@ pub type Policy = Box<dyn FnMut(&PermissionCard) -> Option<String> + Send>;
 
 /// Allows once, else the first option.
 pub fn allow_once() -> Policy {
-    Box::new(|card| {
-        card.options
-            .iter()
-            .find(|o| o.kind == PermissionKind::AllowOnce)
-            .or(card.options.first())
-            .map(|o| o.id.clone())
-    })
+    Box::new(|card| card.options.iter().find(|o| o.kind == PermissionKind::AllowOnce).or(card.options.first()).map(|o| o.id.clone()))
 }
 
 /// Rejects once, else dismisses.
 pub fn reject_once() -> Policy {
-    Box::new(|card| {
-        card.options
-            .iter()
-            .find(|o| o.kind == PermissionKind::RejectOnce)
-            .map(|o| o.id.clone())
-    })
+    Box::new(|card| card.options.iter().find(|o| o.kind == PermissionKind::RejectOnce).map(|o| o.id.clone()))
 }
 
 struct Terminal {
@@ -73,19 +62,7 @@ pub struct Driver {
 impl Driver {
     pub fn new(hub: Hub) -> Self {
         let (tx, rx) = mpsc::channel();
-        Self {
-            hub,
-            clients: HashMap::new(),
-            tx,
-            rx,
-            terminals: HashMap::new(),
-            next_terminal: 1,
-            policy: allow_once(),
-            announced: Vec::new(),
-            listed: Vec::new(),
-            logins: Vec::new(),
-            stopped: Vec::new(),
-        }
+        Self { hub, clients: HashMap::new(), tx, rx, terminals: HashMap::new(), next_terminal: 1, policy: allow_once(), announced: Vec::new(), listed: Vec::new(), logins: Vec::new(), stopped: Vec::new() }
     }
 
     pub fn client(&self, conn: ConnId) -> Option<&AcpClient> {
@@ -103,53 +80,26 @@ impl Driver {
 
     fn carry_out(&mut self, effect: Effect) -> Vec<Effect> {
         match effect {
-            Effect::Spawn {
-                conn,
-                generation,
-                agent,
-                root,
-            } => {
+            Effect::Spawn { conn, generation, agent, root } => {
                 let tx = self.tx.clone();
-                let launch = Launch {
-                    program: agent.program,
-                    args: agent.args,
-                    env: agent.env,
-                    cwd: root,
-                };
-                let result = AcpClient::start(&launch, move |event| {
-                    tx.send(Inbox::Agent(conn, generation, event)).is_ok()
-                })
-                .map(|client| {
+                let launch = Launch { program: agent.program, args: agent.args, env: agent.env, cwd: root };
+                let result = AcpClient::start(&launch, move |event| tx.send(Inbox::Agent(conn, generation, event)).is_ok()).map(|client| {
                     self.clients.insert(conn, client);
                 });
-                self.hub.on_spawned(
-                    conn,
-                    generation,
-                    result.map_err(|e| e.to_string()),
-                    Instant::now(),
-                )
+                self.hub.on_spawned(conn, generation, result.map_err(|e| e.to_string()), Instant::now())
             }
             Effect::Stop { conn } => {
                 self.clients.remove(&conn);
                 self.stopped.push(conn);
                 Vec::new()
             }
-            Effect::Request {
-                conn,
-                id,
-                method,
-                params,
-            } => {
+            Effect::Request { conn, id, method, params } => {
                 if let Some(c) = self.clients.get(&conn) {
                     let _ = c.request(id, method, params);
                 }
                 Vec::new()
             }
-            Effect::Notify {
-                conn,
-                method,
-                params,
-            } => {
+            Effect::Notify { conn, method, params } => {
                 if let Some(c) = self.clients.get(&conn) {
                     let _ = c.notify(method, params);
                 }
@@ -161,12 +111,7 @@ impl Driver {
                 }
                 Vec::new()
             }
-            Effect::Serve {
-                conn,
-                id,
-                thread,
-                request,
-            } => {
+            Effect::Serve { conn, id, thread, request } => {
                 if let Some(result) = self.serve(conn, &thread, &id, request) {
                     return self.hub.on_served(conn, &thread, id, result);
                 }
@@ -184,14 +129,7 @@ impl Driver {
                 self.logins.push((conn, method));
                 Vec::new()
             }
-            Effect::Withdraw { .. }
-            | Effect::Save(_)
-            | Effect::Forget(_)
-            | Effect::Changed(_)
-            | Effect::ConnectionChanged(_)
-            | Effect::Attention { .. }
-            | Effect::TurnEnded { .. }
-            | Effect::FenixAnswered { .. } => Vec::new(),
+            Effect::Withdraw { .. } | Effect::Save(_) | Effect::Forget(_) | Effect::Changed(_) | Effect::ConnectionChanged(_) | Effect::Attention { .. } | Effect::TurnEnded { .. } | Effect::FenixAnswered { .. } => Vec::new(),
         }
     }
 
@@ -202,26 +140,11 @@ impl Driver {
             let pending: Vec<PermissionCard> = self
                 .hub
                 .view(&id)
-                .map(|v| {
-                    v.thread
-                        .entries
-                        .iter()
-                        .filter_map(|e| {
-                            if let Entry::Permission(c) = e {
-                                (c.state == PermissionState::Pending).then(|| c.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                })
+                .map(|v| v.thread.entries.iter().filter_map(|e| if let Entry::Permission(c) = e { (c.state == PermissionState::Pending).then(|| c.clone()) } else { None }).collect())
                 .unwrap_or_default();
             for card in pending {
                 let option = (self.policy)(&card);
-                fx.extend(
-                    self.hub
-                        .answer_permission(&id, &card.key, option.as_deref()),
-                );
+                fx.extend(self.hub.answer_permission(&id, &card.key, option.as_deref()));
             }
         }
         fx
@@ -229,54 +152,25 @@ impl Driver {
 
     /// Does what the agent asked. `None`: the answer comes later (a
     /// terminal's exit).
-    fn serve(
-        &mut self,
-        conn: ConnId,
-        thread: &ThreadId,
-        id: &Value,
-        request: ClientRequest,
-    ) -> Option<Result<Value, RpcError>> {
+    fn serve(&mut self, conn: ConnId, thread: &ThreadId, id: &Value, request: ClientRequest) -> Option<Result<Value, RpcError>> {
         let failed = |e: std::io::Error| RpcError::new(code::INTERNAL_ERROR, e.to_string());
         Some(match request {
-            ClientRequest::ReadTextFile {
-                path, line, limit, ..
-            } => std::fs::read_to_string(&path).map_err(failed).map(|text| {
+            ClientRequest::ReadTextFile { path, line, limit, .. } => std::fs::read_to_string(&path).map_err(failed).map(|text| {
                 let start = line.map_or(0, |l| l.saturating_sub(1) as usize);
-                let lines: Vec<&str> = text
-                    .split_inclusive('\n')
-                    .skip(start)
-                    .take(limit.map_or(usize::MAX, |l| l as usize))
-                    .collect();
+                let lines: Vec<&str> = text.split_inclusive('\n').skip(start).take(limit.map_or(usize::MAX, |l| l as usize)).collect();
                 json!({ "content": lines.concat() })
             }),
             ClientRequest::WriteTextFile { path, content, .. } => {
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                std::fs::write(&path, content)
-                    .map(|_| json!(null))
-                    .map_err(failed)
+                std::fs::write(&path, content).map(|_| json!(null)).map_err(failed)
             }
             ClientRequest::RequestPermission { .. } | ClientRequest::Elicit { .. } => return None,
-            ClientRequest::CreateTerminal {
-                command,
-                args,
-                env,
-                cwd,
-                output_byte_limit,
-                ..
-            } => {
-                let root = self
-                    .hub
-                    .meta(thread)
-                    .map(|m| m.root.clone())
-                    .unwrap_or_default();
+            ClientRequest::CreateTerminal { command, args, env, cwd, output_byte_limit, .. } => {
+                let root = self.hub.meta(thread).map(|m| m.root.clone()).unwrap_or_default();
                 let mut cmd = Command::new(&command);
-                cmd.args(&args)
-                    .current_dir(cwd.map(Into::into).unwrap_or(root))
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
+                cmd.args(&args).current_dir(cwd.map(Into::into).unwrap_or(root)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
                 for (k, v) in env {
                     cmd.env(k, v);
                 }
@@ -284,19 +178,7 @@ impl Driver {
                     Err(e) => Err(failed(e)),
                     Ok(mut child) => {
                         let output = Arc::new(Mutex::new(Vec::new()));
-                        for pipe in [
-                            child
-                                .stdout
-                                .take()
-                                .map(|p| Box::new(p) as Box<dyn Read + Send>),
-                            child
-                                .stderr
-                                .take()
-                                .map(|p| Box::new(p) as Box<dyn Read + Send>),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        {
+                        for pipe in [child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>), child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>)].into_iter().flatten() {
                             let output = output.clone();
                             std::thread::spawn(move || {
                                 let mut pipe = pipe;
@@ -311,70 +193,41 @@ impl Driver {
                         }
                         let terminal_id = format!("term-{}", self.next_terminal);
                         self.next_terminal += 1;
-                        self.terminals.insert(
-                            terminal_id.clone(),
-                            Terminal {
-                                output,
-                                limit: output_byte_limit,
-                                exit: Arc::new(Mutex::new(None)),
-                                child: Arc::new(Mutex::new(Some(child))),
-                            },
-                        );
+                        self.terminals.insert(terminal_id.clone(), Terminal { output, limit: output_byte_limit, exit: Arc::new(Mutex::new(None)), child: Arc::new(Mutex::new(Some(child))) });
                         Ok(json!({ "terminalId": terminal_id }))
                     }
                 }
             }
-            ClientRequest::TerminalOutput { terminal_id, .. } => {
-                match self.terminals.get(&terminal_id) {
-                    None => Err(RpcError::new(code::INVALID_PARAMS, "no such terminal")),
-                    Some(t) => {
-                        poll_exit(t);
-                        let (text, truncated) = limited(&t.output.lock().unwrap(), t.limit);
-                        Ok(protocol::terminal_output_result(
-                            &text,
-                            truncated,
-                            t.exit.lock().unwrap().as_ref(),
-                        ))
-                    }
+            ClientRequest::TerminalOutput { terminal_id, .. } => match self.terminals.get(&terminal_id) {
+                None => Err(RpcError::new(code::INVALID_PARAMS, "no such terminal")),
+                Some(t) => {
+                    poll_exit(t);
+                    let (text, truncated) = limited(&t.output.lock().unwrap(), t.limit);
+                    Ok(protocol::terminal_output_result(&text, truncated, t.exit.lock().unwrap().as_ref()))
                 }
-            }
-            ClientRequest::WaitForTerminalExit { terminal_id, .. } => {
-                match self.terminals.get(&terminal_id) {
-                    None => Err(RpcError::new(code::INVALID_PARAMS, "no such terminal")),
-                    Some(t) => {
-                        let (tx, exit, child, thread, id) = (
-                            self.tx.clone(),
-                            t.exit.clone(),
-                            t.child.clone(),
-                            thread.clone(),
-                            id.clone(),
-                        );
-                        std::thread::spawn(move || {
-                            let status = loop {
-                                if let Some(s) = exit.lock().unwrap().clone() {
-                                    break s;
-                                }
-                                let waited = child
-                                    .lock()
-                                    .unwrap()
-                                    .as_mut()
-                                    .and_then(|c| c.try_wait().ok().flatten());
-                                if let Some(s) = waited {
-                                    let s = ExitStatus {
-                                        code: s.code().map(|c| c as u32),
-                                        signal: None,
-                                    };
-                                    *exit.lock().unwrap() = Some(s.clone());
-                                    break s;
-                                }
-                                std::thread::sleep(Duration::from_millis(20));
-                            };
-                            let _ = tx.send(Inbox::Served(conn, thread, id, Ok(status.to_value())));
-                        });
-                        return None;
-                    }
+            },
+            ClientRequest::WaitForTerminalExit { terminal_id, .. } => match self.terminals.get(&terminal_id) {
+                None => Err(RpcError::new(code::INVALID_PARAMS, "no such terminal")),
+                Some(t) => {
+                    let (tx, exit, child, thread, id) = (self.tx.clone(), t.exit.clone(), t.child.clone(), thread.clone(), id.clone());
+                    std::thread::spawn(move || {
+                        let status = loop {
+                            if let Some(s) = exit.lock().unwrap().clone() {
+                                break s;
+                            }
+                            let waited = child.lock().unwrap().as_mut().and_then(|c| c.try_wait().ok().flatten());
+                            if let Some(s) = waited {
+                                let s = ExitStatus { code: s.code().map(|c| c as u32), signal: None };
+                                *exit.lock().unwrap() = Some(s.clone());
+                                break s;
+                            }
+                            std::thread::sleep(Duration::from_millis(20));
+                        };
+                        let _ = tx.send(Inbox::Served(conn, thread, id, Ok(status.to_value())));
+                    });
+                    return None;
                 }
-            }
+            },
             ClientRequest::KillTerminal { terminal_id, .. } => {
                 if let Some(t) = self.terminals.get(&terminal_id) {
                     if let Some(c) = t.child.lock().unwrap().as_mut() {
@@ -438,17 +291,8 @@ impl Driver {
 fn poll_exit(t: &Terminal) {
     let mut exit = t.exit.lock().unwrap();
     if exit.is_none() {
-        if let Some(s) = t
-            .child
-            .lock()
-            .unwrap()
-            .as_mut()
-            .and_then(|c| c.try_wait().ok().flatten())
-        {
-            *exit = Some(ExitStatus {
-                code: s.code().map(|c| c as u32),
-                signal: None,
-            });
+        if let Some(s) = t.child.lock().unwrap().as_mut().and_then(|c| c.try_wait().ok().flatten()) {
+            *exit = Some(ExitStatus { code: s.code().map(|c| c as u32), signal: None });
         }
     }
 }

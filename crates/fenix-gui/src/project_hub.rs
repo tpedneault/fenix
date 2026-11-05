@@ -42,10 +42,7 @@ pub struct HubProject {
 
 impl HubProject {
     pub fn new(root: PathBuf, kind: ProjectKind) -> Self {
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| root.display().to_string());
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
         let exists = root.is_dir();
         HubProject {
             root,
@@ -68,10 +65,7 @@ impl HubProject {
     /// A subproject of `parent`, named by its path below it.
     pub fn child(root: PathBuf, kind: ProjectKind, parent: &Path) -> Self {
         let mut p = HubProject::new(root.clone(), kind);
-        p.name = root
-            .strip_prefix(parent)
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-            .unwrap_or(p.name);
+        p.name = root.strip_prefix(parent).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or(p.name);
         p.parent = Some(parent.to_path_buf());
         p
     }
@@ -113,24 +107,12 @@ pub struct Hub {
 /// appears in `hay` in order.
 fn matches(hay: &str, needle: &str) -> bool {
     let mut hay = hay.chars().flat_map(char::to_lowercase);
-    needle
-        .chars()
-        .flat_map(char::to_lowercase)
-        .filter(|c| !c.is_whitespace())
-        .all(|n| hay.any(|h| h == n))
+    needle.chars().flat_map(char::to_lowercase).filter(|c| !c.is_whitespace()).all(|n| hay.any(|h| h == n))
 }
 
 impl Hub {
     pub fn new(projects: Vec<HubProject>) -> Self {
-        Hub {
-            projects,
-            filter: String::new(),
-            filtering: false,
-            kind_filter: None,
-            focus: 0,
-            editing_group: None,
-            confirm_remove: None,
-        }
+        Hub { projects, filter: String::new(), filtering: false, kind_filter: None, focus: 0, editing_group: None, confirm_remove: None }
     }
 
     /// Project indices in display order, with the heading each starts
@@ -141,67 +123,30 @@ impl Hub {
         let filter = self.filter.trim();
         let visible = |p: &HubProject| {
             self.kind_filter.is_none_or(|k| p.kind == k)
-                && (filter.is_empty()
-                    || matches(&p.name, filter)
-                    || matches(&p.root.display().to_string(), filter)
-                    || p.group.as_deref().is_some_and(|g| matches(g, filter)))
+                && (filter.is_empty() || matches(&p.name, filter) || matches(&p.root.display().to_string(), filter) || p.group.as_deref().is_some_and(|g| matches(g, filter)))
         };
         let children = |root: &Path| -> Vec<usize> {
-            self.projects
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.parent.as_deref() == Some(root) && visible(c))
-                .map(|(i, _)| i)
-                .collect()
+            self.projects.iter().enumerate().filter(|(_, c)| c.parent.as_deref() == Some(root) && visible(c)).map(|(i, _)| i).collect()
         };
-        let top =
-            |p: &HubProject| p.parent.is_none() && (visible(p) || !children(&p.root).is_empty());
+        let top = |p: &HubProject| p.parent.is_none() && (visible(p) || !children(&p.root).is_empty());
         let mut rows: Vec<(String, usize)> = Vec::new();
         let push = |rows: &mut Vec<(String, usize)>, heading: &str, i: usize| {
             rows.push((heading.to_string(), i));
-            rows.extend(
-                children(&self.projects[i].root)
-                    .into_iter()
-                    .map(|c| (heading.to_string(), c)),
-            );
+            rows.extend(children(&self.projects[i].root).into_iter().map(|c| (heading.to_string(), c)));
         };
-        for (i, _) in self
-            .projects
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.pinned && top(p))
-        {
+        for (i, _) in self.projects.iter().enumerate().filter(|(_, p)| p.pinned && top(p)) {
             push(&mut rows, "Pinned", i);
         }
-        let mut groups: Vec<&str> = self
-            .projects
-            .iter()
-            .filter(|p| !p.pinned && p.parent.is_none())
-            .filter_map(|p| p.group.as_deref())
-            .collect();
+        let mut groups: Vec<&str> = self.projects.iter().filter(|p| !p.pinned && p.parent.is_none()).filter_map(|p| p.group.as_deref()).collect();
         groups.sort_unstable();
         groups.dedup();
         for group in groups {
-            for (i, _) in self
-                .projects
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| !p.pinned && p.group.as_deref() == Some(group) && top(p))
-            {
+            for (i, _) in self.projects.iter().enumerate().filter(|(_, p)| !p.pinned && p.group.as_deref() == Some(group) && top(p)) {
                 push(&mut rows, group, i);
             }
         }
-        let heading = if rows.is_empty() {
-            "Projects"
-        } else {
-            "Ungrouped"
-        };
-        for (i, _) in self
-            .projects
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.pinned && p.group.is_none() && top(p))
-        {
+        let heading = if rows.is_empty() { "Projects" } else { "Ungrouped" };
+        for (i, _) in self.projects.iter().enumerate().filter(|(_, p)| !p.pinned && p.group.is_none() && top(p)) {
             push(&mut rows, heading, i);
         }
         rows
@@ -211,20 +156,9 @@ impl Hub {
     /// that are registered in their own right (they have their own row).
     pub fn set_subprojects(&mut self, parent: &Path, found: Vec<(PathBuf, ProjectKind)>) {
         let selected = self.selected().map(|p| p.root.clone());
-        self.projects
-            .retain(|p| p.parent.as_deref() != Some(parent));
-        let registered: Vec<PathBuf> = self
-            .projects
-            .iter()
-            .filter(|p| p.parent.is_none())
-            .map(|p| p.root.clone())
-            .collect();
-        self.projects.extend(
-            found
-                .into_iter()
-                .filter(|(root, _)| !registered.contains(root))
-                .map(|(root, kind)| HubProject::child(root, kind, parent)),
-        );
+        self.projects.retain(|p| p.parent.as_deref() != Some(parent));
+        let registered: Vec<PathBuf> = self.projects.iter().filter(|p| p.parent.is_none()).map(|p| p.root.clone()).collect();
+        self.projects.extend(found.into_iter().filter(|(root, _)| !registered.contains(root)).map(|(root, kind)| HubProject::child(root, kind, parent)));
         if let Some(root) = selected {
             self.focus_root(&root);
         }
@@ -252,11 +186,7 @@ impl Hub {
 
     /// Keeps the selection on `root` across a change that reorders rows.
     pub fn focus_root(&mut self, root: &Path) {
-        if let Some(i) = self
-            .rows()
-            .iter()
-            .position(|(_, i)| self.projects[*i].root == root)
-        {
+        if let Some(i) = self.rows().iter().position(|(_, i)| self.projects[*i].root == root) {
             self.focus = i;
         }
     }
@@ -294,9 +224,7 @@ impl Hub {
                 Key::Backspace => {
                     self.filter.pop();
                 }
-                Key::Down | Key::Tab => {
-                    self.focus = (self.focus + 1).min(self.rows().len().saturating_sub(1))
-                }
+                Key::Down | Key::Tab => self.focus = (self.focus + 1).min(self.rows().len().saturating_sub(1)),
                 Key::Up | Key::BackTab => self.focus = self.focus.saturating_sub(1),
                 Key::Char(c) => self.filter.push(c),
                 Key::Space => self.filter.push(' '),
@@ -319,9 +247,7 @@ impl Hub {
                 self.kind_filter = None;
             }
             Key::Escape => return Action::Close,
-            Key::Char('j') | Key::Down => {
-                self.focus = (self.focus + 1).min(self.rows().len().saturating_sub(1))
-            }
+            Key::Char('j') | Key::Down => self.focus = (self.focus + 1).min(self.rows().len().saturating_sub(1)),
             Key::Char('k') | Key::Up => self.focus = self.focus.saturating_sub(1),
             Key::Char('g') if listed => {
                 if let Some(p) = self.selected() {
@@ -337,9 +263,7 @@ impl Hub {
             }
             Key::Tab | Key::BackTab => {
                 let kinds = self.kinds();
-                let at = self
-                    .kind_filter
-                    .and_then(|k| kinds.iter().position(|x| *x == k));
+                let at = self.kind_filter.and_then(|k| kinds.iter().position(|x| *x == k));
                 self.kind_filter = match (at, key == Key::Tab) {
                     (None, true) => kinds.first().copied(),
                     (None, false) => kinds.last().copied(),
@@ -424,26 +348,13 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
     } else {
         hub.filter.clone()
     };
-    let end = g.put(
-        y,
-        left + 2,
-        &fit(&field, list_width.saturating_sub(4)),
-        if hub.filtering || !hub.filter.is_empty() {
-            Role::Title
-        } else {
-            Role::Muted
-        },
-    );
+    let end = g.put(y, left + 2, &fit(&field, list_width.saturating_sub(4)), if hub.filtering || !hub.filter.is_empty() { Role::Title } else { Role::Muted });
     if hub.filtering {
         g.panels.push((y, left + 1..end + 1));
     }
     y += 1;
     let mut x = left + 2;
-    let all = if hub.kind_filter.is_none() {
-        Role::Accent
-    } else {
-        Role::Muted
-    };
+    let all = if hub.kind_filter.is_none() { Role::Accent } else { Role::Muted };
     x = g.put(y, x, &format!("all {}", hub.projects.len()), all) + 3;
     for kind in hub.kinds() {
         let n = hub.projects.iter().filter(|p| p.kind == kind).count();
@@ -451,16 +362,7 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
         if x + text.len() > left + list_width {
             break;
         }
-        x = g.put(
-            y,
-            x,
-            &text,
-            if hub.kind_filter == Some(kind) {
-                Role::Accent
-            } else {
-                Role::Kind(kind)
-            },
-        ) + 3;
+        x = g.put(y, x, &text, if hub.kind_filter == Some(kind) { Role::Accent } else { Role::Kind(kind) }) + 3;
     }
     y += 2;
 
@@ -487,14 +389,7 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
         }
         g.put(y, left + 2 + indent, p.kind.tag(), Role::Kind(p.kind));
         // Right side: health dot, changes, branch.
-        let branch = if p.parent.is_some() {
-            None
-        } else {
-            p.git
-                .as_ref()
-                .and_then(|g| g.branch.clone())
-                .or_else(|| p.branch.clone())
-        };
+        let branch = if p.parent.is_some() { None } else { p.git.as_ref().and_then(|g| g.branch.clone()).or_else(|| p.branch.clone()) };
         let mut right = String::new();
         if let Some(branch) = &branch {
             right.push_str(&fit(branch, 18));
@@ -512,40 +407,16 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
         let right_len = right.chars().count() + 2;
         let right_x = (left + list_width).saturating_sub(right_len + 2);
         let name_room = right_x.saturating_sub(left + 8 + indent);
-        g.put(
-            y,
-            left + 7 + indent,
-            &fit(&p.name, name_room),
-            if focused { Role::Title } else { Role::Text },
-        );
-        g.put(
-            y,
-            right_x,
-            &right,
-            if p.exists { Role::Muted } else { Role::Bad },
-        );
+        g.put(y, left + 7 + indent, &fit(&p.name, name_room), if focused { Role::Title } else { Role::Text });
+        g.put(y, right_x, &right, if p.exists { Role::Muted } else { Role::Bad });
         if let Some((health, _)) = p.health {
-            g.put(
-                y,
-                (left + list_width).saturating_sub(3),
-                "●",
-                health_role(health),
-            );
+            g.put(y, (left + list_width).saturating_sub(3), "●", health_role(health));
         }
         y += 1;
     }
     if rows.is_empty() {
-        let text = if hub.projects.is_empty() {
-            "no projects yet -- c creates one, a adds a folder"
-        } else {
-            "nothing matches"
-        };
-        g.put(
-            y,
-            left + 2,
-            &fit(text, list_width.saturating_sub(4)),
-            Role::Muted,
-        );
+        let text = if hub.projects.is_empty() { "no projects yet -- c creates one, a adds a folder" } else { "nothing matches" };
+        g.put(y, left + 2, &fit(text, list_width.saturating_sub(4)), Role::Muted);
         y += 1;
     }
     y += 1;
@@ -555,29 +426,14 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
     y += 1;
     if let Some(root) = &hub.confirm_remove {
         y += 1;
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        g.put(
-            y,
-            left + 2,
-            &fit(
-                &format!("d again to remove {name} from the list -- the folder stays"),
-                list_width,
-            ),
-            Role::Warn,
-        );
+        let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        g.put(y, left + 2, &fit(&format!("d again to remove {name} from the list -- the folder stays"), list_width), Role::Warn);
         y += 1;
     }
 
     // The preview.
     if let Some(p) = hub.selected() {
-        let (x, mut y, w) = if two_columns {
-            (left + list_width + 2, 4, width - list_width - 2)
-        } else {
-            (left, y + 1, width)
-        };
+        let (x, mut y, w) = if two_columns { (left + list_width + 2, 4, width - list_width - 2) } else { (left, y + 1, width) };
         let end = g.put(y, x, &fit(&p.name, w.saturating_sub(8)), Role::Title);
         g.put(y, end + 2, p.kind.tag(), Role::Kind(p.kind));
         y += 1;
@@ -608,10 +464,7 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
                 g.put(y, x, "●", health_role(health));
                 let text = match problems {
                     0 => "no problems found".to_string(),
-                    n => format!(
-                        "{n} problem{} -- h for the doctor",
-                        if n == 1 { "" } else { "s" }
-                    ),
+                    n => format!("{n} problem{} -- h for the doctor", if n == 1 { "" } else { "s" }),
                 };
                 g.put(y, x + 2, &fit(&text, w.saturating_sub(2)), Role::Text);
             }
@@ -639,11 +492,7 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
                 g.put(y, x, &fit(&line, w), Role::Text);
                 y += 1;
                 if let Some((subject, _)) = &git.last_commit {
-                    let age = p
-                        .last_commit_age
-                        .as_deref()
-                        .map(|a| format!(" · {a}"))
-                        .unwrap_or_default();
+                    let age = p.last_commit_age.as_deref().map(|a| format!(" · {a}")).unwrap_or_default();
                     g.put(y, x, &fit(&format!("“{subject}”{age}"), w), Role::Muted);
                     y += 1;
                 }
@@ -672,12 +521,7 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
                 y += 1;
             }
             if p.work.len() > 3 {
-                g.put(
-                    y,
-                    x + 2,
-                    &format!("and {} more", p.work.len() - 3),
-                    Role::Muted,
-                );
+                g.put(y, x + 2, &format!("and {} more", p.work.len() - 3), Role::Muted);
                 y += 1;
             }
         }
@@ -697,18 +541,7 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
     } else if hub.filtering {
         &[("Enter", "open"), ("↑ ↓", "move"), ("Esc", "clear")]
     } else {
-        &[
-            ("Enter", "open"),
-            ("c", "new"),
-            ("h", "doctor"),
-            (",", "settings"),
-            ("P", "pin"),
-            ("g", "group"),
-            ("d", "remove"),
-            ("Tab", "kind"),
-            ("/", "filter"),
-            ("q", "close"),
-        ]
+        &[("Enter", "open"), ("c", "new"), ("h", "doctor"), (",", "settings"), ("P", "pin"), ("g", "group"), ("d", "remove"), ("Tab", "kind"), ("/", "filter"), ("q", "close")]
     };
     g.keys(left, width, keys);
     g.finish()
@@ -729,24 +562,10 @@ mod tests {
     fn subprojects_sit_under_their_repository_and_bring_it_along_when_filtered() {
         let mut hub = hub();
         let mono = PathBuf::from("/work/report-gen");
-        hub.set_subprojects(
-            &mono,
-            vec![
-                (mono.join("crates/core"), ProjectKind::Rust),
-                (mono.join("tools"), ProjectKind::Python),
-                (PathBuf::from("/work/orbit-tools"), ProjectKind::Python),
-            ],
-        );
+        hub.set_subprojects(&mono, vec![(mono.join("crates/core"), ProjectKind::Rust), (mono.join("tools"), ProjectKind::Python), (PathBuf::from("/work/orbit-tools"), ProjectKind::Python)]);
         let rows = names(&hub);
-        let at = rows
-            .iter()
-            .position(|r| r == "Ungrouped/report-gen")
-            .unwrap();
-        assert_eq!(
-            &rows[at + 1..],
-            ["Ungrouped/crates/core", "Ungrouped/tools"],
-            "a registered one isn't repeated as a child"
-        );
+        let at = rows.iter().position(|r| r == "Ungrouped/report-gen").unwrap();
+        assert_eq!(&rows[at + 1..], ["Ungrouped/crates/core", "Ungrouped/tools"], "a registered one isn't repeated as a child");
         let text = layout(&hub, 130).text;
         assert!(text.contains("└  RS   crates/core"), "{text}");
         for c in "/crates".chars() {
@@ -755,19 +574,13 @@ mod tests {
         assert_eq!(names(&hub), ["Projects/report-gen", "Projects/crates/core"]);
         hub.key(Key::Escape);
         // Pins, groups and removal don't apply to a subproject.
-        hub.focus = names(&hub)
-            .iter()
-            .position(|r| r.ends_with("crates/core"))
-            .unwrap();
+        hub.focus = names(&hub).iter().position(|r| r.ends_with("crates/core")).unwrap();
         assert_eq!(hub.key(Key::Char('P')), Action::None);
         assert_eq!(hub.key(Key::Char('d')), Action::None);
         assert_eq!(hub.key(Key::Enter), Action::Open(mono.join("crates/core")));
         // Found again: replaced, not doubled.
         hub.set_subprojects(&mono, vec![(mono.join("tools"), ProjectKind::Python)]);
-        assert_eq!(
-            hub.projects.iter().filter(|p| p.parent.is_some()).count(),
-            1
-        );
+        assert_eq!(hub.projects.iter().filter(|p| p.parent.is_some()).count(), 1);
     }
 
     fn hub() -> Hub {
@@ -775,44 +588,24 @@ mod tests {
             project("orbit-tools", ProjectKind::Python, None, true),
             project("blink-lab", ProjectKind::Arduino, Some("Class labs"), false),
             project("mission-c", ProjectKind::Mib, Some("Mission ops"), false),
-            project(
-                "servo-sweep",
-                ProjectKind::Arduino,
-                Some("Class labs"),
-                false,
-            ),
+            project("servo-sweep", ProjectKind::Arduino, Some("Class labs"), false),
             project("report-gen", ProjectKind::Python, None, false),
         ])
     }
 
     fn names(hub: &Hub) -> Vec<String> {
-        hub.rows()
-            .iter()
-            .map(|(g, i)| format!("{g}/{}", hub.projects[*i].name))
-            .collect()
+        hub.rows().iter().map(|(g, i)| format!("{g}/{}", hub.projects[*i].name)).collect()
     }
 
     #[test]
     fn rows_are_pinned_then_groups_then_the_rest() {
         assert_eq!(
             names(&hub()),
-            [
-                "Pinned/orbit-tools",
-                "Class labs/blink-lab",
-                "Class labs/servo-sweep",
-                "Mission ops/mission-c",
-                "Ungrouped/report-gen"
-            ]
+            ["Pinned/orbit-tools", "Class labs/blink-lab", "Class labs/servo-sweep", "Mission ops/mission-c", "Ungrouped/report-gen"]
         );
         let text = layout(&hub(), 130).text;
-        assert!(
-            text.contains("PINNED") && text.contains("CLASS LABS") && text.contains("UNGROUPED"),
-            "{text}"
-        );
-        assert!(
-            text.contains("INO 2") && text.contains("all 5"),
-            "kind chips:\n{text}"
-        );
+        assert!(text.contains("PINNED") && text.contains("CLASS LABS") && text.contains("UNGROUPED"), "{text}");
+        assert!(text.contains("INO 2") && text.contains("all 5"), "kind chips:\n{text}");
     }
 
     #[test]
@@ -823,10 +616,7 @@ mod tests {
         }
         assert!(hub.filtering);
         assert_eq!(names(&hub), ["Class labs/servo-sweep"]);
-        assert_eq!(
-            hub.key(Key::Enter),
-            Action::Open(PathBuf::from("/work/servo-sweep"))
-        );
+        assert_eq!(hub.key(Key::Enter), Action::Open(PathBuf::from("/work/servo-sweep")));
         hub.key(Key::Escape);
         assert_eq!(names(&hub).len(), 5, "Esc clears the filter");
     }
@@ -836,11 +626,7 @@ mod tests {
         let mut hub = hub();
         hub.key(Key::Tab);
         assert_eq!(hub.kind_filter, Some(ProjectKind::Python));
-        assert_eq!(
-            names(&hub),
-            ["Pinned/orbit-tools", "Projects/report-gen"]
-                .map(|s| s.replace("Projects", "Ungrouped"))
-        );
+        assert_eq!(names(&hub), ["Pinned/orbit-tools", "Projects/report-gen"].map(|s| s.replace("Projects", "Ungrouped")));
         hub.key(Key::Tab);
         assert_eq!(hub.kind_filter, Some(ProjectKind::Arduino));
         hub.key(Key::Tab);
@@ -857,9 +643,7 @@ mod tests {
         assert_eq!(hub.key(Key::Char(',')), Action::Settings(blink.clone()));
         assert_eq!(hub.key(Key::Char('P')), Action::TogglePin(blink.clone()));
         assert_eq!(hub.key(Key::Char('d')), Action::None, "d once asks");
-        assert!(layout(&hub, 130)
-            .text
-            .contains("d again to remove blink-lab"));
+        assert!(layout(&hub, 130).text.contains("d again to remove blink-lab"));
         assert_eq!(hub.key(Key::Char('d')), Action::Remove(blink.clone()));
         hub.key(Key::Char('g'));
         hub.key(Key::Backspace);
@@ -875,27 +659,14 @@ mod tests {
     fn the_preview_shows_git_health_and_work() {
         let mut hub = hub();
         let p = &mut hub.projects[0];
-        p.git = Some(GitSummary {
-            branch: Some("master".into()),
-            changed: 3,
-            ahead: 2,
-            behind: 0,
-            last_commit: Some(("Parse PUS-17 replies".into(), 0)),
-        });
+        p.git = Some(GitSummary { branch: Some("master".into()), changed: 3, ahead: 2, behind: 0, last_commit: Some(("Parse PUS-17 replies".into(), 0)) });
         p.last_commit_age = Some("1 h".into());
         p.health = Some((Health::Warn, 1));
         p.jira = Some("FNX".into());
         p.work = vec!["FNX-58 Telemetry decoder".into()];
         p.tasks = vec!["run".into(), "test".into()];
         let text = layout(&hub, 130).text;
-        for needle in [
-            "master ↑2 · 3 changed",
-            "Parse PUS-17 replies",
-            "1 problem",
-            "FNX-58 Telemetry decoder",
-            "run · test",
-            "master ↑2 •3",
-        ] {
+        for needle in ["master ↑2 · 3 changed", "Parse PUS-17 replies", "1 problem", "FNX-58 Telemetry decoder", "run · test", "master ↑2 •3"] {
             assert!(text.contains(needle), "{needle:?} missing:\n{text}");
         }
     }
@@ -914,16 +685,9 @@ mod tests {
     #[test]
     fn it_fits_a_narrow_pane() {
         let mut hub = hub();
-        hub.projects[0].git = Some(GitSummary {
-            branch: Some("a-very-long-feature-branch-name".into()),
-            ..Default::default()
-        });
+        hub.projects[0].git = Some(GitSummary { branch: Some("a-very-long-feature-branch-name".into()), ..Default::default() });
         let page = layout(&hub, 50);
-        assert!(
-            page.text.lines().all(|l| l.chars().count() <= 50),
-            "{}",
-            page.text
-        );
+        assert!(page.text.lines().all(|l| l.chars().count() <= 50), "{}", page.text);
         assert!(page.focus.is_some());
     }
 }

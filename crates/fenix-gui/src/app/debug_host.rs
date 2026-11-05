@@ -49,11 +49,7 @@ pub(super) fn debug_mode_action(key: KeyPress) -> Option<DebugAction> {
 /// The F-keys, everyone else's debugger keys, in every mode: F5 starts or
 /// continues, Shift-F5 stops, Ctrl-Shift-F5 restarts, F6 pauses, F9 sets
 /// a breakpoint, F10 / F11 / Shift-F11 step over, in and out.
-pub(super) fn function_key_action(
-    key: &winit::keyboard::NamedKey,
-    shift: bool,
-    ctrl: bool,
-) -> Option<DebugAction> {
+pub(super) fn function_key_action(key: &winit::keyboard::NamedKey, shift: bool, ctrl: bool) -> Option<DebugAction> {
     use winit::keyboard::NamedKey as K;
     Some(match (key, shift, ctrl) {
         (K::F5, false, false) => DebugAction::StartOrContinue,
@@ -81,22 +77,11 @@ pub(crate) fn debug_dock_height(line_height: f32) -> f32 {
 /// share)` given its share of the width, its lines cut or padded to it
 /// and cut at `rows`: the rows, each column's text apart, the titles
 /// first.
-pub(super) fn dock_columns(
-    columns: &[(&str, Vec<String>, usize)],
-    width: usize,
-    rows: usize,
-) -> Vec<Vec<String>> {
-    let total: usize = columns
-        .iter()
-        .map(|(_, _, share)| share)
-        .sum::<usize>()
-        .max(1);
+pub(super) fn dock_columns(columns: &[(&str, Vec<String>, usize)], width: usize, rows: usize) -> Vec<Vec<String>> {
+    let total: usize = columns.iter().map(|(_, _, share)| share).sum::<usize>().max(1);
     let gaps = columns.len().saturating_sub(1) * 3;
     let usable = width.saturating_sub(gaps);
-    let widths: Vec<usize> = columns
-        .iter()
-        .map(|(_, _, share)| usable * share / total)
-        .collect();
+    let widths: Vec<usize> = columns.iter().map(|(_, _, share)| usable * share / total).collect();
     let fit = |text: &str, w: usize| -> String {
         let n = text.chars().count();
         if n > w {
@@ -148,9 +133,7 @@ const INLINE_VALUE_CHARS: usize = 48;
 
 /// `path`'s file name alone, for a narrow column.
 fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
 }
 
 /// Whether `a` and `b` name the same file, as a breakpoint's path, a
@@ -158,14 +141,8 @@ fn file_name(path: &Path) -> String {
 /// Windows, letter case aside.
 pub(super) fn same_file(a: &Path, b: &Path) -> bool {
     let norm = |p: &Path| {
-        let s = fenix_lsp::normalize(p.to_path_buf())
-            .to_string_lossy()
-            .replace('\\', "/");
-        if cfg!(windows) {
-            s.to_lowercase()
-        } else {
-            s
-        }
+        let s = fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('\\', "/");
+        if cfg!(windows) { s.to_lowercase() } else { s }
     };
     norm(a) == norm(b)
 }
@@ -176,38 +153,15 @@ pub(super) fn same_file(a: &Path, b: &Path) -> bool {
 /// only, `name = value` with the line's names in the order they appear.
 /// `lines` is `(0-based line, text)` for those lines, in order.
 #[cfg(test)]
-pub(super) fn inline_values(
-    lines: &[(usize, String)],
-    stop_line: usize,
-    locals: &[(String, String)],
-) -> Vec<(usize, String)> {
-    inline_pieces(lines, stop_line, locals)
-        .into_iter()
-        .map(|(line, pieces)| {
-            (
-                line,
-                pieces
-                    .into_iter()
-                    .map(|(n, v)| format!("{n} = {v}"))
-                    .collect::<Vec<_>>()
-                    .join("  "),
-            )
-        })
-        .collect()
+pub(super) fn inline_values(lines: &[(usize, String)], stop_line: usize, locals: &[(String, String)]) -> Vec<(usize, String)> {
+    inline_pieces(lines, stop_line, locals).into_iter().map(|(line, pieces)| (line, pieces.into_iter().map(|(n, v)| format!("{n} = {v}")).collect::<Vec<_>>().join("  "))).collect()
 }
 
 /// `inline_values`, each line's `(name, value)`s apart, the value cut to
 /// fit.
-pub(super) fn inline_pieces(
-    lines: &[(usize, String)],
-    stop_line: usize,
-    locals: &[(String, String)],
-) -> Vec<(usize, Vec<(String, String)>)> {
+pub(super) fn inline_pieces(lines: &[(usize, String)], stop_line: usize, locals: &[(String, String)]) -> Vec<(usize, Vec<(String, String)>)> {
     let first = stop_line.saturating_sub(INLINE_LOOKBACK);
-    let lines: Vec<&(usize, String)> = lines
-        .iter()
-        .filter(|(l, _)| (first..=stop_line).contains(l))
-        .collect();
+    let lines: Vec<&(usize, String)> = lines.iter().filter(|(l, _)| (first..=stop_line).contains(l)).collect();
     let words = |text: &str| -> Vec<String> {
         let mut out = Vec::new();
         let mut cur = String::new();
@@ -250,39 +204,16 @@ pub(super) fn inline_pieces(
 /// `INLINE_VALUE_CHARS`.
 fn cut_value(value: &str) -> String {
     let value: String = value.chars().filter(|c| !c.is_control()).collect();
-    if value.chars().count() > INLINE_VALUE_CHARS {
-        format!(
-            "{}…",
-            value
-                .chars()
-                .take(INLINE_VALUE_CHARS - 1)
-                .collect::<String>()
-        )
-    } else {
-        value
-    }
+    if value.chars().count() > INLINE_VALUE_CHARS { format!("{}…", value.chars().take(INLINE_VALUE_CHARS - 1).collect::<String>()) } else { value }
 }
 
 /// A line's values as decorations at `at`, the end of the line: each
 /// `name = value`, a changed one's value in ember with what it was struck
 /// beside it (`changed`).
-fn value_decorations(
-    at: usize,
-    pieces: &[(String, String)],
-    changed: &[(String, String)],
-) -> Vec<crate::decorations::Decoration> {
+fn value_decorations(at: usize, pieces: &[(String, String)], changed: &[(String, String)]) -> Vec<crate::decorations::Decoration> {
     use crate::decorations::{Decoration, Look};
     use crate::page::Role;
-    let text = |text: String, role: Role| Decoration {
-        start: at,
-        end: at,
-        look: Look::Text {
-            text,
-            role,
-            after: true,
-        },
-        id: None,
-    };
+    let text = |text: String, role: Role| Decoration { start: at, end: at, look: Look::Text { text, role, after: true }, id: None };
     let mut out = Vec::new();
     let mut lead = "    ".to_string();
     for (name, value) in pieces {
@@ -291,12 +222,7 @@ fn value_decorations(
                 out.push(text(format!("{lead}{name} = "), Role::Muted));
                 out.push(text(value.clone(), Role::Warn));
                 out.push(text(" ".to_string(), Role::Muted));
-                out.push(Decoration {
-                    start: at,
-                    end: at,
-                    look: Look::Struck(cut_value(old)),
-                    id: None,
-                });
+                out.push(Decoration { start: at, end: at, look: Look::Struck(cut_value(old)), id: None });
             }
             None => out.push(text(format!("{lead}{name} = {value}"), Role::Muted)),
         }
@@ -311,16 +237,9 @@ pub(super) fn debug_state_text(session: &DebugSession) -> String {
         return "ended".to_string();
     }
     // Stopped in a child session: which.
-    let child = session
-        .children
-        .iter()
-        .find(|c| c.generation == session.stopped_on)
-        .map(|c| format!(" in {}", c.name))
-        .unwrap_or_default();
+    let child = session.children.iter().find(|c| c.generation == session.stopped_on).map(|c| format!(" in {}", c.name)).unwrap_or_default();
     match (session.stopped_thread, session.call_stack.first()) {
-        (Some(_), Some((function, path, line))) => {
-            format!("stopped {function} {}:{line}{child}", file_name(path))
-        }
+        (Some(_), Some((function, path, line))) => format!("stopped {function} {}:{line}{child}", file_name(path)),
         (Some(_), None) => "stopped".to_string(),
         (None, _) if session.initialized => "running".to_string(),
         (None, _) => "starting".to_string(),
@@ -332,9 +251,7 @@ impl App {
     /// you're in, Normal mode in the editor, and not left with Esc since
     /// it stopped.
     pub(super) fn debug_mode_active(&self) -> bool {
-        let Some(session) = self.debug_session.as_ref() else {
-            return false;
-        };
+        let Some(session) = self.debug_session.as_ref() else { return false };
         session.stopped_thread.is_some()
             && !session.ended
             && !self.debug_mode_left
@@ -349,29 +266,17 @@ impl App {
     /// and for a key that's part of something under way (a leader key, a
     /// count, an operator).
     pub(super) fn debug_mode_key(&mut self, key: KeyPress) -> bool {
-        if !self.debug_mode_active()
-            || self.leader_matcher.is_pending()
-            || self.local_matcher.is_some()
-            || !self.vim.is_idle()
-        {
+        if !self.debug_mode_active() || self.leader_matcher.is_pending() || self.local_matcher.is_some() || !self.vim.is_idle() {
             return false;
         }
-        let Some(action) = debug_mode_action(key) else {
-            return false;
-        };
+        let Some(action) = debug_mode_action(key) else { return false };
         self.debug_do(action);
         true
     }
 
     /// An F-key, in any mode: done if it's a debugger key.
     pub(super) fn debug_function_key(&mut self, key: &winit::keyboard::NamedKey) -> bool {
-        let Some(action) = function_key_action(
-            key,
-            self.modifiers.shift_key(),
-            self.modifiers.control_key(),
-        ) else {
-            return false;
-        };
+        let Some(action) = function_key_action(key, self.modifiers.shift_key(), self.modifiers.control_key()) else { return false };
         self.debug_do(action);
         true
     }
@@ -398,12 +303,7 @@ impl App {
             self.set_error("buffer has no file to run to".to_string());
             return;
         };
-        if self
-            .debug_session
-            .as_ref()
-            .and_then(|s| s.stopped_thread)
-            .is_none()
-        {
+        if self.debug_session.as_ref().and_then(|s| s.stopped_thread).is_none() {
             self.set_error("debug session isn't stopped".to_string());
             return;
         }
@@ -427,9 +327,7 @@ impl App {
 
     /// F6: stops the running program where it is.
     pub(crate) fn debug_pause(&mut self) {
-        if !self.debug_scope_matches() {
-            return;
-        }
+        if !self.debug_scope_matches() { return; }
         let Some(session) = self.debug_session.as_ref().filter(|s| !s.ended) else {
             self.set_error("no debug session running".to_string());
             return;
@@ -440,36 +338,20 @@ impl App {
         }
         // The connection the program runs on: a child's, under js-debug.
         let thread_id = session.last_thread.unwrap_or(0);
-        if let Some(client) = session
-            .client_of(session.running_on)
-            .or_else(|| session.client_of(session.generation))
-        {
-            let _ = client.request(fenix_dap::requests::Request::Pause(
-                fenix_dap::requests::PauseRequestArguments::builder()
-                    .thread_id(thread_id)
-                    .build(),
-            ));
+        if let Some(client) = session.client_of(session.running_on).or_else(|| session.client_of(session.generation)) {
+            let _ = client.request(fenix_dap::requests::Request::Pause(fenix_dap::requests::PauseRequestArguments::builder().thread_id(thread_id).build()));
         }
     }
 
     /// Ctrl-Shift-F5: the session ended and started again, as it was
     /// launched -- the same adapter, program and attributes.
     pub(crate) fn debug_restart(&mut self) {
-        if !self.debug_scope_matches() {
-            return;
-        }
+        if !self.debug_scope_matches() { return; }
         let Some(session) = self.debug_session.as_ref() else {
             self.set_error("no debug session to restart".to_string());
             return;
         };
-        let (language, root, adapter, attributes, attach, name) = (
-            session.language,
-            session.root.clone(),
-            session.adapter.clone(),
-            session.launch_attributes.clone(),
-            session.attach,
-            session.name.clone(),
-        );
+        let (language, root, adapter, attributes, attach, name) = (session.language, session.root.clone(), session.adapter.clone(), session.launch_attributes.clone(), session.attach, session.name.clone());
         if !session.ended || !session.client_closed {
             self.debug_stop();
         }
@@ -483,15 +365,9 @@ impl App {
         if let Some(then) = self.debug_trail_modeline() {
             return format!("   [{then}]");
         }
-        let Some(session) = self.debug_session.as_ref().filter(|s| !s.ended) else {
-            return String::new();
-        };
+        let Some(session) = self.debug_session.as_ref().filter(|s| !s.ended) else { return String::new() };
         let state = debug_state_text(session);
-        if self.debug_mode_active() {
-            format!("   [{state}]   {DEBUG_KEYS}")
-        } else {
-            format!("   [{state}]")
-        }
+        if self.debug_mode_active() { format!("   [{state}]   {DEBUG_KEYS}") } else { format!("   [{state}]") }
     }
 
     /// Whether the debug dock is shown: there's a session, and it hasn't
@@ -505,12 +381,7 @@ impl App {
         if !self.debug_dock_shown() {
             return 0.0;
         }
-        debug_dock_height(
-            self.text
-                .as_ref()
-                .map(|t| t.line_height())
-                .unwrap_or(crate::text::LINE_HEIGHT),
-        )
+        debug_dock_height(self.text.as_ref().map(|t| t.line_height()).unwrap_or(crate::text::LINE_HEIGHT))
     }
 
     /// `SPC u d`: the dock shown, or put away.
@@ -540,48 +411,21 @@ impl App {
     /// document lines `lines` from its first row, `rows` of them: each
     /// `(row, mark)`. Nothing for a buffer without a file, or when there's
     /// nothing to show.
-    pub(super) fn debug_marks(
-        &self,
-        buffer: BufferId,
-        lines: &[usize],
-        rows: usize,
-    ) -> Vec<(usize, DebugMark)> {
+    pub(super) fn debug_marks(&self, buffer: BufferId, lines: &[usize], rows: usize) -> Vec<(usize, DebugMark)> {
         let stop = self.debug_stop_location();
         if self.breakpoints.values().all(|l| l.is_empty()) && stop.is_none() {
             return Vec::new();
         }
-        let Some(path) = self
-            .buffers
-            .get(buffer)
-            .and_then(|ob| ob.buffer.path())
-            .map(Path::to_path_buf)
-        else {
-            return Vec::new();
-        };
-        let breakpoints: HashMap<usize, BreakpointLook> = self
-            .breakpoints
-            .iter()
-            .filter(|(p, _)| same_file(p, &path))
-            .flat_map(|(_, lines)| lines.iter().map(|(l, b)| (*l, b.look())))
-            .collect();
-        let stop_line = stop
-            .filter(|(p, _)| same_file(p, &path))
-            .map(|(_, line)| line);
+        let Some(path) = self.buffers.get(buffer).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return Vec::new() };
+        let breakpoints: HashMap<usize, BreakpointLook> = self.breakpoints.iter().filter(|(p, _)| same_file(p, &path)).flat_map(|(_, lines)| lines.iter().map(|(l, b)| (*l, b.look()))).collect();
+        let stop_line = stop.filter(|(p, _)| same_file(p, &path)).map(|(_, line)| line);
         let mut marks = Vec::new();
         for (row, &line) in lines.iter().enumerate().take(rows + 1) {
             let one_based = line + 1;
             let mark = match (stop_line == Some(one_based), breakpoints.get(&one_based)) {
                 (true, Some(look)) => DebugMark::StopOnBreakpoint(*look),
                 (true, None) => DebugMark::Stop,
-                (false, Some(look))
-                    if self
-                        .agent_calls
-                        .agent_breakpoints
-                        .iter()
-                        .any(|(p, l)| *l == one_based && same_file(p, &path)) =>
-                {
-                    DebugMark::AgentBreakpoint(*look)
-                }
+                (false, Some(look)) if self.agent_calls.agent_breakpoints.iter().any(|(p, l)| *l == one_based && same_file(p, &path)) => DebugMark::AgentBreakpoint(*look),
                 (false, Some(look)) => DebugMark::Breakpoint(*look),
                 (false, None) => continue,
             };
@@ -594,87 +438,41 @@ impl App {
     /// every buffer on its file; taken away from them all when it isn't
     /// stopped. Called whenever the debug panes are drawn again.
     pub(super) fn refresh_debug_decorations(&mut self) {
-        let mut stale: Vec<BufferId> = self
-            .wasm
-            .decorations
-            .iter()
-            .filter(|(_, sets)| sets.iter().any(|(who, _)| who == DEBUG_DECORATIONS))
-            .map(|(id, _)| *id)
-            .collect();
+        let mut stale: Vec<BufferId> = self.wasm.decorations.iter().filter(|(_, sets)| sets.iter().any(|(who, _)| who == DEBUG_DECORATIONS)).map(|(id, _)| *id).collect();
         // A stop gone back to along the trail, its values as they were; else
         // the selected frame's, and what changed at this stop.
         let (stop, locals, changed) = match self.debug_trail_viewed() {
-            Some(then) => (
-                Some((then.path.clone(), then.line)),
-                then.values.clone(),
-                then.changed.clone(),
-            ),
+            Some(then) => (Some((then.path.clone(), then.line)), then.values.clone(), then.changed.clone()),
             None => {
-                let selected = self
-                    .debug_session
-                    .as_ref()
-                    .map(|s| s.selected_frame)
-                    .unwrap_or(0);
+                let selected = self.debug_session.as_ref().map(|s| s.selected_frame).unwrap_or(0);
                 let locals: Vec<(String, String)> = self
                     .debug_session
                     .as_ref()
                     .filter(|s| s.stopped_thread.is_some())
                     .and_then(|s| s.variables.first().map(|scope| scope.values()))
                     .unwrap_or_default();
-                (
-                    self.debug_frame_location(selected),
-                    locals,
-                    self.debug_trail_changed_now(),
-                )
+                (self.debug_frame_location(selected), locals, self.debug_trail_changed_now())
             }
         };
         // Each buffer's: the values at its stop, and its pins.
         let mut found: HashMap<BufferId, Vec<crate::decorations::Decoration>> = HashMap::new();
         if let Some((path, line)) = stop.filter(|_| !locals.is_empty()) {
-            let ids: Vec<BufferId> = self
-                .buffers
-                .ids_sorted_by_path()
-                .into_iter()
-                .filter(|id| {
-                    self.buffers
-                        .get(*id)
-                        .and_then(|ob| ob.buffer.path())
-                        .is_some_and(|p| same_file(p, &path))
-                })
-                .collect();
+            let ids: Vec<BufferId> = self.buffers.ids_sorted_by_path().into_iter().filter(|id| self.buffers.get(*id).and_then(|ob| ob.buffer.path()).is_some_and(|p| same_file(p, &path))).collect();
             for id in ids {
-                let Some(ob) = self.buffers.get(id) else {
-                    continue;
-                };
+                let Some(ob) = self.buffers.get(id) else { continue };
                 let stop_line = line - 1;
                 if stop_line >= ob.buffer.line_count() {
                     continue;
                 }
                 let first = stop_line.saturating_sub(INLINE_LOOKBACK);
-                let lines: Vec<(usize, String)> = (first..=stop_line)
-                    .map(|l| (l, ob.buffer.line(l).to_string()))
-                    .collect();
-                found.entry(id).or_default().extend(
-                    inline_pieces(&lines, stop_line, &locals)
-                        .into_iter()
-                        .flat_map(|(l, pieces)| {
-                            value_decorations(
-                                ob.buffer.line_start_char(l) + ob.buffer.line_len(l),
-                                &pieces,
-                                &changed,
-                            )
-                        }),
-                );
+                let lines: Vec<(usize, String)> = (first..=stop_line).map(|l| (l, ob.buffer.line(l).to_string())).collect();
+                found.entry(id).or_default().extend(inline_pieces(&lines, stop_line, &locals).into_iter().flat_map(|(l, pieces)| value_decorations(ob.buffer.line_start_char(l) + ob.buffer.line_len(l), &pieces, &changed)));
             }
         }
         if !self.debug_pins.is_empty() && self.debug_session.is_some() {
             for id in self.buffers.ids_sorted_by_path() {
-                let Some(ob) = self.buffers.get(id) else {
-                    continue;
-                };
-                let Some(path) = ob.buffer.path() else {
-                    continue;
-                };
+                let Some(ob) = self.buffers.get(id) else { continue };
+                let Some(path) = ob.buffer.path() else { continue };
                 let pins = self.debug_pin_decorations(path, &ob.buffer);
                 if !pins.is_empty() {
                     found.entry(id).or_default().extend(pins);
@@ -701,24 +499,9 @@ mod tests {
 
     #[test]
     fn the_dock_lays_its_columns_side_by_side_cut_to_their_share() {
-        let rows = dock_columns(
-            &[
-                ("STACK", vec!["main  app.py:3".to_string()], 1),
-                (
-                    "VARS",
-                    vec!["a = 1".to_string(), "a_very_long_name = 2".to_string()],
-                    1,
-                ),
-            ],
-            23,
-            3,
-        );
+        let rows = dock_columns(&[("STACK", vec!["main  app.py:3".to_string()], 1), ("VARS", vec!["a = 1".to_string(), "a_very_long_name = 2".to_string()], 1)], 23, 3);
         assert_eq!(rows.len(), 3);
-        assert_eq!(
-            rows[0],
-            ["STACK     ", "VARS      "],
-            "23 less one gap of 3, halved"
-        );
+        assert_eq!(rows[0], ["STACK     ", "VARS      "], "23 less one gap of 3, halved");
         assert_eq!(rows[1], ["main  app…", "a = 1     "]);
         assert_eq!(rows[2], ["          ", "a_very_lo…"]);
     }
@@ -726,36 +509,12 @@ mod tests {
     #[test]
     fn debug_mode_has_five_keys_and_esc_and_the_f_keys_are_the_usual_ones() {
         use DebugAction::*;
-        let keys: Vec<Option<DebugAction>> = "nsocrjx"
-            .chars()
-            .map(|c| debug_mode_action(KeyPress::char(c)))
-            .collect();
-        assert_eq!(
-            keys,
-            [
-                Some(StepOver),
-                Some(StepIn),
-                Some(StepOut),
-                Some(StartOrContinue),
-                Some(RunToCursor),
-                None,
-                None
-            ]
-        );
-        assert_eq!(
-            debug_mode_action(KeyPress::named(FenixNamedKey::Escape)),
-            Some(Leave)
-        );
-        assert_eq!(
-            debug_mode_action(KeyPress::char('n').with_ctrl()),
-            None,
-            "Ctrl-n is Normal's"
-        );
+        let keys: Vec<Option<DebugAction>> = "nsocrjx".chars().map(|c| debug_mode_action(KeyPress::char(c))).collect();
+        assert_eq!(keys, [Some(StepOver), Some(StepIn), Some(StepOut), Some(StartOrContinue), Some(RunToCursor), None, None]);
+        assert_eq!(debug_mode_action(KeyPress::named(FenixNamedKey::Escape)), Some(Leave));
+        assert_eq!(debug_mode_action(KeyPress::char('n').with_ctrl()), None, "Ctrl-n is Normal's");
         use winit::keyboard::NamedKey as K;
-        assert_eq!(
-            function_key_action(&K::F5, false, false),
-            Some(StartOrContinue)
-        );
+        assert_eq!(function_key_action(&K::F5, false, false), Some(StartOrContinue));
         assert_eq!(function_key_action(&K::F5, true, false), Some(Stop));
         assert_eq!(function_key_action(&K::F5, true, true), Some(Restart));
         assert_eq!(function_key_action(&K::F11, true, false), Some(StepOut));
@@ -763,65 +522,29 @@ mod tests {
     }
 
     fn lines(text: &str) -> Vec<(usize, String)> {
-        text.lines()
-            .enumerate()
-            .map(|(i, l)| (i, l.to_string()))
-            .collect()
+        text.lines().enumerate().map(|(i, l)| (i, l.to_string())).collect()
     }
 
     #[test]
     fn each_local_is_written_once_on_its_last_line_above_the_stop() {
         let src = lines("def build_rows(orders, rate):\n    rows = []\n    for o in orders:\n        total = o.qty * rate\n        rows.append(total)\n");
-        let locals = vec![
-            ("orders".to_string(), "[Order ×38]".to_string()),
-            ("rate".to_string(), "1.36".to_string()),
-            ("o".to_string(), "Order(1042)".to_string()),
-            ("rows".to_string(), "[]".to_string()),
-            ("total".to_string(), "4.08".to_string()),
-        ];
+        let locals = vec![("orders".to_string(), "[Order ×38]".to_string()), ("rate".to_string(), "1.36".to_string()), ("o".to_string(), "Order(1042)".to_string()), ("rows".to_string(), "[]".to_string()), ("total".to_string(), "4.08".to_string())];
         let got = inline_values(&src, 3, &locals);
-        assert_eq!(
-            got,
-            vec![
-                (1, "rows = []".to_string()),
-                (2, "orders = [Order ×38]".to_string()),
-                (3, "total = 4.08  o = Order(1042)  rate = 1.36".to_string())
-            ],
-            "nothing below the stop; orders and rate on their last lines"
-        );
+        assert_eq!(got, vec![(1, "rows = []".to_string()), (2, "orders = [Order ×38]".to_string()), (3, "total = 4.08  o = Order(1042)  rate = 1.36".to_string())], "nothing below the stop; orders and rate on their last lines");
     }
 
     #[test]
     fn a_long_value_is_cut_and_only_whole_words_match() {
         let src = lines("ratio = rate_of(x)\n");
         let long = "x".repeat(80);
-        let got = inline_values(
-            &src,
-            0,
-            &[
-                ("rate".to_string(), "1".to_string()),
-                ("x".to_string(), long),
-            ],
-        );
+        let got = inline_values(&src, 0, &[("rate".to_string(), "1".to_string()), ("x".to_string(), long)]);
         assert_eq!(got.len(), 1);
-        assert!(
-            got[0].1.starts_with("x = xxx")
-                && got[0].1.ends_with('…')
-                && !got[0].1.contains("rate ="),
-            "{:?}",
-            got
-        );
+        assert!(got[0].1.starts_with("x = xxx") && got[0].1.ends_with('…') && !got[0].1.contains("rate ="), "{:?}", got);
     }
 
     #[test]
     fn paths_compare_across_separators_and_case_on_windows() {
-        assert!(same_file(
-            Path::new("C:/p/src/main.rs"),
-            Path::new("C:\\p\\src\\main.rs")
-        ));
-        assert_eq!(
-            same_file(Path::new("C:/P/Main.rs"), Path::new("c:/p/main.rs")),
-            cfg!(windows)
-        );
+        assert!(same_file(Path::new("C:/p/src/main.rs"), Path::new("C:\\p\\src\\main.rs")));
+        assert_eq!(same_file(Path::new("C:/P/Main.rs"), Path::new("c:/p/main.rs")), cfg!(windows));
     }
 }

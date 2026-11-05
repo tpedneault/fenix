@@ -40,18 +40,9 @@ fn is_scope_node(lang: LanguageId, node: Node<'_>) -> bool {
             // Every multi-line element is a scope: foldable, listed by
             // `SPC c s`, and a step in the breadcrumbs.
             LanguageId::Xml => node.kind() == "element",
-            _ => matches!(
-                node.kind(),
-                "function_item"
-                    | "impl_item"
-                    | "mod_item"
-                    | "struct_item"
-                    | "enum_item"
-                    | "function_definition"
-                    | "class_definition"
-                    | "method_definition"
-                    | "procedure"
-            ),
+            _ => matches!(node.kind(),
+                "function_item" | "impl_item" | "mod_item" | "struct_item" | "enum_item" |
+                "function_definition" | "class_definition" | "method_definition" | "procedure"),
         }
 }
 
@@ -71,8 +62,7 @@ enum QueryKey {
 }
 
 fn compiled(key: QueryKey, language: &Language, source: &str) -> Arc<Query> {
-    compiled_or_said(key, language, source)
-        .expect("bundled highlights.scm for this language failed to compile")
+    compiled_or_said(key, language, source).expect("bundled highlights.scm for this language failed to compile")
 }
 
 /// `compiled`, for a query that may not compile -- an extension's: what's
@@ -101,43 +91,24 @@ fn compiled_or_said(key: QueryKey, language: &Language, source: &str) -> Option<
             None
         }
     };
-    cache
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(key)
-        .or_insert(query)
-        .clone()
+    cache.lock().unwrap_or_else(|e| e.into_inner()).entry(key).or_insert(query).clone()
 }
 
 /// The query of `key` for a grammar, when it has one and it compiles.
 fn grammar_query(key: QueryKey, language: Option<&Language>, source: &str) -> Option<Arc<Query>> {
-    language
-        .filter(|_| !source.trim().is_empty())
-        .and_then(|l| compiled_or_said(key, l, source))
+    language.filter(|_| !source.trim().is_empty()).and_then(|l| compiled_or_said(key, l, source))
 }
 
 impl InlineGrammar {
     fn new(block_language: &Language) -> Self {
-        let span_query = compiled(
-            QueryKey::MarkdownInlineSpans,
-            block_language,
-            "(inline) @inline",
-        );
+        let span_query = compiled(QueryKey::MarkdownInlineSpans, block_language, "(inline) @inline");
         let inline_language: Language = tree_sitter_md::INLINE_LANGUAGE.into();
         let mut parser = Parser::new();
         parser
             .set_language(&inline_language)
             .expect("bundled grammar's ABI is compatible with the bundled tree-sitter core");
-        let query = compiled(
-            QueryKey::MarkdownInline,
-            &inline_language,
-            tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
-        );
-        Self {
-            span_query,
-            parser: RefCell::new(parser),
-            query,
-        }
+        let query = compiled(QueryKey::MarkdownInline, &inline_language, tree_sitter_md::HIGHLIGHT_QUERY_INLINE);
+        Self { span_query, parser: RefCell::new(parser), query }
     }
 }
 
@@ -153,9 +124,7 @@ fn push_todo_captures<'a>(source: &str, raw: &mut Vec<RawCapture<'a>>) {
         .map(|c| c.range.clone())
         .collect();
     for range in comments {
-        let Some(text) = source.get(range.clone()) else {
-            continue;
-        };
+        let Some(text) = source.get(range.clone()) else { continue };
         for (keyword, kind) in todo::find_keywords(text) {
             raw.push(RawCapture {
                 range: (range.start + keyword.start)..(range.start + keyword.end),
@@ -180,20 +149,8 @@ pub struct NodeInfo {
 impl NodeInfo {
     fn of(node: Node<'_>, source: &str, field: Option<String>) -> Self {
         let text = source.get(node.start_byte()..node.end_byte()).unwrap_or("");
-        let first: String = text
-            .lines()
-            .next()
-            .unwrap_or("")
-            .chars()
-            .take(160)
-            .collect();
-        NodeInfo {
-            kind: node.kind().to_string(),
-            start: (node.start_position().row, node.start_position().column),
-            end: (node.end_position().row, node.end_position().column),
-            field,
-            first_line: first,
-        }
+        let first: String = text.lines().next().unwrap_or("").chars().take(160).collect();
+        NodeInfo { kind: node.kind().to_string(), start: (node.start_position().row, node.start_position().column), end: (node.end_position().row, node.end_position().column), field, first_line: first }
     }
 }
 
@@ -228,15 +185,9 @@ impl SyntaxState {
     /// this rather than guessing from indentation, which is unreliable for
     /// Tcl and for brace-free languages.
     pub fn scope_ranges(&self) -> Vec<(usize, usize)> {
-        let Some(tree) = &self.tree else {
-            return Vec::new();
-        };
+        let Some(tree) = &self.tree else { return Vec::new() };
         if self.lang.is_grammar() {
-            let mut ranges: Vec<(usize, usize)> = self
-                .folded(tree, None)
-                .into_iter()
-                .map(|n| (n.start_position().row, n.end_position().row))
-                .collect();
+            let mut ranges: Vec<(usize, usize)> = self.folded(tree, None).into_iter().map(|n| (n.start_position().row, n.end_position().row)).collect();
             ranges.sort_unstable();
             ranges.dedup();
             return ranges;
@@ -248,62 +199,37 @@ impl SyntaxState {
             if is_scope_node(self.lang, node) {
                 ranges.push((node.start_position().row, node.end_position().row));
             }
-            if cursor.goto_first_child() {
-                continue;
-            }
+            if cursor.goto_first_child() { continue }
             loop {
-                if cursor.goto_next_sibling() {
-                    break;
-                }
-                if !cursor.goto_parent() {
-                    ranges.sort_unstable();
-                    ranges.dedup();
-                    return ranges;
-                }
+                if cursor.goto_next_sibling() { break }
+                if !cursor.goto_parent() { ranges.sort_unstable(); ranges.dedup(); return ranges }
             }
         }
     }
 
     /// Scope headers for an explicitly requested document navigation picker.
     pub fn scope_lines(&self) -> Vec<usize> {
-        self.scope_ranges()
-            .into_iter()
-            .map(|(start, _)| start)
-            .collect()
+        self.scope_ranges().into_iter().map(|(start, _)| start).collect()
     }
     /// Enclosing multiline scopes, outermost first, using the current tree.
     pub fn enclosing_scopes(&self, byte: usize) -> Vec<(usize, usize)> {
-        let Some(tree) = &self.tree else {
-            return Vec::new();
-        };
+        let Some(tree) = &self.tree else { return Vec::new() };
         let root = tree.root_node();
         let byte = byte.min(root.end_byte());
         if self.lang.is_grammar() {
-            let mut scopes: Vec<Node<'_>> = self
-                .folded(tree, Some(byte))
-                .into_iter()
-                .filter(|n| n.start_byte() <= byte && byte <= n.end_byte())
-                .collect();
+            let mut scopes: Vec<Node<'_>> = self.folded(tree, Some(byte)).into_iter().filter(|n| n.start_byte() <= byte && byte <= n.end_byte()).collect();
             scopes.sort_by_key(|n| (n.start_byte(), std::cmp::Reverse(n.end_byte())));
-            let mut result: Vec<(usize, usize)> = scopes
-                .into_iter()
-                .map(|n| (n.start_position().row, n.end_position().row))
-                .collect();
+            let mut result: Vec<(usize, usize)> = scopes.into_iter().map(|n| (n.start_position().row, n.end_position().row)).collect();
             result.dedup();
             return result;
         }
-        let Some(mut node) = root.descendant_for_byte_range(byte, byte) else {
-            return Vec::new();
-        };
+        let Some(mut node) = root.descendant_for_byte_range(byte, byte) else { return Vec::new() };
         let mut result = Vec::new();
         loop {
             if is_scope_node(self.lang, node) {
                 result.push((node.start_position().row, node.end_position().row));
             }
-            match node.parent() {
-                Some(parent) => node = parent,
-                None => break,
-            }
+            match node.parent() { Some(parent) => node = parent, None => break }
         }
         result.reverse();
         result
@@ -315,61 +241,34 @@ impl SyntaxState {
     pub fn new(lang: LanguageId, source: &str) -> Self {
         let language = lang.language();
         let mut parser = match &language {
-            Some(language) if lang.is_grammar() => {
-                crate::grammar::parser(language).unwrap_or_default()
-            }
+            Some(language) if lang.is_grammar() => crate::grammar::parser(language).unwrap_or_default(),
             Some(language) => {
                 let mut parser = Parser::new();
-                parser.set_language(language).expect(
-                    "bundled grammar's ABI is compatible with the bundled tree-sitter core",
-                );
+                parser.set_language(language).expect("bundled grammar's ABI is compatible with the bundled tree-sitter core");
                 parser
             }
             None => Parser::new(),
         };
         let tree = language.as_ref().and_then(|_| parser.parse(source, None));
         let query = match &language {
-            Some(language) if lang.is_grammar() => grammar_query(
-                QueryKey::Highlights(lang),
-                Some(language),
-                lang.highlights_query(),
-            ),
-            Some(language) => Some(compiled(
-                QueryKey::Highlights(lang),
-                language,
-                lang.highlights_query(),
-            )),
+            Some(language) if lang.is_grammar() => grammar_query(QueryKey::Highlights(lang), Some(language), lang.highlights_query()),
+            Some(language) => Some(compiled(QueryKey::Highlights(lang), language, lang.highlights_query())),
             None => None,
         };
         let grammar = match lang {
             LanguageId::Grammar(i) => crate::grammar::grammar(i),
             _ => None,
         };
-        let folds =
-            grammar.and_then(|g| grammar_query(QueryKey::Folds(lang), language.as_ref(), &g.folds));
-        let indents = grammar
-            .and_then(|g| grammar_query(QueryKey::Indents(lang), language.as_ref(), &g.indents));
-        let inline = language
-            .as_ref()
-            .filter(|_| lang == LanguageId::Markdown)
-            .map(InlineGrammar::new);
-        Self {
-            lang,
-            parser,
-            tree,
-            query,
-            folds,
-            indents,
-            inline,
-        }
+        let folds = grammar.and_then(|g| grammar_query(QueryKey::Folds(lang), language.as_ref(), &g.folds));
+        let indents = grammar.and_then(|g| grammar_query(QueryKey::Indents(lang), language.as_ref(), &g.indents));
+        let inline = language.as_ref().filter(|_| lang == LanguageId::Markdown).map(InlineGrammar::new);
+        Self { lang, parser, tree, query, folds, indents, inline }
     }
 
     /// The nodes a grammar's `@fold`s capture that span lines -- those
     /// around `byte`, when it's given.
     fn folded<'t>(&self, tree: &'t Tree, byte: Option<usize>) -> Vec<Node<'t>> {
-        let Some(folds) = &self.folds else {
-            return Vec::new();
-        };
+        let Some(folds) = &self.folds else { return Vec::new() };
         let mut cursor = QueryCursor::new();
         if let Some(byte) = byte {
             cursor.set_byte_range(byte..byte + 1);
@@ -379,9 +278,7 @@ impl SyntaxState {
         let mut captures = cursor.captures(folds, tree.root_node(), &[] as &[u8]);
         while let Some((m, ix)) = captures.next() {
             let capture = m.captures[*ix];
-            if names[capture.index as usize] == "fold"
-                && capture.node.start_position().row < capture.node.end_position().row
-            {
+            if names[capture.index as usize] == "fold" && capture.node.start_position().row < capture.node.end_position().row {
                 found.push(capture.node);
             }
         }
@@ -393,13 +290,8 @@ impl SyntaxState {
     /// starts on `byte`'s line, before it, and ends after it. None when
     /// there's no such query: the bracket before the cursor decides.
     pub fn indents_after(&self, source: &str, byte: usize) -> Option<bool> {
-        let (Some(indents), Some(tree)) = (&self.indents, &self.tree) else {
-            return None;
-        };
-        let line_start = source
-            .get(..byte.min(source.len()))
-            .map(|s| s.rfind('\n').map_or(0, |i| i + 1))
-            .unwrap_or(0);
+        let (Some(indents), Some(tree)) = (&self.indents, &self.tree) else { return None };
+        let line_start = source.get(..byte.min(source.len())).map(|s| s.rfind('\n').map_or(0, |i| i + 1)).unwrap_or(0);
         let names = indents.capture_names();
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(byte.saturating_sub(1)..byte + 1);
@@ -407,10 +299,7 @@ impl SyntaxState {
         while let Some((m, ix)) = captures.next() {
             let capture = m.captures[*ix];
             let node = capture.node;
-            if matches!(names[capture.index as usize], "indent" | "indent.begin")
-                && (line_start..byte).contains(&node.start_byte())
-                && node.end_byte() >= byte
-            {
+            if matches!(names[capture.index as usize], "indent" | "indent.begin") && (line_start..byte).contains(&node.start_byte()) && node.end_byte() >= byte {
                 return Some(true);
             }
         }
@@ -435,14 +324,8 @@ impl SyntaxState {
     /// overlapping, ordered list of `(byte range, capture name)` --
     /// restricted to the given range so callers doing windowed rendering
     /// only pay for what's actually on screen, not the whole file.
-    pub fn highlights_in_range(
-        &self,
-        source: &str,
-        byte_range: Range<usize>,
-    ) -> Vec<(Range<usize>, &str)> {
-        let (Some(tree), Some(query)) = (&self.tree, &self.query) else {
-            return Vec::new();
-        };
+    pub fn highlights_in_range(&self, source: &str, byte_range: Range<usize>) -> Vec<(Range<usize>, &str)> {
+        let (Some(tree), Some(query)) = (&self.tree, &self.query) else { return Vec::new() };
         let names = query.capture_names();
 
         let mut cursor = QueryCursor::new();
@@ -486,12 +369,8 @@ impl SyntaxState {
     /// highlight query over the whole file, which costs many times the
     /// parse itself.
     pub fn todo_items_of(lang: LanguageId, source: &str) -> Vec<TodoItem> {
-        let Some(mut parser) = lang.language().as_ref().and_then(crate::grammar::parser) else {
-            return Vec::new();
-        };
-        let Some(tree) = parser.parse(source, None) else {
-            return Vec::new();
-        };
+        let Some(mut parser) = lang.language().as_ref().and_then(crate::grammar::parser) else { return Vec::new() };
+        let Some(tree) = parser.parse(source, None) else { return Vec::new() };
         let mut ranges = Vec::new();
         let mut cursor = tree.walk();
         loop {
@@ -500,11 +379,7 @@ impl SyntaxState {
             if is_comment {
                 let range = node.start_byte()..node.end_byte();
                 if let Some(text) = source.get(range.clone()) {
-                    ranges.extend(
-                        todo::find_keywords(text).into_iter().map(|(k, kind)| {
-                            ((range.start + k.start)..(range.start + k.end), kind)
-                        }),
-                    );
+                    ranges.extend(todo::find_keywords(text).into_iter().map(|(k, kind)| ((range.start + k.start)..(range.start + k.end), kind)));
                 }
             }
             if !is_comment && cursor.goto_first_child() {
@@ -530,14 +405,10 @@ impl SyntaxState {
     /// what "where am I" asks (a coding agent's `syntax_node`). Empty
     /// without a tree.
     pub fn node_chain(&self, source: &str, byte: usize) -> Vec<NodeInfo> {
-        let Some(tree) = &self.tree else {
-            return Vec::new();
-        };
+        let Some(tree) = &self.tree else { return Vec::new() };
         let root = tree.root_node();
         let byte = byte.min(root.end_byte());
-        let Some(mut node) = root.named_descendant_for_byte_range(byte, byte) else {
-            return Vec::new();
-        };
+        let Some(mut node) = root.named_descendant_for_byte_range(byte, byte) else { return Vec::new() };
         let mut chain = Vec::new();
         loop {
             chain.push(NodeInfo::of(node, source, self.field_of(node)));
@@ -567,16 +438,10 @@ impl SyntaxState {
     /// Runs a tree-sitter query (`(function_item name: (identifier) @name)`)
     /// over the tree: each capture's name and node, in order, at most
     /// `max`. An error says why the query doesn't compile.
-    pub fn query(
-        &self,
-        source: &str,
-        query: &str,
-        max: usize,
-    ) -> Result<Vec<(String, NodeInfo)>, String> {
+    pub fn query(&self, source: &str, query: &str, max: usize) -> Result<Vec<(String, NodeInfo)>, String> {
         let tree = self.tree.as_ref().ok_or("this file has no syntax tree")?;
         let language = self.parser.language().ok_or("no grammar for this file")?;
-        let query =
-            Query::new(&language, query).map_err(|e| format!("the query doesn't compile: {e}"))?;
+        let query = Query::new(&language, query).map_err(|e| format!("the query doesn't compile: {e}"))?;
         let names = query.capture_names();
         let mut cursor = QueryCursor::new();
         // A query that matches everything is stopped, not left to run.
@@ -585,10 +450,7 @@ impl SyntaxState {
         let mut captures = cursor.captures(&query, tree.root_node(), source.as_bytes());
         while let Some((m, ix)) = captures.next() {
             let capture = m.captures[*ix];
-            found.push((
-                names[capture.index as usize].to_string(),
-                NodeInfo::of(capture.node, source, None),
-            ));
+            found.push((names[capture.index as usize].to_string(), NodeInfo::of(capture.node, source, None)));
             if found.len() >= max {
                 break;
             }
@@ -639,23 +501,17 @@ impl SyntaxState {
         let inline_names = inline.query.capture_names();
         let mut span_cursor = QueryCursor::new();
         span_cursor.set_byte_range(byte_range);
-        let mut spans =
-            span_cursor.captures(&inline.span_query, tree.root_node(), source.as_bytes());
+        let mut spans = span_cursor.captures(&inline.span_query, tree.root_node(), source.as_bytes());
 
         let mut parser = inline.parser.borrow_mut();
         while let Some((query_match, capture_ix)) = spans.next() {
             let node = query_match.captures[*capture_ix].node;
             let (start, end) = (node.start_byte(), node.end_byte());
-            let Some(span_text) = source.get(start..end) else {
-                continue;
-            };
-            let Some(span_tree) = parser.parse(span_text, None) else {
-                continue;
-            };
+            let Some(span_text) = source.get(start..end) else { continue };
+            let Some(span_tree) = parser.parse(span_text, None) else { continue };
 
             let mut inline_cursor = QueryCursor::new();
-            let mut inline_captures =
-                inline_cursor.captures(&inline.query, span_tree.root_node(), span_text.as_bytes());
+            let mut inline_captures = inline_cursor.captures(&inline.query, span_tree.root_node(), span_text.as_bytes());
             while let Some((inline_match, inline_ix)) = inline_captures.next() {
                 let capture = &inline_match.captures[*inline_ix];
                 raw.push(RawCapture {
@@ -678,10 +534,7 @@ mod tests {
         let state = SyntaxState::new(LanguageId::Tcl, source);
         assert_eq!(state.scope_lines(), vec![0, 5]);
         assert_eq!(state.scope_ranges(), vec![(0, 3), (5, 7)]);
-        assert_eq!(
-            state.enclosing_scopes(source.find("set total").unwrap()),
-            vec![(0, 3)]
-        );
+        assert_eq!(state.enclosing_scopes(source.find("set total").unwrap()), vec![(0, 3)]);
     }
 
     /// Tcl gets no LSP -- there is no server for it -- so the
@@ -690,46 +543,26 @@ mod tests {
     /// four things it used to miss.
     fn tcl_captures(source: &str) -> Vec<(String, String)> {
         let state = SyntaxState::new(LanguageId::Tcl, source);
-        state
-            .highlights_in_range(source, 0..source.len())
-            .into_iter()
-            .map(|(r, n)| (n.to_string(), source[r].to_string()))
-            .collect()
+        state.highlights_in_range(source, 0..source.len()).into_iter().map(|(r, n)| (n.to_string(), source[r].to_string())).collect()
     }
 
     fn captured_as(source: &str, text: &str) -> Vec<String> {
-        tcl_captures(source)
-            .into_iter()
-            .filter(|(_, t)| t == text)
-            .map(|(n, _)| n)
-            .collect()
+        tcl_captures(source).into_iter().filter(|(_, t)| t == text).map(|(n, _)| n).collect()
     }
 
     #[test]
     fn a_procs_own_name_reads_as_a_function_not_a_variable() {
         // It was captured as a variable, which in most themes is just
         // body text -- so every definition in a file looked unhighlighted.
-        assert_eq!(
-            captured_as(
-                "proc build_all {} {}
-",
-                "build_all"
-            ),
-            vec!["function"]
-        );
+        assert_eq!(captured_as("proc build_all {} {}
+", "build_all"), vec!["function"]);
     }
 
     #[test]
     fn a_ternary_in_an_expr_gets_its_operators_colored() {
-        let names = tcl_captures(
-            "set x [expr {1 ? 2 : 3}]
-",
-        );
-        let operators: Vec<&str> = names
-            .iter()
-            .filter(|(n, _)| n == "operator")
-            .map(|(_, t)| t.as_str())
-            .collect();
+        let names = tcl_captures("set x [expr {1 ? 2 : 3}]
+");
+        let operators: Vec<&str> = names.iter().filter(|(n, _)| n == "operator").map(|(_, t)| t.as_str()).collect();
         assert_eq!(operators, vec!["?", ":"]);
     }
 
@@ -737,23 +570,11 @@ mod tests {
     fn a_fully_qualified_name_reads_as_a_variable() {
         // `::build_flags` is a plain command argument as far as the
         // grammar is concerned, so nothing captured it at all.
-        assert_eq!(
-            captured_as(
-                "lappend ::build_flags $x
-",
-                "::build_flags"
-            ),
-            vec!["variable"]
-        );
+        assert_eq!(captured_as("lappend ::build_flags $x
+", "::build_flags"), vec!["variable"]);
         // `namespace eval`'s name is a namespace instead (see below).
-        assert_eq!(
-            captured_as(
-                "namespace delete ::app
-",
-                "::app"
-            ),
-            vec!["variable"]
-        );
+        assert_eq!(captured_as("namespace delete ::app
+", "::app"), vec!["variable"]);
     }
 
     #[test]
@@ -767,12 +588,8 @@ mod tests {
 
     #[test]
     fn an_ordinary_word_is_not_mistaken_for_a_qualified_name() {
-        assert!(captured_as(
-            "puts hello
-",
-            "hello"
-        )
-        .is_empty());
+        assert!(captured_as("puts hello
+", "hello").is_empty());
     }
 
     /// `dict keys $d`, `string compare $a $b`: the word right after an
@@ -809,31 +626,15 @@ mod tests {
 
     #[test]
     fn dict_is_a_builtin_like_the_others_and_its_subcommand_reads_as_a_function() {
-        assert_eq!(
-            captured_as("dict keys $d\n", "dict"),
-            vec!["function.builtin"]
-        );
-        assert_eq!(
-            captured_as("dict keys $d\n", "keys"),
-            vec!["function.builtin"]
-        );
+        assert_eq!(captured_as("dict keys $d\n", "dict"), vec!["function.builtin"]);
+        assert_eq!(captured_as("dict keys $d\n", "keys"), vec!["function.builtin"]);
     }
 
     #[test]
     fn namespace_is_its_own_grammar_rule_and_still_gets_a_colored_subcommand() {
-        assert_eq!(
-            captured_as("namespace eval ::app {}\n", "namespace"),
-            vec!["keyword"]
-        );
-        assert_eq!(
-            captured_as("namespace eval ::app {}\n", "eval"),
-            vec!["function.builtin"]
-        );
-        assert_eq!(
-            captured_as("namespace eval ::app {}\n", "::app"),
-            vec!["namespace"],
-            "the type's colour"
-        );
+        assert_eq!(captured_as("namespace eval ::app {}\n", "namespace"), vec!["keyword"]);
+        assert_eq!(captured_as("namespace eval ::app {}\n", "eval"), vec!["function.builtin"]);
+        assert_eq!(captured_as("namespace eval ::app {}\n", "::app"), vec!["namespace"], "the type's colour");
     }
 
     /// Each kind of word on a line in a colour of its own: the keyword
@@ -850,17 +651,9 @@ mod tests {
         assert_eq!(captured_as(source, "lindex"), vec!["function.builtin"]);
         assert_eq!(captured_as(source, "puts"), vec!["function.builtin"]);
         assert_eq!(captured_as(source, "incr"), vec!["function.builtin"]);
-        assert_eq!(
-            captured_as(source, "mathutils::sum"),
-            vec!["function"],
-            "a proc of yours"
-        );
+        assert_eq!(captured_as(source, "mathutils::sum"), vec!["function"], "a proc of yours");
         assert_eq!(captured_as(source, "$argv"), vec!["variable", "variable"]);
-        assert_eq!(
-            captured_as(source, "target"),
-            vec!["variable"],
-            "the name set assigns"
-        );
+        assert_eq!(captured_as(source, "target"), vec!["variable"], "the name set assigns");
     }
 
     /// `after`'s the one ensemble with a second, non-subcommand calling
@@ -868,25 +661,10 @@ mod tests {
     /// as though it were one of its three real subcommands.
     #[test]
     fn afters_millisecond_delay_form_is_not_mistaken_for_a_subcommand() {
-        assert_eq!(
-            captured_as("after cancel $id\n", "cancel"),
-            vec!["function.builtin"]
-        );
-        assert_eq!(
-            captured_as("after idle {}\n", "idle"),
-            vec!["function.builtin"]
-        );
-        assert!(
-            captured_as("after 500 {}\n", "500")
-                .iter()
-                .all(|n| n != "function.builtin"),
-            "a delay in ms is not a subcommand"
-        );
-        assert_eq!(
-            captured_as("after 500 {}\n", "500"),
-            vec!["number"],
-            "still colored as the number it is"
-        );
+        assert_eq!(captured_as("after cancel $id\n", "cancel"), vec!["function.builtin"]);
+        assert_eq!(captured_as("after idle {}\n", "idle"), vec!["function.builtin"]);
+        assert!(captured_as("after 500 {}\n", "500").iter().all(|n| n != "function.builtin"), "a delay in ms is not a subcommand");
+        assert_eq!(captured_as("after 500 {}\n", "500"), vec!["number"], "still colored as the number it is");
     }
 
     /// A command's ordinary, non-subcommand arguments must not pick up
@@ -899,10 +677,7 @@ mod tests {
     fn an_ordinary_argument_after_a_real_subcommand_is_not_colored_as_one() {
         assert!(captured_as("dict set d k v\n", "k").is_empty());
         assert!(captured_as("dict set d k v\n", "v").is_empty());
-        assert!(
-            captured_as("info exists x\n", "x").is_empty(),
-            "`info exists` has no nested subcommand -- `x` is a plain variable name"
-        );
+        assert!(captured_as("info exists x\n", "x").is_empty(), "`info exists` has no nested subcommand -- `x` is a plain variable name");
         assert!(captured_as("array set arr {}\n", "arr").is_empty());
     }
 
@@ -923,21 +698,10 @@ mod tests {
             ("trace add variable x write cb\n", "add", "variable"),
             ("trace remove command foo delete cb\n", "remove", "command"),
         ] {
-            assert_eq!(
-                captured_as(source, first),
-                vec!["function.builtin".to_string()],
-                "{source:?}"
-            );
+            assert_eq!(captured_as(source, first), vec!["function.builtin".to_string()], "{source:?}");
             let second_capture = captured_as(source, second);
-            assert_eq!(
-                second_capture.len(),
-                1,
-                "{source:?}: {second:?} captured as {second_capture:?}"
-            );
-            assert!(
-                second_capture[0].starts_with("function"),
-                "{source:?}: {second_capture:?}"
-            );
+            assert_eq!(second_capture.len(), 1, "{source:?}: {second:?} captured as {second_capture:?}");
+            assert!(second_capture[0].starts_with("function"), "{source:?}: {second_capture:?}");
         }
     }
 
@@ -947,10 +711,7 @@ mod tests {
     /// variable name, not a third-level subcommand.
     #[test]
     fn a_nested_ensemble_roots_other_subcommands_stay_single_level() {
-        assert_eq!(
-            captured_as("info exists someVar\n", "exists"),
-            vec!["function.builtin"]
-        );
+        assert_eq!(captured_as("info exists someVar\n", "exists"), vec!["function.builtin"]);
         assert!(captured_as("info exists someVar\n", "someVar").is_empty());
     }
     use crate::language::LanguageId;
@@ -960,33 +721,18 @@ mod tests {
         let source = r#"fn main() { let s = "hi"; }"#;
         let state = SyntaxState::new(LanguageId::Rust, source);
         let highlights = state.highlights_in_range(source, 0..source.len());
-        assert!(
-            !highlights.is_empty(),
-            "expected at least one highlight span, got none"
-        );
+        assert!(!highlights.is_empty(), "expected at least one highlight span, got none");
 
         // "fn" (byte 0..2) should be captured as some flavor of keyword.
-        let fn_capture = highlights
-            .iter()
-            .find(|(range, _)| range.start == 0 && range.end == 2);
-        assert!(
-            fn_capture.is_some(),
-            "expected a capture covering \"fn\", got {highlights:?}"
-        );
-        assert!(
-            fn_capture.unwrap().1.starts_with("keyword"),
-            "got {highlights:?}"
-        );
+        let fn_capture = highlights.iter().find(|(range, _)| range.start == 0 && range.end == 2);
+        assert!(fn_capture.is_some(), "expected a capture covering \"fn\", got {highlights:?}");
+        assert!(fn_capture.unwrap().1.starts_with("keyword"), "got {highlights:?}");
 
         // The string literal `"hi"` should be captured as some flavor of string.
         let string_start = source.find('"').unwrap();
-        let has_string_capture = highlights
-            .iter()
-            .any(|(range, name)| range.start <= string_start && name.starts_with("string"));
-        assert!(
-            has_string_capture,
-            "expected a string capture, got {highlights:?}"
-        );
+        let has_string_capture =
+            highlights.iter().any(|(range, name)| range.start <= string_start && name.starts_with("string"));
+        assert!(has_string_capture, "expected a string capture, got {highlights:?}");
     }
 
     #[test]
@@ -996,9 +742,7 @@ mod tests {
         // Restrict to just the second line -- shouldn't see anything from the first.
         let second_line_start = source.find("fn b").unwrap();
         let highlights = state.highlights_in_range(source, second_line_start..source.len());
-        assert!(highlights
-            .iter()
-            .all(|(range, _)| range.start >= second_line_start));
+        assert!(highlights.iter().all(|(range, _)| range.start >= second_line_start));
     }
 
     #[test]
@@ -1010,31 +754,19 @@ mod tests {
         // instead rename `a` to `main` by replacing char 3 ("a") -- an
         // edit that should still parse cleanly and keep highlighting the
         // "fn" keyword at the same position.
-        let edit = RawEdit {
-            start_char: 3,
-            new_end_char: 7,
-            removed: "a".to_string(),
-        };
+        let edit = RawEdit { start_char: 3, new_end_char: 7, removed: "a".to_string() };
         source.replace_range(3..4, "main");
         state.apply_edits(&source, std::slice::from_ref(&edit));
 
         let highlights = state.highlights_in_range(&source, 0..source.len());
-        let fn_capture = highlights
-            .iter()
-            .find(|(range, _)| range.start == 0 && range.end == 2);
-        assert!(
-            fn_capture.is_some(),
-            "expected \"fn\" still highlighted after edit, got {highlights:?}"
-        );
+        let fn_capture = highlights.iter().find(|(range, _)| range.start == 0 && range.end == 2);
+        assert!(fn_capture.is_some(), "expected \"fn\" still highlighted after edit, got {highlights:?}");
     }
 
     #[test]
     fn empty_source_yields_no_highlights() {
         let state = SyntaxState::new(LanguageId::Rust, "");
-        assert_eq!(
-            state.highlights_in_range("", 0..0),
-            Vec::<(Range<usize>, &str)>::new()
-        );
+        assert_eq!(state.highlights_in_range("", 0..0), Vec::<(Range<usize>, &str)>::new());
     }
 
     /// One smoke test per newly-registered language: confirms `new` doesn't
@@ -1046,10 +778,7 @@ mod tests {
     fn smoke_test(lang: LanguageId, source: &str) {
         let state = SyntaxState::new(lang, source);
         let highlights = state.highlights_in_range(source, 0..source.len());
-        assert!(
-            !highlights.is_empty(),
-            "expected at least one highlight span for {lang:?}, got none"
-        );
+        assert!(!highlights.is_empty(), "expected at least one highlight span for {lang:?}, got none");
     }
 
     #[test]
@@ -1059,9 +788,7 @@ mod tests {
         let highlights = state.highlights_in_range(source, 0..source.len());
         let captured = |text: &str| {
             let start = source.find(text).unwrap();
-            highlights
-                .iter()
-                .any(|(range, _)| range.start <= start && start < range.end)
+            highlights.iter().any(|(range, _)| range.start <= start && start < range.end)
         };
         assert!(captured("// blink"), "comment: {highlights:?}");
         assert!(captured("void"), "primitive type: {highlights:?}");
@@ -1070,18 +797,12 @@ mod tests {
 
     #[test]
     fn toml_highlights_something() {
-        smoke_test(
-            LanguageId::Toml,
-            "[package]\nname = \"fenix\"\nversion = \"0.0.1\"\n",
-        );
+        smoke_test(LanguageId::Toml, "[package]\nname = \"fenix\"\nversion = \"0.0.1\"\n");
     }
 
     #[test]
     fn markdown_highlights_something() {
-        smoke_test(
-            LanguageId::Markdown,
-            "# Heading\n\nSome *text* and a ```code``` fence.\n",
-        );
+        smoke_test(LanguageId::Markdown, "# Heading\n\nSome *text* and a ```code``` fence.\n");
     }
 
     #[test]
@@ -1091,13 +812,8 @@ mod tests {
         let highlights = state.highlights_in_range(source, 0..source.len());
 
         let bold_start = source.find("bold").unwrap();
-        let has_strong = highlights
-            .iter()
-            .any(|(r, n)| r.start <= bold_start && r.end >= bold_start + 4 && *n == "text.strong");
-        assert!(
-            has_strong,
-            "expected \"bold\" captured as text.strong, got {highlights:?}"
-        );
+        let has_strong = highlights.iter().any(|(r, n)| r.start <= bold_start && r.end >= bold_start + 4 && *n == "text.strong");
+        assert!(has_strong, "expected \"bold\" captured as text.strong, got {highlights:?}");
     }
 
     #[test]
@@ -1107,13 +823,9 @@ mod tests {
         let highlights = state.highlights_in_range(source, 0..source.len());
 
         let italic_start = source.find("italic").unwrap();
-        let has_emphasis = highlights.iter().any(|(r, n)| {
-            r.start <= italic_start && r.end >= italic_start + 6 && *n == "text.emphasis"
-        });
-        assert!(
-            has_emphasis,
-            "expected \"italic\" captured as text.emphasis, got {highlights:?}"
-        );
+        let has_emphasis =
+            highlights.iter().any(|(r, n)| r.start <= italic_start && r.end >= italic_start + 6 && *n == "text.emphasis");
+        assert!(has_emphasis, "expected \"italic\" captured as text.emphasis, got {highlights:?}");
     }
 
     #[test]
@@ -1123,13 +835,8 @@ mod tests {
         let highlights = state.highlights_in_range(source, 0..source.len());
 
         let code_start = source.find("code").unwrap();
-        let has_literal = highlights
-            .iter()
-            .any(|(r, n)| r.start <= code_start && r.end >= code_start + 4 && *n == "text.literal");
-        assert!(
-            has_literal,
-            "expected \"code\" captured as text.literal, got {highlights:?}"
-        );
+        let has_literal = highlights.iter().any(|(r, n)| r.start <= code_start && r.end >= code_start + 4 && *n == "text.literal");
+        assert!(has_literal, "expected \"code\" captured as text.literal, got {highlights:?}");
     }
 
     #[test]
@@ -1139,13 +846,8 @@ mod tests {
         let highlights = state.highlights_in_range(source, 0..source.len());
 
         let url_start = source.find("https").unwrap();
-        let has_uri = highlights
-            .iter()
-            .any(|(r, n)| r.start <= url_start && *n == "text.uri");
-        assert!(
-            has_uri,
-            "expected the URL captured as text.uri, got {highlights:?}"
-        );
+        let has_uri = highlights.iter().any(|(r, n)| r.start <= url_start && *n == "text.uri");
+        assert!(has_uri, "expected the URL captured as text.uri, got {highlights:?}");
     }
 
     #[test]
@@ -1161,16 +863,11 @@ mod tests {
         let highlights = state.highlights_in_range(source, 0..source.len());
 
         let bold_start = source.find("bold").unwrap();
-        let narrow_wins = highlights
-            .iter()
-            .any(|(r, n)| r.start <= bold_start && r.end >= bold_start + 4 && *n == "text.strong");
+        let narrow_wins = highlights.iter().any(|(r, n)| r.start <= bold_start && r.end >= bold_start + 4 && *n == "text.strong");
         assert!(narrow_wins, "expected the narrower text.strong capture to win inside the heading, got {highlights:?}");
 
         let has_title = highlights.iter().any(|(_, n)| *n == "text.title");
-        assert!(
-            has_title,
-            "expected the rest of the heading still captured as text.title, got {highlights:?}"
-        );
+        assert!(has_title, "expected the rest of the heading still captured as text.title, got {highlights:?}");
     }
 
     #[test]
@@ -1198,28 +895,15 @@ mod tests {
         let end_star = source.rfind('*').unwrap();
         source.replace_range(end_star..end_star + 1, "**");
         let edits = [
-            RawEdit {
-                start_char: star,
-                new_end_char: star + 2,
-                removed: "*".to_string(),
-            },
-            RawEdit {
-                start_char: end_star + 1,
-                new_end_char: end_star + 3,
-                removed: "*".to_string(),
-            },
+            RawEdit { start_char: star, new_end_char: star + 2, removed: "*".to_string() },
+            RawEdit { start_char: end_star + 1, new_end_char: end_star + 3, removed: "*".to_string() },
         ];
         state.apply_edits(&source, &edits);
 
         let highlights = state.highlights_in_range(&source, 0..source.len());
         let italic_start = source.find("italic").unwrap();
-        let has_strong = highlights.iter().any(|(r, n)| {
-            r.start <= italic_start && r.end >= italic_start + 6 && *n == "text.strong"
-        });
-        assert!(
-            has_strong,
-            "expected the edited text now captured as text.strong, got {highlights:?}"
-        );
+        let has_strong = highlights.iter().any(|(r, n)| r.start <= italic_start && r.end >= italic_start + 6 && *n == "text.strong");
+        assert!(has_strong, "expected the edited text now captured as text.strong, got {highlights:?}");
     }
 
     #[test]
@@ -1255,10 +939,7 @@ mod tests {
 
     #[test]
     fn typescript_highlights_something() {
-        smoke_test(
-            LanguageId::TypeScript,
-            "function main(): string { return \"hi\"; }",
-        );
+        smoke_test(LanguageId::TypeScript, "function main(): string { return \"hi\"; }");
     }
 
     #[test]
@@ -1288,88 +969,35 @@ mod tests {
     #[test]
     fn the_newer_grammars_highlight_keywords_strings_and_comments() {
         for (lang, source, keyword) in [
-            (
-                LanguageId::Go,
-                "package main\n// TODO: go\nfunc main() { println(\"hi\") }\n",
-                "func",
-            ),
-            (
-                LanguageId::Java,
-                "// TODO: java\nclass A { String s = \"hi\"; }\n",
-                "class",
-            ),
-            (
-                LanguageId::CSharp,
-                "// TODO: cs\nclass A { string s = \"hi\"; }\n",
-                "class",
-            ),
+            (LanguageId::Go, "package main\n// TODO: go\nfunc main() { println(\"hi\") }\n", "func"),
+            (LanguageId::Java, "// TODO: java\nclass A { String s = \"hi\"; }\n", "class"),
+            (LanguageId::CSharp, "// TODO: cs\nclass A { string s = \"hi\"; }\n", "class"),
             (LanguageId::Lua, "-- TODO: lua\nlocal s = \"hi\"\n", "local"),
-            (
-                LanguageId::Sql,
-                "-- TODO: sql\nSELECT 'hi' FROM t;\n",
-                "SELECT",
-            ),
-            (
-                LanguageId::Css,
-                "/* TODO: css */\na { color: red; }\n@media print { a { content: \"hi\"; } }\n",
-                "@media",
-            ),
-            (
-                LanguageId::Html,
-                "<!-- TODO: html -->\n<p class=\"hi\">text</p>\n",
-                "p",
-            ),
-            (
-                LanguageId::Mermaid,
-                "%% TODO: mmd\nflowchart TD\n    a[\"hi\"] --> b\n",
-                "flowchart",
-            ),
+            (LanguageId::Sql, "-- TODO: sql\nSELECT 'hi' FROM t;\n", "SELECT"),
+            (LanguageId::Css, "/* TODO: css */\na { color: red; }\n@media print { a { content: \"hi\"; } }\n", "@media"),
+            (LanguageId::Html, "<!-- TODO: html -->\n<p class=\"hi\">text</p>\n", "p"),
+            (LanguageId::Mermaid, "%% TODO: mmd\nflowchart TD\n    a[\"hi\"] --> b\n", "flowchart"),
         ] {
             let state = SyntaxState::new(lang, source);
             let highlights = state.highlights_in_range(source, 0..source.len());
-            let name_of = |text: &str| {
-                highlights
-                    .iter()
-                    .find(|(r, _)| &source[r.clone()] == text)
-                    .map(|(_, n)| *n)
-            };
-            assert!(
-                name_of(keyword).is_some_and(|n| n.starts_with("keyword") || n == "tag"),
-                "{lang:?}: {keyword} -> {:?}",
-                name_of(keyword)
-            );
-            assert!(
-                highlights.iter().any(|(_, n)| n.starts_with("string")),
-                "{lang:?}: a string: {highlights:?}"
-            );
-            assert!(
-                highlights.iter().any(|(_, n)| n.starts_with("comment")),
-                "{lang:?}: a comment: {highlights:?}"
-            );
+            let name_of = |text: &str| highlights.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, n)| *n);
+            assert!(name_of(keyword).is_some_and(|n| n.starts_with("keyword") || n == "tag"), "{lang:?}: {keyword} -> {:?}", name_of(keyword));
+            assert!(highlights.iter().any(|(_, n)| n.starts_with("string")), "{lang:?}: a string: {highlights:?}");
+            assert!(highlights.iter().any(|(_, n)| n.starts_with("comment")), "{lang:?}: a comment: {highlights:?}");
             let todos = state.todo_items(source);
             assert_eq!(todos.len(), 1, "{lang:?}: {todos:?}");
-            assert_eq!(
-                SyntaxState::todo_items_of(lang, source),
-                todos,
-                "{lang:?}: the sweep finds the same"
-            );
+            assert_eq!(SyntaxState::todo_items_of(lang, source), todos, "{lang:?}: the sweep finds the same");
         }
     }
 
     #[test]
     fn tcl_highlights_something() {
-        smoke_test(
-            LanguageId::Tcl,
-            "proc greet {name} {\n    puts \"hello $name\"\n}\n",
-        );
+        smoke_test(LanguageId::Tcl, "proc greet {name} {\n    puts \"hello $name\"\n}\n");
     }
 
     #[test]
     fn dockerfile_highlights_something() {
-        smoke_test(
-            LanguageId::Dockerfile,
-            "FROM rust:1\nRUN cargo build\nCMD [\"./app\"]\n",
-        );
+        smoke_test(LanguageId::Dockerfile, "FROM rust:1\nRUN cargo build\nCMD [\"./app\"]\n");
     }
 
     #[test]
@@ -1389,31 +1017,20 @@ mod tests {
         let highlights = state.highlights_in_range(source, 0..source.len());
 
         let comment_start = source.find('#').unwrap();
-        let has_comment = highlights
-            .iter()
-            .any(|(r, n)| r.start == comment_start && (*n == "comment" || *n == "spell"));
-        assert!(
-            has_comment,
-            "expected the comment to be captured, got {highlights:?}"
-        );
+        let has_comment = highlights.iter().any(|(r, n)| r.start == comment_start && (*n == "comment" || *n == "spell"));
+        assert!(has_comment, "expected the comment to be captured, got {highlights:?}");
 
         let if_start = source.find("if").unwrap();
         let has_if = highlights
             .iter()
             .any(|(r, n)| r.start == if_start && (*n == "keyword" || *n == "conditional"));
-        assert!(
-            has_if,
-            "expected \"if\" to be captured as keyword/conditional, got {highlights:?}"
-        );
+        assert!(has_if, "expected \"if\" to be captured as keyword/conditional, got {highlights:?}");
 
         let while_start = source.find("while").unwrap();
         let has_while = highlights
             .iter()
             .any(|(r, n)| r.start == while_start && (*n == "keyword" || *n == "repeat"));
-        assert!(
-            has_while,
-            "expected \"while\" to be captured as keyword/repeat, got {highlights:?}"
-        );
+        assert!(has_while, "expected \"while\" to be captured as keyword/repeat, got {highlights:?}");
     }
 
     #[test]
@@ -1427,65 +1044,33 @@ mod tests {
         let state = SyntaxState::new(LanguageId::Rust, source);
         let highlights = state.highlights_in_range(source, 0..source.len());
         let todo = source.find("TODO(tom):").unwrap();
-        assert!(
-            highlights.iter().any(|(r, n)| r.start == todo
-                && &source[r.clone()] == "TODO(tom):"
-                && *n == "comment.todo.todo"),
-            "{highlights:?}"
-        );
+        assert!(highlights.iter().any(|(r, n)| r.start == todo && &source[r.clone()] == "TODO(tom):" && *n == "comment.todo.todo"), "{highlights:?}");
         let in_string = source.find("TODO: not").unwrap();
-        assert!(
-            !highlights
-                .iter()
-                .any(|(r, n)| r.start == in_string && n.starts_with("comment.todo")),
-            "{highlights:?}"
-        );
+        assert!(!highlights.iter().any(|(r, n)| r.start == in_string && n.starts_with("comment.todo")), "{highlights:?}");
 
         let items = state.todo_items(source);
         assert_eq!(SyntaxState::todo_items_of(LanguageId::Rust, source), items);
-        let summary: Vec<(TodoKind, usize, &str)> = items
-            .iter()
-            .map(|i| (i.kind, i.line, i.message.as_str()))
-            .collect();
-        assert_eq!(
-            summary,
-            vec![(TodoKind::Todo, 1, "wire up"), (TodoKind::Fix, 3, "broken")]
-        );
+        let summary: Vec<(TodoKind, usize, &str)> = items.iter().map(|i| (i.kind, i.line, i.message.as_str())).collect();
+        assert_eq!(summary, vec![(TodoKind::Todo, 1, "wire up"), (TodoKind::Fix, 3, "broken")]);
     }
 
     #[test]
     fn todo_keywords_work_in_every_comment_syntax() {
         for (lang, source) in [
-            (
-                LanguageId::Python,
-                "# TODO: py
-",
-            ),
-            (
-                LanguageId::Tcl,
-                "# TODO: tcl
+            (LanguageId::Python, "# TODO: py
+"),
+            (LanguageId::Tcl, "# TODO: tcl
 puts hi
-",
-            ),
-            (
-                LanguageId::Xml,
-                "<a><!-- TODO: xml --></a>
-",
-            ),
-            (
-                LanguageId::Bash,
-                "echo hi # TODO: sh
-",
-            ),
+"),
+            (LanguageId::Xml, "<a><!-- TODO: xml --></a>
+"),
+            (LanguageId::Bash, "echo hi # TODO: sh
+"),
         ] {
             let state = SyntaxState::new(lang, source);
             let items = state.todo_items(source);
             assert_eq!(items.len(), 1, "{lang:?}: {items:?}");
-            assert_eq!(
-                SyntaxState::todo_items_of(lang, source),
-                items,
-                "{lang:?}: the sweep finds the same"
-            );
+            assert_eq!(SyntaxState::todo_items_of(lang, source), items, "{lang:?}: the sweep finds the same");
             assert_eq!(items[0].kind, TodoKind::Todo);
         }
     }
@@ -1497,12 +1082,7 @@ puts hi
 ";
         let state = SyntaxState::new(LanguageId::Xml, source);
         let highlights = state.highlights_in_range(source, 0..source.len());
-        let name_of = |text: &str| {
-            highlights
-                .iter()
-                .find(|(r, _)| &source[r.clone()] == text)
-                .map(|(_, n)| *n)
-        };
+        let name_of = |text: &str| highlights.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, n)| *n);
         assert_eq!(name_of("root"), Some("tag"));
         assert_eq!(name_of("id"), Some("property"));
         assert_eq!(name_of("<!-- c -->"), Some("comment"));
@@ -1523,12 +1103,9 @@ puts hi
 
     #[test]
     fn dtd_highlights_something() {
-        smoke_test(
-            LanguageId::Dtd,
-            "<!ELEMENT note (to,from)>
+        smoke_test(LanguageId::Dtd, "<!ELEMENT note (to,from)>
 <!ATTLIST note id CDATA #REQUIRED>
-",
-        );
+");
     }
 
     /// The JSON grammar as WebAssembly, as an extension would bring it, as
@@ -1554,51 +1131,23 @@ puts hi
         let source = "{\n  \"a\": [\n    1,\n    true\n  ],\n  \"b\": \"x\"\n}\n";
         let mut state = SyntaxState::new(lang, source);
         let highlights = state.highlights_in_range(source, 0..source.len());
-        let name_of = |text: &str| {
-            highlights
-                .iter()
-                .find(|(r, _)| &source[r.clone()] == text)
-                .map(|(_, n)| n.to_string())
-        };
+        let name_of = |text: &str| highlights.iter().find(|(r, _)| &source[r.clone()] == text).map(|(_, n)| n.to_string());
         assert_eq!(name_of("true").as_deref(), Some("constant.builtin"));
         assert_eq!(name_of("1").as_deref(), Some("number"));
         assert_eq!(name_of("\"x\"").as_deref(), Some("string"));
         assert_eq!(state.scope_ranges(), vec![(0, 6), (1, 4)]);
-        assert_eq!(
-            state.enclosing_scopes(source.find("true").unwrap()),
-            vec![(0, 6), (1, 4)]
-        );
-        assert_eq!(
-            state.indents_after(source, source.find('[').unwrap() + 1),
-            Some(true),
-            "after the array's ["
-        );
-        assert_eq!(
-            state.indents_after(source, source.find("\"x\"").unwrap() + 3),
-            Some(false),
-            "after a string"
-        );
+        assert_eq!(state.enclosing_scopes(source.find("true").unwrap()), vec![(0, 6), (1, 4)]);
+        assert_eq!(state.indents_after(source, source.find('[').unwrap() + 1), Some(true), "after the array's [");
+        assert_eq!(state.indents_after(source, source.find("\"x\"").unwrap() + 3), Some(false), "after a string");
         // Edited as any other.
         let at = source.find("true").unwrap();
         let edited = source.replacen("true", "false", 1);
-        state.apply_edits(
-            &edited,
-            &[RawEdit {
-                start_char: at,
-                new_end_char: at + 5,
-                removed: "true".into(),
-            }],
-        );
+        state.apply_edits(&edited, &[RawEdit { start_char: at, new_end_char: at + 5, removed: "true".into() }]);
         let highlights = state.highlights_in_range(&edited, 0..edited.len());
-        assert!(highlights
-            .iter()
-            .any(|(r, n)| &edited[r.clone()] == "false" && *n == "constant.builtin"));
+        assert!(highlights.iter().any(|(r, n)| &edited[r.clone()] == "false" && *n == "constant.builtin"));
         assert_eq!(SyntaxState::todo_items_of(lang, "{}"), Vec::new());
         // Fenix's own have no indents query: the bracket decides.
-        assert_eq!(
-            SyntaxState::new(LanguageId::Json, "{}").indents_after("{}", 1),
-            None
-        );
+        assert_eq!(SyntaxState::new(LanguageId::Json, "{}").indents_after("{}", 1), None);
     }
 }
 
@@ -1613,42 +1162,21 @@ mod tool_tests {
         let chain = state.node_chain(source, source.find('x').unwrap());
         let kinds: Vec<&str> = chain.iter().map(|n| n.kind.as_str()).collect();
         assert_eq!(kinds.first(), Some(&"identifier"));
-        assert!(
-            kinds.contains(&"let_declaration") && kinds.contains(&"function_item"),
-            "{kinds:?}"
-        );
+        assert!(kinds.contains(&"let_declaration") && kinds.contains(&"function_item"), "{kinds:?}");
         assert_eq!(chain[0].field.as_deref(), Some("pattern"));
         assert_eq!(chain.last().unwrap().kind, "source_file");
         let function = chain.iter().find(|n| n.kind == "function_item").unwrap();
-        assert_eq!(
-            (function.start, function.first_line.as_str()),
-            ((0, 0), "fn main() {")
-        );
+        assert_eq!((function.start, function.first_line.as_str()), ((0, 0), "fn main() {"));
     }
 
     #[test]
     fn a_query_gives_its_captures_and_a_bad_one_says_why() {
         let source = "fn a() {}\nfn b() {}\n";
         let state = SyntaxState::new(LanguageId::Rust, source);
-        let found = state
-            .query(source, "(function_item name: (identifier) @name)", 10)
-            .unwrap();
-        let names: Vec<&str> = found
-            .iter()
-            .map(|(c, n)| {
-                assert_eq!(c, "name");
-                n.first_line.as_str()
-            })
-            .collect();
+        let found = state.query(source, "(function_item name: (identifier) @name)", 10).unwrap();
+        let names: Vec<&str> = found.iter().map(|(c, n)| { assert_eq!(c, "name"); n.first_line.as_str() }).collect();
         assert_eq!(names, ["a", "b"]);
-        assert_eq!(
-            state.query(source, "(function_item) @f", 1).unwrap().len(),
-            1,
-            "at most max"
-        );
-        assert!(state
-            .query(source, "(nope", 10)
-            .unwrap_err()
-            .contains("doesn't compile"));
+        assert_eq!(state.query(source, "(function_item) @f", 1).unwrap().len(), 1, "at most max");
+        assert!(state.query(source, "(nope", 10).unwrap_err().contains("doesn't compile"));
     }
 }

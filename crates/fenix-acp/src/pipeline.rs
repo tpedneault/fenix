@@ -84,11 +84,7 @@ fn two() -> u32 {
 
 impl StepSpec {
     pub fn is_read_only(&self) -> bool {
-        self.read_only
-            || self
-                .mode
-                .as_deref()
-                .is_some_and(|m| m.contains("plan") || m.contains("read"))
+        self.read_only || self.mode.as_deref().is_some_and(|m| m.contains("plan") || m.contains("read"))
     }
 }
 
@@ -104,8 +100,7 @@ pub struct PipelineSpec {
 impl PipelineSpec {
     /// A pipeline file, read: its steps named and their references known.
     pub fn parse(name: &str, text: &str) -> Result<PipelineSpec, String> {
-        let mut spec: PipelineSpec =
-            toml::from_str(text).map_err(|e| format!("pipeline {name}: {e}"))?;
+        let mut spec: PipelineSpec = toml::from_str(text).map_err(|e| format!("pipeline {name}: {e}"))?;
         spec.name = name.to_string();
         if spec.title.is_empty() {
             spec.title = name.to_string();
@@ -168,21 +163,11 @@ pub struct StepEnd {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Next {
     /// Start step `step` with this prompt.
-    Start {
-        step: usize,
-        prompt: String,
-    },
+    Start { step: usize, prompt: String },
     /// Ask you whether to go on, showing what step `step` passes.
-    Gate {
-        step: usize,
-        passing: String,
-    },
-    Done {
-        summary: String,
-    },
-    Stopped {
-        why: String,
-    },
+    Gate { step: usize, passing: String },
+    Done { summary: String },
+    Stopped { why: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -234,8 +219,7 @@ pub fn find_json(text: &str) -> Option<serde_json::Value> {
     }
     for (i, c) in text.char_indices() {
         if c == '[' || c == '{' {
-            let mut stream =
-                serde_json::Deserializer::from_str(&text[i..]).into_iter::<serde_json::Value>();
+            let mut stream = serde_json::Deserializer::from_str(&text[i..]).into_iter::<serde_json::Value>();
             if let Some(Ok(v)) = stream.next() {
                 return Some(v);
             }
@@ -254,18 +238,7 @@ pub fn findings_in(answer: &str) -> Option<Vec<Finding>> {
 fn findings_text(findings: &[Finding]) -> String {
     findings
         .iter()
-        .map(|f| {
-            format!(
-                "- {}{}: {}{}",
-                f.path,
-                f.line.map(|l| format!(":{l}")).unwrap_or_default(),
-                f.severity
-                    .as_deref()
-                    .map(|s| format!("[{s}] "))
-                    .unwrap_or_default(),
-                f.message
-            )
-        })
+        .map(|f| format!("- {}{}: {}{}", f.path, f.line.map(|l| format!(":{l}")).unwrap_or_default(), f.severity.as_deref().map(|s| format!("[{s}] ")).unwrap_or_default(), f.message))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -273,15 +246,7 @@ fn findings_text(findings: &[Finding]) -> String {
 impl Run {
     /// A run of `spec` on what you wrote, and its first step.
     pub fn start(spec: PipelineSpec, input: &str) -> (Run, Next) {
-        let mut run = Run {
-            spec,
-            input: input.to_string(),
-            state: State::Running(0),
-            rounds: 0,
-            passed: BTreeMap::new(),
-            previous: String::new(),
-            findings: Vec::new(),
-        };
+        let mut run = Run { spec, input: input.to_string(), state: State::Running(0), rounds: 0, passed: BTreeMap::new(), previous: String::new(), findings: Vec::new() };
         let prompt = run.prompt_for(0);
         run.state = State::Running(0);
         (run, Next::Start { step: 0, prompt })
@@ -289,10 +254,7 @@ impl Run {
 
     /// Step `step`'s prompt, its template filled in.
     pub fn prompt_for(&self, step: usize) -> String {
-        let mut text = self.spec.steps[step]
-            .prompt
-            .replace("{input}", &self.input)
-            .replace("{previous}", &self.previous);
+        let mut text = self.spec.steps[step].prompt.replace("{input}", &self.input).replace("{previous}", &self.previous);
         for (name, passed) in &self.passed {
             text = text.replace(&format!("{{{name}}}"), passed);
         }
@@ -325,11 +287,7 @@ impl Run {
 
     /// The current step's turn ended.
     pub fn step_ended(&mut self, end: StepEnd) -> Next {
-        let Some(i) = self.step() else {
-            return Next::Stopped {
-                why: "the pipeline isn't running".into(),
-            };
-        };
+        let Some(i) = self.step() else { return Next::Stopped { why: "the pipeline isn't running".into() } };
         if end.stop != "end_turn" {
             let why = format!("step {} ended: {}", self.spec.steps[i].name, end.stop);
             self.state = State::Stopped(why.clone());
@@ -338,18 +296,8 @@ impl Run {
         let step = self.spec.steps[i].clone();
         let passing = match step.passes {
             Passes::Answer => end.answer.clone(),
-            Passes::Plan => end
-                .plan
-                .clone()
-                .filter(|p| !p.trim().is_empty())
-                .unwrap_or_else(|| end.answer.clone()),
-            Passes::Changes => {
-                if end.changes.trim().is_empty() {
-                    "(no changes)".to_string()
-                } else {
-                    end.changes.clone()
-                }
-            }
+            Passes::Plan => end.plan.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| end.answer.clone()),
+            Passes::Changes => if end.changes.trim().is_empty() { "(no changes)".to_string() } else { end.changes.clone() },
             Passes::Transcript => end.transcript.clone(),
         };
         if step.findings {
@@ -360,38 +308,19 @@ impl Run {
             };
             self.findings = findings.clone();
             if !findings.is_empty() {
-                if let Some(back) = step
-                    .on_findings
-                    .as_ref()
-                    .and_then(|b| self.spec.steps.iter().position(|s| &s.name == b))
-                {
+                if let Some(back) = step.on_findings.as_ref().and_then(|b| self.spec.steps.iter().position(|s| &s.name == b)) {
                     if self.rounds < step.max_rounds {
                         self.rounds += 1;
-                        self.previous = format!(
-                            "A review found these; fix them, then run the tests again:\n{}",
-                            findings_text(&findings)
-                        );
-                        self.passed
-                            .insert(step.name.clone(), findings_text(&findings));
+                        self.previous = format!("A review found these; fix them, then run the tests again:\n{}", findings_text(&findings));
+                        self.passed.insert(step.name.clone(), findings_text(&findings));
                         self.state = State::Running(back);
-                        return Next::Start {
-                            step: back,
-                            prompt: self.prompt_for(back),
-                        };
+                        return Next::Start { step: back, prompt: self.prompt_for(back) };
                     }
                 }
                 self.state = State::Done;
-                return Next::Done {
-                    summary: format!(
-                        "{} finding(s) left after {} round(s):\n{}",
-                        findings.len(),
-                        self.rounds,
-                        findings_text(&findings)
-                    ),
-                };
+                return Next::Done { summary: format!("{} finding(s) left after {} round(s):\n{}", findings.len(), self.rounds, findings_text(&findings)) };
             }
-            self.passed
-                .insert(step.name.clone(), "(no findings)".into());
+            self.passed.insert(step.name.clone(), "(no findings)".into());
         } else {
             self.passed.insert(step.name.clone(), passing.clone());
         }
@@ -406,37 +335,23 @@ impl Run {
     fn advance(&mut self, i: usize) -> Next {
         if i + 1 >= self.spec.steps.len() {
             self.state = State::Done;
-            return Next::Done {
-                summary: if self.spec.steps[i].findings {
-                    "the review found nothing to fix".into()
-                } else {
-                    "every step is done".into()
-                },
-            };
+            return Next::Done { summary: if self.spec.steps[i].findings { "the review found nothing to fix".into() } else { "every step is done".into() } };
         }
         self.state = State::Running(i + 1);
-        Next::Start {
-            step: i + 1,
-            prompt: self.prompt_for(i + 1),
-        }
+        Next::Start { step: i + 1, prompt: self.prompt_for(i + 1) }
     }
 
     /// You answered at the gate: go on (with what's passed, as you edited
     /// it), or stop.
     pub fn gate_answered(&mut self, go: bool, edited: Option<String>) -> Next {
-        let State::AtGate(i) = self.state else {
-            return Next::Stopped {
-                why: "not at a gate".into(),
-            };
-        };
+        let State::AtGate(i) = self.state else { return Next::Stopped { why: "not at a gate".into() } };
         if !go {
             let why = format!("stopped at {}'s gate", self.spec.steps[i].name);
             self.state = State::Stopped(why.clone());
             return Next::Stopped { why };
         }
         if let Some(text) = edited {
-            self.passed
-                .insert(self.spec.steps[i].name.clone(), text.clone());
+            self.passed.insert(self.spec.steps[i].name.clone(), text.clone());
             self.previous = text;
         }
         self.advance(i)
@@ -453,63 +368,29 @@ mod tests {
     use super::*;
 
     fn ended(answer: &str) -> StepEnd {
-        StepEnd {
-            stop: "end_turn".into(),
-            answer: answer.into(),
-            ..Default::default()
-        }
+        StepEnd { stop: "end_turn".into(), answer: answer.into(), ..Default::default() }
     }
 
     #[test]
     fn the_built_in_review_reads_and_a_bad_one_says_why() {
         let review = PipelineSpec::review();
-        assert_eq!(
-            review
-                .steps
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect::<Vec<_>>(),
-            ["plan", "build", "review"]
-        );
+        assert_eq!(review.steps.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["plan", "build", "review"]);
         assert!(review.steps[0].is_read_only() && !review.steps[1].is_read_only());
-        assert!(PipelineSpec::parse("x", "steps = []")
-            .unwrap_err()
-            .contains("no steps"));
-        assert!(PipelineSpec::parse(
-            "x",
-            "[[steps]]\nname = \"a\"\nprompt = \"p\"\non_findings = \"nope\"\n"
-        )
-        .unwrap_err()
-        .contains("isn't one of its steps"));
+        assert!(PipelineSpec::parse("x", "steps = []").unwrap_err().contains("no steps"));
+        assert!(PipelineSpec::parse("x", "[[steps]]\nname = \"a\"\nprompt = \"p\"\non_findings = \"nope\"\n").unwrap_err().contains("isn't one of its steps"));
     }
 
     #[test]
     fn a_gate_holds_the_plan_until_you_say_go() {
         let (mut run, next) = Run::start(PipelineSpec::review(), "Add a --verbose flag");
-        let Next::Start { step: 0, prompt } = next else {
-            panic!("{next:?}")
-        };
+        let Next::Start { step: 0, prompt } = next else { panic!("{next:?}") };
         assert!(prompt.contains("Add a --verbose flag"));
-        let next = run.step_ended(StepEnd {
-            plan: Some("1. Parse it\n2. Print more".into()),
-            ..ended("I'd do this")
-        });
-        assert_eq!(
-            next,
-            Next::Gate {
-                step: 0,
-                passing: "1. Parse it\n2. Print more".into()
-            }
-        );
+        let next = run.step_ended(StepEnd { plan: Some("1. Parse it\n2. Print more".into()), ..ended("I'd do this") });
+        assert_eq!(next, Next::Gate { step: 0, passing: "1. Parse it\n2. Print more".into() });
         assert_eq!(run.progress(), "plan ● → build → review");
         let next = run.gate_answered(true, Some("1. Parse it".into()));
-        let Next::Start { step: 1, prompt } = next else {
-            panic!("{next:?}")
-        };
-        assert!(
-            prompt.contains("1. Parse it") && !prompt.contains("Print more"),
-            "your edit is what goes on"
-        );
+        let Next::Start { step: 1, prompt } = next else { panic!("{next:?}") };
+        assert!(prompt.contains("1. Parse it") && !prompt.contains("Print more"), "your edit is what goes on");
         assert_eq!(run.progress(), "plan ✓ → build ● → review");
     }
 
@@ -518,35 +399,17 @@ mod tests {
         let (mut run, _) = Run::start(PipelineSpec::review(), "x");
         run.step_ended(ended("plan"));
         run.gate_answered(true, None);
-        let next = run.step_ended(StepEnd {
-            changes: "+a".into(),
-            ..ended("done")
-        });
-        let Next::Start { step: 2, prompt } = next else {
-            panic!("{next:?}")
-        };
-        assert!(
-            prompt.contains("+a") && prompt.contains("The plan:\nplan"),
-            "{prompt}"
-        );
+        let next = run.step_ended(StepEnd { changes: "+a".into(), ..ended("done") });
+        let Next::Start { step: 2, prompt } = next else { panic!("{next:?}") };
+        assert!(prompt.contains("+a") && prompt.contains("The plan:\nplan"), "{prompt}");
         let finding = "```json\n[{\"path\": \"a.rs\", \"line\": 3, \"severity\": \"error\", \"message\": \"off by one\"}]\n```";
-        let Next::Start { step: 1, prompt } = run.step_ended(ended(finding)) else {
-            panic!()
-        };
+        let Next::Start { step: 1, prompt } = run.step_ended(ended(finding)) else { panic!() };
         assert!(prompt.contains("a.rs:3: [error] off by one"), "{prompt}");
         run.step_ended(ended("fixed"));
-        assert!(
-            matches!(run.step_ended(ended(finding)), Next::Start { step: 1, .. }),
-            "round two"
-        );
+        assert!(matches!(run.step_ended(ended(finding)), Next::Start { step: 1, .. }), "round two");
         run.step_ended(ended("fixed again"));
-        let Next::Done { summary } = run.step_ended(ended(finding)) else {
-            panic!()
-        };
-        assert!(
-            summary.contains("1 finding(s) left after 2 round(s)"),
-            "{summary}"
-        );
+        let Next::Done { summary } = run.step_ended(ended(finding)) else { panic!() };
+        assert!(summary.contains("1 finding(s) left after 2 round(s)"), "{summary}");
         assert_eq!(run.state, State::Done);
     }
 
@@ -556,26 +419,12 @@ mod tests {
         run.step_ended(ended("plan"));
         run.gate_answered(true, None);
         run.step_ended(ended("built"));
-        assert_eq!(
-            run.step_ended(ended("Nothing to fix: ```json\n{\"findings\": []}\n```")),
-            Next::Done {
-                summary: "the review found nothing to fix".into()
-            }
-        );
+        assert_eq!(run.step_ended(ended("Nothing to fix: ```json\n{\"findings\": []}\n```")), Next::Done { summary: "the review found nothing to fix".into() });
         let (mut run, _) = Run::start(PipelineSpec::review(), "x");
-        assert!(matches!(
-            run.step_ended(StepEnd {
-                stop: "cancelled".into(),
-                ..Default::default()
-            }),
-            Next::Stopped { .. }
-        ));
+        assert!(matches!(run.step_ended(StepEnd { stop: "cancelled".into(), ..Default::default() }), Next::Stopped { .. }));
         let (mut run, _) = Run::start(PipelineSpec::review(), "x");
         run.step_ended(ended("plan"));
-        assert!(matches!(
-            run.gate_answered(false, None),
-            Next::Stopped { .. }
-        ));
+        assert!(matches!(run.gate_answered(false, None), Next::Stopped { .. }));
     }
 
     #[test]
@@ -584,22 +433,13 @@ mod tests {
         run.step_ended(ended("plan"));
         run.gate_answered(true, None);
         run.step_ended(ended("built"));
-        assert!(matches!(
-            run.step_ended(ended("Looks fine to me")),
-            Next::Stopped { .. }
-        ));
+        assert!(matches!(run.step_ended(ended("Looks fine to me")), Next::Stopped { .. }));
     }
 
     #[test]
     fn json_is_found_fenced_or_bare() {
-        assert_eq!(
-            find_json("x ```json\n[1]\n``` y"),
-            Some(serde_json::json!([1]))
-        );
-        assert_eq!(
-            find_json("the answer is {\"a\": 2} ok"),
-            Some(serde_json::json!({ "a": 2 }))
-        );
+        assert_eq!(find_json("x ```json\n[1]\n``` y"), Some(serde_json::json!([1])));
+        assert_eq!(find_json("the answer is {\"a\": 2} ok"), Some(serde_json::json!({ "a": 2 })));
         assert_eq!(find_json("none here"), None);
     }
 }

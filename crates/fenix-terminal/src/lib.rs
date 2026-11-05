@@ -44,11 +44,7 @@ impl Terminal {
     /// Passing one is what makes "a shell *here*" mean here -- without
     /// it the answer is a shell somewhere else, and the first thing
     /// anybody types is a `cd`.
-    pub fn spawn_in(
-        rows: u16,
-        cols: u16,
-        cwd: Option<&std::path::Path>,
-    ) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
+    pub fn spawn_in(rows: u16, cols: u16, cwd: Option<&std::path::Path>) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
         Self::spawn_command(rows, cols, cwd, shell_command())
     }
 
@@ -68,56 +64,24 @@ impl Terminal {
         Self::spawn_command(rows, cols, cwd, command)
     }
 
-    fn spawn_command(
-        rows: u16,
-        cols: u16,
-        cwd: Option<&std::path::Path>,
-        mut command: CommandBuilder,
-    ) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
+    fn spawn_command(rows: u16, cols: u16, cwd: Option<&std::path::Path>, mut command: CommandBuilder) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|err| std::io::Error::other(err.to_string()))?;
         if let Some(cwd) = cwd {
             command.cwd(cwd);
         }
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let child = pair.slave.spawn_command(command).map_err(|err| std::io::Error::other(err.to_string()))?;
         // The slave end is only needed to spawn the child -- dropping it
         // here (rather than holding it in `Terminal`) matches portable-
         // pty's own documented usage, and avoids it holding the PTY open
         // past the child's own lifetime on platforms where that matters.
         drop(pair.slave);
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
-        let parser = vt100::Parser::new_with_callbacks(
-            rows,
-            cols,
-            SCROLLBACK_LINES,
-            query::QueryReplies::default(),
-        );
-        Ok((
-            Terminal {
-                child,
-                writer,
-                master: pair.master,
-                parser,
-            },
-            reader,
-        ))
+        let reader = pair.master.try_clone_reader().map_err(|err| std::io::Error::other(err.to_string()))?;
+        let writer = pair.master.take_writer().map_err(|err| std::io::Error::other(err.to_string()))?;
+        let parser = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, query::QueryReplies::default());
+        Ok((Terminal { child, writer, master: pair.master, parser }, reader))
     }
 
     /// Feeds raw PTY output bytes (from the caller's own reader thread)
@@ -153,12 +117,7 @@ impl Terminal {
     /// `$LINES` drifts from what's actually being rendered.
     pub fn resize(&mut self, rows: u16, cols: u16) -> std::io::Result<()> {
         self.master
-            .resize(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
+            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
             .map_err(|err| std::io::Error::other(err.to_string()))?;
         self.parser.screen_mut().set_size(rows, cols);
         Ok(())
@@ -234,8 +193,7 @@ mod tests {
         // thing anybody types is a `cd`.
         let dir = std::env::temp_dir().join(format!("fenix-terminal-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (mut term, _reader) =
-            Terminal::spawn_in(24, 80, Some(&dir)).expect("failed to spawn a shell");
+        let (mut term, _reader) = Terminal::spawn_in(24, 80, Some(&dir)).expect("failed to spawn a shell");
         assert!(term.is_alive());
         term.kill();
         let _ = std::fs::remove_dir_all(&dir);
@@ -246,10 +204,7 @@ mod tests {
         let cmd = shell_command();
         let program = cmd.get_argv()[0].to_string_lossy().to_lowercase();
         #[cfg(windows)]
-        assert!(
-            program.contains("powershell"),
-            "expected powershell, got {program:?}"
-        );
+        assert!(program.contains("powershell"), "expected powershell, got {program:?}");
         #[cfg(not(windows))]
         assert!(!program.is_empty());
     }
@@ -286,8 +241,7 @@ mod tests {
         // what's typed. (`shell_command_resolves_the_platform_default_shell`
         // keeps PowerShell as the default.)
         #[cfg(windows)]
-        let (mut term, mut reader) =
-            Terminal::spawn_program(24, 80, None, "cmd.exe", &[]).expect("failed to spawn cmd.exe");
+        let (mut term, mut reader) = Terminal::spawn_program(24, 80, None, "cmd.exe", &[]).expect("failed to spawn cmd.exe");
         #[cfg(not(windows))]
         let (mut term, mut reader) = Terminal::spawn(24, 80).expect("failed to spawn a shell");
 
@@ -312,10 +266,7 @@ mod tests {
         let mut pump = |term: &mut Terminal, secs: u64, done: &dyn Fn(&str) -> bool| -> bool {
             let deadline = Instant::now() + Duration::from_secs(secs);
             while Instant::now() < deadline {
-                let Ok(chunk) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                else {
-                    return false;
-                };
+                let Ok(chunk) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) else { return false };
                 term.process(&chunk);
                 let screen = term.screen();
                 let (rows, cols) = screen.size();
@@ -343,15 +294,10 @@ mod tests {
             term.write_input(&[*key]).expect("failed to write input");
             std::thread::sleep(Duration::from_millis(20));
         }
-        let found = pump(&mut term, 60, &|text: &str| {
-            text.contains("fenix-terminal-test-marker")
-        });
+        let found = pump(&mut term, 60, &|text: &str| text.contains("fenix-terminal-test-marker"));
         if !found {
             eprintln!("fenix-terminal test: last observed screen text:\n{last_text}");
         }
-        assert!(
-            found,
-            "expected the echoed marker to appear in the parsed screen within the timeout"
-        );
+        assert!(found, "expected the echoed marker to appear in the parsed screen within the timeout");
     }
 }

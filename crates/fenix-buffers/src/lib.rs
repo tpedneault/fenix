@@ -222,34 +222,16 @@ impl Default for BufferList {
 
 impl BufferList {
     pub fn new() -> Self {
-        Self {
-            buffers: BTreeMap::new(),
-            path_index: HashMap::new(),
-            mru: Vec::new(),
-            next_id: 0,
-        }
+        Self { buffers: BTreeMap::new(), path_index: HashMap::new(), mru: Vec::new(), next_id: 0 }
     }
 
-    fn insert(
-        &mut self,
-        buffer: Buffer,
-        syntax: Option<fenix_syntax::SyntaxState>,
-        kind: BufferKind,
-    ) -> BufferId {
+    fn insert(&mut self, buffer: Buffer, syntax: Option<fenix_syntax::SyntaxState>, kind: BufferKind) -> BufferId {
         let id = BufferId(self.next_id);
         self.next_id += 1;
         if let Some(path) = buffer.path() {
             self.path_index.insert(path_key(path), id);
         }
-        self.buffers.insert(
-            id,
-            OpenBuffer {
-                buffer,
-                cursor: Cursor::at_start(),
-                syntax,
-                kind,
-            },
-        );
+        self.buffers.insert(id, OpenBuffer { buffer, cursor: Cursor::at_start(), syntax, kind });
         self.touch(id);
         id
     }
@@ -345,6 +327,7 @@ impl BufferList {
         self.insert(Buffer::empty(), None, BufferKind::Terminal)
     }
 
+
     /// A real, ordinary `Text`-kind buffer seeded with `text` up front --
     /// e.g. `docker logs` output shown by the Docker panel's `l` action.
     /// Unlike `open_dashboard`/`open_explorer`/`open_docker`, this is
@@ -362,8 +345,7 @@ impl BufferList {
     /// at a git ref. Pathless, so saving it can't overwrite anything.
     pub fn open_text_view_like(&mut self, text: &str, like: &Path) -> BufferId {
         let buffer = Buffer::from_text(text);
-        let syntax = fenix_syntax::detect_language_from_path(like)
-            .map(|language| fenix_syntax::SyntaxState::new(language, &buffer.text()));
+        let syntax = fenix_syntax::detect_language_from_path(like).map(|language| fenix_syntax::SyntaxState::new(language, &buffer.text()));
         self.insert(buffer, syntax, BufferKind::Text)
     }
 
@@ -379,9 +361,7 @@ impl BufferList {
     /// Register a preloaded document after a transaction has validated every
     /// target. No disk reads or fallible loading occur during commit.
     pub fn insert_loaded_document(&mut self, buffer: Buffer) -> BufferId {
-        let syntax = buffer
-            .path()
-            .and_then(fenix_syntax::detect_language_from_path)
+        let syntax = buffer.path().and_then(fenix_syntax::detect_language_from_path)
             .map(|language| fenix_syntax::SyntaxState::new(language, &buffer.text()));
         self.insert(buffer, syntax, BufferKind::Text)
     }
@@ -398,10 +378,7 @@ impl BufferList {
             if err.kind() == std::io::ErrorKind::NotFound {
                 return Buffer::from_text_at(path, "");
             }
-            eprintln!(
-                "fenix: couldn't open {} ({err}), starting empty buffer",
-                path.display()
-            );
+            eprintln!("fenix: couldn't open {} ({err}), starting empty buffer", path.display());
             Buffer::empty()
         });
         let syntax = buffer
@@ -489,12 +466,7 @@ impl BufferList {
     /// among themselves since `None < Some(_)`).
     pub fn ids_sorted_by_path(&self) -> Vec<BufferId> {
         let mut ids: Vec<BufferId> = self.buffers.keys().copied().collect();
-        ids.sort_by(|&a, &b| {
-            self.buffers[&a]
-                .buffer
-                .path()
-                .cmp(&self.buffers[&b].buffer.path())
-        });
+        ids.sort_by(|&a, &b| self.buffers[&a].buffer.path().cmp(&self.buffers[&b].buffer.path()));
         ids
     }
 
@@ -521,10 +493,7 @@ mod tests {
         fn new(name: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "fenix-buffers-test-{name}-{}-{n}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir().join(format!("fenix-buffers-test-{name}-{}-{n}", std::process::id()));
             fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
@@ -557,10 +526,7 @@ mod tests {
             BufferKind::TaskOutput,
             BufferKind::ToolStatus,
         ] {
-            assert!(
-                kind.is_session_owned(),
-                "{kind:?} lives in a panel workspace and can't be rebuilt on restore"
-            );
+            assert!(kind.is_session_owned(), "{kind:?} lives in a panel workspace and can't be rebuilt on restore");
         }
     }
 
@@ -614,15 +580,13 @@ mod tests {
         assert_eq!(ob.kind, BufferKind::Explorer);
     }
 
+
     #[test]
     fn open_tool_status_seeds_the_text_and_tags_the_buffer() {
         let mut list = BufferList::new();
         let id = list.open_tool_status("Python  LSP  pyright-langserver  [found]\n");
         let ob = list.get(id).unwrap();
-        assert_eq!(
-            ob.buffer.text(),
-            "Python  LSP  pyright-langserver  [found]\n"
-        );
+        assert_eq!(ob.buffer.text(), "Python  LSP  pyright-langserver  [found]\n");
         assert_eq!(ob.buffer.path(), None);
         assert_eq!(ob.kind, BufferKind::ToolStatus);
     }
@@ -705,23 +669,10 @@ mod tests {
         assert!(verbatim.to_string_lossy().starts_with(r"\\?\"));
         let mut list = BufferList::new();
         let first = list.open_path(&verbatim);
-        assert!(
-            !list
-                .get(first)
-                .unwrap()
-                .buffer
-                .path()
-                .unwrap()
-                .to_string_lossy()
-                .contains('?'),
-            "kept in plain form"
-        );
+        assert!(!list.get(first).unwrap().buffer.path().unwrap().to_string_lossy().contains('?'), "kept in plain form");
         let plain = fenix_core::plain_path(&verbatim);
         assert_eq!(list.open_path(&plain), first);
-        assert_eq!(
-            list.open_path(Path::new(&plain.to_string_lossy().to_uppercase())),
-            first
-        );
+        assert_eq!(list.open_path(Path::new(&plain.to_string_lossy().to_uppercase())), first);
         assert_eq!(list.id_for_path(&verbatim), Some(first));
         assert_eq!(list.open_path_with_text(&plain, "ignored"), first);
         assert_eq!(list.len(), 1);

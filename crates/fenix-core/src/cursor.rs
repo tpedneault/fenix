@@ -14,10 +14,7 @@ pub struct Cursor {
 
 impl Cursor {
     pub fn at_start() -> Self {
-        Self {
-            char_idx: 0,
-            sticky_col: 0,
-        }
+        Self { char_idx: 0, sticky_col: 0 }
     }
 }
 

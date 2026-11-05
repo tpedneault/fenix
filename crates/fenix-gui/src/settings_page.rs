@@ -17,9 +17,7 @@ use std::path::PathBuf;
 
 use fenix_config::{settings, Category, Kind, Problem, Secret, Setting, Value};
 
-use crate::page::{
-    edit_line, fit, frame, insert_at, with_caret, wrap, Grid, Key, Page, Popup, Role,
-};
+use crate::page::{edit_line, fit, frame, insert_at, with_caret, wrap, Grid, Key, Page, Popup, Role};
 
 /// Whose settings the page is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,32 +61,19 @@ pub enum Action {
     None,
     Close,
     /// Set (or, with `None`, reset) a setting; already checked.
-    Set {
-        key: &'static str,
-        value: Option<Value>,
-    },
+    Set { key: &'static str, value: Option<Value> },
     /// Store (or, with `None`, forget) a token.
-    SetSecret {
-        secret: Secret,
-        token: Option<String>,
-    },
+    SetSecret { secret: Secret, token: Option<String> },
     /// Check a token against its server.
     TestSecret(Secret),
     /// Open the file, at a setting's line when there's one.
     OpenFile(Option<&'static str>),
     /// Pick a path in the explorer, starting from `start`: a folder, or
     /// a file. What's picked comes back through `SettingsPage::browsed`.
-    Browse {
-        start: Option<PathBuf>,
-        folder: bool,
-    },
+    Browse { start: Option<PathBuf>, folder: bool },
     /// Pick the setting's value from a list, starting on `current`.
     /// What's picked comes back through `SettingsPage::chose`.
-    Choose {
-        key: &'static str,
-        choices: Vec<String>,
-        current: Option<String>,
-    },
+    Choose { key: &'static str, choices: Vec<String>, current: Option<String> },
     /// Show `scope` instead.
     SwitchScope(Scope),
     /// Something the project's own section asked for: its kind, group,
@@ -132,12 +117,7 @@ enum Edit {
     Inline { key: &'static str, text: String },
     /// A popup form for one entry of a list: its fields, the one being
     /// typed, and which entry it replaces (`None` adds one).
-    Entry {
-        key: &'static str,
-        index: Option<usize>,
-        fields: Vec<String>,
-        at: usize,
-    },
+    Entry { key: &'static str, index: Option<usize>, fields: Vec<String>, at: usize },
 }
 
 pub struct SettingsPage {
@@ -169,17 +149,13 @@ pub struct SettingsPage {
 
 fn setting_matches(s: &Setting, needle: &str) -> bool {
     let needle = needle.to_lowercase();
-    [s.label, s.key, s.help, s.category.label()]
-        .iter()
-        .any(|t| t.to_lowercase().contains(&needle))
+    [s.label, s.key, s.help, s.category.label()].iter().any(|t| t.to_lowercase().contains(&needle))
 }
 
 /// A list setting's entries, as rows of fields.
 fn entries(kind: &Kind, value: Option<&Value>) -> Vec<Vec<String>> {
     match (kind, value) {
-        (Kind::Map { .. }, Some(Value::Map(m))) => {
-            m.iter().map(|(k, v)| vec![k.clone(), v.clone()]).collect()
-        }
+        (Kind::Map { .. }, Some(Value::Map(m))) => m.iter().map(|(k, v)| vec![k.clone(), v.clone()]).collect(),
         (Kind::Records(_), Some(Value::Records(rows))) => rows.clone(),
         _ => Vec::new(),
     }
@@ -198,16 +174,7 @@ fn field_labels(kind: &Kind) -> Vec<&'static str> {
 /// at its default.
 fn blank_fields(kind: &Kind) -> Vec<String> {
     match kind {
-        Kind::Records(fields) => fields
-            .iter()
-            .map(|f| {
-                if f.choices.is_empty() {
-                    String::new()
-                } else {
-                    f.default.unwrap_or(f.choices[0]).to_string()
-                }
-            })
-            .collect(),
+        Kind::Records(fields) => fields.iter().map(|f| if f.choices.is_empty() { String::new() } else { f.default.unwrap_or(f.choices[0]).to_string() }).collect(),
         _ => vec![String::new(); field_labels(kind).len()],
     }
 }
@@ -230,31 +197,14 @@ fn is_list(kind: &Kind) -> bool {
 fn path_field(kind: &Kind, at: usize) -> Option<bool> {
     match kind {
         Kind::Path => Some(false),
-        Kind::Map {
-            value, paths: true, ..
-        } if at == 1 => Some(*value == "Folder"),
+        Kind::Map { value, paths: true, .. } if at == 1 => Some(*value == "Folder"),
         _ => None,
     }
 }
 
 impl SettingsPage {
     pub fn new(scope: Scope, snap: Snapshot) -> Self {
-        let mut page = SettingsPage {
-            scope: Scope::You,
-            snap,
-            category: 0,
-            focus: Focus::Settings,
-            cursor: 0,
-            search: None,
-            searching: false,
-            edit: None,
-            refused: None,
-            note: None,
-            armed_delete: false,
-            browsing: None,
-            caret: None,
-            project_page: None,
-        };
+        let mut page = SettingsPage { scope: Scope::You, snap, category: 0, focus: Focus::Settings, cursor: 0, search: None, searching: false, edit: None, refused: None, note: None, armed_delete: false, browsing: None, caret: None, project_page: None };
         page.set_scope(scope);
         page
     }
@@ -262,11 +212,7 @@ impl SettingsPage {
     /// Shows `scope`, on its first category of settings.
     pub fn set_scope(&mut self, scope: Scope) {
         self.scope = scope;
-        self.category = self
-            .sections()
-            .iter()
-            .position(Option::is_some)
-            .unwrap_or(0);
+        self.category = self.sections().iter().position(Option::is_some).unwrap_or(0);
         self.cursor = 0;
         self.edit = None;
     }
@@ -275,10 +221,7 @@ impl SettingsPage {
     /// (`None`) first, then the categories.
     fn sections(&self) -> Vec<Option<Category>> {
         let project = matches!(self.scope, Scope::Project { .. }).then_some(None);
-        project
-            .into_iter()
-            .chain(self.categories().into_iter().map(Some))
-            .collect()
+        project.into_iter().chain(self.categories().into_iter().map(Some)).collect()
     }
 
     /// Whether the project's own page is the section showing.
@@ -311,24 +254,14 @@ impl SettingsPage {
                 self.category = i;
             }
             self.focus = Focus::Settings;
-            if let Some(i) = self
-                .selectable()
-                .iter()
-                .position(|r| matches!(r, Row::Setting(x) if x.key == key))
-            {
+            if let Some(i) = self.selectable().iter().position(|r| matches!(r, Row::Setting(x) if x.key == key)) {
                 self.cursor = i;
             }
         }
     }
 
     pub fn typing(&self) -> bool {
-        self.searching
-            || self.edit.is_some()
-            || self.in_project_page()
-                && self
-                    .project_page
-                    .as_ref()
-                    .is_some_and(|p| p.editing.is_some())
+        self.searching || self.edit.is_some() || self.in_project_page() && self.project_page.as_ref().is_some_and(|p| p.editing.is_some())
     }
 
     /// Space flips a switch; anywhere else it's the leader.
@@ -364,9 +297,7 @@ impl SettingsPage {
     /// text being typed. Whether it was one.
     fn caret_key(&mut self, key: Key) -> bool {
         let caret = self.caret;
-        let Some(target) = self.typed() else {
-            return false;
-        };
+        let Some(target) = self.typed() else { return false };
         let mut at = caret.unwrap_or(target.chars().count());
         let done = edit_line(target, &mut at, key);
         if done {
@@ -401,23 +332,11 @@ impl SettingsPage {
     /// The categories this scope has settings in: core's, then each
     /// extension's section, by name.
     pub fn categories(&self) -> Vec<Category> {
-        let shown: Vec<Category> = settings()
-            .into_iter()
-            .filter(|s| self.visible(s))
-            .map(|s| s.category)
-            .collect();
-        let mut sections: Vec<Category> = shown
-            .iter()
-            .copied()
-            .filter(|c| matches!(c, Category::Extension(_)))
-            .collect();
+        let shown: Vec<Category> = settings().into_iter().filter(|s| self.visible(s)).map(|s| s.category).collect();
+        let mut sections: Vec<Category> = shown.iter().copied().filter(|c| matches!(c, Category::Extension(_))).collect();
         sections.sort_by_key(|c| (c.label().to_lowercase(), c.label()));
         sections.dedup();
-        Category::ALL
-            .into_iter()
-            .filter(|c| shown.contains(c))
-            .chain(sections)
-            .collect()
+        Category::ALL.into_iter().filter(|c| shown.contains(c)).chain(sections).collect()
     }
 
     fn shown_settings(&self) -> Vec<&'static Setting> {
@@ -425,21 +344,13 @@ impl SettingsPage {
             Some(needle) => {
                 // By section, so each gets one heading.
                 let order = self.categories();
-                let mut found: Vec<&'static Setting> = settings()
-                    .into_iter()
-                    .filter(|s| self.visible(s) && setting_matches(s, needle))
-                    .collect();
+                let mut found: Vec<&'static Setting> = settings().into_iter().filter(|s| self.visible(s) && setting_matches(s, needle)).collect();
                 found.sort_by_key(|s| order.iter().position(|c| *c == s.category));
                 found
             }
             None => {
-                let Some(Some(category)) = self.sections().get(self.category).copied() else {
-                    return Vec::new();
-                };
-                settings()
-                    .into_iter()
-                    .filter(|s| s.category == category && self.visible(s))
-                    .collect()
+                let Some(Some(category)) = self.sections().get(self.category).copied() else { return Vec::new() };
+                settings().into_iter().filter(|s| s.category == category && self.visible(s)).collect()
             }
         }
     }
@@ -465,10 +376,7 @@ impl SettingsPage {
     }
 
     fn selectable(&self) -> Vec<Row> {
-        self.rows()
-            .into_iter()
-            .filter(|r| !matches!(r, Row::Heading(_)))
-            .collect()
+        self.rows().into_iter().filter(|r| !matches!(r, Row::Heading(_))).collect()
     }
 
     pub fn selected(&self) -> Option<Row> {
@@ -488,10 +396,7 @@ impl SettingsPage {
     /// The value in force for `s` in this scope: set here, else
     /// inherited, else none (the default).
     fn value(&self, s: &Setting) -> Option<&Value> {
-        self.snap
-            .here
-            .get(s.key)
-            .or_else(|| self.snap.inherited.get(s.key))
+        self.snap.here.get(s.key).or_else(|| self.snap.inherited.get(s.key))
     }
 
     fn set(&mut self, key: &'static str, value: Option<Value>) -> Action {
@@ -532,9 +437,7 @@ impl SettingsPage {
                     Some(Value::Int(n)) => n,
                     _ => s.default.parse().unwrap_or(min),
                 };
-                Some(Value::Int(
-                    (n + if forward { 1 } else { -1 }).clamp(min, max),
-                ))
+                Some(Value::Int((n + if forward { 1 } else { -1 }).clamp(min, max)))
             }
             Kind::Float { min, max } => {
                 let n = match current {
@@ -542,9 +445,7 @@ impl SettingsPage {
                     Some(Value::Int(n)) => n as f64,
                     _ => s.default.parse().unwrap_or(min),
                 };
-                Some(Value::Float(
-                    (n + if forward { 1.0 } else { -1.0 }).clamp(min, max),
-                ))
+                Some(Value::Float((n + if forward { 1.0 } else { -1.0 }).clamp(min, max)))
             }
             Kind::Minutes => {
                 let n = match current {
@@ -553,10 +454,7 @@ impl SettingsPage {
                 };
                 Some(Value::Int((n + if forward { 1 } else { -1 }).max(1)))
             }
-            Kind::Choice(choices) => cycle(
-                &choices.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
-                text.or(Some(s.default)),
-            ),
+            Kind::Choice(choices) => cycle(&choices.iter().map(|c| c.to_string()).collect::<Vec<_>>(), text.or(Some(s.default))),
             Kind::Theme => cycle(&self.snap.themes.clone(), text.or(Some(s.default))),
             Kind::Font => cycle(&self.snap.fonts.clone(), text),
             _ => None,
@@ -581,14 +479,12 @@ impl SettingsPage {
         match self.focus {
             Focus::Categories => {
                 let n = self.sections().len();
-                self.category =
-                    (self.category as isize + by).clamp(0, n.saturating_sub(1) as isize) as usize;
+                self.category = (self.category as isize + by).clamp(0, n.saturating_sub(1) as isize) as usize;
                 self.cursor = 0;
             }
             Focus::Settings => {
                 let n = self.selectable().len();
-                self.cursor =
-                    (self.cursor as isize + by).clamp(0, n.saturating_sub(1) as isize) as usize;
+                self.cursor = (self.cursor as isize + by).clamp(0, n.saturating_sub(1) as isize) as usize;
             }
         }
     }
@@ -602,10 +498,7 @@ impl SettingsPage {
             self.caret = None;
         }
         if self.in_project_page() {
-            let editing = self
-                .project_page
-                .as_ref()
-                .is_some_and(|p| p.editing.is_some());
+            let editing = self.project_page.as_ref().is_some_and(|p| p.editing.is_some());
             match key {
                 // The page's own keys, unless a field there is being typed.
                 Key::Tab | Key::BackTab if !editing => {
@@ -615,11 +508,7 @@ impl SettingsPage {
                 Key::Char('p') if !editing => return Action::SwitchScope(Scope::You),
                 _ => {}
             }
-            let action = self
-                .project_page
-                .as_mut()
-                .map(|p| p.key(key))
-                .unwrap_or(crate::project_settings::Action::None);
+            let action = self.project_page.as_mut().map(|p| p.key(key)).unwrap_or(crate::project_settings::Action::None);
             return match action {
                 crate::project_settings::Action::None => Action::None,
                 crate::project_settings::Action::Close => Action::Close,
@@ -653,11 +542,7 @@ impl SettingsPage {
             Key::Down | Key::Char('j') => self.move_cursor(1),
             Key::Up | Key::Char('k') => self.move_cursor(-1),
             Key::Tab | Key::BackTab if self.search.is_none() => {
-                self.focus = if self.focus == Focus::Settings {
-                    Focus::Categories
-                } else {
-                    Focus::Settings
-                };
+                self.focus = if self.focus == Focus::Settings { Focus::Categories } else { Focus::Settings };
             }
             Key::Char('/') => {
                 self.searching = true;
@@ -673,14 +558,10 @@ impl SettingsPage {
             }
             Key::Char('p') | Key::Char('P') => {
                 return match (&self.scope, &self.snap.project) {
-                    (Scope::You, Some((root, name))) => Action::SwitchScope(Scope::Project {
-                        root: root.clone(),
-                        name: name.clone(),
-                    }),
+                    (Scope::You, Some((root, name))) => Action::SwitchScope(Scope::Project { root: root.clone(), name: name.clone() }),
                     (Scope::Project { .. }, _) => Action::SwitchScope(Scope::You),
                     _ => {
-                        self.note =
-                            Some(("no project open -- open a file in one first".into(), true));
+                        self.note = Some(("no project open -- open a file in one first".into(), true));
                         Action::None
                     }
                 };
@@ -711,57 +592,27 @@ impl SettingsPage {
             Key::Char('r') => {
                 if let Some(s) = s {
                     if let Kind::Secret(secret) = s.kind {
-                        return Action::SetSecret {
-                            secret,
-                            token: None,
-                        };
+                        return Action::SetSecret { secret, token: None };
                     }
                     if self.snap.here.contains_key(s.key) {
-                        self.note = Some((
-                            format!(
-                                "{} back to {}",
-                                s.label,
-                                if matches!(self.scope, Scope::Project { .. }) {
-                                    "yours"
-                                } else {
-                                    "the default"
-                                }
-                            ),
-                            false,
-                        ));
+                        self.note = Some((format!("{} back to {}", s.label, if matches!(self.scope, Scope::Project { .. }) { "yours" } else { "the default" }), false));
                         return self.set(s.key, None);
                     }
                 }
             }
             Key::Char('x') => {
-                if let Some(Row::Setting(Setting {
-                    kind: Kind::Secret(secret),
-                    ..
-                })) = row
-                {
-                    return Action::SetSecret {
-                        secret: *secret,
-                        token: None,
-                    };
+                if let Some(Row::Setting(Setting { kind: Kind::Secret(secret), .. })) = row {
+                    return Action::SetSecret { secret: *secret, token: None };
                 }
             }
             Key::Char('t') => {
-                if let Some(Row::Setting(Setting {
-                    kind: Kind::Secret(secret),
-                    ..
-                })) = row
-                {
+                if let Some(Row::Setting(Setting { kind: Kind::Secret(secret), .. })) = row {
                     return Action::TestSecret(*secret);
                 }
             }
             Key::Char('a') => {
                 if let Some(s) = s.filter(|s| is_list(&s.kind)) {
-                    self.edit = Some(Edit::Entry {
-                        key: s.key,
-                        index: None,
-                        fields: blank_fields(&s.kind),
-                        at: 0,
-                    });
+                    self.edit = Some(Edit::Entry { key: s.key, index: None, fields: blank_fields(&s.kind), at: 0 });
                 }
             }
             Key::Char('d') => {
@@ -780,16 +631,10 @@ impl SettingsPage {
             Key::Char('J') | Key::Char('K') => {
                 if let Some(Row::Entry(s, i)) = row {
                     let mut list = entries(&s.kind, self.snap.here.get(s.key));
-                    let j = if key == Key::Char('J') {
-                        i + 1
-                    } else {
-                        i.wrapping_sub(1)
-                    };
+                    let j = if key == Key::Char('J') { i + 1 } else { i.wrapping_sub(1) };
                     if j < list.len() {
                         list.swap(i, j);
-                        self.cursor = (self.cursor as isize
-                            + if key == Key::Char('J') { 1 } else { -1 })
-                            as usize;
+                        self.cursor = (self.cursor as isize + if key == Key::Char('J') { 1 } else { -1 }) as usize;
                         return self.set_entries(s, list);
                     }
                 }
@@ -800,41 +645,19 @@ impl SettingsPage {
                     // Too many to step through: a list to pick from.
                     Kind::Font => {
                         let current = self.value(s).map(Value::show);
-                        return Action::Choose {
-                            key: s.key,
-                            choices: self.snap.fonts.clone(),
-                            current,
-                        };
+                        return Action::Choose { key: s.key, choices: self.snap.fonts.clone(), current };
                     }
                     Kind::Map { .. } | Kind::Records(_) => {
-                        self.edit = Some(Edit::Entry {
-                            key: s.key,
-                            index: None,
-                            fields: blank_fields(&s.kind),
-                            at: 0,
-                        });
+                        self.edit = Some(Edit::Entry { key: s.key, index: None, fields: blank_fields(&s.kind), at: 0 });
                     }
                     _ => self.start_inline(s),
                 },
                 Some(Row::Entry(s, i)) => {
-                    let fields = entries(&s.kind, self.snap.here.get(s.key))
-                        .get(i)
-                        .cloned()
-                        .unwrap_or_default();
-                    self.edit = Some(Edit::Entry {
-                        key: s.key,
-                        index: Some(i),
-                        fields,
-                        at: 0,
-                    });
+                    let fields = entries(&s.kind, self.snap.here.get(s.key)).get(i).cloned().unwrap_or_default();
+                    self.edit = Some(Edit::Entry { key: s.key, index: Some(i), fields, at: 0 });
                 }
                 Some(Row::Add(s)) => {
-                    self.edit = Some(Edit::Entry {
-                        key: s.key,
-                        index: None,
-                        fields: blank_fields(&s.kind),
-                        at: 0,
-                    });
+                    self.edit = Some(Edit::Entry { key: s.key, index: None, fields: blank_fields(&s.kind), at: 0 });
                 }
                 _ => {}
             },
@@ -858,22 +681,11 @@ impl SettingsPage {
             return Some(Action::Browse { start, folder });
         }
         let (index, fields) = match row {
-            Row::Entry(_, i) => (
-                Some(i),
-                entries(&s.kind, self.snap.here.get(s.key))
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_default(),
-            ),
+            Row::Entry(_, i) => (Some(i), entries(&s.kind, self.snap.here.get(s.key)).get(i).cloned().unwrap_or_default()),
             _ => (None, blank_fields(&s.kind)),
         };
         let start = Some(PathBuf::from(fields[1].trim())).filter(|p| !p.as_os_str().is_empty());
-        self.edit = Some(Edit::Entry {
-            key: s.key,
-            index,
-            fields,
-            at: 1,
-        });
+        self.edit = Some(Edit::Entry { key: s.key, index, fields, at: 1 });
         self.browsing = None;
         Some(Action::Browse { start, folder })
     }
@@ -907,9 +719,7 @@ impl SettingsPage {
 
     /// The value picked from the list `Enter` opened.
     pub fn chose(&mut self, key: &'static str, text: &str) -> Action {
-        let Some(s) = fenix_config::setting(key) else {
-            return Action::None;
-        };
+        let Some(s) = fenix_config::setting(key) else { return Action::None };
         match s.kind.parse(text) {
             Ok(v) => self.set(s.key, Some(v)),
             Err(why) => {
@@ -922,11 +732,7 @@ impl SettingsPage {
     fn set_entries(&mut self, s: &'static Setting, list: Vec<Vec<String>>) -> Action {
         let value = match s.kind {
             _ if list.is_empty() => None,
-            Kind::Map { .. } => Some(Value::Map(
-                list.into_iter()
-                    .map(|r| (r[0].clone(), r[1].clone()))
-                    .collect(),
-            )),
+            Kind::Map { .. } => Some(Value::Map(list.into_iter().map(|r| (r[0].clone(), r[1].clone())).collect())),
             _ => Some(Value::Records(list)),
         };
         if let Some(v) = &value {
@@ -942,9 +748,7 @@ impl SettingsPage {
         // A field with choices is picked: ← → (h l, Space) step through
         // them, and typing doesn't change it.
         if let Edit::Entry { key: k, at, .. } = &edit {
-            let choices = fenix_config::setting(k)
-                .map(|s| field_choices(&s.kind, *at))
-                .unwrap_or(&[]);
+            let choices = fenix_config::setting(k).map(|s| field_choices(&s.kind, *at)).unwrap_or(&[]);
             if !choices.is_empty() {
                 let step: isize = match key {
                     Key::Right | Key::Space | Key::Char('l') => 1,
@@ -955,16 +759,8 @@ impl SettingsPage {
                 if step != 2 {
                     if let Some(t) = self.typed() {
                         let n = choices.len() as isize;
-                        let now = choices
-                            .iter()
-                            .position(|c| *c == t.trim())
-                            .map(|i| i as isize)
-                            .unwrap_or(-1);
-                        let next = if step == 0 {
-                            now.max(0)
-                        } else {
-                            (now + step).rem_euclid(n)
-                        };
+                        let now = choices.iter().position(|c| *c == t.trim()).map(|i| i as isize).unwrap_or(-1);
+                        let next = if step == 0 { now.max(0) } else { (now + step).rem_euclid(n) };
                         *t = choices[next as usize].to_string();
                     }
                     return Action::None;
@@ -974,30 +770,19 @@ impl SettingsPage {
         match key {
             Key::CtrlO => {
                 let kind = match &edit {
-                    Edit::Inline { key, .. } | Edit::Entry { key, .. } => {
-                        fenix_config::setting(key).map(|s| &s.kind)
-                    }
+                    Edit::Inline { key, .. } | Edit::Entry { key, .. } => fenix_config::setting(key).map(|s| &s.kind),
                 };
                 let (at, text) = match &edit {
                     Edit::Inline { text, .. } => (0, text.clone()),
                     Edit::Entry { fields, at, .. } => {
                         // From another field of an entry that has a path:
                         // onto the path, and browse for it.
-                        let at = if kind.is_some_and(|k| {
-                            path_field(k, *at).is_none() && path_field(k, 1).is_some()
-                        }) {
-                            1
-                        } else {
-                            *at
-                        };
+                        let at = if kind.is_some_and(|k| path_field(k, *at).is_none() && path_field(k, 1).is_some()) { 1 } else { *at };
                         (at, fields.get(at).cloned().unwrap_or_default())
                     }
                 };
                 let Some(folder) = kind.and_then(|k| path_field(k, at)) else {
-                    self.note = Some((
-                        "Ctrl-O browses for a path -- this field isn't one".into(),
-                        true,
-                    ));
+                    self.note = Some(("Ctrl-O browses for a path -- this field isn't one".into(), true));
                     return Action::None;
                 };
                 if let Some(Edit::Entry { at: now, .. }) = &mut self.edit {
@@ -1007,10 +792,7 @@ impl SettingsPage {
                     }
                 }
                 self.browsing = None;
-                return Action::Browse {
-                    start: Some(PathBuf::from(text.trim())).filter(|p| !p.as_os_str().is_empty()),
-                    folder,
-                };
+                return Action::Browse { start: Some(PathBuf::from(text.trim())).filter(|p| !p.as_os_str().is_empty()), folder };
             }
             Key::Escape => {
                 self.edit = None;
@@ -1029,15 +811,10 @@ impl SettingsPage {
                 if key != Key::Enter {
                     return Action::None;
                 }
-                let Some(s) = fenix_config::setting(k) else {
-                    return Action::None;
-                };
+                let Some(s) = fenix_config::setting(k) else { return Action::None };
                 self.edit = None;
                 if let Kind::Secret(secret) = s.kind {
-                    return Action::SetSecret {
-                        secret,
-                        token: Some(text).filter(|t| !t.trim().is_empty()),
-                    };
+                    return Action::SetSecret { secret, token: Some(text).filter(|t| !t.trim().is_empty()) };
                 }
                 if text.trim().is_empty() {
                     return self.set(k, None);
@@ -1052,42 +829,20 @@ impl SettingsPage {
                     }
                 }
             }
-            Edit::Entry {
-                key: k,
-                index,
-                mut fields,
-                at,
-            } => {
-                let Some(s) = fenix_config::setting(k) else {
-                    return Action::None;
-                };
+            Edit::Entry { key: k, index, mut fields, at } => {
+                let Some(s) = fenix_config::setting(k) else { return Action::None };
                 match key {
                     Key::Tab | Key::Down => {
-                        self.edit = Some(Edit::Entry {
-                            key: k,
-                            index,
-                            fields,
-                            at: (at + 1) % field_labels(&s.kind).len().max(1),
-                        });
+                        self.edit = Some(Edit::Entry { key: k, index, fields, at: (at + 1) % field_labels(&s.kind).len().max(1) });
                         Action::None
                     }
                     Key::BackTab | Key::Up => {
                         let n = field_labels(&s.kind).len().max(1);
-                        self.edit = Some(Edit::Entry {
-                            key: k,
-                            index,
-                            fields,
-                            at: (at + n - 1) % n,
-                        });
+                        self.edit = Some(Edit::Entry { key: k, index, fields, at: (at + n - 1) % n });
                         Action::None
                     }
                     Key::Enter if at + 1 < fields.len() => {
-                        self.edit = Some(Edit::Entry {
-                            key: k,
-                            index,
-                            fields,
-                            at: at + 1,
-                        });
+                        self.edit = Some(Edit::Entry { key: k, index, fields, at: at + 1 });
                         Action::None
                     }
                     Key::Enter => {
@@ -1111,24 +866,14 @@ impl SettingsPage {
                         let action = self.set_entries(s, list);
                         if action == Action::None {
                             // Refused: the form stays, with the reason.
-                            self.edit = Some(Edit::Entry {
-                                key: k,
-                                index,
-                                fields,
-                                at,
-                            });
+                            self.edit = Some(Edit::Entry { key: k, index, fields, at });
                         } else {
                             self.edit = None;
                         }
                         action
                     }
                     _ => {
-                        self.edit = Some(Edit::Entry {
-                            key: k,
-                            index,
-                            fields,
-                            at,
-                        });
+                        self.edit = Some(Edit::Entry { key: k, index, fields, at });
                         Action::None
                     }
                 }
@@ -1156,12 +901,7 @@ fn shown(page: &SettingsPage, s: &Setting) -> (String, Role) {
 /// What the right edge of a setting's row says.
 fn hint(page: &SettingsPage, s: &Setting) -> String {
     if let Kind::Secret(secret) = s.kind {
-        return page
-            .snap
-            .secrets
-            .get(&secret)
-            .map(|st| st.source.clone())
-            .unwrap_or_default();
+        return page.snap.secrets.get(&secret).map(|st| st.source.clone()).unwrap_or_default();
     }
     let here = page.snap.here.contains_key(s.key);
     match &page.scope {
@@ -1197,12 +937,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     };
     let x = g.put(1, left, &title, Role::Title) + 2;
     let changed = page.snap.here.len();
-    let file = page
-        .snap
-        .file
-        .file_name()
-        .map(|f| f.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let file = page.snap.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
     let scope_hint = match (&page.scope, &page.snap.project) {
         (Scope::You, Some((_, name))) => format!("p: {name}'s own"),
         (Scope::Project { .. }, _) => "p: yours".to_string(),
@@ -1210,56 +945,26 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     };
     g.put(1, x, &scope_hint, Role::Muted);
     let right = format!("{file} · {changed} set");
-    g.put(
-        1,
-        (left + width).saturating_sub(right.chars().count()),
-        &right,
-        Role::Muted,
-    );
+    g.put(1, (left + width).saturating_sub(right.chars().count()), &right, Role::Muted);
     let mut y = 2;
     // The search field.
     let search_label = match (&page.search, page.searching) {
-        (Some(s), true) => format!(
-            "/ {}",
-            with_caret(s, page.caret_at(s), width.saturating_sub(2))
-        ),
+        (Some(s), true) => format!("/ {}", with_caret(s, page.caret_at(s), width.saturating_sub(2))),
         (Some(s), false) if !s.is_empty() => format!("/ {s}  (Esc clears)"),
-        _ => format!(
-            "/ search {} settings",
-            settings().iter().filter(|s| page.visible(s)).count()
-        ),
+        _ => format!("/ search {} settings", settings().iter().filter(|s| page.visible(s)).count()),
     };
-    let end = g.put(
-        y,
-        left,
-        &fit(&search_label, width),
-        if page.searching {
-            Role::Title
-        } else {
-            Role::Muted
-        },
-    );
+    let end = g.put(y, left, &fit(&search_label, width), if page.searching { Role::Title } else { Role::Muted });
     if page.searching {
-        g.panels
-            .push((y, left..end.max(left + 30).min(left + width)));
+        g.panels.push((y, left..end.max(left + 30).min(left + width)));
     }
     y += 1;
     let problems = &page.snap.problems;
     if let Some((text, bad)) = &page.note {
-        g.put(
-            y,
-            left,
-            &fit(text, width),
-            if *bad { Role::Bad } else { Role::Good },
-        );
+        g.put(y, left, &fit(text, width), if *bad { Role::Bad } else { Role::Good });
         y += 1;
     } else if !problems.is_empty() {
         let first = &problems[0];
-        let more = if problems.len() > 1 {
-            format!(" (+{} more)", problems.len() - 1)
-        } else {
-            String::new()
-        };
+        let more = if problems.len() > 1 { format!(" (+{} more)", problems.len() - 1) } else { String::new() };
         g.put(y, left, &fit(&format!("{first}{more}"), width), Role::Warn);
         y += 1;
     }
@@ -1272,17 +977,8 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     let sections = page.sections();
     let searching = page.search.as_deref().is_some_and(|s| !s.trim().is_empty());
     for (i, c) in sections.iter().enumerate() {
-        let set = settings()
-            .iter()
-            .filter(|s| {
-                Some(s.category) == *c && page.visible(s) && page.snap.here.contains_key(s.key)
-            })
-            .count();
-        let role = if i == page.category && !searching {
-            Role::Title
-        } else {
-            Role::Text
-        };
+        let set = settings().iter().filter(|s| Some(s.category) == *c && page.visible(s) && page.snap.here.contains_key(s.key)).count();
+        let role = if i == page.category && !searching { Role::Title } else { Role::Text };
         let label = c.map(|c| c.label()).unwrap_or("Project & tasks");
         g.put(top + i, left, &fit(label, cat_w - 5), role);
         if set > 0 {
@@ -1307,19 +1003,9 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     let rows = page.rows();
     if page.on_project_page() {
         match &page.project_page {
-            Some(project) => g.embed(
-                &crate::project_settings::layout(project, sw),
-                y,
-                sx,
-                page.focus == Focus::Settings,
-            ),
+            Some(project) => g.embed(&crate::project_settings::layout(project, sw), y, sx, page.focus == Focus::Settings),
             None => {
-                g.put(
-                    y,
-                    sx,
-                    "The project's own settings aren't readable right now.",
-                    Role::Muted,
-                );
+                g.put(y, sx, "The project's own settings aren't readable right now.", Role::Muted);
             }
         }
     } else if rows.is_empty() {
@@ -1342,65 +1028,25 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 if set_here {
                     g.put(y, sx, "•", Role::Accent);
                 }
-                g.put(
-                    y,
-                    sx + 2,
-                    &fit(s.label, label_w.saturating_sub(2)),
-                    if is_sel { Role::Title } else { Role::Text },
-                );
+                g.put(y, sx + 2, &fit(s.label, label_w.saturating_sub(2)), if is_sel { Role::Title } else { Role::Text });
                 let editing = matches!(&page.edit, Some(Edit::Inline { key, .. }) if *key == s.key);
                 let hint_text = hint(page, s);
                 let room = (sx + sw).saturating_sub(vx + hint_text.chars().count() + 2);
                 if editing {
-                    let Some(Edit::Inline { text, .. }) = &page.edit else {
-                        unreachable!()
-                    };
-                    let shown = if matches!(s.kind, Kind::Secret(_)) {
-                        "•".repeat(text.chars().count())
-                    } else {
-                        text.clone()
-                    };
-                    let end = g.put(
-                        y,
-                        vx,
-                        &with_caret(&shown, page.caret_at(text), room.max(10)),
-                        Role::Title,
-                    );
-                    g.panels
-                        .push((y, vx.saturating_sub(1)..(end + 1).max(vx + 24).min(sx + sw)));
+                    let Some(Edit::Inline { text, .. }) = &page.edit else { unreachable!() };
+                    let shown = if matches!(s.kind, Kind::Secret(_)) { "•".repeat(text.chars().count()) } else { text.clone() };
+                    let end = g.put(y, vx, &with_caret(&shown, page.caret_at(text), room.max(10)), Role::Title);
+                    g.panels.push((y, vx.saturating_sub(1)..(end + 1).max(vx + 24).min(sx + sw)));
                 } else {
                     let (text, role) = shown(page, s);
                     let text = match s.kind {
-                        Kind::Bool => format!(
-                            "{} {text}",
-                            if matches!(page.value(s), Some(Value::Bool(false)))
-                                || (page.value(s).is_none() && s.default == "off")
-                            {
-                                "[ ]"
-                            } else {
-                                "[x]"
-                            }
-                        ),
-                        Kind::Choice(_)
-                        | Kind::Theme
-                        | Kind::Font
-                        | Kind::Int { .. }
-                        | Kind::Float { .. }
-                        | Kind::Minutes
-                            if is_sel =>
-                        {
-                            format!("‹ {text} ›")
-                        }
+                        Kind::Bool => format!("{} {text}", if matches!(page.value(s), Some(Value::Bool(false))) || (page.value(s).is_none() && s.default == "off") { "[ ]" } else { "[x]" }),
+                        Kind::Choice(_) | Kind::Theme | Kind::Font | Kind::Int { .. } | Kind::Float { .. } | Kind::Minutes if is_sel => format!("‹ {text} ›"),
                         _ => text,
                     };
                     g.put(y, vx, &fit(&text, room), role);
                 }
-                g.put(
-                    y,
-                    (sx + sw).saturating_sub(hint_text.chars().count()),
-                    &hint_text,
-                    Role::Muted,
-                );
+                g.put(y, (sx + sw).saturating_sub(hint_text.chars().count()), &hint_text, Role::Muted);
                 if is_sel {
                     g.focus(y, sx..sx + sw);
                 }
@@ -1412,15 +1058,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                     }
                 }
                 if let Some(p) = problems.iter().find(|p| p.key.as_deref() == Some(s.key)) {
-                    g.put(
-                        y,
-                        vx,
-                        &fit(
-                            &format!("in the file: {}", p.message),
-                            sw.saturating_sub(label_w + 2),
-                        ),
-                        Role::Warn,
-                    );
+                    g.put(y, vx, &fit(&format!("in the file: {}", p.message), sw.saturating_sub(label_w + 2)), Role::Warn);
                     y += 1;
                 }
                 if is_sel {
@@ -1432,25 +1070,8 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                         g.put(y, vx, &line, Role::Muted);
                         y += 1;
                     }
-                    let key_line = if matches!(s.kind, Kind::Secret(_)) {
-                        format!(
-                            "{} · {}",
-                            s.key,
-                            page.snap
-                                .secrets
-                                .get(&secret_of(s))
-                                .map(|x| x.source.as_str())
-                                .unwrap_or("not set")
-                        )
-                    } else {
-                        s.key.to_string()
-                    };
-                    g.put(
-                        y,
-                        vx,
-                        &fit(&key_line, sw.saturating_sub(label_w + 2)),
-                        Role::Accent,
-                    );
+                    let key_line = if matches!(s.kind, Kind::Secret(_)) { format!("{} · {}", s.key, page.snap.secrets.get(&secret_of(s)).map(|x| x.source.as_str()).unwrap_or("not set")) } else { s.key.to_string() };
+                    g.put(y, vx, &fit(&key_line, sw.saturating_sub(label_w + 2)), Role::Accent);
                     y += 1;
                 }
             }
@@ -1458,29 +1079,13 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 let is_sel = selected == Some(row);
                 let list = entries(&s.kind, page.snap.here.get(s.key));
                 let fields = &list[i];
-                let x = g.put(
-                    y,
-                    sx + 4,
-                    &fit(&fields[0], label_w.saturating_sub(4)),
-                    if is_sel { Role::Title } else { Role::Text },
-                );
-                let rest = fields[1..].join(if matches!(s.kind, Kind::Records(_)) {
-                    "  "
-                } else {
-                    ""
-                });
+                let x = g.put(y, sx + 4, &fit(&fields[0], label_w.saturating_sub(4)), if is_sel { Role::Title } else { Role::Text });
+                let rest = fields[1..].join(if matches!(s.kind, Kind::Records(_)) { "  " } else { "" });
                 let rest = match s.kind {
-                    Kind::Records(defs) if defs.len() == 3 && defs[2].name == "port" => {
-                        format!("{}:{}", fields[1], fields[2])
-                    }
+                    Kind::Records(defs) if defs.len() == 3 && defs[2].name == "port" => format!("{}:{}", fields[1], fields[2]),
                     _ => rest,
                 };
-                g.put(
-                    y,
-                    vx.max(x + 1),
-                    &fit(&rest, (sx + sw).saturating_sub(vx)),
-                    Role::Muted,
-                );
+                g.put(y, vx.max(x + 1), &fit(&rest, (sx + sw).saturating_sub(vx)), Role::Muted);
                 if is_sel {
                     g.focus(y, sx..sx + sw);
                 }
@@ -1488,23 +1093,8 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
             }
             Row::Add(s) => {
                 let is_sel = selected == Some(row);
-                let what = field_labels(&s.kind)
-                    .first()
-                    .map(|l| l.to_lowercase())
-                    .unwrap_or_default();
-                g.put(
-                    y,
-                    sx + 4,
-                    &format!(
-                        "+ add {}",
-                        if what == "name" {
-                            "one".to_string()
-                        } else {
-                            format!("a {what}")
-                        }
-                    ),
-                    Role::Accent,
-                );
+                let what = field_labels(&s.kind).first().map(|l| l.to_lowercase()).unwrap_or_default();
+                g.put(y, sx + 4, &format!("+ add {}", if what == "name" { "one".to_string() } else { format!("a {what}") }), Role::Accent);
                 if is_sel {
                     g.focus(y, sx..sx + sw);
                 }
@@ -1514,28 +1104,12 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     }
 
     // The entry form floats beside the row it's about.
-    if let Some(Edit::Entry {
-        key,
-        index,
-        fields,
-        at,
-    }) = &page.edit
-    {
+    if let Some(Edit::Entry { key, index, fields, at }) = &page.edit {
         if let Some(s) = fenix_config::setting(key) {
             let line = g.focus.as_ref().map(|(l, _)| *l).unwrap_or(top);
             let labels = field_labels(&s.kind);
             let label_w = labels.iter().map(|l| l.chars().count()).max().unwrap_or(4) + 2;
-            let mut rows = vec![
-                vec![(
-                    format!(
-                        "{} · {}",
-                        s.label,
-                        if index.is_some() { "edit" } else { "new" }
-                    ),
-                    Role::Title,
-                )],
-                Vec::new(),
-            ];
+            let mut rows = vec![vec![(format!("{} · {}", s.label, if index.is_some() { "edit" } else { "new" }), Role::Title)], Vec::new()];
             for (i, (label, value)) in labels.iter().zip(fields).enumerate() {
                 let on = i == *at;
                 let picked = !field_choices(&s.kind, i).is_empty();
@@ -1544,16 +1118,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                     (true, false) => with_caret(value, page.caret_at(value), FORM_FIELD_WIDTH),
                     (false, _) => fit(value, FORM_FIELD_WIDTH),
                 };
-                rows.push(vec![
-                    (
-                        format!("{label:<label_w$}"),
-                        if on { Role::Accent } else { Role::Muted },
-                    ),
-                    (
-                        format!("{shown:<40}"),
-                        if on { Role::Title } else { Role::Text },
-                    ),
-                ]);
+                rows.push(vec![(format!("{label:<label_w$}"), if on { Role::Accent } else { Role::Muted }), (format!("{shown:<40}"), if on { Role::Title } else { Role::Text })]);
             }
             if let Some((k, why)) = &page.refused {
                 if k == key {
@@ -1569,60 +1134,22 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 for (i, c) in choices.iter().enumerate() {
                     let sep = if i == 0 { "" } else { " · " };
                     line.push((sep.to_string(), Role::Muted));
-                    line.push((
-                        c.to_string(),
-                        if fields.get(*at).is_some_and(|v| v.trim() == *c) {
-                            Role::Accent
-                        } else {
-                            Role::Muted
-                        },
-                    ));
+                    line.push((c.to_string(), if fields.get(*at).is_some_and(|v| v.trim() == *c) { Role::Accent } else { Role::Muted }));
                 }
                 rows.push(Vec::new());
                 rows.push(line);
             }
-            let browse = if path_field(&s.kind, *at).is_some() {
-                " · Ctrl-O browse"
-            } else {
-                ""
-            };
-            let pick = if choices.is_empty() {
-                ""
-            } else {
-                " · ← → choose"
-            };
-            rows.push(vec![(
-                format!("Tab next field{pick} · Enter saves · Esc cancels{browse}"),
-                Role::Muted,
-            )]);
-            g.popup = Some(Popup {
-                line,
-                col: vx,
-                rows,
-            });
+            let browse = if path_field(&s.kind, *at).is_some() { " · Ctrl-O browse" } else { "" };
+            let pick = if choices.is_empty() { "" } else { " · ← → choose" };
+            rows.push(vec![(format!("Tab next field{pick} · Enter saves · Esc cancels{browse}"), Role::Muted)]);
+            g.popup = Some(Popup { line, col: vx, rows });
         }
     }
 
-    let keys: Vec<(&str, &str)> = if page.in_project_page()
-        && page
-            .project_page
-            .as_ref()
-            .is_some_and(|p| p.editing.is_some())
-    {
+    let keys: Vec<(&str, &str)> = if page.in_project_page() && page.project_page.as_ref().is_some_and(|p| p.editing.is_some()) {
         vec![("Enter", "keep"), ("Esc", "put it back")]
     } else if page.in_project_page() {
-        vec![
-            ("j/k", "row"),
-            ("Enter", "edit"),
-            ("h/l", "change"),
-            ("a", "add"),
-            ("d", "delete"),
-            ("t", "run task"),
-            ("e", "open tools.json"),
-            ("Tab", "sections"),
-            ("p", "yours"),
-            ("q", "close"),
-        ]
+        vec![("j/k", "row"), ("Enter", "edit"), ("h/l", "change"), ("a", "add"), ("d", "delete"), ("t", "run task"), ("e", "open tools.json"), ("Tab", "sections"), ("p", "yours"), ("q", "close")]
     } else if page.searching {
         vec![("Enter", "go to the results"), ("Esc", "clear")]
     } else if let Some(Edit::Inline { key, .. }) = &page.edit {
@@ -1633,12 +1160,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         keys
     } else if let Some(Edit::Entry { key, at, .. }) = &page.edit {
         if fenix_config::setting(key).is_some_and(|s| !field_choices(&s.kind, *at).is_empty()) {
-            vec![
-                ("← →", "choose"),
-                ("Tab", "next field"),
-                ("Enter", "save"),
-                ("Esc", "cancel"),
-            ]
+            vec![("← →", "choose"), ("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
         } else {
             vec![("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
         }
@@ -1646,68 +1168,13 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         vec![("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
     } else {
         match selected {
-            Some(Row::Setting(s)) if s.kind == Kind::Font => vec![
-                ("Enter", "choose"),
-                ("h/l", "change"),
-                ("r", "reset"),
-                ("/", "search"),
-                ("e", "open the file"),
-                ("q", "close"),
-            ],
-            Some(Row::Setting(s)) if s.kind == Kind::Path => vec![
-                ("Enter", "edit"),
-                ("b", "browse"),
-                ("r", "reset"),
-                ("/", "search"),
-                ("e", "open the file"),
-                ("q", "close"),
-            ],
-            Some(Row::Setting(Setting {
-                kind: Kind::Secret(_),
-                ..
-            })) => vec![
-                ("Enter", "set"),
-                ("t", "test"),
-                ("x", "clear"),
-                ("/", "search"),
-                ("e", "open the file"),
-                ("q", "close"),
-            ],
-            Some(Row::Setting(s)) if is_list(&s.kind) => vec![
-                ("a", "add"),
-                ("Enter", "add"),
-                ("r", "clear all"),
-                ("/", "search"),
-                ("e", "open the file"),
-                ("q", "close"),
-            ],
-            Some(Row::Entry(s, _)) if path_field(&s.kind, 1).is_some() => vec![
-                ("Enter", "edit"),
-                ("b", "browse"),
-                ("d", "delete"),
-                ("J/K", "move"),
-                ("a", "add"),
-                ("q", "close"),
-            ],
-            Some(Row::Entry(..)) => vec![
-                ("Enter", "edit"),
-                ("d", "delete"),
-                ("J/K", "move"),
-                ("a", "add"),
-                ("q", "close"),
-            ],
-            _ => vec![
-                ("j/k", "setting"),
-                ("Tab", "categories"),
-                ("h/l", "change"),
-                ("Space", "toggle"),
-                ("Enter", "edit"),
-                ("r", "reset"),
-                ("/", "search"),
-                ("e", "open the file"),
-                ("p", "project"),
-                ("q", "close"),
-            ],
+            Some(Row::Setting(s)) if s.kind == Kind::Font => vec![("Enter", "choose"), ("h/l", "change"), ("r", "reset"), ("/", "search"), ("e", "open the file"), ("q", "close")],
+            Some(Row::Setting(s)) if s.kind == Kind::Path => vec![("Enter", "edit"), ("b", "browse"), ("r", "reset"), ("/", "search"), ("e", "open the file"), ("q", "close")],
+            Some(Row::Setting(Setting { kind: Kind::Secret(_), .. })) => vec![("Enter", "set"), ("t", "test"), ("x", "clear"), ("/", "search"), ("e", "open the file"), ("q", "close")],
+            Some(Row::Setting(s)) if is_list(&s.kind) => vec![("a", "add"), ("Enter", "add"), ("r", "clear all"), ("/", "search"), ("e", "open the file"), ("q", "close")],
+            Some(Row::Entry(s, _)) if path_field(&s.kind, 1).is_some() => vec![("Enter", "edit"), ("b", "browse"), ("d", "delete"), ("J/K", "move"), ("a", "add"), ("q", "close")],
+            Some(Row::Entry(..)) => vec![("Enter", "edit"), ("d", "delete"), ("J/K", "move"), ("a", "add"), ("q", "close")],
+            _ => vec![("j/k", "setting"), ("Tab", "categories"), ("h/l", "change"), ("Space", "toggle"), ("Enter", "edit"), ("r", "reset"), ("/", "search"), ("e", "open the file"), ("p", "project"), ("q", "close")],
         }
     };
     g.keys(left, width, &keys);
@@ -1731,56 +1198,18 @@ mod tests {
         fenix_config::Category::Extensions,
         "Hosts",
         Kind::Records(&[
-            fenix_config::Field {
-                name: "name",
-                label: "Name",
-                range: None,
-                default: None,
-                choices: &[],
-            },
-            fenix_config::Field {
-                name: "host",
-                label: "Host",
-                range: None,
-                default: None,
-                choices: &[],
-            },
-            fenix_config::Field {
-                name: "port",
-                label: "Port",
-                range: Some((1, 65535)),
-                default: Some("5900"),
-                choices: &[],
-            },
+            fenix_config::Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+            fenix_config::Field { name: "host", label: "Host", range: None, default: None, choices: &[] },
+            fenix_config::Field { name: "port", label: "Port", range: Some((1, 65535)), default: Some("5900"), choices: &[] },
         ]),
         "Machines to connect to.",
     )];
 
     /// A shelf of files by name, of the kind 1.x's `documents` was.
-    static SHELF: [Setting; 1] = [Setting::stored(
-        "test.shelf",
-        fenix_config::Category::Extensions,
-        "Shelf",
-        Kind::Map {
-            key: "Name",
-            value: "File",
-            paths: true,
-        },
-        "Files by name.",
-    )];
+    static SHELF: [Setting; 1] = [Setting::stored("test.shelf", fenix_config::Category::Extensions, "Shelf", Kind::Map { key: "Name", value: "File", paths: true }, "Files by name.")];
 
     /// Folders by name, of the kind `mib.roots` is.
-    static ROOTS: [Setting; 1] = [Setting::stored(
-        "test.roots",
-        fenix_config::Category::Extensions,
-        "Roots",
-        Kind::Map {
-            key: "Name",
-            value: "Folder",
-            paths: true,
-        },
-        "Folders by name.",
-    )];
+    static ROOTS: [Setting; 1] = [Setting::stored("test.roots", fenix_config::Category::Extensions, "Roots", Kind::Map { key: "Name", value: "Folder", paths: true }, "Folders by name.")];
 
     /// Records with a field picked from choices, of the kind 1.x's
     /// `ccsds.sources` was.
@@ -1789,49 +1218,11 @@ mod tests {
         fenix_config::Category::Extensions,
         "Live sources",
         Kind::Records(&[
-            fenix_config::Field {
-                name: "name",
-                label: "Name",
-                range: None,
-                default: None,
-                choices: &[],
-            },
-            fenix_config::Field {
-                name: "address",
-                label: "Address",
-                range: None,
-                default: None,
-                choices: &[],
-            },
-            fenix_config::Field {
-                name: "subject",
-                label: "NATS subject",
-                range: None,
-                default: Some(""),
-                choices: &[],
-            },
-            fenix_config::Field {
-                name: "framing",
-                label: "Framing",
-                range: None,
-                default: Some("guess"),
-                choices: &[
-                    "guess",
-                    "packets",
-                    "frames",
-                    "frames fecf",
-                    "frames no-fecf",
-                    "cltus",
-                    "records",
-                ],
-            },
-            fenix_config::Field {
-                name: "header",
-                label: "Record header",
-                range: Some((0, 64)),
-                default: Some("0"),
-                choices: &[],
-            },
+            fenix_config::Field { name: "name", label: "Name", range: None, default: None, choices: &[] },
+            fenix_config::Field { name: "address", label: "Address", range: None, default: None, choices: &[] },
+            fenix_config::Field { name: "subject", label: "NATS subject", range: None, default: Some(""), choices: &[] },
+            fenix_config::Field { name: "framing", label: "Framing", range: None, default: Some("guess"), choices: &["guess", "packets", "frames", "frames fecf", "frames no-fecf", "cltus", "records"] },
+            fenix_config::Field { name: "header", label: "Record header", range: Some((0, 64)), default: Some("0"), choices: &[] },
         ]),
         "Where live telemetry comes from.",
     )];
@@ -1843,28 +1234,10 @@ mod tests {
         fenix_config::schema::register(&SOURCES);
         let mut here = HashMap::new();
         here.insert("editor.font_size", Value::Float(18.0));
-        here.insert(
-            "test.hosts",
-            Value::Records(vec![
-                vec!["test-vm".into(), "127.0.0.1".into(), "5900".into()],
-                vec!["build".into(), "10.0.0.5".into(), "5901".into()],
-            ]),
-        );
+        here.insert("test.hosts", Value::Records(vec![vec!["test-vm".into(), "127.0.0.1".into(), "5900".into()], vec!["build".into(), "10.0.0.5".into(), "5901".into()]]));
         let mut secrets = HashMap::new();
-        secrets.insert(
-            Secret::GitLab,
-            SecretState {
-                set: true,
-                source: "settings.toml".into(),
-            },
-        );
-        Snapshot {
-            here,
-            secrets,
-            themes: vec!["Orbit Dark".into(), "Nord".into()],
-            file: PathBuf::from("settings.toml"),
-            ..Default::default()
-        }
+        secrets.insert(Secret::GitLab, SecretState { set: true, source: "settings.toml".into() });
+        Snapshot { here, secrets, themes: vec!["Orbit Dark".into(), "Nord".into()], file: PathBuf::from("settings.toml"), ..Default::default() }
     }
 
     fn page() -> SettingsPage {
@@ -1873,37 +1246,16 @@ mod tests {
 
     fn goto(p: &mut SettingsPage, key: &str) {
         p.show(key);
-        assert!(
-            matches!(p.selected(), Some(Row::Setting(s)) if s.key == key),
-            "{key}"
-        );
+        assert!(matches!(p.selected(), Some(Row::Setting(s)) if s.key == key), "{key}");
     }
 
     /// Two extensions' settings, each in its own section, as
     /// `installed::settings_of` registers them.
     static DOCKER: [Setting; 2] = [
-        Setting::stored(
-            "docker.host",
-            Category::Extension("Docker"),
-            "Host",
-            Kind::Text,
-            "Where the daemon is.",
-        ),
-        Setting::stored(
-            "docker.context",
-            Category::Extension("Docker"),
-            "Context",
-            Kind::Text,
-            "Which context.",
-        ),
+        Setting::stored("docker.host", Category::Extension("Docker"), "Host", Kind::Text, "Where the daemon is."),
+        Setting::stored("docker.context", Category::Extension("Docker"), "Context", Kind::Text, "Which context."),
     ];
-    static COUNTER: [Setting; 1] = [Setting::stored(
-        "counter.url",
-        Category::Extension("counter"),
-        "URL",
-        Kind::Text,
-        "Where it counts.",
-    )];
+    static COUNTER: [Setting; 1] = [Setting::stored("counter.url", Category::Extension("counter"), "URL", Kind::Text, "Where it counts.")];
 
     #[test]
     fn each_extensions_settings_are_a_section_of_their_own() {
@@ -1912,67 +1264,30 @@ mod tests {
         let mut p = page();
         let cats = p.categories();
         let at = |c: Category| cats.iter().position(|x| *x == c).unwrap();
-        assert!(
-            at(Category::Extensions) < at(Category::Extension("counter"))
-                && at(Category::Extension("counter")) < at(Category::Extension("Docker")),
-            "after core's, by name: {cats:?}"
-        );
+        assert!(at(Category::Extensions) < at(Category::Extension("counter")) && at(Category::Extension("counter")) < at(Category::Extension("Docker")), "after core's, by name: {cats:?}");
         p.show("docker.host");
-        let keys: Vec<&str> = p
-            .selectable()
-            .iter()
-            .filter_map(|r| SettingsPage::setting_of(*r))
-            .map(|s| s.key)
-            .collect();
+        let keys: Vec<&str> = p.selectable().iter().filter_map(|r| SettingsPage::setting_of(*r)).map(|s| s.key).collect();
         assert_eq!(keys, ["docker.host", "docker.context"], "only Docker's");
         let text = layout(&p, 130).text;
-        assert!(
-            text.contains("Docker") && text.contains("counter"),
-            "named on the left:\n{text}"
-        );
+        assert!(text.contains("Docker") && text.contains("counter"), "named on the left:\n{text}");
         p.key(Key::Char('/'));
         for c in "docker".chars() {
             p.key(Key::Char(c));
         }
-        assert_eq!(
-            p.rows()
-                .iter()
-                .filter(|r| matches!(r, Row::Heading(Category::Extension("Docker"))))
-                .count(),
-            1,
-            "one heading in a search"
-        );
+        assert_eq!(p.rows().iter().filter(|r| matches!(r, Row::Heading(Category::Extension("Docker")))).count(), 1, "one heading in a search");
     }
 
     #[test]
     fn the_projects_own_section_is_shown_in_place_and_takes_the_keys() {
         let root = PathBuf::from("/p");
-        let mut p = SettingsPage::new(
-            Scope::Project {
-                root: root.clone(),
-                name: "fenix".into(),
-            },
-            snap(),
-        );
-        p.project_page = Some(crate::project_settings::Settings::new(
-            root,
-            fenix_project::ProjectKind::Python,
-        ));
+        let mut p = SettingsPage::new(Scope::Project { root: root.clone(), name: "fenix".into() }, snap());
+        p.project_page = Some(crate::project_settings::Settings::new(root, fenix_project::ProjectKind::Python));
         p.key(Key::Tab);
         p.key(Key::Char('k'));
         p.key(Key::Enter);
         let text = layout(&p, 130).text;
-        assert!(
-            text.contains("TASKS · 0") && text.contains("detect: Python"),
-            "the project's page, in the right column:\n{text}"
-        );
-        assert!(
-            matches!(
-                p.key(Key::Char('l')),
-                Action::Project(crate::project_settings::Action::SetKind(Some(_)))
-            ),
-            "its keys reach it"
-        );
+        assert!(text.contains("TASKS · 0") && text.contains("detect: Python"), "the project's page, in the right column:\n{text}");
+        assert!(matches!(p.key(Key::Char('l')), Action::Project(crate::project_settings::Action::SetKind(Some(_)))), "its keys reach it");
         assert_eq!(p.key(Key::Tab), Action::None);
         assert!(!p.in_project_page(), "Tab goes back to the sections");
     }
@@ -1982,10 +1297,7 @@ mod tests {
         let mut p = page();
         p.snap.project = Some((PathBuf::from("/p"), "fenix".into()));
         p.refresh(snap());
-        assert!(matches!(
-            p.key(Key::Char('p')),
-            Action::SwitchScope(Scope::Project { .. })
-        ));
+        assert!(matches!(p.key(Key::Char('p')), Action::SwitchScope(Scope::Project { .. })));
     }
 
     #[test]
@@ -1993,129 +1305,48 @@ mod tests {
         let mut p = page();
         goto(&mut p, "editor.font_size");
         let text = layout(&p, 130).text;
-        assert!(
-            text.contains("• Font size") && text.contains("‹ 18 ›") && text.contains("default 16"),
-            "{text}"
-        );
-        assert!(
-            text.contains("Text size, in points.") && text.contains("editor.font_size"),
-            "the selected one explains itself:\n{text}"
-        );
-        assert!(
-            text.contains("Appearance") && text.contains("• 1"),
-            "{text}"
-        );
+        assert!(text.contains("• Font size") && text.contains("‹ 18 ›") && text.contains("default 16"), "{text}");
+        assert!(text.contains("Text size, in points.") && text.contains("editor.font_size"), "the selected one explains itself:\n{text}");
+        assert!(text.contains("Appearance") && text.contains("• 1"), "{text}");
     }
 
     #[test]
     fn enter_on_the_font_lists_the_installed_ones_starting_on_the_current_one() {
         let mut p = page();
-        p.snap.fonts = vec![
-            "Consolas".into(),
-            "Fira Code".into(),
-            "JetBrains Mono".into(),
-        ];
-        p.snap
-            .here
-            .insert("editor.font_family", Value::Text("Fira Code".into()));
+        p.snap.fonts = vec!["Consolas".into(), "Fira Code".into(), "JetBrains Mono".into()];
+        p.snap.here.insert("editor.font_family", Value::Text("Fira Code".into()));
         goto(&mut p, "editor.font_family");
         assert_eq!(
             p.key(Key::Enter),
-            Action::Choose {
-                key: "editor.font_family",
-                choices: p.snap.fonts.clone(),
-                current: Some("Fira Code".into())
-            }
+            Action::Choose { key: "editor.font_family", choices: p.snap.fonts.clone(), current: Some("Fira Code".into()) }
         );
-        assert_eq!(
-            p.chose("editor.font_family", "JetBrains Mono"),
-            Action::Set {
-                key: "editor.font_family",
-                value: Some(Value::Text("JetBrains Mono".into()))
-            }
-        );
-        assert_eq!(
-            p.key(Key::Char('l')),
-            Action::Set {
-                key: "editor.font_family",
-                value: Some(Value::Text("JetBrains Mono".into()))
-            },
-            "h and l still step"
-        );
+        assert_eq!(p.chose("editor.font_family", "JetBrains Mono"), Action::Set { key: "editor.font_family", value: Some(Value::Text("JetBrains Mono".into())) });
+        assert_eq!(p.key(Key::Char('l')), Action::Set { key: "editor.font_family", value: Some(Value::Text("JetBrains Mono".into())) }, "h and l still step");
     }
 
     #[test]
     fn h_and_l_step_a_number_and_cycle_a_choice_and_space_flips_a_switch() {
         let mut p = page();
         goto(&mut p, "editor.font_size");
-        assert_eq!(
-            p.key(Key::Char('l')),
-            Action::Set {
-                key: "editor.font_size",
-                value: Some(Value::Float(19.0))
-            }
-        );
+        assert_eq!(p.key(Key::Char('l')), Action::Set { key: "editor.font_size", value: Some(Value::Float(19.0)) });
         goto(&mut p, "editor.theme");
-        assert_eq!(
-            p.key(Key::Char('l')),
-            Action::Set {
-                key: "editor.theme",
-                value: Some(Value::Text("Nord".into()))
-            }
-        );
+        assert_eq!(p.key(Key::Char('l')), Action::Set { key: "editor.theme", value: Some(Value::Text("Nord".into())) });
         goto(&mut p, "editor.animations");
-        assert_eq!(
-            p.key(Key::Space),
-            Action::Set {
-                key: "editor.animations",
-                value: Some(Value::Bool(false))
-            },
-            "on by default, so off"
-        );
+        assert_eq!(p.key(Key::Space), Action::Set { key: "editor.animations", value: Some(Value::Bool(false)) }, "on by default, so off");
         goto(&mut p, "git.layout");
-        assert_eq!(
-            p.key(Key::Enter),
-            Action::Set {
-                key: "git.layout",
-                value: Some(Value::Text("panes".into()))
-            }
-        );
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "git.layout", value: Some(Value::Text("panes".into())) });
     }
 
     #[test]
     fn the_font_cycles_through_the_installed_ones() {
         let mut snap = snap();
-        snap.fonts = vec![
-            "Cascadia Mono".into(),
-            "Consolas".into(),
-            "JetBrains Mono".into(),
-        ];
+        snap.fonts = vec!["Cascadia Mono".into(), "Consolas".into(), "JetBrains Mono".into()];
         let mut p = SettingsPage::new(Scope::You, snap);
         goto(&mut p, "editor.font_family");
-        assert_eq!(
-            p.key(Key::Char('l')),
-            Action::Set {
-                key: "editor.font_family",
-                value: Some(Value::Text("Cascadia Mono".into()))
-            }
-        );
-        p.snap
-            .here
-            .insert("editor.font_family", Value::Text("Consolas".into()));
-        assert_eq!(
-            p.key(Key::Char('l')),
-            Action::Set {
-                key: "editor.font_family",
-                value: Some(Value::Text("JetBrains Mono".into()))
-            }
-        );
-        assert_eq!(
-            p.key(Key::Char('h')),
-            Action::Set {
-                key: "editor.font_family",
-                value: Some(Value::Text("Cascadia Mono".into()))
-            }
-        );
+        assert_eq!(p.key(Key::Char('l')), Action::Set { key: "editor.font_family", value: Some(Value::Text("Cascadia Mono".into())) });
+        p.snap.here.insert("editor.font_family", Value::Text("Consolas".into()));
+        assert_eq!(p.key(Key::Char('l')), Action::Set { key: "editor.font_family", value: Some(Value::Text("JetBrains Mono".into())) });
+        assert_eq!(p.key(Key::Char('h')), Action::Set { key: "editor.font_family", value: Some(Value::Text("Cascadia Mono".into())) });
         assert!(layout(&p, 130).text.contains("‹ Consolas ›"));
     }
 
@@ -2135,13 +1366,7 @@ mod tests {
             p.key(Key::Backspace);
         }
         p.key(Key::Char('5'));
-        assert_eq!(
-            p.key(Key::Enter),
-            Action::Set {
-                key: "git.auto_fetch",
-                value: Some(Value::Int(5))
-            }
-        );
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "git.auto_fetch", value: Some(Value::Int(5)) });
         assert!(!p.typing());
     }
 
@@ -2149,24 +1374,12 @@ mod tests {
     fn r_resets_and_a_cleared_field_is_back_to_the_default() {
         let mut p = page();
         goto(&mut p, "editor.font_size");
-        assert_eq!(
-            p.key(Key::Char('r')),
-            Action::Set {
-                key: "editor.font_size",
-                value: None
-            }
-        );
+        assert_eq!(p.key(Key::Char('r')), Action::Set { key: "editor.font_size", value: None });
         p.key(Key::Enter);
         for _ in 0..4 {
             p.key(Key::Backspace);
         }
-        assert_eq!(
-            p.key(Key::Enter),
-            Action::Set {
-                key: "editor.font_size",
-                value: None
-            }
-        );
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "editor.font_size", value: None });
     }
 
     #[test]
@@ -2182,66 +1395,28 @@ mod tests {
         }
         p.key(Key::Tab); // past the NATS subject, onto the framing
         let text = layout(&p, 130).popup.unwrap().text();
-        assert!(
-            text.contains("‹ guess ›")
-                && text.contains("frames fecf · frames no-fecf · cltus")
-                && text.contains("← → choose"),
-            "{text}"
-        );
+        assert!(text.contains("‹ guess ›") && text.contains("frames fecf · frames no-fecf · cltus") && text.contains("← → choose"), "{text}");
         for c in "xyz".chars() {
             p.key(Key::Char(c));
         }
         p.key(Key::Right);
         p.key(Key::Right);
         p.key(Key::Right);
-        assert!(
-            layout(&p, 130)
-                .popup
-                .unwrap()
-                .text()
-                .contains("‹ frames fecf ›"),
-            "typing doesn't change it; → steps"
-        );
+        assert!(layout(&p, 130).popup.unwrap().text().contains("‹ frames fecf ›"), "typing doesn't change it; → steps");
         p.key(Key::Left);
         p.key(Key::Char('h'));
         p.key(Key::Char('h'));
         p.key(Key::Char('h'));
-        assert!(
-            layout(&p, 130)
-                .popup
-                .unwrap()
-                .text()
-                .contains("‹ records ›"),
-            "← wraps around"
-        );
+        assert!(layout(&p, 130).popup.unwrap().text().contains("‹ records ›"), "← wraps around");
         p.key(Key::Tab);
         for c in "12".chars() {
             p.key(Key::Char(c));
         }
-        let Action::Set {
-            value: Some(Value::Records(rows)),
-            ..
-        } = p.key(Key::Enter)
-        else {
-            panic!()
-        };
-        assert_eq!(
-            rows.last().unwrap(),
-            &["bench", "tcp://bench:10011", "", "records", "12"]
-        );
+        let Action::Set { value: Some(Value::Records(rows)), .. } = p.key(Key::Enter) else { panic!() };
+        assert_eq!(rows.last().unwrap(), &["bench", "tcp://bench:10011", "", "records", "12"]);
         // A framing that isn't one of them -- a hand-edited file -- is refused.
-        let bad = Value::Records(vec![vec![
-            "x".into(),
-            "tcp://x:1".into(),
-            "".into(),
-            "cadus please".into(),
-            "0".into(),
-        ]]);
-        assert!(fenix_config::setting("test.sources")
-            .unwrap()
-            .kind
-            .check(&bad)
-            .is_err_and(|e| e.contains("Framing: one of guess")));
+        let bad = Value::Records(vec![vec!["x".into(), "tcp://x:1".into(), "".into(), "cadus please".into(), "0".into()]]);
+        assert!(fenix_config::setting("test.sources").unwrap().kind.check(&bad).is_err_and(|e| e.contains("Framing: one of guess")));
     }
 
     #[test]
@@ -2249,12 +1424,7 @@ mod tests {
         let mut p = page();
         goto(&mut p, "test.hosts");
         let text = layout(&p, 130).text;
-        assert!(
-            text.contains("test-vm")
-                && text.contains("10.0.0.5:5901")
-                && text.contains("+ add one"),
-            "{text}"
-        );
+        assert!(text.contains("test-vm") && text.contains("10.0.0.5:5901") && text.contains("+ add one"), "{text}");
         // Edit the second host's port.
         p.key(Key::Char('j'));
         p.key(Key::Char('j'));
@@ -2270,33 +1440,17 @@ mod tests {
             p.key(Key::Char(c));
         }
         assert_eq!(p.key(Key::Enter), Action::None, "refused");
-        assert!(layout(&p, 130)
-            .popup
-            .unwrap()
-            .text()
-            .contains("Port: a whole number from 1 to 65535"));
+        assert!(layout(&p, 130).popup.unwrap().text().contains("Port: a whole number from 1 to 65535"));
         for _ in 0..5 {
             p.key(Key::Backspace);
         }
         p.key(Key::Char('7'));
-        let Action::Set {
-            value: Some(Value::Records(rows)),
-            ..
-        } = p.key(Key::Enter)
-        else {
-            panic!()
-        };
+        let Action::Set { value: Some(Value::Records(rows)), .. } = p.key(Key::Enter) else { panic!() };
         assert_eq!(rows[1], ["build", "10.0.0.5", "7"]);
         // Delete the first, twice to be sure.
         p.key(Key::Char('k'));
         assert_eq!(p.key(Key::Char('d')), Action::None);
-        let Action::Set {
-            value: Some(Value::Records(rows)),
-            ..
-        } = p.key(Key::Char('d'))
-        else {
-            panic!()
-        };
+        let Action::Set { value: Some(Value::Records(rows)), .. } = p.key(Key::Char('d')) else { panic!() };
         assert_eq!(rows.len(), 1);
         // Add one: a port left empty takes its default.
         p.key(Key::Char('a'));
@@ -2309,13 +1463,7 @@ mod tests {
             }
         }
         p.key(Key::Enter);
-        let Action::Set {
-            value: Some(Value::Records(rows)),
-            ..
-        } = p.key(Key::Enter)
-        else {
-            panic!()
-        };
+        let Action::Set { value: Some(Value::Records(rows)), .. } = p.key(Key::Enter) else { panic!() };
         assert_eq!(rows.last().unwrap(), &["lab", "10.1.1.1", "5900"]);
     }
 
@@ -2335,22 +1483,10 @@ mod tests {
     fn b_picks_a_path_setting_in_the_explorer_and_sets_it() {
         let mut p = page();
         goto(&mut p, "completion.symbols_file");
-        assert_eq!(
-            p.key(Key::Char('b')),
-            Action::Browse {
-                start: None,
-                folder: false
-            }
-        );
+        assert_eq!(p.key(Key::Char('b')), Action::Browse { start: None, folder: false });
         assert!(!p.typing());
         let picked = p.browsed(std::path::Path::new("C:/words.txt"));
-        assert_eq!(
-            picked,
-            Action::Set {
-                key: "completion.symbols_file",
-                value: Some(Value::Text("C:/words.txt".into()))
-            }
-        );
+        assert_eq!(picked, Action::Set { key: "completion.symbols_file", value: Some(Value::Text("C:/words.txt".into())) });
         // Only a path's row browses.
         goto(&mut p, "editor.font_size");
         assert_eq!(p.key(Key::Char('b')), Action::None);
@@ -2362,25 +1498,10 @@ mod tests {
         goto(&mut p, "completion.symbols_file");
         p.key(Key::Enter);
         p.paste("C:/old/words.txt");
-        assert_eq!(
-            p.key(Key::CtrlO),
-            Action::Browse {
-                start: Some(PathBuf::from("C:/old/words.txt")),
-                folder: false
-            }
-        );
-        assert_eq!(
-            p.browsed(std::path::Path::new("C:/new/words.txt")),
-            Action::None
-        );
+        assert_eq!(p.key(Key::CtrlO), Action::Browse { start: Some(PathBuf::from("C:/old/words.txt")), folder: false });
+        assert_eq!(p.browsed(std::path::Path::new("C:/new/words.txt")), Action::None);
         assert!(p.typing(), "still being typed");
-        assert_eq!(
-            p.key(Key::Enter),
-            Action::Set {
-                key: "completion.symbols_file",
-                value: Some(Value::Text("C:/new/words.txt".into()))
-            }
-        );
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "completion.symbols_file", value: Some(Value::Text("C:/new/words.txt".into())) });
         // Not on a value that isn't a path.
         goto(&mut p, "git.base_branch");
         p.key(Key::Enter);
@@ -2391,43 +1512,17 @@ mod tests {
     fn a_list_of_paths_browses_into_its_form() {
         let mut p = page();
         goto(&mut p, "test.roots");
-        assert_eq!(
-            p.key(Key::Char('b')),
-            Action::Browse {
-                start: None,
-                folder: true
-            },
-            "a map of folders"
-        );
+        assert_eq!(p.key(Key::Char('b')), Action::Browse { start: None, folder: true }, "a map of folders");
         p.key(Key::Escape);
         goto(&mut p, "test.shelf");
-        assert_eq!(
-            p.key(Key::Char('b')),
-            Action::Browse {
-                start: None,
-                folder: false
-            }
-        );
+        assert_eq!(p.key(Key::Char('b')), Action::Browse { start: None, folder: false });
         p.browsed(std::path::Path::new("C:/docs/manual.pdf"));
-        assert!(layout(&p, 130)
-            .popup
-            .unwrap()
-            .text()
-            .contains("C:/docs/manual.pdf"));
+        assert!(layout(&p, 130).popup.unwrap().text().contains("C:/docs/manual.pdf"));
         p.key(Key::BackTab);
         p.paste("manual");
         p.key(Key::Enter);
-        let Action::Set {
-            value: Some(Value::Map(m)),
-            ..
-        } = p.key(Key::Enter)
-        else {
-            panic!()
-        };
-        assert_eq!(
-            m,
-            [("manual".to_string(), "C:/docs/manual.pdf".to_string())]
-        );
+        let Action::Set { value: Some(Value::Map(m)), .. } = p.key(Key::Enter) else { panic!() };
+        assert_eq!(m, [("manual".to_string(), "C:/docs/manual.pdf".to_string())]);
     }
 
     #[test]
@@ -2437,21 +1532,9 @@ mod tests {
         p.key(Key::Char('a'));
         assert!(p.typing(), "the new entry's form, on its name");
         p.paste("mission");
-        assert_eq!(
-            p.key(Key::CtrlO),
-            Action::Browse {
-                start: None,
-                folder: true
-            }
-        );
+        assert_eq!(p.key(Key::CtrlO), Action::Browse { start: None, folder: true });
         p.browsed(std::path::Path::new("C:/mib"));
-        let Action::Set {
-            value: Some(Value::Map(m)),
-            ..
-        } = p.key(Key::Enter)
-        else {
-            panic!()
-        };
+        let Action::Set { value: Some(Value::Map(m)), .. } = p.key(Key::Enter) else { panic!() };
         assert_eq!(m, [("mission".to_string(), "C:/mib".to_string())]);
     }
 
@@ -2469,17 +1552,8 @@ mod tests {
         p.key(Key::Backspace);
         p.key(Key::Char('1'));
         assert!(layout(&p, 130).text.contains("hotfix/2.1▏"));
-        assert_eq!(
-            p.key(Key::Enter),
-            Action::Set {
-                key: "git.base_branch",
-                value: Some(Value::Text("hotfix/2.1".into()))
-            }
-        );
-        assert_eq!(
-            p.caret, None,
-            "the next field starts with the caret at its end"
-        );
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "git.base_branch", value: Some(Value::Text("hotfix/2.1".into())) });
+        assert_eq!(p.caret, None, "the next field starts with the caret at its end");
     }
 
     #[test]
@@ -2490,18 +1564,11 @@ mod tests {
             p.key(Key::Char(c));
         }
         let text = layout(&p, 130).text;
-        assert!(
-            text.contains("GitLab token")
-                && text.contains("GitHub token")
-                && text.contains("Jira token"),
-            "{text}"
-        );
+        assert!(text.contains("GitLab token") && text.contains("GitHub token") && text.contains("Jira token"), "{text}");
         assert!(!text.contains("Font size"));
         p.key(Key::Enter);
         assert!(matches!(p.selected(), Some(Row::Setting(s)) if s.key == "gitlab.token"));
-        assert!(layout(&p, 130)
-            .text
-            .contains("gitlab.token · settings.toml"));
+        assert!(layout(&p, 130).text.contains("gitlab.token · settings.toml"));
     }
 
     #[test]
@@ -2514,62 +1581,23 @@ mod tests {
             p.key(Key::Char(c));
         }
         let text = layout(&p, 130).text;
-        assert!(
-            text.contains("•••••••••") && !text.contains("glpat-abc"),
-            "{text}"
-        );
-        assert_eq!(
-            p.key(Key::Enter),
-            Action::SetSecret {
-                secret: Secret::GitLab,
-                token: Some("glpat-abc".into())
-            }
-        );
-        assert_eq!(
-            p.key(Key::Char('x')),
-            Action::SetSecret {
-                secret: Secret::GitLab,
-                token: None
-            }
-        );
+        assert!(text.contains("•••••••••") && !text.contains("glpat-abc"), "{text}");
+        assert_eq!(p.key(Key::Enter), Action::SetSecret { secret: Secret::GitLab, token: Some("glpat-abc".into()) });
+        assert_eq!(p.key(Key::Char('x')), Action::SetSecret { secret: Secret::GitLab, token: None });
     }
 
     #[test]
     fn a_projects_scope_shows_only_what_a_project_may_set_and_where_it_comes_from() {
         let mut snap = snap();
         snap.here = HashMap::from([("editor.indent_width", Value::Int(2))]);
-        snap.inherited = HashMap::from([
-            ("editor.indent_width", Value::Int(4)),
-            ("editor.tab_width", Value::Int(8)),
-        ]);
-        let mut p = SettingsPage::new(
-            Scope::Project {
-                root: PathBuf::from("/p"),
-                name: "fenix".into(),
-            },
-            snap,
-        );
+        snap.inherited = HashMap::from([("editor.indent_width", Value::Int(4)), ("editor.tab_width", Value::Int(8))]);
+        let mut p = SettingsPage::new(Scope::Project { root: PathBuf::from("/p"), name: "fenix".into() }, snap);
         goto(&mut p, "editor.indent_width");
         let text = layout(&p, 130).text;
-        assert!(
-            text.starts_with("\nSettings · fenix") || text.contains("Settings · fenix"),
-            "{text}"
-        );
-        assert!(
-            text.contains("set here · yours: 4") && text.contains("from you"),
-            "{text}"
-        );
-        assert!(
-            !text.contains("Font size") && !p.categories().contains(&Category::Appearance),
-            "the theme isn't per-project"
-        );
-        assert_eq!(
-            p.key(Key::Char('r')),
-            Action::Set {
-                key: "editor.indent_width",
-                value: None
-            }
-        );
+        assert!(text.starts_with("\nSettings · fenix") || text.contains("Settings · fenix"), "{text}");
+        assert!(text.contains("set here · yours: 4") && text.contains("from you"), "{text}");
+        assert!(!text.contains("Font size") && !p.categories().contains(&Category::Appearance), "the theme isn't per-project");
+        assert_eq!(p.key(Key::Char('r')), Action::Set { key: "editor.indent_width", value: None });
         assert!(text.contains("Project & tasks"), "{text}");
         assert_eq!(p.key(Key::Char('p')), Action::SwitchScope(Scope::You));
     }

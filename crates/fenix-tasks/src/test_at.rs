@@ -21,10 +21,7 @@ pub fn test_at(path: &Path, text: &str, line: usize, root: &Path) -> Result<Task
         return Err(format!("{} is empty", path.display()));
     }
     let at = line.max(1).min(lines.len()) - 1;
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default();
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
     match extension {
         "rs" => rust_test(path, &lines, at),
         "py" => python_test(path, &lines, at, root),
@@ -38,19 +35,14 @@ fn no_test(path: &Path, at: usize) -> String {
 }
 
 fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string())
 }
 
 /// `path` from `root`, with `/` between its parts, when it's under it;
 /// else as it is.
 fn relative(path: &Path, root: &Path) -> String {
     let rel = path.strip_prefix(root).unwrap_or(path);
-    rel.components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/")
+    rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")
 }
 
 // ---- Rust ----
@@ -61,20 +53,11 @@ fn rust_fn_name(line: &str) -> Option<&str> {
     let code = line.trim_start();
     let at = code.find("fn ")?;
     let before = &code[..at];
-    if !before.split_whitespace().all(|w| {
-        w == "pub"
-            || w.starts_with("pub(")
-            || matches!(
-                w,
-                "async" | "const" | "unsafe" | "extern" | "\"C\"" | "\"Rust\""
-            )
-    }) {
+    if !before.split_whitespace().all(|w| w == "pub" || w.starts_with("pub(") || matches!(w, "async" | "const" | "unsafe" | "extern" | "\"C\"" | "\"Rust\"")) {
         return None;
     }
     let rest = &code[at + 3..];
-    let name: &str = &rest[..rest
-        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-        .unwrap_or(rest.len())];
+    let name: &str = &rest[..rest.find(|c: char| !(c.is_alphanumeric() || c == '_')).unwrap_or(rest.len())];
     (!name.is_empty() && rest[name.len()..].trim_start().starts_with(['(', '<'])).then_some(name)
 }
 
@@ -86,21 +69,12 @@ fn rust_is_test(lines: &[&str], fn_line: usize) -> bool {
         if line.is_empty() || line.starts_with("//") {
             continue;
         }
-        if !line.starts_with("#[")
-            && !line.ends_with(")]")
-            && !line.ends_with(',')
-            && !line.ends_with('(')
-        {
+        if !line.starts_with("#[") && !line.ends_with(")]") && !line.ends_with(',') && !line.ends_with('(') {
             return false;
         }
         let attribute = line.trim_start_matches("#[");
         let path = &attribute[..attribute.find(['(', ']']).unwrap_or(attribute.len())];
-        if path == "test"
-            || path.ends_with("::test")
-            || path == "rstest"
-            || path.starts_with("test_case")
-            || path == "quickcheck"
-        {
+        if path == "test" || path.ends_with("::test") || path == "rstest" || path.starts_with("test_case") || path == "quickcheck" {
             return true;
         }
     }
@@ -194,15 +168,8 @@ fn rust_package(path: &Path) -> Option<(PathBuf, String)> {
                 if line.starts_with('[') {
                     in_package = line == "[package]";
                 } else if in_package {
-                    if let Some(value) = line
-                        .strip_prefix("name")
-                        .map(str::trim_start)
-                        .and_then(|l| l.strip_prefix('='))
-                    {
-                        return Some((
-                            here.to_path_buf(),
-                            value.trim().trim_matches('"').to_string(),
-                        ));
+                    if let Some(value) = line.strip_prefix("name").map(str::trim_start).and_then(|l| l.strip_prefix('=')) {
+                        return Some((here.to_path_buf(), value.trim().trim_matches('"').to_string()));
                     }
                 }
             }
@@ -216,19 +183,9 @@ fn rust_package(path: &Path) -> Option<(PathBuf, String)> {
 /// `--bin x`, or nothing for the library's and main's), and the module
 /// path its file is at in that binary.
 fn rust_target_and_module(crate_dir: &Path, path: &Path) -> (Vec<String>, Vec<String>) {
-    let rel: Vec<String> = path
-        .strip_prefix(crate_dir)
-        .unwrap_or(path)
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
+    let rel: Vec<String> = path.strip_prefix(crate_dir).unwrap_or(path).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
     let stem = |name: &str| name.strip_suffix(".rs").unwrap_or(name).to_string();
-    match rel
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
+    match rel.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
         ["tests", file] => (vec!["--test".into(), stem(file)], Vec::new()),
         ["tests", dir, rest @ ..] => {
             let mut module: Vec<String> = rest.iter().map(|p| stem(p)).collect();
@@ -262,37 +219,21 @@ fn rust_target_and_module(crate_dir: &Path, path: &Path) -> (Vec<String>, Vec<St
 fn rust_test(path: &Path, lines: &[&str], at: usize) -> Result<TaskDef, String> {
     // On a test's attributes, that test; otherwise the function the
     // line is in.
-    let on_attribute = (at..lines.len())
-        .take_while(|&i| lines[i].trim_start().starts_with("#["))
-        .last()
-        .map(|i| i + 1)
-        .filter(|&i| i < lines.len() && rust_fn_name(lines[i]).is_some());
-    let fn_line = on_attribute
-        .or_else(|| (0..=at).rev().find(|&i| rust_fn_name(lines[i]).is_some()))
-        .ok_or_else(|| no_test(path, at))?;
+    let on_attribute = (at..lines.len()).take_while(|&i| lines[i].trim_start().starts_with("#[")).last().map(|i| i + 1).filter(|&i| i < lines.len() && rust_fn_name(lines[i]).is_some());
+    let fn_line = on_attribute.or_else(|| (0..=at).rev().find(|&i| rust_fn_name(lines[i]).is_some())).ok_or_else(|| no_test(path, at))?;
     if !rust_is_test(lines, fn_line) {
         return Err(no_test(path, at));
     }
     let name = rust_fn_name(lines[fn_line]).unwrap_or_default();
-    let (crate_dir, package) = rust_package(path)
-        .ok_or_else(|| format!("{} isn't in a Cargo package", file_name(path)))?;
+    let (crate_dir, package) = rust_package(path).ok_or_else(|| format!("{} isn't in a Cargo package", file_name(path)))?;
     let (target, mut module) = rust_target_and_module(&crate_dir, path);
     module.extend(rust_inline_mods(lines, fn_line));
     module.push(name.to_string());
     let filter = module.join("::");
-    let mut args = vec![
-        "test".to_string(),
-        "--message-format=json".into(),
-        "-p".into(),
-        package,
-    ];
+    let mut args = vec!["test".to_string(), "--message-format=json".into(), "-p".into(), package];
     args.extend(target);
     args.extend(["--".into(), filter.clone(), "--exact".into()]);
-    Ok(TaskDef {
-        name: format!("test {filter}"),
-        command: "cargo".into(),
-        args,
-    })
+    Ok(TaskDef { name: format!("test {filter}"), command: "cargo".into(), args })
 }
 
 // ---- Python ----
@@ -304,16 +245,9 @@ fn indent_of(line: &str) -> usize {
 /// `def name(` or `async def name(`, and `class Name` -- the name.
 fn python_def(line: &str, keyword: &str) -> Option<String> {
     let code = line.trim_start();
-    let code = if keyword == "def" {
-        code.strip_prefix("async ").unwrap_or(code)
-    } else {
-        code
-    };
+    let code = if keyword == "def" { code.strip_prefix("async ").unwrap_or(code) } else { code };
     let rest = code.strip_prefix(keyword)?.strip_prefix(' ')?;
-    let name: String = rest
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
+    let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
     (!name.is_empty()).then_some(name)
 }
 
@@ -343,23 +277,13 @@ fn python_test(path: &Path, lines: &[&str], at: usize, root: &Path) -> Result<Ta
             break;
         }
     }
-    let is_test = |(is_class, name): &(bool, String)| {
-        if *is_class {
-            name.starts_with("Test")
-        } else {
-            name.starts_with("test")
-        }
-    };
+    let is_test = |(is_class, name): &(bool, String)| if *is_class { name.starts_with("Test") } else { name.starts_with("test") };
     if node.is_empty() || !node.iter().all(is_test) {
         return Err(no_test(path, at));
     }
     let names: Vec<String> = node.into_iter().rev().map(|(_, name)| name).collect();
     let id = format!("{}::{}", relative(path, root), names.join("::"));
-    Ok(TaskDef {
-        name: format!("test {}", names.join("::")),
-        command: "pytest".into(),
-        args: vec![id],
-    })
+    Ok(TaskDef { name: format!("test {}", names.join("::")), command: "pytest".into(), args: vec![id] })
 }
 
 // ---- Go ----
@@ -367,36 +291,14 @@ fn python_test(path: &Path, lines: &[&str], at: usize, root: &Path) -> Result<Ta
 fn go_test(path: &Path, lines: &[&str], at: usize, root: &Path) -> Result<TaskDef, String> {
     let name = (0..=at)
         .rev()
-        .find_map(|i| {
-            lines[i]
-                .strip_prefix("func ")
-                .map(|rest| {
-                    rest.chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect::<String>()
-                })
-                .filter(|n| !n.is_empty())
-        })
+        .find_map(|i| lines[i].strip_prefix("func ").map(|rest| rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect::<String>()).filter(|n| !n.is_empty()))
         .ok_or_else(|| no_test(path, at))?;
-    if !["Test", "Benchmark", "Example", "Fuzz"]
-        .iter()
-        .any(|p| name.starts_with(p))
-    {
+    if !["Test", "Benchmark", "Example", "Fuzz"].iter().any(|p| name.starts_with(p)) {
         return Err(no_test(path, at));
     }
     let dir = path.parent().map(|d| relative(d, root)).unwrap_or_default();
-    let package = if dir.is_empty() {
-        ".".to_string()
-    } else if Path::new(&dir).is_absolute() {
-        dir
-    } else {
-        format!("./{dir}")
-    };
-    Ok(TaskDef {
-        name: format!("test {name}"),
-        command: "go".into(),
-        args: vec!["test".into(), "-run".into(), format!("^{name}$"), package],
-    })
+    let package = if dir.is_empty() { ".".to_string() } else if Path::new(&dir).is_absolute() { dir } else { format!("./{dir}") };
+    Ok(TaskDef { name: format!("test {name}"), command: "go".into(), args: vec!["test".into(), "-run".into(), format!("^{name}$"), package] })
 }
 
 #[cfg(test)]
@@ -409,10 +311,7 @@ mod tests {
         fn new(name: &str) -> Self {
             static COUNTER: AtomicU64 = AtomicU64::new(0);
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "fenix-tasks-test-at-{name}-{}-{n}",
-                std::process::id()
-            ));
+            let dir = std::env::temp_dir().join(format!("fenix-tasks-test-at-{name}-{}-{n}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             Self(dir)
         }
@@ -471,35 +370,14 @@ mod tests {
         // On the assert inside `adds`.
         let task = test_at(&path, LIB, 16, &dir.0).unwrap();
         assert_eq!(task.command, "cargo");
-        assert_eq!(
-            task.args,
-            [
-                "test",
-                "--message-format=json",
-                "-p",
-                "ledger",
-                "--",
-                "amounts::parse::tests::adds",
-                "--exact"
-            ]
-        );
+        assert_eq!(task.args, ["test", "--message-format=json", "-p", "ledger", "--", "amounts::parse::tests::adds", "--exact"]);
         assert_eq!(task.name, "test amounts::parse::tests::adds");
         // In a nested module, async.
         let task = test_at(&path, LIB, 22, &dir.0).unwrap();
-        assert!(
-            task.args
-                .contains(&"amounts::parse::tests::nested::deeper".to_string()),
-            "{:?}",
-            task.args
-        );
+        assert!(task.args.contains(&"amounts::parse::tests::nested::deeper".to_string()), "{:?}", task.args);
         // After the nested module has closed.
         let task = test_at(&path, LIB, 28, &dir.0).unwrap();
-        assert!(
-            task.args
-                .contains(&"amounts::parse::tests::after_nested".to_string()),
-            "{:?}",
-            task.args
-        );
+        assert!(task.args.contains(&"amounts::parse::tests::after_nested".to_string()), "{:?}", task.args);
     }
 
     #[test]
@@ -517,25 +395,13 @@ mod tests {
         let dir = TempDir::new("rust-targets");
         let text = "#[test]\nfn works() {}\n";
         let lib = crate_with(&dir, "src/lib.rs", text);
-        assert_eq!(
-            test_at(&lib, text, 2, &dir.0).unwrap().args[4..],
-            ["--", "works", "--exact"]
-        );
+        assert_eq!(test_at(&lib, text, 2, &dir.0).unwrap().args[4..], ["--", "works", "--exact"]);
         let integration = dir.write("tests/cli.rs", text);
-        assert_eq!(
-            test_at(&integration, text, 2, &dir.0).unwrap().args[4..],
-            ["--test", "cli", "--", "works", "--exact"]
-        );
+        assert_eq!(test_at(&integration, text, 2, &dir.0).unwrap().args[4..], ["--test", "cli", "--", "works", "--exact"]);
         let module = dir.write("src/a/mod.rs", text);
-        assert!(test_at(&module, text, 1, &dir.0)
-            .unwrap()
-            .args
-            .contains(&"a::works".to_string()));
+        assert!(test_at(&module, text, 1, &dir.0).unwrap().args.contains(&"a::works".to_string()));
         let bin = dir.write("src/bin/tool.rs", text);
-        assert_eq!(
-            test_at(&bin, text, 2, &dir.0).unwrap().args[4..],
-            ["--bin", "tool", "--", "works", "--exact"]
-        );
+        assert_eq!(test_at(&bin, text, 2, &dir.0).unwrap().args[4..], ["--bin", "tool", "--", "works", "--exact"]);
     }
 
     #[test]
@@ -544,23 +410,14 @@ mod tests {
         let text = "import pytest\n\nclass TestLedger:\n    def setup_method(self):\n        pass\n\n    def test_totals(self):\n        x = 1\n\n        assert x == 1\n\ndef test_plain():\n    assert True\n\ndef helper():\n    pass\n";
         let path = dir.write("tests/test_ledger.py", text);
         let task = test_at(&path, text, 10, &dir.0).unwrap();
-        assert_eq!(
-            (task.command.as_str(), task.args.clone()),
-            (
-                "pytest",
-                vec!["tests/test_ledger.py::TestLedger::test_totals".to_string()]
-            )
-        );
+        assert_eq!((task.command.as_str(), task.args.clone()), ("pytest", vec!["tests/test_ledger.py::TestLedger::test_totals".to_string()]));
         let task = test_at(&path, text, 13, &dir.0).unwrap();
         assert_eq!(task.args, ["tests/test_ledger.py::test_plain"]);
         // On the class line: the whole class.
         let task = test_at(&path, text, 3, &dir.0).unwrap();
         assert_eq!(task.args, ["tests/test_ledger.py::TestLedger"]);
         assert!(test_at(&path, text, 16, &dir.0).is_err());
-        assert!(
-            test_at(&path, text, 4, &dir.0).is_err(),
-            "setup_method isn't a test"
-        );
+        assert!(test_at(&path, text, 4, &dir.0).is_err(), "setup_method isn't a test");
     }
 
     #[test]
@@ -569,22 +426,13 @@ mod tests {
         let text = "package ledger\n\nimport \"testing\"\n\nfunc TestTotals(t *testing.T) {\n\tif 1 != 1 {\n\t\tt.Fatal(\"no\")\n\t}\n}\n\nfunc helper() {}\n";
         let path = dir.write("internal/ledger/ledger_test.go", text);
         let task = test_at(&path, text, 7, &dir.0).unwrap();
-        assert_eq!(
-            task.args,
-            ["test", "-run", "^TestTotals$", "./internal/ledger"]
-        );
+        assert_eq!(task.args, ["test", "-run", "^TestTotals$", "./internal/ledger"]);
         assert!(test_at(&path, text, 11, &dir.0).is_err());
     }
 
     #[test]
     fn other_files_say_they_cant_yet() {
-        let err = test_at(
-            Path::new("/p/a.test.ts"),
-            "it('x', () => {})\n",
-            1,
-            Path::new("/p"),
-        )
-        .unwrap_err();
+        let err = test_at(Path::new("/p/a.test.ts"), "it('x', () => {})\n", 1, Path::new("/p")).unwrap_err();
         assert!(err.contains(".ts files"), "{err}");
     }
 }

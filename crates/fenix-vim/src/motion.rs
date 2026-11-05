@@ -102,15 +102,9 @@ pub fn target(buffer: &Buffer, cursor: &Cursor, motion: Motion, iskeyword_extra:
         }
         Motion::Up => vertical(buffer, cursor, -1),
         Motion::Down => vertical(buffer, cursor, 1),
-        Motion::WordForward => {
-            word_forward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra))
-        }
-        Motion::WordBackward => {
-            word_backward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra))
-        }
-        Motion::WordEndForward => {
-            word_end_forward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra))
-        }
+        Motion::WordForward => word_forward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra)),
+        Motion::WordBackward => word_backward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra)),
+        Motion::WordEndForward => word_end_forward(buffer, cursor.char_idx, |c| classify(c, iskeyword_extra)),
         Motion::BigWordForward => word_forward(buffer, cursor.char_idx, classify_big),
         Motion::BigWordBackward => word_backward(buffer, cursor.char_idx, classify_big),
         Motion::BigWordEndForward => word_end_forward(buffer, cursor.char_idx, classify_big),
@@ -133,15 +127,9 @@ pub fn target(buffer: &Buffer, cursor: &Cursor, motion: Motion, iskeyword_extra:
         // `- 1`/`+ 1` are always in-bounds when a match was found: a
         // forward match is strictly past the cursor (so >= line_start +
         // 1), a backward one strictly before it.
-        Motion::TillChar(c) => find_char_forward(buffer, cursor, c)
-            .map(|i| i - 1)
-            .unwrap_or(cursor.char_idx),
-        Motion::TillCharBack(c) => find_char_backward(buffer, cursor, c)
-            .map(|i| i + 1)
-            .unwrap_or(cursor.char_idx),
-        Motion::MatchingBracket => {
-            crate::bracket::find_match(buffer, cursor.char_idx).unwrap_or(cursor.char_idx)
-        }
+        Motion::TillChar(c) => find_char_forward(buffer, cursor, c).map(|i| i - 1).unwrap_or(cursor.char_idx),
+        Motion::TillCharBack(c) => find_char_backward(buffer, cursor, c).map(|i| i + 1).unwrap_or(cursor.char_idx),
+        Motion::MatchingBracket => crate::bracket::find_match(buffer, cursor.char_idx).unwrap_or(cursor.char_idx),
         Motion::ParagraphForward => paragraph_forward(buffer, cursor),
         Motion::ParagraphBackward => paragraph_backward(buffer, cursor),
     }
@@ -217,10 +205,7 @@ pub fn is_non_blank_at(buffer: &Buffer, idx: usize) -> bool {
     // `_` reads as `Word` under the default and `Punct` with `:set
     // iskeyword-=_`, but either way it's not `Space`, so this can
     // classify with no extra keyword characters at all.
-    matches!(
-        buffer.char_at(idx).map(|c| classify(c, &[])),
-        Some(CharClass::Word) | Some(CharClass::Punct)
-    )
+    matches!(buffer.char_at(idx).map(|c| classify(c, &[])), Some(CharClass::Word) | Some(CharClass::Punct))
 }
 
 /// WORD boundaries: whitespace vs. everything else, no word/punctuation
@@ -359,105 +344,52 @@ mod tests {
     #[test]
     fn left_right_stop_at_line_boundaries_not_wrap() {
         let b = buf("ab\ncd");
-        assert_eq!(
-            target(&b, &cur(0), Motion::Left, DEFAULT_ISKEYWORD_EXTRA),
-            0
-        );
-        assert_eq!(
-            target(&b, &cur(1), Motion::Right, DEFAULT_ISKEYWORD_EXTRA),
-            1
-        ); // already on last char of "ab"
-        assert_eq!(
-            target(&b, &cur(3), Motion::Left, DEFAULT_ISKEYWORD_EXTRA),
-            3
-        ); // start of "cd", can't cross to "ab"
+        assert_eq!(target(&b, &cur(0), Motion::Left, DEFAULT_ISKEYWORD_EXTRA), 0);
+        assert_eq!(target(&b, &cur(1), Motion::Right, DEFAULT_ISKEYWORD_EXTRA), 1); // already on last char of "ab"
+        assert_eq!(target(&b, &cur(3), Motion::Left, DEFAULT_ISKEYWORD_EXTRA), 3); // start of "cd", can't cross to "ab"
     }
 
     #[test]
     fn word_forward_skips_current_word_and_following_space() {
         let b = buf("foo bar baz");
-        assert_eq!(
-            target(&b, &cur(0), Motion::WordForward, DEFAULT_ISKEYWORD_EXTRA),
-            4
-        );
-        assert_eq!(
-            target(&b, &cur(4), Motion::WordForward, DEFAULT_ISKEYWORD_EXTRA),
-            8
-        );
+        assert_eq!(target(&b, &cur(0), Motion::WordForward, DEFAULT_ISKEYWORD_EXTRA), 4);
+        assert_eq!(target(&b, &cur(4), Motion::WordForward, DEFAULT_ISKEYWORD_EXTRA), 8);
     }
 
     #[test]
     fn word_forward_treats_punctuation_as_its_own_word() {
         let b = buf("foo.bar");
-        assert_eq!(
-            target(&b, &cur(0), Motion::WordForward, DEFAULT_ISKEYWORD_EXTRA),
-            3
-        ); // start of "."
-        assert_eq!(
-            target(&b, &cur(3), Motion::WordForward, DEFAULT_ISKEYWORD_EXTRA),
-            4
-        ); // start of "bar"
+        assert_eq!(target(&b, &cur(0), Motion::WordForward, DEFAULT_ISKEYWORD_EXTRA), 3); // start of "."
+        assert_eq!(target(&b, &cur(3), Motion::WordForward, DEFAULT_ISKEYWORD_EXTRA), 4); // start of "bar"
     }
 
     #[test]
     fn word_end_forward_advances_at_least_one_char() {
         let b = buf("foo bar");
-        assert_eq!(
-            target(&b, &cur(0), Motion::WordEndForward, DEFAULT_ISKEYWORD_EXTRA),
-            2
-        ); // end of "foo"
-        assert_eq!(
-            target(&b, &cur(2), Motion::WordEndForward, DEFAULT_ISKEYWORD_EXTRA),
-            6
-        ); // jumps to end of "bar"
+        assert_eq!(target(&b, &cur(0), Motion::WordEndForward, DEFAULT_ISKEYWORD_EXTRA), 2); // end of "foo"
+        assert_eq!(target(&b, &cur(2), Motion::WordEndForward, DEFAULT_ISKEYWORD_EXTRA), 6); // jumps to end of "bar"
     }
 
     #[test]
     fn word_backward_finds_previous_word_start() {
         let b = buf("foo bar baz");
-        assert_eq!(
-            target(&b, &cur(8), Motion::WordBackward, DEFAULT_ISKEYWORD_EXTRA),
-            4
-        );
-        assert_eq!(
-            target(&b, &cur(4), Motion::WordBackward, DEFAULT_ISKEYWORD_EXTRA),
-            0
-        );
+        assert_eq!(target(&b, &cur(8), Motion::WordBackward, DEFAULT_ISKEYWORD_EXTRA), 4);
+        assert_eq!(target(&b, &cur(4), Motion::WordBackward, DEFAULT_ISKEYWORD_EXTRA), 0);
     }
 
     #[test]
     fn line_start_first_non_blank_and_end() {
         let b = buf("  hi there\n");
-        assert_eq!(
-            target(&b, &cur(5), Motion::LineStart, DEFAULT_ISKEYWORD_EXTRA),
-            0
-        );
-        assert_eq!(
-            target(
-                &b,
-                &cur(5),
-                Motion::LineFirstNonBlank,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            2
-        );
-        assert_eq!(
-            target(&b, &cur(0), Motion::LineEnd, DEFAULT_ISKEYWORD_EXTRA),
-            9
-        ); // lands ON 'e' of "there"
+        assert_eq!(target(&b, &cur(5), Motion::LineStart, DEFAULT_ISKEYWORD_EXTRA), 0);
+        assert_eq!(target(&b, &cur(5), Motion::LineFirstNonBlank, DEFAULT_ISKEYWORD_EXTRA), 2);
+        assert_eq!(target(&b, &cur(0), Motion::LineEnd, DEFAULT_ISKEYWORD_EXTRA), 9); // lands ON 'e' of "there"
     }
 
     #[test]
     fn buffer_top_and_bottom_land_on_first_non_blank() {
         let b = buf("a\n  b\nc\n");
-        assert_eq!(
-            target(&b, &cur(0), Motion::BufferTop, DEFAULT_ISKEYWORD_EXTRA),
-            0
-        );
-        assert_eq!(
-            target(&b, &cur(0), Motion::BufferBottom, DEFAULT_ISKEYWORD_EXTRA),
-            6
-        );
+        assert_eq!(target(&b, &cur(0), Motion::BufferTop, DEFAULT_ISKEYWORD_EXTRA), 0);
+        assert_eq!(target(&b, &cur(0), Motion::BufferBottom, DEFAULT_ISKEYWORD_EXTRA), 6);
     }
 
     #[test]
@@ -490,217 +422,80 @@ mod tests {
     #[test]
     fn vertical_motion_uses_sticky_column_clamped_to_short_lines() {
         let b = buf("longline\nhi\nlongline");
-        let c = Cursor {
-            char_idx: 8,
-            sticky_col: 8,
-        }; // end of "longline"
+        let c = Cursor { char_idx: 8, sticky_col: 8 }; // end of "longline"
         let after_down = target(&b, &c, Motion::Down, DEFAULT_ISKEYWORD_EXTRA);
-        assert_eq!(
-            b.line_col(&Cursor {
-                char_idx: after_down,
-                sticky_col: 0
-            }),
-            (1, 1)
-        ); // clamped onto "hi"
+        assert_eq!(b.line_col(&Cursor { char_idx: after_down, sticky_col: 0 }), (1, 1)); // clamped onto "hi"
     }
 
     #[test]
     fn big_word_forward_ignores_punctuation_boundaries() {
         let b = buf("foo.bar baz");
         // unlike WordForward, "foo.bar" is one WORD, not three
-        assert_eq!(
-            target(&b, &cur(0), Motion::BigWordForward, DEFAULT_ISKEYWORD_EXTRA),
-            8
-        );
+        assert_eq!(target(&b, &cur(0), Motion::BigWordForward, DEFAULT_ISKEYWORD_EXTRA), 8);
     }
 
     #[test]
     fn big_word_end_and_backward_ignore_punctuation_too() {
         let b = buf("foo.bar baz");
-        assert_eq!(
-            target(
-                &b,
-                &cur(0),
-                Motion::BigWordEndForward,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            6
-        ); // end of "foo.bar"
-        assert_eq!(
-            target(
-                &b,
-                &cur(8),
-                Motion::BigWordBackward,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            0
-        );
+        assert_eq!(target(&b, &cur(0), Motion::BigWordEndForward, DEFAULT_ISKEYWORD_EXTRA), 6); // end of "foo.bar"
+        assert_eq!(target(&b, &cur(8), Motion::BigWordBackward, DEFAULT_ISKEYWORD_EXTRA), 0);
     }
 
     #[test]
     fn find_char_forward_and_backward_stay_on_the_current_line() {
         let b = buf("abcXbcX\nXafter");
-        assert_eq!(
-            target(&b, &cur(0), Motion::FindChar('X'), DEFAULT_ISKEYWORD_EXTRA),
-            3
-        ); // first X on this line
-        assert_eq!(
-            target(
-                &b,
-                &cur(0),
-                Motion::FindCharBack('X'),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            0
-        ); // none before -- no-op
-        assert_eq!(
-            target(
-                &b,
-                &cur(6),
-                Motion::FindCharBack('X'),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            3
-        ); // scans back to the first line's X
-           // Never crosses to the next line even though it has an 'X' too.
-        assert_eq!(
-            target(&b, &cur(6), Motion::FindChar('X'), DEFAULT_ISKEYWORD_EXTRA),
-            6
-        );
+        assert_eq!(target(&b, &cur(0), Motion::FindChar('X'), DEFAULT_ISKEYWORD_EXTRA), 3); // first X on this line
+        assert_eq!(target(&b, &cur(0), Motion::FindCharBack('X'), DEFAULT_ISKEYWORD_EXTRA), 0); // none before -- no-op
+        assert_eq!(target(&b, &cur(6), Motion::FindCharBack('X'), DEFAULT_ISKEYWORD_EXTRA), 3); // scans back to the first line's X
+        // Never crosses to the next line even though it has an 'X' too.
+        assert_eq!(target(&b, &cur(6), Motion::FindChar('X'), DEFAULT_ISKEYWORD_EXTRA), 6);
     }
 
     #[test]
     fn till_char_stops_one_short_of_the_found_char() {
         let b = buf("abcXdef");
-        assert_eq!(
-            target(&b, &cur(0), Motion::TillChar('X'), DEFAULT_ISKEYWORD_EXTRA),
-            2
-        ); // right before the X
-        assert_eq!(
-            target(
-                &b,
-                &cur(6),
-                Motion::TillCharBack('X'),
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            4
-        ); // right after the X
+        assert_eq!(target(&b, &cur(0), Motion::TillChar('X'), DEFAULT_ISKEYWORD_EXTRA), 2); // right before the X
+        assert_eq!(target(&b, &cur(6), Motion::TillCharBack('X'), DEFAULT_ISKEYWORD_EXTRA), 4); // right after the X
     }
 
     #[test]
     fn find_and_till_char_are_no_ops_when_the_char_is_not_on_the_line() {
         let b = buf("abcdef");
-        assert_eq!(
-            target(&b, &cur(0), Motion::FindChar('Z'), DEFAULT_ISKEYWORD_EXTRA),
-            0
-        );
-        assert_eq!(
-            target(&b, &cur(0), Motion::TillChar('Z'), DEFAULT_ISKEYWORD_EXTRA),
-            0
-        );
+        assert_eq!(target(&b, &cur(0), Motion::FindChar('Z'), DEFAULT_ISKEYWORD_EXTRA), 0);
+        assert_eq!(target(&b, &cur(0), Motion::TillChar('Z'), DEFAULT_ISKEYWORD_EXTRA), 0);
     }
 
     #[test]
     fn matching_bracket_delegates_to_bracket_find_match() {
         let b = buf("(hello)");
-        assert_eq!(
-            target(
-                &b,
-                &cur(0),
-                Motion::MatchingBracket,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            6
-        );
-        assert_eq!(
-            target(
-                &b,
-                &cur(6),
-                Motion::MatchingBracket,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            0
-        );
+        assert_eq!(target(&b, &cur(0), Motion::MatchingBracket, DEFAULT_ISKEYWORD_EXTRA), 6);
+        assert_eq!(target(&b, &cur(6), Motion::MatchingBracket, DEFAULT_ISKEYWORD_EXTRA), 0);
     }
 
     #[test]
     fn matching_bracket_is_a_no_op_off_a_bracket_or_unmatched() {
         let b = buf("(hello");
-        assert_eq!(
-            target(
-                &b,
-                &cur(1),
-                Motion::MatchingBracket,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            1
-        ); // 'h', not a bracket
-        assert_eq!(
-            target(
-                &b,
-                &cur(0),
-                Motion::MatchingBracket,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            0
-        ); // unmatched '('
+        assert_eq!(target(&b, &cur(1), Motion::MatchingBracket, DEFAULT_ISKEYWORD_EXTRA), 1); // 'h', not a bracket
+        assert_eq!(target(&b, &cur(0), Motion::MatchingBracket, DEFAULT_ISKEYWORD_EXTRA), 0); // unmatched '('
     }
 
     #[test]
     fn paragraph_forward_and_backward_find_the_nearest_blank_line() {
         let b = buf("a\nb\n\nc\nd\n\ne");
         // Lines: 0 "a", 1 "b", 2 "" (blank), 3 "c", 4 "d", 5 "" (blank), 6 "e"
-        assert_eq!(
-            target(
-                &b,
-                &cur(0),
-                Motion::ParagraphForward,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            b.line_start_char(2)
-        );
-        assert_eq!(
-            target(
-                &b,
-                &cur(0),
-                Motion::ParagraphBackward,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            0
-        ); // none before -- buffer start
+        assert_eq!(target(&b, &cur(0), Motion::ParagraphForward, DEFAULT_ISKEYWORD_EXTRA), b.line_start_char(2));
+        assert_eq!(target(&b, &cur(0), Motion::ParagraphBackward, DEFAULT_ISKEYWORD_EXTRA), 0); // none before -- buffer start
 
-        let on_c = Cursor {
-            char_idx: b.line_start_char(3),
-            sticky_col: 0,
-        };
-        assert_eq!(
-            target(&b, &on_c, Motion::ParagraphForward, DEFAULT_ISKEYWORD_EXTRA),
-            b.line_start_char(5)
-        );
-        assert_eq!(
-            target(
-                &b,
-                &on_c,
-                Motion::ParagraphBackward,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            b.line_start_char(2)
-        );
+        let on_c = Cursor { char_idx: b.line_start_char(3), sticky_col: 0 };
+        assert_eq!(target(&b, &on_c, Motion::ParagraphForward, DEFAULT_ISKEYWORD_EXTRA), b.line_start_char(5));
+        assert_eq!(target(&b, &on_c, Motion::ParagraphBackward, DEFAULT_ISKEYWORD_EXTRA), b.line_start_char(2));
     }
 
     #[test]
     fn paragraph_forward_lands_at_the_buffer_end_when_no_blank_line_follows() {
         let b = buf("a\nb\nc");
         let end = b.line_start_char(2) + b.line_len(2);
-        assert_eq!(
-            target(
-                &b,
-                &cur(0),
-                Motion::ParagraphForward,
-                DEFAULT_ISKEYWORD_EXTRA
-            ),
-            end
-        );
+        assert_eq!(target(&b, &cur(0), Motion::ParagraphForward, DEFAULT_ISKEYWORD_EXTRA), end);
     }
 
     #[test]

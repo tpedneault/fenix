@@ -16,30 +16,13 @@ pub const TIMEOUT: Duration = Duration::from_secs(3);
 /// (`${file}` in its args is `file`): what it wrote, when it ended well
 /// within `timeout` -- or, with `keep_output`, when it failed but
 /// wrote something (ktlint); else why not.
-pub fn run(
-    spec: &CommandSpec,
-    text: &str,
-    file: &Path,
-    root: &Path,
-    timeout: Duration,
-    keep_output: bool,
-) -> Result<String, String> {
+pub fn run(spec: &CommandSpec, text: &str, file: &Path, root: &Path, timeout: Duration, keep_output: bool) -> Result<String, String> {
     let mut spec = spec.clone();
     let shown = file.to_string_lossy();
-    spec.args = spec
-        .args
-        .iter()
-        .map(|a| a.replace("${file}", &shown))
-        .collect();
-    let name = Path::new(&spec.executable)
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| spec.executable.clone());
+    spec.args = spec.args.iter().map(|a| a.replace("${file}", &shown)).collect();
+    let name = Path::new(&spec.executable).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| spec.executable.clone());
     let mut command = spec.command(root).map_err(|e| format!("{name}: {e}"))?;
-    command
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
+    command.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -74,31 +57,18 @@ pub fn run(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
-                    "{name} took longer than {} s -- the text is as it was",
-                    timeout.as_secs()
-                ));
+                return Err(format!("{name} took longer than {} s -- the text is as it was", timeout.as_secs()));
             }
             Err(e) => return Err(format!("{name}: {e}")),
         }
     };
     let _ = writer.join();
-    let (out, err) = (
-        out.join().unwrap_or_default(),
-        err.join().unwrap_or_default(),
-    );
+    let (out, err) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
     if !status.success() && !(keep_output && !out.is_empty()) {
         let said = String::from_utf8_lossy(&err);
-        let first = said
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or("");
+        let first = said.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
         let code = status.code().map(|c| format!(" ({c})")).unwrap_or_default();
-        return Err(format!(
-            "{name} failed{code}{}{first}",
-            if first.is_empty() { "" } else { ": " }
-        ));
+        return Err(format!("{name} failed{code}{}{first}", if first.is_empty() { "" } else { ": " }));
     }
     String::from_utf8(out).map_err(|_| format!("{name} wrote something that isn't text"))
 }
@@ -117,15 +87,7 @@ mod tests {
     fn the_text_goes_in_and_what_it_writes_comes_back() {
         let dir = tempfile::tempdir().unwrap();
         // Not too short: Windows' `sort` takes four bytes for UTF-16.
-        let got = run(
-            &sort(),
-            "pear\napple\n",
-            &dir.path().join("x.txt"),
-            dir.path(),
-            TIMEOUT,
-            false,
-        )
-        .unwrap();
+        let got = run(&sort(), "pear\napple\n", &dir.path().join("x.txt"), dir.path(), TIMEOUT, false).unwrap();
         assert_eq!(got.replace("\r\n", "\n"), "apple\npear\n");
     }
 
@@ -133,27 +95,10 @@ mod tests {
     fn a_formatter_that_fails_or_isnt_there_says_so() {
         let dir = tempfile::tempdir().unwrap();
         let missing = CommandSpec::new("fenix-no-such-formatter".into(), Vec::new());
-        assert!(run(
-            &missing,
-            "x",
-            &dir.path().join("x.txt"),
-            dir.path(),
-            TIMEOUT,
-            false
-        )
-        .unwrap_err()
-        .starts_with("fenix-no-such-formatter: "));
+        assert!(run(&missing, "x", &dir.path().join("x.txt"), dir.path(), TIMEOUT, false).unwrap_err().starts_with("fenix-no-such-formatter: "));
         // `sort` of a file that isn't there fails, and says why.
         let failing = CommandSpec::new("sort".into(), vec!["${file}".into()]);
-        let err = run(
-            &failing,
-            "x",
-            &dir.path().join("gone.txt"),
-            dir.path(),
-            TIMEOUT,
-            false,
-        )
-        .unwrap_err();
+        let err = run(&failing, "x", &dir.path().join("gone.txt"), dir.path(), TIMEOUT, false).unwrap_err();
         assert!(err.starts_with("sort failed"), "{err}");
     }
 
@@ -162,35 +107,12 @@ mod tests {
     #[test]
     fn what_a_failing_formatter_wrote_is_kept_when_asked() {
         let dir = tempfile::tempdir().unwrap();
-        let (program, args) = if cfg!(windows) {
-            ("cmd", vec!["/C", "echo formatted& exit 1"])
-        } else {
-            ("sh", vec!["-c", "echo formatted; exit 1"])
-        };
-        let failing =
-            CommandSpec::new(program.into(), args.into_iter().map(String::from).collect());
+        let (program, args) = if cfg!(windows) { ("cmd", vec!["/C", "echo formatted& exit 1"]) } else { ("sh", vec!["-c", "echo formatted; exit 1"]) };
+        let failing = CommandSpec::new(program.into(), args.into_iter().map(String::from).collect());
         let file = dir.path().join("x.kt");
-        assert!(run(&failing, "x", &file, dir.path(), TIMEOUT, false)
-            .unwrap_err()
-            .contains("failed (1)"));
-        assert_eq!(
-            run(&failing, "x", &file, dir.path(), TIMEOUT, true)
-                .unwrap()
-                .trim(),
-            "formatted"
-        );
+        assert!(run(&failing, "x", &file, dir.path(), TIMEOUT, false).unwrap_err().contains("failed (1)"));
+        assert_eq!(run(&failing, "x", &file, dir.path(), TIMEOUT, true).unwrap().trim(), "formatted");
         let silent = CommandSpec::new("sort".into(), vec!["${file}".into()]);
-        assert!(
-            run(
-                &silent,
-                "x",
-                &dir.path().join("gone.txt"),
-                dir.path(),
-                TIMEOUT,
-                true
-            )
-            .is_err(),
-            "nothing written: a failure"
-        );
+        assert!(run(&silent, "x", &dir.path().join("gone.txt"), dir.path(), TIMEOUT, true).is_err(), "nothing written: a failure");
     }
 }

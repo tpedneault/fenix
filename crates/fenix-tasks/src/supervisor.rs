@@ -449,8 +449,7 @@ mod tests {
                 std::thread::sleep(Duration::from_secs(30));
             }
             Ok(mode @ ("tree" | "orphan")) => {
-                let flag =
-                    std::env::temp_dir().join(format!("fenix-fixture-{}", std::process::id()));
+                let flag = std::env::temp_dir().join(format!("fenix-fixture-{}", std::process::id()));
                 let mut child = fixture_command("sleep")
                     .env("FENIX_PROCESS_READY_FLAG", &flag)
                     .stdout(Stdio::inherit())
