@@ -592,6 +592,38 @@ impl Thread {
 
     /// What the agent said since the last prompt that went: its answer to
     /// it, as text.
+    /// The plan the agent last put up for approval this turn (Claude's
+    /// `ExitPlanMode`: a `switch_mode` tool call with the plan as its
+    /// content, or as `plan` in its input).
+    pub fn proposed_plan(&self) -> Option<String> {
+        let from = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::User { queued: false, .. }))
+            .map_or(0, |i| i + 1);
+        self.entries[from..].iter().rev().find_map(|e| {
+            let Entry::Tool(call) = e else { return None };
+            if call.kind != ToolKind::SwitchMode {
+                return None;
+            }
+            let shown: Vec<String> = call
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    ToolContent::Content(block) => Some(block.as_text()),
+                    _ => None,
+                })
+                .filter(|t| !t.trim().is_empty())
+                .collect();
+            let plan = if shown.is_empty() {
+                call.raw_input.as_ref()?.get("plan")?.as_str()?.to_string()
+            } else {
+                shown.join("\n\n")
+            };
+            (!plan.trim().is_empty()).then_some(plan)
+        })
+    }
+
     pub fn last_answer(&self) -> String {
         let from = self
             .entries
@@ -753,6 +785,23 @@ mod tests {
         assert_eq!(call.content.len(), 1, "an update without content leaves it");
         assert_eq!(t.tool("ghost").unwrap().title, "Tool");
         assert_eq!(t.entries.len(), 2);
+    }
+
+    #[test]
+    fn the_plan_put_up_for_approval_is_this_turns() {
+        let mut t = Thread::default();
+        t.push_user(vec![ContentBlock::text("plan it")], false);
+        assert_eq!(t.proposed_plan(), None);
+        t.apply(up(json!({ "sessionUpdate": "tool_call", "toolCallId": "p1", "title": "Approve Plan", "kind": "switch_mode", "content": [{ "type": "content", "content": { "type": "text", "text": "1. Read\n2. Write" } }] })), false);
+        assert_eq!(t.proposed_plan().as_deref(), Some("1. Read\n2. Write"));
+        t.apply(up(json!({ "sessionUpdate": "tool_call", "toolCallId": "p2", "title": "Approve Plan", "kind": "switch_mode", "rawInput": { "plan": "1. Only this" } })), false);
+        assert_eq!(
+            t.proposed_plan().as_deref(),
+            Some("1. Only this"),
+            "the latest, from its input"
+        );
+        t.push_user(vec![ContentBlock::text("next")], false);
+        assert_eq!(t.proposed_plan(), None, "a turn of its own");
     }
 
     #[test]

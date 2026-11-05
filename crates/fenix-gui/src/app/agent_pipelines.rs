@@ -425,14 +425,17 @@ impl App {
         };
         let answer = view.thread.last_answer();
         let transcript = view.thread.transcript();
-        let plan = (!view.thread.plan.is_empty()).then(|| {
-            view.thread
-                .plan
-                .iter()
-                .enumerate()
-                .map(|(i, e)| format!("{}. {}", i + 1, e.content))
-                .collect::<Vec<_>>()
-                .join("\n")
+        // The plan the agent put up for approval, else its plan entries.
+        let plan = view.thread.proposed_plan().or_else(|| {
+            (!view.thread.plan.is_empty()).then(|| {
+                view.thread
+                    .plan
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| format!("{}. {}", i + 1, e.content))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
         });
         let Some(running) = self.pipelines.runs.get(&id) else {
             return;

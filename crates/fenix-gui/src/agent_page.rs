@@ -765,7 +765,14 @@ pub fn layout(
                         g.put(
                             y,
                             left,
-                            &fit(&format!("? The agent asks to: {title}"), width),
+                            &fit(
+                                &if card.tool_call.id.starts_with("fenix-pipeline-") {
+                                    format!("? Fenix asks: {title}")
+                                } else {
+                                    format!("? The agent asks to: {title}")
+                                },
+                                width,
+                            ),
                             Role::Warn,
                         );
                         y += 1;

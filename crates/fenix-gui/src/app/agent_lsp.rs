@@ -559,6 +559,7 @@ impl App {
     /// lists references.
     pub(crate) fn request_callers(&mut self) {
         let Some((keys, text_document, position)) = self.focused_lsp_context() else {
+            self.set_error("no language server is running for this file");
             return;
         };
         let mut ready: Vec<LspKey> = keys

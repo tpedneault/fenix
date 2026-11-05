@@ -87,8 +87,10 @@ impl Turn {
     fn play(&mut self, prompt: &[Value]) -> io::Result<&'static str> {
         let text = prompt
             .iter()
-            .find(|block| block["type"] == "text")
-            .and_then(|block| block["text"].as_str())
+            .filter(|block| block["type"] == "text")
+            .filter_map(|block| block["text"].as_str())
+            // Fenix's briefing goes first, as a note: what you typed is after.
+            .find(|text| !text.trim_start().starts_with("<fenix-note>"))
             .unwrap_or("");
         let first = self
             .agent

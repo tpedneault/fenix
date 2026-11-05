@@ -325,6 +325,28 @@ fn auth_methods_only_for_terminal_auth() {
     client.finish().unwrap();
 }
 
+/// Fenix's briefing comes first, as a note: the title and the script are
+/// what you typed after it.
+#[test]
+fn a_briefing_note_is_read_past() {
+    let dir = Scratch::new("note");
+    let mut client = Client::start(&[]);
+    client.initialize(json!({}));
+    let session = client.new_session(dir.path());
+    let from = client.log.len();
+    let id = client.request(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "<fenix-note>\nUse the fenix tools.\n</fenix-note>"}, {"type": "text", "text": "hello there"}]}),
+    );
+    client.response(id);
+    let updates = client.updates_since(from, &session);
+    let title = updates
+        .iter()
+        .find(|u| u["sessionUpdate"] == "session_info_update")
+        .expect("a title");
+    assert_eq!(title["title"], "hello there");
+}
+
 #[test]
 fn new_session_and_hello_streams() {
     let dir = Scratch::new("hello");

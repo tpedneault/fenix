@@ -376,6 +376,17 @@ mod tests {
                 super::super::debug_host::DebugMark::AgentBreakpoint(plain)
             )]
         );
+        // Kept with the session, its shade too.
+        let saved = app.capture_debugging();
+        let mut again = App::with_file(Some(path.clone()));
+        again.restore_debugging(saved);
+        assert_eq!(
+            again.debug_marks(again.focused_buffer_id(), &[0, 1], 2),
+            vec![(
+                1,
+                super::super::debug_host::DebugMark::AgentBreakpoint(plain)
+            )]
+        );
         app.agent_clear_breakpoints();
         assert!(app.debug_marks(buffer, &[0, 1], 2).is_empty());
     }

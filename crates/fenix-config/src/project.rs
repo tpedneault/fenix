@@ -163,13 +163,15 @@ impl ProjectSettings {
         }
         let mut doc = match on_disk.as_deref().map(str::parse::<toml_edit::DocumentMut>) {
             Some(Ok(doc)) => doc,
-            Some(Err(_)) => return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
+            Some(Err(_)) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
                     "{} was changed into something that can't be read, so it wasn't written over",
                     self.path.display()
                 ),
-            )),
+                ))
+            }
             None => {
                 let mut doc = toml_edit::DocumentMut::new();
                 doc.decor_mut().set_prefix(HEADER);

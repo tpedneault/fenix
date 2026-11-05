@@ -177,6 +177,9 @@ pub(super) struct SavedBreakpoint {
     pub line: usize,
     #[serde(flatten)]
     pub breakpoint: Breakpoint,
+    /// A coding agent set it: it keeps its shade, and `SPC u A` clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent: bool,
 }
 
 impl App {
@@ -487,6 +490,10 @@ impl App {
                     path: path.clone(),
                     line: *line,
                     breakpoint: b.clone(),
+                    agent: self
+                        .agent_calls
+                        .agent_breakpoints
+                        .contains(&(path.clone(), *line)),
                 })
             })
             .collect();
@@ -514,7 +521,13 @@ impl App {
     /// The debugger's part of a session file, put back.
     pub(super) fn restore_debugging(&mut self, saved: SavedDebugging) {
         self.breakpoints.clear();
+        self.agent_calls.agent_breakpoints.clear();
         for b in saved.breakpoints {
+            if b.agent {
+                self.agent_calls
+                    .agent_breakpoints
+                    .insert((b.path.clone(), b.line));
+            }
             self.breakpoints
                 .entry(b.path)
                 .or_default()
@@ -612,6 +625,7 @@ mod tests {
                     path: PathBuf::from("/p/a.py"),
                     line: 3,
                     breakpoint: Breakpoint::default(),
+                    agent: false,
                 },
                 SavedBreakpoint {
                     path: PathBuf::from("/p/a.py"),
@@ -621,6 +635,7 @@ mod tests {
                         off: true,
                         ..Default::default()
                     },
+                    agent: true,
                 },
             ],
             pins: vec![Pin {
@@ -637,6 +652,10 @@ mod tests {
             serde_json::json!({ "path": "/p/a.py", "line": 3 })
         );
         assert_eq!(json["breakpoints"][1]["off"], true);
+        assert_eq!(
+            json["breakpoints"][1]["agent"], true,
+            "an agent's keeps its shade"
+        );
         let back: SavedDebugging = serde_json::from_value(json).unwrap();
         assert_eq!(back, saved);
         if cfg!(not(windows)) {

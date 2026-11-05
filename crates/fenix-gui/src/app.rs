@@ -9176,6 +9176,7 @@ impl App {
     /// when there's one, listed when there are more (as `gd` does).
     pub(crate) fn request_implementations(&mut self) {
         let Some((keys, text_document, position)) = self.focused_lsp_context() else {
+            self.set_error("no language server is running for this file");
             return;
         };
         let buffer = self.focused_buffer_id();
