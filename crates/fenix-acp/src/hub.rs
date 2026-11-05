@@ -518,10 +518,16 @@ impl Hub {
     /// the arguments. The answer comes back as `Effect::FenixAnswered`
     /// with one of `FENIX_OPTIONS`' ids, never to the agent.
     pub fn ask_fenix(&mut self, id: &ThreadId, key: &str, title: &str, kind: protocol::ToolKind, input: Value) -> Vec<Effect> {
+        let options: Vec<(&str, &str, protocol::PermissionKind)> = FENIX_OPTIONS.to_vec();
+        self.ask_fenix_with(id, key, title, kind, input, &options)
+    }
+
+    /// `ask_fenix` with answers of its own: id, what the card says, kind.
+    pub fn ask_fenix_with(&mut self, id: &ThreadId, key: &str, title: &str, kind: protocol::ToolKind, input: Value, answers: &[(&str, &str, protocol::PermissionKind)]) -> Vec<Effect> {
         let mut fx = Vec::new();
         let Some(slot) = self.threads.get_mut(id) else { return fx };
         let tool_call = ToolCallFields { id: format!("fenix-{key}"), title: Some(title.to_string()), kind: Some(kind), status: None, content: None, locations: None, raw_input: Some(input), raw_output: None };
-        let options = FENIX_OPTIONS.iter().map(|(id, name, kind)| PermissionOption { id: id.to_string(), name: name.to_string(), kind: *kind }).collect();
+        let options = answers.iter().map(|(id, name, kind)| PermissionOption { id: id.to_string(), name: name.to_string(), kind: *kind }).collect();
         slot.fenix_questions.insert(key.to_string());
         slot.thread.push_permission(PermissionCard { key: key.to_string(), tool_call, options, state: PermissionState::Pending });
         fx.push(Effect::Changed(id.clone()));

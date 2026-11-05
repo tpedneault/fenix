@@ -42,6 +42,13 @@ pub(crate) struct Pipelines {
     gates: HashMap<String, u64>,
     /// `SPC a P` picked one: the next prompt sent starts it.
     pub armed: Option<PipelineSpec>,
+    /// The last review's findings, by the thread whose ledger they're
+    /// about: shown beside their hunks in Agent changes.
+    pub findings: HashMap<ThreadId, Vec<fenix_acp::pipeline::Finding>>,
+    /// What a gate passes on, by run, for `e` to edit.
+    passing: HashMap<u64, String>,
+    /// The steps of runs that ended, for `[s` / `]s` still.
+    ended: Vec<Vec<ThreadId>>,
 }
 
 impl App {
@@ -115,7 +122,13 @@ impl App {
                 let name = self.pipelines.runs[&id].run.spec.steps[step].name.clone();
                 let next = self.pipelines.runs[&id].run.spec.steps.get(step + 1).map(|s| s.name.clone()).unwrap_or_default();
                 let key = format!("pipeline-gate-{id}-{step}");
-                let fx = self.agents.hub.ask_fenix(&thread, &key, &format!("Pipeline: pass what {name} gave on to {next}? (y goes on, n stops)"), fenix_acp::protocol::ToolKind::Other, json!({ "passing": passing }));
+                let answers = [
+                    ("allow_once", "Go on", fenix_acp::protocol::PermissionKind::AllowOnce),
+                    ("edit", "Edit what's passed on, then go on", fenix_acp::protocol::PermissionKind::Other),
+                    ("reject_once", "Stop", fenix_acp::protocol::PermissionKind::RejectOnce),
+                ];
+                let fx = self.agents.hub.ask_fenix_with(&thread, &key, &format!("Pipeline: pass what {name} gave on to {next}?"), fenix_acp::protocol::ToolKind::Other, json!({ "passing": passing }), &answers);
+                self.pipelines.passing.insert(id, passing);
                 self.pipelines.gates.insert(key, id);
                 self.agents_run(fx);
             }
@@ -126,6 +139,8 @@ impl App {
 
     fn pipeline_finished(&mut self, id: u64, how: &str) {
         let Some(running) = self.pipelines.runs.remove(&id) else { return };
+        self.pipelines.passing.remove(&id);
+        self.pipelines.ended.push(running.threads.clone());
         for thread in &running.threads {
             self.pipelines.steps.remove(thread);
             self.pipelines.held.remove(thread);
@@ -197,6 +212,35 @@ impl App {
         self.agents_run(fx);
     }
 
+    /// The gate's text, edited: passed on, and the run goes on. `None`
+    /// (the pane discarded): the run stops.
+    pub(crate) fn pipeline_gate_edited(&mut self, run: u64, text: Option<String>) {
+        let next = match self.pipelines.runs.get_mut(&run) {
+            Some(r) => r.run.gate_answered(text.is_some(), text),
+            None => return,
+        };
+        self.pipeline_do(run, next);
+    }
+
+    /// A step's line for the dock's title (`plan ✓ → build ● → review`),
+    /// when `thread` is one.
+    pub(crate) fn pipeline_strip(&self, thread: &ThreadId) -> Option<String> {
+        let run = self.pipelines.steps.get(thread).and_then(|id| self.pipelines.runs.get(id))?;
+        Some(format!("{}: {}", run.run.spec.title, run.run.progress()))
+    }
+
+    /// `]s` / `[s`: the pipeline's next or previous step's thread.
+    pub(crate) fn pipeline_other_step(&mut self, thread: &ThreadId, forward: bool) {
+        let steps = self.pipelines.runs.values().map(|r| r.threads.clone()).chain(self.pipelines.ended.iter().cloned()).find(|t| t.contains(thread));
+        let Some(steps) = steps else { return self.set_message("this thread isn't a pipeline's step") };
+        let at = steps.iter().position(|t| t == thread).unwrap_or(0);
+        let to = if forward { at + 1 } else { at.wrapping_sub(1) };
+        match steps.get(to) {
+            Some(t) => self.agents_show(t.clone()),
+            None => self.set_message(if forward { "the last step" } else { "the first step" }),
+        }
+    }
+
     /// The diff of what a step's thread changed, from its ledger.
     fn pipeline_changes(&self, thread: &ThreadId) -> String {
         let mut out = String::new();
@@ -253,12 +297,28 @@ impl App {
             Some(r) => r.run.step_ended(StepEnd { stop: stop.to_string(), answer, plan, changes, transcript }),
             None => return,
         };
+        // A review's findings go beside the hunks they're about.
+        if let Some(r) = self.pipelines.runs.get(&id) {
+            if let Some(ledger) = r.ledger.clone() {
+                if r.run.findings.is_empty() {
+                    self.pipelines.findings.remove(&ledger);
+                } else {
+                    self.pipelines.findings.insert(ledger, r.run.findings.clone());
+                }
+            }
+        }
         self.pipeline_do(id, next);
     }
 
     /// The gate's question answered: true when it was a gate's.
     pub(super) fn pipeline_gate_answered(&mut self, key: &str, option: Option<&str>) -> bool {
         let Some(id) = self.pipelines.gates.remove(key) else { return false };
+        // `e`: what's passed on, in a compose pane, sent on when it's sent.
+        if option == Some("edit") {
+            let passing = self.pipelines.passing.get(&id).cloned().unwrap_or_default();
+            self.open_compose_seeded(ComposePurpose::PipelineGate { run: id }, &passing);
+            return true;
+        }
         let go = matches!(option, Some("allow_once" | "allow_thread"));
         let next = match self.pipelines.runs.get_mut(&id) {
             Some(r) => r.run.gate_answered(go, None),
@@ -324,5 +384,32 @@ mod tests {
         assert!(app.pipeline_gate_answered(&key, Some("reject_once")));
         assert!(app.pipelines.runs.is_empty(), "stopped");
         assert!(!app.pipeline_gate_answered("someone-elses", None));
+    }
+
+    #[test]
+    fn e_at_a_gate_edits_what_goes_on_and_the_strip_says_where_it_is() {
+        let mut app = app();
+        app.pipelines.armed = Some(PipelineSpec::parse("g", "title = \"Two\"\n[[steps]]\nname = \"a\"\nagent = \"claude\"\nprompt = \"{input}\"\ngate = true\n[[steps]]\nname = \"b\"\nagent = \"claude\"\nprompt = \"Do: {previous}\"\n").unwrap());
+        app.pipeline_take_prompt("x");
+        let first = app.pipelines.runs.values().next().unwrap().threads[0].clone();
+        assert_eq!(app.pipeline_strip(&first).as_deref(), Some("Two: a ● → b"));
+        app.pipelines.held.clear();
+        app.pipeline_turn_ended(&first, "end_turn");
+        let key = app.pipelines.gates.keys().next().cloned().unwrap();
+        let card = app.agents.hub.view(&first).unwrap().thread.entries.iter().rev().find_map(|e| if let fenix_acp::thread::Entry::Permission(c) = e { Some(c.clone()) } else { None }).unwrap();
+        assert!(card.options.iter().any(|o| o.id == "edit"), "e edits");
+        assert_eq!(crate::agent_page::answer_for(&app.agents.hub.view(&first).unwrap().thread, crate::page::Key::Char('e')), Some(crate::agent_page::Action::Permission { key: key.clone(), option: "edit".into() }));
+        assert!(app.pipeline_gate_answered(&key, Some("edit")));
+        let compose = app.compose.as_ref().map(|c| c.buffer).expect("the passing text, to edit");
+        app.replace_buffer_from_disk(compose, "the edited plan");
+        app.compose_submit();
+        let run = app.pipelines.runs.values().next().unwrap();
+        assert_eq!(run.threads.len(), 2, "the next step started");
+        let second = run.threads[1].clone();
+        assert_eq!(app.pipelines.held.get(&second).map(|h| h.prompt.as_str()), Some("Do: the edited plan"));
+        assert_eq!(app.pipeline_strip(&second).as_deref(), Some("Two: a ✓ → b ●"));
+        // [s from the second step shows the first.
+        app.pipeline_other_step(&second, false);
+        assert_eq!(app.agents.shown(&app.pages), Some(first));
     }
 }

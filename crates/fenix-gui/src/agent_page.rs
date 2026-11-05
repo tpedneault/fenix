@@ -26,6 +26,8 @@ pub struct AgentPage {
     /// The cursor follows the newest card as the agent writes, until you
     /// move it up.
     pub follow: bool,
+    /// `]` or `[` just pressed: an `s` after it is a step, not a turn.
+    pub bracket: Option<bool>,
 }
 
 /// What the page shows of the agent, besides the thread.
@@ -110,13 +112,15 @@ pub enum Action {
     View(String),
     /// `]t` / `[t`: the next or previous thread.
     OtherThread(bool),
+    /// `]s` / `[s`: a pipeline's next or previous step.
+    OtherStep(bool),
     /// `C`: a read-only thread continued in a new session.
     ContinueAnew,
 }
 
 impl AgentPage {
     pub fn new(thread: ThreadId) -> Self {
-        AgentPage { thread, focus: 0, open: HashSet::new(), closed: HashSet::new(), filter: Filter::default(), follow: true }
+        AgentPage { thread, focus: 0, open: HashSet::new(), closed: HashSet::new(), filter: Filter::default(), follow: true, bracket: None }
     }
 
     pub fn typing(&self) -> bool {
@@ -182,6 +186,13 @@ impl AgentPage {
                 page.follow = to + 1 == visible.len();
             }
         };
+        // `]s` / `[s`: the bracket was a turn's jump, or the first half of
+        // a step's.
+        if let Some(forward) = self.bracket.take() {
+            if key == Key::Char('s') {
+                return Action::OtherStep(forward);
+            }
+        }
         // A question waiting: its keys answer it, wherever the cursor is.
         if let Some(answer) = answer_for(thread, key) {
             return answer;
@@ -197,6 +208,7 @@ impl AgentPage {
             Key::Char('G') => go(self, visible.len().saturating_sub(1)),
             Key::Char(']') | Key::Char('[') => {
                 let forward = key == Key::Char(']');
+                self.bracket = Some(forward);
                 let is_turn = |i: usize| matches!(thread.entries[i], Entry::User { .. });
                 let next = if forward { visible[at + 1..].iter().position(|&i| is_turn(i)).map(|p| at + 1 + p) } else { visible[..at].iter().rposition(|&i| is_turn(i)) };
                 if let Some(to) = next {
@@ -293,6 +305,8 @@ pub fn answer_for(thread: &Thread, key: Key) -> Option<Action> {
         Key::Char('n') => by_kind(PermissionKind::RejectOnce).or_else(|| by_kind(PermissionKind::RejectAlways)),
         Key::Char('N') => by_kind(PermissionKind::RejectAlways),
         Key::Char(c @ '1'..='9') => card.options.get(c as usize - '1' as usize).map(|o| o.id.clone()),
+        // A pipeline's gate: edit what's passed on.
+        Key::Char('e') => card.options.iter().find(|o| o.id == "edit").map(|o| o.id.clone()),
         _ => None,
     }?;
     Some(Action::Permission { key: card.key.clone(), option })
@@ -585,6 +599,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                                 PermissionKind::AllowAlways => "Y".to_string(),
                                 PermissionKind::RejectOnce => "n".to_string(),
                                 PermissionKind::RejectAlways => "N".to_string(),
+                                PermissionKind::Other if option.id == "edit" => "e".to_string(),
                                 PermissionKind::Other => (n + 1).to_string(),
                             };
                             let shown = format!("{key}/{}", n + 1);

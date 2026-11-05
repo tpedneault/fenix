@@ -482,6 +482,8 @@ enum ComposePurpose {
     /// A code extension's (`compose`): what's written goes back to it as
     /// `composed` for its call `id`.
     Code { ext: String, id: u64, what: String, verb: &'static str, allow_empty: bool },
+    /// What a pipeline's gate passes on, edited before it goes (`e`).
+    PipelineGate { run: u64 },
     /// The form an agent asked to have filled in (`elicitation/create`),
     /// for its card `key` in thread `thread`.
     Elicitation { thread: String, key: String },
@@ -548,6 +550,7 @@ impl ComposePurpose {
             ComposePurpose::RebaseMessage { hash, .. } => (format!("New message for {}", &hash[..7.min(hash.len())]), "keep"),
             ComposePurpose::Code { what, verb, .. } => (what.clone(), *verb),
             ComposePurpose::Elicitation { .. } => ("The agent asks".to_string(), "send it"),
+            ComposePurpose::PipelineGate { .. } => ("What the pipeline passes on".to_string(), "go on (q stops)"),
         };
         format!("{what}  --  Esc then Enter to {verb}, q to cancel")
     }
@@ -12668,6 +12671,12 @@ impl App {
             self.close_compose();
             return self.code_deliver(&ext, fenix_wasm::host::Notice::Composed((id, None)));
         }
+        if let ComposePurpose::PipelineGate { run } = &compose.purpose {
+            let run = *run;
+            self.close_compose();
+            self.set_message("the pipeline stopped at its gate");
+            return self.pipeline_gate_edited(run, None);
+        }
         if let ComposePurpose::Elicitation { thread, key } = &compose.purpose {
             let (thread, key) = (thread.clone(), key.clone());
             self.close_compose();
@@ -12685,6 +12694,14 @@ impl App {
         let body = body.trim().to_string();
         let purpose = compose.purpose.clone();
 
+        // A pipeline's gate, edited: passed on.
+        if let ComposePurpose::PipelineGate { run } = &purpose {
+            let run = *run;
+            self.close_compose();
+            self.pipeline_gate_edited(run, Some(body));
+            self.wake_caret();
+            return;
+        }
         // An agent's form: checked against what it asked, and sent.
         if let ComposePurpose::Elicitation { thread, key } = &purpose {
             if self.agents_elicit_submit(thread, key, &body) {

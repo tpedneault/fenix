@@ -798,6 +798,7 @@ impl App {
             agent_page::Action::Cancel => self.agents_cancel(),
             agent_page::Action::Permission { key, option } => self.agents_answer(&thread, &key, Some(&option)),
             agent_page::Action::Elicit { key, how } => self.agents_elicit(&thread, &key, how),
+            agent_page::Action::OtherStep(forward) => self.pipeline_other_step(&thread, forward),
             agent_page::Action::Open { path, line } => self.agents_open_location(&thread, &path, line),
             agent_page::Action::Yank(text) => {
                 if let Some(clipboard) = &mut self.clipboard {
