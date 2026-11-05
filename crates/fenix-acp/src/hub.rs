@@ -160,6 +160,9 @@ struct Slot {
     handoff: Option<String>,
     /// Permission cards waiting: card key -> (connection, request id).
     permissions: HashMap<String, (ConnId, Value)>,
+    /// Fenix's own questions about its tools (`ask_fenix`), by card key:
+    /// answered to the caller, not to the agent.
+    fenix_questions: HashSet<String>,
     /// fs and terminal requests handed to the caller, not yet answered.
     served: HashSet<(ConnId, String)>,
     /// Files already announced for editing in this thread.
@@ -202,6 +205,10 @@ pub enum Effect {
     ConnectionChanged(ConnId),
     /// Ask for the user's attention (Fenix may not be focused).
     Attention { thread: ThreadId, why: Attention },
+    /// The user answered (`option`, or `None`: dismissed, or withdrawn
+    /// with the turn) a question Fenix asked about one of its own tools
+    /// (`Hub::ask_fenix`).
+    FenixAnswered { thread: ThreadId, key: String, option: Option<String> },
     /// A prompt is done with: its turn ended (`stop` the agent's
     /// `stopReason`), or it never ran -- or was cut off -- because the
     /// agent couldn't take it (`error`).
@@ -253,6 +260,8 @@ pub struct Hub {
     briefing: Option<String>,
     /// The tools of the `fenix` MCP server it needn't ask to use.
     allowed_fenix_tools: Vec<String>,
+    /// Every tool of the `fenix` server is let through (Fenix asks).
+    fenix_tools_guarded: bool,
     idle_timeout: Duration,
     connections: HashMap<ConnId, Connection>,
     next_conn: u64,
@@ -275,6 +284,7 @@ impl Hub {
             mcp_servers: Vec::new(),
             briefing: None,
             allowed_fenix_tools: Vec::new(),
+            fenix_tools_guarded: false,
             idle_timeout: Duration::from_secs(600),
             connections: HashMap::new(),
             next_conn: 1,
@@ -315,6 +325,13 @@ impl Hub {
     /// `tools` of the `fenix` MCP server are used without asking.
     pub fn set_allowed_fenix_tools(&mut self, tools: Vec<String>) {
         self.allowed_fenix_tools = tools;
+    }
+
+    /// Fenix guards its own tools (it asks you itself, by its rules), so
+    /// an agent asking to use one is answered yes for you: one question,
+    /// not two.
+    pub fn set_fenix_tools_guarded(&mut self, guarded: bool) {
+        self.fenix_tools_guarded = guarded;
     }
 
     pub fn set_idle_timeout(&mut self, timeout: Duration) {
@@ -402,7 +419,7 @@ impl Hub {
         self.order.push(id.clone());
         self.threads.insert(
             id,
-            Slot { meta, thread, link: Link::Detached, turn: Turn::Idle, queue: VecDeque::new(), replay: None, handoff: None, permissions: HashMap::new(), served: HashSet::new(), announced: HashSet::new(), fresh: false },
+            Slot { meta, thread, link: Link::Detached, turn: Turn::Idle, queue: VecDeque::new(), replay: None, handoff: None, permissions: HashMap::new(), fenix_questions: HashSet::new(), served: HashSet::new(), announced: HashSet::new(), fresh: false },
         );
     }
 
@@ -485,11 +502,42 @@ impl Hub {
     }
 
     fn withdraw_permissions(slot: &mut Slot, fx: &mut Vec<Effect>) {
+        let thread = slot.meta.id.clone();
         for key in slot.thread.withdraw_permissions() {
             if let Some((conn, request)) = slot.permissions.remove(&key) {
                 fx.push(Effect::Respond { conn, id: request, result: Ok(protocol::permission_result(None)) });
             }
+            if slot.fenix_questions.remove(&key) {
+                fx.push(Effect::FenixAnswered { thread: thread.clone(), key, option: None });
+            }
         }
+    }
+
+    /// Asks the user, as a card in `id`'s thread, whether one of Fenix's
+    /// own tools may do what an agent asked: `title` says what, `input`
+    /// the arguments. The answer comes back as `Effect::FenixAnswered`
+    /// with one of `FENIX_OPTIONS`' ids, never to the agent.
+    pub fn ask_fenix(&mut self, id: &ThreadId, key: &str, title: &str, kind: protocol::ToolKind, input: Value) -> Vec<Effect> {
+        let mut fx = Vec::new();
+        let Some(slot) = self.threads.get_mut(id) else { return fx };
+        let tool_call = ToolCallFields { id: format!("fenix-{key}"), title: Some(title.to_string()), kind: Some(kind), status: None, content: None, locations: None, raw_input: Some(input), raw_output: None };
+        let options = FENIX_OPTIONS.iter().map(|(id, name, kind)| PermissionOption { id: id.to_string(), name: name.to_string(), kind: *kind }).collect();
+        slot.fenix_questions.insert(key.to_string());
+        slot.thread.push_permission(PermissionCard { key: key.to_string(), tool_call, options, state: PermissionState::Pending });
+        fx.push(Effect::Changed(id.clone()));
+        fx.push(Effect::Attention { thread: id.clone(), why: Attention::Permission });
+        fx
+    }
+
+    /// Takes back a question `ask_fenix` asked that no longer needs an
+    /// answer (the agent cancelled the call).
+    pub fn withdraw_fenix(&mut self, id: &ThreadId, key: &str) -> Vec<Effect> {
+        let Some(slot) = self.threads.get_mut(id) else { return Vec::new() };
+        if !slot.fenix_questions.remove(key) {
+            return Vec::new();
+        }
+        slot.thread.set_permission_state(key, PermissionState::Withdrawn);
+        vec![Effect::Changed(id.clone())]
     }
 
     /// The user picked a permission option (`None`: dismissed it, which
@@ -497,6 +545,16 @@ impl Hub {
     pub fn answer_permission(&mut self, id: &ThreadId, key: &str, option: Option<&str>) -> Vec<Effect> {
         let mut fx = Vec::new();
         let Some(slot) = self.threads.get_mut(id) else { return fx };
+        if slot.fenix_questions.remove(key) {
+            let name = slot.thread.permission_mut(key).and_then(|c| option.and_then(|o| c.options.iter().find(|x| x.id == o)).map(|o| o.name.clone()));
+            slot.thread.set_permission_state(key, match name {
+                Some(name) => PermissionState::Answered(name),
+                None => PermissionState::Withdrawn,
+            });
+            fx.push(Effect::FenixAnswered { thread: id.clone(), key: key.to_string(), option: option.map(str::to_string) });
+            fx.push(Effect::Changed(id.clone()));
+            return fx;
+        }
         let Some((conn, request)) = slot.permissions.remove(key) else { return fx };
         let name = slot.thread.permission_mut(key).and_then(|c| option.and_then(|o| c.options.iter().find(|x| x.id == o)).map(|o| o.name.clone()));
         let state = match name {
@@ -1250,7 +1308,7 @@ impl Hub {
             ClientRequest::RequestPermission { tool_call, options, .. } => {
                 let tool_call = merged_tool_call(&slot.thread, tool_call);
                 let options = options_or_default(options);
-                if let Some(allow) = options.iter().find(|o| o.kind == protocol::PermissionKind::AllowOnce).filter(|_| fenix_tool_of(&tool_call).is_some_and(|tool| self.allowed_fenix_tools.iter().any(|t| t == tool))) {
+                if let Some(allow) = options.iter().find(|o| o.kind == protocol::PermissionKind::AllowOnce).filter(|_| fenix_tool_of(&tool_call).is_some_and(|tool| self.fenix_tools_guarded || self.allowed_fenix_tools.iter().any(|t| t == tool))) {
                     fx.push(Effect::Respond { conn, id, result: Ok(protocol::permission_result(Some(&allow.id))) });
                     return;
                 }
@@ -1294,6 +1352,9 @@ impl Hub {
             }
             for key in slot.thread.withdraw_permissions() {
                 slot.permissions.remove(&key);
+                if slot.fenix_questions.remove(&key) {
+                    fx.push(Effect::FenixAnswered { thread: id.clone(), key, option: None });
+                }
             }
             slot.permissions.clear();
             slot.served.clear();
@@ -1393,6 +1454,15 @@ fn fenix_tool_of(call: &ToolCallFields) -> Option<&str> {
     let tool = ["mcp__fenix__", "fenix.", "fenix/", "fenix:"].iter().find_map(|prefix| title.strip_prefix(prefix)).or_else(|| title.strip_suffix(" (fenix MCP Server)"))?;
     tool.chars().all(|c| c.is_ascii_lowercase() || c == '_').then_some(tool)
 }
+
+/// The answers to a question Fenix asks about its own tools: id, what
+/// the card says, and its kind (which picks its key: `y`, `a`, `n`, `N`).
+pub const FENIX_OPTIONS: &[(&str, &str, protocol::PermissionKind)] = &[
+    ("allow_once", "Allow", protocol::PermissionKind::AllowOnce),
+    ("allow_thread", "Allow for this thread", protocol::PermissionKind::AllowAlways),
+    ("reject_once", "Refuse", protocol::PermissionKind::RejectOnce),
+    ("reject_thread", "Refuse for this thread", protocol::PermissionKind::RejectAlways),
+];
 
 fn options_or_default(options: Vec<PermissionOption>) -> Vec<PermissionOption> {
     if options.is_empty() {

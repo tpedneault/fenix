@@ -632,3 +632,45 @@ fn fenixs_read_tools_are_allowed_and_nothing_else_is() {
         assert!(!ask_to_run(&mut h, conn, title).contains(&allowed), "{title}");
     }
 }
+
+#[test]
+fn fenix_asks_about_its_own_tools_and_hears_the_answer_itself() {
+    let mut h = Harness::new();
+    let (id, conn) = h.live_thread();
+    h.hub.prompt(&id, texts(&["rename it"]));
+    let fx = h.hub.ask_fenix(&id, "q1", "Rename parse to parse_line (3 places)", crate::protocol::ToolKind::Edit, json!({ "new_name": "parse_line" }));
+    assert!(fx.contains(&Effect::Attention { thread: id.clone(), why: Attention::Permission }));
+    assert_eq!(h.hub.status().waiting, 1, "the modeline says an agent waits on you");
+    let card = h.hub.view(&id).unwrap().thread.entries.iter().find_map(|e| if let Entry::Permission(c) = e { Some(c.clone()) } else { None }).unwrap();
+    assert_eq!(card.options.len(), 4);
+    let fx = h.hub.answer_permission(&id, "q1", Some("allow_thread"));
+    assert!(fx.contains(&Effect::FenixAnswered { thread: id.clone(), key: "q1".into(), option: Some("allow_thread".into()) }));
+    assert!(!fx.iter().any(|e| matches!(e, Effect::Respond { .. })), "nothing goes to the agent");
+    assert!(h.hub.answer_permission(&id, "q1", Some("allow_once")).is_empty(), "answered once");
+    // A question still open when the turn is cancelled is answered: no.
+    h.hub.ask_fenix(&id, "q2", "Run tests", crate::protocol::ToolKind::Execute, json!({}));
+    let fx = h.hub.cancel(&id, h.now);
+    assert!(fx.contains(&Effect::FenixAnswered { thread: id.clone(), key: "q2".into(), option: None }));
+    let _ = conn;
+}
+
+#[test]
+fn a_question_the_agent_no_longer_needs_is_withdrawn() {
+    let mut h = Harness::new();
+    let (id, _) = h.live_thread();
+    h.hub.ask_fenix(&id, "q1", "Format a.rs", crate::protocol::ToolKind::Edit, json!({}));
+    assert_eq!(h.hub.withdraw_fenix(&id, "q1"), vec![Effect::Changed(id.clone())]);
+    assert_eq!(h.hub.status().waiting, 0);
+    assert!(h.hub.answer_permission(&id, "q1", Some("allow_once")).is_empty());
+}
+
+#[test]
+fn guarded_fenix_tools_are_let_through_without_a_card() {
+    let mut h = Harness::new();
+    h.hub.set_fenix_tools_guarded(true);
+    let (id, conn) = h.live_thread();
+    h.hub.prompt(&id, texts(&["go"]));
+    let fx = h.event(conn, AcpEvent::Request { id: json!(9), method: "session/request_permission".into(), params: json!({ "sessionId": "s1", "toolCall": { "toolCallId": "t9", "title": "mcp__fenix__rename" }, "options": [{ "optionId": "ok", "name": "Yes", "kind": "allow_once" }] }) });
+    assert!(fx.contains(&Effect::Respond { conn, id: json!(9), result: Ok(json!({ "outcome": { "outcome": "selected", "optionId": "ok" } })) }));
+    assert_eq!(h.hub.status().waiting, 0);
+}

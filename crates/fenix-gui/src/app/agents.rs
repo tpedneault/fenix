@@ -345,8 +345,9 @@ impl App {
         let fenix = self.config.bool_value("agents.mcp.fenix").unwrap_or(true);
         let brief = fenix && self.config.bool_value("agents.mcp.fenix_brief").unwrap_or(true);
         self.agents.hub.set_briefing(brief.then(|| crate::mcp::BRIEFING.to_string()));
-        let auto_read = fenix && self.config.bool_value("agents.mcp.fenix_auto_read").unwrap_or(true);
-        self.agents.hub.set_allowed_fenix_tools(if auto_read { crate::mcp::READ_ONLY_TOOLS.iter().map(|t| t.to_string()).collect() } else { Vec::new() });
+        // Fenix asks about its own tools itself, by the rules
+        // (`agents.mcp.allow`): the agent needn't ask too.
+        self.agents.hub.set_fenix_tools_guarded(fenix);
         if fenix {
             if let Ok(exe) = std::env::current_exe() {
                 servers.push(McpServer::Stdio { name: "fenix".into(), command: exe.to_string_lossy().into_owned(), args: vec!["--mcp".into(), "--thread".into(), "{thread}".into()], env: vec![] });
@@ -613,6 +614,14 @@ impl App {
                     LogSide::Note => "#",
                 };
                 text.push_str(&format!("{side} {}\n", line.text));
+            }
+            text.push('\n');
+        }
+        let calls = self.agent_calls_log();
+        if !calls.is_empty() {
+            text.push_str("## Fenix's tools (fenix --mcp)\n\n");
+            for line in calls {
+                text.push_str(&format!("# {line}\n"));
             }
             text.push('\n');
         }
@@ -1057,6 +1066,7 @@ impl App {
                     }
                 }
                 Effect::TurnEnded { thread, stop } => self.agents_turn_done(&thread, &stop),
+                Effect::FenixAnswered { key, option, .. } => self.agent_question_answered(&key, option.as_deref()),
             }
         }
         if changed {
@@ -1242,6 +1252,7 @@ impl App {
         }
         self.agents_fetched_tick();
         self.agents_asks_tick(now);
+        self.agent_calls_tick(now);
         let running = self.agents_terminals_tick();
         self.agents_logins_tick();
         let status = self.agents.hub.status();

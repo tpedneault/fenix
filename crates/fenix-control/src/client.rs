@@ -110,12 +110,18 @@ impl<R: Read, W: Write> Client<R, W> {
 
     /// `fenix/hello`, introducing this client as `name` `version`.
     pub fn hello(&mut self, name: &str, version: &str) -> Result<HelloResult, ClientError> {
+        self.hello_for(name, version, None)
+    }
+
+    /// `fenix/hello` for an MCP bridge speaking for agent thread `thread`.
+    pub fn hello_for(&mut self, name: &str, version: &str, thread: Option<&str>) -> Result<HelloResult, ClientError> {
         let params = HelloParams {
             protocol: PROTOCOL,
             client: ClientInfo {
                 name: name.to_string(),
                 version: version.to_string(),
                 pid: std::process::id(),
+                thread: thread.map(str::to_string),
             },
         };
         self.request(

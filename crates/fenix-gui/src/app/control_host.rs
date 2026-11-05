@@ -31,6 +31,7 @@ fn done(_: String) -> Result<Value, RpcError> {
 impl App {
     /// `call`, sent to the code extension that answers it, its reply
     /// going back when it does. `Err` gives both back: Fenix answers it.
+    #[allow(clippy::result_large_err)]
     pub(super) fn control_by_extension(&mut self, call: Call, reply: std::sync::mpsc::Sender<crate::ipc::Reply>) -> Result<(), (Call, std::sync::mpsc::Sender<crate::ipc::Reply>)> {
         // Answered once a language server, an adapter or an extension has.
         let call = match call {
@@ -44,6 +45,10 @@ impl App {
             }
             Call::ToolsCall(params) => {
                 self.control_tools_call(params, reply);
+                return Ok(());
+            }
+            Call::Agent { method, caller, params } => {
+                self.control_agent(&method, caller, params, reply);
                 return Ok(());
             }
             call => call,
@@ -127,7 +132,7 @@ impl App {
             Call::DebugState => Ok(self.control_debug_state()),
             Call::Tools => Ok(self.control_tools()),
             // Answered later, on the reply (`control_by_extension`).
-            Call::Lsp(_) | Call::DebugEvaluate(_) | Call::ToolsCall(_) => Err(RpcError::internal("answered by what it asks")),
+            Call::Lsp(_) | Call::DebugEvaluate(_) | Call::ToolsCall(_) | Call::Agent { .. } => Err(RpcError::internal("answered by what it asks")),
             Call::Selection => Ok(self.control_selection()),
             Call::Tasks => {
                 let root = self.integration_root();
@@ -156,7 +161,8 @@ impl App {
 
     /// Whether agents may run things through Fenix's MCP server.
     pub(super) fn control_writes_allowed(&self) -> Result<(), RpcError> {
-        if self.config.bool_value("agents.mcp.fenix_write").unwrap_or(false) {
+        // A call through `fenix/agent.call` was decided by the rules.
+        if self.agent_calls.authorized || self.config.bool_value("agents.mcp.fenix_write").unwrap_or(false) {
             Ok(())
         } else {
             Err(RpcError::invalid_params("running things through Fenix is off: agents.mcp.fenix_write"))

@@ -203,7 +203,7 @@ jira_transition = "deny"
   `allow` into `ask` or `deny`, never the other way. A repository you
   clone can't give its agents more than you do.
 - **Per thread, "allow for this thread"** is one of a card's answers
-  (`a`). It lasts for the thread and is kept with it.
+  (`Y`). It lasts for the thread while Fenix runs.
 - **External clients** (§5.11) start from stricter defaults: `edit`,
   `run` and `external` are `deny` until you allow them for that
   client.
@@ -222,7 +222,7 @@ Fenix asks about `ask` itself, whatever mode the agent is in.
   `parse_output_line` (14 places in 5 files)".
 - **The answers:**
   - `y` once;
-  - `a` for this thread;
+  - `Y` for this thread;
   - `n` refuse: the agent gets an error saying you refused, not that the
     tool failed;
   - `N` refuse for this thread.
@@ -410,17 +410,11 @@ Both follow `agent_tools`' shape, toolset and rules (§2, §3).
 
 ## 5. The MCP server, deeper
 
-Each tool is a control method (`fenix/<name>`) with the four parts the
-control channel needs:
-
-- the method's entry in `CAPABILITIES`;
-- a `Call` variant;
-- a match arm in `server.rs`;
-- its handling in `apply_control` (answered at once) or
-  `control_by_extension` (answered later).
-
-The MCP tool is a row in `mcp.rs`'s `TOOLS`. `CONTROL.md` documents
-each method.
+Every tool goes through one control method, `fenix/agent.call`
+(ADR 0003): a tool is a row in `agent_tools.rs`'s `TOOLS`, with its
+toolset and class, and its work is done in the editor
+(`app/agent_calls.rs` routes it). `CONTROL.md` documents the
+`fenix/agent.*` methods.
 
 ### 5.1 Plumbing first
 

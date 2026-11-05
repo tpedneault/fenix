@@ -129,7 +129,7 @@ impl Driver {
                 self.logins.push((conn, method));
                 Vec::new()
             }
-            Effect::Withdraw { .. } | Effect::Save(_) | Effect::Forget(_) | Effect::Changed(_) | Effect::ConnectionChanged(_) | Effect::Attention { .. } | Effect::TurnEnded { .. } => Vec::new(),
+            Effect::Withdraw { .. } | Effect::Save(_) | Effect::Forget(_) | Effect::Changed(_) | Effect::ConnectionChanged(_) | Effect::Attention { .. } | Effect::TurnEnded { .. } | Effect::FenixAnswered { .. } => Vec::new(),
         }
     }
 

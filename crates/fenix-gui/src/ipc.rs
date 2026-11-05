@@ -36,6 +36,12 @@ use crate::cli::Invocation;
 /// thread would otherwise make it do.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long an agent's call (`fenix/agent.*`) may take: a question to
+/// the user, a task it waits for, a debugger step. The editor gives each
+/// tool its own, shorter, deadline; this only stops a call the editor
+/// lost from hanging its caller.
+const AGENT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// What this launch turned out to be, once single-instance negotiation
 /// settles.
 pub enum Role {
@@ -170,12 +176,13 @@ pub fn spawn_accept_loop(mut listener: Listener, proxy: EventLoopProxy<FenixUser
 
 /// Hands `call` to the UI thread and waits for its answer.
 fn ask_editor(proxy: &EventLoopProxy<FenixUserEvent>, call: Call) -> Reply {
+    let timeout = if matches!(call, Call::Agent { .. }) { AGENT_TIMEOUT } else { ANSWER_TIMEOUT };
     let (reply, answer) = mpsc::channel();
     proxy
         .send_event(FenixUserEvent::Control { call, reply })
         .map_err(|_| RpcError::internal("Fenix is closing"))?;
     answer
-        .recv_timeout(ANSWER_TIMEOUT)
+        .recv_timeout(timeout)
         .map_err(|_| RpcError::internal("Fenix didn't answer in time"))?
 }
 

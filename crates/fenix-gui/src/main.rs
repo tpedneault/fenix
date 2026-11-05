@@ -9,6 +9,7 @@
 
 mod agent_page;
 mod agent_review;
+mod agent_tools;
 mod app;
 mod cli;
 mod clipboard;
@@ -82,7 +83,7 @@ fn main() -> anyhow::Result<()> {
     // Fenix that's running. Before anything that opens a console or a
     // window: its stdio is the protocol.
     if mcp::requested(&args) {
-        mcp::run();
+        mcp::run(&args);
     }
     if console::requested(&args) {
         console::open();

@@ -162,21 +162,66 @@ Every session gets Fenix itself as an MCP server (`fenix --mcp`,
 - where the debugger is stopped: the stack, the variables, watches and
   the program's output.
 
-It can show you a file too. With `agents.mcp.fenix_write` it can also
-run the project's tasks and Fenix's commands, evaluate in the debugger,
-and call the extension tools that change things. Extensions offer tools
-of their own this way.
+It can show you a file too, run the project's tasks, evaluate in the
+debugger, and call the extensions' tools, as your rules let it.
 
-Agents Fenix starts are steered towards these tools:
+**Toolsets.** Fenix's tools come in toolsets, and an agent is shown
+the ones that fit the project, so its list stays short:
 
-- A note before a new session's first prompt tells the agent to prefer
-  them to searching text. You don't see it in the thread
-  (`agents.mcp.fenix_brief`).
-- The tools that only read don't ask for permission
-  (`agents.mcp.fenix_auto_read`). `show_file`, anything that changes
-  something, and extensions' tools still do.
+| Toolset | Shown |
+|---|---|
+| `core`: problems, open files, the selection, definitions, references, hover, symbols | always |
+| `search`, `syntax` | always |
+| `lsp`, `refactor` | when a language server runs for the project |
+| `git` | in a Git repository |
+| `tasks` | when the project has tasks |
+| `debug` | while you debug, or when the project has launches |
+| `commands` | when you turn it on |
+| each extension's | when the extension says so |
 
-The agent still decides, and can use its own tools when it prefers.
+The agent can turn on the others itself (`fenix_toolsets`), and
+`agents.mcp.toolsets` adds or takes some away for everyone, or for a
+project: `["+commands", "-search"]`.
+
+**What they may do.** Every tool has a class: it **reads**, **shows**
+you something, **edits** (always through Agent changes, so you can
+reject it), **runs** something (a task, a test, the debugger), or acts
+outside this machine (**external**). `agents.mcp.allow` says, per class,
+toolset or tool, whether it's `allow`ed, `ask`ed about or `deny`ed; the
+most specific wins:
+
+```toml
+[agents.mcp.allow]
+edit = "allow"            # Agent changes is review enough
+"toolset:debug" = "allow"
+run_command = "deny"
+```
+
+By default reading and showing are allowed, editing and running are
+asked about, external is refused. A project's `.fenix/settings.toml`
+can only make these stricter, never looser.
+
+When a tool is asked about, Fenix asks you itself, as a card in the
+agent's thread, whatever mode the agent is in: `y` allows it once, `Y`
+for the rest of the thread, `n` refuses it, `N` for the rest of the
+thread. The agent is told you refused, not that the tool failed. An
+agent asking its own question about one of Fenix's tools is answered
+yes for you, so you're asked once, by Fenix.
+
+MCP clients Fenix didn't start (`fenix --mcp` run by another program)
+may only read and show unless a `client:` rule says otherwise
+(`"client:edit" = "ask"` needs a thread to ask on, so for them it means
+no). `SPC h a` lists every call to Fenix's tools, with the rule that
+applied.
+
+Fenix 1.0's switches are still read: `agents.mcp.fenix_write = on`
+means `edit` and `run` are allowed, `agents.mcp.fenix_auto_read = off`
+that reading is asked about.
+
+A note before a new session's first prompt tells the agent to prefer
+Fenix's tools to searching text, and that more toolsets can be turned on.
+You don't see it in the thread (`agents.mcp.fenix_brief`). The agent
+still decides, and can use its own tools when it prefers.
 
 Your own MCP servers (`agents.mcp.servers`) go to every session too: the
 command line that starts one, or the address of one that's running.
