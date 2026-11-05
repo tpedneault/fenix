@@ -5057,6 +5057,10 @@ pub struct App {
     /// `SPC q r` asked for Fenix to start again once it has quit
     /// (`prepare_restart`); `main` starts the new one.
     pub(crate) restart_requested: bool,
+    /// What the last frame's language-server sync saw
+    /// (`sync_lsp_if_changed`): the focused buffer, its edit count, the
+    /// servers, those ready, and those given up on.
+    lsp_frame_synced: Option<(BufferId, u64, usize, usize, usize)>,
     /// Why each of `lsp_unavailable` stopped, with the last it wrote to
     /// stderr: what Tool Status shows.
     lsp_failures: HashMap<LspKey, String>,
@@ -5816,6 +5820,7 @@ impl App {
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
             restart_requested: false,
+            lsp_frame_synced: None,
             lsp_failures: HashMap::new(),
             lsp_additional: HashMap::new(),
             lsp_fanouts: HashMap::new(),
@@ -6634,6 +6639,20 @@ impl App {
     /// would send `didOpen` but then never notice an edit made while
     /// staying on the same buffer, since nothing else marks "this
     /// buffer changed" the way switching away/back does.
+    /// `sync_lsp_for_focused_buffer`, each frame: skipped while the
+    /// focused buffer, its edit count, and the servers running and ready
+    /// are what they were the last time.
+    fn sync_lsp_if_changed(&mut self) {
+        let ready = self.lsp_sessions.values().filter(|s| s.capabilities.is_some()).count();
+        let now = (self.focused_buffer_id(), self.open().buffer.edit_count(), self.lsp_sessions.len(), ready, self.lsp_unavailable.len());
+        if self.lsp_frame_synced == Some(now) {
+            return;
+        }
+        self.sync_lsp_for_focused_buffer();
+        let ready = self.lsp_sessions.values().filter(|s| s.capabilities.is_some()).count();
+        self.lsp_frame_synced = Some((self.focused_buffer_id(), self.open().buffer.edit_count(), self.lsp_sessions.len(), ready, self.lsp_unavailable.len()));
+    }
+
     fn sync_lsp_for_focused_buffer(&mut self) {
         let _profile = crate::profile::Scope::new("sync LSP");
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
@@ -18663,8 +18682,10 @@ impl App {
         // server needs a `textDocument/didChange` -- editing doesn't
         // otherwise have a dedicated "something changed" hook the way
         // focus changes do (`refresh_project_root`), so this is checked
-        // here instead, once per rendered frame.
-        self.sync_lsp_for_focused_buffer();
+        // here instead, once per rendered frame -- and only when the
+        // buffer, its edits or the servers have moved since the last, as
+        // the sync itself copies the text and looks at the disk (#74).
+        self.sync_lsp_if_changed();
         self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
@@ -30637,6 +30658,23 @@ configure_board stm32
         assert!(text.starts_with("didn't answer\n  | line 12"), "{text}");
         assert!(text.ends_with("  | line 19"));
         assert_eq!(failure_text("gone", ""), "gone (it wrote nothing to stderr)");
+    }
+
+    /// A frame with nothing new to tell a server doesn't copy the text or
+    /// look at the disk again; one after an edit does.
+    #[test]
+    fn a_frame_only_syncs_the_language_servers_when_something_moved() {
+        let dir = TempDir::new("lsp_frame_sync");
+        let file = dir.write("notes.txt", "one\n");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.sync_lsp_if_changed();
+        let first = app.lsp_frame_synced;
+        assert!(first.is_some());
+        app.sync_lsp_if_changed();
+        assert_eq!(app.lsp_frame_synced, first);
+        app.test_insert_str("x");
+        app.sync_lsp_if_changed();
+        assert_ne!(app.lsp_frame_synced, first, "an edit is synced");
     }
 
     #[test]

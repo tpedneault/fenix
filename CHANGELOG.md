@@ -136,6 +136,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `SPC p t` lists each task once: an extension's and Fenix's own with
   the same name or command line are one row, the extension's. In a uv
   project Fenix's `pytest` and `ruff check` run through `uv run`. (#35)
+- An idle window no longer copies the focused file's text and looks at
+  the disk each frame to tell its language servers what they already
+  know. (#74)
 
 ## [1.0.1] - 2026-11-03
 
