@@ -295,6 +295,7 @@ impl App {
             self.agent_calls.seen = seen;
         }
         self.agent_task_waits_tick(now);
+        self.agent_lsp_tick(now);
         let revision = self.agent_calls.revision;
         self.agent_calls.waiters.retain(|w| {
             if now >= w.until {

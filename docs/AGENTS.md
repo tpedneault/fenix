@@ -167,6 +167,12 @@ debugger, and call the extensions' tools, as your rules let it.
 
 Beyond those, Fenix's toolsets give an agent:
 
+- **lsp**: `implementations`, `call_hierarchy` (who calls it, or what it
+  calls), `type_hierarchy`, `signature_help`, and `code_actions`, each
+  with an id.
+- **refactor**: `rename` by the language server, `apply_code_action`,
+  and `format` (a file or some lines). These edit, so they're asked
+  about unless you allow them.
 - **git**: `git_status`, `git_diff` (unstaged, staged, or a branch
   against its base), `git_log` (of a branch, a path, a range or a few
   lines), `git_show`, `git_blame` (unsaved lines say so), and

@@ -168,7 +168,7 @@ impl App {
             // -- tasks --
             "run_task" => self.agent_run_task(arguments, reply),
             "task_output" => answer(reply, self.agent_task_output(&arguments, max)),
-            _ => return Err(reply),
+            other => return self.agent_lsp_call(caller, other, arguments, reply),
         }
         Ok(())
     }

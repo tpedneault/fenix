@@ -33,6 +33,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   about, Fenix asks you itself, as a card in the agent's thread, whatever
   mode the agent is in: once or for the thread. MCP clients Fenix didn't
   start may only read and show unless `client:` rules say otherwise.
+- Agents can ask the language servers for implementations, call and
+  type hierarchies, signature help and code actions, and have them
+  rename, apply a code action or format: every edit goes to Agent
+  changes, as the agent's own do.
 - Agents get Git through Fenix (`git_status`, `git_diff`, `git_log`,
   `git_show`, `git_blame`, `git_stage`), a project search that sees
   unsaved text and a replace whose edits you review, the syntax tree

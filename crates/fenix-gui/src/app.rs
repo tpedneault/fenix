@@ -1,6 +1,7 @@
 mod agents;
 mod agent_calls;
 mod agent_toolsets;
+mod agent_lsp;
 mod control_agent;
 mod refactor;
 mod snippets;
@@ -1252,6 +1253,8 @@ enum PendingLspRequest {
     WorkspaceNames,
     /// `fenix/lsp`'s, for its client (`LspFanout::Control`).
     Control { fanout: u64 },
+    /// An agent's, through Fenix's tools (`agent_lsp`).
+    Agent { id: u64 },
 }
 
 /// The project whose language server settings `path` is
@@ -4737,6 +4740,8 @@ pub struct App {
     agents: agents::AgentHost,
     /// What MCP bridges asked (`fenix/agent.*`): questions, toolsets, news.
     agent_calls: agent_calls::AgentCalls,
+    /// Agents' requests to the language servers (`lsp`, `refactor`).
+    agent_lsp: agent_lsp::AgentLsp,
     refactor_undo: Option<refactor::Undo>,
     /// `SPC TAB r`'s new-name prompt, when in progress -- pre-seeded
     /// with the active workspace's current name, same capturing-prompt
@@ -5812,6 +5817,7 @@ impl App {
             refactor_preview: None,
             agents: agents::AgentHost::new(),
             agent_calls: agent_calls::AgentCalls::default(),
+            agent_lsp: agent_lsp::AgentLsp::default(),
             refactor_undo: None,
             workspace_rename_prompt: None,
             delete_file_confirm: false,
@@ -6880,6 +6886,7 @@ impl App {
     /// request-sending method's eventual answer passes through.
     fn apply_lsp_response(&mut self, key: LspKey, pending: PendingLspRequest, result: Result<serde_json::Value, fenix_lsp::ResponseError>) {
         match pending {
+            PendingLspRequest::Agent { id } => self.agent_lsp_answered(id, result.map_err(|e| e.message)),
             PendingLspRequest::Initialize => match result {
                 Ok(value) => {
                     let capabilities = serde_json::from_value::<lsp_types::InitializeResult>(value).ok().map(|r| r.capabilities);
@@ -7059,6 +7066,10 @@ impl App {
     /// went away. Counted as that server's failure, so the request's
     /// other servers aren't kept waiting for it.
     fn lsp_request_failed(&mut self, key: &LspKey, pending: PendingLspRequest) {
+        if let PendingLspRequest::Agent { id } = pending {
+            self.agent_lsp_answered(id, Err("the request couldn't be sent".into()));
+            return;
+        }
         let fanout = match pending {
             PendingLspRequest::Hover { fanout } | PendingLspRequest::Definition { fanout } | PendingLspRequest::References { fanout } | PendingLspRequest::CodeAction { fanout } | PendingLspRequest::Control { fanout } => fanout,
             PendingLspRequest::Completion { .. } => {
