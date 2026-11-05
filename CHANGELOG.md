@@ -68,6 +68,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   failed `SPC u e` (`error: use of undeclared identifier ...`), from the
   error's details, instead of "the adapter refused, without saying why".
   (#32)
+- A debug session that has ended no longer blocks starting one in another
+  project ("debug session belongs to another project"): the new one
+  replaces it, as it does in the same project. (#31)
 
 ## [1.0.1] - 2026-11-03
 

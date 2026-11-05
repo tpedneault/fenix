@@ -9871,9 +9871,10 @@ impl App {
     /// if one is running but not currently stopped (nothing useful to
     /// do -- it's already going).
     pub(crate) fn debug_start_or_continue(&mut self) {
-        if !self.debug_scope_matches() { return; }
-        // One that's over gives way to a new one.
+        // One that's over gives way to a new one, whichever project it
+        // was in.
         self.debug_clear_ended();
+        if !self.debug_scope_matches() { return; }
         if let Some(session) = &self.debug_session {
             let Some(thread_id) = session.stopped_thread else {
                 // Already running -- nothing to continue, but its dock
@@ -9966,7 +9967,12 @@ impl App {
     /// from this machine's processes -- then its `preLaunchTask`
     /// runs, and the session starts once that succeeds.
     pub(crate) fn debug_start_from(&mut self, mut template: crate::dap::Template) {
-        if !self.debug_scope_matches() || !self.debug_clear_ended() { return; }
+        // One that's over gives way, whichever project it was in; one
+        // still running doesn't.
+        if !self.debug_clear_ended() {
+            self.debug_scope_matches();
+            return;
+        }
         let Some(language) = self.focused_language() else {
             self.set_error("no recognized language for the focused buffer".to_string());
             return;
@@ -29567,6 +29573,30 @@ configure_board stm32
         let s = app.debug_session.as_ref().unwrap();
         let text = render_call_stack_text(s);
         assert!(s.ended && text.contains("configurationDone: Failed command") && text.contains("hostpolicy.dll"), "{text}");
+    }
+
+    /// A session that ended in another project doesn't block starting one
+    /// here: it gives way, as one in this project does. One still running
+    /// there still does.
+    #[test]
+    fn an_ended_session_in_another_project_gives_way() {
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+        {
+            let s = app.debug_session.as_mut().unwrap();
+            s.root = PathBuf::from("/some/other/project");
+            s.ended = true;
+        }
+        app.debug_start_or_continue();
+        assert!(!app.modeline_pieces().1.contains("another project"), "{}", app.modeline_pieces().1);
+        assert!(app.debug_session.as_ref().is_none_or(|s| s.root != Path::new("/some/other/project")));
+
+        debug_test_session(&mut app);
+        app.debug_session.as_mut().unwrap().root = PathBuf::from("/some/other/project");
+        app.debug_start_or_continue();
+        assert!(app.modeline_pieces().1.contains("another project"), "{}", app.modeline_pieces().1);
+        app.debug_start_from(crate::dap::Template::from_project(&Default::default(), "python").unwrap());
+        assert!(app.debug_session.as_ref().is_some_and(|s| s.root == Path::new("/some/other/project")));
     }
 
     /// `SPC u q`: the adapter goes, the panel says "stopped", and the next
