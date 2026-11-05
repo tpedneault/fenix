@@ -55,7 +55,8 @@ beside all your panes (it never splits the one you're in), the thread
 above and its prompt below. `SPC a a` brings it out on the project's
 last thread, or a new one, with the prompt ready to write in; from the
 dock, `SPC a a` puts it away. `SPC a A` shows or puts it away from
-anywhere. The prompt offers no completions as you type; `@` and `/`
+anywhere. There's one dock, and it comes with you from workspace to
+workspace, at the width you left it. The prompt offers no completions as you type; `@` and `/`
 have pickers of their own. `SPC a n` always starts a new thread, in
 the same dock, with the default agent (`agents.default`); `SPC a p`
 starts one with another. Its title rows say which thread it is, which agent the
@@ -168,7 +169,10 @@ and `[s` / `]s` in the thread go to the step before or after. What the
 steps change goes into one review, so `SPC a r` shows the outcome once,
 the review's findings beside the hunks they're about.
 A step in a plan or read-only mode can't change files: anything it
-writes anyway is put back. `SPC a k` stops the step, and the pipeline.
+writes anyway is put back, and when its agent offers to leave its plan
+mode, the plan is what the step gives and the gate is what's asked, not
+the agent's own card. A run ends on the thread that has the changes.
+`SPC a k` stops the step, and the pipeline.
 
 Pipelines are files: `pipelines/<name>.toml` in Fenix's settings folder,
 or a project's `.fenix/pipelines/<name>.toml`, with a step per

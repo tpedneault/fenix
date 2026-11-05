@@ -147,6 +147,13 @@ impl App {
         }
         let review = if running.ledger.is_some() { " -- SPC a r reviews what it changed" } else { "" };
         self.set_message(format!("{}: {how}{review}", running.run.spec.title));
+        // Left on a step's thread, you'd review nothing: the changes are
+        // on the ledger's.
+        if let Some(ledger) = running.ledger.clone().filter(|ledger| self.agents.shown(&self.pages).is_some_and(|shown| shown != *ledger && running.threads.contains(&shown))) {
+            let pane = self.focused_pane_id();
+            self.agents_show(ledger);
+            self.windows_mut().focus(pane);
+        }
         if let Some(thread) = running.ledger.clone().or_else(|| running.threads.last().cloned()) {
             if let Some(t) = self.agents.hub.thread_mut(&thread) {
                 t.notice(fenix_acp::thread::NoticeKind::Info, format!("Pipeline {}: {how}", running.run.spec.title));
@@ -169,6 +176,10 @@ impl App {
         let thread = self.agents.hub.new_thread(&agent, &root);
         if let Some(t) = self.agents.hub.thread_mut(&thread) {
             t.notice(fenix_acp::thread::NoticeKind::Info, format!("Pipeline {}: {progress}", self.pipelines.runs[&id].run.spec.title));
+        }
+        // A read-only step ends at its plan: the gate decides, not a card.
+        if spec.is_read_only() {
+            self.agents.hub.stop_at_plans(&thread);
         }
         // The step's toolsets, and no others, for its session.
         if !spec.toolsets.is_empty() {
@@ -268,10 +279,13 @@ impl App {
     pub(super) fn pipeline_turn_ended(&mut self, thread: &ThreadId, stop: &str) {
         let Some(&id) = self.pipelines.steps.get(thread) else { return };
         let Some(view) = self.agents.hub.view(thread) else { return };
-        let answer = view.thread.last_answer();
+        // A plan the step offered is what it came up with: its last words
+        // only lead up to offering it.
+        let taken = view.thread.taken_plan.clone();
+        let answer = taken.clone().unwrap_or_else(|| view.thread.last_answer());
         let transcript = view.thread.transcript();
         // The plan the agent put up for approval, else its plan entries.
-        let plan = view.thread.proposed_plan().or_else(|| (!view.thread.plan.is_empty()).then(|| view.thread.plan.iter().enumerate().map(|(i, e)| format!("{}. {}", i + 1, e.content)).collect::<Vec<_>>().join("\n")));
+        let plan = taken.or_else(|| view.thread.proposed_plan()).or_else(|| (!view.thread.plan.is_empty()).then(|| view.thread.plan.iter().enumerate().map(|(i, e)| format!("{}. {}", i + 1, e.content)).collect::<Vec<_>>().join("\n")));
         let Some(running) = self.pipelines.runs.get(&id) else { return };
         let read_only = running.run.step().is_some_and(|i| running.run.spec.steps[i].is_read_only());
         // What git saw changed, too, though no tool call said so.
@@ -370,6 +384,37 @@ mod tests {
         // The step ends: the run is done.
         app.pipeline_turn_ended(&thread, "end_turn");
         assert!(app.pipelines.runs.is_empty());
+    }
+
+    #[test]
+    fn the_plan_a_step_offers_is_what_passes_on() {
+        let mut app = app();
+        app.pipelines.armed = Some(PipelineSpec::parse("p", "[[steps]]\nname = \"plan\"\nagent = \"claude\"\nmode = \"plan\"\nprompt = \"{input}\"\npasses = \"plan\"\ngate = true\n[[steps]]\nname = \"build\"\nagent = \"claude\"\nprompt = \"Do: {previous}\"\n").unwrap());
+        app.pipeline_take_prompt("x");
+        let thread = app.pipelines.runs.values().next().unwrap().threads[0].clone();
+        app.pipelines.held.clear();
+        app.agents.hub.thread_mut(&thread).unwrap().taken_plan = Some("1. Change a.rs".into());
+        app.pipeline_turn_ended(&thread, "end_turn");
+        let key = app.pipelines.gates.keys().next().cloned().expect("the gate is up");
+        assert!(app.pipeline_gate_answered(&key, Some("allow_once")));
+        let build = app.pipelines.runs.values().next().unwrap().threads[1].clone();
+        assert_eq!(app.pipelines.held.get(&build).map(|h| h.prompt.as_str()), Some("Do: 1. Change a.rs"));
+    }
+
+    #[test]
+    fn a_run_ends_on_the_thread_with_its_changes() {
+        let mut app = app();
+        app.pipelines.armed = Some(PipelineSpec::parse("p", "[[steps]]\nname = \"build\"\nagent = \"claude\"\nprompt = \"{input}\"\n[[steps]]\nname = \"review\"\nagent = \"claude\"\nmode = \"plan\"\nprompt = \"{previous}\"\n").unwrap());
+        app.pipeline_take_prompt("x");
+        let build = app.pipelines.runs.values().next().unwrap().threads[0].clone();
+        app.pipelines.held.clear();
+        app.agents.baselines.entry(build.clone()).or_default().insert(PathBuf::from("a.rs"), Some("before".into()));
+        app.pipeline_turn_ended(&build, "end_turn");
+        let review = app.pipelines.runs.values().next().unwrap().threads[1].clone();
+        assert_eq!(app.agents.shown(&app.pages), Some(review.clone()));
+        app.pipeline_turn_ended(&review, "end_turn");
+        assert!(app.pipelines.runs.is_empty());
+        assert_eq!(app.agents.shown(&app.pages), Some(build));
     }
 
     #[test]

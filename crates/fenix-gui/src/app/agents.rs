@@ -97,6 +97,8 @@ pub(crate) struct AgentHost {
     pub(super) composer: Option<BufferId>,
     /// The pane the panel was opened beside: where files it opens go.
     code_pane: Option<fenix_window::WindowId>,
+    /// The width the dock is coming back at, moving between workspaces.
+    dock_share: Option<f32>,
     /// The panes given the dock's titles, to take them back from one that
     /// shows something else now.
     pub(super) titled: Vec<fenix_window::WindowId>,
@@ -180,6 +182,7 @@ impl AgentHost {
             page: None,
             composer: None,
             code_pane: None,
+            dock_share: None,
             titled: Vec::new(),
             in_prompt: false,
             baselines: HashMap::new(),

@@ -2,13 +2,22 @@
 //! page above and its prompt under it. There's one. It's beside every
 //! pane rather than beside the one you were in, so opening it never
 //! splits your code; its two panes have titles instead of tab strips;
-//! and it's found again, not built again, after a restart.
+//! it comes with you from workspace to workspace; and it's found again,
+//! not built again, after a restart.
 
 use super::*;
 use fenix_window::WindowId;
 
 /// How much of the dock's height the thread gets; the prompt has the rest.
 const THREAD_SHARE: f32 = 0.78;
+
+/// The dock as it left a workspace, for where it goes next.
+pub(in crate::app) struct DockLeft {
+    /// The dock's buffer the focus was on, if it was in the dock.
+    focused: Option<BufferId>,
+    /// How much of the window's width it took.
+    share: Option<f32>,
+}
 
 impl App {
     /// Every pane showing `buffer`, in the window tree's order.
@@ -25,7 +34,7 @@ impl App {
     }
 
     /// Whether `pane` is one of the dock's.
-    pub(super) fn agents_is_dock_pane(&self, pane: WindowId) -> bool {
+    pub(in crate::app) fn agents_is_dock_pane(&self, pane: WindowId) -> bool {
         let (page, composer) = self.agents_dock_panes();
         Some(pane) == page || Some(pane) == composer
     }
@@ -73,7 +82,7 @@ impl App {
                     self.windows_mut().split_before(SplitKind::Horizontal, page)
                 }
                 None => {
-                    let share = self.config.int_value("agents.panel_width").unwrap_or(38).clamp(20, 80) as f32 / 100.0;
+                    let share = self.agents.dock_share.take().unwrap_or_else(|| self.config.int_value("agents.panel_width").unwrap_or(38).clamp(20, 80) as f32 / 100.0);
                     self.windows_mut().split_root(SplitKind::Vertical, page, 1.0 - share)
                 }
             };
@@ -96,6 +105,84 @@ impl App {
         self.windows_mut().focus(page_pane);
         self.agents_dock_titles();
         page_pane
+    }
+
+    /// The dock, while the active workspace has it: how it is, before
+    /// that workspace goes.
+    pub(in crate::app) fn agents_dock_leaving(&self) -> Option<DockLeft> {
+        let pane = self.agents_dock_panes().0?;
+        let focused = self.agents_is_dock_pane(self.focused_pane_id()).then(|| self.focused_buffer_id());
+        let bounds = fenix_window::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+        let share = self.windows().layout(bounds).into_iter().find(|(id, _)| *id == pane).map(|(_, rect)| rect.w);
+        Some(DockLeft { focused, share })
+    }
+
+    /// Puts the dock up in the active workspace, as it `left` the last:
+    /// the same width, and the focus in it only if it was. Your focus
+    /// here otherwise stays in your code.
+    pub(in crate::app) fn agents_dock_arrive(&mut self, left: DockLeft) {
+        let Some(page) = self.agents.page.filter(|p| self.pages.contains_key(p)) else { return };
+        let from = self.focused_pane_id();
+        self.agents.dock_share = left.share.filter(|share| (0.2..=0.8).contains(share));
+        self.agents_dock_ensure(page);
+        self.agents.dock_share = None;
+        let pane = left.focused.and_then(|buffer| self.agents_panes_showing(buffer).first().copied());
+        self.windows_mut().focus(pane.unwrap_or(from));
+    }
+
+    /// There's one dock, and it's where you are: when the workspace in
+    /// front isn't the one with the dock, it moves here. Asked of every
+    /// frame, so however the workspace changed -- a key, a task's output,
+    /// a session put back with a dock in two -- the outcome's the same.
+    /// Each workspace's panes are its own, so its layout comes back as it
+    /// was without the dock in it.
+    fn agents_dock_follow(&mut self) {
+        let page = self.agents.page.filter(|p| self.pages.contains_key(p));
+        let dock: Vec<BufferId> = page.into_iter().chain(self.agents.composer).collect();
+        if dock.is_empty() {
+            return;
+        }
+        let active = self.workspaces.active_index();
+        let mut left = None;
+        for index in (0..self.workspaces.len()).filter(|i| *i != active) {
+            let ws = &self.workspaces.workspaces[index];
+            let panes: Vec<WindowId> = ws.windows.windows().into_iter().filter(|p| ws.windows.content(*p).is_some_and(|c| dock.contains(c))).collect();
+            let Some(&first) = panes.first() else { continue };
+            let focused = panes.iter().find(|p| **p == ws.windows.focused_id()).and_then(|p| ws.windows.content(*p).copied());
+            let bounds = fenix_window::Rect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
+            let share = page.and_then(|page| ws.windows.layout(bounds).into_iter().find(|(id, _)| ws.windows.content(*id) == Some(&page)).map(|(_, rect)| rect.w));
+            let found: &mut DockLeft = left.get_or_insert(DockLeft { focused: None, share: None });
+            found.focused = found.focused.or(focused);
+            found.share = found.share.or(share);
+            // A workspace needs a pane: a dock with nothing beside it
+            // leaves its Home behind.
+            if panes.len() == ws.windows.window_count() {
+                let home = ws.home.filter(|id| self.buffers.get(*id).is_some());
+                let home = home.unwrap_or_else(|| self.buffers.open_dashboard(""));
+                let ws = &mut self.workspaces.workspaces[index];
+                ws.home = Some(home);
+                ws.windows.set_content(first, home);
+                ws.pane_tabs.insert(first, Vec::new());
+            }
+            let ws = &mut self.workspaces.workspaces[index];
+            for pane in panes {
+                let kept = ws.windows.focused_id();
+                if ws.windows.content(pane).is_some_and(|c| dock.contains(c)) && ws.windows.focus(pane) && ws.windows.close_focused() {
+                    ws.pane_states.remove(&pane);
+                    ws.scroll_anims.remove(&pane);
+                    ws.pane_tabs.remove(&pane);
+                    ws.last_tab.remove(&pane);
+                    ws.preview.remove(&pane);
+                    ws.closed_tabs.remove(&pane);
+                }
+                if kept != pane {
+                    ws.windows.focus(kept);
+                }
+            }
+        }
+        if let Some(left) = left {
+            self.agents_dock_arrive(left);
+        }
     }
 
     /// The dock's two title rows, from the shown thread: who it is and
@@ -142,6 +229,7 @@ impl App {
     /// Before a frame is drawn: a pane that left the dock (a file opened
     /// in it) loses the dock's title, cheaply -- no titles are made here.
     pub(crate) fn agents_dock_sync(&mut self) {
+        self.agents_dock_follow();
         if self.agents.titled.is_empty() {
             return;
         }
@@ -229,7 +317,7 @@ impl App {
     /// Focus to the code: the pane the dock was opened from, else the
     /// first pane that isn't the dock's. For what the agents open (files,
     /// their changes, the log), which never goes in the dock.
-    pub(super) fn agents_focus_code(&mut self) {
+    pub(in crate::app) fn agents_focus_code(&mut self) {
         let panes = self.windows().windows();
         let pane = self
             .agents

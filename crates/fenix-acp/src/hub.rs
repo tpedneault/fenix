@@ -163,6 +163,9 @@ struct Slot {
     /// Fenix's own questions about its tools (`ask_fenix`), by card key:
     /// answered to the caller, not to the agent.
     fenix_questions: HashSet<String>,
+    /// A plan offered here ends the turn instead of asking to carry it
+    /// out (`stop_at_plans`).
+    stops_at_plans: bool,
     /// fs and terminal requests handed to the caller, not yet answered.
     served: HashSet<(ConnId, String)>,
     /// Files already announced for editing in this thread.
@@ -419,7 +422,7 @@ impl Hub {
         self.order.push(id.clone());
         self.threads.insert(
             id,
-            Slot { meta, thread, link: Link::Detached, turn: Turn::Idle, queue: VecDeque::new(), replay: None, handoff: None, permissions: HashMap::new(), fenix_questions: HashSet::new(), served: HashSet::new(), announced: HashSet::new(), fresh: false },
+            Slot { meta, thread, link: Link::Detached, turn: Turn::Idle, queue: VecDeque::new(), replay: None, handoff: None, permissions: HashMap::new(), fenix_questions: HashSet::new(), stops_at_plans: false, served: HashSet::new(), announced: HashSet::new(), fresh: false },
         );
     }
 
@@ -510,6 +513,16 @@ impl Hub {
             if slot.fenix_questions.remove(&key) {
                 fx.push(Effect::FenixAnswered { thread: thread.clone(), key, option: None });
             }
+        }
+    }
+
+    /// `id` only plans: when its agent offers to leave its plan mode, the
+    /// plan goes on `Thread::taken_plan` and the offer is turned down,
+    /// which ends the turn with nothing carried out. A pipeline's gate
+    /// decides what happens to the plan, not a card in the step.
+    pub fn stop_at_plans(&mut self, id: &ThreadId) {
+        if let Some(slot) = self.threads.get_mut(id) {
+            slot.stops_at_plans = true;
         }
     }
 
@@ -1235,14 +1248,19 @@ impl Hub {
 
     fn turn_ended(&mut self, conn: ConnId, id: &ThreadId, result: Result<Value, RpcError>, fx: &mut Vec<Effect>) {
         let Some(slot) = self.threads.get_mut(id) else { return };
+        // Turning a plan down cancels the turn. That's how a plan step
+        // ends, unless you cancelled it too.
+        let planned = slot.stops_at_plans && slot.thread.taken_plan.is_some() && !matches!(slot.turn, Turn::Cancelling { .. });
         slot.turn = Turn::Idle;
         let stop = match &result {
+            Ok(v) if planned && matches!(StopReason::parse(v), StopReason::Cancelled) => "end_turn".to_string(),
             Ok(v) => v.get("stopReason").and_then(Value::as_str).unwrap_or("end_turn").to_string(),
             Err(_) => "error".to_string(),
         };
         match result {
             Ok(v) => match StopReason::parse(&v) {
                 StopReason::EndTurn => {}
+                StopReason::Cancelled if planned => slot.thread.end_running_tools(),
                 StopReason::Cancelled => {
                     slot.thread.end_running_tools();
                     slot.thread.notice(NoticeKind::Interrupted, "Cancelled.");
@@ -1357,6 +1375,15 @@ impl Hub {
                 if let Some(allow) = options.iter().find(|o| o.kind == protocol::PermissionKind::AllowOnce).filter(|_| fenix_tool_of(&tool_call).is_some_and(|tool| self.fenix_tools_guarded || self.allowed_fenix_tools.iter().any(|t| t == tool))) {
                     fx.push(Effect::Respond { conn, id, result: Ok(protocol::permission_result(Some(&allow.id))) });
                     return;
+                }
+                if slot.stops_at_plans && tool_call.kind == Some(protocol::ToolKind::SwitchMode) {
+                    let no = options.iter().find(|o| matches!(o.kind, protocol::PermissionKind::RejectOnce | protocol::PermissionKind::RejectAlways));
+                    if let (Some(plan), Some(no)) = (offered_plan(&tool_call), no) {
+                        slot.thread.taken_plan = Some(plan);
+                        fx.push(Effect::Respond { conn, id, result: Ok(protocol::permission_result(Some(&no.id))) });
+                        fx.push(Effect::Changed(thread));
+                        return;
+                    }
                 }
                 let key = id.to_string();
                 slot.permissions.insert(key.clone(), (conn, id));
@@ -1520,6 +1547,17 @@ fn options_or_default(options: Vec<PermissionOption>) -> Vec<PermissionOption> {
     } else {
         options
     }
+}
+
+/// The plan a mode switch offers: the agent's `plan` input, else what the
+/// call shows.
+fn offered_plan(tool_call: &ToolCallFields) -> Option<String> {
+    let input = tool_call.raw_input.as_ref().and_then(|v| v.get("plan")).and_then(Value::as_str).map(str::to_string);
+    let shown = || {
+        let parts: Vec<String> = tool_call.content.iter().flatten().filter_map(|c| if let protocol::ToolContent::Content(block) = c { Some(block.as_text()) } else { None }).collect();
+        Some(parts.join("\n\n"))
+    };
+    input.or_else(shown).filter(|plan| !plan.trim().is_empty())
 }
 
 /// A permission request's tool call, filled in from the card already in

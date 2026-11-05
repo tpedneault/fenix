@@ -231,6 +231,48 @@ fn permission_answers_go_back_by_request_id() {
     assert!(h.hub.answer_permission(&id, &card.key, Some("allow-once")).is_empty(), "answered once");
 }
 
+/// The card an agent's plan mode raises to leave it, as the adapter sends it.
+fn offer_plan(h: &mut Harness, conn: ConnId) -> Vec<Effect> {
+    h.event(conn, AcpEvent::Request { id: json!("p-1"), method: "session/request_permission".into(), params: json!({ "sessionId": "s1", "toolCall": { "toolCallId": "t1", "title": "Ready to code?", "kind": "switch_mode", "rawInput": { "plan": "1. Change a.rs" } }, "options": [{ "optionId": "acceptEdits", "name": "Yes", "kind": "allow_always" }, { "optionId": "default", "name": "Yes, ask", "kind": "allow_once" }, { "optionId": "plan", "name": "No, keep planning", "kind": "reject_once" }] }) })
+}
+
+#[test]
+fn a_thread_that_stops_at_plans_keeps_the_plan_and_ends_its_turn_without_asking() {
+    let mut h = Harness::new();
+    let (id, conn) = h.live_thread();
+    h.hub.stop_at_plans(&id);
+    let prompt = request(&h.hub.prompt(&id, texts(&["plan it"])), "session/prompt").unwrap();
+    let fx = offer_plan(&mut h, conn);
+    assert!(fx.contains(&Effect::Respond { conn, id: json!("p-1"), result: Ok(json!({ "outcome": { "outcome": "selected", "optionId": "plan" } })) }));
+    assert_eq!(h.hub.status().waiting, 0, "no card");
+    assert_eq!(h.hub.view(&id).unwrap().thread.taken_plan.as_deref(), Some("1. Change a.rs"));
+    let fx = h.answer(conn, prompt.0, json!({ "stopReason": "cancelled" }));
+    assert!(fx.contains(&Effect::TurnEnded { thread: id.clone(), stop: "end_turn".into() }), "{fx:?}");
+    assert!(notices(&h.hub, &id).is_empty(), "nothing was cancelled");
+}
+
+#[test]
+fn cancelling_a_thread_that_offered_a_plan_is_still_a_cancel() {
+    let mut h = Harness::new();
+    let (id, conn) = h.live_thread();
+    h.hub.stop_at_plans(&id);
+    let prompt = request(&h.hub.prompt(&id, texts(&["plan it"])), "session/prompt").unwrap();
+    offer_plan(&mut h, conn);
+    h.hub.cancel(&id, h.now);
+    let fx = h.answer(conn, prompt.0, json!({ "stopReason": "cancelled" }));
+    assert!(fx.contains(&Effect::TurnEnded { thread: id.clone(), stop: "cancelled".into() }), "{fx:?}");
+}
+
+#[test]
+fn a_plan_is_still_asked_about_in_any_other_thread() {
+    let mut h = Harness::new();
+    let (id, conn) = h.live_thread();
+    h.hub.prompt(&id, texts(&["plan it"]));
+    offer_plan(&mut h, conn);
+    assert_eq!(h.hub.status().waiting, 1);
+    assert_eq!(h.hub.view(&id).unwrap().thread.taken_plan, None);
+}
+
 #[test]
 fn an_edit_announced_asks_for_its_files_to_be_snapshotted_once() {
     let mut h = Harness::new();

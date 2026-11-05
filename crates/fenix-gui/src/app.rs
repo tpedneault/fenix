@@ -13284,9 +13284,7 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        if self.workspaces.remove_active() {
-            self.workspace_removed(session.workspace_index);
-        }
+        self.remove_active_workspace();
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -13813,9 +13811,7 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        if self.workspaces.remove_active() {
-            self.workspace_removed(session.workspace_index);
-        }
+        self.remove_active_workspace();
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -13890,9 +13886,7 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        if self.workspaces.remove_active() {
-            self.workspace_removed(session.workspace_index);
-        }
+        self.remove_active_workspace();
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -15037,7 +15031,10 @@ impl App {
         let focused = self.focused_buffer_id();
         // A workspace's Home is its own: seed the new one with a fresh
         // Home rather than the one it was opened from.
-        let id = if self.is_a_workspace_home(focused) { self.new_home_buffer() } else { focused };
+        // And the dock comes along by itself, so neither of its panes is
+        // what the new workspace is seeded with.
+        let dock = self.agents_is_dock_pane(self.focused_pane_id());
+        let id = if dock || self.is_a_workspace_home(focused) { self.new_home_buffer() } else { focused };
         let cursor = self.buffers.get(id).map(|ob| ob.cursor).unwrap_or(Cursor::at_start());
         self.workspaces.new_workspace(id, cursor);
         self.wake_caret();
@@ -15058,10 +15055,7 @@ impl App {
     /// last one -- same safety posture as `close_window` refusing the
     /// last window.
     pub(crate) fn remove_workspace(&mut self) {
-        let removed = self.workspaces.active_index();
-        if self.workspaces.remove_active() {
-            self.workspace_removed(removed);
-        }
+        self.remove_active_workspace();
         self.wake_caret();
     }
 
@@ -15145,9 +15139,7 @@ impl App {
         self.drop_buffer_from_every_strip(buffer);
         if workspace_index < self.workspaces.len() {
             self.workspaces.switch_to_index(workspace_index);
-            if self.workspaces.remove_active() {
-                self.workspace_removed(workspace_index);
-            } else {
+            if !self.remove_active_workspace() {
                 // The last workspace: Home in the pane instead.
                 let home = self.ensure_workspace_home();
                 for p in self.windows().windows() {
@@ -15159,6 +15151,21 @@ impl App {
         }
         self.refresh_project_root();
         self.wake_caret();
+    }
+
+    /// Removes the active workspace; the dock, if it was in it, stays
+    /// with you in the one that's left.
+    fn remove_active_workspace(&mut self) -> bool {
+        let removed = self.workspaces.active_index();
+        let dock = self.agents_dock_leaving();
+        if !self.workspaces.remove_active() {
+            return false;
+        }
+        self.workspace_removed(removed);
+        if let Some(dock) = dock {
+            self.agents_dock_arrive(dock);
+        }
+        true
     }
 
     /// `SPC TAB TAB`: a fuzzy picker over every currently open

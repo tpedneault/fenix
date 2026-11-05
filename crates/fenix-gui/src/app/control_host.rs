@@ -122,7 +122,16 @@ impl App {
                     // a window needs; the answer doesn't wait for it.
                     self.pending_frames.push((files, params.focus));
                 } else {
+                    // A file goes beside the dock, never over it: with the
+                    // focus in the dock, that's over a thread and its cards.
+                    let dock = Some(self.focused_pane_id()).filter(|pane| self.agents_is_dock_pane(*pane));
+                    if dock.is_some() {
+                        self.agents_focus_code();
+                    }
                     self.open_positions(&files, params.focus);
+                    if let Some(pane) = dock.filter(|_| !params.focus) {
+                        self.windows_mut().focus(pane);
+                    }
                 }
                 Ok(json!({}))
             }

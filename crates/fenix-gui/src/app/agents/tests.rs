@@ -296,6 +296,140 @@ fn the_prompt_offers_no_completions_as_you_type() {
     assert!(f.app.completion.is_none());
 }
 
+/// How many workspaces have a pane showing `buffer`.
+fn workspaces_showing(app: &App, buffer: BufferId) -> usize {
+    app.workspaces.workspaces.iter().filter(|ws| ws.windows.windows().iter().any(|p| ws.windows.content(*p) == Some(&buffer))).count()
+}
+
+#[test]
+fn the_dock_comes_with_you_to_another_workspace_and_leaves_the_last_as_it_was() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    let (page, composer) = (f.app.agents.page.unwrap(), f.app.agents.composer.unwrap());
+    f.app.agents_focus_code();
+    let code = f.app.focused_pane_id();
+    let other = f.app.buffers.open_text_view("other\n");
+    f.app.workspaces.new_workspace(other, Cursor::at_start());
+    f.app.agents_dock_sync();
+    assert_eq!((workspaces_showing(&f.app, page), workspaces_showing(&f.app, composer)), (1, 1), "one dock");
+    let (Some(here), Some(prompt)) = f.app.agents_dock_panes() else { panic!("the dock, here") };
+    assert!(f.app.pane_titles.get(&here).is_some_and(|t| t.starts_with("Agent")), "titles, not tabs");
+    assert!(f.app.pane_titles.contains_key(&prompt));
+    assert!(!f.app.agents_is_dock_pane(f.app.focused_pane_id()), "your focus stays in your code");
+    // Back: the same, and the other workspace is one pane again.
+    f.app.prev_workspace();
+    f.app.agents_dock_sync();
+    assert!(matches!(f.app.agents_dock_panes(), (Some(_), Some(_))));
+    assert!(f.app.windows().windows().contains(&code));
+    assert_eq!(f.app.workspaces.workspaces[1].windows.window_count(), 1);
+    assert_eq!(*f.app.workspaces.workspaces[1].windows.focused_content(), other);
+}
+
+#[test]
+fn the_focus_in_the_dock_comes_with_it() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    let composer = f.app.agents.composer.unwrap();
+    f.app.new_workspace();
+    f.app.agents_dock_sync();
+    assert_eq!(f.app.focused_buffer_id(), composer, "still in the prompt");
+    assert_eq!(f.app.windows().window_count(), 3, "with Home beside the dock, not a thread with no prompt");
+    assert!(f.app.windows().windows().iter().any(|p| f.app.windows().content(*p).and_then(|c| f.app.buffers.get(*c)).is_some_and(|ob| ob.kind == BufferKind::Dashboard)));
+}
+
+#[test]
+fn the_dock_keeps_its_width_from_workspace_to_workspace() {
+    let mut f = fixture("");
+    f.app.config.set_value("agents.panel_width", Some(fenix_config::Value::Int(30)));
+    f.app.agents_open_panel();
+    f.app.agents_focus_code();
+    f.app.windows_mut().resize_focused(0.05);
+    let width = |app: &App| {
+        let page = app.agents_dock_panes().0.unwrap();
+        rects(app).into_iter().find(|(id, _)| *id == page).unwrap().1.w
+    };
+    let before = width(&f.app);
+    assert!((before - 300.0).abs() > 10.0, "it was resized: {before}");
+    let other = f.app.buffers.open_text_view("other\n");
+    f.app.workspaces.new_workspace(other, Cursor::at_start());
+    f.app.agents_dock_sync();
+    assert!((width(&f.app) - before).abs() < 2.0, "{} then {before}", width(&f.app));
+}
+
+#[test]
+fn putting_the_dock_away_leaves_nothing_of_it_in_any_workspace() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    let composer = f.app.agents.composer.unwrap();
+    let other = f.app.buffers.open_text_view("other\n");
+    f.app.workspaces.new_workspace(other, Cursor::at_start());
+    f.app.agents_dock_sync();
+    f.app.agents_close_panel();
+    f.app.agents_dock_sync();
+    assert_eq!(workspaces_showing(&f.app, composer), 0);
+    assert_eq!(f.app.windows().window_count(), 1);
+    f.app.prev_workspace();
+    f.app.agents_dock_sync();
+    assert_eq!(f.app.agents_dock_panes(), (None, None), "and it stays away");
+}
+
+#[test]
+fn a_session_with_a_dock_in_two_workspaces_comes_back_with_one() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    let (page, composer) = (f.app.agents.page.unwrap(), f.app.agents.composer.unwrap());
+    // As 1.0's sessions left it: the thread and the prompt elsewhere too,
+    // the prompt on its own pane.
+    let other = f.app.buffers.open_text_view("other\n");
+    f.app.workspaces.new_workspace(other, Cursor::at_start());
+    f.app.windows_mut().split(SplitKind::Vertical, page);
+    f.app.windows_mut().split(SplitKind::Horizontal, composer);
+    f.app.agents_dock_sync();
+    assert_eq!((workspaces_showing(&f.app, page), workspaces_showing(&f.app, composer)), (1, 1));
+    assert_eq!(f.app.workspaces.workspaces[0].windows.window_count(), 1, "the code's alone again");
+}
+
+#[test]
+fn a_workspace_that_was_only_the_thread_keeps_a_pane() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    let page = f.app.agents.page.unwrap();
+    f.app.workspaces.new_workspace(page, Cursor::at_start());
+    let other = f.app.buffers.open_text_view("other\n");
+    f.app.workspaces.new_workspace(other, Cursor::at_start());
+    f.app.agents_dock_sync();
+    let alone = &f.app.workspaces.workspaces[1].windows;
+    assert_eq!(alone.window_count(), 1);
+    assert_ne!(*alone.focused_content(), page);
+}
+
+#[test]
+fn removing_the_workspace_with_the_dock_keeps_the_dock() {
+    let mut f = fixture("");
+    let other = f.app.buffers.open_text_view("other\n");
+    f.app.workspaces.new_workspace(other, Cursor::at_start());
+    f.app.agents_open_panel();
+    let thread = f.app.agents.shown(&f.app.pages);
+    f.app.remove_workspace();
+    assert_eq!(f.app.workspaces.len(), 1);
+    assert!(matches!(f.app.agents_dock_panes(), (Some(_), Some(_))));
+    assert_eq!(f.app.agents.shown(&f.app.pages), thread);
+}
+
+#[test]
+fn a_file_shown_with_the_focus_in_the_dock_opens_beside_it() {
+    let mut f = fixture("");
+    let file = f.root.join("a.txt");
+    std::fs::write(&file, "a\n").unwrap();
+    f.app.agents_open_panel();
+    let (page, composer) = (f.app.agents.page.unwrap(), f.app.agents.composer.unwrap());
+    let params = fenix_control::protocol::OpenParams { paths: vec![fenix_control::protocol::OpenPath { path: file.to_string_lossy().into_owned(), line: None, column: None }], new_window: false, focus: false };
+    f.app.apply_control(fenix_control::Call::Open(params)).unwrap();
+    assert_eq!(f.app.focused_buffer_id(), composer, "the focus wasn't asked for");
+    assert_eq!(f.app.agents_panes_showing(page).len(), 1, "the thread's still up");
+    assert!(f.app.windows().windows().iter().any(|p| f.app.windows().content(*p).and_then(|c| f.app.buffers.get(*c)).is_some_and(|ob| ob.buffer.path() == Some(file.as_path()))));
+}
+
 #[test]
 fn a_dock_put_back_by_the_session_is_taken_on_not_built_again() {
     let mut f = fixture("");
