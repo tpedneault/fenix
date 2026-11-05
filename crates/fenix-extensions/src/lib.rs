@@ -14,7 +14,7 @@ pub mod package;
 pub mod registry;
 pub mod store;
 
-pub use manifest::{Manifest, Permissions, Runtime};
+pub use manifest::{Manifest, Permissions, Runtime, ToolClass};
 /// The versions manifests are checked against.
 pub use semver;
 pub use package::Package;

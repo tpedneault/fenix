@@ -34,7 +34,10 @@ fenix [--new-window] [--project <dir>] [--goto <file:line[:col]>] [file[:line[:c
 Lines and columns count from 1. A file argument is read as a position
 only when no file of exactly that name exists. Relative paths are taken
 from the directory `fenix` was started in. `--` ends the flags, for a
-file whose name starts with `-`; any other unknown flag is ignored.
+file whose name starts with `-`; any other unknown flag is ignored,
+with a warning on stderr. `fenix --help` lists the options and
+`fenix --version` prints the version; both print and exit, without
+reaching a running Fenix.
 
 ## Where Fenix listens
 
@@ -168,6 +171,11 @@ and the view scrolls to it; a position past the end lands on the last
 line. `newWindow` (default `false`) opens another OS window for them.
 `focus` (default `true`) brings Fenix forward, un-minimizing it. An
 empty `paths` with `focus` just brings Fenix forward.
+
+A file that isn't there yet, in a folder that is, opens as a new file
+named for it, created when it's saved, as `SPC f f` does. An empty
+`path`, a folder, or a file in a folder that doesn't exist answers
+`-32602` with the reason, and then none of the paths open.
 
 ### `fenix/openProject`
 
@@ -388,17 +396,48 @@ Runs one: the result is what its service answers, as JSON if it is, else
 as a string. One with `"writes": true` is refused (`-32602`) unless
 `agents.mcp.fenix_write` is on.
 
+### `fenix/agent.*`
+
+What MCP bridges (`fenix --mcp`) use. Each call is made for the
+connection's caller: the `client.name` it said hello with and, for a
+bridge Fenix started, the agent thread (`client.thread` in
+`fenix/hello`'s params). A caller with no thread, or one Fenix doesn't
+know, is a client of yours: the `client:` rules apply to it. Every tool
+has a class (`read`, `show`, `edit`, `run`, `external`) and a toolset,
+and `agents.mcp.allow` says what each may do ([Coding agents](AGENTS.md#fenix-as-a-tool)).
+
+- `fenix/agent.tools`: params `{}`. The tools the caller is offered
+  now, MCP's shape: `{ "tools": [{ "name", "description", "inputSchema" }] }`.
+  A tool its toolset doesn't show, or the rules refuse, isn't listed.
+- `fenix/agent.call`: params `{ "call": string, "tool": string,
+  "arguments"?: object, "progressToken"? }`. Runs one, Fenix's or an
+  extension's: `{ "answer": ... }`, with `"toolsChanged": true` when it
+  turned a toolset on or off. A tool the rules refuse is `-32602`; one
+  they ask about waits for your answer on the caller's thread. `call` is
+  the caller's id for it, for `fenix/agent.cancel`. `fenix_call`'s
+  `{ "tool", "arguments" }` is the tool it names, decided as that one.
+- `fenix/agent.cancel`: params `{ "call": string }`. The caller gave up
+  on it: a question about it is taken back, and the call answers
+  `cancelled`.
+- `fenix/agent.wait`: params `{ "since": number }`. News since that
+  revision, answered when there is some or after 20 seconds: `{
+  "revision", "events": [{ "kind": "tools" | "resources" | "prompts" |
+  "resource" | "progress" | "log", ... }] }`. `since: 0` answers at once
+  with the revision to wait from.
+- `fenix/agent.resources`, `fenix/agent.read`, `fenix/agent.subscribe`,
+  `fenix/agent.prompts`, `fenix/agent.prompt`: MCP's resources and
+  prompts, in MCP's shapes.
+
 ## `fenix --mcp`
 
-`fenix --mcp` is an MCP server on stdio (JSON-RPC, a message a line)
-whose tools are the methods above: `diagnostics`, `open_files`,
-`selection`, `show_file` (`fenix/open`, without taking the focus),
-`tasks`, `read_buffer`, `definition`, `references`, `hover`,
-`document_symbols`, `workspace_symbols`, `debug_state`; with
-`agents.mcp.fenix_write`, `run_task`, `run_command`, `debug_evaluate`;
-and the extensions' tools. Fenix hands it to the coding agents it starts
-(`agents.mcp.fenix`); any MCP client can run it, with a Fenix running to
-answer.
+`fenix --mcp` is an MCP server on stdio (JSON-RPC, a message a line).
+Each tool, resource and prompt is a `fenix/agent.*` call to the Fenix
+that's running, which decides by its rules; the bridge decides nothing
+itself. It speaks MCP revisions 2024-11-05 to 2025-11-25, and tells its
+client when the tool list changes. Fenix hands it to the coding agents it
+starts as `fenix --mcp --thread <id>` (`agents.mcp.fenix`); any MCP
+client can run it, with a Fenix running to answer, and is then a client
+of yours.
 
 ## Fenix's files
 

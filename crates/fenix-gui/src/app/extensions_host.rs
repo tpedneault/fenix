@@ -97,7 +97,32 @@ impl App {
     }
 
     /// Installs `ext` from the registry on another thread, one at a time.
+    /// What installing `ext` would let it do, when it's code that asks
+    /// for more than its sandbox: the lines to show before it's installed.
+    fn install_asks(&self, ext: &str) -> Option<(String, Vec<String>)> {
+        let page = self.find_page(|m| matches!(m, PageModel::Extensions(_)))?;
+        let Some(PageModel::Extensions(page)) = self.pages.get(&page).map(|s| &s.model) else { return None };
+        let row = page.available().into_iter().find(|r| r.id == ext)?;
+        (row.runtime == fenix_extensions::manifest::Runtime::Wasm && !row.permissions.none()).then(|| (row.name.clone(), row.permissions.lines()))
+    }
+
+    /// Installs `ext` from the registry -- once you've said yes to what it
+    /// asks for, when it's code that asks for anything (#41).
     fn install_from_registry(&mut self, ext: String) {
+        if let Some((name, asks)) = self.install_asks(&ext) {
+            self.set_message(format!("{name} asks to: {}", asks.join("; ")));
+            let candidates = vec![
+                fenix_picker::Candidate::new(format!("Install {name}, which may: {}", asks.join("; ")), super::agents::Pick::InstallExtension(ext)),
+                fenix_picker::Candidate::new("Don't install it".to_string(), super::agents::Pick::Nothing),
+            ];
+            self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
+            return;
+        }
+        self.install_from_registry_now(ext);
+    }
+
+    /// Installs `ext` from the registry, off the UI thread.
+    pub(super) fn install_from_registry_now(&mut self, ext: String) {
         let Some(store) = crate::installed::store() else { return self.set_error("no folder to keep extensions in") };
         let registry = match crate::installed::registry(Some(&self.config)) {
             Ok(registry) => registry,
@@ -189,7 +214,7 @@ impl App {
             }),
             RegistryEvent::Installed(result) => {
                 match result {
-                    Ok(said) => self.set_message(said.replace('\n', " ")),
+                    Ok(said) => self.set_message(format!("{} SPC q r restarts now, where you are.", said.replace('\n', " "))),
                     Err(e) => self.set_error(e),
                 }
                 let rows = crate::installed::rows();
@@ -257,7 +282,7 @@ impl App {
             }
             Action::SwitchInstalled(ext, on) => {
                 match crate::installed::store().map(|store| store.set_enabled(&ext, on)) {
-                    Some(Ok(())) => self.set_message(format!("{ext}: {} from the next start", if on { "on" } else { "off" })),
+                    Some(Ok(())) => self.set_message(format!("{ext}: {} from the next start -- SPC q r restarts now, where you are", if on { "on" } else { "off" })),
                     Some(Err(e)) => self.set_error(e),
                     None => self.set_error("no folder to keep extensions in"),
                 }
@@ -265,7 +290,7 @@ impl App {
             }
             Action::Uninstall(ext) => {
                 match crate::installed::store().map(|store| store.uninstall_unneeded(&ext)) {
-                    Some(Ok(removed)) => self.set_message(format!("Removed {} -- what they brought stays until Fenix next starts", crate::installed::said_removed(&removed))),
+                    Some(Ok(removed)) => self.set_message(format!("Removed {} -- what they brought stays until Fenix next starts (SPC q r restarts now)", crate::installed::said_removed(&removed))),
                     Some(Err(e)) => self.set_error(e),
                     None => self.set_error("no folder to keep extensions in"),
                 }
@@ -326,5 +351,29 @@ mod tests {
         app.set_setting("extensions.store", Some(fenix_config::Value::Bool(true))).unwrap();
         app.open_welcome_page();
         assert!(matches!(registry_of(&app), Registry::Looking), "the welcome looks, for its bundles");
+    }
+
+    /// A code extension that asks for anything waits for your yes before
+    /// it's installed (#41); one that asks for nothing doesn't.
+    #[test]
+    fn a_code_extension_asks_before_it_installs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = App::with_file(None);
+        app.config = fenix_config::Config::load_or_default(dir.path().join("settings.toml"));
+        app.open_extensions_page();
+        let release = |runtime: &str, extra: &str| format!(r#"{{"version": "1.0.0", "fenix": ">=1.0, <2", "runtime": "{runtime}", "url": "u", "sha256": "", "size": 1{extra}}}"#);
+        let json = format!(
+            r#"{{"format": 1, "extensions": [{{"id": "acme.net", "name": "Net", "description": "x", "versions": [{}]}}, {{"id": "acme.theme", "name": "Theme", "description": "x", "versions": [{}]}}]}}"#,
+            release("wasm", r#", "api": "1.0", "permissions": {"network": ["api.example.com"]}"#),
+            release("none", ""),
+        );
+        app.apply_registry_event(RegistryEvent::Read(Ok(serde_json::from_str(&json).unwrap())));
+        assert!(app.install_asks("acme.theme").is_none(), "data asks for nothing");
+        let (name, asks) = app.install_asks("acme.net").expect("it asks");
+        assert_eq!(name, "Net");
+        assert!(asks.iter().any(|a| a.contains("api.example.com")), "{asks:?}");
+        app.install_from_registry("acme.net".into());
+        assert!(matches!(app.active_picker, Some(ActivePicker::Agents(_))), "a question, not an install");
+        assert!(app.wasm.installing.is_none());
     }
 }

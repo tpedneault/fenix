@@ -1,8 +1,8 @@
 use std::io::{BufReader, Read, Write};
-use std::process::{Child, ChildStderr, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -57,7 +57,13 @@ pub struct LspClient {
     child: Option<Mutex<Child>>,
     reader_thread: Option<JoinHandle<()>>,
     stderr_thread: Option<JoinHandle<()>>,
+    /// The last of what the server wrote to stderr (`stderr_tail`).
+    stderr: Arc<Mutex<Vec<u8>>>,
 }
+
+/// How much of a server's stderr is kept: its last few lines, enough to
+/// say why it never answered.
+const STDERR_TAIL: usize = 4096;
 
 impl LspClient {
     /// Spawns `command` (with `args`), working directory `cwd` (a
@@ -95,10 +101,13 @@ impl LspClient {
         // otherwise fill that pipe's OS buffer and block the *server*
         // itself the moment nothing on this side ever reads it, stalling
         // the whole connection.
-        let stderr_thread = thread::spawn(move || drain_and_discard(stderr));
+        // Its last few kilobytes are kept, for when it never answers.
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let keeping = Arc::clone(&said);
+        let stderr_thread = thread::spawn(move || drain_keeping_tail(stderr, &keeping));
 
         Ok((
-            LspClient { stdin: Mutex::new(Box::new(stdin)), next_id: AtomicI64::new(1), child: Some(Mutex::new(child)), reader_thread: Some(reader_thread), stderr_thread: Some(stderr_thread) },
+            LspClient { stdin: Mutex::new(Box::new(stdin)), next_id: AtomicI64::new(1), child: Some(Mutex::new(child)), reader_thread: Some(reader_thread), stderr_thread: Some(stderr_thread), stderr: said },
             rx,
         ))
     }
@@ -108,7 +117,18 @@ impl LspClient {
     pub fn connect(from_server: impl Read + Send + 'static, to_server: impl Write + Send + 'static) -> (LspClient, Receiver<LspEvent>) {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || read_loop(from_server, tx));
-        (LspClient { stdin: Mutex::new(Box::new(to_server)), next_id: AtomicI64::new(1), child: None, reader_thread: None, stderr_thread: None }, rx)
+        (LspClient { stdin: Mutex::new(Box::new(to_server)), next_id: AtomicI64::new(1), child: None, reader_thread: None, stderr_thread: None, stderr: Arc::default() }, rx)
+    }
+
+    /// The last lines the server wrote to stderr, trimmed: what a server
+    /// that never answers `initialize` says about why. Empty for one
+    /// reached another way (`connect`).
+    pub fn stderr_tail(&self) -> String {
+        let tail = self.stderr.lock().map(|t| t.clone()).unwrap_or_default();
+        let text = String::from_utf8_lossy(&tail);
+        // From a whole line on, once the tail has been cut.
+        let text = if tail.len() >= STDERR_TAIL { text.split_once('\n').map(|(_, rest)| rest).unwrap_or(&text) } else { &text };
+        text.trim().to_string()
     }
 
     /// Sends a typed request (e.g. `lsp_types::request::HoverRequest`),
@@ -258,15 +278,21 @@ fn classify(msg: RawMessage) -> LspEvent {
     }
 }
 
-/// Reads and discards a server's stderr for as long as the process
-/// lives -- see `spawn`'s own doc comment for why this can't just be
-/// left unread.
-fn drain_and_discard(mut stderr: ChildStderr) {
+/// Reads a server's stderr for as long as the process lives -- see
+/// `spawn`'s own doc comment for why this can't just be left unread --
+/// keeping only its last `STDERR_TAIL` bytes.
+fn drain_keeping_tail(mut stderr: impl Read, said: &Mutex<Vec<u8>>) {
     let mut buf = [0u8; 4096];
     loop {
         match stderr.read(&mut buf) {
             Ok(0) | Err(_) => return,
-            Ok(_) => continue,
+            Ok(n) => {
+                if let Ok(mut tail) = said.lock() {
+                    tail.extend_from_slice(&buf[..n]);
+                    let over = tail.len().saturating_sub(STDERR_TAIL);
+                    tail.drain(..over);
+                }
+            }
         }
     }
 }
@@ -281,6 +307,24 @@ mod tests {
 
     fn request_msg(id: i64, method: &str) -> RawMessage {
         RawMessage::request(id, method, Value::Null)
+    }
+
+    /// What a server says on stderr is kept, its last lines only, for
+    /// when it never answers `initialize`.
+    #[test]
+    fn a_server_s_stderr_keeps_its_last_lines() {
+        let (client, _rx) = LspClient::connect(std::io::empty(), std::io::sink());
+        assert_eq!(client.stderr_tail(), "");
+        let mut said = String::new();
+        for n in 0..1000 {
+            said.push_str(&format!("line {n}\n"));
+        }
+        said.push_str("Error: Could not find a valid TypeScript installation\n");
+        drain_keeping_tail(said.as_bytes(), &client.stderr);
+        let tail = client.stderr_tail();
+        assert!(tail.ends_with("Could not find a valid TypeScript installation"), "{tail}");
+        assert!(tail.len() <= STDERR_TAIL && tail.starts_with("line "), "{tail}");
+        assert!(!tail.contains("line 0\n"));
     }
 
     #[test]

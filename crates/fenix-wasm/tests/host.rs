@@ -132,6 +132,32 @@ fn it_activates_and_what_it_says_and_asks_comes_back() {
     assert_eq!(ext.run("hello.greet").0, Ok(()));
 }
 
+/// Let go while it's still loading, it's not waited for: `detach`
+/// returns at once, and what it says once it's up -- that it's ready, what
+/// it logs -- goes nowhere. Fenix's UI thread let go of forty of them as
+/// you moved to another project, waiting out each one's loading.
+#[cfg(unix)]
+#[test]
+fn let_go_while_it_loads_it_isnt_waited_for_and_isnt_heard() {
+    let engine = engine(&Options::default()).unwrap();
+    let _ticker = Ticker::start(&engine);
+    let dir = tempfile::tempdir().unwrap();
+    // Its code from a pipe: it's loading until the pipe is written.
+    let fifo = dir.path().join("extension.wasm");
+    assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+    let (tx, rx) = mpsc::channel();
+    let worker = Worker::start(&engine, Spec::new("test.hello", fifo.clone(), dir.path()), move |e| {
+        let _ = tx.send(e);
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let started = std::time::Instant::now();
+    worker.detach();
+    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+    // Now it loads, and activates.
+    std::fs::write(&fifo, std::fs::read(hello()).unwrap()).unwrap();
+    assert!(rx.recv_timeout(Duration::from_secs(10)).is_err(), "nothing is heard of it");
+}
+
 /// A trap stops the extension, says why, and refuses what follows.
 /// Returns how long the call took, from after the extension was up.
 fn stops_on(command: &str, why: &str) -> Duration {
@@ -1605,4 +1631,59 @@ fn an_agent_is_brought_asked_and_heard() {
     let turn = fenix_wasm::host::AgentTurn { agent: "claude".into(), thread: "t1".into(), title: "T".into(), root: "/p".into(), stop_reason: "end_turn".into(), text: "Done.".into() };
     let (_, seen) = ext.call(Call::AgentTurnEnded(turn));
     assert!(said(&seen, Level::Info, "turn ended: claude t1 end_turn Done."), "{seen:?}");
+}
+
+/// 1.2: a service that answers later says how far it's got
+/// (`service-progress`), and hears when it's given up on
+/// (`service-cancelled`); an ask's answer so far comes to
+/// `agent-ask-progress`.
+#[test]
+fn a_service_says_how_far_it_got_and_hears_its_cancellation() {
+    let mut ext = start();
+    let (result, seen) = ext.call(Call::Serve { call: 41, name: "hello.forever".into(), payload: String::new() });
+    assert_eq!(result, Ok(Reply::Served(None)), "answered later, or never");
+    assert!(seen.contains(&Event::Asked(Request::ServiceProgress { call: 41, message: "working".into(), fraction: Some(0.5) })), "{seen:?}");
+    assert!(seen.contains(&Event::Asked(Request::ServiceProgress { call: 41, message: "still working".into(), fraction: None })), "{seen:?}");
+    let (result, seen) = ext.call(Call::ServiceCancelled(41));
+    assert_eq!(result, Ok(Reply::Done));
+    assert!(said(&seen, Level::Info, "service 41 cancelled"), "{seen:?}");
+    let (_, seen) = ext.call(Call::AgentAskProgress { call: 9, text: "Fix the".into() });
+    assert!(said(&seen, Level::Info, "ask 9 so far: Fix the"), "{seen:?}");
+}
+
+/// An extension built before 1.2 has neither export: telling it is
+/// nothing, not a trap.
+#[test]
+fn an_extension_built_before_1_2_is_told_nothing_it_lacks() {
+    let engine = engine(&Options::default()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/guests/counter.wasm");
+    let (tx, events) = mpsc::channel();
+    let worker = Worker::start(&engine, Spec::new("test.counter", wasm, dir.path()), move |e| {
+        let _ = tx.send(e);
+    });
+    let mut ext = Running { worker, events, dir, _ticker: Ticker::start(&engine) };
+    ext.until(|e| *e == Event::Ready);
+    assert_eq!(ext.call(Call::ServiceCancelled(3)).0, Ok(Reply::Done));
+    assert_eq!(ext.call(Call::AgentAskProgress { call: 3, text: "x".into() }).0, Ok(Reply::Done));
+    assert_eq!(ext.call(Call::Serve { call: 1, name: "counter.count".into(), payload: String::new() }).0, Ok(Reply::Served(Some(Ok("0".into())))), "still running");
+}
+
+/// Pages first: a page laid out while service calls wait goes before
+/// them, behind at most the one under way.
+#[test]
+fn a_page_goes_before_the_service_calls_waiting() {
+    let mut ext = start();
+    let serves: Vec<u64> = (0..4).map(|n| ext.worker.call(Call::Serve { call: n, name: "hello.busy".into(), payload: String::new() }, 0)).collect();
+    let render = ext.worker.call(Call::Render { page: 1, width: 40, height: 10 }, 0);
+    let mut order = Vec::new();
+    while order.len() < 5 {
+        if let Event::Finished { call, result } = ext.next() {
+            assert!(result.is_ok(), "{result:?}");
+            order.push(call);
+        }
+    }
+    let at = |call: u64| order.iter().position(|c| *c == call).unwrap();
+    assert!(at(render) <= 1, "behind at most the call under way: {order:?}");
+    assert!(at(serves[1]) < at(serves[2]) && at(serves[2]) < at(serves[3]), "the rest in the order they came: {order:?}");
 }

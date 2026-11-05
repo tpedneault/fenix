@@ -343,7 +343,8 @@ impl Template {
     /// `${file}`, `${fileDir}`, `${module}` and `${project}` in `text`,
     /// filled in, and the variables picked or given (`filled`).
     fn fill(&self, text: &str, file: Option<&Path>, root: &Path) -> String {
-        let shown = |p: &Path| p.to_string_lossy().into_owned();
+        // Plain (no `\\?\`): an extension's launch is handed these.
+        let shown = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().into_owned();
         let dir = file.and_then(Path::parent).map(shown).unwrap_or_else(|| shown(root));
         let text = if text.contains("${module}") { text.replace("${module}", &file.map(|f| module_of(f, root)).unwrap_or_default()) } else { text.to_string() };
         let mut text = text.replace("${fileDir}", &dir).replace("${file}", &file.map(shown).unwrap_or_default()).replace("${project}", &shown(root));
@@ -507,11 +508,13 @@ paths = ["${project}/src"]
         let args = t.arguments(LanguageId::Python, Some(&file), &root).unwrap();
         assert_eq!(args["program"], serde_json::json!(file.to_string_lossy()), "the file you're in, when it names none");
         assert_eq!(args["console"], "internalConsole", "what Fenix sends for the language");
-        assert_eq!(args["args"], serde_json::json!([file.to_string_lossy(), "-v"]));
-        assert_eq!(args["cwd"], serde_json::json!(PathBuf::from("/p/src").to_string_lossy()));
-        assert_eq!(args["env"]["ROOT"], serde_json::json!(root.to_string_lossy()));
+        // Filled in as Fenix writes paths (on Windows, with `\`).
+        let shown = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().into_owned();
+        assert_eq!(args["args"], serde_json::json!([shown(&file), "-v"]));
+        assert_eq!(args["cwd"], serde_json::json!(shown(Path::new("/p/src"))));
+        assert_eq!(args["env"]["ROOT"], serde_json::json!(shown(&root)));
         assert_eq!((args["subProcess"].as_bool(), args["justMyCode"].as_bool()), (Some(true), Some(false)));
-        assert_eq!(args["paths"], serde_json::json!([format!("{}/src", root.to_string_lossy())]));
+        assert_eq!(args["paths"], serde_json::json!([format!("{}/src", shown(&root))]));
     }
 
     /// `debugServer`: the adapter already listening there is the one

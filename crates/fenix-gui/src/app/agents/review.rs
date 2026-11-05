@@ -14,7 +14,7 @@ const MARKS: &str = "fenix:agents";
 
 impl App {
     /// A file's text now: its buffer's when it's open, else the disk's.
-    pub(super) fn agents_current(&self, path: &Path) -> Option<String> {
+    pub(in crate::app) fn agents_current(&self, path: &Path) -> Option<String> {
         match self.buffers.id_for_path(path).and_then(|id| self.buffers.get(id)) {
             Some(ob) => Some(ob.buffer.text()),
             None => std::fs::read_to_string(path).ok(),
@@ -190,7 +190,7 @@ impl App {
     /// Rejects a hunk, or the whole file: it goes back to what it was. An
     /// open buffer takes it as one undo step, and is saved; with unsaved
     /// edits of yours in it, you're told to deal with those first.
-    fn agents_reject(&mut self, thread: &ThreadId, file: &ReviewFile, hunk: Option<usize>) {
+    pub(super) fn agents_reject(&mut self, thread: &ThreadId, file: &ReviewFile, hunk: Option<usize>) {
         let open = self.buffers.id_for_path(&file.path);
         if let Some(id) = open.filter(|id| self.buffers.get(*id).is_some_and(|b| b.buffer.is_dirty())) {
             let name = self.buffer_display_name(id);
@@ -277,7 +277,7 @@ impl App {
     }
 
     /// The tint on lines agents changed, in every open buffer.
-    pub(super) fn agents_refresh_marks(&mut self) {
+    pub(in crate::app) fn agents_refresh_marks(&mut self) {
         let mut marks: HashMap<BufferId, Vec<crate::decorations::Decoration>> = HashMap::new();
         for baselines in self.agents.baselines.values() {
             for (path, before) in baselines {
@@ -319,7 +319,7 @@ impl App {
     /// that no tool call announced, are the agent's too -- compared to
     /// the index when they're tracked, else listed with nothing to
     /// compare them to.
-    pub(super) fn agents_turn_ended(&mut self, thread: &ThreadId) {
+    pub(in crate::app) fn agents_turn_ended(&mut self, thread: &ThreadId) {
         let Some(before) = self.agents.turn_start.remove(thread) else { return };
         let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else { return };
         for entry in fenix_git::list_files(&root) {

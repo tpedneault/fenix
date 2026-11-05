@@ -262,7 +262,7 @@ fn run_job(root: &Path, job: &Job) -> Result<String, String> {
         Job::Reset { target, mode } => fenix_git::reset(root, target, *mode),
         Job::Continue => match fenix_git::in_progress(root) {
             Some(fenix_git::InProgress::Rebase { .. }) => fenix_git::rebase_continue(root),
-            Some(fenix_git::InProgress::Merge) => fenix_git::commit(root, "Merge"),
+            Some(fenix_git::InProgress::Merge) => fenix_git::commit(root, &fenix_git::merge_message(root).unwrap_or_else(|| "Merge".to_string())),
             Some(op) => Err(format!("{} can't be continued from here -- finish it with git", op.label())),
             None => Err("nothing in progress to continue".to_string()),
         },
@@ -303,8 +303,16 @@ impl App {
             _ => self.git_action_repo_root(),
         };
         let start = std::fs::canonicalize(&start).map(fenix_lsp::normalize).unwrap_or(start);
-        let Some(root) = fenix_project::vcs::repository_root(&start) else {
-            self.set_error(format!("{} isn't in a git repository", readable_path(&start)));
+        // A file from outside any repository (one left open after a
+        // project switch): the project's repository instead.
+        let project = self.git_action_repo_root();
+        let project = std::fs::canonicalize(&project).map(fenix_lsp::normalize).unwrap_or(project);
+        let Some(root) = fenix_project::vcs::repository_root(&start).or_else(|| fenix_project::vcs::repository_root(&project)) else {
+            if start == project {
+                self.set_error(format!("{} isn't in a git repository", readable_path(&start)));
+            } else {
+                self.set_error(format!("neither {} nor the project, {}, is in a git repository", readable_path(&start), readable_path(&project)));
+            }
             return;
         };
         let root = fenix_lsp::normalize(root);
@@ -433,6 +441,13 @@ impl App {
                 if let Some(line) = line {
                     self.jump_to_grep_match(&fenix_project::GrepMatch { path: full, line, col: 1, text: String::new() });
                 }
+            }
+            // A merge finished with git's prepared message, in the
+            // composer to be edited first, as `git commit` would.
+            Action::Run(Job::Continue) if fenix_git::in_progress(&root) == Some(fenix_git::InProgress::Merge) => {
+                let message = fenix_git::merge_message(&root).unwrap_or_else(|| "Merge".to_string());
+                let compose = crate::git_status::Compose::New(Default::default());
+                self.open_compose_seeded(ComposePurpose::GitCommit { repo_root: root, compose }, &message);
             }
             Action::Run(job) => self.git_page_run(id, job),
             Action::Compose(compose) => {
@@ -710,6 +725,23 @@ mod tests {
         let shown = text(&mut app);
         assert!(shown.contains("STAGED 1") && !shown.contains("UNSTAGED"), "the page read the tree again:\n{shown}");
         assert!(shown.contains("stage a.txt ✓"), "{shown}");
+    }
+
+    /// `SPC g g` with a file from outside any repository in front: the
+    /// project's repository, not nothing.
+    #[test]
+    fn a_file_outside_any_repository_opens_the_project_s() {
+        let repo = Repo::new("outside");
+        let elsewhere = std::env::temp_dir().join(format!("fenix-git-page-elsewhere-{}", std::process::id()));
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let file = elsewhere.join("notes.txt");
+        std::fs::write(&file, "x\n").unwrap();
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.project_root = Some(repo.dir.clone());
+        app.open_git_status();
+        let said = app.modeline_pieces().1;
+        assert_eq!(page_mut(&mut app).root, repo.dir, "{said}");
+        let _ = std::fs::remove_dir_all(&elsewhere);
     }
 
     #[test]

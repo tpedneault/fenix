@@ -251,7 +251,7 @@ impl App {
         blocks
     }
 
-    fn agents_mention_block(&self, root: &Path, token: &str, embedded: bool) -> Option<ContentBlock> {
+    pub(super) fn agents_mention_block(&self, root: &Path, token: &str, embedded: bool) -> Option<ContentBlock> {
         let resource = |uri: String, text: String, name: &str| {
             if embedded {
                 ContentBlock::Resource { uri, text: Some(cut(text)), mime_type: Some("text/plain".into()) }
@@ -307,7 +307,7 @@ impl App {
         }
     }
 
-    fn agents_file_block(&self, root: &Path, path: &Path, embedded: bool) -> Option<ContentBlock> {
+    pub(super) fn agents_file_block(&self, root: &Path, path: &Path, embedded: bool) -> Option<ContentBlock> {
         let name = path.strip_prefix(root).unwrap_or(path).to_string_lossy().into_owned();
         if embedded {
             let text = self.agents_current(path)?;
@@ -389,28 +389,90 @@ impl App {
     /// `SPC a c`: a commit message for what's staged, written by the
     /// agent; when its answer is in, it's on the clipboard.
     pub(crate) fn agents_commit_message(&mut self) {
-        let root = self.agents_root();
-        let diff = std::process::Command::new("git").args(["diff", "--cached"]).current_dir(&root).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        // Into the commit composer, when one is open: its repository's
+        // staged change.
+        let composer = self.compose.as_ref().and_then(|c| match &c.purpose {
+            ComposePurpose::CommitMessage { repo_root } | ComposePurpose::GitCommit { repo_root, .. } => Some((c.buffer, repo_root.clone())),
+            _ => None,
+        });
+        let root = composer.as_ref().map(|(_, r)| r.clone()).unwrap_or_else(|| self.agents_root());
+        let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&root).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        let diff = git(&["diff", "--cached"]);
         if diff.trim().is_empty() {
             self.set_message("nothing staged to write a commit message for");
             return;
         }
-        self.agents_open_panel();
-        let Some(thread) = self.agents.shown(&self.pages) else { return };
-        let blocks = vec![
-            ContentBlock::text("Write a commit message for this staged change: a subject line under 72 characters, a blank line, then a short body saying why. Reply with only the message, nothing before or after it, and don't change any files."),
+        let subjects = git(&["log", "-20", "--format=%s"]);
+        // The project's own rules for a message: a commit template, and
+        // what CONTRIBUTING.md says of commits.
+        let template = git(&["config", "commit.template"]).trim().to_string();
+        let template = if template.is_empty() { root.join(".gitmessage") } else { root.join(home_path(&template)) };
+        let template = std::fs::read_to_string(template).unwrap_or_default();
+        let contributing = std::fs::read_to_string(root.join("CONTRIBUTING.md")).ok().and_then(|t| commits_section(&t)).unwrap_or_default();
+        let composer_buffer = composer.map(|(b, _)| b);
+        if composer_buffer.is_none() {
+            self.agents_open_panel();
+        }
+        let thread = match self.agents.shown(&self.pages) {
+            Some(thread) => thread,
+            None => {
+                let entries = self.agents_configure();
+                let wanted = self.config.text_value("agents.ask.agent").map(str::trim).filter(|a| !a.is_empty()).map(catalog::slug);
+                let Some(agent) = wanted.or_else(|| self.agents_default_of(&entries)) else {
+                    self.agents_none_found(&entries);
+                    return;
+                };
+                let thread = self.agents.hub.new_thread(&agent, &root);
+                self.agents_show(thread.clone());
+                thread
+            }
+        };
+        let mut blocks = vec![
+            ContentBlock::text("Write a commit message for this staged change: a subject line under 72 characters, a blank line, then a short body saying why. Follow the style of the project's recent commits and any rules given. Reply with only the message, nothing before or after it, and don't change any files."),
             ContentBlock::Resource { uri: "fenix://git-diff-cached".into(), text: Some(cut(diff)), mime_type: Some("text/x-diff".into()) },
         ];
+        if !subjects.trim().is_empty() {
+            blocks.push(ContentBlock::Resource { uri: "fenix://git-log-subjects".into(), text: Some(subjects), mime_type: Some("text/plain".into()) });
+        }
+        if !template.trim().is_empty() {
+            blocks.push(ContentBlock::Resource { uri: "fenix://commit-template".into(), text: Some(template), mime_type: Some("text/plain".into()) });
+        }
+        if !contributing.trim().is_empty() {
+            blocks.push(ContentBlock::Resource { uri: "fenix://contributing-commits".into(), text: Some(contributing), mime_type: Some("text/markdown".into()) });
+        }
         self.agents.commit_message = Some(thread.clone());
+        self.agents.commit_into = composer_buffer;
+        if composer_buffer.is_some() {
+            self.set_message("the agent is writing the message into the composer");
+        }
         let fx = self.agents.hub.prompt(&thread, blocks);
         self.agents_run(fx);
     }
 
-    /// The commit message's turn ended: its answer to the clipboard.
+    /// The message as it's written, into the composer when there's one.
+    pub(super) fn agents_commit_message_streamed(&mut self, thread: &ThreadId) {
+        if self.agents.commit_message.as_ref() != Some(thread) {
+            return;
+        }
+        let Some(buffer) = self.agents.commit_into.filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b)) else { return };
+        let text = self.agents.hub.view(thread).map(|v| v.thread.last_answer()).unwrap_or_default();
+        if text.trim().is_empty() {
+            return;
+        }
+        let message = strip_fence(&text);
+        if self.buffers.get(buffer).is_some_and(|ob| ob.buffer.text() != message) {
+            self.replace_buffer_from_disk(buffer, &message);
+        }
+    }
+
+    /// The commit message's turn ended: in the composer it was written
+    /// for, else onto the clipboard.
     pub(super) fn agents_commit_message_done(&mut self, thread: &ThreadId) {
         if self.agents.commit_message.as_ref() != Some(thread) {
             return;
         }
+        self.agents_commit_message_streamed(thread);
+        let into = self.agents.commit_into.take();
         self.agents.commit_message = None;
         let Some(text) = self.agents.hub.view(thread).and_then(|v| {
             v.thread.entries.iter().rev().find_map(|e| match e {
@@ -421,10 +483,57 @@ impl App {
             return;
         };
         let message = strip_fence(&text);
+        if let Some(buffer) = into.filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b)) {
+            self.replace_buffer_from_disk(buffer, &message);
+            self.set_message("the agent's message is in the composer: edit it, then Esc and Enter to commit");
+            return;
+        }
         if let Some(clipboard) = &mut self.clipboard {
             let _ = clipboard.set_text(message.clone());
         }
         self.set_message("the agent's commit message is on the clipboard");
+    }
+}
+
+/// `~/` at the start of a path, as the home folder.
+fn home_path(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default().join(rest),
+        None => PathBuf::from(path),
+    }
+}
+
+/// What a CONTRIBUTING.md says of commits: the section whose heading
+/// mentions them (or making a change), and any line about commit
+/// messages, at most 2,000 characters.
+pub(crate) fn commits_section(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if line.starts_with('#') {
+            let heading = line.to_lowercase();
+            inside = heading.contains("commit") || heading.contains("making a change");
+            continue;
+        }
+        let lower = line.to_lowercase();
+        if inside || lower.contains("commit subject") || lower.contains("commit message") {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    let out = out.trim().to_string();
+    (!out.is_empty()).then(|| out.chars().take(2000).collect())
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+
+    #[test]
+    fn the_contributing_rules_on_commits_are_found() {
+        let text = "# Contributing\n\nHi.\n\n## Making a change\n\nCommit subjects name the area first.\n\n## Releases\n\nTag it.\n";
+        assert_eq!(commits_section(text).as_deref(), Some("Commit subjects name the area first."));
+        assert_eq!(commits_section("# Nothing\n"), None);
     }
 }
 
@@ -447,7 +556,7 @@ pub(crate) fn mentions(text: &str) -> Vec<String> {
     out
 }
 
-fn cut(mut text: String) -> String {
+pub(super) fn cut(mut text: String) -> String {
     if text.len() > MENTION_BYTES {
         let mut end = MENTION_BYTES;
         while !text.is_char_boundary(end) {
@@ -459,7 +568,7 @@ fn cut(mut text: String) -> String {
     text
 }
 
-fn file_uri(path: &Path) -> String {
+pub(super) fn file_uri(path: &Path) -> String {
     let text = path.to_string_lossy().replace('\\', "/");
     if text.starts_with('/') {
         format!("file://{text}")

@@ -408,10 +408,16 @@ fn read_loop(stdout: impl Read, tx: Sender<DapEvent>, said: Option<StderrTail>) 
 /// custom `debugpySockets` event broke it) is directly testable without
 /// a real child process's `ChildStdout`.
 fn decode_message(bytes: &[u8]) -> DapEvent {
-    if let Ok(msg) = serde_json::from_slice::<ProtocolMessage>(bytes) {
-        return classify(msg);
+    // A refusal always goes through `lenient`, which reads its reason
+    // from wherever the adapter put it; anything else is read as it came
+    // first.
+    let refusal = serde_json::from_slice::<serde_json::Value>(bytes).ok().filter(|raw| raw["type"] == "response" && raw["success"] == false);
+    if refusal.is_none() {
+        if let Ok(msg) = serde_json::from_slice::<ProtocolMessage>(bytes) {
+            return classify(msg);
+        }
     }
-    let mut raw = match serde_json::from_slice::<serde_json::Value>(bytes) {
+    let mut raw = match refusal.map(Ok).unwrap_or_else(|| serde_json::from_slice::<serde_json::Value>(bytes)) {
         Ok(raw) => raw,
         Err(err) => return DapEvent::Disconnected(format!("malformed message from adapter: {err}")),
     };
@@ -454,6 +460,7 @@ fn lenient(raw: &mut serde_json::Value) -> bool {
     // take, or none, becomes an empty one, and what the spec doesn't name
     // goes.
     if raw["type"] == "response" && raw["success"] == false {
+        let detail = refusal_detail(raw);
         if let Some(message) = raw.as_object_mut() {
             let keep = ["seq", "type", "request_seq", "success", "command", "message"];
             message.retain(|k, _| keep.contains(&k.as_str()));
@@ -461,7 +468,9 @@ fn lenient(raw: &mut serde_json::Value) -> bool {
             if !message.get("command").is_some_and(|c| c.is_string()) {
                 message.insert("command".into(), serde_json::json!(""));
             }
-            if !message.get("message").is_some_and(|m| m.is_string()) {
+            if let Some(detail) = detail {
+                message.insert("message".into(), serde_json::json!(detail));
+            } else if !message.get("message").is_some_and(|m| m.as_str().is_some_and(|m| !m.trim().is_empty())) {
                 message.insert("message".into(), serde_json::json!("the adapter refused, without saying why"));
             }
             changed = true;
@@ -506,6 +515,30 @@ fn lenient(raw: &mut serde_json::Value) -> bool {
         }
     }
     changed
+}
+
+/// The reason a refusal gives in its `body.error` (DAP's `Message`), its
+/// `format` with the `{name}`s of its `variables` filled in: where the
+/// spec puts the detail, and where lldb-dap puts its only reason. With
+/// `message` as well, and saying something `format` doesn't, both.
+fn refusal_detail(raw: &serde_json::Value) -> Option<String> {
+    let error = raw.pointer("/body/error")?;
+    let mut text = error["format"].as_str()?.to_string();
+    if let Some(variables) = error["variables"].as_object() {
+        for (name, value) in variables {
+            let value = value.as_str().map(str::to_string).unwrap_or_else(|| value.to_string());
+            text = text.replace(&format!("{{{name}}}"), &value);
+        }
+    }
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    match raw["message"].as_str().map(str::trim) {
+        Some(message) if !message.is_empty() && !text.contains(message) && !message.contains(&text) => Some(format!("{message}: {text}")),
+        Some(message) if message.contains(&text) => Some(message.to_string()),
+        _ => Some(text),
+    }
 }
 
 fn classify(msg: ProtocolMessage) -> DapEvent {
@@ -703,6 +736,34 @@ mod tests {
             DapEvent::Response { result: Ok(SuccessResponse::StackTrace(body)), .. } => assert_eq!(body.stack_frames.len(), 2),
             other => panic!("expected a stack, got {other:?}"),
         }
+    }
+
+    fn refusal_text(bytes: &[u8]) -> String {
+        match decode_message(bytes) {
+            DapEvent::Response { result: Err(err), .. } => err.message,
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    /// lldb-dap says why an `evaluate` failed only in `body.error`: its
+    /// `format`, with the `variables` filled in, is the reason, not "the
+    /// adapter refused, without saying why".
+    #[test]
+    fn a_refusal_s_reason_is_read_from_its_error_body() {
+        let lldb = br#"{"seq":5,"type":"response","request_seq":9,"command":"evaluate","success":false,"body":{"error":{"id":3,"format":"error: use of undeclared identifier '{name}'","variables":{"name":"fraction"},"showUser":true}}}"#;
+        assert_eq!(refusal_text(lldb), "error: use of undeclared identifier 'fraction'");
+        // A short `message` and a detailed body: both.
+        let both = br#"{"seq":5,"type":"response","request_seq":9,"command":"evaluate","success":false,"message":"notStopped","body":{"error":{"id":1,"format":"the program is running"}}}"#;
+        assert_eq!(refusal_text(both), "notStopped: the program is running");
+        // The same said twice, once.
+        let twice = br#"{"seq":5,"type":"response","request_seq":9,"command":"evaluate","success":false,"message":"boom","body":{"error":{"id":1,"format":"boom"}}}"#;
+        assert_eq!(refusal_text(twice), "boom");
+        // A plain message, as before.
+        let plain = br#"{"seq":5,"type":"response","request_seq":9,"command":"evaluate","success":false,"message":"ZeroDivisionError"}"#;
+        assert_eq!(refusal_text(plain), "ZeroDivisionError");
+        // Nothing anywhere.
+        let none = br#"{"seq":5,"type":"response","request_seq":9,"command":"evaluate","success":false,"body":{}}"#;
+        assert_eq!(refusal_text(none), "the adapter refused, without saying why");
     }
 
     /// netcoredbg 3.1.2 numbers its messages with strings (`"seq":"2"`):

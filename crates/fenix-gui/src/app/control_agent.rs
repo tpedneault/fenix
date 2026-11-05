@@ -53,7 +53,7 @@ impl LspQuestion {
 /// The zero-based character in `line` that `params` means: `column`
 /// (from 1), or where `symbol` starts as a whole word, or the line's
 /// first non-blank.
-fn column_in(line: &str, params: &Value) -> Result<usize, RpcError> {
+pub(super) fn column_in(line: &str, params: &Value) -> Result<usize, RpcError> {
     if let Some(symbol) = params.get("symbol").and_then(Value::as_str) {
         return word_at(line, symbol).ok_or_else(|| RpcError::invalid_params(format!("{symbol} isn't on that line: {}", line.trim_end())));
     }
@@ -174,7 +174,7 @@ fn var_value(var: &debug_drawer::DebugVar) -> Value {
 
 impl App {
     /// `path` from `params`, against the project when relative.
-    fn control_path(&self, params: &Value) -> Result<PathBuf, RpcError> {
+    pub(super) fn control_path(&self, params: &Value) -> Result<PathBuf, RpcError> {
         let path = params.get("path").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("path: which file"))?;
         let path = PathBuf::from(path);
         Ok(if path.is_absolute() { path } else { self.integration_root().join(path) })
@@ -365,26 +365,47 @@ impl App {
         }
     }
 
-    /// The tools the extensions that are on offer agents.
+    /// The tools the extensions that are on offer agents: those installed
+    /// and switched on (`wasm.installed` holds only those), whatever
+    /// their state -- one stopped is listed, marked so.
     fn extension_tools(&self) -> Vec<(String, String, fenix_extensions::manifest::AgentToolContribution)> {
         let mut tools = Vec::new();
         for extension in &self.wasm.installed {
-            let short = extension.id.rsplit('.').next().unwrap_or(&extension.id).replace('-', "_");
+            let toolset = fenix_extensions::manifest::toolset_of(&extension.id);
             for tool in &extension.manifest.contributes.agent_tools {
-                tools.push((format!("{short}_{}", tool.name), extension.id.clone(), tool.clone()));
+                tools.push((format!("{toolset}_{}", tool.name), extension.id.clone(), tool.clone()));
             }
         }
         tools
     }
 
-    /// `fenix/tools`: what `fenix/tools.call` can run.
+    /// `fenix/tools`: what `fenix/tools.call` can run. Each tool has its
+    /// class (`read`, `show`, `edit`, `run`, `external`), its toolset (the
+    /// extension's short name, its name's prefix), whether it's offered by
+    /// default, its deadline in milliseconds, and `stopped` while its
+    /// extension is stopped (with why).
     pub(super) fn control_tools(&self) -> Value {
         let tools: Vec<Value> = self
             .extension_tools()
             .into_iter()
             .map(|(name, extension, tool)| {
                 let schema = tool.input.as_deref().and_then(|text| serde_json::from_str::<Value>(text).ok()).unwrap_or_else(|| json!({ "type": "object" }));
-                json!({ "name": name, "description": tool.description, "inputSchema": schema, "extension": extension, "writes": tool.writes })
+                let mut listed = json!({
+                    "name": name,
+                    "description": tool.description,
+                    "inputSchema": schema,
+                    "extension": extension,
+                    "writes": tool.writes,
+                    "class": tool.effective_class().as_str(),
+                    "toolset": fenix_extensions::manifest::toolset_of(&extension),
+                    "default": tool.default,
+                    "timeout_ms": tool.timeout_ms(),
+                });
+                if let Some(super::wasm_host::Status::Stopped(why)) = self.wasm.status.get(&extension) {
+                    listed["stopped"] = json!(true);
+                    listed["stoppedWhy"] = json!(why);
+                }
+                listed
             })
             .collect();
         json!({ "tools": tools })
@@ -392,15 +413,24 @@ impl App {
 
     /// `fenix/tools.call`: answered on `reply` by the extension's service.
     pub(super) fn control_tools_call(&mut self, params: Value, reply: Sender<Reply>) {
+        self.control_tools_call_with(params, reply, None);
+    }
+
+    /// `fenix/tools.call`, its progress (`service-progress`) given to
+    /// `progress` as it comes. The call's deadline is its tool's
+    /// `timeout_ms`, an answer given later included. The id is what
+    /// `code_serve_cancel` takes to give it up -- none when it was
+    /// answered at once (an unknown tool, one held back).
+    pub(crate) fn control_tools_call_with(&mut self, params: Value, reply: Sender<Reply>, progress: Option<super::wasm_host::OnProgress>) -> Option<super::wasm_host::ServeId> {
         let name = params.get("name").and_then(Value::as_str).unwrap_or("").to_string();
         let Some((_, extension, tool)) = self.extension_tools().into_iter().find(|(n, _, _)| *n == name) else {
             let _ = reply.send(Err(RpcError::invalid_params(format!("no tool {name}"))));
-            return;
+            return None;
         };
         if tool.writes {
             if let Err(error) = self.control_writes_allowed() {
                 let _ = reply.send(Err(error));
-                return;
+                return None;
             }
         }
         let payload = params.get("arguments").cloned().unwrap_or_else(|| json!({})).to_string();
@@ -408,7 +438,8 @@ impl App {
             let answer = said.map_err(RpcError::invalid_params).map(|text| serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)));
             let _ = reply.send(answer);
         };
-        self.code_serve(&extension, &tool.service, payload, super::wasm_host::Answer::Fenix(Box::new(then)));
+        let options = super::wasm_host::ServeOptions { timeout: Some(std::time::Duration::from_millis(u64::from(tool.timeout_ms()))), progress };
+        Some(self.code_serve_with(&extension, &tool.service, payload, super::wasm_host::Answer::Fenix(Box::new(then)), options))
     }
 }
 

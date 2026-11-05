@@ -11,6 +11,7 @@
 //!   attaching, resuming, crashes -- as a pure state machine.
 //! - `store`: threads kept on disk.
 //! - `catalog`: the agents Fenix knows how to start.
+//! - `pipeline`: prompts run through several agents in turn.
 //! - `mock`: an agent for tests, playing Claude Code's adapter.
 
 pub mod catalog;
@@ -18,6 +19,7 @@ pub mod client;
 pub mod driver;
 pub mod hub;
 pub mod mock;
+pub mod pipeline;
 pub mod protocol;
 pub mod registry;
 pub mod store;

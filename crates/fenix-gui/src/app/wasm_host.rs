@@ -1,6 +1,8 @@
 //! The extensions that run code (WebAssembly), in Fenix: each loaded on a
 //! worker thread of its own (`fenix_wasm::host`) when Fenix starts, if it
-//! asks to be, or the first time one of its commands runs. What they say,
+//! asks to be -- a language pack once a file or a project of its is open
+//! -- or the first time it's used. Nothing on the UI thread waits for one
+//! to load, nor for one let go to stop. What they say,
 //! what they ask of Fenix and how their calls end come back as
 //! `FenixUserEvent::Wasm`. Here they're answered: a picker, a prompt, a
 //! page (`code_page`), a terminal, a file opened, another extension's or
@@ -76,6 +78,47 @@ pub(crate) enum Answer {
     Fenix(Box<dyn FnOnce(&mut App, Result<String, String>)>),
 }
 
+/// How far a service call has got (`service-progress`, 1.2): what it's
+/// doing, and how much is done, 0 to 1, when it says.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Progress {
+    pub message: String,
+    pub fraction: Option<f32>,
+}
+
+/// Where a service call's progress goes, each time it says how far it's
+/// got: an agent's tool card, MCP's `notifications/progress`.
+pub(crate) type OnProgress = Box<dyn FnMut(&mut App, &Progress)>;
+
+/// How Fenix waits on a service call of its own (`code_serve_with`).
+#[derive(Default)]
+pub(crate) struct ServeOptions {
+    /// Past this, the caller gets an error, and the extension is told
+    /// (`service-cancelled`): the whole call, an answer given later
+    /// included (an agent tool's `timeout_ms`). None: as long as it takes.
+    pub timeout: Option<std::time::Duration>,
+    pub progress: Option<OnProgress>,
+}
+
+/// A service call in flight: who gets its answer, by when, and where its
+/// progress goes.
+struct Serving {
+    answer: Answer,
+    /// When it's given up on, and how long that was, to say so.
+    deadline: Option<(std::time::Instant, std::time::Duration)>,
+    progress: Option<OnProgress>,
+    /// The service's name, to say which one took too long.
+    name: String,
+}
+
+/// One of Fenix's service calls in flight: the extension answering, and
+/// Fenix's number for it -- what `code_serve_cancel` takes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ServeId {
+    pub server: String,
+    pub call: u64,
+}
+
 /// The PDF reader's services Fenix asks (`fenix.pdf`'s): a file opened at
 /// a page or a heading -- `gf` on `x.pdf#page=38`, a standard's clause --
 /// and a file searched, for the standards library.
@@ -101,6 +144,17 @@ struct Scratch {
     ext: String,
     id: u64,
     title: String,
+}
+
+/// A deadline said plainly: `30 s`, `2 min`, `1 min 30 s`.
+fn said_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64().round() as u64;
+    match (secs / 60, secs % 60) {
+        (0, 0) => format!("{} ms", d.as_millis()),
+        (0, s) => format!("{s} s"),
+        (m, 0) => format!("{m} min"),
+        (m, s) => format!("{m} min {s} s"),
+    }
 }
 
 /// The key pages draw extension `ext`'s image `id` by.
@@ -152,7 +206,7 @@ pub(crate) struct WasmHost {
     pub(crate) statuses: HashMap<String, String>,
     /// Service calls in flight, by the extension answering and Fenix's
     /// number for the call: who gets the answer.
-    serving: HashMap<(String, u64), Answer>,
+    serving: HashMap<(String, u64), Serving>,
     next_serve: u64,
     /// Each one's section on Home (`home-set`).
     pub(crate) home: HashMap<String, fenix_wasm::host::HomeSection>,
@@ -173,6 +227,15 @@ pub(crate) struct WasmHost {
     restored: u64,
     /// The project each worker was started in: its `/project`.
     projects: HashMap<String, Option<PathBuf>>,
+    /// Those running in a project other than the one you're in: started
+    /// again there the next time they're used (a command, a page, a
+    /// service, a language server), not all at once as you move. `/project`
+    /// is fixed for as long as a worker runs.
+    pub(crate) stale: HashSet<String>,
+    /// The extensions that wait for their files (`Activation::waits_for`),
+    /// and the projects already looked at for them and found not to be
+    /// theirs.
+    not_theirs: HashSet<(String, PathBuf)>,
     /// What each was last told it's in (`focus-changed`).
     focused: HashMap<String, Option<String>>,
     /// Terminals they opened, by buffer: whose, and its id there.
@@ -353,6 +416,64 @@ fn checked_spec(((program, args, cwd), env): (fenix_wasm::host::Checked, fenix_w
 /// servers': its own, beside any server it is (`<ext>:<server>`).
 pub(crate) fn problems_key(ext: &str) -> String {
     format!("{ext}:#problems")
+}
+
+/// What a call to an extension running in another project than yours
+/// (`WasmHost::stale`) does.
+#[derive(Debug, PartialEq, Eq)]
+enum Stale {
+    /// It's used: started again in yours first.
+    Restart,
+    /// Where you are in yours, which isn't its: not told.
+    Drop,
+    /// What it started itself, or no matter where: told where it is.
+    Deliver,
+}
+
+fn stale_call(what: &Call) -> Stale {
+    use fenix_wasm::host::Changed;
+    match what {
+        Call::RunCommand(_)
+        | Call::Render { .. }
+        | Call::Key { .. }
+        | Call::KeyPress { .. }
+        | Call::Mouse { .. }
+        | Call::Paste { .. }
+        | Call::SurfaceInput { .. }
+        | Call::PageRestore { .. }
+        | Call::Serve { .. }
+        | Call::Grant(_)
+        | Call::DecorationClicked { .. } => Stale::Restart,
+        Call::FocusMoved(_) | Call::ViewChanged(_) | Call::FileSaved(_) | Call::BufferChanged(Changed::File(_)) | Call::Deliver(Notice::FocusChanged(_)) | Call::Deliver(Notice::Saved(_)) => Stale::Drop,
+        _ => Stale::Deliver,
+    }
+}
+
+/// Whether the project at `root` is one an extension waiting for
+/// `languages` and `markers` is for: one of the markers at its top, or a
+/// file of one of the languages there or in `src/`.
+fn project_has(root: &Path, languages: &[String], markers: &[String]) -> bool {
+    let markers = fenix_extensions::manifest::ContextContribution { name: String::new(), markers: markers.to_vec(), languages: Vec::new(), pages: Vec::new() };
+    if markers.holds(root) {
+        return true;
+    }
+    if languages.is_empty() {
+        return false;
+    }
+    let speaks = |dir: &Path| {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| {
+            let path = entry.path();
+            path.is_file() && fenix_syntax::detect_language_from_path(&path).is_some_and(|l| languages.contains(&crate::lsp::language_config_name(l)))
+        })
+    };
+    speaks(root) || speaks(&root.join("src"))
+}
+
+/// Whether `ext` waits for its languages or markers before it loads
+/// (`Activation::waits_for`).
+fn waits(ext: &CodeExtension) -> bool {
+    let (languages, markers) = ext.manifest.activation.waits_for(&ext.manifest.contributes.contexts);
+    !languages.is_empty() || !markers.is_empty()
 }
 
 /// The same folder, however it's written.
@@ -619,15 +740,55 @@ pub(crate) enum Happened {
 }
 
 impl App {
-    /// At start-up: the code extensions there are, and those that start
-    /// with Fenix, started.
-    pub(super) fn code_extensions_at_startup(&mut self) {
+    /// At start-up, before the project is known: the code extensions
+    /// there are, and their project markers.
+    pub(super) fn code_extensions_installed(&mut self) {
         self.wasm.installed = crate::installed::code_extensions();
         // The packs' project markers: a project's top where Fenix's own
         // find none (a `dotnet new console` folder).
         let markers = self.wasm.installed.iter().flat_map(|e| &e.manifest.contributes.contexts).flat_map(|c| c.markers.iter().cloned()).collect();
         fenix_project::set_extension_markers(markers);
-        let starting: Vec<String> = self.wasm.installed.iter().filter(|e| e.manifest.activation.on_startup).map(|e| e.id.clone()).collect();
+    }
+
+    /// At start-up, once the project is known: those that start with
+    /// Fenix, started -- each on a worker of its own, so nothing here
+    /// waits for one to load. One for some languages or projects only (a
+    /// language pack: `Activation::waits_for`) waits for them instead
+    /// (`code_start_waiting`).
+    pub(super) fn code_extensions_at_startup(&mut self) {
+        let starting: Vec<String> = self.wasm.installed.iter().filter(|e| e.manifest.activation.on_startup && !waits(e)).map(|e| e.id.clone()).collect();
+        for id in starting {
+            self.start_code_extension(&id);
+        }
+    }
+
+    /// Those that wait for their languages or markers
+    /// (`Activation::waits_for`), started when the file you're in is one of
+    /// theirs or the project is: one of their markers at its top, or a
+    /// file of theirs there or in `src/`. One that stopped stays stopped.
+    fn code_start_waiting(&mut self, file: Option<&Path>, project: Option<&Path>) {
+        let language = file.and_then(fenix_syntax::detect_language_from_path).map(crate::lsp::language_config_name);
+        let mut starting = Vec::new();
+        for ext in self.wasm.installed.iter().filter(|e| !self.wasm.workers.contains_key(&e.id) && !self.wasm.status.contains_key(&e.id)) {
+            let (languages, markers) = ext.manifest.activation.waits_for(&ext.manifest.contributes.contexts);
+            if languages.is_empty() && markers.is_empty() {
+                continue;
+            }
+            if language.as_ref().is_some_and(|l| languages.contains(l)) {
+                starting.push(ext.id.clone());
+                continue;
+            }
+            let Some(root) = project else { continue };
+            let key = (ext.id.clone(), root.to_path_buf());
+            if self.wasm.not_theirs.contains(&key) {
+                continue;
+            }
+            if project_has(root, &languages, &markers) {
+                starting.push(ext.id.clone());
+            } else {
+                self.wasm.not_theirs.insert(key);
+            }
+        }
         for id in starting {
             self.start_code_extension(&id);
         }
@@ -726,7 +887,8 @@ impl App {
         spec.call_ticks = call_ticks(&ext.manifest);
         spec.permissions = ext.manifest.permissions.clone();
         // `/project` is fixed for as long as the worker runs; moving to
-        // another project starts it again there (`code_focus_changed`).
+        // another project starts it again there when it's next used
+        // (`code_focus_changed`, `code_call`).
         spec.project = self.code_project();
         spec.events = ext.manifest.contributes.events.clone();
         spec.tools_dir = if cfg!(test) { None } else { fenix_storage::paths::tools_dir() };
@@ -824,13 +986,28 @@ impl App {
         // you went between its page and your code.
         let file = self.open().buffer.path().map(Path::to_path_buf);
         let project = file.as_deref().and_then(fenix_project::find_project_root);
+        self.code_start_waiting(file.as_deref(), project.as_deref());
         let running: Vec<CodeExtension> = self.wasm.installed.iter().filter(|e| self.wasm.workers.contains_key(&e.id) && e.manifest.permissions.filesystem != fenix_extensions::manifest::Filesystem::None).cloned().collect();
         for ext in running {
             let theirs = self.wasm.projects.get(&ext.id).cloned().flatten();
             if project.is_some() && theirs != project {
-                self.restart_code_extension(&ext.id);
+                // Its `/project` can't move. A language pack for the
+                // project you're in starts again here now -- its server,
+                // tasks and checks are this project's; any other, the
+                // next time it's used. Forty of them, every one starting
+                // again at each move, held Fenix up for seconds.
+                let (languages, markers) = ext.manifest.activation.waits_for(&ext.manifest.contributes.contexts);
+                let pack = !languages.is_empty() || !markers.is_empty();
+                let here = pack && (file.as_deref().and_then(fenix_syntax::detect_language_from_path).map(crate::lsp::language_config_name).is_some_and(|l| languages.contains(&l)) || project.as_deref().is_some_and(|root| project_has(root, &languages, &markers)));
+                if here {
+                    self.restart_code_extension(&ext.id);
+                } else if self.wasm.stale.insert(ext.id.clone()) {
+                    self.note_output(&ext.id, "-- you moved to another project: it starts again there when it's next used".into());
+                }
                 continue;
             }
+            // Back in its own project: it carries on as it was.
+            self.wasm.stale.remove(&ext.id);
             let guest = match (&file, &theirs) {
                 (Some(file), Some(root)) => file.strip_prefix(root).ok().map(|rel| format!("/project/{}", rel.to_string_lossy().replace('\\', "/"))),
                 _ => None,
@@ -1137,10 +1314,16 @@ impl App {
             _ => None,
         }).collect();
         self.note_output(ext, "-- the project changed: starting again there".into());
-        self.wasm.workers.remove(ext);
+        self.wasm.stale.remove(ext);
+        // Let go, not waited for: one still loading or in a call would hold
+        // the UI thread until it's done.
+        if let Some(worker) = self.wasm.workers.remove(ext) {
+            worker.detach();
+        }
         self.forget_code_lsp_sessions(ext);
         self.wasm.status.remove(ext);
         self.wasm.queued.remove(ext);
+        self.code_serving_stopped(ext, "it started again, in the project you moved to");
         self.wasm.calls.retain(|(e, _), _| e != ext);
         self.wasm.statuses.remove(ext);
         self.wasm.focused.remove(ext);
@@ -1205,8 +1388,25 @@ impl App {
         *cursor.write().unwrap() = at;
     }
 
-    /// Sends `what` to extension `ext`, starting it first if need be.
+    /// Sends `what` to extension `ext`, starting it first if need be --
+    /// or, when it's running in another project than yours
+    /// (`WasmHost::stale`), starting it again here first if this uses it;
+    /// what's only about where you are isn't told it there.
     fn code_call(&mut self, ext: &str, what: Call, ticks: u64, pending: Pending) {
+        if self.wasm.stale.contains(ext) {
+            match stale_call(&what) {
+                Stale::Restart => {
+                    self.restart_code_extension(ext);
+                    // Its pages are put back under new ids, and laid out
+                    // again as they ask: what was for the old ones goes.
+                    if what.is_page() && !matches!(what, Call::PageRestore { .. }) {
+                        return;
+                    }
+                }
+                Stale::Drop => return,
+                Stale::Deliver => {}
+            }
+        }
         // A command's, an event's, a service's: the extension's own deadline
         // (`limits.call_ms`, its worker's `call_ticks`).
         let ticks = if ticks == COMMAND_TICKS { 0 } else { ticks };
@@ -1509,18 +1709,85 @@ impl App {
     /// Asks code extension `server` for service `name`; `answer` gets
     /// what it says, now or later.
     pub(crate) fn code_serve(&mut self, server: &str, name: &str, payload: String, answer: Answer) {
+        self.code_serve_with(server, name, payload, answer, ServeOptions::default());
+    }
+
+    /// `code_serve`, with a deadline for the whole call and somewhere for
+    /// its progress to go: what an agent's tool call is. The id it
+    /// returns is what `code_serve_cancel` takes.
+    pub(crate) fn code_serve_with(&mut self, server: &str, name: &str, payload: String, answer: Answer, options: ServeOptions) -> ServeId {
         self.wasm.next_serve += 1;
         let call = self.wasm.next_serve;
-        self.wasm.serving.insert((server.to_string(), call), answer);
+        let deadline = options.timeout.map(|t| (std::time::Instant::now() + t, t));
+        self.wasm.serving.insert((server.to_string(), call), Serving { answer, deadline, progress: options.progress, name: name.to_string() });
         self.code_call(server, Call::Serve { call, name: name.to_string(), payload }, COMMAND_TICKS, Pending::Serve(call));
+        ServeId { server: server.to_string(), call }
+    }
+
+    /// Service call `id` given up on -- an agent cancelled its tool call,
+    /// or its turn: its caller is answered with `why` (an error), and the
+    /// extension told (`service-cancelled`), so what it does for it can
+    /// stop. An answer it gives after goes nowhere. False when the call
+    /// was already answered.
+    pub(crate) fn code_serve_cancel(&mut self, id: &ServeId, why: &str) -> bool {
+        if !self.wasm.serving.contains_key(&(id.server.clone(), id.call)) {
+            return false;
+        }
+        self.code_answered(&id.server, id.call, Err(why.to_string()));
+        if self.code_ready(&id.server) {
+            self.code_call(&id.server, Call::ServiceCancelled(id.call), COMMAND_TICKS, Pending::Other);
+        }
+        true
+    }
+
+    /// Fenix's service calls past their deadline: given up on, with an
+    /// error saying so. When the next one is due.
+    pub(crate) fn code_serve_deadlines(&mut self, now: std::time::Instant) -> Option<std::time::Instant> {
+        let late: Vec<(ServeId, String)> = self
+            .wasm
+            .serving
+            .iter()
+            .filter_map(|((server, call), s)| {
+                let (at, took) = s.deadline?;
+                (now >= at).then(|| (ServeId { server: server.clone(), call: *call }, format!("{} didn't answer in {}: it took too long", s.name, said_duration(took))))
+            })
+            .collect();
+        for (id, why) in late {
+            self.note_output(&id.server, format!("  warn  {why}"));
+            self.code_serve_cancel(&id, &why);
+        }
+        self.wasm.serving.values().filter_map(|s| s.deadline.map(|(at, _)| at)).min()
+    }
+
+    /// Every service call extension `ext` was to answer, answered with an
+    /// error: it stopped (`why`), so none will come.
+    fn code_serving_stopped(&mut self, ext: &str, why: &str) {
+        let mut open: Vec<u64> = self.wasm.serving.keys().filter(|(server, _)| server == ext).map(|(_, call)| *call).collect();
+        open.sort_unstable();
+        let why = format!("the extension stopped: {why}");
+        for call in open {
+            self.code_answered(ext, call, Err(why.clone()));
+        }
     }
 
     /// Service call `call` to `server` answered: to whoever asked.
     fn code_answered(&mut self, server: &str, call: u64, answer: Result<String, String>) {
-        match self.wasm.serving.remove(&(server.to_string(), call)) {
+        match self.wasm.serving.remove(&(server.to_string(), call)).map(|s| s.answer) {
             Some(Answer::Ext { asker, id }) => self.code_deliver(&asker, Notice::ServiceReply((id, answer))),
             Some(Answer::Fenix(then)) => then(self, answer),
             None => {}
+        }
+    }
+
+    /// Service call `call` to `server` says how far it's got: to whoever
+    /// waits for it, when they listen (an extension asking another has no
+    /// event to hear it by).
+    fn code_progress(&mut self, server: &str, call: u64, progress: Progress) {
+        let key = (server.to_string(), call);
+        let Some(mut then) = self.wasm.serving.get_mut(&key).and_then(|s| s.progress.take()) else { return };
+        then(self, &progress);
+        if let Some(s) = self.wasm.serving.get_mut(&key) {
+            s.progress = Some(then);
         }
     }
 
@@ -1948,6 +2215,14 @@ impl App {
         self.wasm.decorations.get(&buffer).map(|sets| sets.iter().flat_map(|(_, set)| set.iter()).collect()).unwrap_or_default()
     }
 
+    /// Its `agents.ask` call `call`'s answer so far (`agent-ask-progress`),
+    /// told when it has that export.
+    pub(super) fn code_ask_progress(&mut self, ext: &str, call: u64, text: String) {
+        if self.code_ready(ext) {
+            self.code_call(ext, Call::AgentAskProgress { call, text }, COMMAND_TICKS, Pending::Other);
+        }
+    }
+
     /// Gives `notice` to extension `ext`, if it's running.
     pub(super) fn code_deliver(&mut self, ext: &str, notice: Notice) {
         if matches!(self.wasm.status.get(ext), Some(Status::Ready)) {
@@ -2084,6 +2359,9 @@ impl App {
                         self.set_error(format!("{why} -- SPC h l has what it said"));
                     }
                 }
+                // Its callers answered: those queued, and those it was
+                // to answer later.
+                self.code_serving_stopped(&ext, &why);
                 self.mark_code_pages(&ext, |p| p.stopped = Some(why.clone()));
                 self.wasm.focus_told.remove(&ext);
                 self.wasm.layers.forget(&ext);
@@ -2235,6 +2513,7 @@ impl App {
                 self.page_images.image_sizes.remove(&key);
             }
             Request::ServiceAnswer { call, answer } => self.code_answered(ext, call, answer),
+            Request::ServiceProgress { call, message, fraction } => self.code_progress(ext, call, Progress { message, fraction }),
             Request::Prompt { id, label, initial, masked } => {
                 self.wasm.prompt = Some(CodePrompt { ext: ext.to_string(), id, label, input: initial, masked });
                 self.wake_caret();
@@ -2378,16 +2657,28 @@ impl App {
             Request::LanguageServer { languages, program } => {
                 let Some(root) = self.wasm.projects.get(ext).cloned().flatten() else { return self.note_output(ext, "-- language-server-set: it has no project".into()) };
                 let key = (ext.to_string(), root.clone());
-                match program {
+                let before = self.wasm.servers.get(&key).cloned();
+                let now = program.map(|given| (languages, checked_spec(given)));
+                if before == now {
+                    return;
+                }
+                // Only the servers of the languages it names, then and now:
+                // every pack saying its own as it starts was stopping and
+                // starting the others' -- rust-analyzer as the Ada pack
+                // started.
+                let mut affected: Vec<String> = before.iter().chain(now.iter()).flat_map(|(languages, _)| languages.iter().cloned()).collect();
+                affected.sort();
+                affected.dedup();
+                match now {
                     // Where it said, with its environment.
                     Some(given) => {
-                        self.wasm.servers.insert(key, (languages, checked_spec(given)));
+                        self.wasm.servers.insert(key, given);
                     }
                     None => {
                         self.wasm.servers.remove(&key);
                     }
                 }
-                self.restart_language_servers_in(&root);
+                self.restart_language_servers_for(&root, &affected);
             }
             Request::LanguageServerAdd { name, languages, program } => {
                 let Some(root) = self.wasm.projects.get(ext).cloned().flatten() else { return self.note_output(ext, "-- language-server-add: it has no project".into()) };
@@ -2750,6 +3041,15 @@ impl App {
                 let root = self.wasm.projects.get(ext).cloned().flatten();
                 self.agents_ask(ext, id, &payload, root);
             }
+            // One of its asks given up on: `{"call": <its agents.ask call>}`.
+            Request::Service { id, name, payload } if name == "agents.cancel" => {
+                let call = serde_json::from_str::<serde_json::Value>(&payload).ok().and_then(|v| v.get("call").and_then(serde_json::Value::as_u64));
+                let answer = match call {
+                    Some(call) => self.agents_ask_cancel(ext, call).then(String::new).ok_or_else(|| format!("no ask {call} of its is waiting")),
+                    None => Err("agents.cancel: {\"call\": <the agents.ask call>}".to_string()),
+                };
+                self.code_deliver(ext, Notice::ServiceReply((id, answer)));
+            }
             Request::Service { id, name, payload } => {
                 // Another code extension's.
                 match self.code_server(&name, Some(ext)) {
@@ -3089,6 +3389,20 @@ impl App {
         self.sync_lsp_for_focused_buffer();
     }
 
+    /// The primary language servers for `languages` (Fenix's names) in the
+    /// project at `root`, stopped and started again as its files need
+    /// them; the others carry on.
+    fn restart_language_servers_for(&mut self, root: &Path, languages: &[String]) {
+        let root = fenix_lsp::normalize(refactor::identity(root));
+        let theirs = |key: &super::LspKey| key.root == root && matches!(key.server, super::LspServer::Primary(l) if languages.contains(&crate::lsp::language_config_name(l)));
+        self.lsp_unavailable.retain(|key| !theirs(key));
+        let running: Vec<_> = self.lsp_sessions.keys().filter(|key| theirs(key)).cloned().collect();
+        for key in running {
+            self.stop_lsp_session(&key);
+        }
+        self.sync_lsp_for_focused_buffer();
+    }
+
     /// The buffer of extension `ext`'s terminal `id`, while it's open.
     fn code_terminal(&self, ext: &str, id: u64) -> Option<BufferId> {
         self.wasm.terminals.iter().find(|(b, (e, i))| e == ext && *i == id && self.buffers.get(**b).is_some()).map(|(b, _)| *b)
@@ -3375,6 +3689,7 @@ impl App {
         let mut out = String::new();
         for ext in &self.wasm.installed {
             let status = match self.wasm.status.get(&ext.id) {
+                None if waits(ext) => "not started: it starts with a file of its languages, or in a project of its".to_string(),
                 None => "not started: it starts the first time one of its commands runs".to_string(),
                 Some(Status::Starting) => "starting".into(),
                 Some(Status::Ready) => "running".into(),
@@ -3538,6 +3853,10 @@ pub(crate) mod tests {
         let list = app.control_tools();
         assert_eq!(list["tools"][0]["name"], "hello_later");
         assert_eq!(list["tools"][1]["writes"], true);
+        let first = &list["tools"][0];
+        assert_eq!((first["class"].as_str(), first["toolset"].as_str(), first["default"].as_bool(), first["timeout_ms"].as_u64()), (Some("read"), Some("hello"), Some(false), Some(30_000)));
+        assert_eq!(list["tools"][1]["class"], "run", "writes, with no class: run");
+        assert!(first.get("stopped").is_none());
         let (reply, answer) = std::sync::mpsc::channel();
         app.control_tools_call(serde_json::json!({ "name": "hello_later", "arguments": { "a": 1 } }), reply);
         let got = std::cell::RefCell::new(None);
@@ -3554,6 +3873,68 @@ pub(crate) mod tests {
         let (reply, answer) = std::sync::mpsc::channel();
         app.control_tools_call(serde_json::json!({ "name": "hello_nothing" }), reply);
         assert!(answer.recv().unwrap().unwrap_err().message.contains("no tool"));
+    }
+
+    /// A tool call that's never answered is given up on at its deadline:
+    /// its caller gets an error, the extension is told; what it said of
+    /// its progress reached the caller first. A cancelled one is the same.
+    #[test]
+    fn a_tool_call_past_its_deadline_or_cancelled_is_answered_and_told() {
+        let mut app = App::with_file(None);
+        app.wasm.installed = vec![hello("[contributes]\nservices = [\"hello.forever\"]\n\n[[contributes.agent_tools]]\nname = \"forever\"\ndescription = \"Never\"\nservice = \"hello.forever\"\ntimeout_ms = 200\n")];
+        let list = app.control_tools();
+        assert_eq!(list["tools"][0]["timeout_ms"], 200);
+        let progress = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let heard = progress.clone();
+        let (reply, answer) = std::sync::mpsc::channel();
+        let id = app.control_tools_call_with(serde_json::json!({ "name": "hello_forever" }), reply, Some(Box::new(move |_, p: &Progress| heard.borrow_mut().push(p.clone())))).expect("in flight");
+        pump_until(&mut app, |_| progress.borrow().len() == 2);
+        assert_eq!(progress.borrow()[0], Progress { message: "working".into(), fraction: Some(0.5) });
+        assert_eq!(progress.borrow()[1].fraction, None);
+        assert!(answer.try_recv().is_err(), "nothing yet");
+        // Woken for its deadline (it may have passed while it started).
+        while let Some(due) = app.code_serve_deadlines(std::time::Instant::now()) {
+            std::thread::sleep(due.saturating_duration_since(std::time::Instant::now()));
+        }
+        let err = answer.recv().unwrap().unwrap_err().message;
+        assert!(err.contains("hello.forever didn't answer in 200 ms"), "{err}");
+        pump_until(&mut app, |a| said(a, &format!("service {} cancelled", id.call)));
+        assert!(!app.code_serve_cancel(&id, "again"), "answered already");
+
+        // Cancelled by its caller: the same, with why.
+        let got = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let kept = got.clone();
+        let id = app.code_serve_with("test.hello", "hello.forever", String::new(), Answer::Fenix(Box::new(move |_, a| *kept.borrow_mut() = Some(a))), ServeOptions::default());
+        pump_until(&mut app, |a| a.wasm.calls.is_empty());
+        assert!(app.code_serve_cancel(&id, "the agent cancelled it"));
+        assert_eq!(got.borrow().clone(), Some(Err("the agent cancelled it".to_string())));
+        pump_until(&mut app, |a| said(a, &format!("service {} cancelled", id.call)));
+    }
+
+    /// An extension that stops answers every call it was to answer: those
+    /// it would answer later, and those still waiting for it.
+    #[test]
+    fn a_stopped_extension_answers_its_callers() {
+        let mut app = App::with_file(None);
+        app.wasm.installed = vec![hello("")];
+        let answers = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let later = answers.clone();
+        app.code_serve("test.hello", "hello.forever", String::new(), Answer::Fenix(Box::new(move |_, a| later.borrow_mut().push(a))));
+        pump_until(&mut app, |a| a.code_ready("test.hello") && a.wasm.calls.is_empty());
+        app.run_extension_command("test.hello", "hello.spin");
+        let queued = answers.clone();
+        app.code_serve("test.hello", "hello.upper", "x".into(), Answer::Fenix(Box::new(move |_, a| queued.borrow_mut().push(a))));
+        pump_until(&mut app, |_| answers.borrow().len() == 2);
+        for answer in answers.borrow().iter() {
+            let err = answer.clone().unwrap_err();
+            assert!(err.contains("stopped") && err.contains("took too long"), "{err}");
+        }
+        assert!(answers.borrow()[0].clone().unwrap_err().starts_with("the extension stopped: "), "{:?}", answers.borrow());
+        let list = app.control_tools();
+        assert!(list["tools"].as_array().unwrap().is_empty());
+        app.wasm.installed = vec![hello("[contributes]\nservices = [\"hello.forever\"]\n\n[[contributes.agent_tools]]\nname = \"forever\"\ndescription = \"Never\"\nservice = \"hello.forever\"\n")];
+        let list = app.control_tools();
+        assert_eq!(list["tools"][0]["stopped"], true, "listed, marked stopped: {list}");
     }
 
     /// A service it answers later reaches Fenix's own caller when it
@@ -3989,7 +4370,14 @@ pub(crate) mod tests {
         std::fs::write(other.path().join("main.cpp"), "int main() {}\n").unwrap();
         app.open_file_from_picker(&other.path().join("main.cpp"));
         app.tell_extensions(super::Happened::FocusChanged);
-        pump_until(&mut app, |a| said(a, "the project changed: starting again there"));
+        // Not as you move: the next time it's used.
+        assert!(said(&app, "you moved to another project: it starts again there when it's next used"), "{}", app.extension_output_text());
+        assert!(!said(&app, "the project changed: starting again there"));
+        assert_eq!(app.wasm.projects.get("test.hello").cloned().flatten(), before);
+        // Its page laid out is its use.
+        app.code_page_wants(buffer, 80, 24);
+        assert!(said(&app, "the project changed: starting again there"));
+        assert!(!app.wasm.stale.contains("test.hello"));
         let now = app.wasm.projects.get("test.hello").cloned().flatten();
         assert_ne!(now, before);
         assert_eq!(now.as_deref().and_then(Path::file_name), other.path().file_name(), "{now:?}");
@@ -4010,6 +4398,128 @@ pub(crate) mod tests {
         app.tell_extensions(super::Happened::FocusChanged);
         pump_until(&mut app, |a| said(a, "in Some(\"/project/b.cpp\")"));
         assert_eq!(app.extension_output_text().matches("starting again there").count(), 1);
+    }
+
+    /// Moving to another project, a language pack for it starts again
+    /// there at once; another extension that reads the project isn't
+    /// started again until it's used, and carries on as it was if you come
+    /// back first. Every extension starting again at every move held
+    /// Fenix up.
+    #[test]
+    fn moving_to_another_project_starts_its_pack_again_and_the_rest_when_used() {
+        let mut app = App::with_file(None);
+        let mut pack = hello("[activation]\non_startup = true\n\n[permissions]\nfilesystem = \"project-read\"\n\n[[contributes.contexts]]\nname = \"hello-cpp\"\nlanguages = [\"cpp\"]\n");
+        pack.id = "test.pack".into();
+        app.wasm.installed = vec![pack, hello("[permissions]\nfilesystem = \"project-read\"\n")];
+        let project = |name: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join(".git")).unwrap();
+            std::fs::write(dir.path().join(name), "\n").unwrap();
+            dir
+        };
+        let (a, b) = (project("a.cpp"), project("b.cpp"));
+        let root = |app: &App, ext: &str| app.wasm.projects.get(ext).cloned().flatten().and_then(|p| p.file_name().map(|n| n.to_owned()));
+        app.open_file_from_picker(&a.path().join("a.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert!(app.wasm.workers.contains_key("test.pack"), "a C++ file: its pack starts");
+        app.start_code_extension("test.hello");
+        pump_until(&mut app, |a| a.code_ready("test.pack") && a.code_ready("test.hello"));
+
+        app.open_file_from_picker(&b.path().join("b.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert_eq!(root(&app, "test.pack").as_deref(), b.path().file_name(), "the pack, at once");
+        assert!(app.wasm.output["test.pack"].iter().any(|l| l.contains("the project changed: starting again there")));
+        assert!(app.wasm.stale.contains("test.hello"));
+        assert_eq!(root(&app, "test.hello").as_deref(), a.path().file_name(), "the other, not yet");
+
+        // Back before it's used: it was never stopped.
+        app.open_file_from_picker(&a.path().join("a.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert!(!app.wasm.stale.contains("test.hello"));
+        app.open_file_from_picker(&b.path().join("b.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert!(app.wasm.stale.contains("test.hello"));
+        // Where you are isn't told it there.
+        let calls = app.wasm.calls.len();
+        app.code_call("test.hello", Call::FileSaved("/project/b.cpp".into()), COMMAND_TICKS, Pending::Other);
+        app.code_call("test.hello", Call::FocusMoved(Focus::None), COMMAND_TICKS, Pending::Other);
+        assert_eq!(app.wasm.calls.len(), calls);
+        assert!(app.wasm.stale.contains("test.hello"));
+
+        // Used: it starts again here, and runs.
+        app.run_extension_command("test.hello", "hello.greet");
+        assert!(!app.wasm.stale.contains("test.hello"));
+        assert_eq!(root(&app, "test.hello").as_deref(), b.path().file_name());
+        pump_until(&mut app, |a| said(a, "hello, Fenix"));
+        assert_eq!(app.wasm.output["test.hello"].iter().filter(|l| l.contains("the project changed")).count(), 1);
+    }
+
+    /// One for some languages or projects only -- a language pack that
+    /// starts with Fenix, or one whose `[activation]` names them -- waits
+    /// until a file of its language is opened or a project of its marker
+    /// is; one that starts with Fenix and names none starts with it.
+    #[test]
+    fn a_pack_waits_for_its_language_or_marker_and_the_rest_start_with_fenix() {
+        let mut app = App::with_file(None);
+        let mut pack = hello("[activation]\non_startup = true\n\n[[contributes.contexts]]\nname = \"hello-cpp\"\nlanguages = [\"cpp\"]\n");
+        pack.id = "test.pack".into();
+        let mut named = hello("[activation]\nlanguages = [\"rust\"]\nmarkers = [\"{folder}.hello\"]\n");
+        named.id = "test.named".into();
+        let mut eager = hello("[activation]\non_startup = true\n\n[[contributes.contexts]]\nname = \"hello-screen\"\npages = [\"screen\"]\n");
+        eager.id = "test.eager".into();
+        app.wasm.installed = vec![pack, named, eager];
+        app.code_extensions_at_startup();
+        let started = |app: &App| ["test.pack", "test.named", "test.eager"].map(|id| app.wasm.workers.contains_key(id));
+        assert_eq!(started(&app), [false, false, true]);
+        assert!(app.extension_output_text().contains("it starts with a file of its languages, or in a project of its"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("Notes");
+        std::fs::create_dir_all(notes.join(".git")).unwrap();
+        std::fs::write(notes.join("todo.txt"), "\n").unwrap();
+        app.open_file_from_picker(&notes.join("todo.txt"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert_eq!(started(&app), [false, false, true], "neither's");
+
+        std::fs::write(notes.join("main.cpp"), "\n").unwrap();
+        app.open_file_from_picker(&notes.join("main.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert_eq!(started(&app), [true, false, true], "a C++ file");
+
+        let sketch = dir.path().join("Blink");
+        std::fs::create_dir_all(sketch.join(".git")).unwrap();
+        std::fs::write(sketch.join("Blink.hello"), "").unwrap();
+        std::fs::write(sketch.join("readme.txt"), "\n").unwrap();
+        app.open_file_from_picker(&sketch.join("readme.txt"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert_eq!(started(&app), [true, true, true], "a project of its marker");
+    }
+
+    /// An extension setting its language server starts again only the
+    /// servers of the languages it names, and only when it changes them:
+    /// each pack setting its own as it started was stopping every other
+    /// server of the project.
+    #[test]
+    fn setting_its_server_restarts_only_that_languages_servers() {
+        let mut app = App::with_file(None);
+        app.wasm.installed = vec![hello("[permissions]\nprocess = [\"cmd\"]\nfilesystem = \"project-read\"\n")];
+        app.start_code_extension("test.hello");
+        let root = app.wasm.projects.get("test.hello").cloned().flatten().expect("a project: Fenix's own, in tests");
+        let at = fenix_lsp::normalize(refactor::identity(&root));
+        let rust = super::super::LspKey::primary(fenix_syntax::LanguageId::Rust, at.clone());
+        let cpp = super::super::LspKey::primary(fenix_syntax::LanguageId::Cpp, at.clone());
+        let _r = reading_server(&mut app, rust.clone(), serde_json::json!({}));
+        let _c = reading_server(&mut app, cpp.clone(), serde_json::json!({}));
+        let set = |app: &mut App, program: &str| {
+            let checked = ((program.to_string(), vec!["--stdio".to_string()], None), Vec::new());
+            app.answer_code_request("test.hello", Request::LanguageServer { languages: vec!["cpp".into()], program: Some(checked) });
+        };
+        set(&mut app, "hello-ls");
+        assert!(app.lsp_sessions.contains_key(&rust), "rust-analyzer carries on");
+        assert!(!app.lsp_sessions.contains_key(&cpp), "C++'s starts again");
+        let _c = reading_server(&mut app, cpp.clone(), serde_json::json!({}));
+        set(&mut app, "hello-ls");
+        assert!(app.lsp_sessions.contains_key(&cpp), "the same again: nothing to start again");
     }
 
     /// What it says about its project -- a language server, doctor checks,
@@ -4940,7 +5450,7 @@ pub(crate) mod tests {
         let (client, _) = fenix_lsp::LspClient::connect(from_server, to_server);
         app.lsp_sessions.insert(key.clone(), super::super::LspSession {
             generation: 1, client, name: "server".into(), languages: vec!["javascript".into()], root: key.root.clone(), reader: None,
-            capabilities: Some(serde_json::from_value(caps).unwrap()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(serde_json::from_value(caps).unwrap()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
         });
         std::io::BufReader::new(from_fenix)
     }

@@ -342,9 +342,53 @@ pub fn buffer_words(buffer: &Buffer) -> HashSet<String> {
         .collect()
 }
 
+/// `buffer_words`, without the word the cursor is typing -- `clas` in
+/// `clas|` isn't something to complete `clas` to, and offered first it
+/// took `Enter` -- unless that word is in the buffer somewhere else too.
+pub fn buffer_words_besides_cursor(buffer: &Buffer, cursor: &Cursor) -> HashSet<String> {
+    let mut words = buffer_words(buffer);
+    let at = cursor.char_idx.min(buffer.len_chars());
+    let mut start = at;
+    while start > 0 && buffer.char_at(start - 1).is_some_and(is_ident_char) {
+        start -= 1;
+    }
+    let mut end = at;
+    while buffer.char_at(end).is_some_and(is_ident_char) {
+        end += 1;
+    }
+    if start == end {
+        return words;
+    }
+    let typed: String = (start..end).filter_map(|i| buffer.char_at(i)).collect();
+    let text = buffer.text();
+    let occurrences = text.split(|c: char| !is_ident_char(c)).filter(|w| *w == typed).count();
+    if occurrences <= 1 {
+        words.remove(&typed);
+    }
+    words
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_word_being_typed_isnt_offered_unless_it_is_elsewhere() {
+        let buffer = buf("class A:\n    pass\nclas");
+        let words = buffer_words_besides_cursor(&buffer, &cur(buffer.len_chars()));
+        assert!(words.contains("class") && !words.contains("clas"), "{words:?}");
+        // `level` is in the file: typing `lev` offers `level`, not `lev`.
+        let buffer = buf("level = 1\nlev");
+        let words = buffer_words_besides_cursor(&buffer, &cur(buffer.len_chars()));
+        assert!(words.contains("level") && !words.contains("lev"));
+        // Typed, and also written elsewhere: still offered.
+        let buffer = buf("seek seek");
+        assert!(buffer_words_besides_cursor(&buffer, &cur(9)).contains("seek"));
+        // The cursor mid-word: the whole word is the one being typed.
+        let buffer = buf("other mid_word");
+        let words = buffer_words_besides_cursor(&buffer, &cur(9));
+        assert!(!words.contains("mid_word") && words.contains("other"));
+    }
 
     fn buf(text: &str) -> Buffer {
         Buffer::from_text(text)

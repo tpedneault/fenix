@@ -83,14 +83,30 @@ pub fn resolve_command(command: &str) -> String {
 /// response but was never actually hit). A no-op on every other
 /// platform (and on a Windows path that was never canonicalized in the
 /// first place).
+///
+/// The UNC form, `\\?\UNC\server\share`, becomes `\\server\share`. On
+/// Windows the separators are made one kind too: a root joined with a
+/// forward-slashed name (`C:\src/main.rs`) reads `C:\src\main.rs`, in
+/// what Fenix shows and what it sends.
 pub fn normalize(path: std::path::PathBuf) -> std::path::PathBuf {
-    match path.to_str() {
-        Some(s) => match s.strip_prefix(r"\\?\") {
-            Some(stripped) => std::path::PathBuf::from(stripped),
-            None => path,
-        },
+    match path.to_str().and_then(|s| plain_text(s, cfg!(windows))) {
+        Some(plain) => std::path::PathBuf::from(plain),
         None => path,
     }
+}
+
+/// `normalize` on the text of a path: `None` when there's nothing to
+/// change. `windows` also makes every `/` a `\`.
+fn plain_text(text: &str, windows: bool) -> Option<String> {
+    let stripped = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        text.to_string()
+    };
+    let plain = if windows { stripped.replace('/', "\\") } else { stripped };
+    (plain != text).then_some(plain)
 }
 
 /// Reads one framed message from `reader`, returning its raw body bytes
@@ -363,7 +379,7 @@ mod resolve_command_tests {
 
 #[cfg(test)]
 mod normalize_tests {
-    use super::normalize;
+    use super::{normalize, plain_text};
     use std::path::PathBuf;
 
     #[test]
@@ -374,6 +390,17 @@ mod normalize_tests {
     #[test]
     fn is_a_no_op_on_a_path_with_no_verbatim_prefix() {
         assert_eq!(normalize(PathBuf::from(r"C:\Users\thoma\file.py")), PathBuf::from(r"C:\Users\thoma\file.py"));
+    }
+
+    #[test]
+    fn plain_text_drops_both_verbatim_forms_and_on_windows_mixed_separators() {
+        assert_eq!(plain_text(r"\\?\C:\src\a.rs", false).as_deref(), Some(r"C:\src\a.rs"));
+        assert_eq!(plain_text(r"\\?\UNC\server\share\a.rs", false).as_deref(), Some(r"\\server\share\a.rs"));
+        assert_eq!(plain_text(r"C:\ledger\src/main.rs", true).as_deref(), Some(r"C:\ledger\src\main.rs"));
+        assert_eq!(plain_text(r"\\?\C:\ledger/src/main.rs", true).as_deref(), Some(r"C:\ledger\src\main.rs"));
+        assert_eq!(plain_text(r"C:\src\a.rs", true), None);
+        // Elsewhere a `/` is the separator, and a `\` part of a name.
+        assert_eq!(plain_text("/src/a.rs", false), None);
     }
 }
 

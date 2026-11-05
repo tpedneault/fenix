@@ -175,6 +175,15 @@ fn hello_reports_the_version_pid_and_capabilities() {
             "fenix/debug.evaluate",
             "fenix/tools",
             "fenix/tools.call",
+            "fenix/agent.tools",
+            "fenix/agent.call",
+            "fenix/agent.cancel",
+            "fenix/agent.wait",
+            "fenix/agent.resources",
+            "fenix/agent.read",
+            "fenix/agent.subscribe",
+            "fenix/agent.prompts",
+            "fenix/agent.prompt",
         ]
     );
     assert_eq!(hello.capabilities, CAPABILITIES);
@@ -678,4 +687,31 @@ fn a_header_split_across_writes_is_still_framed() {
     )
     .unwrap();
     assert_eq!(reply["result"]["pid"], json!(4242));
+}
+
+#[test]
+fn agent_calls_carry_the_caller_from_hello_and_never_from_params() {
+    let hello = r#"{"jsonrpc":"2.0","id":1,"method":"fenix/hello","params":{"protocol":1,"client":{"name":"fenix-mcp","version":"1","pid":1,"thread":"t-7"}}}"#;
+    let mut input = frame(hello);
+    input.extend(frame(
+        r#"{"jsonrpc":"2.0","id":2,"method":"fenix/agent.call","params":{"tool":"rename","arguments":{},"caller":{"thread":"other"}}}"#,
+    ));
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":3,"method":"fenix/agent.tools"}"#));
+    let (_, calls) = exchange(&input);
+    let caller = fenix_control::AgentCaller { client: "fenix-mcp".into(), thread: Some("t-7".into()) };
+    assert_eq!(
+        calls,
+        vec![
+            Call::Agent { method: "call".into(), caller: caller.clone(), params: json!({ "tool": "rename", "arguments": {}, "caller": { "thread": "other" } }) },
+            Call::Agent { method: "tools".into(), caller, params: Value::Null },
+        ]
+    );
+}
+
+#[test]
+fn a_client_without_a_thread_calls_as_itself() {
+    let mut input = frame(HELLO);
+    input.extend(frame(r#"{"jsonrpc":"2.0","id":2,"method":"fenix/agent.wait","params":{"since":0}}"#));
+    let (_, calls) = exchange(&input);
+    assert_eq!(calls, vec![Call::Agent { method: "wait".into(), caller: fenix_control::AgentCaller { client: "t".into(), thread: None }, params: json!({ "since": 0 }) }]);
 }

@@ -36,6 +36,12 @@ use crate::cli::Invocation;
 /// thread would otherwise make it do.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long an agent's call (`fenix/agent.*`) may take: a question to
+/// the user, a task it waits for, a debugger step. The editor gives each
+/// tool its own, shorter, deadline; this only stops a call the editor
+/// lost from hanging its caller.
+const AGENT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// What this launch turned out to be, once single-instance negotiation
 /// settles.
 pub enum Role {
@@ -88,6 +94,31 @@ fn negotiate_at(endpoint: &Endpoint, invocation: &Invocation) -> Role {
         }
     }
     Role::Standalone
+}
+
+/// Set on the Fenix a restart (`SPC q r`) starts: the one it replaces is
+/// still quitting, so this one waits for its endpoint to go before
+/// taking it, rather than handing itself to the Fenix that's leaving.
+pub const RESTARTED_ENV: &str = "FENIX_RESTARTED";
+
+/// Waits, up to `timeout`, until nobody serves `endpoint`: true once
+/// it's free.
+pub fn wait_until_free(timeout: Duration) -> bool {
+    wait_until_free_at(&Endpoint::current(), timeout)
+}
+
+fn wait_until_free_at(endpoint: &Endpoint, timeout: Duration) -> bool {
+    let until = std::time::Instant::now() + timeout;
+    loop {
+        // Only "nobody serves it" is free. A connection that fails (a
+        // Windows pipe whose one instance is taken answers "busy") means
+        // the old Fenix still holds it.
+        match Client::connect(endpoint) {
+            Ok(None) => return true,
+            _ if std::time::Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
+            _ => return false,
+        }
+    }
 }
 
 /// The client half: `fenix/hello`, the foreground handed on, then the
@@ -170,12 +201,13 @@ pub fn spawn_accept_loop(mut listener: Listener, proxy: EventLoopProxy<FenixUser
 
 /// Hands `call` to the UI thread and waits for its answer.
 fn ask_editor(proxy: &EventLoopProxy<FenixUserEvent>, call: Call) -> Reply {
+    let timeout = if matches!(call, Call::Agent { .. }) { AGENT_TIMEOUT } else { ANSWER_TIMEOUT };
     let (reply, answer) = mpsc::channel();
     proxy
         .send_event(FenixUserEvent::Control { call, reply })
         .map_err(|_| RpcError::internal("Fenix is closing"))?;
     answer
-        .recv_timeout(ANSWER_TIMEOUT)
+        .recv_timeout(timeout)
         .map_err(|_| RpcError::internal("Fenix didn't answer in time"))?
 }
 
@@ -225,6 +257,17 @@ mod tests {
             tx.send(calls.lock().unwrap().clone()).unwrap();
         });
         rx
+    }
+
+    /// A restarted Fenix waits for the one quitting to let go of the
+    /// endpoint, and not forever.
+    #[test]
+    fn a_restart_waits_for_the_endpoint_to_be_free() {
+        let endpoint = unique();
+        assert!(wait_until_free_at(&endpoint, Duration::from_millis(10)), "nobody serves it yet");
+        let Role::Server(listener) = negotiate_at(&endpoint, &Invocation::default()) else { panic!("should serve") };
+        assert!(!wait_until_free_at(&endpoint, Duration::from_millis(300)), "still served");
+        drop(listener);
     }
 
     #[test]

@@ -5,12 +5,19 @@
 //! agent can ask the editor what only the editor knows -- the language
 //! servers' problems and answers, the open files as they stand, what you
 //! have selected, where the debugger is stopped -- show you a file, and,
-//! when `agents.mcp.fenix_write` lets it, run the project's tasks and
-//! Fenix's commands and evaluate in the debugger. Extensions add tools of
-//! their own (`contributes.agent_tools`).
+//! as the user's rules (`agents.mcp.allow`) let it, edit through the
+//! language servers, run tasks and drive the debugger. Extensions add
+//! tools of their own (`contributes.agent_tools`).
 //!
 //! Fenix hands it to every agent session it opens
-//! (`agents.mcp.fenix`); `--thread <id>` names the thread, for the log.
+//! (`agents.mcp.fenix`); `--thread <id>` names the thread it speaks for,
+//! so Fenix applies the rules for agents it started, asks on that
+//! thread and records its edits there. Without one it's a client of
+//! yours, with the stricter `client:` rules (`agent_tools::decide`).
+//!
+//! The bridge itself decides nothing: every tool, resource and prompt
+//! is a `fenix/agent.*` call, and the editor checks the caller's rules
+//! (`app/agent_calls.rs`).
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
@@ -21,221 +28,261 @@ pub const BRIEFING: &str = "You are running inside Fenix, the user's editor, whi
 - Before searching text for a symbol, use `definition` and `references`, and `hover` for its type and docs: they come from the language servers and are exact. `document_symbols` outlines a file, and `workspace_symbols` finds a name across the project.\n\
 - `open_files` says which files have unsaved edits. Read those with `read_buffer`, because the disk has an older version.\n\
 - `diagnostics` shows problems without a build, including in unsaved text.\n\
-- When debugging, `debug_state` shows where the program is stopped, with its stack and variables.\n\
 - `selection` is what the user has selected, and `show_file` points them at a place.\n\
+- More toolsets (git, refactor, tasks, debug, search, syntax, and the extensions') may be off: `fenix_toolsets` lists them and turns one on. Edits made through Fenix's tools go to the user's review like your own.\n\
 Fall back to your own tools when these have no answer. Don't mention this note.";
 
-/// The tools that only read, which agents needn't ask to use
-/// (`agents.mcp.fenix_auto_read`). `show_file` moves what's on your
-/// screen, and the rest change things.
-pub const READ_ONLY_TOOLS: &[&str] = &["diagnostics", "open_files", "selection", "tasks", "read_buffer", "definition", "references", "hover", "document_symbols", "workspace_symbols", "debug_state"];
-
-/// The MCP protocol version answered when the client asks for one this
-/// doesn't know.
-const PROTOCOL: &str = "2025-06-18";
+/// The MCP protocol revisions this server speaks, newest first. A client
+/// asking for one of them gets it; any other gets the newest.
+pub const PROTOCOLS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// `--mcp` among the arguments.
 pub fn requested(args: &[String]) -> bool {
     args.iter().any(|a| a == "--mcp")
 }
 
-struct Tool {
-    name: &'static str,
-    description: &'static str,
-    method: &'static str,
-    schema: fn() -> Value,
+/// The value after `flag` among the arguments.
+fn flag_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).filter(|v| !v.starts_with("--")).cloned()
 }
 
-fn no_arguments() -> Value {
-    json!({ "type": "object", "properties": {} })
+/// The revision to answer `asked` with.
+pub fn negotiate(asked: Option<&str>) -> &'static str {
+    asked.and_then(|a| PROTOCOLS.iter().find(|p| **p == a)).copied().unwrap_or(PROTOCOLS[0])
 }
 
-const TOOLS: &[Tool] = &[
-    Tool {
-        name: "diagnostics",
-        description: "The problems Fenix's language servers found: in one file (path), or in every file open in Fenix. Fresher than a build: they follow unsaved edits too.",
-        method: fenix_control::protocol::method::DIAGNOSTICS,
-        schema: || json!({ "type": "object", "properties": { "path": { "type": "string", "description": "An absolute path; leave out for every open file" } } }),
-    },
-    Tool {
-        name: "open_files",
-        description: "The files open in Fenix: which has the focus, and which have unsaved edits the user hasn't saved yet (the disk doesn't have them).",
-        method: fenix_control::protocol::method::BUFFERS,
-        schema: no_arguments,
-    },
-    Tool {
-        name: "selection",
-        description: "What the user has selected in Fenix (or the line the cursor is on): its file, line and text.",
-        method: fenix_control::protocol::method::SELECTION,
-        schema: no_arguments,
-    },
-    Tool {
-        name: "show_file",
-        description: "Shows the user a file in Fenix, at a line: to point at what you mean.",
-        method: fenix_control::protocol::method::OPEN,
-        schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer", "minimum": 1 } }, "required": ["path"] }),
-    },
-    Tool {
-        name: "tasks",
-        description: "The project's tasks as Fenix knows them (build, test, lint...), by name.",
-        method: fenix_control::protocol::method::TASKS,
-        schema: no_arguments,
-    },
-    Tool {
-        name: "run_task",
-        description: "Runs one of the project's tasks in Fenix's task pane, where the user sees it. Only when the user allows it (agents.mcp.fenix_write).",
-        method: fenix_control::protocol::method::TASKS_RUN,
-        schema: || json!({ "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] }),
-    },
-    Tool {
-        name: "run_command",
-        description: "Runs a Fenix command by its id (fenix/commands lists them). Only when the user allows it (agents.mcp.fenix_write).",
-        method: fenix_control::protocol::method::AGENT_COMMAND,
-        schema: || json!({ "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] }),
-    },
-    Tool {
-        name: "read_buffer",
-        description: "A file open in Fenix as it stands now, with the user's unsaved edits, which the disk doesn't have. Whole, or startLine to endLine (from 1). open_files says which are open and unsaved.",
-        method: fenix_control::protocol::method::BUFFER_READ,
-        schema: || json!({ "type": "object", "properties": { "path": { "type": "string" }, "startLine": { "type": "integer" }, "endLine": { "type": "integer" } }, "required": ["path"] }),
-    },
-    Tool {
-        name: "definition",
-        description: "Where the symbol at a place in a file is defined, from the language servers: more exact than searching. Give path, line (from 1), and symbol, the name on that line, or column (from 1).",
-        method: fenix_control::protocol::method::LSP,
-        schema: position_schema,
-    },
-    Tool {
-        name: "references",
-        description: "Every use of the symbol at a place in a file, across the project, from the language servers, each with its line: what a change to it would touch. Give path, line (from 1), and symbol or column.",
-        method: fenix_control::protocol::method::LSP,
-        schema: position_schema,
-    },
-    Tool {
-        name: "hover",
-        description: "The type and documentation of the symbol at a place in a file, from the language servers. Give path, line (from 1), and symbol or column.",
-        method: fenix_control::protocol::method::LSP,
-        schema: position_schema,
-    },
-    Tool {
-        name: "document_symbols",
-        description: "A file's outline from the language servers: its types, functions and so on, with their lines.",
-        method: fenix_control::protocol::method::LSP,
-        schema: || json!({ "type": "object", "properties": { "path": { "type": "string" } }, "required": ["path"] }),
-    },
-    Tool {
-        name: "workspace_symbols",
-        description: "Finds types, functions and so on by name across the project, from the language servers already running there.",
-        method: fenix_control::protocol::method::LSP,
-        schema: || json!({ "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] }),
-    },
-    Tool {
-        name: "debug_state",
-        description: "Where Fenix's debugger is stopped: the call stack, the variables in the selected frame, watches, and the program's latest output.",
-        method: fenix_control::protocol::method::DEBUG_STATE,
-        schema: || json!({ "type": "object", "properties": {} }),
-    },
-    Tool {
-        name: "debug_evaluate",
-        description: "Evaluates an expression where the debugger is stopped. It may run code in the program. Only when the user allows it (agents.mcp.fenix_write).",
-        method: fenix_control::protocol::method::DEBUG_EVALUATE,
-        schema: || json!({ "type": "object", "properties": { "expression": { "type": "string" } }, "required": ["expression"] }),
-    },
-];
-
-/// A place in a file: what the language tools take.
-fn position_schema() -> Value {
-    json!({ "type": "object", "properties": { "path": { "type": "string" }, "line": { "type": "integer" }, "symbol": { "type": "string", "description": "The name on that line" }, "column": { "type": "integer" } }, "required": ["path", "line"] })
+/// What a session needs to remember between messages.
+#[derive(Default)]
+pub struct Session {
+    /// The revision `initialize` settled on.
+    pub protocol: Option<&'static str>,
 }
 
-/// A tool's answer, as MCP has it.
-fn tool_result(answer: Result<Value, String>) -> Value {
+/// A tool's answer, as MCP has it. `structured`: the revision has
+/// `structuredContent` (2025-06-18 on).
+fn tool_result(answer: Result<Value, String>, structured: bool) -> Value {
     match answer {
-        Ok(answer) => json!({ "content": [{ "type": "text", "text": serde_json::to_string_pretty(&answer).unwrap_or_default() }], "structuredContent": answer }),
+        Ok(answer) => {
+            // An answer that's text already goes as it is.
+            let text = answer.as_str().map(str::to_string).unwrap_or_else(|| serde_json::to_string_pretty(&answer).unwrap_or_default());
+            let mut result = json!({ "content": [{ "type": "text", "text": text }] });
+            if structured && answer.is_object() {
+                result["structuredContent"] = answer;
+            }
+            result
+        }
         Err(why) => json!({ "content": [{ "type": "text", "text": why }], "isError": true }),
     }
 }
 
-/// One MCP message, answered: `call` makes a control request. `None`
-/// for a notification.
-pub fn handle(message: &Value, call: &mut dyn FnMut(&str, Value) -> Result<Value, String>) -> Option<Value> {
-    let id = message.get("id").cloned().filter(|i| !i.is_null())?;
-    let method = message.get("method").and_then(Value::as_str).unwrap_or("");
-    let params = message.get("params").cloned().unwrap_or(Value::Null);
-    let result = match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL),
-            "capabilities": { "tools": {} },
-            "serverInfo": { "name": "fenix", "title": "Fenix", "version": env!("CARGO_PKG_VERSION") },
-            "instructions": "Fenix is the editor the user is working in. Prefer these tools to searching text: definition, references and hover come from its language servers and are exact. read_buffer has the unsaved edits the disk doesn't, diagnostics the problems without a build, and debug_state where the debugger is stopped.",
-        })),
-        "ping" => Ok(json!({})),
-        "tools/list" => {
-            let mut tools: Vec<Value> = TOOLS.iter().map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": (t.schema)() })).collect();
-            // The extensions', when there's a Fenix to ask.
-            if let Ok(offered) = call(fenix_control::protocol::method::TOOLS, json!({})) {
-                tools.extend(offered["tools"].as_array().into_iter().flatten().map(|t| json!({ "name": t["name"], "description": t["description"], "inputSchema": t["inputSchema"] })));
-            }
-            Ok(json!({ "tools": tools }))
-        }
-        "tools/call" => {
-            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let arguments = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
-            match TOOLS.iter().find(|t| t.name == name) {
-                // An extension's, which Fenix knows.
-                None => Ok(tool_result(call(fenix_control::protocol::method::TOOLS_CALL, json!({ "name": name, "arguments": arguments })))),
-                Some(tool) => {
-                    let request = match tool.name {
-                        // `fenix/open` takes a list of positions.
-                        "show_file" => json!({ "paths": [{ "path": arguments.get("path"), "line": arguments.get("line") }], "focus": false }),
-                        // `fenix/lsp` is every question, by kind.
-                        "definition" | "references" | "hover" | "document_symbols" | "workspace_symbols" => {
-                            let mut request = arguments;
-                            request["kind"] = json!(tool.name);
-                            request
-                        }
-                        _ => arguments,
-                    };
-                    Ok(tool_result(call(tool.method, request)))
-                }
-            }
-        }
-        _ => Err((-32601, format!("no method {method}"))),
-    };
-    Some(match result {
-        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err((code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
-    })
+/// The core tools, for a `tools/list` with no Fenix to ask.
+fn fallback_tools() -> Vec<Value> {
+    crate::agent_tools::TOOLS.iter().filter(|t| t.toolset == "core").map(crate::agent_tools::listed).collect()
 }
 
-/// Serves MCP on stdio until it closes, then exits.
-pub fn run() -> ! {
-    let mut client: Option<fenix_control::Client<fenix_control::Stream, fenix_control::Stream>> = None;
-    let mut call = |method: &str, params: Value| -> Result<Value, String> {
-        if client.is_none() {
-            let mut c = fenix_control::Client::connect(&fenix_control::Endpoint::current()).map_err(|e| e.to_string())?.ok_or("Fenix isn't running")?;
-            c.hello("fenix-mcp", env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())?;
-            client = Some(c);
+/// What one MCP message comes to: the reply (none for a notification),
+/// and notifications to send after it.
+#[derive(Debug, Default, PartialEq)]
+pub struct Output {
+    pub reply: Option<Value>,
+    pub after: Vec<Value>,
+}
+
+fn notification(method: &str, params: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "method": method, "params": params })
+}
+
+/// The request's id as a call id Fenix can cancel by.
+pub fn call_id(id: &Value) -> String {
+    id.to_string()
+}
+
+/// One MCP message, answered: `call` makes a control request.
+pub fn handle(session: &mut Session, message: &Value, call: &mut dyn FnMut(&str, Value) -> Result<Value, String>) -> Output {
+    let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = message.get("params").cloned().unwrap_or(Value::Null);
+    let Some(id) = message.get("id").cloned().filter(|i| !i.is_null()) else {
+        // Notifications. A cancelled request is cancelled in Fenix too.
+        if method == "notifications/cancelled" {
+            if let Some(request) = params.get("requestId") {
+                let _ = call(fenix_control::protocol::method::AGENT_CANCEL, json!({ "call": call_id(request) }));
+            }
         }
-        let result = client.as_mut().unwrap().request::<Value>(method, params);
-        if result.is_err() {
-            // A broken connection is tried afresh next time.
-            client = None;
-        }
-        result.map_err(|e| e.to_string())
+        return Output::default();
     };
+    let mut after = Vec::new();
+    let structured = session.protocol.is_none_or(|p| p >= "2025-06-18");
+    let forward = |call: &mut dyn FnMut(&str, Value) -> Result<Value, String>, method: &str, params: Value| call(method, params).map_err(|e| (-32603, e));
+    let result: Result<Value, (i64, String)> = match method {
+        "initialize" => {
+            let protocol = negotiate(params.get("protocolVersion").and_then(Value::as_str));
+            session.protocol = Some(protocol);
+            Ok(json!({
+                "protocolVersion": protocol,
+                "capabilities": {
+                    "tools": { "listChanged": true },
+                    "resources": { "subscribe": true, "listChanged": true },
+                    "prompts": { "listChanged": true },
+                    "logging": {},
+                },
+                "serverInfo": { "name": "fenix", "title": "Fenix", "version": env!("CARGO_PKG_VERSION") },
+                "instructions": "Fenix is the editor the user is working in. Prefer these tools to searching text: definition, references and hover come from its language servers and are exact. read_buffer has the unsaved edits the disk doesn't, diagnostics the problems without a build. fenix_toolsets lists the toolsets that are off (git, refactor, tasks, debug...) and turns one on.",
+            }))
+        }
+        "ping" => Ok(json!({})),
+        "logging/setLevel" => Ok(json!({})),
+        "tools/list" => match call(fenix_control::protocol::method::AGENT_TOOLS, json!({})) {
+            Ok(offered) => Ok(json!({ "tools": offered["tools"] })),
+            // No Fenix to ask: the core tools, which will say so when called.
+            Err(_) => Ok(json!({ "tools": fallback_tools() })),
+        },
+        "tools/call" => {
+            let mut request = json!({ "call": call_id(&id), "tool": params.get("name").cloned().unwrap_or(Value::Null), "arguments": params.get("arguments").cloned().unwrap_or_else(|| json!({})) });
+            if let Some(token) = params.get("_meta").and_then(|m| m.get("progressToken")) {
+                request["progressToken"] = token.clone();
+            }
+            let answer = call(fenix_control::protocol::method::AGENT_CALL, request);
+            // A toolset turned on or off: the list is different now.
+            if answer.as_ref().is_ok_and(|a| a.get("toolsChanged").and_then(Value::as_bool) == Some(true)) {
+                after.push(notification("notifications/tools/list_changed", json!({})));
+            }
+            Ok(tool_result(answer.map(|mut a| a.get_mut("answer").map(Value::take).unwrap_or(a)), structured))
+        }
+        "resources/list" => forward(call, fenix_control::protocol::method::AGENT_RESOURCES, json!({})),
+        "resources/templates/list" => forward(call, fenix_control::protocol::method::AGENT_RESOURCES, json!({ "templates": true })),
+        "resources/read" => forward(call, fenix_control::protocol::method::AGENT_READ, params),
+        "resources/subscribe" => forward(call, fenix_control::protocol::method::AGENT_SUBSCRIBE, json!({ "uri": params.get("uri"), "on": true })),
+        "resources/unsubscribe" => forward(call, fenix_control::protocol::method::AGENT_SUBSCRIBE, json!({ "uri": params.get("uri"), "on": false })),
+        "prompts/list" => forward(call, fenix_control::protocol::method::AGENT_PROMPTS, json!({})),
+        "prompts/get" => forward(call, fenix_control::protocol::method::AGENT_PROMPT, params),
+        _ => Err((-32601, format!("no method {method}"))),
+    };
+    Output {
+        reply: Some(match result {
+            Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+            Err((code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+        }),
+        after,
+    }
+}
+
+/// What Fenix's `fenix/agent.wait` events become for the MCP client.
+pub fn notifications_for(events: &[Value]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for event in events {
+        match event.get("kind").and_then(Value::as_str) {
+            Some("tools") => out.push(notification("notifications/tools/list_changed", json!({}))),
+            Some("resources") => out.push(notification("notifications/resources/list_changed", json!({}))),
+            Some("prompts") => out.push(notification("notifications/prompts/list_changed", json!({}))),
+            Some("resource") => out.push(notification("notifications/resources/updated", json!({ "uri": event["uri"] }))),
+            Some("progress") => {
+                let mut params = json!({ "progressToken": event["token"], "progress": event.get("progress").cloned().unwrap_or(json!(0)) });
+                for key in ["total", "message"] {
+                    if let Some(v) = event.get(key).filter(|v| !v.is_null()) {
+                        params[key] = v.clone();
+                    }
+                }
+                out.push(notification("notifications/progress", params));
+            }
+            Some("log") => out.push(notification("notifications/message", json!({ "level": event.get("level").cloned().unwrap_or(json!("info")), "logger": "fenix", "data": event["data"] }))),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A connection to the running Fenix, introduced as the bridge for
+/// `thread`.
+type Control = fenix_control::Client<fenix_control::Stream, fenix_control::Stream>;
+
+fn connect(thread: Option<&str>) -> Result<Control, String> {
+    let mut c = fenix_control::Client::connect(&fenix_control::Endpoint::current()).map_err(|e| e.to_string())?.ok_or("Fenix isn't running")?;
+    c.hello_for("fenix-mcp", env!("CARGO_PKG_VERSION"), thread).map_err(|e| e.to_string())?;
+    Ok(c)
+}
+
+/// Connections kept for the next call, so each doesn't say hello again.
+struct Pool {
+    thread: Option<String>,
+    idle: std::sync::Mutex<Vec<Control>>,
+}
+
+impl Pool {
+    fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        let taken = self.idle.lock().unwrap().pop();
+        let mut client = match taken {
+            Some(c) => c,
+            None => connect(self.thread.as_deref())?,
+        };
+        let result = client.request::<Value>(method, params).map_err(|e| e.to_string());
+        // A connection that failed is dropped, and tried afresh next time.
+        if result.is_ok() {
+            self.idle.lock().unwrap().push(client);
+        }
+        result
+    }
+}
+
+/// Serves MCP on stdio until it closes, then exits. Each tool call runs
+/// on a thread of its own, so a long one (a question to the user, a task
+/// it waits for) doesn't hold up the rest, and a cancellation can reach
+/// Fenix while it runs. A watcher waits on `fenix/agent.wait` and passes
+/// Fenix's news on as notifications.
+pub fn run(args: &[String]) -> ! {
+    use std::sync::{Arc, Mutex};
+    let pool = Arc::new(Pool { thread: flag_value(args, "--thread"), idle: Mutex::new(Vec::new()) });
+    let out = Arc::new(Mutex::new(std::io::stdout()));
+    let send = |out: &Mutex<std::io::Stdout>, messages: &[Value]| {
+        let mut out = out.lock().unwrap();
+        for m in messages {
+            let _ = writeln!(out, "{}", serde_json::to_string(m).unwrap_or_default());
+        }
+        let _ = out.flush();
+    };
+    let session = Arc::new(Mutex::new(Session::default()));
+    let mut watching = false;
     let stdin = std::io::stdin();
     let mut reader = stdin.lock();
-    let mut out = std::io::stdout();
     loop {
         let body = match fenix_rpc_line(&mut reader) {
             Some(body) => body,
             None => std::process::exit(0),
         };
         let Ok(message) = serde_json::from_slice::<Value>(&body) else { continue };
-        if let Some(reply) = handle(&message, &mut call) {
-            let _ = writeln!(out, "{}", serde_json::to_string(&reply).unwrap_or_default());
-            let _ = out.flush();
+        let slow = message.get("method").and_then(Value::as_str) == Some("tools/call");
+        if !watching && message.get("method").and_then(Value::as_str) == Some("notifications/initialized") {
+            watching = true;
+            let (pool, out) = (Arc::clone(&pool), Arc::clone(&out));
+            std::thread::spawn(move || {
+                let mut since = 0u64;
+                loop {
+                    match pool.call(fenix_control::protocol::method::AGENT_WAIT, json!({ "since": since })) {
+                        Ok(news) => {
+                            since = news.get("revision").and_then(Value::as_u64).unwrap_or(since);
+                            let events = news.get("events").and_then(Value::as_array).cloned().unwrap_or_default();
+                            send(&out, &notifications_for(&events));
+                        }
+                        Err(_) => std::thread::sleep(std::time::Duration::from_secs(2)),
+                    }
+                }
+            });
+        }
+        let (pool, out, session) = (Arc::clone(&pool), Arc::clone(&out), Arc::clone(&session));
+        let work = move || {
+            let mut call = |method: &str, params: Value| pool.call(method, params);
+            // The session is only written by `initialize`, which isn't slow.
+            let output = if slow {
+                let mut copy = Session { protocol: session.lock().unwrap().protocol };
+                handle(&mut copy, &message, &mut call)
+            } else {
+                handle(&mut session.lock().unwrap(), &message, &mut call)
+            };
+            send(&out, &output.reply.into_iter().chain(output.after).collect::<Vec<_>>());
+        };
+        if slow {
+            std::thread::spawn(work);
+        } else {
+            work();
         }
     }
 }
@@ -259,81 +306,102 @@ fn fenix_rpc_line(reader: &mut impl BufRead) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    fn ask(message: Value, answers: &mut Vec<(String, Value)>) -> Value {
+    fn ask(message: Value, answers: &mut Vec<(String, Value)>) -> Output {
         let mut call = |method: &str, params: Value| {
             answers.push((method.to_string(), params.clone()));
-            if method == fenix_control::protocol::method::TASKS_RUN {
-                Err("running things through Fenix is off: agents.mcp.fenix_write".to_string())
-            } else {
-                Ok(json!({ "ok": method }))
+            match params.get("tool").and_then(Value::as_str) {
+                Some("run_task") => Err("refused: you said no".to_string()),
+                Some("fenix_toolsets") => Ok(json!({ "answer": { "enabled": "git" }, "toolsChanged": true })),
+                _ => Ok(json!({ "answer": { "ok": method } })),
             }
         };
-        handle(&message, &mut call).unwrap()
+        handle(&mut Session::default(), &message, &mut call)
     }
 
     #[test]
-    fn it_initializes_and_lists_its_tools() {
-        let mut calls = Vec::new();
-        let init = ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26" } }), &mut calls);
-        assert_eq!(init["result"]["protocolVersion"], json!("2025-03-26"));
-        assert_eq!(init["result"]["serverInfo"]["name"], json!("fenix"));
-        let tools = ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }), &mut calls);
-        let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
-        assert_eq!(names, TOOLS.iter().map(|t| t.name).collect::<Vec<_>>());
-        for tool in ["diagnostics", "read_buffer", "definition", "references", "hover", "document_symbols", "workspace_symbols", "debug_state", "debug_evaluate", "run_task"] {
-            assert!(names.contains(&tool), "{tool}");
-        }
-        assert_eq!(calls.len(), 1, "Fenix is asked only for the extensions' tools");
-        assert!(handle(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), &mut |_, _| unreachable!()).is_none());
+    fn it_negotiates_a_revision_it_knows() {
+        assert_eq!(negotiate(Some("2025-03-26")), "2025-03-26");
+        assert_eq!(negotiate(Some("2030-01-01")), PROTOCOLS[0]);
+        assert_eq!(negotiate(None), PROTOCOLS[0]);
+        let mut session = Session::default();
+        let init = handle(&mut session, &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2024-11-05" } }), &mut |_, _| unreachable!());
+        let result = &init.reply.unwrap()["result"];
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
+        assert_eq!(session.protocol, Some("2024-11-05"));
     }
 
     #[test]
-    fn a_tool_is_a_control_call_and_a_refusal_is_an_error_result() {
-        let mut calls = Vec::new();
-        let answer = ask(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "diagnostics", "arguments": { "path": "/p/a.rs" } } }), &mut calls);
-        assert_eq!(calls[0], ("fenix/diagnostics".to_string(), json!({ "path": "/p/a.rs" })));
-        assert_eq!(answer["result"]["structuredContent"], json!({ "ok": "fenix/diagnostics" }));
-        let shown = ask(json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "show_file", "arguments": { "path": "/p/a.rs", "line": 3 } } }), &mut calls);
-        assert!(shown.get("result").is_some());
-        assert_eq!(calls[1].1, json!({ "paths": [{ "path": "/p/a.rs", "line": 3 }], "focus": false }));
-        let refused = ask(json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "run_task", "arguments": { "name": "test" } } }), &mut calls);
-        assert_eq!(refused["result"]["isError"], json!(true));
-    }
-
-    #[test]
-    fn every_read_only_tool_exists_and_none_of_them_changes_anything() {
-        for tool in READ_ONLY_TOOLS {
-            assert!(TOOLS.iter().any(|t| t.name == *tool), "{tool}");
-        }
-        for changes in ["run_task", "run_command", "debug_evaluate", "show_file"] {
-            assert!(!READ_ONLY_TOOLS.contains(&changes), "{changes}");
-        }
-    }
-
-    #[test]
-    fn the_language_tools_ask_by_kind() {
-        let mut calls = Vec::new();
-        ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "references", "arguments": { "path": "a.rs", "line": 3, "symbol": "total" } } }), &mut calls);
-        assert_eq!(calls[0], (fenix_control::protocol::method::LSP.to_string(), json!({ "kind": "references", "path": "a.rs", "line": 3, "symbol": "total" })));
-    }
-
-    #[test]
-    fn a_name_fenix_doesnt_have_goes_to_the_extensions() {
-        let mut calls = Vec::new();
-        ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "jira_issue", "arguments": { "key": "A-1" } } }), &mut calls);
-        assert_eq!(calls[0], (fenix_control::protocol::method::TOOLS_CALL.to_string(), json!({ "name": "jira_issue", "arguments": { "key": "A-1" } })));
-    }
-
-    #[test]
-    fn the_extensions_tools_are_listed_after_fenixs() {
+    fn tools_come_from_fenix_or_the_core_without_it() {
         let mut call = |method: &str, _: Value| -> Result<Value, String> {
-            assert_eq!(method, fenix_control::protocol::method::TOOLS);
-            Ok(json!({ "tools": [{ "name": "jira_issue", "description": "An issue", "inputSchema": { "type": "object" }, "writes": false }] }))
+            assert_eq!(method, fenix_control::protocol::method::AGENT_TOOLS);
+            Ok(json!({ "tools": [{ "name": "jira_issue" }] }))
         };
-        let list = handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), &mut call).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().last().unwrap()["name"], "jira_issue");
+        let list = handle(&mut Session::default(), &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), &mut call);
+        assert_eq!(list.reply.unwrap()["result"]["tools"][0]["name"], "jira_issue");
         let mut gone = |_: &str, _: Value| -> Result<Value, String> { Err("Fenix isn't running".into()) };
-        let list = handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), &mut gone).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), TOOLS.len(), "Fenix's own without one");
+        let list = handle(&mut Session::default(), &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), &mut gone);
+        let names: Vec<String> = list.reply.unwrap()["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
+        assert!(names.contains(&"diagnostics".to_string()) && names.contains(&"fenix_toolsets".to_string()));
+    }
+
+    #[test]
+    fn a_tool_is_an_agent_call_with_its_id_and_a_refusal_is_an_error_result() {
+        let mut calls = Vec::new();
+        let answer = ask(json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "diagnostics", "arguments": { "path": "/p/a.rs" }, "_meta": { "progressToken": "p1" } } }), &mut calls);
+        assert_eq!(calls[0], ("fenix/agent.call".to_string(), json!({ "call": "3", "tool": "diagnostics", "arguments": { "path": "/p/a.rs" }, "progressToken": "p1" })));
+        assert_eq!(answer.reply.unwrap()["result"]["structuredContent"], json!({ "ok": "fenix/agent.call" }));
+        let refused = ask(json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "run_task", "arguments": { "name": "test" } } }), &mut calls);
+        assert_eq!(refused.reply.unwrap()["result"]["isError"], json!(true));
+    }
+
+    #[test]
+    fn turning_on_a_toolset_says_the_list_changed() {
+        let mut calls = Vec::new();
+        let out = ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "fenix_toolsets", "arguments": { "enable": "git" } } }), &mut calls);
+        assert_eq!(out.after, vec![notification("notifications/tools/list_changed", json!({}))]);
+        assert_eq!(out.reply.unwrap()["result"]["structuredContent"], json!({ "enabled": "git" }));
+    }
+
+    #[test]
+    fn a_cancelled_request_is_cancelled_in_fenix() {
+        let mut calls = Vec::new();
+        let out = ask(json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 9 } }), &mut calls);
+        assert_eq!(out, Output::default());
+        assert_eq!(calls, vec![("fenix/agent.cancel".to_string(), json!({ "call": "9" }))]);
+        assert_eq!(ask(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), &mut calls), Output::default());
+    }
+
+    #[test]
+    fn an_older_revision_gets_no_structured_content() {
+        let mut session = Session { protocol: Some("2025-03-26") };
+        let out = handle(&mut session, &json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "x" } }), &mut |_, _| Ok(json!({ "answer": { "a": 1 } })));
+        let result = &out.reply.unwrap()["result"];
+        assert!(result.get("structuredContent").is_none());
+        assert!(result["content"][0]["text"].as_str().unwrap().contains("\"a\": 1"));
+    }
+
+    #[test]
+    fn fenixs_news_become_notifications() {
+        let out = notifications_for(&[json!({ "kind": "tools" }), json!({ "kind": "resource", "uri": "fenix://diagnostics" }), json!({ "kind": "progress", "token": "p1", "progress": 2, "total": 5, "message": "querying" }), json!({ "kind": "unknown" })]);
+        let methods: Vec<&str> = out.iter().map(|n| n["method"].as_str().unwrap()).collect();
+        assert_eq!(methods, ["notifications/tools/list_changed", "notifications/resources/updated", "notifications/progress"]);
+        assert_eq!(out[2]["params"], json!({ "progressToken": "p1", "progress": 2, "total": 5, "message": "querying" }));
+    }
+
+    #[test]
+    fn resources_and_prompts_are_asked_of_fenix() {
+        let mut calls = Vec::new();
+        ask(json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/subscribe", "params": { "uri": "fenix://selection" } }), &mut calls);
+        ask(json!({ "jsonrpc": "2.0", "id": 2, "method": "prompts/get", "params": { "name": "explain", "arguments": {} } }), &mut calls);
+        assert_eq!(calls[0], ("fenix/agent.subscribe".to_string(), json!({ "uri": "fenix://selection", "on": true })));
+        assert_eq!(calls[1].0, "fenix/agent.prompt");
+    }
+
+    #[test]
+    fn the_thread_comes_from_the_arguments() {
+        let args: Vec<String> = ["fenix", "--mcp", "--thread", "t-1"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(flag_value(&args, "--thread").as_deref(), Some("t-1"));
+        assert_eq!(flag_value(&args[..2], "--thread"), None);
     }
 }

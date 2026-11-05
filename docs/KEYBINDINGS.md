@@ -32,7 +32,7 @@ the other way round after `\v`.
 | `SPC f e` | Open the file explorer at your home directory; open a file directly, or `S` fuzzy-searches recursively from wherever you navigate to |
 | `SPC f t` | Toggle the focused buffer between plain text and table view |
 | `SPC f o` | Switch between an extension's page for a file (a picture, a PDF) and the file's text |
-| `SPC f f` | Open a file by typing its path (bypasses `.gitignore`) |
+| `SPC f f` | Open a file by typing its path (bypasses `.gitignore`); a path that doesn't exist yet is a new file, created with its folders on save |
 | `SPC f n` | Create a new Arduino sketch (the Arduino extension) |
 | `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
 | `SPC f r` | Fuzzy-find a recently-opened file |
@@ -41,6 +41,7 @@ the other way round after `\v`.
 | `SPC f y` | Copy the current file's path to the clipboard |
 | `SPC f E` | Read this file again as another encoding (`file.save_with_encoding` in `SPC :` saves it in one) |
 | `SPC q q` | Quit |
+| `SPC q r` | Restart where you are (windows, files, unsaved text): extensions installed or switched on since start are loaded |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
@@ -77,6 +78,8 @@ the other way round after `\v`.
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |
 | `SPC p k` | End the currently running task |
+| `SPC p r` | Run the test the cursor is in (Rust, pytest, Go), alone, in Task Output |
+| `Enter` in Task Output | Go to the `path:line:col` the line names: a compiler's error, a panic, a test's stack |
 | `SPC u u` | Start a debug session, or continue one that's stopped |
 | `SPC u b` | Toggle a breakpoint on the focused buffer's current line |
 | `SPC u n` / `SPC u i` / `SPC u o` | Step over / into / out |
@@ -90,6 +93,7 @@ the other way round after `\v`.
 | `SPC u t` | Turn the line's breakpoint off, or on again, keeping it |
 | `SPC u x` | The exceptions to stop on, in the drawer (`t` turns one on or off) |
 | `SPC u P` | Pin the value under the cursor to its line, or unpin it |
+| `SPC u A` | Clear the breakpoints coding agents set; yours stay |
 | `SPC u U` | Start debugging with a launch picked again (`SPC u u` reuses the project's last) |
 | `K` while stopped | The lens: the value of the name under the cursor, and what's in it |
 | `[t` / `]t` while debugging | Back / on along the Ember Trail, the code and its values as they were; Enter returns to now |
@@ -165,6 +169,7 @@ the other way round after `\v`.
 | `SPC a A` | Show or put away the agents' dock, wherever you are |
 | `SPC a n` / `SPC a t` | A new thread with the default agent (`SPC a p` for another) / this project's threads |
 | `SPC a p` | The agents: a thread with one, a login, a restart |
+| `SPC a P` | Run the next prompt through a pipeline: plan, build and review by agents in turn |
 | `SPC a m` / `SPC a M` | The agent's mode / its model and other settings |
 | `SPC a k` / `SPC a R` | Cancel the agent's turn / start its agent again |
 | `SPC a i` | Continue a session the agent started outside Fenix |
@@ -173,7 +178,7 @@ the other way round after `\v`.
 | `]a` / `[a` | The next / previous change an agent made and you haven't kept, across files |
 | `SPC a e` | Ask the agent about the selection (it goes to the prompt as `@selection`) |
 | `SPC a d` | Ask the agent to fix the problem on the cursor's line |
-| `SPC a c` | A commit message for what's staged, written by the agent, onto the clipboard |
+| `SPC a c` | A commit message for what's staged, written by the agent: into the commit composer when it's open, else onto the clipboard |
 | `SPC a h` | Hand the thread off to another agent: the conversation goes with it |
 | `SPC a D` | Delete the thread (asks first) |
 | `SPC a f` | Follow the agent: the pane beside its thread shows where it works |

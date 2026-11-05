@@ -191,7 +191,7 @@ and its answer comes to `handle` as an `Event` with that id.
 | `host::git_state()` | API 1.1. The open project's repository (`GitSummary { branch, head, upstream, ahead, behind, conflicts }`), with `contributes.events = ["git"]`: none outside a repository. Read again at most every two seconds; ask that often to notice a commit (a new `head` on the same branch), a push (`ahead` back to 0) or a conflict. |
 | `host::last_task()` | API 1.1. The task that ended last (`TaskResult { name, ok, tests }`), with `contributes.events = ["tasks"]`: `tests` is `Some((passed, failed))` when its output gives them (cargo, pytest, Jest, Vitest, `go test -v`). Call it when `task-ended` comes. |
 | `forge::call`, `forge::branch_answer`, `forge::refresh` | Being a code-review forge for Fenix's Git pages. See [Forges](#forges). |
-| `std::fs` | Its own folder, `/data`, kept between runs; its tools folder, `/tools`, when its manifest names a program there; and the project, `/project`, if its permissions say: the one you're in. Open a file in another project and Fenix starts the extension again there, its pages saved and opened again (`page_state`, `page_restore`), so keep in a page's state what it needs. |
+| `std::fs` | Its own folder, `/data`, kept between runs; its tools folder, `/tools`, when its manifest names a program there; and the project, `/project`, if its permissions say: the one you're in. Open a file in another project and Fenix starts the extension again there, its pages saved and opened again (`page_state`, `page_restore`), so keep in a page's state what it needs: a language pack for that project at once, any other the next time it's used there (a command, a page, a service, its language server). Until then it runs on in the project it started in, and isn't told what you do in the other (`focus_moved`, `file_saved`, `buffer_changed` of a file, `view_changed`); come back first and it carries on. |
 
 ## Drawing over the editor
 
@@ -688,8 +688,67 @@ run::spawn(async {
 ```
 
 It's Fenix's service `agents.ask`: `{"prompt": "...", "agent": "codex"}`
-in, `{"text", "stopReason", "agent", "thread"}` out. An ask unanswered
-after 10 minutes, or by an agent that wants a login, is an error.
+in, `{"text", "json", "stopReason", "agent", "thread", "reverted"}` out.
+An ask unanswered after 10 minutes, or by an agent that wants a login, is
+an error. With no agent named, `agents.ask.agent` picks one, then
+`agents.default`; `agents.ask.model` picks the model, when the agent
+offers a choice -- a quick, cheap one for drafts.
+
+**Asking with options (1.2).** `agents::ask_with` takes an `Ask`: what
+to attach, the shape of the answer, a draft as it's written, whether the
+thread stays, and how long it may take. It returns a handle at once:
+await it for the `Answer`, or `cancel()` it.
+
+```rust
+let ask = Ask::new("Write this pull request's description.")
+    .agent(None)                                         // agents.ask.agent, else agents.default
+    .attach(Attach::diff(DiffOf::range("origin/main", "HEAD")))
+    .attach(Attach::commits("origin/main..HEAD"))
+    .attach(Attach::file(".github/pull_request_template.md"))
+    .answer_as(schema)                                   // a JSON Schema: {title, body}
+    .stream(true)                                        // agent_ask_progress, as it writes
+    .show(Show::Thread)                                  // or Show::Hidden
+    .timeout(Duration::from_secs(120));
+let handle = agents::ask_with(ask)?;                     // handle.id(), handle.cancel()
+let answer = handle.await?;                              // answer.json, answer.text, answer.thread
+```
+
+- **Attachments are read by Fenix**, so the extension needs no file or
+  process permission to send them: `Attach::diff` (`DiffOf::Staged`,
+  `DiffOf::Unstaged`, `DiffOf::range(base, head)`), `Attach::commits`
+  (a range's messages), `Attach::file` (a file of the project, with your
+  unsaved edits), `Attach::selection`, `Attach::diagnostics`, and
+  `Attach::text` (anything it has). Each goes to the agent as a resource
+  of its own, not pasted into the prompt.
+- **Code asks you first.** The first ask that sends a diff, a file or the
+  selection to an agent asks you, once for that extension and agent; the
+  answer is kept. `agents.forget_ask_consent` makes every extension ask
+  again.
+- **A structured answer.** With `answer_as`, the agent is asked for one
+  JSON block matching the schema (`type`, `properties`, `required`,
+  `items`, `enum`, `additionalProperties`, `minLength`, `maxLength` are
+  checked). Fenix finds it, checks it, and asks again once when it
+  doesn't fit; `answer.json` is that value, or the ask is an error.
+- **A draft as it's written.** With `stream(true)`,
+  `Extension::agent_ask_progress(id, text)` is told the whole answer so
+  far as it grows.
+- **Read-only, for real.** The ask runs in the agent's most restrictive
+  mode, when it offers one (Claude Code's *plan*); whatever it asks
+  permission for is refused; and a file its turn changes anyway is put
+  back at the end, from the thread's change ledger -- `answer.reverted`
+  names them.
+- **Hidden.** `Show::Hidden` (or `agents.ask.show = "hidden"`) deletes
+  the thread once it's answered: it's never on `SPC a t`.
+- **Cancel.** `handle.cancel()` cancels the turn and closes the thread;
+  the ask ends with the error `cancelled`. It's Fenix's service
+  `agents.cancel`, `{"call": <the ask's id>}`.
+
+In the payload these are `attach` (a list of `{"kind": "diff", "of":
+"staged" | "unstaged" | "range", "base", "head"}`, `{"kind": "commits",
+"range"}`, `{"kind": "file", "path"}`, `{"kind": "selection"}`,
+`{"kind": "diagnostics"}`, `{"kind": "text", "name", "text"}`),
+`answerAs`, `stream`, `show` (`thread` or `hidden`) and `timeoutMs` (at
+most 30 minutes).
 
 **Hearing them.** With `contributes.events = ["agents"]`,
 `Extension::agent_turn_ended` is told of each turn that ends, in any
@@ -718,6 +777,90 @@ Agents see it as `counter_count`: the last part of your id, then `name`. `serve`
 
 It needs Fenix 1.1 or later: set `fenix = ">=1.1"` in `[engine]`.
 
+**Classes, deadlines and toolsets (1.2).** A tool says what it may do,
+and how long it may take:
+
+```toml
+[[contributes.agent_tools]]
+name = "transition"
+description = "Moves a Jira issue to another status"
+service = "jira.transition"
+class = "external"             # read, show, edit, run or external
+timeout_ms = 120000            # the whole call; 30000 when it doesn't say, at most 600000
+default = true                 # offered to agents without being asked for
+```
+
+| Class | What it may do |
+|---|---|
+| `read` | read what Fenix or the extension knows |
+| `show` | move what's on your screen |
+| `edit` | change buffers and files: needs `editor = "write"` or `filesystem = "project-write"` |
+| `run` | start processes, run commands |
+| `external` | act outside this machine -- post, send, change a remote system: needs `network` or `sockets` |
+
+A tool with no class is `run` when it `writes`, else `read`. Agents' rules
+are per class (and per toolset, and per tool). A tool's toolset is the
+extension's: `jira` for `acme.jira`, the prefix of its tools' names; it's
+offered by default only when a tool says `default = true`. A tool's
+description is at most 300 characters and its input schema at most 2 KiB,
+for an extension built for 1.2 (`api = "1.2"`): what every agent is given
+on every turn has to stay short.
+
+**The long tool.** `limits.call_ms` is how long the extension's *code*
+may run before it returns; `timeout_ms` is how long the agent waits for
+the answer. A tool that waits on something -- an HTTP request, a
+program, a timer -- returns `None` from `serve` at once, and answers
+later with `answer(call, ...)`, from a `spawn`, an HTTP reply or a
+timer. Meanwhile its pages go on answering. It can say how far it's got,
+and hear when it's given up on:
+
+```rust
+fn serve(&mut self, call: u64, name: &str, payload: &str) -> Option<Result<String, String>> {
+    let payload = payload.to_string();
+    run::spawn(async move {
+        fenix_extension_api::progress(call, "asking Jira", Some(0.1));   // what the agent's card shows
+        let answer = run::fetch(HttpRequest::post("https://jira.example.com/...", &payload)).await;
+        fenix_extension_api::answer(call, answer.map(|r| r.text()));
+    });
+    None
+}
+
+fn service_cancelled(&mut self, call: u64) {
+    // the agent cancelled, or timeout_ms passed: stop what's under way
+    // for `call`; an answer given now goes nowhere.
+}
+```
+
+Past `timeout_ms` the agent is told the tool took too long, and the
+extension is told (`service_cancelled`). An extension that stops answers
+every call it had with "the extension stopped: <why>". An extension
+built before 1.2 has no `service_cancelled`; its late answer is dropped.
+
+**Resources and prompts (1.2).** An extension can offer agents things to
+read, and prompts their clients can offer you, each answered by one of
+its services:
+
+```toml
+[[contributes.agent_resources]]
+uri_template = "fenix://ext/jira/issue/{key}"   # each {name} lower case, digits and _
+name = "Jira issue"
+description = "An issue, with its comments"
+service = "jira.issue"          # given {"uri": ..., "params": {"key": ...}}
+mime_type = "text/markdown"
+
+[[contributes.agent_prompts]]
+name = "triage"
+description = "Triage an issue"
+service = "jira.triage"         # given the arguments; answers the prompt's messages
+
+[[contributes.agent_prompts.arguments]]
+name = "key"
+description = "The issue's key"
+required = true
+```
+
+They follow `agent_tools`' toolset and rules.
+
 ## Its manifest
 
 ```toml
@@ -730,11 +873,14 @@ runtime = "wasm"
 
 [engine]
 fenix = ">=1.0, <2"
-api = "1.0"                    # fenix-extension-api's API
+api = "1.2"                    # fenix-extension-api's API
 
 [activation]                   # nothing loads until one of these
 on_startup = false
 commands = ["counter.*"]
+languages = ["markdown"]       # a file of one of these opened, or at the
+                               # project's top or in src/ (Fenix 1.1)
+markers = ["counter.toml"]     # a project holding one of these (Fenix 1.1)
 
 [permissions]                  # nothing, unless it says
 process = ["git", "${setting:counter.git}", "/data/tools/*", "/tools/*"]
@@ -799,7 +945,8 @@ events = ["saved", "typing"]   # what you're doing it's told of:
                                # task_started), typing, active, changed (a
                                # file's buffer, with editor = "read"),
                                # focus, view, debug, agents
-                               # (agent_turn_ended, with permissions.agents)
+                               # (agent_turn_ended; what the agent said
+                               # only with permissions.agents)
 
 [limits]
 call_ms = 30000                # how long a command or an event may take,
@@ -821,6 +968,15 @@ id = "counter"                 # its own name, or one starting counter.
 name = "Counter Agent"
 login = "counter login"        # how to log in, for the agents page
 ```
+
+An extension that starts with Fenix (`on_startup = true`) and has a
+context naming markers or languages -- a language pack -- waits for
+them as `[activation]`'s `languages` and `markers` do: it loads when a
+file of one of its languages is opened, or a project of its is, not
+when Fenix starts. One whose contexts name only pages starts with Fenix.
+Either way, a command, a page, a service or its language server starts
+it when it's used. Fenix 1.0 starts a pack with Fenix, and loads one that
+only names `languages` or `markers` when it's used.
 
 A context's menu is its keymaps' `[[local.<name>]]` entries
 (`keymaps/*.toml`), keys after `SPC m`:
@@ -851,15 +1007,32 @@ followed out of its folders. A file it opens is opened from those bytes.
 
 A command has 5 seconds, a page or a key 1 second, and activating it
 10 seconds. `limits.call_ms` gives its commands, events and
-services longer, up to a minute: a database query. Its pages wait
-meanwhile -- the last one stays on screen -- since an extension does one
-thing at a time; work longer than that belongs in a program it runs
-(`spawn`), whose output comes as events. Its memory is capped at 128 MiB. Past any of those, endless
-recursion, or a panic, the extension stops with the reason on its
-output page, and Fenix carries on. It starts again with Fenix.
+services longer, up to a minute: a database query. That's how long its
+code may run before it returns. A service that answers later has as long
+as its caller waits: an agent's tool call, its `timeout_ms` (30 seconds
+unless it says, up to 10 minutes), an answer given later included.
+
+An extension does one thing at a time, but pages go first: laying out a
+page, its keys, a paste and a surface's input are taken before the tool
+calls and events waiting, so a page waits behind at most the one call
+under way. Work longer than a call belongs in a program it runs
+(`spawn`), an HTTP request or a timer, whose answers come as events. Its
+memory is capped at 128 MiB. Past any of those, endless recursion, or a
+panic, the extension stops with the reason on its output page, its
+callers are answered, and Fenix carries on. It starts again with Fenix.
+
+An agent tool's description is at most 300 characters, its input schema
+at most 2 KiB (for an extension built for 1.2).
 
 The API follows semantic versioning. An extension built against 1.N runs
 on a Fenix that offers 1.M, N no more than M: a minor version only adds,
-and an extension that uses what one added says so (`api = "1.1"`). Nothing
-is removed or changed within 1.x. This Fenix offers 1.0. Its definition
-is `crates/fenix-extension-api/wit/world.wit`.
+and an extension that uses what one added says so (`api = "1.2"`).
+Nothing is removed or changed within 1.x: what a minor version adds is a
+new import, or a new export Fenix calls only when the extension has it,
+never a new case of `Event`. This Fenix offers 1.2: 1.1 added
+`git_state` and `last_task`; 1.2 added `service_progress`, the exports
+`service_cancelled` and `agent_ask_progress`, `agents::ask_with`, tools'
+classes, deadlines and toolsets, and agent resources and prompts. Its
+definition is `crates/fenix-extension-api/wit/world.wit` (its package
+stays `fenix:extension@1.0.0` across 1.x, so what an older extension
+imports is still found).

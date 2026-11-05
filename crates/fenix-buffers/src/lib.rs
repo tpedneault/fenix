@@ -371,7 +371,13 @@ impl BufferList {
             self.touch(id);
             return id;
         }
+        // A file that isn't there yet is a new one, named, to be created
+        // when it's saved, as Emacs' find-file does. Any other failure
+        // starts an empty buffer.
         let buffer = Buffer::from_path(path).unwrap_or_else(|err| {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                return Buffer::from_text_at(path, "");
+            }
             eprintln!("fenix: couldn't open {} ({err}), starting empty buffer", path.display());
             Buffer::empty()
         });
@@ -626,6 +632,21 @@ mod tests {
         let id = list.open_path(&path);
         assert_eq!(list.get(id).unwrap().buffer.text(), "hello\n");
         assert_eq!(list.get(id).unwrap().kind, BufferKind::Text);
+    }
+
+    /// `SPC f f src/new.rs`: a buffer named for the file, empty, to be
+    /// created when it's saved -- not `[No Name]` with the path lost.
+    #[test]
+    fn open_path_on_a_file_that_isnt_there_yet_keeps_its_name() {
+        let dir = TempDir::new("open_path_new");
+        let path = dir.0.join("src").join("new.rs");
+        let mut list = BufferList::new();
+        let id = list.open_path(&path);
+        let ob = list.get(id).unwrap();
+        assert_eq!(ob.buffer.path(), Some(path.as_path()));
+        assert_eq!(ob.buffer.text(), "");
+        assert!(!path.exists(), "nothing is written until it's saved");
+        assert_eq!(list.open_path(&path), id);
     }
 
     #[test]
