@@ -16,6 +16,9 @@ use serde_json::Value;
 pub struct Thread {
     pub entries: Vec<Entry>,
     pub plan: Vec<PlanEntry>,
+    /// The plan the agent offered to leave its plan mode with, when Fenix
+    /// took it instead of asking (`Hub::stop_at_plans`).
+    pub proposed_plan: Option<String>,
     pub commands: Vec<AvailableCommand>,
     pub modes: Option<Modes>,
     pub config_options: Vec<ConfigOption>,

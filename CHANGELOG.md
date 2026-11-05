@@ -257,6 +257,21 @@ it did.
   there the next time it's used -- a command, a page, a service, its
   language server -- and carries on as it was if you come back first.
   Every extension used to start again at every move. (#33)
+- An agent's `rename` and `apply_code_action` work with language servers
+  that name document versions, as rust-analyzer does: every one was
+  refused as stale.
+- A pipeline's plan step stops at the plan: its agent's offer to carry
+  it out no longer has it build everything, only for that to be put
+  back and its summary passed on as the plan.
+- A pipeline ends on the thread with its changes, so `SPC a r` finds them.
+- There's one agents' dock, and it comes with you between workspaces, so
+  a card an agent waits on stays in sight. Opening it in a second
+  workspace made a second one that shared its thread: putting either
+  away left the other a Home pane and a prompt, and the first lost its
+  titles. A new workspace from the dock starts on Home, not on a thread
+  with no prompt.
+- A file an agent shows, or that's opened from outside, goes beside the
+  dock, not over a thread and its cards.
 
 ## [1.0.1] - 2026-11-03
 

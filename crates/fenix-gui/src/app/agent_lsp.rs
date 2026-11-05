@@ -96,17 +96,8 @@ impl App {
     /// `symbol` or `column`).
     fn agent_lsp_target(&mut self, arguments: &Value, capable: impl Fn(&lsp_types::ServerCapabilities) -> bool, what: &str) -> Result<(LspKey, lsp_types::TextDocumentIdentifier, Option<lsp_types::Position>, PathBuf, String), RpcError> {
         let path = self.control_path(arguments)?;
-        let (text, version) = match self.buffers.id_for_path(&path).and_then(|id| self.buffers.get(id)) {
-            Some(ob) => (ob.buffer.text(), ob.buffer.edit_count()),
-            None => {
-                let text = std::fs::read_to_string(&path).map_err(|e| invalid(format!("{}: {e}", path.display())))?;
-                use std::hash::{Hash, Hasher};
-                let mut hash = std::collections::hash_map::DefaultHasher::new();
-                text.hash(&mut hash);
-                (text, hash.finish())
-            }
-        };
-        self.sync_lsp_for(&path, &text, version);
+        let (text, revision) = self.agent_document(&path).map_err(invalid)?;
+        self.sync_lsp_for(&path, &text, revision);
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()));
         let keys = self.cached_lsp_keys(&path);
         if keys.is_empty() {
@@ -135,6 +126,42 @@ impl App {
             None => None,
         };
         Ok((key, lsp_types::TextDocumentIdentifier { uri }, position, path, text))
+    }
+
+    /// A file's text as Fenix has it, and what tells that text from the
+    /// last the servers were sent: the buffer's edit count, or a file's
+    /// hash when it isn't open.
+    fn agent_document(&self, path: &Path) -> Result<(String, u64), String> {
+        if let Some(ob) = self.buffers.id_for_path(path).and_then(|id| self.buffers.get(id)) {
+            return Ok((ob.buffer.text(), ob.buffer.edit_count()));
+        }
+        let text = self.agent_text_of(path)?;
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hash);
+        Ok((text, hash.finish()))
+    }
+
+    /// Brings every document `key`'s server has open up to date before an
+    /// edit is asked of it. An edit can reach any of them, and a file an
+    /// agent wrote since is only sent when something asks about that file.
+    fn agent_lsp_sync_open(&mut self, key: &LspKey) {
+        let Some(session) = self.lsp_sessions.get(key) else { return };
+        let open: Vec<PathBuf> = session.open_documents.keys().cloned().collect();
+        for path in open {
+            let Ok((text, revision)) = self.agent_document(&path) else { continue };
+            self.sync_lsp_for(&path, &text, revision);
+        }
+    }
+
+    /// The version `key`'s server has of `path`, while the text it has is
+    /// `text`. A server's edit names the version it was worked out
+    /// against, so it's only good for that text.
+    fn agent_server_version(&self, key: &LspKey, path: &Path, text: &str) -> Option<i32> {
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
+        let session = self.lsp_sessions.get(key)?;
+        let (_, next) = session.open_documents.get(&canonical)?;
+        (session.synced_text.get(&canonical)?.as_str() == text).then_some(next - 1)
     }
 
     fn agent_lsp_send<R: lsp_types::request::Request>(&mut self, key: LspKey, params: R::Params, step: Step, caller: &AgentCaller, reply: Sender<Reply>) {
@@ -174,6 +201,7 @@ impl App {
                 }
                 "code_actions" => {
                     let (key, doc, _, path, text) = self.agent_lsp_target(&arguments, |c| fenix_lsp::fanout::provides(c, fenix_lsp::fanout::Feature::CodeAction), "code actions")?;
+                    self.agent_lsp_sync_open(&key);
                     let first = arguments.get("line").and_then(Value::as_u64).ok_or_else(|| invalid("line: which line, from 1"))?.max(1) as u32 - 1;
                     let last = arguments.get("endLine").and_then(Value::as_u64).map(|l| l.max(1) as u32 - 1).unwrap_or(first).max(first);
                     let end_char = text.lines().nth(last as usize).map(|l| l.encode_utf16().count() as u32).unwrap_or(0);
@@ -188,7 +216,7 @@ impl App {
                     let (key, action) = self.agent_lsp.actions.get(id).cloned().ok_or_else(|| invalid(format!("no code action {id}: code_actions lists them (they last until the next list)")))?;
                     match action {
                         lsp_types::CodeActionOrCommand::CodeAction(action) if action.edit.is_some() => {
-                            let answer = self.agent_apply_workspace_edit(caller, action.edit.unwrap());
+                            let answer = self.agent_apply_workspace_edit(caller, &key, action.edit.unwrap());
                             let _ = reply.send(answer);
                         }
                         lsp_types::CodeActionOrCommand::CodeAction(action) if action.data.is_some() => {
@@ -201,6 +229,7 @@ impl App {
                 "rename" => {
                     let new_name = arguments.get("new_name").and_then(Value::as_str).filter(|n| !n.is_empty()).ok_or_else(|| invalid("new_name: what to call it"))?.to_string();
                     let (key, doc, at, _, _) = self.agent_lsp_target(&arguments, |c| fenix_lsp::fanout::provides(c, fenix_lsp::fanout::Feature::Rename), "rename")?;
+                    self.agent_lsp_sync_open(&key);
                     let params = lsp_types::RenameParams { text_document_position: lsp_types::TextDocumentPositionParams { text_document: doc, position: position_needed(at)? }, new_name, work_done_progress_params: Default::default() };
                     self.agent_lsp_send::<lsp_types::request::Rename>(key, params, Step::Rename, caller, reply.clone());
                 }
@@ -239,10 +268,11 @@ impl App {
 
     /// Applies a workspace edit for the caller, file by file, through its
     /// thread's change ledger.
-    fn agent_apply_workspace_edit(&mut self, caller: &AgentCaller, edit: lsp_types::WorkspaceEdit) -> Reply {
+    fn agent_apply_workspace_edit(&mut self, caller: &AgentCaller, key: &LspKey, edit: lsp_types::WorkspaceEdit) -> Reply {
         let planned = fenix_lsp::workspace_edit::prepare(edit, |path| {
             let text = self.agent_text_of(path)?;
-            Ok(fenix_lsp::workspace_edit::Document { path: path.to_path_buf(), text, version: None })
+            let version = self.agent_server_version(key, path, &text);
+            Ok(fenix_lsp::workspace_edit::Document { path: path.to_path_buf(), text, version })
         })
         .map_err(invalid)?;
         if planned.is_empty() {
@@ -346,13 +376,13 @@ impl App {
             }
             Step::Resolve => match serde_json::from_value::<lsp_types::CodeAction>(value) {
                 Ok(action) => match action.edit {
-                    Some(edit) => self.agent_apply_workspace_edit(&caller, edit),
+                    Some(edit) => self.agent_apply_workspace_edit(&caller, &key, edit),
                     None => Err(invalid("the language server gave this action no edit")),
                 },
                 Err(e) => Err(invalid(format!("the language server's action didn't read: {e}"))),
             },
             Step::Rename => match serde_json::from_value::<Option<lsp_types::WorkspaceEdit>>(value) {
-                Ok(Some(edit)) => self.agent_apply_workspace_edit(&caller, edit),
+                Ok(Some(edit)) => self.agent_apply_workspace_edit(&caller, &key, edit),
                 Ok(None) => Err(invalid("the language server can't rename that")),
                 Err(e) => Err(invalid(format!("the language server's rename didn't read: {e}"))),
             },
@@ -436,6 +466,45 @@ mod tests {
         assert_eq!(app.agent_text_of(&file).unwrap(), "fn new() {}\nfn main() { new(); }\n");
         let thread = fenix_acp::hub::ThreadId(caller.thread.clone().unwrap());
         assert_eq!(app.agents.baselines[&thread].values().next().unwrap().as_deref(), Some("fn old() {}\nfn main() { old(); }\n"));
+    }
+
+    /// A server with `file` open at `version`, having been sent `text`.
+    fn server_has(app: &mut App, file: &Path, version: i32, text: &str) {
+        let key = LspKey::primary(fenix_syntax::LanguageId::Rust, std::env::temp_dir());
+        let (program, args) = if cfg!(windows) { ("cmd", vec!["/c".to_string(), "echo".to_string(), "x".to_string()]) } else { ("echo", vec!["x".to_string()]) };
+        let (client, _) = fenix_lsp::LspClient::spawn(program, &args, &key.root).unwrap();
+        let canonical = fenix_lsp::normalize(std::fs::canonicalize(file).unwrap());
+        app.lsp_sessions.insert(key.clone(), LspSession {
+            generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical.clone(), (0, version + 1))]), synced_text: HashMap::from([(canonical, text.to_string())]), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+        });
+    }
+
+    fn versioned_edit_of(file: &Path, version: i32, edits: Value) -> Value {
+        let uri = fenix_lsp::path_to_uri(&fenix_lsp::normalize(std::fs::canonicalize(file).unwrap())).unwrap();
+        json!({ "documentChanges": [{ "textDocument": { "uri": uri.as_str(), "version": version }, "edits": edits }] })
+    }
+
+    #[test]
+    fn an_edit_naming_the_version_the_server_has_applies() {
+        let (_dir, file, mut app, caller) = project();
+        let text = app.agent_text_of(&file).unwrap();
+        server_has(&mut app, &file, 3, &text);
+        let (id, answer) = waiting(&mut app, Step::Rename, &caller);
+        app.agent_lsp_answered(id, Ok(versioned_edit_of(&file, 3, json!([{ "range": range(0, 3, 6), "newText": "new" }]))));
+        assert!(answer.try_recv().unwrap().is_ok());
+        assert!(app.agent_text_of(&file).unwrap().starts_with("fn new()"));
+    }
+
+    #[test]
+    fn an_edit_worked_out_against_other_text_is_refused() {
+        let (_dir, file, mut app, caller) = project();
+        let before = app.agent_text_of(&file).unwrap();
+        server_has(&mut app, &file, 3, "fn older() {}\n");
+        let (id, answer) = waiting(&mut app, Step::Rename, &caller);
+        app.agent_lsp_answered(id, Ok(versioned_edit_of(&file, 3, json!([{ "range": range(0, 3, 6), "newText": "new" }]))));
+        assert!(answer.try_recv().unwrap().unwrap_err().message.contains("stale"));
+        assert_eq!(app.agent_text_of(&file).unwrap(), before);
     }
 
     #[test]
