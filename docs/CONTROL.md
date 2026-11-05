@@ -169,6 +169,11 @@ line. `newWindow` (default `false`) opens another OS window for them.
 `focus` (default `true`) brings Fenix forward, un-minimizing it. An
 empty `paths` with `focus` just brings Fenix forward.
 
+A file that isn't there yet, in a folder that is, opens as a new file
+named for it, created when it's saved, as `SPC f f` does. An empty
+`path`, a folder, or a file in a folder that doesn't exist answers
+`-32602` with the reason, and then none of the paths open.
+
 ### `fenix/openProject`
 
 ```json

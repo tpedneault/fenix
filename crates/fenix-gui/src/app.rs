@@ -8443,6 +8443,15 @@ impl App {
         // An extension's formatter first, when you've asked for that; one
         // that fails says so, and the text is saved as it is.
         let unformatted = if self.config.format_on_save == Some(true) { self.run_extension_formatter().and_then(Result::err) } else { None };
+        // A new file (`SPC f f src/new/mod.rs`) in folders that aren't
+        // there yet: they're made.
+        if let Some(parent) = self.open().buffer.path().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
+            if let Err(err) = std::fs::create_dir_all(parent) {
+                self.set_error(format!("save failed: couldn't create {}: {err}", fenix_core::plain_path(parent).display()));
+                self.wake_caret();
+                return;
+            }
+        }
         let ob = self.open_mut();
         match ob.buffer.save() {
             Ok(()) => {
@@ -13970,7 +13979,11 @@ impl App {
             let root = self.project_root.clone().unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             root.join(expanded)
         };
+        let new = !resolved.exists();
         self.open_file_from_picker(&resolved);
+        if new && self.open().buffer.path().is_some() {
+            self.set_message(format!("{} is a new file -- SPC f s creates it", fenix_core::plain_path(&resolved).display()));
+        }
     }
 
     /// What to show in place of the modeline while `find_file_prompt` is

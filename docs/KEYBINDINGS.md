@@ -32,7 +32,7 @@ the other way round after `\v`.
 | `SPC f e` | Open the file explorer at your home directory; open a file directly, or `S` fuzzy-searches recursively from wherever you navigate to |
 | `SPC f t` | Toggle the focused buffer between plain text and table view |
 | `SPC f o` | Switch between an extension's page for a file (a picture, a PDF) and the file's text |
-| `SPC f f` | Open a file by typing its path (bypasses `.gitignore`) |
+| `SPC f f` | Open a file by typing its path (bypasses `.gitignore`); a path that doesn't exist yet is a new file, created with its folders on save |
 | `SPC f n` | Create a new Arduino sketch (the Arduino extension) |
 | `SPC f a` | Fuzzy-find a file in the project, including gitignored ones |
 | `SPC f r` | Fuzzy-find a recently-opened file |

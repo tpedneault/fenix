@@ -75,6 +75,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   file and line it names (`panicked at src\lib.rs:89:9`), not an empty
   buffer named for the whole line, and `Enter` on any line of Task Output
   that names a `path:line:col` goes there. (#19)
+- `SPC f f` on a file that doesn't exist yet opens a new file by that
+  name, rather than a `[No Name]` buffer with the path lost, and `SPC f s`
+  creates it, and any folders it's in. (#18)
+- `fenix/open` answers `-32602` with the reason for a path it can't
+  open (an empty one, a folder, a file in a folder that doesn't exist),
+  and opens nothing, rather than `{}` and a `[No Name]` tab. A new file
+  in a folder that exists opens as `SPC f f` opens it. (#39)
 
 ## [1.0.1] - 2026-11-03
 
