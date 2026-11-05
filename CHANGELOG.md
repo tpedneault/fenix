@@ -6,8 +6,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [Unreleased]
-
 ### Added
 
 - An agent can ask you for something as it works (ACP's
@@ -24,6 +22,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cursor is implemented (listed when there are several), and `SPC c h`
   lists who calls the function under the cursor, as `gr` lists
   references.
+- A breakpoint a coding agent set has a gutter shade of its own, kept
+  across restarts, so you can tell it from yours; `SPC u A` clears them.
+- The modeline names the MCP clients connected to Fenix over HTTP
+  (`agents.mcp.http`) while they are.
+
+### Fixed
+
+- A pipeline's plan step passes on the plan the agent put up for your
+  approval, not just the words that followed it; its gate says it's
+  Fenix asking.
+- `SPC c i` and `SPC c h` say so when no language server runs for the
+  file, instead of doing nothing.
 
 ## [1.1.0] - 2026-11-05
 
