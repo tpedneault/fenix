@@ -14,10 +14,12 @@ pub use tree::ProcessTree;
 mod defs;
 mod location;
 mod output;
+mod test_at;
 
 pub use defs::TaskDef;
 pub use location::{parse_path_position, PathPosition};
 pub use output::{find_location, parse_line, ParsedLine, TaskLocation};
+pub use test_at::test_at;
 
 mod tests_count;
 pub use tests_count::test_counts;

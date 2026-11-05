@@ -22,6 +22,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The control channel has what these use: `fenix/buffer.read`,
   `fenix/lsp`, `fenix/debug.state`, `fenix/debug.evaluate`, `fenix/tools`
   and `fenix/tools.call`.
+- `SPC p r` runs the test the cursor is in, alone, in Task Output: a
+  Rust `#[test]` (by its whole module path, in its package and test
+  binary), a pytest test or test class, or a Go `TestXxx`. `SPC p T` runs
+  it again. (#55)
 
 ### Changed
 

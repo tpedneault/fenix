@@ -9610,6 +9610,52 @@ impl App {
         self.enter_picker(ActivePicker::Task(fenix_picker::PickerState::new(candidates)));
     }
 
+    /// `SPC p r`: the test the cursor is in, run in Task Output.
+    pub(crate) fn run_test_at_cursor(&mut self) {
+        let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else {
+            self.set_error("no file here -- SPC p r runs the test the cursor is in");
+            return;
+        };
+        let line = self.open().buffer.line_col(&self.cursor()).0 + 1;
+        // A refusal has already been said.
+        let _ = self.run_test_at(&path, line);
+    }
+
+    /// Runs the test that line `line` (1-based) of the file at `path` is
+    /// in, alone, in Task Output, as `SPC p r` does there: a Rust
+    /// `#[test]`, a pytest test or a Go `TestXxx` (`fenix_tasks::test_at`),
+    /// read from the file's open buffer when it has one, unsaved edits and
+    /// all. The task's name (`test ledger::tests::adds`) when it started;
+    /// why not when it didn't, also shown in the modeline. `SPC p T` runs
+    /// it again.
+    pub(crate) fn run_test_at(&mut self, path: &Path, line: usize) -> Result<String, String> {
+        let text = match self.buffer_id_for_lsp_path(path).and_then(|id| self.buffers.get(id)) {
+            Some(ob) => ob.buffer.text(),
+            None => match std::fs::read_to_string(path) {
+                Ok(text) => text,
+                Err(err) => {
+                    let why = format!("{}: {err}", readable_path(path));
+                    self.set_error(why.clone());
+                    return Err(why);
+                }
+            },
+        };
+        let root = tool_sessions::root_for_path(path);
+        let task = match fenix_tasks::test_at(path, &text, line, &root) {
+            Ok(task) => task,
+            Err(why) => {
+                self.set_error(why.clone());
+                return Err(why);
+            }
+        };
+        let name = task.name.clone();
+        if self.run_task_as(task, root, None) {
+            Ok(name)
+        } else {
+            Err(self.modeline_pieces().1)
+        }
+    }
+
     /// The tasks the project at `root` has, as `SPC t t` offers them: the
     /// extensions', those found from its files, and its own
     /// (`tools.json`'s), which win by name.
@@ -29328,6 +29374,29 @@ configure_board stm32
         });
         app.handle_user_event(FenixUserEvent::TaskEvent(app.focused_buffer_id(), fenix_tasks::RunId::next(), fenix_tasks::TaskEvent::Output(vec![])));
         app.handle_user_event(FenixUserEvent::TaskEvent(app.focused_buffer_id(), fenix_tasks::RunId::next(), fenix_tasks::TaskEvent::Finished(fenix_tasks::TaskOutcome::Cancelled)));
+    }
+
+    /// `SPC p r`, and what `run_test {path, line}` calls: the test a line
+    /// is in, alone, in Task Output -- from the buffer's text, unsaved
+    /// edits and all.
+    #[test]
+    fn run_test_at_runs_the_test_a_line_is_in() {
+        let dir = TempDir::new("run_test_at");
+        dir.write("pyproject.toml", "[project]\nname = \"ledger\"\n");
+        let path = dir.write("test_ledger.py", "def helper():\n    pass\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let err = app.run_test_at(&path, 2).unwrap_err();
+        assert!(err.contains("isn't in a test"), "{err}");
+        assert!(app.modeline_pieces().1.contains("isn't in a test"));
+        // Typed, not saved.
+        let end = app.open().buffer.len_chars();
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        buffer.replace_range(cursor, end, end, "\ndef test_totals():\n    assert 1 == 1\n");
+        assert_eq!(app.run_test_at(&path, 5).unwrap(), "test test_totals");
+        let session = app.task_session.as_ref().expect("Task Output opened");
+        let header = app.buffers.get(session.buffer).unwrap().buffer.text();
+        assert!(header.starts_with("$ pytest test_ledger.py::test_totals"), "{header}");
+        assert_eq!(app.project_last_tasks.values().next().map(|t| t.name.as_str()), Some("test test_totals"), "SPC p T runs it again");
     }
 
     #[test]

@@ -1161,6 +1161,12 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   `--> file:line:col`. `Enter` on a line of Task Output that names a
   place -- one of those, or a `path:line:col` anywhere in it, such as a
   test's stack -- goes there.
+  `SPC p r` runs just the test the cursor is in: a Rust `#[test]`
+  (`cargo test -p <package> -- <module::path::name> --exact`, with
+  `--test`/`--bin` for an integration test or a binary's), a pytest
+  function or `Test` class (`pytest file::Class::test`), or a Go
+  `TestXxx` (`go test -run '^TestXxx$' ./dir`), read from the buffer as
+  it is, unsaved edits included. `SPC p T` runs it again.
   Task cancellation terminates the process tree on Windows, including children
   holding output pipes. Closing or rerunning a task never waits for reader
   threads. Windows also cleans up tasks when the editor exits abruptly. Output

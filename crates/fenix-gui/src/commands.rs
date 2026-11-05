@@ -155,6 +155,7 @@ impl CommandRegistry {
         registry.external("task.run", "Fuzzy-pick and run a discovered project task", |app| app.picker_tasks());
         registry.external("task.rerun_last", "Rerun the most recently run task", |app| app.rerun_last_task());
         registry.register("task.kill", "End the currently running task", cmd_task_kill);
+        registry.register("task.run_test_at_cursor", "Run the test the cursor is in", cmd_task_run_test_at_cursor);
         registry.external("dashboard.open", "Show Home, the start-up dashboard", |app| app.open_dashboard());
         registry.external("terminal.toggle", "Toggle the terminal panel", |app| app.toggle_terminal());
         registry.external("terminal.open_buffer", "Open a shell in the focused pane", |app| app.open_terminal_buffer());
@@ -533,6 +534,10 @@ fn cmd_project_delete(ctx: &mut CommandCtx) {
 
 fn cmd_task_kill(ctx: &mut CommandCtx) {
     ctx.app.kill_running_task();
+}
+
+fn cmd_task_run_test_at_cursor(ctx: &mut CommandCtx) {
+    ctx.app.run_test_at_cursor();
 }
 
 fn cmd_explorer_dual_pane(ctx: &mut CommandCtx) {
