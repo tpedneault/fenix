@@ -8,6 +8,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Tool Status (`SPC l m`) agrees with the doctor and the sessions: it
+  resolves each server and debug adapter as they do, an extension's
+  included (the Rust extension's `lldb-dap`); a server installed off
+  `PATH` (pyright in `~/.local/bin`) says where, not `[missing]`; one
+  that's running is found, not `[missing, running]`; and Go's and Lua's
+  servers have install hints. (#43)
 - The project doctor names a project Fenix has no kind of its own for
   -- Zig, Ruby, PHP, Swift, Java, Kotlin, C#, Ada, Lua -- as the
   language pack whose markers it has calls it (`zig (Zig)`), not

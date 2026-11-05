@@ -11171,9 +11171,25 @@ impl App {
         let configured_command = |spec: &fenix_project::tools::CommandSpec| {
             spec.command(&root).ok().map(|command| (command.get_program().to_string_lossy().into_owned(), spec.args.clone()))
         };
+        // As the sessions resolve them: the project's own, then an
+        // extension's, then Fenix's defaults (#43).
         let entries = crate::tool_status::scan(
-            |language| tools.lsp.get(&crate::lsp::language_config_name(language)).and_then(configured_command).or_else(|| crate::lsp::resolve_server_command(language, &configured)),
-            |language| tools.dap.get(&crate::lsp::language_config_name(language)).and_then(configured_command).or_else(|| crate::dap::default_adapter_command(language)),
+            |language| {
+                tools
+                    .lsp
+                    .get(&crate::lsp::language_config_name(language))
+                    .and_then(configured_command)
+                    .or_else(|| self.wasm.language_server(&root, language).as_ref().and_then(configured_command))
+                    .or_else(|| crate::lsp::resolve_server_command(language, &configured))
+            },
+            |language| {
+                tools
+                    .dap
+                    .get(&crate::lsp::language_config_name(language))
+                    .and_then(configured_command)
+                    .or_else(|| self.wasm.debug_adapter(&root, language).and_then(|a| a.command).as_ref().and_then(configured_command))
+                    .or_else(|| crate::dap::default_adapter_command(language))
+            },
             |language| lsp_sessions.contains(&language),
             |language| dap_language == Some(language),
         );

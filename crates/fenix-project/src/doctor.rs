@@ -158,6 +158,23 @@ pub trait Probe {
     }
 }
 
+/// `program` where tool installers put programs that may not be on PATH
+/// (`Probe::tool_dirs`'s, `uv tool install`'s bin folder): where the
+/// doctor finds one it says isn't on PATH, for Tool Status to say the
+/// same.
+pub fn in_tool_dirs(program: &str) -> Option<PathBuf> {
+    struct Defaults;
+    impl Probe for Defaults {
+        fn locate(&self, _: &str) -> Option<PathBuf> {
+            None
+        }
+        fn run(&self, _: &Path, _: &[&str], _: &Path) -> Option<(bool, String)> {
+            None
+        }
+    }
+    find_in(&Defaults.tool_dirs(), program)
+}
+
 /// `program` in one of `dirs`, with Windows' executable extensions.
 fn find_in(dirs: &[PathBuf], program: &str) -> Option<PathBuf> {
     let extensions: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
