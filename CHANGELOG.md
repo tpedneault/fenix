@@ -26,6 +26,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Rust `#[test]` (by its whole module path, in its package and test
   binary), a pytest test or test class, or a Go `TestXxx`. `SPC p T` runs
   it again. (#55)
+- `SPC q r` restarts Fenix where you are, the session and unsaved text
+  kept: what an extension installed or switched on since start, or a
+  setting read only then, needs. The Extensions page and its messages
+  say so. (#40)
 
 ### Changed
 
@@ -106,6 +110,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Finishing a merge (`SPC g x c`, or `c` on the Git page) commits with
   Git's prepared message (`Merge branch 'feature'`), opened in the
   composer to edit first, rather than with "Merge". (#45)
+- "no known debug adapter" says where to look: the project's
+  `tools.json`, an extension's tool on `PATH` (`SPC p h`), or a restart
+  (`SPC q r`) for one installed since Fenix started. (#40)
 
 ## [1.0.1] - 2026-11-03
 

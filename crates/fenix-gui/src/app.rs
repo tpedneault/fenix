@@ -1142,6 +1142,17 @@ struct LspSession {
     pulls: HashMap<PathBuf, LspPull>,
 }
 
+/// Why `SPC u u` can't debug a `language` file: no adapter from the
+/// project, an extension or Fenix -- and where to look, since the usual
+/// reasons are a tool not on `PATH` or something changed since start.
+fn no_debug_adapter(language: fenix_syntax::LanguageId) -> String {
+    let name = crate::lsp::language_config_name(language);
+    format!(
+        "no debug adapter for {name}: the project's .fenix/tools.json names none, no extension running gives one, and Fenix has none built in \
+         -- an extension's adapter needs its tool on PATH (SPC p h checks), and one installed or set up since Fenix started needs SPC q r"
+    )
+}
+
 /// How long a language server has to answer `initialize` before it's
 /// given up on, said to be failing, and stopped: one that never will
 /// (typescript-language-server with no `tsserver.js`) otherwise shows
@@ -5043,6 +5054,9 @@ pub struct App {
     /// `lsp_workspace_names` its calls are colored by.
     tcl_name_servers: HashMap<BufferId, (Instant, Vec<LspKey>)>,
     lsp_unavailable: std::collections::HashSet<LspKey>,
+    /// `SPC q r` asked for Fenix to start again once it has quit
+    /// (`prepare_restart`); `main` starts the new one.
+    pub(crate) restart_requested: bool,
     /// Why each of `lsp_unavailable` stopped, with the last it wrote to
     /// stderr: what Tool Status shows.
     lsp_failures: HashMap<LspKey, String>,
@@ -5801,6 +5815,7 @@ impl App {
             lsp_workspace_names: HashMap::new(),
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
+            restart_requested: false,
             lsp_failures: HashMap::new(),
             lsp_additional: HashMap::new(),
             lsp_fanouts: HashMap::new(),
@@ -8604,6 +8619,15 @@ impl App {
     /// anyway." Note this is no longer reachable from a bare `:q`/
     /// `SPC b k` -- those only close the focused buffer now, see
     /// `App::kill_buffer`.
+    /// `SPC q r` (`app.restart`): quits and starts again, the session
+    /// restored -- unsaved text and all -- for what only a start reads.
+    pub(crate) fn request_restart(&mut self, event_loop: &ActiveEventLoop) {
+        match self.prepare_restart() {
+            Some(why) => self.set_error(why),
+            None => event_loop.exit(),
+        }
+    }
+
     pub(crate) fn request_quit(&mut self, event_loop: &ActiveEventLoop) {
         if !self.arm_quit_confirm_if_dirty() {
             event_loop.exit();
@@ -10014,7 +10038,7 @@ impl App {
             Ok(tools) => tools,
             Err(error) => { self.set_error(error); return; }
         };
-        let Some(spec) = self.debug_adapter_command(&root, language, &tools) else { self.set_error(format!("no known debug adapter for {language:?}")); return; };
+        let Some(spec) = self.debug_adapter_command(&root, language, &tools) else { let why = no_debug_adapter(language); self.set_error(why); return; };
         // No launch configuration of its own: the extensions' (their
         // `launch/*.toml`, and those they give as they run), to pick from.
         if tools.launch.is_empty() {
@@ -10100,7 +10124,7 @@ impl App {
             Some(port) => crate::dap::Adapter { command: None, port: Some(port) },
             None => match self.debug_adapter_command(&root, language, &tools) {
                 Some(spec) => spec,
-                None => return self.set_error(format!("no known debug adapter for {language:?}")),
+                None => return self.set_error(no_debug_adapter(language)),
             },
         };
         for name in template.variables() {
@@ -29587,6 +29611,16 @@ configure_board stm32
         assert!(app.modeline_pieces().1.contains("no file to set a breakpoint"));
     }
 
+    /// `SPC q r` with nowhere to keep the session (a test's App, or
+    /// `session.restore = false`): it says so, and Fenix keeps running.
+    #[test]
+    fn a_restart_without_a_session_to_come_back_to_is_refused() {
+        let mut app = App::with_file(None);
+        let why = app.prepare_restart().expect("refused");
+        assert!(why.contains("session"), "{why}");
+        assert!(!app.restart_requested);
+    }
+
     #[test]
     fn debug_start_or_continue_errors_for_an_unrecognized_language() {
         let dir = TempDir::new("debug_no_language");
@@ -29602,7 +29636,9 @@ configure_board stm32
         let file = dir.write("main.rs", "fn main() {}\n");
         let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
         app.debug_start_or_continue();
-        assert!(app.modeline_pieces().1.contains("no known debug adapter"));
+        let said = app.modeline_pieces().1;
+        assert!(said.contains("no debug adapter for rust"), "{said}");
+        assert!(said.contains("SPC p h") && said.contains("SPC q r"), "says where to look: {said}");
     }
 
     #[test]

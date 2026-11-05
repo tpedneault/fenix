@@ -58,6 +58,11 @@ impl Launcher {
         Launcher { state: State::Pending { proxy, startup, queued: Vec::new() } }
     }
 
+    /// Whether the editor quit to start again (`SPC q r`).
+    pub fn restart_requested(&self) -> bool {
+        matches!(&self.state, State::Running(app) if app.restart_requested)
+    }
+
     fn launch(&mut self, event_loop: &ActiveEventLoop) {
         let State::Pending { proxy, startup, queued } = std::mem::replace(&mut self.state, State::Moving) else { return };
 

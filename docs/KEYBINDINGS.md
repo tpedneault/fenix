@@ -41,6 +41,7 @@ the other way round after `\v`.
 | `SPC f y` | Copy the current file's path to the clipboard |
 | `SPC f E` | Read this file again as another encoding (`file.save_with_encoding` in `SPC :` saves it in one) |
 | `SPC q q` | Quit |
+| `SPC q r` | Restart where you are (windows, files, unsaved text): extensions installed or switched on since start are loaded |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |

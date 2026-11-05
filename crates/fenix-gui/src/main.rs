@@ -166,6 +166,12 @@ fn main() -> anyhow::Result<()> {
     // Fenix someone is using.
     // Safe mode opens a window of its own: a Fenix already running has
     // its extensions, and handing it the files would keep them.
+    // Started by `SPC q r`: the Fenix it replaces lets go of the
+    // endpoint as it finishes quitting.
+    if std::env::var_os(ipc::RESTARTED_ENV).is_some() {
+        std::env::remove_var(ipc::RESTARTED_ENV);
+        ipc::wait_until_free(std::time::Duration::from_secs(15));
+    }
     let standalone = std::env::var_os("FENIX_STANDALONE").is_some_and(|v| !v.is_empty() && v != "0") || installed::safe_mode();
     let role = if standalone { ipc::Role::Standalone } else { ipc::negotiate(&invocation) };
     match role {
@@ -181,6 +187,18 @@ fn main() -> anyhow::Result<()> {
     // editor loads behind it -- see `launch`.
     let mut launcher = launch::Launcher::new(proxy, invocation);
     event_loop.run_app(&mut launcher)?;
+
+    // `SPC q r`: the session is saved; the next Fenix restores it. It's
+    // started without this launch's files (the session has them) but
+    // with its safe mode, console and extensions' options left out too:
+    // a restart is to use what's installed.
+    if launcher.restart_requested() {
+        let keep: Vec<&String> = args.iter().filter(|a| a.as_str() == "--console").collect();
+        let exe = std::env::current_exe()?;
+        if let Err(e) = std::process::Command::new(exe).args(keep).env(ipc::RESTARTED_ENV, "1").spawn() {
+            eprintln!("fenix: couldn't start again ({e}); start Fenix yourself");
+        }
+    }
 
     Ok(())
 }

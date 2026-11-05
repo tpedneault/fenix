@@ -91,6 +91,7 @@ impl CommandRegistry {
         registry.register("edit.undo", "Undo the last edit", cmd_undo);
         registry.register("edit.redo", "Redo the last undone edit", cmd_redo);
         registry.register("app.quit", "Quit Fenix (confirms first if there are unsaved buffers)", cmd_quit);
+        registry.register("app.restart", "Restart Fenix where you are, for extensions and settings read at start", cmd_restart);
         registry.register("app.quit_force", "Quit Fenix immediately, discarding any unsaved changes", cmd_quit_force);
         registry.register("app.save_all_and_quit", "Save every unsaved buffer, then quit Fenix", cmd_save_all_and_quit);
         registry.register(
@@ -434,6 +435,10 @@ fn cmd_redo(ctx: &mut CommandCtx) {
 
 fn cmd_quit(ctx: &mut CommandCtx) {
     ctx.app.request_quit(ctx.event_loop);
+}
+
+fn cmd_restart(ctx: &mut CommandCtx) {
+    ctx.app.request_restart(ctx.event_loop);
 }
 
 fn cmd_quit_force(ctx: &mut CommandCtx) {

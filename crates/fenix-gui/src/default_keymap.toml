@@ -121,6 +121,11 @@ label = "quit"
 command = "app.quit"
 
 [[leader]]
+keys = "SPC q r"
+label = "restart, keeping your place"
+command = "app.restart"
+
+[[leader]]
 keys = "SPC t"
 group = "toggle"
 
