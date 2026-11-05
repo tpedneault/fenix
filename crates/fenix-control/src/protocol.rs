@@ -34,6 +34,12 @@ pub mod method {
     pub const TASKS: &str = "fenix/tasks";
     pub const TASKS_RUN: &str = "fenix/tasks.run";
     pub const AGENT_COMMAND: &str = "fenix/agentCommand";
+    pub const BUFFER_READ: &str = "fenix/buffer.read";
+    pub const LSP: &str = "fenix/lsp";
+    pub const DEBUG_STATE: &str = "fenix/debug.state";
+    pub const DEBUG_EVALUATE: &str = "fenix/debug.evaluate";
+    pub const TOOLS: &str = "fenix/tools";
+    pub const TOOLS_CALL: &str = "fenix/tools.call";
 }
 
 /// Every method this crate knows, besides `fenix/hello` itself, which
@@ -55,6 +61,12 @@ pub const CAPABILITIES: &[&str] = &[
     method::TASKS,
     method::TASKS_RUN,
     method::AGENT_COMMAND,
+    method::BUFFER_READ,
+    method::LSP,
+    method::DEBUG_STATE,
+    method::DEBUG_EVALUATE,
+    method::TOOLS,
+    method::TOOLS_CALL,
 ];
 
 /// Error codes: JSON-RPC's own, and Fenix's in the range JSON-RPC
@@ -346,4 +358,20 @@ pub enum Call {
     /// `{ "id": string }`: runs a Fenix command for an agent, when
     /// `agents.mcp.fenix_write` lets it.
     AgentCommand(Value),
+    /// `{ "path": string, "startLine"?: number, "endLine"?: number }`: an
+    /// open file as it stands in Fenix, unsaved edits and all.
+    BufferRead(Value),
+    /// `{ "kind": string, "path"?: string, "line"?: number, "column"?:
+    /// number, "symbol"?: string, "query"?: string }`: the language
+    /// servers' answer.
+    Lsp(Value),
+    /// Where the debugger is stopped, and what it can see there.
+    DebugState,
+    /// `{ "expression": string }`: evaluated where the debugger is
+    /// stopped, when `agents.mcp.fenix_write` lets it.
+    DebugEvaluate(Value),
+    /// The tools extensions offer agents.
+    Tools,
+    /// `{ "name": string, "arguments"?: object }`: runs one of them.
+    ToolsCall(Value),
 }

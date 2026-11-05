@@ -593,3 +593,42 @@ fn trimming_keeps_the_end_at_a_line() {
     assert!(trimmed.ends_with("third line\n") && !trimmed.contains("first"));
     assert_eq!(trim_front("short", 100), "short");
 }
+
+#[test]
+fn a_new_sessions_first_prompt_carries_the_note_unseen() {
+    let mut h = Harness::new();
+    h.hub.set_briefing(Some("prefer fenix".into()));
+    let (id, conn) = h.live_thread();
+    let fx = h.hub.prompt(&id, texts(&["hello"]));
+    let (first, params) = request(&fx, "session/prompt").unwrap();
+    let prompt = params["prompt"].as_array().unwrap();
+    assert_eq!(prompt.len(), 2);
+    assert!(prompt[0]["text"].as_str().unwrap().contains("prefer fenix"));
+    assert_eq!(prompt[1]["text"], "hello");
+    let shown: Vec<_> = h.hub.view(&id).unwrap().thread.entries.iter().filter_map(|e| if let Entry::User { blocks, .. } = e { Some(blocks.clone()) } else { None }).collect();
+    assert_eq!(shown, vec![texts(&["hello"])], "not in the thread");
+    let fx = h.answer(conn, first, json!({ "stopReason": "end_turn" }));
+    assert!(fx.iter().all(|e| !matches!(e, Effect::Request { method: "session/prompt", .. })));
+    let fx = h.hub.prompt(&id, texts(&["again"]));
+    assert_eq!(request(&fx, "session/prompt").unwrap().1["prompt"].as_array().unwrap().len(), 1, "once a session");
+}
+
+fn ask_to_run(h: &mut Harness, conn: ConnId, title: &str) -> Vec<Effect> {
+    h.event(conn, AcpEvent::Request { id: json!("p-1"), method: "session/request_permission".into(), params: json!({ "sessionId": "s1", "toolCall": { "toolCallId": "t1", "title": title }, "options": [{ "optionId": "yes", "name": "Yes", "kind": "allow_once" }, { "optionId": "no", "name": "No", "kind": "reject_once" }] }) })
+}
+
+#[test]
+fn fenixs_read_tools_are_allowed_and_nothing_else_is() {
+    let mut h = Harness::new();
+    h.hub.set_allowed_fenix_tools(vec!["hover".into()]);
+    let (id, conn) = h.live_thread();
+    h.hub.prompt(&id, texts(&["go"]));
+    let allowed = Effect::Respond { conn, id: json!("p-1"), result: Ok(json!({ "outcome": { "outcome": "selected", "optionId": "yes" } })) };
+    for title in ["mcp__fenix__hover", "fenix.hover", "fenix/hover", "fenix:hover", "hover (fenix MCP Server)"] {
+        assert!(ask_to_run(&mut h, conn, title).contains(&allowed), "{title}");
+    }
+    assert!(!h.hub.view(&id).unwrap().thread.entries.iter().any(|e| matches!(e, Entry::Permission(_))), "no card");
+    for title in ["mcp__fenix__run_task", "mcp__notfenix__hover", "hover", "Edit fenix.hover", "fenix.hover && rm -rf"] {
+        assert!(!ask_to_run(&mut h, conn, title).contains(&allowed), "{title}");
+    }
+}

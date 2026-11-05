@@ -941,3 +941,11 @@ fn an_api_key_is_kept_in_the_keychain_and_given_to_every_agent() {
     assert!(keychain.get("agents.ANTHROPIC_API_KEY").is_none());
     assert!(f.app.config.list_value("agents.secrets").is_empty());
 }
+
+#[test]
+fn an_mcp_server_is_a_command_or_an_address() {
+    assert!(matches!(mcp_server("a", "my-server --flag"), Some(McpServer::Stdio { command, args, .. }) if command == "my-server" && args == ["--flag"]));
+    assert!(matches!(mcp_server("b", "https://mcp.example.com/x"), Some(McpServer::Http { url, headers, .. }) if url == "https://mcp.example.com/x" && headers.is_empty()));
+    assert!(matches!(mcp_server("c", "sse+https://mcp.example.com Authorization=Bearer"), Some(McpServer::Sse { url, headers, .. }) if url == "https://mcp.example.com" && headers == [("Authorization".to_string(), "Bearer".to_string())]));
+    assert!(mcp_server("d", "").is_none());
+}

@@ -3528,6 +3528,34 @@ pub(crate) mod tests {
         assert!(said.as_deref().is_some_and(|e| e.contains("test.hello stopped")), "{said:?}");
     }
 
+    /// A service it offers agents is a tool: listed under its name, run
+    /// with its arguments, and held back if it writes and that's off.
+    #[test]
+    fn an_extensions_agent_tool_is_listed_and_called() {
+        let mut app = App::with_file(None);
+        let tools = "[contributes]\nservices = [\"hello.later\"]\n\n[[contributes.agent_tools]]\nname = \"later\"\ndescription = \"Later\"\nservice = \"hello.later\"\n\n[[contributes.agent_tools]]\nname = \"change\"\ndescription = \"Changes\"\nservice = \"hello.later\"\nwrites = true\n";
+        app.wasm.installed = vec![hello(tools)];
+        let list = app.control_tools();
+        assert_eq!(list["tools"][0]["name"], "hello_later");
+        assert_eq!(list["tools"][1]["writes"], true);
+        let (reply, answer) = std::sync::mpsc::channel();
+        app.control_tools_call(serde_json::json!({ "name": "hello_later", "arguments": { "a": 1 } }), reply);
+        let got = std::cell::RefCell::new(None);
+        pump_until(&mut app, |_| {
+            if got.borrow().is_none() {
+                *got.borrow_mut() = answer.try_recv().ok();
+            }
+            got.borrow().is_some()
+        });
+        assert_eq!(got.into_inner().unwrap().unwrap(), "later: {\"a\":1}");
+        let (reply, answer) = std::sync::mpsc::channel();
+        app.control_tools_call(serde_json::json!({ "name": "hello_change" }), reply);
+        assert!(answer.recv().unwrap().unwrap_err().message.contains("fenix_write"));
+        let (reply, answer) = std::sync::mpsc::channel();
+        app.control_tools_call(serde_json::json!({ "name": "hello_nothing" }), reply);
+        assert!(answer.recv().unwrap().unwrap_err().message.contains("no tool"));
+    }
+
     /// A service it answers later reaches Fenix's own caller when it
     /// does; Home has its section, and a row picked goes back to it.
     #[test]

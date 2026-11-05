@@ -1,4 +1,5 @@
 mod agents;
+mod control_agent;
 mod refactor;
 mod snippets;
 mod tool_sessions;
@@ -863,6 +864,8 @@ enum PendingDapRequest {
     Lens { expression: String },
     /// The children of what the lens shows, under `card` once they come.
     LensChildren { card: String },
+    /// `fenix/debug.evaluate`'s, answered to its client.
+    Control { reply: std::sync::mpsc::Sender<crate::ipc::Reply> },
     /// A pin's value.
     Pin { pin: debug_breakpoints::Pin },
 }
@@ -1245,6 +1248,8 @@ enum PendingLspRequest {
     /// `workspace/symbol`, for the project's procs a Tcl call is colored
     /// by (`App::known_commands`).
     WorkspaceNames,
+    /// `fenix/lsp`'s, for its client (`LspFanout::Control`).
+    Control { fanout: u64 },
 }
 
 /// The project whose language server settings `path` is
@@ -1322,6 +1327,10 @@ enum LspFanout {
         /// (`diagnostics-set-ex`), shown after the servers' actions.
         fixes: Vec<(lsp_types::CodeActionOrCommand, refactor::Context, Option<String>)>,
     },
+    /// `fenix/lsp`: answered to the client that asked. Several can be
+    /// under way, unlike the others: an agent's questions don't replace
+    /// each other.
+    Control { question: control_agent::LspQuestion, gather: fenix_lsp::fanout::Gather<LspKey, serde_json::Value>, reply: std::sync::mpsc::Sender<crate::ipc::Reply> },
 }
 
 /// The completion popup's server answers while it stays anchored at one
@@ -6587,6 +6596,15 @@ impl App {
     fn sync_lsp_for_focused_buffer(&mut self) {
         let _profile = crate::profile::Scope::new("sync LSP");
         let Some(path) = self.open().buffer.path().map(Path::to_path_buf) else { return };
+        let edit_count = self.open().buffer.edit_count();
+        let text = self.open().buffer.text();
+        self.sync_lsp_for(&path, &text, edit_count);
+    }
+
+    /// Starts `path`'s language servers if they aren't running, and tells
+    /// those that are its text, if `edit_count` says that's changed.
+    fn sync_lsp_for(&mut self, path: &Path, text: &str, edit_count: u64) {
+        let path = path.to_path_buf();
         let language = fenix_syntax::detect_language_from_path(&path);
         let cwd = tool_sessions::lsp_root_for_path(&path);
         if let Some(language) = language {
@@ -6611,11 +6629,9 @@ impl App {
         // own keys) needs the same normalized form, or two spellings of
         // the same file stop matching each other.
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path.clone()));
-        let edit_count = self.open().buffer.edit_count();
-        let text = self.open().buffer.text();
         for (key, language_id, by_pattern) in self.lsp_targets(&path) {
             let Some(session) = self.lsp_sessions.get_mut(&key) else { continue };
-            sync_lsp_document(session, &canonical, &language_id, by_pattern, &text, edit_count);
+            sync_lsp_document(session, &canonical, &language_id, by_pattern, text, edit_count);
         }
     }
 
@@ -6902,6 +6918,12 @@ impl App {
                     self.set_error(format!("{name} failed to initialize: {}", err.message));
                 }
             },
+            PendingLspRequest::Control { fanout } => {
+                if let Some(LspFanout::Control { gather, .. }) = self.lsp_fanouts.get_mut(&fanout) {
+                    gather.answer(&key, result.ok());
+                }
+                self.lsp_fanout_progress(fanout);
+            }
             PendingLspRequest::Hover { fanout } => {
                 let text = result.ok().and_then(|v| serde_json::from_value::<Option<lsp_types::Hover>>(v).ok()).map(|hover| hover.map(|h| crate::lsp::hover_contents_text(h.contents)));
                 if let Some(LspFanout::Hover { gather, .. }) = self.lsp_fanouts.get_mut(&fanout) {
@@ -7033,7 +7055,7 @@ impl App {
     /// other servers aren't kept waiting for it.
     fn lsp_request_failed(&mut self, key: &LspKey, pending: PendingLspRequest) {
         let fanout = match pending {
-            PendingLspRequest::Hover { fanout } | PendingLspRequest::Definition { fanout } | PendingLspRequest::References { fanout } | PendingLspRequest::CodeAction { fanout } => fanout,
+            PendingLspRequest::Hover { fanout } | PendingLspRequest::Definition { fanout } | PendingLspRequest::References { fanout } | PendingLspRequest::CodeAction { fanout } | PendingLspRequest::Control { fanout } => fanout,
             PendingLspRequest::Completion { .. } => {
                 if let Some(state) = &mut self.lsp_completion {
                     state.answers.forget(key);
@@ -7046,6 +7068,7 @@ impl App {
             Some(LspFanout::Hover { gather, .. }) => { gather.answer(key, None); }
             Some(LspFanout::Locations { gather, .. }) => { gather.answer(key, None); }
             Some(LspFanout::CodeActions { gather, .. }) => { gather.answer(key, None); }
+            Some(LspFanout::Control { gather, .. }) => { gather.answer(key, None); }
             None => return,
         }
         self.lsp_fanout_progress(fanout);
@@ -7097,11 +7120,16 @@ impl App {
             }
             Some(LspFanout::Locations { gather, .. }) => gather.is_ready(now, |locations| !locations.is_empty()),
             Some(LspFanout::CodeActions { gather, .. }) => gather.is_ready(now, |actions| !actions.is_empty()),
+            Some(LspFanout::Control { gather, .. }) => gather.is_complete() || now >= gather.deadline(),
         };
         if !done {
             return;
         }
         match self.lsp_fanouts.remove(&id) {
+            Some(LspFanout::Control { question, gather, reply }) => {
+                let answers = gather.into_arrived().into_iter().map(|(_, answer)| answer).collect();
+                self.control_lsp_answered(question, answers, reply);
+            }
             Some(LspFanout::Locations { buffer, references, gather }) => {
                 if buffer != focused {
                     return;
@@ -10512,6 +10540,14 @@ impl App {
                 self.debug_variables_came(on, frame, path, vars);
             }
             PendingDapRequest::Repl { expression } => self.debug_repl_answered(expression, result),
+            PendingDapRequest::Control { reply } => {
+                let answer = match result {
+                    Ok(SuccessResponse::Evaluate(body)) => Ok(serde_json::json!({ "result": body.result, "type": body.type_ })),
+                    Ok(_) => Err(fenix_control::RpcError::internal("the adapter answered something else")),
+                    Err(err) => Err(fenix_control::RpcError::invalid_params(err.message.trim().to_string())),
+                };
+                let _ = reply.send(answer);
+            }
             PendingDapRequest::Lens { expression } => self.debug_lens_answered(on, expression, result),
             PendingDapRequest::Pin { pin } => {
                 let value = match result {

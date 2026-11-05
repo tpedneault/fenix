@@ -227,6 +227,12 @@ impl Session<'_> {
             method::TASKS => Call::Tasks,
             method::TASKS_RUN => Call::TasksRun(params),
             method::AGENT_COMMAND => Call::AgentCommand(params),
+            method::BUFFER_READ => Call::BufferRead(params),
+            method::LSP => Call::Lsp(params),
+            method::DEBUG_STATE => Call::DebugState,
+            method::DEBUG_EVALUATE => Call::DebugEvaluate(params),
+            method::TOOLS => Call::Tools,
+            method::TOOLS_CALL => Call::ToolsCall(params),
             // Listed in the server's capabilities but unknown here: the
             // caller asked for more than this crate implements.
             _ => {

@@ -490,6 +490,9 @@ pub struct Contributes {
     /// The services it answers (`serve`), by name.
     #[serde(default)]
     pub services: Vec<String>,
+    /// Those services agents may call, as tools (`fenix --mcp`).
+    #[serde(default)]
+    pub agent_tools: Vec<AgentToolContribution>,
     /// Where its `SPC m` menu applies (`[[local.<name>]]` in its keymaps).
     #[serde(default)]
     pub contexts: Vec<ContextContribution>,
@@ -768,6 +771,24 @@ fn text_kind() -> String {
 /// The kinds a contributed setting may be.
 pub const SETTING_KINDS: &[&str] = &["text", "bool", "int", "minutes", "path", "list", "map", "records", "choice", "secret"];
 
+/// One of its services, as a tool coding agents can call (`fenix --mcp`).
+/// It's given the tool's arguments as JSON, and what it answers goes back.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AgentToolContribution {
+    /// `search`: agents see `<the extension's last name>_search`.
+    pub name: String,
+    /// What it does, for the agent deciding whether to call it.
+    pub description: String,
+    /// The service it calls, from `contributes.services`.
+    pub service: String,
+    /// The JSON Schema of its arguments, as text.
+    #[serde(default)]
+    pub input: Option<String>,
+    /// It changes something: only with `agents.mcp.fenix_write`.
+    #[serde(default)]
+    pub writes: bool,
+}
+
 /// A command, run by calling the extension's `run-command`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct CommandContribution {
@@ -845,6 +866,19 @@ impl Manifest {
             }
             if setting.kind == "choice" && setting.choices.is_empty() {
                 return Err(format!("extension.toml: setting {} is a choice of nothing (choices)", setting.key));
+            }
+        }
+        for tool in &self.contributes.agent_tools {
+            if tool.name.is_empty() || !tool.name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                return Err(format!("extension.toml: agent tool {:?} -- lower case letters, digits and _", tool.name));
+            }
+            if !self.contributes.services.contains(&tool.service) {
+                return Err(format!("extension.toml: agent tool {:?} -- {:?} isn't one of its services", tool.name, tool.service));
+            }
+            if let Some(input) = &tool.input {
+                if !serde_json::from_str::<serde_json::Value>(input).is_ok_and(|v| v.is_object()) {
+                    return Err(format!("extension.toml: agent tool {:?} -- input isn't a JSON object", tool.name));
+                }
             }
         }
         for service in &self.contributes.services {
@@ -1145,6 +1179,13 @@ namespaces = [\"issues\"]
         let more = text.clone() + "\n[contributes]\nservices = [\"jira.issue\"]\n\n[[contributes.settings]]\nkey = \"jira.base_url\"\ndescription = \"Your server\"\n\n[[contributes.settings]]\nkey = \"jira.mode\"\nkind = \"choice\"\nchoices = [\"a\", \"b\"]\n";
         let m = Manifest::parse(&more).unwrap();
         assert_eq!(m.contributes.services, ["jira.issue"]);
+        let tool = more.clone() + "\n[[contributes.agent_tools]]\nname = \"issue\"\ndescription = \"An issue\"\nservice = \"jira.issue\"\ninput = '{\"type\":\"object\"}'\n";
+        let t = Manifest::parse(&tool).unwrap();
+        assert_eq!(t.contributes.agent_tools[0].service, "jira.issue");
+        assert!(!t.contributes.agent_tools[0].writes, "reading, unless it says");
+        assert!(Manifest::parse(&tool.replace("service = \"jira.issue\"", "service = \"jira.other\"")).unwrap_err().contains("isn't one of its services"));
+        assert!(Manifest::parse(&tool.replace("name = \"issue\"", "name = \"Is sue\"")).unwrap_err().contains("lower case"));
+        assert!(Manifest::parse(&tool.replace("{\"type\":\"object\"}", "not json")).unwrap_err().contains("JSON object"));
         assert_eq!((m.contributes.settings[0].key.as_str(), m.contributes.settings[0].kind.as_str()), ("jira.base_url", "text"));
         assert!(Manifest::parse(&more.replace("jira.base_url", "editor.font")).unwrap_err().contains("settings start with its name"));
         assert!(Manifest::parse(&more.replace("kind = \"choice\"", "kind = \"colour\"")).unwrap_err().contains("one of text"));

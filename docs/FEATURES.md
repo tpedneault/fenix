@@ -925,7 +925,9 @@ the guide.
 - **Logins**: an agent that wants one says so in the thread. `SPC a p`
   offers its ways: one the agent does itself, or its own login command
   in a terminal pane under the thread, after which Fenix asks again.
-- **Fenix as a tool**: every session gets Fenix as an MCP server
+- **Fenix as a tool**: language server answers, unsaved text, the
+  debugger's stop and extensions' tools, as well as the following. Every
+  session gets Fenix as an MCP server
   (`fenix --mcp`, `agents.mcp.fenix`): the agent can ask for the
   language servers' problems, the open files (and which have unsaved
   edits), your selection, and show you a file. With

@@ -167,6 +167,22 @@ pub enum NoticeKind {
     Login,
 }
 
+const NOTE_OPEN: &str = "<fenix-note>";
+const NOTE_CLOSE: &str = "</fenix-note>";
+
+/// `text` as a note from Fenix to the agent, which a session's replay
+/// can tell from what you typed.
+pub fn as_note(text: &str) -> String {
+    format!("{NOTE_OPEN}\n{text}\n{NOTE_CLOSE}")
+}
+
+/// What's left of `text` after a note at its start, if it has one.
+fn without_note(text: &str) -> Option<String> {
+    let rest = text.trim_start().strip_prefix(NOTE_OPEN)?;
+    let (_, after) = rest.split_once(NOTE_CLOSE)?;
+    Some(after.trim_start().to_string())
+}
+
 impl Thread {
     /// Applies one update from the agent. `replaying`: it comes from
     /// `session/load`'s replay, which is the only time an agent's echo of
@@ -177,6 +193,14 @@ impl Thread {
                 if !replaying {
                     return;
                 }
+                let content = match content {
+                    ContentBlock::Text(text) => match without_note(&text) {
+                        Some(text) if text.is_empty() => return,
+                        Some(text) => ContentBlock::Text(text),
+                        None => ContentBlock::Text(text),
+                    },
+                    other => other,
+                };
                 match self.entries.last_mut() {
                     Some(Entry::User { blocks, queued: false }) => push_block(blocks, content),
                     _ => self.entries.push(Entry::User { blocks: vec![content], queued: false }),
@@ -520,6 +544,8 @@ mod tests {
     #[test]
     fn user_chunks_are_taken_only_from_a_replay() {
         let mut t = Thread::default();
+        t.apply(up(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": as_note("for the agent") } })), true);
+        assert!(t.entries.is_empty(), "Fenix's note isn't a message of yours");
         t.apply(up(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "echo" } })), false);
         assert!(t.entries.is_empty());
         t.apply(up(json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "fix " } })), true);

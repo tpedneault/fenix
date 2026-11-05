@@ -164,6 +164,8 @@ struct Slot {
     served: HashSet<(ConnId, String)>,
     /// Files already announced for editing in this thread.
     announced: HashSet<String>,
+    /// A new session, not yet given its first prompt.
+    fresh: bool,
 }
 
 /// What the caller does for the hub. Effects live for a moment, from
@@ -247,6 +249,10 @@ pub struct Hub {
     /// Handed to every session; `{thread}` in an argument becomes the
     /// thread's id.
     mcp_servers: Vec<McpServer>,
+    /// A note for the agent, before the first prompt of a new session.
+    briefing: Option<String>,
+    /// The tools of the `fenix` MCP server it needn't ask to use.
+    allowed_fenix_tools: Vec<String>,
     idle_timeout: Duration,
     connections: HashMap<ConnId, Connection>,
     next_conn: u64,
@@ -267,6 +273,8 @@ impl Hub {
             capabilities: ClientCapabilities::fenix(),
             client_version: client_version.into(),
             mcp_servers: Vec::new(),
+            briefing: None,
+            allowed_fenix_tools: Vec::new(),
             idle_timeout: Duration::from_secs(600),
             connections: HashMap::new(),
             next_conn: 1,
@@ -296,6 +304,17 @@ impl Hub {
 
     pub fn set_mcp_servers(&mut self, servers: Vec<McpServer>) {
         self.mcp_servers = servers;
+    }
+
+    /// `briefing` goes before the first prompt of each new session. It
+    /// isn't shown in the thread.
+    pub fn set_briefing(&mut self, briefing: Option<String>) {
+        self.briefing = briefing;
+    }
+
+    /// `tools` of the `fenix` MCP server are used without asking.
+    pub fn set_allowed_fenix_tools(&mut self, tools: Vec<String>) {
+        self.allowed_fenix_tools = tools;
     }
 
     pub fn set_idle_timeout(&mut self, timeout: Duration) {
@@ -383,7 +402,7 @@ impl Hub {
         self.order.push(id.clone());
         self.threads.insert(
             id,
-            Slot { meta, thread, link: Link::Detached, turn: Turn::Idle, queue: VecDeque::new(), replay: None, handoff: None, permissions: HashMap::new(), served: HashSet::new(), announced: HashSet::new() },
+            Slot { meta, thread, link: Link::Detached, turn: Turn::Idle, queue: VecDeque::new(), replay: None, handoff: None, permissions: HashMap::new(), served: HashSet::new(), announced: HashSet::new(), fresh: false },
         );
     }
 
@@ -815,8 +834,13 @@ impl Hub {
         if self.connections.get(&conn).map(|c| &c.state) != Some(&ConnState::Ready) {
             return;
         }
-        let Some(blocks) = slot.queue.pop_front() else { return };
+        let Some(mut blocks) = slot.queue.pop_front() else { return };
         slot.thread.mark_sent();
+        if std::mem::take(&mut slot.fresh) {
+            if let Some(briefing) = &self.briefing {
+                blocks.insert(0, ContentBlock::text(crate::thread::as_note(briefing)));
+            }
+        }
         if let Some(request) = self.send(conn, "session/prompt", protocol::prompt_params(&session, &blocks), Pending::Prompt { thread: id.clone() }, fx) {
             let slot = self.threads.get_mut(id).unwrap();
             slot.turn = Turn::Prompting { request };
@@ -1020,7 +1044,10 @@ impl Hub {
             Ok(v) => {
                 let setup = SessionSetup::parse(&v);
                 let session = match (how, &setup.session_id, &slot.meta.session_id) {
-                    (Attach::New, Some(new), _) => new.clone(),
+                    (Attach::New, Some(new), _) => {
+                        slot.fresh = true;
+                        new.clone()
+                    }
                     (Attach::New, None, _) => {
                         slot.link = Link::Detached;
                         slot.thread.notice(NoticeKind::Error, "The agent started a session without an id.");
@@ -1221,9 +1248,15 @@ impl Hub {
         let slot = self.threads.get_mut(&thread).unwrap();
         match request {
             ClientRequest::RequestPermission { tool_call, options, .. } => {
+                let tool_call = merged_tool_call(&slot.thread, tool_call);
+                let options = options_or_default(options);
+                if let Some(allow) = options.iter().find(|o| o.kind == protocol::PermissionKind::AllowOnce).filter(|_| fenix_tool_of(&tool_call).is_some_and(|tool| self.allowed_fenix_tools.iter().any(|t| t == tool))) {
+                    fx.push(Effect::Respond { conn, id, result: Ok(protocol::permission_result(Some(&allow.id))) });
+                    return;
+                }
                 let key = id.to_string();
                 slot.permissions.insert(key.clone(), (conn, id));
-                slot.thread.push_permission(PermissionCard { key, tool_call: merged_tool_call(&slot.thread, tool_call), options: options_or_default(options), state: PermissionState::Pending });
+                slot.thread.push_permission(PermissionCard { key, tool_call, options, state: PermissionState::Pending });
                 fx.push(Effect::Changed(thread.clone()));
                 fx.push(Effect::Attention { thread, why: Attention::Permission });
             }
@@ -1349,6 +1382,16 @@ impl Hub {
     pub fn thread_mut(&mut self, id: &ThreadId) -> Option<&mut Thread> {
         self.threads.get_mut(id).map(|s| &mut s.thread)
     }
+}
+
+/// The tool of the `fenix` MCP server a call is of, by how agents name
+/// them: `mcp__fenix__hover`, `fenix.hover`, `fenix/hover`, `fenix:hover`
+/// or `hover (fenix MCP Server)`. It has to be the whole title, so that
+/// nothing else passes for one.
+fn fenix_tool_of(call: &ToolCallFields) -> Option<&str> {
+    let title = call.title.as_deref()?.trim();
+    let tool = ["mcp__fenix__", "fenix.", "fenix/", "fenix:"].iter().find_map(|prefix| title.strip_prefix(prefix)).or_else(|| title.strip_suffix(" (fenix MCP Server)"))?;
+    tool.chars().all(|c| c.is_ascii_lowercase() || c == '_').then_some(tool)
 }
 
 fn options_or_default(options: Vec<PermissionOption>) -> Vec<PermissionOption> {
