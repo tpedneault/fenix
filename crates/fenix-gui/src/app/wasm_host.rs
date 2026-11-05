@@ -2531,7 +2531,19 @@ impl App {
     /// What extension `ext` asked of Fenix, done.
     fn answer_code_request(&mut self, ext: &str, request: Request) {
         match request {
-            Request::Notify(Level::Error | Level::Warn, text) => self.set_error(text),
+            Request::Notify(level @ (Level::Error | Level::Warn), text) => {
+                // A page of its with nothing on it yet says so on the page
+                // too, rather than staying blank once the message fades
+                // (#75).
+                if matches!(level, Level::Error) {
+                    self.mark_code_pages(ext, |p| {
+                        if p.shown.is_none() && p.surface.as_ref().is_none_or(|s| s.texture.is_none()) {
+                            p.failed = Some(text.clone());
+                        }
+                    });
+                }
+                self.set_error(text);
+            }
             Request::Notify(_, text) => self.set_message(text),
             Request::RunCommand(id) => self.run_command_for_extension(&id),
             Request::OpenFile { path, line, sealed, text } => {

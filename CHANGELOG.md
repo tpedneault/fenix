@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- An extension's page that couldn't be shown -- a `bad.pdf` that isn't
+  a PDF -- says so on the page, with what went wrong, rather than going
+  blank once the red message fades. (#75)
 - An extension installed, switched on or off, or removed from the
   Extensions page is put in use at once, without a restart: its code
   starts or stops (its pages, language servers, tasks and checks with
