@@ -48,6 +48,18 @@ pub(super) fn lsp_root_for_path(path: &Path) -> PathBuf {
     fenix_lsp::normalize(fenix_project::workspace::language_root(&root))
 }
 
+/// Language server sessions that are done with, shut down on a thread of
+/// their own: a server is asked to exit and given a moment before it's
+/// killed, and its readers end once it has -- a second or more, which
+/// the UI thread mustn't wait out (an extension starting and setting its
+/// server had it stop others in turn).
+pub(super) fn let_go(sessions: Vec<LspSession>) {
+    if sessions.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new().name("fenix-lsp-stopping".into()).spawn(move || drop(sessions));
+}
+
 pub(super) fn generation() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
@@ -144,11 +156,12 @@ impl App {
     /// Stops one server: its process, its diagnostics, and anything still
     /// waiting on its answers.
     pub(super) fn stop_lsp_session(&mut self, key: &LspKey) {
-        if let Some(session) = self.lsp_sessions.remove(key) {
+        if let Some(mut session) = self.lsp_sessions.remove(key) {
             self.diagnostics.forget_server(key);
-            for pending in session.pending.into_values() {
+            for pending in std::mem::take(&mut session.pending).into_values() {
                 self.lsp_request_failed(key, pending);
             }
+            let_go(vec![session]);
         }
     }
 

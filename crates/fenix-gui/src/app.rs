@@ -5543,11 +5543,14 @@ impl App {
         }
         // A first run is welcomed.
         app.extensions_at_startup();
-        // The extensions that run code: those that start with Fenix, started.
-        app.code_extensions_at_startup();
+        // The extensions that run code, and their projects' markers.
+        app.code_extensions_installed();
         // The file opened at start was given its project before the
-        // packs' markers were known: again, now they are.
+        // packs' markers were known: again, now they are. Then those that
+        // start with Fenix start, in it (or a moment later, after it, each
+        // would start again there).
         app.refresh_project_root();
+        app.code_extensions_at_startup();
         // What the keychain said as settings were read (a token too long
         // for it, kept in settings.toml).
         let said = startup::said_later();
@@ -6777,6 +6780,10 @@ impl App {
         if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) { return; }
         {
             let _profile = crate::profile::Scope::new("start extension");
+            // One running in another project serves this one from here.
+            if self.wasm.stale.contains(ext) {
+                self.restart_code_extension(ext);
+            }
             self.start_code_extension(ext);
         }
         let _profile = crate::profile::Scope::new("connect");
@@ -6815,7 +6822,8 @@ impl App {
     /// again elsewhere. Each starts again when a buffer needs it.
     pub(super) fn forget_code_lsp_sessions(&mut self, ext: &str) {
         let mine = |key: &LspKey| matches!(&key.server, LspServer::Additional(n) if n.starts_with(&format!("{ext}:")));
-        self.lsp_sessions.retain(|key, _| !mine(key));
+        let gone: Vec<LspSession> = self.lsp_sessions.extract_if(|key, _| mine(key)).map(|(_, session)| session).collect();
+        tool_sessions::let_go(gone);
         self.lsp_unavailable.retain(|key| !mine(key));
         // The problems it gave (`diagnostics-set`) go with it.
         let problems = wasm_host::problems_key(ext);

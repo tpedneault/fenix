@@ -1,6 +1,8 @@
 //! The extensions that run code (WebAssembly), in Fenix: each loaded on a
 //! worker thread of its own (`fenix_wasm::host`) when Fenix starts, if it
-//! asks to be, or the first time one of its commands runs. What they say,
+//! asks to be -- a language pack once a file or a project of its is open
+//! -- or the first time it's used. Nothing on the UI thread waits for one
+//! to load, nor for one let go to stop. What they say,
 //! what they ask of Fenix and how their calls end come back as
 //! `FenixUserEvent::Wasm`. Here they're answered: a picker, a prompt, a
 //! page (`code_page`), a terminal, a file opened, another extension's or
@@ -225,6 +227,15 @@ pub(crate) struct WasmHost {
     restored: u64,
     /// The project each worker was started in: its `/project`.
     projects: HashMap<String, Option<PathBuf>>,
+    /// Those running in a project other than the one you're in: started
+    /// again there the next time they're used (a command, a page, a
+    /// service, a language server), not all at once as you move. `/project`
+    /// is fixed for as long as a worker runs.
+    pub(crate) stale: HashSet<String>,
+    /// The extensions that wait for their files (`Activation::waits_for`),
+    /// and the projects already looked at for them and found not to be
+    /// theirs.
+    not_theirs: HashSet<(String, PathBuf)>,
     /// What each was last told it's in (`focus-changed`).
     focused: HashMap<String, Option<String>>,
     /// Terminals they opened, by buffer: whose, and its id there.
@@ -405,6 +416,64 @@ fn checked_spec(((program, args, cwd), env): (fenix_wasm::host::Checked, fenix_w
 /// servers': its own, beside any server it is (`<ext>:<server>`).
 pub(crate) fn problems_key(ext: &str) -> String {
     format!("{ext}:#problems")
+}
+
+/// What a call to an extension running in another project than yours
+/// (`WasmHost::stale`) does.
+#[derive(Debug, PartialEq, Eq)]
+enum Stale {
+    /// It's used: started again in yours first.
+    Restart,
+    /// Where you are in yours, which isn't its: not told.
+    Drop,
+    /// What it started itself, or no matter where: told where it is.
+    Deliver,
+}
+
+fn stale_call(what: &Call) -> Stale {
+    use fenix_wasm::host::Changed;
+    match what {
+        Call::RunCommand(_)
+        | Call::Render { .. }
+        | Call::Key { .. }
+        | Call::KeyPress { .. }
+        | Call::Mouse { .. }
+        | Call::Paste { .. }
+        | Call::SurfaceInput { .. }
+        | Call::PageRestore { .. }
+        | Call::Serve { .. }
+        | Call::Grant(_)
+        | Call::DecorationClicked { .. } => Stale::Restart,
+        Call::FocusMoved(_) | Call::ViewChanged(_) | Call::FileSaved(_) | Call::BufferChanged(Changed::File(_)) | Call::Deliver(Notice::FocusChanged(_)) | Call::Deliver(Notice::Saved(_)) => Stale::Drop,
+        _ => Stale::Deliver,
+    }
+}
+
+/// Whether the project at `root` is one an extension waiting for
+/// `languages` and `markers` is for: one of the markers at its top, or a
+/// file of one of the languages there or in `src/`.
+fn project_has(root: &Path, languages: &[String], markers: &[String]) -> bool {
+    let markers = fenix_extensions::manifest::ContextContribution { name: String::new(), markers: markers.to_vec(), languages: Vec::new(), pages: Vec::new() };
+    if markers.holds(root) {
+        return true;
+    }
+    if languages.is_empty() {
+        return false;
+    }
+    let speaks = |dir: &Path| {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|entry| {
+            let path = entry.path();
+            path.is_file() && fenix_syntax::detect_language_from_path(&path).is_some_and(|l| languages.contains(&crate::lsp::language_config_name(l)))
+        })
+    };
+    speaks(root) || speaks(&root.join("src"))
+}
+
+/// Whether `ext` waits for its languages or markers before it loads
+/// (`Activation::waits_for`).
+fn waits(ext: &CodeExtension) -> bool {
+    let (languages, markers) = ext.manifest.activation.waits_for(&ext.manifest.contributes.contexts);
+    !languages.is_empty() || !markers.is_empty()
 }
 
 /// The same folder, however it's written.
@@ -671,15 +740,55 @@ pub(crate) enum Happened {
 }
 
 impl App {
-    /// At start-up: the code extensions there are, and those that start
-    /// with Fenix, started.
-    pub(super) fn code_extensions_at_startup(&mut self) {
+    /// At start-up, before the project is known: the code extensions
+    /// there are, and their project markers.
+    pub(super) fn code_extensions_installed(&mut self) {
         self.wasm.installed = crate::installed::code_extensions();
         // The packs' project markers: a project's top where Fenix's own
         // find none (a `dotnet new console` folder).
         let markers = self.wasm.installed.iter().flat_map(|e| &e.manifest.contributes.contexts).flat_map(|c| c.markers.iter().cloned()).collect();
         fenix_project::set_extension_markers(markers);
-        let starting: Vec<String> = self.wasm.installed.iter().filter(|e| e.manifest.activation.on_startup).map(|e| e.id.clone()).collect();
+    }
+
+    /// At start-up, once the project is known: those that start with
+    /// Fenix, started -- each on a worker of its own, so nothing here
+    /// waits for one to load. One for some languages or projects only (a
+    /// language pack: `Activation::waits_for`) waits for them instead
+    /// (`code_start_waiting`).
+    pub(super) fn code_extensions_at_startup(&mut self) {
+        let starting: Vec<String> = self.wasm.installed.iter().filter(|e| e.manifest.activation.on_startup && !waits(e)).map(|e| e.id.clone()).collect();
+        for id in starting {
+            self.start_code_extension(&id);
+        }
+    }
+
+    /// Those that wait for their languages or markers
+    /// (`Activation::waits_for`), started when the file you're in is one of
+    /// theirs or the project is: one of their markers at its top, or a
+    /// file of theirs there or in `src/`. One that stopped stays stopped.
+    fn code_start_waiting(&mut self, file: Option<&Path>, project: Option<&Path>) {
+        let language = file.and_then(fenix_syntax::detect_language_from_path).map(crate::lsp::language_config_name);
+        let mut starting = Vec::new();
+        for ext in self.wasm.installed.iter().filter(|e| !self.wasm.workers.contains_key(&e.id) && !self.wasm.status.contains_key(&e.id)) {
+            let (languages, markers) = ext.manifest.activation.waits_for(&ext.manifest.contributes.contexts);
+            if languages.is_empty() && markers.is_empty() {
+                continue;
+            }
+            if language.as_ref().is_some_and(|l| languages.contains(l)) {
+                starting.push(ext.id.clone());
+                continue;
+            }
+            let Some(root) = project else { continue };
+            let key = (ext.id.clone(), root.to_path_buf());
+            if self.wasm.not_theirs.contains(&key) {
+                continue;
+            }
+            if project_has(root, &languages, &markers) {
+                starting.push(ext.id.clone());
+            } else {
+                self.wasm.not_theirs.insert(key);
+            }
+        }
         for id in starting {
             self.start_code_extension(&id);
         }
@@ -778,7 +887,8 @@ impl App {
         spec.call_ticks = call_ticks(&ext.manifest);
         spec.permissions = ext.manifest.permissions.clone();
         // `/project` is fixed for as long as the worker runs; moving to
-        // another project starts it again there (`code_focus_changed`).
+        // another project starts it again there when it's next used
+        // (`code_focus_changed`, `code_call`).
         spec.project = self.code_project();
         spec.events = ext.manifest.contributes.events.clone();
         spec.tools_dir = if cfg!(test) { None } else { fenix_storage::paths::tools_dir() };
@@ -876,13 +986,28 @@ impl App {
         // you went between its page and your code.
         let file = self.open().buffer.path().map(Path::to_path_buf);
         let project = file.as_deref().and_then(fenix_project::find_project_root);
+        self.code_start_waiting(file.as_deref(), project.as_deref());
         let running: Vec<CodeExtension> = self.wasm.installed.iter().filter(|e| self.wasm.workers.contains_key(&e.id) && e.manifest.permissions.filesystem != fenix_extensions::manifest::Filesystem::None).cloned().collect();
         for ext in running {
             let theirs = self.wasm.projects.get(&ext.id).cloned().flatten();
             if project.is_some() && theirs != project {
-                self.restart_code_extension(&ext.id);
+                // Its `/project` can't move. A language pack for the
+                // project you're in starts again here now -- its server,
+                // tasks and checks are this project's; any other, the
+                // next time it's used. Forty of them, every one starting
+                // again at each move, held Fenix up for seconds.
+                let (languages, markers) = ext.manifest.activation.waits_for(&ext.manifest.contributes.contexts);
+                let pack = !languages.is_empty() || !markers.is_empty();
+                let here = pack && (file.as_deref().and_then(fenix_syntax::detect_language_from_path).map(crate::lsp::language_config_name).is_some_and(|l| languages.contains(&l)) || project.as_deref().is_some_and(|root| project_has(root, &languages, &markers)));
+                if here {
+                    self.restart_code_extension(&ext.id);
+                } else if self.wasm.stale.insert(ext.id.clone()) {
+                    self.note_output(&ext.id, "-- you moved to another project: it starts again there when it's next used".into());
+                }
                 continue;
             }
+            // Back in its own project: it carries on as it was.
+            self.wasm.stale.remove(&ext.id);
             let guest = match (&file, &theirs) {
                 (Some(file), Some(root)) => file.strip_prefix(root).ok().map(|rel| format!("/project/{}", rel.to_string_lossy().replace('\\', "/"))),
                 _ => None,
@@ -1189,7 +1314,12 @@ impl App {
             _ => None,
         }).collect();
         self.note_output(ext, "-- the project changed: starting again there".into());
-        self.wasm.workers.remove(ext);
+        self.wasm.stale.remove(ext);
+        // Let go, not waited for: one still loading or in a call would hold
+        // the UI thread until it's done.
+        if let Some(worker) = self.wasm.workers.remove(ext) {
+            worker.detach();
+        }
         self.forget_code_lsp_sessions(ext);
         self.wasm.status.remove(ext);
         self.wasm.queued.remove(ext);
@@ -1258,8 +1388,25 @@ impl App {
         *cursor.write().unwrap() = at;
     }
 
-    /// Sends `what` to extension `ext`, starting it first if need be.
+    /// Sends `what` to extension `ext`, starting it first if need be --
+    /// or, when it's running in another project than yours
+    /// (`WasmHost::stale`), starting it again here first if this uses it;
+    /// what's only about where you are isn't told it there.
     fn code_call(&mut self, ext: &str, what: Call, ticks: u64, pending: Pending) {
+        if self.wasm.stale.contains(ext) {
+            match stale_call(&what) {
+                Stale::Restart => {
+                    self.restart_code_extension(ext);
+                    // Its pages are put back under new ids, and laid out
+                    // again as they ask: what was for the old ones goes.
+                    if what.is_page() && !matches!(what, Call::PageRestore { .. }) {
+                        return;
+                    }
+                }
+                Stale::Drop => return,
+                Stale::Deliver => {}
+            }
+        }
         // A command's, an event's, a service's: the extension's own deadline
         // (`limits.call_ms`, its worker's `call_ticks`).
         let ticks = if ticks == COMMAND_TICKS { 0 } else { ticks };
@@ -2510,16 +2657,28 @@ impl App {
             Request::LanguageServer { languages, program } => {
                 let Some(root) = self.wasm.projects.get(ext).cloned().flatten() else { return self.note_output(ext, "-- language-server-set: it has no project".into()) };
                 let key = (ext.to_string(), root.clone());
-                match program {
+                let before = self.wasm.servers.get(&key).cloned();
+                let now = program.map(|given| (languages, checked_spec(given)));
+                if before == now {
+                    return;
+                }
+                // Only the servers of the languages it names, then and now:
+                // every pack saying its own as it starts was stopping and
+                // starting the others' -- rust-analyzer as the Ada pack
+                // started.
+                let mut affected: Vec<String> = before.iter().chain(now.iter()).flat_map(|(languages, _)| languages.iter().cloned()).collect();
+                affected.sort();
+                affected.dedup();
+                match now {
                     // Where it said, with its environment.
                     Some(given) => {
-                        self.wasm.servers.insert(key, (languages, checked_spec(given)));
+                        self.wasm.servers.insert(key, given);
                     }
                     None => {
                         self.wasm.servers.remove(&key);
                     }
                 }
-                self.restart_language_servers_in(&root);
+                self.restart_language_servers_for(&root, &affected);
             }
             Request::LanguageServerAdd { name, languages, program } => {
                 let Some(root) = self.wasm.projects.get(ext).cloned().flatten() else { return self.note_output(ext, "-- language-server-add: it has no project".into()) };
@@ -3230,6 +3389,20 @@ impl App {
         self.sync_lsp_for_focused_buffer();
     }
 
+    /// The primary language servers for `languages` (Fenix's names) in the
+    /// project at `root`, stopped and started again as its files need
+    /// them; the others carry on.
+    fn restart_language_servers_for(&mut self, root: &Path, languages: &[String]) {
+        let root = fenix_lsp::normalize(refactor::identity(root));
+        let theirs = |key: &super::LspKey| key.root == root && matches!(key.server, super::LspServer::Primary(l) if languages.contains(&crate::lsp::language_config_name(l)));
+        self.lsp_unavailable.retain(|key| !theirs(key));
+        let running: Vec<_> = self.lsp_sessions.keys().filter(|key| theirs(key)).cloned().collect();
+        for key in running {
+            self.stop_lsp_session(&key);
+        }
+        self.sync_lsp_for_focused_buffer();
+    }
+
     /// The buffer of extension `ext`'s terminal `id`, while it's open.
     fn code_terminal(&self, ext: &str, id: u64) -> Option<BufferId> {
         self.wasm.terminals.iter().find(|(b, (e, i))| e == ext && *i == id && self.buffers.get(**b).is_some()).map(|(b, _)| *b)
@@ -3516,6 +3689,7 @@ impl App {
         let mut out = String::new();
         for ext in &self.wasm.installed {
             let status = match self.wasm.status.get(&ext.id) {
+                None if waits(ext) => "not started: it starts with a file of its languages, or in a project of its".to_string(),
                 None => "not started: it starts the first time one of its commands runs".to_string(),
                 Some(Status::Starting) => "starting".into(),
                 Some(Status::Ready) => "running".into(),
@@ -4196,7 +4370,14 @@ pub(crate) mod tests {
         std::fs::write(other.path().join("main.cpp"), "int main() {}\n").unwrap();
         app.open_file_from_picker(&other.path().join("main.cpp"));
         app.tell_extensions(super::Happened::FocusChanged);
-        pump_until(&mut app, |a| said(a, "the project changed: starting again there"));
+        // Not as you move: the next time it's used.
+        assert!(said(&app, "you moved to another project: it starts again there when it's next used"), "{}", app.extension_output_text());
+        assert!(!said(&app, "the project changed: starting again there"));
+        assert_eq!(app.wasm.projects.get("test.hello").cloned().flatten(), before);
+        // Its page laid out is its use.
+        app.code_page_wants(buffer, 80, 24);
+        assert!(said(&app, "the project changed: starting again there"));
+        assert!(!app.wasm.stale.contains("test.hello"));
         let now = app.wasm.projects.get("test.hello").cloned().flatten();
         assert_ne!(now, before);
         assert_eq!(now.as_deref().and_then(Path::file_name), other.path().file_name(), "{now:?}");
@@ -4217,6 +4398,128 @@ pub(crate) mod tests {
         app.tell_extensions(super::Happened::FocusChanged);
         pump_until(&mut app, |a| said(a, "in Some(\"/project/b.cpp\")"));
         assert_eq!(app.extension_output_text().matches("starting again there").count(), 1);
+    }
+
+    /// Moving to another project, a language pack for it starts again
+    /// there at once; another extension that reads the project isn't
+    /// started again until it's used, and carries on as it was if you come
+    /// back first. Every extension starting again at every move held
+    /// Fenix up.
+    #[test]
+    fn moving_to_another_project_starts_its_pack_again_and_the_rest_when_used() {
+        let mut app = App::with_file(None);
+        let mut pack = hello("[activation]\non_startup = true\n\n[permissions]\nfilesystem = \"project-read\"\n\n[[contributes.contexts]]\nname = \"hello-cpp\"\nlanguages = [\"cpp\"]\n");
+        pack.id = "test.pack".into();
+        app.wasm.installed = vec![pack, hello("[permissions]\nfilesystem = \"project-read\"\n")];
+        let project = |name: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::create_dir(dir.path().join(".git")).unwrap();
+            std::fs::write(dir.path().join(name), "\n").unwrap();
+            dir
+        };
+        let (a, b) = (project("a.cpp"), project("b.cpp"));
+        let root = |app: &App, ext: &str| app.wasm.projects.get(ext).cloned().flatten().and_then(|p| p.file_name().map(|n| n.to_owned()));
+        app.open_file_from_picker(&a.path().join("a.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert!(app.wasm.workers.contains_key("test.pack"), "a C++ file: its pack starts");
+        app.start_code_extension("test.hello");
+        pump_until(&mut app, |a| a.code_ready("test.pack") && a.code_ready("test.hello"));
+
+        app.open_file_from_picker(&b.path().join("b.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert_eq!(root(&app, "test.pack").as_deref(), b.path().file_name(), "the pack, at once");
+        assert!(app.wasm.output["test.pack"].iter().any(|l| l.contains("the project changed: starting again there")));
+        assert!(app.wasm.stale.contains("test.hello"));
+        assert_eq!(root(&app, "test.hello").as_deref(), a.path().file_name(), "the other, not yet");
+
+        // Back before it's used: it was never stopped.
+        app.open_file_from_picker(&a.path().join("a.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert!(!app.wasm.stale.contains("test.hello"));
+        app.open_file_from_picker(&b.path().join("b.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert!(app.wasm.stale.contains("test.hello"));
+        // Where you are isn't told it there.
+        let calls = app.wasm.calls.len();
+        app.code_call("test.hello", Call::FileSaved("/project/b.cpp".into()), COMMAND_TICKS, Pending::Other);
+        app.code_call("test.hello", Call::FocusMoved(Focus::None), COMMAND_TICKS, Pending::Other);
+        assert_eq!(app.wasm.calls.len(), calls);
+        assert!(app.wasm.stale.contains("test.hello"));
+
+        // Used: it starts again here, and runs.
+        app.run_extension_command("test.hello", "hello.greet");
+        assert!(!app.wasm.stale.contains("test.hello"));
+        assert_eq!(root(&app, "test.hello").as_deref(), b.path().file_name());
+        pump_until(&mut app, |a| said(a, "hello, Fenix"));
+        assert_eq!(app.wasm.output["test.hello"].iter().filter(|l| l.contains("the project changed")).count(), 1);
+    }
+
+    /// One for some languages or projects only -- a language pack that
+    /// starts with Fenix, or one whose `[activation]` names them -- waits
+    /// until a file of its language is opened or a project of its marker
+    /// is; one that starts with Fenix and names none starts with it.
+    #[test]
+    fn a_pack_waits_for_its_language_or_marker_and_the_rest_start_with_fenix() {
+        let mut app = App::with_file(None);
+        let mut pack = hello("[activation]\non_startup = true\n\n[[contributes.contexts]]\nname = \"hello-cpp\"\nlanguages = [\"cpp\"]\n");
+        pack.id = "test.pack".into();
+        let mut named = hello("[activation]\nlanguages = [\"rust\"]\nmarkers = [\"{folder}.hello\"]\n");
+        named.id = "test.named".into();
+        let mut eager = hello("[activation]\non_startup = true\n\n[[contributes.contexts]]\nname = \"hello-screen\"\npages = [\"screen\"]\n");
+        eager.id = "test.eager".into();
+        app.wasm.installed = vec![pack, named, eager];
+        app.code_extensions_at_startup();
+        let started = |app: &App| ["test.pack", "test.named", "test.eager"].map(|id| app.wasm.workers.contains_key(id));
+        assert_eq!(started(&app), [false, false, true]);
+        assert!(app.extension_output_text().contains("it starts with a file of its languages, or in a project of its"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let notes = dir.path().join("Notes");
+        std::fs::create_dir_all(notes.join(".git")).unwrap();
+        std::fs::write(notes.join("todo.txt"), "\n").unwrap();
+        app.open_file_from_picker(&notes.join("todo.txt"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert_eq!(started(&app), [false, false, true], "neither's");
+
+        std::fs::write(notes.join("main.cpp"), "\n").unwrap();
+        app.open_file_from_picker(&notes.join("main.cpp"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert_eq!(started(&app), [true, false, true], "a C++ file");
+
+        let sketch = dir.path().join("Blink");
+        std::fs::create_dir_all(sketch.join(".git")).unwrap();
+        std::fs::write(sketch.join("Blink.hello"), "").unwrap();
+        std::fs::write(sketch.join("readme.txt"), "\n").unwrap();
+        app.open_file_from_picker(&sketch.join("readme.txt"));
+        app.tell_extensions(super::Happened::FocusChanged);
+        assert_eq!(started(&app), [true, true, true], "a project of its marker");
+    }
+
+    /// An extension setting its language server starts again only the
+    /// servers of the languages it names, and only when it changes them:
+    /// each pack setting its own as it started was stopping every other
+    /// server of the project.
+    #[test]
+    fn setting_its_server_restarts_only_that_languages_servers() {
+        let mut app = App::with_file(None);
+        app.wasm.installed = vec![hello("[permissions]\nprocess = [\"cmd\"]\nfilesystem = \"project-read\"\n")];
+        app.start_code_extension("test.hello");
+        let root = app.wasm.projects.get("test.hello").cloned().flatten().expect("a project: Fenix's own, in tests");
+        let at = fenix_lsp::normalize(refactor::identity(&root));
+        let rust = super::super::LspKey::primary(fenix_syntax::LanguageId::Rust, at.clone());
+        let cpp = super::super::LspKey::primary(fenix_syntax::LanguageId::Cpp, at.clone());
+        let _r = reading_server(&mut app, rust.clone(), serde_json::json!({}));
+        let _c = reading_server(&mut app, cpp.clone(), serde_json::json!({}));
+        let set = |app: &mut App, program: &str| {
+            let checked = ((program.to_string(), vec!["--stdio".to_string()], None), Vec::new());
+            app.answer_code_request("test.hello", Request::LanguageServer { languages: vec!["cpp".into()], program: Some(checked) });
+        };
+        set(&mut app, "hello-ls");
+        assert!(app.lsp_sessions.contains_key(&rust), "rust-analyzer carries on");
+        assert!(!app.lsp_sessions.contains_key(&cpp), "C++'s starts again");
+        let _c = reading_server(&mut app, cpp.clone(), serde_json::json!({}));
+        set(&mut app, "hello-ls");
+        assert!(app.lsp_sessions.contains_key(&cpp), "the same again: nothing to start again");
     }
 
     /// What it says about its project -- a language server, doctor checks,

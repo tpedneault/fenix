@@ -109,6 +109,37 @@ pub struct Activation {
     /// When one of these commands runs (`jira.*` for any of its own).
     #[serde(default)]
     pub commands: Vec<String>,
+    /// When a file of one of these languages (Fenix's names: `rust`,
+    /// `ada`) is opened, or a project's top or its `src/` has one. Fenix 1.1.
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// When the project holds one of these files (`Cargo.toml`,
+    /// `{folder}.gpr`, as a context's `markers`). Fenix 1.1.
+    #[serde(default)]
+    pub markers: Vec<String>,
+}
+
+impl Activation {
+    /// What it waits for before it loads, when it's for some projects or
+    /// languages only: the languages and markers `[activation]` names,
+    /// and -- for one that starts with Fenix -- those its contexts name
+    /// (a language pack's). Both empty: nothing of the kind; it loads when
+    /// Fenix starts, if it asks to, or when it's used.
+    pub fn waits_for(&self, contexts: &[ContextContribution]) -> (Vec<String>, Vec<String>) {
+        let mut languages = self.languages.clone();
+        let mut markers = self.markers.clone();
+        if self.on_startup {
+            for c in contexts {
+                languages.extend(c.languages.iter().cloned());
+                markers.extend(c.markers.iter().cloned());
+            }
+        }
+        languages.sort();
+        languages.dedup();
+        markers.sort();
+        markers.dedup();
+        (languages, markers)
+    }
 }
 
 /// What a code extension may do, shown before it's installed and held to
@@ -1357,6 +1388,22 @@ mod tests {
         assert!(with("\n[contributes]\nevents = [\"git\"]\n").is_ok());
         let m = with("\n[permissions]\nagents = true\n\n[contributes]\nevents = [\"agents\"]\n").unwrap();
         assert!(m.permissions.lines().iter().any(|l| l.contains("coding agents")));
+    }
+
+    /// What it waits for before loading: the languages and markers its
+    /// `[activation]` names, and a pack's contexts' when it starts with
+    /// Fenix; nothing for one that names none.
+    #[test]
+    fn what_it_waits_for_is_its_activations_and_a_packs_contexts() {
+        let with = |extra: &str| Manifest::parse(&(sample("acme.ada", "1.0.0", "wasm").replace("fenix = ", "api = \"1.0\"\nfenix = ") + "\n" + extra)).unwrap();
+        let pack = with("[activation]\non_startup = true\n\n[[contributes.contexts]]\nname = \"ada\"\nmarkers = [\"alire.toml\", \"{folder}.gpr\"]\nlanguages = [\"ada\", \"gpr\"]\n\n[[contributes.contexts]]\nname = \"pages\"\npages = [\"x\"]\n");
+        assert_eq!(pack.activation.waits_for(&pack.contributes.contexts), (vec!["ada".to_string(), "gpr".into()], vec!["alire.toml".to_string(), "{folder}.gpr".into()]));
+        let by_command = with("[activation]\ncommands = [\"acme.*\"]\n\n[[contributes.contexts]]\nname = \"ada\"\nlanguages = [\"ada\"]\n");
+        assert_eq!(by_command.activation.waits_for(&by_command.contributes.contexts), (vec![], vec![]), "a context of one that doesn't start with Fenix is only its menu");
+        let named = with("[activation]\nlanguages = [\"ada\"]\nmarkers = [\"alire.toml\"]\n");
+        assert_eq!(named.activation.waits_for(&[]), (vec!["ada".to_string()], vec!["alire.toml".to_string()]));
+        let eager = with("[activation]\non_startup = true\n\n[[contributes.contexts]]\nname = \"reader\"\npages = [\"pdf\"]\n");
+        assert_eq!(eager.activation.waits_for(&eager.contributes.contexts), (vec![], vec![]), "pages alone: it starts with Fenix");
     }
 
     #[test]

@@ -3621,6 +3621,8 @@ pub struct Worker {
     jobs: mpsc::Sender<Job>,
     next: u64,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// Set once it's let go (`detach`): what it says after goes nowhere.
+    muted: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -3630,13 +3632,35 @@ impl Worker {
     pub fn start(engine: &Engine, spec: Spec, events: impl Fn(Event) + Send + Sync + 'static) -> Worker {
         let (jobs, rx) = mpsc::channel();
         let engine = engine.clone();
-        let sink: Sink = Arc::new(events);
+        let muted = Arc::new(AtomicBool::new(false));
+        let quiet = muted.clone();
+        let sink: Sink = Arc::new(move |event| {
+            if !quiet.load(Ordering::Acquire) {
+                events(event);
+            }
+        });
         let back = jobs.clone();
         let thread = std::thread::Builder::new()
             .name(format!("fenix-ext-{}", spec.id))
             .spawn(move || run(engine, spec, sink, back, rx))
             .expect("a thread for the extension");
-        Worker { jobs, next: 0, thread: Some(thread) }
+        Worker { jobs, next: 0, thread: Some(thread), muted }
+    }
+
+    /// Stops it without waiting: nothing it says from now on is heard, and
+    /// its thread ends on its own once it's done with what it's in --
+    /// loading and activating it included, which can take seconds -- on a
+    /// thread of its own, never the caller's. What dropping it does, but
+    /// for the wait: for the UI thread, which mustn't wait on one.
+    pub fn detach(mut self) {
+        self.muted.store(true, Ordering::Release);
+        let _ = self.jobs.send(Job::Stop);
+        if let Some(thread) = self.thread.take() {
+            // Joined elsewhere, so a panic on it is still collected.
+            let _ = std::thread::Builder::new().name("fenix-ext-stopping".into()).spawn(move || {
+                let _ = thread.join();
+            });
+        }
     }
 
     /// Where its language servers' messages are sent.

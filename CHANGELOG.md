@@ -236,6 +236,21 @@ it did.
   know. (#74)
 - The project wizard shortens a long path in the middle, keeping the
   project's own folder in view, rather than cutting off its end. (#53)
+- Fenix's window comes up before its extensions do: one being let go
+  while it's still loading -- starting again in another project -- is no
+  longer waited for, nor are the language servers being stopped. An
+  extension setting its language server starts again only that
+  language's, and only when it changes, not every server of the project.
+  With 40 extensions the window was held up for seconds. (#33)
+- A language pack that starts with Fenix (`on_startup` and a context
+  naming markers or languages) waits for a file of its languages, or a
+  project of its markers, before it loads. `[activation]` can say so for
+  any extension: `languages` and `markers`. (#33)
+- Moving to another project starts again at once only the language
+  packs for it; another extension that reads the project starts again
+  there the next time it's used -- a command, a page, a service, its
+  language server -- and carries on as it was if you come back first.
+  Every extension used to start again at every move. (#33)
 
 ## [1.0.1] - 2026-11-03
 
