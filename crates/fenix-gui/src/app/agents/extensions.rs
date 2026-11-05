@@ -484,7 +484,7 @@ impl App {
 
     /// Files the ask's turn changed anyway, put back from its thread's
     /// ledger: their names, under the project.
-    fn agents_ask_revert(&mut self, thread: &ThreadId) -> Vec<String> {
+    pub(in crate::app) fn agents_ask_revert(&mut self, thread: &ThreadId) -> Vec<String> {
         // What git shows changed, too, though no tool call announced it.
         self.agents_turn_ended(thread);
         let mut reverted = Vec::new();

@@ -59,6 +59,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `agents.mcp.http` keeps one running on this machine, or
   `fenix --mcp --http <address>`. Clients present the token
   `fenix mcp token` prints, and follow the `client:` rules.
+- Pipelines (`SPC a P`): a prompt run through agents in turn. Fenix's
+  own plans (with a gate where you approve the plan), builds, and
+  reviews, sending the review's findings back to be fixed. Each step is
+  a thread with its own agent, mode and toolsets; their changes are one
+  review. Your own go in `pipelines/*.toml`, or a project's
+  `.fenix/pipelines/`.
 - `SPC h a` lists every call agents made to Fenix's tools, with the rule
   that applied.
 - `fenix --mcp` tells its client when its tool list changes, passes

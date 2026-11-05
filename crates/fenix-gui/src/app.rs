@@ -4,6 +4,7 @@ mod agent_toolsets;
 mod agent_lsp;
 mod agent_debug;
 mod agent_context;
+mod agent_pipelines;
 mod control_agent;
 mod refactor;
 mod snippets;
@@ -4746,6 +4747,8 @@ pub struct App {
     agent_lsp: agent_lsp::AgentLsp,
     /// Resources MCP clients subscribed to (`agent_context`).
     agent_subscriptions: agent_context::Subscriptions,
+    /// Pipelines under way (`SPC a P`).
+    pipelines: agent_pipelines::Pipelines,
     refactor_undo: Option<refactor::Undo>,
     /// `SPC TAB r`'s new-name prompt, when in progress -- pre-seeded
     /// with the active workspace's current name, same capturing-prompt
@@ -5833,6 +5836,7 @@ impl App {
             agent_calls: agent_calls::AgentCalls::default(),
             agent_lsp: agent_lsp::AgentLsp::default(),
             agent_subscriptions: agent_context::Subscriptions::default(),
+            pipelines: agent_pipelines::Pipelines::default(),
             refactor_undo: None,
             workspace_rename_prompt: None,
             delete_file_confirm: false,

@@ -166,6 +166,7 @@ the other way round after `\v`.
 | `SPC a A` | Show or put away the agents' dock, wherever you are |
 | `SPC a n` / `SPC a t` | A new thread with the default agent (`SPC a p` for another) / this project's threads |
 | `SPC a p` | The agents: a thread with one, a login, a restart |
+| `SPC a P` | Run the next prompt through a pipeline: plan, build and review by agents in turn |
 | `SPC a m` / `SPC a M` | The agent's mode / its model and other settings |
 | `SPC a k` / `SPC a R` | Cancel the agent's turn / start its agent again |
 | `SPC a i` | Continue a session the agent started outside Fenix |

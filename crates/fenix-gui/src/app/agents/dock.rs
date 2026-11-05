@@ -237,7 +237,7 @@ impl App {
     }
 
     /// The prompt, focused to write in: Insert mode, at the end.
-    pub(super) fn agents_focus_composer(&mut self) {
+    pub(in crate::app) fn agents_focus_composer(&mut self) {
         let (_, Some(pane)) = self.agents_dock_panes() else { return };
         self.windows_mut().focus(pane);
         let cursor = self.cursor();

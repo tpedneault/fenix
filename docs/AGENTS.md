@@ -142,6 +142,50 @@ crashes is started again (after 1, 2, then 4 seconds) and its thread
 resumed; after three crashes in a minute it stays down until
 `SPC a R`.
 
+## Pipelines
+
+`SPC a P` runs your next prompt through several agents in turn. Fenix's
+own, *Plan, build, review*:
+
+1. **plan**: the default agent, in its plan mode, plans the change. You
+   see the plan and say `y` to go on or `n` to stop.
+2. **build**: carries it out and runs the tests.
+3. **review**: in plan mode again, reviews the changes against the plan
+   and answers with findings. While there are any, they go back to
+   build, at most twice.
+
+Each step is a thread of its own, shown in the dock as it runs. What the
+steps change goes into one review, so `SPC a r` shows the outcome once.
+A step in a plan or read-only mode can't change files: anything it
+writes anyway is put back. `SPC a k` stops the step, and the pipeline.
+
+Pipelines are files: `pipelines/<name>.toml` in Fenix's settings folder,
+or a project's `.fenix/pipelines/<name>.toml`, with a step per
+`[[steps]]`:
+
+```toml
+title = "Plan, then build"
+
+[[steps]]
+name = "plan"
+agent = "claude"              # leave out for agents.default
+mode = "plan"                 # an id, or a word in a mode's name
+prompt = "Plan this:\n\n{input}"
+passes = "plan"               # answer, plan, changes or transcript
+gate = true                   # you approve what goes on
+
+[[steps]]
+name = "build"
+agent = "codex"
+prompt = "Carry out this plan:\n\n{previous}"
+toolsets = ["core", "refactor", "tasks"]
+```
+
+`{input}` is what you wrote, `{previous}` what the step before passed,
+`{<step>}` what that step passed. A step with `findings = true` answers
+with a JSON list of findings, sent back to its `on_findings` step for up
+to `max_rounds` rounds.
+
 ## Shortcuts
 
 - `SPC a d` asks the agent to fix the problem on the cursor's line.

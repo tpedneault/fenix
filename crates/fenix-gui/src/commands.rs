@@ -229,6 +229,7 @@ impl CommandRegistry {
         registry.register("agents.send", "Send the prompt to the agent", |ctx| ctx.app.agents_send());
         registry.external("agents.review", "What the agent's thread changed, hunk by hunk: keep or reject (SPC a r)", |app| app.agents_open_review());
         registry.register("agents.reject_all", "Reject every change the agent's thread made", |ctx| ctx.app.agents_reject_all());
+        registry.register("agents.pipeline", "Run the next prompt through a pipeline of agents (plan, build, review)", |ctx| ctx.app.pipeline_pick());
         registry.register("agents.accept_all", "Keep every change the agent's thread made", |ctx| ctx.app.agents_accept_all());
         registry.register("agents.forget_ask_consent", "Make extensions ask again before they send code to an agent", |ctx| ctx.app.agents_ask_forget_consent(None));
         registry.register("agents.keep_hunk", "Keep the agent's change under the cursor", |ctx| ctx.app.agents_keep_here());

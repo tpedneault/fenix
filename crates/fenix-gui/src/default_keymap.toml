@@ -1161,6 +1161,11 @@ label = "agents, logins"
 command = "agents.agents"
 
 [[leader]]
+keys = "SPC a P"
+label = "pipeline"
+command = "agents.pipeline"
+
+[[leader]]
 keys = "SPC a i"
 label = "import a session"
 command = "agents.import"

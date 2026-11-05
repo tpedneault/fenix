@@ -483,6 +483,16 @@ impl App {
         }
     }
 
+    /// The caller's toolsets are exactly `toolsets` (a pipeline step's),
+    /// `core` besides.
+    pub(super) fn agent_set_session_toolsets(&mut self, caller: &AgentCaller, toolsets: &[String]) {
+        let mut all: BTreeSet<String> = agent_tools::TOOLSETS.iter().map(|t| t.name.to_string()).collect();
+        all.extend(self.agent_extension_toolsets().into_iter().map(|(n, _, _)| n));
+        let enabled: BTreeSet<String> = toolsets.iter().cloned().collect();
+        let disabled = all.difference(&enabled).filter(|n| *n != "core").cloned().collect();
+        self.agent_calls.sessions.insert(caller_key(caller), SessionTools { enabled, disabled });
+    }
+
     /// `fenix_toolsets`: lists them, or turns one on or off for the caller.
     fn agent_toolsets(&mut self, caller: &AgentCaller, arguments: &Value) -> Reply {
         let extensions = self.agent_extension_toolsets();
