@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The project doctor names a project Fenix has no kind of its own for
+  -- Zig, Ruby, PHP, Swift, Java, Kotlin, C#, Ada, Lua -- as the
+  language pack whose markers it has calls it (`zig (Zig)`), not
+  `(Project)`, on the page and in the copied report. (#52)
 - `q` closes Tool Status (`SPC l m`) and Task Output, as it closes the
   other pages, rather than starting a macro; closing either (`q`,
   `SPC b d`) closes the workspace it opened in, and its title strip. With

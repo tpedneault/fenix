@@ -36,6 +36,9 @@ pub struct DoctorPage {
     pub root: PathBuf,
     pub name: String,
     pub kind: ProjectKind,
+    /// What the language pack that recognises it calls it, when Fenix's
+    /// own kinds don't (a Zig, Ruby or C# project: `Other` to Fenix).
+    pub language: Option<String>,
     /// `None` while a check is running.
     pub checks: Option<Vec<Check>>,
     pub focus: usize,
@@ -52,7 +55,16 @@ const OUTPUT_LINES: usize = 5;
 impl DoctorPage {
     pub fn new(root: PathBuf, kind: ProjectKind) -> Self {
         let name = root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| root.display().to_string());
-        DoctorPage { root, name, kind, checks: None, focus: 0, fixing: None, queue: Vec::new(), last_fix: None }
+        DoctorPage { root, name, kind, language: None, checks: None, focus: 0, fixing: None, queue: Vec::new(), last_fix: None }
+    }
+
+    /// What kind of project it is, as said: Fenix's kind, else what the
+    /// extension that recognises it calls it (#52).
+    pub fn kind_label(&self) -> &str {
+        match (&self.language, self.kind) {
+            (Some(language), ProjectKind::Other) => language,
+            _ => self.kind.label(),
+        }
     }
 
     /// Checks are in; keeps the cursor on the same row where it can.
@@ -140,7 +152,7 @@ impl DoctorPage {
 
     /// The checks as plain text, for the clipboard.
     pub fn report(&self) -> String {
-        let mut out = format!("{} ({}) -- {}\n", self.name, self.kind.label(), self.root.display());
+        let mut out = format!("{} ({}) -- {}\n", self.name, self.kind_label(), self.root.display());
         for i in self.order() {
             let Some(c) = self.check(i) else { continue };
             let mark = match c.health {
@@ -173,6 +185,10 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
     let mut g = Grid::new();
     let end = g.put(1, left, doctor.kind.tag(), Role::Kind(doctor.kind));
     let end = g.put(1, end + 2, &doctor.name, Role::Title);
+    let end = match (&doctor.language, doctor.kind) {
+        (Some(language), ProjectKind::Other) => g.put(1, end + 2, &format!("· {language}"), Role::Muted),
+        _ => end,
+    };
     g.put(1, end + 2, "· doctor", Role::Muted);
     let status = match &doctor.checks {
         None => "checking…".to_string(),
@@ -334,6 +350,19 @@ mod tests {
         doctor.last_fix = Some(("uv sync".into(), Err("exited with code 2".into())));
         assert!(layout(&doctor, 100).text.contains("uv sync: exited with code 2"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A project Fenix has no kind for is named as the extension that
+    /// recognises it calls it, not "Project" (#52).
+    #[test]
+    fn a_project_an_extension_recognises_is_named_as_it_says() {
+        let mut doctor = DoctorPage::new(PathBuf::from("/x/demo"), ProjectKind::Other);
+        assert_eq!(doctor.kind_label(), "Project");
+        doctor.language = Some("Zig".into());
+        assert!(doctor.report().starts_with("demo (Zig) -- "), "{}", doctor.report());
+        assert!(layout(&doctor, 100).text.contains("demo  · Zig  · doctor"), "{}", layout(&doctor, 100).text);
+        doctor.kind = ProjectKind::Rust;
+        assert_eq!(doctor.kind_label(), "Rust", "Fenix's own kind first");
     }
 
     #[test]

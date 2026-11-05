@@ -1499,7 +1499,9 @@ impl App {
             }
             None => {
                 let kind = self.project_kind_of(&root);
-                self.open_page(PageModel::Doctor(DoctorPage::new(root, kind)))
+                let mut page = DoctorPage::new(root, kind);
+                page.language = self.wasm.project_language(&page.root);
+                self.open_page(PageModel::Doctor(page))
             }
         };
         self.doctor_check(id);

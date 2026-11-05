@@ -567,6 +567,13 @@ impl WasmHost {
         self.tasks.iter().filter(|((ext, r), _)| same_dir(r, root) && self.is_for(ext, root)).flat_map(|(_, t)| t.clone()).collect()
     }
 
+    /// What the project at `root` is to the extension that recognises it
+    /// by its markers (`contributes.contexts`): that extension's name, as
+    /// the doctor says it (#52).
+    pub(crate) fn project_language(&self, root: &Path) -> Option<String> {
+        self.installed.iter().find(|e| e.manifest.contributes.contexts.iter().any(|c| !c.markers.is_empty() && c.holds(root))).map(|e| e.name.clone())
+    }
+
     /// The extension that gave `task` for the project at `root`, if one
     /// did: what the task picker says it comes from (#35).
     pub(crate) fn task_owner(&self, root: &Path, task: &fenix_tasks::TaskDef) -> Option<String> {
@@ -4722,6 +4729,18 @@ pub(crate) mod tests {
         app.code_extensions_now(vec![hello("")]);
         app.run_extension_command("test.hello", "hello.greet");
         pump_until(&mut app, |a| a.wasm.workers.contains_key("test.hello") && a.code_ready("test.hello"));
+    }
+
+    /// The doctor names a project by the extension that recognises its
+    /// markers (#52).
+    #[test]
+    fn a_project_is_named_by_the_pack_whose_markers_it_has() {
+        let mut app = App::with_file(None);
+        app.wasm.installed = vec![hello("[[contributes.contexts]]\nname = \"zig\"\nmarkers = [\"build.zig\"]\n")];
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(app.wasm.project_language(dir.path()), None);
+        std::fs::write(dir.path().join("build.zig"), "").unwrap();
+        assert_eq!(app.wasm.project_language(dir.path()).as_deref(), Some("Hello"));
     }
 
     /// A language pack is for a project its contexts' markers or languages
