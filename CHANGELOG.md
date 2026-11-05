@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-05
+
+The agents and MCP release: Fenix's tools for coding agents in toolsets,
+with rules for what each may do; pipelines of agents; drafting with
+agents; extension API 1.2; and the fixes since 1.0.1.
+
 ### Added
 
 - Coding agents can ask more of Fenix through `fenix --mcp`: definitions,
@@ -370,6 +376,7 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/tpedneault/fenix/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/tpedneault/fenix/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/tpedneault/fenix/releases/tag/v1.0.0
