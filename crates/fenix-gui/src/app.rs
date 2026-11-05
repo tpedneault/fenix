@@ -7372,7 +7372,7 @@ impl App {
     /// one's has landed). The servers come primary first. The shared
     /// precondition every LSP request this app sends starts from
     /// (`gd`/`gr`/`K`/rename/code actions/format all begin here).
-    fn focused_lsp_context(&self) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
+    pub(super) fn focused_lsp_context(&self) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
         let ob = self.open();
         let path = ob.buffer.path()?;
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
@@ -7463,7 +7463,7 @@ impl App {
     /// `quickfix` list, then jumps to the first entry immediately --
     /// matching real Vim's own `:grep`/tag-list auto-jump-to-first
     /// convention, and `run_grep`'s own precedent in this codebase.
-    fn apply_lsp_references(&mut self, locations: Vec<lsp_types::Location>) {
+    pub(super) fn apply_lsp_references(&mut self, locations: Vec<lsp_types::Location>) {
         self.quickfix = locations
             .into_iter()
             .filter_map(|loc| fenix_lsp::uri_to_path(&loc.uri).map(|path| QuickfixEntry::Lsp { path, position: loc.range.start }))
@@ -7601,6 +7601,27 @@ impl App {
     /// own "find references" shows by default).
     pub(crate) fn request_references(&mut self) {
         self.request_lsp_locations(true);
+    }
+
+    /// `SPC c i` -- where the trait, interface or abstract method under the
+    /// cursor is implemented, from every server that can say: jumped to
+    /// when there's one, listed when there are more (as `gd` does).
+    pub(crate) fn request_implementations(&mut self) {
+        let Some((keys, text_document, position)) = self.focused_lsp_context() else { return };
+        let buffer = self.focused_buffer_id();
+        let targets = self.lsp_route(&keys, fenix_lsp::fanout::Feature::Implementation);
+        if targets.is_empty() {
+            self.set_error("no language server here finds implementations");
+            return;
+        }
+        let order = targets.clone();
+        let fanout = self.start_lsp_fanout(|deadline| LspFanout::Locations { buffer, references: false, gather: fenix_lsp::fanout::Gather::new(order, deadline) }, targets.len());
+        let at = lsp_types::TextDocumentPositionParams { text_document, position };
+        for key in targets {
+            let params = lsp_types::request::GotoImplementationParams { text_document_position_params: at.clone(), work_done_progress_params: Default::default(), partial_result_params: Default::default() };
+            // Answered as a definition is: a location, or several.
+            self.send_lsp_fanout_request::<lsp_types::request::GotoImplementation>(&key, params, PendingLspRequest::Definition { fanout });
+        }
     }
 
     /// `gd`/`gr` sent to every attached server that can answer, the

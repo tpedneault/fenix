@@ -35,6 +35,7 @@ pub enum Feature {
     Rename,
     Formatting,
     SignatureHelp,
+    Implementation,
 }
 
 impl Feature {
@@ -69,6 +70,7 @@ pub fn provides(capabilities: &ServerCapabilities, feature: Feature) -> bool {
         Feature::Rename => on(&capabilities.rename_provider),
         Feature::Formatting => on(&capabilities.document_formatting_provider),
         Feature::SignatureHelp => capabilities.signature_help_provider.is_some(),
+        Feature::Implementation => !matches!(capabilities.implementation_provider, None | Some(lsp_types::ImplementationProviderCapability::Simple(false))),
     }
 }
 

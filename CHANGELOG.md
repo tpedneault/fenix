@@ -16,6 +16,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before it's sent; `Y` sends its defaults, `n` declines, `x` cancels.
   One that asks you to sign in somewhere gives a link: `y` opens it in
   your browser, and the card says when the agent hears it's done.
+- `SPC c i` goes to where the trait, interface or method under the
+  cursor is implemented (listed when there are several), and `SPC c h`
+  lists who calls the function under the cursor, as `gr` lists
+  references.
 
 ## [1.1.0] - 2026-11-05
 
