@@ -105,6 +105,20 @@ use crate::theme::{self, Theme};
 use crate::surface::{Blend, SurfacePipeline};
 
 const BLINK_INTERVAL: Duration = Duration::from_millis(500);
+/// How long the caret blinks after the last key or click, before it
+/// stays lit: as Emacs stops after its tenth blink, so an idle window
+/// stops drawing.
+const CARET_BLINKS_FOR: Duration = Duration::from_secs(30);
+/// The shortest time between two frames drawn only because an
+/// extension's layer moves (a pet walking): 30 frames a second, rather
+/// than every frame the display shows.
+const LAYER_TICK: Duration = Duration::from_millis(33);
+/// The longest the loop sleeps with nothing due: other deadlines (the
+/// disk check) come sooner anyway.
+const IDLE_WAIT: Duration = Duration::from_secs(60);
+/// How long after the splash hands over the editor's first frame may
+/// take before the window is taken to be stuck on the splash (#65).
+const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(10);
 /// How long the caret takes to fade in/out at each blink toggle, instead
 /// of flipping instantly.
 const BLINK_FADE: Duration = Duration::from_millis(120);
@@ -1394,6 +1408,25 @@ struct LspCompletion {
     answers: fenix_lsp::fanout::CompletionSet<LspKey>,
 }
 
+/// What starting a language server off the UI thread came to: its
+/// process and events, or why it couldn't start, with what
+/// `App::lsp_started` needs to take it from there.
+pub struct LspStart {
+    key: LspKey,
+    generation: u64,
+    name: String,
+    languages: Vec<String>,
+    executable: String,
+    cwd: PathBuf,
+    result: std::io::Result<(fenix_lsp::LspClient, std::sync::mpsc::Receiver<fenix_lsp::LspEvent>)>,
+}
+
+impl std::fmt::Debug for LspStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LspStart").field("key", &self.key).field("name", &self.name).field("started", &self.result.is_ok()).finish()
+    }
+}
+
 /// Background reader for one `LspSession` -- drains `fenix_lsp::
 /// LspClient::spawn`'s returned channel for as long as the connection
 /// lives, forwarding every decoded event as `FenixUserEvent::Lsp`.
@@ -1712,6 +1745,10 @@ pub enum FenixUserEvent {
     /// on one buffer -- and events from a slow-to-answer one can arrive
     /// well after focus moved elsewhere.
     Lsp { key: LspKey, generation: u64, event: fenix_lsp::LspEvent },
+    /// A language server's process started, or failed to, on its own
+    /// thread (`start_lsp_session`): finding the program on `PATH` and
+    /// starting it can take seconds, and the window must not wait.
+    LspStarted(Box<LspStart>),
     /// A request sent to several language servers reached its deadline:
     /// act on what has arrived if a slow server is still out.
     LspDeadline(u64),
@@ -2103,6 +2140,7 @@ impl FenixUserEvent {
     fn label(&self) -> &'static str {
         match self {
             Self::Lsp { .. } => "Lsp",
+            Self::LspStarted(_) => "LspStarted",
             Self::LspDeadline(_) => "LspDeadline",
             Self::Dap { .. } => "Dap",
             Self::TaskEvent { .. } => "TaskEvent",
@@ -2640,6 +2678,17 @@ fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> 
     }
 }
 
+
+/// A task picker row: the task's name, its command line, and where it
+/// comes from, so two tasks of one name can be told apart.
+fn task_picker_label(task: &fenix_tasks::TaskDef, source: &str) -> String {
+    let command = std::iter::once(task.command.as_str()).chain(task.args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ");
+    // A name that is already its command line (`cargo build`) says it.
+    if command == task.name || command.starts_with(&format!("{} ", task.name)) {
+        return format!("{}   [{source}]", task.name);
+    }
+    format!("{}   {command}   [{source}]", task.name)
+}
 
 /// Where the explorer's own "places I have been" list lives.
 ///
@@ -5077,6 +5126,15 @@ pub struct App {
     /// `lsp_workspace_names` its calls are colored by.
     tcl_name_servers: HashMap<BufferId, (Instant, Vec<LspKey>)>,
     lsp_unavailable: std::collections::HashSet<LspKey>,
+    /// The language servers being started off the UI thread
+    /// (`start_lsp_session`), each with the generation its start was
+    /// given: a start that comes back to another, or to none -- the
+    /// server was stopped or restarted meanwhile -- is let go.
+    lsp_starting: HashMap<LspKey, u64>,
+    /// Under test, where a start off the UI thread sends what it got,
+    /// as the event loop would be sent it; none starts on the UI thread.
+    #[cfg(test)]
+    lsp_start_sink: Option<std::sync::mpsc::Sender<FenixUserEvent>>,
     /// `SPC q r` asked for Fenix to start again once it has quit
     /// (`prepare_restart`); `main` starts the new one.
     pub(crate) restart_requested: bool,
@@ -5283,11 +5341,23 @@ pub struct App {
     /// When the current fade started; `caret_alpha` eases from this.
     blink_transition_start: Instant,
     next_blink: Instant,
+    /// When the caret was last woken (`wake_caret`: a key, a click):
+    /// it blinks for `CARET_BLINKS_FOR` after, then stays lit, so an
+    /// idle window stops drawing twice a second (#74).
+    caret_woken: Instant,
+    /// When an extension's moving layer may next be drawn: at most every
+    /// `LAYER_TICK`, however fast the display could go (#74).
+    next_layer_frame: Instant,
     pulse: Option<Pulse>,
     /// Everything else that's animating -- see `motion_host`.
     motion: motion_host::MotionState,
     /// The launch splash, fading out over the first frames.
     splash_fade: Option<crate::splash::SplashFade>,
+    /// When the editor's first frame is overdue, from the splash's hand-off:
+    /// past it with nothing presented, the window is still showing the
+    /// splash, so its surface is made again and why it's stuck is said
+    /// (#65). Cleared by the first frame presented.
+    first_frame_due: Option<Instant>,
     /// The most recent status/error message, if any and not yet expired
     /// -- see `StatusMessage`'s own doc comment. Set via `set_message`/
     /// `set_error`; read (and its expiry checked) by `modeline_pieces`.
@@ -5420,8 +5490,8 @@ const TAB_CLOSE_CHARS: usize = 3;
 /// drifts every tab's background/hit-test rect right of its own actually-
 /// narrower rendered text, worse with each subsequent tab. `tabs` is
 /// `(buffer, filename char count)` pairs, left to right; tabs that would
-/// run past the strip's right edge are simply omitted (clipped, not
-/// scrolled) -- a disclosed v1 simplification.
+/// run past the strip's right edge are omitted. The strip starts where
+/// it keeps the active tab in view (`first_tab_shown`).
 #[cfg(test)]
 fn pane_tab_layout(rect: fenix_window::Rect, char_width: f32, tabs: &[(BufferId, usize)]) -> Vec<TabRect> {
     pane_tab_layout_iter(rect, char_width, tabs.iter().copied())
@@ -5439,8 +5509,7 @@ where
     let mut out = Vec::new();
     let mut x = rect.x;
     for (buffer, name_chars) in tabs {
-        let chars = name_chars.clamp(TAB_MIN_NAME_CHARS, TAB_MAX_NAME_CHARS) + TAB_CHROME_CHARS;
-        let w = chars as f32 * char_width;
+        let w = tab_width(name_chars, char_width);
         if x + w > rect.x + rect.w {
             break;
         }
@@ -5451,6 +5520,28 @@ where
         x += w;
     }
     out
+}
+
+/// How wide a tab whose name is `name_chars` long is drawn.
+fn tab_width(name_chars: usize, char_width: f32) -> f32 {
+    (name_chars.clamp(TAB_MIN_NAME_CHARS, TAB_MAX_NAME_CHARS) + TAB_CHROME_CHARS) as f32 * char_width
+}
+
+/// The first tab a strip `room` wide shows so that tab `active` is in
+/// view: 0 while it fits from the start, else as few tabs before it as
+/// leave it whole at the right edge. `width` is a tab's width, asked only
+/// of the tabs from `active` back to the first shown.
+fn first_tab_shown(active: usize, room: f32, width: impl Fn(usize) -> f32) -> usize {
+    let mut used = 0.0;
+    let mut start = active;
+    for i in (0..=active).rev() {
+        used += width(i);
+        if used > room {
+            break;
+        }
+        start = i;
+    }
+    start
 }
 
 /// Clamps `name` to at most `max_chars`, replacing the tail with `…` when
@@ -5855,6 +5946,9 @@ impl App {
             lsp_workspace_names: HashMap::new(),
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
+            lsp_starting: HashMap::new(),
+            #[cfg(test)]
+            lsp_start_sink: None,
             restart_requested: false,
             lsp_frame_synced: None,
             lsp_failures: HashMap::new(),
@@ -5916,9 +6010,12 @@ impl App {
             blink_visible: true,
             blink_transition_start: Instant::now() - BLINK_FADE,
             next_blink: Instant::now() + BLINK_INTERVAL,
+            caret_woken: Instant::now(),
+            next_layer_frame: Instant::now(),
             pulse: None,
             motion: motion_host::MotionState::default(),
             splash_fade: None,
+            first_frame_due: None,
             status_message: None,
             quit_confirm: false,
         }
@@ -6851,7 +6948,7 @@ impl App {
     /// ctags support).
     fn ensure_lsp_session(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
         let key = LspKey::primary(language, fenix_lsp::normalize(refactor::identity(cwd)));
-        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) { return; }
+        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) || self.lsp_starting.contains_key(&key) { return; }
         let configured = match fenix_project::tools::ProjectTools::read(&key.root) {
             Ok(config) => config,
             Err(error) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
@@ -6878,15 +6975,79 @@ impl App {
     /// language it serves there.
     fn ensure_additional_lsp_session(&mut self, server: &fenix_project::tools::AdditionalServer, cwd: &Path) {
         let key = LspKey { server: LspServer::Additional(server.name.clone()), root: fenix_lsp::normalize(refactor::identity(cwd)) };
-        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) { return; }
+        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) || self.lsp_starting.contains_key(&key) { return; }
         self.start_lsp_session(key, server.name.clone(), server.languages.clone(), &server.command(), cwd);
     }
 
     /// Starts `spec` as the server `key` and sends it `initialize`. A
     /// server that can't start is reported and left alone until
     /// `:lsp-restart`; the buffer's other servers carry on without it.
+    ///
+    /// The process is looked for (on Windows, `PATH` searched by hand)
+    /// and started on a thread of its own, its session taken up when the
+    /// event loop hears of it (`apply_lsp_started`): a slow `PATH`, a
+    /// network drive on it, or a server slow to start never holds up the
+    /// window (#33). With no event loop to hear of it, it starts here.
     fn start_lsp_session(&mut self, key: LspKey, name: String, languages: Vec<String>, spec: &fenix_project::tools::CommandSpec, cwd: &Path) {
-        let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+        let Some(send) = self.lsp_start_sender() else {
+            let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+            return self.lsp_started(key, name, languages, &spec.executable, cwd, spawned);
+        };
+        let generation = tool_sessions::generation();
+        self.lsp_starting.insert(key.clone(), generation);
+        let (spec, cwd) = (spec.clone(), cwd.to_path_buf());
+        std::thread::Builder::new()
+            .name("fenix-lsp-start".into())
+            .spawn(move || {
+                let result = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+                send(FenixUserEvent::LspStarted(Box::new(LspStart { key, generation, name, languages, executable: spec.executable, cwd, result })));
+            })
+            .expect("a thread to start a language server");
+    }
+
+    /// Where a language server started off the UI thread sends what it
+    /// came to: the event loop (a window that has gone drops it, the
+    /// server with it, on that thread). None without one.
+    fn lsp_start_sender(&self) -> Option<Box<dyn Fn(FenixUserEvent) + Send>> {
+        #[cfg(test)]
+        if let Some(sink) = self.lsp_start_sink.clone() {
+            return Some(Box::new(move |event| {
+                let _ = sink.send(event);
+            }));
+        }
+        let proxy = self.event_proxy.clone()?;
+        Some(Box::new(move |event| {
+            let _ = proxy.send_event(event);
+        }))
+    }
+
+    /// A language server started off the UI thread came back: taken up
+    /// if it's still the one wanted, else let go, off this thread.
+    fn apply_lsp_started(&mut self, start: LspStart) {
+        if self.lsp_starting.get(&start.key) != Some(&start.generation) {
+            if let Ok((client, _)) = start.result {
+                std::thread::spawn(move || drop(client));
+            }
+            return;
+        }
+        self.lsp_starting.remove(&start.key);
+        self.lsp_started(start.key, start.name, start.languages, &start.executable, &start.cwd, start.result);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Server `key` (`executable`) started, or couldn't: its session, and
+    /// `initialize` sent; or the reason, said and kept for Tool Status.
+    fn lsp_started(
+        &mut self,
+        key: LspKey,
+        name: String,
+        languages: Vec<String>,
+        executable: &str,
+        cwd: &Path,
+        spawned: std::io::Result<(fenix_lsp::LspClient, std::sync::mpsc::Receiver<fenix_lsp::LspEvent>)>,
+    ) {
         match spawned {
             Ok((client, receiver)) => {
                 let generation = tool_sessions::generation();
@@ -6898,9 +7059,9 @@ impl App {
                 self.send_lsp_initialize(key, cwd);
             }
             Err(err) => {
-                self.lsp_failures.insert(key.clone(), format!("couldn't start {}: {err}", spec.executable));
+                self.lsp_failures.insert(key.clone(), format!("couldn't start {executable}: {err}"));
                 self.lsp_unavailable.insert(key);
-                self.set_error(format!("couldn't start {name} ({}) for {}: {err}", spec.executable, cwd.display()));
+                self.set_error(format!("couldn't start {name} ({executable}) for {}: {err}", cwd.display()));
             }
         }
     }
@@ -9468,8 +9629,9 @@ impl App {
 
     /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
     /// (most-recently-touched first, matching Doom's own buffer switcher),
-    /// each labeled with its path (or `*scratch*` for an unnamed buffer)
-    /// and a leading `+` marker for unsaved changes.
+    /// each labeled with its path (a page, terminal or Home by what its
+    /// tab says, `*scratch*` for a plain unnamed buffer) and a leading `+`
+    /// marker for unsaved changes.
     pub(crate) fn picker_switch_buffer(&mut self) {
         let candidates = self
             .buffers
@@ -9477,7 +9639,12 @@ impl App {
             .iter()
             .map(|&id| {
                 let ob = self.buffers.get(id).expect("mru only lists open buffers");
-                let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| "*scratch*".to_string());
+                // A page, a terminal, Home... by what it shows, as its tab
+                // says; a plain unnamed buffer is the scratch (#50).
+                let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| match self.buffer_display_name(id) {
+                    unnamed if unnamed == "[No Name]" => "*scratch*".to_string(),
+                    shown => shown,
+                });
                 let marker = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { "+ " } else { "" };
                 fenix_picker::Candidate::new(format!("{marker}{name}"), id)
             })
@@ -9618,6 +9785,16 @@ impl App {
             }
         }
 
+        // Task Output and Tool Status go with the workspace they opened
+        // in (#29).
+        if self.tool_status_session.as_ref().is_some_and(|s| s.buffer == id) {
+            self.tool_status_close();
+            return;
+        }
+        if self.task_session.as_ref().is_some_and(|s| s.buffer == id) {
+            self.task_output_close();
+            return;
+        }
         // A pane-resident terminal's shell dies with its buffer -- see
         // `close_terminal_buffer` for why this, and not navigating away
         // from the pane, is what ends it.
@@ -9723,8 +9900,25 @@ impl App {
             self.set_error(format!("no known tasks for {}", root.display()));
             return;
         }
-        let candidates = tasks.into_iter().map(|t| fenix_picker::Candidate::new(t.name.clone(), t)).collect();
+        let own = fenix_project::tools::ProjectTools::read(&root).map(|tools| tools.tasks).unwrap_or_default();
+        let candidates = tasks
+            .into_iter()
+            .map(|t| {
+                let label = task_picker_label(&t, &self.task_source(&root, &t, own.contains_key(&t.name)));
+                fenix_picker::Candidate::new(label, t)
+            })
+            .collect();
         self.enter_picker(ActivePicker::Task(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// Where task `task` of the project at `root` comes from, as the task
+    /// picker says: the project's own `tools.json` (`own`), the extension
+    /// that gave it, or Fenix's defaults for the project's kind (#35).
+    fn task_source(&self, root: &Path, task: &fenix_tasks::TaskDef, own: bool) -> String {
+        if own {
+            return "tools.json".to_string();
+        }
+        self.wasm.task_owner(root, task).unwrap_or_else(|| "Fenix".to_string())
     }
 
     /// `SPC p r`: the test the cursor is in, run in Task Output.
@@ -11017,9 +11211,25 @@ impl App {
         let configured_command = |spec: &fenix_project::tools::CommandSpec| {
             spec.command(&root).ok().map(|command| (command.get_program().to_string_lossy().into_owned(), spec.args.clone()))
         };
+        // As the sessions resolve them: the project's own, then an
+        // extension's, then Fenix's defaults (#43).
         let entries = crate::tool_status::scan(
-            |language| tools.lsp.get(&crate::lsp::language_config_name(language)).and_then(configured_command).or_else(|| crate::lsp::resolve_server_command(language, &configured)),
-            |language| tools.dap.get(&crate::lsp::language_config_name(language)).and_then(configured_command).or_else(|| crate::dap::default_adapter_command(language)),
+            |language| {
+                tools
+                    .lsp
+                    .get(&crate::lsp::language_config_name(language))
+                    .and_then(configured_command)
+                    .or_else(|| self.wasm.language_server(&root, language).as_ref().and_then(configured_command))
+                    .or_else(|| crate::lsp::resolve_server_command(language, &configured))
+            },
+            |language| {
+                tools
+                    .dap
+                    .get(&crate::lsp::language_config_name(language))
+                    .and_then(configured_command)
+                    .or_else(|| self.wasm.debug_adapter(&root, language).and_then(|a| a.command).as_ref().and_then(configured_command))
+                    .or_else(|| crate::dap::default_adapter_command(language))
+            },
             |language| lsp_sessions.contains(&language),
             |language| dap_language == Some(language),
         );
@@ -13074,7 +13284,9 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        if self.workspaces.remove_active() {
+            self.workspace_removed(session.workspace_index);
+        }
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -13601,7 +13813,9 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        if self.workspaces.remove_active() {
+            self.workspace_removed(session.workspace_index);
+        }
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -13676,7 +13890,9 @@ impl App {
             self.pane_titles.remove(&pane);
         }
         self.workspaces.switch_to_index(session.workspace_index);
-        self.workspaces.remove_active();
+        if self.workspaces.remove_active() {
+            self.workspace_removed(session.workspace_index);
+        }
         self.refresh_project_root();
         self.wake_caret();
     }
@@ -14842,7 +15058,106 @@ impl App {
     /// last one -- same safety posture as `close_window` refusing the
     /// last window.
     pub(crate) fn remove_workspace(&mut self) {
-        self.workspaces.remove_active();
+        let removed = self.workspaces.active_index();
+        if self.workspaces.remove_active() {
+            self.workspace_removed(removed);
+        }
+        self.wake_caret();
+    }
+
+    /// Workspace `removed` went: the views that were on it are let go --
+    /// Task Output and Tool Status open again in a workspace of their own
+    /// next time (#29) -- and those on the workspaces after it are one
+    /// further left.
+    fn workspace_removed(&mut self, removed: usize) {
+        // Whether a view on `index` stays, and where it is now.
+        let stays = |index: &mut usize| match (*index).cmp(&removed) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Equal => false,
+            std::cmp::Ordering::Greater => {
+                *index -= 1;
+                true
+            }
+        };
+        if self.task_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            if let Some(session) = self.task_session.take() {
+                self.pane_titles.remove(&session.pane);
+            }
+        }
+        if self.tool_status_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            if let Some(session) = self.tool_status_session.take() {
+                self.pane_titles.remove(&session.pane);
+            }
+        }
+        if self.history_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            self.history_session = None;
+        }
+        if self.merge_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            self.merge_session = None;
+        }
+        if self.git_session.as_mut().is_some_and(|s| !stays(&mut s.workspace_index)) {
+            self.git_session = None;
+        }
+    }
+
+    /// `q` closes Tool Status and Task Output, as it closes the other
+    /// pages, rather than starting a macro in a buffer that's only read
+    /// (#29). Whether it did.
+    fn view_closed_by_q(&mut self, keypress: KeyPress) -> bool {
+        if keypress != KeyPress::char('q') || self.vim.mode() != Mode::Normal || !self.vim.is_idle() || self.leader_matcher.is_pending() || self.vim.is_recording() {
+            return false;
+        }
+        let id = self.focused_buffer_id();
+        if self.tool_status_session.as_ref().is_some_and(|s| s.buffer == id) {
+            self.tool_status_close();
+            return true;
+        }
+        if self.task_session.as_ref().is_some_and(|s| s.buffer == id) {
+            self.task_output_close();
+            return true;
+        }
+        false
+    }
+
+    /// Closes Tool Status (`q`, `SPC b d`): its buffer, and the workspace
+    /// it opened in, when there's another to go to (#29).
+    fn tool_status_close(&mut self) {
+        let Some(session) = self.tool_status_session.take() else { return };
+        self.close_view_workspace(session.workspace_index, session.pane, session.buffer);
+    }
+
+    /// Closes Task Output (`q`, `SPC b d`): a task still running is
+    /// cancelled, as `SPC p k` does; its buffer, and the workspace it
+    /// opened in, go. The next task opens it again (#29).
+    fn task_output_close(&mut self) {
+        let Some(session) = self.task_session.take() else { return };
+        if let Some(runner) = &session.runner {
+            runner.cancel();
+        }
+        self.close_view_workspace(session.workspace_index, session.pane, session.buffer);
+    }
+
+    /// A view's buffer closed, with the workspace it was opened in when
+    /// another is left to go to, and its pane's title strip.
+    fn close_view_workspace(&mut self, workspace_index: usize, pane: fenix_window::WindowId, buffer: BufferId) {
+        self.pane_titles.remove(&pane);
+        self.buffers.close(buffer);
+        self.drop_buffer_from_every_strip(buffer);
+        if workspace_index < self.workspaces.len() {
+            self.workspaces.switch_to_index(workspace_index);
+            if self.workspaces.remove_active() {
+                self.workspace_removed(workspace_index);
+            } else {
+                // The last workspace: Home in the pane instead.
+                let home = self.ensure_workspace_home();
+                for p in self.windows().windows() {
+                    if self.windows().content(p) == Some(&buffer) {
+                        self.set_pane_content(p, home);
+                    }
+                }
+            }
+        }
+        self.refresh_project_root();
         self.wake_caret();
     }
 
@@ -15233,9 +15548,74 @@ impl App {
         // a keypress.
         self.blink_transition_start = now - BLINK_FADE;
         self.next_blink = now + BLINK_INTERVAL;
+        self.caret_woken = now;
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+
+    /// The editor's first frame, if it's overdue: what's in the way is
+    /// said on stderr -- no surface, no size, a hidden or minimised
+    /// window -- the surface made again and a frame asked for, every
+    /// `FIRST_FRAME_WITHIN` until one is presented (#65). When it's next
+    /// due, while it's awaited.
+    fn first_frame_tick(&mut self, now: Instant) -> Option<Instant> {
+        let due = self.first_frame_due?;
+        if now < due {
+            return Some(due);
+        }
+        let window = self.window.clone();
+        let surface = self.gpu.as_ref().map(|g| (g.surface.is_some(), g.size.width, g.size.height, g.health.failures()));
+        let (visible, minimized) = window.as_ref().map_or((None, None), |w| (w.is_visible(), w.is_minimized()));
+        let next = now + FIRST_FRAME_WITHIN;
+        // Minimised, there's nothing to draw into: wait for it.
+        if minimized == Some(true) {
+            self.first_frame_due = Some(next);
+            return Some(next);
+        }
+        eprintln!("fenix: no frame drawn {FIRST_FRAME_WITHIN:?} after the splash handed over (surface, width, height, failures: {surface:?}; visible {visible:?}, minimised {minimized:?}); making the window's surface again");
+        if let (Some(context), Some(gpu), Some(window)) = (&self.gpu_context, self.gpu.as_mut(), window.as_ref()) {
+            context.recreate_surface(gpu, Arc::clone(window));
+        }
+        for frame in 0..self.frames.len() {
+            if let Some(window) = self.frame_window(frame) {
+                window.request_redraw();
+            }
+        }
+        self.first_frame_due = Some(next);
+        Some(next)
+    }
+
+    /// The caret's blink, if it's due: true when it changed and is to be
+    /// drawn. Past `CARET_BLINKS_FOR` without a key it stays lit (#74).
+    fn blink_tick(&mut self, now: Instant) -> bool {
+        if now < self.next_blink || self.caret_settled(now) {
+            return false;
+        }
+        self.blink_visible = !self.blink_visible;
+        self.blink_transition_start = now;
+        self.next_blink = now + BLINK_INTERVAL;
+        true
+    }
+
+    /// Whether the caret has stopped blinking: lit, done fading, and long
+    /// enough since the last key or click.
+    fn caret_settled(&self, now: Instant) -> bool {
+        self.blink_visible && now.duration_since(self.caret_woken) >= CARET_BLINKS_FOR && now.duration_since(self.blink_transition_start) >= BLINK_FADE.max(self.motion().blink_fade_d)
+    }
+
+    /// When a moving layer is next to be drawn, if one moves: now, at
+    /// most every `LAYER_TICK` -- what was due is taken, and the next
+    /// time set.
+    fn layer_frame_tick(&mut self, now: Instant) -> Option<Instant> {
+        if !self.layers_moving(now) {
+            return None;
+        }
+        if now >= self.next_layer_frame {
+            self.next_layer_frame = now + LAYER_TICK;
+            return Some(now);
+        }
+        Some(self.next_layer_frame)
     }
 
     /// 0.0 (hidden) to 1.0 (fully visible), eased across `BLINK_FADE` from
@@ -15259,6 +15639,7 @@ impl App {
     fn handle_user_event(&mut self, event: FenixUserEvent) {
         match event {
             FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
+            FenixUserEvent::LspStarted(start) => self.apply_lsp_started(*start),
             FenixUserEvent::LspDeadline(fanout) => self.lsp_fanout_progress(fanout),
             FenixUserEvent::TaskEvent(buffer_id, run_id, event) => self.apply_task_event(buffer_id, run_id, event),
             FenixUserEvent::Dap { generation, event } => {
@@ -15818,6 +16199,9 @@ impl App {
         // is nothing to record a macro in.
         if keypress == KeyPress::char('q') && self.vim.mode() == Mode::Normal && self.focused_is_side_by_side_ref() {
             self.side_by_side_close();
+            return;
+        }
+        if self.view_closed_by_q(keypress) {
             return;
         }
 
@@ -16618,9 +17002,19 @@ impl App {
     /// vim mode label -- there's no Normal/Insert/Visual distinction worth
     /// showing while every key goes straight to it instead of vim's own
     /// dispatch.
+    /// Whether a terminal has the keyboard: the panel (`SPC o t`), or the
+    /// one in the focused pane. `Ctrl-\` gives it back.
+    fn terminal_has_keyboard(&self) -> bool {
+        self.terminal_focused || self.terminal_buffer_focused.is_some_and(|id| self.windows().content(self.focused_pane_id()) == Some(&id))
+    }
+
     fn mode_badge_label(&self) -> &'static str {
         if self.wasm.captured.is_some() {
             return "CAPTURE";
+        }
+        // Keys go to a shell: Vim's mode means nothing meanwhile (#42).
+        if self.terminal_has_keyboard() {
+            return "TERMINAL";
         }
         if self.debug_mode_active() {
             return "DEBUG";
@@ -16810,8 +17204,10 @@ impl App {
             Some((i, n)) => format!("   [{i}/{n}]"),
         };
         let debug_indicator = self.debug_modeline_segment();
+        // How to get the keyboard back, while a shell has it (#42).
+        let terminal_hint = if self.terminal_has_keyboard() { "   Ctrl-\\ back to the editor" } else { "" };
         let suffix = format!(
-            "{filename}{modified}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}   Ln {}, Col {}   {details} ",
+            "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
             col + 1
         );
@@ -18267,9 +18663,17 @@ impl App {
             // visible tabs. Lazily resolve names so repeated redraws
             // while moving do work proportional to tabs that fit, not
             // all files ever visited in that pane.
-            let tabs = self.pane_tab_order(pane).into_iter().map(|id| (id, self.tab_label(id).chars().count()));
-            let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
             let active_buffer = self.windows().content(pane).copied();
+            // From the first tab that keeps the active one in view: with
+            // more tabs than fit, the strip scrolls to it rather than
+            // leaving it past the right edge (#50).
+            let order = self.pane_tab_order(pane);
+            let start = match active_buffer.and_then(|b| order.iter().position(|&id| id == b)) {
+                Some(active) => first_tab_shown(active, strip_rect.w, |i| tab_width(self.tab_label(order[i]).chars().count(), title_char_width)),
+                None => 0,
+            };
+            let tabs = order[start..].iter().map(|&id| (id, self.tab_label(id).chars().count()));
+            let layout = pane_tab_layout_iter(strip_rect, title_char_width, tabs);
             let mut spans: Vec<(String, glyphon::Color, bool)> = Vec::new();
             let mut active_flags: Vec<bool> = Vec::new();
             let mut ranges: Vec<(usize, usize, usize, usize)> = Vec::new();
@@ -19696,7 +20100,8 @@ impl App {
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
-        let caret_alpha = self.caret_alpha();
+        // The panel has the keyboard: the editor's caret isn't where keys go.
+        let caret_alpha = if self.terminal_focused { 0.0 } else { self.caret_alpha() };
         let message_alpha = self.message_alpha(now);
         let jobs = self.background_jobs();
         let frame_ws = (self.active_frame, self.workspaces.active);
@@ -20959,6 +21364,9 @@ impl App {
         if gpu.health.presented() {
             eprintln!("fenix: the window's surface is drawing again");
         }
+        if self.first_frame_due.take().is_some_and(|due| Instant::now() > due) {
+            eprintln!("fenix: the first frame came late, {:?} after the splash handed over", FIRST_FRAME_WITHIN);
+        }
         static FIRST_FRAME: std::sync::Once = std::sync::Once::new();
         FIRST_FRAME.call_once(|| crate::profile::launch_mark("first frame"));
         text.trim();
@@ -20994,6 +21402,7 @@ impl App {
             None => self.gpu.as_mut(),
             Some(f) => self.frames[f].as_mut().and_then(|state| state.gpu.as_mut()),
         };
+        self.first_frame_due = Some(Instant::now() + FIRST_FRAME_WITHIN);
         let Some(gpu) = gpu else { return };
         match splash {
             Some(back) => {
@@ -21273,10 +21682,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             needs_redraw = true;
         }
 
-        if now >= self.next_blink {
-            self.blink_visible = !self.blink_visible;
-            self.blink_transition_start = now;
-            self.next_blink = now + BLINK_INTERVAL;
+        if self.blink_tick(now) {
             needs_redraw = true;
         }
 
@@ -21305,6 +21711,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
         self.prune_motion(now);
         let animating = blink_transitioning || pulse_active || scroll_animating || self.motion_animating(now);
         if animating {
+            needs_redraw = true;
+        }
+        // A layer moving on its own (a pet walking) is drawn at most every
+        // `LAYER_TICK`, not every frame the display can show.
+        let layer_wake = self.layer_frame_tick(now);
+        if layer_wake.is_some_and(|due| due <= now) {
             needs_redraw = true;
         }
 
@@ -21348,7 +21760,9 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // on, not just something that happens when a redraw was already
         // due -- an idle editor whose terminal panel just rewrote a file
         // has no other reason to wake up.
-        let wait_until = if animating { now + ANIM_TICK } else { self.next_blink };
+        // A caret that has stopped blinking has nothing to wake for.
+        let wait_until = if animating { now + ANIM_TICK } else if self.caret_settled(now) { now + IDLE_WAIT } else { self.next_blink };
+        let wait_until = if layer_wake.is_some() { wait_until.min(self.next_layer_frame) } else { wait_until };
         let wait_until = wait_until.min(self.next_disk_check);
         let wait_until = changes_told_at.map_or(wait_until, |at| wait_until.min(at));
         // An extension's layer whose next frame the loop just woke for.
@@ -21396,6 +21810,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // The agents: cancels that never ended, restarts after a crash,
         // idle agents stopped, files they're changing looked at.
         let wait_until = match self.agents_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // The first frame, still not drawn: the window is stuck on the
+        // splash (#65).
+        let wait_until = match self.first_frame_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };
@@ -21843,6 +22263,18 @@ mod tests {
         assert_eq!(visible_document_end_line(&[0, 1, 2], 40), 2);
         assert_eq!(visible_document_end_line(&[7, 8, 9, 10], 2), 9);
         assert_eq!(visible_document_end_line(&[], 40), 0);
+    }
+
+    /// With more tabs than fit, the strip starts where the active tab is
+    /// whole at its right edge; while it fits from the start, at the start
+    /// (#50).
+    #[test]
+    fn the_tab_strip_scrolls_to_keep_the_active_tab_in_view() {
+        let width = |_| 10.0;
+        assert_eq!(first_tab_shown(2, 45.0, width), 0, "fits from the start");
+        assert_eq!(first_tab_shown(19, 45.0, width), 16, "the last four, the active one last");
+        assert_eq!(first_tab_shown(19, 5.0, width), 19, "too narrow for one: still the active one");
+        assert_eq!(first_tab_shown(0, 45.0, width), 0);
     }
 
     #[test]
@@ -23135,6 +23567,39 @@ index 0000000..1111111 100644
     fn fresh_app_caret_is_immediately_fully_visible_no_fade_in_delay() {
         let app = App::with_file(None);
         assert_eq!(app.caret_alpha(), 1.0);
+    }
+
+    /// The first frame overdue after the splash: the loop wakes for it,
+    /// tries again, and keeps waking until one is drawn (#65).
+    #[test]
+    fn an_overdue_first_frame_is_tried_again() {
+        let mut app = App::with_file(None);
+        let now = Instant::now();
+        assert_eq!(app.first_frame_tick(now), None, "nothing awaited");
+        app.first_frame_due = Some(now + FIRST_FRAME_WITHIN);
+        assert_eq!(app.first_frame_tick(now), Some(now + FIRST_FRAME_WITHIN), "not yet");
+        let late = now + FIRST_FRAME_WITHIN + Duration::from_millis(1);
+        assert_eq!(app.first_frame_tick(late), Some(late + FIRST_FRAME_WITHIN), "tried, and awaited again");
+    }
+
+    /// The caret blinks for a while after a key, then stays lit and
+    /// stops waking the loop; the next key starts it again (#74).
+    #[test]
+    fn the_caret_stops_blinking_once_the_window_is_idle() {
+        let mut app = App::with_file(None);
+        app.wake_caret();
+        let woken = app.caret_woken;
+        assert!(app.blink_tick(woken + BLINK_INTERVAL), "blinks at first");
+        assert!(!app.blink_visible);
+        let idle = woken + CARET_BLINKS_FOR + Duration::from_secs(1);
+        assert!(!app.caret_settled(idle), "not while it's out");
+        assert!(app.blink_tick(idle), "comes back on");
+        assert!(app.blink_visible);
+        let later = idle + Duration::from_secs(1);
+        assert!(app.caret_settled(later));
+        assert!(!app.blink_tick(later), "and stays");
+        app.wake_caret();
+        assert!(!app.caret_settled(Instant::now()), "a key starts it again");
     }
 
     #[test]
@@ -26889,6 +27354,23 @@ configure_board stm32
         assert!(app.sidebar.is_none());
     }
 
+    /// While the terminal panel has the keyboard the modeline says so,
+    /// and how to get it back (#42).
+    #[test]
+    fn the_modeline_says_when_a_terminal_has_the_keyboard() {
+        let mut app = App::with_file(None);
+        assert_ne!(app.modeline_pieces().0, "TERMINAL");
+        app.toggle_terminal();
+        app.status_message = None;
+        let (badge, rest) = app.modeline_pieces();
+        assert_eq!(badge, "TERMINAL");
+        assert!(rest.contains("Ctrl-\\ back to the editor"), "{rest}");
+        app.terminal_focused = false;
+        let (badge, rest) = app.modeline_pieces();
+        assert_ne!(badge, "TERMINAL");
+        assert!(!rest.contains("back to the editor"));
+    }
+
     #[test]
     fn toggle_terminal_opens_then_hides_without_dropping_the_session() {
         let mut app = App::with_file(None);
@@ -28997,6 +29479,18 @@ configure_board stm32
         }
     }
 
+    /// A page is listed by its title, not as `*scratch*` (#50).
+    #[test]
+    fn picker_switch_buffer_names_pages_by_their_titles() {
+        let mut app = App::with_file(None);
+        app.cmd_project_new();
+        app.picker_switch_buffer();
+        let Some(ActivePicker::SwitchBuffer(state)) = &app.active_picker else { panic!("expected a SwitchBuffer picker") };
+        let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+        assert!(labels.contains(&"*new project*"), "{labels:?}");
+        assert!(!labels.contains(&"*scratch*"), "{labels:?}");
+    }
+
     #[test]
     fn picker_switch_buffer_marks_dirty_buffers() {
         let mut app = App::with_file(None); // opens the dashboard, not a plain scratch buffer
@@ -29699,6 +30193,24 @@ configure_board stm32
             Some(ActivePicker::Task(state)) => assert_eq!(state.len(), 3), // build/test/clippy
             _ => panic!("expected an open Task picker"),
         }
+    }
+
+    /// Each row says where its task comes from: Fenix's defaults, an
+    /// extension, or the project's `tools.json` (#35).
+    #[test]
+    fn the_task_picker_says_where_each_task_comes_from() {
+        let dir = TempDir::new("task_sources");
+        dir.write("Cargo.toml", "[package]\nname=\"x\"");
+        std::fs::create_dir_all(dir.path().join(".fenix")).unwrap();
+        dir.write(".fenix/tools.json", r#"{"tasks": {"lint": {"executable": "cargo", "args": ["clippy"]}}}"#);
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+        app.picker_tasks();
+        let Some(ActivePicker::Task(state)) = &app.active_picker else { panic!("expected an open Task picker") };
+        let labels = picker_visible_labels(app.active_picker.as_ref().unwrap(), 0, state.len()).into_iter().map(|(_, l)| l).collect::<Vec<_>>();
+        assert!(labels.iter().any(|l| l == "cargo build   [Fenix]"), "{labels:?}");
+        assert!(labels.iter().any(|l| l.starts_with("lint   cargo clippy") && l.ends_with("[tools.json]")), "{labels:?}");
+        assert_eq!(task_picker_label(&fenix_tasks::TaskDef { name: "test".into(), command: "uv".into(), args: vec!["run".into(), "pytest".into()] }, "fenix.python"), "test   uv run pytest   [fenix.python]");
     }
 
     #[test]
@@ -33025,6 +33537,40 @@ configure_board stm32
         assert!(text.contains("rust-analyzer"), "expected the resolved command in:\n{text}");
     }
 
+    /// `q` closes Tool Status, and `SPC b d` Task Output, each with the
+    /// workspace it opened in, leaving no title strip behind; removing
+    /// Task Output's workspace doesn't stop the next task showing (#29).
+    #[test]
+    fn tool_status_and_task_output_close_with_their_workspaces() {
+        let mut app = App::with_file(None);
+        let workspaces = app.workspaces.len();
+        app.open_tool_status_panel();
+        assert_eq!(app.workspaces.len(), workspaces + 1);
+        let pane = app.focused_pane_id();
+        assert!(app.view_closed_by_q(KeyPress::char('q')));
+        assert!(app.tool_status_session.is_none() && !app.pane_titles.contains_key(&pane));
+        assert_eq!(app.workspaces.len(), workspaces, "its workspace went with it");
+        assert!(!app.view_closed_by_q(KeyPress::char('q')), "elsewhere q is Vim's");
+
+        let dir = TempDir::new("task_output_close");
+        let (program, args): (&str, Vec<String>) = if cfg!(windows) { ("cmd", vec!["/c".into(), "exit".into(), "0".into()]) } else { ("true", Vec::new()) };
+        let task = fenix_tasks::TaskDef { name: "t".to_string(), command: program.to_string(), args };
+        app.run_task(task.clone(), dir.path().to_path_buf());
+        assert_eq!(app.open().kind, BufferKind::TaskOutput);
+        app.kill_buffer();
+        assert!(app.task_session.is_none());
+        assert_eq!(app.workspaces.len(), workspaces);
+        // Its workspace removed with SPC TAB d instead: the next run
+        // opens it again rather than writing nowhere.
+        app.run_task(task.clone(), dir.path().to_path_buf());
+        app.remove_workspace();
+        assert!(app.task_session.is_none());
+        app.run_task(task, dir.path().to_path_buf());
+        assert_eq!(app.open().kind, BufferKind::TaskOutput, "shown again");
+        let session = app.task_session.as_ref().unwrap();
+        assert_eq!(session.workspace_index, app.workspaces.active_index());
+    }
+
     #[test]
     fn open_tool_status_panel_reuses_the_same_buffer_on_a_second_open() {
         let mut app = App::with_file(None);
@@ -34268,6 +34814,43 @@ name = \"orbit\"
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command.args(["--ignored", "--exact", "app::tests::lsp_sink_fixture", "--nocapture"]).env("FENIX_LSP_SINK", "1").current_dir(root);
         command
+    }
+
+    /// A language server is looked for and started on a thread of its
+    /// own, and taken up when the event loop hears it's up: the window
+    /// never waits on a slow `PATH` or a slow server (#33). One that
+    /// can't start says so as before; one stopped meanwhile is let go.
+    #[test]
+    fn a_language_server_starts_off_the_ui_thread() {
+        let dir = TempDir::new("lsp_start_off_thread");
+        let mut app = App::with_file(None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.lsp_start_sink = Some(tx);
+        let key = |name: &str| LspKey { server: LspServer::Additional(name.into()), root: dir.path().to_path_buf() };
+        let sink = fenix_project::tools::CommandSpec {
+            executable: std::env::current_exe().unwrap().display().to_string(),
+            args: ["--ignored", "--exact", "app::tests::lsp_sink_fixture", "--nocapture"].map(String::from).to_vec(),
+            env: [("FENIX_LSP_SINK".to_string(), "1".to_string())].into(),
+            ..Default::default()
+        };
+        app.start_lsp_session(key("sink"), "sink".into(), vec!["rust".into()], &sink, dir.path());
+        assert!(!app.lsp_sessions.contains_key(&key("sink")) && app.lsp_starting.contains_key(&key("sink")), "started elsewhere");
+        let started = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert!(matches!(&started, FenixUserEvent::LspStarted(s) if s.result.is_ok()), "{started:?}");
+        app.handle_user_event(started);
+        assert!(app.lsp_sessions.contains_key(&key("sink")) && app.lsp_starting.is_empty());
+        assert!(app.lsp_sessions[&key("sink")].pending.values().any(|p| matches!(p, PendingLspRequest::Initialize)), "asked to initialize");
+
+        let missing = fenix_project::tools::CommandSpec::new("definitely-not-a-language-server-xyz".into(), Vec::new());
+        app.start_lsp_session(key("missing"), "missing".into(), vec!["rust".into()], &missing, dir.path());
+        app.handle_user_event(rx.recv_timeout(Duration::from_secs(60)).unwrap());
+        assert!(app.lsp_unavailable.contains(&key("missing")) && !app.lsp_sessions.contains_key(&key("missing")));
+        assert!(app.lsp_failures[&key("missing")].starts_with("couldn't start definitely-not-a-language-server-xyz"), "{:?}", app.lsp_failures);
+
+        app.start_lsp_session(key("late"), "late".into(), vec!["rust".into()], &sink, dir.path());
+        app.stop_lsp_session(&key("late"));
+        app.handle_user_event(rx.recv_timeout(Duration::from_secs(60)).unwrap());
+        assert!(!app.lsp_sessions.contains_key(&key("late")) && !app.lsp_unavailable.contains(&key("late")), "let go");
     }
 
     fn sink_client(root: &Path) -> fenix_lsp::LspClient {

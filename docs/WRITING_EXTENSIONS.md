@@ -25,7 +25,9 @@ pwsh -File package.ps1             # dist/<id>/ and dist/<id>-<version>.fenixext
 pwsh -File package.ps1 -Install    # and installs it into Fenix
 ```
 
-An installed extension is used from Fenix's next start. `SPC h l` shows
+An extension installed or switched on from the Extensions page is used
+at once; one installed with `package.ps1 -Install` (the command line),
+from Fenix's next start, or `SPC q r`. `SPC h l` shows
 what each one logs, and why one stopped.
 
 ## The extension

@@ -49,6 +49,35 @@ fn start_tuned(permissions: Permissions, settings: &[(&str, &str)], tune: impl F
     running
 }
 
+/// `cmd`, as the test extension runs it (`cmd /c echo ...`): Windows' own
+/// on Windows; elsewhere a `cmd` of the tests' that runs what follows
+/// `/c` with `sh`, put first on `PATH` once for the whole run, before the
+/// first program starts. Its path, as `ComSpec` would give it.
+fn cmd() -> String {
+    #[cfg(windows)]
+    {
+        std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into())
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        static SHIM: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        SHIM.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!("fenix-wasm-cmd-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let shim = dir.join("cmd");
+            std::fs::write(&shim, "#!/bin/sh\n[ \"$1\" = /c ] && shift\neval \"$@\"\n").unwrap();
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let joined = std::env::join_paths(std::iter::once(dir).chain(std::env::split_paths(&path))).unwrap();
+            std::env::set_var("PATH", joined);
+            shim
+        })
+        .to_string_lossy()
+        .into_owned()
+    }
+}
+
 fn start() -> Running {
     start_with(Permissions::default(), &[])
 }
@@ -226,6 +255,7 @@ fn a_timer_goes_off_as_an_event() {
 /// another, or one given as a path, doesn't.
 #[test]
 fn programs_run_only_as_its_manifest_allows() {
+    cmd();
     let mut ext = start_with(Permissions { process: vec!["cmd".into()], ..Permissions::default() }, &[]);
     let (result, _) = ext.run("hello.spawn");
     assert_eq!(result, Ok(()));
@@ -242,7 +272,7 @@ fn programs_run_only_as_its_manifest_allows() {
 /// own folder where its manifest says.
 #[test]
 fn programs_by_path_run_only_where_the_manifest_says() {
-    let cmd = std::env::var("ComSpec").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+    let cmd = cmd();
     let permissions = Permissions { process: vec!["${setting:hello.cli}".into(), "/data/tools/*".into()], ..Permissions::default() };
     let mut ext = start_with(permissions, &[("hello.cli", &cmd)]);
     let (result, _) = ext.run("hello.spawn-setting");
@@ -259,12 +289,13 @@ fn programs_by_path_run_only_where_the_manifest_says() {
 /// may run; it won't look for anything else.
 #[test]
 fn a_program_it_finds_may_run_by_that_path() {
+    cmd();
     let mut ext = start_with(Permissions { process: vec!["cmd".into()], ..Permissions::default() }, &[]);
     let (result, seen) = ext.run("hello.find");
     assert_eq!(result, Ok(()));
     assert!(seen.iter().any(|e| matches!(e, Event::Asked(Request::Found { name, path }) if name == "cmd" && path.is_file())), "{seen:?}");
     assert!(warned(&seen, "find-program: powershell isn't a program this extension may run"), "{seen:?}");
-    assert!(seen.iter().any(|e| matches!(e, Event::Said(_, s) if s.eq_ignore_ascii_case("found cmd.exe"))), "{seen:?}");
+    assert!(seen.iter().any(|e| matches!(e, Event::Said(_, s) if s.eq_ignore_ascii_case(if cfg!(windows) { "found cmd.exe" } else { "found cmd" }))), "{seen:?}");
     let lines = ext.logged_until(|l| l.starts_with("process 1 ended"));
     assert!(lines.iter().any(|l| l == "process 1 said: found it"), "{lines:?}");
 }

@@ -33,6 +33,19 @@ pub struct ToolEntry {
     /// `None` when `found_on_path` is true -- nothing to suggest
     /// installing.
     pub install_hint: Option<&'static str>,
+    /// Where it's installed when that isn't on Fenix's `PATH` (`uv tool
+    /// install`'s folder), as the doctor finds it (#43).
+    pub elsewhere: Option<std::path::PathBuf>,
+}
+
+/// A row's state, from what was found: running means found, whatever
+/// `PATH` says; one installed off `PATH` says where; one not found at all
+/// how to install it.
+fn entry(language: LanguageId, kind: ToolKind, command: String, running: bool) -> ToolEntry {
+    let found_on_path = running || is_on_path(&command);
+    let elsewhere = (!found_on_path).then(|| fenix_project::doctor::in_tool_dirs(&command)).flatten();
+    let install_hint = if found_on_path || elsewhere.is_some() { None } else { install_hint_for(&command) };
+    ToolEntry { language, kind, command, found_on_path, running, install_hint, elsewhere }
 }
 
 /// Every language this app has a built-in LSP default or DAP default
@@ -68,6 +81,9 @@ fn install_hint_for(command: &str) -> Option<&'static str> {
         "clangd" => Some("install clangd via your platform's package manager, or the LLVM installer on Windows"),
         "bash-language-server" => Some("npm install -g bash-language-server"),
         "typescript-language-server" => Some("npm install -g typescript-language-server typescript"),
+        "gopls" => Some("go install golang.org/x/tools/gopls@latest"),
+        "lua-language-server" => Some("install lua-language-server via your platform's package manager, or from https://luals.github.io"),
+        "lldb-dap" => Some("install LLVM (lldb-dap comes with it), or rustup's lldb on macOS"),
         _ => None,
     }
 }
@@ -90,14 +106,10 @@ pub fn scan(
     let mut entries = Vec::new();
     for &language in KNOWN_LANGUAGES {
         if let Some((command, _)) = resolve_lsp_command(language) {
-            let found_on_path = is_on_path(&command);
-            let install_hint = if found_on_path { None } else { install_hint_for(&command) };
-            entries.push(ToolEntry { language, kind: ToolKind::Lsp, command, found_on_path, running: lsp_running(language), install_hint });
+            entries.push(entry(language, ToolKind::Lsp, command, lsp_running(language)));
         }
         if let Some((command, _)) = resolve_dap_command(language) {
-            let found_on_path = is_on_path(&command);
-            let install_hint = if found_on_path { None } else { install_hint_for(&command) };
-            entries.push(ToolEntry { language, kind: ToolKind::Dap, command, found_on_path, running: dap_running(language), install_hint });
+            entries.push(entry(language, ToolKind::Dap, command, dap_running(language)));
         }
     }
     entries
@@ -151,9 +163,16 @@ pub fn render(entries: &[ToolEntry]) -> String {
             ToolKind::Lsp => "LSP",
             ToolKind::Dap => "DAP",
         };
-        let status = if entry.found_on_path { "found" } else { "missing" };
+        let status = match (entry.found_on_path, &entry.elsewhere) {
+            (true, _) => "found",
+            (false, Some(_)) => "not on PATH",
+            (false, None) => "missing",
+        };
         let running = if entry.running { ", running" } else { "" };
         out.push_str(&format!("{:<12} {kind}  {:<28} [{status}{running}]\n", format!("{:?}", entry.language), entry.command));
+        if let Some(dir) = entry.elsewhere.as_ref().and_then(|p| p.parent()) {
+            out.push_str(&format!("             installed in {}, which isn't on Fenix's PATH -- SPC p h can use it for this project\n", dir.display()));
+        }
         if let Some(hint) = entry.install_hint {
             out.push_str(&format!("             install: {hint}\n"));
         }
@@ -284,7 +303,7 @@ mod tests {
         // running this test varies -- only assert the *pairing* holds:
         // missing implies a hint, found implies none.
         for entry in &entries {
-            assert_eq!(entry.install_hint.is_some(), !entry.found_on_path);
+            assert_eq!(entry.install_hint.is_some(), !entry.found_on_path && entry.elsewhere.is_none());
         }
     }
 
@@ -308,12 +327,33 @@ mod tests {
             found_on_path: false,
             running: false,
             install_hint: Some("rustup component add rust-analyzer"),
+            elsewhere: None,
         }];
         let text = render(&entries);
         assert!(text.contains("Rust"));
         assert!(text.contains("rust-analyzer"));
         assert!(text.contains("missing"));
         assert!(text.contains("rustup component add rust-analyzer"));
+    }
+
+    /// A server that's running is found, whatever `PATH` says; one
+    /// installed off `PATH` says where, not "missing" (#43).
+    #[test]
+    fn a_running_server_is_found_and_one_off_path_says_where() {
+        let entries = scan(|l| (l == LanguageId::Python).then(|| ("definitely-not-on-path-xyz".to_string(), vec![])), |_| None, |l| l == LanguageId::Python, |_| false);
+        assert!(entries[0].found_on_path && entries[0].install_hint.is_none(), "not [missing, running]");
+        let off = ToolEntry {
+            language: LanguageId::Python,
+            kind: ToolKind::Lsp,
+            command: "pyright-langserver".to_string(),
+            found_on_path: false,
+            running: false,
+            install_hint: None,
+            elsewhere: Some(std::path::PathBuf::from("/home/me/.local/bin/pyright-langserver")),
+        };
+        let text = render(&[off]);
+        assert!(text.contains("[not on PATH]") && text.contains("installed in /home/me/.local/bin") && !text.contains("missing"), "{text}");
+        assert!(install_hint_for("gopls").is_some() && install_hint_for("lua-language-server").is_some());
     }
 
     #[test]

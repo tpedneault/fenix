@@ -4,7 +4,7 @@
 //! never freezes Fenix. Keys go to it (`page-key`), except `q` and `Esc`,
 //! which close the page as on any other.
 
-use crate::page::{fit, frame, Grid, Key, Page, Role};
+use crate::page::{fit, frame, wrap, Grid, Key, Page, Role};
 use fenix_wasm::host as wit;
 
 pub struct CodePage {
@@ -20,6 +20,10 @@ pub struct CodePage {
     pub asked: Option<(u32, u32)>,
     /// Why its extension stopped, when it has.
     pub stopped: Option<String>,
+    /// What its extension said went wrong while there was nothing on it
+    /// yet -- a PDF that isn't one -- shown on it in place of a blank
+    /// page (#75).
+    pub failed: Option<String>,
     /// What it last said it needs to open again (`page-state`), kept for
     /// the session.
     pub state: Option<String>,
@@ -170,7 +174,7 @@ pub enum Action {
 
 impl CodePage {
     pub fn new(ext: &str, page: u64, kind: &str, title: &str) -> Self {
-        CodePage { ext: ext.into(), page, kind: kind.into(), title: title.into(), shown: None, width: None, asked: None, stopped: None, state: None, surface: None, beside: false, file: None }
+        CodePage { ext: ext.into(), page, kind: kind.into(), title: title.into(), shown: None, width: None, asked: None, stopped: None, failed: None, state: None, surface: None, beside: false, file: None }
     }
 
     /// What it's called: its title, else its kind.
@@ -347,8 +351,9 @@ pub fn layout(p: &CodePage, cols: usize) -> Page {
     if let (Some(c), None) = (p.shown.as_ref().and_then(|s| s.canvas.as_ref()), &p.stopped) {
         return canvas(&p.ext, c, p.shown.as_ref().expect("a canvas is a shown page's"));
     }
-    // A surface's pixels are drawn over its pane, with no text of its own.
-    if p.surface.is_some() && p.stopped.is_none() {
+    // A surface's pixels are drawn over its pane, with no text of its own
+    // -- unless it has none, and why is known.
+    if p.surface.as_ref().is_some_and(|s| s.texture.is_some() || p.failed.is_none()) && p.stopped.is_none() {
         return Page::default();
     }
     let (left, width) = frame(cols, 120);
@@ -360,9 +365,20 @@ pub fn layout(p: &CodePage, cols: usize) -> Page {
         (_, Some(why)) => {
             g.put(top, left + 2, &fit(&format!("{why} -- SPC h l has what it said."), width.saturating_sub(4)), Role::Warn);
         }
-        (None, None) => {
-            g.put(top, left + 2, "Waiting for the extension…", Role::Muted);
-        }
+        (None, None) => match &p.failed {
+            Some(why) => {
+                let room = width.saturating_sub(4);
+                g.put(top, left + 2, &fit("This couldn't be shown:", room), Role::Warn);
+                let lines = wrap(why, room);
+                for (i, line) in lines.iter().enumerate() {
+                    g.put(top + 2 + i, left + 2, line, Role::Text);
+                }
+                g.put(top + 3 + lines.len(), left + 2, &fit("SPC h l has what its extension said.", room), Role::Muted);
+            }
+            None => {
+                g.put(top, left + 2, "Waiting for the extension…", Role::Muted);
+            }
+        },
         (Some(page), None) => {
             for (i, line) in page.lines.iter().enumerate() {
                 let y = top + i;
@@ -492,6 +508,17 @@ mod tests {
         assert_eq!(p.key(Key::Escape), Action::Close);
         p.stopped = Some("test.hello stopped: it crashed".into());
         assert!(layout(&p, 100).all_text().contains("it crashed -- SPC h l"));
+    }
+
+    /// A page with nothing on it yet says what went wrong, rather than
+    /// staying blank (#75).
+    #[test]
+    fn a_page_that_couldnt_be_shown_says_why() {
+        let mut p = CodePage::new("fenix.pdf", 1, "pdf", "bad.pdf");
+        assert!(layout(&p, 100).all_text().contains("Waiting for the extension"));
+        p.failed = Some("bad.pdf: not a PDF (no header)".into());
+        let text = layout(&p, 100).all_text();
+        assert!(text.contains("This couldn't be shown:") && text.contains("bad.pdf: not a PDF (no header)"), "{text}");
     }
 
     /// a colour of its own takes its cells from the spans under it.

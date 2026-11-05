@@ -930,8 +930,8 @@ impl App {
                 if let PageModel::Doctor(d) = &mut state.model {
                     let root = d.root.clone();
                     // The code extensions' checks, from what they last said.
-                    let mut checks = checks;
-                    checks.extend(self.wasm.doctor_checks(&root));
+                    // Each thing checked once (#35).
+                    let checks = doctor::merge(checks, self.wasm.doctor_checks(&root));
                     let health = (doctor::worst(&checks), checks.iter().filter(|c| c.health >= Health::Warn).count());
                     d.set_checks(checks);
                     d.fixing = None;
@@ -1499,7 +1499,9 @@ impl App {
             }
             None => {
                 let kind = self.project_kind_of(&root);
-                self.open_page(PageModel::Doctor(DoctorPage::new(root, kind)))
+                let mut page = DoctorPage::new(root, kind);
+                page.language = self.wasm.project_language(&page.root);
+                self.open_page(PageModel::Doctor(page))
             }
         };
         self.doctor_check(id);
@@ -1825,6 +1827,28 @@ mod tests {
         assert_eq!(app.main_view, MainView::Editor);
         assert_eq!(app.open().kind, BufferKind::Page, "back on the wizard");
         assert_eq!(wizard(&app).target(), dir.0.join("inner").join("fresh"));
+    }
+
+    /// Going up in the folder browser, then cancelling it (Esc or `q`),
+    /// leaves "In" as it was (#53).
+    #[test]
+    fn cancelling_the_browser_leaves_the_folder_alone() {
+        let dir = Scratch::new("browse-cancel");
+        std::fs::create_dir_all(dir.0.join("inner")).unwrap();
+        for cancel in ["\u{1b}", "q"] {
+            let mut app = wizard_app("empty", &dir.0.join("inner"), false);
+            press(&mut app, "\nfresh\n");
+            let before = wizard(&app).parent.clone();
+            press(&mut app, "b");
+            assert!(app.picking_folder());
+            press(&mut app, "-");
+            assert_eq!(app.explorer.as_ref().unwrap().cwd, dir.0, "moved up");
+            press(&mut app, cancel);
+            assert!(!app.picking_folder());
+            assert_eq!(app.open().kind, BufferKind::Page, "back on the wizard");
+            assert_eq!(wizard(&app).parent, before, "{cancel:?}");
+            assert_eq!(wizard(&app).target(), dir.0.join("inner").join("fresh"));
+        }
     }
 
     #[test]

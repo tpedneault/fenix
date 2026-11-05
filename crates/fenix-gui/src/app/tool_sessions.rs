@@ -104,7 +104,7 @@ impl App {
                         LspServer::Additional(server) => server == name,
                     })
         };
-        let removed: Vec<_> = self.lsp_sessions.keys().filter(|key| matches(self, key)).cloned().collect();
+        let removed: Vec<_> = self.lsp_sessions.keys().chain(self.lsp_starting.keys()).filter(|key| matches(self, key)).cloned().collect();
         let unavailable: Vec<_> = self.lsp_unavailable.iter().filter(|key| matches(self, key)).cloned().collect();
         if !name.is_empty() && removed.is_empty() && unavailable.is_empty() {
             self.set_error(format!("no language server called {name} in {}", root.display()));
@@ -156,6 +156,8 @@ impl App {
     /// Stops one server: its process, its diagnostics, and anything still
     /// waiting on its answers.
     pub(super) fn stop_lsp_session(&mut self, key: &LspKey) {
+        // One still starting is let go when it comes back.
+        self.lsp_starting.remove(key);
         if let Some(mut session) = self.lsp_sessions.remove(key) {
             self.diagnostics.forget_server(key);
             for pending in std::mem::take(&mut session.pending).into_values() {

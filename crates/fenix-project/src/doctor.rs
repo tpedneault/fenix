@@ -110,6 +110,33 @@ pub fn worst(checks: &[Check]) -> Health {
     checks.iter().map(|c| c.health).max().unwrap_or(Health::Ok)
 }
 
+/// Fenix's own checks with the extensions' (`theirs`), each thing checked
+/// once: where an extension checks what Fenix does -- the same label, as
+/// `rust-analyzer` or `Rust` -- its row takes the place of Fenix's, since
+/// it knows where its own tools are; and an extension's row that repeats
+/// one before it is left out (#35).
+pub fn merge(core: Vec<Check>, theirs: Vec<Check>) -> Vec<Check> {
+    let key = |c: &Check| c.label.trim().to_lowercase();
+    let mut theirs_once: Vec<Check> = Vec::new();
+    for check in theirs {
+        if !theirs_once.iter().any(|c| key(c) == key(&check)) {
+            theirs_once.push(check);
+        }
+    }
+    let mut out: Vec<Check> = Vec::new();
+    for check in core {
+        if out.iter().any(|c| key(c) == key(&check)) {
+            continue;
+        }
+        match theirs_once.iter().position(|c| key(c) == key(&check)) {
+            Some(i) => out.push(theirs_once.remove(i)),
+            None => out.push(check),
+        }
+    }
+    out.extend(theirs_once);
+    out
+}
+
 /// What the doctor asks of the world.
 pub trait Probe {
     /// Where `program` is, if Fenix can find it.
@@ -129,6 +156,23 @@ pub trait Probe {
         }
         dirs
     }
+}
+
+/// `program` where tool installers put programs that may not be on PATH
+/// (`Probe::tool_dirs`'s, `uv tool install`'s bin folder): where the
+/// doctor finds one it says isn't on PATH, for Tool Status to say the
+/// same.
+pub fn in_tool_dirs(program: &str) -> Option<PathBuf> {
+    struct Defaults;
+    impl Probe for Defaults {
+        fn locate(&self, _: &str) -> Option<PathBuf> {
+            None
+        }
+        fn run(&self, _: &Path, _: &[&str], _: &Path) -> Option<(bool, String)> {
+            None
+        }
+    }
+    find_in(&Defaults.tool_dirs(), program)
 }
 
 /// `program` in one of `dirs`, with Windows' executable extensions.
@@ -460,6 +504,25 @@ fn debug_adapter(d: &mut Doctor, language: &str, adapter: &crate::tools::Command
 
 #[cfg(test)]
 mod tests {
+    /// Each thing is checked once, the extension's row in Fenix's place.
+    #[test]
+    fn merged_checks_list_each_thing_once() {
+        let core = vec![
+            Check::new(Section::Toolchain, "Rust", Health::Ok, "1.97"),
+            Check::new(Section::Toolchain, "rust-analyzer", Health::Bad, "not found"),
+            Check::new(Section::Toolchain, "git", Health::Ok, "2.47"),
+        ];
+        let theirs = vec![
+            Check::new(Section::Toolchain, "rust-analyzer", Health::Ok, "language server for rust · fenix.rust"),
+            Check::new(Section::Toolchain, "Rust-Analyzer", Health::Ok, "again"),
+            Check::new(Section::Toolchain, "cargo-audit", Health::Warn, "not found"),
+        ];
+        let merged = merge(core, theirs);
+        let rows: Vec<(&str, &str)> = merged.iter().map(|c| (c.label.as_str(), c.detail.as_str())).collect();
+        assert_eq!(rows, [("Rust", "1.97"), ("rust-analyzer", "language server for rust · fenix.rust"), ("git", "2.47"), ("cargo-audit", "not found")]);
+        assert_eq!(merged.iter().filter(|c| c.health >= Health::Warn).count(), 1, "counted once");
+    }
+
     use super::*;
     use crate::test_util::TempDir;
     use std::collections::HashMap;

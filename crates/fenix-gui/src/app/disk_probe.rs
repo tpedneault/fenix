@@ -176,9 +176,19 @@ mod tests {
     use super::*;
 
     #[test]
+    // Drive letters and shares are Windows' paths: elsewhere `C:\work`
+    // is one relative name, and what stops answering together is the root.
+    #[cfg(windows)]
     fn a_volume_is_the_drive_or_the_share() {
         assert_eq!(volume_of(Path::new(r"C:\work\a.rs")), PathBuf::from(r"C:\"));
         assert_eq!(volume_of(Path::new(r"\\files\ops\mib\ccf.dat")), PathBuf::from(r"\\files\ops\"));
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_volume_is_the_root() {
+        assert_eq!(volume_of(Path::new("/home/me/work/a.rs")), PathBuf::from("/"));
+        assert_eq!(volume_of(Path::new("work/a.rs")), PathBuf::new());
     }
 
     #[test]
