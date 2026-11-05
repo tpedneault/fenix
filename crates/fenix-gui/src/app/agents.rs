@@ -62,6 +62,8 @@ pub(crate) enum Pick {
     Uninstall(String),
     /// `SPC a s`: an API key to keep in the keychain, by its variable.
     Secret(String),
+    /// An extension's ask that sends code: may it?
+    AskConsent { ext: String, call: u64, allow: bool },
 }
 
 /// An agent's write over unsaved edits of yours, waiting for your
@@ -147,6 +149,10 @@ pub(crate) struct AgentHost {
     pub(super) brought: BTreeMap<(String, String), fenix_acp::hub::AgentSpec>,
     /// Extensions' questions (`agents.ask`), by the thread asked in.
     pub(super) asks: HashMap<ThreadId, extensions::Ask>,
+    /// Asks that send code, waiting for you to say they may.
+    pub(super) consenting: Vec<extensions::Consenting>,
+    /// Which extensions may send code to which agents, as you said.
+    pub(super) consent_file: Option<PathBuf>,
     /// What `agents.ask` answered, in tests (no extension runs then).
     #[cfg(test)]
     pub(super) replies: Vec<(String, u64, Result<String, String>)>,
@@ -195,6 +201,8 @@ impl AgentHost {
             fetched: None,
             brought: BTreeMap::new(),
             asks: HashMap::new(),
+            consenting: Vec::new(),
+            consent_file: if cfg!(test) { Some(super::isolated_test_path("ask-consent.json")) } else { fenix_storage::paths::state_file("ask-consent.json") },
             #[cfg(test)]
             replies: Vec::new(),
         }
@@ -694,6 +702,7 @@ impl App {
             Pick::Uninstall(id) => self.agents_uninstall(&id),
             Pick::Secret(name) => self.agents_secret_prompt(&name),
             Pick::Delete(thread) => self.agents_delete(&thread),
+            Pick::AskConsent { ext, call, allow } => self.agents_ask_consent(&ext, call, allow),
             Pick::Nothing => {}
         }
     }
@@ -1045,6 +1054,7 @@ impl App {
                         self.agents_turn_ended(&thread);
                         self.agents_commit_message_done(&thread);
                     }
+                    self.agents_ask_changed(&thread);
                     if self.agents.shown(&self.pages).as_ref() == Some(&thread) {
                         changed = true;
                         self.agents_follow(&thread);
@@ -1345,6 +1355,7 @@ mod terminals;
 pub(crate) mod threads;
 mod install;
 pub(crate) use install::SECRET_PROMPT;
+mod answer;
 mod extensions;
 
 #[cfg(test)]

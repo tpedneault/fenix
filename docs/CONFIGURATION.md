@@ -517,6 +517,9 @@ when it's out of date).
 | `agents.mcp.servers` | name = command | – | Your own MCP servers, handed to every agent session: the command line that starts each, or the https:// address of one that's running (sse+https:// for SSE), with any headers after it as Name=value. |
 | `agents.terminal.output_limit` | 16–65536 | 1024 | The most of a command's output an agent's terminal keeps, in KiB. |
 | `agents.handoff_kib` | 4–1024 | 64 | How much of a thread's transcript goes with a hand-off to another agent, in KiB. |
+| `agents.ask.agent` | text | – | The agent that answers an extension's question (agents.ask) when it doesn't name one: a commit message, a pull request's description. Empty: the default agent. *A project can set it.* |
+| `agents.ask.model` | text | – | The model those questions go to, when the agent offers a choice (haiku, sonnet): a quick, cheap one for drafts. Empty: the agent's own. *A project can set it.* |
+| `agents.ask.show` | thread / hidden | thread | Whether an extension's question to an agent is kept as a thread on SPC a t (thread), or gone once it's answered (hidden), when the extension doesn't say. |
 | `agents.registry` | text | https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json | The ACP registry agents are installed from. Empty: none. |
 
 **Shelves, not autostart.** VNC hosts, documents and the workspace

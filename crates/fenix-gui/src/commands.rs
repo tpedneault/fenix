@@ -229,6 +229,7 @@ impl CommandRegistry {
         registry.external("agents.review", "What the agent's thread changed, hunk by hunk: keep or reject (SPC a r)", |app| app.agents_open_review());
         registry.register("agents.reject_all", "Reject every change the agent's thread made", |ctx| ctx.app.agents_reject_all());
         registry.register("agents.accept_all", "Keep every change the agent's thread made", |ctx| ctx.app.agents_accept_all());
+        registry.register("agents.forget_ask_consent", "Make extensions ask again before they send code to an agent", |ctx| ctx.app.agents_ask_forget_consent(None));
         registry.register("agents.keep_hunk", "Keep the agent's change under the cursor", |ctx| ctx.app.agents_keep_here());
         registry.register("agents.reject_hunk", "Put the agent's change under the cursor back", |ctx| ctx.app.agents_reject_here());
         registry.register("agents.preview_hunk", "Show what the agent's change under the cursor replaced", |ctx| ctx.app.agents_preview_here());

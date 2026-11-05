@@ -199,7 +199,14 @@ output). Claude Code runs its own.
 
 An extension can bring an agent, ask one (`agents.ask`: a prompt, and
 the answer as text, in a thread of its own on `SPC a t`), and hear when
-a turn ends. See [Writing extensions](WRITING_EXTENSIONS.md#coding-agents).
+a turn ends. An ask runs in the agent's most restrictive mode (Claude
+Code's *plan*), and a file its turn changes anyway is put back. The first
+time an extension wants to send code with an ask -- a diff, a file, your
+selection -- Fenix asks you, once for that extension and agent;
+`agents.forget_ask_consent` makes them ask again. `agents.ask.agent` and
+`agents.ask.model` pick the agent and model asks go to, and
+`agents.ask.show = "hidden"` keeps their threads off `SPC a t`. See
+[Writing extensions](WRITING_EXTENSIONS.md#coding-agents).
 
 ## When something's wrong
 
