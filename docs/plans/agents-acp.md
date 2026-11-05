@@ -911,6 +911,9 @@ conformance run is recorded in ADR 0002.
 ACP v2 when it's stable; elicitation forms; inline edits with the diff in
 place; agents in their own Git worktree; WSL agents on Windows.
 
+Fenix 1.1.0's agents and MCP work, elicitation among it, is planned in
+[`agents-mcp-1.1.md`](agents-mcp-1.1.md).
+
 ## 7. The mock agent
 
 All of it was built in the cloud, where no real agent can run. The mock
