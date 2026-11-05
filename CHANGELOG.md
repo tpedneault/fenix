@@ -30,6 +30,41 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and highlighted code blocks, laid out as the reading view lays out a
   note. Yanking a message (`y`) still copies the Markdown it said.
 
+### Fixed
+
+- A file is open once, however its path is spelled: on Windows a file
+  reached as `\\?\C:\a.rs` (from Home, the recent files or a restored
+  session) and as `C:\a.rs` (from the finder or a language server) opened
+  in two tabs that disagreed. (#56)
+- A very long line, such as 8 MB of JSON on one line, no longer hangs the
+  window: only what a row can show is highlighted and shaped. (#57)
+- `Ctrl-O` in Insert runs one Normal command and comes back to Insert, as
+  in Vim, rather than jumping back to another file still in Insert. (#58)
+- Visual mode has text objects (`viw`, `vip`, `vi(`), `o` for the other
+  end and `J` to join; `A` in a block appends on every row, a block `c`
+  reaches every row, and a block yanked or deleted pastes as a block. (#59)
+- Ex commands take ranges and line numbers (`:36`, `:.,$d`, `:%sort`),
+  and `:d`, `:y`, `:m`, `:t`, `:j`, `:>`, `:<`, `:norm`, `:e`, `:sp`,
+  `:vs`, `:bd`, `:bn`, `:bp` and `:only` work. A command Fenix doesn't
+  know says "Not an editor command" instead of doing nothing. `:s` and
+  `:g` read Vim's patterns (`\(`, `\+`, `\v`), and `&` and `g&` repeat
+  the last `:s`. (#60)
+- Text in any encoding opens as text and saves as it came: a UTF-16 or
+  Latin-1 file no longer opens in the packet decoder or the hex view, and
+  a UTF-8 byte order mark is kept rather than shown. `SPC f E` reads a
+  file again as another encoding, and the modeline says which it is. (#61)
+- The PDF reader works once its extension is installed: PDFium now comes
+  with Fenix, in the zip, the installer and the Linux packages, rather
+  than a PDF opening on a blank page. (#62)
+- In Visual mode a count applies to the motion after it: `v3l` selects
+  three more columns and `3G` goes to line 3. (#68)
+- One huge unsaved file no longer stops the session being saved: its
+  text stays in its recovery file, and Fenix says so. (#69)
+- `cc` and `S` keep the line's indent, as `o` and `Enter` do. (#70)
+- `Enter` ends the line when there's nothing to complete, rather than a
+  completion popup opened on a trigger character taking it. `Tab` and
+  `Ctrl-Y` still accept. (#71)
+
 ## [1.0.1] - 2026-11-03
 
 ### Added
