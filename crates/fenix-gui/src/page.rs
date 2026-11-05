@@ -267,6 +267,27 @@ pub fn fit_tail(s: &str, max: usize) -> String {
     out
 }
 
+/// A path in at most `max` columns, cut in the middle with `…`: its
+/// start, and its end -- the last folder, the one being checked, whole
+/// when there's room for it.
+pub fn fit_path(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    if max < 8 {
+        return fit_tail(s, max);
+    }
+    let keep = max - 1;
+    let last = s.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().map_or(0, |l| l.chars().count() + 1);
+    let back = last.max(keep * 2 / 3).min(keep);
+    let front = keep - back;
+    let mut out: String = s.chars().take(front).collect();
+    out.push('…');
+    out.extend(s.chars().skip(n - back));
+    out
+}
+
 /// A page's `/` filter: what's typed, whether it has the keyboard, and
 /// its caret. Every word typed must appear, in any case.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -668,6 +689,17 @@ mod tests {
         assert_eq!(fit("abc", 3), "abc");
         assert_eq!(fit("abcd", 3), "ab…");
         assert_eq!(fit("abcd", 0), "");
+    }
+
+    #[test]
+    fn fit_path_cuts_the_middle_and_keeps_the_last_folder() {
+        let long = r"C:\Users\thoma\AppData\Local\Temp\claude\C--Users-thoma-Development-fenix\dd8aac7e-b3fa-45cf-88aa\ledger";
+        let fitted = fit_path(long, 40);
+        assert_eq!(fitted.chars().count(), 40, "{fitted}");
+        assert!(fitted.starts_with(r"C:\Users") && fitted.ends_with(r"\ledger") && fitted.contains('…'), "{fitted}");
+        assert_eq!(fit_path("/a/b", 10), "/a/b");
+        // A last folder longer than the room: its end.
+        assert!(fit_path("/x/averyveryverylongname", 12).ends_with("longname"));
     }
 
     #[test]

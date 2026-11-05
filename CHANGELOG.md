@@ -139,6 +139,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An idle window no longer copies the focused file's text and looks at
   the disk each frame to tell its language servers what they already
   know. (#74)
+- The project wizard shortens a long path in the middle, keeping the
+  project's own folder in view, rather than cutting off its end. (#53)
 
 ## [1.0.1] - 2026-11-03
 

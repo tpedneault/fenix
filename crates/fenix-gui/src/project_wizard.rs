@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::page::{fit, frame, wrap, Grid, Key, Page, Role};
+use crate::page::{fit, fit_path, frame, wrap, Grid, Key, Page, Role};
 use fenix_project::template::{Answer, Answers, AskKind, Hook, Plan, Step as CommandStep, Template};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -923,7 +923,7 @@ fn layout_location(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
     let ok = !wizard.name.is_empty() && wizard.location_problem().is_none();
     g.put(y + 2, left + 2, "Creates", Role::Muted);
     g.put(y + 2, left + 18, "●", if ok { Role::Good } else { Role::Warn });
-    g.put(y + 2, left + 20, &fit(&result.display().to_string(), width.saturating_sub(22)), Role::Muted);
+    g.put(y + 2, left + 20, &fit_path(&result.display().to_string(), width.saturating_sub(22)), Role::Muted);
     y += 4;
     g.heading(y, left, width, "After creating");
     y += 1;
@@ -998,7 +998,7 @@ fn layout_review(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top: 
     let Some(plan) = &wizard.plan else { return &[] };
     let mut y = top;
     let end = g.put(y, left + 2, plan.kind.tag(), Role::Kind(plan.kind));
-    g.put(y, end + 2, &fit(&plan.dir.display().to_string(), width.saturating_sub(8)), Role::Title);
+    g.put(y, end + 2, &fit_path(&plan.dir.display().to_string(), width.saturating_sub(8)), Role::Title);
     y += 2;
     g.heading(y, left, width, &format!("Files · {} new", plan.files.len() + plan.after_files.len()));
     y += 1;
