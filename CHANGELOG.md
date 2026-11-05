@@ -82,6 +82,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   open (an empty one, a folder, a file in a folder that doesn't exist),
   and opens nothing, rather than `{}` and a `[No Name]` tab. A new file
   in a folder that exists opens as `SPC f f` opens it. (#39)
+- Paths read as you'd write them on Windows, with no `\\?\` and one kind
+  of separator: in the refactor preview and its messages, the projects
+  Fenix switches to, launch configurations handed to an extension
+  (`${file}`, `${project}`), and the control channel (`fenix/state` said
+  `...\ledger\src/main.rs`). (#38)
 
 ## [1.0.1] - 2026-11-03
 

@@ -2629,13 +2629,9 @@ fn default_recent_dirs_path() -> PathBuf {
 /// shows up wearing it. It means nothing to a reader and makes an
 /// otherwise familiar path unrecognisable at a glance.
 fn readable_path(path: &Path) -> String {
-    let text = path.display().to_string();
-    // The UNC form is `\\?\UNC\server\share`, which unwraps back to
-    // `\\server\share` rather than to `UNC\server\share`.
-    match text.strip_prefix(r"\\?\UNC\") {
-        Some(rest) => format!(r"\\{rest}"),
-        None => text.strip_prefix(r"\\?\").unwrap_or(&text).to_string(),
-    }
+    // `normalize` unwraps the UNC form, `\\?\UNC\server\share`, back to
+    // `\\server\share`, and on Windows makes the separators one kind.
+    fenix_lsp::normalize(path.to_path_buf()).display().to_string()
 }
 
 /// A path's own name, for a message that has already said where.
@@ -14278,6 +14274,7 @@ impl App {
     /// call site (`dashboard_activate_selected`), which isn't already
     /// mid-picker when it calls this.
     fn switch_to_project(&mut self, root: PathBuf) {
+        let root = fenix_lsp::normalize(root);
         self.project_root = Some(root.clone());
         self.known_projects.add(root.clone());
         if let Err(err) = self.known_projects.save() {
