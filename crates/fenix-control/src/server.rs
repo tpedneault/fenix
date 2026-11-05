@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    code, method, Call, CaptureParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError,
+    code, method, AgentCaller, Call, CaptureParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError,
     CAPABILITIES, MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
 };
 
@@ -88,6 +88,7 @@ pub fn serve<R: Read, W: Write>(
     let mut session = Session {
         info,
         greeted: false,
+        caller: AgentCaller::default(),
     };
     loop {
         let body = match fenix_rpc::read_message_limited(&mut reader, MAX_BODY, MAX_HEADER_LINE) {
@@ -136,6 +137,8 @@ fn sniff<R: Read>(mut reader: R) -> io::Result<(bool, Replayed<R>)> {
 struct Session<'a> {
     info: &'a ServerInfo,
     greeted: bool,
+    /// Who said hello: what `fenix/agent.*` calls carry.
+    caller: AgentCaller,
 }
 
 impl Session<'_> {
@@ -233,6 +236,11 @@ impl Session<'_> {
             method::DEBUG_EVALUATE => Call::DebugEvaluate(params),
             method::TOOLS => Call::Tools,
             method::TOOLS_CALL => Call::ToolsCall(params),
+            agent if agent.starts_with("fenix/agent.") => Call::Agent {
+                method: agent["fenix/agent.".len()..].to_string(),
+                caller: self.caller.clone(),
+                params,
+            },
             // Listed in the server's capabilities but unknown here: the
             // caller asked for more than this crate implements.
             _ => {
@@ -256,6 +264,10 @@ impl Session<'_> {
             return Err(error);
         }
         self.greeted = true;
+        self.caller = AgentCaller {
+            client: hello.client.name.clone(),
+            thread: hello.client.thread.clone().filter(|t| !t.is_empty()),
+        };
         let result = HelloResult {
             protocol: PROTOCOL,
             version: self.info.version.clone(),

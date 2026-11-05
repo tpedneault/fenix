@@ -22,9 +22,31 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The control channel has what these use: `fenix/buffer.read`,
   `fenix/lsp`, `fenix/debug.state`, `fenix/debug.evaluate`, `fenix/tools`
   and `fenix/tools.call`.
+- Fenix's tools come in toolsets (`core`, `lsp`, `refactor`, `git`,
+  `search`, `syntax`, `tasks`, `debug`, `commands`, and one per
+  extension). An agent is shown those that fit the project, can turn on
+  others itself (`fenix_toolsets`, `fenix_call`), and
+  `agents.mcp.toolsets` adds or removes some.
+- What Fenix's tools may do is decided per class (read, show, edit,
+  run, external), toolset or tool (`agents.mcp.allow`: allow, ask or
+  deny). A project's rules can only be stricter. When a tool is asked
+  about, Fenix asks you itself, as a card in the agent's thread, whatever
+  mode the agent is in: once or for the thread. MCP clients Fenix didn't
+  start may only read and show unless `client:` rules say otherwise.
+- `SPC h a` lists every call agents made to Fenix's tools, with the rule
+  that applied.
+- `fenix --mcp` tells its client when its tool list changes, passes
+  cancellations on to Fenix, and speaks MCP revisions 2024-11-05 to
+  2025-11-25.
+- The control channel's `fenix/agent.*` methods: what `fenix --mcp`
+  calls, each for the thread its bridge speaks for (`client.thread` in
+  `fenix/hello`).
 
 ### Changed
 
+- `agents.mcp.fenix_write` and `agents.mcp.fenix_auto_read` are read as
+  the rules they meant (`edit` and `run` allowed; `read` asked about),
+  and `agents.mcp.allow` takes their place.
 - What a coding agent says reads as Markdown rendered, in the agent
   panel: headings, emphasis, inline code, lists, quotes, tables, links
   and highlighted code blocks, laid out as the reading view lays out a

@@ -40,6 +40,15 @@ pub mod method {
     pub const DEBUG_EVALUATE: &str = "fenix/debug.evaluate";
     pub const TOOLS: &str = "fenix/tools";
     pub const TOOLS_CALL: &str = "fenix/tools.call";
+    pub const AGENT_TOOLS: &str = "fenix/agent.tools";
+    pub const AGENT_CALL: &str = "fenix/agent.call";
+    pub const AGENT_CANCEL: &str = "fenix/agent.cancel";
+    pub const AGENT_WAIT: &str = "fenix/agent.wait";
+    pub const AGENT_RESOURCES: &str = "fenix/agent.resources";
+    pub const AGENT_READ: &str = "fenix/agent.read";
+    pub const AGENT_SUBSCRIBE: &str = "fenix/agent.subscribe";
+    pub const AGENT_PROMPTS: &str = "fenix/agent.prompts";
+    pub const AGENT_PROMPT: &str = "fenix/agent.prompt";
 }
 
 /// Every method this crate knows, besides `fenix/hello` itself, which
@@ -67,6 +76,15 @@ pub const CAPABILITIES: &[&str] = &[
     method::DEBUG_EVALUATE,
     method::TOOLS,
     method::TOOLS_CALL,
+    method::AGENT_TOOLS,
+    method::AGENT_CALL,
+    method::AGENT_CANCEL,
+    method::AGENT_WAIT,
+    method::AGENT_RESOURCES,
+    method::AGENT_READ,
+    method::AGENT_SUBSCRIBE,
+    method::AGENT_PROMPTS,
+    method::AGENT_PROMPT,
 ];
 
 /// Error codes: JSON-RPC's own, and Fenix's in the range JSON-RPC
@@ -125,8 +143,9 @@ pub struct HelloParams {
     pub client: ClientInfo,
 }
 
-/// Who is connecting. Only for Fenix's own diagnostics: nothing is
-/// allowed or refused on it.
+/// Who is connecting. Its name is for Fenix's own diagnostics; `thread`
+/// says which agent thread an MCP bridge (`fenix --mcp --thread <id>`)
+/// speaks for, so the `fenix/agent.*` methods know whose rules apply.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClientInfo {
     pub name: String,
@@ -134,6 +153,18 @@ pub struct ClientInfo {
     pub version: String,
     #[serde(default)]
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+}
+
+/// Who a `fenix/agent.*` call comes from: the connection's
+/// `fenix/hello`, filled in by the server, never by the caller.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct AgentCaller {
+    /// The client's name (`fenix-mcp`, an MCP client's own).
+    pub client: String,
+    /// The agent thread it speaks for, when Fenix started it.
+    pub thread: Option<String>,
 }
 
 /// `fenix/hello`'s result.
@@ -374,4 +405,10 @@ pub enum Call {
     Tools,
     /// `{ "name": string, "arguments"?: object }`: runs one of them.
     ToolsCall(Value),
+    /// The `fenix/agent.*` methods, which MCP bridges use: `method` is
+    /// the part after `fenix/agent.` (`tools`, `call`, `cancel`, `wait`,
+    /// `resources`, `read`, `subscribe`, `prompts`, `prompt`), `caller`
+    /// who asked. Each tool's class and the user's rules decide what it
+    /// may do, whoever calls (`docs/CONTROL.md`).
+    Agent { method: String, caller: AgentCaller, params: Value },
 }

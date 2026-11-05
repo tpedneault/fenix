@@ -1,4 +1,5 @@
 mod agents;
+mod agent_calls;
 mod control_agent;
 mod refactor;
 mod snippets;
@@ -4733,6 +4734,8 @@ pub struct App {
     /// The coding agents: their connections, the threads, the panel and
     /// its prompt (`agents`).
     agents: agents::AgentHost,
+    /// What MCP bridges asked (`fenix/agent.*`): questions, toolsets, news.
+    agent_calls: agent_calls::AgentCalls,
     refactor_undo: Option<refactor::Undo>,
     /// `SPC TAB r`'s new-name prompt, when in progress -- pre-seeded
     /// with the active workspace's current name, same capturing-prompt
@@ -5807,6 +5810,7 @@ impl App {
             lsp_rename_prompt: None,
             refactor_preview: None,
             agents: agents::AgentHost::new(),
+            agent_calls: agent_calls::AgentCalls::default(),
             refactor_undo: None,
             workspace_rename_prompt: None,
             delete_file_confirm: false,

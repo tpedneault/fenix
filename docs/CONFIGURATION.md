@@ -512,8 +512,11 @@ when it's out of date).
 | `agents.notify` | true / false | on | When Fenix isn't in front: a permission question, or a turn ended, asks for your attention. |
 | `agents.mcp.fenix` | true / false | on | Agents get Fenix as an MCP server (fenix --mcp): diagnostics, language servers' answers, open files as they stand, the debugger's stop. |
 | `agents.mcp.fenix_brief` | true / false | on | Agents Fenix starts are told to prefer its tools, in a note before a new session's first prompt, which isn't shown in the thread. |
-| `agents.mcp.fenix_auto_read` | true / false | on | Agents use Fenix's read-only tools without asking: language server answers, open files, diagnostics, the debugger's stop. |
-| `agents.mcp.fenix_write` | true / false | off | Fenix's MCP server also runs project tasks and Fenix commands, evaluates in the debugger, and calls extension tools that change things. |
+| `agents.mcp.allow` | class, toolset:name or tool = allow, ask or deny | – | Rules for the tools agents call through Fenix: a class (read, show, edit, run, external), toolset:<name>, or a tool's name, each allow, ask or deny; the most specific wins. By default reading and showing are allowed, edits and running are asked about, external is refused. client:<rule> is for MCP clients Fenix didn't start. A project's rules can only be stricter. *A project can set it.* |
+| `agents.mcp.toolsets` | a list | – | Fenix's toolsets agents are shown, beyond those that fit the project: +name adds one (+commands, +debug, an extension's), -name takes one away. Agents can turn on the others themselves (fenix_toolsets). *A project can set it.* |
+| `agents.mcp.max_answer_kib` | 4–1024 | 64 | The most a Fenix tool answers an agent, in KiB: a longer diff, log or output is cut, saying how to get the rest. |
+| `agents.mcp.fenix_auto_read` | true / false | on | Fenix 1.0's switch, still read: off makes agents ask to read (read = ask in agents.mcp.allow). Use agents.mcp.allow instead. |
+| `agents.mcp.fenix_write` | true / false | off | Fenix 1.0's switch, still read: on lets agents edit and run without asking (edit = allow, run = allow in agents.mcp.allow), and lets other control clients run tasks and commands. Use agents.mcp.allow instead. |
 | `agents.mcp.servers` | name = command | – | Your own MCP servers, handed to every agent session: the command line that starts each, or the https:// address of one that's running (sse+https:// for SSE), with any headers after it as Name=value. |
 | `agents.terminal.output_limit` | 16–65536 | 1024 | The most of a command's output an agent's terminal keeps, in KiB. |
 | `agents.handoff_kib` | 4–1024 | 64 | How much of a thread's transcript goes with a hand-off to another agent, in KiB. |
