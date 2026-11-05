@@ -17,7 +17,7 @@ mod output;
 
 pub use defs::TaskDef;
 pub use location::{parse_path_position, PathPosition};
-pub use output::{parse_line, ParsedLine, TaskLocation};
+pub use output::{find_location, parse_line, ParsedLine, TaskLocation};
 
 mod tests_count;
 pub use tests_count::test_counts;

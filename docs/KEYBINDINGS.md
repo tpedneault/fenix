@@ -77,6 +77,7 @@ the other way round after `\v`.
 | `SPC p t` | Fuzzy-pick and run a discovered project task in the Task Output panel |
 | `SPC p T` | Rerun the most recently run task |
 | `SPC p k` | End the currently running task |
+| `Enter` in Task Output | Go to the `path:line:col` the line names: a compiler's error, a panic, a test's stack |
 | `SPC u u` | Start a debug session, or continue one that's stopped |
 | `SPC u b` | Toggle a breakpoint on the focused buffer's current line |
 | `SPC u n` / `SPC u i` / `SPC u o` | Step over / into / out |

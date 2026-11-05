@@ -1156,7 +1156,11 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   cargo's own human-readable output (its `rendered` field), not raw
   JSON -- every other tool's plain `file:line:col: message` convention
   (gcc/clang/`pytest`/`ctest`) is recovered the same way without
-  needing `--message-format=json` at all.
+  needing `--message-format=json` at all, and so are Rust's panics
+  (`thread 'x' panicked at src/lib.rs:89:9:`) and rustc's own
+  `--> file:line:col`. `Enter` on a line of Task Output that names a
+  place -- one of those, or a `path:line:col` anywhere in it, such as a
+  test's stack -- goes there.
   Task cancellation terminates the process tree on Windows, including children
   holding output pipes. Closing or rerunning a task never waits for reader
   threads. Windows also cleans up tasks when the editor exits abruptly. Output

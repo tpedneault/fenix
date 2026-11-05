@@ -71,6 +71,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A debug session that has ended no longer blocks starting one in another
   project ("debug session belongs to another project"): the new one
   replaces it, as it does in the same project. (#31)
+- A Rust panic in Task Output is a place to go: `SPC p n` opens the
+  file and line it names (`panicked at src\lib.rs:89:9`), not an empty
+  buffer named for the whole line, and `Enter` on any line of Task Output
+  that names a `path:line:col` goes there. (#19)
 
 ## [1.0.1] - 2026-11-03
 

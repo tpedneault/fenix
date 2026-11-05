@@ -9802,6 +9802,33 @@ impl App {
         }
     }
 
+    /// `Enter` in Task Output: the place the cursor's line names, opened
+    /// as `SPC p n` would, relative to where the task ran. False, and
+    /// nothing done, when the line names none.
+    pub(crate) fn task_output_open_location_at_cursor(&mut self) -> bool {
+        let (line, _) = self.open().buffer.line_col(&self.cursor());
+        let text = self.open().buffer.line(line).to_string();
+        let Some(found) = fenix_tasks::find_location(text.trim_end()) else { return false };
+        let buffer = self.focused_buffer_id();
+        let base = self
+            .task_session
+            .as_ref()
+            .filter(|s| s.buffer == buffer)
+            .map(|s| s.cwd.clone())
+            .unwrap_or_else(|| self.integration_root());
+        let path = base.join(&found.path);
+        if !path.is_file() {
+            self.set_error(format!("{} isn't a file", readable_path(&path)));
+            return true;
+        }
+        let from = JumpEntry { buffer, char_idx: self.cursor().char_idx };
+        let m = fenix_project::GrepMatch { path, line: found.line, col: found.col, text: found.message };
+        self.open_file_as_preview(&m.path);
+        self.jump_to_grep_match(&m);
+        self.record_jump(from);
+        true
+    }
+
     /// Appends `text` (verbatim, split on any internal `\n` -- a decoded
     /// cargo compiler message's own `rendered` block is often several
     /// lines) to the Task Output buffer, auto-following the same way
@@ -15475,6 +15502,16 @@ impl App {
                 }
                 _ => {}
             }
+        }
+        // `Enter` on a line of a task's output that names a place --
+        // `src/lib.rs:89:9`, a panic, a test's stack -- goes there.
+        if keypress == KeyPress::named(FenixNamedKey::Enter)
+            && self.vim.mode() == Mode::Normal
+            && !self.leader_matcher.is_pending()
+            && self.open().kind == BufferKind::TaskOutput
+            && self.task_output_open_location_at_cursor()
+        {
+            return;
         }
         // `q` in a side-by-side's read-only pane closes it -- that pane
         // is nothing to record a macro in.
@@ -30331,6 +30368,37 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.ensure_lsp_session(fenix_syntax::LanguageId::Batch, &std::env::temp_dir());
         assert!(!app.lsp_sessions.keys().any(|key| key.is_primary_for(fenix_syntax::LanguageId::Batch)));
+    }
+
+    /// A Rust panic in Task Output: `SPC p n` goes to its file, not to
+    /// one named for the whole line, and `Enter` on the line goes there
+    /// too.
+    #[test]
+    fn a_panic_in_task_output_is_a_place_to_go() {
+        let dir = TempDir::new("task_panic_place");
+        let target = dir.write("lib.rs", "one\ntwo\nthree three\n");
+        let mut app = App::with_file(None);
+        let (program, args) = echo_command("noop");
+        app.run_task(fenix_tasks::TaskDef { name: "t".to_string(), command: program, args }, dir.path().to_path_buf());
+        let buffer = app.task_session.as_ref().unwrap().buffer;
+        let cwd = app.task_session.as_ref().unwrap().cwd.clone();
+        app.quickfix.clear();
+        app.append_task_output_line(buffer, "thread 'tests::amounts' (16816) panicked at lib.rs:3:7:".to_string());
+        match app.quickfix.last() {
+            Some(QuickfixEntry::Task(m)) => assert_eq!((m.path.clone(), m.line, m.col), (cwd.join("lib.rs"), 3, 7)),
+            _ => panic!("no quickfix entry for the panic"),
+        }
+        // Enter on the line, in the Task Output pane.
+        assert_eq!(app.focused_buffer_id(), buffer);
+        let last = app.open().buffer.visual_line_count().saturating_sub(1);
+        let line = (0..=last).rev().find(|&l| app.open().buffer.line(l).to_string().contains("panicked")).expect("the line is shown");
+        let start = app.open().buffer.line_start_char(line);
+        app.focused_buffer_and_cursor_mut().1.char_idx = start;
+        // What `Enter` there does (`route_keypress` needs a live event loop).
+        assert!(app.task_output_open_location_at_cursor());
+        assert_eq!(app.open().buffer.path().map(fenix_core::path_key), Some(fenix_core::path_key(&cwd.join("lib.rs"))));
+        assert_eq!(app.open().buffer.line_col(&app.cursor()), (2, 6));
+        let _ = target;
     }
 
     #[test]
