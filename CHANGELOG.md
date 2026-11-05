@@ -103,6 +103,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   you type first is the message, not commands (`P` pasted the
   clipboard). One with text to edit (amend, reword) still opens in
   Normal. (#48)
+- Finishing a merge (`SPC g x c`, or `c` on the Git page) commits with
+  Git's prepared message (`Merge branch 'feature'`), opened in the
+  composer to edit first, rather than with "Merge". (#45)
 
 ## [1.0.1] - 2026-11-03
 

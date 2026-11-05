@@ -12974,7 +12974,13 @@ impl App {
         }
         let result = match op {
             fenix_git::InProgress::Rebase { .. } => fenix_git::rebase_continue(&repo_root),
-            fenix_git::InProgress::Merge => fenix_git::commit(&repo_root, "Merge"),
+            // Git's prepared message, in the composer to be edited, as
+            // `git commit` opens it in an editor.
+            fenix_git::InProgress::Merge => {
+                let message = fenix_git::merge_message(&repo_root).unwrap_or_else(|| "Merge".to_string());
+                self.open_compose_seeded(ComposePurpose::CommitMessage { repo_root }, &message);
+                return;
+            }
             fenix_git::InProgress::CherryPick | fenix_git::InProgress::Revert | fenix_git::InProgress::Bisect => {
                 self.set_error(format!("{} can't be continued from here -- finish it with git", op.label()));
                 return;
@@ -30966,6 +30972,42 @@ configure_board stm32
         assert!(app.modeline_pieces().1.contains("committed: Add a.txt"), "got: {}", app.modeline_pieces().1);
         let log = std::process::Command::new("git").current_dir(dir.path()).args(["log", "--format=%s", "-1"]).output().unwrap();
         assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Add a.txt");
+    }
+
+    /// `SPC g x c` on a merge: Git's prepared message, in the composer
+    /// to edit, and the merge commit carries it -- not "Merge".
+    #[test]
+    fn finishing_a_merge_commits_git_s_message() {
+        let dir = TempDir::new("merge_continue");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git").current_dir(dir.path()).args(args).output().unwrap();
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@e.st"]);
+        git(&["config", "user.name", "Test"]);
+        dir.write("a.txt", "one\n");
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        git(&["checkout", "-q", "-b", "feature"]);
+        dir.write("a.txt", "feature\n");
+        git(&["commit", "-q", "-am", "feature"]);
+        git(&["checkout", "-q", "main"]);
+        dir.write("a.txt", "main\n");
+        git(&["commit", "-q", "-am", "main"]);
+        git(&["merge", "feature"]);
+        dir.write("a.txt", "both\n");
+        git(&["add", "a.txt"]);
+        let mut app = App::with_file(None);
+        app.project_root = Some(dir.path().to_path_buf());
+
+        app.git_operation_continue();
+
+        let compose = app.compose.as_ref().expect("the message, to edit first");
+        let text = app.buffers.get(compose.buffer).unwrap().buffer.text();
+        assert!(text.starts_with("Merge branch 'feature'"), "{text}");
+        app.compose_submit();
+        let log = std::process::Command::new("git").current_dir(dir.path()).args(["log", "--format=%s", "-1"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "Merge branch 'feature'");
     }
 
     #[test]

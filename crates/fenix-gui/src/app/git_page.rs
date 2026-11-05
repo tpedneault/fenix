@@ -262,7 +262,7 @@ fn run_job(root: &Path, job: &Job) -> Result<String, String> {
         Job::Reset { target, mode } => fenix_git::reset(root, target, *mode),
         Job::Continue => match fenix_git::in_progress(root) {
             Some(fenix_git::InProgress::Rebase { .. }) => fenix_git::rebase_continue(root),
-            Some(fenix_git::InProgress::Merge) => fenix_git::commit(root, "Merge"),
+            Some(fenix_git::InProgress::Merge) => fenix_git::commit(root, &fenix_git::merge_message(root).unwrap_or_else(|| "Merge".to_string())),
             Some(op) => Err(format!("{} can't be continued from here -- finish it with git", op.label())),
             None => Err("nothing in progress to continue".to_string()),
         },
@@ -433,6 +433,13 @@ impl App {
                 if let Some(line) = line {
                     self.jump_to_grep_match(&fenix_project::GrepMatch { path: full, line, col: 1, text: String::new() });
                 }
+            }
+            // A merge finished with git's prepared message, in the
+            // composer to be edited first, as `git commit` would.
+            Action::Run(Job::Continue) if fenix_git::in_progress(&root) == Some(fenix_git::InProgress::Merge) => {
+                let message = fenix_git::merge_message(&root).unwrap_or_else(|| "Merge".to_string());
+                let compose = crate::git_status::Compose::New(Default::default());
+                self.open_compose_seeded(ComposePurpose::GitCommit { repo_root: root, compose }, &message);
             }
             Action::Run(job) => self.git_page_run(id, job),
             Action::Compose(compose) => {
