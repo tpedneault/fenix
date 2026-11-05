@@ -84,8 +84,18 @@ fn main() -> anyhow::Result<()> {
     if mcp::requested(&args) {
         mcp::run();
     }
+    // `--help` and `--version` print and exit, on Windows too (a console
+    // is attached to say it in), never reaching a running Fenix.
+    if let Some(said) = cli::info_request(&args) {
+        console::open();
+        println!("{said}");
+        std::process::exit(0);
+    }
     if console::requested(&args) {
         console::open();
+    }
+    for flag in cli::unknown_flags(&args) {
+        eprintln!("fenix: no option {flag}, ignored -- fenix --help lists them");
     }
 
     // `--install-extension` and friends change what's installed and

@@ -34,7 +34,10 @@ fenix [--new-window] [--project <dir>] [--goto <file:line[:col]>] [file[:line[:c
 Lines and columns count from 1. A file argument is read as a position
 only when no file of exactly that name exists. Relative paths are taken
 from the directory `fenix` was started in. `--` ends the flags, for a
-file whose name starts with `-`; any other unknown flag is ignored.
+file whose name starts with `-`; any other unknown flag is ignored,
+with a warning on stderr. `fenix --help` lists the options and
+`fenix --version` prints the version; both print and exit, without
+reaching a running Fenix.
 
 ## Where Fenix listens
 
