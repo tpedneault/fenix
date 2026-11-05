@@ -116,6 +116,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Completion no longer offers the word being typed (`clas` beside
   `class`), unless it's written elsewhere in the file too, so `Enter`
   accepts the word you meant. (#73)
+- A picker closes once Enter has run what it picked: `SPC :` and a
+  command that opens nothing of its own left a blank PICKER page, with
+  keys going to the buffer behind it. With nothing matching, Enter keeps
+  the query. (#30)
 
 ## [1.0.1] - 2026-11-03
 

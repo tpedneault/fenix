@@ -13695,6 +13695,16 @@ impl App {
     /// per picker kind. A no-op (stays open) if the filtered list is
     /// currently empty -- nothing to confirm.
     fn picker_confirm(&mut self) {
+        self.picker_confirm_inner();
+        // A picker that closed leaves its page: what's drawn is where the
+        // keys go. A command it ran that opens a view of its own (another
+        // picker, a page) sets that view when it runs.
+        if self.active_picker.is_none() && self.main_view == MainView::Picker {
+            self.main_view = MainView::Editor;
+        }
+    }
+
+    fn picker_confirm_inner(&mut self) {
         match &self.active_picker {
             Some(ActivePicker::Commands(state)) => {
                 let Some(id) = state.selected().map(|c| c.payload.clone()) else { return };
@@ -14449,7 +14459,15 @@ impl App {
             self.wake_caret();
             return;
         }
-        let Some(picker) = &mut self.active_picker else { return };
+        let Some(picker) = &mut self.active_picker else {
+            // No picker left to take the key: its page goes, rather than
+            // staying up blank while keys reach nothing.
+            if self.main_view == MainView::Picker {
+                self.main_view = MainView::Editor;
+                self.wake_caret();
+            }
+            return;
+        };
         match key.code {
             KeyCode::Named(FenixNamedKey::Escape) => self.picker_cancel(),
             KeyCode::Named(FenixNamedKey::Enter) => self.picker_confirm(),
@@ -28286,6 +28304,27 @@ configure_board stm32
         let mut labels: Vec<String> = state.visible_rows(0, 10).map(|(_, c)| c.label.clone()).collect();
         labels.sort();
         assert_eq!(labels, vec!["a.txt".to_string(), "sub/b.txt".to_string()]);
+    }
+
+    /// `SPC :` and a command that opens nothing of its own: Enter runs it
+    /// and the PICKER page goes, rather than staying up blank.
+    #[test]
+    fn a_command_picked_in_the_palette_leaves_the_picker_page() {
+        let mut app = App::with_file(None);
+        let candidates = vec![fenix_picker::Candidate::new("toggle line numbers".to_string(), "editor.cycle_line_numbers".to_string())];
+        app.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::new(candidates)));
+        app.picker_confirm();
+        assert!(app.active_picker.is_none());
+        assert_eq!(app.main_view, MainView::Editor);
+        assert_eq!(app.queued_command.as_deref(), Some("editor.cycle_line_numbers"));
+        // With no match, Enter does nothing and keeps the query.
+        app.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::new(Vec::new())));
+        app.picker_confirm();
+        assert!(app.active_picker.is_some() && app.main_view == MainView::Picker);
+        // A picker page left with no picker: the next key clears it.
+        app.active_picker = None;
+        app.picker_key(KeyPress::named(FenixNamedKey::Escape));
+        assert_eq!(app.main_view, MainView::Editor);
     }
 
     #[test]
