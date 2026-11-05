@@ -1387,6 +1387,25 @@ struct LspCompletion {
     answers: fenix_lsp::fanout::CompletionSet<LspKey>,
 }
 
+/// What starting a language server off the UI thread came to: its
+/// process and events, or why it couldn't start, with what
+/// `App::lsp_started` needs to take it from there.
+pub struct LspStart {
+    key: LspKey,
+    generation: u64,
+    name: String,
+    languages: Vec<String>,
+    executable: String,
+    cwd: PathBuf,
+    result: std::io::Result<(fenix_lsp::LspClient, std::sync::mpsc::Receiver<fenix_lsp::LspEvent>)>,
+}
+
+impl std::fmt::Debug for LspStart {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LspStart").field("key", &self.key).field("name", &self.name).field("started", &self.result.is_ok()).finish()
+    }
+}
+
 /// Background reader for one `LspSession` -- drains `fenix_lsp::
 /// LspClient::spawn`'s returned channel for as long as the connection
 /// lives, forwarding every decoded event as `FenixUserEvent::Lsp`.
@@ -1705,6 +1724,10 @@ pub enum FenixUserEvent {
     /// on one buffer -- and events from a slow-to-answer one can arrive
     /// well after focus moved elsewhere.
     Lsp { key: LspKey, generation: u64, event: fenix_lsp::LspEvent },
+    /// A language server's process started, or failed to, on its own
+    /// thread (`start_lsp_session`): finding the program on `PATH` and
+    /// starting it can take seconds, and the window must not wait.
+    LspStarted(Box<LspStart>),
     /// A request sent to several language servers reached its deadline:
     /// act on what has arrived if a slow server is still out.
     LspDeadline(u64),
@@ -2096,6 +2119,7 @@ impl FenixUserEvent {
     fn label(&self) -> &'static str {
         match self {
             Self::Lsp { .. } => "Lsp",
+            Self::LspStarted(_) => "LspStarted",
             Self::LspDeadline(_) => "LspDeadline",
             Self::Dap { .. } => "Dap",
             Self::TaskEvent { .. } => "TaskEvent",
@@ -5070,6 +5094,15 @@ pub struct App {
     /// `lsp_workspace_names` its calls are colored by.
     tcl_name_servers: HashMap<BufferId, (Instant, Vec<LspKey>)>,
     lsp_unavailable: std::collections::HashSet<LspKey>,
+    /// The language servers being started off the UI thread
+    /// (`start_lsp_session`), each with the generation its start was
+    /// given: a start that comes back to another, or to none -- the
+    /// server was stopped or restarted meanwhile -- is let go.
+    lsp_starting: HashMap<LspKey, u64>,
+    /// Under test, where a start off the UI thread sends what it got,
+    /// as the event loop would be sent it; none starts on the UI thread.
+    #[cfg(test)]
+    lsp_start_sink: Option<std::sync::mpsc::Sender<FenixUserEvent>>,
     /// `SPC q r` asked for Fenix to start again once it has quit
     /// (`prepare_restart`); `main` starts the new one.
     pub(crate) restart_requested: bool,
@@ -5848,6 +5881,9 @@ impl App {
             lsp_workspace_names: HashMap::new(),
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
+            lsp_starting: HashMap::new(),
+            #[cfg(test)]
+            lsp_start_sink: None,
             restart_requested: false,
             lsp_frame_synced: None,
             lsp_failures: HashMap::new(),
@@ -6844,7 +6880,7 @@ impl App {
     /// ctags support).
     fn ensure_lsp_session(&mut self, language: fenix_syntax::LanguageId, cwd: &Path) {
         let key = LspKey::primary(language, fenix_lsp::normalize(refactor::identity(cwd)));
-        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) { return; }
+        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) || self.lsp_starting.contains_key(&key) { return; }
         let configured = match fenix_project::tools::ProjectTools::read(&key.root) {
             Ok(config) => config,
             Err(error) => { self.lsp_unavailable.insert(key); self.set_error(error); return; }
@@ -6871,15 +6907,79 @@ impl App {
     /// language it serves there.
     fn ensure_additional_lsp_session(&mut self, server: &fenix_project::tools::AdditionalServer, cwd: &Path) {
         let key = LspKey { server: LspServer::Additional(server.name.clone()), root: fenix_lsp::normalize(refactor::identity(cwd)) };
-        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) { return; }
+        if self.lsp_sessions.contains_key(&key) || self.lsp_unavailable.contains(&key) || self.lsp_starting.contains_key(&key) { return; }
         self.start_lsp_session(key, server.name.clone(), server.languages.clone(), &server.command(), cwd);
     }
 
     /// Starts `spec` as the server `key` and sends it `initialize`. A
     /// server that can't start is reported and left alone until
     /// `:lsp-restart`; the buffer's other servers carry on without it.
+    ///
+    /// The process is looked for (on Windows, `PATH` searched by hand)
+    /// and started on a thread of its own, its session taken up when the
+    /// event loop hears of it (`apply_lsp_started`): a slow `PATH`, a
+    /// network drive on it, or a server slow to start never holds up the
+    /// window (#33). With no event loop to hear of it, it starts here.
     fn start_lsp_session(&mut self, key: LspKey, name: String, languages: Vec<String>, spec: &fenix_project::tools::CommandSpec, cwd: &Path) {
-        let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+        let Some(send) = self.lsp_start_sender() else {
+            let spawned = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+            return self.lsp_started(key, name, languages, &spec.executable, cwd, spawned);
+        };
+        let generation = tool_sessions::generation();
+        self.lsp_starting.insert(key.clone(), generation);
+        let (spec, cwd) = (spec.clone(), cwd.to_path_buf());
+        std::thread::Builder::new()
+            .name("fenix-lsp-start".into())
+            .spawn(move || {
+                let result = spec.command(&key.root).and_then(fenix_lsp::LspClient::spawn_command);
+                send(FenixUserEvent::LspStarted(Box::new(LspStart { key, generation, name, languages, executable: spec.executable, cwd, result })));
+            })
+            .expect("a thread to start a language server");
+    }
+
+    /// Where a language server started off the UI thread sends what it
+    /// came to: the event loop (a window that has gone drops it, the
+    /// server with it, on that thread). None without one.
+    fn lsp_start_sender(&self) -> Option<Box<dyn Fn(FenixUserEvent) + Send>> {
+        #[cfg(test)]
+        if let Some(sink) = self.lsp_start_sink.clone() {
+            return Some(Box::new(move |event| {
+                let _ = sink.send(event);
+            }));
+        }
+        let proxy = self.event_proxy.clone()?;
+        Some(Box::new(move |event| {
+            let _ = proxy.send_event(event);
+        }))
+    }
+
+    /// A language server started off the UI thread came back: taken up
+    /// if it's still the one wanted, else let go, off this thread.
+    fn apply_lsp_started(&mut self, start: LspStart) {
+        if self.lsp_starting.get(&start.key) != Some(&start.generation) {
+            if let Ok((client, _)) = start.result {
+                std::thread::spawn(move || drop(client));
+            }
+            return;
+        }
+        self.lsp_starting.remove(&start.key);
+        self.lsp_started(start.key, start.name, start.languages, &start.executable, &start.cwd, start.result);
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    /// Server `key` (`executable`) started, or couldn't: its session, and
+    /// `initialize` sent; or the reason, said and kept for Tool Status.
+    fn lsp_started(
+        &mut self,
+        key: LspKey,
+        name: String,
+        languages: Vec<String>,
+        executable: &str,
+        cwd: &Path,
+        spawned: std::io::Result<(fenix_lsp::LspClient, std::sync::mpsc::Receiver<fenix_lsp::LspEvent>)>,
+    ) {
         match spawned {
             Ok((client, receiver)) => {
                 let generation = tool_sessions::generation();
@@ -6891,9 +6991,9 @@ impl App {
                 self.send_lsp_initialize(key, cwd);
             }
             Err(err) => {
-                self.lsp_failures.insert(key.clone(), format!("couldn't start {}: {err}", spec.executable));
+                self.lsp_failures.insert(key.clone(), format!("couldn't start {executable}: {err}"));
                 self.lsp_unavailable.insert(key);
-                self.set_error(format!("couldn't start {name} ({}) for {}: {err}", spec.executable, cwd.display()));
+                self.set_error(format!("couldn't start {name} ({executable}) for {}: {err}", cwd.display()));
             }
         }
     }
@@ -15200,6 +15300,7 @@ impl App {
     fn handle_user_event(&mut self, event: FenixUserEvent) {
         match event {
             FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
+            FenixUserEvent::LspStarted(start) => self.apply_lsp_started(*start),
             FenixUserEvent::LspDeadline(fanout) => self.lsp_fanout_progress(fanout),
             FenixUserEvent::TaskEvent(buffer_id, run_id, event) => self.apply_task_event(buffer_id, run_id, event),
             FenixUserEvent::Dap { generation, event } => {
@@ -34208,6 +34309,43 @@ name = \"orbit\"
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command.args(["--ignored", "--exact", "app::tests::lsp_sink_fixture", "--nocapture"]).env("FENIX_LSP_SINK", "1").current_dir(root);
         command
+    }
+
+    /// A language server is looked for and started on a thread of its
+    /// own, and taken up when the event loop hears it's up: the window
+    /// never waits on a slow `PATH` or a slow server (#33). One that
+    /// can't start says so as before; one stopped meanwhile is let go.
+    #[test]
+    fn a_language_server_starts_off_the_ui_thread() {
+        let dir = TempDir::new("lsp_start_off_thread");
+        let mut app = App::with_file(None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.lsp_start_sink = Some(tx);
+        let key = |name: &str| LspKey { server: LspServer::Additional(name.into()), root: dir.path().to_path_buf() };
+        let sink = fenix_project::tools::CommandSpec {
+            executable: std::env::current_exe().unwrap().display().to_string(),
+            args: ["--ignored", "--exact", "app::tests::lsp_sink_fixture", "--nocapture"].map(String::from).to_vec(),
+            env: [("FENIX_LSP_SINK".to_string(), "1".to_string())].into(),
+            ..Default::default()
+        };
+        app.start_lsp_session(key("sink"), "sink".into(), vec!["rust".into()], &sink, dir.path());
+        assert!(!app.lsp_sessions.contains_key(&key("sink")) && app.lsp_starting.contains_key(&key("sink")), "started elsewhere");
+        let started = rx.recv_timeout(Duration::from_secs(60)).unwrap();
+        assert!(matches!(&started, FenixUserEvent::LspStarted(s) if s.result.is_ok()), "{started:?}");
+        app.handle_user_event(started);
+        assert!(app.lsp_sessions.contains_key(&key("sink")) && app.lsp_starting.is_empty());
+        assert!(app.lsp_sessions[&key("sink")].pending.values().any(|p| matches!(p, PendingLspRequest::Initialize)), "asked to initialize");
+
+        let missing = fenix_project::tools::CommandSpec::new("definitely-not-a-language-server-xyz".into(), Vec::new());
+        app.start_lsp_session(key("missing"), "missing".into(), vec!["rust".into()], &missing, dir.path());
+        app.handle_user_event(rx.recv_timeout(Duration::from_secs(60)).unwrap());
+        assert!(app.lsp_unavailable.contains(&key("missing")) && !app.lsp_sessions.contains_key(&key("missing")));
+        assert!(app.lsp_failures[&key("missing")].starts_with("couldn't start definitely-not-a-language-server-xyz"), "{:?}", app.lsp_failures);
+
+        app.start_lsp_session(key("late"), "late".into(), vec!["rust".into()], &sink, dir.path());
+        app.stop_lsp_session(&key("late"));
+        app.handle_user_event(rx.recv_timeout(Duration::from_secs(60)).unwrap());
+        assert!(!app.lsp_sessions.contains_key(&key("late")) && !app.lsp_unavailable.contains(&key("late")), "let go");
     }
 
     fn sink_client(root: &Path) -> fenix_lsp::LspClient {

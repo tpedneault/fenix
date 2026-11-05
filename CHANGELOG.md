@@ -8,6 +8,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A language server is looked for and started off the UI thread,
+  Windows' search of `PATH` included: a slow `PATH` (a network drive on
+  it) or a server slow to start no longer freezes the window as a file
+  opens. (#33)
 - The explorer's `x` on an archive named in capitals (`Backup.TAR.GZ`)
   unpacks into a folder spelled as it is (`Backup`), not lowercased.
 

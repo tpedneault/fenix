@@ -3382,7 +3382,7 @@ impl App {
     fn restart_language_servers_in(&mut self, root: &Path) {
         let root = fenix_lsp::normalize(refactor::identity(root));
         self.lsp_unavailable.retain(|key| key.root != root);
-        let running: Vec<_> = self.lsp_sessions.keys().filter(|key| key.root == root).cloned().collect();
+        let running: Vec<_> = self.lsp_sessions.keys().chain(self.lsp_starting.keys()).filter(|key| key.root == root).cloned().collect();
         for key in running {
             self.stop_lsp_session(&key);
         }
@@ -3396,7 +3396,7 @@ impl App {
         let root = fenix_lsp::normalize(refactor::identity(root));
         let theirs = |key: &super::LspKey| key.root == root && matches!(key.server, super::LspServer::Primary(l) if languages.contains(&crate::lsp::language_config_name(l)));
         self.lsp_unavailable.retain(|key| !theirs(key));
-        let running: Vec<_> = self.lsp_sessions.keys().filter(|key| theirs(key)).cloned().collect();
+        let running: Vec<_> = self.lsp_sessions.keys().chain(self.lsp_starting.keys()).filter(|key| theirs(key)).cloned().collect();
         for key in running {
             self.stop_lsp_session(&key);
         }
