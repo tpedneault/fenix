@@ -17,6 +17,9 @@ use std::sync::Arc;
 pub(super) const HISTORY_FILE: &str = "search.json";
 /// How long typing pauses before it searches.
 const DEBOUNCE: Duration = Duration::from_millis(150);
+/// How long the selection rests on a match before it's opened beside the
+/// page: going down the list shouldn't open every file on the way.
+const SHOW_AFTER: Duration = Duration::from_secs(1);
 /// How many searches each project keeps.
 const HISTORY: usize = 50;
 /// What a search streams back at once: this many files, or this often.
@@ -55,6 +58,11 @@ struct UndoFile {
 pub(super) struct SearchHost {
     /// The page whose typing is waiting to search, and when.
     pub(super) due: Option<(BufferId, Instant)>,
+    /// The page whose selection is waiting to be shown, and when.
+    show_due: Option<(BufferId, Instant)>,
+    /// The pane a match was just shown in, to scroll to it once it's
+    /// known how many lines that pane fits.
+    reveal: Option<fenix_window::WindowId>,
     cancel: Option<Arc<AtomicBool>>,
     generation: u64,
     started: Option<Instant>,
@@ -291,15 +299,17 @@ impl App {
                 self.search_run(id);
             }
             SearchAction::Open { path, line, col } => {
+                self.search.show_due = None;
                 self.search_remember(id);
                 self.search_go_to(id, &path, line, col, true);
             }
-            SearchAction::Show { path, line, col } => {
+            SearchAction::Show { .. } => {
                 if self.search_page(id).is_some_and(|p| p.following) {
-                    self.search_go_to(id, &path, line, col, false);
+                    self.search.show_due = Some((id, Instant::now() + SHOW_AFTER));
                 }
             }
             SearchAction::Follow(on) => {
+                self.search.show_due = None;
                 if on {
                     if let Some((path, line, col)) = self.search_page(id).and_then(SearchPage::selected) {
                         self.search_go_to(id, &path, line, col, false);
@@ -311,8 +321,31 @@ impl App {
         self.restale_page(id);
     }
 
-    /// Once a frame: a search waiting on typing that's paused runs.
+    /// Once a frame: a search waiting on typing that's paused runs, and
+    /// the match the selection has rested on is shown. When to look next.
     pub(super) fn search_fire_due(&mut self, now: Instant) -> Option<Instant> {
+        let show = self.search_fire_show(now);
+        let run = self.search_fire_run(now);
+        show.into_iter().chain(run).min()
+    }
+
+    /// The selection, as it is now, if the page still has the keyboard
+    /// and isn't being typed in: it's the page's own focus to give back.
+    fn search_fire_show(&mut self, now: Instant) -> Option<Instant> {
+        let (id, at) = self.search.show_due?;
+        if now < at {
+            return Some(at);
+        }
+        self.search.show_due = None;
+        let page = self.search_page(id).filter(|p| p.following && !p.typing());
+        if let Some((path, line, col)) = page.and_then(SearchPage::selected).filter(|_| self.focused_buffer_id() == id) {
+            self.search_go_to(id, &path, line, col, false);
+            self.restale_page(id);
+        }
+        None
+    }
+
+    fn search_fire_run(&mut self, now: Instant) -> Option<Instant> {
         let (id, at) = self.search.due?;
         if now < at {
             return Some(at);
@@ -482,13 +515,33 @@ impl App {
         if focus {
             self.record_jump(from);
         } else if let Some(pane) = self.pane_showing(id) {
+            self.search.reveal = Some(self.focused_pane_id());
             self.windows_mut().focus(pane);
         }
         self.wake_caret();
     }
 
+    /// Scrolls `pane` to its cursor, if it's showing a match the Search
+    /// page kept the focus from: only the focused pane follows its own.
+    pub(super) fn search_reveal(&mut self, pane: fenix_window::WindowId, visible: usize) {
+        if self.search.reveal != Some(pane) {
+            return;
+        }
+        self.search.reveal = None;
+        let Some(&buffer) = self.windows().content(pane) else { return };
+        let Some(ob) = self.buffers.get(buffer) else { return };
+        let state = *self.pane_state(pane);
+        let line = ob.buffer.line_col(&state.cursor).0;
+        let row = self.pane_display_lines(pane, buffer).iter().position(|&r| r == line).unwrap_or(line);
+        let scroll = scroll_to_include(state.scroll_line, row, visible);
+        let state = self.pane_state_mut(pane);
+        state.scroll_line = scroll;
+        state.rendered_scroll = scroll as f32;
+    }
+
     /// `q`: the page closes; what it had stays for `SPC s .`.
     fn search_close(&mut self, id: BufferId) {
+        self.search.show_due = None;
         if let Some(cancel) = self.search.cancel.take() {
             cancel.store(true, Ordering::Relaxed);
         }
@@ -736,6 +789,66 @@ mod tests {
         assert_eq!(page.total(), 2);
         assert!(matches!(page.status, Status::Done { .. }));
         assert_eq!(app.quickfix.len(), 2, "the matches are the quickfix list");
+    }
+
+    /// Going down the list opens nothing; resting on a match does, the
+    /// one the selection is on by then, and Enter doesn't wait.
+    #[test]
+    fn a_match_is_shown_only_once_the_selection_rests_on_it() {
+        let dir = TempDir::new("search_host_rest");
+        dir.write("a.rs", "helper\n");
+        dir.write("b.rs", "helper\n");
+        let mut app = app_in(&dir);
+        app.search_open(SearchOpen::Project);
+        let id = app.search_page_id().unwrap();
+        type_into(&mut app, id, "helper");
+        app.search_fire_due(Instant::now() + DEBOUNCE * 2);
+        let page = app.search_page_mut(id).unwrap();
+        page.editing = None;
+        assert!(page.following);
+        let shown = |app: &App| app.windows().windows().into_iter().filter_map(|p| app.windows().content(p).copied()).filter_map(|b| app.buffers.get(b)).filter_map(|ob| ob.buffer.path().map(Path::to_path_buf)).collect::<Vec<_>>();
+        let before = shown(&app);
+        let action = app.search_page_mut(id).unwrap().key(crate::page::Key::Char('j'));
+        assert!(matches!(action, SearchAction::Show { .. }));
+        app.search_action(id, action);
+        let wait = app.search_fire_due(Instant::now());
+        assert!(wait.is_some(), "the wake-up it needs");
+        assert_eq!(shown(&app), before, "nothing opened yet");
+        let action = app.search_page_mut(id).unwrap().key(crate::page::Key::Char('j'));
+        app.search_action(id, action);
+        app.search_fire_due(Instant::now() + SHOW_AFTER * 2);
+        let (path, ..) = app.search_page(id).unwrap().selected().unwrap();
+        assert!(shown(&app).contains(&path), "the match it rested on");
+        assert_eq!(app.focused_buffer_id(), id, "and the keyboard stayed on the page");
+        assert!(app.search.show_due.is_none());
+        // Open cancels what's waiting.
+        let action = app.search_page_mut(id).unwrap().key(crate::page::Key::Char('k'));
+        app.search_action(id, action);
+        assert!(app.search.show_due.is_some());
+        let (path, line, col) = app.search_page(id).unwrap().selected().unwrap();
+        app.search_action(id, SearchAction::Open { path, line, col });
+        assert!(app.search.show_due.is_none());
+    }
+
+    /// The preview scrolls to the match though the page keeps the focus.
+    #[test]
+    fn a_match_shown_beside_the_page_is_scrolled_to() {
+        let dir = TempDir::new("search_host_reveal");
+        dir.write("a.rs", &format!("{}helper\n", "x\n".repeat(200)));
+        let mut app = app_in(&dir);
+        app.search_open(SearchOpen::Project);
+        let id = app.search_page_id().unwrap();
+        type_into(&mut app, id, "helper");
+        app.search_fire_due(Instant::now() + DEBOUNCE * 2);
+        let (path, line, col) = app.search_page(id).unwrap().selected().unwrap();
+        app.search_go_to(id, &path, line, col, false);
+        let pane = app.search.reveal.expect("a pane to scroll");
+        assert_ne!(pane, app.focused_pane_id());
+        app.search_reveal(pane, 20);
+        let state = app.pane_state(pane);
+        assert!((181..=200).contains(&state.scroll_line), "{}", state.scroll_line);
+        assert_eq!(state.rendered_scroll, state.scroll_line as f32);
+        assert!(app.search.reveal.is_none());
     }
 
     /// `SPC s s` searches the file you're in, on the page, without

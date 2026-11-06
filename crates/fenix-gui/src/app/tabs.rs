@@ -340,7 +340,7 @@ impl App {
 
     /// Moves `id` to where `onto` is within `pane`'s tabs -- a dragged
     /// tab dropped on another.
-    fn move_tab_onto(&mut self, pane: fenix_window::WindowId, id: BufferId, onto: BufferId) {
+    pub(super) fn move_tab_onto(&mut self, pane: fenix_window::WindowId, id: BufferId, onto: BufferId) {
         let Some(tabs) = self.workspaces.active_pane_tabs_mut().get_mut(&pane) else { return };
         let (Some(from), Some(to)) = (tabs.iter().position(|&b| b == id), tabs.iter().position(|&b| b == onto)) else { return };
         let moved = tabs.remove(from);
@@ -360,7 +360,8 @@ impl App {
 
     /// The mouse over the tab strip, besides a plain click: a middle
     /// click closes the tab, and the left button pressed on one tab and
-    /// released on another moves it there.
+    /// released on another moves it there -- on another pane's strip or
+    /// text, to that pane (`tab_dropped_at`).
     pub(super) fn tab_mouse(&mut self, pos: (f32, f32), button: MouseButton, pressed: bool) {
         let hit = self.tab_geometry.iter().find(|(_, tab)| tab.body.contains_point(pos.0, pos.1)).map(|(pane, tab)| (*pane, tab.buffer));
         let home = self.workspaces.active_workspace().home;
@@ -370,13 +371,21 @@ impl App {
                 self.refresh_project_root();
             }
             (MouseButton::Left, true, hit) => self.tab_drag = hit.filter(|(_, id)| Some(*id) != home),
-            (MouseButton::Left, false, hit) => {
-                if let (Some((pane, id)), Some((over, onto))) = (self.tab_drag.take(), hit) {
-                    if pane == over && id != onto && Some(onto) != home {
+            (MouseButton::Left, false, hit) => match (self.tab_drag.take(), hit) {
+                (Some((pane, id)), Some((over, onto))) if pane == over => {
+                    if id != onto && Some(onto) != home {
                         self.move_tab_onto(pane, id, onto);
                     }
                 }
-            }
+                // Onto another pane's strip or text, or a pane's edge.
+                (Some((pane, id)), _) => {
+                    let Some((w, h)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) else { return };
+                    if !self.tab_dropped_at(pane, id, pos, w, h) {
+                        return;
+                    }
+                }
+                _ => return,
+            },
             _ => return,
         }
         self.wake_caret();

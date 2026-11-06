@@ -19,7 +19,9 @@
 //! - `elicit`: an `elicitation/create` form (a strategy to pick, a count, a
 //!   flag), then says what came back;
 //! - `oauth`: an `elicitation/create` URL, then `elicitation/complete`
-//!   once it's accepted.
+//!   once it's accepted;
+//! - `spend`: a turn that uses 100k output tokens more ($1.50 at the
+//!   mock's prices), for budgets.
 //!
 //! Anything else is answered "You said: <text>". In OLD, NEW and CONTENT,
 //! `\n` stands for a line break.
@@ -47,6 +49,7 @@ pub(super) enum Step {
     Long,
     Ask,
     Link,
+    Spend,
 }
 
 pub(super) fn parse(text: &str) -> Vec<Step> {
@@ -117,6 +120,8 @@ fn command(text: &str) -> Step {
         Step::Ask
     } else if has("oauth") {
         Step::Link
+    } else if has("spend") {
+        Step::Spend
     } else {
         Step::Echo(text.to_string())
     }

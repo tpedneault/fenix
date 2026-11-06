@@ -85,6 +85,8 @@ pub enum Category {
     Extensions,
     /// The coding agents (`SPC a`).
     Agents,
+    /// Toasts, their history and do not disturb (`SPC o n`).
+    Notifications,
     /// An extension's own: the section its settings name, its name when
     /// they name none. Each is a section of the page, as core's are.
     Extension(&'static str),
@@ -93,7 +95,7 @@ pub enum Category {
 impl Category {
     /// Core's, in page order. Extensions' sections (`Extension`) follow
     /// them on the page.
-    pub const ALL: [Category; 12] = [
+    pub const ALL: [Category; 13] = [
         Category::Editor,
         Category::Appearance,
         Category::Motion,
@@ -106,6 +108,7 @@ impl Category {
         Category::Session,
         Category::Extensions,
         Category::Agents,
+        Category::Notifications,
     ];
 
     pub fn label(self) -> &'static str {
@@ -123,6 +126,7 @@ impl Category {
             Category::Session => "Windows & session",
             Category::Extensions => "Extensions",
             Category::Agents => "Agents",
+            Category::Notifications => "Notifications",
             Category::Extension(section) => section,
         }
     }
@@ -343,7 +347,10 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         // Editor
         s("editor.indent_width", Editor, "Indent width", Kind::Int { min: 1, max: 16 }, "Spaces a Tab or >> inserts; Fenix always indents with spaces.", field!(indent_width, usize_get, usize_set)).default("4").project(),
         s("editor.tab_width", Editor, "Tab width", Kind::Int { min: 1, max: 16 }, "Columns a tab character already in a file takes up.", field!(tab_width, usize_get, usize_set)).default("8").project(),
-        s("editor.iskeyword_extra", Editor, "Word characters", Kind::Text, "Characters besides letters, digits and _ that count as part of a word, for w, * and completion.", field!(iskeyword_extra, text_get, text_set)).default("none extra").project(),
+Setting::stored("editor.fold_markers", Editor, "Fold markers", Kind::Bool, "A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does.").with_default("on"),
+        Setting::stored("editor.mouse_hover", Editor, "Hover with the mouse", Kind::Bool, "The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it.").with_default("on"),
+        Setting::stored("editor.hover_delay_ms", Editor, "Mouse hover delay", Kind::Int { min: 0, max: 5000 }, "Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it.").with_default("500"),
+                s("editor.iskeyword_extra", Editor, "Word characters", Kind::Text, "Characters besides letters, digits and _ that count as part of a word, for w, * and completion.", field!(iskeyword_extra, text_get, text_set)).default("none extra").project(),
         // Appearance
         s("editor.theme", Appearance, "Theme", Kind::Theme, "The colour theme; h and l preview each one.", field!(theme, text_get, text_set)).default("Orbit Dark"),
         s("editor.font_family", Appearance, "Font", Kind::Font, "A monospace font installed on this machine; Enter lists them to pick from, h and l step through them.", field!(font_family, text_get, text_set)).default("the system's monospace font"),
@@ -452,6 +459,8 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         Setting::stored("agents.panel_width", Category::Agents, "Panel width", Kind::Int { min: 20, max: 80 }, "How much of the width the agent's thread takes, in percent.").with_default("38"),
         Setting::stored("agents.idle_minutes", Category::Agents, "Stop idle agents after", Kind::Minutes, "An agent with no thread open is stopped after this long.").with_default("10"),
         Setting::stored("agents.notify", Category::Agents, "Ask for attention", Kind::Bool, "When Fenix isn't in front: a permission question, or a turn ended, asks for your attention.").with_default("on"),
+        Setting::stored("agents.usage.modeline", Category::Agents, "Usage on the modeline", Kind::Choice(&["off", "tokens", "cost", "all"]), "What the modeline says each agent used this session: its tokens, its cost (where the agent says), or both with its turns and time. An agent that reports neither shows its turns and time. SPC a U has the days.").with_default("tokens"),
+        Setting::stored("agents.usage.daily_budget", Category::Agents, "Daily budget", Kind::Text, "What the agents may use in a day before Fenix says so, at 80% and again at 100%: a cost ($5) or tokens (2M, 500k). Empty: no budget."),
         Setting::stored("agents.mcp.fenix", Category::Agents, "Offer Fenix's tools", Kind::Bool, "Agents get Fenix as an MCP server (fenix --mcp): diagnostics, language servers' answers, open files as they stand, the debugger's stop.").with_default("on"),
         Setting::stored("agents.mcp.fenix_brief", Category::Agents, "Tell agents to prefer Fenix's tools", Kind::Bool, "Agents Fenix starts are told to prefer its tools, in a note before a new session's first prompt, which isn't shown in the thread.").with_default("on"),
         Setting::stored("agents.mcp.allow", Category::Agents, "What Fenix's tools may do", Kind::Map { key: "Class, toolset:name or tool", value: "allow, ask or deny", paths: false }, "Rules for the tools agents call through Fenix: a class (read, show, edit, run, external), toolset:<name>, or a tool's name, each allow, ask or deny; the most specific wins. By default reading and showing are allowed, edits and running are asked about, external is refused. client:<rule> is for MCP clients Fenix didn't start. A project's rules can only be stricter.").project(),
@@ -467,6 +476,18 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         Setting::stored("agents.ask.model", Category::Agents, "Model for extensions' questions", Kind::Text, "The model those questions go to, when the agent offers a choice (haiku, sonnet): a quick, cheap one for drafts. Empty: the agent's own.").project(),
         Setting::stored("agents.ask.show", Category::Agents, "Show extensions' questions", Kind::Choice(&["thread", "hidden"]), "Whether an extension's question to an agent is kept as a thread on SPC a t (thread), or gone once it's answered (hidden), when the extension doesn't say.").with_default("thread"),
         Setting::stored("agents.registry", Category::Agents, "Agent registry", Kind::Text, "The ACP registry agents are installed from. Empty: none.").with_default("https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"),
+        // Notifications
+        Setting::stored("notifications.enabled", Category::Notifications, "Notifications", Kind::Bool, "Toasts in a corner of the window for what finished or wants you: an agent's turn, a task, an extension's news. Off, they're only kept in the history (SPC o n).").with_default("on"),
+        Setting::stored("notifications.position", Category::Notifications, "Where they show", Kind::Choice(&["top-right", "bottom-right", "top-left", "bottom-left"]), "The corner the toasts stack in, the newest nearest it.").with_default("top-right"),
+        Setting::stored("notifications.max_visible", Category::Notifications, "At once", Kind::Int { min: 1, max: 8 }, "How many toasts show at once; the rest wait their turn.").with_default("4"),
+        Setting::stored("notifications.width", Category::Notifications, "Width", Kind::Int { min: 24, max: 120 }, "A toast's width, in characters.").with_default("46"),
+        Setting::stored("notifications.timeout_low", Category::Notifications, "Low ones show for", Kind::Int { min: 1, max: 600 }, "Seconds a low-urgency toast shows, counted only while Fenix is in front.").with_default("4"),
+        Setting::stored("notifications.timeout_normal", Category::Notifications, "Normal ones show for", Kind::Int { min: 1, max: 600 }, "Seconds a normal toast shows, counted only while Fenix is in front.").with_default("8"),
+        Setting::stored("notifications.timeout_critical", Category::Notifications, "Critical ones show for", Kind::Int { min: 0, max: 3600 }, "Seconds a critical toast shows; 0 keeps it until you dismiss it (SPC o x).").with_default("0"),
+        Setting::stored("notifications.system", Category::Notifications, "The system's notifications", Kind::Choice(&["unfocused", "always", "never"]), "Also show each one as the system's own notification (notify-send on Linux, a Windows toast, macOS's): only while Fenix isn't in front, always, or never.").with_default("unfocused"),
+        Setting::stored("notifications.rules", Category::Notifications, "Rules", Kind::Map { key: "Source (agents, tasks, an extension's id, fenix.*)", value: "mute, history, low, normal or critical", paths: false }, "What to do with a source's notifications: mute them, keep them to the history, or show them at another urgency. A source ending in * matches every one it begins."),
+        Setting::stored("notifications.agents", Category::Notifications, "Agents", Kind::Choice(&["all", "unfocused", "never"]), "Notify when an agent's turn ends or it asks you something: always, only when its thread isn't in front of you, or never.").with_default("unfocused"),
+        Setting::stored("notifications.tasks", Category::Notifications, "Tasks", Kind::Choice(&["all", "long", "failed", "never"]), "Notify when a task ends: every one, those that took 10 seconds or more, only those that failed, or never.").with_default("long"),
         Setting::stored("extensions.registry", Category::Extensions, "Registry", Kind::Text, "Where the registry's index.json is: Fenix's own, or a mirror of it. The index must be signed with Fenix's registry key either way.").with_default("https://raw.githubusercontent.com/tpedneault/fenix-extensions/registry/index.json"),
     ]
 });

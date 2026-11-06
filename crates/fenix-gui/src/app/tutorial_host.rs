@@ -195,12 +195,14 @@ impl App {
             PageModel::Extensions(e) if e.welcome => "welcome".into(),
             PageModel::Extensions(e) => return Some(("extensions".into(), Some(format!("extensions/{}", e.tab.label().to_lowercase())))),
             PageModel::ExtensionOutput(_) => "extensions-output".into(),
+            PageModel::Notifications(_) => "notifications".into(),
             PageModel::Tutorial(_) => "tutorial".into(),
             PageModel::Explorer(..) => "explorer".into(),
             PageModel::Preview(_) => "explorer-preview".into(),
             PageModel::Search(_) => "search".into(),
             PageModel::Agent(_) => "agent".into(),
             PageModel::AgentReview(_) => "agent-changes".into(),
+            PageModel::AgentUsage(_) => "agent-usage".into(),
         };
         Some((kind, None))
     }

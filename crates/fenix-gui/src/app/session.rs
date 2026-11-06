@@ -35,6 +35,9 @@ struct Document {
     #[serde(default)]
     in_recovery: bool,
     cursor: usize,
+    /// The first lines of its closed folds (1.2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    folds: Vec<usize>,
     /// A code extension's page, opened again by it from its state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     code_page: Option<SavedCodePage>,
@@ -72,6 +75,9 @@ struct SavedWorkspace {
     /// The project it belongs to -- absent in sessions from before that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project: Option<PathBuf>,
+    /// The agent thread its dock showed last (1.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_thread: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -212,13 +218,14 @@ impl App {
                 recovery: self.unnamed_snapshots.get(&id).and_then(|p| p.file_name()).and_then(|n| n.to_str()).map(str::to_string),
                 disk: self.disk_state.get(&id).copied().or_else(|| path.as_ref().and_then(|p| DiskFingerprint::of(p))),
                 path: path.clone(), text: (!in_recovery && (dirty || path.is_none())).then(|| ob.buffer.text()), dirty, cursor: ob.cursor.char_idx, code_page: None,
+                folds: { let mut f: Vec<usize> = self.code_folds.get(&id).map(|f| f.iter().copied().collect()).unwrap_or_default(); f.sort_unstable(); f },
             });
         }
         // Code extensions' pages, by what each needs to open again.
         for page in self.code_pages_to_save().into_iter().chain(self.agents_pages_to_save()) {
             ids.insert(page.buffer, documents.len());
             let saved = SavedCodePage { ext: page.ext, kind: page.kind, title: page.title, state: page.state, file: page.file, given: page.given };
-            documents.push(Document { path: None, text: None, dirty: false, disk: None, conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: Some(saved) });
+            documents.push(Document { path: None, text: None, dirty: false, disk: None, conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: Some(saved), folds: Vec::new() });
         }
         let frames = (0..self.frames.len()).map(|frame| {
             let list = if frame == self.active_frame { &self.workspaces } else { &self.frames[frame].as_ref().unwrap().workspaces };
@@ -253,6 +260,7 @@ impl App {
                 .map(|(_, workspace)| SavedWorkspace {
                     name: workspace.name.clone(),
                     project: workspace.project.clone(),
+                    agent_thread: workspace.agent_thread.as_ref().map(|t| t.0.clone()),
                     focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
                     layout: workspace.windows.snapshot(|pane, buffer| {
                         let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
@@ -412,6 +420,11 @@ impl App {
             }
             if doc.dirty { ob.buffer.mark_unsaved(); } else { ob.buffer.mark_saved(); }
             ob.cursor.char_idx = doc.cursor.min(ob.buffer.len_chars());
+            let lines = ob.buffer.line_count();
+            let folds: HashSet<usize> = doc.folds.iter().copied().filter(|l| *l < lines).collect();
+            if !folds.is_empty() {
+                self.code_folds.insert(id, folds);
+            }
             if doc.path.is_none() {
                 if let Some(snapshot) = recovery.iter().find(|snapshot| snapshot.original.is_none() && snapshot.snapshot.file_name().and_then(|n| n.to_str()) == doc.recovery.as_deref() && Some(&snapshot.contents) == doc.text.as_ref()) {
                     self.unnamed_snapshots.insert(id, snapshot.snapshot.clone());
@@ -445,7 +458,7 @@ impl App {
                 .map(|w| {
                     let focused = remap_focus(&w.layout, w.focused);
                     let kept = prune_unrestorable(w.layout.clone())
-                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused, project: w.project.clone() });
+                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused, project: w.project.clone(), agent_thread: w.agent_thread.clone() });
                     (w, kept)
                 })
                 .collect();
@@ -493,7 +506,7 @@ impl App {
                         scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
                     });
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() });
+                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new(), agent_thread: workspace.agent_thread.map(fenix_acp::hub::ThreadId) });
             }
             frames.push(WorkspaceList { workspaces, active: frame.active });
         }
@@ -748,15 +761,16 @@ mod tests {
             version: VERSION,
             documents: vec![Document {
                 path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: None,
+                conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: None, folds: Vec::new(),
             }],
             frames: vec![SavedFrame {
                 active: 1,
                 workspaces: vec![
-                    SavedWorkspace { name: "workspace-1".into(), project: None, focused: 0, layout: Layout::Leaf(pane(Some(0))) },
+                    SavedWorkspace { name: "workspace-1".into(), project: None, agent_thread: None, focused: 0, layout: Layout::Leaf(pane(Some(0))) },
                     SavedWorkspace {
                         name: "workspace-2".into(),
                         project: None,
+                        agent_thread: None,
                         focused: 0,
                         layout: split(Layout::Leaf(pane(None)), split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None)))),
                     },
@@ -800,11 +814,11 @@ mod tests {
             version: VERSION,
             documents: vec![Document {
                 path: Some(file.clone()), text: None, dirty: false, disk: DiskFingerprint::of(&file),
-                conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: None,
+                conflict: false, recovery: None, in_recovery: false, cursor: 0, code_page: None, folds: Vec::new(),
             }],
             frames: vec![SavedFrame {
                 active: 0,
-                workspaces: vec![SavedWorkspace { name: "panel".into(), project: None, focused: 2, layout: panel }],
+                workspaces: vec![SavedWorkspace { name: "panel".into(), project: None, agent_thread: None, focused: 2, layout: panel }],
             }],
             focused_frame: 0,
             debugging: Default::default(),

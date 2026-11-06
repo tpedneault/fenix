@@ -53,6 +53,7 @@ pub use bindings::fenix::extension::types::{
     ClientCert, DecorationRule, HttpOptions, HttpPart, HttpTiming, PlatformInfo, TlsOptions,
     CellColor, TextView,
     AgentTurn, DebugSession, DebugState, GitSummary, LaunchConfig, LaunchRequest, QuickFix, TaskResult,
+    Notification, NotificationAction, Urgency,
 };
 
 /// The most pixels a surface may have (4096 x 4096), and either side.
@@ -350,6 +351,11 @@ const UI_ANSWER: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     Notify(Level, String),
+    /// A notification (`notify-with`, 1.3), checked: its texts cut to
+    /// size, its actions at most five.
+    NotifyWith(Notification),
+    /// The toast with this tag taken away (`notify-dismiss`, 1.3).
+    NotifyDismiss(String),
     RunCommand(String),
     /// A file opened: `sealed` when it's no file it may reach, opened for
     /// you to see -- its buffer, if it's opened now, doesn't reach the
@@ -1743,6 +1749,29 @@ impl fenix::extension::host::Host for State {
 
     fn notify(&mut self, level: Level, message: String) {
         self.ask(Request::Notify(level, message));
+    }
+
+    fn notify_with(&mut self, mut notification: Notification) {
+        let cut = |s: &mut String, max: usize| {
+            if s.chars().count() > max {
+                *s = s.chars().take(max - 1).chain(['…']).collect();
+            }
+        };
+        cut(&mut notification.summary, 200);
+        cut(&mut notification.body, 2000);
+        notification.actions.truncate(5);
+        for a in &mut notification.actions {
+            cut(&mut a.label, 60);
+        }
+        if let Some(tag) = &mut notification.tag {
+            cut(tag, 100);
+        }
+        notification.progress = notification.progress.filter(|p| p.is_finite()).map(|p| p.clamp(0.0, 1.0));
+        self.ask(Request::NotifyWith(notification));
+    }
+
+    fn notify_dismiss(&mut self, tag: String) {
+        self.ask(Request::NotifyDismiss(tag));
     }
 
     fn run_command(&mut self, id: String) {

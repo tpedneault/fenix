@@ -6,6 +6,70 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-06
+
+The notifications release: toasts and a history, folding, the mouse in
+the editor, a thread per workspace and what agents use; extension API
+1.3; and the fixes since 1.1.0.
+
+### Added
+
+- The mouse in the editor: a click puts the cursor on the glyph clicked,
+  dragging selects (and scrolls past the pane's edge), a double click
+  selects a word and a triple the line, Shift-click extends, Alt-drag
+  selects a block. The border between splits drags to resize them, and a
+  tab drags onto another pane, or a pane's edge to split it. A right
+  click opens a menu of what can be done there -- in the text, or on a
+  tab -- with each item's key beside it. The pointer resting on a symbol
+  shows its hover and its problems (`editor.mouse_hover`,
+  `editor.hover_delay_ms`).
+- Notifications, in the manner of Dunst: toasts in a corner of the window
+  with an urgency, actions and a timeout counted only while Fenix is in
+  front; a history (`SPC o n`), do not disturb (`SPC t q`), rules per
+  source, and the system's own notifications while Fenix is away
+  (`[notifications]` settings, `notifications.test` to see them).
+- An agent's finished turn, its question or its login, and a task that
+  took a while or failed, notify (`notifications.agents`,
+  `notifications.tasks`).
+- Extension API 1.3: `notify-with` and `notify-dismiss`.
+- `fenix --notify` and the control channel's `fenix/notify`: a
+  notification from a script or a tool.
+- Folding as Notepad++ has it: fold markers in the gutter to click,
+  Vim's `za zo zc zO zC zR zM zr zm zj zk zx`, `⋯ N lines` on a closed
+  fold, folds by indentation where there's no syntax tree, and folds kept
+  with the session (`editor.fold_markers`).
+- Agents can read what a terminal pane shows (`terminal_output`) and
+  where you've been (`recent_locations`: the jumplist and your marks).
+- Each workspace keeps its own agent thread: the dock follows you and
+  shows the thread of the workspace you're in, while the others work in
+  the background; `SPC a T` lists every thread at work, anywhere.
+- What the agents use: turns, time at work, and the tokens and cost they
+  report (Claude Code's tokens and cost, Codex's tokens), per agent and
+  thread, on the modeline (`agents.usage.modeline`) and by day on
+  `SPC a U`, with a daily budget that notifies at 80% and 100%
+  (`agents.usage.daily_budget`).
+
+### Changed
+
+- The arrow keys are `hjkl` in Normal and Visual mode and after an operator.
+- The Search page shows a match beside it once the selection has rested on it
+  for a second, so going down the results no longer opens every file on the
+  way. `Enter` still opens at once.
+- CI caches its dependencies, runs the Windows tests and lint as two
+  jobs at once, and no longer runs twice for a branch's pull request;
+  dependencies get line tables only in debug builds, and there's a
+  `release-fast` profile.
+
+### Fixed
+
+- A launch that reached a Fenix on its way out, one just killed say, ran
+  without a control channel for as long as it lived, so `fenix file.rs` and
+  `fenix --notify` couldn't reach it. It now waits and takes the channel.
+- The wheel over a pane without the focus scrolls what's drawn at once,
+  not at the next click there.
+- A match the Search page shows beside it is scrolled to, not left below
+  the top of the file.
+
 ## [1.1.0] - 2026-11-05
 
 The agents and MCP release: Fenix's tools for coding agents in toolsets,
@@ -468,7 +532,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/tpedneault/fenix/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tpedneault/fenix/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/tpedneault/fenix/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/tpedneault/fenix/releases/tag/v1.0.0

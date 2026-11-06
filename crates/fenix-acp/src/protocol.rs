@@ -758,6 +758,44 @@ impl StopReason {
     }
 }
 
+/// What a turn used, from `session/prompt`'s answer: its `usage`, which
+/// ACP has as unstable and Claude Code's and Codex's adapters both send,
+/// for that turn alone. Claude's `inputTokens` leave out what the cache
+/// read or wrote, as Codex's leave out what it read; Codex's thought
+/// tokens are counted in its output too.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TurnUsage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub thought: u64,
+}
+
+impl TurnUsage {
+    /// `None` when the answer has no `usage`, or nothing in it Fenix
+    /// knows. The spec's names first, then the Anthropic API's.
+    pub fn parse(result: &Value) -> Option<Self> {
+        let usage = result.get("usage").filter(|u| u.is_object())?;
+        let mut known = false;
+        let mut count = |keys: &[&str]| {
+            let n = keys.iter().find_map(|k| usage.get(*k)).and_then(|v| v.as_u64().or_else(|| v.as_f64().filter(|f| f.is_finite() && *f >= 0.0).map(|f| f.round() as u64)));
+            known |= n.is_some();
+            n.unwrap_or(0)
+        };
+        let parsed = TurnUsage {
+            input: count(&["inputTokens", "input_tokens"]),
+            output: count(&["outputTokens", "output_tokens"]),
+            cache_read: count(&["cachedReadTokens", "cacheReadInputTokens", "cache_read_input_tokens"]),
+            cache_write: count(&["cachedWriteTokens", "cacheCreationInputTokens", "cache_creation_input_tokens"]),
+            thought: count(&["thoughtTokens", "reasoningOutputTokens"]),
+        };
+        let total = count(&["totalTokens", "total_tokens"]);
+        // Only a total: call it all output, rather than nothing.
+        known.then_some(if parsed == TurnUsage::default() { TurnUsage { output: total, ..parsed } } else { parsed })
+    }
+}
+
 pub fn prompt_params(session_id: &str, prompt: &[ContentBlock]) -> Value {
     json!({ "sessionId": session_id, "prompt": prompt.iter().map(ContentBlock::to_value).collect::<Vec<_>>() })
 }
@@ -1062,6 +1100,23 @@ pub fn without_meta(v: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turns_usage_reads_as_claudes_and_codexs_adapters_send_it() {
+        // claude-agent-acp 0.101: the turn's tally, Anthropic's split.
+        let claude = json!({ "stopReason": "end_turn", "usage": { "inputTokens": 3, "outputTokens": 412, "cachedReadTokens": 51200, "cachedWriteTokens": 1800, "totalTokens": 53415 }, "_meta": { "quota": { "token_count": {} } } });
+        assert_eq!(TurnUsage::parse(&claude), Some(TurnUsage { input: 3, output: 412, cache_read: 51200, cache_write: 1800, thought: 0 }));
+        // codex-acp 2.5: thought tokens too (counted in the output).
+        let codex = json!({ "stopReason": "end_turn", "usage": { "totalTokens": 1500, "inputTokens": 1000, "cachedReadTokens": 200, "cachedWriteTokens": 0, "outputTokens": 300, "thoughtTokens": 120 } });
+        assert_eq!(TurnUsage::parse(&codex), Some(TurnUsage { input: 1000, output: 300, cache_read: 200, cache_write: 0, thought: 120 }));
+        // The Anthropic API's own names; a float; only a total.
+        let raw = json!({ "usage": { "input_tokens": 10.0, "output_tokens": 5, "cache_read_input_tokens": 7 } });
+        assert_eq!(TurnUsage::parse(&raw), Some(TurnUsage { input: 10, output: 5, cache_read: 7, ..TurnUsage::default() }));
+        assert_eq!(TurnUsage::parse(&json!({ "usage": { "totalTokens": 42 } })), Some(TurnUsage { output: 42, ..TurnUsage::default() }));
+        for none in [json!({ "stopReason": "end_turn" }), json!({ "usage": null }), json!({ "usage": "lots" }), json!({ "usage": { "what": 1 } })] {
+            assert_eq!(TurnUsage::parse(&none), None, "{none}");
+        }
+    }
 
     #[test]
     fn an_agent_that_says_nothing_offers_nothing() {

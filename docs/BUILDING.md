@@ -6,8 +6,11 @@ Requires a recent stable Rust toolchain (edition 2021).
 cargo build --release
 ```
 
-The binary is `target/release/fenix`. To run without building a
-release binary first:
+The binary is `target/release/fenix`. A release build is fully
+link-time optimized, which takes a while; `cargo build --profile
+release-fast` is nearly as fast to run and much faster to build
+(`target/release-fast/fenix`). To run without building a release binary
+first:
 
 ```bash
 cargo run -p fenix-gui              # opens Home

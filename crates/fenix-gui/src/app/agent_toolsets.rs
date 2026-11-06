@@ -182,9 +182,63 @@ impl App {
                 }
             }
             "task_output" => answer(reply, self.agent_task_output(&arguments, max)),
+            "terminal_output" => answer(reply, self.agent_terminal_output(&arguments, max)),
+            "recent_locations" => answer(reply, Ok(self.agent_recent_locations(&arguments))),
             other => return self.agent_lsp_call(caller, other, arguments, reply),
         }
         Ok(())
+    }
+
+    /// `terminal_output`: the terminal panes, or what one shows.
+    fn agent_terminal_output(&self, arguments: &Value, max: usize) -> Result<Value, RpcError> {
+        let mut terminals: Vec<BufferId> = self.terminal_buffers.keys().copied().collect();
+        terminals.sort();
+        if terminals.is_empty() {
+            return Err(invalid("no terminal is open"));
+        }
+        let Some(n) = arguments.get("terminal").and_then(Value::as_u64) else {
+            let list: Vec<Value> = terminals.iter().enumerate().map(|(i, id)| json!({ "terminal": i + 1, "title": self.buffer_display_name(*id) })).collect();
+            return Ok(json!({ "terminals": list }));
+        };
+        let id = terminals.get((n as usize).saturating_sub(1)).copied().ok_or_else(|| invalid(format!("there are {} terminals", terminals.len())))?;
+        let screen = self.terminal_buffers[&id].session.screen();
+        let mut text = screen.contents();
+        // The end is what was printed last: kept when it's cut.
+        if text.len() > max {
+            let cut = text.len() - max;
+            let cut = (cut..text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+            text = format!("[{} bytes before this left out]\n{}", cut, &text[cut..]);
+        }
+        let (row, col) = screen.cursor_position();
+        Ok(json!({ "terminal": n, "title": self.buffer_display_name(id), "text": text.trim_end(), "cursor": { "line": row + 1, "column": col + 1 } }))
+    }
+
+    /// `recent_locations`: the jumplist, newest first, and the marks.
+    fn agent_recent_locations(&self, arguments: &Value) -> Value {
+        let max = arguments.get("max").and_then(Value::as_u64).unwrap_or(20).clamp(1, 100) as usize;
+        let place = |entry: &JumpEntry| -> Option<Value> {
+            let ob = self.buffers.get(entry.buffer)?;
+            let path = ob.buffer.path()?;
+            let line = ob.buffer.line_col(&Cursor { char_idx: entry.char_idx.min(ob.buffer.len_chars()), sticky_col: 0 }).0;
+            let start = ob.buffer.line_start_char(line);
+            let text = ob.buffer.text_range(start, start + ob.buffer.line_len(line)).trim().chars().take(160).collect::<String>();
+            Some(json!({ "path": path.to_string_lossy(), "line": line + 1, "text": text }))
+        };
+        let here = place(&JumpEntry { buffer: self.focused_buffer_id(), char_idx: self.cursor().char_idx });
+        let mut seen = std::collections::HashSet::new();
+        let jumps: Vec<Value> = here
+            .into_iter()
+            .chain(self.jump_back_stack.iter().rev().filter_map(place))
+            .filter(|v| seen.insert((v["path"].to_string(), v["line"].as_u64())))
+            .take(max)
+            .collect();
+        let mut marks: Vec<(char, Value)> = self.marks.iter().filter_map(|(c, e)| place(e).map(|v| (*c, v))).collect();
+        marks.sort_by_key(|(c, _)| *c);
+        let marks: Vec<Value> = marks.into_iter().map(|(c, mut v)| {
+            v["mark"] = json!(c.to_string());
+            v
+        }).collect();
+        json!({ "recent": jumps, "marks": marks })
     }
 
     fn agent_syntax_state(&self, path: &Path) -> Result<(fenix_syntax::SyntaxState, String), RpcError> {
@@ -367,4 +421,24 @@ mod tests {
         let (_dir, mut app) = project();
         assert!(call(&mut app, None, "task_output", json!({})).unwrap_err().message.contains("no task"));
     }
+
+    #[test]
+    fn recent_locations_are_the_jumplist_newest_first_and_the_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "fn a() {}\nfn b() {}\nfn c() {}\n").unwrap();
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let id = app.focused_buffer_id();
+        app.jump_back_stack.push(JumpEntry { buffer: id, char_idx: 0 });
+        app.jump_back_stack.push(JumpEntry { buffer: id, char_idx: 10 });
+        app.marks.insert('a', JumpEntry { buffer: id, char_idx: 20 });
+        app.test_set_cursor(Cursor { char_idx: 20, sticky_col: 0 });
+        let got = app.agent_recent_locations(&json!({}));
+        let lines: Vec<u64> = got["recent"].as_array().unwrap().iter().map(|v| v["line"].as_u64().unwrap()).collect();
+        assert_eq!(lines, vec![3, 2, 1], "here first, then back through the jumps");
+        assert_eq!(got["recent"][1]["text"], "fn b() {}");
+        assert_eq!((got["marks"][0]["mark"].as_str(), got["marks"][0]["line"].as_u64()), (Some("a"), Some(3)));
+        assert!(app.agent_terminal_output(&json!({}), 1000).is_err(), "no terminal open");
+    }
+
 }

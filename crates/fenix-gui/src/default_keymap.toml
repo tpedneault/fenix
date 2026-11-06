@@ -130,6 +130,11 @@ keys = "SPC t"
 group = "toggle"
 
 [[leader]]
+keys = "SPC t q"
+label = "quiet (do not disturb)"
+command = "notifications.do_not_disturb"
+
+[[leader]]
 keys = "SPC t n"
 label = "line numbers"
 command = "view.cycle_line_numbers"
@@ -484,6 +489,26 @@ group = "open"
 keys = "SPC o d"
 label = "open home"
 command = "dashboard.open"
+
+[[leader]]
+keys = "SPC o n"
+label = "notifications"
+command = "notifications.history"
+
+[[leader]]
+keys = "SPC o x"
+label = "dismiss notification"
+command = "notifications.dismiss"
+
+[[leader]]
+keys = "SPC o X"
+label = "dismiss all notifications"
+command = "notifications.dismiss_all"
+
+[[leader]]
+keys = "SPC o ."
+label = "act on notification"
+command = "notifications.act"
 
 [[leader]]
 keys = "SPC o t"
@@ -1171,6 +1196,11 @@ label = "new thread"
 command = "agents.new"
 
 [[leader]]
+keys = "SPC a T"
+label = "agents at work, anywhere"
+command = "agents.running"
+
+[[leader]]
 keys = "SPC a t"
 label = "threads"
 command = "agents.threads"
@@ -1259,3 +1289,8 @@ command = "agents.handoff"
 keys = "SPC a D"
 label = "delete thread"
 command = "agents.delete"
+
+[[leader]]
+keys = "SPC a U"
+label = "usage: tokens, cost"
+command = "agents.usage"

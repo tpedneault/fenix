@@ -1,9 +1,36 @@
 use super::*;
+use crate::folds;
+use fenix_vim::FoldCommand;
+
+/// The longest file folded by its indentation, in lines.
+const INDENT_FOLD_LINES: usize = 20_000;
 
 #[derive(Clone)]
 enum BreadcrumbTarget { Directory(PathBuf), Symbols, Line(usize) }
 
 impl App {
+    /// What buffer `ob` can fold, `(header, last line)`: the syntax tree's
+    /// scopes, or -- with no tree, or none in it -- its indentation, for
+    /// a file of up to `INDENT_FOLD_LINES` lines.
+    pub(super) fn fold_ranges_of(&self, ob: &OpenBuffer) -> Vec<folds::Range> {
+        if ob.kind != BufferKind::Text {
+            return Vec::new();
+        }
+        let scopes = ob.syntax.as_ref().map(|syntax| syntax.scope_ranges()).unwrap_or_default();
+        if !scopes.is_empty() {
+            return folds::normalize(scopes);
+        }
+        if ob.buffer.path().is_none() || ob.buffer.line_count() > INDENT_FOLD_LINES {
+            return Vec::new();
+        }
+        let text = ob.buffer.text();
+        folds::by_indent(text.lines(), self.vim.indent_width().max(1))
+    }
+
+    pub(super) fn fold_ranges(&self, id: BufferId) -> Vec<folds::Range> {
+        self.buffers.get(id).map(|ob| self.fold_ranges_of(ob)).unwrap_or_default()
+    }
+
     /// The actual document rows that occupy display rows after the current
     /// buffer's structural folds have been applied. A collapsed header stays
     /// visible; its body does not. Keeping this as a mapping rather than
@@ -15,59 +42,161 @@ impl App {
         if collapsed.is_none_or(HashSet::is_empty) {
             return (0..ob.buffer.line_count()).collect();
         }
-        let ranges = ob.syntax.as_ref().map(|syntax| syntax.scope_ranges()).unwrap_or_default();
-        let mut end_by_header = HashMap::new();
-        for (start, end) in ranges {
-            if collapsed.is_some_and(|headers| headers.contains(&start)) {
-                end_by_header.insert(start, end);
-            }
-        }
-        let mut lines = Vec::new();
-        let mut line = 0;
-        while line < ob.buffer.line_count() {
-            lines.push(line);
-            line = end_by_header.get(&line).copied().map_or(line + 1, |end| end + 1);
-        }
-        lines
+        let ranges = self.fold_ranges_of(ob);
+        folds::shown_lines(&ranges, collapsed.expect("checked"), ob.buffer.line_count())
     }
 
+    /// `SPC c z`, `za`: the fold the cursor's in, open or closed.
     pub(crate) fn toggle_code_fold(&mut self) {
+        self.fold_command(FoldCommand::Toggle);
+    }
+
+    /// Vim's `z` fold commands, on the focused buffer.
+    pub(crate) fn fold_command(&mut self, command: FoldCommand) {
         let id = self.focused_buffer_id();
         // Force an incremental parse before consulting scope boundaries.
         self.syntax_highlights_for_visible_range(id, 0, 1);
-        let (line, ranges) = {
-            let ob = self.open();
-            let line = ob.buffer.line_col(&self.cursor()).0;
-            let ranges = ob.syntax.as_ref().map(|syntax| syntax.scope_ranges()).unwrap_or_default();
-            (line, ranges)
-        };
-        let target = ranges
-            .iter()
-            .filter(|&&(start, end)| start <= line && line <= end)
-            .min_by_key(|&&(start, end)| end - start)
-            .copied();
-        let Some((header, _)) = target else {
-            self.set_message("No foldable scope at the cursor");
+        let line = self.open().buffer.line_col(&self.cursor()).0;
+        let ranges = self.fold_ranges(id);
+        if ranges.is_empty() {
+            self.set_message("Nothing here folds");
             return;
-        };
-        let collapsed = self.code_folds.entry(id).or_default();
-        let now_collapsed = if !collapsed.insert(header) {
-            collapsed.remove(&header);
-            false
+        }
+        let closed = self.code_folds.get(&id).cloned().unwrap_or_default();
+        let here = folds::target(&ranges, &closed, line);
+        let mut now = closed.clone();
+        let mut opened: Option<folds::Range> = None;
+        let mut moved_to: Option<usize> = None;
+        let mut message = None;
+        match command {
+            FoldCommand::Toggle => {
+                let Some(r) = here else {
+                    self.set_message("No foldable scope at the cursor");
+                    return;
+                };
+                if now.remove(&r.0) {
+                    opened = Some(r);
+                    message = Some("Scope expanded");
+                } else {
+                    now.insert(r.0);
+                    message = Some("Scope folded");
+                }
+            }
+            FoldCommand::Open { recursive } => {
+                let Some(r) = here else { return self.set_message("No fold at the cursor") };
+                if recursive {
+                    for inner in folds::within(&ranges, r) {
+                        now.remove(&inner.0);
+                    }
+                } else {
+                    now.remove(&r.0);
+                }
+                opened = Some(r);
+            }
+            FoldCommand::Close { recursive } => {
+                let Some(r) = folds::innermost(&ranges, line) else { return self.set_message("No fold at the cursor") };
+                // Closing what's closed closes the one around it, as Vim does.
+                let r = if now.contains(&r.0) && !recursive { ranges.iter().copied().filter(|&(s, e)| s < r.0 && e >= r.1).max_by_key(|r| r.0).unwrap_or(r) } else { r };
+                if recursive {
+                    now.extend(folds::within(&ranges, r).map(|r| r.0));
+                } else {
+                    now.insert(r.0);
+                }
+            }
+            FoldCommand::OpenAll | FoldCommand::Reset => {
+                now.clear();
+                self.fold_levels.insert(id, folds::max_depth(&ranges));
+            }
+            FoldCommand::CloseAll => {
+                now = folds::closed_at_level(&ranges, 0);
+                self.fold_levels.insert(id, 0);
+            }
+            FoldCommand::OpenLevel | FoldCommand::CloseLevel => {
+                let max = folds::max_depth(&ranges);
+                let level = self.fold_levels.get(&id).copied().unwrap_or(max).min(max);
+                let level = if command == FoldCommand::OpenLevel { (level + 1).min(max) } else { level.saturating_sub(1) };
+                self.fold_levels.insert(id, level);
+                now = folds::closed_at_level(&ranges, level);
+                message = Some(if level >= max { "Every fold open" } else if level == 0 { "Every fold closed" } else { "Fold level changed" });
+            }
+            FoldCommand::Next => moved_to = folds::next_start(&ranges, line),
+            FoldCommand::Previous => moved_to = folds::previous_end(&ranges, line),
+        }
+        if now.is_empty() {
+            self.code_folds.remove(&id);
         } else {
-            true
-        };
-        if now_collapsed {
+            self.code_folds.insert(id, now.clone());
+        }
+        if let Some(target) = moved_to {
+            let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+            cursor.char_idx = buffer.line_start_char(target);
+            cursor.sticky_col = 0;
+        }
+        // The cursor inside a fold that closed goes to its header.
+        if let Some(header) = now.iter().copied().filter(|h| !closed.contains(h)).filter_map(|h| ranges.iter().find(|r| r.0 == h)).filter(|&&(s, e)| s < line && line <= e).map(|r| r.0).min() {
             let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
             cursor.char_idx = buffer.line_start_char(header);
             cursor.sticky_col = 0;
-        } else if let Some(&(_, end)) = ranges.iter().find(|&&(start, _)| start == header) {
+        }
+        if let Some((header, end)) = opened {
             // Unfolded: the body opens downwards from under its header.
             let first = self.folded_display_lines(id).iter().position(|&l| l == header + 1).unwrap_or(header + 1);
             self.reveal_lines(id, first, end.saturating_sub(header));
         }
-        self.set_message(if now_collapsed { "Scope folded" } else { "Scope expanded" });
+        if let Some(message) = message {
+            self.set_message(message);
+        }
         self.wake_caret();
+    }
+
+    /// A click on the fold marker in the gutter of `pane`'s row `row`
+    /// (from the top of what it shows): that fold, open or closed. True
+    /// when there was one.
+    pub(super) fn fold_marker_click(&mut self, pane: fenix_window::WindowId, row: usize, col: usize) -> bool {
+        let Some(&buffer) = self.windows().content(pane) else { return false };
+        let Some(ob) = self.buffers.get(buffer) else { return false };
+        if !self.fold_column(ob) {
+            return false;
+        }
+        // The marker is the gutter's last cell but one, a space after it.
+        let gutter = self.gutter_chars(ob);
+        if col + 2 != gutter && col + 1 != gutter {
+            return false;
+        }
+        let scroll = self.pane_state(pane).scroll_line;
+        let Some(&line) = self.pane_display_lines(pane, buffer).get(scroll + row) else { return false };
+        let ranges = self.fold_ranges_of(ob);
+        if !ranges.iter().any(|r| r.0 == line) {
+            return false;
+        }
+        let collapsed = self.code_folds.entry(buffer).or_default();
+        if !collapsed.remove(&line) {
+            collapsed.insert(line);
+        }
+        if collapsed.is_empty() {
+            self.code_folds.remove(&buffer);
+        }
+        self.wake_caret();
+        true
+    }
+
+    /// Whether `ob`'s gutter has a column for fold markers: a file's, with
+    /// line numbers on, and `editor.fold_markers` not off.
+    pub(super) fn fold_column(&self, ob: &OpenBuffer) -> bool {
+        ob.kind == BufferKind::Text
+            && (ob.syntax.is_some() || ob.buffer.path().is_some())
+            && self.line_number_mode != LineNumberMode::Off
+            && self.config.bool_value("editor.fold_markers").unwrap_or(true)
+    }
+
+    /// For `ob`'s gutter: the lines that start a fold, and those closed.
+    pub(super) fn fold_marks(&self, ob: &OpenBuffer) -> Option<(HashMap<usize, usize>, HashSet<usize>)> {
+        if !self.fold_column(ob) {
+            return None;
+        }
+        let id = self.buffers.mru().iter().copied().find(|id| self.buffers.get(*id).is_some_and(|b| std::ptr::eq(b, ob)));
+        let closed = id.and_then(|id| self.code_folds.get(&id).cloned()).unwrap_or_default();
+        Some((self.fold_ranges_of(ob).into_iter().collect(), closed))
     }
 
     /// Keeps a cursor from becoming invisible after a scope that contains it
@@ -75,13 +204,12 @@ impl App {
     /// simply present the scope header, which is the only visible row for it.
     pub(super) fn normalize_cursor_for_folds(&mut self, id: BufferId, pane: fenix_window::WindowId) {
         let Some(headers) = self.code_folds.get(&id) else { return };
-        let (line, ranges) = {
-            let ob = self.buffers.get(id).expect("open pane buffer");
-            (ob.buffer.line_col(&self.pane_state(pane).cursor).0, ob.syntax.as_ref().map(|syntax| syntax.scope_ranges()).unwrap_or_default())
-        };
+        let headers = headers.clone();
+        let line = self.buffers.get(id).expect("open pane buffer").buffer.line_col(&self.pane_state(pane).cursor).0;
+        let ranges = self.fold_ranges(id);
         let header = ranges.into_iter()
             .filter(|(start, end)| headers.contains(start) && *start < line && line <= *end)
-            .max_by_key(|(start, _)| *start)
+            .min_by_key(|(start, _)| *start)
             .map(|(start, _)| start);
         if let Some(header) = header {
             let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
@@ -105,6 +233,7 @@ impl App {
         decorated: &HashMap<usize, crate::decorations::LineLayout>,
     ) -> Vec<(String, glyphon::Color)> {
         let mut spans = Vec::new();
+        let fold_ends: HashMap<usize, usize> = if collapsed_headers.is_empty() { HashMap::new() } else { self.fold_ranges_of(ob).into_iter().collect() };
         for row in 0..rows {
             if display_lines.get(row) == Some(&super::side_by_side::FILLER) {
                 // A side-by-side's filler row: blank, gutter and all.
@@ -112,7 +241,8 @@ impl App {
             } else if let Some(&line) = display_lines.get(row) {
                 spans.extend(self.content_spans_decorated(ob, line, 1, gutter_chars, None, syntax_highlights, cursor_line, tab_stops, scroll_col, decorated));
                 if collapsed_headers.contains(&line) {
-                    spans.push(("  …".to_string(), self.theme.gutter_fg));
+                    let hidden = fold_ends.get(&line).map_or(0, |end| end - line);
+                    spans.push((format!("  ⋯ {hidden} line{}", if hidden == 1 { "" } else { "s" }), self.theme.gutter_fg));
                 }
             } else {
                 spans.extend(self.content_spans_decorated(ob, ob.buffer.line_count(), 1, gutter_chars, None, syntax_highlights, cursor_line, tab_stops, scroll_col, decorated));
@@ -334,4 +464,79 @@ mod tests {
         app.toggle_code_fold();
         assert_eq!(app.folded_display_lines(id), vec![0, 1, 2, 3, 4]);
     }
+
+    fn rust_app(source: &str) -> (App, BufferId) {
+        let mut app = App::with_file(None);
+        let id = app.focused_buffer_id();
+        let ob = app.buffers.get_mut(id).unwrap();
+        ob.kind = BufferKind::Text;
+        ob.buffer = Buffer::from_text(source);
+        app.buffers.get_mut(id).unwrap().syntax = Some(fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, source));
+        app.line_number_mode = LineNumberMode::Absolute;
+        (app, id)
+    }
+
+    const NESTED: &str = "impl Outer {\n    fn inner() {\n        y();\n    }\n}\nfn other() {\n    z();\n}\n";
+
+    #[test]
+    fn vims_fold_keys_close_open_and_go_level_by_level() {
+        let (mut app, id) = rust_app(NESTED);
+        app.test_set_cursor(Cursor { char_idx: NESTED.find("y()").unwrap(), sticky_col: 0 });
+        app.fold_command(FoldCommand::Close { recursive: false });
+        assert_eq!(app.folded_display_lines(id), vec![0, 1, 4, 5, 6, 7, 8], "the innermost: the method");
+        app.fold_command(FoldCommand::Close { recursive: false });
+        assert_eq!(app.folded_display_lines(id), vec![0, 5, 6, 7, 8], "zc again closes the one around it");
+        app.fold_command(FoldCommand::OpenAll);
+        assert_eq!(app.folded_display_lines(id).len(), 9);
+        app.fold_command(FoldCommand::CloseAll);
+        assert_eq!(app.folded_display_lines(id), vec![0, 5, 8]);
+        app.fold_command(FoldCommand::OpenLevel);
+        assert_eq!(app.folded_display_lines(id), vec![0, 1, 4, 5, 6, 7, 8], "zr: the outer ones open, the method still closed");
+        app.fold_command(FoldCommand::OpenLevel);
+        assert_eq!(app.folded_display_lines(id).len(), 9);
+        app.test_set_cursor(Cursor { char_idx: 0, sticky_col: 0 });
+        app.fold_command(FoldCommand::Next);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 1, "zj: the next fold's start");
+        app.fold_command(FoldCommand::Previous);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 1, "zk from the method's start: nothing ends before it, so it stays");
+        app.test_set_cursor(Cursor { char_idx: NESTED.find("z()").unwrap(), sticky_col: 0 });
+        app.fold_command(FoldCommand::Previous);
+        assert_eq!(app.open().buffer.line_col(&app.cursor()).0, 4, "zk: the end of the impl");
+    }
+
+    #[test]
+    fn the_gutter_marks_folds_and_a_click_on_one_toggles_it() {
+        let (mut app, id) = rust_app(NESTED);
+        let gutter = app.gutter_chars(app.open());
+        assert_eq!(gutter, 3, "a digit, the marker, a space");
+        let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
+        let text: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(text.starts_with("1▾ impl Outer {\n2▾     fn inner() {\n3  "), "{text:?}");
+        let pane = app.focused_pane_id();
+        assert!(app.fold_marker_click(pane, 0, 1));
+        assert_eq!(app.folded_display_lines(id), vec![0, 5, 6, 7, 8]);
+        assert!(!app.fold_marker_click(pane, 2, 1), "line 6 starts no fold");
+        let display = app.folded_display_lines(id);
+        let spans = app.folded_content_spans(app.open(), &display, 2, gutter, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0, app.code_folds.get(&id).unwrap(), &HashMap::new());
+        let text: String = spans.iter().map(|(s, _)| s.as_str()).collect();
+        assert!(text.starts_with("1▸ impl Outer {  ⋯ 4 lines"), "{text:?}");
+        app.config.set_value("editor.fold_markers", Some(fenix_config::Value::Bool(false)));
+        assert_eq!(app.gutter_chars(app.open()), 2);
+    }
+
+    #[test]
+    fn a_file_with_no_syntax_folds_by_its_indentation() {
+        let mut app = App::with_file(None);
+        let id = app.focused_buffer_id();
+        let ob = app.buffers.get_mut(id).unwrap();
+        ob.kind = BufferKind::Text;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.conf");
+        std::fs::write(&path, "a:\n  b: 1\n  c: 2\nd: 3\n").unwrap();
+        ob.buffer = Buffer::from_path(&path).unwrap();
+        assert_eq!(app.fold_ranges(id), vec![(0, 2)]);
+        app.fold_command(FoldCommand::Toggle);
+        assert_eq!(app.folded_display_lines(id), vec![0, 3, 4]);
+    }
+
 }

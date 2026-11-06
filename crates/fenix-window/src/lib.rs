@@ -90,6 +90,44 @@ mod rect_tests {
 const MIN_RATIO: f32 = 0.1;
 const MAX_RATIO: f32 = 0.9;
 
+/// Where one split's two sides meet, laid out: what dragging it with
+/// the mouse resizes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Divider {
+    /// Which split: its place in a pre-order walk of the tree's splits,
+    /// for `WindowTree::set_split_ratio`.
+    pub index: usize,
+    pub kind: SplitKind,
+    /// Its x (a `Vertical` split's) or y (a `Horizontal` one's).
+    pub at: f32,
+    /// The room the split shares between its two sides.
+    pub bounds: Rect,
+}
+
+impl Divider {
+    /// Whether `(x, y)` is within `slop` of the divider, along its length.
+    pub fn near(&self, x: f32, y: f32, slop: f32) -> bool {
+        let b = self.bounds;
+        match self.kind {
+            SplitKind::Vertical => (x - self.at).abs() <= slop && y >= b.y && y < b.y + b.h,
+            SplitKind::Horizontal => (y - self.at).abs() <= slop && x >= b.x && x < b.x + b.w,
+        }
+    }
+
+    /// The ratio that puts the divider at `x` or `y` (whichever way it
+    /// moves), clamped as every ratio is.
+    pub fn ratio_at(&self, x: f32, y: f32) -> f32 {
+        let (start, len, pos) = match self.kind {
+            SplitKind::Vertical => (self.bounds.x, self.bounds.w, x),
+            SplitKind::Horizontal => (self.bounds.y, self.bounds.h, y),
+        };
+        if len <= 0.0 {
+            return 0.5;
+        }
+        ((pos - start) / len).clamp(MIN_RATIO, MAX_RATIO)
+    }
+}
+
 enum Node<T> {
     Leaf { id: WindowId, content: T },
     Split { kind: SplitKind, ratio: f32, first: Box<Node<T>>, second: Box<Node<T>> },
@@ -304,6 +342,34 @@ impl<T> Node<T> {
         }
     }
 
+    fn dividers_into(&self, bounds: Rect, out: &mut Vec<Divider>) {
+        if let Node::Split { kind, ratio, first, second } = self {
+            let (a, b) = split_rect(bounds, *kind, *ratio);
+            let at = match kind {
+                SplitKind::Vertical => b.x,
+                SplitKind::Horizontal => b.y,
+            };
+            out.push(Divider { index: out.len(), kind: *kind, at, bounds });
+            first.dividers_into(a, out);
+            second.dividers_into(b, out);
+        }
+    }
+
+    /// The `index`th split of a pre-order walk, `seen` counting those
+    /// passed so far.
+    fn nth_split_ratio(&mut self, index: usize, seen: &mut usize) -> Option<&mut f32> {
+        match self {
+            Node::Leaf { .. } => None,
+            Node::Split { ratio, first, second, .. } => {
+                if *seen == index {
+                    return Some(ratio);
+                }
+                *seen += 1;
+                first.nth_split_ratio(index, seen).or_else(|| second.nth_split_ratio(index, seen))
+            }
+        }
+    }
+
     fn layout_into(&self, bounds: Rect, out: &mut Vec<(WindowId, Rect)>) {
         match self {
             Node::Leaf { id, .. } => out.push((*id, bounds)),
@@ -505,6 +571,28 @@ impl<T> WindowTree<T> {
         out
     }
 
+    /// Every split's divider within `bounds`, outermost first -- the same
+    /// arithmetic as `layout`, so each sits exactly on the edge two panes
+    /// share.
+    pub fn dividers(&self, bounds: Rect) -> Vec<Divider> {
+        let mut out = Vec::new();
+        self.root().dividers_into(bounds, &mut out);
+        out
+    }
+
+    /// Sets the ratio of divider `index`'s split (see `Divider::index`),
+    /// clamped. Returns whether there is such a split.
+    pub fn set_split_ratio(&mut self, index: usize, ratio: f32) -> bool {
+        let ratio = if ratio.is_finite() { ratio.clamp(MIN_RATIO, MAX_RATIO) } else { return false };
+        match self.root_mut().nth_split_ratio(index, &mut 0) {
+            Some(r) => {
+                *r = ratio;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Computes each leaf's pixel `Rect` within `bounds`, recursively
     /// subdividing at each split's ratio. Content is fetched separately
     /// via `content(id)` -- keeps layout decoupled from `T`'s ownership.
@@ -533,6 +621,32 @@ mod tests {
         assert_eq!(t.window_count(), 2);
         assert_eq!(t.focused_id(), new_id);
         assert_eq!(t.focused_content(), &"b");
+    }
+
+    #[test]
+    fn dividers_sit_where_the_panes_meet_and_dragging_one_sets_its_ratio() {
+        let mut t = WindowTree::new("a");
+        let a = t.focused_id();
+        let b = t.split(SplitKind::Vertical, "b");
+        let c = t.split(SplitKind::Horizontal, "c");
+        let bounds = Rect { x: 10.0, y: 0.0, w: 200.0, h: 100.0 };
+        let dividers = t.dividers(bounds);
+        assert_eq!(dividers.len(), 2);
+        let layout = t.layout(bounds);
+        let rect = |id| layout.iter().find(|(w, _)| *w == id).unwrap().1;
+        assert_eq!((dividers[0].kind, dividers[0].at), (SplitKind::Vertical, rect(b).x));
+        assert_eq!((dividers[1].kind, dividers[1].at), (SplitKind::Horizontal, rect(c).y));
+        assert_eq!(dividers[1].bounds, Rect { x: 110.0, y: 0.0, w: 100.0, h: 100.0 }, "the right half it splits");
+        assert!(dividers[0].near(112.0, 50.0, 3.0) && !dividers[0].near(115.0, 50.0, 3.0));
+        assert!(dividers[1].near(150.0, 49.0, 3.0) && !dividers[1].near(50.0, 50.0, 3.0), "only along its own length");
+
+        let ratio = dividers[0].ratio_at(60.0, 0.0);
+        assert_eq!(ratio, 0.25);
+        assert!(t.set_split_ratio(0, ratio));
+        assert_eq!(t.layout(bounds).iter().find(|(w, _)| *w == a).unwrap().1.w, 50.0);
+        assert_eq!(dividers[0].ratio_at(0.0, 0.0), MIN_RATIO, "clamped, as every ratio is");
+        assert_eq!(dividers[1].ratio_at(0.0, 1000.0), MAX_RATIO);
+        assert!(!t.set_split_ratio(2, 0.5), "there are only two splits");
     }
 
     #[test]

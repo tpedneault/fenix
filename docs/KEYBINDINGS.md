@@ -47,6 +47,7 @@ the other way round after `\v`.
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
 | `SPC t a` | Cycle motion: off, subtle, full |
+| `SPC t q` | Do not disturb: only critical notifications show; the rest are kept in the history |
 | `SPC t d` | Cycle inline problems: all, errors only, off |
 | `SPC e e` | Open the file explorer here |
 | `SPC e H` | Open the file explorer at your home folder |
@@ -114,6 +115,9 @@ the other way round after `\v`.
 | `SPC s *` | Search the project for the word under the cursor |
 | `SPC o d` | Go to this workspace's Home, the start-up dashboard (same as `gh`) |
 | `SPC o t` | Toggle the terminal panel |
+| `SPC o n` | The notifications' history: Enter acts on one, `1`-`9` one of its actions, `r` shows it again, `d` forgets it, `D` clears them, `t` do not disturb, `/` filters |
+| `SPC o .` | Do what the newest notification offers (a click on it does too) |
+| `SPC o x` / `SPC o X` | Dismiss the newest notification / all of them (any button but the left on one dismisses it) |
 | `SPC o T` | Open a shell in the focused pane |
 | `SPC d d` | Containers (the `fenix.containers` extension, when installed) |
 | `SPC d p` / `SPC d b` | Its performance page / build the project's `Dockerfile` |
@@ -169,6 +173,7 @@ the other way round after `\v`.
 | `SPC a a` | The agents' dock at the right, on the project's last thread or a new one, ready to write in; from the dock, put it away |
 | `SPC a A` | Show or put away the agents' dock, wherever you are |
 | `SPC a n` / `SPC a t` | A new thread with the default agent (`SPC a p` for another) / this project's threads |
+| `SPC a T` | Every thread at work or waiting on you, in any project or workspace: the one picked is shown in its workspace |
 | `SPC a p` | The agents: a thread with one, a login, a restart |
 | `SPC a P` | Run the next prompt through a pipeline: plan, build and review by agents in turn |
 | `[s` / `]s` (in a thread) | A pipeline's step before or after |
@@ -183,6 +188,8 @@ the other way round after `\v`.
 | `SPC a c` | A commit message for what's staged, written by the agent: into the commit composer when it's open, else onto the clipboard |
 | `SPC a h` | Hand the thread off to another agent: the conversation goes with it |
 | `SPC a D` | Delete the thread (asks first) |
+| `SPC a U` | What the agents used: turns, time, tokens and cost per agent and thread, today, this session and by day |
+| `Tab` / `Enter` (agent usage) | The threads of today, this session or the last 7 days / show the focused thread |
 | `SPC a f` | Follow the agent: the pane beside its thread shows where it works |
 | `SPC h a` | What each agent connection sent and was sent (ACP) |
 | `SPC A a` | Open the agenda page where it was left |
@@ -265,6 +272,13 @@ the other way round after `\v`.
 | `SPC c o` | Fuzzy-find a Markdown heading, or an XML element, and jump to it |
 | `SPC c v` | Check the current XML buffer is well-formed; jump to the first error |
 | `SPC c y` | Copy the XPath of the XML element under the cursor |
+| `SPC c z`, `za` | Open or close the fold the cursor is in |
+| `zo` / `zO`, `zc` / `zC` | Open / close the fold (and, capitals, every one inside it) |
+| `zR` / `zM` | Open / close every fold in the buffer |
+| `zr` / `zm` | One fold level more open / closed |
+| `zj` / `zk` | To the start of the next fold / the end of the one before |
+| `zx`, `zE` | Open every fold and forget them |
+| A click on `▾` / `▸` in the gutter | Close / open that fold |
 | `SPC m` | The mode menu -- what's in it depends on the focused buffer (below) |
 | `SPC m` (PDF) | The reader's commands: pages, zoom, outline, search, the shelf |
 | `SPC m i` (Tcl) | Insert a telecommand from the MIB (`SPC k i`) (the MIB extension) |
@@ -315,6 +329,32 @@ the other way round after `\v`.
 | `SPC TAB TAB` | Switch to an open workspace by name |
 | `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Workspaces) -- switches to it if already open, otherwise creates it |
 | `SPC TAB r` | Rename the active workspace |
+
+## The arrow keys
+
+The arrow keys are `h`, `j`, `k` and `l` wherever a motion is taken: with a
+count, extending a selection, after an operator (`d<Down>`).
+
+## The mouse
+
+In a file's text, and around the panes. Pages, listings, terminals and
+extensions' surfaces have their own (in their sections).
+
+| Mouse | Action |
+|---|---|
+| Click | The cursor to the glyph clicked; Insert stays Insert, Visual ends. Ten lines or more away, it goes on the jumplist |
+| Drag | Select (Visual); held past the pane's top or bottom, it scrolls on |
+| Double click, triple click | Select the word (Vim's word characters, `iskeyword`), the line; dragging on goes a word, a line at a time |
+| `Shift`-click | Stretch the selection from the cursor |
+| `Alt`-drag | Select a block |
+| Right click | A menu where the pointer is: go to definition, references, rename, code actions, hover, cut, copy, paste, select all, the fold, a breakpoint, ask the agent. `j`/`k`, the arrows and `Enter` work it; a click outside or `Esc` closes it |
+| Rest on a symbol | Its hover (as `K`), problems first, after `editor.hover_delay_ms`; moving away or a key closes it |
+| Drag the border between splits | Resize them |
+| Click, middle click a tab | Switch to it, close it |
+| Drag a tab | Along its strip to move it; onto another pane to move it there; onto a pane's edge to split it with the tab in the new half |
+| Right click a tab | Close it, the others, those to its right; split right or down with it; copy its path; reveal it in the explorer |
+| A click on `▾` / `▸` in the gutter | Close / open that fold |
+| Wheel | Scroll the pane under the pointer |
 
 ## File explorer (`SPC e t`, `SPC f j`, the directory picker)
 
@@ -392,7 +432,7 @@ On the results:
 |---|---|
 | `j` / `k`, `gg` / `G` | Next / previous match, first / last |
 | `Enter` | Go to the match |
-| `p` | Show the selection beside the page, or stop |
+| `p` | Show the match the selection rests on beside the page, after a second, or stop |
 | `Tab` / `za`, `zM` / `zR` | Fold a file; fold / open them all |
 | `/` / `i`, `r`, `f` | Edit the search, the replacement, the files |
 | `x` / `X` | Leave out the match's line / its file (again: back in) |

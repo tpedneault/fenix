@@ -89,6 +89,10 @@ pub(super) enum PageModel {
     Agent(Box<crate::agent_page::AgentPage>),
     /// `SPC a r`: what an agent's thread changed (`agents`).
     AgentReview(Box<crate::agent_review::ReviewPage>),
+    /// `SPC o n`: the notifications' history (`notifications`).
+    Notifications(Box<crate::notifications_page::NotificationsPage>),
+    /// `SPC a U`: what the agents used (`agents/usage`).
+    AgentUsage(Box<crate::agent_usage_page::UsagePage>),
 }
 
 pub(super) struct PageState {
@@ -125,7 +129,8 @@ impl PageState {
             PageModel::Doctor(_) | PageModel::ExtensionOutput(_) | PageModel::Tutorial(_) | PageModel::Preview(_) => false,
             PageModel::Search(p) => p.typing(),
             PageModel::Agent(p) => p.typing(),
-            PageModel::AgentReview(_) => false,
+            PageModel::AgentReview(_) | PageModel::AgentUsage(_) => false,
+            PageModel::Notifications(p) => p.typing(),
             PageModel::Code(c) => c.typing(),
             PageModel::Extensions(e) => e.typing(),
             PageModel::Git(g) => g.typing(),
@@ -160,7 +165,8 @@ impl PageState {
                 p.paste(text);
             }
             PageModel::Agent(p) => p.filter.paste(text),
-            PageModel::AgentReview(_) => {}
+            PageModel::AgentReview(_) | PageModel::AgentUsage(_) => {}
+            PageModel::Notifications(p) => p.paste(text),
             PageModel::Extensions(e) => e.paste(text),
             PageModel::Git(g) => g.type_text(text),
             PageModel::Log(l) => l.type_text(text),
@@ -366,6 +372,7 @@ impl App {
             Some(PageModel::Doctor(d)) => format!("*doctor: {}*", d.name),
             Some(PageModel::Extensions(_)) => "*extensions*".to_string(),
             Some(PageModel::ExtensionOutput(_)) => "*extensions' output*".to_string(),
+            Some(PageModel::Notifications(_)) => "*notifications*".to_string(),
             Some(PageModel::Code(p)) => format!("*{}*", p.name()),
             Some(PageModel::Explorer(ExplorerTarget::Overlay, _)) => "*pick a folder*".to_string(),
             Some(PageModel::Search(p)) => {
@@ -388,6 +395,7 @@ impl App {
             Some(PageModel::Snippets(_)) => "*snippets*".to_string(),
             Some(PageModel::Tutorial(_)) => "*tutorial*".to_string(),
             Some(PageModel::AgentReview(_)) => "*agent changes*".to_string(),
+            Some(PageModel::AgentUsage(_)) => "*agent usage*".to_string(),
             Some(PageModel::Agent(p)) => match self.agents.hub.view(&p.thread) {
                 Some(view) => format!("*agent: {}*", crate::page::fit(&view.thread.display_title(), 32)),
                 None => "*agent*".to_string(),
@@ -600,6 +608,8 @@ impl App {
             PageModel::Doctor(d) => project_doctor::layout(d, cols),
             PageModel::Extensions(e) => crate::extensions_page::layout(e, cols),
             PageModel::ExtensionOutput(o) => crate::extension_output::layout(o, cols),
+            PageModel::Notifications(p) => crate::notifications_page::layout(p, cols),
+            PageModel::AgentUsage(p) => crate::agent_usage_page::layout(p, cols),
             PageModel::Code(c) => crate::code_page::layout(c, cols),
             PageModel::Git(g) => git_status::layout(g, cols),
             PageModel::Log(l) => git_log::layout(l, cols),
@@ -794,6 +804,14 @@ impl App {
                 if o.key(key) == crate::extension_output::Action::Close {
                     self.close_page(id);
                 }
+            }
+            PageModel::Notifications(p) => {
+                let action = p.key(key);
+                self.notifications_page_action(id, action);
+            }
+            PageModel::AgentUsage(p) => {
+                let action = p.key(key);
+                self.agents_usage_page_action(id, action);
             }
             PageModel::Code(c) => match c.key(key) {
                 crate::code_page::Action::Close => self.close_page(id),

@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
 use crate::protocol::{
-    code, method, AgentCaller, Call, CaptureParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError,
+    code, method, AgentCaller, Call, CaptureParams, NotifyParams, HelloParams, HelloResult, OpenParams, OpenPath, RpcError,
     CAPABILITIES, MAX_BODY, MAX_HEADER_LINE, PROTOCOL,
 };
 
@@ -212,6 +212,16 @@ impl Session<'_> {
             method::STATE => Call::State,
             method::COMMANDS => Call::Commands,
             method::RUN_COMMAND => Call::RunCommand(params_of(params)?),
+            method::NOTIFY => {
+                let notify: NotifyParams = params_of(params)?;
+                if notify.summary.trim().is_empty() {
+                    return Err(RpcError::invalid_params("a notification needs a summary"));
+                }
+                if notify.urgency.as_deref().is_some_and(|u| !matches!(u, "low" | "normal" | "critical")) {
+                    return Err(RpcError::invalid_params("urgency is low, normal or critical"));
+                }
+                Call::Notify(notify)
+            }
             method::NOTEBOOK_CAPTURE => {
                 let capture: CaptureParams = params_of(params)?;
                 if capture.text.trim().is_empty() {

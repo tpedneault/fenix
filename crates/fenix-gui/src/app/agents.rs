@@ -40,6 +40,8 @@ pub(crate) enum Pick {
     NewThread(String),
     /// Show this thread in the panel.
     Thread(ThreadId),
+    /// `SPC a T`: this thread, in its workspace.
+    Running(ThreadId),
     Mode(String),
     Config { id: String, value: ConfigValue },
     Login { conn: ConnId, method: String },
@@ -161,6 +163,9 @@ pub(crate) struct AgentHost {
     pub(super) consenting: Vec<extensions::Consenting>,
     /// Which extensions may send code to which agents, as you said.
     pub(super) consent_file: Option<PathBuf>,
+    /// What the agents used, by day and this session (`usage`).
+    pub(super) usage: fenix_acp::usage::Ledger,
+    pub(super) usage_file: Option<PathBuf>,
     /// What `agents.ask` answered, in tests (no extension runs then).
     #[cfg(test)]
     pub(super) replies: Vec<(String, u64, Result<String, String>)>,
@@ -171,6 +176,7 @@ impl AgentHost {
         let prefix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| format!("{:x}", d.as_millis())).unwrap_or_else(|_| "t".into());
         let mut hub = Hub::new(prefix, env!("CARGO_PKG_VERSION"));
         hub.set_capabilities(ClientCapabilities::fenix());
+        let usage_file = usage::usage_file();
         AgentHost {
             hub,
             clients: HashMap::new(),
@@ -213,6 +219,8 @@ impl AgentHost {
             asks: HashMap::new(),
             consenting: Vec::new(),
             consent_file: if cfg!(test) { Some(super::isolated_test_path("ask-consent.json")) } else { fenix_storage::paths::state_file("ask-consent.json") },
+            usage: usage::load_usage(usage_file.as_deref()),
+            usage_file,
             #[cfg(test)]
             replies: Vec::new(),
         }
@@ -533,6 +541,83 @@ impl App {
         self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
+    /// `SPC a T`: every thread at work or waiting on you, in any project
+    /// or workspace; the one picked is shown, in its workspace when one
+    /// has it.
+    pub(crate) fn agents_pick_running(&mut self) {
+        let mut candidates = Vec::new();
+        for id in self.agents.hub.thread_ids().iter().rev() {
+            let Some(view) = self.agents.hub.view(id) else { continue };
+            let waiting = view.is_waiting_on_you();
+            let bound = self.workspaces.workspaces.iter().find(|w| w.agent_thread.as_ref() == Some(id)).map(|w| w.name.clone());
+            if !waiting && !view.is_working() && bound.is_none() {
+                continue;
+            }
+            let state = if waiting { "waiting on you" } else if view.is_working() { "working" } else { "idle" };
+            let project = view.meta.root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let place = bound.map(|w| format!(" · in {w}")).unwrap_or_default();
+            let label = format!("{}   {} · {state} · {project}{place}", view.thread.display_title(), view.meta.agent);
+            candidates.push((u8::from(!waiting) + u8::from(state == "idle"), fenix_picker::Candidate::new(label, Pick::Running(id.clone()))));
+        }
+        candidates.sort_by_key(|(rank, _)| *rank);
+        if candidates.is_empty() {
+            self.set_message("no agent is at work: SPC a n starts a thread");
+            return;
+        }
+        self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates.into_iter().map(|(_, c)| c).collect())));
+    }
+
+    /// A thread picked from `SPC a T`: its workspace first, when one has
+    /// it, then the thread.
+    fn agents_go_to_running(&mut self, thread: ThreadId) {
+        if let Some(index) = self.workspaces.workspaces.iter().position(|w| w.agent_thread.as_ref() == Some(&thread)) {
+            if index != self.workspaces.active_index() {
+                self.workspaces.switch_to_index(index);
+            }
+        }
+        self.agents_show(thread);
+    }
+
+    /// When the workspace in front has a thread of its own that isn't the
+    /// one the dock shows, the dock shows it -- the focus where it is.
+    /// Every thread goes on in the background meanwhile.
+    pub(super) fn agents_dock_workspace_thread(&mut self) {
+        let Some(want) = self.workspaces.active_workspace().agent_thread.clone() else { return };
+        let Some(page) = self.agents.page.filter(|p| self.pages.contains_key(p)) else { return };
+        if self.agents.shown(&self.pages).as_ref() == Some(&want) || self.agents.hub.view(&want).is_none() {
+            return;
+        }
+        if let Some(PageModel::Agent(p)) = self.pages.get_mut(&page).map(|s| &mut s.model) {
+            **p = AgentPage::new(want.clone());
+            if let Some(view) = self.agents.hub.view(&want) {
+                p.follow_up(view.thread);
+            }
+        }
+        self.restale_page(page);
+        let fx = self.agents.hub.focus(&want);
+        self.agents_run(fx);
+        self.agents_dock_titles();
+    }
+
+    /// How many threads other than the one shown are at work or waiting.
+    pub(super) fn agents_elsewhere(&self) -> (usize, usize) {
+        let shown = self.agents.shown(&self.pages);
+        let mut working = 0;
+        let mut waiting = 0;
+        for id in self.agents.hub.thread_ids() {
+            if Some(id) == shown.as_ref() {
+                continue;
+            }
+            let Some(view) = self.agents.hub.view(id) else { continue };
+            if view.is_waiting_on_you() {
+                waiting += 1;
+            } else if view.is_working() {
+                working += 1;
+            }
+        }
+        (working, waiting)
+    }
+
     /// `SPC a i`: sessions the agent has for this project that Fenix
     /// doesn't (started in its own CLI): one picked becomes a thread.
     pub(crate) fn agents_import(&mut self) {
@@ -678,6 +763,7 @@ impl App {
                 self.agents_show(id);
             }
             Pick::Thread(id) => self.agents_show(id),
+            Pick::Running(id) => self.agents_go_to_running(id),
             Pick::Mode(mode) => {
                 if let Some(thread) = self.agents.shown(&self.pages) {
                     let fx = self.agents.hub.set_mode(&thread, &mode);
@@ -742,6 +828,9 @@ impl App {
 
     /// Shows `thread` in the dock, putting the dock up if it isn't.
     pub(super) fn agents_show(&mut self, thread: ThreadId) {
+        // This workspace's thread from now on: shown again when you come
+        // back here, whatever the dock shows elsewhere.
+        self.workspaces.active_workspace_mut().agent_thread = Some(thread.clone());
         let page = match self.agents.page.filter(|p| self.pages.contains_key(p)) {
             Some(page) => {
                 if let Some(PageModel::Agent(p)) = self.pages.get_mut(&page).map(|s| &mut s.model) {
@@ -1081,7 +1170,9 @@ impl App {
                     if turning && !self.agents.turning.contains_key(&thread) {
                         self.agents.turning.insert(thread.clone(), Instant::now());
                         self.agents_turn_started(&thread);
-                    } else if !turning && self.agents.turning.remove(&thread).is_some() {
+                    } else if !turning && self.agents.turning.contains_key(&thread) {
+                        let worked = self.agents.turning.remove(&thread).map_or(0, |since| since.elapsed().as_millis() as u64);
+                        self.agents_used(&thread, fenix_acp::usage::Tally::of_turn(worked));
                         self.agents_turn_ended(&thread);
                         self.agents_commit_message_done(&thread);
                     }
@@ -1102,6 +1193,13 @@ impl App {
                 Effect::TurnEnded { thread, stop } => {
                     self.agents_turn_done(&thread, &stop);
                     self.pipeline_turn_ended(&thread, &stop);
+                }
+                Effect::Used { thread, tokens, cost } => {
+                    let mut spent = tokens.as_ref().map(fenix_acp::usage::Tally::of_tokens).unwrap_or_default();
+                    if let Some((amount, currency)) = &cost {
+                        spent.add(&fenix_acp::usage::Tally::of_cost(*amount, currency));
+                    }
+                    self.agents_used(&thread, spent);
                 }
                 Effect::FenixAnswered { key, option, .. } => {
                     if !self.pipeline_gate_answered(&key, option.as_deref()) {
@@ -1125,6 +1223,7 @@ impl App {
     }
 
     fn agents_attention(&mut self, thread: &ThreadId, why: Attention) {
+        self.agents_notify(thread, why);
         let shown = self.agents.shown(&self.pages).as_ref() == Some(thread);
         let title = self.agents.hub.view(thread).map(|v| v.thread.display_title()).unwrap_or_default();
         match why {
@@ -1140,6 +1239,46 @@ impl App {
     }
 
     /// Whether a Fenix window has the keyboard.
+    /// A notification for what thread `thread` wants, as
+    /// `notifications.agents` says: a turn ended, a question, a login.
+    fn agents_notify(&mut self, thread: &ThreadId, why: Attention) {
+        let when = self.config.text_value("notifications.agents").unwrap_or("unfocused");
+        let shown = self.agents.shown(&self.pages).as_ref() == Some(thread);
+        if when == "never" || (when == "unfocused" && shown && self.window_focused()) {
+            return;
+        }
+        let agent = self.agents.status_of(thread).agent;
+        let Some(view) = self.agents.hub.view(thread) else { return };
+        let title = view.thread.display_title();
+        let open = format!("agents.thread:{}", thread.0);
+        let request = match why {
+            Attention::TurnEnded => {
+                let answer = view.thread.last_answer();
+                let failed = view.thread.entries.last().is_some_and(|e| matches!(e, fenix_acp::thread::Entry::Notice(n) if matches!(n.kind, fenix_acp::thread::NoticeKind::Error | fenix_acp::thread::NoticeKind::Stopped | fenix_acp::thread::NoticeKind::Interrupted)));
+                let summary = if failed { format!("{agent} stopped: {title}") } else { format!("{agent} is done: {title}") };
+                let mut r = crate::notify::Request::new("agents", summary).body(answer.trim()).urgency(if failed { crate::notify::Urgency::Critical } else { crate::notify::Urgency::Normal }).action("Open the thread", open);
+                if self.agents.to_review > 0 {
+                    r = r.action("Review the changes", "agents.review");
+                }
+                r
+            }
+            Attention::Permission => {
+                let asks: Vec<String> = view
+                    .thread
+                    .entries
+                    .iter()
+                    .filter_map(|e| match e {
+                        fenix_acp::thread::Entry::Permission(card) if card.state == fenix_acp::thread::PermissionState::Pending => card.tool_call.title.clone(),
+                        _ => None,
+                    })
+                    .collect();
+                crate::notify::Request::new("agents", format!("{agent} asks you: {title}")).body(asks.join("\n")).urgency(crate::notify::Urgency::Critical).action("Answer it", open)
+            }
+            Attention::Login => crate::notify::Request::new("agents", format!("{agent} wants you to sign in")).urgency(crate::notify::Urgency::Critical).action("Sign in", "agents.agents"),
+        };
+        self.notify(request.tag(format!("agent:{}", thread.0)));
+    }
+
     fn window_focused(&self) -> bool {
         (0..self.frames.len()).filter_map(|f| self.frame_window(f)).any(|w| w.has_focus())
     }
@@ -1412,6 +1551,7 @@ mod install;
 pub(crate) use install::SECRET_PROMPT;
 mod answer;
 mod extensions;
+mod usage;
 
 #[cfg(test)]
 mod tests;

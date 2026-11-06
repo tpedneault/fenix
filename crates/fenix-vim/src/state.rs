@@ -6,7 +6,7 @@ use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey, Step};
 
 use crate::bracket;
 use crate::indent;
-use crate::keymaps::{self, CaseChange, InsertEntry, PendingTarget, ScrollTarget, VimAction, VisualAction};
+use crate::keymaps::{self, CaseChange, FoldCommand, InsertEntry, PendingTarget, ScrollTarget, VimAction, VisualAction};
 use crate::keynotation;
 use crate::mode::{Mode, VisualKind};
 use crate::motion::{self, Motion};
@@ -142,6 +142,9 @@ pub enum VimEvent {
     /// cursor's line lands at `target`. Host-resolved since only it
     /// knows pane geometry (visible-line count).
     ScrollWindow(ScrollTarget),
+    /// `za`, `zo`, `zc`, `zR`, `zM`, `zr`, `zm`, `zj`, `zk`... -- the host's
+    /// folds.
+    Fold(FoldCommand),
     /// `.` -- asks the host to replay whatever it last recorded as a
     /// repeatable change. The host owns that capture (raw keystrokes
     /// since the last idle point that produced a real edit), the same
@@ -411,6 +414,8 @@ pub struct VimState {
     /// `VimEvent::ScrollWindow` -- same drain-chain shape as
     /// `pending_jump`.
     pending_scroll: Option<ScrollTarget>,
+    /// A `z` fold command, for the host (`VimEvent::Fold`).
+    pending_fold: Option<FoldCommand>,
     /// Set by `.`; consumed by `handle_key` and turned into `VimEvent::
     /// RepeatLastChange` -- same drain-chain shape as `pending_scroll`,
     /// just with no payload to carry.
@@ -553,6 +558,7 @@ impl VimState {
             pending_mark_set: None,
             pending_mark_jump: None,
             pending_scroll: None,
+            pending_fold: None,
             pending_repeat_last_change: false,
             pending_surround: None,
             command_line: String::new(),
@@ -907,6 +913,39 @@ impl VimState {
         }
     }
 
+    /// Drops whatever a sequence was waiting on -- a count, an operator,
+    /// a `"`, `f`, `m` or `g` -- as a mouse click does: what you meant to
+    /// type is not what you did next.
+    pub fn cancel_pending(&mut self) {
+        self.count = None;
+        self.pending_op = None;
+        self.pending_prefix = None;
+        self.active_register = None;
+        self.pending_replace = None;
+        self.pending_visual_replace = false;
+        self.pending_find = None;
+        self.pending_mark = None;
+        self.pending_surround = None;
+        self.pending_visual_surround = false;
+        self.pending_comment = false;
+        self.normal_matcher.cancel();
+        self.visual_matcher.cancel();
+        self.pending_matcher.cancel();
+    }
+
+    /// Selects from `anchor` to the cursor in Visual mode of `kind`, from
+    /// whatever mode it was in -- the mouse's drag, double and triple
+    /// click. Called again as the drag goes on; leave with
+    /// `exit_visual_mode`, as Escape would. Leave Insert first: this
+    /// doesn't finish what was typed.
+    pub fn select(&mut self, kind: VisualKind, anchor: usize) {
+        self.cancel_pending();
+        self.block_to_line_end = false;
+        self.mode = Mode::Visual;
+        self.visual_kind = kind;
+        self.visual_anchor = anchor;
+    }
+
     /// Whether a multi-key sequence (operator-pending, `gg`, ...) is
     /// waiting on more input, for a which-key-style hint in the host UI.
     pub fn is_pending(&self) -> bool {
@@ -1014,6 +1053,7 @@ impl VimState {
         let macro_stop = self.pending_macro_stop.take();
         let macro_play = self.pending_macro_play.take();
         let scroll = self.pending_scroll.take();
+        let fold = self.pending_fold.take();
         let repeat_last_change = std::mem::take(&mut self.pending_repeat_last_change);
         let comment_lines = self.pending_comment_lines.take();
         let lsp_request = self.pending_lsp_request.take();
@@ -1039,6 +1079,7 @@ impl VimState {
             .or_else(|| macro_stop.map(VimEvent::MacroRecordStop))
             .or_else(|| macro_play.map(|(register, count)| VimEvent::MacroPlay { register, count }))
             .or_else(|| scroll.map(VimEvent::ScrollWindow))
+            .or_else(|| fold.map(VimEvent::Fold))
             .or_else(|| repeat_last_change.then_some(VimEvent::RepeatLastChange))
             .or_else(|| comment_lines.map(|(start_line, end_line)| VimEvent::ToggleComment { start_line, end_line }))
             .or_else(|| lsp_request.map(VimEvent::RequestLsp))
@@ -1992,6 +2033,7 @@ impl VimState {
             VimAction::MarkSetPrompt => self.pending_mark = Some(PendingMark::Set),
             VimAction::MarkJumpPrompt { linewise } => self.pending_mark = Some(PendingMark::Jump { linewise }),
             VimAction::ScrollWindow(target) => self.pending_scroll = Some(target),
+            VimAction::Fold(command) => self.pending_fold = Some(command),
             VimAction::IncrementNumber { delta } => self.increment_number(buffer, cursor, delta * count as i64),
             // No buffer mutation here -- replay is host-driven (mirrors
             // `VimEvent::MacroPlay`), since only the host owns the raw-
@@ -3839,6 +3881,39 @@ ghi");
         assert_eq!(vim.mode(), Mode::Normal);
     }
 
+    /// The arrows are `hjkl` wherever a motion is taken: with a count,
+    /// extending a selection, and after an operator.
+    #[test]
+    fn arrow_keys_are_motions_like_hjkl() {
+        let mut b = buf("abc\ndef\nghi\njkl");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        named(&mut vim, &mut b, &mut c, NamedKey::Right);
+        assert_eq!(c.char_idx, 1);
+        named(&mut vim, &mut b, &mut c, NamedKey::Down);
+        assert_eq!(c.char_idx, 5);
+        named(&mut vim, &mut b, &mut c, NamedKey::Left);
+        assert_eq!(c.char_idx, 4);
+        named(&mut vim, &mut b, &mut c, NamedKey::Up);
+        assert_eq!(c.char_idx, 0);
+        keys(&mut vim, &mut b, &mut c, "2");
+        named(&mut vim, &mut b, &mut c, NamedKey::Down);
+        assert_eq!(c.char_idx, 8, "a count applies");
+        assert!(vim.is_idle(), "and nothing is left waiting");
+
+        keys(&mut vim, &mut b, &mut c, "v");
+        named(&mut vim, &mut b, &mut c, NamedKey::Right);
+        assert_eq!((vim.mode(), vim.visual_anchor(), c.char_idx), (Mode::Visual, 8, 9), "Visual extends");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+
+        keys(&mut vim, &mut b, &mut c, "gg0d");
+        named(&mut vim, &mut b, &mut c, NamedKey::Down);
+        let mut other = buf("abc\ndef\nghi\njkl");
+        let mut at = Cursor::at_start();
+        keys(&mut VimState::new(), &mut other, &mut at, "dj");
+        assert_eq!(b.text_range(0, b.len_chars()), other.text_range(0, other.len_chars()), "an operator takes it as it does `j`");
+    }
+
     #[test]
     fn hjkl_move_the_cursor() {
         let mut b = buf("ab\ncd");
@@ -4943,6 +5018,10 @@ two
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('t')), VimEvent::ScrollWindow(keymaps::ScrollTarget::Top));
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('b')), VimEvent::ScrollWindow(keymaps::ScrollTarget::Bottom));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('a')), VimEvent::Fold(FoldCommand::Toggle));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('M')), VimEvent::Fold(FoldCommand::CloseAll));
     }
 
     #[test]
@@ -6507,5 +6586,31 @@ two
         assert_eq!(vim.visual_kind(), VisualKind::Char);
         keys(&mut vim, &mut b, &mut c, "d");
         assert_eq!(b.text(), " world");
+    }
+
+    #[test]
+    fn select_starts_a_visual_selection_from_the_anchor_dropping_a_pending_operator() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "2d");
+        c.char_idx = 4;
+        vim.select(VisualKind::Char, 1);
+        assert_eq!((vim.mode(), vim.visual_kind(), vim.visual_anchor()), (Mode::Visual, VisualKind::Char, 1));
+        assert!(!vim.is_pending());
+        keys(&mut vim, &mut b, &mut c, "d");
+        assert_eq!(b.text(), "h world", "the selection, inclusive, and no count of 2 left over");
+    }
+
+    #[test]
+    fn cancel_pending_forgets_a_count_and_an_operator() {
+        let mut b = buf("one two three");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3d");
+        vim.cancel_pending();
+        assert!(vim.is_idle());
+        keys(&mut vim, &mut b, &mut c, "w");
+        assert_eq!(c.char_idx, 4, "w moves one word, not deletes three");
     }
 }

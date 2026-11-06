@@ -96,6 +96,14 @@ its extension. The rest is built into Fenix.
   reindent by element depth; `SPC c v` checks well-formedness and jumps
   to the first error (saving a malformed XML file also says so); `SPC c
   y` copies the element's XPath (`/project/dependencies/dependency[2]`).
+- **Folding**, as Notepad++ has it and Vim's keys do it: a column in the
+  gutter marks where a fold starts (`▾`) and where it's closed (`▸`),
+  and a click on it opens or closes it; a closed fold shows its first
+  line and how many it hides (`⋯ 12 lines`). `za`, `zo`/`zO`, `zc`/`zC`,
+  `zR`/`zM`, `zr`/`zm` (a level at a time), `zj`/`zk` and `zx` work as in
+  Vim. Folds come from the syntax tree (a grammar's `folds.scm`), or from
+  the indentation in a file with none; they're kept with the session.
+  `editor.fold_markers` turns the column off.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
   YAML, Python, JavaScript/TypeScript/TSX, C, C++, C#, Go, Java, Lua, SQL,
   HTML, CSS, Bash, Tcl, Dockerfile/Containerfile, Batch (`.bat`/`.cmd`),
@@ -462,7 +470,9 @@ its extension. The rest is built into Fenix.
   the Visual selection; `SPC s p` and `SPC s r` with Replace open): a
   page beside the file you're in that searches as you type, off the UI
   thread, and streams in what it finds, grouped by file -- each match with its line
-  number, lit. It's ripgrep's own libraries in-process (no `rg` needed),
+  number, lit. A match the selection rests on for a second opens beside the
+  page, so going down the list doesn't open every file on the way. It's
+  ripgrep's own libraries in-process (no `rg` needed),
   honouring `.gitignore`; a new keystroke cancels the search before it,
   and one that finds too much stops at `search.max_results` and says so.
   - **Toggles** on the field: `Alt-c` match case (off: smart-case),
@@ -506,6 +516,52 @@ its extension. The rest is built into Fenix.
 
 ## Windows and the UI
 
+- **Notifications**, in the manner of Dunst: toasts stacked in a corner
+  of the window (`notifications.position`), newest nearest it, for what
+  finished or wants you -- an agent's turn or its question, a task that
+  took a while or failed, an extension's news. Each has a source, a
+  summary, a body, an urgency (low, normal, critical: the rail down its
+  left edge) and actions: `SPC o .` or a click does the first, another
+  button dismisses it, `SPC o x` dismisses the newest and `SPC o X` all.
+  They time out by urgency -- a critical one stays -- counted only while
+  Fenix is in front, so one that came while you were away is still there
+  when you're back. One with the same tag replaces the one showing (a
+  progress bar that moves on); the same again stacks, counted (×3). Past
+  `notifications.max_visible` they wait their turn. **The history**
+  (`SPC o n`) keeps the last 200: act on one again, show it again,
+  forget it, filter them. **Do not disturb** (`SPC t q`) keeps all but
+  the critical ones to the history and says on the modeline how many
+  came. **Rules** per source (`notifications.rules`) mute one, keep it to
+  the history, or show it at another urgency. While Fenix isn't in
+  front, each also goes to the system's own notifications (`notify-send`
+  on Linux, a Windows toast, macOS's), as `notifications.system` says.
+  `notifications.test` shows one of each. Extensions notify with
+  `notify-with` (API 1.3).
+- **The mouse**, for when the hand is on it anyway -- every keyboard way
+  stays. A click in a file puts the cursor on the glyph clicked (through
+  the gutter, folds, tabs, an extension's inlays, the sticky headers and
+  sideways scroll; past a line's end is its end, under the last line is
+  the last line); Insert stays Insert, Visual ends. Dragging selects
+  (Visual), and past the pane's top or bottom keeps scrolling; a double
+  click selects a word (by the word characters `w` uses), a triple click
+  the line, and dragging on from either goes a word or a line at a time.
+  Shift-click stretches the selection from the cursor, and Alt-drag
+  selects a block. A click goes on the jumplist only when it moves the
+  cursor ten lines or more, so `Ctrl-O` comes back from a far one but
+  isn't filled by every little one. The border between two splits
+  drags to resize them (the pointer shows which way); a tab drags along
+  its strip, onto another pane to move there, or onto a pane's edge to
+  split it with the tab in the new half; a middle click closes a tab. A
+  right click in the text opens a menu where the pointer is -- go to
+  definition, references, rename, code actions, hover, cut, copy, paste,
+  select all, the fold, a breakpoint, ask the agent -- each with its key
+  beside it; on a tab, close it, the others or those to its right, split
+  with it, copy its path or reveal it. j/k or the arrows and Enter work
+  it too; a click outside or Esc closes it. Resting the pointer on a
+  symbol for `editor.hover_delay_ms` shows what `K` would, under it,
+  with any problem there first; moving off or typing closes it
+  (`editor.mouse_hover` turns it off). Pages, listings, terminals and
+  extensions' surfaces keep their own mouse.
 - **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
   pane keeping its own independent cursor and scroll position, directional
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
@@ -918,7 +974,20 @@ the guide.
   `SPC a i` continues a session started in the agent's own CLI. The
   panel comes back with the session after a restart, the prompt you
   hadn't sent included; the agent starts again when you look at it.
+- **A thread per workspace**: the dock comes with you from workspace to
+  workspace, and each workspace keeps the thread it showed last -- go
+  back to it and the dock shows that one again, kept with the session.
+  The others go on in the background: the dock's title says how many
+  are at work or waiting on you, they notify when they're done or ask
+  you something, and `SPC a T` lists every one at work, in any project,
+  and takes you to its workspace.
 - **Modes and models** (`SPC a m`, `SPC a M`): the agent's own.
+- **Usage** (`SPC a U`): each agent's and thread's turns, time at work,
+  tokens and cost -- as far as the agent says them: Claude Code says
+  tokens and cost, Codex tokens -- for today, this session and the last
+  7 days, with a bar a day. The modeline says it for the agents used this
+  session (`◆ claude 12.4k tok · $0.31`, `agents.usage.modeline`), and
+  a daily budget notifies at 80% and 100% (`agents.usage.daily_budget`).
 - **Commands**: an agent that runs its commands through Fenix (ACP's
   terminals) gets them run in the project, the whole process tree
   stopped on cancel, and its card shows the output as it comes

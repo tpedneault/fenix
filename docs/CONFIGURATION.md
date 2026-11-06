@@ -413,6 +413,9 @@ when it's out of date).
 | **Editor** | | | |
 | `editor.indent_width` | 1–16 | 4 | Spaces a Tab or >> inserts; Fenix always indents with spaces. *A project can set it.* |
 | `editor.tab_width` | 1–16 | 8 | Columns a tab character already in a file takes up. *A project can set it.* |
+| `editor.fold_markers` | true / false | on | A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does. |
+| `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
+| `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
 | `search.smart_case` | true / false | on | A search in lower case matches any case; a capital letter makes it exact. For / and the Search page; Alt-c on the page, \C in /, match case anyway. |
 | `search.regex` | true / false | off | Whether the Search page (SPC /) starts reading the query as a regex rather than literal text. Alt-r flips it there; / and :s are always regexes. |
@@ -513,6 +516,8 @@ when it's out of date).
 | `agents.panel_width` | 20–80 | 38 | How much of the width the agent's thread takes, in percent. |
 | `agents.idle_minutes` | minutes | 10 | An agent with no thread open is stopped after this long. |
 | `agents.notify` | true / false | on | When Fenix isn't in front: a permission question, or a turn ended, asks for your attention. |
+| `agents.usage.modeline` | off / tokens / cost / all | tokens | What the modeline says each agent used this session: its tokens, its cost (where the agent says), or both with its turns and time. An agent that reports neither shows its turns and time. SPC a U has the days. |
+| `agents.usage.daily_budget` | text | – | What the agents may use in a day before Fenix says so, at 80% and again at 100%: a cost ($5) or tokens (2M, 500k). Empty: no budget. |
 | `agents.mcp.fenix` | true / false | on | Agents get Fenix as an MCP server (fenix --mcp): diagnostics, language servers' answers, open files as they stand, the debugger's stop. |
 | `agents.mcp.fenix_brief` | true / false | on | Agents Fenix starts are told to prefer its tools, in a note before a new session's first prompt, which isn't shown in the thread. |
 | `agents.mcp.allow` | class, toolset:name or tool = allow, ask or deny | – | Rules for the tools agents call through Fenix: a class (read, show, edit, run, external), toolset:<name>, or a tool's name, each allow, ask or deny; the most specific wins. By default reading and showing are allowed, edits and running are asked about, external is refused. client:<rule> is for MCP clients Fenix didn't start. A project's rules can only be stricter. *A project can set it.* |
@@ -528,6 +533,18 @@ when it's out of date).
 | `agents.ask.model` | text | – | The model those questions go to, when the agent offers a choice (haiku, sonnet): a quick, cheap one for drafts. Empty: the agent's own. *A project can set it.* |
 | `agents.ask.show` | thread / hidden | thread | Whether an extension's question to an agent is kept as a thread on SPC a t (thread), or gone once it's answered (hidden), when the extension doesn't say. |
 | `agents.registry` | text | https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json | The ACP registry agents are installed from. Empty: none. |
+| **Notifications** | | | |
+| `notifications.enabled` | true / false | on | Toasts in a corner of the window for what finished or wants you: an agent's turn, a task, an extension's news. Off, they're only kept in the history (SPC o n). |
+| `notifications.position` | top-right / bottom-right / top-left / bottom-left | top-right | The corner the toasts stack in, the newest nearest it. |
+| `notifications.max_visible` | 1–8 | 4 | How many toasts show at once; the rest wait their turn. |
+| `notifications.width` | 24–120 | 46 | A toast's width, in characters. |
+| `notifications.timeout_low` | 1–600 | 4 | Seconds a low-urgency toast shows, counted only while Fenix is in front. |
+| `notifications.timeout_normal` | 1–600 | 8 | Seconds a normal toast shows, counted only while Fenix is in front. |
+| `notifications.timeout_critical` | 0–3600 | 0 | Seconds a critical toast shows; 0 keeps it until you dismiss it (SPC o x). |
+| `notifications.system` | unfocused / always / never | unfocused | Also show each one as the system's own notification (notify-send on Linux, a Windows toast, macOS's): only while Fenix isn't in front, always, or never. |
+| `notifications.rules` | source (agents, tasks, an extension's id, fenix.*) = mute, history, low, normal or critical | – | What to do with a source's notifications: mute them, keep them to the history, or show them at another urgency. A source ending in * matches every one it begins. |
+| `notifications.agents` | all / unfocused / never | unfocused | Notify when an agent's turn ends or it asks you something: always, only when its thread isn't in front of you, or never. |
+| `notifications.tasks` | all / long / failed / never | long | Notify when a task ends: every one, those that took 10 seconds or more, only those that failed, or never. |
 
 **Shelves, not autostart.** VNC hosts, documents and the workspace
 shelf make things selectable (`SPC v v`, `SPC r f`, `SPC TAB f`); none of

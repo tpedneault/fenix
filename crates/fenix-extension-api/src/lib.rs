@@ -71,6 +71,7 @@ pub use bindings::fenix::extension::types::{
     DebugSession, DebugState, LaunchConfig, LaunchRequest, QuickFix,
     AgentTurn,
     GitSummary, TaskResult,
+    Notification, NotificationAction, Urgency,
 };
 pub use bindings::{Event, Key, Page, SurfaceInput};
 
@@ -879,6 +880,60 @@ pub fn env_var(name: &str) -> Option<String> {
 /// Says `message` in Fenix's message line.
 pub fn notify(message: &str) {
     host::notify(Level::Info, message)
+}
+
+impl Notification {
+    /// A notification of normal urgency: `Notification::new("Build
+    /// passed").body("in 41 s").action("Open the log", "acme.ci.log").show()`.
+    /// API 1.3.
+    pub fn new(summary: impl Into<String>) -> Notification {
+        Notification { summary: summary.into(), body: String::new(), urgency: Urgency::Normal, actions: Vec::new(), tag: None, progress: None, timeout_ms: None }
+    }
+
+    pub fn body(mut self, body: impl Into<String>) -> Self {
+        self.body = body.into();
+        self
+    }
+
+    pub fn urgency(mut self, urgency: Urgency) -> Self {
+        self.urgency = urgency;
+        self
+    }
+
+    /// Something it offers to do; the first is what Enter or a click does.
+    /// `command` is one of its own commands (`acme.ci.log`) or Fenix's,
+    /// `url:https://...`, or `open:<path>[:line]`.
+    pub fn action(mut self, label: impl Into<String>, command: impl Into<String>) -> Self {
+        self.actions.push(NotificationAction { label: label.into(), command: command.into() });
+        self
+    }
+
+    /// Another with the same tag replaces it: a progress that moves on.
+    pub fn tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = Some(tag.into());
+        self
+    }
+
+    /// A bar along its foot, 0 to 1.
+    pub fn progress(mut self, progress: f32) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
+    pub fn timeout_ms(mut self, ms: u32) -> Self {
+        self.timeout_ms = Some(ms);
+        self
+    }
+
+    /// Shows it (`notify-with`).
+    pub fn show(&self) {
+        host::notify_with(self)
+    }
+}
+
+/// Takes away its toast tagged `tag` (`notify-dismiss`). API 1.3.
+pub fn notify_dismiss(tag: &str) {
+    host::notify_dismiss(tag)
 }
 
 /// One of its own settings, as text.

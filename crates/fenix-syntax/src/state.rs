@@ -155,6 +155,9 @@ impl NodeInfo {
 }
 
 /// Per-buffer incremental parse + highlight state for one language.
+/// `scope_ranges` as worked out at a revision.
+type ScopesAt = (u64, Vec<(usize, usize)>);
+
 pub struct SyntaxState {
     lang: LanguageId,
     parser: Parser,
@@ -177,14 +180,39 @@ pub struct SyntaxState {
     /// workaround). `None` for every other language, which has no such
     /// split to begin with.
     inline: Option<InlineGrammar>,
+    /// Bumped each time the tree changes, so what's worked out from it
+    /// (`scope_ranges`) is kept until then.
+    revision: u64,
+    /// `scope_ranges`, for `revision`: asked of every frame drawn.
+    scopes: std::sync::Mutex<Option<ScopesAt>>,
 }
 
 impl SyntaxState {
+    /// Changes each time the tree does.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Every multiline declaration-like node as `(start_row, end_row)`.
     /// Consumers that present a structural outline or folding controls use
     /// this rather than guessing from indentation, which is unreliable for
     /// Tcl and for brace-free languages.
     pub fn scope_ranges(&self) -> Vec<(usize, usize)> {
+        if let Ok(cached) = self.scopes.lock() {
+            if let Some((revision, ranges)) = cached.as_ref() {
+                if *revision == self.revision {
+                    return ranges.clone();
+                }
+            }
+        }
+        let ranges = self.compute_scope_ranges();
+        if let Ok(mut cached) = self.scopes.lock() {
+            *cached = Some((self.revision, ranges.clone()));
+        }
+        ranges
+    }
+
+    fn compute_scope_ranges(&self) -> Vec<(usize, usize)> {
         let Some(tree) = &self.tree else { return Vec::new() };
         if self.lang.is_grammar() {
             let mut ranges: Vec<(usize, usize)> = self.folded(tree, None).into_iter().map(|n| (n.start_position().row, n.end_position().row)).collect();
@@ -262,7 +290,7 @@ impl SyntaxState {
         let folds = grammar.and_then(|g| grammar_query(QueryKey::Folds(lang), language.as_ref(), &g.folds));
         let indents = grammar.and_then(|g| grammar_query(QueryKey::Indents(lang), language.as_ref(), &g.indents));
         let inline = language.as_ref().filter(|_| lang == LanguageId::Markdown).map(InlineGrammar::new);
-        Self { lang, parser, tree, query, folds, indents, inline }
+        Self { lang, parser, tree, query, folds, indents, inline, revision: 0, scopes: std::sync::Mutex::new(None) }
     }
 
     /// The nodes a grammar's `@fold`s capture that span lines -- those
@@ -318,6 +346,7 @@ impl SyntaxState {
             }
         }
         self.tree = self.parser.parse(source, self.tree.as_ref());
+        self.revision += 1;
     }
 
     /// Highlight spans within `byte_range`, flattened into a non-

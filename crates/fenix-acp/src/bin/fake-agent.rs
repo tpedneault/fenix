@@ -4,7 +4,7 @@
 //! `fake-agent [--profile claude] [--store DIR] [--crash-on METHOD]
 //! [--crash-after N] [--logged-out] [--slow MS] [--no-replay]
 //! [--forget-sessions] [--unannounced-write] [--bypass] [--fs] [--terminal]
-//! [--agent-auth]`: see `fenix_acp::mock` for what each does, and what a
+//! [--agent-auth] [--usage claude|codex|none]`: see `fenix_acp::mock` for what each does, and what a
 //! prompt makes it do.
 
 use std::io::BufReader;

@@ -157,6 +157,34 @@ impl App {
                     params.id
                 ))),
             },
+            Call::Notify(params) => {
+                let urgency = params.urgency.as_deref().and_then(crate::notify::Urgency::parse);
+                let commands = Rc::clone(&self.commands);
+                let actions = params
+                    .actions
+                    .into_iter()
+                    .filter(|a| a.command.starts_with("url:https://") || a.command.starts_with("url:http://") || a.command.starts_with("open:") || commands.get(&a.command).is_some_and(|c| c.external()))
+                    .take(5)
+                    .map(|a| crate::notify::Action { label: a.label, command: a.command })
+                    .collect();
+                let request = crate::notify::Request {
+                    source: params.source.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "cli".into()),
+                    summary: params.summary,
+                    body: params.body,
+                    urgency,
+                    actions,
+                    tag: params.tag,
+                    timeout: None,
+                    progress: params.progress.map(|p| p.min(100) as f32 / 100.0),
+                    quiet: false,
+                };
+                let shown = match self.notify(request) {
+                    crate::notify::Pushed::Shown(id) | crate::notify::Pushed::Updated(id) => json!({ "id": id, "shown": true }),
+                    crate::notify::Pushed::Kept(id) => json!({ "id": id, "shown": false }),
+                    crate::notify::Pushed::Muted => json!({ "shown": false, "muted": true }),
+                };
+                Ok(shown)
+            }
             // Answered by the notebook extension (`control_by_extension`)
             // when it's installed.
             Call::NotebookCapture(_) => Err(RpcError::invalid_params("the notebook is an extension (fenix.notebook): SPC h x installs it")),

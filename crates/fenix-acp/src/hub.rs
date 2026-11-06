@@ -16,7 +16,7 @@
 //! out. See `docs/plans/agents-acp.md` §3.5 for the design.
 
 use crate::client::{AcpEvent, RpcError};
-use crate::protocol::{self, code, AgentInfo, AuthKind, ClientCapabilities, ClientRequest, ConfigValue, ContentBlock, ListedSession, McpServer, PermissionOption, SessionId, SessionSetup, SessionUpdate, StopReason, ToolCallFields};
+use crate::protocol::{self, code, AgentInfo, AuthKind, ClientCapabilities, ClientRequest, ConfigValue, ContentBlock, ListedSession, McpServer, PermissionOption, SessionId, SessionSetup, SessionUpdate, StopReason, ToolCallFields, TurnUsage};
 use crate::thread::{NoticeKind, PermissionCard, PermissionState, Thread};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -216,6 +216,10 @@ pub enum Effect {
     /// `stopReason`), or it never ran -- or was cut off -- because the
     /// agent couldn't take it (`error`).
     TurnEnded { thread: ThreadId, stop: String },
+    /// What the agent says the thread used: a turn's tokens, from
+    /// `session/prompt`'s answer, or what the session's cost went up by
+    /// (`usage_update` carries its running total).
+    Used { thread: ThreadId, tokens: Option<TurnUsage>, cost: Option<(f64, String)> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1252,6 +1256,7 @@ impl Hub {
         // ends, unless you cancelled it too.
         let planned = slot.stops_at_plans && slot.thread.taken_plan.is_some() && !matches!(slot.turn, Turn::Cancelling { .. });
         slot.turn = Turn::Idle;
+        let used = result.as_ref().ok().and_then(TurnUsage::parse);
         let stop = match &result {
             Ok(v) if planned && matches!(StopReason::parse(v), StopReason::Cancelled) => "end_turn".to_string(),
             Ok(v) => v.get("stopReason").and_then(Value::as_str).unwrap_or("end_turn").to_string(),
@@ -1296,6 +1301,9 @@ impl Hub {
             }
             Err(e) => slot.thread.notice(NoticeKind::Error, format!("The agent failed: {}", e.message)),
         }
+        if used.is_some() {
+            fx.push(Effect::Used { thread: id.clone(), tokens: used, cost: None });
+        }
         fx.push(Effect::Changed(id.clone()));
         fx.push(Effect::Save(id.clone()));
         fx.push(Effect::Attention { thread: id.clone(), why: Attention::TurnEnded });
@@ -1331,6 +1339,15 @@ impl Hub {
                 if !paths.is_empty() {
                     fx.push(Effect::Announced { thread: id.clone(), tool_call: fields.id.clone(), paths });
                 }
+            }
+        }
+        if let (SessionUpdate::Usage { cost: Some((amount, currency)), .. }, None) = (&update, &slot.replay) {
+            // A running total: what it went up by. One that went down is
+            // a session counting afresh (the agent started again).
+            let before = slot.thread.usage.as_ref().and_then(|u| u.cost.as_ref()).filter(|(_, c)| c == currency).map_or(0.0, |(a, _)| *a);
+            let spent = if *amount >= before { amount - before } else { *amount };
+            if spent > 0.0 {
+                fx.push(Effect::Used { thread: id.clone(), tokens: None, cost: Some((spent, currency.clone())) });
             }
         }
         match &mut slot.replay {

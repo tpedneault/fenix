@@ -7,7 +7,8 @@
 //! that think, stream, call tools, ask permission, edit files on disk and
 //! run commands. Each prompt picks what the turn does ([`script`]). Cues
 //! ([`MockOptions`]) make it crash, log out, go slow, forget sessions, or
-//! work the ways other agents do (`--fs`, `--terminal`, `--agent-auth`).
+//! work the ways other agents do (`--fs`, `--terminal`, `--agent-auth`,
+//! `--usage codex`).
 //!
 //! [`run`] serves one connection, on any reader and writer: the
 //! `fake-agent` binary gives it stdio, tests give it in-memory pipes. It
@@ -63,6 +64,20 @@ pub struct MockOptions {
     pub terminal: bool,
     /// `--agent-auth`: offer an `authenticate`-style login, `mock-login`.
     pub agent_auth: bool,
+    /// `--usage claude|codex|none`: what a turn says it used. Claude's
+    /// adapter (the default) gives the tokens in `session/prompt`'s
+    /// answer, cache included, and the session's running cost in
+    /// `usage_update`; Codex's gives the tokens (and the thought ones)
+    /// and the context, no cost; `none`, nothing.
+    pub usage: Usage,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Usage {
+    #[default]
+    Claude,
+    Codex,
+    None,
 }
 
 impl MockOptions {
@@ -104,6 +119,14 @@ impl MockOptions {
                 "--fs" => options.fs = true,
                 "--terminal" => options.terminal = true,
                 "--agent-auth" => options.agent_auth = true,
+                "--usage" => {
+                    options.usage = match value()?.as_str() {
+                        "claude" => Usage::Claude,
+                        "codex" => Usage::Codex,
+                        "none" => Usage::None,
+                        other => return Err(format!("--usage: claude, codex or none, not `{other}`")),
+                    }
+                }
                 other => return Err(format!("unknown flag `{other}`")),
             }
         }

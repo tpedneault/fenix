@@ -30,6 +30,7 @@ fenix [--new-window] [--project <dir>] [--goto <file:line[:col]>] [file[:line[:c
 | `fenix --project ~/src/fenix` | Switches to that project, as `SPC p p` does |
 | `fenix --new-window a.rs` | Opens `a.rs` in another OS window of the same Fenix |
 | `fenix` | Brings the running Fenix to the front |
+| `fenix --notify "Build done" --body "in 41 s"` | Shows a notification in the running Fenix (`--urgency low\|normal\|critical`, `--tag`, `--progress 0-100`), as `fenix/notify` does; exits 1 when no Fenix is running |
 
 Lines and columns count from 1. A file argument is read as a position
 only when no file of exactly that name exists. Relative paths are taken
@@ -248,6 +249,29 @@ Result: `{}`, once the command has run. Fenix comes forward, as for
 `fenix/open`: most external commands open a page, a picker or a prompt
 for you to carry on in. A command that isn't `external`, or an id Fenix
 doesn't have, answers `-32602` with a message saying which.
+
+### `fenix/notify`
+
+```json
+{ "summary": "Nightly build failed", "body": "3 tests failed in fenix-tasks", "urgency": "critical",
+  "source": "ci", "tag": "nightly", "progress": 40,
+  "actions": [{ "label": "Open the log", "command": "url:https://ci.example.com/run/812" }] }
+```
+
+Result: `{ "id": 7, "shown": true }`; `"shown": false` when it was only
+kept in the history (do not disturb, a rule, notifications off), and
+`"muted": true` when a rule dropped it.
+
+Shows a notification as Fenix's own are shown: a toast, the history
+(`SPC o n`), and the system's notification while Fenix isn't in front,
+as the user's `[notifications]` settings and rules say. Only `summary`
+is needed. `urgency` is `low`, `normal` (the default) or `critical`;
+`source` is what the history and the rules call it (`cli` when it's not
+given); one with the same `source` and `tag` replaces the one showing;
+`progress` is 0 to 100. An action's `command` is a Fenix command that
+`fenix/runCommand` may run, `url:https://...`, or `open:<path>[:line]`;
+others are dropped, and at most five are kept. An empty summary, or
+another urgency, answers `-32602`.
 
 ### `fenix/notebook.capture`
 

@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use fenix_keymap::{KeyPress, KeyTrie};
+use fenix_keymap::{KeyPress, KeyTrie, NamedKey};
 
 use crate::mode::VisualKind;
 use crate::motion::Motion;
@@ -82,6 +82,9 @@ pub enum VimAction {
     /// centered, at the top, or at the bottom -- resolved by the host
     /// (`VimEvent::ScrollWindow`), since only it knows pane geometry.
     ScrollWindow(ScrollTarget),
+    /// `za`, `zo`, `zc`, `zR`, `zM`... -- folds, the host's
+    /// (`VimEvent::Fold`).
+    Fold(FoldCommand),
     /// `Ctrl-a`/`Ctrl-x`: increment/decrement the nearest number at or
     /// after the cursor on the current line, by `count` (already signed
     /// -- negative for `Ctrl-x`).
@@ -107,6 +110,30 @@ pub enum VimAction {
     /// `gt`/`gT`/`g<Tab>`/`gh` -- resolved into `VimEvent::Tab`, the
     /// count folded in there.
     Tab(crate::state::TabMove),
+}
+
+/// Vim's fold commands, `z` and a letter: done by the host, which knows
+/// where the folds are (the syntax tree, the language server, indents).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldCommand {
+    /// `za`: the fold the cursor is in, open or closed.
+    Toggle,
+    /// `zo` / `zO`: opened (and, `zO`, every one inside it).
+    Open { recursive: bool },
+    /// `zc` / `zC`: closed (and, `zC`, every one inside it).
+    Close { recursive: bool },
+    /// `zR` / `zM`: every fold in the buffer opened / closed.
+    OpenAll,
+    CloseAll,
+    /// `zr` / `zm`: one level more open / closed.
+    OpenLevel,
+    CloseLevel,
+    /// `zj` / `zk`: to the start of the next fold / the end of the one
+    /// before.
+    Next,
+    Previous,
+    /// `zx` / `zE`: every fold opened, as `zR`, and forgotten.
+    Reset,
 }
 
 /// `zz`/`zt`/`zb`'s target -- where the cursor's line should land in the
@@ -192,6 +219,10 @@ fn add_motions<A>(trie: &mut KeyTrie<A>, wrap: impl Fn(Motion) -> A) {
     trie.insert(&[KeyPress::char('l')], "right", wrap(Motion::Right));
     trie.insert(&[KeyPress::char('j')], "down", wrap(Motion::Down));
     trie.insert(&[KeyPress::char('k')], "up", wrap(Motion::Up));
+    trie.insert(&[KeyPress::named(NamedKey::Left)], "left", wrap(Motion::Left));
+    trie.insert(&[KeyPress::named(NamedKey::Right)], "right", wrap(Motion::Right));
+    trie.insert(&[KeyPress::named(NamedKey::Down)], "down", wrap(Motion::Down));
+    trie.insert(&[KeyPress::named(NamedKey::Up)], "up", wrap(Motion::Up));
     trie.insert(&[KeyPress::char('w')], "word forward", wrap(Motion::WordForward));
     trie.insert(&[KeyPress::char('b')], "word backward", wrap(Motion::WordBackward));
     trie.insert(&[KeyPress::char('e')], "word end", wrap(Motion::WordEndForward));
@@ -293,6 +324,19 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char('z'), KeyPress::char('z')], "scroll center", VimAction::ScrollWindow(ScrollTarget::Center));
     t.insert(&[KeyPress::char('z'), KeyPress::char('t')], "scroll top", VimAction::ScrollWindow(ScrollTarget::Top));
     t.insert(&[KeyPress::char('z'), KeyPress::char('b')], "scroll bottom", VimAction::ScrollWindow(ScrollTarget::Bottom));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('a')], "toggle fold", VimAction::Fold(FoldCommand::Toggle));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('o')], "open fold", VimAction::Fold(FoldCommand::Open { recursive: false }));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('O')], "open fold, all inside", VimAction::Fold(FoldCommand::Open { recursive: true }));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('c')], "close fold", VimAction::Fold(FoldCommand::Close { recursive: false }));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('C')], "close fold, all inside", VimAction::Fold(FoldCommand::Close { recursive: true }));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('R')], "open every fold", VimAction::Fold(FoldCommand::OpenAll));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('M')], "close every fold", VimAction::Fold(FoldCommand::CloseAll));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('r')], "open a fold level", VimAction::Fold(FoldCommand::OpenLevel));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('m')], "close a fold level", VimAction::Fold(FoldCommand::CloseLevel));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('j')], "next fold", VimAction::Fold(FoldCommand::Next));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('k')], "previous fold", VimAction::Fold(FoldCommand::Previous));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('x')], "reset folds", VimAction::Fold(FoldCommand::Reset));
+    t.insert(&[KeyPress::char('z'), KeyPress::char('E')], "forget every fold", VimAction::Fold(FoldCommand::Reset));
 
     t.insert(&[KeyPress::char('a').with_ctrl()], "increment number", VimAction::IncrementNumber { delta: 1 });
     t.insert(&[KeyPress::char('x').with_ctrl()], "decrement number", VimAction::IncrementNumber { delta: -1 });

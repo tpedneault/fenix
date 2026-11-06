@@ -5,12 +5,14 @@ mod agent_lsp;
 mod agent_debug;
 mod agent_context;
 mod agent_pipelines;
+mod notifications;
 mod control_agent;
 mod refactor;
 mod snippets;
 mod tool_sessions;
 mod session;
 mod editor_ui;
+mod mouse;
 mod todos;
 mod home;
 mod tabs;
@@ -317,6 +319,8 @@ struct TaskSession {
     /// fenix-tasks, so closing a pane never joins a worker.
     runner: Option<fenix_tasks::TaskRunner>,
     run_id: Option<fenix_tasks::RunId>,
+    /// When the run under way started, for its notification.
+    started: Option<Instant>,
 }
 
 /// The History view's session (`SPC g l`) -- the commit graph, the refs
@@ -4052,6 +4056,9 @@ struct Workspace {
     /// Each pane's closed tabs, newest last, with the place each held --
     /// what `SPC b u` reopens.
     closed_tabs: HashMap<fenix_window::WindowId, Vec<(BufferId, usize)>>,
+    /// The agent thread the dock showed here last: shown again when you
+    /// come back, while the others go on in the background.
+    agent_thread: Option<fenix_acp::hub::ThreadId>,
 }
 
 impl Workspace {
@@ -4060,7 +4067,7 @@ impl Workspace {
         pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
         let mut pane_tabs = HashMap::new();
         pane_tabs.insert(windows.focused_id(), vec![*windows.content(windows.focused_id()).expect("freshly created window has content")]);
-        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None, home: None, last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() }
+        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None, home: None, last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new(), agent_thread: None }
     }
 }
 
@@ -4580,6 +4587,9 @@ pub struct App {
     explorer_reveal_pending: HashMap<ExplorerTarget, PathBuf>,
     /// Being dragged by its edge.
     sidebar_drag: bool,
+    /// The mouse in the text, on the dividers and tabs, its menu and
+    /// its hover -- see `app/mouse.rs`.
+    mouse: mouse::MouseState,
     /// Bumped for every filter search started, so what a superseded one
     /// finds is dropped.
     explorer_search: u64,
@@ -4954,6 +4964,15 @@ pub struct App {
     /// row list is derived from the current syntax tree every frame, so an
     /// edit can never leave stale byte or character offsets behind.
     code_folds: HashMap<BufferId, HashSet<usize>>,
+    /// Each buffer's fold level (`zm`, `zr`): folds this deep or more are
+    /// closed. None: every one open.
+    fold_levels: HashMap<BufferId, usize>,
+    /// Notifications: the toasts showing and the history (`notify`).
+    notifications: crate::notify::Center,
+    /// Where each toast was drawn last frame, for clicks.
+    toast_rects: Vec<(u64, fenix_window::Rect)>,
+    /// When each extension's last notifications came, for their rate.
+    notification_rates: HashMap<String, Vec<Instant>>,
     /// The optional parts of Fenix that live behind `feature::Feature`
     /// (Docker so far), each owning its own state.
     /// Every command, built once at startup -- shared (`Rc`) so a command
@@ -5813,6 +5832,7 @@ impl App {
             sidebar_followed: None,
             explorer_reveal_pending: HashMap::new(),
             sidebar_drag: false,
+            mouse: Default::default(),
             explorer_last_click: None,
             explorer_search: 0,
             explorer_preview: None,
@@ -5887,6 +5907,10 @@ impl App {
             chrome_git: None,
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
+            fold_levels: HashMap::new(),
+            notifications: crate::notify::Center::new(),
+            toast_rects: Vec::new(),
+            notification_rates: HashMap::new(),
             commands: Rc::new(CommandRegistry::with_builtins().with_code_extensions(&crate::installed::code_extensions())),
             wasm: wasm_host::WasmHost::default(),
             recent_commands: Vec::new(),
@@ -7537,6 +7561,12 @@ impl App {
     /// precondition every LSP request this app sends starts from
     /// (`gd`/`gr`/`K`/rename/code actions/format all begin here).
     pub(super) fn focused_lsp_context(&self) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
+        self.focused_lsp_context_at(self.cursor().char_idx)
+    }
+
+    /// `focused_lsp_context`, asking about char `at` rather than the
+    /// cursor's -- where the mouse rests.
+    pub(super) fn focused_lsp_context_at(&self, at: usize) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
         let ob = self.open();
         let path = ob.buffer.path()?;
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
@@ -7549,7 +7579,7 @@ impl App {
             return None;
         }
         let uri = fenix_lsp::path_to_uri(&canonical)?;
-        let position = fenix_lsp::char_offset_to_position(ob.buffer.rope(), self.cursor().char_idx);
+        let position = fenix_lsp::char_offset_to_position(ob.buffer.rope(), at.min(ob.buffer.len_chars()));
         Some((keys, lsp_types::TextDocumentIdentifier { uri }, position))
     }
 
@@ -7724,7 +7754,12 @@ impl App {
     /// ones with genuinely nothing to say) -- Tcl's built-in usage lines
     /// come from the Tcl extension, which is a language server.
     pub(crate) fn request_hover(&mut self) {
-        let Some((keys, text_document, position)) = self.focused_lsp_context() else {
+        self.request_hover_at(self.cursor().char_idx);
+    }
+
+    /// `request_hover`, about char `at` of the focused buffer.
+    pub(super) fn request_hover_at(&mut self, at: usize) {
+        let Some((keys, text_document, position)) = self.focused_lsp_context_at(at) else {
             self.lsp_hover = None;
             return;
         };
@@ -10061,7 +10096,7 @@ impl App {
             let workspace_index = self.workspaces.active_index();
             let pane = self.focused_pane_id();
             self.pane_titles.insert(pane, "Task Output".to_string());
-            self.task_session = Some(TaskSession { workspace_index, pane, buffer, cwd: root.clone(), root: root.clone(), runner: None, run_id: None });
+            self.task_session = Some(TaskSession { workspace_index, pane, buffer, cwd: root.clone(), root: root.clone(), runner: None, run_id: None, started: None });
             buffer
         };
 
@@ -10099,7 +10134,7 @@ impl App {
     /// with a run identity because the output buffer is reused on rerun.
     fn start_task_process(&mut self, task: fenix_tasks::TaskDef, spec: fenix_project::tools::CommandSpec, root: PathBuf, buffer: BufferId) {
         let run_id = fenix_tasks::RunId::next();
-        if let Some(session) = self.task_session.as_mut() { session.run_id = Some(run_id); }
+        if let Some(session) = self.task_session.as_mut() { session.run_id = Some(run_id); session.started = Some(Instant::now()); }
         let command = spec.command(&root).map_err(|e| format!("couldn't start `{}`: {e}", task.command));
         let command = match command {
             Ok(command) => command,
@@ -10286,6 +10321,8 @@ impl App {
             ok: success == Some(true),
             tests: fenix_tasks::test_counts(&output),
         });
+        let took = self.task_session.as_mut().and_then(|s| s.started.take()).map(|t| t.elapsed());
+        self.task_notify(success == Some(true), took);
         if let Some(root) = self.task_session.as_ref().map(|s| s.root.clone()) {
             self.tell_extensions(Happened::TaskFinished { root: root.clone(), success: success == Some(true) });
             self.debug_task_ended(&root, success == Some(true));
@@ -15757,6 +15794,13 @@ impl App {
     /// `repeat_last_change` -> `route_keypress` directly, same as a
     /// macro, so its own replayed keys never re-enter this tap.
     fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+        // The right click's menu, open, has the keyboard.
+        if self.mouse.menu.is_some() {
+            if let Some(action) = self.menu_key(keypress) {
+                self.run_menu_action(action);
+            }
+            return;
+        }
         if self.vim.is_recording() {
             self.macro_capture.push(keypress);
         }
@@ -15794,6 +15838,8 @@ impl App {
         // than needing its own dedicated close key.
         self.lsp_hover = None;
         self.lsp_hover_fanout = None;
+        // And the one the pointer opened: typing closes it.
+        self.close_mouse_hover();
 
         // The terminal panel, when focused, owns *every* key -- checked
         // before even the capturing prompts/confirms below, since a
@@ -16611,6 +16657,7 @@ impl App {
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::Message(msg) => self.set_message(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),
+            VimEvent::Fold(command) => self.fold_command(command),
             VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::Pulse(range) => {
@@ -17204,7 +17251,7 @@ impl App {
         // The sketch's board and port -- `refresh_embedded_indicator`
         // keeps this current for whatever buffer is focused.
         let feature_indicators: String = self.code_statuses().concat();
-        let feature_indicators = feature_indicators + &self.agents_status_segment();
+        let feature_indicators = feature_indicators + &self.agents_status_segment() + &self.agents_usage_segment() + &self.notifications_segment();
         let git_indicator = self.chrome_git_segment();
         let search_indicator = match self.search_count() {
             Some((_, 0)) | None => String::new(),
@@ -17524,7 +17571,7 @@ impl App {
         if self.line_number_mode == LineNumberMode::Off {
             return blame;
         }
-        ob.buffer.visual_line_count().max(1).to_string().len() + 1 + blame
+        ob.buffer.visual_line_count().max(1).to_string().len() + 1 + blame + usize::from(self.fold_column(ob))
     }
 
     /// Rich-text spans for one pane's content area covering `rows` screen
@@ -17608,6 +17655,9 @@ impl App {
         let theme = self.theme;
         let visual_lines = ob.buffer.visual_line_count();
         let mut spans = Vec::new();
+        // The fold markers' column: ▾ on a fold's first line, ▸ when it's
+        // closed.
+        let fold_marks = if dashboard_pad.is_none() && gutter_chars > 0 { self.fold_marks(ob) } else { None };
         for r in 0..rows {
             let buffer_line = render_base_line + r;
             let has_line = buffer_line < visual_lines;
@@ -17623,17 +17673,30 @@ impl App {
                 }
                 let numbers = gutter_chars - blame;
                 if numbers > 0 {
+                    let marker_cells = usize::from(fold_marks.is_some());
                     let gutter = if has_line {
                         let n = match self.line_number_mode {
                             LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
                             _ => buffer_line + 1,
                         };
-                        format!("{:>width$} ", n, width = numbers - 1)
+                        format!("{:>width$}", n, width = numbers.saturating_sub(1 + marker_cells))
                     } else {
-                        format!("{:<width$}", "~", width = numbers)
+                        format!("{:<width$}", "~", width = numbers.saturating_sub(marker_cells))
                     };
                     let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
                     spans.push((gutter, color));
+                    if let Some((starts, closed)) = &fold_marks {
+                        let marker = match (has_line && starts.contains_key(&buffer_line), closed.contains(&buffer_line)) {
+                            (true, true) => "▸",
+                            (true, false) => "▾",
+                            _ => " ",
+                        };
+                        let marker_color = if closed.contains(&buffer_line) { rgba_to_glyphon(theme.caret) } else { theme.gutter_fg };
+                        spans.push((marker.to_string(), marker_color));
+                    }
+                    if has_line {
+                        spans.push((" ".to_string(), color));
+                    }
                 }
             } else if !has_line {
                 spans.push(("~".to_string(), theme.gutter_fg));
@@ -18462,34 +18525,46 @@ impl App {
         gutter_px: f32,
         content_frac: f32,
     ) -> Option<(fenix_window::Rect, RowSpans)> {
-        let text = self.lsp_hover.as_ref()?;
-        let (row, col) = focused_caret?;
         let (char_width, line_height) = match &self.text {
             Some(t) => (t.char_width(), t.line_height()),
             None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
         };
-        let (caret_x, caret_y) = caret_pixel_pos(focused_rect, row, col, gutter_px, content_frac, char_width, line_height);
+        // The pointer's: under the glyph it rests on, its problems first.
+        let (problems, (caret_x, caret_y)) = match &self.mouse.hover {
+            Some(hover) => (hover.problems.as_slice(), (hover.anchor.0, hover.anchor.1 - line_height)),
+            None => {
+                let (row, col) = focused_caret?;
+                (&[][..], caret_pixel_pos(focused_rect, row, col, gutter_px, content_frac, char_width, line_height))
+            }
+        };
+        if self.lsp_hover.is_none() && problems.is_empty() {
+            return None;
+        }
 
         let shown_rows = popup::max_rows(modeline_top, COMPLETION_MARGIN, line_height, COMPLETION_PADDING).min(COMPLETION_MAX_ROWS);
-        let lines: Vec<&str> = text.lines().take(shown_rows).collect();
+        let theme = self.theme;
+        let mut lines: Vec<(&str, glyphon::Color)> = problems.iter().map(|(p, error)| (p.as_str(), if *error { theme.git_conflicted } else { theme.git_modified })).collect();
+        if let Some(text) = &self.lsp_hover {
+            lines.extend(text.lines().map(|l| (l, theme.fg_modeline)));
+        }
+        lines.truncate(shown_rows);
         if lines.is_empty() {
             return None;
         }
 
-        let theme = self.theme;
         let mut spans = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
+        for (i, (line, color)) in lines.iter().enumerate() {
             if i > 0 {
                 spans.push(("\n".to_string(), theme.fg_modeline, false));
             }
-            spans.push((line.to_string(), theme.fg_modeline, false));
+            spans.push((line.to_string(), *color, false));
         }
 
         // Sized to its longest line up to the window, not to `WHICH_KEY_
         // MAX_WIDTH` -- see `prompt_popup` for why that cap doesn't apply
         // to free text: a usage line (`tcl::hover_text` wraps its
         // subcommand list at 72 columns) was being cut mid-word.
-        let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let longest = lines.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0);
         let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
         let width = (longest as f32 * char_width + COMPLETION_PADDING).clamp(text::WHICH_KEY_MIN_WIDTH, max_width);
         let height = lines.len() as f32 * line_height + COMPLETION_PADDING;
@@ -18861,6 +18936,10 @@ impl App {
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
         let icon = if self.sidebar_drag || self.on_sidebar_edge(pos) {
             winit::window::CursorIcon::ColResize
+        } else if let Some(icon) = self.divider_icon(&geometry, pos) {
+            icon
+        } else if self.tab_drag.is_some() {
+            winit::window::CursorIcon::Grabbing
         } else {
             cursor_icon_for(&geometry, pos, line_height)
         };
@@ -18883,10 +18962,8 @@ impl App {
         (scroll + line, col)
     }
 
-    /// Left-click: focuses whatever the click landed on -- a plain
-    /// focus change, the same granularity `SPC w hjkl`/pane-cycling
-    /// already work at (see this feature's own design notes on why
-    /// this isn't per-glyph cursor placement). Mirrors the exact flag
+    /// Left-click: focuses whatever the click landed on, and in a pane's
+    /// text puts the cursor on the glyph clicked (`text_press`). Mirrors the exact flag
     /// semantics `explorer_quit`/`navigate_window`'s own sidebar hand-
     /// off already use: `sidebar_focused`/`terminal_focused` are plain
     /// override flags independent of the tree's own focused pane, so
@@ -18928,6 +19005,14 @@ impl App {
                         self.wake_caret();
                         return;
                     }
+                    let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+                    let content = pane_content_rect(rect, line_height, self.pane_has_breadcrumb(id));
+                    if pos.1 >= content.y && self.explorer_in_pane(id).is_none() {
+                        let (row, col) = self.cell_at(pos, (content.x, content.y), 0);
+                        if self.fold_marker_click(id, row, col) {
+                            return;
+                        }
+                    }
                     // A listing's row, chevron or breadcrumb.
                     if let Some(target) = self.explorer_in_pane(id) {
                         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
@@ -18936,6 +19021,13 @@ impl App {
                             let (line, col) = self.cell_at(pos, (content.x, content.y), self.pane_state(id).scroll_line);
                             self.explorer_click(target, line, col);
                         }
+                        self.wake_caret();
+                        return;
+                    }
+                    // Text: the cursor to the glyph, a selection started.
+                    if pos.1 >= content.y && self.text_press(id, rect, pos, Instant::now()) {
+                        self.unfocus_terminal_buffer();
+                        self.code_surface_sync_capture();
                         self.wake_caret();
                         return;
                     }
@@ -19024,6 +19116,8 @@ impl App {
         let max_scroll = total.saturating_sub(visible);
         let state = self.pane_state_mut(pane);
         state.scroll_line = state.scroll_line.saturating_add_signed(-lines).min(max_scroll);
+        // What's drawn: only the focused pane's follows `scroll_line`.
+        state.rendered_scroll = state.scroll_line as f32;
     }
 
     /// Wheel-scrolls the focused pane by moving its cursor/selection --
@@ -19682,6 +19776,9 @@ impl App {
             if !is_focused {
                 // A side-by-side pane scrolls with the one beside it.
                 self.side_by_side_follow(pane, pane_visible_lines);
+                // The Search page's preview, which never had the focus
+                // long enough to follow its cursor.
+                self.search_reveal(pane, pane_visible_lines);
             }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
@@ -20107,6 +20204,11 @@ impl App {
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
+        // The right click's menu.
+        let context_menu_popup = overlays_here.then(|| self.context_menu_popup(window_width, window_height)).flatten();
+        // Notifications: the toasts, in their corner, under the tab strip.
+        let toasts = if overlays_here { self.toasts(window_width, tab_strip_height(line_height) + line_height, modeline_top, char_width, line_height) } else { Vec::new() };
+        self.toast_rects = toasts.iter().map(|t| (t.id, t.rect)).collect();
         // The panel has the keyboard: the editor's caret isn't where keys go.
         let caret_alpha = if self.terminal_focused { 0.0 } else { self.caret_alpha() };
         let message_alpha = self.message_alpha(now);
@@ -20346,6 +20448,12 @@ impl App {
         }
         if let Some((rect, spans)) = page_popup {
             open_popups.push((popup::PopupId::Page, rect, spans, None));
+        }
+        for toast in &toasts {
+            open_popups.push((popup::PopupId::Toast(toast.slot), toast.rect, toast.spans.clone(), None));
+        }
+        if let Some((rect, spans, selected_row)) = context_menu_popup {
+            open_popups.push((popup::PopupId::ContextMenu, rect, spans, selected_row));
         }
         let popup_draws = motion_state.popup_draws(prefs, open_popups, now);
         let mut popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = Vec::new();
@@ -21286,6 +21394,12 @@ impl App {
                         continue;
                     }
                 }
+                if let popup::PopupId::Toast(slot) = draw.id {
+                    if let Some(toast) = toasts.iter().find(|t| t.slot == slot) {
+                        App::paint_toast(popup_rect, gpu, toast, rect, alpha, theme, corner_radius, shadows);
+                        continue;
+                    }
+                }
                 if shadows {
                     popup_rect.push_shadow(gpu, rect.x, rect.y + 4.0, rect.w, rect.h, corner_radius, 10.0, [0.0, 0.0, 0.0, 0.38 * alpha]);
                 }
@@ -21299,7 +21413,7 @@ impl App {
                 // The completion popup's own selected-candidate row --
                 // `theme.selection`, not `theme.hl_line`: the popup has no
                 // caret of its own, so this has to stand out on its own.
-                if draw.id == popup::PopupId::Completion {
+                if matches!(draw.id, popup::PopupId::Completion | popup::PopupId::ContextMenu) {
                     if let Some(row) = draw.selected {
                         let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
                         let inset = if corner_radius > 0.0 { 3.0 } else { 0.0 };
@@ -21320,6 +21434,8 @@ impl App {
                 .map(|&(id, rect)| {
                     if id == popup::PopupId::WhichKey {
                         (id, rect, (which_key::INSET_X, which_key::INSET_Y), modeline_top)
+                    } else if matches!(id, popup::PopupId::Toast(_)) {
+                        (id, rect, App::toast_inset(), f32::MAX)
                     } else {
                         (id, rect, (text::PAD_LEFT, 4.0), f32::MAX)
                     }
@@ -21609,6 +21725,13 @@ impl ApplicationHandler<FenixUserEvent> for App {
                         self.drag_sidebar_to(pos.0, width);
                     }
                 }
+                if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
+                    // A selection or a divider following the pointer; the
+                    // menu's row under it; the hover's wait.
+                    self.mouse_drag_to(pos, window_width, window_height);
+                    self.menu_hover_at(pos, window_width, window_height);
+                    self.pointer_rest_at(pos, Instant::now(), window_width, window_height);
+                }
                 self.code_surface_pointer(pos, None);
                 self.code_page_pointer(pos, None);
                 if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
@@ -21617,6 +21740,23 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed { self.snippet = None; }
+                let size = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32));
+                // The right click's menu takes the click on it; one off it
+                // closes it and goes on.
+                if let (ElementState::Pressed, Some(pos), Some((w, h))) = (state, self.cursor_pos, size) {
+                    if let Some(chosen) = self.menu_press_at(pos, w, h) {
+                        if let Some(action) = chosen {
+                            self.run_menu_action(action);
+                        }
+                        return;
+                    }
+                }
+                if state == ElementState::Pressed {
+                    self.close_mouse_hover();
+                }
+                if button == MouseButton::Left && state == ElementState::Released {
+                    self.mouse_release();
+                }
                 // The sidebar's edge, dragged to resize it.
                 if button == MouseButton::Left {
                     if state == ElementState::Pressed && self.cursor_pos.is_some_and(|pos| self.on_sidebar_edge(pos)) {
@@ -21628,6 +21768,16 @@ impl ApplicationHandler<FenixUserEvent> for App {
                         return;
                     }
                 }
+                // A divider between two panes, dragged to resize them.
+                if let (MouseButton::Left, ElementState::Pressed, Some(pos), Some((w, h))) = (button, state, self.cursor_pos, size) {
+                    if self.divider_press_at(pos, w, h) {
+                        return;
+                    }
+                }
+                // A click on a toast: its action, or dismissed.
+                if state == ElementState::Pressed && self.cursor_pos.is_some_and(|pos| self.toast_click(pos, button)) {
+                    return;
+                }
                 // A click on an extension's clickable item is its alone.
                 if state == ElementState::Pressed && button == MouseButton::Left && self.cursor_pos.is_some_and(|pos| self.layer_click(pos) || self.decoration_click(pos)) {
                     return;
@@ -21635,6 +21785,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if let Some(pos) = self.cursor_pos {
                         self.handle_click(pos);
+                    }
+                }
+                // A right click in text or on a tab: its menu.
+                if let (MouseButton::Right, ElementState::Pressed, Some(pos), Some((w, h))) = (button, state, self.cursor_pos, size) {
+                    if self.right_click_at(pos, w, h) {
+                        return;
                     }
                 }
                 // A click on a code page that takes the mouse is its too.
@@ -21649,6 +21805,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                self.mouse.menu = None;
+                self.close_mouse_hover();
                 if let Some(pos) = self.cursor_pos {
                     self.handle_wheel(pos, delta);
                 }
@@ -21817,6 +21975,21 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // The agents: cancels that never ended, restarts after a crash,
         // idle agents stopped, files they're changing looked at.
         let wait_until = match self.agents_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // A drag held past a pane's edge scrolls on; the pointer resting
+        // on a symbol shows its hover.
+        let wait_until = match self.drag_scroll_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        let wait_until = match self.hover_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // Notifications: the next toast to time out.
+        let wait_until = match self.notifications_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };

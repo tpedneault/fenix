@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/fenix-acp", "crates/fenix-brand", "crates/fenix-snippets", "crates/fenix-storage", "crates/fenix-buffers", "crates/fenix-completion", "crates/fenix-config", "crates/fenix-control", "crates/fenix-core", "crates/fenix-dap", "crates/fenix-diff", "crates/fenix-explorer", "crates/fenix-extension-api", "crates/fenix-extensions", "crates/fenix-format", "crates/fenix-fs", "crates/fenix-git", "crates/fenix-gui", "crates/fenix-keymap", "crates/fenix-lsp", "crates/fenix-model", "crates/fenix-pdf", "crates/fenix-pdfium", "crates/fenix-picker", "crates/fenix-project", "crates/fenix-recovery", "crates/fenix-rpc", "crates/fenix-syntax", "crates/fenix-table", "crates/fenix-tasks", "crates/fenix-terminal", "crates/fenix-vim", "crates/fenix-wasm", "crates/fenix-window"]
 
 [workspace.package]
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tpedneault/fenix"
@@ -14,3 +14,18 @@ publish = false
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Dependencies are rarely stepped through: line tables keep their
+# backtraces readable, and drop most of the debug info a link has to
+# write. Fenix's own crates keep full debug info.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+# A release build in a few minutes rather than many, for trying a change
+# at full speed: `cargo build --profile release-fast`. Releases are built
+# with `release`.
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true

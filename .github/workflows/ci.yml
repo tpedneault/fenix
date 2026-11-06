@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Branches only: a tag points at a commit its branch's run has already
+  # checked, and the Release workflow builds it again anyway.
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -15,13 +18,30 @@ concurrency:
 env:
   CARGO_TERM_COLOR: never
   RUST_BACKTRACE: '1'
+  # Line tables are all a backtrace needs; full debug info makes every
+  # object file and link several times bigger. Tests inherit dev's.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+  # Incremental artifacts are never reused on a fresh runner, and the
+  # cache would only carry them around.
+  CARGO_INCREMENTAL: '0'
 
 jobs:
   windows:
-    name: Windows workspace
+    name: Windows workspace (${{ matrix.gates }})
+    # A pull request from a branch of this repository was already checked
+    # by its push; only a fork's needs its own run.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: windows-2022
-    # The whole workspace's tests and Clippy: 35 to 55 minutes on a runner.
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        # The tests in one job; Clippy and the debug build in another, at
+        # the same time.
+        gates: [Tests, Lint]
+    # Not rust-lld: it links tree-sitter's C wasm store against
+    # wasmtime's C API as if from a DLL ("locally defined symbol
+    # imported"), and loading a wasm grammar then crashes.
     defaults:
       run:
         shell: pwsh
@@ -36,6 +56,15 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy --no-self-update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustup override set stable
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: fenix editor
+          # One cache per half: their builds differ (check vs. codegen).
+          key: ${{ matrix.gates }}
+          # Pushes write it (a branch's own, read before master's); pull
+          # requests only read it.
+          save-if: ${{ github.event_name == 'push' }}
       - name: Configure Windows Git paths
         run: |
           git config --global core.longpaths true
@@ -44,26 +73,28 @@ jobs:
       - name: Install Universal Ctags
         # Tcl completion and symbol lookup shell out to it, and their tests
         # use the real thing.
+        if: matrix.gates == 'Tests'
         run: |
           choco install universal-ctags --no-progress -y
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Test, lint, and build
+      - name: ${{ matrix.gates == 'Tests' && 'Test' || 'Lint and build' }}
         # The runner's default TEMP is an 8.3 short path (C:\Users\RUNNER~1),
         # which canonicalizes to a different spelling than tests compare
         # against. Its own temp folder has no short names in it.
         env:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
-        run: ./scripts/ci.ps1 -Suite Workspace
+        run: ./scripts/ci.ps1 -Suite Workspace -Gates ${{ matrix.gates }}
       - name: Upload diagnostic logs
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: windows-ci-logs
+          name: windows-ci-logs-${{ matrix.gates }}
           path: fenix editor/target/ci/
           if-no-files-found: warn
           retention-days: 14
       - name: Upload tested debug executable
+        if: matrix.gates == 'Lint'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: fenix-windows-debug
@@ -73,6 +104,7 @@ jobs:
 
   linux-reliability:
     name: Linux reliability
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
@@ -87,6 +119,10 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy --no-self-update
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustup override set stable
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.event_name == 'push' }}
       - name: Filesystem, process, and protocol regressions
         run: ./scripts/ci.ps1 -Suite Reliability
       - name: Upload diagnostic logs
