@@ -23,6 +23,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Vim's `za zo zc zO zC zR zM zr zm zj zk zx`, `⋯ N lines` on a closed
   fold, folds by indentation where there's no syntax tree, and folds kept
   with the session (`editor.fold_markers`).
+- Agents can read what a terminal pane shows (`terminal_output`) and
+  where you've been (`recent_locations`: the jumplist and your marks).
 - Each workspace keeps its own agent thread: the dock follows you and
   shows the thread of the workspace you're in, while the others work in
   the background; `SPC a T` lists every thread at work, anywhere.

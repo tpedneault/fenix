@@ -252,6 +252,10 @@ Every session gets Fenix itself as an MCP server (`fenix --mcp`,
 - the open files, which have unsaved edits, and their text as it stands
   in Fenix, which the disk doesn't have yet;
 - your selection;
+- what a terminal pane shows (`terminal_output`): your shells, a server's
+  output;
+- where you've been (`recent_locations`): the places you jumped from and
+  to, newest first, and your marks;
 - where the debugger is stopped: the stack, the variables, watches and
   the program's output.
 
