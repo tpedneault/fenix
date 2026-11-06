@@ -330,6 +330,11 @@ the other way round after `\v`.
 | `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Workspaces) -- switches to it if already open, otherwise creates it |
 | `SPC TAB r` | Rename the active workspace |
 
+## The arrow keys
+
+The arrow keys are `h`, `j`, `k` and `l` wherever a motion is taken: with a
+count, extending a selection, after an operator (`d<Down>`).
+
 ## The mouse
 
 In a file's text, and around the panes. Pages, listings, terminals and
@@ -427,7 +432,7 @@ On the results:
 |---|---|
 | `j` / `k`, `gg` / `G` | Next / previous match, first / last |
 | `Enter` | Go to the match |
-| `p` | Show the selection beside the page, or stop |
+| `p` | Show the match the selection rests on beside the page, after a second, or stop |
 | `Tab` / `za`, `zM` / `zR` | Fold a file; fold / open them all |
 | `/` / `i`, `r`, `f` | Edit the search, the replacement, the files |
 | `x` / `X` | Leave out the match's line / its file (again: back in) |

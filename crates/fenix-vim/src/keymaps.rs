@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use fenix_keymap::{KeyPress, KeyTrie};
+use fenix_keymap::{KeyPress, KeyTrie, NamedKey};
 
 use crate::mode::VisualKind;
 use crate::motion::Motion;
@@ -219,6 +219,10 @@ fn add_motions<A>(trie: &mut KeyTrie<A>, wrap: impl Fn(Motion) -> A) {
     trie.insert(&[KeyPress::char('l')], "right", wrap(Motion::Right));
     trie.insert(&[KeyPress::char('j')], "down", wrap(Motion::Down));
     trie.insert(&[KeyPress::char('k')], "up", wrap(Motion::Up));
+    trie.insert(&[KeyPress::named(NamedKey::Left)], "left", wrap(Motion::Left));
+    trie.insert(&[KeyPress::named(NamedKey::Right)], "right", wrap(Motion::Right));
+    trie.insert(&[KeyPress::named(NamedKey::Down)], "down", wrap(Motion::Down));
+    trie.insert(&[KeyPress::named(NamedKey::Up)], "up", wrap(Motion::Up));
     trie.insert(&[KeyPress::char('w')], "word forward", wrap(Motion::WordForward));
     trie.insert(&[KeyPress::char('b')], "word backward", wrap(Motion::WordBackward));
     trie.insert(&[KeyPress::char('e')], "word end", wrap(Motion::WordEndForward));

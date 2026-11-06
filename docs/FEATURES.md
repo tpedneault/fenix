@@ -470,7 +470,9 @@ its extension. The rest is built into Fenix.
   the Visual selection; `SPC s p` and `SPC s r` with Replace open): a
   page beside the file you're in that searches as you type, off the UI
   thread, and streams in what it finds, grouped by file -- each match with its line
-  number, lit. It's ripgrep's own libraries in-process (no `rg` needed),
+  number, lit. A match the selection rests on for a second opens beside the
+  page, so going down the list doesn't open every file on the way. It's
+  ripgrep's own libraries in-process (no `rg` needed),
   honouring `.gitignore`; a new keystroke cancels the search before it,
   and one that finds too much stops at `search.max_results` and says so.
   - **Toggles** on the field: `Alt-c` match case (off: smart-case),

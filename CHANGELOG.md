@@ -45,10 +45,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The arrow keys are `hjkl` in Normal and Visual mode and after an operator.
+- The Search page shows a match beside it once the selection has rested on it
+  for a second, so going down the results no longer opens every file on the
+  way. `Enter` still opens at once.
 - CI caches its dependencies, runs the Windows tests and lint as two
   jobs at once, and no longer runs twice for a branch's pull request;
   dependencies get line tables only in debug builds, and there's a
   `release-fast` profile.
+
+### Fixed
+
+- A launch that reached a Fenix on its way out, one just killed say, ran
+  without a control channel for as long as it lived, so `fenix file.rs` and
+  `fenix --notify` couldn't reach it. It now waits and takes the channel.
 
 ## [1.1.0] - 2026-11-05
 

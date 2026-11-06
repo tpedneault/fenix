@@ -3881,6 +3881,39 @@ ghi");
         assert_eq!(vim.mode(), Mode::Normal);
     }
 
+    /// The arrows are `hjkl` wherever a motion is taken: with a count,
+    /// extending a selection, and after an operator.
+    #[test]
+    fn arrow_keys_are_motions_like_hjkl() {
+        let mut b = buf("abc\ndef\nghi\njkl");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        named(&mut vim, &mut b, &mut c, NamedKey::Right);
+        assert_eq!(c.char_idx, 1);
+        named(&mut vim, &mut b, &mut c, NamedKey::Down);
+        assert_eq!(c.char_idx, 5);
+        named(&mut vim, &mut b, &mut c, NamedKey::Left);
+        assert_eq!(c.char_idx, 4);
+        named(&mut vim, &mut b, &mut c, NamedKey::Up);
+        assert_eq!(c.char_idx, 0);
+        keys(&mut vim, &mut b, &mut c, "2");
+        named(&mut vim, &mut b, &mut c, NamedKey::Down);
+        assert_eq!(c.char_idx, 8, "a count applies");
+        assert!(vim.is_idle(), "and nothing is left waiting");
+
+        keys(&mut vim, &mut b, &mut c, "v");
+        named(&mut vim, &mut b, &mut c, NamedKey::Right);
+        assert_eq!((vim.mode(), vim.visual_anchor(), c.char_idx), (Mode::Visual, 8, 9), "Visual extends");
+        named(&mut vim, &mut b, &mut c, NamedKey::Escape);
+
+        keys(&mut vim, &mut b, &mut c, "gg0d");
+        named(&mut vim, &mut b, &mut c, NamedKey::Down);
+        let mut other = buf("abc\ndef\nghi\njkl");
+        let mut at = Cursor::at_start();
+        keys(&mut VimState::new(), &mut other, &mut at, "dj");
+        assert_eq!(b.text_range(0, b.len_chars()), other.text_range(0, other.len_chars()), "an operator takes it as it does `j`");
+    }
+
     #[test]
     fn hjkl_move_the_cursor() {
         let mut b = buf("ab\ncd");
