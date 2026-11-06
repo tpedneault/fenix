@@ -1018,7 +1018,13 @@ unless it says, up to 10 minutes), an answer given later included.
 An extension does one thing at a time, but pages go first: laying out a
 page, its keys, a paste and a surface's input are taken before the tool
 calls and events waiting, so a page waits behind at most the one call
-under way. Work longer than a call belongs in a program it runs
+under way. `page::refresh` only marks a page to be laid out again
+at the next frame: calling it a thousand times between two frames costs
+one layout. So an extension taking in a stream (a socket's messages, a
+program's output) can refresh as it goes -- but each call should return
+in a few milliseconds, handling what came and leaving the rest for the
+next event or a timer, since a frame's layout waits for the call under
+way. Work longer than a call belongs in a program it runs
 (`spawn`), an HTTP request or a timer, whose answers come as events. Its
 memory is capped at 128 MiB. Past any of those, endless recursion, or a
 panic, the extension stops with the reason on its output page, its
