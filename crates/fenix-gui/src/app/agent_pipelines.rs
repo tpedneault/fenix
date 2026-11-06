@@ -5,7 +5,8 @@
 //! What the steps change goes into one ledger -- the first thread's -- so
 //! you review the outcome once (`SPC a r`). A read-only step's changes
 //! are put back. A gate is a question in the step's thread: `y` goes on,
-//! `n` stops.
+//! `n` stops, and writing to the step is another round of it, the question
+//! taken back until that's done.
 
 use fenix_acp::hub::ThreadId;
 use fenix_acp::pipeline::{Next, PipelineSpec, Run, StepEnd};
@@ -23,6 +24,9 @@ pub(crate) struct Running {
     pub threads: Vec<ThreadId>,
     /// The thread whose ledger holds every step's changes.
     pub ledger: Option<ThreadId>,
+    /// The mode a step's session was in before it was put in the step's:
+    /// where a later step with no mode of its own goes back to.
+    pub usual_mode: Option<String>,
 }
 
 /// A step's thread, waiting for its session to send its prompt.
@@ -51,13 +55,17 @@ pub(crate) struct Pipelines {
     ended: Vec<Vec<ThreadId>>,
 }
 
+fn gate_key(run: u64, step: usize) -> String {
+    format!("pipeline-gate-{run}-{step}")
+}
+
 impl App {
-    /// The pipelines there are: Fenix's `review`, then yours
+    /// The pipelines there are: Fenix's own, then yours
     /// (`pipelines/*.toml` in the settings folder), then the project's
     /// (`.fenix/pipelines/*.toml`), a later one replacing an earlier of
     /// the same name.
     pub(super) fn pipeline_specs(&self) -> (Vec<PipelineSpec>, Vec<String>) {
-        let mut specs = vec![PipelineSpec::review()];
+        let mut specs = PipelineSpec::built_in();
         let mut problems = Vec::new();
         let mut dirs: Vec<PathBuf> = fenix_storage::paths::Roots::current().map(|r| r.settings_file().with_file_name("pipelines")).into_iter().collect();
         dirs.push(self.agents_root().join(".fenix").join("pipelines"));
@@ -109,7 +117,7 @@ impl App {
         self.pipelines.next += 1;
         let id = self.pipelines.next;
         let root = self.agents_root();
-        self.pipelines.runs.insert(id, Running { run, root, threads: Vec::new(), ledger: None });
+        self.pipelines.runs.insert(id, Running { run, root, threads: Vec::new(), ledger: None, usual_mode: None });
         self.pipeline_do(id, next);
         true
     }
@@ -121,13 +129,15 @@ impl App {
                 let Some(thread) = self.pipelines.runs.get(&id).and_then(|r| r.threads.last().cloned()) else { return };
                 let name = self.pipelines.runs[&id].run.spec.steps[step].name.clone();
                 let next = self.pipelines.runs[&id].run.spec.steps.get(step + 1).map(|s| s.name.clone()).unwrap_or_default();
-                let key = format!("pipeline-gate-{id}-{step}");
+                let onward = if next.is_empty() { "Finish".to_string() } else { format!("Go on to {next}") };
+                let key = gate_key(id, step);
                 let answers = [
                     ("allow_once", "Go on", fenix_acp::protocol::PermissionKind::AllowOnce),
                     ("edit", "Edit what's passed on, then go on", fenix_acp::protocol::PermissionKind::Other),
                     ("reject_once", "Stop", fenix_acp::protocol::PermissionKind::RejectOnce),
                 ];
-                let fx = self.agents.hub.ask_fenix_with(&thread, &key, &format!("Pipeline: pass what {name} gave on to {next}?"), fenix_acp::protocol::ToolKind::Other, json!({ "passing": passing }), &answers);
+                let question = if passing == fenix_acp::pipeline::NO_CHANGES { format!("Pipeline: {name} changed nothing. {onward} anyway, or write to it") } else { format!("Pipeline: {name} is done. {onward}, or write to it for another round") };
+                let fx = self.agents.hub.ask_fenix_with(&thread, &key, &question, fenix_acp::protocol::ToolKind::Other, json!({ "passing": passing }), &answers);
                 self.pipelines.passing.insert(id, passing);
                 self.pipelines.gates.insert(key, id);
                 self.agents_run(fx);
@@ -195,9 +205,38 @@ impl App {
         self.pipeline_changed(&thread);
     }
 
+    /// Written to at its gate, the step is working again: the question
+    /// waits for it, and what it comes up with is what's passed on.
+    fn pipeline_reopen_gate(&mut self, thread: &ThreadId) {
+        let Some(&id) = self.pipelines.steps.get(thread) else { return };
+        if !self.agents.hub.view(thread).is_some_and(|v| v.is_working()) {
+            return;
+        }
+        let Some(running) = self.pipelines.runs.get_mut(&id).filter(|r| r.threads.last() == Some(thread)) else { return };
+        let fenix_acp::pipeline::State::AtGate(step) = running.run.state else { return };
+        let key = gate_key(id, step);
+        if self.pipelines.gates.remove(&key).is_none() {
+            return;
+        }
+        running.run.gate_reopened();
+        self.pipelines.passing.remove(&id);
+        if let Some(t) = self.agents.hub.thread_mut(thread) {
+            t.taken_plan = None;
+        }
+        let fx = self.agents.hub.withdraw_fenix(thread, &key);
+        self.agents_run(fx);
+    }
+
+    /// Whether `thread` is a step at its gate, its question up.
+    pub(super) fn pipeline_at_gate(&self, thread: &ThreadId) -> bool {
+        let Some(id) = self.pipelines.steps.get(thread) else { return false };
+        self.pipelines.gates.values().any(|g| g == id) && self.pipelines.runs.get(id).is_some_and(|r| r.threads.last() == Some(thread))
+    }
+
     /// A thread changed: a step's held prompt goes once its session is up,
     /// in the step's mode.
     pub(super) fn pipeline_changed(&mut self, thread: &ThreadId) {
+        self.pipeline_reopen_gate(thread);
         let Some(view) = self.agents.hub.view(thread) else { return };
         if !matches!(view.link, fenix_acp::hub::Link::Live { .. }) {
             if let fenix_acp::hub::Link::ReadOnly(why) = view.link {
@@ -212,11 +251,27 @@ impl App {
         let Some(running) = self.pipelines.runs.get(&held.run) else { return };
         let step = running.run.step().map(|i| running.run.spec.steps[i].clone());
         let mut fx = Vec::new();
+        let usual = running.usual_mode.clone();
+        let is_plan = |id: &str| id.to_lowercase().contains("plan");
         if let (Some(wanted), Some(modes)) = (step.as_ref().and_then(|s| s.mode.clone()), view.thread.modes.as_ref()) {
             let wanted = wanted.to_lowercase();
             let found = modes.available.iter().find(|m| m.id.to_lowercase() == wanted || m.name.to_lowercase().contains(&wanted) || m.id.to_lowercase().contains(&wanted)).map(|m| m.id.clone());
             if let Some(mode) = found.filter(|m| *m != modes.current) {
+                let current = modes.current.clone();
                 fx.extend(self.agents.hub.set_mode(thread, &mode));
+                if let Some(r) = self.pipelines.runs.get_mut(&held.run).filter(|r| r.usual_mode.is_none()) {
+                    r.usual_mode = Some(current);
+                }
+            }
+        } else if let (Some(modes), true) = (self.agents.hub.view(thread).and_then(|v| v.thread.modes.clone()), step.as_ref().is_some_and(|s| s.mode.is_none())) {
+            // A step that's to do the work, in a session some agents start
+            // in the mode the last one left off in: planning it would only
+            // plan.
+            if is_plan(&modes.current) {
+                let back = usual.filter(|m| !is_plan(m)).or_else(|| modes.available.iter().map(|m| m.id.clone()).find(|m| !is_plan(m)));
+                if let Some(mode) = back {
+                    fx.extend(self.agents.hub.set_mode(thread, &mode));
+                }
             }
         }
         fx.extend(self.agents.hub.prompt(thread, vec![ContentBlock::text(held.prompt)]));
@@ -278,6 +333,10 @@ impl App {
     /// A step's turn ended: the run is told, and does what's next.
     pub(super) fn pipeline_turn_ended(&mut self, thread: &ThreadId, stop: &str) {
         let Some(&id) = self.pipelines.steps.get(thread) else { return };
+        // An earlier step's thread, written to: the run has moved on.
+        if self.pipelines.runs.get(&id).is_some_and(|r| r.threads.last() != Some(thread)) {
+            return;
+        }
         let Some(view) = self.agents.hub.view(thread) else { return };
         // A plan the step offered is what it came up with: its last words
         // only lead up to offering it.
@@ -367,7 +426,7 @@ mod tests {
         app.project_root = Some(dir.path().to_path_buf());
         let (specs, problems) = app.pipeline_specs();
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"review") && names.contains(&"quick"), "{names:?}");
+        assert_eq!(names, ["review", "fix", "tdd", "refactor", "audit", "quick"]);
         assert_eq!(problems.len(), 1, "{problems:?}");
     }
 
@@ -415,6 +474,34 @@ mod tests {
         app.pipeline_turn_ended(&review, "end_turn");
         assert!(app.pipelines.runs.is_empty());
         assert_eq!(app.agents.shown(&app.pages), Some(build));
+    }
+
+    #[test]
+    fn a_turn_on_an_earlier_steps_thread_leaves_the_run_alone() {
+        let mut app = app();
+        app.pipelines.armed = Some(PipelineSpec::parse("p", "[[steps]]\nname = \"one\"\nagent = \"claude\"\nprompt = \"{input}\"\n[[steps]]\nname = \"two\"\nagent = \"claude\"\nprompt = \"{previous}\"\n").unwrap());
+        app.pipeline_take_prompt("x");
+        let one = app.pipelines.runs.values().next().unwrap().threads[0].clone();
+        app.pipelines.held.clear();
+        app.pipeline_turn_ended(&one, "end_turn");
+        app.pipeline_turn_ended(&one, "end_turn");
+        assert_eq!(app.pipelines.runs.values().next().unwrap().run.state, fenix_acp::pipeline::State::Running(1));
+    }
+
+    #[test]
+    fn a_build_that_changed_nothing_asks_before_review() {
+        let mut app = app();
+        let spec = "[[steps]]\nname = \"build\"\nagent = \"claude\"\nprompt = \"{input}\"\npasses = \"changes\"\n[[steps]]\nname = \"review\"\nagent = \"claude\"\nprompt = \"{previous}\"\n";
+        app.pipelines.armed = Some(PipelineSpec::parse("p", spec).unwrap());
+        app.pipeline_take_prompt("x");
+        let build = app.pipelines.runs.values().next().unwrap().threads[0].clone();
+        app.pipelines.held.clear();
+        app.pipeline_turn_ended(&build, "end_turn");
+        let run = &app.pipelines.runs.values().next().unwrap().run;
+        assert_eq!(run.state, fenix_acp::pipeline::State::AtGate(0));
+        assert_eq!(app.pipelines.runs.values().next().unwrap().threads.len(), 1, "review didn't start");
+        let view = app.agents.hub.view(&build).unwrap();
+        assert!(view.thread.entries.iter().any(|e| matches!(e, fenix_acp::thread::Entry::Permission(c) if c.tool_call.title.as_deref().is_some_and(|t| t.contains("build changed nothing")))));
     }
 
     #[test]

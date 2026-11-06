@@ -3,7 +3,9 @@
 //! a step passes on, and a review step's findings sent back to be fixed.
 //! Sans-I/O like the hub: a `Run` takes what happened (a step's turn
 //! ended, you answered at a gate) and says what to do next. The editor
-//! starts each step as a thread of its own and feeds its end back.
+//! starts each step as a thread of its own and feeds its end back. A step
+//! at a gate stays open: write to it and that's another round of the same
+//! step, and the gate comes back when it's done.
 //!
 //! A pipeline is data (`pipelines/<name>.toml` in Fenix's settings
 //! folder, or a project's `.fenix/pipelines/`):
@@ -118,35 +120,32 @@ impl PipelineSpec {
         Ok(spec)
     }
 
-    /// The one Fenix ships: plan, build, review, findings back to build.
+    /// The ones Fenix ships (`pipelines/*.toml` beside this file).
+    pub fn built_in() -> Vec<PipelineSpec> {
+        BUILT_IN.iter().map(|(name, text)| PipelineSpec::parse(name, &text.replace("{answer}", FINDINGS_ANSWER)).expect("a built-in pipeline reads")).collect()
+    }
+
+    /// Plan, build, review, findings back to build.
     pub fn review() -> PipelineSpec {
-        PipelineSpec::parse("review", REVIEW).expect("the built-in pipeline reads")
+        Self::built_in().swap_remove(0)
     }
 }
 
-const REVIEW: &str = r#"
-title = "Plan, build, review"
+/// Fenix's own, in the order they're offered: name and file.
+const BUILT_IN: &[(&str, &str)] = &[
+    ("review", include_str!("pipelines/review.toml")),
+    ("fix", include_str!("pipelines/fix.toml")),
+    ("tdd", include_str!("pipelines/tdd.toml")),
+    ("refactor", include_str!("pipelines/refactor.toml")),
+    ("audit", include_str!("pipelines/audit.toml")),
+];
 
-[[steps]]
-name = "plan"
-mode = "plan"
-prompt = "Plan this change. Read what you need, but don't edit any files. Give the plan as numbered steps, each naming the files it touches.\n\n{input}"
-passes = "plan"
-gate = true
+/// What `{answer}` stands for in a built-in's prompt: how a review answers
+/// so that `findings_in` can read it. As it's written in a TOML string.
+const FINDINGS_ANSWER: &str = r#"Answer with one JSON block, in ```json fences: a list of findings, each {\"path\", \"line\", \"severity\": \"error\" | \"warning\" | \"note\", \"message\"}; an empty list when there's nothing to fix."#;
 
-[[steps]]
-name = "build"
-prompt = "Carry out this plan, then run the project's tests.\n\n{previous}"
-passes = "changes"
-
-[[steps]]
-name = "review"
-mode = "plan"
-prompt = "Review these changes against the plan. Don't edit any files. Answer with one JSON block, in ```json fences: a list of findings, each {\"path\", \"line\", \"severity\": \"error\" | \"warning\" | \"note\", \"message\"}; an empty list when there's nothing to fix.\n\nThe plan:\n{plan}\n\nThe changes:\n{previous}"
-findings = true
-on_findings = "build"
-max_rounds = 2
-"#;
+/// What a step that passes changes passes when it made none.
+pub const NO_CHANGES: &str = "(no changes)";
 
 /// How a step ended, as the editor read it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -204,6 +203,8 @@ pub struct Run {
     previous: String,
     /// The last review's findings.
     pub findings: Vec<Finding>,
+    /// The step is on another round, written to at its gate.
+    follow_up: bool,
 }
 
 /// The JSON block in an answer: the first ```json fence, else the first
@@ -246,7 +247,7 @@ fn findings_text(findings: &[Finding]) -> String {
 impl Run {
     /// A run of `spec` on what you wrote, and its first step.
     pub fn start(spec: PipelineSpec, input: &str) -> (Run, Next) {
-        let mut run = Run { spec, input: input.to_string(), state: State::Running(0), rounds: 0, passed: BTreeMap::new(), previous: String::new(), findings: Vec::new() };
+        let mut run = Run { spec, input: input.to_string(), state: State::Running(0), rounds: 0, passed: BTreeMap::new(), previous: String::new(), findings: Vec::new(), follow_up: false };
         let prompt = run.prompt_for(0);
         run.state = State::Running(0);
         (run, Next::Start { step: 0, prompt })
@@ -288,7 +289,13 @@ impl Run {
     /// The current step's turn ended.
     pub fn step_ended(&mut self, end: StepEnd) -> Next {
         let Some(i) = self.step() else { return Next::Stopped { why: "the pipeline isn't running".into() } };
+        let follow_up = std::mem::take(&mut self.follow_up);
         if end.stop != "end_turn" {
+            // Another round given up on: what the step had still stands.
+            if follow_up {
+                self.state = State::AtGate(i);
+                return Next::Gate { step: i, passing: self.previous.clone() };
+            }
             let why = format!("step {} ended: {}", self.spec.steps[i].name, end.stop);
             self.state = State::Stopped(why.clone());
             return Next::Stopped { why };
@@ -297,7 +304,7 @@ impl Run {
         let passing = match step.passes {
             Passes::Answer => end.answer.clone(),
             Passes::Plan => end.plan.clone().filter(|p| !p.trim().is_empty()).unwrap_or_else(|| end.answer.clone()),
-            Passes::Changes => if end.changes.trim().is_empty() { "(no changes)".to_string() } else { end.changes.clone() },
+            Passes::Changes => if end.changes.trim().is_empty() { NO_CHANGES.to_string() } else { end.changes.clone() },
             Passes::Transcript => end.transcript.clone(),
         };
         if step.findings {
@@ -318,14 +325,18 @@ impl Run {
                     }
                 }
                 self.state = State::Done;
-                return Next::Done { summary: format!("{} finding(s) left after {} round(s):\n{}", findings.len(), self.rounds, findings_text(&findings)) };
+                let left = if step.on_findings.is_some() { format!(" left after {} round(s)", self.rounds) } else { String::new() };
+                return Next::Done { summary: format!("{} finding(s){left}:\n{}", findings.len(), findings_text(&findings)) };
             }
             self.passed.insert(step.name.clone(), "(no findings)".into());
         } else {
             self.passed.insert(step.name.clone(), passing.clone());
         }
         self.previous = passing.clone();
-        if step.gate {
+        // A step meant to change things that didn't: the next has nothing
+        // to work on, so you say whether it's worth going on.
+        let nothing_done = step.passes == Passes::Changes && end.changes.trim().is_empty() && i + 1 < self.spec.steps.len();
+        if step.gate || nothing_done || follow_up {
             self.state = State::AtGate(i);
             return Next::Gate { step: i, passing };
         }
@@ -339,6 +350,15 @@ impl Run {
         }
         self.state = State::Running(i + 1);
         Next::Start { step: i + 1, prompt: self.prompt_for(i + 1) }
+    }
+
+    /// You wrote to the step at its gate: it's working again, and its end
+    /// brings the gate back.
+    pub fn gate_reopened(&mut self) {
+        if let State::AtGate(i) = self.state {
+            self.state = State::Running(i);
+            self.follow_up = true;
+        }
     }
 
     /// You answered at the gate: go on (with what's passed, as you edited
@@ -368,7 +388,7 @@ mod tests {
     use super::*;
 
     fn ended(answer: &str) -> StepEnd {
-        StepEnd { stop: "end_turn".into(), answer: answer.into(), ..Default::default() }
+        StepEnd { stop: "end_turn".into(), answer: answer.into(), changes: "+a".into(), ..Default::default() }
     }
 
     #[test]
@@ -378,6 +398,56 @@ mod tests {
         assert!(review.steps[0].is_read_only() && !review.steps[1].is_read_only());
         assert!(PipelineSpec::parse("x", "steps = []").unwrap_err().contains("no steps"));
         assert!(PipelineSpec::parse("x", "[[steps]]\nname = \"a\"\nprompt = \"p\"\non_findings = \"nope\"\n").unwrap_err().contains("isn't one of its steps"));
+    }
+
+    /// Run through as if everything went well: each step has its turn, each
+    /// gate is passed, and it ends. Only names that mean something in a
+    /// prompt, and only steps that have run by then.
+    #[test]
+    fn every_built_in_reads_runs_and_names_only_what_it_has() {
+        let specs = PipelineSpec::built_in();
+        assert_eq!(specs.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["review", "fix", "tdd", "refactor", "audit"]);
+        for spec in specs {
+            for (i, step) in spec.steps.iter().enumerate() {
+                let known: Vec<&str> = ["input", "previous"].into_iter().chain(spec.steps[..i].iter().map(|s| s.name.as_str())).collect();
+                for piece in step.prompt.split('{').skip(1) {
+                    let Some(word) = piece.split('}').next().filter(|w| !w.is_empty() && w.chars().all(|c| c.is_alphanumeric() || c == '_')) else { continue };
+                    assert!(known.contains(&word), "{}: {} names {{{word}}}", spec.name, step.name);
+                }
+                if step.findings {
+                    assert!(step.prompt.contains("```json") && step.is_read_only(), "{}: {}", spec.name, step.name);
+                }
+            }
+            let name = spec.name.clone();
+            let steps = spec.steps.len();
+            let (mut run, first) = Run::start(spec, "the task");
+            assert!(matches!(first, Next::Start { step: 0, .. }));
+            let mut next = run.step_ended(ended("```json\n[]\n```"));
+            for _ in 0..steps * 2 {
+                next = match next {
+                    Next::Gate { .. } => run.gate_answered(true, None),
+                    Next::Start { prompt, .. } => {
+                        assert!(prompt.contains("the task") || !prompt.contains("{input}"), "{name}");
+                        run.step_ended(ended("```json\n[]\n```"))
+                    }
+                    done => {
+                        assert!(matches!(done, Next::Done { .. }), "{name}: {done:?}");
+                        break;
+                    }
+                };
+            }
+            assert_eq!(run.state, State::Done, "{name}");
+        }
+    }
+
+    /// A review on its own has nowhere to send what it finds: it says.
+    #[test]
+    fn a_review_alone_reports_its_findings() {
+        let audit = PipelineSpec::built_in().into_iter().find(|s| s.name == "audit").unwrap();
+        let (mut run, _) = Run::start(audit, "");
+        let finding = "```json\n[{\"path\": \"a.rs\", \"line\": 3, \"severity\": \"error\", \"message\": \"off by one\"}]\n```";
+        let Next::Done { summary } = run.step_ended(ended(finding)) else { panic!() };
+        assert_eq!(summary, "1 finding(s):\n- a.rs:3: [error] off by one");
     }
 
     #[test]
@@ -399,18 +469,53 @@ mod tests {
         let (mut run, _) = Run::start(PipelineSpec::review(), "x");
         run.step_ended(ended("plan"));
         run.gate_answered(true, None);
-        let next = run.step_ended(StepEnd { changes: "+a".into(), ..ended("done") });
+        let next = run.step_ended(ended("done"));
+        assert!(matches!(next, Next::Gate { step: 1, .. }), "{next:?}");
+        let next = run.gate_answered(true, None);
         let Next::Start { step: 2, prompt } = next else { panic!("{next:?}") };
         assert!(prompt.contains("+a") && prompt.contains("The plan:\nplan"), "{prompt}");
         let finding = "```json\n[{\"path\": \"a.rs\", \"line\": 3, \"severity\": \"error\", \"message\": \"off by one\"}]\n```";
         let Next::Start { step: 1, prompt } = run.step_ended(ended(finding)) else { panic!() };
         assert!(prompt.contains("a.rs:3: [error] off by one"), "{prompt}");
-        run.step_ended(ended("fixed"));
+        assert!(matches!(run.step_ended(ended("fixed")), Next::Gate { step: 1, .. }), "build waits every round");
+        run.gate_answered(true, None);
         assert!(matches!(run.step_ended(ended(finding)), Next::Start { step: 1, .. }), "round two");
         run.step_ended(ended("fixed again"));
+        run.gate_answered(true, None);
         let Next::Done { summary } = run.step_ended(ended(finding)) else { panic!() };
         assert!(summary.contains("1 finding(s) left after 2 round(s)"), "{summary}");
         assert_eq!(run.state, State::Done);
+    }
+
+    #[test]
+    fn a_step_at_its_gate_takes_as_many_rounds_as_you_want() {
+        let (mut run, _) = Run::start(PipelineSpec::review(), "x");
+        run.step_ended(ended("plan one"));
+        run.gate_reopened();
+        assert_eq!(run.state, State::Running(0));
+        assert_eq!(run.step_ended(ended("plan two")), Next::Gate { step: 0, passing: "plan two".into() });
+        let Next::Start { step: 1, prompt } = run.gate_answered(true, None) else { panic!() };
+        assert!(prompt.contains("plan two") && !prompt.contains("plan one"), "{prompt}");
+        // Build: a second round's changes are what's passed, and one you
+        // cancel leaves the gate as it was.
+        run.step_ended(StepEnd { changes: "+one".into(), ..ended("built") });
+        run.gate_reopened();
+        assert_eq!(run.step_ended(StepEnd { changes: "+one\n+two".into(), ..ended("more") }), Next::Gate { step: 1, passing: "+one\n+two".into() });
+        run.gate_reopened();
+        assert_eq!(run.step_ended(StepEnd { stop: "cancelled".into(), ..Default::default() }), Next::Gate { step: 1, passing: "+one\n+two".into() });
+        let Next::Start { step: 2, prompt } = run.gate_answered(true, None) else { panic!() };
+        assert!(prompt.contains("+one\n+two"), "{prompt}");
+    }
+
+    #[test]
+    fn a_build_that_changed_nothing_waits_at_a_gate() {
+        let (mut run, _) = Run::start(PipelineSpec::review(), "x");
+        run.step_ended(ended("plan"));
+        run.gate_answered(true, None);
+        let next = run.step_ended(StepEnd { changes: String::new(), ..ended("I updated the plan") });
+        assert_eq!(next, Next::Gate { step: 1, passing: NO_CHANGES.to_string() });
+        assert_eq!(run.state, State::AtGate(1));
+        assert!(matches!(run.gate_answered(false, None), Next::Stopped { .. }), "stopped, not reviewed");
     }
 
     #[test]
@@ -419,6 +524,7 @@ mod tests {
         run.step_ended(ended("plan"));
         run.gate_answered(true, None);
         run.step_ended(ended("built"));
+        run.gate_answered(true, None);
         assert_eq!(run.step_ended(ended("Nothing to fix: ```json\n{\"findings\": []}\n```")), Next::Done { summary: "the review found nothing to fix".into() });
         let (mut run, _) = Run::start(PipelineSpec::review(), "x");
         assert!(matches!(run.step_ended(StepEnd { stop: "cancelled".into(), ..Default::default() }), Next::Stopped { .. }));
@@ -433,6 +539,7 @@ mod tests {
         run.step_ended(ended("plan"));
         run.gate_answered(true, None);
         run.step_ended(ended("built"));
+        run.gate_answered(true, None);
         assert!(matches!(run.step_ended(ended("Looks fine to me")), Next::Stopped { .. }));
     }
 

@@ -227,7 +227,12 @@ impl App {
                 Some(mode) => format!("to {agent} · {mode}"),
                 None => format!("to {agent}"),
             };
-            let send = if waiting { "waiting on you: y or n answers, here or in the thread" } else { "Ctrl-Enter sends (Enter in Normal), ↑ the last one" };
+            let at_gate = self.agents.shown(&self.pages).is_some_and(|t| self.pipeline_at_gate(&t));
+            let send = if at_gate {
+                "Ctrl-Enter sends another round; y in Normal goes on, n stops"
+            } else if waiting {
+                "waiting on you: y or n answers, here or in the thread"
+            } else { "Ctrl-Enter sends (Enter in Normal), ↑ the last one" };
             self.pane_titles.insert(pane, format!("{to}   ·   {send}"));
         }
     }

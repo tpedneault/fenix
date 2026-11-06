@@ -1,0 +1,22 @@
+title = "Plan, build, review"
+
+[[steps]]
+name = "plan"
+mode = "plan"
+prompt = "Plan this change. Read what you need, but don't edit any files. Give the plan as numbered steps, each naming the files it touches.\n\n{input}"
+passes = "plan"
+gate = true
+
+[[steps]]
+name = "build"
+prompt = "Carry out this plan, then run the project's tests.\n\n{previous}"
+passes = "changes"
+gate = true
+
+[[steps]]
+name = "review"
+mode = "plan"
+prompt = "Review these changes against the plan. Don't edit any files. {answer}\n\nThe plan:\n{plan}\n\nThe changes:\n{previous}"
+findings = true
+on_findings = "build"
+max_rounds = 2

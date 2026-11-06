@@ -70,6 +70,8 @@ pub(crate) enum Pick {
     Pipeline(fenix_acp::pipeline::PipelineSpec),
     /// A code extension you said may do what it asks: installed.
     InstallExtension(String),
+    /// A row of the form an agent asked to have answered.
+    Form(elicit::FormPick),
 }
 
 /// An agent's write over unsaved edits of yours, waiting for your
@@ -118,6 +120,8 @@ pub(crate) struct AgentHost {
     inbox: Arc<Mutex<VecDeque<(ConnId, u32, AcpEvent)>>>,
     /// A prompt held while `agents.save_before_prompt` asks.
     held: Option<(ThreadId, Vec<ContentBlock>)>,
+    /// The agent's form being answered, a field at a time.
+    pub(super) form: Option<elicit::FormFill>,
     /// Where `Effect::Listed` goes: a picker to import from.
     listing: bool,
     /// Files changed during a turn with nothing to compare them to.
@@ -198,6 +202,7 @@ impl AgentHost {
             next_guard: 1,
             inbox: Arc::new(Mutex::new(VecDeque::new())),
             held: None,
+            form: None,
             listing: false,
             unknown: HashMap::new(),
             turn_start: HashMap::new(),
@@ -814,6 +819,7 @@ impl App {
             Pick::Secret(name) => self.agents_secret_prompt(&name),
             Pick::Delete(thread) => self.agents_delete(&thread),
             Pick::AskConsent { ext, call, allow } => self.agents_ask_consent(&ext, call, allow),
+            Pick::Form(pick) => self.agents_form_picked(pick),
             Pick::Nothing => {}
         }
     }
@@ -1416,7 +1422,9 @@ impl App {
         }
         self.agents.dirty.insert(thread.clone());
         self.agents_refresh_marks();
-        Ok(Value::Null)
+        // An object, as ACP says: `null` reads as a failed write to a strict
+        // agent, though the file was written.
+        Ok(serde_json::json!({}))
     }
 
     // -----------------------------------------------------------------
@@ -1548,6 +1556,7 @@ mod review;
 mod terminals;
 pub(crate) mod threads;
 mod install;
+pub(crate) use elicit::FORM_PROMPT;
 pub(crate) use install::SECRET_PROMPT;
 mod answer;
 mod extensions;

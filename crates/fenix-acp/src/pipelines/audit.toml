@@ -1,0 +1,7 @@
+title = "Review what's changed"
+
+[[steps]]
+name = "review"
+mode = "plan"
+prompt = "Review what's changed in this project and isn't committed: see `git status` and `git diff`, and read what you need around it. Don't edit any files. {answer}\n\nWhat to look at, if anything in particular:\n{input}"
+findings = true

@@ -75,6 +75,11 @@ impl App {
             return false;
         }
         let Some(thread) = self.agents.shown(&self.pages) else { return false };
+        // At a pipeline's gate the prompt is for another round: `y` starting
+        // a sentence isn't "go on". From Normal mode it still is.
+        if self.vim.mode() == Mode::Insert && self.pipeline_at_gate(&thread) {
+            return false;
+        }
         let answer = self.agents.hub.view(&thread).and_then(|v| agent_page::answer_for(v.thread, crate::page::Key::Char(c)));
         match answer {
             Some(agent_page::Action::Permission { key, option }) => self.agents_answer(&thread, &key, Some(&option)),

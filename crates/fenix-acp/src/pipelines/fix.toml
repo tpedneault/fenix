@@ -1,0 +1,22 @@
+title = "Diagnose, fix, review"
+
+[[steps]]
+name = "diagnose"
+read_only = true
+prompt = "Find out why this happens. Reproduce it if you can, and read and run what helps, but change nothing: anything you edit is put back. Say what the cause is, with its file and line, how you know, and the smallest fix.\n\n{input}"
+passes = "answer"
+gate = true
+
+[[steps]]
+name = "fix"
+prompt = "Fix this, keeping to this problem. Add a test that fails without the fix, then run the project's tests.\n\nThe problem:\n{input}\n\n{previous}"
+passes = "changes"
+gate = true
+
+[[steps]]
+name = "review"
+mode = "plan"
+prompt = "Review this fix. Does it fix the cause and not just the symptom, and is there a test that fails without it? Don't edit any files. {answer}\n\nThe problem:\n{input}\n\nThe diagnosis:\n{diagnose}\n\nThe changes:\n{previous}"
+findings = true
+on_findings = "fix"
+max_rounds = 2

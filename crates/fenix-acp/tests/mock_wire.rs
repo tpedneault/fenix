@@ -647,7 +647,7 @@ fn fs_cue_reads_and_writes_through_the_client() {
         write["params"],
         json!({"sessionId": session, "path": file, "content": "in the edited\n"})
     );
-    client.answer(&write, json!(null));
+    client.answer(&write, json!({}));
     assert_eq!(client.response(id)["result"]["stopReason"], "end_turn");
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "on disk\n");
     let read = client

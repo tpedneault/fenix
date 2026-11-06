@@ -502,9 +502,6 @@ enum ComposePurpose {
     Code { ext: String, id: u64, what: String, verb: &'static str, allow_empty: bool },
     /// What a pipeline's gate passes on, edited before it goes (`e`).
     PipelineGate { run: u64 },
-    /// The form an agent asked to have filled in (`elicitation/create`),
-    /// for its card `key` in thread `thread`.
-    Elicitation { thread: String, key: String },
 }
 
 /// Where an extension's compose pane `what` is kept unsent.
@@ -567,7 +564,6 @@ impl ComposePurpose {
             },
             ComposePurpose::RebaseMessage { hash, .. } => (format!("New message for {}", &hash[..7.min(hash.len())]), "keep"),
             ComposePurpose::Code { what, verb, .. } => (what.clone(), *verb),
-            ComposePurpose::Elicitation { .. } => ("The agent asks".to_string(), "send it"),
             ComposePurpose::PipelineGate { .. } => ("What the pipeline passes on".to_string(), "go on (q stops)"),
         };
         format!("{what}  --  Esc then Enter to {verb}, q to cancel")
@@ -12927,12 +12923,6 @@ impl App {
             self.set_message("the pipeline stopped at its gate");
             return self.pipeline_gate_edited(run, None);
         }
-        if let ComposePurpose::Elicitation { thread, key } = &compose.purpose {
-            let (thread, key) = (thread.clone(), key.clone());
-            self.close_compose();
-            self.set_message("declined");
-            return self.agents_elicit_discarded(&thread, &key);
-        }
         self.close_compose();
         self.set_message("comment discarded");
     }
@@ -12949,14 +12939,6 @@ impl App {
             let run = *run;
             self.close_compose();
             self.pipeline_gate_edited(run, Some(body));
-            self.wake_caret();
-            return;
-        }
-        // An agent's form: checked against what it asked, and sent.
-        if let ComposePurpose::Elicitation { thread, key } = &purpose {
-            if self.agents_elicit_submit(thread, key, &body) {
-                self.close_compose();
-            }
             self.wake_caret();
             return;
         }

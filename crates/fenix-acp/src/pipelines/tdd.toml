@@ -1,0 +1,21 @@
+title = "Tests first, build, review"
+
+[[steps]]
+name = "tests"
+prompt = "Write the tests for this change, and only the tests. Run them, and make sure they fail for the right reason: the change isn't there yet.\n\n{input}"
+passes = "changes"
+gate = true
+
+[[steps]]
+name = "build"
+prompt = "Make these tests pass, then run the project's tests. Don't change or remove a test to do it: if one is wrong, say so and stop.\n\nWhat's wanted:\n{input}\n\n{previous}"
+passes = "changes"
+gate = true
+
+[[steps]]
+name = "review"
+mode = "plan"
+prompt = "Review these changes against what was wanted. Do the tests cover it, and were any weakened to pass? Don't edit any files. {answer}\n\nWhat was wanted:\n{input}\n\nThe changes:\n{previous}"
+findings = true
+on_findings = "build"
+max_rounds = 2
