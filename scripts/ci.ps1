@@ -2,7 +2,12 @@
 [CmdletBinding()]
 param(
     [ValidateSet('Workspace', 'Reliability')]
-    [string] $Suite = 'Workspace'
+    [string] $Suite = 'Workspace',
+    # Which gates run: all of them, or one half, so CI can run the halves
+    # as parallel jobs. Tests: the test suite. Lint: Clippy, then (for the
+    # workspace) the debug build of the executables.
+    [ValidateSet('All', 'Tests', 'Lint')]
+    [string] $Gates = 'All'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,7 +48,9 @@ try {
             $testArgs += @('-p', $package)
         }
     }
-    Invoke-Gate 'tests' 'cargo' $testArgs
+    if ($Gates -ne 'Lint') {
+        Invoke-Gate 'tests' 'cargo' $testArgs
+    }
     # Strict linting: the whole workspace on Windows; on Linux, the crates
     # its tests cover, which build without a display.
     $clippyArgs = @('clippy', '--locked', '--all-targets')
@@ -54,11 +61,13 @@ try {
             $clippyArgs += @('-p', $package)
         }
     }
-    Invoke-Gate 'clippy' 'cargo' ($clippyArgs + @('--', '-D', 'warnings'))
-    if ($Suite -eq 'Workspace') {
-        Invoke-Gate 'build' 'cargo' @('build', '--locked', '-p', 'fenix-gui', '-p', 'fenix-pdfium')
+    if ($Gates -ne 'Tests') {
+        Invoke-Gate 'clippy' 'cargo' ($clippyArgs + @('--', '-D', 'warnings'))
+        if ($Suite -eq 'Workspace') {
+            Invoke-Gate 'build' 'cargo' @('build', '--locked', '-p', 'fenix-gui', '-p', 'fenix-pdfium')
+        }
     }
-    Write-Host "All $Suite gates passed. Logs: $logRoot"
+    Write-Host "All $Suite gates ($Gates) passed. Logs: $logRoot"
 } finally {
     $results | ConvertTo-Json -Depth 4 -AsArray | Set-Content -LiteralPath (Join-Path $logRoot 'summary.json') -Encoding utf8
     Pop-Location

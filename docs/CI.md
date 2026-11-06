@@ -1,6 +1,8 @@
 # Continuous integration
 
-The `CI` workflow runs on pushes, pull requests, and manual dispatch. No secrets
+The `CI` workflow runs on pushes to branches, pull requests from forks
+(a branch of this repository's was already checked by its push), and
+manual dispatch. No secrets
 or live services are required. Actions are pinned to commit hashes and the token
 has read-only repository access. Dependency resolution uses `Cargo.lock` through
 `--locked`. The compiler follows Rust stable; each run records the exact compiler
@@ -25,6 +27,16 @@ environment. Rust subprocess fixtures are also marked ignored, but their parent
 tests explicitly execute them. Do not pass `--include-ignored` to this workflow:
 some fixtures intentionally sleep or produce unbounded output.
 
+## Speed
+
+The Windows gates run as two jobs at once: `Tests`, and `Lint` (Clippy,
+then the debug build). Both jobs and the Linux one cache the compiled
+dependencies (`Swatinem/rust-cache`); pushes write the cache, pull
+requests only read it, and a branch's first run reads master's. CI
+builds with line tables rather than full debug info
+(`CARGO_PROFILE_DEV_DEBUG`), without incremental artifacts, and links
+on Windows with `rust-lld`.
+
 ## Run locally
 
 Install Rust with Clippy, Git, PowerShell 7, and [Universal Ctags](https://ctags.io/)
@@ -35,6 +47,8 @@ Tools and a Windows SDK. From the repository root:
 pwsh -NoProfile -File ./scripts/ci.ps1 -Suite Workspace
 pwsh -NoProfile -File ./scripts/ci.ps1 -Suite Reliability
 ```
+
+`-Gates Tests` or `-Gates Lint` runs one half, as CI's jobs do.
 
 The script uses the active local Rust toolchain and returns failure if any gate
 fails. Each invocation gets a unique directory under `target/ci/`, with command

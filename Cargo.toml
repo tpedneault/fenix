@@ -14,3 +14,18 @@ publish = false
 [profile.release]
 lto = true
 codegen-units = 1
+
+# Dependencies are rarely stepped through: line tables keep their
+# backtraces readable, and drop most of the debug info a link has to
+# write. Fenix's own crates keep full debug info.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+# A release build in a few minutes rather than many, for trying a change
+# at full speed: `cargo build --profile release-fast`. Releases are built
+# with `release`.
+[profile.release-fast]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
