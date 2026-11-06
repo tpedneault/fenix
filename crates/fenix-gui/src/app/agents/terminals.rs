@@ -59,7 +59,7 @@ impl AgentTerminal {
 /// and runs in the platform's shell, as other ACP clients do: Devin sends
 /// those, and starting one as a program failed ("Failed to create
 /// terminal").
-fn agent_command(command: &str, args: &[String]) -> std::process::Command {
+pub(in crate::app) fn agent_command(command: &str, args: &[String]) -> std::process::Command {
     if let Some(program) = catalog::find_on_path(command) {
         let mut process = std::process::Command::new(program);
         process.args(args);

@@ -1204,6 +1204,43 @@ fn an_asks_options_are_read_and_checked() {
     assert_eq!(extensions::restrictive_mode(&modes).as_deref(), Some("plan"));
 }
 
+/// A command that fails sends its output back to the agent's step, and
+/// its rounds running out stops the run.
+#[test]
+fn a_pipelines_command_sends_a_failure_back_to_the_agent() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    let spec = "[[steps]]\nname = \"build\"\nprompt = \"{input} {previous}\"\n[[steps]]\nname = \"test\"\nrun = \"git no-such-command\"\non_failure = \"build\"\nmax_rounds = 1\n";
+    f.app.pipelines.armed = Some(fenix_acp::pipeline::PipelineSpec::parse("p", spec).unwrap());
+    f.type_prompt("first");
+    assert!(f.pump(|app| !app.pipelines.runs.is_empty() && app.pipelines.runs.values().all(|r| r.threads.len() == 2)), "back to build");
+    let second = f.app.pipelines.runs.values().next().unwrap().threads[1].clone();
+    let told = |app: &App| app.agents.hub.view(&second).is_some_and(|v| v.thread.transcript().contains("`git no-such-command` failed (exit 1)"));
+    assert!(f.pump(told), "{:?}", f.app.agents.hub.view(&second).unwrap().thread.transcript());
+    assert!(f.pump(|app| app.pipelines.runs.is_empty()), "out of rounds");
+    assert!(f.app.status_message.as_ref().is_some_and(|m| m.text.contains("still fails")));
+}
+
+/// A command that passes hands on what came before it, what it printed
+/// there for a later step to name.
+#[test]
+fn a_pipelines_command_that_passes_goes_on() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    let spec = "[[steps]]\nname = \"build\"\nprompt = \"{input}\"\n[[steps]]\nname = \"test\"\nrun = \"git --version\"\n[[steps]]\nname = \"review\"\nprompt = \"saw {test}\"\n";
+    f.app.pipelines.armed = Some(fenix_acp::pipeline::PipelineSpec::parse("p", spec).unwrap());
+    f.type_prompt("first");
+    assert!(f.pump(|app| app.pipelines.runs.values().any(|r| r.threads.len() == 2)), "on to review");
+    let (build, review) = {
+        let threads = &f.app.pipelines.runs.values().next().unwrap().threads;
+        (threads[0].clone(), threads[1].clone())
+    };
+    assert!(f.pump(|app| app.agents.hub.view(&review).is_some_and(|v| v.thread.transcript().contains("saw git version"))));
+    assert!(format!("{:?}", f.app.agents.hub.view(&build).unwrap().thread.entries).contains("`git --version` passed"));
+}
+
 /// A step at its gate is still open: writing to it takes the question back
 /// for another round, whose end asks again, and only `y` moves on.
 #[test]

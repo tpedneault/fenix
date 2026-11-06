@@ -24,7 +24,15 @@
 //! name = "build"
 //! prompt = "Carry out this plan.\n\n{previous}"
 //! passes = "changes"
+//!
+//! [[steps]]
+//! name = "test"
+//! run = "cargo test"
+//! on_failure = "build"
 //! ```
+//!
+//! A step with `run` is a command, no agent in it: its exit code says
+//! whether the run goes on, and what it printed goes back to `on_failure`.
 
 use std::collections::BTreeMap;
 
@@ -56,7 +64,16 @@ pub struct StepSpec {
     pub mode: Option<String>,
     /// `{input}` (what you wrote), `{previous}` (what the step before
     /// passed), `{<step>}` (what that step passed).
+    #[serde(default)]
     pub prompt: String,
+    /// A command to run in the project, in place of a prompt, taken as
+    /// written. It passes what came before it on untouched; `{<step>}` is
+    /// what it printed.
+    #[serde(default)]
+    pub run: Option<String>,
+    /// Where a failed command's output goes to be fixed.
+    #[serde(default)]
+    pub on_failure: Option<String>,
     /// Fenix's toolsets this step's agent is shown; empty for the usual.
     #[serde(default)]
     pub toolsets: Vec<String>,
@@ -71,7 +88,7 @@ pub struct StepSpec {
     pub findings: bool,
     #[serde(default)]
     pub on_findings: Option<String>,
-    /// How many times findings go back, at most.
+    /// How many times findings or a failure go back, at most.
     #[serde(default = "two")]
     pub max_rounds: u32,
     /// What it changes on disk is put back at its end. A step in a plan
@@ -114,6 +131,27 @@ impl PipelineSpec {
             if let Some(back) = &step.on_findings {
                 if !spec.steps.iter().any(|s| &s.name == back) {
                     return Err(format!("pipeline {name}: step {} sends findings to {back}, which isn't one of its steps", step.name));
+                }
+            }
+            let say = |what: &str| format!("pipeline {name}: step {} {what}", step.name);
+            let Some(command) = &step.run else {
+                if step.prompt.trim().is_empty() {
+                    return Err(say("needs a prompt, or a command in `run`"));
+                }
+                if step.on_failure.is_some() {
+                    return Err(say("has on_failure, which is for a step with `run`"));
+                }
+                continue;
+            };
+            if command.trim().is_empty() || !step.prompt.is_empty() {
+                return Err(say("needs either a prompt or a command in `run`, not both"));
+            }
+            if step.gate || step.findings || step.on_findings.is_some() || step.agent.is_some() || step.mode.is_some() || !step.toolsets.is_empty() {
+                return Err(say("is a command: gate, findings, on_findings, agent, mode and toolsets are for agents"));
+            }
+            if let Some(back) = &step.on_failure {
+                if !spec.steps.iter().any(|s| &s.name == back && s.run.is_none()) {
+                    return Err(say(&format!("sends failures to {back}, which isn't an agent's step")));
                 }
             }
         }
@@ -163,6 +201,8 @@ pub struct StepEnd {
 pub enum Next {
     /// Start step `step` with this prompt.
     Start { step: usize, prompt: String },
+    /// Run step `step`'s command, and say how it went (`command_ended`).
+    Run { step: usize, command: String },
     /// Ask you whether to go on, showing what step `step` passes.
     Gate { step: usize, passing: String },
     Done { summary: String },
@@ -205,6 +245,8 @@ pub struct Run {
     pub findings: Vec<Finding>,
     /// The step is on another round, written to at its gate.
     follow_up: bool,
+    /// Times each command step's failure went back.
+    failures: BTreeMap<String, u32>,
 }
 
 /// The JSON block in an answer: the first ```json fence, else the first
@@ -236,6 +278,18 @@ pub fn findings_in(answer: &str) -> Option<Vec<Finding>> {
     serde_json::from_value(list).ok()
 }
 
+/// How much of a command's output an agent is given: the end of it, where
+/// a failure is.
+const OUTPUT_KEPT: usize = 12_000;
+
+fn output_kept(output: &str) -> &str {
+    let mut start = output.len().saturating_sub(OUTPUT_KEPT);
+    while !output.is_char_boundary(start) {
+        start += 1;
+    }
+    &output[start..]
+}
+
 fn findings_text(findings: &[Finding]) -> String {
     findings
         .iter()
@@ -247,10 +301,23 @@ fn findings_text(findings: &[Finding]) -> String {
 impl Run {
     /// A run of `spec` on what you wrote, and its first step.
     pub fn start(spec: PipelineSpec, input: &str) -> (Run, Next) {
-        let mut run = Run { spec, input: input.to_string(), state: State::Running(0), rounds: 0, passed: BTreeMap::new(), previous: String::new(), findings: Vec::new(), follow_up: false };
-        let prompt = run.prompt_for(0);
-        run.state = State::Running(0);
-        (run, Next::Start { step: 0, prompt })
+        let mut run = Run { spec, input: input.to_string(), state: State::Running(0), rounds: 0, passed: BTreeMap::new(), previous: String::new(), findings: Vec::new(), follow_up: false, failures: BTreeMap::new() };
+        let next = run.begin(0);
+        (run, next)
+    }
+
+    /// Step `i` is next: its prompt to send, or its command to run.
+    fn begin(&mut self, i: usize) -> Next {
+        self.state = State::Running(i);
+        match self.spec.steps[i].run.clone() {
+            Some(command) => Next::Run { step: i, command },
+            None => Next::Start { step: i, prompt: self.prompt_for(i) },
+        }
+    }
+
+    /// The step under way is a command, so no agent's turn is its end.
+    pub fn at_command(&self) -> bool {
+        matches!(self.state, State::Running(i) if self.spec.steps[i].run.is_some())
     }
 
     /// Step `step`'s prompt, its template filled in.
@@ -320,8 +387,7 @@ impl Run {
                         self.rounds += 1;
                         self.previous = format!("A review found these; fix them, then run the tests again:\n{}", findings_text(&findings));
                         self.passed.insert(step.name.clone(), findings_text(&findings));
-                        self.state = State::Running(back);
-                        return Next::Start { step: back, prompt: self.prompt_for(back) };
+                        return self.begin(back);
                     }
                 }
                 self.state = State::Done;
@@ -348,8 +414,40 @@ impl Run {
             self.state = State::Done;
             return Next::Done { summary: if self.spec.steps[i].findings { "the review found nothing to fix".into() } else { "every step is done".into() } };
         }
-        self.state = State::Running(i + 1);
-        Next::Start { step: i + 1, prompt: self.prompt_for(i + 1) }
+        self.begin(i + 1)
+    }
+
+    /// The current step's command ended: `exit` is `None` when it was
+    /// stopped. Passed, what the step before gave goes on to the next.
+    /// Failed, its output goes to `on_failure` while rounds are left.
+    pub fn command_ended(&mut self, exit: Option<i32>, output: &str) -> Next {
+        let Some(i) = self.step() else { return Next::Stopped { why: "the pipeline isn't running".into() } };
+        let step = self.spec.steps[i].clone();
+        let command = step.run.clone().unwrap_or_default();
+        let kept = output_kept(output);
+        self.passed.insert(step.name.clone(), kept.to_string());
+        let failure = match exit {
+            Some(0) => return self.advance(i),
+            Some(code) => code,
+            None => {
+                let why = format!("step {} was stopped", step.name);
+                self.state = State::Stopped(why.clone());
+                return Next::Stopped { why };
+            }
+        };
+        let back = step.on_failure.as_ref().and_then(|b| self.spec.steps.iter().position(|s| &s.name == b));
+        let used = self.failures.entry(step.name.clone()).or_default();
+        let why = match back {
+            Some(back) if *used < step.max_rounds => {
+                *used += 1;
+                self.previous = format!("`{command}` failed (exit {failure}). Fix what's wrong; it runs again after you.\n\n{kept}");
+                return self.begin(back);
+            }
+            Some(_) => format!("`{command}` still fails (exit {failure}) after {used} round(s)"),
+            None => format!("`{command}` failed (exit {failure})"),
+        };
+        self.state = State::Stopped(why.clone());
+        Next::Stopped { why }
     }
 
     /// You wrote to the step at its gate: it's working again, and its end
@@ -438,6 +536,58 @@ mod tests {
             }
             assert_eq!(run.state, State::Done, "{name}");
         }
+    }
+
+    const TESTED: &str = "[[steps]]\nname = \"build\"\nprompt = \"{input} {previous}\"\npasses = \"changes\"\n[[steps]]\nname = \"test\"\nrun = \"cargo test\"\non_failure = \"build\"\nmax_rounds = 1\n[[steps]]\nname = \"review\"\nprompt = \"{previous} / {test}\"\n";
+
+    #[test]
+    fn a_command_that_passes_hands_on_what_came_before_it() {
+        let (mut run, _) = Run::start(PipelineSpec::parse("p", TESTED).unwrap(), "x");
+        assert_eq!(run.step_ended(ended("built")), Next::Run { step: 1, command: "cargo test".into() });
+        assert!(run.at_command());
+        let Next::Start { step: 2, prompt } = run.command_ended(Some(0), "ok") else { panic!() };
+        assert_eq!(prompt, "+a / ok", "the changes, and what it printed");
+        assert!(!run.at_command());
+    }
+
+    #[test]
+    fn a_failed_command_goes_back_until_its_rounds_run_out() {
+        let (mut run, _) = Run::start(PipelineSpec::parse("p", TESTED).unwrap(), "x");
+        run.step_ended(ended("built"));
+        let Next::Start { step: 0, prompt } = run.command_ended(Some(101), "assertion failed") else { panic!() };
+        assert!(prompt.contains("`cargo test` failed (exit 101)") && prompt.contains("assertion failed"), "{prompt}");
+        assert!(matches!(run.step_ended(ended("fixed")), Next::Run { step: 1, .. }), "run again");
+        let next = run.command_ended(Some(101), "assertion failed");
+        assert_eq!(next, Next::Stopped { why: "`cargo test` still fails (exit 101) after 1 round(s)".into() });
+    }
+
+    #[test]
+    fn a_command_with_nowhere_to_go_stops_and_one_stopped_stops() {
+        let spec = "[[steps]]\nname = \"test\"\nrun = \"make\"\n";
+        let (mut run, first) = Run::start(PipelineSpec::parse("p", spec).unwrap(), "x");
+        assert_eq!(first, Next::Run { step: 0, command: "make".into() }, "it can come first");
+        assert_eq!(run.command_ended(Some(2), ""), Next::Stopped { why: "`make` failed (exit 2)".into() });
+        let (mut run, _) = Run::start(PipelineSpec::parse("p", spec).unwrap(), "x");
+        assert_eq!(run.command_ended(None, ""), Next::Stopped { why: "step test was stopped".into() });
+        let (mut run, _) = Run::start(PipelineSpec::parse("p", spec).unwrap(), "x");
+        assert_eq!(run.command_ended(Some(0), ""), Next::Done { summary: "every step is done".into() });
+    }
+
+    #[test]
+    fn only_the_end_of_a_long_output_is_kept_on_a_character() {
+        let long = format!("é{}END", "x".repeat(OUTPUT_KEPT - 3));
+        let kept = output_kept(&long);
+        assert!(kept.ends_with("END") && kept.len() <= OUTPUT_KEPT, "{}", kept.len());
+    }
+
+    #[test]
+    fn a_step_is_an_agents_or_a_command_not_both_or_neither() {
+        let bad = |text: &str| PipelineSpec::parse("p", text).unwrap_err();
+        assert!(bad("[[steps]]\nname = \"a\"\n").contains("needs a prompt"));
+        assert!(bad("[[steps]]\nname = \"a\"\nprompt = \"p\"\nrun = \"r\"\n").contains("not both"));
+        assert!(bad("[[steps]]\nname = \"a\"\nrun = \"r\"\ngate = true\n").contains("is a command"));
+        assert!(bad("[[steps]]\nname = \"a\"\nprompt = \"p\"\non_failure = \"a\"\n").contains("step with `run`"));
+        assert!(bad("[[steps]]\nname = \"a\"\nrun = \"r\"\non_failure = \"a\"\n").contains("isn't an agent's step"));
     }
 
     /// A review on its own has nowhere to send what it finds: it says.

@@ -6,11 +6,14 @@
 //! you review the outcome once (`SPC a r`). A read-only step's changes
 //! are put back. A gate is a question in the step's thread: `y` goes on,
 //! `n` stops, and writing to the step is another round of it, the question
-//! taken back until that's done.
+//! taken back until that's done. A step with a command runs in the
+//! project on `fenix-tasks`' runner, off the event loop, and says how it
+//! went on the thread before it.
 
 use fenix_acp::hub::ThreadId;
 use fenix_acp::pipeline::{Next, PipelineSpec, Run, StepEnd};
 use fenix_acp::protocol::ContentBlock;
+use fenix_tasks::{OutputLine, TaskEvent, TaskOutcome, TaskRunner};
 use serde_json::json;
 
 use super::*;
@@ -27,6 +30,25 @@ pub(crate) struct Running {
     /// The mode a step's session was in before it was put in the step's:
     /// where a later step with no mode of its own goes back to.
     pub usual_mode: Option<String>,
+}
+
+/// What a command step's output is kept to, from its end.
+const COMMAND_KEPT: usize = 256 * 1024;
+/// Lines of a failed command shown on the thread.
+const COMMAND_SHOWN: usize = 12;
+
+/// A command step running.
+struct Command {
+    line: String,
+    runner: TaskRunner,
+    state: Arc<Mutex<CommandState>>,
+}
+
+#[derive(Default)]
+struct CommandState {
+    output: String,
+    /// It ended: its exit code, `None` when it was stopped.
+    ended: Option<Option<i32>>,
 }
 
 /// A step's thread, waiting for its session to send its prompt.
@@ -53,6 +75,8 @@ pub(crate) struct Pipelines {
     passing: HashMap<u64, String>,
     /// The steps of runs that ended, for `[s` / `]s` still.
     ended: Vec<Vec<ThreadId>>,
+    /// Commands running, by run.
+    commands: HashMap<u64, Command>,
 }
 
 fn gate_key(run: u64, step: usize) -> String {
@@ -93,7 +117,7 @@ impl App {
         if let Some(problem) = problems.first() {
             self.set_error(problem.clone());
         }
-        let candidates = specs.into_iter().map(|s| fenix_picker::Candidate::new(format!("{}   {}", s.title, s.steps.iter().map(|st| st.name.as_str()).collect::<Vec<_>>().join(" → ")), Pick::Pipeline(s))).collect();
+        let candidates = specs.into_iter().map(|s| fenix_picker::Candidate::new(format!("{}   {}", s.title, s.steps.iter().map(|st| st.run.as_ref().map_or_else(|| st.name.clone(), |run| format!("{} ({run})", st.name))).collect::<Vec<_>>().join(" → ")), Pick::Pipeline(s))).collect();
         self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -125,6 +149,7 @@ impl App {
     fn pipeline_do(&mut self, id: u64, next: Next) {
         match next {
             Next::Start { step, prompt } => self.pipeline_start_step(id, step, prompt),
+            Next::Run { command, .. } => self.pipeline_run_command(id, command),
             Next::Gate { step, passing } => {
                 let Some(thread) = self.pipelines.runs.get(&id).and_then(|r| r.threads.last().cloned()) else { return };
                 let name = self.pipelines.runs[&id].run.spec.steps[step].name.clone();
@@ -150,6 +175,9 @@ impl App {
     fn pipeline_finished(&mut self, id: u64, how: &str) {
         let Some(running) = self.pipelines.runs.remove(&id) else { return };
         self.pipelines.passing.remove(&id);
+        if let Some(command) = self.pipelines.commands.remove(&id) {
+            command.runner.cancel();
+        }
         self.pipelines.ended.push(running.threads.clone());
         for thread in &running.threads {
             self.pipelines.steps.remove(thread);
@@ -170,6 +198,103 @@ impl App {
             }
             self.agents_run(vec![fenix_acp::hub::Effect::Changed(thread)]);
         }
+    }
+
+    /// A word on the run's latest thread, or the status line before it
+    /// has one.
+    fn pipeline_say(&mut self, id: u64, kind: fenix_acp::thread::NoticeKind, text: String) {
+        match self.pipelines.runs.get(&id).and_then(|r| r.threads.last().cloned()) {
+            Some(thread) => {
+                if let Some(t) = self.agents.hub.thread_mut(&thread) {
+                    t.notice(kind, text);
+                }
+                self.agents_run(vec![fenix_acp::hub::Effect::Changed(thread)]);
+            }
+            None => self.set_message(text),
+        }
+    }
+
+    fn pipeline_run_command(&mut self, id: u64, line: String) {
+        let Some(running) = self.pipelines.runs.get(&id) else { return };
+        let root = running.root.clone();
+        let progress = running.run.progress();
+        let mut process = super::agents::agent_command(&line, &[]);
+        process.current_dir(&root);
+        let state = Arc::new(Mutex::new(CommandState::default()));
+        let sink = state.clone();
+        let runner = TaskRunner::spawn_command(process, move |event| {
+            let mut s = sink.lock().unwrap();
+            match event {
+                TaskEvent::Output(lines) => {
+                    for OutputLine { text, .. } in lines {
+                        s.output.push_str(&text);
+                        s.output.push('\n');
+                    }
+                    if s.output.len() > COMMAND_KEPT {
+                        let mut start = s.output.len() - COMMAND_KEPT;
+                        while !s.output.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        s.output.drain(..start);
+                    }
+                }
+                TaskEvent::Finished(outcome) => {
+                    s.ended = Some(match outcome {
+                        TaskOutcome::Exited { success: true, .. } => Some(0),
+                        TaskOutcome::Exited { code, .. } => Some(code.unwrap_or(-1)),
+                        TaskOutcome::Cancelled => None,
+                        TaskOutcome::Failed(why) => {
+                            s.output.push_str(&format!("{why}\n"));
+                            Some(127)
+                        }
+                    });
+                }
+            }
+            true
+        });
+        match runner {
+            Ok(runner) => {
+                self.pipelines.commands.insert(id, Command { line: line.clone(), runner, state });
+                self.pipeline_say(id, fenix_acp::thread::NoticeKind::Info, format!("Pipeline ({progress}): running `{line}`"));
+            }
+            Err(e) => self.pipeline_finished(id, &format!("stopped: couldn't run `{line}`: {e}")),
+        }
+    }
+
+    /// Commands that ended move their runs on. Whether any is running.
+    pub(super) fn pipeline_commands_tick(&mut self) -> bool {
+        let ended: Vec<u64> = self.pipelines.commands.iter().filter(|(_, c)| c.state.lock().unwrap().ended.is_some()).map(|(id, _)| *id).collect();
+        for id in ended {
+            let Some(command) = self.pipelines.commands.remove(&id) else { continue };
+            let (exit, output) = {
+                let s = command.state.lock().unwrap();
+                (s.ended.flatten(), s.output.clone())
+            };
+            use fenix_acp::thread::NoticeKind;
+            match exit {
+                Some(0) => self.pipeline_say(id, NoticeKind::Info, format!("`{}` passed", command.line)),
+                Some(code) => {
+                    let lines: Vec<&str> = output.lines().collect();
+                    let tail = lines[lines.len().saturating_sub(COMMAND_SHOWN)..].join("\n");
+                    self.pipeline_say(id, NoticeKind::Warning, format!("`{}` failed (exit {code}):\n{tail}", command.line));
+                }
+                None => {}
+            }
+            let Some(next) = self.pipelines.runs.get_mut(&id).map(|r| r.run.command_ended(exit, &output)) else { continue };
+            self.pipeline_do(id, next);
+        }
+        !self.pipelines.commands.is_empty()
+    }
+
+    /// `SPC a k` while a command step runs on the thread in front: true
+    /// when there was one to stop, which stops the run.
+    pub(super) fn pipeline_cancel_command(&mut self) -> bool {
+        let shown = self.agents.shown(&self.pages);
+        let found = self.pipelines.commands.iter().find(|(id, _)| self.pipelines.runs.get(*id).is_some_and(|r| r.threads.is_empty() || shown.as_ref().is_some_and(|t| r.threads.contains(t))));
+        let Some((_, command)) = found else { return false };
+        command.runner.cancel();
+        self.set_message(format!("stopping `{}`", command.line));
+        true
     }
 
     fn pipeline_start_step(&mut self, id: u64, step: usize, prompt: String) {
@@ -333,8 +458,9 @@ impl App {
     /// A step's turn ended: the run is told, and does what's next.
     pub(super) fn pipeline_turn_ended(&mut self, thread: &ThreadId, stop: &str) {
         let Some(&id) = self.pipelines.steps.get(thread) else { return };
-        // An earlier step's thread, written to: the run has moved on.
-        if self.pipelines.runs.get(&id).is_some_and(|r| r.threads.last() != Some(thread)) {
+        // An earlier step's thread, written to: the run has moved on. So
+        // has it past the last one, while a command runs.
+        if self.pipelines.runs.get(&id).is_some_and(|r| r.threads.last() != Some(thread) || r.run.at_command()) {
             return;
         }
         let Some(view) = self.agents.hub.view(thread) else { return };
