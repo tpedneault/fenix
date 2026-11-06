@@ -732,7 +732,16 @@ impl Turn {
             "fs/write_text_file",
             json!({"sessionId": self.session, "path": path, "content": text}),
         )?;
-        Ok(written.map(|result| result.map(|_| ())))
+        // As a strict agent reads it: `WriteTextFileResponse` is an object.
+        Ok(written.map(|result| {
+            result.and_then(|r| {
+                if r.is_object() {
+                    Ok(())
+                } else {
+                    Err(format!("invalid type: {r}, expected struct WriteTextFileResponse"))
+                }
+            })
+        }))
     }
 
     /// A request to the client: `Err(Interrupted)` if the turn was

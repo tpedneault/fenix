@@ -1204,32 +1204,104 @@ fn an_asks_options_are_read_and_checked() {
     assert_eq!(extensions::restrictive_mode(&modes).as_deref(), Some("plan"));
 }
 
-/// The agent asks for a form (`elicitation/create`): a card with its
-/// fields; `y` opens the form as TOML in a compose pane, and what's
-/// written there, checked against the form, is the answer.
+/// A step at its gate is still open: writing to it takes the question back
+/// for another round, whose end asks again, and only `y` moves on.
 #[test]
-fn an_agents_form_is_filled_in_and_sent() {
+fn a_pipelines_gate_takes_another_round() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    let spec = "[[steps]]\nname = \"build\"\nprompt = \"{input}\"\ngate = true\n[[steps]]\nname = \"review\"\nprompt = \"Look: {previous}\"\n";
+    f.app.pipelines.armed = Some(fenix_acp::pipeline::PipelineSpec::parse("p", spec).unwrap());
+    f.type_prompt("first");
+    let at_gate = |app: &App| app.agents.shown(&app.pages).is_some_and(|t| app.pipeline_at_gate(&t));
+    assert!(f.pump(at_gate), "the gate is up");
+    let build = f.thread();
+    // Typing in the prompt isn't answering: y starts a sentence.
+    f.app.agents_focus_composer();
+    assert_eq!(f.app.vim.mode(), Mode::Insert);
+    assert!(!f.app.agents_composer_key(KeyPress::char('y')));
+    assert!(at_gate(&f.app));
+    assert!(f.app.pane_titles.values().any(|t| t.contains("Ctrl-Enter sends another round")));
+    // Another round: the question goes, and comes back at its end.
+    f.type_prompt("second");
+    assert!(!at_gate(&f.app) || f.view().is_working(), "taken back as it goes");
+    assert!(f.pump(|app| !app.agents.hub.view(&build).unwrap().is_working() && app.pipeline_at_gate(&build)));
+    assert_eq!(f.thread(), build, "still the same step");
+    let answers = f.view().thread.entries.iter().filter(|e| matches!(e, Entry::User { .. })).count();
+    assert_eq!(answers, 2, "both rounds went to the one thread");
+    let cards: Vec<_> = f.view().thread.entries.iter().filter_map(|e| if let Entry::Permission(c) = e { Some(c.state.clone()) } else { None }).collect();
+    assert_eq!(cards, vec![PermissionState::Withdrawn, PermissionState::Pending], "one question open");
+    // y goes on, to the next step.
+    f.key(Key::Char('y'));
+    assert!(f.pump(|app| app.agents.shown(&app.pages).is_some_and(|t| t != build)), "on to review");
+}
+
+/// The agent asks for a form (`elicitation/create`): a card saying what
+/// it's asking, whole; `y` asks it a field at a time, and picking or
+/// typing is the answer.
+#[test]
+fn an_agents_form_is_answered_a_field_at_a_time() {
     let mut f = fixture("");
     f.app.agents_open_panel();
     assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
     f.type_prompt("elicit");
     assert!(f.pump(|app| app.agents.hub.status().waiting == 1), "the card is up");
     let text = f.page_text();
-    assert!(text.contains("The agent asks: How should I approach this?") && text.contains("Files to touch *") && text.contains("y fill it in"), "{text}");
+    assert!(text.contains("The agent asks: How should I approach this?") && text.contains("Files to touch *") && text.contains("· Quick") && text.contains("y answer"), "{text}");
+    assert!(!text.contains("the defaults"), "they don't make an answer: {text}");
     f.key(Key::Char('y'));
-    let compose = f.app.compose.as_ref().map(|c| c.buffer).expect("the form, in a compose pane");
-    let form = f.app.buffers.get(compose).unwrap().buffer.text();
-    assert!(form.contains("strategy = \"careful\"") && form.contains("files ="), "{form}");
-    // Sent as it opened: the required count is missing, and it stays.
-    f.app.compose_submit();
-    assert!(f.app.compose.is_some(), "not sent: files is required");
-    f.app.replace_buffer_from_disk(compose, &form.replace("files = ", "files = 4").replace("\"careful\"", "\"quick\""));
-    f.app.compose_submit();
-    assert!(f.app.compose.is_none());
+    // Strategy: starts on the default; move to Quick.
+    let Some(ActivePicker::Agents(state)) = &mut f.app.active_picker else { panic!("the choices") };
+    assert_eq!(state.selected().unwrap().label, "Strategy: Careful");
+    state.move_selection(1);
+    f.app.picker_confirm();
+    // Files to touch: typed, and checked.
+    for c in "99".chars() {
+        assert!(f.app.code_prompt_key(KeyPress::char(c)));
+    }
+    assert!(f.app.code_prompt_key(KeyPress::named(FenixNamedKey::Enter)));
+    assert!(f.app.code_prompt_text().is_some_and(|t| t.contains("99")), "out of range: asked again");
+    assert!(f.app.code_prompt_key(KeyPress::named(FenixNamedKey::Backspace)));
+    assert!(f.app.code_prompt_key(KeyPress::named(FenixNamedKey::Enter)));
+    // Run the tests: yes or no.
+    let Some(ActivePicker::Agents(state)) = &f.app.active_picker else { panic!("yes or no") };
+    assert_eq!(state.selected().unwrap().label, "Run the tests: yes");
+    f.app.picker_confirm();
     assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
     let said = f.view().thread.last_answer();
-    assert!(said.contains("\"strategy\":\"quick\"") && said.contains("\"files\":4"), "{said}");
+    assert!(said.contains("\"strategy\":\"quick\"") && said.contains("\"files\":9") && said.contains("\"tests\":true"), "{said}");
     assert!(f.page_text().contains("✓ How should I approach this? — accept: "));
+}
+
+/// What isn't on the list can be typed, and Esc leaves the card waiting.
+#[test]
+fn an_answer_of_your_own_goes_with_the_form() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    f.type_prompt("elicit");
+    assert!(f.pump(|app| app.agents.hub.status().waiting == 1));
+    f.key(Key::Char('y'));
+    f.app.picker_cancel();
+    assert_eq!(f.app.agents.hub.status().waiting, 1, "Esc: still waiting");
+    f.key(Key::Char('y'));
+    let Some(ActivePicker::Agents(state)) = &mut f.app.active_picker else { panic!("the choices") };
+    for c in "else".chars() {
+        state.push_char(c);
+    }
+    assert_eq!(state.selected().unwrap().label, "Strategy: something else…");
+    f.app.picker_confirm();
+    for c in "pair on it".chars() {
+        assert!(f.app.code_prompt_key(KeyPress::char(c)));
+    }
+    assert!(f.app.code_prompt_key(KeyPress::named(FenixNamedKey::Enter)));
+    assert!(f.app.code_prompt_key(KeyPress::char('2')));
+    assert!(f.app.code_prompt_key(KeyPress::named(FenixNamedKey::Enter)));
+    f.app.picker_confirm();
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
+    let said = f.view().thread.last_answer();
+    assert!(said.contains("\"strategy\":\"pair on it\"") && said.contains("\"files\":2"), "{said}");
 }
 
 /// `Y` takes the defaults, when they make a whole answer; `n` declines.

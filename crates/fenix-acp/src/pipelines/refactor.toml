@@ -1,0 +1,22 @@
+title = "Plan a refactor, carry it out, review"
+
+[[steps]]
+name = "plan"
+mode = "plan"
+prompt = "Plan this refactor, keeping behaviour exactly as it is. Read what you need, but don't edit any files. Give the plan as numbered steps, each naming the files it touches, and say which tests cover them and which are missing.\n\n{input}"
+passes = "plan"
+gate = true
+
+[[steps]]
+name = "refactor"
+prompt = "Carry out this refactor a step at a time, changing no behaviour, and run the project's tests after each step.\n\n{previous}"
+passes = "changes"
+gate = true
+
+[[steps]]
+name = "review"
+mode = "plan"
+prompt = "Review this refactor against the plan. Look for any change in behaviour, however small. Don't edit any files. {answer}\n\nThe plan:\n{plan}\n\nThe changes:\n{previous}"
+findings = true
+on_findings = "refactor"
+max_rounds = 2

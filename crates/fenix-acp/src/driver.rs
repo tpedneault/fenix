@@ -164,7 +164,7 @@ impl Driver {
                 if let Some(parent) = std::path::Path::new(&path).parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                std::fs::write(&path, content).map(|_| json!(null)).map_err(failed)
+                std::fs::write(&path, content).map(|_| json!({})).map_err(failed)
             }
             ClientRequest::RequestPermission { .. } | ClientRequest::Elicit { .. } => return None,
             ClientRequest::CreateTerminal { command, args, env, cwd, output_byte_limit, .. } => {
@@ -234,7 +234,7 @@ impl Driver {
                         let _ = c.kill();
                     }
                 }
-                Ok(json!(null))
+                Ok(json!({}))
             }
             ClientRequest::ReleaseTerminal { terminal_id, .. } => {
                 if let Some(t) = self.terminals.remove(&terminal_id) {
@@ -242,7 +242,7 @@ impl Driver {
                         let _ = c.kill();
                     }
                 }
-                Ok(json!(null))
+                Ok(json!({}))
             }
         })
     }

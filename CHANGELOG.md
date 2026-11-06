@@ -6,6 +6,38 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Four more built-in pipelines on `SPC a P`: *Diagnose, fix, review*, *Tests
+  first, build, review*, *Plan a refactor, carry it out, review*, and *Review
+  what's changed*, a review of what isn't committed.
+
+### Changed
+
+- An agent's form is answered a field at a time: a picker for its choices,
+  with *something else…* to type your own, and the prompt line for the rest.
+  The card shows the choices and each field's description, and offers `Y`
+  only when the defaults make an answer.
+
+- A pipeline's gate stays open: write to the step for another round, as many
+  as you want, and `y` hands off when you're happy. The built-in pipeline's
+  build now stops at a gate too, each time, so a run no longer finishes
+  unattended.
+- A pipeline's step that was to change files and changed none asks before
+  going on, rather than handing the next step nothing to review. A step with
+  no mode of its own doesn't stay in the plan mode a session started in.
+
+### Fixed
+
+- A turn on an earlier step's thread no longer counts as the current step
+  ending, which moved the pipeline on by mistake.
+- Every `fs/write_text_file` showed as failed on agents that read responses
+  strictly, Devin among them, though the file was written: Fenix answered
+  `null`, not the object ACP says. `terminal/kill` and `terminal/release` too.
+- An agent's form whose field names aren't plain words, `Data scope` say,
+  could never be sent: it was edited as TOML, and they aren't TOML keys.
+- Choices spelled `anyOf`, or titled with `enumNames`, are read as choices.
+
 ## [1.2.0] - 2026-11-06
 
 The notifications release: toasts and a history, folding, the mouse in

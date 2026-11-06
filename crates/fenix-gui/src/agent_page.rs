@@ -271,7 +271,7 @@ impl AgentPage {
 /// How a card asking for something (`elicitation/create`) was answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ElicitAnswer {
-    /// Fill the form in (or open the link): `y`.
+    /// Answer the form (or open the link): `y`.
     Fill,
     /// Send the form's defaults as they are: `Y`.
     Defaults,
@@ -642,8 +642,28 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                             }
                             g.put(y, left + 2, &fit(&what, inner), Role::Text);
                             y += 1;
+                            for line in f.description.iter().flat_map(|d| wrap(d, inner.saturating_sub(2))) {
+                                g.put(y, left + 4, &line, Role::Muted);
+                                y += 1;
+                            }
+                            if let fenix_acp::protocol::FieldKind::Choice { options, .. } = &f.kind {
+                                for (_, title) in options {
+                                    for (i, line) in wrap(title, inner.saturating_sub(4)).into_iter().enumerate() {
+                                        g.put(y, left + 4, &if i == 0 { format!("· {line}") } else { format!("  {line}") }, Role::Muted);
+                                        y += 1;
+                                    }
+                                }
+                            }
                         }
-                        let keys: &[(&str, &str)] = if url { &[("y", "open the link"), ("n", "decline"), ("x", "cancel")] } else { &[("y", "fill it in"), ("Y", "the defaults"), ("n", "decline"), ("x", "cancel")] };
+                        // `Y` only when the defaults make an answer.
+                        let defaults_do = !e.fields.is_empty() && e.problems(&e.defaults()).is_empty();
+                        let keys: &[(&str, &str)] = if url {
+                            &[("y", "open the link"), ("n", "decline"), ("x", "cancel")]
+                        } else if defaults_do {
+                            &[("y", "answer"), ("Y", "the defaults"), ("n", "decline"), ("x", "cancel")]
+                        } else {
+                            &[("y", "answer"), ("n", "decline"), ("x", "cancel")]
+                        };
                         let mut x = left + 2;
                         for (k, what) in keys {
                             x = g.put(y, x, k, Role::Accent) + 1;

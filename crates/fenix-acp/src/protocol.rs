@@ -951,9 +951,12 @@ pub struct Elicitation {
 fn choice_options(p: &Value) -> Option<(Vec<(String, String)>, bool)> {
     let titled = |list: &[Value]| list.iter().filter_map(|o| Some((str_of(o, "const")?, str_of(o, "title").or_else(|| str_of(o, "const")).unwrap_or_default()))).collect::<Vec<_>>();
     if let Some(list) = p.get("enum").and_then(Value::as_array) {
-        return Some((list.iter().filter_map(|v| v.as_str().map(|s| (s.to_string(), s.to_string()))).collect(), false));
+        // `enumNames`, the older way to title them, is by place.
+        let names = p.get("enumNames").and_then(Value::as_array);
+        let title = |i: usize, s: &str| names.and_then(|n| n.get(i)).and_then(Value::as_str).unwrap_or(s).to_string();
+        return Some((list.iter().filter_map(Value::as_str).enumerate().map(|(i, s)| (s.to_string(), title(i, s))).collect(), false));
     }
-    if let Some(list) = p.get("oneOf").and_then(Value::as_array) {
+    if let Some(list) = p.get("oneOf").or_else(|| p.get("anyOf")).and_then(Value::as_array) {
         return Some((titled(list), false));
     }
     if p.get("type").and_then(Value::as_str) == Some("array") {
@@ -961,7 +964,7 @@ fn choice_options(p: &Value) -> Option<(Vec<(String, String)>, bool)> {
         if let Some(list) = items.get("enum").and_then(Value::as_array) {
             return Some((list.iter().filter_map(|v| v.as_str().map(|s| (s.to_string(), s.to_string()))).collect(), true));
         }
-        if let Some(list) = items.get("anyOf").and_then(Value::as_array) {
+        if let Some(list) = items.get("anyOf").or_else(|| items.get("oneOf")).and_then(Value::as_array) {
             return Some((titled(list), true));
         }
     }
@@ -1010,42 +1013,47 @@ impl Elicitation {
         for f in &self.fields {
             let Some(v) = content.get(&f.name).filter(|v| !v.is_null()) else {
                 if f.required {
-                    out.push(format!("{} is required", f.name));
+                    out.push(format!("{} is required", f.title));
                 }
                 continue;
             };
-            match &f.kind {
-                FieldKind::Text { min, max, .. } => match v.as_str() {
-                    Some(s) => {
-                        let n = s.chars().count() as u64;
-                        if min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m) {
-                            out.push(format!("{}: {} characters, not within {}..{}", f.name, n, min.unwrap_or(0), max.map(|m| m.to_string()).unwrap_or_default()));
-                        }
-                    }
-                    None => out.push(format!("{} is text, in quotes", f.name)),
-                },
-                FieldKind::Number { integer, min, max } => match v.as_f64() {
-                    Some(x) if *integer && x.fract() != 0.0 => out.push(format!("{} is a whole number", f.name)),
-                    Some(x) if min.is_some_and(|m| x < m) || max.is_some_and(|m| x > m) => out.push(format!("{} is out of range", f.name)),
-                    Some(_) => {}
-                    None => out.push(format!("{} is a number", f.name)),
-                },
-                FieldKind::Boolean => {
-                    if !v.is_boolean() {
-                        out.push(format!("{} is true or false", f.name));
-                    }
-                }
-                FieldKind::Choice { options, multi } => {
-                    let ok = |s: &Value| s.as_str().is_some_and(|s| options.iter().any(|(value, _)| value == s));
-                    let fine = if *multi { v.as_array().is_some_and(|a| a.iter().all(ok)) } else { ok(v) };
-                    if !fine {
-                        out.push(format!("{} is {}: {}", f.name, if *multi { "a list of" } else { "one of" }, options.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>().join(", ")));
-                    }
-                }
-                FieldKind::Unknown(_) => {}
-            }
+            out.extend(f.problem(v));
         }
         out
+    }
+
+    /// The form's defaults, as an answer would carry them.
+    pub fn defaults(&self) -> Map<String, Value> {
+        self.fields.iter().filter_map(|f| Some((f.name.clone(), f.default.clone()?))).collect()
+    }
+}
+
+impl Field {
+    /// What's wrong with `v` as this field's answer, if anything.
+    pub fn problem(&self, v: &Value) -> Option<String> {
+        let name = &self.title;
+        match &self.kind {
+            FieldKind::Text { min, max, .. } => match v.as_str() {
+                Some(s) => {
+                    let n = s.chars().count() as u64;
+                    (min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m)).then(|| format!("{name}: {n} characters, not within {}..{}", min.unwrap_or(0), max.map(|m| m.to_string()).unwrap_or_default()))
+                }
+                None => Some(format!("{name} is text")),
+            },
+            FieldKind::Number { integer, min, max } => match v.as_f64() {
+                Some(x) if *integer && x.fract() != 0.0 => Some(format!("{name} is a whole number")),
+                Some(x) if min.is_some_and(|m| x < m) || max.is_some_and(|m| x > m) => Some(format!("{name} is out of range")),
+                Some(_) => None,
+                None => Some(format!("{name} is a number")),
+            },
+            FieldKind::Boolean => (!v.is_boolean()).then(|| format!("{name} is true or false")),
+            FieldKind::Choice { options, multi } => {
+                let ok = |s: &Value| s.as_str().is_some_and(|s| options.iter().any(|(value, _)| value == s));
+                let fine = if *multi { v.as_array().is_some_and(|a| a.iter().all(ok)) } else { ok(v) };
+                (!fine).then(|| format!("{name} is {}: {}", if *multi { "a list of" } else { "one of" }, options.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>().join(", ")))
+            }
+            FieldKind::Unknown(_) => None,
+        }
     }
 }
 
@@ -1100,6 +1108,25 @@ pub fn without_meta(v: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Each way a schema can spell a list of choices, and a field name
+    /// that's a phrase.
+    #[test]
+    fn choices_read_however_the_schema_spells_them() {
+        let form = |p: Value| Elicitation::parse(&json!({ "message": "?", "requestedSchema": { "type": "object", "properties": { "Data scope": p } } })).unwrap().fields.remove(0);
+        let options = |f: Field| match f.kind {
+            FieldKind::Choice { options, multi } => (options, multi),
+            other => panic!("{other:?}"),
+        };
+        let both = vec![("a".to_string(), "A".to_string()), ("b".to_string(), "B".to_string())];
+        let titled = json!([{ "const": "a", "title": "A" }, { "const": "b", "title": "B" }]);
+        assert_eq!(options(form(json!({ "type": "string", "enum": ["a", "b"], "enumNames": ["A", "B"] }))), (both.clone(), false));
+        assert_eq!(options(form(json!({ "type": "string", "oneOf": titled }))), (both.clone(), false));
+        assert_eq!(options(form(json!({ "type": "string", "anyOf": titled }))), (both.clone(), false));
+        assert_eq!(options(form(json!({ "type": "array", "items": { "oneOf": titled } }))), (both, true));
+        let f = form(json!({ "type": "string", "enum": ["a"] }));
+        assert_eq!((f.name.as_str(), f.title.as_str()), ("Data scope", "Data scope"));
+    }
 
     #[test]
     fn a_turns_usage_reads_as_claudes_and_codexs_adapters_send_it() {

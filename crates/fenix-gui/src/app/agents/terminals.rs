@@ -172,7 +172,7 @@ impl App {
                 if let Some(runner) = &t.runner {
                     runner.cancel();
                 }
-                Some(Ok(Value::Null))
+                Some(Ok(serde_json::json!({})))
             }
             ClientRequest::ReleaseTerminal { terminal_id, .. } => {
                 // Its output stays on the card; the process goes.
@@ -185,7 +185,7 @@ impl App {
                         s.exit = Some(ExitStatus { code: None, signal: Some("released".into()) });
                     }
                 }
-                Some(Ok(Value::Null))
+                Some(Ok(serde_json::json!({})))
             }
             _ => None,
         }

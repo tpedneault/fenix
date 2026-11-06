@@ -82,10 +82,11 @@ prompt goes to and in which mode.
 - A command's card says what ran (`$ rg -n session`) when the agent's
   own title for it doesn't ("Ran command").
 - When the agent asks you for something as it works -- a choice, a
-  few values, a sign-in -- its question is a card too. A form: `y` opens
-  it in a compose pane, each field a line with its default and what it
-  takes; send it (`Esc`, `Enter`) and it's checked first, `q` declines.
-  `Y` sends the defaults as they are, `n` declines, `x` cancels. A link
+  few values, a sign-in -- its question is a card too, with each field and
+  its choices. A form: `y` asks it a field at a time, a picker for the
+  choices, with *something else…* to type your own, and the prompt line for
+  the rest; `Esc` leaves the card waiting. `Y` sends the defaults, when they
+  make an answer, `n` declines, `x` cancels. A link
   (a sign-in elsewhere): `y` opens it in your browser; the card says when
   the agent hears it's done.
 - `SPC a m` picks the agent's mode (Claude Code's *plan*, *accept
@@ -184,16 +185,29 @@ their cost.
 
 ## Pipelines
 
-`SPC a P` runs your next prompt through several agents in turn. Fenix's
-own, *Plan, build, review*:
+`SPC a P` runs your next prompt through several agents in turn. Fenix
+comes with five:
+
+| Pipeline | Steps | For |
+|---|---|---|
+| *Plan, build, review* | plan → build → review | A change you want thought through first |
+| *Diagnose, fix, review* | diagnose → fix → review | A bug: the cause, then a fix with a test that fails without it |
+| *Tests first, build, review* | tests → build → review | Tests written and seen to fail, then code that passes them unchanged |
+| *Plan a refactor, carry it out, review* | plan → refactor → review | A change that keeps behaviour, reviewed for any that moved |
+| *Review what's changed* | review | What isn't committed yet, with no edits. What you write says what to look at |
+
+*Plan, build, review* goes like this, and the others the same way:
 
 1. **plan**: the default agent, in its plan mode, plans the change. You
    see the plan and say `y` to go on, `e` to edit what's passed on
-   first (in a compose pane), or `n` to stop.
-2. **build**: carries it out and runs the tests.
+   first (in a compose pane), or `n` to stop. Or write to it, for as many
+   rounds as it takes.
+2. **build**: carries it out and runs the tests, then waits at a gate the
+   same way: write to it to ask for more, `y` when you're happy. If it
+   changed nothing, the question says so.
 3. **review**: in plan mode again, reviews the changes against the plan
    and answers with findings. While there are any, they go back to
-   build, at most twice.
+   build, at most twice, and build waits for you each time.
 
 Each step is a thread of its own, shown in the dock as it runs; the
 dock's title says where the pipeline is (`plan ✓ → build ● → review`),
@@ -204,11 +218,15 @@ A step in a plan or read-only mode can't change files: anything it
 writes anyway is put back, and when its agent offers to leave its plan
 mode, the plan is what the step gives and the gate is what's asked, not
 the agent's own card. A run ends on the thread that has the changes.
-`SPC a k` stops the step, and the pipeline.
+`SPC a k` stops the step, and the pipeline; on a round you asked for at
+a gate, it stops that round and the gate comes back. In the prompt at a
+gate, typing is for another round: `y` and `n` answer from Normal mode or
+the thread.
 
 Pipelines are files: `pipelines/<name>.toml` in Fenix's settings folder,
 or a project's `.fenix/pipelines/<name>.toml`, with a step per
-`[[steps]]`:
+`[[steps]]`. One named like a built-in (`review`, `fix`, `tdd`, `refactor`,
+`audit`) replaces it:
 
 ```toml
 title = "Plan, then build"

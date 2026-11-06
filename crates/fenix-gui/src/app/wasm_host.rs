@@ -3692,6 +3692,11 @@ impl App {
                 let p = self.wasm.prompt.take().unwrap();
                 self.agents_secret_entered(&p.label, &p.input);
             }
+            // A field of an agent's form.
+            KeyCode::Named(FenixNamedKey::Enter) if prompt.ext == super::agents::FORM_PROMPT => {
+                let p = self.wasm.prompt.take().unwrap();
+                self.agents_form_typed(&p.input);
+            }
             KeyCode::Named(FenixNamedKey::Enter) => {
                 let p = self.wasm.prompt.take().unwrap();
                 self.code_deliver(&p.ext, Notice::Prompted((p.id, Some(p.input))));

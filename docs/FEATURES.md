@@ -1026,7 +1026,9 @@ the guide.
 - **Pipelines** (`SPC a P`): your next prompt through agents in turn --
   plan (you approve it), build, review, the review's findings sent back
   to be fixed -- each step a thread with its own agent, mode and
-  toolsets, their changes one review. Your own are `pipelines/*.toml`.
+  toolsets, their changes one review. Each stops at a gate you can keep
+  writing at, until you say go. Also a bug fix, tests first, a refactor,
+  and a review of what isn't committed. Your own are `pipelines/*.toml`.
 - **Agents** (`SPC a p`): a thread with another, a login, a restart.
   It also reads the ACP registry (`agents.registry`) and installs an
   agent from it into Fenix's data folder -- a download whose SHA-256 is
