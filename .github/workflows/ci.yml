@@ -39,10 +39,9 @@ jobs:
         # The tests in one job; Clippy and the debug build in another, at
         # the same time.
         gates: [Tests, Lint]
-    env:
-      # Rust's own lld links far faster than link.exe, and ships with the
-      # toolchain.
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
+    # Not rust-lld: it links tree-sitter's C wasm store against
+    # wasmtime's C API as if from a DLL ("locally defined symbol
+    # imported"), and loading a wasm grammar then crashes.
     defaults:
       run:
         shell: pwsh

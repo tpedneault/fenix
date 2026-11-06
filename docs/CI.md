@@ -34,8 +34,10 @@ then the debug build). Both jobs and the Linux one cache the compiled
 dependencies (`Swatinem/rust-cache`); pushes write the cache, pull
 requests only read it, and a branch's first run reads master's. CI
 builds with line tables rather than full debug info
-(`CARGO_PROFILE_DEV_DEBUG`), without incremental artifacts, and links
-on Windows with `rust-lld`.
+(`CARGO_PROFILE_DEV_DEBUG`) and without incremental artifacts. It
+links with `link.exe`, not `rust-lld`: lld links tree-sitter's C wasm
+store to wasmtime's C API as if from a DLL, and loading a wasm grammar
+then crashes.
 
 ## Run locally
 
