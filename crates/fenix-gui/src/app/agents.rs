@@ -639,6 +639,9 @@ impl App {
 
     /// `SPC a k`: cancels the turn (or takes back a queued prompt).
     pub(crate) fn agents_cancel(&mut self) {
+        if self.pipeline_cancel_command() {
+            return;
+        }
         let Some(thread) = self.agents.shown(&self.pages) else { return };
         let fx = self.agents.hub.cancel(&thread, Instant::now());
         self.agents_run(fx);
@@ -1442,6 +1445,7 @@ impl App {
         self.agents_asks_tick(now);
         let calls_next = self.agent_calls_tick(now);
         let running = self.agents_terminals_tick();
+        let running = self.pipeline_commands_tick() || running;
         self.agents_logins_tick();
         let status = self.agents.hub.status();
         // A turn waiting on your answer is still under way.
@@ -1558,6 +1562,7 @@ pub(crate) mod threads;
 mod install;
 pub(crate) use elicit::FORM_PROMPT;
 pub(crate) use install::SECRET_PROMPT;
+pub(super) use terminals::agent_command;
 mod answer;
 mod extensions;
 mod usage;

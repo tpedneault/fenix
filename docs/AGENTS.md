@@ -251,6 +251,34 @@ toolsets = ["core", "refactor", "tasks"]
 with a JSON list of findings, sent back to its `on_findings` step for up
 to `max_rounds` rounds.
 
+A step can be a command instead of a prompt, with no agent in it, so that
+the tests themselves say whether a build passed:
+
+```toml
+[[steps]]
+name = "build"
+prompt = "Carry out this plan:\n\n{previous}"
+passes = "changes"
+
+[[steps]]
+name = "test"
+run = "cargo test"            # in the project, in your shell if it isn't one program
+on_failure = "build"          # where its output goes to be fixed
+max_rounds = 3                # how many times, at most (2 if left out)
+
+[[steps]]
+name = "review"
+prompt = "Review these changes:\n\n{previous}"
+```
+
+It runs in the project as you, as written: no `{input}` goes into it. A
+command that exits 0 hands what came before it to the next step, and its
+output is `{test}`, by its name. One that fails sends the end of its output
+back to `on_failure`, then runs again; with no `on_failure`, or its rounds
+used up, the pipeline stops. The thread before it says how it went, and
+`SPC a k` stops it. The `SPC a P` list shows each step's command, so you
+see what a project's pipeline runs before you pick it.
+
 ## Shortcuts
 
 - `SPC a d` asks the agent to fix the problem on the cursor's line.

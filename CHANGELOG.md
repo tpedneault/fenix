@@ -8,6 +8,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- A pipeline's step can be a command: `run = "cargo test"`, with no agent in
+  it. It passing moves the run on, and `on_failure` sends its output back to
+  an agent's step to be fixed, for `max_rounds` rounds.
 - Four more built-in pipelines on `SPC a P`: *Diagnose, fix, review*, *Tests
   first, build, review*, *Plan a refactor, carry it out, review*, and *Review
   what's changed*, a review of what isn't committed.
