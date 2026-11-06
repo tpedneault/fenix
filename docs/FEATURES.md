@@ -96,6 +96,14 @@ its extension. The rest is built into Fenix.
   reindent by element depth; `SPC c v` checks well-formedness and jumps
   to the first error (saving a malformed XML file also says so); `SPC c
   y` copies the element's XPath (`/project/dependencies/dependency[2]`).
+- **Folding**, as Notepad++ has it and Vim's keys do it: a column in the
+  gutter marks where a fold starts (`▾`) and where it's closed (`▸`),
+  and a click on it opens or closes it; a closed fold shows its first
+  line and how many it hides (`⋯ 12 lines`). `za`, `zo`/`zO`, `zc`/`zC`,
+  `zR`/`zM`, `zr`/`zm` (a level at a time), `zj`/`zk` and `zx` work as in
+  Vim. Folds come from the syntax tree (a grammar's `folds.scm`), or from
+  the indentation in a file with none; they're kept with the session.
+  `editor.fold_markers` turns the column off.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
   YAML, Python, JavaScript/TypeScript/TSX, C, C++, C#, Go, Java, Lua, SQL,
   HTML, CSS, Bash, Tcl, Dockerfile/Containerfile, Batch (`.bat`/`.cmd`),

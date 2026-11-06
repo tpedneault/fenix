@@ -6,7 +6,7 @@ use fenix_keymap::{KeyCode, KeyPress, Matcher, Mods, NamedKey, Step};
 
 use crate::bracket;
 use crate::indent;
-use crate::keymaps::{self, CaseChange, InsertEntry, PendingTarget, ScrollTarget, VimAction, VisualAction};
+use crate::keymaps::{self, CaseChange, FoldCommand, InsertEntry, PendingTarget, ScrollTarget, VimAction, VisualAction};
 use crate::keynotation;
 use crate::mode::{Mode, VisualKind};
 use crate::motion::{self, Motion};
@@ -142,6 +142,9 @@ pub enum VimEvent {
     /// cursor's line lands at `target`. Host-resolved since only it
     /// knows pane geometry (visible-line count).
     ScrollWindow(ScrollTarget),
+    /// `za`, `zo`, `zc`, `zR`, `zM`, `zr`, `zm`, `zj`, `zk`... -- the host's
+    /// folds.
+    Fold(FoldCommand),
     /// `.` -- asks the host to replay whatever it last recorded as a
     /// repeatable change. The host owns that capture (raw keystrokes
     /// since the last idle point that produced a real edit), the same
@@ -411,6 +414,8 @@ pub struct VimState {
     /// `VimEvent::ScrollWindow` -- same drain-chain shape as
     /// `pending_jump`.
     pending_scroll: Option<ScrollTarget>,
+    /// A `z` fold command, for the host (`VimEvent::Fold`).
+    pending_fold: Option<FoldCommand>,
     /// Set by `.`; consumed by `handle_key` and turned into `VimEvent::
     /// RepeatLastChange` -- same drain-chain shape as `pending_scroll`,
     /// just with no payload to carry.
@@ -553,6 +558,7 @@ impl VimState {
             pending_mark_set: None,
             pending_mark_jump: None,
             pending_scroll: None,
+            pending_fold: None,
             pending_repeat_last_change: false,
             pending_surround: None,
             command_line: String::new(),
@@ -1014,6 +1020,7 @@ impl VimState {
         let macro_stop = self.pending_macro_stop.take();
         let macro_play = self.pending_macro_play.take();
         let scroll = self.pending_scroll.take();
+        let fold = self.pending_fold.take();
         let repeat_last_change = std::mem::take(&mut self.pending_repeat_last_change);
         let comment_lines = self.pending_comment_lines.take();
         let lsp_request = self.pending_lsp_request.take();
@@ -1039,6 +1046,7 @@ impl VimState {
             .or_else(|| macro_stop.map(VimEvent::MacroRecordStop))
             .or_else(|| macro_play.map(|(register, count)| VimEvent::MacroPlay { register, count }))
             .or_else(|| scroll.map(VimEvent::ScrollWindow))
+            .or_else(|| fold.map(VimEvent::Fold))
             .or_else(|| repeat_last_change.then_some(VimEvent::RepeatLastChange))
             .or_else(|| comment_lines.map(|(start_line, end_line)| VimEvent::ToggleComment { start_line, end_line }))
             .or_else(|| lsp_request.map(VimEvent::RequestLsp))
@@ -1992,6 +2000,7 @@ impl VimState {
             VimAction::MarkSetPrompt => self.pending_mark = Some(PendingMark::Set),
             VimAction::MarkJumpPrompt { linewise } => self.pending_mark = Some(PendingMark::Jump { linewise }),
             VimAction::ScrollWindow(target) => self.pending_scroll = Some(target),
+            VimAction::Fold(command) => self.pending_fold = Some(command),
             VimAction::IncrementNumber { delta } => self.increment_number(buffer, cursor, delta * count as i64),
             // No buffer mutation here -- replay is host-driven (mirrors
             // `VimEvent::MacroPlay`), since only the host owns the raw-
@@ -4943,6 +4952,10 @@ two
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('t')), VimEvent::ScrollWindow(keymaps::ScrollTarget::Top));
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('b')), VimEvent::ScrollWindow(keymaps::ScrollTarget::Bottom));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('a')), VimEvent::Fold(FoldCommand::Toggle));
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
+        assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('M')), VimEvent::Fold(FoldCommand::CloseAll));
     }
 
     #[test]

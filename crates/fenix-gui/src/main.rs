@@ -58,6 +58,7 @@ mod lsp;
 mod markdown;
 mod mcp;
 mod motion;
+mod folds;
 mod notify;
 mod notifications_page;
 mod merge_view;

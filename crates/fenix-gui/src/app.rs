@@ -4960,6 +4960,9 @@ pub struct App {
     /// row list is derived from the current syntax tree every frame, so an
     /// edit can never leave stale byte or character offsets behind.
     code_folds: HashMap<BufferId, HashSet<usize>>,
+    /// Each buffer's fold level (`zm`, `zr`): folds this deep or more are
+    /// closed. None: every one open.
+    fold_levels: HashMap<BufferId, usize>,
     /// Notifications: the toasts showing and the history (`notify`).
     notifications: crate::notify::Center,
     /// Where each toast was drawn last frame, for clicks.
@@ -5899,6 +5902,7 @@ impl App {
             chrome_git: None,
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
+            fold_levels: HashMap::new(),
             notifications: crate::notify::Center::new(),
             toast_rects: Vec::new(),
             notification_rates: HashMap::new(),
@@ -16628,6 +16632,7 @@ impl App {
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::Message(msg) => self.set_message(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),
+            VimEvent::Fold(command) => self.fold_command(command),
             VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::Pulse(range) => {
@@ -17541,7 +17546,7 @@ impl App {
         if self.line_number_mode == LineNumberMode::Off {
             return blame;
         }
-        ob.buffer.visual_line_count().max(1).to_string().len() + 1 + blame
+        ob.buffer.visual_line_count().max(1).to_string().len() + 1 + blame + usize::from(self.fold_column(ob))
     }
 
     /// Rich-text spans for one pane's content area covering `rows` screen
@@ -17625,6 +17630,9 @@ impl App {
         let theme = self.theme;
         let visual_lines = ob.buffer.visual_line_count();
         let mut spans = Vec::new();
+        // The fold markers' column: ▾ on a fold's first line, ▸ when it's
+        // closed.
+        let fold_marks = if dashboard_pad.is_none() && gutter_chars > 0 { self.fold_marks(ob) } else { None };
         for r in 0..rows {
             let buffer_line = render_base_line + r;
             let has_line = buffer_line < visual_lines;
@@ -17640,17 +17648,30 @@ impl App {
                 }
                 let numbers = gutter_chars - blame;
                 if numbers > 0 {
+                    let marker_cells = usize::from(fold_marks.is_some());
                     let gutter = if has_line {
                         let n = match self.line_number_mode {
                             LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
                             _ => buffer_line + 1,
                         };
-                        format!("{:>width$} ", n, width = numbers - 1)
+                        format!("{:>width$}", n, width = numbers.saturating_sub(1 + marker_cells))
                     } else {
-                        format!("{:<width$}", "~", width = numbers)
+                        format!("{:<width$}", "~", width = numbers.saturating_sub(marker_cells))
                     };
                     let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
                     spans.push((gutter, color));
+                    if let Some((starts, closed)) = &fold_marks {
+                        let marker = match (has_line && starts.contains_key(&buffer_line), closed.contains(&buffer_line)) {
+                            (true, true) => "▸",
+                            (true, false) => "▾",
+                            _ => " ",
+                        };
+                        let marker_color = if closed.contains(&buffer_line) { rgba_to_glyphon(theme.caret) } else { theme.gutter_fg };
+                        spans.push((marker.to_string(), marker_color));
+                    }
+                    if has_line {
+                        spans.push((" ".to_string(), color));
+                    }
                 }
             } else if !has_line {
                 spans.push(("~".to_string(), theme.gutter_fg));
@@ -18944,6 +18965,14 @@ impl App {
                     if self.ruler_click(id, rect, pos) {
                         self.wake_caret();
                         return;
+                    }
+                    let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
+                    let content = pane_content_rect(rect, line_height, self.pane_has_breadcrumb(id));
+                    if pos.1 >= content.y && self.explorer_in_pane(id).is_none() {
+                        let (row, col) = self.cell_at(pos, (content.x, content.y), 0);
+                        if self.fold_marker_click(id, row, col) {
+                            return;
+                        }
                     }
                     // A listing's row, chevron or breadcrumb.
                     if let Some(target) = self.explorer_in_pane(id) {

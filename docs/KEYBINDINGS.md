@@ -270,6 +270,13 @@ the other way round after `\v`.
 | `SPC c o` | Fuzzy-find a Markdown heading, or an XML element, and jump to it |
 | `SPC c v` | Check the current XML buffer is well-formed; jump to the first error |
 | `SPC c y` | Copy the XPath of the XML element under the cursor |
+| `SPC c z`, `za` | Open or close the fold the cursor is in |
+| `zo` / `zO`, `zc` / `zC` | Open / close the fold (and, capitals, every one inside it) |
+| `zR` / `zM` | Open / close every fold in the buffer |
+| `zr` / `zm` | One fold level more open / closed |
+| `zj` / `zk` | To the start of the next fold / the end of the one before |
+| `zx`, `zE` | Open every fold and forget them |
+| A click on `▾` / `▸` in the gutter | Close / open that fold |
 | `SPC m` | The mode menu -- what's in it depends on the focused buffer (below) |
 | `SPC m` (PDF) | The reader's commands: pages, zoom, outline, search, the shelf |
 | `SPC m i` (Tcl) | Insert a telecommand from the MIB (`SPC k i`) (the MIB extension) |

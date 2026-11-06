@@ -19,7 +19,7 @@ mod test_util;
 pub use bracket::find_match as find_matching_bracket;
 pub use charclass::DEFAULT_ISKEYWORD_EXTRA;
 pub use indent::{toggle_checkbox, DEFAULT_INDENT_WIDTH};
-pub use keymaps::{InsertEntry, ScrollTarget, VimAction};
+pub use keymaps::{FoldCommand, InsertEntry, ScrollTarget, VimAction};
 pub use mode::{Mode, VisualKind};
 pub use motion::Motion;
 pub use operator::Operator;

@@ -347,7 +347,8 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         // Editor
         s("editor.indent_width", Editor, "Indent width", Kind::Int { min: 1, max: 16 }, "Spaces a Tab or >> inserts; Fenix always indents with spaces.", field!(indent_width, usize_get, usize_set)).default("4").project(),
         s("editor.tab_width", Editor, "Tab width", Kind::Int { min: 1, max: 16 }, "Columns a tab character already in a file takes up.", field!(tab_width, usize_get, usize_set)).default("8").project(),
-        s("editor.iskeyword_extra", Editor, "Word characters", Kind::Text, "Characters besides letters, digits and _ that count as part of a word, for w, * and completion.", field!(iskeyword_extra, text_get, text_set)).default("none extra").project(),
+Setting::stored("editor.fold_markers", Editor, "Fold markers", Kind::Bool, "A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does.").with_default("on"),
+                s("editor.iskeyword_extra", Editor, "Word characters", Kind::Text, "Characters besides letters, digits and _ that count as part of a word, for w, * and completion.", field!(iskeyword_extra, text_get, text_set)).default("none extra").project(),
         // Appearance
         s("editor.theme", Appearance, "Theme", Kind::Theme, "The colour theme; h and l preview each one.", field!(theme, text_get, text_set)).default("Orbit Dark"),
         s("editor.font_family", Appearance, "Font", Kind::Font, "A monospace font installed on this machine; Enter lists them to pick from, h and l step through them.", field!(font_family, text_get, text_set)).default("the system's monospace font"),

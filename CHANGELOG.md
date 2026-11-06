@@ -19,6 +19,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Extension API 1.3: `notify-with` and `notify-dismiss`.
 - `fenix --notify` and the control channel's `fenix/notify`: a
   notification from a script or a tool.
+- Folding as Notepad++ has it: fold markers in the gutter to click,
+  Vim's `za zo zc zO zC zR zM zr zm zj zk zx`, `⋯ N lines` on a closed
+  fold, folds by indentation where there's no syntax tree, and folds kept
+  with the session (`editor.fold_markers`).
 - Each workspace keeps its own agent thread: the dock follows you and
   shows the thread of the workspace you're in, while the others work in
   the background; `SPC a T` lists every thread at work, anywhere.
