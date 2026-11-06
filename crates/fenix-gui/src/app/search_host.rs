@@ -60,6 +60,9 @@ pub(super) struct SearchHost {
     pub(super) due: Option<(BufferId, Instant)>,
     /// The page whose selection is waiting to be shown, and when.
     show_due: Option<(BufferId, Instant)>,
+    /// The pane a match was just shown in, to scroll to it once it's
+    /// known how many lines that pane fits.
+    reveal: Option<fenix_window::WindowId>,
     cancel: Option<Arc<AtomicBool>>,
     generation: u64,
     started: Option<Instant>,
@@ -512,9 +515,28 @@ impl App {
         if focus {
             self.record_jump(from);
         } else if let Some(pane) = self.pane_showing(id) {
+            self.search.reveal = Some(self.focused_pane_id());
             self.windows_mut().focus(pane);
         }
         self.wake_caret();
+    }
+
+    /// Scrolls `pane` to its cursor, if it's showing a match the Search
+    /// page kept the focus from: only the focused pane follows its own.
+    pub(super) fn search_reveal(&mut self, pane: fenix_window::WindowId, visible: usize) {
+        if self.search.reveal != Some(pane) {
+            return;
+        }
+        self.search.reveal = None;
+        let Some(&buffer) = self.windows().content(pane) else { return };
+        let Some(ob) = self.buffers.get(buffer) else { return };
+        let state = *self.pane_state(pane);
+        let line = ob.buffer.line_col(&state.cursor).0;
+        let row = self.pane_display_lines(pane, buffer).iter().position(|&r| r == line).unwrap_or(line);
+        let scroll = scroll_to_include(state.scroll_line, row, visible);
+        let state = self.pane_state_mut(pane);
+        state.scroll_line = scroll;
+        state.rendered_scroll = scroll as f32;
     }
 
     /// `q`: the page closes; what it had stays for `SPC s .`.
@@ -806,6 +828,27 @@ mod tests {
         let (path, line, col) = app.search_page(id).unwrap().selected().unwrap();
         app.search_action(id, SearchAction::Open { path, line, col });
         assert!(app.search.show_due.is_none());
+    }
+
+    /// The preview scrolls to the match though the page keeps the focus.
+    #[test]
+    fn a_match_shown_beside_the_page_is_scrolled_to() {
+        let dir = TempDir::new("search_host_reveal");
+        dir.write("a.rs", &format!("{}helper\n", "x\n".repeat(200)));
+        let mut app = app_in(&dir);
+        app.search_open(SearchOpen::Project);
+        let id = app.search_page_id().unwrap();
+        type_into(&mut app, id, "helper");
+        app.search_fire_due(Instant::now() + DEBOUNCE * 2);
+        let (path, line, col) = app.search_page(id).unwrap().selected().unwrap();
+        app.search_go_to(id, &path, line, col, false);
+        let pane = app.search.reveal.expect("a pane to scroll");
+        assert_ne!(pane, app.focused_pane_id());
+        app.search_reveal(pane, 20);
+        let state = app.pane_state(pane);
+        assert!((181..=200).contains(&state.scroll_line), "{}", state.scroll_line);
+        assert_eq!(state.rendered_scroll, state.scroll_line as f32);
+        assert!(app.search.reveal.is_none());
     }
 
     /// `SPC s s` searches the file you're in, on the page, without

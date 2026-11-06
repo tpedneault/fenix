@@ -19116,6 +19116,8 @@ impl App {
         let max_scroll = total.saturating_sub(visible);
         let state = self.pane_state_mut(pane);
         state.scroll_line = state.scroll_line.saturating_add_signed(-lines).min(max_scroll);
+        // What's drawn: only the focused pane's follows `scroll_line`.
+        state.rendered_scroll = state.scroll_line as f32;
     }
 
     /// Wheel-scrolls the focused pane by moving its cursor/selection --
@@ -19774,6 +19776,9 @@ impl App {
             if !is_focused {
                 // A side-by-side pane scrolls with the one beside it.
                 self.side_by_side_follow(pane, pane_visible_lines);
+                // The Search page's preview, which never had the focus
+                // long enough to follow its cursor.
+                self.search_reveal(pane, pane_visible_lines);
             }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);

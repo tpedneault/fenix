@@ -6,6 +6,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-06
+
+The notifications release: toasts and a history, folding, the mouse in
+the editor, a thread per workspace and what agents use; extension API
+1.3; and the fixes since 1.1.0.
+
 ### Added
 
 - The mouse in the editor: a click puts the cursor on the glyph clicked,
@@ -59,6 +65,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A launch that reached a Fenix on its way out, one just killed say, ran
   without a control channel for as long as it lived, so `fenix file.rs` and
   `fenix --notify` couldn't reach it. It now waits and takes the channel.
+- The wheel over a pane without the focus scrolls what's drawn at once,
+  not at the next click there.
+- A match the Search page shows beside it is scrolled to, not left below
+  the top of the file.
 
 ## [1.1.0] - 2026-11-05
 
@@ -522,7 +532,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/tpedneault/fenix/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tpedneault/fenix/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/tpedneault/fenix/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/tpedneault/fenix/releases/tag/v1.0.0
