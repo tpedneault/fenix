@@ -69,15 +69,20 @@ fn negotiate_at(endpoint: &Endpoint, invocation: &Invocation) -> Role {
     // the winner, which may need a moment to start listening.
     for _ in 0..20 {
         match Client::connect(endpoint) {
-            Ok(Some(mut client)) => {
-                return match hand_off(&mut client, invocation) {
-                    Ok(()) => Role::HandedOff,
-                    Err(e) => {
-                        eprintln!("fenix: the running Fenix didn't take this launch ({e}); starting another");
-                        Role::Standalone
-                    }
-                };
-            }
+            Ok(Some(mut client)) => match hand_off(&mut client, invocation) {
+                Ok(()) => return Role::HandedOff,
+                // The Fenix it reached is quitting, or was killed: the
+                // endpoint comes free in a moment, and this launch can
+                // serve it, rather than go without for its whole life.
+                Err(ClientError::Io(e)) if went_away(&e) => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("fenix: the running Fenix didn't take this launch ({e}); starting another");
+                    return Role::Standalone;
+                }
+            },
             Ok(None) => {}
             Err(e) => {
                 eprintln!("fenix: can't reach the control endpoint ({e}); running on its own");
@@ -93,7 +98,15 @@ fn negotiate_at(endpoint: &Endpoint, invocation: &Invocation) -> Role {
             }
         }
     }
+    eprintln!("fenix: the control endpoint stayed busy; running on its own");
     Role::Standalone
+}
+
+/// Whether a connection ended under its client, as one to a Fenix on its
+/// way out does (Windows: "The pipe has been ended").
+fn went_away(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, UnexpectedEof};
+    matches!(e.kind(), BrokenPipe | ConnectionAborted | ConnectionReset | UnexpectedEof)
 }
 
 /// Set on the Fenix a restart (`SPC q r`) starts: the one it replaces is
@@ -268,6 +281,22 @@ mod tests {
         let Role::Server(listener) = negotiate_at(&endpoint, &Invocation::default()) else { panic!("should serve") };
         assert!(!wait_until_free_at(&endpoint, Duration::from_millis(300)), "still served");
         drop(listener);
+    }
+
+    /// A Fenix that dies as it's reached leaves the endpoint to this
+    /// launch, which serves it: no window without a control channel.
+    #[test]
+    fn a_fenix_going_away_during_the_handoff_leaves_the_endpoint_to_this_launch() {
+        let endpoint = unique();
+        let Role::Server(mut listener) = negotiate_at(&endpoint, &Invocation::default()) else { panic!("should serve") };
+        let dying = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap();
+            drop(stream);
+            drop(listener);
+        });
+        let role = negotiate_at(&endpoint, &Invocation::default());
+        dying.join().unwrap();
+        assert!(matches!(role, Role::Server(_)));
     }
 
     #[test]
