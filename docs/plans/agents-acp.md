@@ -967,7 +967,9 @@ code never sees the profile's name. Only the tests choose it.
 - **Other styles:**
   - `--fs` (reads and writes through `fs/*`);
   - `--terminal` (Bash through `terminal/*`);
-  - `--agent-auth` (an `authenticate`-style login).
+  - `--agent-auth` (an `authenticate`-style login);
+  - `--usage codex` / `--usage none` (tokens and context but no cost, as
+    `codex-acp` reports them / no usage at all).
 
   These cover the ways other agents may work, so Fenix's other code paths
   are tested even though the Claude profile never takes them. They're the

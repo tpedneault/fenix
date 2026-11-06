@@ -12,6 +12,7 @@
 //! - `store`: threads kept on disk.
 //! - `catalog`: the agents Fenix knows how to start.
 //! - `pipeline`: prompts run through several agents in turn.
+//! - `usage`: what the agents used -- turns, time, tokens, cost -- by day.
 //! - `mock`: an agent for tests, playing Claude Code's adapter.
 
 pub mod catalog;
@@ -24,3 +25,4 @@ pub mod protocol;
 pub mod registry;
 pub mod store;
 pub mod thread;
+pub mod usage;

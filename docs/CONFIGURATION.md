@@ -514,6 +514,8 @@ when it's out of date).
 | `agents.panel_width` | 20–80 | 38 | How much of the width the agent's thread takes, in percent. |
 | `agents.idle_minutes` | minutes | 10 | An agent with no thread open is stopped after this long. |
 | `agents.notify` | true / false | on | When Fenix isn't in front: a permission question, or a turn ended, asks for your attention. |
+| `agents.usage.modeline` | off / tokens / cost / all | tokens | What the modeline says each agent used this session: its tokens, its cost (where the agent says), or both with its turns and time. An agent that reports neither shows its turns and time. SPC a U has the days. |
+| `agents.usage.daily_budget` | text | – | What the agents may use in a day before Fenix says so, at 80% and again at 100%: a cost ($5) or tokens (2M, 500k). Empty: no budget. |
 | `agents.mcp.fenix` | true / false | on | Agents get Fenix as an MCP server (fenix --mcp): diagnostics, language servers' answers, open files as they stand, the debugger's stop. |
 | `agents.mcp.fenix_brief` | true / false | on | Agents Fenix starts are told to prefer its tools, in a note before a new session's first prompt, which isn't shown in the thread. |
 | `agents.mcp.allow` | class, toolset:name or tool = allow, ask or deny | – | Rules for the tools agents call through Fenix: a class (read, show, edit, run, external), toolset:<name>, or a tool's name, each allow, ask or deny; the most specific wins. By default reading and showing are allowed, edits and running are asked about, external is refused. client:<rule> is for MCP clients Fenix didn't start. A project's rules can only be stricter. *A project can set it.* |

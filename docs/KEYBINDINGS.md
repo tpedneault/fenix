@@ -188,6 +188,8 @@ the other way round after `\v`.
 | `SPC a c` | A commit message for what's staged, written by the agent: into the commit composer when it's open, else onto the clipboard |
 | `SPC a h` | Hand the thread off to another agent: the conversation goes with it |
 | `SPC a D` | Delete the thread (asks first) |
+| `SPC a U` | What the agents used: turns, time, tokens and cost per agent and thread, today, this session and by day |
+| `Tab` / `Enter` (agent usage) | The threads of today, this session or the last 7 days / show the focused thread |
 | `SPC a f` | Follow the agent: the pane beside its thread shows where it works |
 | `SPC h a` | What each agent connection sent and was sent (ACP) |
 | `SPC A a` | Open the agenda page where it was left |

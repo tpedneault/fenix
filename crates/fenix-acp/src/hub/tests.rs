@@ -746,3 +746,27 @@ fn a_link_elicitation_completes_and_an_unknown_mode_is_refused() {
     let fx = h.event(conn, AcpEvent::Request { id: json!(6), method: "elicitation/create".into(), params: json!({ "sessionId": "s1", "mode": "telepathy", "message": "?" }) });
     assert!(matches!(&fx[..], [Effect::Respond { result: Err(e), .. }] if e.code == crate::protocol::code::INVALID_PARAMS));
 }
+
+/// A turn's tokens come with its answer; the session's cost comes as a
+/// running total, handed on as what it went up by.
+#[test]
+fn what_a_turn_used_is_handed_on_tokens_with_the_answer_cost_as_it_grows() {
+    let mut h = Harness::new();
+    let (id, conn) = h.live_thread();
+    let cost = |amount: f64| json!({ "sessionUpdate": "usage_update", "used": 9000, "size": 200000, "cost": { "amount": amount, "currency": "USD" }, "_meta": { "_claude/model": "claude-opus-5-5" } });
+    let used = |fx: &[Effect]| fx.iter().filter_map(|e| if let Effect::Used { tokens, cost, .. } = e { Some((tokens.clone(), cost.clone())) } else { None }).collect::<Vec<_>>();
+    let turn = request(&h.hub.prompt(&id, texts(&["one"])), "session/prompt").unwrap();
+    assert_eq!(used(&h.update(conn, "s1", cost(0.25))), vec![(None, Some((0.25, "USD".into())))]);
+    let fx = h.answer(conn, turn.0, json!({ "stopReason": "end_turn", "usage": { "inputTokens": 3, "outputTokens": 120, "cachedReadTokens": 8000, "cachedWriteTokens": 900, "totalTokens": 9023 }, "_meta": { "quota": {} } }));
+    let tokens = TurnUsage { input: 3, output: 120, cache_read: 8000, cache_write: 900, thought: 0 };
+    assert_eq!(used(&fx), vec![(Some(tokens), None)]);
+    // The same total again is nothing new; more is the difference.
+    assert!(used(&h.update(conn, "s1", cost(0.25))).is_empty());
+    let more = used(&h.update(conn, "s1", cost(0.40)));
+    assert!(matches!(&more[..], [(None, Some((a, _)))] if (a - 0.15).abs() < 1e-9), "{more:?}");
+    // A total that went down is an agent counting afresh.
+    assert_eq!(used(&h.update(conn, "s1", cost(0.05))), vec![(None, Some((0.05, "USD".into())))]);
+    // An answer without usage says nothing of it.
+    let turn = request(&h.hub.prompt(&id, texts(&["two"])), "session/prompt").unwrap();
+    assert!(used(&h.answer(conn, turn.0, json!({ "stopReason": "end_turn" }))).is_empty());
+}

@@ -246,6 +246,7 @@ impl CommandRegistry {
         registry.register("agents.continue", "Continue a read-only thread in a new session of its agent", |ctx| ctx.app.agents_continue_anew());
         registry.register("agents.delete", "Delete the thread (asks first)", |ctx| ctx.app.agents_delete_thread());
         registry.external("agents.secret", "An API key for the coding agents, kept in the keychain (SPC a s)", |app| app.agents_pick_secret());
+        registry.external("agents.usage", "What the agents used: turns, time, tokens and cost, per agent and thread, today, this session and by day (SPC a U)", |app| app.open_agents_usage_page());
         registry.external("agents.log", "What each agent connection sent and was sent (ACP)", |app| app.agents_open_log());
         registry.external("settings.open", "Every setting, on one page: search, change, reset", |app| app.open_settings_page(crate::settings_page::Scope::You, None));
         registry.external("settings.this_project", "This project's own settings, over yours in it", |app| app.cmd_settings_this_project());

@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 
 use super::config;
 use super::script::{self, Step};
-use super::{lock, Agent, CallError, TurnCtl};
+use super::{lock, Agent, CallError, TurnCtl, Usage};
 
 /// The context window the usage updates report.
 const CONTEXT_WINDOW: u64 = 200_000;
@@ -41,6 +41,7 @@ pub(super) fn run(
                 cwd,
                 record: Vec::new(),
                 output: 0,
+                spent: 0,
             };
             turn.play(&prompt)
                 .and_then(|stop| turn.finish(&prompt, stop))
@@ -81,6 +82,8 @@ struct Turn {
     record: Vec<Value>,
     /// Characters of agent text, for the usage figures.
     output: usize,
+    /// Output tokens `spend` added.
+    spent: u64,
 }
 
 impl Turn {
@@ -124,7 +127,7 @@ impl Turn {
     fn finish(&mut self, prompt: &[Value], stop: &'static str) -> io::Result<()> {
         let prompt_chars: usize = prompt.iter().map(|block| block.to_string().len()).sum();
         let input = (prompt_chars / 4 + 1200) as u64;
-        let output = (self.output / 4 + 20) as u64;
+        let output = (self.output / 4 + 20) as u64 + self.spent;
         let mut user: Vec<Value> = Vec::new();
         let message_id = self.agent.uuid();
         for block in prompt {
@@ -134,6 +137,8 @@ impl Turn {
             let mut sessions = self.agent.sessions();
             sessions.get_mut(&self.session).map(|session| {
                 let record = &mut session.record;
+                // The context so far, read back from the cache as Claude's is.
+                let cached = (record.input_tokens + record.output_tokens).min(CONTEXT_WINDOW);
                 record.history.append(&mut user);
                 record.history.append(&mut self.record);
                 record.input_tokens += input;
@@ -142,25 +147,39 @@ impl Turn {
                 let stamp = self.agent.stamp();
                 record.updated_nanos = stamp;
                 record.updated_at = super::store::iso(stamp);
-                record.clone()
+                (record.clone(), cached)
             })
         };
-        if let Some(record) = &stored {
+        let usage = self.agent.options().usage;
+        let mut cached = 0;
+        if let Some((record, read)) = &stored {
+            cached = *read;
             self.agent.store().save(record);
             let used = (record.input_tokens + record.output_tokens).min(CONTEXT_WINDOW);
-            self.agent.update(
-                &self.session,
-                json!({"sessionUpdate": "usage_update", "used": used, "size": CONTEXT_WINDOW,
-                       "cost": {"amount": (record.cost * 1e6).round() / 1e6, "currency": "USD"}}),
-            )?;
+            let cost = json!({"amount": (record.cost * 1e6).round() / 1e6, "currency": "USD"});
+            match usage {
+                Usage::Claude => self.agent.update(
+                    &self.session,
+                    json!({"sessionUpdate": "usage_update", "used": used, "size": CONTEXT_WINDOW, "cost": cost,
+                           "_meta": {"_claude/model": record.settings().model}}),
+                )?,
+                Usage::Codex => self.agent.update(&self.session, json!({"sessionUpdate": "usage_update", "used": used, "size": CONTEXT_WINDOW}))?,
+                Usage::None => {}
+            }
         }
-        self.agent.answer(
-            &self.ctl.request,
-            json!({"stopReason": stop, "usage": {
-                "inputTokens": input, "outputTokens": output, "cachedReadTokens": 0, "cachedWriteTokens": 0,
-                "totalTokens": input + output,
+        let answer = match usage {
+            Usage::Claude => {
+                let tally = json!({"inputTokens": input, "outputTokens": output, "cachedReadTokens": cached, "cachedWriteTokens": 0, "totalTokens": input + output + cached});
+                let count = json!({"totalTokens": input + output + cached, "inputTokens": input, "cachedInputTokens": cached, "cachedWriteTokens": 0, "outputTokens": output, "reasoningOutputTokens": 0});
+                json!({"stopReason": stop, "usage": tally, "_meta": {"quota": {"token_count": count, "model_usage": []}}})
+            }
+            Usage::Codex => json!({"stopReason": stop, "usage": {
+                "totalTokens": input + output + cached, "inputTokens": input, "cachedReadTokens": cached, "cachedWriteTokens": 0,
+                "outputTokens": output, "thoughtTokens": output / 4,
             }}),
-        )
+            Usage::None => json!({"stopReason": stop}),
+        };
+        self.agent.answer(&self.ctl.request, answer)
     }
 
     fn step(&mut self, step: Step) -> io::Result<Flow> {
@@ -279,6 +298,11 @@ impl Turn {
                     }
                     Err(Interrupted) => Ok(Flow::Stop("cancelled")),
                 }
+            }
+            Step::Spend => {
+                self.spent += 100_000;
+                self.say(&["That took a lot of tokens."])?;
+                Ok(Flow::Next)
             }
             Step::Long => {
                 for _ in 0..5 {

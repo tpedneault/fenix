@@ -17226,7 +17226,7 @@ impl App {
         // The sketch's board and port -- `refresh_embedded_indicator`
         // keeps this current for whatever buffer is focused.
         let feature_indicators: String = self.code_statuses().concat();
-        let feature_indicators = feature_indicators + &self.agents_status_segment() + &self.notifications_segment();
+        let feature_indicators = feature_indicators + &self.agents_status_segment() + &self.agents_usage_segment() + &self.notifications_segment();
         let git_indicator = self.chrome_git_segment();
         let search_indicator = match self.search_count() {
             Some((_, 0)) | None => String::new(),

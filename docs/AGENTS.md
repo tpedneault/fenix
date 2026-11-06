@@ -150,6 +150,38 @@ crashes is started again (after 1, 2, then 4 seconds) and its thread
 resumed; after three crashes in a minute it stays down until
 `SPC a R`.
 
+## Usage
+
+What the agents use is counted as they go: each agent's and each
+thread's turns, time at work (a turn's start to its end), and the
+tokens and cost the agent says it used. The modeline says it for every
+agent used this session -- `◆ claude 12.4k tok` -- and
+`agents.usage.modeline` picks what: `tokens` (the default), `cost`,
+`all` (both, with the turns and time), or `off`. `SPC a U` has the
+totals for today, this session and the last 7 days, per agent and per
+thread, with a bar for each day; `Enter` shows the focused thread, `Tab`
+lists another period's threads.
+
+What each agent reports differs:
+
+- **Claude Code** (`claude-agent-acp`) says a turn's tokens with its
+  answer -- input, output, and what the prompt cache read and wrote --
+  and the session's cost so far, in USD, with how full its context is.
+- **Codex** (`codex-acp`) says a turn's tokens and how full its context
+  is, but no cost.
+- An agent that says neither still has its turns and time counted, and
+  the modeline shows those.
+
+Tokens are the ones the model took in and wrote, cache writes included;
+what it read back from the cache -- the same context again, every
+request -- is counted apart, as *cache read*. The days are kept for 90
+days in `agent-usage.json`, beside the threads in Fenix's state folder.
+
+`agents.usage.daily_budget` sets what a day may use, as a cost (`$5`)
+or tokens (`2M`, `500k`): Fenix notifies once when the day's use passes
+80% of it, and again at 100%. A cost budget counts only agents that say
+their cost.
+
 ## Pipelines
 
 `SPC a P` runs your next prompt through several agents in turn. Fenix's

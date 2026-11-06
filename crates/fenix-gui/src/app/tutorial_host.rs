@@ -202,6 +202,7 @@ impl App {
             PageModel::Search(_) => "search".into(),
             PageModel::Agent(_) => "agent".into(),
             PageModel::AgentReview(_) => "agent-changes".into(),
+            PageModel::AgentUsage(_) => "agent-usage".into(),
         };
         Some((kind, None))
     }

@@ -26,6 +26,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Each workspace keeps its own agent thread: the dock follows you and
   shows the thread of the workspace you're in, while the others work in
   the background; `SPC a T` lists every thread at work, anywhere.
+- What the agents use: turns, time at work, and the tokens and cost they
+  report (Claude Code's tokens and cost, Codex's tokens), per agent and
+  thread, on the modeline (`agents.usage.modeline`) and by day on
+  `SPC a U`, with a daily budget that notifies at 80% and 100%
+  (`agents.usage.daily_budget`).
 
 ### Changed
 

@@ -1147,3 +1147,53 @@ fn flags_parse() {
     assert!(MockOptions::from_args(["--what"].map(String::from)).is_err());
     assert!(MockOptions::from_args(["--slow"].map(String::from)).is_err());
 }
+
+/// What a turn says it used, as each adapter says it: Claude's tokens,
+/// the cache read back, and the session's running cost; Codex's tokens
+/// and thought tokens with no cost; or nothing.
+#[test]
+fn usage_is_reported_as_claudes_or_codexs_adapter_reports_it() {
+    let dir = Scratch::new("usage");
+    let mut client = Client::start(&[]);
+    let session = client.new_session(dir.path());
+    let id = prompt(&mut client, &session, "hello");
+    let first = client.response(id)["result"].clone();
+    let id = prompt(&mut client, &session, "spend");
+    let second = client.response(id)["result"].clone();
+    let (a, b) = (&first["usage"], &second["usage"]);
+    assert_eq!(a["cachedReadTokens"], 0);
+    assert_eq!(
+        b["cachedReadTokens"].as_u64().unwrap(),
+        a["inputTokens"].as_u64().unwrap() + a["outputTokens"].as_u64().unwrap(),
+        "the first turn, read back from the cache"
+    );
+    assert!(b["outputTokens"].as_u64().unwrap() > 100_000, "spend: {b}");
+    assert!(second["_meta"]["quota"]["token_count"]["totalTokens"].is_u64());
+    let costs: Vec<f64> = client
+        .log
+        .iter()
+        .filter(|m| m["params"]["update"]["sessionUpdate"] == "usage_update")
+        .map(|m| m["params"]["update"]["cost"]["amount"].as_f64().unwrap())
+        .collect();
+    assert!(costs.len() == 2 && costs[1] > costs[0] + 1.4, "a running total: {costs:?}");
+    client.finish().unwrap();
+
+    let mut client = Client::start(&["--usage", "codex"]);
+    let session = client.new_session(dir.path());
+    let from = client.log.len();
+    let id = prompt(&mut client, &session, "hello");
+    let result = client.response(id)["result"].clone();
+    assert!(result["usage"]["thoughtTokens"].is_u64() && result.get("_meta").is_none());
+    let update = client.updates_since(from, &session).last().cloned().unwrap();
+    assert_eq!(update["sessionUpdate"], "usage_update");
+    assert!(update.get("cost").is_none() && update["size"] == 200_000);
+    client.finish().unwrap();
+
+    let mut client = Client::start(&["--usage", "none"]);
+    let session = client.new_session(dir.path());
+    let from = client.log.len();
+    let id = prompt(&mut client, &session, "hello");
+    assert!(client.response(id)["result"].get("usage").is_none());
+    assert!(!kinds(&client.updates_since(from, &session)).contains(&"usage_update"));
+    client.finish().unwrap();
+}

@@ -163,6 +163,9 @@ pub(crate) struct AgentHost {
     pub(super) consenting: Vec<extensions::Consenting>,
     /// Which extensions may send code to which agents, as you said.
     pub(super) consent_file: Option<PathBuf>,
+    /// What the agents used, by day and this session (`usage`).
+    pub(super) usage: fenix_acp::usage::Ledger,
+    pub(super) usage_file: Option<PathBuf>,
     /// What `agents.ask` answered, in tests (no extension runs then).
     #[cfg(test)]
     pub(super) replies: Vec<(String, u64, Result<String, String>)>,
@@ -173,6 +176,7 @@ impl AgentHost {
         let prefix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| format!("{:x}", d.as_millis())).unwrap_or_else(|_| "t".into());
         let mut hub = Hub::new(prefix, env!("CARGO_PKG_VERSION"));
         hub.set_capabilities(ClientCapabilities::fenix());
+        let usage_file = usage::usage_file();
         AgentHost {
             hub,
             clients: HashMap::new(),
@@ -215,6 +219,8 @@ impl AgentHost {
             asks: HashMap::new(),
             consenting: Vec::new(),
             consent_file: if cfg!(test) { Some(super::isolated_test_path("ask-consent.json")) } else { fenix_storage::paths::state_file("ask-consent.json") },
+            usage: usage::load_usage(usage_file.as_deref()),
+            usage_file,
             #[cfg(test)]
             replies: Vec::new(),
         }
@@ -1164,7 +1170,9 @@ impl App {
                     if turning && !self.agents.turning.contains_key(&thread) {
                         self.agents.turning.insert(thread.clone(), Instant::now());
                         self.agents_turn_started(&thread);
-                    } else if !turning && self.agents.turning.remove(&thread).is_some() {
+                    } else if !turning && self.agents.turning.contains_key(&thread) {
+                        let worked = self.agents.turning.remove(&thread).map_or(0, |since| since.elapsed().as_millis() as u64);
+                        self.agents_used(&thread, fenix_acp::usage::Tally::of_turn(worked));
                         self.agents_turn_ended(&thread);
                         self.agents_commit_message_done(&thread);
                     }
@@ -1185,6 +1193,13 @@ impl App {
                 Effect::TurnEnded { thread, stop } => {
                     self.agents_turn_done(&thread, &stop);
                     self.pipeline_turn_ended(&thread, &stop);
+                }
+                Effect::Used { thread, tokens, cost } => {
+                    let mut spent = tokens.as_ref().map(fenix_acp::usage::Tally::of_tokens).unwrap_or_default();
+                    if let Some((amount, currency)) = &cost {
+                        spent.add(&fenix_acp::usage::Tally::of_cost(*amount, currency));
+                    }
+                    self.agents_used(&thread, spent);
                 }
                 Effect::FenixAnswered { key, option, .. } => {
                     if !self.pipeline_gate_answered(&key, option.as_deref()) {
@@ -1536,6 +1551,7 @@ mod install;
 pub(crate) use install::SECRET_PROMPT;
 mod answer;
 mod extensions;
+mod usage;
 
 #[cfg(test)]
 mod tests;

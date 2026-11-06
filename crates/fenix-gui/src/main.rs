@@ -9,6 +9,7 @@
 
 mod agent_page;
 mod agent_review;
+mod agent_usage_page;
 mod agent_tools;
 mod agent_work;
 mod mcp_http;

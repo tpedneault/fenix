@@ -1289,3 +1289,8 @@ command = "agents.handoff"
 keys = "SPC a D"
 label = "delete thread"
 command = "agents.delete"
+
+[[leader]]
+keys = "SPC a U"
+label = "usage: tokens, cost"
+command = "agents.usage"

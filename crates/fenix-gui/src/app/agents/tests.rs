@@ -1263,3 +1263,106 @@ fn a_link_is_opened_and_its_card_marked_done() {
     assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.entries.iter().any(|e| matches!(e, Entry::Elicitation(c) if c.state == fenix_acp::thread::ElicitationState::Completed)))));
     assert!(f.page_text().contains("Sign in to the example service — done"));
 }
+
+fn connected_with(mock_flags: &str) -> Fixture {
+    let mut f = fixture(mock_flags);
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))), "never connected");
+    f
+}
+
+fn usage_page_text(f: &mut Fixture) -> String {
+    let id = f.app.find_page(|m| matches!(m, PageModel::AgentUsage(_))).expect("the usage page");
+    let Some(PageModel::AgentUsage(p)) = f.app.pages.get(&id).map(|s| &s.model) else { panic!() };
+    crate::agent_usage_page::layout(p, 110).all_text()
+}
+
+/// The mock reports as Claude's adapter does: the turn's tokens with its
+/// answer, the session's running cost in `usage_update`. Both are counted
+/// for the agent and the thread, with the turn and its time, said on the
+/// modeline as `agents.usage.modeline` says, kept for the day, and shown
+/// on `SPC a U`.
+#[test]
+fn what_an_agent_used_is_on_the_modeline_and_the_usage_page() {
+    let mut f = connected_with("");
+    f.turn("hello");
+    f.turn("what now");
+    let mock = f.app.agents.usage.session.agents["mock"].clone();
+    assert_eq!(mock.turns, 2);
+    assert_eq!(mock.reports, 2);
+    assert!(mock.tokens() > 2400 && mock.cache_read > 0, "{mock:?}");
+    assert_eq!(mock.currency.as_deref(), Some("USD"));
+    let session_cost = f.view().thread.usage.as_ref().and_then(|u| u.cost.clone()).unwrap().0;
+    assert!((mock.cost - session_cost).abs() < 1e-9, "the running total, counted once: {} vs {session_cost}", mock.cost);
+    let segment = f.app.agents_usage_segment();
+    assert_eq!(segment, format!("   ◆ mock {} tok", fenix_acp::usage::tokens_text(mock.tokens())));
+    f.app.config.set_value("agents.usage.modeline", Some(fenix_config::Value::Text("cost".into())));
+    assert!(f.app.agents_usage_segment().starts_with("   ◆ mock $0.0"), "{}", f.app.agents_usage_segment());
+    f.app.config.set_value("agents.usage.modeline", Some(fenix_config::Value::Text("all".into())));
+    assert!(f.app.agents_usage_segment().contains(" tok · $0.0") && f.app.agents_usage_segment().contains(" · 2 turns · "));
+    f.app.config.set_value("agents.usage.modeline", Some(fenix_config::Value::Text("off".into())));
+    assert_eq!(f.app.agents_usage_segment(), "");
+    assert_eq!(f.app.agents_status_segment(), "", "the agents' own segment is as it was");
+
+    // Kept for the day, beside the threads.
+    let kept = fenix_acp::usage::Ledger::load(f.app.agents.usage_file.as_ref().unwrap());
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    assert_eq!(kept.days[&today].agents["mock"], mock);
+    assert_eq!(kept.days[&today].threads[&f.thread().0].title, "hello");
+
+    let thread = f.thread();
+    f.app.open_agents_usage_page();
+    let text = usage_page_text(&mut f);
+    assert!(text.contains("Agent usage") && text.contains("Threads · today") && text.contains("hello"), "{text}");
+    assert!(text.lines().any(|l| l.contains("mock") && l.contains('$')), "{text}");
+    let id = f.app.find_page(|m| matches!(m, PageModel::AgentUsage(_))).unwrap();
+    // Another turn while it's open: the page follows.
+    f.app.agents_show(thread.clone());
+    f.turn("again");
+    let Some(PageModel::AgentUsage(p)) = f.app.pages.get(&id).map(|s| &s.model) else { panic!() };
+    assert_eq!(p.ledger.session.agents["mock"].turns, 3);
+    f.app.open_agents_usage_page();
+    assert_eq!(f.app.find_page(|m| matches!(m, PageModel::AgentUsage(_))), Some(id), "one page");
+    let Some(PageModel::AgentUsage(p)) = f.app.pages.get_mut(&id).map(|s| &mut s.model) else { panic!() };
+    let action = p.key(Key::Enter);
+    assert_eq!(action, crate::agent_usage_page::Action::Open(thread.0.clone()));
+    f.app.agents_usage_page_action(id, action);
+    assert_eq!(f.app.agents.shown(&f.app.pages), Some(thread));
+}
+
+/// An agent that says its tokens but no cost (Codex's adapter), and one
+/// that says nothing: tokens, then turns and time.
+#[test]
+fn without_cost_or_tokens_the_modeline_says_what_it_can() {
+    let mut f = connected_with("--usage codex");
+    f.turn("hello");
+    let mock = &f.app.agents.usage.session.agents["mock"];
+    assert!(mock.has_tokens() && !mock.has_cost());
+    f.app.config.set_value("agents.usage.modeline", Some(fenix_config::Value::Text("cost".into())));
+    assert!(f.app.agents_usage_segment().ends_with(" tok"), "{}", f.app.agents_usage_segment());
+
+    let mut f = connected_with("--usage none");
+    f.turn("hello");
+    let segment = f.app.agents_usage_segment();
+    assert!(segment.starts_with("   ◆ mock 1 turn · ") && segment.ends_with('s'), "{segment}");
+}
+
+/// `agents.usage.daily_budget`: 80% and 100% are each said once.
+#[test]
+fn a_daily_budget_is_warned_of_at_80_and_100_percent() {
+    let mut f = connected_with("");
+    f.app.config.set_value("agents.usage.daily_budget", Some(fenix_config::Value::Text("$1.80".into())));
+    let said = |app: &App| app.notifications.history().iter().filter(|n| n.summary.contains("budget")).map(|n| n.summary.clone()).collect::<Vec<_>>();
+    f.turn("hello");
+    assert!(said(&f.app).is_empty());
+    f.turn("spend");
+    let warned = said(&f.app);
+    assert!(matches!(&warned[..], [w] if w.starts_with("The agents used 80% of today's budget: $1.") && w.ends_with("of $1.80")), "{warned:?}");
+    f.turn("spend");
+    let warned = said(&f.app);
+    assert!(warned.len() == 2 && warned[1].starts_with("The agents reached today's budget"), "{warned:?}");
+    f.turn("spend");
+    assert_eq!(said(&f.app).len(), 2, "once a day each");
+    f.app.open_agents_usage_page();
+    assert!(usage_page_text(&mut f).contains("today's budget $1.80: "), "the page says it too");
+}

@@ -955,6 +955,12 @@ the guide.
   you something, and `SPC a T` lists every one at work, in any project,
   and takes you to its workspace.
 - **Modes and models** (`SPC a m`, `SPC a M`): the agent's own.
+- **Usage** (`SPC a U`): each agent's and thread's turns, time at work,
+  tokens and cost -- as far as the agent says them: Claude Code says
+  tokens and cost, Codex tokens -- for today, this session and the last
+  7 days, with a bar a day. The modeline says it for the agents used this
+  session (`◆ claude 12.4k tok · $0.31`, `agents.usage.modeline`), and
+  a daily budget notifies at 80% and 100% (`agents.usage.daily_budget`).
 - **Commands**: an agent that runs its commands through Fenix (ACP's
   terminals) gets them run in the project, the whole process tree
   stopped on cancel, and its card shows the output as it comes
