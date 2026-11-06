@@ -117,6 +117,26 @@ fn word_span(buffer: &Buffer, cursor: &Cursor, around: bool, iskeyword_extra: &[
     }
 }
 
+/// The word the char at `at` is part of -- Vim's `iw`, kept to its line:
+/// a run of word characters (by `'iskeyword'`), of punctuation, or of
+/// blanks. What a double click selects. Empty on an empty line.
+pub fn word_at(buffer: &Buffer, at: usize, iskeyword_extra: &[char]) -> Range<usize> {
+    let len = buffer.len_chars();
+    let in_line = |i: usize| buffer.char_at(i).filter(|&c| c != '\n' && c != '\r');
+    let Some(c) = in_line(at.min(len)) else { return at..at };
+    let class = classify(c, iskeyword_extra);
+    let same = |i: usize| in_line(i).is_some_and(|c| classify(c, iskeyword_extra) == class);
+    let mut start = at;
+    while start > 0 && same(start - 1) {
+        start -= 1;
+    }
+    let mut end = at + 1;
+    while end < len && same(end) {
+        end += 1;
+    }
+    start..end
+}
+
 /// The positions of the nearest enclosing (or next upcoming) pair of
 /// `quote` characters on the cursor's own line -- real Vim's quote text
 /// objects never cross a line boundary, since quotes almost never
@@ -374,5 +394,16 @@ mod tests {
         let (line, _) = b.line_col(&Cursor { char_idx: b.line_start_char(1), sticky_col: 0 });
         assert_eq!(line, 1);
         assert_eq!(span(&b, &cur(b.line_start_char(1)), TextObject::InnerParagraph, DEFAULT_ISKEYWORD_EXTRA), b.line_start_char(1)..b.line_start_char(3));
+    }
+
+    #[test]
+    fn word_at_takes_the_run_the_char_is_in_and_stays_on_its_line() {
+        let b = buf("foo.bar_baz  x\n   next");
+        assert_eq!(word_at(&b, 1, DEFAULT_ISKEYWORD_EXTRA), 0..3);
+        assert_eq!(word_at(&b, 3, DEFAULT_ISKEYWORD_EXTRA), 3..4, "punctuation is its own word");
+        assert_eq!(word_at(&b, 6, DEFAULT_ISKEYWORD_EXTRA), 4..11, "_ is a word character");
+        assert_eq!(word_at(&b, 6, &[]), 4..7, "unless iskeyword drops it");
+        assert_eq!(word_at(&b, 12, DEFAULT_ISKEYWORD_EXTRA), 11..13, "blanks, not past the line's end");
+        assert_eq!(word_at(&b, 14, DEFAULT_ISKEYWORD_EXTRA), 14..14, "the newline is no word");
     }
 }

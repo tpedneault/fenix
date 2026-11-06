@@ -913,6 +913,39 @@ impl VimState {
         }
     }
 
+    /// Drops whatever a sequence was waiting on -- a count, an operator,
+    /// a `"`, `f`, `m` or `g` -- as a mouse click does: what you meant to
+    /// type is not what you did next.
+    pub fn cancel_pending(&mut self) {
+        self.count = None;
+        self.pending_op = None;
+        self.pending_prefix = None;
+        self.active_register = None;
+        self.pending_replace = None;
+        self.pending_visual_replace = false;
+        self.pending_find = None;
+        self.pending_mark = None;
+        self.pending_surround = None;
+        self.pending_visual_surround = false;
+        self.pending_comment = false;
+        self.normal_matcher.cancel();
+        self.visual_matcher.cancel();
+        self.pending_matcher.cancel();
+    }
+
+    /// Selects from `anchor` to the cursor in Visual mode of `kind`, from
+    /// whatever mode it was in -- the mouse's drag, double and triple
+    /// click. Called again as the drag goes on; leave with
+    /// `exit_visual_mode`, as Escape would. Leave Insert first: this
+    /// doesn't finish what was typed.
+    pub fn select(&mut self, kind: VisualKind, anchor: usize) {
+        self.cancel_pending();
+        self.block_to_line_end = false;
+        self.mode = Mode::Visual;
+        self.visual_kind = kind;
+        self.visual_anchor = anchor;
+    }
+
     /// Whether a multi-key sequence (operator-pending, `gg`, ...) is
     /// waiting on more input, for a which-key-style hint in the host UI.
     pub fn is_pending(&self) -> bool {
@@ -6520,5 +6553,31 @@ two
         assert_eq!(vim.visual_kind(), VisualKind::Char);
         keys(&mut vim, &mut b, &mut c, "d");
         assert_eq!(b.text(), " world");
+    }
+
+    #[test]
+    fn select_starts_a_visual_selection_from_the_anchor_dropping_a_pending_operator() {
+        let mut b = buf("hello world");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "2d");
+        c.char_idx = 4;
+        vim.select(VisualKind::Char, 1);
+        assert_eq!((vim.mode(), vim.visual_kind(), vim.visual_anchor()), (Mode::Visual, VisualKind::Char, 1));
+        assert!(!vim.is_pending());
+        keys(&mut vim, &mut b, &mut c, "d");
+        assert_eq!(b.text(), "h world", "the selection, inclusive, and no count of 2 left over");
+    }
+
+    #[test]
+    fn cancel_pending_forgets_a_count_and_an_operator() {
+        let mut b = buf("one two three");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        keys(&mut vim, &mut b, &mut c, "3d");
+        vim.cancel_pending();
+        assert!(vim.is_idle());
+        keys(&mut vim, &mut b, &mut c, "w");
+        assert_eq!(c.char_idx, 4, "w moves one word, not deletes three");
     }
 }

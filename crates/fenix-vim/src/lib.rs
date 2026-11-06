@@ -26,4 +26,4 @@ pub use operator::Operator;
 pub use state::{BracketTarget, LspRequestKind, SplitWay, TabMove, VimEvent, VimState};
 pub use search::all_matches_in_range;
 pub use substitute::{replace_in_text, SubstitutePreview};
-pub use textobject::TextObject;
+pub use textobject::{word_at, TextObject};

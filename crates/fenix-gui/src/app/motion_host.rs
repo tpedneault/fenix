@@ -680,7 +680,8 @@ impl App {
         let same_place = previous.as_ref().is_some_and(|(k, a, _)| *k == key && rect_eq(*a, area));
         let mut out = Vec::with_capacity(layout.len());
         match previous {
-            Some((_, _, old)) if same_place && prefs.layout && old != layout => {
+            // A divider being dragged follows the pointer at once.
+            Some((_, _, old)) if same_place && prefs.layout && old != layout && !self.mouse_resizing() => {
                 // Where each pane was drawn last: mid-tween, its current rect.
                 let drawn = |pane: fenix_window::WindowId| -> Option<fenix_window::Rect> {
                     let target = old.iter().find(|(p, _)| *p == pane).map(|(_, r)| *r)?;

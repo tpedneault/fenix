@@ -59,6 +59,10 @@ pub enum PopupId {
     /// focused pane's page has one, and a page takes the keyboard while
     /// it's open, so nothing else here can be showing at the same time.
     Page,
+    /// The right click's menu (`app/mouse.rs`), beside the pointer. It
+    /// has the keyboard while it's open, and goes when the pointer does
+    /// anything else, so it's drawn over whatever else is up.
+    ContextMenu,
     /// A notification's toast, by its slot (0 nearest its corner): any
     /// number may show with any of the others, each in its own place.
     Toast(u8),

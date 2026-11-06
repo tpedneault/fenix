@@ -535,6 +535,31 @@ its extension. The rest is built into Fenix.
   on Linux, a Windows toast, macOS's), as `notifications.system` says.
   `notifications.test` shows one of each. Extensions notify with
   `notify-with` (API 1.3).
+- **The mouse**, for when the hand is on it anyway -- every keyboard way
+  stays. A click in a file puts the cursor on the glyph clicked (through
+  the gutter, folds, tabs, an extension's inlays, the sticky headers and
+  sideways scroll; past a line's end is its end, under the last line is
+  the last line); Insert stays Insert, Visual ends. Dragging selects
+  (Visual), and past the pane's top or bottom keeps scrolling; a double
+  click selects a word (by the word characters `w` uses), a triple click
+  the line, and dragging on from either goes a word or a line at a time.
+  Shift-click stretches the selection from the cursor, and Alt-drag
+  selects a block. A click goes on the jumplist only when it moves the
+  cursor ten lines or more, so `Ctrl-O` comes back from a far one but
+  isn't filled by every little one. The border between two splits
+  drags to resize them (the pointer shows which way); a tab drags along
+  its strip, onto another pane to move there, or onto a pane's edge to
+  split it with the tab in the new half; a middle click closes a tab. A
+  right click in the text opens a menu where the pointer is -- go to
+  definition, references, rename, code actions, hover, cut, copy, paste,
+  select all, the fold, a breakpoint, ask the agent -- each with its key
+  beside it; on a tab, close it, the others or those to its right, split
+  with it, copy its path or reveal it. j/k or the arrows and Enter work
+  it too; a click outside or Esc closes it. Resting the pointer on a
+  symbol for `editor.hover_delay_ms` shows what `K` would, under it,
+  with any problem there first; moving off or typing closes it
+  (`editor.mouse_hover` turns it off). Pages, listings, terminals and
+  extensions' surfaces keep their own mouse.
 - **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
   pane keeping its own independent cursor and scroll position, directional
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style

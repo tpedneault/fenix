@@ -8,6 +8,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The mouse in the editor: a click puts the cursor on the glyph clicked,
+  dragging selects (and scrolls past the pane's edge), a double click
+  selects a word and a triple the line, Shift-click extends, Alt-drag
+  selects a block. The border between splits drags to resize them, and a
+  tab drags onto another pane, or a pane's edge to split it. A right
+  click opens a menu of what can be done there -- in the text, or on a
+  tab -- with each item's key beside it. The pointer resting on a symbol
+  shows its hover and its problems (`editor.mouse_hover`,
+  `editor.hover_delay_ms`).
 - Notifications, in the manner of Dunst: toasts in a corner of the window
   with an urgency, actions and a timeout counted only while Fenix is in
   front; a history (`SPC o n`), do not disturb (`SPC t q`), rules per

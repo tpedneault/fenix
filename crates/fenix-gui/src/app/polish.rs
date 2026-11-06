@@ -338,11 +338,9 @@ impl App {
         }
     }
 
-    /// Sticky scroll: the headers of the scopes the pane's top line is
-    /// inside, as one row of spans each, outermost first -- at most
-    /// `appearance.sticky_lines`, the innermost kept when there are more.
-    /// Empty when the cursor would be under them, so it's never hidden.
-    pub(super) fn sticky_rows(&mut self, buffer: BufferId, base_line: usize, cursor_row: Option<usize>, gutter_chars: usize, tab_stops: &TabStops, cursor_line: usize) -> Vec<RowSpans> {
+    /// The lines `sticky_rows` shows, outermost first -- what a click on
+    /// one of its rows goes to.
+    pub(super) fn sticky_headers(&self, buffer: BufferId, base_line: usize, cursor_row: Option<usize>) -> Vec<usize> {
         let polish = &self.config.polish;
         if polish.sticky_scroll == Some(false) || base_line == 0 {
             return Vec::new();
@@ -368,6 +366,15 @@ impl App {
         if headers.is_empty() || cursor_row.is_some_and(|row| row < headers.len()) {
             return Vec::new();
         }
+        headers
+    }
+
+    /// Sticky scroll: the headers of the scopes the pane's top line is
+    /// inside, as one row of spans each, outermost first -- at most
+    /// `appearance.sticky_lines`, the innermost kept when there are more.
+    /// Empty when the cursor would be under them, so it's never hidden.
+    pub(super) fn sticky_rows(&mut self, buffer: BufferId, base_line: usize, cursor_row: Option<usize>, gutter_chars: usize, tab_stops: &TabStops, cursor_line: usize) -> Vec<RowSpans> {
+        let headers = self.sticky_headers(buffer, base_line, cursor_row);
         let mut out = Vec::with_capacity(headers.len());
         for line in headers {
             let highlights = self.syntax_highlights_for_visible_range(buffer, line, 1);

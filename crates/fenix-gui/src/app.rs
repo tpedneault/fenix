@@ -12,6 +12,7 @@ mod snippets;
 mod tool_sessions;
 mod session;
 mod editor_ui;
+mod mouse;
 mod todos;
 mod home;
 mod tabs;
@@ -4586,6 +4587,9 @@ pub struct App {
     explorer_reveal_pending: HashMap<ExplorerTarget, PathBuf>,
     /// Being dragged by its edge.
     sidebar_drag: bool,
+    /// The mouse in the text, on the dividers and tabs, its menu and
+    /// its hover -- see `app/mouse.rs`.
+    mouse: mouse::MouseState,
     /// Bumped for every filter search started, so what a superseded one
     /// finds is dropped.
     explorer_search: u64,
@@ -5828,6 +5832,7 @@ impl App {
             sidebar_followed: None,
             explorer_reveal_pending: HashMap::new(),
             sidebar_drag: false,
+            mouse: Default::default(),
             explorer_last_click: None,
             explorer_search: 0,
             explorer_preview: None,
@@ -7556,6 +7561,12 @@ impl App {
     /// precondition every LSP request this app sends starts from
     /// (`gd`/`gr`/`K`/rename/code actions/format all begin here).
     pub(super) fn focused_lsp_context(&self) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
+        self.focused_lsp_context_at(self.cursor().char_idx)
+    }
+
+    /// `focused_lsp_context`, asking about char `at` rather than the
+    /// cursor's -- where the mouse rests.
+    pub(super) fn focused_lsp_context_at(&self, at: usize) -> Option<(Vec<LspKey>, lsp_types::TextDocumentIdentifier, lsp_types::Position)> {
         let ob = self.open();
         let path = ob.buffer.path()?;
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
@@ -7568,7 +7579,7 @@ impl App {
             return None;
         }
         let uri = fenix_lsp::path_to_uri(&canonical)?;
-        let position = fenix_lsp::char_offset_to_position(ob.buffer.rope(), self.cursor().char_idx);
+        let position = fenix_lsp::char_offset_to_position(ob.buffer.rope(), at.min(ob.buffer.len_chars()));
         Some((keys, lsp_types::TextDocumentIdentifier { uri }, position))
     }
 
@@ -7743,7 +7754,12 @@ impl App {
     /// ones with genuinely nothing to say) -- Tcl's built-in usage lines
     /// come from the Tcl extension, which is a language server.
     pub(crate) fn request_hover(&mut self) {
-        let Some((keys, text_document, position)) = self.focused_lsp_context() else {
+        self.request_hover_at(self.cursor().char_idx);
+    }
+
+    /// `request_hover`, about char `at` of the focused buffer.
+    pub(super) fn request_hover_at(&mut self, at: usize) {
+        let Some((keys, text_document, position)) = self.focused_lsp_context_at(at) else {
             self.lsp_hover = None;
             return;
         };
@@ -15778,6 +15794,13 @@ impl App {
     /// `repeat_last_change` -> `route_keypress` directly, same as a
     /// macro, so its own replayed keys never re-enter this tap.
     fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+        // The right click's menu, open, has the keyboard.
+        if self.mouse.menu.is_some() {
+            if let Some(action) = self.menu_key(keypress) {
+                self.run_menu_action(action);
+            }
+            return;
+        }
         if self.vim.is_recording() {
             self.macro_capture.push(keypress);
         }
@@ -15815,6 +15838,8 @@ impl App {
         // than needing its own dedicated close key.
         self.lsp_hover = None;
         self.lsp_hover_fanout = None;
+        // And the one the pointer opened: typing closes it.
+        self.close_mouse_hover();
 
         // The terminal panel, when focused, owns *every* key -- checked
         // before even the capturing prompts/confirms below, since a
@@ -18500,34 +18525,46 @@ impl App {
         gutter_px: f32,
         content_frac: f32,
     ) -> Option<(fenix_window::Rect, RowSpans)> {
-        let text = self.lsp_hover.as_ref()?;
-        let (row, col) = focused_caret?;
         let (char_width, line_height) = match &self.text {
             Some(t) => (t.char_width(), t.line_height()),
             None => (text::CHAR_WIDTH, text::LINE_HEIGHT),
         };
-        let (caret_x, caret_y) = caret_pixel_pos(focused_rect, row, col, gutter_px, content_frac, char_width, line_height);
+        // The pointer's: under the glyph it rests on, its problems first.
+        let (problems, (caret_x, caret_y)) = match &self.mouse.hover {
+            Some(hover) => (hover.problems.as_slice(), (hover.anchor.0, hover.anchor.1 - line_height)),
+            None => {
+                let (row, col) = focused_caret?;
+                (&[][..], caret_pixel_pos(focused_rect, row, col, gutter_px, content_frac, char_width, line_height))
+            }
+        };
+        if self.lsp_hover.is_none() && problems.is_empty() {
+            return None;
+        }
 
         let shown_rows = popup::max_rows(modeline_top, COMPLETION_MARGIN, line_height, COMPLETION_PADDING).min(COMPLETION_MAX_ROWS);
-        let lines: Vec<&str> = text.lines().take(shown_rows).collect();
+        let theme = self.theme;
+        let mut lines: Vec<(&str, glyphon::Color)> = problems.iter().map(|(p, error)| (p.as_str(), if *error { theme.git_conflicted } else { theme.git_modified })).collect();
+        if let Some(text) = &self.lsp_hover {
+            lines.extend(text.lines().map(|l| (l, theme.fg_modeline)));
+        }
+        lines.truncate(shown_rows);
         if lines.is_empty() {
             return None;
         }
 
-        let theme = self.theme;
         let mut spans = Vec::new();
-        for (i, line) in lines.iter().enumerate() {
+        for (i, (line, color)) in lines.iter().enumerate() {
             if i > 0 {
                 spans.push(("\n".to_string(), theme.fg_modeline, false));
             }
-            spans.push((line.to_string(), theme.fg_modeline, false));
+            spans.push((line.to_string(), *color, false));
         }
 
         // Sized to its longest line up to the window, not to `WHICH_KEY_
         // MAX_WIDTH` -- see `prompt_popup` for why that cap doesn't apply
         // to free text: a usage line (`tcl::hover_text` wraps its
         // subcommand list at 72 columns) was being cut mid-word.
-        let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+        let longest = lines.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0);
         let max_width = (window_width - 2.0 * COMPLETION_MARGIN).max(text::WHICH_KEY_MIN_WIDTH);
         let width = (longest as f32 * char_width + COMPLETION_PADDING).clamp(text::WHICH_KEY_MIN_WIDTH, max_width);
         let height = lines.len() as f32 * line_height + COMPLETION_PADDING;
@@ -18899,6 +18936,10 @@ impl App {
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
         let icon = if self.sidebar_drag || self.on_sidebar_edge(pos) {
             winit::window::CursorIcon::ColResize
+        } else if let Some(icon) = self.divider_icon(&geometry, pos) {
+            icon
+        } else if self.tab_drag.is_some() {
+            winit::window::CursorIcon::Grabbing
         } else {
             cursor_icon_for(&geometry, pos, line_height)
         };
@@ -18921,10 +18962,8 @@ impl App {
         (scroll + line, col)
     }
 
-    /// Left-click: focuses whatever the click landed on -- a plain
-    /// focus change, the same granularity `SPC w hjkl`/pane-cycling
-    /// already work at (see this feature's own design notes on why
-    /// this isn't per-glyph cursor placement). Mirrors the exact flag
+    /// Left-click: focuses whatever the click landed on, and in a pane's
+    /// text puts the cursor on the glyph clicked (`text_press`). Mirrors the exact flag
     /// semantics `explorer_quit`/`navigate_window`'s own sidebar hand-
     /// off already use: `sidebar_focused`/`terminal_focused` are plain
     /// override flags independent of the tree's own focused pane, so
@@ -18982,6 +19021,13 @@ impl App {
                             let (line, col) = self.cell_at(pos, (content.x, content.y), self.pane_state(id).scroll_line);
                             self.explorer_click(target, line, col);
                         }
+                        self.wake_caret();
+                        return;
+                    }
+                    // Text: the cursor to the glyph, a selection started.
+                    if pos.1 >= content.y && self.text_press(id, rect, pos, Instant::now()) {
+                        self.unfocus_terminal_buffer();
+                        self.code_surface_sync_capture();
                         self.wake_caret();
                         return;
                     }
@@ -20153,6 +20199,8 @@ impl App {
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
+        // The right click's menu.
+        let context_menu_popup = overlays_here.then(|| self.context_menu_popup(window_width, window_height)).flatten();
         // Notifications: the toasts, in their corner, under the tab strip.
         let toasts = if overlays_here { self.toasts(window_width, tab_strip_height(line_height) + line_height, modeline_top, char_width, line_height) } else { Vec::new() };
         self.toast_rects = toasts.iter().map(|t| (t.id, t.rect)).collect();
@@ -20398,6 +20446,9 @@ impl App {
         }
         for toast in &toasts {
             open_popups.push((popup::PopupId::Toast(toast.slot), toast.rect, toast.spans.clone(), None));
+        }
+        if let Some((rect, spans, selected_row)) = context_menu_popup {
+            open_popups.push((popup::PopupId::ContextMenu, rect, spans, selected_row));
         }
         let popup_draws = motion_state.popup_draws(prefs, open_popups, now);
         let mut popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = Vec::new();
@@ -21357,7 +21408,7 @@ impl App {
                 // The completion popup's own selected-candidate row --
                 // `theme.selection`, not `theme.hl_line`: the popup has no
                 // caret of its own, so this has to stand out on its own.
-                if draw.id == popup::PopupId::Completion {
+                if matches!(draw.id, popup::PopupId::Completion | popup::PopupId::ContextMenu) {
                     if let Some(row) = draw.selected {
                         let y = rect.y + COMPLETION_PADDING / 2.0 + row as f32 * line_height;
                         let inset = if corner_radius > 0.0 { 3.0 } else { 0.0 };
@@ -21669,6 +21720,13 @@ impl ApplicationHandler<FenixUserEvent> for App {
                         self.drag_sidebar_to(pos.0, width);
                     }
                 }
+                if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
+                    // A selection or a divider following the pointer; the
+                    // menu's row under it; the hover's wait.
+                    self.mouse_drag_to(pos, window_width, window_height);
+                    self.menu_hover_at(pos, window_width, window_height);
+                    self.pointer_rest_at(pos, Instant::now(), window_width, window_height);
+                }
                 self.code_surface_pointer(pos, None);
                 self.code_page_pointer(pos, None);
                 if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
@@ -21677,6 +21735,23 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 if state == ElementState::Pressed { self.snippet = None; }
+                let size = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32));
+                // The right click's menu takes the click on it; one off it
+                // closes it and goes on.
+                if let (ElementState::Pressed, Some(pos), Some((w, h))) = (state, self.cursor_pos, size) {
+                    if let Some(chosen) = self.menu_press_at(pos, w, h) {
+                        if let Some(action) = chosen {
+                            self.run_menu_action(action);
+                        }
+                        return;
+                    }
+                }
+                if state == ElementState::Pressed {
+                    self.close_mouse_hover();
+                }
+                if button == MouseButton::Left && state == ElementState::Released {
+                    self.mouse_release();
+                }
                 // The sidebar's edge, dragged to resize it.
                 if button == MouseButton::Left {
                     if state == ElementState::Pressed && self.cursor_pos.is_some_and(|pos| self.on_sidebar_edge(pos)) {
@@ -21685,6 +21760,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
                     }
                     if state == ElementState::Released && std::mem::take(&mut self.sidebar_drag) {
                         self.sidebar_width_dragged();
+                        return;
+                    }
+                }
+                // A divider between two panes, dragged to resize them.
+                if let (MouseButton::Left, ElementState::Pressed, Some(pos), Some((w, h))) = (button, state, self.cursor_pos, size) {
+                    if self.divider_press_at(pos, w, h) {
                         return;
                     }
                 }
@@ -21701,6 +21782,12 @@ impl ApplicationHandler<FenixUserEvent> for App {
                         self.handle_click(pos);
                     }
                 }
+                // A right click in text or on a tab: its menu.
+                if let (MouseButton::Right, ElementState::Pressed, Some(pos), Some((w, h))) = (button, state, self.cursor_pos, size) {
+                    if self.right_click_at(pos, w, h) {
+                        return;
+                    }
+                }
                 // A click on a code page that takes the mouse is its too.
                 if let Some(pos) = self.cursor_pos {
                     self.code_page_pointer(pos, Some((button, state == ElementState::Pressed)));
@@ -21713,6 +21800,8 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                self.mouse.menu = None;
+                self.close_mouse_hover();
                 if let Some(pos) = self.cursor_pos {
                     self.handle_wheel(pos, delta);
                 }
@@ -21881,6 +21970,16 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // The agents: cancels that never ended, restarts after a crash,
         // idle agents stopped, files they're changing looked at.
         let wait_until = match self.agents_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // A drag held past a pane's edge scrolls on; the pointer resting
+        // on a symbol shows its hover.
+        let wait_until = match self.drag_scroll_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        let wait_until = match self.hover_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };

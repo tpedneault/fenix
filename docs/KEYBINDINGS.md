@@ -330,6 +330,27 @@ the other way round after `\v`.
 | `SPC TAB f` | Open a workspace from the workspace shelf (`SPC ,` > Workspaces) -- switches to it if already open, otherwise creates it |
 | `SPC TAB r` | Rename the active workspace |
 
+## The mouse
+
+In a file's text, and around the panes. Pages, listings, terminals and
+extensions' surfaces have their own (in their sections).
+
+| Mouse | Action |
+|---|---|
+| Click | The cursor to the glyph clicked; Insert stays Insert, Visual ends. Ten lines or more away, it goes on the jumplist |
+| Drag | Select (Visual); held past the pane's top or bottom, it scrolls on |
+| Double click, triple click | Select the word (Vim's word characters, `iskeyword`), the line; dragging on goes a word, a line at a time |
+| `Shift`-click | Stretch the selection from the cursor |
+| `Alt`-drag | Select a block |
+| Right click | A menu where the pointer is: go to definition, references, rename, code actions, hover, cut, copy, paste, select all, the fold, a breakpoint, ask the agent. `j`/`k`, the arrows and `Enter` work it; a click outside or `Esc` closes it |
+| Rest on a symbol | Its hover (as `K`), problems first, after `editor.hover_delay_ms`; moving away or a key closes it |
+| Drag the border between splits | Resize them |
+| Click, middle click a tab | Switch to it, close it |
+| Drag a tab | Along its strip to move it; onto another pane to move it there; onto a pane's edge to split it with the tab in the new half |
+| Right click a tab | Close it, the others, those to its right; split right or down with it; copy its path; reveal it in the explorer |
+| A click on `▾` / `▸` in the gutter | Close / open that fold |
+| Wheel | Scroll the pane under the pointer |
+
 ## File explorer (`SPC e t`, `SPC f j`, the directory picker)
 
 The sidebar, a listing in a pane and the directory picker are one page

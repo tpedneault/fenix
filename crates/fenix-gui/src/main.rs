@@ -59,6 +59,7 @@ mod lsp;
 mod markdown;
 mod mcp;
 mod motion;
+mod mouse;
 mod folds;
 mod notify;
 mod notifications_page;
