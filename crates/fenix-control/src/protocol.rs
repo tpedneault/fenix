@@ -49,6 +49,7 @@ pub mod method {
     pub const AGENT_SUBSCRIBE: &str = "fenix/agent.subscribe";
     pub const AGENT_PROMPTS: &str = "fenix/agent.prompts";
     pub const AGENT_PROMPT: &str = "fenix/agent.prompt";
+    pub const NOTIFY: &str = "fenix/notify";
 }
 
 /// Every method this crate knows, besides `fenix/hello` itself, which
@@ -85,6 +86,7 @@ pub const CAPABILITIES: &[&str] = &[
     method::AGENT_SUBSCRIBE,
     method::AGENT_PROMPTS,
     method::AGENT_PROMPT,
+    method::NOTIFY,
 ];
 
 /// Error codes: JSON-RPC's own, and Fenix's in the range JSON-RPC
@@ -282,6 +284,37 @@ pub enum CaptureTarget {
     Journal,
 }
 
+/// `fenix/notify`'s params: a notification, from a script or a tool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyParams {
+    pub summary: String,
+    #[serde(default)]
+    pub body: String,
+    /// `low`, `normal` or `critical`.
+    #[serde(default)]
+    pub urgency: Option<String>,
+    /// Who it's from, as the history and the rules name it; `fenix --notify`
+    /// says `cli`.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Another with the same source and tag replaces it.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// 0 to 100.
+    #[serde(default)]
+    pub progress: Option<u8>,
+    /// What it offers to do: `{ "label", "command" }`, a Fenix command
+    /// that may be run from outside, `url:https://...` or `open:<path>[:line]`.
+    #[serde(default)]
+    pub actions: Vec<NotifyAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyAction {
+    pub label: String,
+    pub command: String,
+}
+
 /// `fenix/notebook.capture`'s params.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaptureParams {
@@ -372,6 +405,8 @@ pub enum Call {
     Commands,
     RunCommand(RunCommandParams),
     NotebookCapture(CaptureParams),
+    /// A notification to show (`fenix/notify`).
+    Notify(NotifyParams),
     AgendaTasks(TasksParams),
     AgendaClockIn(ClockInParams),
     AgendaClockOut,

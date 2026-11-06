@@ -47,6 +47,7 @@ the other way round after `\v`.
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
 | `SPC t a` | Cycle motion: off, subtle, full |
+| `SPC t q` | Do not disturb: only critical notifications show; the rest are kept in the history |
 | `SPC t d` | Cycle inline problems: all, errors only, off |
 | `SPC e e` | Open the file explorer here |
 | `SPC e H` | Open the file explorer at your home folder |
@@ -114,6 +115,9 @@ the other way round after `\v`.
 | `SPC s *` | Search the project for the word under the cursor |
 | `SPC o d` | Go to this workspace's Home, the start-up dashboard (same as `gh`) |
 | `SPC o t` | Toggle the terminal panel |
+| `SPC o n` | The notifications' history: Enter acts on one, `1`-`9` one of its actions, `r` shows it again, `d` forgets it, `D` clears them, `t` do not disturb, `/` filters |
+| `SPC o .` | Do what the newest notification offers (a click on it does too) |
+| `SPC o x` / `SPC o X` | Dismiss the newest notification / all of them (any button but the left on one dismisses it) |
 | `SPC o T` | Open a shell in the focused pane |
 | `SPC d d` | Containers (the `fenix.containers` extension, when installed) |
 | `SPC d p` / `SPC d b` | Its performance page / build the project's `Dockerfile` |
@@ -169,6 +173,7 @@ the other way round after `\v`.
 | `SPC a a` | The agents' dock at the right, on the project's last thread or a new one, ready to write in; from the dock, put it away |
 | `SPC a A` | Show or put away the agents' dock, wherever you are |
 | `SPC a n` / `SPC a t` | A new thread with the default agent (`SPC a p` for another) / this project's threads |
+| `SPC a T` | Every thread at work or waiting on you, in any project or workspace: the one picked is shown in its workspace |
 | `SPC a p` | The agents: a thread with one, a login, a restart |
 | `SPC a P` | Run the next prompt through a pipeline: plan, build and review by agents in turn |
 | `[s` / `]s` (in a thread) | A pipeline's step before or after |

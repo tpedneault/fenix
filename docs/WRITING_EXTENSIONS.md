@@ -107,6 +107,7 @@ and its answer comes to `handle` as an `Event` with that id.
 |---|---|
 | `info!`, `warn!`, `error!` | Log to its output page. |
 | `notify(text)` | Say something in Fenix's message line. |
+| `Notification::new(summary).body(text).urgency(Urgency::Critical).action(label, command).tag(t).progress(0.4).show()`, `notify_dismiss(tag)` | API 1.3. A notification: a toast in a corner of the window, kept in the history (`SPC o n`), the system's own when Fenix isn't in front -- as the user's settings and rules say. An action is one of its own commands, Fenix's, `url:https://...` or `open:<path>[:line]`; the first is what Enter or a click does. One with the same tag replaces the one showing. Past 10 a minute they're only kept in the history. |
 | `page::open`, `page::refresh`, `page::close` | Its pages, built with `Page::new().line([...]).rule().focus(n).key(k, what)`, and runs coloured `title`, `text`, `muted`, `accent`, `good`, `warn`, `bad`. `.popup(line, rows)` draws a menu or a question beside a line; keys still come to the page. |
 | `open_text(title, text, language)` | Text read-only in a buffer of its own, highlighted (`json`, `yaml`, `log`). |
 | `open_url(url)` | An http(s) URL in the system's browser. |
@@ -1031,10 +1032,11 @@ on a Fenix that offers 1.M, N no more than M: a minor version only adds,
 and an extension that uses what one added says so (`api = "1.2"`).
 Nothing is removed or changed within 1.x: what a minor version adds is a
 new import, or a new export Fenix calls only when the extension has it,
-never a new case of `Event`. This Fenix offers 1.2: 1.1 added
+never a new case of `Event`. This Fenix offers 1.3: 1.1 added
 `git_state` and `last_task`; 1.2 added `service_progress`, the exports
 `service_cancelled` and `agent_ask_progress`, `agents::ask_with`, tools'
-classes, deadlines and toolsets, and agent resources and prompts. Its
+classes, deadlines and toolsets, and agent resources and prompts; 1.3
+added notifications (`notify_with`, `notify_dismiss`). Its
 definition is `crates/fenix-extension-api/wit/world.wit` (its package
 stays `fenix:extension@1.0.0` across 1.x, so what an older extension
 imports is still found).

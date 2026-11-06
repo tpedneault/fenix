@@ -210,10 +210,16 @@ impl App {
         if let Some(pane) = page_pane {
             // A pipeline's step: where it's at, first.
             let strip = thread.as_ref().and_then(|t| self.pipeline_strip(t));
-            let shown = match strip {
+            let mut shown = match strip {
                 Some(strip) => format!("Agent · {strip} · {title}"),
                 None => format!("Agent · {title}"),
             };
+            // The others, at work in the background.
+            match self.agents_elsewhere() {
+                (0, 0) => {}
+                (w, 0) => shown.push_str(&format!("   ·   {w} more at work: SPC a T")),
+                (_, n) => shown.push_str(&format!("   ·   {n} more waiting on you: SPC a T")),
+            }
             self.pane_titles.insert(pane, shown);
         }
         if let Some(pane) = composer_pane {
@@ -230,6 +236,7 @@ impl App {
     /// in it) loses the dock's title, cheaply -- no titles are made here.
     pub(crate) fn agents_dock_sync(&mut self) {
         self.agents_dock_follow();
+        self.agents_dock_workspace_thread();
         if self.agents.titled.is_empty() {
             return;
         }

@@ -59,6 +59,9 @@ pub enum PopupId {
     /// focused pane's page has one, and a page takes the keyboard while
     /// it's open, so nothing else here can be showing at the same time.
     Page,
+    /// A notification's toast, by its slot (0 nearest its corner): any
+    /// number may show with any of the others, each in its own place.
+    Toast(u8),
 }
 
 /// Where a popup wants to appear, before clamping to the window.

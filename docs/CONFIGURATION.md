@@ -528,6 +528,18 @@ when it's out of date).
 | `agents.ask.model` | text | – | The model those questions go to, when the agent offers a choice (haiku, sonnet): a quick, cheap one for drafts. Empty: the agent's own. *A project can set it.* |
 | `agents.ask.show` | thread / hidden | thread | Whether an extension's question to an agent is kept as a thread on SPC a t (thread), or gone once it's answered (hidden), when the extension doesn't say. |
 | `agents.registry` | text | https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json | The ACP registry agents are installed from. Empty: none. |
+| **Notifications** | | | |
+| `notifications.enabled` | true / false | on | Toasts in a corner of the window for what finished or wants you: an agent's turn, a task, an extension's news. Off, they're only kept in the history (SPC o n). |
+| `notifications.position` | top-right / bottom-right / top-left / bottom-left | top-right | The corner the toasts stack in, the newest nearest it. |
+| `notifications.max_visible` | 1–8 | 4 | How many toasts show at once; the rest wait their turn. |
+| `notifications.width` | 24–120 | 46 | A toast's width, in characters. |
+| `notifications.timeout_low` | 1–600 | 4 | Seconds a low-urgency toast shows, counted only while Fenix is in front. |
+| `notifications.timeout_normal` | 1–600 | 8 | Seconds a normal toast shows, counted only while Fenix is in front. |
+| `notifications.timeout_critical` | 0–3600 | 0 | Seconds a critical toast shows; 0 keeps it until you dismiss it (SPC o x). |
+| `notifications.system` | unfocused / always / never | unfocused | Also show each one as the system's own notification (notify-send on Linux, a Windows toast, macOS's): only while Fenix isn't in front, always, or never. |
+| `notifications.rules` | source (agents, tasks, an extension's id, fenix.*) = mute, history, low, normal or critical | – | What to do with a source's notifications: mute them, keep them to the history, or show them at another urgency. A source ending in * matches every one it begins. |
+| `notifications.agents` | all / unfocused / never | unfocused | Notify when an agent's turn ends or it asks you something: always, only when its thread isn't in front of you, or never. |
+| `notifications.tasks` | all / long / failed / never | long | Notify when a task ends: every one, those that took 10 seconds or more, only those that failed, or never. |
 
 **Shelves, not autostart.** VNC hosts, documents and the workspace
 shelf make things selectable (`SPC v v`, `SPC r f`, `SPC TAB f`); none of

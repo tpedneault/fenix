@@ -72,6 +72,9 @@ struct SavedWorkspace {
     /// The project it belongs to -- absent in sessions from before that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     project: Option<PathBuf>,
+    /// The agent thread its dock showed last (1.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_thread: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -253,6 +256,7 @@ impl App {
                 .map(|(_, workspace)| SavedWorkspace {
                     name: workspace.name.clone(),
                     project: workspace.project.clone(),
+                    agent_thread: workspace.agent_thread.as_ref().map(|t| t.0.clone()),
                     focused: workspace.windows.windows().iter().position(|id| *id == workspace.windows.focused_id()).unwrap_or(0),
                     layout: workspace.windows.snapshot(|pane, buffer| {
                         let state = workspace.pane_states.get(&pane).copied().unwrap_or_else(|| PaneState::seeded_at(self.buffers.get(*buffer).map(|ob| ob.cursor).unwrap_or(Cursor::at_start())));
@@ -445,7 +449,7 @@ impl App {
                 .map(|w| {
                     let focused = remap_focus(&w.layout, w.focused);
                     let kept = prune_unrestorable(w.layout.clone())
-                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused, project: w.project.clone() });
+                        .map(|layout| SavedWorkspace { name: w.name.clone(), layout, focused, project: w.project.clone(), agent_thread: w.agent_thread.clone() });
                     (w, kept)
                 })
                 .collect();
@@ -493,7 +497,7 @@ impl App {
                         scroll_line, rendered_scroll: scroll_line as f32, scroll_col: pane.scroll_col.min(1_000_000),
                     });
                 }
-                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() });
+                workspaces.push(Workspace { name: workspace.name, windows: tree, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: workspace.project, home: Some(home), last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new(), agent_thread: workspace.agent_thread.map(fenix_acp::hub::ThreadId) });
             }
             frames.push(WorkspaceList { workspaces, active: frame.active });
         }
@@ -753,10 +757,11 @@ mod tests {
             frames: vec![SavedFrame {
                 active: 1,
                 workspaces: vec![
-                    SavedWorkspace { name: "workspace-1".into(), project: None, focused: 0, layout: Layout::Leaf(pane(Some(0))) },
+                    SavedWorkspace { name: "workspace-1".into(), project: None, agent_thread: None, focused: 0, layout: Layout::Leaf(pane(Some(0))) },
                     SavedWorkspace {
                         name: "workspace-2".into(),
                         project: None,
+                        agent_thread: None,
                         focused: 0,
                         layout: split(Layout::Leaf(pane(None)), split(Layout::Leaf(pane(None)), Layout::Leaf(pane(None)))),
                     },
@@ -804,7 +809,7 @@ mod tests {
             }],
             frames: vec![SavedFrame {
                 active: 0,
-                workspaces: vec![SavedWorkspace { name: "panel".into(), project: None, focused: 2, layout: panel }],
+                workspaces: vec![SavedWorkspace { name: "panel".into(), project: None, agent_thread: None, focused: 2, layout: panel }],
             }],
             focused_frame: 0,
             debugging: Default::default(),

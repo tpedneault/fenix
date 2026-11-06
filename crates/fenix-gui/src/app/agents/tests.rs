@@ -326,6 +326,31 @@ fn the_dock_comes_with_you_to_another_workspace_and_leaves_the_last_as_it_was() 
 }
 
 #[test]
+fn each_workspace_shows_its_own_thread_and_the_others_go_on() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    let first = f.thread();
+    let other = f.app.buffers.open_text_view("other\n");
+    f.app.workspaces.new_workspace(other, Cursor::at_start());
+    f.app.agents_dock_sync();
+    assert_eq!(f.thread(), first, "a workspace with no thread of its own shows the last one");
+    let second = f.app.agents.hub.new_thread("mock", &f.root);
+    f.app.agents_show(second.clone());
+    assert_eq!(f.app.workspaces.active_workspace().agent_thread.as_ref(), Some(&second));
+    // Back to the first workspace: its own thread, the second's kept.
+    f.app.prev_workspace();
+    f.app.agents_dock_sync();
+    assert_eq!(f.thread(), first);
+    f.app.next_workspace();
+    f.app.agents_dock_sync();
+    assert_eq!(f.thread(), second);
+    assert!(f.app.agents.hub.view(&first).is_some(), "the other thread is still there");
+    // SPC a T: the thread in the other workspace takes you there.
+    f.app.agents_go_to_running(first.clone());
+    assert_eq!((f.app.workspaces.active_index(), f.thread()), (0, first));
+}
+
+#[test]
 fn the_focus_in_the_dock_comes_with_it() {
     let mut f = fixture("");
     f.app.agents_open_panel();

@@ -1214,6 +1214,7 @@ impl App {
                 PageModel::Reading(_) => named("reading"),
                 PageModel::Extensions(_) => named("extensions"),
                 PageModel::ExtensionOutput(_) => named("extensions-output"),
+                PageModel::Notifications(_) => named("notifications"),
                 PageModel::Tutorial(_) => named("tutorial"),
                 PageModel::Search(_) => named("search"),
                 PageModel::Agent(_) => named("agent"),
@@ -2552,6 +2553,8 @@ impl App {
                 self.set_error(text);
             }
             Request::Notify(_, text) => self.set_message(text),
+            Request::NotifyWith(n) => self.extension_notify(ext, n),
+            Request::NotifyDismiss(tag) => self.extension_notify_dismiss(ext, &tag),
             Request::RunCommand(id) => self.run_command_for_extension(&id),
             Request::OpenFile { path, line, sealed, text } => {
                 // Sealed unless you had it open already.

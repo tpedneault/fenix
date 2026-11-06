@@ -5,6 +5,7 @@ mod agent_lsp;
 mod agent_debug;
 mod agent_context;
 mod agent_pipelines;
+mod notifications;
 mod control_agent;
 mod refactor;
 mod snippets;
@@ -317,6 +318,8 @@ struct TaskSession {
     /// fenix-tasks, so closing a pane never joins a worker.
     runner: Option<fenix_tasks::TaskRunner>,
     run_id: Option<fenix_tasks::RunId>,
+    /// When the run under way started, for its notification.
+    started: Option<Instant>,
 }
 
 /// The History view's session (`SPC g l`) -- the commit graph, the refs
@@ -4052,6 +4055,9 @@ struct Workspace {
     /// Each pane's closed tabs, newest last, with the place each held --
     /// what `SPC b u` reopens.
     closed_tabs: HashMap<fenix_window::WindowId, Vec<(BufferId, usize)>>,
+    /// The agent thread the dock showed here last: shown again when you
+    /// come back, while the others go on in the background.
+    agent_thread: Option<fenix_acp::hub::ThreadId>,
 }
 
 impl Workspace {
@@ -4060,7 +4066,7 @@ impl Workspace {
         pane_states.insert(windows.focused_id(), PaneState::seeded_at(initial_cursor));
         let mut pane_tabs = HashMap::new();
         pane_tabs.insert(windows.focused_id(), vec![*windows.content(windows.focused_id()).expect("freshly created window has content")]);
-        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None, home: None, last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new() }
+        Self { name, windows, pane_states, scroll_anims: HashMap::new(), pane_tabs, project: None, home: None, last_tab: HashMap::new(), preview: HashMap::new(), closed_tabs: HashMap::new(), agent_thread: None }
     }
 }
 
@@ -4954,6 +4960,12 @@ pub struct App {
     /// row list is derived from the current syntax tree every frame, so an
     /// edit can never leave stale byte or character offsets behind.
     code_folds: HashMap<BufferId, HashSet<usize>>,
+    /// Notifications: the toasts showing and the history (`notify`).
+    notifications: crate::notify::Center,
+    /// Where each toast was drawn last frame, for clicks.
+    toast_rects: Vec<(u64, fenix_window::Rect)>,
+    /// When each extension's last notifications came, for their rate.
+    notification_rates: HashMap<String, Vec<Instant>>,
     /// The optional parts of Fenix that live behind `feature::Feature`
     /// (Docker so far), each owning its own state.
     /// Every command, built once at startup -- shared (`Rc`) so a command
@@ -5887,6 +5899,9 @@ impl App {
             chrome_git: None,
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
+            notifications: crate::notify::Center::new(),
+            toast_rects: Vec::new(),
+            notification_rates: HashMap::new(),
             commands: Rc::new(CommandRegistry::with_builtins().with_code_extensions(&crate::installed::code_extensions())),
             wasm: wasm_host::WasmHost::default(),
             recent_commands: Vec::new(),
@@ -10061,7 +10076,7 @@ impl App {
             let workspace_index = self.workspaces.active_index();
             let pane = self.focused_pane_id();
             self.pane_titles.insert(pane, "Task Output".to_string());
-            self.task_session = Some(TaskSession { workspace_index, pane, buffer, cwd: root.clone(), root: root.clone(), runner: None, run_id: None });
+            self.task_session = Some(TaskSession { workspace_index, pane, buffer, cwd: root.clone(), root: root.clone(), runner: None, run_id: None, started: None });
             buffer
         };
 
@@ -10099,7 +10114,7 @@ impl App {
     /// with a run identity because the output buffer is reused on rerun.
     fn start_task_process(&mut self, task: fenix_tasks::TaskDef, spec: fenix_project::tools::CommandSpec, root: PathBuf, buffer: BufferId) {
         let run_id = fenix_tasks::RunId::next();
-        if let Some(session) = self.task_session.as_mut() { session.run_id = Some(run_id); }
+        if let Some(session) = self.task_session.as_mut() { session.run_id = Some(run_id); session.started = Some(Instant::now()); }
         let command = spec.command(&root).map_err(|e| format!("couldn't start `{}`: {e}", task.command));
         let command = match command {
             Ok(command) => command,
@@ -10286,6 +10301,8 @@ impl App {
             ok: success == Some(true),
             tests: fenix_tasks::test_counts(&output),
         });
+        let took = self.task_session.as_mut().and_then(|s| s.started.take()).map(|t| t.elapsed());
+        self.task_notify(success == Some(true), took);
         if let Some(root) = self.task_session.as_ref().map(|s| s.root.clone()) {
             self.tell_extensions(Happened::TaskFinished { root: root.clone(), success: success == Some(true) });
             self.debug_task_ended(&root, success == Some(true));
@@ -17204,7 +17221,7 @@ impl App {
         // The sketch's board and port -- `refresh_embedded_indicator`
         // keeps this current for whatever buffer is focused.
         let feature_indicators: String = self.code_statuses().concat();
-        let feature_indicators = feature_indicators + &self.agents_status_segment();
+        let feature_indicators = feature_indicators + &self.agents_status_segment() + &self.notifications_segment();
         let git_indicator = self.chrome_git_segment();
         let search_indicator = match self.search_count() {
             Some((_, 0)) | None => String::new(),
@@ -20107,6 +20124,9 @@ impl App {
         // never coexists with any popup above.
         let prompt_popup = overlays_here.then(|| self.prompt_popup(window_width, modeline_top)).flatten();
         let page_popup = overlays_here.then(|| self.page_popup(page_popup_at, window_width, modeline_top)).flatten();
+        // Notifications: the toasts, in their corner, under the tab strip.
+        let toasts = if overlays_here { self.toasts(window_width, tab_strip_height(line_height) + line_height, modeline_top, char_width, line_height) } else { Vec::new() };
+        self.toast_rects = toasts.iter().map(|t| (t.id, t.rect)).collect();
         // The panel has the keyboard: the editor's caret isn't where keys go.
         let caret_alpha = if self.terminal_focused { 0.0 } else { self.caret_alpha() };
         let message_alpha = self.message_alpha(now);
@@ -20346,6 +20366,9 @@ impl App {
         }
         if let Some((rect, spans)) = page_popup {
             open_popups.push((popup::PopupId::Page, rect, spans, None));
+        }
+        for toast in &toasts {
+            open_popups.push((popup::PopupId::Toast(toast.slot), toast.rect, toast.spans.clone(), None));
         }
         let popup_draws = motion_state.popup_draws(prefs, open_popups, now);
         let mut popup_rects: Vec<(popup::PopupId, fenix_window::Rect)> = Vec::new();
@@ -21286,6 +21309,12 @@ impl App {
                         continue;
                     }
                 }
+                if let popup::PopupId::Toast(slot) = draw.id {
+                    if let Some(toast) = toasts.iter().find(|t| t.slot == slot) {
+                        App::paint_toast(popup_rect, gpu, toast, rect, alpha, theme, corner_radius, shadows);
+                        continue;
+                    }
+                }
                 if shadows {
                     popup_rect.push_shadow(gpu, rect.x, rect.y + 4.0, rect.w, rect.h, corner_radius, 10.0, [0.0, 0.0, 0.0, 0.38 * alpha]);
                 }
@@ -21320,6 +21349,8 @@ impl App {
                 .map(|&(id, rect)| {
                     if id == popup::PopupId::WhichKey {
                         (id, rect, (which_key::INSET_X, which_key::INSET_Y), modeline_top)
+                    } else if matches!(id, popup::PopupId::Toast(_)) {
+                        (id, rect, App::toast_inset(), f32::MAX)
                     } else {
                         (id, rect, (text::PAD_LEFT, 4.0), f32::MAX)
                     }
@@ -21628,6 +21659,10 @@ impl ApplicationHandler<FenixUserEvent> for App {
                         return;
                     }
                 }
+                // A click on a toast: its action, or dismissed.
+                if state == ElementState::Pressed && self.cursor_pos.is_some_and(|pos| self.toast_click(pos, button)) {
+                    return;
+                }
                 // A click on an extension's clickable item is its alone.
                 if state == ElementState::Pressed && button == MouseButton::Left && self.cursor_pos.is_some_and(|pos| self.layer_click(pos) || self.decoration_click(pos)) {
                     return;
@@ -21817,6 +21852,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // The agents: cancels that never ended, restarts after a crash,
         // idle agents stopped, files they're changing looked at.
         let wait_until = match self.agents_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // Notifications: the next toast to time out.
+        let wait_until = match self.notifications_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };

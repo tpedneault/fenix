@@ -58,6 +58,8 @@ mod lsp;
 mod markdown;
 mod mcp;
 mod motion;
+mod notify;
+mod notifications_page;
 mod merge_view;
 mod popup;
 mod profile;
@@ -119,6 +121,32 @@ fn main() -> anyhow::Result<()> {
     }
     for flag in cli::unknown_flags(&args) {
         eprintln!("fenix: no option {flag}, ignored -- fenix --help lists them");
+    }
+
+    // `--notify`: a notification for the running Fenix, and exit.
+    if let Some(request) = cli::notify_request(&args) {
+        console::open();
+        let params = match request {
+            Ok(params) => params,
+            Err(why) => {
+                eprintln!("fenix: {why}");
+                std::process::exit(2);
+            }
+        };
+        let sent = fenix_control::Client::connect(&fenix_control::Endpoint::current())
+            .map_err(|e| e.to_string())
+            .and_then(|c| c.ok_or_else(|| "Fenix isn't running".to_string()))
+            .and_then(|mut c| {
+                c.hello("fenix-cli", env!("CARGO_PKG_VERSION")).map_err(|e| e.to_string())?;
+                c.request::<serde_json::Value>(fenix_control::protocol::method::NOTIFY, serde_json::to_value(&params).expect("plain data")).map_err(|e| e.to_string())
+            });
+        match sent {
+            Ok(_) => std::process::exit(0),
+            Err(why) => {
+                eprintln!("fenix: {why}");
+                std::process::exit(1);
+            }
+        }
     }
 
     // `--install-extension` and friends change what's installed and

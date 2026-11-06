@@ -184,6 +184,7 @@ fn hello_reports_the_version_pid_and_capabilities() {
             "fenix/agent.subscribe",
             "fenix/agent.prompts",
             "fenix/agent.prompt",
+            "fenix/notify",
         ]
     );
     assert_eq!(hello.capabilities, CAPABILITIES);

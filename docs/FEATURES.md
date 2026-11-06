@@ -506,6 +506,27 @@ its extension. The rest is built into Fenix.
 
 ## Windows and the UI
 
+- **Notifications**, in the manner of Dunst: toasts stacked in a corner
+  of the window (`notifications.position`), newest nearest it, for what
+  finished or wants you -- an agent's turn or its question, a task that
+  took a while or failed, an extension's news. Each has a source, a
+  summary, a body, an urgency (low, normal, critical: the rail down its
+  left edge) and actions: `SPC o .` or a click does the first, another
+  button dismisses it, `SPC o x` dismisses the newest and `SPC o X` all.
+  They time out by urgency -- a critical one stays -- counted only while
+  Fenix is in front, so one that came while you were away is still there
+  when you're back. One with the same tag replaces the one showing (a
+  progress bar that moves on); the same again stacks, counted (×3). Past
+  `notifications.max_visible` they wait their turn. **The history**
+  (`SPC o n`) keeps the last 200: act on one again, show it again,
+  forget it, filter them. **Do not disturb** (`SPC t q`) keeps all but
+  the critical ones to the history and says on the modeline how many
+  came. **Rules** per source (`notifications.rules`) mute one, keep it to
+  the history, or show it at another urgency. While Fenix isn't in
+  front, each also goes to the system's own notifications (`notify-send`
+  on Linux, a Windows toast, macOS's), as `notifications.system` says.
+  `notifications.test` shows one of each. Extensions notify with
+  `notify-with` (API 1.3).
 - **Windows, buffers, workspaces**: splits (`SPC w v`/`SPC w s`) with each
   pane keeping its own independent cursor and scroll position, directional
   navigation, a buffer switcher (`SPC b b`), and Doom-Emacs-style
@@ -918,6 +939,13 @@ the guide.
   `SPC a i` continues a session started in the agent's own CLI. The
   panel comes back with the session after a restart, the prompt you
   hadn't sent included; the agent starts again when you look at it.
+- **A thread per workspace**: the dock comes with you from workspace to
+  workspace, and each workspace keeps the thread it showed last -- go
+  back to it and the dock shows that one again, kept with the session.
+  The others go on in the background: the dock's title says how many
+  are at work or waiting on you, they notify when they're done or ask
+  you something, and `SPC a T` lists every one at work, in any project,
+  and takes you to its workspace.
 - **Modes and models** (`SPC a m`, `SPC a M`): the agent's own.
 - **Commands**: an agent that runs its commands through Fenix (ACP's
   terminals) gets them run in the project, the whole process tree

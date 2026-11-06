@@ -222,6 +222,7 @@ impl CommandRegistry {
         registry.external("agents.toggle_dock", "Show or put away the agents' dock, wherever you are (SPC a A)", |app| app.agents_toggle_dock());
         registry.external("agents.new", "A new thread with a coding agent", |app| app.agents_new_thread());
         registry.external("agents.threads", "This project's agent threads: show one", |app| app.agents_pick_thread());
+        registry.external("agents.running", "Every agent thread at work or waiting on you, in any project or workspace: show one, in its workspace (SPC a T)", |app| app.agents_pick_running());
         registry.external("agents.agents", "The coding agents: a thread with one, a login, a restart", |app| app.agents_pick_agent());
         registry.external("agents.import", "Sessions the agent has for this project, started outside Fenix: continue one here", |app| app.agents_import());
         registry.register("agents.cancel", "Cancel the agent's turn (or take back a queued prompt)", |ctx| ctx.app.agents_cancel());
@@ -338,6 +339,12 @@ impl CommandRegistry {
         registry.register("code.scope_parent", "Jump to the enclosing scope header", |ctx| ctx.app.jump_scope_parent());
         registry.register("code.breadcrumbs", "Navigate this document's scope headers", |ctx| ctx.app.picker_document_scopes());
         registry.register("code.toggle_fold", "Collapse or expand the current code scope", |ctx| ctx.app.toggle_code_fold());
+        registry.external("notifications.history", "The notifications' history: act on one again, forget them, do not disturb", |app| app.open_notifications_page());
+        registry.register("notifications.dismiss", "Dismiss the newest notification showing", |ctx| ctx.app.notifications_dismiss_newest());
+        registry.external("notifications.dismiss_all", "Dismiss every notification showing", |app| app.notifications_dismiss_all());
+        registry.register("notifications.act", "Do what the newest notification offers (its first action)", |ctx| ctx.app.notifications_act_newest());
+        registry.external("notifications.do_not_disturb", "Do not disturb, on or off: only critical notifications show", |app| app.notifications_toggle_dnd());
+        registry.external("notifications.test", "Show one notification of each kind, to see how they look", |app| app.notifications_test());
         registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
         registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);

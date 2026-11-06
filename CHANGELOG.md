@@ -6,6 +6,30 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Notifications, in the manner of Dunst: toasts in a corner of the window
+  with an urgency, actions and a timeout counted only while Fenix is in
+  front; a history (`SPC o n`), do not disturb (`SPC t q`), rules per
+  source, and the system's own notifications while Fenix is away
+  (`[notifications]` settings, `notifications.test` to see them).
+- An agent's finished turn, its question or its login, and a task that
+  took a while or failed, notify (`notifications.agents`,
+  `notifications.tasks`).
+- Extension API 1.3: `notify-with` and `notify-dismiss`.
+- `fenix --notify` and the control channel's `fenix/notify`: a
+  notification from a script or a tool.
+- Each workspace keeps its own agent thread: the dock follows you and
+  shows the thread of the workspace you're in, while the others work in
+  the background; `SPC a T` lists every thread at work, anywhere.
+
+### Changed
+
+- CI caches its dependencies, runs the Windows tests and lint as two
+  jobs at once, and no longer runs twice for a branch's pull request;
+  dependencies get line tables only in debug builds, and there's a
+  `release-fast` profile.
+
 ## [1.1.0] - 2026-11-05
 
 The agents and MCP release: Fenix's tools for coding agents in toolsets,

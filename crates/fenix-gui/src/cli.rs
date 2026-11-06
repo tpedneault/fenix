@@ -37,6 +37,13 @@ Opening:
   --new-window               Open in another window of the running Fenix
   --                         End the options: what follows is a file
 
+Notifying:
+  --notify <summary>         Show a notification in the running Fenix, with:
+    --body <text>            what it says under its summary
+    --urgency <level>        low, normal (the default) or critical
+    --tag <tag>              replacing the one with the same tag (a progress)
+    --progress <0-100>       a bar along its foot
+
 Running:
   --disable-extensions       Start without extensions (safe mode), in a window of its own
   --console                  Show what Fenix prints (Windows)
@@ -89,13 +96,18 @@ const KNOWN_FLAGS: &[&str] = &[
     "--machine",
     "--help",
     "--version",
+    "--notify",
+    "--body",
+    "--urgency",
+    "--tag",
+    "--progress",
 ];
 
 /// The options in `args` Fenix doesn't know, as typed: `--projet` is
 /// warned of, not quietly dropped. A value after an option that takes
 /// one isn't an option.
 pub fn unknown_flags(args: &[String]) -> Vec<String> {
-    let takes_value = [GOTO_FLAG, PROJECT_FLAG, "--install-extension", "--uninstall-extension"];
+    let takes_value = [GOTO_FLAG, PROJECT_FLAG, "--install-extension", "--uninstall-extension", "--notify", "--body", "--urgency", "--tag", "--progress"];
     let mut unknown = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -114,6 +126,45 @@ pub fn unknown_flags(args: &[String]) -> Vec<String> {
         }
     }
     unknown
+}
+
+/// `fenix --notify <summary> [--body ..] [--urgency ..] [--tag ..]
+/// [--progress ..]`: the notification to hand the running Fenix, or why
+/// it doesn't read. None when there's no `--notify`.
+pub fn notify_request(args: &[String]) -> Option<Result<fenix_control::NotifyParams, String>> {
+    let mut summary = None;
+    let mut params = fenix_control::NotifyParams { summary: String::new(), body: String::new(), urgency: None, source: Some("cli".into()), tag: None, progress: None, actions: Vec::new() };
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            break;
+        }
+        let (flag, inline) = match arg.split_once('=') {
+            Some((f, v)) if f.starts_with("--") => (f, Some(v.to_string())),
+            _ => (arg.as_str(), None),
+        };
+        let mut value = || inline.clone().or_else(|| args.next().cloned());
+        match flag {
+            "--notify" => summary = Some(value().unwrap_or_default()),
+            "--body" => params.body = value().unwrap_or_default(),
+            "--urgency" => params.urgency = value(),
+            "--tag" => params.tag = value(),
+            "--progress" => match value().map(|v| v.trim_end_matches('%').parse::<u8>()) {
+                Some(Ok(p)) if p <= 100 => params.progress = Some(p),
+                _ => return Some(Err("--progress takes 0 to 100".into())),
+            },
+            _ => {}
+        }
+    }
+    let summary = summary?;
+    if summary.trim().is_empty() {
+        return Some(Err("--notify needs a summary: fenix --notify \"Build done\"".into()));
+    }
+    if params.urgency.as_deref().is_some_and(|u| !matches!(u, "low" | "normal" | "critical")) {
+        return Some(Err("--urgency is low, normal or critical".into()));
+    }
+    params.summary = summary;
+    Some(Ok(params))
 }
 
 /// One parsed command line.
@@ -325,4 +376,16 @@ mod tests {
         assert!(inv.new_window);
         assert_eq!(inv.files, vec![at(cwd().join("-weird.txt"), None, None)]);
     }
+
+    #[test]
+    fn notify_reads_its_options_and_says_whats_wrong() {
+        assert_eq!(notify_request(&args(&["a.rs"])), None);
+        let p = notify_request(&args(&["--notify", "Build done", "--body=in 41 s", "--urgency", "low", "--progress", "40%", "--tag", "b"])).unwrap().unwrap();
+        assert_eq!((p.summary.as_str(), p.body.as_str(), p.urgency.as_deref(), p.progress, p.tag.as_deref(), p.source.as_deref()), ("Build done", "in 41 s", Some("low"), Some(40), Some("b"), Some("cli")));
+        assert!(notify_request(&args(&["--notify", " "])).unwrap().is_err());
+        assert!(notify_request(&args(&["--notify", "x", "--urgency", "loud"])).unwrap().is_err());
+        assert!(notify_request(&args(&["--notify", "x", "--progress", "140"])).unwrap().is_err());
+        assert!(unknown_flags(&args(&["--notify", "x", "--body", "--y"])).is_empty(), "a value isn't an option");
+    }
+
 }

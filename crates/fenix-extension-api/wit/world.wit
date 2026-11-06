@@ -1,4 +1,4 @@
-// Fenix's extension API, 1.2. An extension is a component of the
+// Fenix's extension API, 1.3. An extension is a component of the
 // `extension` world: Fenix calls its exports, and it calls Fenix through
 // `host`, each call checked against the permissions its manifest asks
 // for (`[permissions]`).
@@ -44,7 +44,8 @@
 //
 // 1.1 added `git-state` and `last-task`. 1.2 added `service-progress`, and
 // the exports `service-cancelled` and `agent-ask-progress` (world
-// `extension`; `extension-base` is what every 1.x extension has).
+// `extension`; `extension-base` is what every 1.x extension has). 1.3
+// added `notify-with` and `notify-dismiss`: notifications, as toasts.
 //
 // The package keeps version 1.0.0 across 1.x: what a 1.x adds is in the
 // same package, so a guest built for 1.0 still names the interfaces it
@@ -1073,6 +1074,36 @@ interface types {
         conflicts: u32,
     }
 
+    /// How much a notification wants you (1.3).
+    enum urgency { low, normal, critical }
+
+    /// Something a notification offers to do: a command, by id -- its
+    /// own (`<id>.<command>`) or Fenix's -- or `url:https://...` opened
+    /// in the browser, or `open:<path>[:line]` for a file it may open.
+    record notification-action {
+        label: string,
+        command: string,
+    }
+
+    /// A notification (`notify-with`, 1.3): a toast in a corner of the
+    /// window, kept in the history (`SPC o n`), and the system's own
+    /// when Fenix isn't in front, as the user's settings say.
+    record notification {
+        summary: string,
+        body: string,
+        urgency: urgency,
+        /// The first is what Enter or a click does.
+        actions: list<notification-action>,
+        /// Another with the same tag replaces it, rather than showing
+        /// beside it: a progress that moves on.
+        tag: option<string>,
+        /// A bar along its foot, 0 to 1.
+        progress: option<f32>,
+        /// How long it shows, in milliseconds; none for what its urgency
+        /// and the user's settings say.
+        timeout-ms: option<u32>,
+    }
+
     /// The task that ended last (`last-task`, 1.1).
     record task-result {
         /// Its name, as `task-started` gave it.
@@ -1086,12 +1117,19 @@ interface types {
 }
 
 interface host {
-    use types.{level, command, http-request, picker-item, check, task, layer-level, item, model-info, here, home-section, image-info, text-edit, editor-theme, rgb, surface-options, cursor-image, surface-mark, cursor-info, folder-entry, text-buffer, decoration, problem, tls-options, decoration-rule, platform-info, launch-config, git-summary, task-result};
+    use types.{level, command, http-request, picker-item, check, task, layer-level, item, model-info, here, home-section, image-info, text-edit, editor-theme, rgb, surface-options, cursor-image, surface-mark, cursor-info, folder-entry, text-buffer, decoration, problem, tls-options, decoration-rule, platform-info, launch-config, git-summary, task-result, notification};
 
     /// Kept for its output page (`SPC h l`).
     log: func(level: level, message: string);
     /// Said in Fenix's message line.
     notify: func(level: level, message: string);
+    /// A notification, from this extension: a toast, the history, the
+    /// system's own when Fenix is away. At most 10 a minute show; past
+    /// that they're only kept. 1.3.
+    notify-with: func(notification: notification);
+    /// Takes away the toast with this tag, if one is showing; the
+    /// history keeps it. 1.3.
+    notify-dismiss: func(tag: string);
 
     /// Runs a Fenix command, by id, as if picked from the palette.
     run-command: func(id: string);

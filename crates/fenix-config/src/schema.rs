@@ -85,6 +85,8 @@ pub enum Category {
     Extensions,
     /// The coding agents (`SPC a`).
     Agents,
+    /// Toasts, their history and do not disturb (`SPC o n`).
+    Notifications,
     /// An extension's own: the section its settings name, its name when
     /// they name none. Each is a section of the page, as core's are.
     Extension(&'static str),
@@ -93,7 +95,7 @@ pub enum Category {
 impl Category {
     /// Core's, in page order. Extensions' sections (`Extension`) follow
     /// them on the page.
-    pub const ALL: [Category; 12] = [
+    pub const ALL: [Category; 13] = [
         Category::Editor,
         Category::Appearance,
         Category::Motion,
@@ -106,6 +108,7 @@ impl Category {
         Category::Session,
         Category::Extensions,
         Category::Agents,
+        Category::Notifications,
     ];
 
     pub fn label(self) -> &'static str {
@@ -123,6 +126,7 @@ impl Category {
             Category::Session => "Windows & session",
             Category::Extensions => "Extensions",
             Category::Agents => "Agents",
+            Category::Notifications => "Notifications",
             Category::Extension(section) => section,
         }
     }
@@ -467,6 +471,18 @@ static SETTINGS: LazyLock<Vec<Setting>> = LazyLock::new(|| {
         Setting::stored("agents.ask.model", Category::Agents, "Model for extensions' questions", Kind::Text, "The model those questions go to, when the agent offers a choice (haiku, sonnet): a quick, cheap one for drafts. Empty: the agent's own.").project(),
         Setting::stored("agents.ask.show", Category::Agents, "Show extensions' questions", Kind::Choice(&["thread", "hidden"]), "Whether an extension's question to an agent is kept as a thread on SPC a t (thread), or gone once it's answered (hidden), when the extension doesn't say.").with_default("thread"),
         Setting::stored("agents.registry", Category::Agents, "Agent registry", Kind::Text, "The ACP registry agents are installed from. Empty: none.").with_default("https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"),
+        // Notifications
+        Setting::stored("notifications.enabled", Category::Notifications, "Notifications", Kind::Bool, "Toasts in a corner of the window for what finished or wants you: an agent's turn, a task, an extension's news. Off, they're only kept in the history (SPC o n).").with_default("on"),
+        Setting::stored("notifications.position", Category::Notifications, "Where they show", Kind::Choice(&["top-right", "bottom-right", "top-left", "bottom-left"]), "The corner the toasts stack in, the newest nearest it.").with_default("top-right"),
+        Setting::stored("notifications.max_visible", Category::Notifications, "At once", Kind::Int { min: 1, max: 8 }, "How many toasts show at once; the rest wait their turn.").with_default("4"),
+        Setting::stored("notifications.width", Category::Notifications, "Width", Kind::Int { min: 24, max: 120 }, "A toast's width, in characters.").with_default("46"),
+        Setting::stored("notifications.timeout_low", Category::Notifications, "Low ones show for", Kind::Int { min: 1, max: 600 }, "Seconds a low-urgency toast shows, counted only while Fenix is in front.").with_default("4"),
+        Setting::stored("notifications.timeout_normal", Category::Notifications, "Normal ones show for", Kind::Int { min: 1, max: 600 }, "Seconds a normal toast shows, counted only while Fenix is in front.").with_default("8"),
+        Setting::stored("notifications.timeout_critical", Category::Notifications, "Critical ones show for", Kind::Int { min: 0, max: 3600 }, "Seconds a critical toast shows; 0 keeps it until you dismiss it (SPC o x).").with_default("0"),
+        Setting::stored("notifications.system", Category::Notifications, "The system's notifications", Kind::Choice(&["unfocused", "always", "never"]), "Also show each one as the system's own notification (notify-send on Linux, a Windows toast, macOS's): only while Fenix isn't in front, always, or never.").with_default("unfocused"),
+        Setting::stored("notifications.rules", Category::Notifications, "Rules", Kind::Map { key: "Source (agents, tasks, an extension's id, fenix.*)", value: "mute, history, low, normal or critical", paths: false }, "What to do with a source's notifications: mute them, keep them to the history, or show them at another urgency. A source ending in * matches every one it begins."),
+        Setting::stored("notifications.agents", Category::Notifications, "Agents", Kind::Choice(&["all", "unfocused", "never"]), "Notify when an agent's turn ends or it asks you something: always, only when its thread isn't in front of you, or never.").with_default("unfocused"),
+        Setting::stored("notifications.tasks", Category::Notifications, "Tasks", Kind::Choice(&["all", "long", "failed", "never"]), "Notify when a task ends: every one, those that took 10 seconds or more, only those that failed, or never.").with_default("long"),
         Setting::stored("extensions.registry", Category::Extensions, "Registry", Kind::Text, "Where the registry's index.json is: Fenix's own, or a mirror of it. The index must be signed with Fenix's registry key either way.").with_default("https://raw.githubusercontent.com/tpedneault/fenix-extensions/registry/index.json"),
     ]
 });
