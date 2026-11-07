@@ -29,3 +29,25 @@ inherits = "release"
 lto = "thin"
 codegen-units = 16
 incremental = true
+
+# Extensions are compiled to machine code when they're loaded, and an
+# unoptimised compiler takes seconds over each: the extension tests run
+# about five times faster with these. They cost minutes, once.
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+[profile.dev.package.cranelift-frontend]
+opt-level = 2
+[profile.dev.package.cranelift-entity]
+opt-level = 2
+[profile.dev.package.cranelift-bforest]
+opt-level = 2
+[profile.dev.package.cranelift-assembler-x64]
+opt-level = 2
+[profile.dev.package.regalloc2]
+opt-level = 2
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 2
+[profile.dev.package.wasmtime-environ]
+opt-level = 2
+[profile.dev.package.wasmparser]
+opt-level = 2
