@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 fenix-rpc = { path = "../fenix-rpc" }
+fenix-tasks = { path = "../fenix-tasks" }
 lsp-types = "0.97"
 ropey = "1"
 serde = { version = "1", features = ["derive"] }

@@ -79,6 +79,8 @@ pub struct DapClient {
 #[derive(Default)]
 struct Outbox {
     out: Option<Box<dyn Write + Send>>,
+    /// Whether what a socket's writer was given has gone out.
+    drain: Option<fenix_rpc::QueueDrain>,
     waiting: Vec<Vec<u8>>,
 }
 
@@ -144,7 +146,9 @@ impl DapClient {
         // adapter that quits did.
         let stderr_thread = thread::spawn(move || drain_keeping_tail(stderr, &said));
 
-        let outbox = Outbox { out: Some(Box::new(stdin)), waiting: Vec::new() };
+        // Off the caller's thread: see `QueueWriter`.
+        let stdin = fenix_rpc::QueueWriter::spawn("fenix-dap-writer", stdin)?;
+        let outbox = Outbox { out: Some(Box::new(stdin)), drain: None, waiting: Vec::new() };
         Ok((
             DapClient {
                 outbox: Arc::new(Mutex::new(outbox)),
@@ -215,7 +219,16 @@ impl DapClient {
             *lock(&socket2) = Some(kept);
             {
                 let mut outbox = lock(&out2);
-                let mut writing: Box<dyn Write + Send> = Box::new(writing);
+                let mut writing: Box<dyn Write + Send> = match fenix_rpc::QueueWriter::spawn("fenix-dap-writer", writing) {
+                    Ok(queue) => {
+                        outbox.drain = Some(queue.drain());
+                        Box::new(queue)
+                    }
+                    Err(e) => {
+                        let _ = tx.send(DapEvent::Disconnected(e.to_string()));
+                        return;
+                    }
+                };
                 for body in std::mem::take(&mut outbox.waiting) {
                     if let Err(e) = fenix_rpc::write_message(&mut writing, &body) {
                         let _ = tx.send(DapEvent::Disconnected(e.to_string()));
@@ -329,6 +342,13 @@ impl DapClient {
         // Fenix two minutes. Over stdio, the pipes close when every process
         // holding them has: killing `uv run` leaves the Python it started,
         // and the debuggee, with them, which held Fenix until they quit.
+        // Not before `disconnect` has gone, though: it's in a queue, and
+        // the shutdown would beat it there. An adapter that isn't reading
+        // isn't waited for.
+        let drain = lock(&self.outbox).drain.clone();
+        if let Some(drain) = drain {
+            drain.wait(Duration::from_millis(200));
+        }
         if let Some(socket) = lock(&self.socket).take() {
             let _ = socket.shutdown(std::net::Shutdown::Both);
         }

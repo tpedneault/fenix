@@ -232,6 +232,13 @@ impl FontContext {
         let atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.config.format);
         Self { font_system, swash_cache: SwashCache::new(), atlas, cache, default_family }
     }
+
+    /// The atlas and cache again, on a new device; the glyphs go back in as
+    /// they're drawn. The font database stays: reading it is the slow part.
+    pub fn rebuild_gpu(&mut self, gpu: &GpuState) {
+        self.cache = Cache::new(&gpu.device);
+        self.atlas = TextAtlas::new(&gpu.device, &gpu.queue, &self.cache, gpu.config.format);
+    }
 }
 
 pub struct TextPipeline {
@@ -382,6 +389,16 @@ impl TextPipeline {
         Metrics::new(self.font_size * MODELINE_FONT_SCALE, self.line_height)
     }
     /// `fonts` is shared with every other frame -- see `FontContext`.
+    /// The renderers again, on the new device `FontContext::rebuild_gpu` has
+    /// already moved to. Everything else here is text, and stays.
+    pub fn rebuild_gpu(&mut self, gpu: &GpuState) {
+        let mut guard = self.fonts.borrow_mut();
+        let ctx = &mut *guard;
+        self.viewport = Viewport::new(&gpu.device, &ctx.cache);
+        self.renderer = TextRenderer::new(&mut ctx.atlas, &gpu.device, wgpu::MultisampleState::default(), None);
+        self.popup_renderer = TextRenderer::new(&mut ctx.atlas, &gpu.device, wgpu::MultisampleState::default(), None);
+    }
+
     pub fn new(gpu: &GpuState, fonts: Rc<RefCell<FontContext>>) -> Self {
         // Bound to a named guard rather than `&mut *fonts.borrow_mut()`:
         // that temporary would be dropped at the end of its own `let`,
