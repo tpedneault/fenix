@@ -442,6 +442,15 @@ when it's out of date).
 | `appearance.rainbow_brackets` | true / false | off | Brackets are coloured by how deeply they're nested. |
 | `appearance.tabs` | auto / block / underline / off | auto | How each pane's tabs are drawn: the theme's own look (Visual Studio Dark uses blocks, the rest an underline), always blocks, always an underline, or no tab strip at all -- gt and gT still move between tabs then. |
 | `editor.preview_tab` | true / false | on | A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P. |
+| `screenshot.style` | accent / solid / sunset / ocean / candy / forest / none | accent | What's behind a code screenshot's window: a gradient of the theme's accent, the accent flat, one of four gradients, or nothing (see-through). |
+| `screenshot.title` | true / false | on | A code screenshot's window has a title bar with three dots and the file's name. |
+| `screenshot.line_numbers` | true / false | off | A code screenshot shows each line's number in the file. |
+| `screenshot.scale` | 1–4 | 2 | Pixels per point a code screenshot is drawn at; 2 is sharp on a retina screen. |
+| `screenshot.padding` | 0–200 | 56 | Points of background around a code screenshot's window. |
+| `screenshot.max_width` | 20–400 | 100 | Columns a code screenshot's lines take at most; a longer one wraps or is cut. |
+| `screenshot.long_lines` | wrap / cut | wrap | A line wider than the screenshot's width goes on under itself, or stops with an ellipsis. |
+| `screenshot.context` | 0–50 | 3 | Lines either side of the highlighted ones that SPC c S takes too. |
+| `screenshot.folder` | a path | the Pictures folder | Where code screenshots are saved, besides the clipboard. |
 | **Motion** | | | |
 | `editor.animations` | true / false | on | Off stops every animation, whatever the settings below say. |
 | `motion.level` | off / subtle / full | subtle | How much moves. Subtle: short animations that show what changed. Full adds the caret gliding, folds opening and panes moving. Each animation below can be turned on or off on its own. SPC t a cycles it. |

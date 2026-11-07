@@ -6,6 +6,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Code screenshots (`SPC c s`, `code.screenshot`): the Visual selection's
+  lines, or the file, drawn as a picture in the theme's syntax colours and
+  your font -- a window with rounded corners, a soft shadow and a title
+  bar with the file's name, on a gradient -- at twice the size for a
+  sharp retina image. Tabs are expanded, trailing spaces and the shared
+  indentation removed, long lines wrapped or cut. It's copied to the
+  clipboard and saved as `fenix-<file>-<lines>-<time>.png`; the
+  notification opens the image or its folder. `SPC c S` highlights the
+  selected lines among those around them. `screenshot.*` settings choose
+  the background, line numbers, title bar, scale, padding, width and
+  folder.
+
 ## [1.2.0] - 2026-11-06
 
 The notifications release: toasts and a history, folding, the mouse in

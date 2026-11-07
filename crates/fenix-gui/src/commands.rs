@@ -339,6 +339,8 @@ impl CommandRegistry {
         registry.register("code.outline", "Fuzzy-find a Markdown heading and jump to it", cmd_outline);
         registry.register("code.scope_parent", "Jump to the enclosing scope header", |ctx| ctx.app.jump_scope_parent());
         registry.register("code.breadcrumbs", "Navigate this document's scope headers", |ctx| ctx.app.picker_document_scopes());
+        registry.register("code.screenshot", "A picture of the selection (or the file), copied and saved as a PNG", |ctx| ctx.app.code_screenshot());
+        registry.register("code.screenshot_highlight", "A picture of the selected lines highlighted, with the lines around them", |ctx| ctx.app.code_screenshot_highlighted());
         registry.register("code.toggle_fold", "Collapse or expand the current code scope", |ctx| ctx.app.toggle_code_fold());
         registry.external("notifications.history", "The notifications' history: act on one again, forget them, do not disturb", |app| app.open_notifications_page());
         registry.register("notifications.dismiss", "Dismiss the newest notification showing", |ctx| ctx.app.notifications_dismiss_newest());

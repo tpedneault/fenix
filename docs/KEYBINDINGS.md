@@ -273,6 +273,8 @@ the other way round after `\v`.
 | `SPC c v` | Check the current XML buffer is well-formed; jump to the first error |
 | `SPC c y` | Copy the XPath of the XML element under the cursor |
 | `SPC c z`, `za` | Open or close the fold the cursor is in |
+| `SPC c s` | A picture of the Visual selection's lines (or the file, up to 500 lines) in your theme and font, framed like a window: copied as an image and saved as a PNG (`screenshot.*` settings) |
+| `SPC c S` | The same, with the selected lines highlighted and `screenshot.context` lines around them |
 | `zo` / `zO`, `zc` / `zC` | Open / close the fold (and, capitals, every one inside it) |
 | `zR` / `zM` | Open / close every fold in the buffer |
 | `zr` / `zm` | One fold level more open / closed |

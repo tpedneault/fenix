@@ -50,6 +50,8 @@ fenix-terminal = { path = "../fenix-terminal" }
 fenix-vim = { path = "../fenix-vim" }
 fenix-window = { path = "../fenix-window" }
 glyphon = "0.12.0"
+# Code screenshots' frames and shadows (`screenshot.rs`); already in the tree.
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
 image = { version = "0.25", default-features = false, features = ["ico", "png", "jpeg", "gif", "webp", "bmp"] }
 lsp-types = "0.97"
 pollster = "1.0.1"

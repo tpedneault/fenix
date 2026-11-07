@@ -104,6 +104,18 @@ its extension. The rest is built into Fenix.
   Vim. Folds come from the syntax tree (a grammar's `folds.scm`), or from
   the indentation in a file with none; they're kept with the session.
   `editor.fold_markers` turns the column off.
+- **Code screenshots** (`SPC c s`): the Visual selection's lines, or the
+  whole file (500 lines at most), as a picture in the theme's syntax
+  colours and your font, drawn on the CPU: a window with rounded corners,
+  a soft shadow and an optional title bar (three dots and the file's
+  name), on a background of the theme's accent, one of four gradients,
+  or nothing. At 2x by default; tabs expanded, trailing whitespace and the
+  shared indentation removed; optional line numbers, as in the file; long
+  lines wrapped or cut at `screenshot.max_width`. Copied to the clipboard
+  and saved as `fenix-<file>-<lines>-<time>.png` in `screenshot.folder`
+  (the Pictures folder), with a notification that opens the image or the
+  folder. `SPC c S` highlights the selected lines, with
+  `screenshot.context` lines around them.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
   YAML, Python, JavaScript/TypeScript/TSX, C, C++, C#, Go, Java, Lua, SQL,
   HTML, CSS, Bash, Tcl, Dockerfile/Containerfile, Batch (`.bat`/`.cmd`),
