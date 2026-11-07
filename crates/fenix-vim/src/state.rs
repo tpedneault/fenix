@@ -145,6 +145,9 @@ pub enum VimEvent {
     /// `za`, `zo`, `zc`, `zR`, `zM`, `zr`, `zm`, `zj`, `zk`... -- the host's
     /// folds.
     Fold(FoldCommand),
+    /// `gj`/`gk` -- and `j`/`k` while `set_display_jk` is on: `count`
+    /// screen rows down or up. The host knows where its lines wrap.
+    DisplayLine { down: bool, count: u32 },
     /// `.` -- asks the host to replay whatever it last recorded as a
     /// repeatable change. The host owns that capture (raw keystrokes
     /// since the last idle point that produced a real edit), the same
@@ -416,6 +419,10 @@ pub struct VimState {
     pending_scroll: Option<ScrollTarget>,
     /// A `z` fold command, for the host (`VimEvent::Fold`).
     pending_fold: Option<FoldCommand>,
+    /// A move by screen rows, for the host (`VimEvent::DisplayLine`).
+    pending_display_line: Option<(bool, u32)>,
+    /// `j`/`k` move by screen row, not buffer line (`set_display_jk`).
+    display_jk: bool,
     /// Set by `.`; consumed by `handle_key` and turned into `VimEvent::
     /// RepeatLastChange` -- same drain-chain shape as `pending_scroll`,
     /// just with no payload to carry.
@@ -559,6 +566,8 @@ impl VimState {
             pending_mark_jump: None,
             pending_scroll: None,
             pending_fold: None,
+            pending_display_line: None,
+            display_jk: false,
             pending_repeat_last_change: false,
             pending_surround: None,
             command_line: String::new(),
@@ -593,6 +602,13 @@ impl VimState {
 
     /// What the language says of the next Enter: a level more (`Some(true)`)
     /// or not; `None` leaves it to the bracket before the cursor.
+    /// Whether `j`/`k` (and the arrows) go by screen row, as `gj`/`gk`
+    /// do, rather than by buffer line -- for a prose box whose lines
+    /// wrap. An operator's `j`/`k` (`dj`) stays linewise.
+    pub fn set_display_jk(&mut self, on: bool) {
+        self.display_jk = on;
+    }
+
     pub fn set_syntax_indent(&mut self, indent: Option<bool>) {
         self.syntax_indent = indent;
     }
@@ -1054,6 +1070,7 @@ impl VimState {
         let macro_play = self.pending_macro_play.take();
         let scroll = self.pending_scroll.take();
         let fold = self.pending_fold.take();
+        let display_line = self.pending_display_line.take();
         let repeat_last_change = std::mem::take(&mut self.pending_repeat_last_change);
         let comment_lines = self.pending_comment_lines.take();
         let lsp_request = self.pending_lsp_request.take();
@@ -1080,6 +1097,7 @@ impl VimState {
             .or_else(|| macro_play.map(|(register, count)| VimEvent::MacroPlay { register, count }))
             .or_else(|| scroll.map(VimEvent::ScrollWindow))
             .or_else(|| fold.map(VimEvent::Fold))
+            .or_else(|| display_line.map(|(down, count)| VimEvent::DisplayLine { down, count }))
             .or_else(|| repeat_last_change.then_some(VimEvent::RepeatLastChange))
             .or_else(|| comment_lines.map(|(start_line, end_line)| VimEvent::ToggleComment { start_line, end_line }))
             .or_else(|| lsp_request.map(VimEvent::RequestLsp))
@@ -1897,7 +1915,9 @@ impl VimState {
                     self.pending_jump = Some(before);
                 }
             }
+            VimAction::Motion(m @ (Motion::Up | Motion::Down)) if self.display_jk => self.pending_display_line = Some((m == Motion::Down, count)),
             VimAction::Motion(m) => apply_motion(buffer, cursor, m, count, &self.iskeyword_extra),
+            VimAction::DisplayLine { down } => self.pending_display_line = Some((down, count)),
             VimAction::Operator(op) => {
                 self.pending_op = Some(op);
                 self.pending_op_count = count;
@@ -2979,6 +2999,10 @@ impl VimState {
         let raw_count = if matches!(step, Step::Pending(_)) { self.count } else { self.count.take() };
         if let Step::Matched(action) = step {
             match *action {
+                VisualAction::DisplayLine { down } => self.pending_display_line = Some((down, raw_count.unwrap_or(1).max(1))),
+                VisualAction::Motion(m @ (Motion::Up | Motion::Down)) if self.display_jk => {
+                    self.pending_display_line = Some((m == Motion::Down, raw_count.unwrap_or(1).max(1)));
+                }
                 VisualAction::Motion(m) => {
                     if matches!(m, Motion::BufferTop | Motion::BufferBottom) {
                         cursor.char_idx = motion::buffer_line_target(buffer, m, raw_count);
@@ -5022,6 +5046,38 @@ two
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('a')), VimEvent::Fold(FoldCommand::Toggle));
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('z')), VimEvent::None);
         assert_eq!(vim.handle_key(&mut b, &mut c, KeyPress::char('M')), VimEvent::Fold(FoldCommand::CloseAll));
+    }
+
+    #[test]
+    fn gj_and_gk_ask_the_host_to_move_by_screen_row_and_j_does_too_when_told() {
+        let mut b = buf("one\ntwo\nthree\nfour");
+        let mut c = Cursor::at_start();
+        let mut vim = VimState::new();
+        let key = |vim: &mut VimState, b: &mut Buffer, c: &mut Cursor, ch: char| vim.handle_key(b, c, KeyPress::char(ch));
+        assert_eq!(key(&mut vim, &mut b, &mut c, 'g'), VimEvent::None);
+        assert_eq!(key(&mut vim, &mut b, &mut c, 'j'), VimEvent::DisplayLine { down: true, count: 1 });
+        key(&mut vim, &mut b, &mut c, '3');
+        key(&mut vim, &mut b, &mut c, 'g');
+        assert_eq!(key(&mut vim, &mut b, &mut c, 'k'), VimEvent::DisplayLine { down: false, count: 3 });
+        assert_eq!(c.char_idx, 0, "the host moves the cursor, not Vim");
+        assert_eq!(key(&mut vim, &mut b, &mut c, 'j'), VimEvent::None, "plain j is still a buffer line");
+        assert_eq!(b.line_col(&c).0, 1);
+        vim.set_display_jk(true);
+        assert_eq!(key(&mut vim, &mut b, &mut c, 'k'), VimEvent::DisplayLine { down: false, count: 1 });
+        // An operator's j is the plain one.
+        let (mut plain, mut at) = (buf("one\ntwo\nthree\nfour"), c);
+        let mut fresh = VimState::new();
+        key(&mut fresh, &mut plain, &mut at, 'd');
+        key(&mut fresh, &mut plain, &mut at, 'j');
+        key(&mut vim, &mut b, &mut c, 'd');
+        assert_eq!(key(&mut vim, &mut b, &mut c, 'j'), VimEvent::None);
+        assert_eq!(b.text(), plain.text());
+        // And in Visual mode.
+        key(&mut vim, &mut b, &mut c, 'v');
+        assert_eq!(key(&mut vim, &mut b, &mut c, 'j'), VimEvent::DisplayLine { down: true, count: 1 });
+        key(&mut vim, &mut b, &mut c, 'g');
+        assert_eq!(key(&mut vim, &mut b, &mut c, 'k'), VimEvent::DisplayLine { down: false, count: 1 });
+        assert_eq!(vim.mode(), Mode::Visual);
     }
 
     #[test]

@@ -188,14 +188,18 @@ impl App {
             Vec::new()
         };
         let index = base as isize + row;
+        // A wrapped line's row: the stretch of it the row shows.
+        let wrap_rows = self.pane_display_rows(pane, buffer);
+        let mut part = None;
         let (line, scroll_col) = match usize::try_from(row).ok().and_then(|r| sticky.get(r)) {
             Some(&line) => (line, 0),
             None => {
                 let at = index.clamp(0, lines.len() as isize - 1) as usize;
+                part = wrap_rows.as_ref().and_then(|rows| rows.get(at)).copied();
                 // A filler row has no line: the nearest real one below it,
                 // else above.
                 let line = lines[at..].iter().chain(lines[..at].iter().rev()).copied().find(|&l| l != side_by_side::FILLER)?;
-                (line, state.scroll_col)
+                (line, if wrap_rows.is_some() { 0 } else { state.scroll_col })
             }
         };
         let start = ob.buffer.line_start_char(line);
@@ -209,8 +213,13 @@ impl App {
             crate::decorations::layout_line(&line_text, start, &decorations, &tab_stops, line == cursor_line).col_map
         };
         let gutter = x < 0.0;
+        let scroll_col = part.map_or(scroll_col, |p| tabstops::visual_col(&col_map, p.start));
         let vcol = (x / char_width).floor().max(0.0) as usize + scroll_col;
-        let (col, past_end) = char_col_at(&col_map, vcol);
+        let (mut col, mut past_end) = char_col_at(&col_map, vcol);
+        // Past the end of a row the line goes on from: its last char.
+        if let Some(p) = part.filter(|p| !p.last && col >= p.end) {
+            (col, past_end) = (p.end.saturating_sub(1).max(p.start), false);
+        }
         let shown_row = row.clamp(0, text::lines_that_fit(content.h, line_height) as isize);
         let glyph_x = content.x + text::PAD_LEFT + gutter_px + tabstops::visual_col(&col_map, col).saturating_sub(scroll_col) as f32 * char_width;
         let glyph_bottom = content.y + text::PAD_TOP + (shown_row as f32 + 1.0 - frac) * line_height;
@@ -985,6 +994,27 @@ mod tests {
         let at_pos = at(&app, 2, 2);
         click(&mut app, at_pos);
         assert_eq!(cursor_at(&app), (4, 2));
+    }
+
+    #[test]
+    fn a_click_on_a_wrapped_lines_later_row_lands_on_the_char_drawn_there() {
+        let mut app = app_with("alpha beta gamma delta epsilon\nnext");
+        app.config.set_value("editor.soft_wrap", Some(fenix_config::Value::Text("all".into())));
+        let pane = app.focused_pane_id();
+        // Twelve cells across: rows "alpha beta ", "gamma delta ", "epsilon".
+        app.note_wrap_cols(pane, 13);
+        let at_pos = at(&app, 1, 2);
+        click(&mut app, at_pos);
+        assert_eq!(cursor_at(&app), (0, 13), "the m of gamma");
+        let at_pos = at(&app, 1, 30);
+        click(&mut app, at_pos);
+        assert_eq!(cursor_at(&app), (0, 22), "past a row's end: its last char, not the next row's first");
+        let at_pos = at(&app, 2, 3);
+        click(&mut app, at_pos);
+        assert_eq!(cursor_at(&app), (0, 26));
+        let at_pos = at(&app, 3, 1);
+        click(&mut app, at_pos);
+        assert_eq!(cursor_at(&app), (1, 1), "the next line is a row further down");
     }
 
     #[test]

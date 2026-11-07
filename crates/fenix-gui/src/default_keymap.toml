@@ -175,6 +175,11 @@ label = "inline problems"
 command = "view.cycle_diagnostics"
 
 [[leader]]
+keys = "SPC t w"
+label = "soft wrap"
+command = "view.toggle_wrap"
+
+[[leader]]
 keys = "SPC e"
 group = "explorer"
 

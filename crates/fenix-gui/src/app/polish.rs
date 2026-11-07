@@ -23,6 +23,8 @@ pub(super) struct PaneView<'a> {
     /// The Visual selection, as `(row, start_col, end_col)`.
     pub selection: &'a Segments,
     pub remap_col: &'a dyn Fn(usize, usize) -> usize,
+    /// When its lines wrap: the stretch of its line each row shows.
+    pub wrapped: Option<&'a [crate::wrap::Row]>,
 }
 
 /// What `polish_pane` hands back to draw.
@@ -128,15 +130,29 @@ impl App {
                 let [r, g, b, _] = glyphon_to_rgba(self.severity_color(sev));
                 let alpha = if sev == Severity::Info { 0.6 } else { 0.95 };
                 for line in start_line..=end_line {
-                    let Some(row) = row_of(line) else { continue };
                     let s = if line == start_line { start_col } else { 0 };
                     let e = if line == end_line { end_col } else { ob.buffer.line_len(line) };
-                    let (s, e) = ((view.remap_col)(row, s), (view.remap_col)(row, e));
-                    out.squiggles.push((row, s, e.max(s + 1), [r, g, b, alpha]));
+                    // Wrapped, each row of the line takes its part.
+                    let parts: Vec<(usize, usize, usize)> = match view.wrapped {
+                        Some(rows) => rows
+                            .iter()
+                            .enumerate()
+                            .take(view.rows)
+                            .filter(|(_, row)| row.line == line)
+                            .filter_map(|(i, row)| row.clip(s, e.max(s + 1)).map(|(a, b)| (i, a, b)))
+                            .collect(),
+                        None => row_of(line).map(|row| (row, s, e)).into_iter().collect(),
+                    };
+                    for (row, s, e) in parts {
+                        let (s, e) = ((view.remap_col)(row, s), (view.remap_col)(row, e));
+                        out.squiggles.push((row, s, e.max(s + 1), [r, g, b, alpha]));
+                    }
                 }
             }
             for (line, (sev, message)) in &worst {
                 let Some(row) = row_of(*line) else { continue };
+                // The message goes after a wrapped line's last row.
+                let end_row = view.wrapped.and_then(|rows| rows.iter().take(view.rows).rposition(|r| r.line == *line)).unwrap_or(row);
                 let color = self.severity_color(*sev);
                 let Some(cells) = rows.get_mut(row) else { continue };
                 if view.gutter_chars > 0 && inline != "off" {
@@ -152,7 +168,9 @@ impl App {
                 };
                 if show_message && !message.is_empty() {
                     let faded = glyphon::Color::rgba(color.r(), color.g(), color.b(), 200);
-                    cells.push((format!("    ■ {message}"), faded, false));
+                    if let Some(cells) = rows.get_mut(end_row) {
+                        cells.push((format!("    ■ {message}"), faded, false));
+                    }
                 }
             }
         }
@@ -167,8 +185,9 @@ impl App {
                     if view.tab_rows.contains(&row) || line >= ob.buffer.line_count() {
                         continue;
                     }
-                    let start = ob.buffer.line_start_char(line) + view.scroll_col;
-                    let end = ob.buffer.line_start_char(line) + ob.buffer.line_len(line);
+                    let part = view.wrapped.and_then(|rows| rows.get(row));
+                    let start = ob.buffer.line_start_char(line) + part.map_or(view.scroll_col, |p| p.start);
+                    let end = ob.buffer.line_start_char(line) + part.filter(|p| !p.last).map_or(ob.buffer.line_len(line), |p| p.end);
                     let from = depths.partition_point(|(at, _)| *at < start);
                     let here: HashMap<usize, usize> = depths[from..].iter().take_while(|(at, _)| *at < end).map(|&(at, d)| (at - start, d)).collect();
                     if here.is_empty() {
@@ -275,7 +294,12 @@ impl App {
                 marks.extend(found.iter().map(|&l| (l, RulerMark::Search)));
             }
         }
-        Some(Ruler { lines, first: view.rendered_scroll, visible: view.rows.saturating_sub(1) as f32, cursor: view.cursor_line, marks })
+        // Wrapped, the rows in view are fewer lines than rows.
+        let (first, visible) = match view.wrapped.map(|rows| &rows[..rows.len().min(view.rows.saturating_sub(1))]) {
+            Some([a, .., b]) => (a.line as f32, (b.line - a.line + 1) as f32),
+            _ => (view.rendered_scroll, view.rows.saturating_sub(1) as f32),
+        };
+        Some(Ruler { lines, first, visible, cursor: view.cursor_line, marks })
     }
 
     /// How pane tabs are drawn, or `None` for no tab strip:
@@ -489,6 +513,7 @@ mod tests {
             tab_rows: &tab_rows,
             selection: &selection,
             remap_col: &remap,
+            wrapped: None,
         };
         app.polish_pane(&view, spans, Instant::now())
     }

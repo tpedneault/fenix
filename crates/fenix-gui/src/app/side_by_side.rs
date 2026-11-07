@@ -100,15 +100,19 @@ fn buffer_text(ob: &OpenBuffer) -> String {
 impl App {
     /// The side-by-side session `pane` belongs to, in the workspace in
     /// front.
-    fn side_by_side_at(&self, pane: fenix_window::WindowId) -> Option<&SideBySide> {
+    pub(super) fn side_by_side_at(&self, pane: fenix_window::WindowId) -> Option<&SideBySide> {
         let here = self.workspaces.active_index();
         self.side_by_sides.iter().find(|s| s.workspace == here && s.side_of(pane).is_some())
     }
 
     /// A pane's display lines: its buffer's lines with folds applied,
     /// and -- in a side-by-side pane -- the filler rows that keep it lined
-    /// up with the other side.
+    /// up with the other side. In a pane that wraps, a line is on each
+    /// of its rows (`pane_display_rows` says which part).
     pub(super) fn pane_display_lines(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Vec<usize> {
+        if let Some(rows) = self.pane_display_rows(pane, buffer) {
+            return rows.iter().map(|r| r.line).collect();
+        }
         let lines = self.folded_display_lines(buffer);
         match self.side_by_side_at(pane) {
             Some(s) if (pane == s.ref_pane && buffer == s.ref_buffer) || (pane == s.live_pane && buffer == s.live_buffer) => {

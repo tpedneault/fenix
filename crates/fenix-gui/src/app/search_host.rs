@@ -529,10 +529,11 @@ impl App {
         }
         self.search.reveal = None;
         let Some(&buffer) = self.windows().content(pane) else { return };
-        let Some(ob) = self.buffers.get(buffer) else { return };
+        if self.buffers.get(buffer).is_none() {
+            return;
+        }
         let state = *self.pane_state(pane);
-        let line = ob.buffer.line_col(&state.cursor).0;
-        let row = self.pane_display_lines(pane, buffer).iter().position(|&r| r == line).unwrap_or(line);
+        let row = self.display_row_of(pane, buffer, state.cursor.char_idx);
         let scroll = scroll_to_include(state.scroll_line, row, visible);
         let state = self.pane_state_mut(pane);
         state.scroll_line = scroll;

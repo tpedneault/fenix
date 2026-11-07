@@ -165,6 +165,10 @@ impl App {
         }
         let scroll = self.pane_state(pane).scroll_line;
         let Some(&line) = self.pane_display_lines(pane, buffer).get(scroll + row) else { return false };
+        // A wrapped line's later rows have no marker.
+        if self.pane_display_rows(pane, buffer).is_some_and(|rows| rows.get(scroll + row).is_some_and(|r| r.start > 0)) {
+            return false;
+        }
         let ranges = self.fold_ranges_of(ob);
         if !ranges.iter().any(|r| r.0 == line) {
             return false;
@@ -231,13 +235,32 @@ impl App {
         scroll_col: usize,
         collapsed_headers: &HashSet<usize>,
         decorated: &HashMap<usize, crate::decorations::LineLayout>,
+        wrap_rows: Option<&[crate::wrap::Row]>,
     ) -> Vec<(String, glyphon::Color)> {
         let mut spans = Vec::new();
         let fold_ends: HashMap<usize, usize> = if collapsed_headers.is_empty() { HashMap::new() } else { self.fold_ranges_of(ob).into_iter().collect() };
         for row in 0..rows {
+            let part = wrap_rows.and_then(|rows| rows.get(row)).filter(|r| r.start > 0 || !r.last);
             if display_lines.get(row) == Some(&super::side_by_side::FILLER) {
                 // A side-by-side's filler row: blank, gutter and all.
                 spans.push((" ".repeat(gutter_chars), self.theme.gutter_fg));
+            } else if let (Some(&line), Some(part)) = (display_lines.get(row), part) {
+                // A wrapped line's row: its own stretch of the line.
+                let map = match decorated.get(&line) {
+                    Some(layout) => layout.col_map.clone(),
+                    None => {
+                        let start = ob.buffer.line_start_char(line);
+                        tabstops::expand_line(&ob.buffer.text_range(start, start + ob.buffer.line_len(line)), tab_stops).1
+                    }
+                };
+                let visual = |col: usize| map.get(col).copied().unwrap_or_else(|| map.last().copied().unwrap_or(0));
+                let from = visual(part.start);
+                let cells = if part.last { usize::MAX } else { visual(part.end) - from };
+                spans.extend(self.content_spans_window(ob, line, 1, gutter_chars, None, syntax_highlights, cursor_line, tab_stops, from, decorated, Some((cells, part.start > 0))));
+                if part.last && collapsed_headers.contains(&line) {
+                    let hidden = fold_ends.get(&line).map_or(0, |end| end - line);
+                    spans.push((format!("  ⋯ {hidden} line{}", if hidden == 1 { "" } else { "s" }), self.theme.gutter_fg));
+                }
             } else if let Some(&line) = display_lines.get(row) {
                 spans.extend(self.content_spans_decorated(ob, line, 1, gutter_chars, None, syntax_highlights, cursor_line, tab_stops, scroll_col, decorated));
                 if collapsed_headers.contains(&line) {
@@ -517,7 +540,7 @@ mod tests {
         assert_eq!(app.folded_display_lines(id), vec![0, 5, 6, 7, 8]);
         assert!(!app.fold_marker_click(pane, 2, 1), "line 6 starts no fold");
         let display = app.folded_display_lines(id);
-        let spans = app.folded_content_spans(app.open(), &display, 2, gutter, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0, app.code_folds.get(&id).unwrap(), &HashMap::new());
+        let spans = app.folded_content_spans(app.open(), &display, 2, gutter, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0, app.code_folds.get(&id).unwrap(), &HashMap::new(), None);
         let text: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert!(text.starts_with("1▸ impl Outer {  ⋯ 4 lines"), "{text:?}");
         app.config.set_value("editor.fold_markers", Some(fenix_config::Value::Bool(false)));

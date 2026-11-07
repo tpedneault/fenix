@@ -12,6 +12,7 @@ mod snippets;
 mod tool_sessions;
 mod session;
 mod editor_ui;
+mod soft_wrap;
 mod mouse;
 mod todos;
 mod home;
@@ -5099,6 +5100,8 @@ pub struct App {
     /// While a folded or side-by-side pane's overlays are worked out:
     /// the buffer line `render_base_line` stands for (see its comment).
     render_base_override: std::cell::Cell<Option<usize>>,
+    /// Soft wrap's widths, toggles and rows -- see `soft_wrap`.
+    soft_wrap: soft_wrap::SoftWrap,
     merge_session: Option<MergeSession>,
     compose: Option<ComposeSession>,
     /// Each file-backed buffer's file as Fenix last saw it. Absent for a
@@ -5958,6 +5961,7 @@ impl App {
             indent_steps: std::cell::RefCell::new(HashMap::new()),
             side_by_sides: Vec::new(),
             render_base_override: std::cell::Cell::new(None),
+            soft_wrap: Default::default(),
             merge_session: None,
             compose: None,
             disk_state,
@@ -16597,6 +16601,7 @@ impl App {
         self.pull_clipboard_before_paste(keypress);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
+        let jk_by_row = self.jk_by_display_row();
         let vim_event = {
             let reverts_edits = self.buffers.get(id).is_some_and(|ob| self.buffer_edits_are_reverted(id, ob.kind));
             let Some(ob) = self.buffers.get_mut(id) else { return };
@@ -16611,6 +16616,7 @@ impl App {
                 });
                 self.vim.set_syntax_indent(indent);
             }
+            self.vim.set_display_jk(jk_by_row);
             let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, keypress);
             // See `dispatch_keypress`'s own doc comment for `change_
             // capture`/`replaying_change` -- suppressed only while `.`
@@ -16710,6 +16716,7 @@ impl App {
             VimEvent::Message(msg) => self.set_message(msg),
             VimEvent::ScrollWindow(target) => self.scroll_window(target),
             VimEvent::Fold(command) => self.fold_command(command),
+            VimEvent::DisplayLine { down, count } => self.move_display_rows(down, count),
             VimEvent::RepeatLastChange => self.repeat_last_change(event_loop),
             VimEvent::ToggleComment { start_line, end_line } => self.toggle_comment_lines(start_line, end_line),
             VimEvent::Pulse(range) => {
@@ -16926,13 +16933,10 @@ impl App {
     fn ensure_cursor_visible(&mut self, visible_lines: usize) {
         let buffer_id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
-        let (line, scroll_line) = {
-            let ob = self.buffers.get(buffer_id).expect("focused window always has an open buffer");
-            let cursor = self.pane_state(pane).cursor;
-            let document_line = ob.buffer.line_col(&cursor).0;
-            let display_line = self.pane_display_lines(pane, buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
-            (display_line, self.pane_state(pane).scroll_line)
-        };
+        // The cursor's display row: its line's, or -- wrapped -- the row
+        // of it the cursor is on.
+        let line = self.display_row_of(pane, buffer_id, self.pane_state(pane).cursor.char_idx);
+        let scroll_line = self.pane_state(pane).scroll_line;
         let target = scroll_to_include(scroll_line, line, visible_lines);
         if target != scroll_line {
             let jump = target.abs_diff(scroll_line);
@@ -16975,6 +16979,11 @@ impl App {
     fn ensure_cursor_visible_horizontally(&mut self, visible_cols: usize) {
         let pane = self.focused_pane_id();
         let buffer_id = self.focused_buffer_id();
+        // A wrapped pane has nothing past its right edge.
+        if self.pane_display_rows(pane, buffer_id).is_some() {
+            self.pane_state_mut(pane).scroll_col = 0;
+            return;
+        }
         let cursor_col = {
             let ob = self.buffers.get(buffer_id).expect("focused window always has an open buffer");
             let cursor = self.pane_state(pane).cursor;
@@ -17021,10 +17030,11 @@ impl App {
     /// the *target* `rendered_scroll` is easing toward).
     ///
     /// In a pane whose rows aren't its lines one for one -- a scope
-    /// folded, or a side-by-side's filler rows -- the overlays (selection,
-    /// search matches, brackets) are worked out against a buffer line set
-    /// in `render_base_override` and then moved to the rows those lines
-    /// are on.
+    /// folded, a line soft-wrapped, or a side-by-side's filler rows -- the
+    /// overlays (selection, search matches, brackets) are worked out
+    /// against a buffer line set in `render_base_override` and then moved
+    /// to the rows those lines are on (a wrapped line's to each of its
+    /// rows, cut to what that row shows).
     fn render_base_line(&self) -> usize {
         if let Some(line) = self.render_base_override.get() {
             return line;
@@ -17704,6 +17714,30 @@ impl App {
         scroll_col: usize,
         decorated: &HashMap<usize, crate::decorations::LineLayout>,
     ) -> Vec<(String, glyphon::Color)> {
+        self.content_spans_window(ob, render_base_line, rows, gutter_chars, dashboard_pad, syntax_highlights, cursor_line, tab_stops, scroll_col, decorated, None)
+    }
+
+    /// `content_spans_decorated`, for a soft-wrapped row when `window` is
+    /// `Some((cells, continued))`: `cells` visual columns of the line from
+    /// `scroll_col`, and -- `continued`, a row after the line's first --
+    /// a `↪` in the gutter where its number would be.
+    #[allow(clippy::too_many_arguments)]
+    fn content_spans_window(
+        &self,
+        ob: &OpenBuffer,
+        render_base_line: usize,
+        rows: usize,
+        gutter_chars: usize,
+        dashboard_pad: Option<&[usize]>,
+        syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
+        cursor_line: usize,
+        tab_stops: &TabStops,
+        scroll_col: usize,
+        decorated: &HashMap<usize, crate::decorations::LineLayout>,
+        window: Option<(usize, bool)>,
+    ) -> Vec<(String, glyphon::Color)> {
+        let keep = window.map_or(MAX_ROW_CHARS, |(cells, _)| cells.min(MAX_ROW_CHARS));
+        let continued = window.is_some_and(|(_, continued)| continued);
         let theme = self.theme;
         let visual_lines = ob.buffer.visual_line_count();
         let mut spans = Vec::new();
@@ -17721,10 +17755,13 @@ impl App {
             } else if gutter_chars > 0 {
                 let blame = self.blame_width(ob);
                 if blame > 0 {
-                    spans.push(self.blame_cell(ob, buffer_line, blame));
+                    spans.push(if continued { (" ".repeat(blame), theme.gutter_fg) } else { self.blame_cell(ob, buffer_line, blame) });
                 }
                 let numbers = gutter_chars - blame;
-                if numbers > 0 {
+                if numbers > 0 && continued && has_line {
+                    // A wrapped line's later row: no number of its own.
+                    spans.push((format!("{:>width$} ", "↪", width = numbers.saturating_sub(1)), theme.gutter_fg));
+                } else if numbers > 0 {
                     let marker_cells = usize::from(fold_marks.is_some());
                     let gutter = if has_line {
                         let n = match self.line_number_mode {
@@ -17765,12 +17802,12 @@ impl App {
                     let theme = self.theme;
                     let ranges = decorated_ranges(remapped, &layout.runs, |role| pages::role_color(theme, role));
                     let (sliced, skipped_bytes) = skip_chars(display, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
+                    let sliced = keep_chars(sliced, keep);
                     spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &ranges, theme.fg));
                 } else if line_text.contains('\t') {
                     let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
                     let (sliced, skipped_bytes) = skip_chars(&display, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
+                    let sliced = keep_chars(sliced, keep);
                     if syntax_highlights.is_empty() {
                         spans.push((sliced.to_string(), theme.fg));
                     } else {
@@ -17793,7 +17830,7 @@ impl App {
                     }
                 } else {
                     let (sliced, skipped_bytes) = skip_chars(&line_text, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
+                    let sliced = keep_chars(sliced, keep);
                     if syntax_highlights.is_empty() {
                         spans.push((sliced.to_string(), theme.fg));
                     } else {
@@ -18952,10 +18989,8 @@ impl App {
     fn scroll_window_at(&mut self, target: VimScrollTarget, window_width: f32, window_height: f32) {
         let pane = self.focused_pane_id();
         let buffer_id = self.focused_buffer_id();
-        let Some(ob) = self.buffers.get(buffer_id) else { return };
-        let cursor = self.pane_state(pane).cursor;
-        let (document_line, _) = ob.buffer.line_col(&cursor);
-        let line = self.pane_display_lines(pane, buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
+        if self.buffers.get(buffer_id).is_none() { return };
+        let line = self.display_row_of(pane, buffer_id, self.pane_state(pane).cursor.char_idx);
 
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
         let (sidebar_px, terminal_h, modeline_top) = self.frame_metrics(window_height);
@@ -19832,6 +19867,11 @@ impl App {
                 // long enough to follow its cursor.
                 self.search_reveal(pane, pane_visible_lines);
             }
+            // How wide the text is, which a pane that wraps wraps to.
+            if let Some(ob) = self.buffers.get(buffer_id) {
+                let gutter_px = self.gutter_chars(ob) as f32 * char_width;
+                self.note_wrap_cols(pane, text::cols_that_fit(rect.w - gutter_px, char_width));
+            }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
@@ -19850,15 +19890,25 @@ impl App {
             // from its own independent cursor/scroll position.
             let pane_state = *self.pane_state(pane);
             // Sideways scrolling eases a column at a time.
-            let shown_scroll_col = self.scroll_col(pane, pane_state.scroll_col, now);
+            // A wrapped pane's rows: each a stretch of a line.
+            let wrap_rows = self.pane_display_rows(pane, buffer_id);
+            // Sideways scrolling eases a column at a time; a wrapped pane
+            // has none.
+            let shown_scroll_col = if wrap_rows.is_some() { 0 } else { self.scroll_col(pane, pane_state.scroll_col, now) };
             let rendered_scroll = pane_state.rendered_scroll;
             // Scroll positions are display-row based once a scope is
-            // collapsed. This mapping is the single conversion point back
-            // to document rows for every operation below.
-            let display_lines = self.pane_display_lines(pane, buffer_id);
+            // collapsed or a line wraps. This mapping is the single
+            // conversion point back to document rows for every operation
+            // below.
+            let display_lines = match &wrap_rows {
+                Some(rows) => rows.iter().map(|r| r.line).collect(),
+                None => self.pane_display_lines(pane, buffer_id),
+            };
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
             let visible_document_lines = &display_lines[render_base_line.min(display_lines.len())..];
-            let folds_active = display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
+            let visible_wrap: Option<&[crate::wrap::Row]> = wrap_rows.as_deref().map(|rows| &rows[render_base_line.min(rows.len())..]);
+            let wrapped = wrap_rows.as_ref().is_some_and(|rows| rows.iter().any(|r| r.start > 0 || !r.last));
+            let folds_active = wrapped || display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
             let render_frac = rendered_scroll - rendered_scroll.floor();
             // Computed here (rather than at its previous spot, further
             // down) so the dashboard-centering block below can look up
@@ -19936,16 +19986,28 @@ impl App {
                     } else {
                         line_text.chars().take_while(|&c| c == ' ').count()
                     };
-                    // Home's leading spaces are layout, not indentation.
-                    if !is_dashboard {
+                    // Home's leading spaces are layout, not indentation; a
+                    // wrapped line's later rows have none.
+                    if !is_dashboard && visible_wrap.and_then(|rows| rows.get(r)).is_none_or(|row| row.start == 0) {
                         indent_guides.extend(indent_guide_columns(leading_columns, indent_width).map(|col| (r, col)));
                     }
                 }
             }
+            // Where each row starts and ends in its line's visual columns:
+            // a wrapped row's stretch, else the sideways scroll on.
+            let row_cells: Vec<(usize, usize)> = (0..=pane_visible_lines)
+                .map(|r| match visible_wrap.and_then(|rows| rows.get(r)) {
+                    Some(row) => {
+                        let visual = |col: usize| col_maps.get(&r).map(|m| tabstops::visual_col(m, col)).unwrap_or(col);
+                        (visual(row.start), if row.last { usize::MAX } else { visual(row.end) })
+                    }
+                    None => (shown_scroll_col, usize::MAX),
+                })
+                .collect();
             let content_spans = match self.buffers.get(buffer_id) {
                 Some(ob) if folds_active => self.folded_content_spans(
                     ob, visible_document_lines, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
-                    line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &decorated,
+                    line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &decorated, visible_wrap,
                 ),
                 Some(ob) => self.content_spans_decorated(
                     ob, render_base_line, pane_visible_lines + 1, gutter_chars, dashboard_pad.as_deref(),
@@ -19962,7 +20024,16 @@ impl App {
             // part of the transition (it hasn't panned into view yet) --
             // `None` means "don't draw the hl-line/caret this frame," not
             // a bug.
-            let hl_row = visible_document_lines.iter().position(|&row| row == line).filter(|&row| row <= pane_visible_lines);
+            // The row char column `col` of line `line` is drawn on, if
+            // it's in view.
+            let row_of = |line: usize, col: usize| -> Option<usize> {
+                match visible_wrap {
+                    Some(rows) => crate::wrap::row_holding(rows, line, col).filter(|&r| rows[r].holds(col)),
+                    None => visible_document_lines.iter().position(|&l| l == line),
+                }
+                .filter(|&row| row <= pane_visible_lines)
+            };
+            let hl_row = row_of(line, col);
 
             // Char column -> visual column, via this row's `col_maps`
             // entry when it has one (a line with a tab), else unchanged
@@ -19983,7 +20054,8 @@ impl App {
             // position clamps to column 0 (still drawn, just from the
             // pane's left edge) instead of underflowing.
             let remap_col = |row: usize, col: usize| -> usize {
-                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(shown_scroll_col)
+                let from = row_cells.get(row).map_or(shown_scroll_col, |cells| cells.0);
+                col_maps.get(&row).map(|m| tabstops::visual_col(m, col)).unwrap_or(col).saturating_sub(from)
             };
             let remap_segments = |segments: Segments| -> Segments {
                 segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
@@ -20004,14 +20076,41 @@ impl App {
                 match (first, last) {
                     (Some(first), Some(last)) => {
                         let span = last - first + 1;
+                        // A wrapped line's segment goes on each of its rows,
+                        // cut to the part on that row.
                         let to_rows = |segments: Segments| -> Segments {
                             segments
                                 .into_iter()
-                                .filter_map(|(r, s, e)| {
-                                    let row = visible_document_lines.iter().position(|&l| l == first + r)?;
-                                    (row <= pane_visible_lines).then_some((row, s, e))
+                                .flat_map(|(r, s, e)| -> Segments {
+                                    let line = first + r;
+                                    match visible_wrap {
+                                        Some(rows) => rows
+                                            .iter()
+                                            .enumerate()
+                                            .take(pane_visible_lines + 1)
+                                            .filter(|(_, row)| row.line == line)
+                                            .filter_map(|(i, row)| row.clip(s, e).map(|(a, b)| (i, a, b)))
+                                            .collect(),
+                                        None => visible_document_lines
+                                            .iter()
+                                            .position(|&l| l == line)
+                                            .filter(|&row| row <= pane_visible_lines)
+                                            .map(|row| (row, s, e))
+                                            .into_iter()
+                                            .collect(),
+                                    }
                                 })
                                 .collect()
+                        };
+                        // While a search is typed, the caret previews where
+                        // it lands.
+                        let caret = match self.vim.mode() {
+                            Mode::Search => self.buffers.get(buffer_id).and_then(|ob| {
+                                let at = self.vim.preview_match(&ob.buffer, &pane_state.cursor)?;
+                                let (l, c) = ob.buffer.line_col(&Cursor { char_idx: at, sticky_col: 0 });
+                                row_of(l, c).map(|row| (row, remap_col(row, c)))
+                            }),
+                            _ => hl_row.map(|row| (row, remap_col(row, col))),
                         };
                         self.render_base_override.set(Some(first));
                         let overlays = (
@@ -20019,7 +20118,7 @@ impl App {
                             self.pulse_overlay(span).map(|(segs, a)| (remap_segments(to_rows(segs)), a)),
                             remap_segments(to_rows(self.bracket_match_segments(span))),
                             remap_segments(to_rows(self.hlsearch_segments(span))),
-                            hl_row.map(|row| (row, remap_col(row, col))),
+                            caret,
                         );
                         self.render_base_override.set(None);
                         overlays
@@ -20042,7 +20141,7 @@ impl App {
                         let start = ob.buffer.byte_to_char(range.start);
                         let len = ob.buffer.byte_to_char(range.end) - start;
                         let (line, col) = ob.buffer.line_col(&Cursor { char_idx: start, sticky_col: 0 });
-                        let row = visible_document_lines.iter().position(|&l| l == line).filter(|&r| r <= pane_visible_lines)?;
+                        let row = row_of(line, col)?;
                         let [r, g, b, _] = glyphon_to_rgba(theme.todo_color(*kind));
                         Some((row, remap_col(row, col), remap_col(row, col + len), [r, g, b, 0.18]))
                     })
@@ -20055,8 +20154,9 @@ impl App {
             let mut decoration_underlines = Vec::new();
             let mut decoration_strikes = Vec::new();
             for (row, layout) in &decoration_rows {
+                let (from, to) = row_cells.get(*row).copied().unwrap_or((shown_scroll_col, usize::MAX));
                 for (cols, mark) in &layout.marks {
-                    let (a, b) = (cols.start.saturating_sub(shown_scroll_col), cols.end.saturating_sub(shown_scroll_col));
+                    let (a, b) = (cols.start.max(from) - from, cols.end.min(to).max(from) - from);
                     if a >= b {
                         continue;
                     }
@@ -20143,6 +20243,7 @@ impl App {
                     tab_rows: &tab_rows,
                     selection: &selection_segments,
                     remap_col: &remap_col,
+                    wrapped: visible_wrap.filter(|_| wrapped),
                 };
                 let polished = self.polish_pane(&view, &mut spans, now);
                 extra.squiggles = polished.squiggles;
@@ -22178,12 +22279,14 @@ impl App {
     fn test_route_key(&mut self, kp: KeyPress) {
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
+        let jk_by_row = self.jk_by_display_row();
         let vim_event = {
             let reverts_edits = self.buffers.get(id).is_some_and(|ob| self.buffer_edits_are_reverted(id, ob.kind));
             let ob = self.buffers.get_mut(id).expect("focused window always has an open buffer");
             let pane_state = self.workspaces.active_pane_states_mut().get_mut(&pane).expect("every existing pane has a PaneState");
             let mode_before = self.vim.mode();
             let edit_count_before = ob.buffer.edit_count();
+            self.vim.set_display_jk(jk_by_row);
             let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, kp);
             // Mirrors `route_keypress`'s own instrumentation -- see
             // `dispatch_keypress`'s doc comment.
@@ -22228,6 +22331,7 @@ impl App {
             VimEvent::BracketJump { target: fenix_vim::BracketTarget::AgentHunk, forward, count } => self.agents_jump_to_hunk(forward, count),
             VimEvent::Diff { put } => self.side_by_side_take(put),
             VimEvent::Tab(mv) => self.move_tab(mv),
+            VimEvent::DisplayLine { down, count } => self.move_display_rows(down, count),
             _ => {}
         }
         self.after_vim_key(kp);

@@ -19,6 +19,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   panic. A freeze of 30 seconds or more leaves `fenix-hang.dmp` beside it, with
   every thread's stack.
 - `WGPU_BACKEND` (`dx12`, `vulkan`) chooses the graphics API.
+- Soft wrap. The agent's prompt and the compose boxes wrap their long lines
+  to the pane's width, so everything you typed is in view; `j`/`k` there move
+  a screen row. `editor.soft_wrap` (`off`, `prose`, `all`; `off` by default)
+  wraps other buffers, `SPC t w` one buffer, and `gj`/`gk` move a screen row
+  in any of them.
 
 ### Changed
 

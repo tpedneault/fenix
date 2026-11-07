@@ -85,6 +85,8 @@ pub enum VimAction {
     /// `za`, `zo`, `zc`, `zR`, `zM`... -- folds, the host's
     /// (`VimEvent::Fold`).
     Fold(FoldCommand),
+    /// `gj`/`gk`: down or up a screen row of a wrapped line, for the host.
+    DisplayLine { down: bool },
     /// `Ctrl-a`/`Ctrl-x`: increment/decrement the nearest number at or
     /// after the cursor on the current line, by `count` (already signed
     /// -- negative for `Ctrl-x`).
@@ -148,6 +150,8 @@ pub enum ScrollTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisualAction {
     Motion(Motion),
+    /// `gj`/`gk`, as in Normal mode.
+    DisplayLine { down: bool },
     Apply(Operator),
     /// Pressing a visual-entry key (`v`/`V`/`Ctrl-v`) while already in
     /// Visual mode: same kind as the current selection exits to Normal
@@ -265,6 +269,8 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
     t.insert(&[KeyPress::char(':')], "command line", VimAction::EnterCommandLine);
 
     t.insert(&[KeyPress::char('g'), KeyPress::char('v')], "reselect visual", VimAction::ReselectVisual);
+    t.insert(&[KeyPress::char('g'), KeyPress::char('j')], "down a screen row", VimAction::DisplayLine { down: true });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('k')], "up a screen row", VimAction::DisplayLine { down: false });
     t.insert(&[KeyPress::char('g'), KeyPress::char('c')], "toggle comment...", VimAction::ToggleCommentPrompt);
     t.insert(&[KeyPress::char('g'), KeyPress::char('d')], "go to definition", VimAction::RequestLsp(crate::state::LspRequestKind::GoToDefinition));
     t.insert(&[KeyPress::char('g'), KeyPress::char('r')], "references", VimAction::RequestLsp(crate::state::LspRequestKind::References));
@@ -351,6 +357,8 @@ fn build_normal_trie() -> KeyTrie<VimAction> {
 fn build_visual_trie() -> KeyTrie<VisualAction> {
     let mut t = KeyTrie::new();
     add_motions(&mut t, VisualAction::Motion);
+    t.insert(&[KeyPress::char('g'), KeyPress::char('j')], "down a screen row", VisualAction::DisplayLine { down: true });
+    t.insert(&[KeyPress::char('g'), KeyPress::char('k')], "up a screen row", VisualAction::DisplayLine { down: false });
     t.insert(&[Operator::Delete.trigger_key()], "delete selection", VisualAction::Apply(Operator::Delete));
     t.insert(&[Operator::Change.trigger_key()], "change selection", VisualAction::Apply(Operator::Change));
     t.insert(&[Operator::Yank.trigger_key()], "yank selection", VisualAction::Apply(Operator::Yank));

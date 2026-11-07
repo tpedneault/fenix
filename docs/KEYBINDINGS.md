@@ -49,6 +49,7 @@ the other way round after `\v`.
 | `SPC t a` | Cycle motion: off, subtle, full |
 | `SPC t q` | Do not disturb: only critical notifications show; the rest are kept in the history |
 | `SPC t d` | Cycle inline problems: all, errors only, off |
+| `SPC t w` | Soft wrap the current buffer's long lines, or stop (`editor.soft_wrap` sets it for every buffer) |
 | `SPC e e` | Open the file explorer here |
 | `SPC e H` | Open the file explorer at your home folder |
 | `SPC e h` | Show or hide hidden files and folders (dot-names, and on Windows those marked hidden), in every explorer; remembered |
@@ -278,6 +279,7 @@ the other way round after `\v`.
 | `zr` / `zm` | One fold level more open / closed |
 | `zj` / `zk` | To the start of the next fold / the end of the one before |
 | `zx`, `zE` | Open every fold and forget them |
+| `gj` / `gk` | Down / up a screen row of a soft-wrapped line, at the same column (`j` / `k` go by buffer line, as in Vim) |
 | A click on `▾` / `▸` in the gutter | Close / open that fold |
 | `SPC m` | The mode menu -- what's in it depends on the focused buffer (below) |
 | `SPC m` (PDF) | The reader's commands: pages, zoom, outline, search, the shelf |
@@ -635,6 +637,7 @@ and for the followed parameter `value:` `raw:` `limits:out` (`in`,
 | `q` | Put the dock away (the thread is kept) |
 | `Enter` (the prompt, Normal mode), `Ctrl-Enter` (Insert) | Send it |
 | `Ctrl-C` (the prompt, Normal mode) | Cancel the turn |
+| `j` / `k` (the prompt, Normal mode) | Down / up a screen row, as `gj` / `gk` -- the prompt wraps its long lines (so does a compose box) |
 | `↑` / `↓` (an empty prompt, or one brought back as it was) | The prompt sent before / after |
 | `y` `Y` `n` `N` / `1`…`9` (an empty prompt, a question waiting) | Answer it, as in the thread |
 | `@` (the prompt, Insert mode) | Mention a file, `@selection`, `@file`, `@diagnostics` or `@diff` |

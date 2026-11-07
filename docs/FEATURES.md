@@ -104,6 +104,18 @@ its extension. The rest is built into Fenix.
   Vim. Folds come from the syntax tree (a grammar's `folds.scm`), or from
   the indentation in a file with none; they're kept with the session.
   `editor.fold_markers` turns the column off.
+- **Soft wrap**: a long line goes on over more rows instead of off the
+  pane's right edge, broken after a space (a word longer than the row is
+  cut where the row ends), to the pane's width -- resize the pane and it
+  wraps again. The agent's prompt and the compose boxes (a commit
+  message, a pull request's description) always wrap; any other buffer
+  by `editor.soft_wrap` (`off`, `prose` for Markdown and plain text, or
+  `all`) or `SPC t w`. A wrapped line's later rows show `↪` in the gutter
+  where its number would be. The caret, Visual selections, search
+  matches, the mouse and scrolling all go by the row; `gj`/`gk` move a
+  row, and in the prompt and compose boxes so do `j`/`k`. There's no
+  sideways scrolling while a pane wraps. A closed fold's header wraps
+  like any line, with its `⋯` after its last row.
 - **Syntax highlighting** via tree-sitter for Rust, TOML, Markdown, JSON,
   YAML, Python, JavaScript/TypeScript/TSX, C, C++, C#, Go, Java, Lua, SQL,
   HTML, CSS, Bash, Tcl, Dockerfile/Containerfile, Batch (`.bat`/`.cmd`),
