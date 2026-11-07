@@ -91,8 +91,12 @@ impl Launcher {
         crate::profile::launch_mark("window");
         let (gpu_context, mut gpu) = pollster::block_on(GpuContext::new(Arc::clone(&window)));
         crate::profile::launch_mark("gpu");
+        // In the log whether or not anyone asked: which GPU, through what
+        // and on which driver is the first thing to know about a window
+        // that stopped drawing.
+        let adapter = gpu_context.adapter_info();
+        crate::watchdog::note(&format!("Fenix {} on {} via {:?}, driver {} {}", env!("CARGO_PKG_VERSION"), adapter.name, adapter.backend, adapter.driver, adapter.driver_info));
         if std::env::var_os("FENIX_PROFILE").is_some() {
-            let adapter = gpu_context.adapter_info();
             eprintln!("fenix-profile launch/adapter: {} via {:?}", adapter.name, adapter.backend);
         }
 

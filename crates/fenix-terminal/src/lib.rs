@@ -79,7 +79,10 @@ impl Terminal {
         // past the child's own lifetime on platforms where that matters.
         drop(pair.slave);
         let reader = pair.master.try_clone_reader().map_err(|err| std::io::Error::other(err.to_string()))?;
+        // Off the caller's thread, which is the UI thread: a paste into
+        // a shell that has stopped reading would otherwise hold the window.
         let writer = pair.master.take_writer().map_err(|err| std::io::Error::other(err.to_string()))?;
+        let writer: Box<dyn Write + Send> = Box::new(fenix_rpc::QueueWriter::spawn("fenix-terminal-writer", writer)?);
         let parser = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, query::QueryReplies::default());
         Ok((Terminal { child, writer, master: pair.master, parser }, reader))
     }

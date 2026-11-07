@@ -69,11 +69,23 @@ pub fn limits(memory: usize) -> wasmtime::StoreLimits {
     wasmtime::StoreLimitsBuilder::new().memory_size(memory).instances(16).tables(16).memories(4).trap_on_grow_failure(true).build()
 }
 
+/// `Ticker`'s sleep running this far over is the machine having slept.
+const SLEPT_AFTER: Duration = Duration::from_secs(5);
+
 /// Moves `engine`'s epoch on every `TICK` until dropped, so a call given
 /// a deadline of `n` ticks traps about `n * TICK` after it starts.
 pub struct Ticker {
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// How many ticks to make up, `due` being where the clock says the count
+/// should be. A run far past that is the machine having slept, not a call
+/// having used the time: a call caught mid-way by the lid closing mustn't
+/// be trapped for a deadline it had all of on waking.
+fn ticks_owed(ticked: u128, due: u128) -> u128 {
+    let owed = due.saturating_sub(ticked);
+    if owed * TICK.as_nanos() > SLEPT_AFTER.as_nanos() { 1 } else { owed }
 }
 
 impl Ticker {
@@ -91,10 +103,11 @@ impl Ticker {
                 while !flag.load(Ordering::Relaxed) {
                     std::thread::sleep(TICK);
                     let due = started.elapsed().as_nanos() / TICK.as_nanos();
-                    while ticked < due {
+                    let owed = ticks_owed(ticked, due);
+                    for _ in 0..owed {
                         engine.increment_epoch();
-                        ticked += 1;
                     }
+                    ticked = due;
                 }
             })
             .expect("a thread for the epoch");
@@ -114,6 +127,16 @@ impl Drop for Ticker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The epoch counts time a call had, so a call mustn't be charged for
+    /// the hours the lid was shut.
+    #[test]
+    fn the_machine_sleeping_isnt_time_a_call_used() {
+        assert_eq!(ticks_owed(100, 100), 0);
+        assert_eq!(ticks_owed(100, 103), 3, "a sleep that ran long is made up");
+        let hours = 8 * 3600 * 1000 / TICK.as_millis();
+        assert_eq!(ticks_owed(100, 100 + hours), 1);
+    }
     use wasmtime::{Instance, Module, Store};
 
     fn run(engine: &wasmtime::Engine, wat: &str, export: &str, deadline: u64) -> wasmtime::Result<i32> {

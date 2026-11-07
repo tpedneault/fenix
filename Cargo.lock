@@ -1343,6 +1343,7 @@ name = "fenix-lsp"
 version = "1.2.0"
 dependencies = [
  "fenix-rpc",
+ "fenix-tasks",
  "lsp-types",
  "ropey",
  "serde",
@@ -1481,6 +1482,7 @@ dependencies = [
 name = "fenix-terminal"
 version = "1.2.0"
 dependencies = [
+ "fenix-rpc",
  "portable-pty",
  "vt100",
 ]

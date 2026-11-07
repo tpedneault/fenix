@@ -83,7 +83,8 @@ impl MotionGpu {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: gpu.config.format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                // `COPY_SRC` is the live tests', to look at what was drawn.
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

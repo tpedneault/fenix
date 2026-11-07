@@ -14,6 +14,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Four more built-in pipelines on `SPC a P`: *Diagnose, fix, review*, *Tests
   first, build, review*, *Plan a refactor, carry it out, review*, and *Review
   what's changed*, a review of what isn't committed.
+- `fenix-hangs.log` now says which GPU and driver are in use, when the machine
+  slept and woke, what happened to the window's surface and device, and any
+  panic. A freeze of 30 seconds or more leaves `fenix-hang.dmp` beside it, with
+  every thread's stack.
+- `WGPU_BACKEND` (`dx12`, `vulkan`) chooses the graphics API.
 
 ### Changed
 
@@ -40,6 +45,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - An agent's form whose field names aren't plain words, `Data scope` say,
   could never be sent: it was edited as TOML, and they aren't TOML keys.
 - Choices spelled `anyOf`, or titled with `enumNames`, are read as choices.
+- A window whose GPU device is lost, as can happen over a long sleep, recovers:
+  Fenix sets up everything it draws with again, in about a second, with nothing
+  lost. Before, the window never drew again and Fenix had to be killed.
+- A language server, agent, debug adapter or shell that stops reading can no
+  longer freeze the window. Writing to one waited for it to read, on the UI
+  thread; now that happens on a thread of its own.
+- Closing a language server no longer waits on the processes it started, which
+  froze the window for as long as they ran; a server started through a shell
+  or `npm`'s shim now goes with everything it started.
+- An extension's call isn't failed for a deadline missed while the machine was
+  asleep.
 
 ## [1.2.0] - 2026-11-06
 

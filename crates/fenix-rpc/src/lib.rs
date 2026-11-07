@@ -15,6 +15,8 @@
 //! beside the `Content-Length` pair, on the same plain `BufRead`/`Write`.
 
 use std::io::{self, BufRead, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc};
 
 /// On Windows, `std::process::Command::new` only launches a bare program
 /// name via `CreateProcess`'s own loader, which -- unlike a real shell --
@@ -284,6 +286,200 @@ pub fn write_line_message<W: Write>(writer: &mut W, body: &[u8]) -> io::Result<(
     writer.write_all(body)?;
     writer.write_all(b"\n")?;
     writer.flush()
+}
+
+/// How much may wait for a peer that has stopped reading. Past it, writes
+/// fail: its text isn't worth more of the machine's memory than this, and
+/// a peer this far behind isn't coming back.
+const MAX_QUEUED: usize = 256 * 1024 * 1024;
+
+/// A writer that never blocks: what's written goes out on a thread of its
+/// own, in order, a message at a time (each `flush`).
+///
+/// A pipe holds a few kilobytes. Past that, a write waits for the other
+/// side to read, and a peer that has stopped reading -- wedged, or not
+/// back from the machine's sleep -- never does. Language servers, agents
+/// and debug adapters are all written to from the UI thread, so a write
+/// that waits is a window that stays frozen until Fenix is killed.
+///
+/// Dropping it ends the thread once what's queued has gone out, which
+/// closes `out`. A write stuck on a peer that never reads ends when the
+/// peer does.
+pub struct QueueWriter {
+    /// What's written since the last `flush`.
+    pending: Vec<u8>,
+    sending: mpsc::Sender<Vec<u8>>,
+    queued: Arc<AtomicUsize>,
+    /// The peer is gone, or too far behind.
+    failed: Arc<AtomicBool>,
+    most: usize,
+}
+
+impl QueueWriter {
+    /// Starts the thread that writes to `out`, named `name`.
+    pub fn spawn(name: &str, out: impl Write + Send + 'static) -> io::Result<QueueWriter> {
+        Self::spawn_limited(name, out, MAX_QUEUED)
+    }
+
+    fn spawn_limited(name: &str, mut out: impl Write + Send + 'static, most: usize) -> io::Result<QueueWriter> {
+        let (sending, chunks) = mpsc::channel::<Vec<u8>>();
+        let queued = Arc::new(AtomicUsize::new(0));
+        let failed = Arc::new(AtomicBool::new(false));
+        let (left, broke) = (Arc::clone(&queued), Arc::clone(&failed));
+        std::thread::Builder::new().name(name.to_string()).spawn(move || {
+            for chunk in chunks {
+                let wrote = out.write_all(&chunk).and_then(|()| out.flush());
+                left.fetch_sub(chunk.len(), Ordering::Relaxed);
+                if wrote.is_err() {
+                    broke.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+        })?;
+        Ok(QueueWriter { pending: Vec::new(), sending, queued, failed, most })
+    }
+}
+
+impl QueueWriter {
+    /// What says when the queue has gone out, kept apart from the writer
+    /// so it can be asked after the writer has been handed on.
+    pub fn drain(&self) -> QueueDrain {
+        QueueDrain(Arc::clone(&self.queued))
+    }
+}
+
+/// See `QueueWriter::drain`.
+#[derive(Clone)]
+pub struct QueueDrain(Arc<AtomicUsize>);
+
+impl QueueDrain {
+    /// Waits up to `limit` for everything flushed so far to have gone out;
+    /// true if it has. For a last message before the connection is closed
+    /// by other means: closing doesn't wait for the queue.
+    pub fn wait(&self, limit: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        while self.0.load(Ordering::Relaxed) > 0 {
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        true
+    }
+}
+
+impl Write for QueueWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if self.failed.load(Ordering::Relaxed) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the other side has gone"));
+        }
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.pending);
+        if self.queued.load(Ordering::Relaxed) + chunk.len() > self.most {
+            self.failed.store(true, Ordering::Relaxed);
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the other side has stopped reading"));
+        }
+        self.queued.fetch_add(chunk.len(), Ordering::Relaxed);
+        self.sending.send(chunk).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "the other side has gone"))
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Holds every write until told to go, as a pipe nobody reads does.
+    struct Stuck(mpsc::Receiver<()>, Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Stuck {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            let _ = self.0.recv();
+            self.1.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Broken;
+
+    impl Write for Broken {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writing_returns_at_once_and_it_all_arrives_in_order() {
+        let (go, held) = mpsc::channel();
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut writer = QueueWriter::spawn("test", Stuck(held, Arc::clone(&written))).unwrap();
+        let started = Instant::now();
+        write_message(&mut writer, b"one").unwrap();
+        write_line_message(&mut writer, b"two").unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(written.lock().unwrap().is_empty());
+        for _ in 0..16 {
+            let _ = go.send(());
+        }
+        drop(go);
+        drop(writer);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while written.lock().unwrap().len() < "Content-Length: 3\r\n\r\none".len() + "two\n".len() {
+            assert!(Instant::now() < deadline, "the queue never drained");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(written.lock().unwrap().as_slice(), b"Content-Length: 3\r\n\r\nonetwo\n");
+    }
+
+    #[test]
+    fn a_peer_that_stopped_reading_fails_writes_past_the_limit() {
+        let (_go, held) = mpsc::channel();
+        let mut writer = QueueWriter::spawn_limited("test", Stuck(held, Arc::default()), 100).unwrap();
+        writer.write_all(&[0; 60]).unwrap();
+        writer.flush().unwrap();
+        writer.write_all(&[0; 60]).unwrap();
+        assert_eq!(writer.flush().unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert!(writer.write_all(&[0]).is_err(), "and it stays failed");
+    }
+
+    #[test]
+    fn a_drain_says_when_the_queue_has_gone_out_and_gives_up_in_time() {
+        let (go, held) = mpsc::channel();
+        let mut writer = QueueWriter::spawn("test", Stuck(held, Arc::default())).unwrap();
+        let drain = writer.drain();
+        writer.write_all(b"x").unwrap();
+        writer.flush().unwrap();
+        assert!(!drain.wait(Duration::from_millis(20)), "the peer isn't reading");
+        go.send(()).unwrap();
+        assert!(drain.wait(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn a_peer_that_has_gone_fails_the_next_write() {
+        let mut writer = QueueWriter::spawn("test", Broken).unwrap();
+        writer.write_all(b"x").unwrap();
+        writer.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while writer.write(b"y").is_ok() {
+            assert!(Instant::now() < deadline, "the failure never showed");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 }
 
 #[cfg(test)]
