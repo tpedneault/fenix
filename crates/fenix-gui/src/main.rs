@@ -201,6 +201,11 @@ fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::<FenixUserEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let proxy = event_loop.create_proxy();
+    // Winit doesn't say when the machine wakes; the watchdog notices.
+    let waking = proxy.clone();
+    watchdog::on_wake(move |slept| {
+        let _ = waking.send_event(FenixUserEvent::Woke(slept));
+    });
 
     let cwd = std::env::current_dir().unwrap_or_default();
     let invocation = match cli::parse(&args, &cwd, |path| path.exists()) {

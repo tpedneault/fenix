@@ -30,6 +30,7 @@ mod git_rebase_page;
 mod settings_host;
 mod snippets_host;
 mod tutorial_host;
+mod gpu_host;
 mod motion_host;
 mod debug_host;
 mod debug_drawer;
@@ -1452,14 +1453,13 @@ impl std::fmt::Debug for LspStart {
 /// stalling input behind a burst -- everything just gets forwarded.
 struct LspReader {
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
 }
 
 impl LspReader {
     fn spawn(receiver: std::sync::mpsc::Receiver<fenix_lsp::LspEvent>, key: LspKey, generation: u64, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
-        let handle = std::thread::spawn(move || loop {
+        std::thread::spawn(move || loop {
             if thread_stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -1476,16 +1476,17 @@ impl LspReader {
                 Err(_) => return, // the LspClient side hung up -- session closed/dropped
             }
         });
-        Self { stop, handle: Some(handle) }
+        Self { stop }
     }
 }
 
 impl Drop for LspReader {
+    /// Not joined: the thread ends with the first event after this, or
+    /// when the client's read loop does, and that's when every process
+    /// holding the server's pipes has gone. The UI thread isn't to wait
+    /// for that.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
     }
 }
 
@@ -1497,14 +1498,13 @@ impl Drop for LspReader {
 /// carries `language`).
 struct DapReader {
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
 }
 
 impl DapReader {
     fn spawn(receiver: std::sync::mpsc::Receiver<fenix_dap::DapEvent>, generation: u64, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
-        let handle = std::thread::spawn(move || loop {
+        std::thread::spawn(move || loop {
             if thread_stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -1521,16 +1521,14 @@ impl DapReader {
                 Err(_) => return, // the DapClient side hung up -- session closed/dropped
             }
         });
-        Self { stop, handle: Some(handle) }
+        Self { stop }
     }
 }
 
 impl Drop for DapReader {
+    /// Not joined, as `LspReader` isn't.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
     }
 }
 
@@ -1647,14 +1645,13 @@ struct GitSession {
 /// against.
 struct GitStatusPoller {
     stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
 }
 
 impl GitStatusPoller {
     fn spawn(repo_root: PathBuf, send: impl Fn(FenixUserEvent) -> bool + Send + 'static) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
-        let handle = std::thread::spawn(move || loop {
+        std::thread::spawn(move || loop {
             if thread_stop.load(Ordering::Relaxed) {
                 return;
             }
@@ -1672,16 +1669,15 @@ impl GitStatusPoller {
                 waited += step;
             }
         });
-        Self { stop, handle: Some(handle) }
+        Self { stop }
     }
 }
 
 impl Drop for GitStatusPoller {
+    /// Not joined: a `git status` on a share that has gone away takes as
+    /// long as it takes, and the UI thread isn't to wait for it.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
     }
 }
 
@@ -1755,6 +1751,8 @@ struct GitPrompt {
 /// do* -- `App::user_event` decides the "do."
 #[derive(Debug)]
 pub enum FenixUserEvent {
+    /// The machine was asleep this long (`watchdog`). Winit doesn't say.
+    Woke(Duration),
     /// One decoded event from a language server's connection (a
     /// response, notification, server-initiated request, or a
     /// disconnect), from that server's `LspReader`. Carries its `key`
@@ -2156,6 +2154,7 @@ impl FenixUserEvent {
     /// Which event this is, for the hang log (`watchdog`).
     fn label(&self) -> &'static str {
         match self {
+            Self::Woke(_) => "Woke",
             Self::Lsp { .. } => "Lsp",
             Self::LspStarted(_) => "LspStarted",
             Self::LspDeadline(_) => "LspDeadline",
@@ -5385,6 +5384,11 @@ pub struct App {
     motion: motion_host::MotionState,
     /// The launch splash, fading out over the first frames.
     splash_fade: Option<crate::splash::SplashFade>,
+    /// Getting the windows drawing again when they stop: see `gpu_host`.
+    gpu_watch: crate::gpu::GpuWatch,
+    /// Frames that have reached the screen: what the live tests watch.
+    #[cfg(test)]
+    frames_presented: u64,
     /// When the editor's first frame is overdue, from the splash's hand-off:
     /// past it with nothing presented, the window is still showing the
     /// splash, so its surface is made again and why it's stuck is said
@@ -6052,6 +6056,9 @@ impl App {
             pulse: None,
             motion: motion_host::MotionState::default(),
             splash_fade: None,
+            gpu_watch: Default::default(),
+            #[cfg(test)]
+            frames_presented: 0,
             first_frame_due: None,
             status_message: None,
             quit_confirm: false,
@@ -6187,7 +6194,10 @@ impl App {
     /// the OS still considers foreground.
     fn focus_active_frame_window(&self) {
         if let Some(window) = &self.window {
-            window.focus_window();
+            // A live test's windows are hidden, and leave the focus alone.
+            if !cfg!(test) {
+                window.focus_window();
+            }
             window.request_redraw();
         }
     }
@@ -6213,7 +6223,7 @@ impl App {
     fn open_frame(&mut self, event_loop: &ActiveEventLoop, placement: FramePlacement) {
         let (Some(context), Some(fonts)) = (&self.gpu_context, &self.fonts) else { return };
 
-        let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+        let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon()).with_visible(!cfg!(test));
         if let Some(position) = placement.position {
             attrs = attrs.with_position(position);
         }
@@ -15654,7 +15664,9 @@ impl App {
         }
         eprintln!("fenix: no frame drawn {FIRST_FRAME_WITHIN:?} after the splash handed over (surface, width, height, failures: {surface:?}; visible {visible:?}, minimised {minimized:?}); making the window's surface again");
         if let (Some(context), Some(gpu), Some(window)) = (&self.gpu_context, self.gpu.as_mut(), window.as_ref()) {
-            context.recreate_surface(gpu, Arc::clone(window));
+            if let Err(why) = context.recreate_surface(gpu, Arc::clone(window)) {
+                self.gpu_watch.want_rebuild(why);
+            }
         }
         for frame in 0..self.frames.len() {
             if let Some(window) = self.frame_window(frame) {
@@ -15717,6 +15729,7 @@ impl App {
     /// for keyboard input.
     fn handle_user_event(&mut self, event: FenixUserEvent) {
         match event {
+            FenixUserEvent::Woke(slept) => self.machine_woke(slept, Instant::now()),
             FenixUserEvent::Lsp { key, generation, event } => self.apply_lsp_event(key, generation, event),
             FenixUserEvent::LspStarted(start) => self.apply_lsp_started(*start),
             FenixUserEvent::LspDeadline(fanout) => self.lsp_fanout_progress(fanout),
@@ -21243,10 +21256,10 @@ impl App {
 
         // Pictures pages show, read since the last frame: uploaded once.
         for tex in self.page_images.textures.values_mut() {
-            if let Some(bgra) = tex.bgra.take() {
+            if let (None, Some(bgra)) = (&tex.texture, &tex.bgra) {
                 if tex.w > 0 && tex.h > 0 {
                     let texture = surfaces.create(gpu, tex.w, tex.h);
-                    surfaces.upload_rect(gpu, &texture, 0, 0, tex.w, tex.h, &bgra);
+                    surfaces.upload_rect(gpu, &texture, 0, 0, tex.w, tex.h, bgra);
                     tex.texture = Some(texture);
                 }
             }
@@ -21309,11 +21322,13 @@ impl App {
             // Only ever on loan to the launch splash, which hands it back
             // before the first frame. Gone otherwise, the window would
             // never be drawn again, so it gets a new one.
-            if gpu.surface_missing() {
+            if gpu.surface_missing() && !self.gpu_watch.rebuild_pending() {
                 if let Some(context) = &self.gpu_context {
-                    eprintln!("fenix: the window had no surface to draw into; making it a new one");
-                    context.recreate_surface(gpu, Arc::clone(window));
-                    window.request_redraw();
+                    crate::watchdog::note("the window had no surface to draw into; making it a new one");
+                    match context.recreate_surface(gpu, Arc::clone(window)) {
+                        Ok(()) => window.request_redraw(),
+                        Err(why) => self.gpu_watch.want_rebuild(why),
+                    }
                 }
             }
             return;
@@ -21321,29 +21336,53 @@ impl App {
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            status @ (wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost) => {
+            // Nothing to draw into for now, which isn't trouble; but nothing
+            // else will ask for the frame once there is.
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                self.gpu_watch.retry_after(now, crate::gpu::RETRY_WAIT);
+                return;
+            }
+            status => {
+                let inner = window.inner_size();
+                // Minimised, a surface has no size to be: `Resized` brings
+                // it back, and none of this is the surface's fault.
+                if window.is_minimized() == Some(true) || inner.width == 0 || inner.height == 0 {
+                    return;
+                }
                 // Usually the window changed size since the surface was
                 // configured; a run of these means it's stuck, and the
                 // window would go on showing its last picture -- see
-                // `SurfaceHealth`.
+                // `SurfaceHealth`. `Validation` is what a lost device says
+                // here, and `Timeout` is what a wedged one does (each
+                // having held this thread for a second or two).
                 let response = gpu.health.failed();
-                let status = if matches!(status, wgpu::CurrentSurfaceTexture::Lost) { "lost" } else { "out of date" };
+                let status = match status {
+                    wgpu::CurrentSurfaceTexture::Lost => "lost",
+                    wgpu::CurrentSurfaceTexture::Outdated => "out of date",
+                    wgpu::CurrentSurfaceTexture::Timeout => "timing out",
+                    _ => "unusable",
+                };
+                let failures = gpu.health.failures();
                 if response.report {
-                    eprintln!("fenix: the window's surface is still {status} after {} tries; making it a new one", gpu.health.failures());
+                    crate::watchdog::note(&format!("the window's surface is still {status} after {failures} tries; making it a new one"));
                 }
                 match (response.recovery, &self.gpu_context) {
-                    (crate::gpu::Recovery::Recreate, Some(context)) => context.recreate_surface(gpu, Arc::clone(window)),
-                    _ => gpu.reconfigure(window.inner_size()),
+                    (crate::gpu::Recovery::Rebuild, _) => self.gpu_watch.want_rebuild(format!("the window's surface is still {status} after {failures} tries")),
+                    (crate::gpu::Recovery::Recreate, Some(context)) => {
+                        if let Err(why) = context.recreate_surface(gpu, Arc::clone(window)) {
+                            self.gpu_watch.want_rebuild(why);
+                        }
+                    }
+                    // Configuring on a device that's being replaced is
+                    // wasted, and would wait on it.
+                    _ if self.gpu_watch.rebuild_pending() => {}
+                    _ => gpu.reconfigure(inner),
                 }
                 if response.retry {
                     window.request_redraw();
+                } else {
+                    self.gpu_watch.retry_after(now, crate::gpu::RETRY_WAIT);
                 }
-                return;
-            }
-            status @ (wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation) => {
-                eprintln!("fenix: surface acquire failed: {status:?}");
                 return;
             }
         };
@@ -21524,7 +21563,12 @@ impl App {
         gpu.queue.present(frame);
         _profile.mark("present complete");
         if gpu.health.presented() {
-            eprintln!("fenix: the window's surface is drawing again");
+            crate::watchdog::note("the window's surface is drawing again");
+        }
+        self.gpu_watch.presented();
+        #[cfg(test)]
+        {
+            self.frames_presented += 1;
         }
         if self.first_frame_due.take().is_some_and(|due| Instant::now() > due) {
             eprintln!("fenix: the first frame came late, {:?} after the splash handed over", FIRST_FRAME_WITHIN);
@@ -21583,7 +21627,9 @@ impl App {
             // The splash's thread failed, and its surface went with it.
             None if gpu.surface.is_none() => {
                 if let (Some(context), Some(window)) = (&self.gpu_context, window) {
-                    context.recreate_surface(gpu, window);
+                    if let Err(why) = context.recreate_surface(gpu, window) {
+                        self.gpu_watch.want_rebuild(why);
+                    }
                 }
             }
             None => {}
@@ -22035,6 +22081,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
         // The first frame, still not drawn: the window is stuck on the
         // splash (#65).
         let wait_until = match self.first_frame_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // A window that stopped drawing, and the device behind it.
+        let wait_until = match self.gpu_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };

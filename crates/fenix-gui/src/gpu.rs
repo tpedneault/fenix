@@ -1,4 +1,5 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -25,6 +26,11 @@ pub struct GpuContext {
     /// frame's swapchain agrees and one set of render pipelines works
     /// for all of them.
     pub format: wgpu::TextureFormat,
+    /// Why the device went, once it has: the driver reset it (a machine
+    /// back from a long sleep is the usual reason), and nothing made from
+    /// it will ever draw again. Set by wgpu's callback, on whatever thread
+    /// noticed; read by `App::gpu_tick`.
+    lost: Arc<Mutex<Option<String>>>,
 }
 
 /// One frame's own swapchain: the surface, its configuration, and its
@@ -66,8 +72,38 @@ impl GpuContext {
     /// frame goes through `attach` instead, which needs no `await`.
     pub async fn new(window: Arc<Window>) -> (Self, GpuState) {
         let size = window.inner_size();
-        let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window).expect("create surface");
+        let (context, surface, config) = Self::open(window).await.unwrap_or_else(|why| panic!("{why}"));
+        surface.configure(&context.device, &config);
+        let state = GpuState {
+            surface: Some(surface),
+            lent: false,
+            health: SurfaceHealth::default(),
+            device: Arc::clone(&context.device),
+            queue: Arc::clone(&context.queue),
+            config,
+            size,
+            pending_resize: None,
+        };
+        (context, state)
+    }
+
+    /// A new instance, adapter and device, for a device that's gone. The
+    /// adapter is asked for again rather than kept: after a driver reset
+    /// the old one may be dead too, and on a laptop with two GPUs the
+    /// answer may differ. `window`'s surface is only needed to ask with,
+    /// so nothing is configured here, and the old swapchains can stay
+    /// until this has worked.
+    pub async fn reopen(window: Arc<Window>) -> Result<Self, String> {
+        Self::open(window).await.map(|(context, _, _)| context)
+    }
+
+    /// What's common to `new` and `reopen`: everything up to configuring
+    /// the first surface.
+    async fn open(window: Arc<Window>) -> Result<(Self, wgpu::Surface<'static>, wgpu::SurfaceConfiguration), String> {
+        let size = window.inner_size();
+        // `WGPU_BACKEND` (vulkan, dx12) chooses the API.
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let surface = instance.create_surface(window).map_err(|e| format!("create surface: {e}"))?;
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -77,7 +113,7 @@ impl GpuContext {
                 apply_limit_buckets: false,
             })
             .await
-            .expect("request adapter");
+            .map_err(|e| format!("request adapter: {e}"))?;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -89,11 +125,11 @@ impl GpuContext {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .expect("request device");
+            .map_err(|e| format!("request device: {e}"))?;
 
         let mut config = surface
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .expect("surface unsupported by adapter");
+            .ok_or("surface unsupported by adapter")?;
         // `get_default_config` just takes the adapter's first reported
         // format, which on this stack (Windows/DX12 in particular) is
         // very often an `*Srgb` variant. Every pipeline here (`rect.rs`,
@@ -117,23 +153,32 @@ impl GpuContext {
         if surface.get_capabilities(&adapter).usages.contains(wgpu::TextureUsages::COPY_SRC) {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
-        surface.configure(&device, &config);
 
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
+        let lost = Arc::new(Mutex::new(None));
+        let told = Arc::clone(&lost);
+        device.set_device_lost_callback(move |reason, message| {
+            let why = format!("the GPU device was lost ({reason:?}{}{message})", if message.is_empty() { "" } else { ": " });
+            crate::watchdog::note(&why);
+            *told.lock().unwrap_or_else(|e| e.into_inner()) = Some(why);
+        });
+        // Left to wgpu, any of these panics: a window that's been asleep
+        // isn't worth losing the editor over. In a debug build a validation
+        // error still is, as it's a bug to fix.
+        device.on_uncaptured_error(Arc::new(|error: wgpu::Error| {
+            if cfg!(debug_assertions) && matches!(error, wgpu::Error::Validation { .. }) {
+                panic!("wgpu: {error}");
+            }
+            crate::watchdog::note(&format!("wgpu: {error}"));
+        }));
+
         let context =
-            Self { instance, adapter, device: Arc::clone(&device), queue: Arc::clone(&queue), format: config.format };
-        let state = GpuState {
-            surface: Some(surface),
-            lent: false,
-            health: SurfaceHealth::default(),
-            device,
-            queue,
-            config,
-            size,
-            pending_resize: None,
-        };
-        (context, state)
+            Self { instance, adapter, device: Arc::new(device), queue: Arc::new(queue), format: config.format, lost };
+        Ok((context, surface, config))
+    }
+
+    /// Why the device went, if it has.
+    pub fn lost(&self) -> Option<String> {
+        self.lost.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// A second (third, ...) frame's swapchain on this same device.
@@ -146,11 +191,17 @@ impl GpuContext {
     /// this codebase, and `GpuContext::format`'s doc comment for why
     /// every frame has to agree on one.
     pub fn attach(&self, window: Arc<Window>) -> GpuState {
+        self.try_attach(window).unwrap_or_else(|why| panic!("{why}"))
+    }
+
+    /// `attach`, for when it may not work: a machine just back from sleep
+    /// can have a window its driver won't draw to yet.
+    pub fn try_attach(&self, window: Arc<Window>) -> Result<GpuState, String> {
         let size = window.inner_size();
-        let surface = self.instance.create_surface(window).expect("create surface");
+        let surface = self.instance.create_surface(window).map_err(|e| format!("create surface: {e}"))?;
         let mut config = surface
             .get_default_config(&self.adapter, size.width.max(1), size.height.max(1))
-            .expect("surface unsupported by adapter");
+            .ok_or("surface unsupported by adapter")?;
         config.format = self.format;
         config.present_mode = wgpu::PresentMode::AutoVsync;
         if surface.get_capabilities(&self.adapter).usages.contains(wgpu::TextureUsages::COPY_SRC) {
@@ -158,7 +209,7 @@ impl GpuContext {
         }
         surface.configure(&self.device, &config);
 
-        GpuState {
+        Ok(GpuState {
             surface: Some(surface),
             lent: false,
             health: SurfaceHealth::default(),
@@ -167,7 +218,7 @@ impl GpuContext {
             config,
             size,
             pending_resize: None,
-        }
+        })
     }
 
     /// Replaces `gpu`'s surface with a new one for `window`, at the
@@ -175,14 +226,24 @@ impl GpuContext {
     /// out frames however it's configured, or one that never came back
     /// from the launch splash. The old one goes first: a window takes
     /// only one swapchain at a time.
-    pub fn recreate_surface(&self, gpu: &mut GpuState, window: Arc<Window>) {
+    ///
+    /// Not on a lost device, though: configuring on one fails, and a
+    /// surface that was never configured takes the process down the first
+    /// time a frame is asked of it.
+    pub fn recreate_surface(&self, gpu: &mut GpuState, window: Arc<Window>) -> Result<(), String> {
+        // Doesn't wait; it's what delivers a loss wgpu is still holding.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        if let Some(why) = self.lost() {
+            return Err(why);
+        }
         gpu.surface = None;
-        let fresh = self.attach(window);
+        let fresh = self.try_attach(window)?;
         gpu.surface = fresh.surface;
         gpu.config = fresh.config;
         gpu.size = fresh.size;
         gpu.pending_resize = None;
         gpu.lent = false;
+        Ok(())
     }
 
     /// The adapter in use, and the graphics API it's driven through.
@@ -202,6 +263,11 @@ impl GpuState {
     pub fn restore_surface(&mut self, surface: wgpu::Surface<'static>) {
         self.surface = Some(surface);
         self.lent = false;
+    }
+
+    /// Whether the launch splash is drawing on the surface.
+    pub fn lent(&self) -> bool {
+        self.lent
     }
 
     /// Whether the surface is gone without being on loan to the splash:
@@ -263,29 +329,36 @@ pub enum Recovery {
     Reconfigure,
     /// Configuring hasn't helped: make a new surface for the window.
     Recreate,
+    /// A new surface hasn't helped either: the device is what's wrong,
+    /// whether or not the driver has said so. Everything is made again.
+    Rebuild,
 }
 
-/// The run of frames a surface has failed to give out (`Outdated` or
-/// `Lost`), and what to do about each. One failure is routine -- the
-/// window changed size since the surface was configured -- and
-/// configuring it again is the cure. A run of them is not: left alone,
-/// the window goes on showing whatever was presented last (the launch
-/// splash, when it starts with the first frame) while the editor works
-/// on unseen behind it. So the surface is made afresh, and the trouble
-/// is reported rather than retried in silence.
+/// The run of frames a surface has failed to give out, and what to do
+/// about each. One failure is routine -- the window changed size since the
+/// surface was configured -- and configuring it again is the cure. A run
+/// of them is not: left alone, the window goes on showing whatever was
+/// presented last (the launch splash, when it starts with the first frame)
+/// while the editor works on unseen behind it. So the surface is made
+/// afresh, then the device, and the trouble is reported rather than
+/// retried in silence.
 #[derive(Debug, Default)]
 pub struct SurfaceHealth {
     failures: u32,
     reported: bool,
 }
 
-/// The surface is made afresh at the third failure in a row, and every
-/// `RECREATE_EVERY` after that.
+/// The surface is made afresh at the third failure in a row.
 const RECREATE_AT: u32 = 3;
-const RECREATE_EVERY: u32 = 30;
-/// Failures past this many in a row wait for the next event to be tried
-/// again, so a surface that won't recover can't keep the loop spinning.
+/// The device at the sixth, and every `REBUILD_EVERY` after that.
+const REBUILD_AT: u32 = 6;
+const REBUILD_EVERY: u32 = 6;
+/// Failures past this many in a row are tried again after `RETRY_WAIT`
+/// rather than at once, so a surface that won't recover can't keep the
+/// loop spinning.
 const RETRY_UP_TO: u32 = 6;
+/// How long to wait before asking again for a frame, past `RETRY_UP_TO`.
+pub const RETRY_WAIT: Duration = Duration::from_secs(1);
 
 /// What `SurfaceHealth::failed` decided.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,7 +366,7 @@ pub struct FailureResponse {
     pub recovery: Recovery,
     /// Ask for another frame straight away.
     pub retry: bool,
-    /// Worth a line on stderr: the run just got long enough to matter.
+    /// Worth a line in the log: the run just got long enough to matter.
     pub report: bool,
 }
 
@@ -302,11 +375,17 @@ impl SurfaceHealth {
     pub fn failed(&mut self) -> FailureResponse {
         self.failures = self.failures.saturating_add(1);
         let n = self.failures;
-        let recreate = n >= RECREATE_AT && (n - RECREATE_AT).is_multiple_of(RECREATE_EVERY);
+        let rebuild = n >= REBUILD_AT && (n - REBUILD_AT).is_multiple_of(REBUILD_EVERY);
         let report = n == RECREATE_AT && !self.reported;
         self.reported |= report;
         FailureResponse {
-            recovery: if recreate { Recovery::Recreate } else { Recovery::Reconfigure },
+            recovery: if rebuild {
+                Recovery::Rebuild
+            } else if n == RECREATE_AT {
+                Recovery::Recreate
+            } else {
+                Recovery::Reconfigure
+            },
             retry: n <= RETRY_UP_TO,
             report,
         }
@@ -324,6 +403,113 @@ impl SurfaceHealth {
     }
 }
 
+/// The longest wait between attempts at making the device again.
+const MOST_BETWEEN_REBUILDS: Duration = Duration::from_secs(30);
+
+/// How long a window has to draw once a rebuild is done.
+pub const FRAME_AFTER_REBUILD: Duration = Duration::from_secs(10);
+
+/// Getting the windows drawing again: what a failing surface, a lost
+/// device or the machine waking has asked for, and when next to try.
+/// Everything here is what's decided; `App::gpu_tick` does it.
+#[derive(Debug, Default)]
+pub struct GpuWatch {
+    /// The device is to be made again, and why.
+    rebuild: Option<String>,
+    /// Attempts since a frame last reached the screen: what spaces the
+    /// next one out. Reset by a frame, not by an attempt that seemed to
+    /// work, since one that didn't would otherwise be retried flat out.
+    attempts: u32,
+    next_rebuild: Option<Instant>,
+    /// Ask for a frame then, whatever else has or hasn't happened: a
+    /// window with nothing moving has no other reason to.
+    retry_at: Option<Instant>,
+    /// A frame is expected by then, and what it means if there's none.
+    frame_due: Option<(Instant, String)>,
+}
+
+/// What `GpuWatch::tick` says is due.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct GpuDue {
+    /// Make the device again.
+    pub rebuild: bool,
+    /// Ask every window for a frame.
+    pub redraw: bool,
+    /// When to look again.
+    pub next: Option<Instant>,
+}
+
+impl GpuWatch {
+    /// The device is to be made again.
+    pub fn want_rebuild(&mut self, why: String) {
+        self.rebuild.get_or_insert(why);
+    }
+
+    /// Whether a rebuild is waiting: until it's done nothing is to be
+    /// made on the old device.
+    pub fn rebuild_pending(&self) -> bool {
+        self.rebuild.is_some()
+    }
+
+    pub fn why(&self) -> Option<&str> {
+        self.rebuild.as_deref()
+    }
+
+    /// Ask for a frame after `wait`, unless that's already planned.
+    pub fn retry_after(&mut self, now: Instant, wait: Duration) {
+        self.retry_at.get_or_insert(now + wait);
+    }
+
+    /// A frame has to reach the screen by `at`, or the device is suspect.
+    pub fn expect_frame(&mut self, at: Instant, why: String) {
+        self.frame_due = Some((at, why));
+    }
+
+    /// An attempt at making the device again was made. One that `worked`
+    /// still has a frame to prove it with.
+    pub fn rebuild_tried(&mut self, now: Instant, worked: bool) {
+        self.attempts = self.attempts.saturating_add(1);
+        self.next_rebuild = Some(now + self.backoff());
+        if worked {
+            self.rebuild = None;
+            self.expect_frame(now + FRAME_AFTER_REBUILD, format!("no frame {FRAME_AFTER_REBUILD:?} after the GPU was set up again"));
+        }
+    }
+
+    /// 1 s, 2 s, 4 s... up to `MOST_BETWEEN_REBUILDS`, after `attempts`.
+    fn backoff(&self) -> Duration {
+        Duration::from_secs(1u64 << self.attempts.saturating_sub(1).min(16)).min(MOST_BETWEEN_REBUILDS)
+    }
+
+    /// A frame reached the screen: all is well, and the next trouble
+    /// starts from the beginning.
+    pub fn presented(&mut self) {
+        *self = GpuWatch::default();
+    }
+
+    /// What's due at `now`. `hidden` is that no window can be drawn into
+    /// (all minimised): a frame can't be expected of one.
+    pub fn tick(&mut self, now: Instant, hidden: bool) -> GpuDue {
+        let mut due = GpuDue::default();
+        if self.frame_due.as_ref().is_some_and(|(at, _)| now >= *at) {
+            if let Some((_, why)) = self.frame_due.take().filter(|_| !hidden) {
+                self.rebuild.get_or_insert(why);
+            }
+        }
+        if self.retry_at.is_some_and(|at| now >= at) {
+            self.retry_at = None;
+            due.redraw = true;
+        }
+        let rebuild_at = self.rebuild.as_ref().map(|_| self.next_rebuild.unwrap_or(now));
+        due.rebuild = rebuild_at.is_some_and(|at| now >= at);
+        due.next = [self.retry_at, rebuild_at.filter(|at| *at > now), self.frame_due.as_ref().map(|(at, _)| *at)]
+            .into_iter()
+            .flatten()
+            .min();
+        due
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,15 +523,12 @@ mod tests {
     }
 
     #[test]
-    fn a_run_of_failures_recreates_the_surface_and_says_so_once() {
+    fn a_run_of_failures_climbs_from_the_surface_to_the_device_and_says_so_once() {
         let mut health = SurfaceHealth::default();
-        let responses: Vec<FailureResponse> = (0..RECREATE_AT + RECREATE_EVERY).map(|_| health.failed()).collect();
-        let recreated: Vec<u32> = (1..)
-            .zip(&responses)
-            .filter(|(_, response)| response.recovery == Recovery::Recreate)
-            .map(|(n, _)| n)
-            .collect();
-        assert_eq!(recreated, vec![RECREATE_AT, RECREATE_AT + RECREATE_EVERY]);
+        let responses: Vec<FailureResponse> = (0..REBUILD_AT + REBUILD_EVERY).map(|_| health.failed()).collect();
+        let at = |recovery| -> Vec<u32> { (1..).zip(&responses).filter(|(_, r)| r.recovery == recovery).map(|(n, _)| n).collect() };
+        assert_eq!(at(Recovery::Recreate), vec![RECREATE_AT]);
+        assert_eq!(at(Recovery::Rebuild), vec![REBUILD_AT, REBUILD_AT + REBUILD_EVERY]);
         let reported: Vec<u32> = (1..).zip(&responses).filter(|(_, response)| response.report).map(|(n, _)| n).collect();
         assert_eq!(reported, vec![RECREATE_AT]);
     }
@@ -367,5 +550,79 @@ mod tests {
         assert!(health.presented());
         assert!(!health.presented());
         assert!(!health.failed().report);
+    }
+
+    #[test]
+    fn nothing_wrong_leaves_nothing_to_do_or_wait_for() {
+        assert_eq!(GpuWatch::default().tick(Instant::now(), false), GpuDue::default());
+    }
+
+    #[test]
+    fn a_rebuild_is_tried_at_once_then_further_and_further_apart() {
+        let start = Instant::now();
+        let mut watch = GpuWatch::default();
+        watch.want_rebuild("lost".into());
+        assert!(watch.tick(start, false).rebuild, "the first attempt doesn't wait");
+        let mut now = start;
+        let mut waits = Vec::new();
+        for _ in 0..7 {
+            watch.rebuild_tried(now, false);
+            let due = watch.tick(now, false);
+            assert!(!due.rebuild);
+            let next = due.next.expect("it says when to look again");
+            waits.push((next - now).as_secs());
+            now = next;
+            assert!(watch.tick(now, false).rebuild);
+        }
+        assert_eq!(waits, [1, 2, 4, 8, 16, 30, 30]);
+    }
+
+    /// The driver saying the device is fine proves nothing: only a frame
+    /// on the screen ends it, and until one does attempts keep backing off.
+    #[test]
+    fn a_rebuild_that_seemed_to_work_is_tried_again_if_no_frame_comes() {
+        let start = Instant::now();
+        let mut watch = GpuWatch::default();
+        watch.want_rebuild("lost".into());
+        watch.rebuild_tried(start, true);
+        assert!(!watch.rebuild_pending());
+        let at = watch.tick(start, false).next.expect("waits for the frame");
+        assert_eq!(at, start + FRAME_AFTER_REBUILD);
+        watch.tick(at, false);
+        assert!(watch.rebuild_pending());
+        watch.rebuild_tried(at, true);
+        assert_eq!(watch.attempts, 2);
+    }
+
+    #[test]
+    fn a_frame_ends_it_all() {
+        let now = Instant::now();
+        let mut watch = GpuWatch::default();
+        watch.want_rebuild("lost".into());
+        watch.rebuild_tried(now, true);
+        watch.retry_after(now, RETRY_WAIT);
+        watch.presented();
+        assert_eq!(watch.attempts, 0);
+        assert_eq!(watch.tick(now + Duration::from_secs(60), false), GpuDue::default());
+    }
+
+    #[test]
+    fn no_frame_from_a_minimised_window_isnt_trouble() {
+        let now = Instant::now();
+        let mut watch = GpuWatch::default();
+        watch.expect_frame(now, "woke".into());
+        assert_eq!(watch.tick(now, true), GpuDue::default());
+        assert!(!watch.rebuild_pending());
+    }
+
+    #[test]
+    fn a_retry_asks_for_a_frame_once_when_its_time_comes() {
+        let now = Instant::now();
+        let mut watch = GpuWatch::default();
+        watch.retry_after(now, RETRY_WAIT);
+        watch.retry_after(now + Duration::from_millis(500), RETRY_WAIT);
+        assert_eq!(watch.tick(now, false).next, Some(now + RETRY_WAIT));
+        assert!(watch.tick(now + RETRY_WAIT, false).redraw);
+        assert!(!watch.tick(now + RETRY_WAIT, false).redraw);
     }
 }

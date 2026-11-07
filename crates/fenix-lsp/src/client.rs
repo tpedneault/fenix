@@ -1,9 +1,9 @@
 use std::io::{BufReader, Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
 use serde_json::Value;
@@ -52,11 +52,10 @@ pub enum LspEvent {
 pub struct LspClient {
     stdin: Mutex<Box<dyn Write + Send>>,
     next_id: AtomicI64,
-    /// The server's process; none for one reached another way
-    /// (`connect`): an extension's, in Fenix's own process.
-    child: Option<Mutex<Child>>,
-    reader_thread: Option<JoinHandle<()>>,
-    stderr_thread: Option<JoinHandle<()>>,
+    /// The server's process, and everything it started; none for one
+    /// reached another way (`connect`): an extension's, in Fenix's own
+    /// process.
+    tree: Option<fenix_tasks::ProcessTree>,
     /// The last of what the server wrote to stderr (`stderr_tail`).
     stderr: Arc<Mutex<Vec<u8>>>,
 }
@@ -79,22 +78,20 @@ impl LspClient {
 
     /// Spawn a configured process, preserving its explicit arguments, cwd and environment.
     pub fn spawn_command(mut process: Command) -> std::io::Result<(LspClient, Receiver<LspEvent>)> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            // Fenix is a windowed app: without this every server (and every
-            // tool it starts in turn) opens a console window on Windows.
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            process.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        process.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        // In a tree: a server started through a shell or `npm`'s shim is
+        // the shell's child, and only the whole tree going closes its
+        // pipes. No console window either, for it or what it starts.
+        let mut tree = fenix_tasks::ProcessTree::spawn(process)?;
 
-        let stdin = child.stdin.take().expect("stdin was requested as piped");
-        let stdout = child.stdout.take().expect("stdout was requested as piped");
-        let stderr = child.stderr.take().expect("stderr was requested as piped");
+        let stdin = tree.take_stdin().expect("stdin was requested as piped");
+        let stdout = tree.take_stdout().expect("stdout was requested as piped");
+        let stderr = tree.take_stderr().expect("stderr was requested as piped");
+        // Off the caller's thread: see `QueueWriter`.
+        let stdin = fenix_rpc::QueueWriter::spawn("fenix-lsp-writer", stdin)?;
 
         let (tx, rx) = mpsc::channel();
-        let reader_thread = thread::spawn(move || read_loop(stdout, tx));
+        thread::spawn(move || read_loop(stdout, tx));
         // A server's stderr is drained and discarded on its own thread,
         // never read from the main loop above -- an LSP server that
         // writes enough diagnostic/debug output there (many do) would
@@ -104,12 +101,9 @@ impl LspClient {
         // Its last few kilobytes are kept, for when it never answers.
         let said = Arc::new(Mutex::new(Vec::new()));
         let keeping = Arc::clone(&said);
-        let stderr_thread = thread::spawn(move || drain_keeping_tail(stderr, &keeping));
+        thread::spawn(move || drain_keeping_tail(stderr, &keeping));
 
-        Ok((
-            LspClient { stdin: Mutex::new(Box::new(stdin)), next_id: AtomicI64::new(1), child: Some(Mutex::new(child)), reader_thread: Some(reader_thread), stderr_thread: Some(stderr_thread), stderr: said },
-            rx,
-        ))
+        Ok((LspClient { stdin: Mutex::new(Box::new(stdin)), next_id: AtomicI64::new(1), tree: Some(tree), stderr: said }, rx))
     }
 
     /// A server that isn't a process: it reads what this client writes to
@@ -117,7 +111,11 @@ impl LspClient {
     pub fn connect(from_server: impl Read + Send + 'static, to_server: impl Write + Send + 'static) -> (LspClient, Receiver<LspEvent>) {
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || read_loop(from_server, tx));
-        (LspClient { stdin: Mutex::new(Box::new(to_server)), next_id: AtomicI64::new(1), child: None, reader_thread: None, stderr_thread: None, stderr: Arc::default() }, rx)
+        let to_server: Box<dyn Write + Send> = match fenix_rpc::QueueWriter::spawn("fenix-lsp-writer", to_server) {
+            Ok(queue) => Box::new(queue),
+            Err(_) => Box::new(std::io::sink()),
+        };
+        (LspClient { stdin: Mutex::new(to_server), next_id: AtomicI64::new(1), tree: None, stderr: Arc::default() }, rx)
     }
 
     /// The last lines the server wrote to stderr, trimmed: what a server
@@ -170,39 +168,27 @@ impl Drop for LspClient {
     /// notification, which a well-behaved server responds to by exiting
     /// on its own. Sent without waiting for `shutdown`'s reply (this
     /// client is going away regardless of whether one ever arrives),
-    /// then a short bounded wait for the process to actually exit before
-    /// force-killing it -- same "ask nicely, then force, but never block
-    /// indefinitely" posture as `fenix_terminal::Terminal::kill`'s own
-    /// doc comment reasons about, and for the same underlying concern:
-    /// this may run on a thread that must not hang.
+    /// then a short wait for the process to actually exit before
+    /// force-killing it and everything it started -- all of that on a
+    /// thread of its own, because this runs on the UI thread. Its reader
+    /// threads aren't waited for: they end when the pipes close, which is
+    /// when every process holding them has gone.
     fn drop(&mut self) {
         let _ = self.write(&RawMessage::request(0, "shutdown", Value::Null));
         let _ = self.write(&RawMessage::notification("exit", Value::Null));
         // One reached another way ends when its other side does.
-        let Some(child) = &self.child else { return };
-        if let Ok(mut child) = child.lock() {
-            let mut exited = false;
+        let Some(mut tree) = self.tree.take() else { return };
+        // If no thread can be started, `spawn` drops the closure right
+        // here, and the tree's `Drop` kills it.
+        let _ = thread::Builder::new().name("fenix-lsp-close".into()).spawn(move || {
             for _ in 0..20 {
-                match child.try_wait() {
-                    Ok(Some(_)) => {
-                        exited = true;
-                        break;
-                    }
+                match tree.try_wait() {
                     Ok(None) => thread::sleep(Duration::from_millis(50)),
-                    Err(_) => break,
+                    Ok(Some(_)) | Err(_) => break,
                 }
             }
-            if !exited {
-                let _ = child.kill();
-            }
-            let _ = child.wait();
-        }
-        if let Some(t) = self.reader_thread.take() {
-            let _ = t.join();
-        }
-        if let Some(t) = self.stderr_thread.take() {
-            let _ = t.join();
-        }
+            tree.kill();
+        });
     }
 }
 
@@ -307,6 +293,58 @@ mod tests {
 
     fn request_msg(id: i64, method: &str) -> RawMessage {
         RawMessage::request(id, method, Value::Null)
+    }
+
+    /// A program that runs for half a minute and never reads its stdin,
+    /// behind a shell: killing the shell alone leaves it holding the
+    /// pipes. The shape of a server started through `npm`'s `.cmd` shim.
+    fn a_server_behind_a_shell_that_reads_nothing() -> Command {
+        #[cfg(windows)]
+        {
+            let mut command = Command::new("cmd");
+            command.args(["/c", "ping -n 30 127.0.0.1"]);
+            command
+        }
+        #[cfg(not(windows))]
+        {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 30; true"]);
+            command
+        }
+    }
+
+    /// Runs `what` on a thread of its own and fails if it's still going
+    /// after `limit`: what's tested here hangs when it's wrong.
+    fn within(limit: Duration, what: impl FnOnce() + Send + 'static) {
+        let (done, finished) = mpsc::channel();
+        thread::spawn(move || {
+            what();
+            let _ = done.send(());
+        });
+        finished.recv_timeout(limit).expect("still blocked: this would freeze the window");
+    }
+
+    /// A server that stops reading fills the pipe, and after that a write
+    /// never returns. The UI thread sends `didChange` from its redraw, so
+    /// the window would be gone until Fenix was killed.
+    #[test]
+    fn a_server_that_stopped_reading_doesnt_hold_the_caller() {
+        let (client, _rx) = LspClient::spawn_command(a_server_behind_a_shell_that_reads_nothing()).unwrap();
+        // Well past any pipe's buffer.
+        let text = "x".repeat(4 * 1024 * 1024);
+        within(Duration::from_secs(5), move || {
+            for _ in 0..4 {
+                let _ = client.write(&RawMessage::notification("textDocument/didChange", Value::String(text.clone())));
+            }
+        });
+    }
+
+    /// Closing a server must not wait on what it started: the pipes stay
+    /// open until every process holding them has gone.
+    #[test]
+    fn closing_a_client_doesnt_wait_on_what_its_server_started() {
+        let (client, _rx) = LspClient::spawn_command(a_server_behind_a_shell_that_reads_nothing()).unwrap();
+        within(Duration::from_secs(5), move || drop(client));
     }
 
     /// What a server says on stderr is kept, its last lines only, for

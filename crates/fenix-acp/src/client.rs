@@ -214,6 +214,8 @@ impl AcpClient {
                 stderr_log.lock().unwrap().push(LogSide::Stderr, &line);
             }
         })?;
+        // Off the caller's thread: see `QueueWriter`.
+        let stdin = fenix_rpc::QueueWriter::spawn("fenix-acp-writer", stdin)?;
         let client = Self { writer: Mutex::new(Box::new(stdin)), tree: tree.clone(), log: log.clone() };
         start_reader(BufReader::new(stdout), log, Some(tree), send)?;
         Ok(client)

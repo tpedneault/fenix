@@ -20,7 +20,8 @@ use crate::reading_page::{Action as ReadAction, ReadingPage};
 pub(super) struct PageTex {
     pub(super) w: u32,
     pub(super) h: u32,
-    /// Waiting to be uploaded.
+    /// Kept once uploaded: a lost device takes the texture with it, and a
+    /// picture from an extension can't be asked for again.
     pub(super) bgra: Option<Vec<u8>>,
     pub(super) texture: Option<Surface>,
 }
