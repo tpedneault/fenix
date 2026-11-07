@@ -1276,11 +1276,6 @@ label = "fix the problem here"
 command = "agents.fix_diagnostic"
 
 [[leader]]
-keys = "SPC a c"
-label = "commit message"
-command = "agents.commit_message"
-
-[[leader]]
 keys = "SPC a h"
 label = "hand off to another agent"
 command = "agents.handoff"

@@ -499,7 +499,8 @@ enum ComposePurpose {
     RebaseMessage { page: BufferId, hash: String },
     /// A code extension's (`compose`): what's written goes back to it as
     /// `composed` for its call `id`.
-    Code { ext: String, id: u64, what: String, verb: &'static str, allow_empty: bool },
+    /// `ask`, when it has one, is what `A` asks your agent to write here.
+    Code { ext: String, id: u64, what: String, verb: &'static str, allow_empty: bool, ask: Option<String> },
     /// What a pipeline's gate passes on, edited before it goes (`e`).
     PipelineGate { run: u64 },
 }
@@ -566,7 +567,20 @@ impl ComposePurpose {
             ComposePurpose::Code { what, verb, .. } => (what.clone(), *verb),
             ComposePurpose::PipelineGate { .. } => ("What the pipeline passes on".to_string(), "go on (q stops)"),
         };
-        format!("{what}  --  Esc then Enter to {verb}, q to cancel")
+        let agent = if self.agent_writes() { ", A while it's untouched has the agent write it" } else { "" };
+        format!("{what}  --  Esc then Enter to {verb}{agent}, q to cancel")
+    }
+
+    /// Whether `A` in the empty pane has the agent write it: a new
+    /// commit's message (from what's staged), and what an extension gave
+    /// an ask for. Not an amend or a reword: they start from a message,
+    /// and what's staged isn't what they're about.
+    fn agent_writes(&self) -> bool {
+        match self {
+            ComposePurpose::CommitMessage { .. } | ComposePurpose::GitCommit { compose: crate::git_status::Compose::New(_), .. } => true,
+            ComposePurpose::Code { ask, .. } => ask.is_some(),
+            _ => false,
+        }
     }
 }
 
@@ -587,6 +601,9 @@ struct ComposeSession {
     /// The text it opened with: what's written past it, unsent, is kept
     /// (`App::keep_compose_draft`).
     seed: String,
+    /// `seed` is only a starting point, a template: `A` writes over it
+    /// until it's been touched. Never what you wrote and didn't send.
+    agent_over_seed: bool,
 }
 
 /// The Merge view (`SPC g x`): the conflicted files on the left, the
@@ -12833,7 +12850,7 @@ impl App {
         self.windows_mut().resize_focused(0.25);
         self.pane_titles.insert(pane, purpose.title());
         self.windows_mut().focus(pane);
-        self.compose = Some(ComposeSession { pane, buffer, purpose, returning_to, seed: seed.to_string() });
+        self.compose = Some(ComposeSession { pane, buffer, purpose, returning_to, seed: seed.to_string(), agent_over_seed: false });
         // A blank one is there to be typed into: it opens in Insert, so
         // the first word written isn't run as commands (`P` pasting).
         // One with text to edit (an amend, a description) opens in Normal.
@@ -12841,7 +12858,8 @@ impl App {
             if let (Some(ob), Some(state)) = (self.buffers.get_mut(buffer), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
                 self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('i'));
             }
-            self.set_message("write, then Esc and Enter to send -- q discards");
+            let agent = self.compose.as_ref().is_some_and(|c| c.purpose.agent_writes());
+            self.set_message(if agent { "write, or Esc then A for the agent; Esc and Enter sends -- q discards" } else { "write, then Esc and Enter to send -- q discards" });
         } else {
             self.set_message("write (i to insert), then Esc and Enter to send -- q discards");
         }
@@ -12851,12 +12869,18 @@ impl App {
     /// A compose pane for code extension `ext`'s call `id` -- with what
     /// you wrote in its last one of the same name and didn't send, when
     /// there's that.
-    pub(super) fn open_code_compose(&mut self, ext: &str, id: u64, what: String, verb: &'static str, allow_empty: bool, seed: &str) {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn open_code_compose(&mut self, ext: &str, id: u64, what: String, verb: &'static str, allow_empty: bool, seed: &str, ask: Option<String>, over_initial: bool) {
         let kept = self.take_compose_draft(ext, &what);
         let back = kept.is_some();
-        self.open_compose_seeded(ComposePurpose::Code { ext: ext.to_string(), id, what, verb, allow_empty }, kept.as_deref().unwrap_or(seed));
+        self.open_compose_seeded(ComposePurpose::Code { ext: ext.to_string(), id, what, verb, allow_empty, ask }, kept.as_deref().unwrap_or(seed));
         if back {
             self.set_message("what you wrote and didn't send is back -- Esc then Enter keeps it, q discards it");
+        } else if over_initial && !seed.is_empty() {
+            if let Some(compose) = self.compose.as_mut() {
+                compose.agent_over_seed = compose.purpose.agent_writes();
+            }
+            self.set_message("A has the agent write it over this, i edits it -- Esc and Enter sends, q discards");
         }
     }
 
@@ -12888,6 +12912,8 @@ impl App {
     /// Tears the compose pane down and puts focus back where it was.
     fn close_compose(&mut self) {
         let Some(compose) = self.compose.take() else { return };
+        // The agent writing it has nowhere to write any more.
+        self.agents_compose_gone(compose.buffer);
         // Closed while still typing (it opens in Insert): back to Normal
         // for wherever focus goes.
         if self.vim.mode() == Mode::Insert {
@@ -12907,6 +12933,33 @@ impl App {
             self.windows_mut().focus(compose.returning_to);
         }
         self.wake_caret();
+    }
+
+    /// Whether `A` here has the agent write the compose pane: it's the
+    /// one in focus, in Normal mode with nothing half typed, it's a pane
+    /// the agent can write, and nothing of yours is in it: it's empty, or
+    /// still the template it opened with. Past that `A` is Vim's, appending
+    /// to the line, and clearing the box is all it takes to ask again.
+    fn compose_agent_offered(&self) -> bool {
+        let Some(compose) = self.compose.as_ref() else { return false };
+        compose.pane == self.focused_pane_id()
+            && self.vim.mode() == Mode::Normal
+            && !self.vim.is_pending()
+            && compose.purpose.agent_writes()
+            && self.buffers.get(compose.buffer).is_some_and(|ob| {
+                let text = ob.buffer.text();
+                text.trim().is_empty() || (compose.agent_over_seed && text.trim_end() == compose.seed.trim_end())
+            })
+    }
+
+    /// `A` in an empty compose pane: the agent writes it.
+    fn compose_agent_write(&mut self) {
+        let Some(compose) = self.compose.as_ref() else { return };
+        let buffer = compose.buffer;
+        match compose.purpose.clone() {
+            ComposePurpose::Code { ext, ask: Some(ask), .. } => self.agents_compose_ask(&ext, &ask, buffer),
+            _ => self.agents_commit_message(),
+        }
     }
 
     /// `q` in the compose pane: throw the draft away.
@@ -16196,7 +16249,7 @@ impl App {
         // stepping between hunks have to mean the same thing in all
         // three. Everything else falls through to the per-view blocks
         // below, and from there to Vim.
-        // The compose pane's own two keys, checked before anything else
+        // The compose pane's own keys, checked before anything else
         // claims them. Only in Normal mode: in Insert, `Enter` is a
         // newline and `q` is a letter, which is the whole point of
         // writing a comment in a real buffer.
@@ -16215,6 +16268,10 @@ impl App {
                 }
                 KeyCode::Char('q') => {
                     self.compose_cancel();
+                    return;
+                }
+                KeyCode::Char('A') if self.compose_agent_offered() => {
+                    self.compose_agent_write();
                     return;
                 }
                 _ => {}
@@ -22680,27 +22737,27 @@ index 0000000..1111111 100644
             app.replace_buffer_from_disk(buffer, text);
         };
         let written = |app: &App| app.buffers.get(app.compose.as_ref().unwrap().buffer).unwrap().buffer.text();
-        app.open_code_compose("fenix.review", 1, "Description of feature/x".into(), "keep", true, "## Summary");
+        app.open_code_compose("fenix.review", 1, "Description of feature/x".into(), "keep", true, "## Summary", None, false);
         assert_eq!(written(&app), "## Summary");
         write(&mut app, "## Summary\n\nHalf of what I meant");
         // Another one opened in its place: this one's text is kept.
-        app.open_code_compose("fenix.review", 2, "Reply".into(), "send", false, "");
+        app.open_code_compose("fenix.review", 2, "Reply".into(), "send", false, "", None, false);
         app.compose_cancel();
-        app.open_code_compose("fenix.review", 3, "Description of feature/x".into(), "keep", true, "## Summary");
+        app.open_code_compose("fenix.review", 3, "Description of feature/x".into(), "keep", true, "## Summary", None, false);
         assert_eq!(written(&app), "## Summary\n\nHalf of what I meant");
         // Brought back once; q now discards it.
         app.compose_cancel();
-        app.open_code_compose("fenix.review", 4, "Description of feature/x".into(), "keep", true, "## Summary");
+        app.open_code_compose("fenix.review", 4, "Description of feature/x".into(), "keep", true, "## Summary", None, false);
         assert_eq!(written(&app), "## Summary");
         // Open as Fenix quits: kept too.
         write(&mut app, "## Summary\n\nWritten, then the window closed");
         app.keep_compose_draft();
         app.compose_cancel();
-        app.open_code_compose("fenix.review", 5, "Description of feature/x".into(), "keep", true, "## Summary");
+        app.open_code_compose("fenix.review", 5, "Description of feature/x".into(), "keep", true, "## Summary", None, false);
         assert_eq!(written(&app), "## Summary\n\nWritten, then the window closed");
         app.compose_cancel();
         // Nothing written past its seed: nothing kept.
-        app.open_code_compose("fenix.review", 6, "Description of feature/y".into(), "keep", true, "seed");
+        app.open_code_compose("fenix.review", 6, "Description of feature/y".into(), "keep", true, "seed", None, false);
         app.keep_compose_draft();
         assert!(!app.compose_drafts_file.exists(), "nothing past its seed");
         app.compose_cancel();

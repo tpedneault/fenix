@@ -394,16 +394,18 @@ impl App {
         self.agents_run(fx);
     }
 
-    /// `SPC a c`: a commit message for what's staged, written by the
-    /// agent; when its answer is in, it's on the clipboard.
+    /// `A` in the empty commit composer: a message for what's staged in
+    /// its repository, written by the agent into the composer.
     pub(crate) fn agents_commit_message(&mut self) {
-        // Into the commit composer, when one is open: its repository's
-        // staged change.
         let composer = self.compose.as_ref().and_then(|c| match &c.purpose {
             ComposePurpose::CommitMessage { repo_root } | ComposePurpose::GitCommit { repo_root, .. } => Some((c.buffer, repo_root.clone())),
             _ => None,
         });
-        let root = composer.as_ref().map(|(_, r)| r.clone()).unwrap_or_else(|| self.agents_root());
+        let Some((buffer, root)) = composer else { return };
+        if self.agents.commit_message.is_some() {
+            self.set_message("the agent is writing it already");
+            return;
+        }
         let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&root).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
         let diff = git(&["diff", "--cached"]);
         if diff.trim().is_empty() {
@@ -417,10 +419,6 @@ impl App {
         let template = if template.is_empty() { root.join(".gitmessage") } else { root.join(home_path(&template)) };
         let template = std::fs::read_to_string(template).unwrap_or_default();
         let contributing = std::fs::read_to_string(root.join("CONTRIBUTING.md")).ok().and_then(|t| commits_section(&t)).unwrap_or_default();
-        let composer_buffer = composer.map(|(b, _)| b);
-        if composer_buffer.is_none() {
-            self.agents_open_panel();
-        }
         let thread = match self.agents.shown(&self.pages) {
             Some(thread) => thread,
             None => {
@@ -431,7 +429,10 @@ impl App {
                     return;
                 };
                 let thread = self.agents.hub.new_thread(&agent, &root);
+                // The dock comes up to show it working; you stay in the box.
+                let pane = self.focused_pane_id();
                 self.agents_show(thread.clone());
+                self.windows_mut().focus(pane);
                 thread
             }
         };
@@ -449,32 +450,38 @@ impl App {
             blocks.push(ContentBlock::Resource { uri: "fenix://contributing-commits".into(), text: Some(contributing), mime_type: Some("text/markdown".into()) });
         }
         self.agents.commit_message = Some(thread.clone());
-        self.agents.commit_into = composer_buffer;
-        if composer_buffer.is_some() {
-            self.set_message("the agent is writing the message into the composer");
-        }
+        self.agents.commit_into = Some(buffer);
+        self.set_message("the agent is writing the message into the composer");
         let fx = self.agents.hub.prompt(&thread, blocks);
         self.agents_run(fx);
     }
 
-    /// The message as it's written, into the composer when there's one.
-    pub(super) fn agents_commit_message_streamed(&mut self, thread: &ThreadId) {
-        if self.agents.commit_message.as_ref() != Some(thread) {
+    /// `text`, an agent's answer so far, in compose pane `buffer` if it's
+    /// still the one open.
+    pub(super) fn agents_fill_compose(&mut self, buffer: BufferId, text: &str) {
+        if self.compose.as_ref().is_none_or(|c| c.buffer != buffer) {
             return;
         }
-        let Some(buffer) = self.agents.commit_into.filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b)) else { return };
-        let text = self.agents.hub.view(thread).map(|v| v.thread.last_answer()).unwrap_or_default();
-        if text.trim().is_empty() {
-            return;
-        }
-        let message = strip_fence(&text);
+        let message = strip_fence(text);
         if self.buffers.get(buffer).is_some_and(|ob| ob.buffer.text() != message) {
             self.replace_buffer_from_disk(buffer, &message);
         }
     }
 
-    /// The commit message's turn ended: in the composer it was written
-    /// for, else onto the clipboard.
+    /// The message as it's written, into the composer.
+    pub(super) fn agents_commit_message_streamed(&mut self, thread: &ThreadId) {
+        if self.agents.commit_message.as_ref() != Some(thread) {
+            return;
+        }
+        let Some(buffer) = self.agents.commit_into else { return };
+        let text = self.agents.hub.view(thread).map(|v| v.thread.last_answer()).unwrap_or_default();
+        if !text.trim().is_empty() {
+            self.agents_fill_compose(buffer, &text);
+        }
+    }
+
+    /// The commit message's turn ended: it's in the composer it was
+    /// written for, unless that closed.
     pub(super) fn agents_commit_message_done(&mut self, thread: &ThreadId) {
         if self.agents.commit_message.as_ref() != Some(thread) {
             return;
@@ -490,16 +497,10 @@ impl App {
         }) else {
             return;
         };
-        let message = strip_fence(&text);
         if let Some(buffer) = into.filter(|b| self.compose.as_ref().is_some_and(|c| c.buffer == *b)) {
-            self.replace_buffer_from_disk(buffer, &message);
+            self.agents_fill_compose(buffer, &text);
             self.set_message("the agent's message is in the composer: edit it, then Esc and Enter to commit");
-            return;
         }
-        if let Some(clipboard) = &mut self.clipboard {
-            let _ = clipboard.set_text(message.clone());
-        }
-        self.set_message("the agent's commit message is on the clipboard");
     }
 }
 

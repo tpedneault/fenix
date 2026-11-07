@@ -156,6 +156,7 @@ the other way round after `\v`.
 | `SPC g q` | Close the Git view in front -- the panel, graph or conflicts view, or a Git page |
 | `o` / `M` (Git page) | This branch's pull request -- review it, or open one / the reviews (the Review extension) |
 | `Enter` / `q` (Compose) | Send what's written / discard it (also used for commit messages) |
+| `A` (a commit message, a pull request's description or a review's summary, Normal mode) | The agent writes it, into the box, while the box is empty or still its untouched template. With your text in the box `A` is Vim's, append at the line's end: clear it to ask again |
 | `1` / `2` (Merge) | Jump to the Conflicts / Merge pane |
 | `Enter` / `o` / `t` (Merge files) | Resolve line by line / take the whole file from the left / from the right |
 | `n` / `p` / `u` (Merge) | Next / previous conflict / put the conflict back |
@@ -185,7 +186,6 @@ the other way round after `\v`.
 | `]a` / `[a` | The next / previous change an agent made and you haven't kept, across files |
 | `SPC a e` | Ask the agent about the selection (it goes to the prompt as `@selection`) |
 | `SPC a d` | Ask the agent to fix the problem on the cursor's line |
-| `SPC a c` | A commit message for what's staged, written by the agent: into the commit composer when it's open, else onto the clipboard |
 | `SPC a h` | Hand the thread off to another agent: the conversation goes with it |
 | `SPC a D` | Delete the thread (asks first) |
 | `SPC a U` | What the agents used: turns, time, tokens and cost per agent and thread, today, this session and by day |
@@ -615,7 +615,7 @@ and for the followed parameter `value:` `raw:` `limits:out` (`in`,
 | `C` / `S` | review | Comment on the line or lines marked / suggest a change, held for your review |
 | `r` / `R` / `]t` | review | Reply / resolve or reopen / the next thread |
 | `i` / `s` / `m` | review | Only what changed since your review / submit (`a` `r` `c`, `S S`) / merge (`m m`) |
-| `S S` / `Enter` / `e` / `d` / `D` | new pull request | Open it / edit a field / write the description / toggle draft / the Compare page |
+| `S S` / `Enter` / `e` / `d` / `D` | new pull request | Open it / edit a field / write the description (`A` in its box has the agent write it) / toggle draft / the Compare page |
 
 ## An agent's thread (`SPC a a`)
 

@@ -897,7 +897,7 @@ README has its keys.
     as `Refs FNX-58`, and the reviewers from `git.reviewers` (or the
     project's own `.fenix/settings.toml`).
     `Enter` edits a field in place, `e` writes the description in a
-    compose pane, `d` toggles draft. Under the form are the commits it
+    compose pane (`A` there has the agent write it), `d` toggles draft. Under the form are the commits it
     brings and what's worth knowing first: whether it's pushed, whether
     it merges into the base without conflicts, how far the base moved,
     and `fixup!` commits not folded in yet. `S S` opens it -- pushing the
@@ -943,9 +943,9 @@ the guide.
   (`@file`), the language servers' problems (`@diagnostics`) or the
   working tree's changes (`@diff`). `/` offers the agent's own commands;
   a picture pasted with `Ctrl-V` goes along too. `SPC a d` asks the
-  agent to fix the problem on the cursor's line; `SPC a c` has it write
-  a commit message for what's staged, in the project's style: into the
-  commit composer when it's open, else onto the clipboard.
+  agent to fix the problem on the cursor's line. `A` in an empty commit
+  box, in Normal mode, has it write a message for what's staged, in the
+  project's style, into the box.
 - **Questions**: when the agent asks before an edit or a command, the
   question is a card with its own answers (`y`, `n`, …), and the
   modeline says an agent is waiting on you.
@@ -1041,8 +1041,9 @@ the guide.
 - **Extensions** can bring an agent of their own, ask one a question
   (with the branch's diff, a file or the selection attached, and a
   structured answer), offer agents tools, resources and prompts, and
-  hear each turn end. The Review extension drafts a pull request's
-  description and summarizes one under review this way.
+  hear each turn end, and a compose pane can have them write it. The
+  Review extension writes a pull request's description and your review's
+  summary in their boxes (`A`) this way.
 
 ## Agenda and Jira
 

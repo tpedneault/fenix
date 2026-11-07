@@ -17,6 +17,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The agent writes a commit message from the commit box: `A` in Normal mode,
+  while the box is empty, fills it from what's staged. `SPC a c` is gone, and
+  the message no longer goes to the clipboard. With text in the box `A` stays
+  Vim's append; clear the box to ask again.
+- Extension API 1.4: `compose_with_ask`, a compose pane that `A` has the agent
+  write, over an untouched template too. The Review extension uses it for a
+  pull request's description and your review's summary.
 - An agent's form is answered a field at a time: a picker for its choices,
   with *something else…* to type your own, and the prompt line for the rest.
   The card shows the choices and each field's description, and offers `Y`

@@ -241,7 +241,6 @@ impl CommandRegistry {
         registry.register("agents.follow", "Follow the agent: the pane beside its thread shows where it works", |ctx| ctx.app.agents_toggle_follow());
         registry.register("agents.ask_selection", "Ask the agent about the selection (or the line): it goes to the prompt as @selection", |ctx| ctx.app.agents_ask_selection());
         registry.register("agents.fix_diagnostic", "Ask the agent to fix the problem on the cursor's line", |ctx| ctx.app.agents_fix_diagnostic());
-        registry.external("agents.commit_message", "The agent writes a commit message for what's staged, onto the clipboard", |app| app.agents_commit_message());
         registry.register("agents.handoff", "Continue the thread with another agent: the conversation goes with it", |ctx| ctx.app.agents_pick_handoff());
         registry.register("agents.continue", "Continue a read-only thread in a new session of its agent", |ctx| ctx.app.agents_continue_anew());
         registry.register("agents.delete", "Delete the thread (asks first)", |ctx| ctx.app.agents_delete_thread());

@@ -134,6 +134,7 @@ and its answer comes to `handle` as an `Event` with that id.
 | `image::load(bytes)`, `image::file(path)` | A picture for its canvases (PNG, JPEG, GIF, WebP): its id and size in pixels, for `Grid::picture`. A file is under its folders, or a full path Fenix gave it. |
 | `pick_many(title, items)` | A picker where Tab marks rows → `Event::PickedMany`. |
 | `compose(title, verb, initial, allow_empty)` | A pane to write in → `Event::Composed`. |
+| `compose_with_ask(title, verb, initial, allow_empty, ask, over_initial)` | API 1.4, with `permissions.agents`. The same pane, and `A` in Normal mode while it's empty has the agent answer `ask` into it, as it writes. With `over_initial`, `initial` is only a starting point (a template), and `A` writes over it until it's been touched. The answer isn't given to the extension: what comes back is what's in the pane when you send it. |
 | `here()` | With `editor = "read"`: the file you were in when you ran its command, the selection or the line, its project. |
 | `home(Some(&section))` | Its section on Home; a row picked there → `Event::HomePicked`. |
 | `set_setting(key, value)` | One of its own settings changed and saved. A `map` setting reads and writes as JSON, `[["key", "value"], ...]`. |
@@ -1038,11 +1039,12 @@ on a Fenix that offers 1.M, N no more than M: a minor version only adds,
 and an extension that uses what one added says so (`api = "1.2"`).
 Nothing is removed or changed within 1.x: what a minor version adds is a
 new import, or a new export Fenix calls only when the extension has it,
-never a new case of `Event`. This Fenix offers 1.3: 1.1 added
+never a new case of `Event`. This Fenix offers 1.4: 1.1 added
 `git_state` and `last_task`; 1.2 added `service_progress`, the exports
 `service_cancelled` and `agent_ask_progress`, `agents::ask_with`, tools'
 classes, deadlines and toolsets, and agent resources and prompts; 1.3
-added notifications (`notify_with`, `notify_dismiss`). Its
+added notifications (`notify_with`, `notify_dismiss`); 1.4 added
+`compose_with_ask`. Its
 definition is `crates/fenix-extension-api/wit/world.wit` (its package
 stays `fenix:extension@1.0.0` across 1.x, so what an older extension
 imports is still found).

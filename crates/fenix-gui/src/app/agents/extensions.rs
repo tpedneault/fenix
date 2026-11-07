@@ -16,6 +16,18 @@ pub(super) const MAX_ASK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// The most commits an attachment's messages list.
 const MAX_COMMITS: usize = 100;
 
+/// The call an ask for a compose pane goes under: past any an extension
+/// makes, and there's only ever one pane being written.
+const COMPOSE_ASK: u64 = u64::MAX;
+
+/// An extension's compose pane being written by the agent (`A`): the ask
+/// is the extension's, its permissions and its project, and the answer
+/// goes to the pane instead of to it.
+pub(crate) struct ComposeAsk {
+    ext: String,
+    buffer: BufferId,
+}
+
 /// An extension's question to an agent, waiting for its turn to end.
 pub(crate) struct Ask {
     /// The extension that asked, and its service call to answer.
@@ -187,6 +199,48 @@ impl App {
         self.agents_ask_start(ext, call, &agent, &root, options, blocks);
     }
 
+    /// `A` in extension `ext`'s compose pane `buffer`: `payload` asked of
+    /// the agent, the answer written into the pane.
+    pub(crate) fn agents_compose_ask(&mut self, ext: &str, payload: &str, buffer: BufferId) {
+        if self.agents.compose_ask.is_some() {
+            return self.set_message("the agent is writing it already");
+        }
+        self.agents.compose_ask = Some(ComposeAsk { ext: ext.to_string(), buffer });
+        self.set_message("the agent is writing it");
+        let root = self.wasm.projects.get(ext).cloned().flatten();
+        self.agents_ask(ext, COMPOSE_ASK, payload, root);
+    }
+
+    /// Compose pane `buffer` closed: the agent writing it stops.
+    pub(crate) fn agents_compose_gone(&mut self, buffer: BufferId) {
+        let Some(ext) = self.agents.compose_ask.as_ref().filter(|a| a.buffer == buffer).map(|a| a.ext.clone()) else { return };
+        self.agents_ask_cancel(&ext, COMPOSE_ASK);
+        self.agents.compose_ask = None;
+    }
+
+    /// Whether `call` of `ext` is an ask for a compose pane.
+    fn agents_composing(&self, ext: &str, call: u64) -> bool {
+        call == COMPOSE_ASK && self.agents.compose_ask.as_ref().is_some_and(|a| a.ext == ext)
+    }
+
+    /// The compose pane's ask is answered: what the agent wrote is in the
+    /// pane, or why it isn't is said.
+    fn agents_compose_answered(&mut self, answer: Result<String, String>) {
+        let Some(ask) = self.agents.compose_ask.take() else { return };
+        if self.compose.as_ref().is_none_or(|c| c.buffer != ask.buffer) {
+            return;
+        }
+        let text = answer.and_then(|a| serde_json::from_str::<Value>(&a).map_err(|e| e.to_string())).map(|a| a["text"].as_str().unwrap_or_default().to_string());
+        match text {
+            Ok(text) if !text.trim().is_empty() => {
+                self.agents_fill_compose(ask.buffer, &text);
+                self.set_message("the agent's text is in the box: edit it, then Esc and Enter");
+            }
+            Ok(_) => self.set_error("the agent wrote nothing".to_string()),
+            Err(why) => self.set_error(format!("the agent didn't write it: {why}")),
+        }
+    }
+
     /// The prompt's blocks: the prompt, a line saying who asks and how to
     /// answer, then each attachment as a resource of its own.
     fn agents_ask_blocks(&self, ext: &str, root: &Path, options: &AskOptions) -> Result<Vec<ContentBlock>, String> {
@@ -356,7 +410,13 @@ impl App {
             if !text.is_empty() && text != ask.streamed {
                 ask.streamed = text.clone();
                 let (ext, call) = (ask.ext.clone(), ask.call);
-                self.code_ask_progress(&ext, call, text);
+                if self.agents_composing(&ext, call) {
+                    if let Some(buffer) = self.agents.compose_ask.as_ref().map(|a| a.buffer) {
+                        self.agents_fill_compose(buffer, &text);
+                    }
+                } else {
+                    self.code_ask_progress(&ext, call, text);
+                }
             }
         }
     }
@@ -617,6 +677,9 @@ impl App {
     fn agents_reply(&mut self, ext: &str, call: u64, answer: Result<String, String>) {
         #[cfg(test)]
         self.agents.replies.push((ext.to_string(), call, answer.clone()));
+        if self.agents_composing(ext, call) {
+            return self.agents_compose_answered(answer);
+        }
         self.code_deliver(ext, Notice::ServiceReply((call, answer)));
     }
 

@@ -282,10 +282,13 @@ see what a project's pipeline runs before you pick it.
 ## Shortcuts
 
 - `SPC a d` asks the agent to fix the problem on the cursor's line.
-- `SPC a c` has it write a commit message for what's staged, in the
-  project's style (its last commits, a commit template, what
-  CONTRIBUTING.md says of commits): into the commit composer as it
-  writes, when one is open, else onto the clipboard.
+- `A` in the commit box, in Normal mode and while it's empty, has it
+  write a message for what's staged, in the project's style (its last
+  commits, a commit template, what CONTRIBUTING.md says of commits), into
+  the box as it writes. The Review extension's boxes for a pull request's
+  description and your review's summary take `A` the same way; the
+  description's template, untouched, counts as empty. With your text in
+  the box, `A` is Vim's.
 - `SPC a e` asks about the selection.
 
 ## Fenix as a tool

@@ -1,4 +1,4 @@
-// Fenix's extension API, 1.3. An extension is a component of the
+// Fenix's extension API, 1.4. An extension is a component of the
 // `extension` world: Fenix calls its exports, and it calls Fenix through
 // `host`, each call checked against the permissions its manifest asks
 // for (`[permissions]`).
@@ -45,7 +45,8 @@
 // 1.1 added `git-state` and `last-task`. 1.2 added `service-progress`, and
 // the exports `service-cancelled` and `agent-ask-progress` (world
 // `extension`; `extension-base` is what every 1.x extension has). 1.3
-// added `notify-with` and `notify-dismiss`: notifications, as toasts.
+// added `notify-with` and `notify-dismiss`: notifications, as toasts. 1.4
+// added `compose-with-ask`: a compose pane the agent can write.
 //
 // The package keeps version 1.0.0 across 1.x: what a 1.x adds is in the
 // same package, so a guest built for 1.0 still names the interfaces it
@@ -1148,6 +1149,14 @@ interface host {
     /// Esc then Enter does `verb` (`post`), `q` drops it; `composed`
     /// brings it. Empty text is refused unless `allow-empty`.
     compose: func(title: string, verb: string, initial: string, allow-empty: bool) -> u64;
+    /// `compose`, and `A` in Normal mode, while the pane is empty, has
+    /// your coding agent write it: `ask` is what's asked, an `agents.ask`
+    /// payload, and its answer fills the pane as it's written. With
+    /// `over-initial`, `initial` is only a starting point (a template),
+    /// and `A` writes over it too until it's been touched. What's in the
+    /// pane comes back as `composed`; the answer doesn't come any other
+    /// way. Needs `permissions.agents` when `A` is pressed. 1.4.
+    compose-with-ask: func(title: string, verb: string, initial: string, allow-empty: bool, ask: string, over-initial: bool) -> u64;
     /// Where you are: the file, the selection or line, its project (with
     /// `editor = "read"` in its permissions).
     editor-here: func() -> option<here>;
