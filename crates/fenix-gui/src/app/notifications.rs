@@ -279,6 +279,17 @@ impl App {
             }
             return;
         }
+        // A file or folder, in the system's own app for it (a screenshot,
+        // the folder it's in).
+        if let Some(path) = command.strip_prefix("reveal:") {
+            #[cfg(not(test))]
+            if let Err(e) = super::open_in_browser(path) {
+                self.set_error(format!("{path}: {e}"));
+            }
+            #[cfg(test)]
+            let _ = path;
+            return;
+        }
         if let Some(url) = command.strip_prefix("url:") {
             if url.starts_with("https://") || url.starts_with("http://") {
                 #[cfg(not(test))]

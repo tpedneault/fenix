@@ -73,6 +73,7 @@ mod splash;
 mod model3d;
 mod sprite;
 mod surface;
+mod screenshot;
 mod tabstops;
 mod text;
 mod theme;

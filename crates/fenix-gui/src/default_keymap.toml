@@ -876,7 +876,17 @@ keys = "SPC c z"
 label = "toggle fold"
 command = "code.toggle_fold"
 
-# XML. `SPC c o` (outline), `SPC c s` (elements), `SPC c z`
+[[leader]]
+keys = "SPC c s"
+label = "screenshot"
+command = "code.screenshot"
+
+[[leader]]
+keys = "SPC c S"
+label = "screenshot, selection highlighted"
+command = "code.screenshot_highlight"
+
+# XML. `SPC c o` (outline), `SPC c z`
 # (fold) and `SPC c F` (reindent) already cover it through the
 # grammar; these two only make sense for XML.
 [[leader]]

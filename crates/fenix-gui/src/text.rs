@@ -126,7 +126,7 @@ fn span_bounds(
 /// the face is installed on this machine, so every path that turns a name
 /// into a `Family::Name(_)` used for real shaping/measurement checks this
 /// first rather than trusting the name.
-fn is_monospace_installed(font_system: &FontSystem, family: &str) -> bool {
+pub(crate) fn is_monospace_installed(font_system: &FontSystem, family: &str) -> bool {
     font_system.db().faces().any(|face| face.monospaced && face.families.iter().any(|(name, _)| name == family))
 }
 
@@ -238,6 +238,18 @@ impl FontContext {
     pub fn rebuild_gpu(&mut self, gpu: &GpuState) {
         self.cache = Cache::new(&gpu.device);
         self.atlas = TextAtlas::new(&gpu.device, &gpu.queue, &self.cache, gpu.config.format);
+    }
+
+    /// The font database, for drawing text off screen (a code screenshot)
+    /// with the fonts and fallbacks the panes use.
+    pub fn font_system(&mut self) -> &mut FontSystem {
+        &mut self.font_system
+    }
+
+    /// `family` when it's an installed monospace font, else the one the
+    /// panes fall back to -- what `TextPipeline::set_font_family` settles on.
+    pub fn body_family(&self, family: Option<&str>) -> String {
+        family.filter(|f| is_monospace_installed(&self.font_system, f)).unwrap_or(self.default_family).to_string()
     }
 }
 
