@@ -78,7 +78,7 @@ impl Launcher {
         let splash_on = config.motion.splash != Some(false);
         let still = !motion::on(&config, Feature::Splash);
 
-        let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(crate::app::fenix_icon()).with_visible(false);
+        let mut attrs = Window::default_attributes().with_title(crate::app::window_title(None)).with_window_icon(crate::app::fenix_icon()).with_visible(false);
         if config.restore_windows != Some(false) {
             if let Some(first) = config.windows.first() {
                 attrs = attrs

@@ -6,8 +6,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-06
+
 ### Added
 
+- The window title says which Fenix it is: `orbit-tools — Fenix 1.3.0`.
 - A pipeline's step can be a command: `run = "cargo test"`, with no agent in
   it. It passing moves the run on, and `on_failure` sends its output back to
   an agent's step to be fixed, for `max_rounds` rounds.
@@ -590,7 +593,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/tpedneault/fenix/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/tpedneault/fenix/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tpedneault/fenix/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/tpedneault/fenix/compare/v1.0.0...v1.0.1

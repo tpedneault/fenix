@@ -37,6 +37,7 @@ mod debug_drawer;
 mod debug_trail;
 mod debug_breakpoints;
 pub(crate) use debug_host::debug_dock_height;
+pub(crate) use projects::window_title;
 pub(crate) use debug_breakpoints::BreakpointPart;
 mod polish;
 mod which_key;
@@ -6223,7 +6224,7 @@ impl App {
     fn open_frame(&mut self, event_loop: &ActiveEventLoop, placement: FramePlacement) {
         let (Some(context), Some(fonts)) = (&self.gpu_context, &self.fonts) else { return };
 
-        let mut attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon()).with_visible(!cfg!(test));
+        let mut attrs = Window::default_attributes().with_title(window_title(None)).with_window_icon(fenix_icon()).with_visible(!cfg!(test));
         if let Some(position) = placement.position {
             attrs = attrs.with_position(position);
         }
@@ -21692,7 +21693,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             return;
         }
 
-        let attrs = Window::default_attributes().with_title("Fenix").with_window_icon(fenix_icon());
+        let attrs = Window::default_attributes().with_title(window_title(None)).with_window_icon(fenix_icon());
         let window =
             Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
         crate::profile::launch_mark("window");
