@@ -796,6 +796,15 @@ pub fn compose(title: &str, verb: &str, initial: &str, allow_empty: bool) -> u64
     host::compose(title, verb, initial, allow_empty)
 }
 
+/// [`compose`], and `A` in Normal mode, while the pane is empty, has your
+/// coding agent write it from `ask`, into the pane as it's written. With
+/// `over_initial`, `initial` is only a starting point (a template), and
+/// `A` writes over it too until it's been touched. Needs
+/// `permissions.agents`. API 1.4.
+pub fn compose_with_ask(title: &str, verb: &str, initial: &str, allow_empty: bool, ask: agents::Ask, over_initial: bool) -> u64 {
+    host::compose_with_ask(title, verb, initial, allow_empty, &ask.stream(true).payload(), over_initial)
+}
+
 /// Where you were when the command it's running was picked: the file,
 /// the selection or the line, its project. Needs `editor = "read"`.
 pub fn here() -> Option<Here> {

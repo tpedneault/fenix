@@ -371,8 +371,10 @@ pub enum Request {
     /// as dots, and kept nowhere, when it's `masked` (`prompt-secret`,
     ///).
     Prompt { id: u64, label: String, initial: String, masked: bool },
-    /// A compose pane; answer with `Notice::Composed((id, text))`.
-    Compose { id: u64, title: String, verb: String, initial: String, allow_empty: bool },
+    /// A compose pane; answer with `Notice::Composed((id, text))`. With
+    /// `ask` (`compose-with-ask`, 1.4), `A` has the agent write it, over
+    /// an untouched `initial` too when `over_initial`.
+    Compose { id: u64, title: String, verb: String, initial: String, allow_empty: bool, ask: Option<String>, over_initial: bool },
     /// Its section on Home, or none.
     Home(Option<HomeSection>),
     /// One of its own settings, changed: save it (already in its map).
@@ -1812,7 +1814,13 @@ impl fenix::extension::host::Host for State {
 
     fn compose(&mut self, title: String, verb: String, initial: String, allow_empty: bool) -> u64 {
         let id = self.id();
-        self.ask(Request::Compose { id, title, verb, initial, allow_empty });
+        self.ask(Request::Compose { id, title, verb, initial, allow_empty, ask: None, over_initial: false });
+        id
+    }
+
+    fn compose_with_ask(&mut self, title: String, verb: String, initial: String, allow_empty: bool, ask: String, over_initial: bool) -> u64 {
+        let id = self.id();
+        self.ask(Request::Compose { id, title, verb, initial, allow_empty, ask: Some(ask), over_initial });
         id
     }
 

@@ -147,10 +147,12 @@ pub(crate) struct AgentHost {
     /// The earlier prompt Up/Down put in the prompt: its place in the
     /// history, and its text, while it's left as it was.
     pub(super) recalled: Option<(usize, String)>,
-    /// The thread writing a commit message (`SPC a c`).
+    /// The thread writing a commit message (`A` in its compose pane).
     pub(super) commit_message: Option<ThreadId>,
-    /// The commit composer the message goes into, when one was open.
+    /// The commit composer the message goes into.
     pub(super) commit_into: Option<BufferId>,
+    /// An extension's compose pane the agent is writing (`A`).
+    pub(super) compose_ask: Option<extensions::ComposeAsk>,
     /// Commands agents run through Fenix, by terminal id.
     pub(super) terminals: HashMap<String, terminals::AgentTerminal>,
     pub(super) next_terminal: u64,
@@ -216,6 +218,7 @@ impl AgentHost {
             recalled: None,
             commit_message: None,
             commit_into: None,
+            compose_ask: None,
             terminals: HashMap::new(),
             next_terminal: 1,
             logins: Vec::new(),

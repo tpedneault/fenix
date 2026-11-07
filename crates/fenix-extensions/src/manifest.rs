@@ -11,7 +11,7 @@ use serde::Deserialize;
 /// The extension API this Fenix offers code extensions
 /// (`fenix-extension-api`'s `wit/world.wit`). An extension built against
 /// 1.x runs on any later 1.x: a minor version only adds.
-pub const API: &str = "1.3.0";
+pub const API: &str = "1.4.0";
 
 /// Whether an extension built against `api` runs on this Fenix's `API`.
 pub fn api_fits(api: &str) -> bool {
@@ -1282,7 +1282,7 @@ mod tests {
         assert!(Manifest::parse(&sample("acme.jira", "1.0.0", "wasm")).unwrap_err().contains("engine.api"), "a wasm one says its API");
         let wasm = |api: &str| Manifest::parse(&sample("acme.jira", "1.0.0", "wasm").replace("fenix = ", &format!("api = \"{api}\"\nfenix = "))).unwrap();
         assert!(wasm("1.0").runs_in(&v("1.0.0")).is_ok());
-        assert!(wasm("2.0").runs_in(&v("1.0.0")).unwrap_err().contains("built for extension API 2.0, and this Fenix offers 1.3.0"));
+        assert!(wasm("2.0").runs_in(&v("1.0.0")).unwrap_err().contains("built for extension API 2.0, and this Fenix offers 1.4.0"));
         assert!(Manifest::parse(&sample("acme.jira", "1.0.0", "lua")).unwrap().runs_in(&v("1.0.0")).unwrap_err().contains("Lua"));
     }
 
@@ -1308,8 +1308,8 @@ mod tests {
 
     #[test]
     fn the_api_fits_by_its_major_and_any_minor_up_to_this_one() {
-        assert!(api_fits("1") && api_fits("1.0") && api_fits("1.0.0") && api_fits("1.1") && api_fits("1.2") && api_fits("1.3"));
-        assert!(!api_fits("1.3.1") && !api_fits("1.4"), "a later 1.x has what this one lacks");
+        assert!(api_fits("1") && api_fits("1.0") && api_fits("1.0.0") && api_fits("1.1") && api_fits("1.2") && api_fits("1.3") && api_fits("1.4"));
+        assert!(!api_fits("1.4.1") && !api_fits("1.5"), "a later 1.x has what this one lacks");
         assert!(!api_fits("0.8") && !api_fits("0.8.8") && !api_fits("2.0") && !api_fits("x"));
     }
 

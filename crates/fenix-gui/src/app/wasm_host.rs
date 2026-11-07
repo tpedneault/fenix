@@ -226,7 +226,7 @@ pub(crate) struct WasmHost {
     /// out of the extensions' own range.
     restored: u64,
     /// The project each worker was started in: its `/project`.
-    projects: HashMap<String, Option<PathBuf>>,
+    pub(super) projects: HashMap<String, Option<PathBuf>>,
     /// Those running in a project other than the one you're in: started
     /// again there the next time they're used (a command, a page, a
     /// service, a language server), not all at once as you move. `/project`
@@ -2617,9 +2617,9 @@ impl App {
                 let badge: &'static str = Box::leak(title.to_uppercase().into_boxed_str());
                 self.enter_picker(ActivePicker::Code { ext: ext.to_string(), id, badge, many: true, state: fenix_picker::PickerState::new(candidates) });
             }
-            Request::Compose { id, title, verb, initial, allow_empty } => {
+            Request::Compose { id, title, verb, initial, allow_empty, ask, over_initial } => {
                 let verb: &'static str = Box::leak(verb.into_boxed_str());
-                self.open_code_compose(ext, id, title, verb, allow_empty, &initial);
+                self.open_code_compose(ext, id, title, verb, allow_empty, &initial, ask, over_initial);
             }
             Request::Home(section) => {
                 match section {

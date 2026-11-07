@@ -886,10 +886,140 @@ fn a_commit_message_is_asked_for_with_the_staged_diff() {
     git(&["init", "-q"]);
     std::fs::write(f.root.join("a.txt"), "one\n").unwrap();
     git(&["add", "a.txt"]);
-    f.app.agents_commit_message();
+    let root = f.root.clone();
+    let compose = open_to_normal(&mut f, ComposePurpose::GitCommit { repo_root: root, compose: crate::git_status::Compose::New(Default::default()) });
+    assert!(f.app.pane_titles.values().any(|t| t.contains("A while it's untouched has the agent write it")));
+    press_big_a(&mut f);
+    assert_eq!(f.app.vim.mode(), Mode::Normal, "A isn't Vim's here");
     assert!(f.pump(|app| app.agents.hub.status() == Default::default() && app.agents.commit_message.is_none()), "the answer came");
     let blocks = first_prompt(&f);
     assert!(matches!(&blocks[1], ContentBlock::Resource { text: Some(t), .. } if t.contains("+one")), "{blocks:?}");
+    assert!(!f.app.buffers.get(compose).unwrap().buffer.text().trim().is_empty(), "it's in the box");
+    assert_eq!(f.app.focused_pane_id(), f.app.compose.as_ref().unwrap().pane, "you're still in the box");
+}
+
+/// `A`, as `route_keypress` takes it in a compose pane.
+fn press_big_a(f: &mut Fixture) {
+    if f.app.compose_agent_offered() {
+        f.app.compose_agent_write();
+    } else {
+        f.app.test_dispatch_key(KeyPress::char('A'));
+    }
+}
+
+/// A compose pane open, in Normal mode: where you are after writing, or
+/// after Esc in a blank one. Its buffer.
+fn open_to_normal(f: &mut Fixture, purpose: ComposePurpose) -> BufferId {
+    f.app.open_compose(purpose);
+    f.app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+    assert_eq!(f.app.vim.mode(), Mode::Normal);
+    f.app.compose.as_ref().unwrap().buffer
+}
+
+#[test]
+fn a_is_vims_once_the_commit_box_has_text_and_in_a_box_the_agent_doesnt_write() {
+    let mut f = fixture("");
+    let root = f.root.clone();
+    let compose = open_to_normal(&mut f, ComposePurpose::CommitMessage { repo_root: root.clone() });
+    f.app.replace_buffer_from_disk(compose, "mine");
+    press_big_a(&mut f);
+    assert_eq!(f.app.vim.mode(), Mode::Insert, "append at the line's end");
+    assert!(f.app.agents.commit_message.is_none(), "nothing asked");
+    assert_eq!(f.app.buffers.get(compose).unwrap().buffer.text(), "mine");
+    f.app.close_compose();
+    // Half of a command: `dA` isn't asking anybody.
+    open_to_normal(&mut f, ComposePurpose::CommitMessage { repo_root: root.clone() });
+    f.app.test_dispatch_key(KeyPress::char('d'));
+    assert!(!f.app.compose_agent_offered());
+    f.app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+    assert!(f.app.compose_agent_offered());
+    f.app.close_compose();
+    let amend = ComposePurpose::GitCommit { repo_root: root, compose: crate::git_status::Compose::Amend(Default::default()) };
+    assert!(!amend.title().contains("agent"), "{}", amend.title());
+    open_to_normal(&mut f, amend);
+    press_big_a(&mut f);
+    assert_eq!(f.app.vim.mode(), Mode::Insert, "an amend starts from its message");
+    f.app.close_compose();
+    f.app.open_code_compose("test.hello", 3, "Reply".into(), "send", false, "", None, false);
+    f.app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+    press_big_a(&mut f);
+    assert_eq!(f.app.vim.mode(), Mode::Insert, "no ask, no agent");
+    assert!(f.app.agents.replies.is_empty());
+}
+
+#[test]
+fn a_in_an_extensions_box_has_the_agent_write_its_ask_into_the_box() {
+    let mut f = fixture("");
+    f.app.wasm.installed.push(extension("[permissions]\nagents = true\n"));
+    f.app.open_code_compose("test.hello", 3, "Review summary".into(), "keep", true, "", Some(r#"{"prompt": "hello", "stream": true}"#.into()), false);
+    assert!(f.app.pane_titles.values().any(|t| t.starts_with("Review summary") && t.contains("the agent")));
+    f.app.test_dispatch_key(KeyPress::named(FenixNamedKey::Escape));
+    press_big_a(&mut f);
+    let compose = f.app.compose.as_ref().unwrap().buffer;
+    assert!(f.pump(|app| app.agents.compose_ask.is_none()), "never answered");
+    let (ext, _, answer) = f.app.agents.replies.remove(0);
+    assert_eq!(ext, "test.hello");
+    let answer: Value = serde_json::from_str(&answer.unwrap()).unwrap();
+    let text = f.app.buffers.get(compose).unwrap().buffer.text();
+    assert!(!text.trim().is_empty(), "{answer} / {:?}", f.app.status_message.as_ref().map(|m| m.text.clone()));
+    assert_eq!(text.trim(), answer["text"].as_str().unwrap().trim(), "what it said, in the box");
+    assert!(f.app.compose.is_some(), "yours to edit and send");
+    assert!(f.app.agents.asks.is_empty());
+}
+
+#[test]
+fn a_writes_over_a_template_until_its_touched_and_never_over_a_kept_draft() {
+    let mut f = fixture("");
+    f.app.wasm.installed.push(extension("[permissions]\nagents = true\n"));
+    let ask = || Some(r#"{"prompt": "hello", "stream": true}"#.to_string());
+    let open = |f: &mut Fixture, over| {
+        f.app.open_code_compose("test.hello", 3, "Description of x".into(), "keep", true, "## Summary", ask(), over);
+        f.app.compose.as_ref().unwrap().buffer
+    };
+    // It's a template, and untouched.
+    let compose = open(&mut f, true);
+    assert!(f.app.compose_agent_offered());
+    press_big_a(&mut f);
+    assert!(f.pump(|app| app.agents.compose_ask.is_none()), "never answered");
+    let text = f.app.buffers.get(compose).unwrap().buffer.text();
+    assert!(!text.contains("## Summary") && !text.trim().is_empty(), "{text}");
+    f.app.close_compose();
+    // Touched, it's yours.
+    let compose = open(&mut f, true);
+    f.app.replace_buffer_from_disk(compose, "## Summary\nmine");
+    assert!(!f.app.compose_agent_offered());
+    f.app.close_compose();
+    // Not a template: what's in it is yours from the start, and clearing it
+    // is how to ask.
+    let compose = open(&mut f, false);
+    assert!(!f.app.compose_agent_offered());
+    f.app.replace_buffer_from_disk(compose, "");
+    assert!(f.app.compose_agent_offered());
+    f.app.close_compose();
+    // Text you wrote and didn't send, come back, isn't a template.
+    let file = f.app.compose_drafts_file.clone();
+    write_compose_drafts(&file, &[(compose_draft_key("test.hello", "Description of x"), "half written".to_string())].into_iter().collect());
+    open(&mut f, true);
+    assert!(!f.app.compose_agent_offered());
+    f.app.close_compose();
+}
+
+#[test]
+fn closing_the_box_stops_the_agent_writing_it_and_a_refused_ask_leaves_it_empty() {
+    let mut f = fixture("");
+    f.app.wasm.installed.push(extension("[permissions]\nagents = true\n"));
+    f.app.open_code_compose("test.hello", 3, "Review summary".into(), "keep", true, "", Some(r#"{"prompt": "write the review"}"#.into()), false);
+    f.app.compose_agent_write();
+    assert!(f.app.agents.compose_ask.is_some());
+    f.app.close_compose();
+    assert!(f.app.agents.compose_ask.is_none() && f.app.agents.asks.is_empty() && f.app.agents.consenting.is_empty(), "given up on");
+
+    f.app.wasm.installed[0] = extension("");
+    f.app.open_code_compose("test.hello", 4, "Review summary".into(), "keep", true, "", Some(r#"{"prompt": "write the review"}"#.into()), false);
+    let compose = f.app.compose.as_ref().unwrap().buffer;
+    f.app.compose_agent_write();
+    assert!(f.app.agents.compose_ask.is_none(), "answered at once");
+    assert!(f.app.buffers.get(compose).unwrap().buffer.text().trim().is_empty());
 }
 
 /// Devin's way: a whole command line as `command`, no `args` -- a shell's
