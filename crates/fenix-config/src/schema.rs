@@ -394,6 +394,16 @@ Setting::stored("editor.fold_markers", Editor, "Fold markers", Kind::Bool, "A co
         s("appearance.rainbow_brackets", Appearance, "Rainbow brackets", Kind::Bool, "Brackets are coloured by how deeply they're nested.", sub!(polish.rainbow_brackets, bool_get, bool_set)).default("off"),
         s("appearance.tabs", Appearance, "Tabs", Kind::Choice(&["auto", "block", "underline", "off"]), "How each pane's tabs are drawn: the theme's own look (Visual Studio Dark uses blocks, the rest an underline), always blocks, always an underline, or no tab strip at all -- gt and gT still move between tabs then.", sub!(polish.tabs, text_get, text_set)).default("auto"),
         s("editor.preview_tab", Appearance, "Preview tabs", Kind::Bool, "A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P.", field!(preview_tab, bool_get, bool_set)).default("on"),
+        // Screenshots (`SPC c s`)
+        Setting::stored("screenshot.style", Appearance, "Screenshot background", Kind::Choice(&["accent", "solid", "sunset", "ocean", "candy", "forest", "none"]), "What's behind a code screenshot's window: a gradient of the theme's accent, the accent flat, one of four gradients, or nothing (see-through).").with_default("accent"),
+        Setting::stored("screenshot.title", Appearance, "Screenshot title bar", Kind::Bool, "A code screenshot's window has a title bar with three dots and the file's name.").with_default("on"),
+        Setting::stored("screenshot.line_numbers", Appearance, "Screenshot line numbers", Kind::Bool, "A code screenshot shows each line's number in the file.").with_default("off"),
+        Setting::stored("screenshot.scale", Appearance, "Screenshot scale", Kind::Float { min: 1.0, max: 4.0 }, "Pixels per point a code screenshot is drawn at; 2 is sharp on a retina screen.").with_default("2"),
+        Setting::stored("screenshot.padding", Appearance, "Screenshot padding", Kind::Int { min: 0, max: 200 }, "Points of background around a code screenshot's window.").with_default("56"),
+        Setting::stored("screenshot.max_width", Appearance, "Screenshot width", Kind::Int { min: 20, max: 400 }, "Columns a code screenshot's lines take at most; a longer one wraps or is cut.").with_default("100"),
+        Setting::stored("screenshot.long_lines", Appearance, "Screenshot long lines", Kind::Choice(&["wrap", "cut"]), "A line wider than the screenshot's width goes on under itself, or stops with an ellipsis.").with_default("wrap"),
+        Setting::stored("screenshot.context", Appearance, "Screenshot context", Kind::Int { min: 0, max: 50 }, "Lines either side of the highlighted ones that SPC c S takes too.").with_default("3"),
+        Setting::stored("screenshot.folder", Appearance, "Screenshot folder", Kind::Path, "Where code screenshots are saved, besides the clipboard.").with_default("the Pictures folder"),
         // Files
         s("editor.watch_files", Files, "Watch files on disk", Kind::Bool, "Notice when an open file changes on disk, and reload it when you haven't edited it.", field!(watch_files, bool_get, bool_set)).default("on"),
         s("editor.format_on_save", Files, "Format on save", Kind::Bool, "Saving runs the formatter an extension gives for the file's language (a language pack's) first.", field!(format_on_save, bool_get, bool_set)).default("off"),

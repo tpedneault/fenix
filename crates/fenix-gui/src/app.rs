@@ -56,6 +56,7 @@ mod wasm_host;
 pub(crate) use wasm_host::image_key as code_image_key;
 mod layers;
 mod reading_host;
+mod screenshot_host;
 mod control_host;
 mod startup;
 use tool_sessions::{LspKey, LspServer};
