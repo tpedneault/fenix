@@ -16,15 +16,55 @@ use std::path::{Path, PathBuf};
 use fenix_keymap::{KeyCode, KeyPress, NamedKey as FenixNamedKey};
 
 use super::debug_breakpoints::BreakpointPart;
-use super::debug_host::{dock_columns, DEBUG_DOCK_ROWS};
+use super::debug_host::{self, dock_columns, DEBUG_DOCK_ROWS};
 use super::*;
 
 /// How many lines the console keeps.
 const CONSOLE_LINES: usize = 500;
 
 /// The rows each column shows: the dock but its header, the columns'
-/// titles and the evaluate line.
-pub(super) const LIST_ROWS: usize = DEBUG_DOCK_ROWS - 3;
+/// titles, the evaluate line and the two rows the cards stand off in.
+pub(super) const LIST_ROWS: usize = DEBUG_DOCK_ROWS - 5;
+
+/// The dock's rows: the header, the columns' titles (their first list row
+/// is the next), the evaluate line.
+pub(super) const HEADER_ROW: usize = 0;
+pub(super) const TITLE_ROW: usize = 2;
+pub(super) const EVAL_ROW: usize = TITLE_ROW + LIST_ROWS + 2;
+
+/// What's drawn behind the dock's text, in its rows and characters: the
+/// state's chip, the keys' caps, each column's card -- the focused one's
+/// outlined -- and the evaluate box.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DockDecor {
+    /// (row, first character, end) of the state, and whether it's stopped.
+    pub status: Option<(usize, usize, usize, bool)>,
+    /// (row, first character, end) of each key.
+    pub caps: Vec<(usize, usize, usize)>,
+    /// Each column's first character and width.
+    pub columns: Vec<(usize, usize)>,
+    /// The column the drawer's keys go to, while it has them.
+    pub focused: Option<usize>,
+    /// Whether the evaluate line is being typed in.
+    pub typing: bool,
+}
+
+/// `keys` as "key label  key label", each key's place in it beside.
+fn key_strip(keys: &[(&str, &str)]) -> (String, Vec<(usize, usize)>) {
+    let mut text = String::new();
+    let mut caps = Vec::new();
+    for (i, (key, label)) in keys.iter().enumerate() {
+        if i > 0 {
+            text.push_str("   ");
+        }
+        let at = text.chars().count();
+        text.push_str(key);
+        caps.push((at, at + key.chars().count()));
+        text.push(' ');
+        text.push_str(label);
+    }
+    (text, caps)
+}
 
 /// The most of a value's children the lens's card lists.
 const LENS_CHILDREN: usize = 12;
@@ -413,40 +453,86 @@ impl App {
     }
 
     /// The dock's text, `width` characters across: a header with the
-    /// session and where it is, the columns side by side, and the
-    /// evaluate line.
+    /// session, where it is and the keys, the columns side by side, and
+    /// the evaluate line. The tests' way in; `redraw` takes the layout.
+    #[cfg(test)]
     pub(super) fn debug_dock_spans(&self, width: usize) -> Vec<(String, glyphon::Color, bool)> {
-        let Some(session) = self.debug_session.as_ref() else { return Vec::new() };
+        self.debug_dock_layout(width).0
+    }
+
+    /// The dock's text, and what's drawn behind it (`DockDecor`).
+    pub(super) fn debug_dock_layout(&self, width: usize) -> (Vec<(String, glyphon::Color, bool)>, DockDecor) {
+        let Some(session) = self.debug_session.as_ref() else { return (Vec::new(), DockDecor::default()) };
         let theme = &self.theme;
         let (accent, muted) = (theme.git_modified, theme.gutter_fg);
         let focused = self.debug_drawer_focused();
+        let shares: Vec<usize> = COLUMNS.iter().map(|c| c.share()).collect();
+        let spans_at = debug_host::column_spans(&shares, width);
         let mut columns: Vec<(String, Vec<String>, usize)> = Vec::new();
+        // The selected row's text when its column cut it: shown whole on
+        // the bottom line while the drawer has the keys.
+        let mut cut: Option<String> = None;
         for (c, column) in COLUMNS.iter().enumerate() {
             let rows = self.debug_drawer_rows(*column);
             let first = self.debug_drawer_first_row(c, rows.len());
+            let w = spans_at[c].1;
             let mut title = column.title().to_string();
             if rows.len() > LIST_ROWS {
                 title.push_str(&format!("  {}-{}/{}", first + 1, (first + LIST_ROWS).min(rows.len()), rows.len()));
             }
-            columns.push((title, rows.into_iter().skip(first).take(LIST_ROWS).map(|(text, _)| text).collect(), column.share()));
+            // A column with nothing in it says why in a line or two of its
+            // own width, rather than cut off after a few words.
+            let lines: Vec<String> = match rows.as_slice() {
+                [(hint, RowAct::None)] if hint.chars().count() > w => crate::page::wrap(hint, w.max(1)),
+                _ => rows.iter().skip(first).take(LIST_ROWS).map(|(text, _)| text.clone()).collect(),
+            };
+            if focused && self.debug_drawer.column == c {
+                if let Some((text, _)) = rows.get(self.debug_drawer.selected[c].min(rows.len().saturating_sub(1))) {
+                    if text.chars().count() > w {
+                        cut = Some(text.trim().to_string());
+                    }
+                }
+            }
+            columns.push((title, lines, column.share()));
         }
         let borrowed: Vec<(&str, Vec<String>, usize)> = columns.iter().map(|(t, l, s)| (t.as_str(), l.clone(), *s)).collect();
         let rows = dock_columns(&borrowed, width, LIST_ROWS + 1);
-        let mut out: Vec<(String, glyphon::Color, bool)> = Vec::new();
-        out.push((format!("{}  ", file_label(Path::new(&session.name))), theme.fg, false));
-        out.push((debug_host::debug_state_text(session), if session.stopped_thread.is_some() { accent } else { muted }, false));
-        let keys = if focused {
-            "    j k move  h l column  Enter open  x remove  a watch  i evaluate  Esc back\n"
-        } else if session.ended {
-            "    F5 starts another  SPC u d hides\n"
-        } else {
-            "    F5 continue  F10 next  F11 in  ⇧F11 out  ⇧F5 stop  SPC u f drawer\n"
+        let mut decor = DockDecor {
+            columns: spans_at.clone(),
+            focused: focused.then_some(self.debug_drawer.column),
+            typing: focused && self.debug_drawer.line.is_some(),
+            ..DockDecor::default()
         };
-        out.push((keys.to_string(), muted, true));
+        let mut out: Vec<(String, glyphon::Color, bool)> = Vec::new();
+        // The header: the session, its state on a chip, and the keys on
+        // their caps -- the step keys while it runs, the drawer's in it.
+        let name = format!("{}  ", file_label(Path::new(&session.name)));
+        let mut at = name.chars().count() + 1;
+        out.push((format!(" {name}"), theme.fg, false));
+        let state = format!(" {} ", debug_host::debug_state_text(session));
+        let stopped = session.stopped_thread.is_some();
+        decor.status = Some((HEADER_ROW, at, at + state.chars().count(), stopped));
+        at += state.chars().count();
+        out.push((state, if stopped { accent } else { muted }, false));
+        let keys: &[(&str, &str)] = if focused {
+            &[("j k", "move"), ("h l", "column"), ("Enter", "open"), ("x", "remove"), ("a", "watch"), ("i", "evaluate"), ("Esc", "back")]
+        } else if session.ended {
+            &[("F5", "starts another"), ("SPC u d", "hides")]
+        } else {
+            &[("F5", "continue"), ("F10", "next"), ("F11", "in"), ("⇧F11", "out"), ("⇧F5", "stop"), ("SPC u f", "drawer")]
+        };
+        let (strip, caps) = key_strip(keys);
+        let lead = 4;
+        // In the text's own face, not the hints': the caps are placed by
+        // its character cells.
+        out.push((format!("{}{strip}", " ".repeat(lead)), muted, false));
+        decor.caps = caps.into_iter().map(|(a, b)| (HEADER_ROW, at + lead + a, at + lead + b)).collect();
+        // A row for the cards to stand off the header in.
+        out.push(("\n\n".to_string(), theme.fg, false));
         for (r, cells) in rows.into_iter().enumerate() {
             for (c, cell) in cells.into_iter().enumerate() {
                 if c > 0 {
-                    out.push((" │ ".to_string(), muted, false));
+                    out.push(("   ".to_string(), muted, false));
                 }
                 let mine = focused && self.debug_drawer.column == c;
                 let color = match r {
@@ -459,16 +545,23 @@ impl App {
             }
             out.push(("\n".to_string(), theme.fg, false));
         }
+        // And one under them, then the evaluate line.
+        out.push(("\n".to_string(), theme.fg, false));
         match &self.debug_drawer.line {
             Some(line) if focused => {
                 out.push((line.purpose.prompt().to_string(), accent, false));
                 out.push((format!("{}▏", line.text), theme.fg, false));
             }
+            _ if focused && cut.is_some() => {
+                let whole = cut.unwrap_or_default();
+                out.push(("› ".to_string(), muted, false));
+                out.push((crate::page::fit(&whole, width.saturating_sub(2)), theme.fg, false));
+            }
             _ if focused && COLUMNS[self.debug_drawer.column] == Column::Breakpoints => out.push(("t on/off  e condition  H hit count  L log message  x remove".to_string(), muted, true)),
-            _ if focused => out.push(("i evaluates in the selected frame, a adds a watch".to_string(), muted, true)),
-            _ => out.push(("SPC u e evaluates  K on a name shows its value".to_string(), muted, true)),
+            _ if focused => out.push(("› i evaluates in the selected frame, a adds a watch".to_string(), muted, true)),
+            _ => out.push(("› SPC u e evaluates  K on a name shows its value".to_string(), muted, true)),
         }
-        out
+        (out, decor)
     }
 
     /// Where the drawer's selection is drawn, `width` characters across:
@@ -485,11 +578,9 @@ impl App {
         }
         let first = self.debug_drawer_first_row(c, len);
         let selected = self.debug_drawer.selected[c].min(len - 1);
-        let total: usize = COLUMNS.iter().map(|c| c.share()).sum();
-        let usable = width.saturating_sub((COLUMNS.len() - 1) * 3);
-        let widths: Vec<usize> = COLUMNS.iter().map(|c| usable * c.share() / total).collect();
-        let x = widths[..c].iter().sum::<usize>() + c * 3;
-        Some((2 + selected - first, x, widths[c]))
+        let shares: Vec<usize> = COLUMNS.iter().map(|c| c.share()).collect();
+        let (x, w) = debug_host::column_spans(&shares, width)[c];
+        Some((TITLE_ROW + 1 + selected - first, x, w))
     }
 
     /// A key while the drawer has the keys: true when it's the drawer's.

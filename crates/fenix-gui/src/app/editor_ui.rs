@@ -344,6 +344,11 @@ impl App {
             let mut target = root.map(Path::to_path_buf).unwrap_or_default();
             for component in relative.components() {
                 target.push(component);
+                // `C:\Users`: the drive, then `Users` -- the root's `\` is
+                // part of the drive, not a folder of its own.
+                if matches!(component, std::path::Component::RootDir) {
+                    continue;
+                }
                 let action = if target == path { BreadcrumbTarget::Symbols } else { BreadcrumbTarget::Directory(target.clone()) };
                 parts.push((component.as_os_str().to_string_lossy().into_owned(), action));
             }
@@ -415,6 +420,23 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file outside any project: its drive, then its folders -- no `\`
+    /// between them as a folder of its own.
+    #[test]
+    fn a_paths_root_is_not_a_breadcrumb_of_its_own() {
+        let dir = std::env::temp_dir().join(format!("fenix-crumb-root-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("x.txt");
+        std::fs::write(&file, "x").unwrap();
+        let mut app = App::with_file(None);
+        app.project_root = None;
+        app.test_open_path(&file);
+        let id = app.focused_buffer_id();
+        let parts: Vec<String> = app.breadcrumb_parts(id, 0).into_iter().map(|(t, _)| t).collect();
+        assert!(!parts.iter().any(|p| p == "\\" || p == "/"), "{parts:?}");
+        assert_eq!(parts.last().map(String::as_str), Some("x.txt"));
+    }
 
     #[test]
     fn breadcrumbs_follow_nested_rust_scopes_without_changing_text() {

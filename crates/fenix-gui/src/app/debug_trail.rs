@@ -247,7 +247,10 @@ impl App {
     /// Whether the ribbon is under the focused pane's tabs, in place of
     /// its breadcrumb: there's a trail here.
     pub(super) fn debug_ribbon_shown(&self) -> bool {
-        self.debug_trail_here()
+        // Once the session has ended, the breadcrumb is back -- unless
+        // you've gone back along the trail (`[t`), which still works.
+        let ended = self.debug_session.as_ref().is_some_and(|s| s.ended);
+        self.debug_trail_here() && (!ended || self.debug_trail.viewing.is_some())
     }
 
     /// The ribbon: the trail's newest stops, the one shown marked, this

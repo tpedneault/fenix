@@ -159,6 +159,7 @@ fn the_dock_is_one_column_beside_every_pane_and_never_splits_the_code() {
     assert!(f.app.pane_titles.get(&composer).is_some_and(|t| t.contains("sends")), "{:?}", f.app.pane_titles.get(&composer));
     assert_eq!((f.app.focused_pane_id(), f.app.vim.mode()), (composer, Mode::Insert));
     assert_eq!(f.app.buffer_display_name(f.app.agents.composer.unwrap()), "*agent prompt*");
+    assert!(f.app.modeline_pieces().1.starts_with("Agent prompt"), "its plain name on the modeline: {:?}", f.app.modeline_pieces().1);
     // Clicked away from the prompt, still in Insert (to the code, say):
     // Normal mode there, so nothing's typed into the file by surprise.
     f.app.agents_dock_sync();

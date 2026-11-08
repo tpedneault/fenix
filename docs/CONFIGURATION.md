@@ -133,6 +133,9 @@ tabs = "underline"        # or "block" (Visual Studio's filled tabs)
 [surfaces]
 bg = "#1a1b26"
 # sidebar_bg = "#1a1b26"  # the explorer's; bg when left out
+# tray = "#12121a"        # between the panels; worked out when left out
+# card = "#222430"        # a card in a panel (a tool call, a debugger column)
+# input = "#292b39"       # an input or a key's cap
 bg_modeline = "#24283b"
 divider = "#565f89"
 caret = "#e0af68"
@@ -180,10 +183,18 @@ staged = "#9ece6a"
 untracked = "#7aa2f7"
 ignored = "#929bb9"
 conflicted = "#f7768e"
+
+# [terminal]  # a terminal's 16 ANSI colours; worked out from the above when left out
+# ansi = ["#4c5064", "#f7768e", "#9ece6a", "#ff9e64", "#7aa2f7", "#bb9af7", "#2ac3de", "#a2aad0",
+#         "#929bb9", "#ff97aa", "#b2e27f", "#ffb88d", "#9bbbff", "#d3bcfe", "#41d6f0", "#c0caf5"]
 ```
 
 Colours are `#rrggbb`; a surface drawn over another (a highlight) can be
-see-through, as `#rrggbbaa` or `{ color, alpha }`; text can't. The
+see-through, as `#rrggbbaa` or `{ color, alpha }`; text can't. Left out,
+`tray` is a shade under `bg` -- towards black on a dark theme, towards
+the text on a light one -- and `card` and `input` step from `bg` towards
+`fg` only as far as keeps every text colour as readable on them as the
+bars below (an input that can't step further sinks the other way). The
 shipped themes keep body text, comments and line numbers at 4.5:1 against every surface
 they're drawn on (accents 3:1 on a light theme),
 comments quieter than code, and operators distinct from both -- worth
@@ -417,6 +428,7 @@ when it's out of date).
 | `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
 | `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
+| `terminal.shell` | text | PowerShell 7, else Windows PowerShell; $SHELL | The shell a terminal starts, with its arguments: pwsh -NoLogo, bash -l; a path with spaces in double quotes. Empty: PowerShell 7 on Windows when it's installed, else Windows PowerShell; $SHELL elsewhere. |
 | `search.smart_case` | true / false | on | A search in lower case matches any case; a capital letter makes it exact. For / and the Search page; Alt-c on the page, \C in /, match case anyway. |
 | `search.regex` | true / false | off | Whether the Search page (SPC /) starts reading the query as a regex rather than literal text. Alt-r flips it there; / and :s are always regexes. |
 | `search.exclude` | a list | – | Globs the Search page leaves out to begin with ("target", "*.lock"). Ignored files are left out anyway; f on the page edits the globs. |
@@ -441,6 +453,7 @@ when it's out of date).
 | `which_key.order` | key / label | key | The key menu's order: by key, so a key never moves, or by what it does. |
 | `appearance.rainbow_brackets` | true / false | off | Brackets are coloured by how deeply they're nested. |
 | `appearance.tabs` | auto / block / underline / off | auto | How each pane's tabs are drawn: the theme's own look (Visual Studio Dark uses blocks, the rest an underline), always blocks, always an underline, or no tab strip at all -- gt and gT still move between tabs then. |
+| `appearance.panels` | framed / flat | framed | How the window's panes, sidebar, terminal and docks are drawn: rounded panels on a darker tray a gap apart, with an edge on the one that has the keyboard, or flat and edge to edge with lines between them, as before 1.4. |
 | `editor.preview_tab` | true / false | on | A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P. |
 | `screenshot.style` | accent / solid / sunset / ocean / candy / forest / none | accent | What's behind a code screenshot's window: a gradient of the theme's accent, the accent flat, one of four gradients, or nothing (see-through). |
 | `screenshot.title` | true / false | on | A code screenshot's window has a title bar with three dots and the file's name. |

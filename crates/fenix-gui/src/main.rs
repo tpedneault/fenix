@@ -209,7 +209,7 @@ fn main() -> anyhow::Result<()> {
     });
 
     let cwd = std::env::current_dir().unwrap_or_default();
-    let invocation = match cli::parse(&args, &cwd, |path| path.exists()) {
+    let invocation = match cli::parse(&args, &cwd, |path| path.exists()).map(|i| cli::folders_as_project(i, std::path::Path::is_dir)) {
         Ok(invocation) => invocation,
         Err(message) => {
             eprintln!("fenix: {message}");

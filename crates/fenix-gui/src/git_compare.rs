@@ -517,11 +517,19 @@ pub fn layout(page: &GitCompare, cols: usize) -> Page {
     // Which side is which, in words: "feature/x compared with origin/main".
     let own = page.own_label(&data.branch);
     let (head, base) = if page.swapped { (page.target.clone(), own) } else { (own, page.target.clone()) };
-    let x = g.put(y, left, &head, Role::Title);
+    // The names first, each given half the line at most; the mode at the
+    // right when there's room past them, else on a line of its own.
+    let half = (width.saturating_sub(15) / 2).max(8);
+    let x = g.put(y, left, &fit(&head, half), Role::Title);
     let x = g.put(y, x + 1, "compared with", Role::Muted);
-    g.put(y, x + 1, &base, Role::Accent);
+    let x = g.put(y, x + 1, &fit(&base, half), Role::Accent);
     let mode = format!("{} · {}", if page.three_dot { "since splitting (...)" } else { "every difference (..)" }, if page.worktree { "working tree" } else { "committed" });
-    g.put(y, right.saturating_sub(mode.chars().count()), &mode, Role::Muted);
+    if x + 2 + mode.chars().count() > right {
+        y += 1;
+        g.put(y, left, &fit(&mode, width), Role::Muted);
+    } else {
+        g.put(y, right.saturating_sub(mode.chars().count()), &mode, Role::Muted);
+    }
     y += 1;
 
     let mut facts = Vec::new();
@@ -545,11 +553,11 @@ pub fn layout(page: &GitCompare, cols: usize) -> Page {
             Some(secs) => (format!("{remote} last fetched {} -- f fetches", ago(secs)), Role::Warn),
             None => (format!("{remote} never fetched here -- f fetches"), Role::Warn),
         };
-        g.put(y, left, &text, role);
+        g.put(y, left, &fit(&text, width), role);
         y += 1;
     }
     if !page.worktree && page.own.is_none() && data.uncommitted > 0 {
-        g.put(y, left, &format!("{} on disk not included -- w brings them in", count(data.uncommitted, "uncommitted change")), Role::Muted);
+        g.put(y, left, &fit(&format!("{} on disk not included -- w brings them in", count(data.uncommitted, "uncommitted change")), width), Role::Muted);
         y += 1;
     }
     if let Some(busy) = &page.busy {
@@ -695,6 +703,16 @@ pub fn layout(page: &GitCompare, cols: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = page();
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
 
     fn commit(hash: &str, message: &str) -> Commit {
         Commit { hash: hash.repeat(8), short_hash: hash.to_string(), message: message.into(), author: "Ada".into(), relative_date: "2 days ago".into() }

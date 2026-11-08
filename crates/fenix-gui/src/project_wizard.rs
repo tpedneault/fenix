@@ -1114,6 +1114,16 @@ fn layout_creating(wizard: &Wizard, g: &mut Grid, left: usize, width: usize, top
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = wizard(Path::new("/tmp"));
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
     use fenix_project::template::builtin_templates;
 
     fn wizard(parent: &Path) -> Wizard {

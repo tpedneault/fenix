@@ -27,6 +27,10 @@ pub enum Look {
     /// Text at `start` with a line through it, dimmed, staying with the
     /// character before: a value that was (the debugger's Ember Trail).
     Struck(String),
+    /// Text at `start` on a small rounded box of its role's colour,
+    /// staying with the character before: a value the debugger writes at
+    /// the end of a line.
+    Chip { text: String, role: Role },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,13 +47,13 @@ pub struct Decoration {
 
 impl Decoration {
     fn is_place(&self) -> bool {
-        matches!(self.look, Look::Text { .. } | Look::Swatch(_) | Look::Struck(_))
+        matches!(self.look, Look::Text { .. } | Look::Swatch(_) | Look::Struck(_) | Look::Chip { .. })
     }
 
     /// Text inserted right at it moves it along (the place's char follows
     /// it), unless it's text that stays with the char before.
     fn moves_with_insert(&self) -> bool {
-        !matches!(self.look, Look::Text { after: true, .. } | Look::Struck(_))
+        !matches!(self.look, Look::Text { after: true, .. } | Look::Struck(_) | Look::Chip { .. })
     }
 }
 
@@ -151,6 +155,8 @@ pub enum Mark {
     Underline(Role),
     /// A line through it, in this role's colour.
     Strike(Role),
+    /// A chip behind it, in this role's colour, faded.
+    Chip(Role),
 }
 
 /// Lays out the line `text`, its first char at `line_start` in the
@@ -205,6 +211,10 @@ pub fn layout_line(text: &str, line_start: usize, decorations: &[&Decoration], s
                 Look::Struck(text) => {
                     push(&mut out, &mut vcol, text, Some(Role::Muted));
                     out.marks.push((from..vcol, Mark::Strike(Role::Muted)));
+                }
+                Look::Chip { text, role } => {
+                    push(&mut out, &mut vcol, text, Some(*role));
+                    out.marks.push((from..vcol, Mark::Chip(*role)));
                 }
                 Look::Swatch(rgb) => {
                     out.marks.push((vcol..vcol + 1, Mark::Swatch(*rgb)));
@@ -281,6 +291,17 @@ mod tests {
 
     fn edit(start: usize, new_end: usize, removed: &str) -> EditDelta {
         EditDelta { start_char: start, new_end_char: new_end, removed: removed.into() }
+    }
+
+    /// A chip is text that takes room, marked to be drawn on a box.
+    #[test]
+    fn a_chip_takes_room_and_is_marked() {
+        let d = [Decoration { start: 1, end: 1, look: Look::Chip { text: "x = 1".into(), role: Role::Accent }, id: None }];
+        let refs: Vec<&Decoration> = d.iter().collect();
+        let l = layout_line("ab", 0, &refs, &TabStops::Fixed(4), false);
+        assert_eq!(l.display, "ax = 1b");
+        assert_eq!(l.runs, [(1..6, Role::Accent)]);
+        assert_eq!(l.marks, [(1..6, Mark::Chip(Role::Accent))]);
     }
 
     /// An inlay takes room: what follows moves along, and the caret's

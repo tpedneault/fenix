@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use fenix_project::search::{FileResult, Line, MatchAt, Options, Pattern};
 
-use crate::page::{edit_line, fit, insert_at, with_caret, Grid, Key, Page, Role};
+use crate::page::{CardLook, Chip, edit_line, fit, insert_at, with_caret, Grid, Key, Page, Role};
 
 /// A one-line field and its caret.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -182,6 +182,9 @@ pub struct SearchPage {
     /// This project's searches, newest first, and where `↑` has got to.
     pub history: Vec<String>,
     pub history_at: Option<usize>,
+    /// The query is selected, as `SPC /` leaves it on a page already
+    /// open: what's typed next replaces it, an arrow keeps it.
+    pub query_selected: bool,
 }
 
 impl SearchPage {
@@ -211,6 +214,9 @@ impl SearchPage {
     /// The text pasted into the field being typed.
     pub fn paste(&mut self, text: &str) -> Action {
         let Some(field) = self.editing else { return Action::None };
+        if field == Field::Query && std::mem::take(&mut self.query_selected) {
+            self.query.set("");
+        }
         let input = self.input_mut(field);
         insert_at(&mut input.text, &mut input.caret, text.lines().next().unwrap_or(""));
         self.changed(field)
@@ -459,6 +465,16 @@ impl SearchPage {
     }
 
     fn field_key(&mut self, field: Field, key: Key) -> Action {
+        if field == Field::Query && std::mem::take(&mut self.query_selected) {
+            match key {
+                Key::Char(_) | Key::Space => self.query.set(""),
+                Key::Backspace | Key::Delete | Key::DeleteWordBack => {
+                    self.query.set("");
+                    return self.changed(field);
+                }
+                _ => {}
+            }
+        }
         match key {
             Key::Enter => {
                 self.editing = None;
@@ -563,48 +579,44 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
 
     // The fields.
     let toggles: Vec<(&str, bool)> = vec![("Aa", page.options.match_case), ("ab", page.options.whole_word), (".*", page.options.regex)];
-    let toggles_w: usize = toggles.iter().map(|(t, _)| t.chars().count() + 1).sum::<usize>() + 1;
+    let toggles_w: usize = toggles.iter().map(|(t, _)| t.chars().count() + 3).sum::<usize>() + 1;
     let field = |g: &mut Grid, line: usize, label: &str, input: &Input, editing: bool, hint: &str, room: usize| {
         g.put(line, left, label, if editing { Role::Accent } else { Role::Muted });
         let x = left + label_w;
         let room = room.max(6);
-        let shown = if editing { with_caret(&input.text, input.caret, room) } else if input.text.is_empty() { fit(hint, room) } else { fit(&input.text, room) };
+        // Selected (a search opened again): lit, with no caret in it.
+        let selected = editing && label == "Search" && page.query_selected && !input.text.is_empty();
+        let shown = if selected { fit(&input.text, room) } else if editing { with_caret(&input.text, input.caret, room) } else if input.text.is_empty() { fit(hint, room) } else { fit(&input.text, room) };
         let role = if !editing && input.text.is_empty() { Role::Muted } else { Role::Title };
-        g.put(line, x, &shown, role);
-        g.panel(line, x.saturating_sub(1)..x + room + 1);
+        if selected {
+            g.chip(line, x, &shown, Role::Title, Chip::Status(Role::Accent));
+        } else {
+            g.put(line, x, &shown, role);
+        }
+        // An input box, outlined in the accent while it's being typed in.
+        g.card(line..line + 1, x.saturating_sub(1)..x + room + 1, if editing { CardLook::FieldFocused } else { CardLook::Field });
     };
     let room = width.saturating_sub(label_w + toggles_w + 2);
     field(&mut g, line, "Search", &page.query, page.editing == Some(Field::Query), "what to look for", room);
     let mut x = left + label_w + room + 2;
     for (text, on) in &toggles {
-        g.put(line, x, text, if *on { Role::Accent } else { Role::Muted });
-        if *on {
-            g.underline(line, x..x + text.chars().count());
-        }
-        x += text.chars().count() + 1;
+        x = g.toggle(line, x, text, *on) + 1;
     }
     line += 1;
     if page.replace_open {
         field(&mut g, line, "Replace", &page.replace, page.editing == Some(Field::Replace), "what it becomes", room);
         let x = left + label_w + room + 2;
-        g.put(line, x, "AB→", if page.preserve_case { Role::Accent } else { Role::Muted });
-        if page.preserve_case {
-            g.underline(line, x..x + 3);
-        }
+        g.toggle(line, x, "AB→", page.preserve_case);
         line += 1;
     }
     // The scope and the files.
     g.put(line, left, "in", Role::Muted);
     let mut x = left + label_w;
+    // The scope as chips, the one searched in on.
     for &scope in &page.scopes {
-        let on = scope == page.scope();
-        let text = scope.label();
-        g.put(line, x, text, if on { Role::Accent } else { Role::Muted });
-        if on {
-            g.underline(line, x..x + text.chars().count());
-        }
-        x += text.chars().count() + 2;
+        x = g.toggle(line, x, scope.label(), scope == page.scope()) + 1;
     }
+    x += 1;
     if page.options.hidden {
         x = g.put(line, x, "+hidden", Role::Warn) + 2;
     }
@@ -617,22 +629,30 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
         let role = if !editing_globs && page.globs.text.is_empty() { Role::Muted } else { Role::Title };
         g.put(line, at + 6, &shown, role);
         if editing_globs || !page.globs.text.is_empty() {
-            g.panel(line, at + 5..at + 6 + globs_room + 1);
+            g.card(line..line + 1, at + 5..at + 6 + globs_room + 1, if editing_globs { CardLook::FieldFocused } else { CardLook::Field });
         }
     }
     line += 1;
     // How it went.
     let (status, role) = status_line(page);
     g.put(line, left, &fit(&status, width), role);
-    line += 1;
-    g.rule(line, left..left + width);
-    line += 1;
+    line += 2;
 
     // The results.
     let rows = page.rows();
     let replacing = page.replace_open && page.pattern.is_some();
+    // Each file's results on a card of their own, a line apart.
+    let mut card_from: Option<usize> = None;
+    let mut gaps = 0;
     for (r, row) in rows.iter().enumerate() {
-        let y = line + r;
+        if matches!(row, Row::File(_)) {
+            if let Some(from) = card_from.take() {
+                g.card(from..line + r + gaps, left.saturating_sub(1)..left + width, CardLook::Plain);
+                gaps += 1;
+            }
+            card_from = Some(line + r + gaps);
+        }
+        let y = line + r + gaps;
         let focused = r == page.cursor && page.editing.is_none();
         match *row {
             Row::File(fi) => {
@@ -648,9 +668,10 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
                 let dir_len = shown.rfind('/').map(|i| shown[..=i].chars().count()).unwrap_or(0);
                 let dir: String = shown.chars().take(dir_len).collect();
                 let base: String = shown.chars().skip(dir_len).collect();
-                let x2 = g.put(y, x, &dir, Role::Muted);
-                g.put(y, x2, &base, if file.left_out { Role::Muted } else { Role::Title });
-                g.put(y, left + width - count.chars().count(), &count, Role::Muted);
+                // The name first, its folder quieter after it.
+                let x2 = g.put(y, x, &base, if file.left_out { Role::Muted } else { Role::Title });
+                g.put(y, x2 + 1, dir.trim_end_matches('/'), Role::Muted);
+                g.chip(y, (left + width).saturating_sub(count.chars().count() + 3), &format!(" {count} "), Role::Muted, Chip::Badge);
             }
             Row::Line(fi, li) => {
                 let file = &page.files[fi];
@@ -668,8 +689,9 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
                 for (text, role, lit) in pieces {
                     let role = if context || out { Role::Muted } else { role };
                     let end = g.put(y, at, &text, role);
+                    // A match on a chip of the accent.
                     if lit && !out {
-                        g.underline(y, at..end);
+                        g.chips.push((y, at..end, Chip::Status(Role::Accent)));
                     }
                     at = end;
                 }
@@ -681,6 +703,9 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
         if focused {
             g.focus(y, left..left + width);
         }
+    }
+    if let Some(from) = card_from {
+        g.card(from..line + rows.len() + gaps, left.saturating_sub(1)..left + width, CardLook::Plain);
     }
     if rows.is_empty() && !matches!(page.status, Status::Searching { .. }) {
         let hint = match (&page.status, page.query.text.is_empty()) {
@@ -851,6 +876,16 @@ fn line_pieces(page: &SearchPage, file: &ResultFile, line: &Line, replacing: boo
 mod tests {
     use super::*;
 
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = page();
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols, Some(30)), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
+
     fn found(path: &str, lines: &[(usize, &str, &str)]) -> FileResult {
         let pattern = |needle: &str, text: &str| text.match_indices(needle).map(|(i, m)| i..i + m.len()).collect();
         FileResult {
@@ -873,7 +908,10 @@ mod tests {
         let p = page();
         let text = layout(&p, 80, Some(30)).text;
         assert!(text.contains("3 matches in 2 files"), "{text}");
-        assert!(text.contains("src/main.rs") && text.contains("docs/notes.md"));
+        assert!(text.contains("main.rs src") && text.contains("notes.md docs"), "the name, then its folder:\n{text}");
+        let laid = layout(&p, 80, Some(30));
+        assert_eq!(laid.cards.iter().filter(|c| c.look == CardLook::Plain).count(), 2, "a card a file");
+        assert!(laid.chips.iter().any(|(_, _, c)| *c == Chip::Status(Role::Accent)), "a match on a chip");
         assert!(text.contains("7 let v = helper();"), "indentation trimmed, numbered:\n{text}");
         assert!(text.lines().last().unwrap().contains("Enter open"));
     }
@@ -929,6 +967,27 @@ mod tests {
         assert_eq!(p.key(Key::Char('R')), Action::None);
         assert!(p.confirm && layout(&p, 80, Some(30)).all_text().contains("Replace 1 match in 1 file?"));
         assert_eq!(p.key(Key::Char('y')), Action::Apply);
+    }
+
+    /// A search opened again has its query selected: typing replaces it,
+    /// Backspace clears it, and an arrow keeps it to edit.
+    #[test]
+    fn a_selected_query_is_typed_over() {
+        let mut p = page();
+        p.edit(Field::Query);
+        p.query_selected = true;
+        assert!(layout(&p, 80, Some(30)).chips.iter().any(|(l, _, c)| *l == 0 && *c == Chip::Status(Role::Accent)), "lit");
+        p.key(Key::Char('x'));
+        assert_eq!(p.query.text, "x", "replaced, not appended to");
+        p.query = Input::new("helper");
+        p.query_selected = true;
+        p.key(Key::Backspace);
+        assert_eq!(p.query.text, "");
+        p.query = Input::new("helper");
+        p.query_selected = true;
+        p.key(Key::Left);
+        p.key(Key::Char('s'));
+        assert_eq!(p.query.text, "helpesr", "an arrow keeps it to edit");
     }
 
     #[test]

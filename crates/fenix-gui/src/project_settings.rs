@@ -538,11 +538,16 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
         } else {
             match &field {
                 Field::Kind => {
+                    let room = (left + width).saturating_sub(value_x);
                     let text = match settings.declared {
                         Some(k) => format!("‹ {} ›", k.label()),
-                        None => format!("‹ detect: {} ›", settings.detected.label()),
+                        // "detect:" goes first when it's tight.
+                        None => {
+                            let full = format!("‹ detect: {} ›", settings.detected.label());
+                            if full.chars().count() <= room { full } else { format!("‹ {} ›", settings.detected.label()) }
+                        }
                     };
-                    g.put(y, value_x, &text, Role::Title);
+                    g.put(y, value_x, &fit(&text, room), Role::Title);
                 }
                 Field::Pinned => {
                     g.put(y, value_x, if settings.pinned { "[x]" } else { "[ ]" }, if settings.pinned { Role::Good } else { Role::Muted });
@@ -594,6 +599,16 @@ pub fn layout(settings: &Settings, cols: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let (p, _root) = settings("narrow", Some(r#"{"tasks":{"test":{"executable":"uv","args":["run","pytest"]}},"lsp":{"python":{"executable":"basedpyright-langserver","args":["--stdio"]}},"launch":{"program":"src/main.py","cwd":"nowhere","env":{"MODE":"dev"}}}"#));
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
 
     fn settings(name: &str, tools_json: Option<&str>) -> (Settings, PathBuf) {
         let root = std::env::temp_dir().join(format!("fenix-settings-{name}-{}", std::process::id()));

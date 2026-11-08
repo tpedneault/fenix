@@ -8,7 +8,7 @@
 //! The prompt itself is written in a buffer of its own under this page,
 //! with Vim's keys (`app/agents.rs`, the composer).
 
-use crate::page::{fit, frame, wrap, Filter, Grid, Key, Page, Role};
+use crate::page::{fit, frame, wrap, CardLook, Chip, Filter, Grid, Key, Page, Role};
 use fenix_acp::hub::{Link, ThreadId, Turn};
 use fenix_acp::protocol::{ContentBlock, PermissionKind, PlanStatus, ToolContent, ToolKind, ToolStatus};
 use fenix_acp::thread::{ElicitationState, Entry, NoticeKind, PermissionState, Thread};
@@ -26,8 +26,13 @@ pub struct AgentPage {
     /// The cursor follows the newest card as the agent writes, until you
     /// move it up.
     pub follow: bool,
+    /// The last question the cursor was taken to.
+    pub asked: Option<String>,
     /// `]` or `[` just pressed: an `s` after it is a step, not a turn.
     pub bracket: Option<bool>,
+    /// The answer `j` and `k` are on in the question waiting, by the
+    /// question's key: Enter gives it.
+    pub choice: Option<(String, usize)>,
 }
 
 /// What the page shows of the agent, besides the thread.
@@ -120,7 +125,7 @@ pub enum Action {
 
 impl AgentPage {
     pub fn new(thread: ThreadId) -> Self {
-        AgentPage { thread, focus: 0, open: HashSet::new(), closed: HashSet::new(), filter: Filter::default(), follow: true, bracket: None }
+        AgentPage { thread, focus: 0, open: HashSet::new(), closed: HashSet::new(), filter: Filter::default(), follow: true, bracket: None, choice: None, asked: None }
     }
 
     pub fn typing(&self) -> bool {
@@ -170,6 +175,14 @@ impl AgentPage {
                 self.focus = last;
             }
         }
+        // A question the agent has just asked takes the cursor, once, even
+        // when you'd moved up the thread: `j`, `k` and Enter answer it.
+        if let Some((i, card)) = waiting_permission(thread) {
+            if self.asked.as_deref() != Some(card.key.as_str()) {
+                self.asked = Some(card.key.clone());
+                self.focus = i;
+            }
+        }
     }
 
     pub fn key(&mut self, thread: &Thread, key: Key) -> Action {
@@ -196,6 +209,29 @@ impl AgentPage {
         // A question waiting: its keys answer it, wherever the cursor is.
         if let Some(answer) = answer_for(thread, key) {
             return answer;
+        }
+        // On it, `j` and `k` go from answer to answer -- past the first or
+        // the last, on to the cards around it -- and Enter gives the one
+        // they're on.
+        if let Some((i, card)) = waiting_permission(thread).filter(|(i, _)| *i == self.focus) {
+            let on = self.chosen(card);
+            match key {
+                Key::Char('j') | Key::Down if on + 1 < card.options.len() => {
+                    self.choice = Some((card.key.clone(), on + 1));
+                    return Action::None;
+                }
+                Key::Char('k') | Key::Up if on > 0 => {
+                    self.choice = Some((card.key.clone(), on - 1));
+                    return Action::None;
+                }
+                Key::Enter => {
+                    let _ = i;
+                    if let Some(option) = card.options.get(on) {
+                        return Action::Permission { key: card.key.clone(), option: option.id.clone() };
+                    }
+                }
+                _ => {}
+            }
         }
         match key {
             Key::Char('q') => return Action::Close,
@@ -257,6 +293,15 @@ impl AgentPage {
         Action::None
     }
 
+    /// The answer `j` and `k` are on in `card`: the one chosen, else the
+    /// first that allows it, else the first.
+    pub fn chosen(&self, card: &fenix_acp::thread::PermissionCard) -> usize {
+        match &self.choice {
+            Some((key, on)) if *key == card.key && *on < card.options.len() => *on,
+            _ => card.options.iter().position(|o| o.kind == PermissionKind::AllowOnce).unwrap_or(0),
+        }
+    }
+
     /// Keeps the cursor on a card the filter lets through.
     fn snap(&mut self, thread: &Thread) {
         let visible = self.visible(thread);
@@ -279,6 +324,28 @@ pub enum ElicitAnswer {
     Decline,
     /// `x`.
     Cancel,
+}
+
+/// The permission question waiting in `thread`, newest first, and where
+/// it is in the thread.
+fn waiting_permission(thread: &Thread) -> Option<(usize, &fenix_acp::thread::PermissionCard)> {
+    thread.entries.iter().enumerate().rev().find_map(|(i, e)| match e {
+        Entry::Permission(c) if c.state == PermissionState::Pending => Some((i, c)),
+        _ => None,
+    })
+}
+
+/// The key a permission's answer takes, as its cap shows it: `y`, `Y`,
+/// `n`, `N`, `e`, else its place.
+fn option_key(option: &fenix_acp::protocol::PermissionOption, n: usize) -> String {
+    match option.kind {
+        PermissionKind::AllowOnce => "y".to_string(),
+        PermissionKind::AllowAlways => "Y".to_string(),
+        PermissionKind::RejectOnce => "n".to_string(),
+        PermissionKind::RejectAlways => "N".to_string(),
+        PermissionKind::Other if option.id == "edit" => "e".to_string(),
+        PermissionKind::Other => (n + 1).to_string(),
+    }
 }
 
 /// The answer `key` gives the question waiting in `thread`, if one is and
@@ -413,30 +480,42 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
     let (left, width) = frame(cols, 110);
     let mut g = Grid::new();
     let mut y = 1;
-    g.put(y, left, &fit(&thread.display_title(), width), Role::Title);
-    y += 1;
-    let mut x = g.put(y, left, &status.agent, Role::Accent);
-    let piece = |g: &mut Grid, x: &mut usize, text: &str, role: Role| {
-        if text.is_empty() {
-            return;
-        }
-        *x = g.put(y, *x, " · ", Role::Muted);
-        *x = g.put(y, *x, text, role);
-    };
-    piece(&mut g, &mut x, &status.state, status.state_role.unwrap_or(Role::Muted));
+    // The thread's title is the dock's own title bar's; here, the agent
+    // and how it's doing, then its mode, model and what it has used --
+    // each part whole, going on to a second row rather than off the edge.
+    let mut parts: Vec<(String, Role, Option<Chip>)> = vec![(status.agent.clone(), Role::Accent, None)];
+    if !status.state.is_empty() {
+        let role = status.state_role.unwrap_or(Role::Muted);
+        parts.push((status.state.clone(), role, Some(Chip::Status(role))));
+    }
     if let Some(modes) = &thread.modes {
         let name = modes.available.iter().find(|m| m.id == modes.current).map(|m| m.name.as_str()).unwrap_or(modes.current.as_str());
-        piece(&mut g, &mut x, name, Role::Text);
+        parts.push((name.to_string(), Role::Text, None));
     }
     if let Some(model) = thread.config_options.iter().find(|o| o.category.as_deref() == Some("model")) {
-        piece(&mut g, &mut x, &model.current_label(), Role::Text);
+        parts.push((model.current_label(), Role::Text, None));
     }
     if let Some(usage) = &thread.usage {
         let mut text = format!("{}% context", usage.percent());
         if let Some((amount, currency)) = &usage.cost {
             text.push_str(&format!(" · {amount:.2} {currency}"));
         }
-        piece(&mut g, &mut x, &text, Role::Muted);
+        parts.push((text, Role::Muted, None));
+    }
+    let mut x = left;
+    for (i, (text, role, chip)) in parts.iter().enumerate() {
+        let text = fit(text, width);
+        let gap = if i == 0 { 0 } else if chip.is_some() { 2 } else { 3 };
+        if i > 0 && x + gap + text.chars().count() > left + width {
+            y += 1;
+            x = left;
+        } else if i > 0 {
+            x = if chip.is_some() { g.put(y, x, "  ", Role::Muted) } else { g.put(y, x, " · ", Role::Muted) };
+        }
+        x = match chip {
+            Some(chip) => g.chip(y, x, &text, *role, *chip),
+            None => g.put(y, x, &text, *role),
+        };
     }
     let _ = (link, turn);
     y += 1;
@@ -455,17 +534,23 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
     let visible = page.visible(thread);
     if visible.is_empty() {
         let hint = if thread.entries.is_empty() { "Write a prompt below (i), and Enter in Normal mode sends it." } else { "Nothing matches the filter." };
-        g.put(y, left, hint, Role::Muted);
-        y += 2;
+        // Wrapped in a narrow dock, not run past its edge.
+        for line in wrap(hint, width.max(12)) {
+            g.put(y, left, &line, Role::Muted);
+            y += 1;
+        }
+        y += 1;
     }
     let inner = width.saturating_sub(2);
-    for &i in &visible {
+    // Tool calls one after another are one card: where it started.
+    let mut tools_from: Option<usize> = None;
+    for (n, &i) in visible.iter().enumerate() {
         let entry = &thread.entries[i];
         let top = y;
         let open = page.is_open(i, entry);
         match entry {
             Entry::User { blocks, queued } => {
-                let mut x = g.put(y, left, "› You", Role::Accent);
+                let mut x = g.put(y, left + 1, "› You", Role::Accent);
                 if *queued {
                     g.put(y, x + 1, "(queued — C-c takes it back)", Role::Muted);
                 }
@@ -473,18 +558,20 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                 for block in blocks {
                     match block {
                         ContentBlock::Text(text) => {
-                            for line in text.lines().flat_map(|l| wrap(l, inner)) {
-                                g.put(y, left + 2, &line, Role::Text);
+                            for line in text.lines().flat_map(|l| wrap(l, inner.saturating_sub(1))) {
+                                g.put(y, left + 3, &line, Role::Text);
                                 y += 1;
                             }
                         }
                         other => {
-                            x = g.put(y, left + 2, &fit(&other.as_text(), inner), Role::Accent);
+                            x = g.put(y, left + 3, &fit(&other.as_text(), inner.saturating_sub(1)), Role::Accent);
                             let _ = x;
                             y += 1;
                         }
                     }
                 }
+                // What you wrote, on an input's surface.
+                g.card(top..y, left..left + width, CardLook::Input);
             }
             Entry::Agent { text, extra, .. } => {
                 if !text.trim().is_empty() {
@@ -514,12 +601,12 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
             }
             Entry::Tool(call) => {
                 let (mark, role) = status_mark(call.status);
-                let mut x = g.put(y, left, mark, role) + 1;
+                let mut x = g.put(y, left + 1, mark, role) + 1;
                 x = g.put(y, x, kind_mark(call.kind), Role::Muted) + 1;
-                g.put(y, x, &fit(&call.title, (left + width).saturating_sub(x)), Role::Text);
+                g.put(y, x, &fit(&call.title, (left + width).saturating_sub(x + 1)), Role::Text);
                 y += 1;
                 if let Some(command) = command_shown(call, status) {
-                    g.put(y, left + 2, &fit(&format!("$ {command}"), inner), Role::Accent);
+                    g.put(y, left + 3, &fit(&format!("$ {command}"), inner.saturating_sub(1)), Role::Accent);
                     y += 1;
                 }
                 if let Some(l) = call.locations.first() {
@@ -527,14 +614,14 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                         Some(line) => format!("{}:{line}", l.path),
                         None => l.path.clone(),
                     };
-                    g.put(y, left + 2, &fit(&place, inner), Role::Accent);
+                    g.put(y, left + 3, &fit(&place, inner.saturating_sub(1)), Role::Accent);
                     y += 1;
                 }
                 if open {
                     for content in &call.content {
                         match content {
                             ToolContent::Diff { path, old_text, new_text } => {
-                                g.put(y, left + 2, &fit(path, inner), Role::Muted);
+                                g.put(y, left + 3, &fit(path, inner.saturating_sub(1)), Role::Muted);
                                 y += 1;
                                 for line in diff_lines(old_text.as_deref().unwrap_or(""), new_text).iter().take(60) {
                                     let role = match line.chars().next() {
@@ -542,7 +629,7 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                                         Some('-') => Role::Bad,
                                         _ => Role::Muted,
                                     };
-                                    g.put(y, left + 2, &fit(line, inner), role);
+                                    g.put(y, left + 3, &fit(line, inner.saturating_sub(1)), role);
                                     y += 1;
                                 }
                             }
@@ -551,18 +638,18 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                                 let lines: Vec<&str> = text.lines().filter(|l| !l.trim_start().starts_with("```")).collect();
                                 let shown = lines.len().min(40);
                                 for line in &lines[lines.len() - shown..] {
-                                    g.put(y, left + 2, &fit(line, inner), Role::Muted);
+                                    g.put(y, left + 3, &fit(line, inner.saturating_sub(1)), Role::Muted);
                                     y += 1;
                                 }
                                 if lines.len() > shown {
-                                    g.put(y, left + 2, &format!("({} lines above; v shows all)", lines.len() - shown), Role::Muted);
+                                    g.put(y, left + 3, &format!("({} lines above; v shows all)", lines.len() - shown), Role::Muted);
                                     y += 1;
                                 }
                             }
                             ToolContent::Terminal(id) => match status.terminals.get(id) {
                                 Some(TermView { tail, exit, .. }) => {
                                     for line in tail.lines() {
-                                        g.put(y, left + 2, &fit(line, inner), Role::Muted);
+                                        g.put(y, left + 3, &fit(line, inner.saturating_sub(1)), Role::Muted);
                                         y += 1;
                                     }
                                     let (text, role) = match exit {
@@ -574,11 +661,11 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                                             _ => "ended".to_string(),
                                         }, Role::Bad),
                                     };
-                                    g.put(y, left + 2, &text, role);
+                                    g.put(y, left + 3, &text, role);
                                     y += 1;
                                 }
                                 None => {
-                                    g.put(y, left + 2, &format!("terminal {id}"), Role::Muted);
+                                    g.put(y, left + 3, &format!("terminal {id}"), Role::Muted);
                                     y += 1;
                                 }
                             },
@@ -590,27 +677,25 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                 let title = card.tool_call.title.clone().unwrap_or_else(|| "a tool".into());
                 match &card.state {
                     PermissionState::Pending => {
-                        g.put(y, left, &fit(&if card.tool_call.id.starts_with("fenix-pipeline-") { format!("? Fenix asks: {title}") } else { format!("? The agent asks to: {title}") }, width), Role::Warn);
+                        g.put(y, left + 1, &fit(&if card.tool_call.id.starts_with("fenix-pipeline-") { format!("? Fenix asks: {title}") } else { format!("? The agent asks to: {title}") }, width.saturating_sub(2)), Role::Warn);
                         y += 1;
-                        let mut x = left + 2;
+                        // One answer a line, each on its key's cap; the one
+                        // `j` and `k` are on in the accent.
+                        let on = page.chosen(card);
                         for (n, option) in card.options.iter().enumerate() {
-                            let key = match option.kind {
-                                PermissionKind::AllowOnce => "y".to_string(),
-                                PermissionKind::AllowAlways => "Y".to_string(),
-                                PermissionKind::RejectOnce => "n".to_string(),
-                                PermissionKind::RejectAlways => "N".to_string(),
-                                PermissionKind::Other if option.id == "edit" => "e".to_string(),
-                                PermissionKind::Other => (n + 1).to_string(),
-                            };
-                            let shown = format!("{key}/{}", n + 1);
-                            if x + shown.len() + option.name.chars().count() + 4 > left + width {
-                                y += 1;
-                                x = left + 2;
+                            let chosen = n == on;
+                            if chosen {
+                                // Its whole row, not only its cap.
+                                g.panels.push((y, left + 2..(left + width).saturating_sub(1)));
                             }
-                            x = g.put(y, x, &shown, Role::Accent) + 1;
-                            x = g.put(y, x, &option.name, Role::Text) + 3;
+                            let x = g.chip(y, left + 3, &option_key(option, n), Role::Accent, if chosen { Chip::Chosen } else { Chip::Key });
+                            g.put(y, x + 2, &fit(&option.name, (left + width).saturating_sub(x + 3)), if chosen { Role::Accent } else { Role::Text });
+                            y += 1;
                         }
+                        g.put(y, left + 3, &fit("j k choose · Enter answers · or its key, from anywhere", inner.saturating_sub(2)), Role::Muted);
                         y += 1;
+                        // Waiting on you: outlined.
+                        g.card(top..y, left..left + width, CardLook::Ask);
                     }
                     PermissionState::Answered(name) => {
                         g.put(y, left, &fit(&format!("✓ {title} — {name}"), width), Role::Muted);
@@ -666,10 +751,11 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                         };
                         let mut x = left + 2;
                         for (k, what) in keys {
-                            x = g.put(y, x, k, Role::Accent) + 1;
+                            x = g.chip(y, x, k, Role::Accent, Chip::Key) + 1;
                             x = g.put(y, x, what, Role::Text) + 3;
                         }
                         y += 1;
+                        g.card(top..y, left..left + width, CardLook::Ask);
                     }
                     ElicitationState::Answered { action, summary } => {
                         let said = if summary.is_empty() { action.clone() } else { format!("{action}: {summary}") };
@@ -706,6 +792,17 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
         }
         if i == page.focus {
             g.focus(top, left..left + width);
+        }
+        // A tool call starts or carries on a card; the next entry being
+        // one too keeps it going, with no gap between them.
+        if matches!(entry, Entry::Tool(_)) {
+            let from = *tools_from.get_or_insert(top);
+            let next_is_tool = visible.get(n + 1).is_some_and(|&j| matches!(thread.entries[j], Entry::Tool(_)));
+            if next_is_tool {
+                continue;
+            }
+            g.card(from..y, left..left + width, CardLook::Plain);
+            tools_from = None;
         }
         y += 1;
     }
@@ -763,7 +860,7 @@ mod tests {
         let mut page = AgentPage::new(ThreadId("x".into()));
         page.follow_up(&t);
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
-        for want in ["Fix the parser", "Claude Code · ready", "› You", "▸ thinking  Look at parse.rs first.", "✓ edit Edit src/parse.rs", "/p/src/parse.rs:2", "-b", "+B", "✓ run cargo test", "Fixed it.", "fn x() {}", "PLAN · 1/2", "☑ Fix", "◐ Test"] {
+        for want in ["Claude Code  ready", "› You", "▸ thinking  Look at parse.rs first.", "✓ edit Edit src/parse.rs", "/p/src/parse.rs:2", "-b", "+B", "✓ run cargo test", "Fixed it.", "fn x() {}", "PLAN · 1/2", "☑ Fix", "◐ Test"] {
             assert!(text.contains(want), "missing {want:?} in\n{text}");
         }
         assert!(!text.contains("test ok"), "a command's output is folded");
@@ -858,11 +955,117 @@ mod tests {
         });
         let mut page = AgentPage::new(ThreadId("x".into()));
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
-        assert!(text.contains("? The agent asks to: rm -rf build") && text.contains("y/1 Yes") && text.contains("n/3 No"), "{text}");
+        assert!(text.contains("? The agent asks to: rm -rf build") && text.contains("y  Yes") && text.contains("n  No"), "{text}");
         page.key(&t, Key::Char('g'));
         assert_eq!(page.key(&t, Key::Char('n')), Action::Permission { key: "7".into(), option: "reject".into() });
         assert_eq!(page.key(&t, Key::Char('Y')), Action::Permission { key: "7".into(), option: "allow-always".into() });
         assert_eq!(page.key(&t, Key::Char('2')), Action::Permission { key: "7".into(), option: "allow-always".into() });
+    }
+
+    fn asking() -> Thread {
+        let mut t = thread();
+        t.push_permission(PermissionCard {
+            key: "7".into(),
+            tool_call: ToolCallFields { id: "t3".into(), title: Some("rm -rf build".into()), ..Default::default() },
+            options: vec![
+                PermissionOption { id: "allow-once".into(), name: "Yes".into(), kind: PermissionKind::AllowOnce },
+                PermissionOption { id: "allow-always".into(), name: "Yes, and don't ask again".into(), kind: PermissionKind::AllowAlways },
+                PermissionOption { id: "reject".into(), name: "No".into(), kind: PermissionKind::RejectOnce },
+            ],
+            state: PermissionState::Pending,
+        });
+        t
+    }
+
+    /// The thread's title is the dock's title bar's, not a line of the
+    /// page; the status row's parts go on to a second row in a narrow
+    /// dock, each whole, rather than off the edge.
+    #[test]
+    fn the_header_has_no_title_and_wraps_its_parts_whole() {
+        let t = thread();
+        let page = AgentPage::new(ThreadId("x".into()));
+        let wide = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
+        let first = wide.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        assert!(first.trim_start().starts_with("Claude Code"), "the status first; the title is the dock's: {wide}");
+        let busy = Status { agent: "Claude Code".into(), state: "waiting on you".into(), ..Status::default() };
+        let mut t = t;
+        t.modes = Some(fenix_acp::protocol::Modes { current: "default".into(), available: vec![fenix_acp::protocol::Mode { id: "default".into(), name: "Default (recommended)".into(), description: None }] });
+        let narrow = layout(&page, &t, &Link::Detached, &Turn::Idle, &busy, 44).text;
+        let rows: Vec<&str> = narrow.lines().take(4).collect();
+        assert!(rows.iter().any(|r| r.contains("Claude Code") && r.contains("waiting on you")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.trim_start().starts_with("Default (recommended)")), "the mode whole, on a row of its own: {rows:?}");
+        assert!(narrow.lines().all(|l| l.chars().count() <= 44), "nothing past the edge");
+    }
+
+    /// On the question, `j` and `k` go from answer to answer, Enter gives
+    /// the one they're on, and past the last `j` goes back to the cards.
+    #[test]
+    fn j_and_k_choose_an_answer_and_enter_gives_it() {
+        let t = asking();
+        let mut page = AgentPage::new(ThreadId("x".into()));
+        page.follow_up(&t);
+        let question = t.entries.len() - 1;
+        assert_eq!(page.focus, question);
+        let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100);
+        let yes = laid.text.lines().position(|l| l.contains("y  Yes")).unwrap();
+        assert!(laid.chips.iter().any(|(line, _, chip)| *line == yes && *chip == Chip::Chosen), "the first that allows it is chosen");
+        assert_eq!(page.key(&t, Key::Char('j')), Action::None);
+        assert_eq!(page.key(&t, Key::Char('j')), Action::None);
+        assert_eq!(page.key(&t, Key::Enter), Action::Permission { key: "7".into(), option: "reject".into() });
+        assert_eq!(page.key(&t, Key::Char('k')), Action::None);
+        assert_eq!(page.key(&t, Key::Enter), Action::Permission { key: "7".into(), option: "allow-always".into() });
+        let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100);
+        let always = laid.text.lines().position(|l| l.contains("Y  Yes, and")).unwrap();
+        assert!(laid.chips.iter().any(|(line, _, chip)| *line == always && *chip == Chip::Chosen));
+        page.key(&t, Key::Char('k'));
+        page.key(&t, Key::Char('k'));
+        assert_ne!(page.focus, question, "past the first answer, on to the card above");
+        assert!(laid.panels.iter().any(|(line, _)| *line == always), "the chosen answer's row is lit");
+    }
+
+    /// A new question takes the cursor even when you'd moved up the
+    /// thread -- once, so you can still move away from it.
+    #[test]
+    fn a_new_question_takes_the_cursor_once() {
+        let t = asking();
+        let mut page = AgentPage::new(ThreadId("x".into()));
+        page.follow = false;
+        page.focus = 0;
+        page.follow_up(&t);
+        assert_eq!(page.focus, t.entries.len() - 1, "on the question");
+        page.focus = 0;
+        page.follow_up(&t);
+        assert_eq!(page.focus, 0, "not pulled back to it");
+    }
+
+    /// Tool calls one after another are one card, what you wrote is on
+    /// an input's, and the question waiting is outlined.
+    /// An empty thread's hint wraps in a narrow dock.
+    #[test]
+    fn the_empty_threads_hint_keeps_inside_a_narrow_dock() {
+        let t = Thread::default();
+        let page = AgentPage::new(ThreadId("x".into()));
+        let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 44);
+        assert!(laid.text.lines().all(|l| l.trim_end().chars().count() <= 44), "{}", laid.text);
+        assert!(laid.text.contains("sends it."), "{}", laid.text);
+    }
+
+    #[test]
+    fn the_thread_is_set_off_in_cards() {
+        let t = asking();
+        let mut page = AgentPage::new(ThreadId("x".into()));
+        page.follow_up(&t);
+        let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100);
+        let lines: Vec<&str> = laid.text.lines().collect();
+        let line_of = |want: &str| lines.iter().position(|l| l.contains(want)).unwrap();
+        let card_at = |line: usize| laid.cards.iter().find(|c| c.lines.contains(&line)).map(|c| c.look);
+        assert_eq!(card_at(line_of("› You")), Some(CardLook::Input));
+        assert_eq!(card_at(line_of("✓ edit")), Some(CardLook::Plain));
+        assert_eq!(card_at(line_of("✓ edit")), card_at(line_of("✓ run")));
+        let tools = laid.cards.iter().filter(|c| c.look == CardLook::Plain).count();
+        assert_eq!(tools, 1, "two tool calls in a row are one card: {:?}", laid.cards);
+        assert_eq!(card_at(line_of("rm -rf build")), Some(CardLook::Ask));
+        assert_eq!(card_at(line_of("Fixed it.")), None, "what the agent says is on the page");
     }
 
     #[test]

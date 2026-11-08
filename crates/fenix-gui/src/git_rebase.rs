@@ -315,7 +315,7 @@ pub fn layout(page: &RebasePage, cols: usize) -> Page {
         }
     }
     y += 1;
-    g.put(y, left, "Undo point recorded when it runs -- U on the Git page takes it back.", Role::Muted);
+    g.put(y, left, &fit("Undo point recorded when it runs -- U on the Git page takes it back.", width), Role::Muted);
     y += 1;
     if page.pushed > 0 {
         g.put(y, left, &format!("{} of these are already pushed -- the push afterwards will need --force-with-lease.", page.pushed), Role::Warn);
@@ -332,6 +332,16 @@ pub fn layout(page: &RebasePage, cols: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = page(&["status page", "sections fold", "fixup! status page", "a commit whose subject runs on well past the width of a narrow pane"]);
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
 
     fn commits(subjects: &[&str]) -> Vec<Replayed> {
         subjects.iter().enumerate().map(|(i, s)| Replayed { hash: format!("{i:0>40}"), short_hash: format!("{i:0>7}"), subject: s.to_string() }).collect()

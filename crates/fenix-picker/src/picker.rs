@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use crate::fuzzy::fuzzy_match_chars;
+use crate::fuzzy::{fuzzy_match_chars, fuzzy_positions, word_match, word_positions};
 
 /// One entry in a picker: `label` is what's displayed and fuzzy-matched
 /// against; `payload` is whatever the caller actually wants back when the
@@ -11,12 +11,40 @@ use crate::fuzzy::fuzzy_match_chars;
 pub struct Candidate<T> {
     pub label: String,
     pub payload: T,
+    /// More words it's found by, but not shown or highlighted: a
+    /// command's description. Matched only in `MatchMode::Words`, and
+    /// only by whole word starts.
+    pub keywords: String,
+    /// Added to its score: lately used, often used.
+    pub boost: i64,
 }
 
 impl<T> Candidate<T> {
     pub fn new(label: impl Into<String>, payload: T) -> Self {
-        Self { label: label.into(), payload }
+        Self { label: label.into(), payload, keywords: String::new(), boost: 0 }
     }
+
+    /// The same, found by `keywords` too.
+    pub fn with_keywords(mut self, keywords: impl Into<String>) -> Self {
+        self.keywords = keywords.into();
+        self
+    }
+
+    /// The same, ranked `boost` higher.
+    pub fn with_boost(mut self, boost: i64) -> Self {
+        self.boost = boost;
+        self
+    }
+}
+
+/// How a query is matched against the candidates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MatchMode {
+    /// A subsequence of the label's characters (`fuzzy_match`): paths.
+    #[default]
+    Fuzzy,
+    /// Word by word (`word_match`): commands and names.
+    Words,
 }
 
 struct Scored {
@@ -36,14 +64,45 @@ pub struct PickerState<T> {
     filtered: Vec<Scored>,
     selected: usize,
     marks: HashSet<usize>,
+    mode: MatchMode,
 }
 
 impl<T> PickerState<T> {
     pub fn new(candidates: Vec<Candidate<T>>) -> Self {
-        let mut state =
-            Self { all: candidates, query: String::new(), filtered: Vec::new(), selected: 0, marks: HashSet::new() };
+        Self::with_mode(candidates, MatchMode::Fuzzy)
+    }
+
+    /// A picker that matches as `mode` says.
+    pub fn with_mode(candidates: Vec<Candidate<T>>, mode: MatchMode) -> Self {
+        let mut state = Self { all: candidates, query: String::new(), filtered: Vec::new(), selected: 0, marks: HashSet::new(), mode };
         state.refilter();
         state
+    }
+
+    /// How it matches.
+    pub fn mode(&self) -> MatchMode {
+        self.mode
+    }
+
+    /// The characters of `label` the query matched, for drawing them in
+    /// the accent.
+    pub fn positions(&self, label: &str) -> Vec<usize> {
+        if self.query.trim().is_empty() {
+            return Vec::new();
+        }
+        match self.mode {
+            MatchMode::Fuzzy => fuzzy_positions(&self.query, label).unwrap_or_default(),
+            MatchMode::Words => word_positions(&self.query, label),
+        }
+    }
+
+    /// `candidate`'s score for `query`, or `None` when it doesn't match.
+    fn score(mode: MatchMode, query: &str, chars: &[char], candidate: &Candidate<T>) -> Option<i64> {
+        let base = match mode {
+            MatchMode::Fuzzy => fuzzy_match_chars(chars, &candidate.label),
+            MatchMode::Words => word_match(query, &candidate.label, &candidate.keywords),
+        }?;
+        Some(base + candidate.boost)
     }
 
     /// Like `new`, but pre-marks the candidates at `marked_indices`
@@ -86,9 +145,9 @@ impl<T> PickerState<T> {
         // Whatever matches the longer query matched the shorter one, so
         // only the rows still shown need scoring again -- each character
         // typed into a big list gets cheaper, not the same.
-        let query: Vec<char> = self.query.chars().collect();
-        let all = &self.all;
-        self.filtered.retain_mut(|s| match fuzzy_match_chars(&query, &all[s.index].label) {
+        let chars: Vec<char> = self.query.chars().collect();
+        let (all, query, mode) = (&self.all, &self.query, self.mode);
+        self.filtered.retain_mut(|s| match Self::score(mode, query, &chars, &all[s.index]) {
             Some(score) => {
                 s.score = score;
                 true
@@ -133,13 +192,9 @@ impl<T> PickerState<T> {
     }
 
     fn refilter(&mut self) {
-        let query: Vec<char> = self.query.chars().collect();
-        self.filtered = self
-            .all
-            .iter()
-            .enumerate()
-            .filter_map(|(index, c)| fuzzy_match_chars(&query, &c.label).map(|score| Scored { index, score }))
-            .collect();
+        let chars: Vec<char> = self.query.chars().collect();
+        let (query, mode) = (&self.query, self.mode);
+        self.filtered = self.all.iter().enumerate().filter_map(|(index, c)| Self::score(mode, query, &chars, c).map(|score| Scored { index, score })).collect();
         self.sort_filtered();
     }
 

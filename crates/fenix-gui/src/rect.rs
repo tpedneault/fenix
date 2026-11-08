@@ -22,6 +22,26 @@ pub struct BoxStyle {
     pub border_color: [f32; 4],
 }
 
+/// The pieces a box `(x, y, w, h)` is drawn in: `(quad, shaped)` --
+/// shaped ones are drawn as the whole box's rounded shape seen through
+/// that quad, the rest a plain fill. A box much bigger than its corners
+/// and border is four edge strips and its inside; a small one, itself.
+pub(crate) fn box_pieces(b: (f32, f32, f32, f32), radius: f32, border: f32) -> Vec<((f32, f32, f32, f32), bool)> {
+    let (x, y, w, h) = b;
+    // Wide enough for the corner's curve, the border and the soft edge.
+    let e = (radius.max(border).max(0.0) + 2.0).ceil();
+    if w < e * 4.0 || h < e * 4.0 {
+        return vec![(b, true)];
+    }
+    vec![
+        ((x, y, w, e), true),
+        ((x, y + h - e, w, e), true),
+        ((x, y + e, e, h - e * 2.0), true),
+        ((x + w - e, y + e, e, h - e * 2.0), true),
+        ((x + e, y + e, w - e * 2.0, h - e * 2.0), false),
+    ]
+}
+
 /// How many rects one renderer's vertex buffer is *initially* sized for
 /// -- not a cap. `flush` grows the buffer whenever a frame queues more
 /// than currently fit (see its own doc comment): this used to be a hard
@@ -116,9 +136,35 @@ impl RectRenderer {
 
     /// A box with rounded corners, and a border when `style.border` is
     /// more than zero. A radius of 0 and no border is `push_rect`.
+    ///
+    /// A big box is shaded only where its shape matters: four strips
+    /// along its edges are the rounded box -- its corners, its border,
+    /// its soft edge -- and the inside is a plain fill. The pixels are
+    /// the same; the shading isn't paid across a whole panel, which on a
+    /// software renderer (llvmpipe, WARP) costs a few milliseconds a
+    /// frame for each.
     pub fn push_box(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, style: BoxStyle) {
         let params = [style.radius.max(0.0), style.border.max(0.0), 0.0, 0.0];
-        self.push_quad(gpu, (x, y, w, h), (x, y, w, h), style.fill, params, style.border_color);
+        for (quad, shaped) in box_pieces((x, y, w, h), style.radius, style.border) {
+            if shaped {
+                self.push_quad(gpu, quad, (x, y, w, h), style.fill, params, style.border_color);
+            } else if style.fill[3] > 0.0 {
+                self.push_quad(gpu, quad, quad, style.fill, [0.0; 4], [0.0; 4]);
+            }
+        }
+    }
+
+    /// A quarter of a circle's outline, `thickness` wide along radius
+    /// `radius` around (`cx`, `cy`): the quarter toward `right` and `down`
+    /// of its centre. A ring's border, seen through one quadrant -- a
+    /// smooth bend for a line that turns a corner.
+    pub fn push_arc(&mut self, gpu: &GpuState, cx: f32, cy: f32, radius: f32, thickness: f32, right: bool, down: bool, color: [f32; 4]) {
+        let outer = radius + thickness / 2.0;
+        let shape = (cx - outer, cy - outer, outer * 2.0, outer * 2.0);
+        let reach = outer + 1.0;
+        let quad = (if right { cx } else { cx - reach }, if down { cy } else { cy - reach }, reach, reach);
+        let clear = [color[0], color[1], color[2], 0.0];
+        self.push_quad(gpu, quad, shape, clear, [outer, thickness, 0.0, 0.0], color);
     }
 
     /// A box with its own radius at each corner: top-left, top-right,
@@ -136,10 +182,20 @@ impl RectRenderer {
 
     /// A soft shadow under a box: the box's shape with its edge spread
     /// over `blur` pixels either side.
+    ///
+    /// As `push_box`, only its soft edge is shaded: well inside, a
+    /// shadow is its full colour, drawn plain.
     pub fn push_shadow(&mut self, gpu: &GpuState, x: f32, y: f32, w: f32, h: f32, radius: f32, blur: f32, color: [f32; 4]) {
         let blur = blur.max(0.5);
         let quad = (x - blur, y - blur, w + blur * 2.0, h + blur * 2.0);
-        self.push_quad(gpu, quad, (x, y, w, h), color, [radius.max(0.0), 0.0, blur, 0.0], [0.0; 4]);
+        let params = [radius.max(0.0), 0.0, blur, 0.0];
+        for (piece, shaped) in box_pieces(quad, radius.max(0.0) + blur * 2.0, 0.0) {
+            if shaped {
+                self.push_quad(gpu, piece, (x, y, w, h), color, params, [0.0; 4]);
+            } else {
+                self.push_quad(gpu, piece, piece, color, [0.0; 4], [0.0; 4]);
+            }
+        }
     }
 
     /// Two triangles covering `quad`, shaded as the box `shape` (both
@@ -195,5 +251,23 @@ impl RectRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.draw(0..self.vertex_count, 0..1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panel is its edges, shaped, and its inside, plain: together they
+    /// cover it exactly once; a key's cap stays one shaped box.
+    #[test]
+    fn a_big_box_is_shaded_only_along_its_edges() {
+        let pieces = box_pieces((10.0, 20.0, 400.0, 300.0), 8.0, 0.0);
+        assert_eq!(pieces.len(), 5);
+        let area: f32 = pieces.iter().map(|((_, _, w, h), _)| w * h).sum();
+        assert!((area - 400.0 * 300.0).abs() < 0.01, "covered once: {area}");
+        let shaded: f32 = pieces.iter().filter(|(_, s)| *s).map(|((_, _, w, h), _)| w * h).sum();
+        assert!(shaded < 400.0 * 300.0 * 0.2, "most of it plain: {shaded}");
+        assert_eq!(box_pieces((0.0, 0.0, 30.0, 18.0), 4.0, 1.0), vec![((0.0, 0.0, 30.0, 18.0), true)]);
     }
 }

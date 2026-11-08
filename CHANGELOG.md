@@ -6,6 +6,186 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-08
+
+### Changed
+
+- Pages: a page's tab has its icon and plain name (Settings, Search · HEADER,
+  Git · orbit-ground, Log · master) rather than `*settings*`, and a page starts
+  right under its tabs, with no breadcrumb row.
+- Settings: whole names, switches for what's on or off, a stepper for the value
+  being changed, values on fields, and whether each is changed or the default.
+  The setting selected opens with what it does and its key in `settings.toml`;
+  the categories are a card with their counts, and you and the project are
+  chips.
+- Git status: the branch, where it stands against its upstream and the changes
+  are chips; each section is a card with its count, each file shows its status
+  on a badge, its name before its folder and the lines it adds and removes
+  (read once a refresh), and an open diff is a well inside its card. With
+  changes but nothing staged, the page says how to stage.
+- Search: the query, the replacement and the files in input boxes, case, word
+  and regex as toggles that show when they're on, the scope as chips, each
+  file's results on a card with its count, and matches on a chip.
+- Git log: the graph is drawn rather than typed in `*`, `|`, `\` and `/`:
+  each branch a line in its own colour, a commit a dot (a merge a ring, HEAD
+  ringed), and a merge or a branch's end a rounded bend, a row a commit with
+  no rows of connectors between. The lanes run on through a commit opened to
+  its files. With many branches at once the lanes close up to fit a fifth of
+  the page and the furthest share its edge; each commit's text starts just
+  past the lanes in use near it. Branches and tags as chips, the author's
+  initials on a badge in a column of their own and the hash quieter; the
+  commit the cursor is on opens under it with its author, when, and its whole
+  hash.
+
+- Panels: the window is a tray, and the panes, the sidebar, the terminal and
+  the docks sit on it as rounded panels a small gap apart, with no lines
+  between them. Dragging between two panes still resizes the split. The panel
+  with the keyboard has a quiet edge in the mode's colour, when there's more
+  than one to tell apart. `appearance.panels = "flat"` keeps the look from
+  before: edge to edge, with lines between the panes.
+- Themes work out three more surfaces from their own colours: the `tray`
+  between panels, a `card` and an `input`. Each steps away from the page
+  only as far as keeps the theme's text at its contrast; a theme file can
+  set them itself, under `[surfaces]`.
+- The agents' dock: tool calls in a row are one card, what you wrote is on a
+  card of its own, and a question the agent asks is an outlined card with an
+  answer a line, each on its key's cap. The prompt under it is drawn as a
+  box you type in, and the state beside the agent's name is a chip.
+- A question the agent asks takes `j` and `k` to move between its answers,
+  and Enter to give the one they're on, as well as `y`, `Y`, `n` and the
+  numbers from anywhere.
+- The debug drawer: the step keys are on caps in its header beside the
+  session's state, each column is a card -- the one with the keys outlined
+  -- and the evaluate line is a box. It's a row taller, and each column
+  shows nine rows.
+- The values the debugger writes at the ends of lines are on chips, a
+  changed one in ember.
+- Every page's key strip shows its keys on caps.
+- Terminals start PowerShell 7 (`pwsh`) on Windows when it's installed, else
+  Windows PowerShell as before, without its banner; `terminal.shell` names
+  another shell and its arguments (`bash -l`, a quoted path).
+- Terminals draw in the theme's own colours: the 16 ANSI colours come from
+  its Git and syntax colours, its text and its page, unless the theme file
+  lists its own (`[terminal] ansi`). Bold, dim, italic, underline and inverse
+  are drawn, so PowerShell's menu completion shows the item it's on and its
+  suggestions read as quieter than what you typed.
+- Pickers float: every picker opens as a card over the dimmed window rather
+  than taking over the pane, its matches lit in the theme's accent and its
+  keys in a footer on caps. Every picker, the command picker and the `SPC`
+  menu are the same card, centred in the window, so going from one to
+  another doesn't move it; its rows are taller than the editor's lines, with
+  a gap before each section, and commands and the menu's groups have their
+  area's icon. Enter, Esc, `C-n`/`C-p`, the arrows, Tab and
+  `C-v` are as before.
+- The file picker shows each file's icon, its name then its folder, the files
+  opened lately first (under *Recent* while nothing's typed), and the first
+  lines of the selected file beside the list when the window is wide enough
+  (read once per selection, 64 KB at most).
+- The command picker (`SPC :`) names each command by its area and a short
+  name (`Git › Blame`) with what it does beneath and its keys on caps. A name
+  or an area is matched before a description, which is matched by whole
+  words; the commands run lately come first, then an area's main command
+  (`SPC g g` for Git) and those with the fewest keys, and a query that names
+  an area shows its commands under it and the rest under *Elsewhere*. A command that
+  can't run here -- XML's outside XML, the debugger's with no session -- is
+  dimmed with why, last. Beside the list, the selected command's keys, where
+  it is in the `SPC` menu and its id; `C-y` copies the id.
+- The `SPC` menu (and the local leader's) is the same floating card: the
+  chords used lately, the groups with how many commands each holds, and the
+  commands, with `:` to search them all by name. Vim's prefixes (`g`, `z`,
+  `]`, `[`) show in a slim hint bar above the modeline instead -- or at the
+  top when the cursor is near the bottom -- so it never covers the line
+  being edited. `which_key.delay_ms`, Backspace and paging are as before.
+
+### Added
+
+- Copy and paste in terminals: drag across the text to select it,
+  `Ctrl-Shift-C` copies and `Ctrl-Shift-V` pastes, and a right click copies
+  the selection or pastes when there's none. A paste is bracketed when the
+  program asked for it.
+- Terminals send the keys line editors bind, as xterm does: `Ctrl`, `Shift`
+  and `Alt` on the arrows, Home, End, Page Up and Down and Delete (PowerShell's
+  `Ctrl-Left` and `Ctrl-Right` by word, `Shift`-arrows selecting),
+  `Ctrl-Space` (PowerShell's menu completion), `Shift-Tab`, `Ctrl-Backspace`,
+  `Alt` combinations, F1-F12, and the arrows' application mode. While a debug
+  session runs, F5, F10 and F11 still step it.
+- In a terminal, a double click selects a word (a path or URL whole), a triple
+  click the line, and a selection stays on its text as output scrolls.
+  Holding `Ctrl` over a link underlines it and shows a hand.
+- A terminal in a pane is titled with what it runs and where (`terminal 1 ·
+  pwsh · orbit-ground`), and the panel says the same on the modeline; a shell
+  that marks its prompts (`OSC 133`) adds `· running` while a command runs.
+- `Ctrl`-click on a `path:line:col` in a terminal -- a compiler's error, a
+  stack trace, PowerShell's `At C:\x.ps1:12 char:5` -- opens the file at that
+  line beside the terminal; on a URL, in the browser. Relative paths are read
+  from where the shell says it is (`OSC 7`, `OSC 9;9`), else where it started.
+
+### Fixed
+
+- Text is drawn in the theme's own colours. It used to come out darker than the
+  theme file said on every machine (Orbit Dark's `#bb9af7` keywords as
+  `#6142b2`), and with less contrast than the themes are tested for.
+
+- A jump lands in the middle of the window rather than on its last row: a
+  symbol picked (a language pack's `SPC m s`), a search result, `gd`, the
+  jumplist, a path followed from a terminal. One already on screen stays
+  where it is; a step past the edge (`j`) still scrolls a line.
+- A terminal's ANSI black is a grey that reads on a dark page, and the
+  bright colours are the same hues, livelier, rather than washed towards
+  white.
+- The agents' dock: the thread's title is in its title bar once, not again
+  as the page's first line; the agent's state, mode, model and usage go on
+  to a second row in a narrow dock instead of off its edge; and the prompt
+  box shows only what you've written, without line numbers or `~` rows.
+- The debug drawer: a column with nothing in it says why in full, wrapped
+  in the column, and the selected row's value, when its column cut it, is
+  shown whole on the drawer's bottom line.
+- Pages keep inside a narrow pane, down to a third of a laptop's screen:
+  their headers' chips, titles and notes are cut or left out rather than
+  running off the edge or over each other, and a pane under 40 columns is
+  no longer laid out as if it were 40. In a narrow pane Settings shows its
+  settings at the whole width, and Tab trades them for the categories;
+  Extensions closes up its tabs; Agent usage drops the cache, time and token
+  columns; a section heading is cut to its width (the Snippets preview's ran
+  off the page at 80 columns).
+- A page's modeline names it as its tab does (`Log · fenix`, not
+  `*log: fenix*`), without the line and column of a caret it doesn't have,
+  and the modeline never ends on a separator. A pane too narrow for its tabs
+  is titled the same way.
+- Git status shows an untracked folder as `notes/`, lined up with the files,
+  rather than a blank name and the folder a cell further on.
+- The Log's tab names what it follows -- the branch (`Log · master`), the
+  file (`Log · main.rs`, `Log · a.rs:3–9`) or every branch -- rather than
+  the repository.
+- Settings: stepping a setting back on to its default takes it out of
+  `settings.toml` rather than writing the default there and counting it as
+  changed; one that overrides an inherited value still writes it.
+- `SPC /` with a Search page open selects the last query, so typing
+  replaces it rather than adding to it; an arrow keeps it to edit.
+- The agents' dock: a question the agent asks takes the cursor when it
+  comes, even when you'd moved up the thread, and the answer `j`, `k` and
+  Enter are on is lit across its row. A page is never scrolled past its
+  end, so a dock that grows shows the cards above rather than blank rows.
+  The prompt's title (and any pane's) is cut with a "…" in a narrow dock
+  rather than at its edge, an empty thread's hint wraps, and the modeline
+  calls the prompt "Agent prompt", not `*agent prompt*`.
+- `SPC b b` is the same card as the file picker: each buffer's icon, its
+  name then its folder (in the project, else from `~`) or its tab's name,
+  and `unsaved` at the right; Home and the empty scratches are listed once.
+- The panel terminal, from Home or a page with no project, starts in the
+  folder of the file used last rather than Fenix's own.
+- The `SPC` menu: its count of commands is the command picker's; *Recent*
+  lists a command once, with its area's icon; a section's heading is never
+  left at the foot of a page with nothing under it.
+- A file outside any project has `C: › Users › …` as its breadcrumb, not
+  `C: › \ › Users`.
+- Every pane showing Home has the logo, not only the first.
+- The debugger's trail ribbon gives the breadcrumb back once the session
+  has ended; `[t` still goes back along the trail.
+- `fenix <folder>` opens the folder as the project, as `--project` does,
+  rather than trying to open it as a file.
+- The `SPC` menu's local leader (`m`, mode) has an icon like the rest.
+
 ## [1.3.0] - 2026-11-06
 
 ### Added
@@ -604,7 +784,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/tpedneault/fenix/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/tpedneault/fenix/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/tpedneault/fenix/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tpedneault/fenix/compare/v1.0.1...v1.1.0

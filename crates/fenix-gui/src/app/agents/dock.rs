@@ -33,6 +33,11 @@ impl App {
         (page, composer)
     }
 
+    /// The prompt's pane, while the dock is up: drawn as an input.
+    pub(in crate::app) fn agents_composer_pane(&self) -> Option<WindowId> {
+        self.agents_dock_panes().1
+    }
+
     /// Whether `pane` is one of the dock's.
     pub(in crate::app) fn agents_is_dock_pane(&self, pane: WindowId) -> bool {
         let (page, composer) = self.agents_dock_panes();

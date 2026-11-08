@@ -51,6 +51,24 @@ pub struct Theme {
     /// push documents) -- only a theme that actually wants the two
     /// surfaces to read as visually distinct sets this to something else.
     pub sidebar_bg: [f32; 4],
+    /// What the window shows between its panels: the editor, the
+    /// sidebar, the terminal and the docks sit on it as rounded
+    /// surfaces. Darker than `bg` on a dark theme, a shade of grey under
+    /// a light one; worked out from `bg` unless the theme file says.
+    pub tray: [f32; 4],
+    /// A card inside a panel: an agent's tool calls, a permission it
+    /// asks for, a debugger column. A step from `bg` towards `fg`.
+    pub card: [f32; 4],
+    /// Somewhere you type or a key you press, apart from `card`: the
+    /// evaluate line, a key's cap, your own message. A step further
+    /// towards `fg`, or -- where that would cost the text its contrast --
+    /// a step the other way, sunk into the page.
+    pub input: [f32; 4],
+    /// The 16 ANSI colours a terminal's programs name (black, red, green,
+    /// yellow, blue, magenta, cyan, white, then their bright forms), in
+    /// this theme's own: its Git and syntax accents, its text and its
+    /// surfaces -- unless its file lists its own (`[terminal] ansi`).
+    pub ansi: [[f32; 4]; 16],
     pub bg_modeline: [f32; 4],
     pub fg: glyphon::Color,
     pub fg_modeline: glyphon::Color,
@@ -325,6 +343,8 @@ struct ThemeFile {
     #[serde(default)]
     border: Option<ColorSpec>,
     surfaces: Surfaces,
+    #[serde(default)]
+    terminal: Option<TerminalColors>,
     text: Text,
     modes: Modes,
     syntax: Syntax,
@@ -339,6 +359,15 @@ struct Surfaces {
     /// The explorer sidebar's; the editor's `bg` when left out.
     #[serde(default)]
     sidebar_bg: Option<ColorSpec>,
+    /// Between the panels; worked out from `bg` when left out.
+    #[serde(default)]
+    tray: Option<ColorSpec>,
+    /// A card in a panel; worked out from `bg` and `fg` when left out.
+    #[serde(default)]
+    card: Option<ColorSpec>,
+    /// An input or a key's cap; worked out when left out.
+    #[serde(default)]
+    input: Option<ColorSpec>,
     bg_modeline: ColorSpec,
     divider: ColorSpec,
     caret: ColorSpec,
@@ -346,6 +375,13 @@ struct Surfaces {
     selection: ColorSpec,
     bracket_match: ColorSpec,
     search_match: ColorSpec,
+}
+
+/// `[terminal]`: the 16 ANSI colours, when a theme wants its own.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalColors {
+    ansi: Vec<ColorSpec>,
 }
 
 #[derive(serde::Deserialize)]
@@ -442,6 +478,133 @@ impl ColorSpec {
     }
 }
 
+/// How far a card is from `bg` towards `fg`, and an input.
+const CARD_STEP: f32 = 0.05;
+const INPUT_STEP: f32 = 0.09;
+
+/// `a` moved `t` of the way to `b`, opaque.
+pub fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let at = |i: usize| a[i] + (b[i] - a[i]) * t;
+    [at(0), at(1), at(2), 1.0]
+}
+
+/// Text's colour as a fill.
+pub fn rgba_of(c: glyphon::Color) -> [f32; 4] {
+    [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, 1.0]
+}
+
+/// How bright a colour looks, 0 to 1 (WCAG's relative luminance).
+pub fn luminance_of(c: [f32; 4]) -> f32 {
+    let lin = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+}
+
+/// The 16 ANSI colours from a theme's own: red, green and yellow are its
+/// Git colours (removed, added, changed), blue, magenta and cyan its
+/// functions, keywords and types; white is its text a step quieter and
+/// bright white its text. Black is a grey that still reads on the page --
+/// a dark theme's a third of the way to its text, a light theme's its ink
+/// -- and bright black its line numbers' quiet grey. Each bright colour is
+/// the same hue, livelier: lighter and more saturated on a dark page,
+/// deeper on a light one, rather than washed towards white.
+fn ansi_for(bg: [f32; 4], fg: [f32; 4], quiet: [f32; 4], [red, green, yellow, blue, magenta, cyan]: [[f32; 4]; 6]) -> [[f32; 4]; 16] {
+    let light = luminance_of(bg) > 0.5;
+    // A dark page's black: a third of the way to the text, or further,
+    // until it reads at 2.6:1 -- dim, but there.
+    let dark_black = {
+        let mut step = 0.3;
+        while step < 0.7 && contrast_of(mix(bg, fg, step), bg) < 2.6 {
+            step += 0.02;
+        }
+        mix(bg, fg, step)
+    };
+    let (black, white, bright_white) = if light { (fg, mix(bg, fg, 0.28), mix(bg, fg, 0.12)) } else { (dark_black, mix(fg, bg, 0.18), fg) };
+    let bright = |c: [f32; 4]| {
+        let (h, s, l) = hsl(c);
+        if light { from_hsl(h, (s + 0.1).min(1.0), (l - 0.1).max(0.0)) } else { from_hsl(h, (s + 0.12).min(1.0), (l + 0.08).min(0.92)) }
+    };
+    [black, red, green, yellow, blue, magenta, cyan, white, quiet, bright(red), bright(green), bright(yellow), bright(blue), bright(magenta), bright(cyan), bright_white]
+}
+
+/// A colour as hue (0-1), saturation and lightness.
+fn hsl(c: [f32; 4]) -> (f32, f32, f32) {
+    let (r, g, b) = (c[0], c[1], c[2]);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    if (max - min).abs() < 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let h = if max == r { (g - b) / d + if g < b { 6.0 } else { 0.0 } } else if max == g { (b - r) / d + 2.0 } else { (r - g) / d + 4.0 };
+    (h / 6.0, s, l)
+}
+
+/// `hsl`'s inverse, opaque.
+fn from_hsl(h: f32, s: f32, l: f32) -> [f32; 4] {
+    if s <= 0.0 {
+        return [l, l, l, 1.0];
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let channel = |t: f32| {
+        let t = t.rem_euclid(1.0);
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    [channel(h + 1.0 / 3.0), channel(h), channel(h - 1.0 / 3.0), 1.0]
+}
+
+/// How far apart two colours are to read, 1 to 21 (WCAG's ratio).
+pub fn contrast_of(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let (a, b) = (luminance_of(a), luminance_of(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// A surface `want` of the way from `bg` towards `fg`, or less: as far
+/// as all of `reading` stays at 4.5:1 on it and all of `accents` at
+/// `accent_bar` -- or, for one already under its bar on `bg`, about as
+/// readable as it is there. Worked out in whole 8-bit steps, as it's
+/// shown.
+fn step_off(bg: [f32; 4], fg: glyphon::Color, reading: &[glyphon::Color], accents: &[glyphon::Color], accent_bar: f32, want: f32) -> [f32; 4] {
+    let shown = |c: [f32; 4]| [(c[0] * 255.0).round() / 255.0, (c[1] * 255.0).round() / 255.0, (c[2] * 255.0).round() / 255.0, 1.0];
+    let keeps = |surface: [f32; 4], texts: &[glyphon::Color], bar: f32| {
+        texts.iter().all(|&t| {
+            let t = rgba_of(t);
+            let on_bg = contrast_of(t, bg);
+            contrast_of(t, surface) >= if on_bg >= bar + 0.01 { bar + 0.01 } else { on_bg - 0.01 }
+        })
+    };
+    let mut step = want;
+    while step > want * 0.2 {
+        let surface = shown(mix(bg, rgba_of(fg), step));
+        if keeps(surface, reading, 4.5) && keeps(surface, accents, accent_bar) {
+            return surface;
+        }
+        step -= 0.0025;
+    }
+    // Nothing holds (a theme already at its bars on `bg`): a hint of one.
+    shown(mix(bg, rgba_of(fg), want * 0.2))
+}
+
+/// The tray under a theme's panels: a dark theme's sinks below its page,
+/// towards black; a light theme's is a grey a step under its page,
+/// towards its ink, so the white panels still read as lifted off it.
+fn tray_for(bg: [f32; 4], fg: glyphon::Color) -> [f32; 4] {
+    if luminance_of(bg) > 0.5 {
+        mix(bg, rgba_of(fg), 0.08)
+    } else {
+        mix(bg, [0.0, 0.0, 0.0, 1.0], 0.32)
+    }
+}
+
 /// A fill's color as text.
 fn opaque([r, g, b, _]: [f32; 4]) -> glyphon::Color {
     let byte = |v: f32| (v * 255.0).round() as u8;
@@ -470,7 +633,56 @@ pub fn parse(text: &str) -> Result<Theme, String> {
     let fg = f.text.fg.text("text.fg")?;
     let m = &f.modes;
     let text_dark = m.text_dark.text("modes.text_dark")?;
+    // What's read on a card: a card may not make any of it harder to
+    // read than the theme's bars (`every_theme_keeps_text_readable_...`).
+    let reading = vec![fg, f.text.gutter_fg.text("text.gutter_fg")?, f.syntax.comment.text("syntax.comment")?, f.syntax.variable.text("syntax.variable")?, f.explorer.file.text("explorer.file")?, f.text.caret_text.as_ref().map(|c| c.text("text.caret_text")).transpose()?.unwrap_or(opaque(caret))];
+    let mut accents = Vec::new();
+    for (key, spec) in [("syntax.keyword", &f.syntax.keyword), ("syntax.string", &f.syntax.string), ("syntax.function", &f.syntax.function), ("syntax.type", &f.syntax.ty), ("syntax.number", &f.syntax.number), ("syntax.constant", &f.syntax.constant), ("syntax.operator", &f.syntax.operator), ("syntax.punctuation", &f.syntax.punctuation), ("syntax.attribute", &f.syntax.attribute), ("explorer.folder", &f.explorer.folder), ("git.modified", &f.git.modified), ("git.staged", &f.git.staged), ("git.untracked", &f.git.untracked), ("git.ignored", &f.git.ignored), ("git.conflicted", &f.git.conflicted)] {
+        accents.push(spec.text(key)?);
+    }
+    let accent_bar = if luminance_of(bg) > 0.5 { 3.0 } else { 4.5 };
+    let card = s.card.as_ref().map(|c| c.rgba("surfaces.card")).transpose()?.unwrap_or_else(|| step_off(bg, fg, &reading, &accents, accent_bar, CARD_STEP));
+    let input = s.input.as_ref().map(|c| c.rgba("surfaces.input")).transpose()?.unwrap_or_else(|| {
+        let towards_text = step_off(bg, fg, &reading, &accents, accent_bar, INPUT_STEP);
+        // Where the text's own contrast stops both at the same shade, an
+        // input sinks the other way instead -- a well, not a lift -- which
+        // only makes its text easier to read.
+        if luminance_of(towards_text) - luminance_of(bg) > (luminance_of(card) - luminance_of(bg)) * 1.2 || luminance_of(bg) > 0.5 {
+            towards_text
+        } else {
+            mix(bg, [0.0, 0.0, 0.0, 1.0], INPUT_STEP * 1.6)
+        }
+    });
+    let ansi = match &f.terminal {
+        Some(t) => {
+            if t.ansi.len() != 16 {
+                return Err(format!("terminal.ansi: 16 colours -- black, red, green, yellow, blue, magenta, cyan, white, then the bright ones -- not {}", t.ansi.len()));
+            }
+            let mut out = [[0.0; 4]; 16];
+            for (i, c) in t.ansi.iter().enumerate() {
+                out[i] = c.text(&format!("terminal.ansi[{i}]")).map(rgba_of)?;
+            }
+            out
+        }
+        None => {
+            let accent = |spec: &ColorSpec, key: &str| spec.text(key).map(rgba_of);
+            ansi_for(
+                bg,
+                rgba_of(fg),
+                rgba_of(f.text.gutter_fg.text("text.gutter_fg")?),
+                [
+                    accent(&f.git.conflicted, "git.conflicted")?,
+                    accent(&f.git.staged, "git.staged")?,
+                    accent(&f.git.modified, "git.modified")?,
+                    accent(&f.syntax.function, "syntax.function")?,
+                    accent(&f.syntax.keyword, "syntax.keyword")?,
+                    accent(&f.syntax.ty, "syntax.type")?,
+                ],
+            )
+        }
+    };
     Ok(Theme {
+        ansi,
         name: leak(f.name.trim().to_string()),
         font_family: f.font_family.filter(|s| !s.trim().is_empty()).map(leak),
         border: f.border.as_ref().map(|c| c.rgba("border")).transpose()?,
@@ -478,6 +690,9 @@ pub fn parse(text: &str) -> Result<Theme, String> {
         tabs,
         bg,
         sidebar_bg: s.sidebar_bg.as_ref().map(|c| c.rgba("surfaces.sidebar_bg")).transpose()?.unwrap_or(bg),
+        tray: s.tray.as_ref().map(|c| c.rgba("surfaces.tray")).transpose()?.unwrap_or_else(|| tray_for(bg, fg)),
+        card,
+        input,
         bg_modeline: s.bg_modeline.rgba("surfaces.bg_modeline")?,
         fg,
         fg_modeline: f.text.fg_modeline.as_ref().map(|c| c.text("text.fg_modeline")).transpose()?.unwrap_or(fg),
@@ -750,7 +965,7 @@ mod tests {
             ];
             let accent_need = if is_light(theme) { 3.0 } else { 4.5 };
             let line = composite(theme.hl_line, theme.bg);
-            for surface in [theme.bg, line, theme.bg_modeline, theme.sidebar_bg] {
+            for surface in [theme.bg, line, theme.bg_modeline, theme.sidebar_bg, theme.card, theme.input] {
                 for (colors, need) in [(&reading[..], 4.5), (&accents[..], accent_need)] {
                     for &color in colors {
                         let ratio = contrast(color, surface);
@@ -1063,6 +1278,73 @@ mod tests {
         let tabs = mine.replace("tabs = \"underline\"", "tabs = \"round\"");
         assert!(parse(&tabs).err().unwrap().contains("underline or block"));
         assert!(parse(&mine.replace("[git]", "[gits]")).is_err(), "an unknown section is an error, not ignored");
+    }
+
+    /// Every theme's panels sit on a tray they stand out from: darker
+    /// under a dark theme's page, a grey under a light one's; cards and
+    /// inputs stand off the page, and apart.
+    #[test]
+    fn every_theme_works_out_a_tray_cards_and_inputs() {
+        for theme in all() {
+            let (bg, tray) = (luminance_of(theme.bg), luminance_of(theme.tray));
+            assert!(tray < bg, "{}: the tray is under the panels", theme.name);
+            let off = |c: [f32; 4]| (luminance_of(c) - bg).abs();
+            assert!(off(theme.card) > 0.0, "{}: a card stands off the page", theme.name);
+            assert!(off(theme.input) > 0.0 && theme.input != theme.card, "{}: an input stands off the page and a card", theme.name);
+        }
+        let orbit = default_theme();
+        assert!(luminance_of(orbit.card) > luminance_of(orbit.bg), "a dark theme's cards are lighter than its page");
+        let light = named("GitHub Light");
+        assert!(luminance_of(light.card) < luminance_of(light.bg), "a light theme's are darker");
+    }
+
+    /// A terminal's ANSI colours are the theme's: its Git colours for red,
+    /// green and yellow, its text for bright white on a dark page and its
+    /// ink for black on a light one; a theme file can list its own 16.
+    #[test]
+    fn a_terminals_colours_are_the_themes() {
+        let orbit = default_theme();
+        assert_eq!(orbit.ansi[1], rgba_of(orbit.git_conflicted));
+        assert_eq!(orbit.ansi[2], rgba_of(orbit.git_staged));
+        assert_eq!(orbit.ansi[15], rgba_of(orbit.fg));
+        assert!(luminance_of(orbit.ansi[0]) > luminance_of(orbit.bg) && luminance_of(orbit.ansi[0]) < luminance_of(orbit.ansi[8]), "black is a grey above a dark page, under bright black");
+        let light = named("GitHub Light");
+        assert_eq!(light.ansi[0], rgba_of(light.fg), "on a light page black is the ink");
+        for theme in all().iter().filter(|t| t.name != "TempleOS") {
+            // On a light page its whites are meant to be faint, as a dark
+            // page's black was before; everything else reads, black too.
+            let faint: &[usize] = if is_light(theme) { &[7, 15] } else { &[] };
+            for (i, c) in theme.ansi.iter().enumerate().filter(|(i, _)| !faint.contains(i)) {
+                assert!(contrast_of(*c, theme.bg) >= 2.0, "{}: ANSI {i} reads on the page: {:.2}", theme.name, contrast_of(*c, theme.bg));
+            }
+            // Each bright colour stands further from the page than its
+            // plain one, and keeps its hue rather than turning white.
+            for i in 1..7 {
+                let (plain, bright) = (theme.ansi[i], theme.ansi[i + 8]);
+                assert!(contrast_of(bright, theme.bg) > contrast_of(plain, theme.bg), "{}: bright {i} stands out more", theme.name);
+                let (_, s_plain, _) = hsl(plain);
+                let (_, s_bright, _) = hsl(bright);
+                assert!(s_bright >= s_plain - 1e-3 || s_plain > 0.95, "{}: bright {i} isn't washed out", theme.name);
+            }
+        }
+        let (h, s, l) = hsl([0.2, 0.6, 0.4, 1.0]);
+        let back = from_hsl(h, s, l);
+        assert!((back[0] - 0.2).abs() < 1e-4 && (back[1] - 0.6).abs() < 1e-4 && (back[2] - 0.4).abs() < 1e-4, "hsl goes there and back");
+        let mine = BUILT_IN[0].1.replace("[text]", "[terminal]\nansi = [\"#000000\", \"#ff0000\"]\n\n[text]");
+        assert!(parse(&mine).err().unwrap().contains("16 colours"));
+        let sixteen = format!("[terminal]\nansi = [{}]\n\n[text]", vec!["\"#102030\""; 16].join(", "));
+        let theme = parse(&BUILT_IN[0].1.replace("[text]", &sixteen)).expect("reads");
+        assert!((theme.ansi[9][0] - 16.0 / 255.0).abs() < 1e-6);
+    }
+
+    /// A theme file can set its own tray, card and input.
+    #[test]
+    fn a_theme_file_can_set_its_panel_surfaces() {
+        let mine = BUILT_IN[0].1.replace("hl_line = ", "tray = \"#000000\"\ncard = \"#101010\"\ninput = { color = \"#ffffff\", alpha = 0.1 }\nhl_line = ");
+        let theme = parse(&mine).expect("reads");
+        assert_eq!(theme.tray, [0.0, 0.0, 0.0, 1.0]);
+        assert!((theme.card[0] - 16.0 / 255.0).abs() < 1e-6);
+        assert!((theme.input[3] - 0.1).abs() < 1e-6);
     }
 
     /// Yours are read from a folder, sorted; a broken one is said, not

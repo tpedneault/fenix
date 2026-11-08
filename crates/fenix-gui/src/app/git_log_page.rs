@@ -5,13 +5,13 @@
 
 use super::pages::{PageEvent, PageModel};
 use super::*;
-use crate::git_log::{Detail, GitLog, GraphLine, LogAction, LogData, Scope};
+use crate::git_log::{Detail, GitLog, LogAction, LogData, Scope};
 use crate::git_status::{Action, Compose, DiffState};
 
 /// Commits read for a page.
 const LIMIT: usize = 300;
 
-fn read_log(root: &Path, scope: &Scope, words: Option<String>, author: Option<String>, style: crate::graph_view::GraphStyle) -> LogData {
+fn read_log(root: &Path, scope: &Scope, words: Option<String>, author: Option<String>) -> LogData {
     let mut patches = HashMap::new();
     let commits = match scope {
         Scope::Lines { path, start, end } => match fenix_git::line_log(root, path, *start, *end, LIMIT) {
@@ -38,22 +38,13 @@ fn read_log(root: &Path, scope: &Scope, words: Option<String>, author: Option<St
             fenix_git::log(root, &query)
         }
     };
-    let rows = fenix_git::assign_lanes(&commits);
-    let panel = crate::graph_view::render_graph(&commits, &rows, style);
-    let lines = panel
-        .text
-        .lines()
-        .zip(panel.lines)
-        .map(|(text, line)| {
-            let (spans, commit) = line.map(|l| (l.spans, l.commit)).unwrap_or_default();
-            GraphLine { text: text.to_string(), spans, commit }
-        })
-        .collect();
+    let graph = fenix_git::assign_lanes(&commits);
     LogData {
+        lanes: fenix_git::lane_count(&graph),
+        graph,
         on_head: fenix_git::reachable(root, "HEAD", LIMIT * 4).into_iter().collect(),
         head: Some(fenix_git::oplog::rev(root, "HEAD")).filter(|h| !h.is_empty()),
         branch: fenix_git::oplog::current_branch(root).unwrap_or_else(|| "HEAD (detached)".to_string()),
-        lines,
         commits,
         patches,
     }
@@ -127,13 +118,12 @@ impl App {
     }
 
     pub(super) fn git_log_refresh(&mut self, id: BufferId) {
-        let style = crate::graph_view::GraphStyle::from_config(self.config.git_graph_style.as_deref());
         let Some(log) = self.git_log(id) else { return };
         log.loading = true;
         let (root, scope) = (log.root.clone(), log.scope.clone());
         let (words, author) = log.query();
         self.page_spawn(move |send| {
-            let data = read_log(&root, &scope, words, author, style);
+            let data = read_log(&root, &scope, words, author);
             send(PageEvent::GitLogData { buffer: id, data: Box::new(data) });
         });
     }

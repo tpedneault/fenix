@@ -528,6 +528,24 @@ its extension. The rest is built into Fenix.
 
 ## Windows and the UI
 
+- **Panels.** The window is a tray, and everything in it sits on it as a
+  rounded panel a small gap from the next: each pane, the sidebar, the
+  terminal, the agents' dock and the debug drawer. There are no lines
+  between them; dragging in the gap between two panes resizes the split.
+  The panel that has the keyboard -- a pane, the sidebar, the terminal,
+  the debug drawer -- has a quiet edge in the mode's colour, once there's
+  more than one to tell apart. `appearance.panels = "flat"` draws them as
+  before 1.4 instead: edge to edge, lines between them, no tray.
+  Inside a panel, what belongs together is a card -- an agent's tool
+  calls, a debugger column -- and keys are shown on caps. The tray, the
+  cards and the inputs are the theme's (`[surfaces]`'s `tray`, `card` and
+  `input`), worked out from its colours when it doesn't set them.
+  A page's tab has its icon and plain name -- Settings, Search · HEADER,
+  Git · orbit-ground -- and the page starts right under it. Pages draw
+  their fields as input boxes, their options as toggles, what's on or off
+  as switches and their sections as cards: Settings, Git status, Search and
+  the Git log.
+
 - **Notifications**, in the manner of Dunst: toasts stacked in a corner
   of the window (`notifications.position`), newest nearest it, for what
   finished or wants you -- an agent's turn or its question, a task that
@@ -946,9 +964,12 @@ the guide.
 - **The thread** (`SPC a a`) opens beside your code: your prompts, the
   agent's answers and its thinking (folded), each tool call as a card --
   what it read, the diff of what it edited, the output of what it ran --
-  and its plan below them. The prompt is a buffer under the thread, with
-  Vim's keys: `Enter` in Normal mode sends it. A prompt written while the
-  agent works waits its turn.
+  and its plan below them. Tool calls in a row are one card, your prompts
+  have one of their own, and a question the agent asks is an outlined
+  card, its answers on their keys' caps (`j` `k` and Enter choose one, or
+  its key). The prompt is a box under the thread, a buffer with Vim's
+  keys: `Enter` in Normal mode sends it. A prompt written while the agent
+  works waits its turn.
 - **Context**: `@` in the prompt mentions a file (its text goes along,
   unsaved edits included, when the agent takes it that way), what you
   selected (`@selection`, from `SPC a e`), the file beside the panel
@@ -1301,16 +1322,18 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   time (`SPC u U` asks again).
   - **In the code.** Breakpoints are squares in the gutter (F9 or `SPC u b`),
     the stop a bar beside them, the stopped line tinted, and the selected
-    frame's values written at the ends of the lines above it.
+    frame's values on chips at the ends of the lines above it.
   - **DEBUG.** A stop puts the editor in DEBUG: `n` `s` `o` step over, in
     and out, `c` continues, `r` runs to the cursor, every other key is
     Normal's, and Esc goes back to Normal still stopped. The F-keys work in
     every mode.
-  - **The drawer.** Under the panes: the call stack, the variables, the
-    watches and pins, the breakpoints and the console, side by side. `SPC u f`
-    goes into it -- Enter selects a frame (the values in the code move with
-    it) or opens a variable; `SPC u e` evaluates in the selected frame, the
-    answer in the console beside the program's output.
+  - **The drawer.** Under the panes: the session's state and the step keys
+    on their caps, then the call stack, the variables, the watches and pins,
+    the breakpoints and the console, side by side, each a card. `SPC u f`
+    goes into it -- the column with the keys is outlined; Enter selects a
+    frame (the values in the code move with it) or opens a variable; `SPC u
+    e` evaluates in the selected frame, in the box at its foot, the answer
+    in the console beside the program's output.
   - **The lens.** `K` on a name while stopped shows its value and what's in
     it; the language server's hover otherwise.
   - **The Ember Trail.** Each stop is kept (`debug.trail_stops`, 200): the
@@ -1328,17 +1351,28 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   - **Child sessions.** An adapter that runs programs in sessions of their
     own (js-debug's `startDebugging`) has each shown under the one that
     asked for it, the stopped one's frames under it.
-- **Key menu**: pause after `SPC` (or Vim's `g`, `z`, `]`, `[`, or `SPC m`)
-  and a drawer opens up out of the modeline showing what can come next.
-  Its header is the keys pressed so far as keycaps and the group's name;
-  below, the keys in columns, groups first (each marked `+` with how many
-  commands it holds) then commands, or a group's own sections (git's
-  View / Branch & remote / This change). Keys are ordered by key, so none
-  moves when a label changes (`which_key.order = "label"` sorts by what
-  they do). Backspace goes up a level; a group too big for 40% of the
-  window pages with `Ctrl-n`/`Ctrl-p` instead of hiding anything. It
+- **Key menu**: pause after `SPC` (or `SPC m`, the local leader) and a
+  card floats over the dimmed window showing what can come next: the
+  chords used lately, the groups (each with how many commands it holds),
+  then the commands, or a group's own sections (git's View / Branch &
+  remote / This change). Its prompt is the keys pressed so far as caps;
+  `:` searches every command by name instead. Vim's `g`, `z`, `]` and `[`
+  show in a slim hint bar above the modeline (at the top when the cursor
+  is near the bottom), never over the line being edited. Keys are ordered
+  by key, so none moves when a label changes (`which_key.order = "label"`
+  sorts by what they do). Backspace goes up a level; a group too big for
+  the window pages with `Ctrl-n`/`Ctrl-p` instead of hiding anything. It
   waits `which_key.delay_ms` (250 ms) before opening, so a quick
   `SPC f f` never flashes it; once open, deeper levels show at once.
+- **Palettes**: every picker is a card floating over the dimmed window,
+  matches lit in the accent, its keys in a footer. The file picker shows
+  icons, the name then the folder, recent files first, and a bounded
+  preview of the selected file beside the list. The command picker
+  (`SPC :`) shows `Area › Short name` with the description beneath and
+  the keys on caps; it ranks names and areas before descriptions (whole
+  words), recent commands first, groups by area, dims the ones that can't
+  run here with why, and shows the selected one's keys, menu path and id
+  (`C-y` copies it).
 - **Motion and polish**: the window opens at once with a launch splash --
   the Fenix mark assembling, then breathing, over a line that fills as
   startup gets further -- drawn from its own thread, so a slow start
@@ -1619,9 +1653,17 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   reused, since a recycled one would point at a different shell than the
   one you remembered.
 
-  Both run `powershell.exe` on Windows, `$SHELL` (falling back to
-  `/bin/sh`) elsewhere, with full ANSI color support (16-color,
-  256-color, and RGB foreground/background). Neither is killed by
+  Both run the shell `terminal.shell` names, with its arguments; left
+  empty, PowerShell 7 (`pwsh`) on Windows when it's installed, else
+  Windows PowerShell, and `$SHELL` (falling back to `/bin/sh`) elsewhere.
+  PowerShell starts without its banner. The 16 ANSI colours are the
+  theme's own -- its Git colours for red, green and yellow, its syntax
+  accents for blue, magenta and cyan, its text for white, and for black
+  a grey that still reads on the page; the bright ones are the same hues,
+  livelier -- unless the theme lists its own (`[terminal] ansi`); 256-colour
+  and RGB are as the program asks. Bold, dim, italic, underline and
+  inverse are drawn, so PowerShell's menu completion shows the item it's
+  on and its suggestions from history read as quieter than what you typed. Neither is killed by
   looking away: hiding the panel, or pointing a pane at another buffer,
   leaves the shell and anything running in it going, and coming back
   shows it caught up to wherever it got to. Closing a terminal *buffer*
@@ -1643,9 +1685,37 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   for `:w` to write to a file and nothing Vim's editing commands can
   corrupt.
 
-  v1 limitations: no mouse reporting, no bracketed paste, no F-keys, no
-  application-cursor-mode variants -- covers ordinary shell/REPL/pager
-  use, not a full terminfo-correct implementation. Terminal *queries*
+  **Copy, paste and links.** Dragging across a terminal's text selects
+  it; `Ctrl-Shift-C` copies it and `Ctrl-Shift-V` pastes, and a right
+  click copies the selection or, with none, pastes. A paste is
+  bracketed when the program asked for that, so a shell doesn't run a
+  multi-line paste line by line. `Ctrl`-click on a `path:line:col` -- a
+  compiler's error, a stack trace, PowerShell's `At C:\x.ps1:12 char:5`
+  -- opens the file at that line beside the terminal; on a URL, in the
+  browser. A relative path is read from where the shell says it is
+  (`OSC 7`, or `OSC 9;9` from a PowerShell prompt), else where it
+  started, else the project. Holding `Ctrl` over one underlines it and
+  shows a hand. A double click selects a word -- a path, a URL or a hash
+  whole -- and a triple click the line; a selection stays on its text as
+  more output comes in or the view scrolls back.
+
+  **Keys.** Every key reaches the shell as xterm sends it: `Ctrl`,
+  `Shift` and `Alt` on the arrows, Home, End, Page Up and Down and Delete
+  (`Ctrl-Left` a word back, `Shift-Right` selecting in PSReadLine),
+  `Ctrl-Space` (PowerShell's menu completion), `Shift-Tab`,
+  `Ctrl-Backspace` deleting a word, `Alt` as an `ESC` first, F1-F12, and
+  the arrows' application mode when a program asks for it. While a debug
+  session runs, F5, F10 and F11 still step it.
+
+  **Titles.** A terminal in a pane is titled with what it runs and
+  where -- `terminal 1 · pwsh · orbit-ground` -- and the panel says the
+  same on the modeline. A shell that marks its prompts (`OSC 133`, as VS
+  Code's and Windows Terminal's shell integrations do) adds `· running`
+  while a command runs.
+
+  Limitations: no mouse reporting to programs -- covers shells, REPLs,
+  pagers and most full-screen tools, not a full terminfo-correct
+  implementation. Terminal *queries*
   are answered, though (cursor position, device attributes), which is
   not optional on Windows: ConPTY opens every session by asking where
   the cursor is and produces no further output at all until it is told

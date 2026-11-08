@@ -44,6 +44,11 @@ pub const MAX_FONT_SIZE: f32 = 40.0;
 pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6;
 pub const PAD_LEFT: f32 = 8.0;
 pub const PAD_TOP: f32 = 4.0;
+
+/// How far the sidebar's and the terminal's text sit inside their panels
+/// beyond `PAD_LEFT`/`PAD_TOP`: the panels are inset from the window's
+/// edge by the tray, so their text is too.
+pub const STRIP_INSET: f32 = 6.0;
 /// Smallest and largest a popup like which-key is allowed to size itself
 /// to its own content (see `App::which_key_popup`) -- always at least
 /// this wide even for a short list, never wider than this even for a
@@ -222,6 +227,17 @@ pub struct FontContext {
     default_family: &'static str,
 }
 
+/// The glyph atlas, in glyphon's `Web` colour mode: text colours go to
+/// the surface as they are, as the rects' do. The surface is deliberately
+/// not sRGB (`GpuState`), and glyphon's default (`Accurate`) converts
+/// colours from sRGB to linear for an sRGB one -- on this surface that
+/// drew every theme's text darker than its file says (Orbit Dark's
+/// `#bb9af7` keywords came out `#6142b2`), and darker than the contrast
+/// the themes are tested for.
+fn text_atlas(gpu: &GpuState, cache: &Cache) -> TextAtlas {
+    TextAtlas::with_color_mode(&gpu.device, &gpu.queue, cache, gpu.config.format, glyphon::ColorMode::Web)
+}
+
 impl FontContext {
     pub fn new(gpu: &GpuState) -> Self {
         let mut font_system = FontSystem::new();
@@ -229,7 +245,7 @@ impl FontContext {
         let default_family: &'static str =
             Box::leak(default_monospace_family(&font_system).into_boxed_str());
         let cache = Cache::new(&gpu.device);
-        let atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.config.format);
+        let atlas = text_atlas(gpu, &cache);
         Self { font_system, swash_cache: SwashCache::new(), atlas, cache, default_family }
     }
 
@@ -237,7 +253,7 @@ impl FontContext {
     /// they're drawn. The font database stays: reading it is the slow part.
     pub fn rebuild_gpu(&mut self, gpu: &GpuState) {
         self.cache = Cache::new(&gpu.device);
-        self.atlas = TextAtlas::new(&gpu.device, &gpu.queue, &self.cache, gpu.config.format);
+        self.atlas = text_atlas(gpu, &self.cache);
     }
 
     /// The font database, for drawing text off screen (a code screenshot)
@@ -275,6 +291,12 @@ pub struct TextPipeline {
     /// only ever touches `popup_renderer`'s own buffer.
     popup_renderer: TextRenderer,
     content_buffers: HashMap<PaneId, GlyphBuffer>,
+    /// What each of `content_buffers` was last shaped from (`pane_key`):
+    /// the same again is not shaped again.
+    content_keys: HashMap<PaneId, u64>,
+    /// The same for `popups`: the palette's card and the menus are drawn
+    /// every frame the caret blinks under them.
+    popup_keys: HashMap<PopupId, u64>,
     /// The body font's own advance for characters a page's grid gives a
     /// cell count of their own (`grid_spans`), by the family and size it
     /// was measured at.
@@ -459,6 +481,8 @@ impl TextPipeline {
             renderer,
             popup_renderer,
             content_buffers: HashMap::new(),
+            content_keys: HashMap::new(),
+            popup_keys: HashMap::new(),
             advances: RefCell::new(((default_family, 0), HashMap::new())),
             titles: HashMap::new(),
             breadcrumbs: HashMap::new(),
@@ -756,9 +780,23 @@ impl TextPipeline {
     /// `grid`: each character kept to the cells a page counts for it
     /// (`page::char_cells`) -- a wide one two, its fallback glyph's own
     /// advance made up to that -- so what follows stays on its columns.
-    pub fn set_pane_rich(&mut self, pane: PaneId, w: f32, h: f32, segments: &[(&str, Color, bool)], grid: bool) {
+    /// `styles`: spans drawn bold or italic, by index (a terminal's);
+    /// only for a pane that isn't kept to a grid, where spans are
+    /// segments one for one.
+    pub fn set_pane_rich(&mut self, pane: PaneId, w: f32, h: f32, segments: &[(&str, Color, bool)], grid: bool, styles: &[(usize, u8)]) {
         let _profile = crate::profile::Scope::new("shape pane");
-        let spans = if grid { self.grid_spans(segments) } else { self.cell_spans(segments) };
+        // The same text, colours and size as last frame, in the same font:
+        // it's shaped already. Most frames change one pane, or none --
+        // the caret moved, a popup or the palette is over them.
+        let key = pane_key(segments, (w, h), grid, styles, (self.font_size, self.line_height, self.icon_spacing), self.content_family());
+        if self.content_buffers.contains_key(&pane) && self.content_keys.get(&pane) == Some(&key) {
+            return;
+        }
+        self.content_keys.insert(pane, key);
+        let mut spans = if grid { self.grid_spans(segments) } else { self.cell_spans(segments) };
+        if !grid {
+            apply_styles(&mut spans, styles);
+        }
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.content_buffers.contains_key(&pane) {
@@ -835,6 +873,7 @@ impl TextPipeline {
     /// atlas entries) would accumulate forever.
     pub fn retain_panes(&mut self, keep: &[PaneId]) {
         self.content_buffers.retain(|id, _| keep.contains(id));
+        self.content_keys.retain(|id, _| keep.contains(id));
     }
 
     /// Sets one pane's tab-strip text -- same rich-span/lazy-create
@@ -976,8 +1015,18 @@ impl TextPipeline {
     /// their own content, clamped by `popup::resolve`'s position math
     /// and (for how many rows are offered in the first place)
     /// `popup::max_rows` -- not by wrapping/clipping inside the buffer.
-    pub fn set_popup_rich(&mut self, id: PopupId, width: f32, segments: &[(&str, Color, bool)]) {
-        let spans = self.rich_spans(segments);
+    /// `pitch`: its rows' height, when not the editor's line height (the
+    /// palette's taller rows).
+    pub fn set_popup_rich(&mut self, id: PopupId, width: f32, segments: &[(&str, Color, bool)], pitch: Option<f32>) {
+        let line_height = pitch.unwrap_or(self.line_height);
+        let key = pane_key(segments, (width, 0.0), false, &[], (self.font_size, line_height, self.icon_spacing), self.content_family());
+        if self.popups.contains_key(&id) && self.popup_keys.get(&id) == Some(&key) {
+            return;
+        }
+        self.popup_keys.insert(id, key);
+        // An icon a cell wide, as in a listing: the palette's rows line up
+        // their keys and folders by cell.
+        let spans = self.cell_spans(segments);
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.popups.contains_key(&id) {
@@ -986,6 +1035,7 @@ impl TextPipeline {
             self.popups.insert(id, buf);
         }
         let buf = self.popups.get_mut(&id).expect("just inserted if missing");
+        buf.set_metrics(Metrics::new(self.font_size, line_height));
         buf.set_size(Some(width), None);
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
@@ -997,6 +1047,7 @@ impl TextPipeline {
     /// forever, same reasoning as `retain_panes`.
     pub fn retain_popups(&mut self, keep: &[PopupId]) {
         self.popups.retain(|id, _| keep.contains(id));
+        self.popup_keys.retain(|id, _| keep.contains(id));
     }
 
     /// Sets the sidebar's rows -- same icon/color rich-text mechanism as
@@ -1028,9 +1079,10 @@ impl TextPipeline {
         self.debug_dock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
-    pub fn set_terminal_rich(&mut self, segments: &[(&str, Color, bool)]) {
+    pub fn set_terminal_rich(&mut self, segments: &[(&str, Color, bool)], styles: &[(usize, u8)]) {
         let default_attrs = Attrs::new().family(self.content_family());
-        let spans = self.rich_spans(segments);
+        let mut spans = self.rich_spans(segments);
+        apply_styles(&mut spans, styles);
         self.terminal.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
@@ -1211,8 +1263,8 @@ impl TextPipeline {
         if sidebar_open {
             areas.push(TextArea {
                 buffer: &self.sidebar,
-                left: PAD_LEFT,
-                top: PAD_TOP,
+                left: PAD_LEFT + STRIP_INSET,
+                top: PAD_TOP + STRIP_INSET,
                 scale: 1.0,
                 bounds: TextBounds { left: 0, top: 0, right: self.sidebar_width as i32, bottom: modeline_top as i32 },
                 default_color: theme.fg,
@@ -1225,8 +1277,8 @@ impl TextPipeline {
         if debug_dock_h > 0.0 {
             areas.push(TextArea {
                 buffer: &self.debug_dock,
-                left: PAD_LEFT,
-                top: dock_top + PAD_TOP,
+                left: crate::app::DOCK_TEXT_X,
+                top: dock_top + crate::app::DOCK_TEXT_Y,
                 scale: 1.0,
                 bounds: TextBounds { left: 0, top: dock_top as i32, right: gpu.config.width as i32, bottom: modeline_top as i32 },
                 default_color: theme.fg,
@@ -1237,8 +1289,8 @@ impl TextPipeline {
             let top = dock_top - terminal_height(self.line_height);
             areas.push(TextArea {
                 buffer: &self.terminal,
-                left: PAD_LEFT,
-                top: top + PAD_TOP,
+                left: PAD_LEFT + STRIP_INSET,
+                top: top + PAD_TOP + STRIP_INSET / 2.0,
                 scale: 1.0,
                 bounds: TextBounds { left: 0, top: top as i32, right: gpu.config.width as i32, bottom: dock_top as i32 },
                 default_color: theme.fg,
@@ -1355,11 +1407,43 @@ fn content_height(window_height: f32, modeline_height: f32) -> f32 {
     (window_height - modeline_height).max(0.0)
 }
 
+/// What a pane's text is shaped from, as one number: its spans and their
+/// colours and fonts, its size, its look and the font's metrics.
+fn pane_key(segments: &[(&str, Color, bool)], size: (f32, f32), grid: bool, styles: &[(usize, u8)], metrics: (f32, f32, f32), family: Family<'_>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (text, color, icon) in segments {
+        text.hash(&mut h);
+        color.0.hash(&mut h);
+        icon.hash(&mut h);
+    }
+    (size.0.to_bits(), size.1.to_bits(), grid, styles, metrics.0.to_bits(), metrics.1.to_bits(), metrics.2.to_bits()).hash(&mut h);
+    format!("{family:?}").hash(&mut h);
+    h.finish()
+}
+
+/// Draws the spans `styles` names bold or italic (`terminal_view::BOLD`,
+/// `ITALIC`): a terminal's text, which a program styles cell by cell.
+fn apply_styles(spans: &mut [(&str, Attrs<'_>)], styles: &[(usize, u8)]) {
+    for &(i, style) in styles {
+        if let Some((_, attrs)) = spans.get_mut(i) {
+            let mut a = attrs.clone();
+            if style & crate::app::TERM_BOLD != 0 {
+                a = a.weight(glyphon::cosmic_text::Weight::BOLD);
+            }
+            if style & crate::app::TERM_ITALIC != 0 {
+                a = a.style(glyphon::cosmic_text::Style::Italic);
+            }
+            *attrs = a;
+        }
+    }
+}
+
 /// Pixel height of the terminal panel's `TERMINAL_ROWS` rows, at the
 /// given `line_height` -- mirrors `content_height`'s role for the
 /// sidebar, just for a row count instead of "whatever's left."
 pub fn terminal_height(line_height: f32) -> f32 {
-    TERMINAL_ROWS as f32 * line_height + PAD_TOP * 2.0
+    TERMINAL_ROWS as f32 * line_height + PAD_TOP * 2.0 + STRIP_INSET
 }
 
 /// How many full text lines fit in a content area of the given pixel
@@ -1427,6 +1511,22 @@ mod tests {
         }
     }
     use super::*;
+
+    /// A pane is shaped again only when what it's shaped from changed:
+    /// its text, a colour, its size, a style or the font's metrics.
+    #[test]
+    fn a_pane_is_shaped_again_only_when_its_text_or_look_changed() {
+        let red = Color::rgb(255, 0, 0);
+        let f = Family::Monospace;
+        let key = |text: &str, color: Color, w: f32, styles: &[(usize, u8)], size: f32| pane_key(&[(text, color, false)], (w, 100.0), false, styles, (size, 20.0, 0.0), f);
+        let base = key("fn a()", red, 400.0, &[], 14.0);
+        assert_eq!(base, key("fn a()", red, 400.0, &[], 14.0), "the same: not again");
+        assert_ne!(base, key("fn b()", red, 400.0, &[], 14.0));
+        assert_ne!(base, key("fn a()", Color::rgb(0, 255, 0), 400.0, &[], 14.0));
+        assert_ne!(base, key("fn a()", red, 500.0, &[], 14.0));
+        assert_ne!(base, key("fn a()", red, 400.0, &[(0, 1)], 14.0));
+        assert_ne!(base, key("fn a()", red, 400.0, &[], 16.0));
+    }
 
     #[test]
     fn embedded_symbols_nerd_font_mono_loads_and_resolves_by_the_expected_family_name() {

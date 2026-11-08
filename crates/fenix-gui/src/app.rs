@@ -26,6 +26,7 @@ mod git_editor;
 mod git_compare_page;
 mod side_by_side;
 mod git_log_page;
+mod graph_draw;
 mod git_rebase_page;
 mod settings_host;
 mod snippets_host;
@@ -36,7 +37,13 @@ mod debug_host;
 mod debug_drawer;
 mod debug_trail;
 mod debug_breakpoints;
-pub(crate) use debug_host::debug_dock_height;
+mod panels;
+mod palette;
+mod terminal_view;
+mod terminal_mouse;
+mod terminal_keys;
+pub(crate) use debug_host::{debug_dock_height, DOCK_TEXT_X, DOCK_TEXT_Y};
+pub(crate) use terminal_view::{BOLD as TERM_BOLD, ITALIC as TERM_ITALIC};
 pub(crate) use projects::window_title;
 pub(crate) use debug_breakpoints::BreakpointPart;
 mod polish;
@@ -2022,6 +2029,7 @@ impl App {
         }
         let problems = keymap::reload_leader();
         self.leader_matcher = keymap::leader_trie().matcher();
+        *self.leader_places.borrow_mut() = None;
         if problems.is_empty() {
             self.set_message(format!("Your keybindings are in use: {}", keymap::user_keys().len()));
         } else {
@@ -2033,21 +2041,9 @@ impl App {
     /// and the extension it's from -- the ones run lately first.
     pub(crate) fn open_command_palette(&mut self) {
         self.palette_describes = false;
-        let keys = crate::keymap::leader_keys();
-        let rank = |id: &str| self.recent_commands.iter().position(|c| c == id).unwrap_or(usize::MAX);
-        let mut commands: Vec<&crate::commands::Command> = self.commands.iter().filter(|c| c.id != "commands.palette").collect();
-        commands.sort_by_key(|c| rank(&c.id));
-        let candidates = commands
-            .into_iter()
-            .map(|c| {
-                let key = keys.get(c.id.as_ref()).map(|k| format!("  {k}")).unwrap_or_default();
-                let from = c.source.map(|id| format!("  · {}", extension_name(id))).unwrap_or_default();
-                fenix_picker::Candidate::new(format!("{}  {}{key}{from}", c.description, c.id), c.id.to_string())
-            })
-            .collect();
+        let candidates = self.command_candidates();
         self.completion = None;
-        self.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::new(candidates)));
-        self.set_message("Enter runs it -- Tab gives it keys");
+        self.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::with_mode(candidates, fenix_picker::MatchMode::Words)));
     }
 
     /// Tab in the palette: the next keys typed are `command`'s.
@@ -2106,6 +2102,7 @@ impl App {
         }
         let problems = keymap::reload_leader();
         self.leader_matcher = keymap::leader_trie().matcher();
+        *self.leader_places.borrow_mut() = None;
         if !problems.is_empty() {
             self.set_error(format!("keybindings.toml: {}", problems.join("; ")));
             return;
@@ -2661,6 +2658,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
 /// slice `[offset, offset + count)`, paired with whether each is the
 /// current selection -- same windowing shape `ExplorerState`'s rendering
 /// already uses for a directory listing.
+#[cfg(test)]
 fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> Vec<(bool, String)> {
     match picker {
         ActivePicker::FindFile(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -2768,6 +2766,35 @@ fn scroll_to_include(scroll_line: usize, cursor_line: usize, visible_lines: usiz
         cursor_line + 1 - visible_lines
     } else {
         scroll_line
+    }
+}
+
+/// Where a pane's view goes for its cursor on `cursor_line`, `total`
+/// display lines long: as Vim does it, a cursor more than half a window
+/// past the view's edge -- a jump to a symbol, a search result, a
+/// definition, another file -- is put in the middle of the window, as
+/// `zz` would; one that only stepped past the edge (`j` on the last
+/// line) scrolls just far enough to show it. A jump near the end of the
+/// file keeps the last line at the bottom rather than scrolling past it.
+/// `jumped`: the cursor got there by a jump (a picker, a search result,
+/// a definition, the jumplist), which is centred whenever it's out of
+/// view at all -- a function found just past the bottom edge is shown
+/// with its body, not on the last row.
+fn scroll_for_cursor(scroll_line: usize, cursor_line: usize, visible_lines: usize, total: usize, jumped: bool) -> usize {
+    let visible = visible_lines.max(1);
+    let past = if cursor_line < scroll_line {
+        scroll_line - cursor_line
+    } else if cursor_line >= scroll_line + visible {
+        cursor_line + 1 - (scroll_line + visible)
+    } else {
+        0
+    };
+    if past > visible / 2 || (jumped && past > 0) {
+        // Never past the last line's own top -- but always showing the cursor.
+        let last_top = total.saturating_sub(visible).max(cursor_line.saturating_sub(visible - 1));
+        cursor_line.saturating_sub(visible / 2).min(last_top)
+    } else {
+        scroll_to_include(scroll_line, cursor_line, visible)
     }
 }
 
@@ -3112,6 +3139,29 @@ fn pane_chrome_height(line_height: f32, has_breadcrumb: bool) -> f32 {
 /// the tail of the previous tab's own text instead of the gap between
 /// tabs, and a click square on the last tab's visible `×` landed `PAD_
 /// LEFT` short of it.
+/// `path` inside `root`, as `src/main.rs`: matched however either was
+/// spelt -- `\\?\`, the drive letter's case, `/` or `\` -- since a root is
+/// kept canonical and a buffer's path as it was opened.
+fn path_within(root: &Path, path: &Path) -> Option<String> {
+    if let Ok(rest) = path.strip_prefix(root) {
+        return Some(rest.to_string_lossy().replace('\\', "/"));
+    }
+    let plain = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('/', "\\");
+    let (root, path) = (plain(root), plain(path));
+    let root = format!("{}\\", root.trim_end_matches('\\'));
+    let inside = path.len() > root.len() && path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
+    inside.then(|| path[root.len()..].replace('\\', "/"))
+}
+
+/// `path` whole, its home folder as `~`: a file outside the project.
+fn home_relative(path: &Path) -> String {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
+    match home.and_then(|h| path_within(&h, path)) {
+        Some(rest) => format!("~/{rest}"),
+        None => path.display().to_string(),
+    }
+}
+
 fn tab_strip_rect(rect: fenix_window::Rect) -> fenix_window::Rect {
     fenix_window::Rect { x: rect.x + text::PAD_LEFT, w: (rect.w - text::PAD_LEFT).max(0.0), ..rect }
 }
@@ -3135,7 +3185,10 @@ fn modeline_suffix_spans(suffix: &str, theme: &Theme, foreground: glyphon::Color
     }
 
     let mut spans = Vec::new();
-    for (index, field) in suffix.split("   ").enumerate() {
+    // An empty field -- a page's details, say -- gets no dot of its own,
+    // so the line never ends on one.
+    let fields = suffix.split("   ").enumerate().filter(|(index, field)| *index == 0 || !field.trim().is_empty());
+    for (index, field) in fields {
         if index != 0 {
             spans.push((" · ".to_string(), theme.gutter_fg));
         }
@@ -3527,64 +3580,6 @@ fn fetch_git_refresh_data(repo_root: &Path) -> GitRefreshData {
     let in_progress = fenix_git::in_progress(repo_root);
     let sides = fenix_git::conflict_sides(repo_root);
     GitRefreshData { status, files, branches, commits, stashes, in_progress, sides }
-}
-
-/// Resolves a `vt100` cell color to a real theme color -- `Default`
-/// falls back to whatever's passed (the active theme's own fg/bg), so a
-/// program that never sets a color inherits Fenix's current theme, the
-/// same "everything reads from `Theme`" convention every other color in
-/// this app already follows. `Rgb` is truecolor, direct. `Idx` is the
-/// standard 256-color palette (`xterm_256_rgb`).
-fn vt100_color(color: vt100::Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
-    match color {
-        vt100::Color::Default => default,
-        vt100::Color::Rgb(r, g, b) => (r, g, b),
-        vt100::Color::Idx(idx) => xterm_256_rgb(idx),
-    }
-}
-
-/// Encodes one keypress into the raw bytes a real terminal would send
-/// for it -- `None` for anything with no sensible terminal meaning
-/// (function keys, mouse, etc., simply not forwarded in v1). Covers
-/// ordinary interactive use (shell prompts, REPLs, pagers, basic arrow-
-/// key navigation inside programs like `less`) -- disclosed cuts:
-/// no mouse reporting, no bracketed paste, no F-keys, no application-
-/// cursor-mode variants (a full terminfo-correct implementation is a
-/// much bigger, separate undertaking than this).
-fn encode_terminal_key(keypress: KeyPress) -> Option<Vec<u8>> {
-    if keypress.mods.ctrl {
-        if let KeyCode::Char(c) = keypress.code {
-            let upper = c.to_ascii_uppercase();
-            if upper.is_ascii_uppercase() {
-                return Some(vec![upper as u8 - b'A' + 1]);
-            }
-        }
-        return None;
-    }
-    match keypress.code {
-        KeyCode::Char(c) => Some(c.to_string().into_bytes()),
-        KeyCode::Named(FenixNamedKey::Enter) => Some(b"\r".to_vec()),
-        KeyCode::Named(FenixNamedKey::Backspace) => Some(vec![0x7f]),
-        KeyCode::Named(FenixNamedKey::Tab) => Some(b"\t".to_vec()),
-        KeyCode::Named(FenixNamedKey::Escape) => Some(vec![0x1b]),
-        KeyCode::Named(FenixNamedKey::Left) => Some(b"\x1b[D".to_vec()),
-        KeyCode::Named(FenixNamedKey::Right) => Some(b"\x1b[C".to_vec()),
-        KeyCode::Named(FenixNamedKey::Up) => Some(b"\x1b[A".to_vec()),
-        KeyCode::Named(FenixNamedKey::Down) => Some(b"\x1b[B".to_vec()),
-        KeyCode::Named(FenixNamedKey::Home) => Some(b"\x1b[H".to_vec()),
-        KeyCode::Named(FenixNamedKey::End) => Some(b"\x1b[F".to_vec()),
-        KeyCode::Named(FenixNamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
-        KeyCode::Named(FenixNamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
-        KeyCode::Named(FenixNamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
-    }
-}
-
-/// An `(r, g, b)` byte triple as the rect-fill `[f32; 4]` representation
-/// every other themed background already uses (`Theme::bg`/`hl_line`/
-/// selection, etc.) -- opaque (alpha `1.0`), matching a real terminal
-/// cell's own background always being a solid fill, never translucent.
-fn rgb_f32((r, g, b): (u8, u8, u8)) -> [f32; 4] {
-    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
 }
 
 /// The standard xterm 256-color palette -- 0-15 the fixed default
@@ -4680,6 +4675,17 @@ pub struct App {
     /// Where each pane-resident shell was started, for the ones opened
     /// somewhere in particular (`SPC e T`).
     terminal_buffer_cwds: HashMap<BufferId, PathBuf>,
+    /// What's selected in a terminal with the mouse (`terminal_mouse`).
+    term_select: Option<terminal_mouse::TermSelection>,
+    /// The link `Ctrl` is held over in a terminal: which, its row and
+    /// columns (`terminal_mouse::terminal_hover`).
+    term_hover: Option<(terminal_mouse::TermTarget, u16, usize, usize)>,
+    /// A run of clicks in a terminal: a second selects a word, a third
+    /// the line.
+    term_clicks: crate::mouse::ClickCounter,
+    /// The pane a jump just moved the cursor in (`mark_jump`): its next
+    /// scroll centres the cursor when it's out of view.
+    jump_view: Option<fenix_window::WindowId>,
     /// A terminal buffer that runs one program instead of a shell (a
     /// serial monitor, a debugger console) -- what `spawn_terminal_for`
     /// starts, and restarts, in it.
@@ -4787,6 +4793,11 @@ pub struct App {
     /// for the hub's health dot.
     project_health: HashMap<PathBuf, (fenix_project::doctor::Health, usize)>,
     active_picker: Option<ActivePicker>,
+    /// The file the palette's preview last read, and its first lines.
+    palette_preview: RefCell<Option<(PathBuf, Vec<String>)>>,
+    /// Where each command sits under the leader, worked out once per
+    /// leader keymap (`palette::leader_places`).
+    leader_places: RefCell<Option<std::rc::Rc<palette::Places>>>,
     /// `Ctrl-O`/`Ctrl-I` -- a global, not per-pane/per-workspace,
     /// back/forward pair of stacks (like a browser's history, not real
     /// Vim's single circular list with a pointer -- a deliberate
@@ -5866,6 +5877,10 @@ impl App {
             terminal_buffers_spawning: HashSet::new(),
             terminal_buffer_labels: HashMap::new(),
             terminal_buffer_cwds: HashMap::new(),
+            term_select: None,
+            term_hover: None,
+            term_clicks: crate::mouse::ClickCounter::default(),
+            jump_view: None,
             terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
@@ -5889,6 +5904,8 @@ impl App {
             project_meta: fenix_project::meta::ProjectMeta::load_or_default(default_project_meta_path()),
             project_health: HashMap::new(),
             active_picker: None,
+            palette_preview: RefCell::new(None),
+            leader_places: RefCell::new(None),
             jump_back_stack: Vec::new(),
             jump_forward_stack: Vec::new(),
             marks: HashMap::new(),
@@ -7639,6 +7656,7 @@ impl App {
     /// usable both for "jump to a different file" and "jump within the
     /// one already focused," e.g. a same-file `gd`).
     fn goto_lsp_position(&mut self, position: lsp_types::Position) {
+        self.mark_jump();
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         cursor.char_idx = fenix_lsp::position_to_char_offset(buffer.rope(), position).min(buffer.len_chars());
         let (_, sticky) = buffer.line_col(cursor);
@@ -9017,11 +9035,8 @@ impl App {
     /// machinery as `picker_switch_buffer`, restricted to just the
     /// buffers blocking `:qa`/`SPC q q`.
     fn picker_switch_dirty_buffers(&mut self) {
-        let candidates = self
-            .dirty_tracked_buffer_ids()
-            .into_iter()
-            .map(|id| fenix_picker::Candidate::new(format!("+ {}", self.buffer_display_name(id)), id))
-            .collect();
+        let ids = self.dirty_tracked_buffer_ids();
+        let candidates = self.buffer_candidates(&ids);
         self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -9079,10 +9094,15 @@ impl App {
             let rows = text::TERMINAL_ROWS as u16;
             let cols = self.terminal_cols();
             let cwd = self.terminal_start_dir();
+            let shell = self.terminal_shell_to_spawn();
+            let spawn = move || match &shell {
+                Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
+                None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
+            };
             match self.event_proxy.clone() {
                 Some(proxy) => {
                     std::thread::spawn(move || {
-                        let result = fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref());
+                        let result = spawn();
                         let _ = proxy.send_event(FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, TerminalSpawnResult(result)));
                     });
                 }
@@ -9091,7 +9111,7 @@ impl App {
                     // -- run synchronously and apply the result directly,
                     // same "no fake event loop needed" posture `git_
                     // refresh_session`'s own `None` branch already has.
-                    let result = fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref());
+                    let result = spawn();
                     self.apply_terminal_spawned(result);
                 }
             }
@@ -9154,7 +9174,7 @@ impl App {
             (Some(gpu), Some(text)) => (gpu.size.width as f32, text.char_width()),
             _ => (800.0, text::CHAR_WIDTH),
         };
-        (((width - text::PAD_LEFT * 2.0) / char_width).floor().max(1.0)) as u16
+        (((width - (text::PAD_LEFT + text::STRIP_INSET) * 2.0) / char_width).floor().max(1.0)) as u16
     }
 
     /// `pane_cols` with the caller's own headless fallback -- the merge
@@ -9217,10 +9237,14 @@ impl App {
     /// you're in, else the focused file's folder -- not Fenix's own
     /// working folder (your home, started from the Start menu).
     fn terminal_start_dir(&self) -> Option<PathBuf> {
+        let folder_of = |id: BufferId| self.buffers.get(id).and_then(|ob| ob.buffer.path()).and_then(Path::parent).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf);
         self.project_root
             .clone()
-            .or_else(|| self.open().buffer.path().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf))
             .filter(|p| p.is_dir())
+            .or_else(|| folder_of(self.focused_buffer_id()).filter(|p| p.is_dir()))
+            // From Home or a page, with no project: where the file used
+            // last is, rather than wherever Fenix itself was started.
+            .or_else(|| self.buffers.mru().iter().filter_map(|&id| folder_of(id)).find(|p| p.is_dir()))
     }
 
     /// `open_terminal_buffer`, starting the shell somewhere in
@@ -9259,6 +9283,26 @@ impl App {
         self.wake_caret();
     }
 
+    /// The shell `terminal.shell` names, as a program and its arguments;
+    /// none when it's empty (or can't be read), for the platform's own
+    /// (`fenix_terminal::default_shell`).
+    pub(super) fn terminal_shell(&self) -> Option<(String, Vec<String>)> {
+        let line = self.config.text_value("terminal.shell")?.trim();
+        let mut words = fenix_project::tools::split_command_line(line).ok()?.into_iter();
+        let program = words.next().filter(|p| !p.is_empty())?;
+        Some((program, words.collect()))
+    }
+
+    /// `terminal_shell` as it's started: a PowerShell it names reports its
+    /// folder at each prompt, as the platform's own does
+    /// (`fenix_terminal::shell_args`).
+    fn terminal_shell_to_spawn(&self) -> Option<(String, Vec<String>)> {
+        self.terminal_shell().map(|(program, args)| {
+            let args = fenix_terminal::shell_args(&program, args);
+            (program, args)
+        })
+    }
+
     /// Starts a shell for one terminal buffer, sized to the pane
     /// currently showing it. Backgrounded for the same reason the
     /// panel's spawn is (see `toggle_terminal`): process creation is not
@@ -9269,7 +9313,7 @@ impl App {
         // Remembered rather than passed once, so a shell respawned after
         // `exit` comes back where it was rather than somewhere else.
         let cwd = self.terminal_buffer_cwds.get(&id).cloned();
-        let program = self.terminal_buffer_programs.get(&id).cloned();
+        let program = self.terminal_buffer_programs.get(&id).cloned().or_else(|| self.terminal_shell_to_spawn());
         let spawn = move || match &program {
             Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
             None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
@@ -9372,12 +9416,54 @@ impl App {
     }
 
     /// Writes one keypress to a pane-resident terminal, encoded exactly
-    /// as the panel encodes its own (`encode_terminal_key`) -- a key
+    /// as the panel encodes its own (`terminal_keys::encode`) -- a key
     /// with no terminal meaning is dropped rather than guessed at.
     fn write_terminal_buffer_input(&mut self, id: BufferId, keypress: KeyPress) {
-        let Some(bytes) = encode_terminal_key(keypress) else { return };
+        let shift = self.modifiers.shift_key();
         let Some(state) = self.terminal_buffers.get_mut(&id) else { return };
+        let Some(bytes) = terminal_keys::encode(keypress, shift, state.session.screen().application_cursor(), state.session.win32_input()) else { return };
         let _ = state.session.write_input(&bytes);
+    }
+
+    /// F1 to F12 while a terminal has the keyboard: its program's, unless
+    /// a debug session is running, whose F5, F10 and F11 step it from
+    /// anywhere. True when the key went to the terminal.
+    fn terminal_function_key(&mut self, key: &NamedKey) -> bool {
+        if self.debug_session.is_some() {
+            return false;
+        }
+        let n = match key {
+            NamedKey::F1 => 1,
+            NamedKey::F2 => 2,
+            NamedKey::F3 => 3,
+            NamedKey::F4 => 4,
+            NamedKey::F5 => 5,
+            NamedKey::F6 => 6,
+            NamedKey::F7 => 7,
+            NamedKey::F8 => 8,
+            NamedKey::F9 => 9,
+            NamedKey::F10 => 10,
+            NamedKey::F11 => 11,
+            NamedKey::F12 => 12,
+            _ => return false,
+        };
+        let (shift, alt, ctrl) = (self.modifiers.shift_key(), self.modifiers.alt_key(), self.modifiers.control_key());
+        let Some(bytes) = terminal_keys::encode_function(n, shift, alt, ctrl) else { return false };
+        let session = if self.terminal_focused {
+            self.terminal.as_mut().map(|t| &mut *t.session)
+        } else {
+            match self.active_terminal_buffer() {
+                Some(id) => self.terminal_buffers.get_mut(&id).map(|t| &mut *t.session),
+                None => None,
+            }
+        };
+        match session {
+            Some(session) => {
+                let _ = session.write_input(&bytes);
+                true
+            }
+            None => false,
+        }
     }
 
     /// How many rows and columns of shell fit in `pane`, from the same
@@ -9498,8 +9584,9 @@ impl App {
     /// if it does). Errors (the shell's pipe closed, e.g. it just
     /// exited) are swallowed -- the next `SPC o t` respawns.
     fn write_terminal_input(&mut self, keypress: KeyPress) {
-        let Some(bytes) = encode_terminal_key(keypress) else { return };
+        let shift = self.modifiers.shift_key();
         let Some(state) = self.terminal.as_mut() else { return };
+        let Some(bytes) = terminal_keys::encode(keypress, shift, state.session.screen().application_cursor(), state.session.win32_input()) else { return };
         let _ = state.session.write_input(&bytes);
     }
 
@@ -9688,28 +9775,55 @@ impl App {
     }
 
     /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
-    /// (most-recently-touched first, matching Doom's own buffer switcher),
-    /// each labeled with its path (a page, terminal or Home by what its
-    /// tab says, `*scratch*` for a plain unnamed buffer) and a leading `+`
-    /// marker for unsaved changes.
+    /// (most-recently-touched first, matching Doom's own buffer switcher).
+    /// The palette draws each with its icon, its name then its folder,
+    /// and whether it has unsaved changes.
     pub(crate) fn picker_switch_buffer(&mut self) {
-        let candidates = self
-            .buffers
-            .mru()
-            .iter()
-            .map(|&id| {
-                let ob = self.buffers.get(id).expect("mru only lists open buffers");
-                // A page, a terminal, Home... by what it shows, as its tab
-                // says; a plain unnamed buffer is the scratch (#50).
-                let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| match self.buffer_display_name(id) {
-                    unnamed if unnamed == "[No Name]" => "*scratch*".to_string(),
-                    shown => shown,
-                });
-                let marker = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { "+ " } else { "" };
-                fenix_picker::Candidate::new(format!("{marker}{name}"), id)
-            })
-            .collect();
+        let ids = self.buffers.mru().to_vec();
+        let candidates = self.buffer_candidates(&ids);
         self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// The buffer picker's rows for `ids`, in order: a file by its path
+    /// in the project (outside it, whole); a page, terminal or Home by
+    /// its tab's name; a plain unnamed buffer as the scratch (#50), a
+    /// second as `scratch 2`. What reads the same as one already listed
+    /// -- each pane's Home, another empty scratch -- is listed once.
+    fn buffer_candidates(&self, ids: &[BufferId]) -> Vec<fenix_picker::Candidate<BufferId>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut scratches = 0;
+        let mut out = Vec::new();
+        for &id in ids {
+            let Some(ob) = self.buffers.get(id) else { continue };
+            let label = if let Some(path) = ob.buffer.path() {
+                self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
+            } else if ob.kind == BufferKind::Dashboard {
+                // Each pane's Home is the one Home: by the workspace's
+                // name, as its tab has it.
+                if !seen.insert("home".to_string()) {
+                    continue;
+                }
+                self.workspaces.active_workspace().name.clone()
+            } else {
+                let shown = self.buffer_display_name(id);
+                if shown == "[No Name]" {
+                    let empty = ob.buffer.rope().len_chars() == 0 && !ob.buffer.is_dirty();
+                    if empty && !seen.insert("empty scratch".to_string()) {
+                        continue;
+                    }
+                    scratches += 1;
+                    if scratches == 1 { "scratch".to_string() } else { format!("scratch {scratches}") }
+                } else {
+                    let name = self.tab_label(id);
+                    if !seen.insert(name.clone()) {
+                        continue;
+                    }
+                    name
+                }
+            };
+            out.push(fenix_picker::Candidate::new(label, id));
+        }
+        out
     }
 
     /// `SPC s l`: a fuzzy picker over every line in the focused buffer --
@@ -14709,6 +14823,7 @@ impl App {
     }
 
     fn jump_to_grep_match(&mut self, m: &fenix_project::GrepMatch) {
+        self.mark_jump();
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target_line = m.line.saturating_sub(1).min(buffer.visual_line_count().saturating_sub(1));
         let start = buffer.line_start_char(target_line);
@@ -14723,6 +14838,7 @@ impl App {
     /// this always lands at the start of it rather than on a specific
     /// character within.
     fn jump_to_tag(&mut self, tag: &fenix_completion::ctags::TagEntry) {
+        self.mark_jump();
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target_line = tag.line.saturating_sub(1).min(buffer.visual_line_count().saturating_sub(1));
         cursor.char_idx = buffer.line_start_char(target_line);
@@ -14737,6 +14853,13 @@ impl App {
     fn record_jump(&mut self, from: JumpEntry) {
         self.jump_back_stack.push(from);
         self.jump_forward_stack.clear();
+        self.mark_jump();
+    }
+
+    /// The cursor in the focused pane is jumping, not stepping: the next
+    /// scroll centres it if it lands out of view (`scroll_for_cursor`).
+    fn mark_jump(&mut self) {
+        self.jump_view = Some(self.focused_pane_id());
     }
 
     /// `Ctrl-O`: jumps to the most recently recorded position, pushing
@@ -14830,6 +14953,7 @@ impl App {
             self.open_buffer_in_focused_pane_as(entry.buffer, true);
             self.refresh_project_root();
         }
+        self.mark_jump();
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target = entry.char_idx.min(buffer.len_chars());
         cursor.char_idx = if linewise {
@@ -14873,6 +14997,19 @@ impl App {
                 if let Some(id) = state.selected().map(|c| c.payload.clone()) {
                     self.active_picker = None;
                     self.bind_keys_start(id);
+                }
+                return;
+            }
+        }
+        // C-y in the palette: the command's id, to bind it or run it from
+        // outside.
+        if key == KeyPress::char('y').with_ctrl() {
+            if let Some(ActivePicker::Commands(state)) = &self.active_picker {
+                if let Some(id) = state.selected().map(|c| c.payload.clone()) {
+                    if let Some(clipboard) = &mut self.clipboard {
+                        let _ = clipboard.set_text(id.clone());
+                    }
+                    self.set_message(format!("copied {id}"));
                 }
                 return;
             }
@@ -15812,6 +15949,10 @@ impl App {
         }
 
         if let Key::Named(named) = &event.logical_key {
+            if self.terminal_function_key(named) {
+                self.wake_caret();
+                return;
+            }
             if self.debug_function_key(named) {
                 return;
             }
@@ -15901,7 +16042,8 @@ impl App {
         if self.terminal_focused {
             if keypress == KeyPress::char('\\').with_ctrl() {
                 self.terminal_focused = false;
-            } else {
+            } else if !self.terminal_clipboard_key(terminal_mouse::TermTarget::Panel, keypress) {
+                self.terminal_typed(terminal_mouse::TermTarget::Panel);
                 self.write_terminal_input(keypress);
             }
             self.wake_caret();
@@ -15917,7 +16059,8 @@ impl App {
         if let Some(id) = self.active_terminal_buffer() {
             if keypress == KeyPress::char('\\').with_ctrl() {
                 self.unfocus_terminal_buffer();
-            } else {
+            } else if !self.terminal_clipboard_key(terminal_mouse::TermTarget::Buffer(id), keypress) {
+                self.terminal_typed(terminal_mouse::TermTarget::Buffer(id));
                 self.write_terminal_buffer_input(id, keypress);
             }
             self.wake_caret();
@@ -16928,14 +17071,20 @@ impl App {
     fn ensure_cursor_visible(&mut self, visible_lines: usize) {
         let buffer_id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
-        let (line, scroll_line) = {
+        let (line, scroll_line, total) = {
             let ob = self.buffers.get(buffer_id).expect("focused window always has an open buffer");
             let cursor = self.pane_state(pane).cursor;
             let document_line = ob.buffer.line_col(&cursor).0;
-            let display_line = self.pane_display_lines(pane, buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
-            (display_line, self.pane_state(pane).scroll_line)
+            let display = self.pane_display_lines(pane, buffer_id);
+            let display_line = display.iter().position(|&row| row == document_line).unwrap_or(document_line);
+            (display_line, self.pane_state(pane).scroll_line, display.len())
         };
-        let target = scroll_to_include(scroll_line, line, visible_lines);
+        // A jump into this pane since the last frame: centred if out of view.
+        let jumped = self.jump_view == Some(pane);
+        if jumped {
+            self.jump_view = None;
+        }
+        let target = scroll_for_cursor(scroll_line, line, visible_lines, total, jumped);
         if target != scroll_line {
             let jump = target.abs_diff(scroll_line);
             // A jump bigger than a few screens (`G`, a search landing far
@@ -17244,7 +17393,11 @@ impl App {
             return (label, suffix);
         }
         let ob = self.open();
-        let filename = self.buffer_display_name(self.focused_buffer_id());
+        // A page (Home, the Log, Settings...) by its tab's plain name, and
+        // with no line and column: it has no caret to have them.
+        let id = self.focused_buffer_id();
+        let on_page = ob.kind == BufferKind::Dashboard || self.is_page_buffer(id);
+        let filename = if on_page { self.tab_label(id) } else { tabs::plain_name(&self.buffer_display_name(id)) };
         let modified = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { " [+]" } else { "" };
         // A file that moved under an unsaved buffer is worth seeing
         // without pressing anything: the message that announced it
@@ -17313,11 +17466,15 @@ impl App {
         };
         let debug_indicator = self.debug_modeline_segment();
         // How to get the keyboard back, while a shell has it (#42).
-        let terminal_hint = if self.terminal_has_keyboard() { "   Ctrl-\\ back to the editor" } else { "" };
+        let terminal_hint = match self.terminal_focused.then(|| self.terminal_title(terminal_mouse::TermTarget::Panel)).flatten() {
+            // The panel has no title of its own: what it runs is here.
+            Some(what) => format!("   {what}   Ctrl-\\ back to the editor"),
+            None if self.terminal_has_keyboard() => "   Ctrl-\\ back to the editor".to_string(),
+            None => String::new(),
+        };
+        let place = if on_page { String::new() } else { format!("   Ln {}, Col {}", line + 1, col + 1) };
         let suffix = format!(
-            "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}   Ln {}, Col {}   {details} ",
-            line + 1,
-            col + 1
+            "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}{place}   {details} "
         );
         (mode_label, suffix)
     }
@@ -17618,6 +17775,9 @@ impl App {
             // thinks it drew.
             || ob.kind == BufferKind::Terminal
             || ob.kind == BufferKind::Page
+            // A prompt (the agents' composer) is a box you type in: what
+            // you wrote, with no line numbers beside it.
+            || ob.kind == BufferKind::Prompt
         {
             return 0;
         }
@@ -17752,7 +17912,8 @@ impl App {
                         spans.push((" ".to_string(), color));
                     }
                 }
-            } else if !has_line {
+            } else if !has_line && ob.kind != BufferKind::Prompt {
+                // A prompt's rows past what was written are just the box.
                 spans.push(("~".to_string(), theme.gutter_fg));
             }
             if has_line {
@@ -18645,7 +18806,7 @@ impl App {
     /// kicking off a background spawn and `apply_terminal_spawned`
     /// hearing back -- see `toggle_terminal`'s own doc comment for why
     /// that gap can be long enough to matter, particularly on Windows.
-    fn terminal_panel_render(&self) -> Option<(RowSpans, Vec<(usize, usize, usize, [f32; 4])>)> {
+    fn terminal_panel_render(&self) -> Option<terminal_view::TermView> {
         if !self.terminal_open {
             return None;
         }
@@ -18658,87 +18819,15 @@ impl App {
             // panel grabs focus -- there's no other UI surface that
             // mentions the chord at all, and this is exactly the moment
             // a user unfamiliar with it needs to see it.
-            return Some((vec![("Starting shell... (Ctrl-\\ to unfocus)".to_string(), self.theme.fg, false)], Vec::new()));
+            return Some(terminal_view::TermView { spans: vec![("Starting shell... (Ctrl-\\ to unfocus)".to_string(), self.theme.fg, false)], ..Default::default() });
         }
         None
     }
 
-    fn terminal_row_spans(&self, screen: &vt100::Screen) -> (RowSpans, Vec<(usize, usize, usize, [f32; 4])>) {
-        let theme = self.theme;
-        let default_fg = (theme.fg.r(), theme.fg.g(), theme.fg.b());
-        let default_bg = ((theme.bg[0] * 255.0) as u8, (theme.bg[1] * 255.0) as u8, (theme.bg[2] * 255.0) as u8);
-        let (rows, cols) = screen.size();
-        let mut spans: RowSpans = Vec::new();
-        let mut bg_segments = Vec::new();
-        for row in 0..rows {
-            let mut run_color = theme.fg;
-            let mut run_text = String::new();
-            let mut bg_run: Option<(usize, (u8, u8, u8))> = None;
-            for col in 0..cols {
-                let cell = screen.cell(row, col);
-                let (fr, fg_g, fb) = cell.map(|c| vt100_color(c.fgcolor(), default_fg)).unwrap_or(default_fg);
-                let fg = glyphon::Color::rgb(fr, fg_g, fb);
-                let bg = cell.map(|c| vt100_color(c.bgcolor(), default_bg)).unwrap_or(default_bg);
-                let text = cell.map(|c| c.contents()).filter(|t| !t.is_empty()).unwrap_or(" ");
-                if col == 0 {
-                    run_color = fg;
-                } else if fg != run_color {
-                    spans.push((std::mem::take(&mut run_text), run_color, false));
-                    run_color = fg;
-                }
-                run_text.push_str(text);
-
-                if bg != default_bg {
-                    match bg_run {
-                        Some((_, c)) if c == bg => {}
-                        Some((start, c)) => {
-                            bg_segments.push((row as usize, start, col as usize, rgb_f32(c)));
-                            bg_run = Some((col as usize, bg));
-                        }
-                        None => bg_run = Some((col as usize, bg)),
-                    }
-                } else if let Some((start, c)) = bg_run.take() {
-                    bg_segments.push((row as usize, start, col as usize, rgb_f32(c)));
-                }
-            }
-            if let Some((start, c)) = bg_run.take() {
-                bg_segments.push((row as usize, start, cols as usize, rgb_f32(c)));
-            }
-            spans.push((run_text, run_color, false));
-            if row + 1 < rows {
-                spans.push(("\n".to_string(), theme.fg, false));
-            }
-        }
-        (spans, bg_segments)
-    }
-
-    /// Builds the picker's visible rows as rich-text spans: row 0 is the
-    /// query prompt (`"> {query}"`), the rows below are the filtered/
-    /// ranked candidates windowed by `self.picker_scroll`, flowing
-    /// through the same `set_content_rich` pipeline as a pane's text. Returns the spans
-    /// plus which rendered row (if any) is the current selection, for
-    /// the caller to draw a highlight rect over.
-    fn picker_row_spans(&self, picker: &ActivePicker, rows: usize) -> (RowSpans, Option<usize>) {
-        let theme = self.theme;
-        let mut spans: RowSpans = vec![(format!("> {}", picker_query(picker)), theme.fg, false)];
-
-        let candidate_rows = rows.saturating_sub(1);
-        let visible = picker_visible_labels(picker, self.picker_scroll, candidate_rows);
-        if !visible.is_empty() {
-            spans.push(("\n".to_string(), theme.fg, false));
-        }
-        let count = visible.len();
-        let mut hl_row = None;
-        for (i, (is_selected, label)) in visible.into_iter().enumerate() {
-            if is_selected {
-                hl_row = Some(i + 1);
-            }
-            spans.push((label, theme.fg, false));
-            if i + 1 < count {
-                spans.push(("\n".to_string(), theme.fg, false));
-            }
-        }
-        (spans, hl_row)
+    /// A terminal's screen as it's drawn: the theme's ANSI colours, and
+    /// bold, dim, italic, underline and inverse (`terminal_view`).
+    fn terminal_row_spans(&self, screen: &vt100::Screen) -> terminal_view::TermView {
+        terminal_view::view(self.theme, screen)
     }
 
     /// The sidebar/terminal/pane rects a mouse click or wheel notch
@@ -18791,7 +18880,7 @@ impl App {
                 self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
             let strip_rect = tab_strip_rect(fenix_window::Rect {
                 x: rect.x,
-                y: rect.y - title_reserved_height(line_height),
+                y: rect.y - pane_chrome_height(line_height, self.pane_has_breadcrumb(pane)),
                 w: rect.w,
                 h: tab_strip_height(line_height),
             });
@@ -18825,7 +18914,7 @@ impl App {
                 // lines up like every other tab.
                 let is_home = self.workspaces.active_workspace().home == Some(tab.buffer);
                 let name = self.tab_label(tab.buffer);
-                let icon_ch = if is_home { icon::HOME } else { icon::navigation_icon_for(&name) };
+                let icon_ch = if is_home { icon::HOME } else { self.page_tab_icon(tab.buffer).unwrap_or_else(|| icon::navigation_icon_for(&name)) };
                 let dirty = self
                     .buffers
                     .get(tab.buffer)
@@ -18871,8 +18960,21 @@ impl App {
             (layout, active_flags, spans, crumbs, ranges, italic)
     }
 
+    /// How the panels are drawn (`appearance.panels`).
+    pub(super) fn panel_look(&self) -> panels::Look {
+        panels::Look::from_setting(self.config.text_value("appearance.panels"))
+    }
+
+    /// Whether `pane` has a breadcrumb row under its tabs: a file's, or
+    /// a text buffer's, does -- where in it the cursor is; a page or a
+    /// tool's buffer doesn't, its tab already says what it is, and starts
+    /// right under the tabs.
     fn pane_has_breadcrumb(&self, pane: fenix_window::WindowId) -> bool {
-        self.tab_style().is_some() && !self.pane_titles.contains_key(&pane)
+        if self.tab_style().is_none() || self.pane_titles.contains_key(&pane) {
+            return false;
+        }
+        let Some(ob) = self.windows().content(pane).and_then(|b| self.buffers.get(*b)) else { return true };
+        ob.buffer.path().is_some() || matches!(ob.kind, BufferKind::Text | BufferKind::Table)
     }
 
     fn frame_geometry(&self, window_width: f32, sidebar_px: f32, terminal_h: f32, modeline_top: f32) -> FrameGeometry {
@@ -18886,7 +18988,14 @@ impl App {
             w: (window_width - sidebar_px).max(0.0),
             h: (modeline_top - terminal_h).max(0.0),
         };
-        let panes = self.windows().layout(pane_area);
+        // Each pane is drawn as a panel on the tray, a gap from the next:
+        // its rect is where that panel is, so the text, the mouse and the
+        // drawing all agree. The split's dividers stay where the layout
+        // put them, in the gaps, for dragging.
+        // Flat (`appearance.panels`): edge to edge, as before 1.4.
+        let outer = panels::Edges { left: sidebar_px <= 0.0, top: true, right: true };
+        let framed = self.panel_look() == panels::Look::Framed;
+        let panes: Vec<_> = self.windows().layout(pane_area).into_iter().map(|(id, rect)| (id, if framed { panels::framed(rect, pane_area, outer) } else { rect })).collect();
         // The tabs the last frame measured and drew, not a fresh estimate.
         // Re-deriving them here from character counts is what used to make
         // a click land on a different tab than the one under the cursor:
@@ -18920,7 +19029,8 @@ impl App {
     fn frame_metrics(&self, window_height: f32) -> (f32, f32, f32) {
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
         let modeline_height = self.text.as_ref().map(|t| t.modeline_height()).unwrap_or(text::LINE_HEIGHT);
-        let show_sidebar = self.sidebar_open && self.main_view == MainView::Editor;
+        // The palette floats over the window; the sidebar stays.
+        let show_sidebar = self.sidebar_open;
         let sidebar_px = if show_sidebar { self.sidebar_width } else { 0.0 };
         let show_terminal = self.terminal_open;
         let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
@@ -18994,6 +19104,9 @@ impl App {
             icon
         } else if self.tab_drag.is_some() {
             winit::window::CursorIcon::Grabbing
+        } else if self.term_hover.is_some() {
+            // Ctrl over a terminal's link: a click follows it.
+            winit::window::CursorIcon::Pointer
         } else {
             cursor_icon_for(&geometry, pos, line_height)
         };
@@ -19043,7 +19156,7 @@ impl App {
             Some(ScrollTarget::Sidebar) => {
                 self.sidebar_focused = true;
                 self.terminal_focused = false;
-                let (line, col) = self.cell_at(pos, (0.0, 0.0), 0);
+                let (line, col) = self.cell_at(pos, (text::STRIP_INSET, text::STRIP_INSET), 0);
                 self.explorer_click(ExplorerTarget::Sidebar, line, col);
             }
             Some(ScrollTarget::Terminal) => {
@@ -19393,7 +19506,6 @@ impl App {
                 text::CHAR_WIDTH * text::MODELINE_FONT_SCALE,
             ),
         };
-        let visible_lines = text::visible_line_count(window_height, modeline_height, line_height);
         let caret_is_block = self.caret_is_block();
         // Resize the git dashboard's sections to suit whichever one is
         // focused, before anything reads the layout. Done here, once a
@@ -19422,13 +19534,12 @@ impl App {
         // -- drawn from the explorer page laid out at its width.
         self.sidebar_follow();
         self.notice_explorer_growth(now);
-        let show_sidebar = self.sidebar_open && main_view == MainView::Editor;
+        let show_sidebar = self.sidebar_open;
         let sidebar_width = self.sidebar_width;
         let sidebar_px = if show_sidebar { sidebar_width } else { 0.0 };
         if let Some(text) = &mut self.text {
             text.set_sidebar_width(sidebar_width, window_height);
         }
-        let sidebar_render = if show_sidebar { self.sidebar_rows(text::cols_that_fit(sidebar_width, char_width), visible_lines) } else { None };
 
         // The terminal panel: a frame-level strip like the sidebar, but
         // shrinking height instead of width, and -- deliberately unlike
@@ -19441,9 +19552,18 @@ impl App {
         let show_terminal = self.terminal_open;
         let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
         let terminal_render = self.terminal_panel_render();
+        let terminal_selection = self.terminal_selection_for(terminal_mouse::TermTarget::Panel);
+        let terminal_link = self.terminal_hover_for(terminal_mouse::TermTarget::Panel);
         let dock_h = self.debug_dock_px();
-        let dock_cols = ((window_width - text::PAD_LEFT * 2.0) / char_width).max(0.0) as usize;
-        let debug_dock_render = self.debug_dock_shown().then(|| self.debug_dock_spans(dock_cols));
+        // The sidebar's rows: as many as fit its panel, above the terminal
+        // and the debug dock, which run under it.
+        let sidebar_lines = text::lines_that_fit(window_height - modeline_height - terminal_h - dock_h - text::STRIP_INSET * 2.0, line_height);
+        let sidebar_render = if show_sidebar { self.sidebar_rows(text::cols_that_fit(sidebar_width - text::STRIP_INSET * 2.0, char_width), sidebar_lines) } else { None };
+        let dock_cols = debug_host::debug_dock_cols(window_width, char_width);
+        let (debug_dock_render, dock_decor) = match self.debug_dock_shown().then(|| self.debug_dock_layout(dock_cols)) {
+            Some((spans, decor)) => (Some(spans), decor),
+            None => (None, debug_drawer::DockDecor::default()),
+        };
         let debug_drawer_highlight = self.debug_drawer_highlight(dock_cols);
 
         let modeline_top = window_height - modeline_height;
@@ -19451,6 +19571,11 @@ impl App {
         let pane_area = geometry.pane_area;
         let layout = self.motion_layout(geometry.panes, pane_area, now);
         let focused_pane = self.windows().focused_id();
+        // The agents' prompt is drawn as a box you type in.
+        let composer_pane = self.agents_composer_pane();
+        let look = self.panel_look();
+        let panel_radius = look.radius();
+        let keyboard_panel = panels::keyboard_panel(focused_pane, self.terminal_focused && self.terminal_open, self.sidebar_focused, self.debug_drawer_focused());
 
         // One entry per visible window pane -- built fresh every frame
         // from whatever `WindowTree::layout` currently reports (splits/
@@ -19616,6 +19741,9 @@ impl App {
                 .get(&pane)
                 .cloned()
                 .or_else(|| self.table_view_header(buffer_id))
+                // A page by its tab's name (`Settings`, not `*settings*`):
+                // a pane too narrow for its tabs shows this instead.
+                .or_else(|| self.is_page_buffer(buffer_id).then(|| self.tab_label(buffer_id)))
                 .unwrap_or_else(|| self.buffer_display_name(buffer_id));
             // Every pane has a title bar, and an editing pane a
             // breadcrumb bar under it too, so its *content* area is
@@ -19641,7 +19769,9 @@ impl App {
             // all: an empty pane, no file list, and no way to see what
             // was being typed. Checked here, once, rather than repeated
             // in both blocks' own conditions.
-            let overlay_covers_pane = is_focused && main_view == MainView::Picker;
+            // The picker floats over the panes as the palette, so it covers
+            // none of them.
+            let overlay_covers_pane = false;
 
             // A terminal pane's content is a `vt100` screen grid owned
             // by `terminal_buffers`, not the buffer's own (always empty)
@@ -19665,8 +19795,8 @@ impl App {
                         let _ = state.session.resize(want_rows, want_cols);
                     }
                 }
-                let screen_spans = self.terminal_buffers.get(&buffer_id).map(|state| self.terminal_row_spans(state.session.screen()));
-                let (spans, colored_bg_segments) = screen_spans.unwrap_or_default();
+                let view = self.terminal_buffers.get(&buffer_id).map(|state| self.terminal_row_spans(state.session.screen())).unwrap_or_default();
+                let terminal_view::TermView { spans, styles, backgrounds: colored_bg_segments, underlines } = view;
                 // The caret is the shell's own cursor, and is drawn only
                 // while this terminal actually has the keyboard -- an
                 // idle blinking block in a pane that ignores your typing
@@ -19682,17 +19812,22 @@ impl App {
                         let (row, col) = screen.cursor_position();
                         (row as usize, col as usize)
                     });
+                // Its name, then what it runs and where.
+                let title = match self.terminal_title(terminal_mouse::TermTarget::Buffer(buffer_id)) {
+                    Some(what) => format!("{} · {what}", pane_title.trim_matches('*')),
+                    None => pane_title,
+                };
                 panes_render.push(PaneRender {
                     pane,
                     rect,
-                    title: pane_title,
+                    title,
                     spans,
                     hl_row: None,
                     hl_row_strong: false,
                     marked_rows: Vec::new(),
                     row_tints: Vec::new(),
                     colored_bg_segments,
-                    selection_segments: Segments::new(),
+                    selection_segments: self.terminal_selection_for(terminal_mouse::TermTarget::Buffer(buffer_id)),
                     pulse_overlay: None,
                     bracket_match_segments: Segments::new(),
                     hlsearch_segments: Segments::new(),
@@ -19710,7 +19845,11 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
-                    extra: motion_host::PaneExtras::default(),
+                    extra: motion_host::PaneExtras {
+                        underlines: underlines.into_iter().chain(self.terminal_hover_for(terminal_mouse::TermTarget::Buffer(buffer_id)).map(|(r, a, b)| (r, a, b, theme.caret))).collect(),
+                        span_styles: styles,
+                        ..Default::default()
+                    },
                 });
                 continue;
             }
@@ -19766,48 +19905,6 @@ impl App {
                 }
             }
 
-            if is_focused && main_view == MainView::Picker {
-                let rows = pane_visible_lines + 1;
-                if let Some(picker) = &self.active_picker {
-                    self.picker_scroll = scroll_to_include(self.picker_scroll, picker_selected_row(picker), pane_visible_lines);
-                }
-                let (spans, selected_row) = match &self.active_picker {
-                    Some(picker) => self.picker_row_spans(picker, rows),
-                    None => (Vec::new(), None),
-                };
-                panes_render.push(PaneRender {
-                    pane,
-                    rect,
-                    title: pane_title,
-                    spans,
-                    hl_row: selected_row,
-                    hl_row_strong: true,
-                    marked_rows: Vec::new(),
-                    row_tints: Vec::new(),
-                    colored_bg_segments: Vec::new(),
-                    selection_segments: Segments::new(),
-                    pulse_overlay: None,
-                    bracket_match_segments: Segments::new(),
-                    hlsearch_segments: Segments::new(),
-                    caret: None,
-                    content_frac: 0.0,
-                    gutter_px: 0.0,
-                    tabs_layout: Vec::new(),
-                    tab_active: Vec::new(),
-                    tab_spans: Vec::new(),
-                    breadcrumb_spans: Vec::new(),
-                    tab_ranges: Vec::new(),
-                    tab_italic: Vec::new(),
-                    has_breadcrumb,
-                    gutter_marks: Vec::new(), debug_marks: Vec::new(), trail_marks: Vec::new(),
-                    row_accents: Vec::new(),
-                    indent_guides: Vec::new(),
-                    home: home::HomeOverlay::default(),
-                    extra: motion_host::PaneExtras::default(),
-                });
-                continue;
-            }
-
             // Plain buffer content -- every pane not currently showing an
             // overlay, focused or not. `buffer_id` was already looked up
             // above, alongside `pane_title`.
@@ -19845,14 +19942,22 @@ impl App {
                 let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
                 let gutter_px = gutter_chars as f32 * char_width;
                 let visible_cols = text::cols_that_fit(rect.w - gutter_px, char_width);
-                self.ensure_cursor_visible_horizontally(visible_cols);
+                if !is_dashboard {
+                    self.ensure_cursor_visible_horizontally(visible_cols);
+                }
+            }
+            // Home and a page are laid out to the pane's width and never
+            // scroll sideways: their chips, cards and switches are placed by
+            // cell, so text scrolled under them would slide off its boxes.
+            if is_dashboard && self.pane_state(pane).scroll_col != 0 {
+                self.pane_state_mut(pane).scroll_col = 0;
             }
             // Every pane -- not just the focused one -- has its own
             // `PaneState` (seeded when it was created), so each renders
             // from its own independent cursor/scroll position.
             let pane_state = *self.pane_state(pane);
             // Sideways scrolling eases a column at a time.
-            let shown_scroll_col = self.scroll_col(pane, pane_state.scroll_col, now);
+            let shown_scroll_col = if is_dashboard { 0 } else { self.scroll_col(pane, pane_state.scroll_col, now) };
             let rendered_scroll = pane_state.rendered_scroll;
             // Scroll positions are display-row based once a scope is
             // collapsed. This mapping is the single conversion point back
@@ -20056,6 +20161,7 @@ impl App {
             // underlines under it -- already in visual columns.
             let mut decoration_underlines = Vec::new();
             let mut decoration_strikes = Vec::new();
+            let mut decoration_chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>)> = Vec::new();
             for (row, layout) in &decoration_rows {
                 for (cols, mark) in &layout.marks {
                     let (a, b) = (cols.start.saturating_sub(shown_scroll_col), cols.end.saturating_sub(shown_scroll_col));
@@ -20067,6 +20173,10 @@ impl App {
                         crate::decorations::Mark::Tint(shade) => todo_bg_segments.push((*row, a, b, pages::shade_color(theme, *shade))),
                         crate::decorations::Mark::Underline(role) => decoration_underlines.push((*row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
                         crate::decorations::Mark::Strike(role) => decoration_strikes.push((*row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
+                        crate::decorations::Mark::Chip(role) => {
+                            let [r, g, b2, _] = glyphon_to_rgba(pages::role_color(theme, *role));
+                            decoration_chips.push((*row, a, b, [r, g, b2, 0.13], None));
+                        }
                     }
                 }
             }
@@ -20121,7 +20231,7 @@ impl App {
                 row_tints.push((row, [r, g, b, 0.14]));
             }
 
-            let (home_segments, home_overlay) =
+            let (home_segments, mut home_overlay) =
                 if is_page {
                     self.page_backgrounds(buffer_id, render_base_line, pane_visible_lines)
                 } else if is_home {
@@ -20186,7 +20296,7 @@ impl App {
                 pulse_overlay,
                 bracket_match_segments,
                 hlsearch_segments,
-                caret: if is_dashboard { None } else { caret },
+                caret: if is_dashboard || (is_focused && main_view == MainView::Picker) { None } else { caret },
                 content_frac: render_frac,
                 gutter_px,
                 tabs_layout,
@@ -20201,7 +20311,10 @@ impl App {
                 trail_marks,
                 indent_guides,
                 row_accents,
-                home: home_overlay,
+                home: {
+                    home_overlay.chips.extend(decoration_chips.into_iter().map(|(r, a, b, f, o)| (r, a, b, f, o, false)));
+                    home_overlay
+                },
                 extra,
             });
         }
@@ -20225,12 +20338,34 @@ impl App {
         // left to `text.rs`/`prepare` so its position is known before the
         // `bg_rect` panel-background push below.
         // The which-key drawer, once a sequence has waited long enough.
+        // The leader's menu and the open picker, as palette cards over
+        // the window above the modeline; Vim's prefixes' hint bar, kept
+        // off the cursor's line.
+        let card_area = fenix_window::Rect { x: 0.0, y: 0.0, w: window_width, h: modeline_top };
+        let focused_render = panes_render.iter().find(|p| p.pane == focused_pane);
+        let cursor_y = focused_render.and_then(|p| p.caret.map(|(row, _)| p.rect.y + text::PAD_TOP + row as f32 * line_height));
+        let bar_top = focused_render.map(|p| p.rect.y).unwrap_or(0.0);
         let which_key_popup = if overlays_here && self.which_key_open(now) {
             self.which_key_pending().map(|pending| {
-                let drawer = self.which_key_drawer(&pending, window_width, window_height, modeline_top, char_width, line_height);
-                self.motion.which_key_pages = drawer.pages;
-                self.motion.which_key_drawer = Some(drawer.clone());
-                (drawer.rect, drawer.spans)
+                let vim = pending.source == which_key::Source::Vim;
+                let area = if vim { fenix_window::Rect { x: 0.0, y: bar_top, w: window_width, h: (modeline_top - bar_top).max(0.0) } } else { card_area };
+                let card = self.which_key_card(&pending, area, char_width, line_height, cursor_y);
+                self.motion.which_key_pages = card.pages;
+                let id = if vim { popup::PopupId::WhichKey } else { popup::PopupId::Leader };
+                let out = (id, card.rect, card.spans.clone());
+                self.motion.cards.insert(id, card);
+                out
+            })
+        } else {
+            None
+        };
+        let palette_popup = if overlays_here && self.main_view == MainView::Picker {
+            let lines = palette::list_lines(card_area, line_height);
+            self.palette_view(lines).map(|view| {
+                let card = palette::layout(&view, self.theme, card_area, char_width, line_height, 0);
+                let out = (card.rect, card.spans.clone());
+                self.motion.cards.insert(popup::PopupId::Palette, card);
+                out
             })
         } else {
             None
@@ -20313,7 +20448,7 @@ impl App {
         for pane in &panes_render {
             let content_refs: Vec<(&str, glyphon::Color, bool)> =
                 pane.spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_pane_rich(pane.pane, pane.rect.w, pane.rect.h, &content_refs, pane.extra.grid);
+            text.set_pane_rich(pane.pane, pane.rect.w, pane.rect.h, &content_refs, pane.extra.grid, &pane.extra.span_styles);
             let sticky: RowSpans = polish::join_rows(pane.extra.sticky.clone());
             let sticky_refs: Vec<(&str, glyphon::Color, bool)> = sticky.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_pane_sticky(pane.pane, pane.rect.w, &sticky_refs);
@@ -20351,7 +20486,11 @@ impl App {
             let tab_rect = fenix_window::Rect { x: pane.rect.x, y: top, w: pane.rect.w, h: tab_h };
             if pane.tabs_layout.is_empty() {
                 let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
-                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(pane.title.as_str(), color, false)], &[]);
+                // Cut to the pane with a "…", rather than at its edge
+                // mid-word (the agents' prompt says what sends it there).
+                let fits = ((tab_rect.w - text::PAD_LEFT * 2.0).max(0.0) / text.title_char_width().max(1.0)).floor() as usize;
+                let title = crate::page::fit(&pane.title, fits);
+                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(title.as_str(), color, false)], &[]);
             } else {
                 let refs: Vec<(&str, glyphon::Color, bool)> =
                     pane.tab_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
@@ -20384,12 +20523,15 @@ impl App {
                     tab.close.x = text_origin + close_left;
                     tab.close.w = close_right - close_left;
                 }
-                let crumb_rect =
-                    fenix_window::Rect { x: pane.rect.x, y: top + tab_h, w: pane.rect.w, h: breadcrumb_strip_height(line_height) };
-                let crumb_refs: Vec<(&str, glyphon::Color, bool)> =
-                    pane.breadcrumb_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-                text.set_pane_breadcrumb_rich(pane.pane, crumb_rect.w, &crumb_refs);
-                breadcrumb_text_rects.push((pane.pane, crumb_rect));
+                // A page has no breadcrumb row: its tab says what it is.
+                if pane.has_breadcrumb {
+                    let crumb_rect =
+                        fenix_window::Rect { x: pane.rect.x, y: top + tab_h, w: pane.rect.w, h: breadcrumb_strip_height(line_height) };
+                    let crumb_refs: Vec<(&str, glyphon::Color, bool)> =
+                        pane.breadcrumb_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+                    text.set_pane_breadcrumb_rich(pane.pane, crumb_rect.w, &crumb_refs);
+                    breadcrumb_text_rects.push((pane.pane, crumb_rect));
+                }
             }
             title_rects.push((pane.pane, title_rect));
             tab_text_rects.push((pane.pane, tab_rect));
@@ -20400,10 +20542,9 @@ impl App {
                 sidebar_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_sidebar_rich(&sidebar_refs);
         }
-        if let Some((terminal_spans, _)) = &terminal_render {
-            let terminal_refs: Vec<(&str, glyphon::Color, bool)> =
-                terminal_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_terminal_rich(&terminal_refs);
+        if let Some(view) = &terminal_render {
+            let terminal_refs: Vec<(&str, glyphon::Color, bool)> = view.spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_terminal_rich(&terminal_refs, &view.styles);
         }
         if let Some(dock_spans) = &debug_dock_render {
             let dock_refs: Vec<(&str, glyphon::Color, bool)> = dock_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
@@ -20485,8 +20626,11 @@ impl App {
         // Every popup open this frame, then the ones still fading out --
         // `popup_draws` decides each one's opacity and rise.
         let mut open_popups: Vec<(popup::PopupId, fenix_window::Rect, RowSpans, Option<usize>)> = Vec::new();
-        if let Some((rect, spans)) = which_key_popup {
-            open_popups.push((popup::PopupId::WhichKey, rect, spans, None));
+        if let Some((id, rect, spans)) = which_key_popup {
+            open_popups.push((id, rect, spans, None));
+        }
+        if let Some((rect, spans)) = palette_popup {
+            open_popups.push((popup::PopupId::Palette, rect, spans, None));
         }
         if let Some((rect, spans)) = git_menu_popup {
             open_popups.push((popup::PopupId::GitMenu, rect, spans, None));
@@ -20514,14 +20658,21 @@ impl App {
         for draw in &popup_draws {
             let fade = |c: glyphon::Color| glyphon::Color::rgba(c.r(), c.g(), c.b(), (c.a() as f32 * draw.alpha).round() as u8);
             let refs: Vec<(&str, glyphon::Color, bool)> = draw.spans.iter().map(|(s, c, i)| (s.as_str(), fade(*c), *i)).collect();
-            text.set_popup_rich(draw.id, draw.rect.w, &refs);
+            text.set_popup_rich(draw.id, draw.rect.w, &refs, motion_state.cards.get(&draw.id).map(|c| c.pitch));
             popup_rects.push((draw.id, draw.rect));
         }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
-        let sidebar_row_y = |row: usize| text::PAD_TOP + row as f32 * line_height;
+        let sidebar_row_y = |row: usize| text::PAD_TOP + text::STRIP_INSET + row as f32 * line_height;
 
         bg_rect.clear();
+        // Every pane's panel, its chrome and all, rounded on the tray.
+        for pane in &panes_render {
+            let chrome_h = pane_chrome_height(line_height, pane.has_breadcrumb);
+            let r = pane.rect;
+            let fill = if Some(pane.pane) == composer_pane { theme.input } else { theme.bg };
+            bg_rect.push_box(gpu, r.x, r.y - chrome_h, r.w, r.h + chrome_h, crate::rect::BoxStyle { radius: panel_radius, fill, border: 0.0, border_color: [0.0; 4] });
+        }
         for pane in &panes_render {
             // Row index (relative to that pane's own render_base_line, or
             // its explorer/picker listing's own scroll) -> pixel y within
@@ -20547,6 +20698,22 @@ impl App {
             // prepare`'s `TextArea` for this pane actually renders the
             // text, or these rects drift out of alignment with it.
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
+            // Where a page's boxes stop: its text is cut at the pane's edge,
+            // and a chip or card past it would be drawn over the pane beside.
+            let inside_right = pane.rect.x + pane.rect.w - (char_width * 0.5).round();
+            // A page's cards: under its tints, so the focused row's still
+            // shows on one. A little wider than their cells.
+            for &(row, rows, a, b, fill, outline, tight) in &pane.home.cards {
+                let pad = (char_width * 0.6).round();
+                let (x, w, top) = (content_x + a as f32 * char_width - pad, (b - a) as f32 * char_width + pad * 2.0, pane.rect.y + text::PAD_TOP - pane.content_frac * line_height);
+                // A selected row among others keeps to its own rows, or it
+                // would run into the ones above and below.
+                let r = if tight { panels::row_rect(x, w, top, line_height, 0, rows.saturating_sub(1)) } else { panels::card_rect(x, w, top, line_height, 0, rows.saturating_sub(1)) };
+                let Some(r) = panels::clip_right(r, inside_right) else { continue };
+                let y = r.y + row as f32 * line_height;
+                let style = crate::rect::BoxStyle { radius: panels::CARD_RADIUS, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
+                bg_rect.push_box(gpu, r.x, y, r.w, r.h, style);
+            }
             // Drawn before selection/search/pulse so those still read as
             // overlays on top of whatever the shell painted, rather than
             // being covered by it.
@@ -20556,9 +20723,55 @@ impl App {
                 let w = (col_end - col_start) as f32 * char_width;
                 bg_rect.push_rect(gpu, x, y, w, line_height, color);
             }
+            for &(row, a, b, fill, outline, pill) in &pane.home.chips {
+                let r = panels::key_cap(content_x, char_width, row_y(row), line_height, a, b);
+                let Some(r) = panels::clip_right(r, inside_right) else { continue };
+                let radius = if pill { r.h / 2.0 } else { panels::KEY_RADIUS };
+                let style = crate::rect::BoxStyle { radius, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
+            }
+            // A commit graph's rows: rails, bends and dots, kept to the
+            // pane like the rest.
+            for (row, a, b, lanes, marks) in &pane.home.graph {
+                let x = content_x + *a as f32 * char_width;
+                let w = ((*b - *a) as f32 * char_width).min(inside_right - x);
+                if w <= 0.0 {
+                    continue;
+                }
+                let ring = theme.caret;
+                for shape in graph_draw::shapes(x, w, row_y(*row), line_height, char_width, *lanes, marks, ring) {
+                    match shape {
+                        graph_draw::Shape::Bar(x, y, w, h, color) => bg_rect.push_rect(gpu, x, y, w, h, color),
+                        graph_draw::Shape::Arc { cx, cy, r, right, down, color } => bg_rect.push_arc(gpu, cx, cy, r, graph_draw::thickness(char_width), right, down, color),
+                        graph_draw::Shape::Dot { cx, cy, r, ring, color } => {
+                            let style = if ring {
+                                crate::rect::BoxStyle { radius: r, fill: [color[0], color[1], color[2], 0.0], border: graph_draw::thickness(char_width), border_color: color }
+                            } else {
+                                crate::rect::BoxStyle { radius: r, fill: color, border: 0.0, border_color: [0.0; 4] }
+                            };
+                            bg_rect.push_box(gpu, cx - r, cy - r, r * 2.0, r * 2.0, style);
+                        }
+                    }
+                }
+            }
+            // A switch's knob, at the end it's on.
+            for &(row, a, b, on) in &pane.home.switches {
+                let r = panels::key_cap(content_x, char_width, row_y(row), line_height, a, b);
+                if r.x + r.w > inside_right {
+                    continue;
+                }
+                let d = (r.h - 4.0).max(2.0);
+                let x = if on { r.x + r.w - d - 2.0 } else { r.x + 2.0 };
+                let color = if on { glyphon_to_rgba(theme.git_staged) } else { glyphon_to_rgba(theme.gutter_fg) };
+                bg_rect.push_box(gpu, x, r.y + 2.0, d, d, crate::rect::BoxStyle { radius: d / 2.0, fill: color, border: 0.0, border_color: [0.0; 4] });
+            }
             for &(row, start, end) in &pane.home.rules {
                 let y = (row_y(row) + line_height / 2.0).round();
-                bg_rect.push_rect(gpu, content_x + start as f32 * char_width, y, (end - start) as f32 * char_width, 1.0, pane.home.rule_color);
+                let x = content_x + start as f32 * char_width;
+                let w = ((end - start) as f32 * char_width).min(inside_right - x);
+                if w > 0.0 {
+                    bg_rect.push_rect(gpu, x, y, w, 1.0, pane.home.rule_color);
+                }
             }
             // A canvas's hairlines down it, in the middle of their cells.
             for &(col, row, rows) in &pane.home.vertical_rules {
@@ -20628,9 +20841,6 @@ impl App {
         }
 
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
-        // A hairline boundary makes the status surface feel intentionally
-        // separate from the editor canvas without adding visual weight.
-        bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, 1.0, theme.divider);
         // A full-height accent rail instead of a filled badge box behind
         // the mode label -- Signal Rail's own "read the mode from the
         // eye-corner" bit, borrowed from a mixing console's channel-status
@@ -20683,11 +20893,12 @@ impl App {
             // `sidebar_bg` defaults to exactly `bg` on every theme but one
             // (see its own doc comment), so this is only a real change for
             // a theme that deliberately wants the two surfaces distinct.
-            bg_rect.push_rect(gpu, 0.0, 0.0, sidebar_width, modeline_top, theme.sidebar_bg);
+            let panel = panels::sidebar_in(look, sidebar_width, modeline_top - dock_h - terminal_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panel_radius, fill: theme.sidebar_bg, border: 0.0, border_color: [0.0; 4] });
             if let Some((_, _, tinted, _)) = &sidebar_render {
                 // Marked rows, and the file being edited.
                 for &row in tinted {
-                    bg_rect.push_rect(gpu, 0.0, sidebar_row_y(row), sidebar_width, line_height, theme.hl_line);
+                    bg_rect.push_rect(gpu, panel.x, sidebar_row_y(row), panel.w, line_height, theme.hl_line);
                 }
             }
             if let Some((_, Some(selected_row), _, _)) = &sidebar_render {
@@ -20699,60 +20910,105 @@ impl App {
                 // than the subtle current-line tint meant to be a secondary
                 // cue alongside a visible caret.
                 let y = sidebar_row_y(*selected_row);
-                bg_rect.push_rect(gpu, 0.0, y, sidebar_width, line_height, theme.selection);
+                bg_rect.push_rect(gpu, panel.x, y, panel.w, line_height, theme.selection);
             }
             if let Some((_, _, _, underlines)) = &sidebar_render {
                 for &(row, start, end) in underlines {
                     let y = (sidebar_row_y(row) + line_height - 2.0).round();
-                    bg_rect.push_rect(gpu, text::PAD_LEFT + start as f32 * char_width, y, (end - start) as f32 * char_width, 1.0, theme.caret);
+                    bg_rect.push_rect(gpu, text::PAD_LEFT + text::STRIP_INSET + start as f32 * char_width, y, (end - start) as f32 * char_width, 1.0, theme.caret);
                 }
             }
-            // A thin divider along the sidebar's own right edge, same
-            // color/weight as the ones between split panes, so there's a
-            // visible seam now that it's no longer a different color
-            // from the content area next to it.
-            bg_rect.push_rect(gpu, sidebar_width - 1.0, 0.0, 2.0, modeline_top, theme.divider);
         }
         if dock_h > 0.0 {
             let dock_top = modeline_top - dock_h;
-            bg_rect.push_rect(gpu, 0.0, dock_top, window_width, dock_h, theme.bg);
-            bg_rect.push_rect(gpu, 0.0, dock_top, window_width, 2.0, theme.divider);
-            if let Some((row, col, width)) = debug_drawer_highlight {
-                let x = text::PAD_LEFT + col as f32 * char_width;
-                bg_rect.push_rect(gpu, x, dock_top + text::PAD_TOP + row as f32 * line_height, width as f32 * char_width, line_height, theme.selection);
+            let panel = panels::strip_in(look, window_width, dock_top, dock_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panel_radius, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
+            // Concept A's drawer: its text is a grid; behind it, the
+            // state's chip and the keys' caps in the header, a card per
+            // column -- the one with the keys outlined -- and the
+            // evaluate line's box.
+            let text_top = dock_top + DOCK_TEXT_Y;
+            let row_y = |row: usize| text_top + row as f32 * line_height;
+            let col_x = |col: usize| DOCK_TEXT_X + col as f32 * char_width;
+            let pad = (char_width * 0.8).round();
+            let faded = |c: [f32; 4], a: f32| [c[0], c[1], c[2], a];
+            let plain = |fill: [f32; 4], radius: f32| crate::rect::BoxStyle { radius, fill, border: 0.0, border_color: [0.0; 4] };
+            if let Some((row, a, b, stopped)) = dock_decor.status {
+                let color = if stopped { glyphon_to_rgba(theme.git_modified) } else { glyphon_to_rgba(theme.gutter_fg) };
+                let r = panels::key_cap(DOCK_TEXT_X, char_width, row_y(row), line_height, a, b);
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, plain(faded(color, 0.16), r.h / 2.0));
             }
+            for &(row, a, b) in &dock_decor.caps {
+                let r = panels::key_cap(DOCK_TEXT_X, char_width, row_y(row), line_height, a, b);
+                let outline = faded(glyphon_to_rgba(theme.fg), 0.16);
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, crate::rect::BoxStyle { radius: panels::KEY_RADIUS, fill: theme.input, border: 1.0, border_color: outline });
+            }
+            let last_row = debug_drawer::TITLE_ROW + debug_drawer::LIST_ROWS;
+            for (c, &(x, w)) in dock_decor.columns.iter().enumerate() {
+                let r = panels::card_rect(col_x(x) - pad, w as f32 * char_width + pad * 2.0, text_top, line_height, debug_drawer::TITLE_ROW, last_row);
+                let focus = dock_decor.focused == Some(c);
+                let style = crate::rect::BoxStyle { radius: panels::CARD_RADIUS, fill: theme.card, border: if focus { 1.5 } else { 0.0 }, border_color: if focus { theme.mode_command } else { [0.0; 4] } };
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
+            }
+            if let Some((row, col, width)) = debug_drawer_highlight {
+                let x = col_x(col) - pad * 0.5;
+                bg_rect.push_box(gpu, x, row_y(row), width as f32 * char_width + pad, line_height, plain(theme.selection, panels::KEY_RADIUS));
+            }
+            // As wide as the cards above it.
+            let across = dock_decor.columns.last().map(|&(x, w)| x + w).unwrap_or(dock_cols);
+            let eval = panels::card_rect(col_x(0) - pad, across as f32 * char_width + pad * 2.0, text_top, line_height, debug_drawer::EVAL_ROW, debug_drawer::EVAL_ROW);
+            let typing = dock_decor.typing;
+            bg_rect.push_box(gpu, eval.x, eval.y, eval.w, eval.h, crate::rect::BoxStyle { radius: panels::CARD_RADIUS, fill: theme.input, border: if typing { 1.0 } else { 0.0 }, border_color: if typing { faded(theme.caret, 0.6) } else { [0.0; 4] } });
         }
         if show_terminal {
             let terminal_top = modeline_top - dock_h - terminal_h;
             // Base fill, matching what a "default background" cell
-            // resolves to (`vt100_color`'s own `Default => theme.bg`) --
-            // so an ordinary cell blends seamlessly into the strip
+            // resolves to (`terminal_view`: none of its own, so the page)
+            // -- so an ordinary cell blends seamlessly into the strip
             // rather than needing its own explicit background segment.
-            bg_rect.push_rect(gpu, 0.0, terminal_top, window_width, terminal_h, theme.bg);
-            if let Some((_, bg_segments)) = &terminal_render {
-                for &(row, col_start, col_end, color) in bg_segments {
-                    let x = text::PAD_LEFT + col_start as f32 * char_width;
-                    let y = terminal_top + text::PAD_TOP + row as f32 * line_height;
-                    let w = (col_end - col_start) as f32 * char_width;
-                    bg_rect.push_rect(gpu, x, y, w, line_height, color);
+            let panel = panels::strip_in(look, window_width, terminal_top, terminal_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panel_radius, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
+            if let Some(view) = &terminal_render {
+                let cell_x = |col: usize| text::PAD_LEFT + text::STRIP_INSET + col as f32 * char_width;
+                let row_y = |row: usize| terminal_top + text::PAD_TOP + text::STRIP_INSET / 2.0 + row as f32 * line_height;
+                for &(row, col_start, col_end, color) in &view.backgrounds {
+                    bg_rect.push_rect(gpu, cell_x(col_start), row_y(row), (col_end - col_start) as f32 * char_width, line_height, color);
+                }
+                for &(row, col_start, col_end, color) in &view.underlines {
+                    bg_rect.push_rect(gpu, cell_x(col_start), (row_y(row) + line_height - 2.0).round(), (col_end - col_start) as f32 * char_width, 1.0, color);
+                }
+                if let Some((row, a, b)) = terminal_link {
+                    bg_rect.push_rect(gpu, cell_x(a), (row_y(row) + line_height - 2.0).round(), (b - a) as f32 * char_width, 1.0, theme.caret);
+                }
+                for &(row, col_start, col_end) in &terminal_selection {
+                    bg_rect.push_rect(gpu, cell_x(col_start), row_y(row), (col_end - col_start) as f32 * char_width, line_height, theme.selection);
                 }
             }
-            // A thin divider along the strip's own top edge, same
-            // reasoning as the sidebar's own right-edge divider.
-            bg_rect.push_rect(gpu, 0.0, terminal_top, window_width, 2.0, theme.divider);
         }
-        // Divider lines along every split boundary the layout computed --
-        // drawn from each pane's own right/bottom edge, so two adjacent
-        // panes each contribute one line and they land on top of each
-        // other exactly on the boundary. Skipped for the last column/row
-        // (nothing to divide from past the window edge).
-        for pane in &panes_render {
-            if pane.rect.x + pane.rect.w < pane_area.x + pane_area.w - 0.5 {
-                bg_rect.push_rect(gpu, pane.rect.x + pane.rect.w - 1.0, pane.rect.y, 2.0, pane.rect.h, theme.divider);
+        // Framed, no lines between panes: the tray's gap is the seam. Flat,
+        // the lines it had before 1.4: between panes, along the sidebar's
+        // edge, over the terminal, the debug drawer and the modeline.
+        if look == panels::Look::Flat {
+            for pane in &panes_render {
+                let chrome_h = pane_chrome_height(line_height, pane.has_breadcrumb);
+                let (top, h) = (pane.rect.y - chrome_h, pane.rect.h + chrome_h);
+                if pane.rect.x + pane.rect.w < pane_area.x + pane_area.w - 0.5 {
+                    bg_rect.push_rect(gpu, pane.rect.x + pane.rect.w - 1.0, top, 2.0, h, theme.divider);
+                }
+                if pane.rect.y + pane.rect.h < pane_area.y + pane_area.h - 0.5 {
+                    bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y + pane.rect.h - 1.0, pane.rect.w, 2.0, theme.divider);
+                }
             }
-            if pane.rect.y + pane.rect.h < pane_area.y + pane_area.h - 0.5 {
-                bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y + pane.rect.h - 1.0, pane.rect.w, 2.0, theme.divider);
+            if show_sidebar {
+                bg_rect.push_rect(gpu, sidebar_width - 1.0, 0.0, 2.0, modeline_top - dock_h - terminal_h, theme.divider);
             }
+            if show_terminal {
+                bg_rect.push_rect(gpu, 0.0, modeline_top - dock_h - terminal_h, window_width, 2.0, theme.divider);
+            }
+            if dock_h > 0.0 {
+                bg_rect.push_rect(gpu, 0.0, modeline_top - dock_h, window_width, 2.0, theme.divider);
+            }
+            bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, 1.0, theme.divider);
         }
         // Title-bar backgrounds -- same `bg_modeline` color the modeline
         // itself uses, so a titled pane reads as "a small modeline for
@@ -20765,17 +21021,27 @@ impl App {
         // divider` line closing off the strip's own bottom edge (the
         // divider loop above only draws *between* panes, not under a
         // pane's own title/tab strip).
-        for &(_, rect) in &title_rects {
-            bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+        let top_corners = [panel_radius, panel_radius, 0.0, 0.0];
+        for &(pane, rect) in &title_rects {
+            // A pane with a title rather than tabs: the agents' dock and
+            // the other tool panels. Their title is on the panel itself.
+            let fill = if Some(pane) == composer_pane {
+                theme.input
+            } else if panes_render.iter().any(|p| p.pane == pane && p.tabs_layout.is_empty()) {
+                theme.bg
+            } else {
+                theme.bg_modeline
+            };
+            bg_rect.push_corners(gpu, rect.x, rect.y, rect.w, rect.h, top_corners, fill);
         }
         for pane in &panes_render {
             if pane.tabs_layout.is_empty() {
                 continue;
             }
-            let strip_y = pane.rect.y - title_reserved_height(line_height);
+            let strip_y = pane.rect.y - pane_chrome_height(line_height, pane.has_breadcrumb);
             let strip_h = tab_strip_height(line_height);
             let breadcrumb_y = strip_y + strip_h;
-            let breadcrumb_h = breadcrumb_strip_height(line_height);
+            let breadcrumb_h = if pane.has_breadcrumb { breadcrumb_strip_height(line_height) } else { 0.0 };
             // Breadcrumbs are navigation chrome, but a shade closer to the
             // editing canvas than the tab row -- and, per the design's own
             // `.crumbs-b`, a visibly shorter bar than the tab row above it
@@ -20789,7 +21055,7 @@ impl App {
                 // tab is its bright text over an underline in the mode's
                 // colour -- muted in a pane without the keyboard -- and a
                 // hairline sets Home apart from the tabs after it.
-                bg_rect.push_rect(gpu, pane.rect.x, strip_y, pane.rect.w, strip_h + breadcrumb_h, theme.bg);
+                bg_rect.push_corners(gpu, pane.rect.x, strip_y, pane.rect.w, strip_h + breadcrumb_h, top_corners, theme.bg);
                 bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
                 if let Some(home) = pane.tabs_layout.first() {
                     let x = (home.body.x + home.body.w + 2.0).round();
@@ -20822,7 +21088,9 @@ impl App {
                     bg_rect.push_rect(gpu, x, strip_y, w, 3.0, theme.mode_normal);
                 }
             }
-            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, theme.divider);
+            if pane.has_breadcrumb {
+                bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, theme.divider);
+            }
         }
         // Inline git gutter marks (Part 5) -- a thin colored bar, one per
         // changed line still in view. Sits within the pane's own left
@@ -20938,6 +21206,25 @@ impl App {
                 let active = active_guide.is_some_and(|(row, column)| column == col && first_row <= row && row <= last_row);
                 let color = if active { glyphon_to_rgba(theme.gutter_fg) } else { indent_guide_color };
                 bg_rect.push_rect(gpu, x, y, 1.0, height, color);
+            }
+        }
+        // The focus edge: round the panel with the keyboard, over what's in
+        // it, when there's more than one to tell apart. Framed only; flat
+        // keeps the look it had, the focused pane's title in the accent.
+        let panels_shown = panes_render.len() + usize::from(show_sidebar) + usize::from(show_terminal) + usize::from(dock_h > 0.0);
+        if look == panels::Look::Framed && panels_shown > 1 && overlays_here {
+            let edge_rect = match keyboard_panel {
+                panels::KeyboardPanel::Pane(id) => panes_render.iter().find(|p| p.pane == id).map(|p| {
+                    let chrome_h = pane_chrome_height(line_height, p.has_breadcrumb);
+                    fenix_window::Rect { x: p.rect.x, y: p.rect.y - chrome_h, w: p.rect.w, h: p.rect.h + chrome_h }
+                }),
+                panels::KeyboardPanel::Sidebar => show_sidebar.then(|| panels::sidebar_in(look, sidebar_width, modeline_top - dock_h - terminal_h)),
+                panels::KeyboardPanel::Terminal => show_terminal.then(|| panels::strip_in(look, window_width, modeline_top - dock_h - terminal_h, terminal_h)),
+                panels::KeyboardPanel::Dock => (dock_h > 0.0).then(|| panels::strip_in(look, window_width, modeline_top - dock_h, dock_h)),
+            };
+            if let Some(r) = edge_rect {
+                let style = crate::rect::BoxStyle { radius: panel_radius, fill: [0.0; 4], border: 1.0, border_color: panels::focus_edge(badge_bg) };
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
             }
         }
         // Layered last -- on top of everything else pushed to `bg_rect`
@@ -21288,17 +21575,21 @@ impl App {
         // Every other quad this frame draws, after the surfaces: Home's
         // logo, and the pictures on pages fitted into the cells their page
         // left for them. Resolved back to their surfaces inside the pass.
-        let logo_slot = (|| {
-            let logo = self.home_logo.as_ref()?;
-            logo.texture.as_ref()?;
-            let pane = panes_render.iter().find(|p| p.home.logo.is_some())?;
-            let (row, col, lines) = pane.home.logo.expect("found by it");
-            let (w, h) = (logo.image.width as f32, logo.image.height as f32);
-            let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + col as f32 * char_width;
-            let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
-            let y = top + (lines as f32 * line_height - h) / 2.0;
-            Some(surfaces.push(gpu, (x.round(), y.round(), w, h), crate::surface::FULL, None))
-        })();
+        // In every pane showing a Home, not only the first.
+        let logo_slots: Vec<usize> = match self.home_logo.as_ref().filter(|logo| logo.texture.is_some()) {
+            None => Vec::new(),
+            Some(logo) => panes_render
+                .iter()
+                .filter_map(|pane| {
+                    let (row, col, lines) = pane.home.logo?;
+                    let (w, h) = (logo.image.width as f32, logo.image.height as f32);
+                    let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + col as f32 * char_width;
+                    let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
+                    let y = top + (lines as f32 * line_height - h) / 2.0;
+                    Some(surfaces.push(gpu, (x.round(), y.round(), w, h), crate::surface::FULL, None))
+                })
+                .collect(),
+        };
         let mut picture_draws: Vec<(&crate::page::ImageKey, usize)> = Vec::new();
         for pane in &panes_render {
             for (row, col, rows, cols, key, view) in &pane.home.images {
@@ -21393,7 +21684,8 @@ impl App {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
-            let [r, g, b, a] = theme.bg;
+            // The tray: what shows between the panels -- flat, the page.
+            let [r, g, b, a] = if look == panels::Look::Flat { theme.bg } else { theme.tray };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -21432,8 +21724,8 @@ impl App {
                 }
             }
 
-            if let Some(slot) = logo_slot {
-                if let Some(texture) = self.home_logo.as_ref().and_then(|logo| logo.texture.as_ref()) {
+            if let Some(texture) = self.home_logo.as_ref().and_then(|logo| logo.texture.as_ref()) {
+                for &slot in &logo_slots {
                     surfaces.draw(&mut pass, texture, slot, Blend::Over);
                 }
             }
@@ -21468,11 +21760,9 @@ impl App {
             let with_alpha = |[r, g, b, a]: [f32; 4], alpha: f32| [r, g, b, a * alpha];
             for draw in &popup_draws {
                 let (rect, alpha) = (draw.rect, draw.alpha);
-                if draw.id == popup::PopupId::WhichKey {
-                    if let Some(drawer) = &motion_state.which_key_drawer {
-                        which_key::paint_drawer(popup_rect, gpu, drawer, rect, modeline_top, badge_bg, theme, char_width, line_height, shadows);
-                        continue;
-                    }
+                if let Some(card) = motion_state.cards.get(&draw.id) {
+                    palette::paint(popup_rect, gpu, card, rect, alpha, theme, char_width, line_height, (window_width, window_height), shadows);
+                    continue;
                 }
                 if let popup::PopupId::Toast(slot) = draw.id {
                     if let Some(toast) = toasts.iter().find(|t| t.slot == slot) {
@@ -21512,8 +21802,8 @@ impl App {
             let popup_text: Vec<(popup::PopupId, fenix_window::Rect, (f32, f32), f32)> = popup_rects
                 .iter()
                 .map(|&(id, rect)| {
-                    if id == popup::PopupId::WhichKey {
-                        (id, rect, (which_key::INSET_X, which_key::INSET_Y), modeline_top)
+                    if let Some(card) = motion_state.cards.get(&id) {
+                        (id, rect, palette::inset(card), if id == popup::PopupId::WhichKey { modeline_top } else { f32::MAX })
                     } else if matches!(id, popup::PopupId::Toast(_)) {
                         (id, rect, App::toast_inset(), f32::MAX)
                     } else {
@@ -21788,6 +22078,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                // Ctrl pressed or let go over a terminal's link.
+                self.terminal_hover(self.cursor_pos);
+                if let (Some(pos), Some((w, h))) = (self.cursor_pos, self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))) {
+                    self.update_hover_cursor(pos, w, h);
+                }
             }
             // Alt-Tabbing (or otherwise switching) away from the window
             // while a surface has the keyboard releases it: keys typed
@@ -21821,6 +22116,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
                 self.code_surface_pointer(pos, None);
                 self.code_page_pointer(pos, None);
+                self.terminal_hover(Some(pos));
                 if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
                     self.update_hover_cursor(pos, window_width, window_height);
                 }
@@ -21871,7 +22167,18 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if let Some(pos) = self.cursor_pos {
+                        // A terminal's text: a selection starts, or a
+                        // Ctrl-click follows the link there.
+                        if self.terminal_mouse_press(pos) {
+                            return;
+                        }
                         self.handle_click(pos);
+                    }
+                }
+                // A right click on a terminal copies or pastes.
+                if let (MouseButton::Right, ElementState::Pressed, Some(pos)) = (button, state, self.cursor_pos) {
+                    if self.terminal_right_click(pos) {
+                        return;
                     }
                 }
                 // A right click in text or on a tab: its menu.
@@ -23504,11 +23811,12 @@ index 0000000..1111111 100644
             app.test_insert('\n');
         }
         app.test_set_cursor(Cursor::at_start());
-        for _ in 0..15 {
+        for _ in 0..12 {
             let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
             buffer.move_down(cursor);
         }
-        // Cursor now on line 15; a 10-line viewport wants scroll_line = 6.
+        // Cursor now on line 12; a 10-line viewport wants scroll_line = 3
+        // (a step past the edge, not a jump, which would be centred).
         app.ensure_cursor_visible(10);
         let pane = app.focused_pane_id();
         assert!(app.workspaces.active_scroll_anims().contains_key(&pane)); // mid-ease from that first scroll
@@ -23548,6 +23856,41 @@ index 0000000..1111111 100644
         let ps = app.pane_state(pane);
         assert!(app.workspaces.active_scroll_anims().contains_key(&pane), "still easing");
         assert!(ps.rendered_scroll < ps.scroll_line as f32);
+    }
+
+    /// A jump far off the view lands mid-window, as `zz` puts it; a step
+    /// past the edge scrolls a line; near the end the last line stays at
+    /// the bottom; a cursor in view leaves the view alone.
+    #[test]
+    fn a_far_jump_lands_mid_window_and_a_step_scrolls_a_line() {
+        assert_eq!(scroll_for_cursor(0, 120, 30, 400, false), 105, "far below: centred");
+        assert_eq!(scroll_for_cursor(200, 20, 30, 400, false), 5, "far above too");
+        assert_eq!(scroll_for_cursor(0, 30, 30, 400, false), 1, "j on the last line: one line");
+        assert_eq!(scroll_for_cursor(0, 44, 30, 400, false), 15, "a motion within half a window past the edge: just far enough");
+        assert_eq!(scroll_for_cursor(0, 33, 30, 400, true), 18, "a jump just past the edge: centred all the same");
+        assert_eq!(scroll_for_cursor(10, 20, 30, 400, true), 10, "a jump already in view: stays");
+        assert_eq!(scroll_for_cursor(0, 395, 30, 400, true), 370, "near the end: the last line at the bottom");
+        assert_eq!(scroll_for_cursor(0, 3, 30, 10, true), 0, "a short file never scrolls");
+    }
+
+    /// Opening a file at a line far down -- what a symbol picker, a search
+    /// result or `gd` does -- puts that line in the middle of the pane.
+    #[test]
+    fn a_jump_into_a_file_shows_the_line_in_the_middle_of_the_pane() {
+        let dir = TempDir::new("jump_centre");
+        let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+        let file = dir.write("long.tcl", &text);
+        let mut app = App::with_file(None);
+        app.open_file_from_picker(&file);
+        app.jump_to_grep_match(&fenix_project::GrepMatch { path: file.clone(), line: 151, col: 1, text: String::new() });
+        app.ensure_cursor_visible(20);
+        let scroll = app.pane_state(app.focused_pane_id()).scroll_line;
+        assert_eq!(scroll, 140, "line 151 (row 150) sits ten rows down a 20-row pane");
+        // Just past the bottom edge, as a search result often is: centred
+        // too, where a step down would only scroll a line.
+        app.jump_to_grep_match(&fenix_project::GrepMatch { path: file, line: 162, col: 1, text: String::new() });
+        app.ensure_cursor_visible(20);
+        assert_eq!(app.pane_state(app.focused_pane_id()).scroll_line, 151);
     }
 
     #[test]
@@ -23606,6 +23949,7 @@ index 0000000..1111111 100644
     #[test]
     fn prompt_popup_shows_command_line_while_typing_an_ex_command() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         for ch in [':', 'w', 'q'] {
             app.test_vim_key(KeyPress::char(ch));
         }
@@ -23618,6 +23962,7 @@ index 0000000..1111111 100644
     #[test]
     fn prompt_popup_shows_the_search_query_while_typing_it() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         for ch in ['/', 'f', 'o', 'o'] {
             app.test_vim_key(KeyPress::char(ch));
         }
@@ -23956,6 +24301,19 @@ index 0000000..1111111 100644
         let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 \n~ \n~ ");
+    }
+
+    /// The agents' prompt is a box: no line numbers, no `~` rows under
+    /// what you've written.
+    #[test]
+    fn a_prompt_has_no_gutter_and_no_tildes() {
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_prompt();
+        app.open_buffer_in_focused_pane(id);
+        let ob = app.buffers.get(id).unwrap();
+        assert_eq!(app.gutter_chars(ob), 0);
+        let spans = app.content_spans(ob, 0, 4, 0, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
+        assert!(!spans.iter().any(|(s, _)| s.contains('~')), "{spans:?}");
     }
 
     #[test]
@@ -25594,6 +25952,10 @@ configure_board stm32
         app.project_root = None;
         let code = app.buffers.open_path(&file);
         app.open_buffer_in_focused_pane(code);
+        assert_eq!(app.terminal_start_dir().map(|p| p.canonicalize().unwrap()), Some(dir.0.canonicalize().unwrap()));
+        // From a buffer of no file, still no project: the folder of the
+        // file used last, not Fenix's own.
+        app.new_scratch_buffer();
         assert_eq!(app.terminal_start_dir().map(|p| p.canonicalize().unwrap()), Some(dir.0.canonicalize().unwrap()));
     }
 
@@ -27264,7 +27626,8 @@ configure_board stm32
 
     /// Where on screen the sidebar's cell (`line`, `col`) is.
     fn sidebar_pos(line: usize, col: usize) -> (f32, f32) {
-        (text::PAD_LEFT + col as f32 * text::CHAR_WIDTH + 1.0, text::PAD_TOP + line as f32 * text::LINE_HEIGHT + 1.0)
+        // Where the sidebar draws it: inside its panel (`STRIP_INSET`).
+        (text::PAD_LEFT + text::STRIP_INSET + col as f32 * text::CHAR_WIDTH + 1.0, text::PAD_TOP + text::STRIP_INSET + line as f32 * text::LINE_HEIGHT + 1.0)
     }
 
     #[test]
@@ -27683,7 +28046,8 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.terminal_open = true;
         app.terminal_spawning = true;
-        let (spans, bg_segments) = app.terminal_panel_render().expect("expected a placeholder while spawning");
+        let view = app.terminal_panel_render().expect("expected a placeholder while spawning");
+        let (spans, bg_segments) = (view.spans, view.backgrounds);
         let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
         assert!(joined.contains("Starting shell"));
         assert!(bg_segments.is_empty());
@@ -27693,7 +28057,7 @@ configure_board stm32
     fn terminal_panel_render_shows_real_content_once_a_session_exists() {
         let mut app = App::with_file(None);
         app.toggle_terminal(); // synchronous spawn in a test, see the test above
-        let (spans, _) = app.terminal_panel_render().expect("expected real terminal content");
+        let spans = app.terminal_panel_render().expect("expected real terminal content").spans;
         let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
         assert!(!joined.contains("Starting shell"), "a live session must not still show the placeholder");
     }
@@ -27976,6 +28340,20 @@ configure_board stm32
         assert_eq!(app.gutter_chars(ob), 0);
     }
 
+    /// `terminal.shell` is a program and its arguments, a quoted path
+    /// one word; empty is the platform's own.
+    #[test]
+    fn the_terminal_shell_setting_is_a_program_and_its_arguments() {
+        let mut app = App::with_file(None);
+        assert_eq!(app.terminal_shell(), None, "unset: the platform's");
+        app.config.set_value("terminal.shell", Some(fenix_config::Value::Text("  ".into())));
+        assert_eq!(app.terminal_shell(), None, "empty: the platform's");
+        app.config.set_value("terminal.shell", Some(fenix_config::Value::Text(r#""C:\Program Files\Git\bin\bash.exe" -l"#.into())));
+        assert_eq!(app.terminal_shell(), Some((r"C:\Program Files\Git\bin\bash.exe".to_string(), vec!["-l".to_string()])));
+        app.config.set_value("terminal.shell", Some(fenix_config::Value::Text("pwsh -NoLogo -NoProfile".into())));
+        assert_eq!(app.terminal_shell(), Some(("pwsh".to_string(), vec!["-NoLogo".to_string(), "-NoProfile".to_string()])));
+    }
+
     #[test]
     fn write_terminal_input_is_a_no_op_without_a_live_session() {
         let mut app = App::with_file(None);
@@ -28057,7 +28435,7 @@ configure_board stm32
         type_line(|key| app.write_terminal_input(key), "echo fenix-panel-marker");
 
         let render = |app: &App| {
-            app.terminal_panel_render().map(|(spans, _)| spans.iter().map(|(text, _, _)| text.as_str()).collect::<String>()).unwrap_or_default()
+            app.terminal_panel_render().map(|view| view.spans.iter().map(|(text, _, _)| text.as_str()).collect::<String>()).unwrap_or_default()
         };
         match pump_until(&mut app, TerminalTarget::Panel, reader, "fenix-panel-marker", render) {
             Ok(_) => {}
@@ -28082,7 +28460,7 @@ configure_board stm32
 
         let render = move |app: &App| match app.terminal_buffers.get(&id) {
             Some(state) => {
-                let (spans, _) = app.terminal_row_spans(state.session.screen());
+                let spans = app.terminal_row_spans(state.session.screen()).spans;
                 spans.iter().map(|(text, _, _)| text.as_str()).collect::<String>()
             }
             None => String::new(),
@@ -28107,17 +28485,6 @@ configure_board stm32
             }
         }
         out
-    }
-
-    #[test]
-    fn encode_terminal_key_covers_printable_chars_and_common_control_sequences() {
-        assert_eq!(encode_terminal_key(KeyPress::char('a')), Some(b"a".to_vec()));
-        assert_eq!(encode_terminal_key(KeyPress::char('c').with_ctrl()), Some(vec![0x03])); // Ctrl-C
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Enter)), Some(b"\r".to_vec()));
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Backspace)), Some(vec![0x7f]));
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Escape)), Some(vec![0x1b]));
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Left)), Some(b"\x1b[D".to_vec()));
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Up)), Some(b"\x1b[A".to_vec()));
     }
 
     #[test]
@@ -28149,6 +28516,50 @@ configure_board stm32
             Some(fenix_window::Rect { x: 0.0, y: modeline_top - terminal_h, w: 800.0, h: terminal_h })
         );
         assert_eq!(geometry.panes.len(), 1); // no splits yet
+    }
+
+    /// Framed, each pane is inset on the tray; flat (`appearance.panels`),
+    /// it's the layout's rect edge to edge, as before 1.4, and a click
+    /// still lands on the pane drawn there either way.
+    #[test]
+    fn panes_are_framed_on_the_tray_or_flat_edge_to_edge() {
+        let mut app = App::with_file(None);
+        let first = app.windows().focused_id();
+        app.split_vertical();
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let layout = app.windows().layout(fenix_window::Rect { x: 0.0, y: 0.0, w: 800.0, h: modeline_top - terminal_h });
+        let framed = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        assert_eq!(app.panel_look(), panels::Look::Framed, "framed unless set");
+        for ((id, raw), (_, drawn)) in layout.iter().zip(&framed.panes) {
+            assert!(drawn.x > raw.x && drawn.w < raw.w, "{id:?} inset: {drawn:?} in {raw:?}");
+        }
+        app.config.set_value("appearance.panels", Some(fenix_config::Value::Text("flat".into())));
+        assert_eq!(app.panel_look(), panels::Look::Flat);
+        let flat = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        assert_eq!(flat.panes, layout, "edge to edge");
+        let first_rect = flat.panes.iter().find(|(id, _)| *id == first).unwrap().1;
+        app.handle_click_at((first_rect.x + 2.0, first_rect.y + 30.0), 800.0, 600.0);
+        assert_eq!(app.windows().focused_id(), first, "a click at its very edge is the pane's");
+    }
+
+    /// The focus edge follows the keyboard: the pane clicked or moved to,
+    /// the terminal panel while it's typed in, the sidebar while it is.
+    #[test]
+    fn the_focus_edge_follows_the_keyboard() {
+        let mut app = App::with_file(None);
+        let first = app.windows().focused_id();
+        app.split_vertical();
+        let second = app.windows().focused_id();
+        let edge = |app: &App| panels::keyboard_panel(app.windows().focused_id(), app.terminal_focused && app.terminal_open, app.sidebar_focused, app.debug_drawer_focused());
+        assert_eq!(edge(&app), panels::KeyboardPanel::Pane(second));
+        app.windows_mut().focus(first);
+        assert_eq!(edge(&app), panels::KeyboardPanel::Pane(first));
+        app.terminal_open = true;
+        app.terminal_focused = true;
+        assert_eq!(edge(&app), panels::KeyboardPanel::Terminal);
+        app.terminal_focused = false;
+        app.sidebar_focused = true;
+        assert_eq!(edge(&app), panels::KeyboardPanel::Sidebar);
     }
 
     #[test]
@@ -29600,11 +30011,63 @@ configure_board stm32
         let Some(ActivePicker::Commands(state)) = &app.active_picker else { panic!("the palette") };
         assert_eq!(state.len(), app.commands().iter().count() - 1, "every command but the palette");
         let rows: Vec<String> = state.visible_rows(0, 3).map(|(_, c)| c.label.clone()).collect();
-        assert!(rows[0].contains("file.save") && rows[0].contains("SPC f s"), "{rows:?}");
-        assert!(rows[1].contains("window.split_vertical") && rows[1].contains("SPC w v"), "{rows:?}");
+        assert!(rows[0].starts_with("Files › Save") && rows[0].ends_with("file.save"), "{rows:?}");
+        assert!(rows[1].contains("window.split_vertical"), "{rows:?}");
         app.picker_confirm();
         assert_eq!(app.queued_command.as_deref(), Some("file.save"));
         assert!(app.active_picker.is_none());
+    }
+
+    /// Typing an area puts its commands first, matches names and ids word
+    /// by word, a description only by whole words, and nothing whose
+    /// letters are just scattered across it.
+    #[test]
+    fn the_palette_ranks_by_name_and_area() {
+        let mut app = App::with_file(None);
+        app.open_command_palette();
+        for c in "git".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let Some(ActivePicker::Commands(state)) = &app.active_picker else { panic!("the palette") };
+        let ids: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.payload.clone()).collect();
+        assert!(ids[..10].iter().all(|id| id.starts_with("git.")), "Git's first: {:?}", &ids[..10]);
+        assert!(!ids.iter().any(|id| id == "debug.breakpoint_hits"), "not by scattered letters");
+        assert!(ids.len() < 60, "{} matches", ids.len());
+        app.picker_cancel();
+        app.open_command_palette();
+        for c in "hit count".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let Some(ActivePicker::Commands(state)) = &app.active_picker else { panic!("the palette") };
+        assert_eq!(state.selected().map(|c| c.payload.as_str()), Some("debug.breakpoint_hits"), "found by its description's words");
+    }
+
+    /// The palette's view of the commands: area › name, the description
+    /// under it, keys on caps, the details beside; one that can't run
+    /// here faded, with why.
+    #[test]
+    fn the_palettes_view_of_a_command() {
+        let mut app = App::with_file(None);
+        app.open_command_palette();
+        for c in "git".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let view = app.palette_view(30).expect("a view");
+        let palette::Body::List(rows) = &view.body else { panic!("a list") };
+        assert_eq!(rows[0].area.as_deref(), Some("Git"));
+        assert_eq!(rows[0].section.as_ref().map(|s| s.0.as_str()), Some("Git"));
+        assert!(rows.iter().any(|r| r.keys.as_deref().is_some_and(|k| k.starts_with("SPC g "))), "keys from the keymap: {rows:?}");
+        assert!(matches!(&view.side, Some(palette::Side::Details { .. })));
+        assert!(view.chips.iter().any(|(t, accent)| *accent && t.ends_with("in Git")));
+        app.picker_cancel();
+        app.open_command_palette();
+        for c in "xml".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let view = app.palette_view(30).unwrap();
+        let palette::Body::List(rows) = &view.body else { panic!("a list") };
+        let xml = rows.iter().find(|r| r.title.contains("well-formed") || r.title.contains("XML")).expect("an XML command");
+        assert!(xml.dimmed && xml.detail.as_deref() == Some("Not an XML file"), "{xml:?}");
     }
 
     #[test]
@@ -29744,8 +30207,8 @@ configure_board stm32
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
                 let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-                assert_eq!(labels[0], b.display().to_string());
-                assert!(labels.contains(&a.display().to_string().as_str()));
+                assert_eq!(labels[0], home_relative(&b), "outside a project: the whole path, from ~ when under it");
+                assert!(labels.contains(&home_relative(&a).as_str()));
             }
             _ => panic!("expected picker_switch_buffer to open a SwitchBuffer picker"),
         }
@@ -29759,8 +30222,39 @@ configure_board stm32
         app.picker_switch_buffer();
         let Some(ActivePicker::SwitchBuffer(state)) = &app.active_picker else { panic!("expected a SwitchBuffer picker") };
         let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-        assert!(labels.contains(&"*new project*"), "{labels:?}");
-        assert!(!labels.contains(&"*scratch*"), "{labels:?}");
+        assert!(labels.contains(&"New project"), "by its tab's name: {labels:?}");
+        assert!(!labels.contains(&"scratch"), "{labels:?}");
+    }
+
+    /// Each pane's Home and the empty scratches are listed once; a second
+    /// scratch with something in it is `scratch 2`.
+    #[test]
+    fn picker_switch_buffer_lists_lookalikes_once() {
+        // However the root and the file were spelt, a file in the project
+        // is by its place in it.
+        assert_eq!(path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
+        assert_eq!(path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
+        let mut homes = App::with_file(None);
+        // A second Home, as a session restored with one a pane can have.
+        let other = homes.new_home_buffer();
+        let mut ids = homes.buffers.mru().to_vec();
+        if !ids.contains(&other) {
+            ids.push(other);
+        }
+        assert!(ids.iter().filter(|id| homes.buffers.get(**id).is_some_and(|ob| ob.kind == BufferKind::Dashboard)).count() >= 2, "a Home a pane");
+        let names: Vec<String> = homes.buffer_candidates(&ids).into_iter().map(|c| c.label).collect();
+        assert_eq!(names.iter().filter(|n| **n == homes.workspaces.active_workspace().name).count(), 1, "one Home: {names:?}");
+        assert!(!names.iter().any(|n| n == "home"), "{names:?}");
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.new_scratch_buffer();
+        app.new_scratch_buffer();
+        app.test_insert('x');
+        app.picker_switch_buffer();
+        let Some(ActivePicker::SwitchBuffer(state)) = &app.active_picker else { panic!() };
+        let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+        assert_eq!(labels.iter().filter(|l| l.starts_with("scratch")).count(), 2, "the one written in, and one empty: {labels:?}");
+        assert!(labels.contains(&"scratch") && labels.contains(&"scratch 2"), "{labels:?}");
     }
 
     #[test]
@@ -29770,19 +30264,17 @@ configure_board stm32
         app.picker_switch_buffer();
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
-                assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "*scratch*");
+                assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "scratch");
             }
             _ => panic!("expected a SwitchBuffer picker"),
         }
 
         app.test_insert('x'); // now dirty
         app.picker_switch_buffer();
-        match &app.active_picker {
-            Some(ActivePicker::SwitchBuffer(state)) => {
-                assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "+ *scratch*");
-            }
-            _ => panic!("expected a SwitchBuffer picker"),
-        }
+        let view = app.palette_view(20).expect("the buffer picker's card");
+        let palette::Body::List(rows) = view.body else { panic!() };
+        assert_eq!(rows[0].title, "scratch");
+        assert_eq!(rows[0].right, "unsaved", "its changes said at the right");
     }
 
     #[test]
@@ -30687,6 +31179,33 @@ configure_board stm32
     /// requests sent through `session.client` actually reach anything
     /// alive doesn't matter here -- only the dispatch logic on the
     /// receiving side is under test.
+    /// A narrow column's hint wraps in it rather than stopping after a
+    /// few words; a value too long for its column is shown whole on the
+    /// drawer's bottom line while it's selected.
+    #[test]
+    fn the_drawer_wraps_its_hints_and_shows_a_cut_value_whole() {
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+        let dock: String = app.debug_dock_spans(100).into_iter().map(|(text, _, _)| text).collect();
+        let squeezed: String = dock.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(squeezed.contains("SPC u P pins one"), "the Watches hint whole, over its rows: {dock}");
+        let long = format!("b'{}'", "\\x0c".repeat(40));
+        {
+            let s = app.debug_session.as_mut().unwrap();
+            s.stopped_thread = Some(1);
+            s.variables = vec![debug_drawer::DebugScope::of("Locals", &[("raw", long.as_str())])];
+        }
+        app.debug_dock_open = true;
+        app.debug_drawer.focused = true;
+        app.debug_drawer.column = 1;
+        let rows = app.debug_drawer_rows(debug_drawer::Column::Variables);
+        let at = rows.iter().position(|(t, _)| t.contains("raw")).unwrap();
+        app.debug_drawer.selected[1] = at;
+        let dock: String = app.debug_dock_spans(100).into_iter().map(|(text, _, _)| text).collect();
+        let bottom = dock.lines().last().unwrap_or("");
+        assert!(bottom.starts_with("› ") && bottom.contains("raw = b'"), "the selected value on the bottom line: {bottom}");
+    }
+
     fn debug_test_session(app: &mut App) {
         let dir = TempDir::new("debug_session_probe");
         // A process that stays alive: requests the test makes must reach it.
@@ -30882,7 +31401,7 @@ configure_board stm32
         }
         app.refresh_debug_panes();
         assert_eq!(app.debug_marks(buffer, &[0, 1, 2], 3), vec![(2, debug_host::DebugMark::StopOnBreakpoint(debug_breakpoints::BreakpointLook::Plain))]);
-        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { crate::decorations::Look::Text { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
+        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { crate::decorations::Look::Chip { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
         assert_eq!(texts, vec!["a = 1", "b = 2"], "a on the def line, b on its last line above the stop");
         app.apply_dap_event(fenix_dap::DapEvent::Event(fenix_dap::events::Event::Continued(fenix_dap::events::ContinuedEventBody::builder().thread_id(1).build())));
         assert!(app.code_decorations(buffer).is_empty(), "running: no values");
@@ -30941,7 +31460,7 @@ configure_board stm32
         app.debug_scopes_came(on, 20, vec![dap_scope("Locals", 3)]);
         app.debug_variables_came(on, 20, vec!["Locals".into()], vec![dap_var("rows", "[]", 0), dap_var("o", "Order(2)", 8)]);
         assert!(asked_vars(&app).contains(&(20, vec!["Locals".to_string(), "o".to_string()])), "o stays open");
-        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { crate::decorations::Look::Text { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
+        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { crate::decorations::Look::Chip { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
         assert_eq!(texts, vec!["rows = []"], "main's values, in caller.py");
         let stack: Vec<String> = app.debug_drawer_rows(debug_drawer::Column::Stack).into_iter().map(|(t, _)| t).collect();
         assert_eq!(stack, ["  run  callee.py:3", "▸ main  caller.py:2"]);
@@ -30978,7 +31497,8 @@ configure_board stm32
         trail_stop(&mut app, &file, 3, &[("total", "0"), ("i", "0")]);
         trail_stop(&mut app, &file, 3, &[("total", "1"), ("i", "1")]);
         let looks: Vec<Look> = app.code_decorations(buffer).into_iter().map(|d| d.look.clone()).collect();
-        assert!(looks.contains(&Look::Text { text: "1".into(), role: crate::page::Role::Warn, after: true }), "{looks:?}");
+        assert!(looks.contains(&Look::Chip { text: "total = 1".into(), role: crate::page::Role::Warn }), "a changed value on a chip of its own: {looks:?}");
+        assert!(looks.contains(&Look::Chip { text: "i = 1".into(), role: crate::page::Role::Warn }), "{looks:?}");
         assert!(looks.contains(&Look::Struck("0".into())), "{looks:?}");
         let marks = app.debug_trail_marks(buffer, &[0, 1, 2], 3);
         assert_eq!(marks.iter().map(|(row, c)| (*row, c[3])).collect::<Vec<_>>(), [(2, 1.0)]);
@@ -30988,13 +31508,21 @@ configure_board stm32
         app.debug_trail_scrub(false, 1);
         assert_eq!(app.debug_trail.viewing, Some(0));
         assert!(app.debug_modeline_segment().contains("stop 1/2"), "{}", app.debug_modeline_segment());
-        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { Look::Text { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
+        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { Look::Chip { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
         assert_eq!(texts, ["total = 0", "i = 0"], "the first stop, as it was");
         assert!(app.debug_trail_key(KeyPress::named(FenixNamedKey::Enter)));
         assert_eq!(app.debug_trail.viewing, None);
         app.debug_trail_scrub(false, 1);
         app.debug_trail_scrub(true, 1);
         assert_eq!(app.debug_trail.viewing, None, "]t past the newest is now");
+
+        // Ended: the breadcrumb is back under the tabs, and `[t` still
+        // goes back along the trail, showing it again.
+        app.debug_session.as_mut().unwrap().ended = true;
+        assert!(app.debug_ribbon_spans().is_none(), "no ribbon once the session's over");
+        app.debug_trail_scrub(false, 1);
+        assert!(app.debug_ribbon_spans().is_some(), "looking back along the trail shows it");
+        app.debug_trail_now();
 
         // Restarted: the trail stays, dim.
         debug_test_session(&mut app);
@@ -33774,21 +34302,27 @@ configure_board stm32
     }
 
     #[test]
-    fn picker_row_spans_shows_the_query_prompt_and_flags_the_selected_row() {
-        let candidates =
-            vec![fenix_picker::Candidate::new("a.txt", PathBuf::from("a.txt")), fenix_picker::Candidate::new("b.txt", PathBuf::from("b.txt"))];
-        let app = App::with_file(None);
-        let picker = ActivePicker::FindFile(fenix_picker::PickerState::new(candidates));
-
-        let (spans, selected_row) = app.picker_row_spans(&picker, 5);
-        assert_eq!(selected_row, Some(1)); // row 0 is the prompt, row 1 the first candidate
-        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        assert!(joined.starts_with("> "));
-        assert!(joined.contains("a.txt"));
-        assert!(joined.contains("b.txt"));
+    fn the_palette_shows_a_pickers_rows_the_selected_one_and_a_preview() {
+        let dir = TempDir::new("palette_rows");
+        let a = dir.write("a.txt", "first line\nsecond line\n");
+        let b = dir.touch("b.txt");
+        let candidates = vec![fenix_picker::Candidate::new("a.txt", a), fenix_picker::Candidate::new("b.txt", b)];
+        let mut app = App::with_file(None);
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        let view = app.palette_view(20).expect("a view");
+        let palette::Body::List(rows) = &view.body else { panic!("a list") };
+        assert_eq!(rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["a.txt", "b.txt"]);
+        assert!(rows[0].selected && !rows[1].selected);
+        assert!(rows[0].icon.is_some(), "a file's icon");
+        let Some(palette::Side::Preview { lines, .. }) = &view.side else { panic!("a preview") };
+        assert_eq!(lines, &["first line", "second line"]);
+        // Another picker, the generic look: its labels, nothing beside.
+        app.picker_pick_theme();
+        let view = app.palette_view(20).unwrap();
+        assert!(view.side.is_none() && view.chips[0].0 == "Themes");
     }
 
-    // -- Tool status (`SPC l m`) -------------------------------------------
+        // -- Tool status (`SPC l m`) -------------------------------------------
 
     #[test]
     fn open_tool_status_panel_opens_a_tool_status_buffer_in_a_new_workspace() {
@@ -34256,9 +34790,26 @@ configure_board stm32
         assert!(!app.modeline_pieces().1.contains("fresh"));
     }
 
+    /// A page's modeline names it as its tab does, with no line and
+    /// column, and doesn't end on a separator.
+    #[test]
+    fn a_pages_modeline_has_no_caret_place_or_dangling_dot() {
+        let mut app = App::with_file(None);
+        app.open_extensions_page();
+        let suffix = app.modeline_pieces().1;
+        assert!(!suffix.contains("Ln ") && !suffix.contains('*'), "{suffix:?}");
+        let theme = &app.theme;
+        let spans = modeline_suffix_spans(&suffix, theme, theme.fg_modeline);
+        let line: String = spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(!line.trim_end().ends_with('·'), "{line:?}");
+        let spans = modeline_suffix_spans("a.rs   Ln 1, Col 1   Rust   LF ", theme, theme.fg_modeline);
+        assert_eq!(spans.iter().filter(|(t, _)| t == " · ").count(), 3);
+    }
+
     #[test]
     fn an_expired_message_falls_back_to_the_ordinary_modeline() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         app.set_message("stale");
         app.status_message.as_mut().unwrap().set_at = Instant::now() - MESSAGE_DURATION * 2;
         assert!(app.modeline_pieces().1.contains("Ln 1, Col"));

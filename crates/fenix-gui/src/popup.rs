@@ -66,6 +66,13 @@ pub enum PopupId {
     /// A notification's toast, by its slot (0 nearest its corner): any
     /// number may show with any of the others, each in its own place.
     Toast(u8),
+    /// The open picker, as the palette (`app/palette.rs`): a card over
+    /// the dimmed editor. It has the keyboard, so nothing above shows
+    /// beside it but a toast.
+    Palette,
+    /// The leader's menu (and the local leader's), as the palette.
+    /// `WhichKey` is Vim's own prefixes' hint bar.
+    Leader,
 }
 
 /// Where a popup wants to appear, before clamping to the window.

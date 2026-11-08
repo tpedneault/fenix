@@ -203,6 +203,8 @@ impl App {
             }
             _ => {
                 page.edit(Field::Query);
+                // Opened again: the last query selected, for typing over.
+                page.query_selected = existing.is_some() && !page.query.text.is_empty();
                 !page.query.text.is_empty()
             }
         };

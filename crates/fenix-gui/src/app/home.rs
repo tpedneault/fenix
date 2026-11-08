@@ -40,11 +40,27 @@ pub(super) struct HomeOverlay {
     /// Hairlines down the page: (cell, first row, which may be above the
     /// pane; rows).
     pub(super) vertical_rules: Vec<(usize, isize, usize)>,
+    /// Cards behind lines: (first row, which may be above the pane;
+    /// rows; first cell; end cell; fill; outline, if it has one).
+    /// Whether it keeps to its own rows rather than standing off them: a
+    /// selected row among others.
+    pub(super) cards: Vec<(isize, usize, usize, usize, [f32; 4], Option<[f32; 4]>, bool)>,
+    /// Chips behind cells: (row, first cell, end cell, fill, outline,
+    /// whether it's a pill rather than a key's cap).
+    pub(super) chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>, bool)>,
+    /// Switches' knobs: (row, first cell, end cell, on).
+    pub(super) switches: Vec<(usize, usize, usize, bool)>,
+    /// A commit graph's rows: (row, first cell, end cell, the graph's
+    /// lanes, its marks in their colours).
+    pub(super) graph: Vec<GraphRowDraw>,
 }
 
 /// (row, first cell, end cell, colour) -- the shape `PaneRender`'s
 /// `colored_bg_segments` takes.
 pub(super) type BgSegments = Vec<(usize, usize, usize, [f32; 4])>;
+
+/// One row of a commit graph as `HomeOverlay::graph` holds it.
+pub(super) type GraphRowDraw = (usize, usize, usize, usize, Vec<(crate::page::GraphMark, [f32; 4])>);
 
 /// "now", "5 min", "3 h", "2 d", "6 w".
 fn age(modified: Option<std::time::SystemTime>) -> String {

@@ -60,6 +60,50 @@ pub(super) fn shade_color(theme: &Theme, shade: crate::page::Shade) -> [f32; 4] 
     }
 }
 
+/// A card's fill and outline in `theme`.
+pub(super) fn card_colors(theme: &Theme, look: crate::page::CardLook) -> ([f32; 4], Option<[f32; 4]>) {
+    use crate::page::CardLook;
+    match look {
+        CardLook::Plain => (theme.card, None),
+        CardLook::Input => (theme.input, None),
+        CardLook::Ask => (theme.card, Some([theme.caret[0], theme.caret[1], theme.caret[2], 0.6])),
+        CardLook::Field => (theme.input, Some(faded_fg(theme, 0.10))),
+        CardLook::FieldFocused => (theme.input, Some([theme.caret[0], theme.caret[1], theme.caret[2], 0.6])),
+        CardLook::Selected => ([theme.mode_command[0], theme.mode_command[1], theme.mode_command[2], 0.10], Some([theme.mode_command[0], theme.mode_command[1], theme.mode_command[2], 0.45])),
+    }
+}
+
+/// The text's colour at `alpha`: a faint outline that reads on any surface.
+fn faded_fg(theme: &Theme, alpha: f32) -> [f32; 4] {
+    let c = glyphon_to_rgba(theme.fg);
+    [c[0], c[1], c[2], alpha]
+}
+
+/// A chip's fill and outline in `theme`: a key's cap is an input's
+/// surface, outlined faintly so it shows on a card as on the page; the
+/// chosen key and a status are their colour, faded, so their text (in
+/// that colour) still reads on them.
+pub(super) fn chip_color(theme: &Theme, chip: crate::page::Chip) -> ([f32; 4], Option<[f32; 4]>) {
+    use crate::page::Chip;
+    let faded = |c: [f32; 4], a: f32| [c[0], c[1], c[2], a];
+    match chip {
+        Chip::Key => (theme.input, Some(faded(glyphon_to_rgba(theme.fg), 0.16))),
+        Chip::Chosen => (faded(theme.caret, 0.22), Some(faded(theme.caret, 0.55))),
+        Chip::Status(role) => (faded(glyphon_to_rgba(role_color(theme, role)), 0.16), None),
+        Chip::Toggle(true) => (faded(theme.mode_command, 0.16), Some(faded(theme.mode_command, 0.5))),
+        Chip::Toggle(false) => ([0.0; 4], None),
+        Chip::Badge | Chip::Value => (theme.input, None),
+        // Its track; the knob is drawn over it (`HomeOverlay::switches`).
+        Chip::Switch(on) => (if on { faded(glyphon_to_rgba(theme.git_staged), 0.35) } else { theme.input }, (!on).then(|| faded(glyphon_to_rgba(theme.fg), 0.16))),
+    }
+}
+
+/// Whether a chip is a pill (round ends) rather than a key's cap.
+pub(super) fn chip_is_pill(chip: crate::page::Chip) -> bool {
+    use crate::page::Chip;
+    matches!(chip, Chip::Status(_) | Chip::Toggle(_) | Chip::Badge | Chip::Switch(_))
+}
+
 pub(super) enum PageModel {
     Wizard(Wizard),
     Hub(Hub),
@@ -389,7 +433,7 @@ impl App {
                 None => "*files*".to_string(),
             },
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
-            Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
+            Some(PageModel::Log(l)) => format!("*log: {}*", l.tab_name()),
             Some(PageModel::Compare(c)) => format!("*compare: {}*", c.target),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
             Some(PageModel::Snippets(_)) => "*snippets*".to_string(),
@@ -547,12 +591,21 @@ impl App {
         let Some(state) = self.pages.get_mut(&id) else { return };
         let focus = state.page.focus.as_ref().map(|(line, _)| *line);
         let was = std::mem::replace(&mut state.last_focus, focus);
+        // Never scrolled further than the page needs: a pane that grew
+        // (the agents' dock with its drawer hidden) shows the lines above
+        // rather than blank rows below.
+        let most = state.page.text.lines().count().saturating_sub(visible);
         if let (Some(before), Some(now)) = (was, focus) {
             if now < before && now + 2 <= visible {
                 let ps = self.pane_state_mut(pane);
                 ps.scroll_line = 0;
                 ps.rendered_scroll = 0.0;
             }
+        }
+        let ps = self.pane_state_mut(pane);
+        if ps.scroll_line > most {
+            ps.scroll_line = most;
+            ps.rendered_scroll = ps.rendered_scroll.min(most as f32);
         }
     }
 
@@ -999,30 +1052,45 @@ impl App {
         let theme = self.theme;
         let color = |role: PageRole| role_color(theme, role);
         let last = first_line + rows;
-        let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = state
-            .page
-            .spans
-            .iter()
-            .filter(|s| s.line >= first_line && s.line <= last && s.line < ob.buffer.line_count())
-            .map(|s| {
-                let start = ob.buffer.line_start_char(s.line);
+        // Each line looked up once -- where it starts and its characters'
+        // byte offsets -- not once a span: a page has several spans a
+        // line, and the rope's lookups are what this pass costs.
+        let mut lines: HashMap<usize, (usize, Vec<usize>)> = HashMap::new();
+        let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = Vec::with_capacity(state.page.spans.len());
+        for s in state.page.spans.iter().filter(|s| s.line >= first_line && s.line <= last && s.line < ob.buffer.line_count()) {
+            let (start, offsets) = lines.entry(s.line).or_insert_with(|| {
+                let start = ob.buffer.char_to_byte(ob.buffer.line_start_char(s.line));
                 let len = ob.buffer.line_len(s.line);
-                let a = ob.buffer.char_to_byte(start + s.cols.start.min(len));
-                let b = ob.buffer.char_to_byte(start + s.cols.end.min(len));
-                (a..b, color(s.role))
-            })
-            .filter(|(r, _)| r.start < r.end)
-            .collect();
+                let text: String = ob.buffer.line(s.line).chars().take(len).collect();
+                let mut offsets: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+                offsets.push(text.len());
+                (start, offsets)
+            });
+            let at = |col: usize| *start + offsets[col.min(offsets.len() - 1)];
+            let (a, b) = (at(s.cols.start), at(s.cols.end));
+            if a < b {
+                ranges.push((a..b, color(s.role)));
+            }
+        }
         ranges.sort_by_key(|(r, _)| r.start);
         // A character is one colour: a range that overlaps the one before
-        // it is cut to start after it (the renderer would draw it twice).
+        // it is cut to start after it (the renderer would draw it twice);
+        // one touching the one before in the same colour joins it, so
+        // there's less to shape.
+        let mut out: Vec<(std::ops::Range<usize>, glyphon::Color)> = Vec::with_capacity(ranges.len());
         let mut end = 0;
-        ranges.retain_mut(|(r, _)| {
+        for (mut r, c) in ranges {
             r.start = r.start.max(end);
+            if r.start >= r.end {
+                continue;
+            }
             end = end.max(r.end);
-            r.start < r.end
-        });
-        ranges
+            match out.last_mut() {
+                Some((prev, pc)) if prev.end == r.start && *pc == c => prev.end = r.end,
+                _ => out.push((r, c)),
+            }
+        }
+        out
     }
 
     /// The page's backgrounds -- the focused rows' tint and rail, a field
@@ -1081,6 +1149,46 @@ impl App {
             .map(|(col, lines)| (*col, lines.start as isize - first_line as isize, lines.len()))
             .collect();
         overlay.rule_color = home::home_rule(theme);
+        // Cards and chips: the page's own boxes, in the theme's panel
+        // surfaces (`Theme::card`, `Theme::input`).
+        overlay.cards = state
+            .page
+            .cards
+            .iter()
+            .filter(|c| c.lines.end > first_line && c.lines.start <= first_line + rows)
+            .map(|c| {
+                let map = state.page.cells(c.lines.start);
+                let (a, b) = (crate::page::cell_of(map.as_deref(), c.cols.start), crate::page::cell_of(map.as_deref(), c.cols.end));
+                let (fill, outline) = card_colors(theme, c.look);
+                (c.lines.start as isize - first_line as isize, c.lines.len(), a, b, fill, outline, c.look == crate::page::CardLook::Selected)
+            })
+            .collect();
+        overlay.chips = state
+            .page
+            .chips
+            .iter()
+            .filter_map(|(line, cols, chip)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); let (fill, outline) = chip_color(theme, *chip); (row, a, b, fill, outline, chip_is_pill(*chip)) }))
+            .collect();
+        overlay.graph = state
+            .page
+            .graph
+            .iter()
+            .filter_map(|s| {
+                let row = visible(s.line)?;
+                let (a, b) = cells(s.line, &s.cols);
+                let marks = s.marks.iter().map(|m| (*m, glyphon_to_rgba(role_color(theme, m.role())))).collect();
+                Some((row, a, b, s.lanes, marks))
+            })
+            .collect();
+        overlay.switches = state
+            .page
+            .chips
+            .iter()
+            .filter_map(|(line, cols, chip)| match chip {
+                crate::page::Chip::Switch(on) => visible(*line).map(|row| { let (a, b) = cells(*line, cols); (row, a, b, *on) }),
+                _ => None,
+            })
+            .collect();
         overlay.images = state
             .page
             .images
@@ -1747,6 +1855,22 @@ mod tests {
         }
     }
 
+    /// A pane that grows doesn't leave a page scrolled past its end, its
+    /// first lines off the top and blank rows below.
+    #[test]
+    fn a_page_is_never_scrolled_past_its_end() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(crate::settings_page::Scope::You, None);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.ensure_page_layout(id, pane, 160);
+        let lines = app.pages[&id].page.text.lines().count();
+        app.pane_state_mut(pane).scroll_line = lines;
+        app.page_scroll_to_top(id, pane, 10);
+        assert_eq!(app.pane_state(pane).scroll_line, lines - 10, "its last screenful");
+        app.page_scroll_to_top(id, pane, lines + 20);
+        assert_eq!(app.pane_state(pane).scroll_line, 0, "it all fits: from the top");
+    }
+
     #[test]
     fn a_page_shows_from_its_top_when_its_selection_moves_back_up() {
         let mut app = App::with_file(None);
@@ -1761,12 +1885,38 @@ mod tests {
         app.ensure_page_layout(id, pane, 160);
         app.page_scroll_to_top(id, pane, 40);
         app.pane_state_mut(pane).scroll_line = 3;
-        app.page_scroll_to_top(id, pane, 40);
+        // A pane shorter than the page, so 3 lines down is a place it can be.
+        let short = app.pages[&id].page.text.lines().count() - 3;
+        app.page_scroll_to_top(id, pane, short.min(40));
         assert_eq!(app.pane_state(pane).scroll_line, 3, "no move: the page stays where it was put");
         app.page_key(KeyPress::char('k'));
         app.ensure_page_layout(id, pane, 160);
         app.page_scroll_to_top(id, pane, 40);
         assert_eq!(app.pane_state(pane).scroll_line, 0, "back up in the first screenful: the top");
+    }
+
+    /// A page's colours come out in order, apart, on character
+    /// boundaries (its "›" and "·" are several bytes), and touching
+    /// ranges of one colour as one.
+    #[test]
+    fn a_pages_colours_are_ordered_apart_and_joined() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(crate::settings_page::Scope::You, None);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.ensure_page_layout(id, pane, 160);
+        let ranges = app.page_highlights(id, 0, 60);
+        assert!(!ranges.is_empty());
+        let text = app.buffers.get(id).unwrap().buffer.text();
+        for pair in ranges.windows(2) {
+            let ((a, ca), (b, cb)) = (&pair[0], &pair[1]);
+            assert!(a.end <= b.start, "apart: {a:?} {b:?}");
+            assert!(!(a.end == b.start && ca == cb), "touching in one colour are one: {a:?} {b:?}");
+        }
+        for (r, _) in &ranges {
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end), "{r:?}");
+        }
+        let at = text.find("Indent width").unwrap();
+        assert!(ranges.iter().any(|(r, _)| r.start <= at && at < r.end), "a setting's name is coloured");
     }
 
     #[test]
