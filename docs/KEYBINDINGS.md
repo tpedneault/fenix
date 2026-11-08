@@ -127,6 +127,7 @@ the other way round after `\v`.
 | `SPC d p` / `SPC d b` | Its performance page / build the project's `Dockerfile` |
 | `SPC ,` | Every setting, on one page -- search, change, reset |
 | `SPC :` / `Alt-x` | Run any command by name (the command palette) |
+| In the command palette: `Tab` / `C-y` | Give the selected command a key / copy its id |
 | `SPC h T` | The tutorial: Fenix's keys, a lesson at a time, each in a practice buffer |
 | `SPC h x` / `SPC h w` | The Extensions page / the welcome's packs |
 | `SPC h k` / `SPC h c` | Say what a key runs / what a command does |

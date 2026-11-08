@@ -42,6 +42,28 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lists its own (`[terminal] ansi`). Bold, dim, italic, underline and inverse
   are drawn, so PowerShell's menu completion shows the item it's on and its
   suggestions read as quieter than what you typed.
+- Pickers float: every picker opens as a card over the dimmed window rather
+  than taking over the pane, its matches lit in the theme's accent and its
+  keys in a footer on caps. Enter, Esc, `C-n`/`C-p`, the arrows, Tab and
+  `C-v` are as before.
+- The file picker shows each file's icon, its name then its folder, the files
+  opened lately first (under *Recent* while nothing's typed), and the first
+  lines of the selected file beside the list when the window is wide enough
+  (read once per selection, 64 KB at most).
+- The command picker (`SPC :`) names each command by its area and a short
+  name (`Git › Blame`) with what it does beneath and its keys on caps. A name
+  or an area is matched before a description, which is matched by whole
+  words; the commands run lately come first, and a query that names an area
+  shows its commands under it and the rest under *Elsewhere*. A command that
+  can't run here -- XML's outside XML, the debugger's with no session -- is
+  dimmed with why, last. Beside the list, the selected command's keys, where
+  it is in the `SPC` menu and its id; `C-y` copies the id.
+- The `SPC` menu (and the local leader's) is the same floating card: the
+  chords used lately, the groups with how many commands each holds, and the
+  commands, with `:` to search them all by name. Vim's prefixes (`g`, `z`,
+  `]`, `[`) show in a slim hint bar above the modeline instead -- or at the
+  top when the cursor is near the bottom -- so it never covers the line
+  being edited. `which_key.delay_ms`, Backspace and paging are as before.
 
 ### Added
 

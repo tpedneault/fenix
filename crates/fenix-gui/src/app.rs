@@ -37,6 +37,7 @@ mod debug_drawer;
 mod debug_trail;
 mod debug_breakpoints;
 mod panels;
+mod palette;
 mod terminal_view;
 mod terminal_mouse;
 mod terminal_keys;
@@ -2027,6 +2028,7 @@ impl App {
         }
         let problems = keymap::reload_leader();
         self.leader_matcher = keymap::leader_trie().matcher();
+        *self.leader_places.borrow_mut() = None;
         if problems.is_empty() {
             self.set_message(format!("Your keybindings are in use: {}", keymap::user_keys().len()));
         } else {
@@ -2038,21 +2040,9 @@ impl App {
     /// and the extension it's from -- the ones run lately first.
     pub(crate) fn open_command_palette(&mut self) {
         self.palette_describes = false;
-        let keys = crate::keymap::leader_keys();
-        let rank = |id: &str| self.recent_commands.iter().position(|c| c == id).unwrap_or(usize::MAX);
-        let mut commands: Vec<&crate::commands::Command> = self.commands.iter().filter(|c| c.id != "commands.palette").collect();
-        commands.sort_by_key(|c| rank(&c.id));
-        let candidates = commands
-            .into_iter()
-            .map(|c| {
-                let key = keys.get(c.id.as_ref()).map(|k| format!("  {k}")).unwrap_or_default();
-                let from = c.source.map(|id| format!("  · {}", extension_name(id))).unwrap_or_default();
-                fenix_picker::Candidate::new(format!("{}  {}{key}{from}", c.description, c.id), c.id.to_string())
-            })
-            .collect();
+        let candidates = self.command_candidates();
         self.completion = None;
-        self.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::new(candidates)));
-        self.set_message("Enter runs it -- Tab gives it keys");
+        self.enter_picker(ActivePicker::Commands(fenix_picker::PickerState::with_mode(candidates, fenix_picker::MatchMode::Words)));
     }
 
     /// Tab in the palette: the next keys typed are `command`'s.
@@ -2111,6 +2101,7 @@ impl App {
         }
         let problems = keymap::reload_leader();
         self.leader_matcher = keymap::leader_trie().matcher();
+        *self.leader_places.borrow_mut() = None;
         if !problems.is_empty() {
             self.set_error(format!("keybindings.toml: {}", problems.join("; ")));
             return;
@@ -2666,6 +2657,7 @@ fn picker_selected_row(picker: &ActivePicker) -> usize {
 /// slice `[offset, offset + count)`, paired with whether each is the
 /// current selection -- same windowing shape `ExplorerState`'s rendering
 /// already uses for a directory listing.
+#[cfg(test)]
 fn picker_visible_labels(picker: &ActivePicker, offset: usize, count: usize) -> Vec<(bool, String)> {
     match picker {
         ActivePicker::FindFile(s) => s.visible_rows(offset, count).map(|(sel, c)| (sel, c.label.clone())).collect(),
@@ -4774,6 +4766,11 @@ pub struct App {
     /// for the hub's health dot.
     project_health: HashMap<PathBuf, (fenix_project::doctor::Health, usize)>,
     active_picker: Option<ActivePicker>,
+    /// The file the palette's preview last read, and its first lines.
+    palette_preview: RefCell<Option<(PathBuf, Vec<String>)>>,
+    /// Where each command sits under the leader, worked out once per
+    /// leader keymap (`palette::leader_places`).
+    leader_places: RefCell<Option<std::rc::Rc<palette::Places>>>,
     /// `Ctrl-O`/`Ctrl-I` -- a global, not per-pane/per-workspace,
     /// back/forward pair of stacks (like a browser's history, not real
     /// Vim's single circular list with a pointer -- a deliberate
@@ -5880,6 +5877,8 @@ impl App {
             project_meta: fenix_project::meta::ProjectMeta::load_or_default(default_project_meta_path()),
             project_health: HashMap::new(),
             active_picker: None,
+            palette_preview: RefCell::new(None),
+            leader_places: RefCell::new(None),
             jump_back_stack: Vec::new(),
             jump_forward_stack: Vec::new(),
             marks: HashMap::new(),
@@ -14937,6 +14936,19 @@ impl App {
                 return;
             }
         }
+        // C-y in the palette: the command's id, to bind it or run it from
+        // outside.
+        if key == KeyPress::char('y').with_ctrl() {
+            if let Some(ActivePicker::Commands(state)) = &self.active_picker {
+                if let Some(id) = state.selected().map(|c| c.payload.clone()) {
+                    if let Some(clipboard) = &mut self.clipboard {
+                        let _ = clipboard.set_text(id.clone());
+                    }
+                    self.set_message(format!("copied {id}"));
+                }
+                return;
+            }
+        }
         if key == KeyPress::char('v').with_ctrl() {
             let pasted = self.clipboard_text();
             if let (Some(picker), Some(text)) = (&mut self.active_picker, pasted) {
@@ -18750,35 +18762,6 @@ impl App {
         terminal_view::view(self.theme, screen)
     }
 
-    /// Builds the picker's visible rows as rich-text spans: row 0 is the
-    /// query prompt (`"> {query}"`), the rows below are the filtered/
-    /// ranked candidates windowed by `self.picker_scroll`, flowing
-    /// through the same `set_content_rich` pipeline as a pane's text. Returns the spans
-    /// plus which rendered row (if any) is the current selection, for
-    /// the caller to draw a highlight rect over.
-    fn picker_row_spans(&self, picker: &ActivePicker, rows: usize) -> (RowSpans, Option<usize>) {
-        let theme = self.theme;
-        let mut spans: RowSpans = vec![(format!("> {}", picker_query(picker)), theme.fg, false)];
-
-        let candidate_rows = rows.saturating_sub(1);
-        let visible = picker_visible_labels(picker, self.picker_scroll, candidate_rows);
-        if !visible.is_empty() {
-            spans.push(("\n".to_string(), theme.fg, false));
-        }
-        let count = visible.len();
-        let mut hl_row = None;
-        for (i, (is_selected, label)) in visible.into_iter().enumerate() {
-            if is_selected {
-                hl_row = Some(i + 1);
-            }
-            spans.push((label, theme.fg, false));
-            if i + 1 < count {
-                spans.push(("\n".to_string(), theme.fg, false));
-            }
-        }
-        (spans, hl_row)
-    }
-
     /// The sidebar/terminal/pane rects a mouse click or wheel notch
     /// needs to hit-test against -- `sidebar_px`/`terminal_h`/
     /// `modeline_top` are handed in already resolved (`redraw` and the
@@ -18970,7 +18953,8 @@ impl App {
     fn frame_metrics(&self, window_height: f32) -> (f32, f32, f32) {
         let line_height = self.text.as_ref().map(|t| t.line_height()).unwrap_or(text::LINE_HEIGHT);
         let modeline_height = self.text.as_ref().map(|t| t.modeline_height()).unwrap_or(text::LINE_HEIGHT);
-        let show_sidebar = self.sidebar_open && self.main_view == MainView::Editor;
+        // The palette floats over the window; the sidebar stays.
+        let show_sidebar = self.sidebar_open;
         let sidebar_px = if show_sidebar { self.sidebar_width } else { 0.0 };
         let show_terminal = self.terminal_open;
         let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
@@ -19474,7 +19458,7 @@ impl App {
         // -- drawn from the explorer page laid out at its width.
         self.sidebar_follow();
         self.notice_explorer_growth(now);
-        let show_sidebar = self.sidebar_open && main_view == MainView::Editor;
+        let show_sidebar = self.sidebar_open;
         let sidebar_width = self.sidebar_width;
         let sidebar_px = if show_sidebar { sidebar_width } else { 0.0 };
         if let Some(text) = &mut self.text {
@@ -19706,7 +19690,9 @@ impl App {
             // all: an empty pane, no file list, and no way to see what
             // was being typed. Checked here, once, rather than repeated
             // in both blocks' own conditions.
-            let overlay_covers_pane = is_focused && main_view == MainView::Picker;
+            // The picker floats over the panes as the palette, so it covers
+            // none of them.
+            let overlay_covers_pane = false;
 
             // A terminal pane's content is a `vt100` screen grid owned
             // by `terminal_buffers`, not the buffer's own (always empty)
@@ -19838,48 +19824,6 @@ impl App {
                     });
                     continue;
                 }
-            }
-
-            if is_focused && main_view == MainView::Picker {
-                let rows = pane_visible_lines + 1;
-                if let Some(picker) = &self.active_picker {
-                    self.picker_scroll = scroll_to_include(self.picker_scroll, picker_selected_row(picker), pane_visible_lines);
-                }
-                let (spans, selected_row) = match &self.active_picker {
-                    Some(picker) => self.picker_row_spans(picker, rows),
-                    None => (Vec::new(), None),
-                };
-                panes_render.push(PaneRender {
-                    pane,
-                    rect,
-                    title: pane_title,
-                    spans,
-                    hl_row: selected_row,
-                    hl_row_strong: true,
-                    marked_rows: Vec::new(),
-                    row_tints: Vec::new(),
-                    colored_bg_segments: Vec::new(),
-                    selection_segments: Segments::new(),
-                    pulse_overlay: None,
-                    bracket_match_segments: Segments::new(),
-                    hlsearch_segments: Segments::new(),
-                    caret: None,
-                    content_frac: 0.0,
-                    gutter_px: 0.0,
-                    tabs_layout: Vec::new(),
-                    tab_active: Vec::new(),
-                    tab_spans: Vec::new(),
-                    breadcrumb_spans: Vec::new(),
-                    tab_ranges: Vec::new(),
-                    tab_italic: Vec::new(),
-                    has_breadcrumb,
-                    gutter_marks: Vec::new(), debug_marks: Vec::new(), trail_marks: Vec::new(),
-                    row_accents: Vec::new(),
-                    indent_guides: Vec::new(),
-                    home: home::HomeOverlay::default(),
-                    extra: motion_host::PaneExtras::default(),
-                });
-                continue;
             }
 
             // Plain buffer content -- every pane not currently showing an
@@ -20265,7 +20209,7 @@ impl App {
                 pulse_overlay,
                 bracket_match_segments,
                 hlsearch_segments,
-                caret: if is_dashboard { None } else { caret },
+                caret: if is_dashboard || (is_focused && main_view == MainView::Picker) { None } else { caret },
                 content_frac: render_frac,
                 gutter_px,
                 tabs_layout,
@@ -20307,12 +20251,34 @@ impl App {
         // left to `text.rs`/`prepare` so its position is known before the
         // `bg_rect` panel-background push below.
         // The which-key drawer, once a sequence has waited long enough.
+        // The leader's menu and the open picker, as palette cards over
+        // the window above the modeline; Vim's prefixes' hint bar, kept
+        // off the cursor's line.
+        let card_area = fenix_window::Rect { x: 0.0, y: 0.0, w: window_width, h: modeline_top };
+        let focused_render = panes_render.iter().find(|p| p.pane == focused_pane);
+        let cursor_y = focused_render.and_then(|p| p.caret.map(|(row, _)| p.rect.y + text::PAD_TOP + row as f32 * line_height));
+        let bar_top = focused_render.map(|p| p.rect.y).unwrap_or(0.0);
         let which_key_popup = if overlays_here && self.which_key_open(now) {
             self.which_key_pending().map(|pending| {
-                let drawer = self.which_key_drawer(&pending, window_width, window_height, modeline_top, char_width, line_height);
-                self.motion.which_key_pages = drawer.pages;
-                self.motion.which_key_drawer = Some(drawer.clone());
-                (drawer.rect, drawer.spans)
+                let vim = pending.source == which_key::Source::Vim;
+                let area = if vim { fenix_window::Rect { x: 0.0, y: bar_top, w: window_width, h: (modeline_top - bar_top).max(0.0) } } else { card_area };
+                let card = self.which_key_card(&pending, area, char_width, line_height, cursor_y);
+                self.motion.which_key_pages = card.pages;
+                let id = if vim { popup::PopupId::WhichKey } else { popup::PopupId::Leader };
+                let out = (id, card.rect, card.spans.clone());
+                self.motion.cards.insert(id, card);
+                out
+            })
+        } else {
+            None
+        };
+        let palette_popup = if overlays_here && self.main_view == MainView::Picker {
+            let lines = palette::list_lines(card_area, line_height);
+            self.palette_view(lines).map(|view| {
+                let card = palette::layout(&view, self.theme, card_area, char_width, line_height, 0);
+                let out = (card.rect, card.spans.clone());
+                self.motion.cards.insert(popup::PopupId::Palette, card);
+                out
             })
         } else {
             None
@@ -20566,8 +20532,11 @@ impl App {
         // Every popup open this frame, then the ones still fading out --
         // `popup_draws` decides each one's opacity and rise.
         let mut open_popups: Vec<(popup::PopupId, fenix_window::Rect, RowSpans, Option<usize>)> = Vec::new();
-        if let Some((rect, spans)) = which_key_popup {
-            open_popups.push((popup::PopupId::WhichKey, rect, spans, None));
+        if let Some((id, rect, spans)) = which_key_popup {
+            open_popups.push((id, rect, spans, None));
+        }
+        if let Some((rect, spans)) = palette_popup {
+            open_popups.push((popup::PopupId::Palette, rect, spans, None));
         }
         if let Some((rect, spans)) = git_menu_popup {
             open_popups.push((popup::PopupId::GitMenu, rect, spans, None));
@@ -21643,11 +21612,9 @@ impl App {
             let with_alpha = |[r, g, b, a]: [f32; 4], alpha: f32| [r, g, b, a * alpha];
             for draw in &popup_draws {
                 let (rect, alpha) = (draw.rect, draw.alpha);
-                if draw.id == popup::PopupId::WhichKey {
-                    if let Some(drawer) = &motion_state.which_key_drawer {
-                        which_key::paint_drawer(popup_rect, gpu, drawer, rect, modeline_top, badge_bg, theme, char_width, line_height, shadows);
-                        continue;
-                    }
+                if let Some(card) = motion_state.cards.get(&draw.id) {
+                    palette::paint(popup_rect, gpu, card, rect, alpha, theme, char_width, line_height, (window_width, window_height), shadows);
+                    continue;
                 }
                 if let popup::PopupId::Toast(slot) = draw.id {
                     if let Some(toast) = toasts.iter().find(|t| t.slot == slot) {
@@ -21687,8 +21654,8 @@ impl App {
             let popup_text: Vec<(popup::PopupId, fenix_window::Rect, (f32, f32), f32)> = popup_rects
                 .iter()
                 .map(|&(id, rect)| {
-                    if id == popup::PopupId::WhichKey {
-                        (id, rect, (which_key::INSET_X, which_key::INSET_Y), modeline_top)
+                    if let Some(card) = motion_state.cards.get(&id) {
+                        (id, rect, palette::inset(card), if id == popup::PopupId::WhichKey { modeline_top } else { f32::MAX })
                     } else if matches!(id, popup::PopupId::Toast(_)) {
                         (id, rect, App::toast_inset(), f32::MAX)
                     } else {
@@ -29890,11 +29857,63 @@ configure_board stm32
         let Some(ActivePicker::Commands(state)) = &app.active_picker else { panic!("the palette") };
         assert_eq!(state.len(), app.commands().iter().count() - 1, "every command but the palette");
         let rows: Vec<String> = state.visible_rows(0, 3).map(|(_, c)| c.label.clone()).collect();
-        assert!(rows[0].contains("file.save") && rows[0].contains("SPC f s"), "{rows:?}");
-        assert!(rows[1].contains("window.split_vertical") && rows[1].contains("SPC w v"), "{rows:?}");
+        assert!(rows[0].starts_with("Files › Save") && rows[0].ends_with("file.save"), "{rows:?}");
+        assert!(rows[1].contains("window.split_vertical"), "{rows:?}");
         app.picker_confirm();
         assert_eq!(app.queued_command.as_deref(), Some("file.save"));
         assert!(app.active_picker.is_none());
+    }
+
+    /// Typing an area puts its commands first, matches names and ids word
+    /// by word, a description only by whole words, and nothing whose
+    /// letters are just scattered across it.
+    #[test]
+    fn the_palette_ranks_by_name_and_area() {
+        let mut app = App::with_file(None);
+        app.open_command_palette();
+        for c in "git".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let Some(ActivePicker::Commands(state)) = &app.active_picker else { panic!("the palette") };
+        let ids: Vec<String> = state.visible_rows(0, state.len()).map(|(_, c)| c.payload.clone()).collect();
+        assert!(ids[..10].iter().all(|id| id.starts_with("git.")), "Git's first: {:?}", &ids[..10]);
+        assert!(!ids.iter().any(|id| id == "debug.breakpoint_hits"), "not by scattered letters");
+        assert!(ids.len() < 60, "{} matches", ids.len());
+        app.picker_cancel();
+        app.open_command_palette();
+        for c in "hit count".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let Some(ActivePicker::Commands(state)) = &app.active_picker else { panic!("the palette") };
+        assert_eq!(state.selected().map(|c| c.payload.as_str()), Some("debug.breakpoint_hits"), "found by its description's words");
+    }
+
+    /// The palette's view of the commands: area › name, the description
+    /// under it, keys on caps, the details beside; one that can't run
+    /// here faded, with why.
+    #[test]
+    fn the_palettes_view_of_a_command() {
+        let mut app = App::with_file(None);
+        app.open_command_palette();
+        for c in "git".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let view = app.palette_view(30).expect("a view");
+        let palette::Body::List(rows) = &view.body else { panic!("a list") };
+        assert_eq!(rows[0].area.as_deref(), Some("Git"));
+        assert_eq!(rows[0].section.as_ref().map(|s| s.0.as_str()), Some("Git"));
+        assert!(rows.iter().any(|r| r.keys.as_deref().is_some_and(|k| k.starts_with("SPC g "))), "keys from the keymap: {rows:?}");
+        assert!(matches!(&view.side, Some(palette::Side::Details { .. })));
+        assert!(view.chips.iter().any(|(t, accent)| *accent && t.ends_with("in Git")));
+        app.picker_cancel();
+        app.open_command_palette();
+        for c in "xml".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let view = app.palette_view(30).unwrap();
+        let palette::Body::List(rows) = &view.body else { panic!("a list") };
+        let xml = rows.iter().find(|r| r.title.contains("well-formed") || r.title.contains("XML")).expect("an XML command");
+        assert!(xml.dimmed && xml.detail.as_deref() == Some("Not an XML file"), "{xml:?}");
     }
 
     #[test]
@@ -34092,21 +34111,27 @@ configure_board stm32
     }
 
     #[test]
-    fn picker_row_spans_shows_the_query_prompt_and_flags_the_selected_row() {
-        let candidates =
-            vec![fenix_picker::Candidate::new("a.txt", PathBuf::from("a.txt")), fenix_picker::Candidate::new("b.txt", PathBuf::from("b.txt"))];
-        let app = App::with_file(None);
-        let picker = ActivePicker::FindFile(fenix_picker::PickerState::new(candidates));
-
-        let (spans, selected_row) = app.picker_row_spans(&picker, 5);
-        assert_eq!(selected_row, Some(1)); // row 0 is the prompt, row 1 the first candidate
-        let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
-        assert!(joined.starts_with("> "));
-        assert!(joined.contains("a.txt"));
-        assert!(joined.contains("b.txt"));
+    fn the_palette_shows_a_pickers_rows_the_selected_one_and_a_preview() {
+        let dir = TempDir::new("palette_rows");
+        let a = dir.write("a.txt", "first line\nsecond line\n");
+        let b = dir.touch("b.txt");
+        let candidates = vec![fenix_picker::Candidate::new("a.txt", a), fenix_picker::Candidate::new("b.txt", b)];
+        let mut app = App::with_file(None);
+        app.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
+        let view = app.palette_view(20).expect("a view");
+        let palette::Body::List(rows) = &view.body else { panic!("a list") };
+        assert_eq!(rows.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(), ["a.txt", "b.txt"]);
+        assert!(rows[0].selected && !rows[1].selected);
+        assert!(rows[0].icon.is_some(), "a file's icon");
+        let Some(palette::Side::Preview { lines, .. }) = &view.side else { panic!("a preview") };
+        assert_eq!(lines, &["first line", "second line"]);
+        // Another picker, the generic look: its labels, nothing beside.
+        app.picker_pick_theme();
+        let view = app.palette_view(20).unwrap();
+        assert!(view.side.is_none() && view.chips[0].0 == "Themes");
     }
 
-    // -- Tool status (`SPC l m`) -------------------------------------------
+        // -- Tool status (`SPC l m`) -------------------------------------------
 
     #[test]
     fn open_tool_status_panel_opens_a_tool_status_buffer_in_a_new_workspace() {

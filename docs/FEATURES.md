@@ -1346,17 +1346,28 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   - **Child sessions.** An adapter that runs programs in sessions of their
     own (js-debug's `startDebugging`) has each shown under the one that
     asked for it, the stopped one's frames under it.
-- **Key menu**: pause after `SPC` (or Vim's `g`, `z`, `]`, `[`, or `SPC m`)
-  and a drawer opens up out of the modeline showing what can come next.
-  Its header is the keys pressed so far as keycaps and the group's name;
-  below, the keys in columns, groups first (each marked `+` with how many
-  commands it holds) then commands, or a group's own sections (git's
-  View / Branch & remote / This change). Keys are ordered by key, so none
-  moves when a label changes (`which_key.order = "label"` sorts by what
-  they do). Backspace goes up a level; a group too big for 40% of the
-  window pages with `Ctrl-n`/`Ctrl-p` instead of hiding anything. It
+- **Key menu**: pause after `SPC` (or `SPC m`, the local leader) and a
+  card floats over the dimmed window showing what can come next: the
+  chords used lately, the groups (each with how many commands it holds),
+  then the commands, or a group's own sections (git's View / Branch &
+  remote / This change). Its prompt is the keys pressed so far as caps;
+  `:` searches every command by name instead. Vim's `g`, `z`, `]` and `[`
+  show in a slim hint bar above the modeline (at the top when the cursor
+  is near the bottom), never over the line being edited. Keys are ordered
+  by key, so none moves when a label changes (`which_key.order = "label"`
+  sorts by what they do). Backspace goes up a level; a group too big for
+  the window pages with `Ctrl-n`/`Ctrl-p` instead of hiding anything. It
   waits `which_key.delay_ms` (250 ms) before opening, so a quick
   `SPC f f` never flashes it; once open, deeper levels show at once.
+- **Palettes**: every picker is a card floating over the dimmed window,
+  matches lit in the accent, its keys in a footer. The file picker shows
+  icons, the name then the folder, recent files first, and a bounded
+  preview of the selected file beside the list. The command picker
+  (`SPC :`) shows `Area › Short name` with the description beneath and
+  the keys on caps; it ranks names and areas before descriptions (whole
+  words), recent commands first, groups by area, dims the ones that can't
+  run here with why, and shows the selected one's keys, menu path and id
+  (`C-y` copies it).
 - **Motion and polish**: the window opens at once with a launch splash --
   the Fenix mark assembling, then breathing, over a line that fills as
   startup gets further -- drawn from its own thread, so a slow start

@@ -67,6 +67,7 @@ impl App {
             Some((files, at)) => (files.as_ref().clone(), at.elapsed() < FRESH_FOR),
             None => (Vec::new(), false),
         };
+        let candidates = self.boost_recent_files(candidates);
         self.enter_picker(ActivePicker::FindFile(fenix_picker::PickerState::new(candidates)));
         self.file_index.waiting = None;
         if !fresh {
@@ -109,14 +110,17 @@ impl App {
         self.file_index.pending.remove(&key);
         if self.file_index.waiting.as_ref() == Some(&key) {
             self.file_index.waiting = None;
-            if let Some(ActivePicker::FindFile(state)) = &mut self.active_picker {
+            if matches!(&self.active_picker, Some(ActivePicker::FindFile(_))) {
                 if files.is_empty() && self.file_index.close_if_empty {
                     // Nothing to pick from: say so rather than leave an
                     // empty picker open.
                     self.picker_cancel();
                     self.set_message(format!("nothing under {}", readable_path(&key.0)));
                 } else {
-                    state.replace_candidates(files.clone());
+                    let boosted = self.boost_recent_files(files.clone());
+                    if let Some(ActivePicker::FindFile(state)) = &mut self.active_picker {
+                        state.replace_candidates(boosted);
+                    }
                 }
             }
         }

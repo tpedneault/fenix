@@ -275,7 +275,9 @@ pub(super) struct MotionState {
     pub which_key_page: usize,
     pub which_key_pages: usize,
     pub which_key_path: Vec<KeyPress>,
-    pub which_key_drawer: Option<super::which_key::Drawer>,
+    /// The palette cards last laid out -- the picker's, the leader's,
+    /// the hint bar -- by popup, kept to draw one fading out.
+    pub cards: HashMap<popup::PopupId, super::palette::Card>,
     pub layout: HashMap<fenix_window::WindowId, Tween<fenix_window::Rect>>,
     pub layout_last: Option<((usize, usize), fenix_window::Rect, Vec<(fenix_window::WindowId, fenix_window::Rect)>)>,
     pub reveals: Vec<Reveal>,

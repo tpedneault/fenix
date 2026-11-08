@@ -999,7 +999,9 @@ impl TextPipeline {
     /// and (for how many rows are offered in the first place)
     /// `popup::max_rows` -- not by wrapping/clipping inside the buffer.
     pub fn set_popup_rich(&mut self, id: PopupId, width: f32, segments: &[(&str, Color, bool)]) {
-        let spans = self.rich_spans(segments);
+        // An icon a cell wide, as in a listing: the palette's rows line up
+        // their keys and folders by cell.
+        let spans = self.cell_spans(segments);
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.popups.contains_key(&id) {
