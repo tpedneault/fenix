@@ -20617,9 +20617,12 @@ impl App {
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
             // A page's cards: under its tints, so the focused row's still
             // shows on one. A little wider than their cells.
-            for &(row, rows, a, b, fill, outline) in &pane.home.cards {
+            for &(row, rows, a, b, fill, outline, tight) in &pane.home.cards {
                 let pad = (char_width * 0.6).round();
-                let r = panels::card_rect(content_x + a as f32 * char_width - pad, (b - a) as f32 * char_width + pad * 2.0, pane.rect.y + text::PAD_TOP - pane.content_frac * line_height, line_height, 0, rows.saturating_sub(1));
+                let (x, w, top) = (content_x + a as f32 * char_width - pad, (b - a) as f32 * char_width + pad * 2.0, pane.rect.y + text::PAD_TOP - pane.content_frac * line_height);
+                // A selected row among others keeps to its own rows, or it
+                // would run into the ones above and below.
+                let r = if tight { panels::row_rect(x, w, top, line_height, 0, rows.saturating_sub(1)) } else { panels::card_rect(x, w, top, line_height, 0, rows.saturating_sub(1)) };
                 let y = r.y + row as f32 * line_height;
                 let style = crate::rect::BoxStyle { radius: panels::CARD_RADIUS, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
                 bg_rect.push_box(gpu, r.x, y, r.w, r.h, style);

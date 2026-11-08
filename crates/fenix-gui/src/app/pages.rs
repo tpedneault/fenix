@@ -1043,30 +1043,45 @@ impl App {
         let theme = self.theme;
         let color = |role: PageRole| role_color(theme, role);
         let last = first_line + rows;
-        let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = state
-            .page
-            .spans
-            .iter()
-            .filter(|s| s.line >= first_line && s.line <= last && s.line < ob.buffer.line_count())
-            .map(|s| {
-                let start = ob.buffer.line_start_char(s.line);
+        // Each line looked up once -- where it starts and its characters'
+        // byte offsets -- not once a span: a page has several spans a
+        // line, and the rope's lookups are what this pass costs.
+        let mut lines: HashMap<usize, (usize, Vec<usize>)> = HashMap::new();
+        let mut ranges: Vec<(std::ops::Range<usize>, glyphon::Color)> = Vec::with_capacity(state.page.spans.len());
+        for s in state.page.spans.iter().filter(|s| s.line >= first_line && s.line <= last && s.line < ob.buffer.line_count()) {
+            let (start, offsets) = lines.entry(s.line).or_insert_with(|| {
+                let start = ob.buffer.char_to_byte(ob.buffer.line_start_char(s.line));
                 let len = ob.buffer.line_len(s.line);
-                let a = ob.buffer.char_to_byte(start + s.cols.start.min(len));
-                let b = ob.buffer.char_to_byte(start + s.cols.end.min(len));
-                (a..b, color(s.role))
-            })
-            .filter(|(r, _)| r.start < r.end)
-            .collect();
+                let text: String = ob.buffer.line(s.line).chars().take(len).collect();
+                let mut offsets: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
+                offsets.push(text.len());
+                (start, offsets)
+            });
+            let at = |col: usize| *start + offsets[col.min(offsets.len() - 1)];
+            let (a, b) = (at(s.cols.start), at(s.cols.end));
+            if a < b {
+                ranges.push((a..b, color(s.role)));
+            }
+        }
         ranges.sort_by_key(|(r, _)| r.start);
         // A character is one colour: a range that overlaps the one before
-        // it is cut to start after it (the renderer would draw it twice).
+        // it is cut to start after it (the renderer would draw it twice);
+        // one touching the one before in the same colour joins it, so
+        // there's less to shape.
+        let mut out: Vec<(std::ops::Range<usize>, glyphon::Color)> = Vec::with_capacity(ranges.len());
         let mut end = 0;
-        ranges.retain_mut(|(r, _)| {
+        for (mut r, c) in ranges {
             r.start = r.start.max(end);
+            if r.start >= r.end {
+                continue;
+            }
             end = end.max(r.end);
-            r.start < r.end
-        });
-        ranges
+            match out.last_mut() {
+                Some((prev, pc)) if prev.end == r.start && *pc == c => prev.end = r.end,
+                _ => out.push((r, c)),
+            }
+        }
+        out
     }
 
     /// The page's backgrounds -- the focused rows' tint and rail, a field
@@ -1136,7 +1151,7 @@ impl App {
                 let map = state.page.cells(c.lines.start);
                 let (a, b) = (crate::page::cell_of(map.as_deref(), c.cols.start), crate::page::cell_of(map.as_deref(), c.cols.end));
                 let (fill, outline) = card_colors(theme, c.look);
-                (c.lines.start as isize - first_line as isize, c.lines.len(), a, b, fill, outline)
+                (c.lines.start as isize - first_line as isize, c.lines.len(), a, b, fill, outline, c.look == crate::page::CardLook::Selected)
             })
             .collect();
         overlay.chips = state
@@ -1840,6 +1855,30 @@ mod tests {
         app.ensure_page_layout(id, pane, 160);
         app.page_scroll_to_top(id, pane, 40);
         assert_eq!(app.pane_state(pane).scroll_line, 0, "back up in the first screenful: the top");
+    }
+
+    /// A page's colours come out in order, apart, on character
+    /// boundaries (its "›" and "·" are several bytes), and touching
+    /// ranges of one colour as one.
+    #[test]
+    fn a_pages_colours_are_ordered_apart_and_joined() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(crate::settings_page::Scope::You, None);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.ensure_page_layout(id, pane, 160);
+        let ranges = app.page_highlights(id, 0, 60);
+        assert!(!ranges.is_empty());
+        let text = app.buffers.get(id).unwrap().buffer.text();
+        for pair in ranges.windows(2) {
+            let ((a, ca), (b, cb)) = (&pair[0], &pair[1]);
+            assert!(a.end <= b.start, "apart: {a:?} {b:?}");
+            assert!(!(a.end == b.start && ca == cb), "touching in one colour are one: {a:?} {b:?}");
+        }
+        for (r, _) in &ranges {
+            assert!(text.is_char_boundary(r.start) && text.is_char_boundary(r.end), "{r:?}");
+        }
+        let at = text.find("Indent width").unwrap();
+        assert!(ranges.iter().any(|(r, _)| r.start <= at && at < r.end), "a setting's name is coloured");
     }
 
     #[test]

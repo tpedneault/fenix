@@ -73,8 +73,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The command picker (`SPC :`) names each command by its area and a short
   name (`Git › Blame`) with what it does beneath and its keys on caps. A name
   or an area is matched before a description, which is matched by whole
-  words; the commands run lately come first, and a query that names an area
-  shows its commands under it and the rest under *Elsewhere*. A command that
+  words; the commands run lately come first, then an area's main command
+  (`SPC g g` for Git) and those with the fewest keys, and a query that names
+  an area shows its commands under it and the rest under *Elsewhere*. A command that
   can't run here -- XML's outside XML, the debugger's with no session -- is
   dimmed with why, last. Beside the list, the selected command's keys, where
   it is in the `SPC` menu and its id; `C-y` copies the id.

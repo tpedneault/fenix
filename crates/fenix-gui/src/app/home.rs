@@ -42,7 +42,9 @@ pub(super) struct HomeOverlay {
     pub(super) vertical_rules: Vec<(usize, isize, usize)>,
     /// Cards behind lines: (first row, which may be above the pane;
     /// rows; first cell; end cell; fill; outline, if it has one).
-    pub(super) cards: Vec<(isize, usize, usize, usize, [f32; 4], Option<[f32; 4]>)>,
+    /// Whether it keeps to its own rows rather than standing off them: a
+    /// selected row among others.
+    pub(super) cards: Vec<(isize, usize, usize, usize, [f32; 4], Option<[f32; 4]>, bool)>,
     /// Chips behind cells: (row, first cell, end cell, fill, outline,
     /// whether it's a pill rather than a key's cap).
     pub(super) chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>, bool)>,

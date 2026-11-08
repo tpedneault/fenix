@@ -137,6 +137,15 @@ pub(crate) fn card_rect(x: f32, w: f32, top: f32, line_height: f32, first: usize
     Rect { x, y: y - pad, w, h: h + pad * 2.0 }
 }
 
+/// A card on rows `first..=last` that keeps to them, a pixel inside:
+/// for a selected row among others, where `card_rect`'s margin would run
+/// into its neighbours.
+pub(crate) fn row_rect(x: f32, w: f32, top: f32, line_height: f32, first: usize, last: usize) -> Rect {
+    let y = top + first as f32 * line_height;
+    let h = (last.max(first) - first + 1) as f32 * line_height;
+    Rect { x, y: y + 1.0, w, h: (h - 2.0).max(0.0) }
+}
+
 /// A key's cap behind columns `start..end` of a row at `y`: a char
 /// either side wide less a little, so neighbouring caps stay apart, and
 /// most of the row high.
@@ -222,6 +231,8 @@ mod tests {
     fn a_card_wraps_its_rows_and_a_cap_its_columns() {
         let card = card_rect(10.0, 300.0, 100.0, 20.0, 2, 4);
         assert!(card.y < 140.0 && card.y > 130.0 && card.y + card.h > 200.0 && card.y + card.h < 210.0, "around its rows, not into the next: {card:?}");
+        let row = row_rect(10.0, 300.0, 100.0, 20.0, 2, 4);
+        assert!(row.y > 140.0 && row.y + row.h < 200.0, "a selected row keeps inside its rows: {row:?}");
         let cap = key_cap(8.0, 10.0, 50.0, 20.0, 3, 4);
         assert!(cap.x < 38.0 && cap.x + cap.w > 48.0 && cap.y > 50.0 && cap.y + cap.h < 70.0, "{cap:?}");
     }

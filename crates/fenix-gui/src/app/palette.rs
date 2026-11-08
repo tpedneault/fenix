@@ -522,10 +522,12 @@ pub(super) fn hint_bar(path: &[KeyPress], title: &str, hints: &[fenix_keymap::Hi
     }
     c = head.put(c + 2, title, group, false);
     head.put(c, &format!("  · {} keys", hints.len()), quiet, false);
-    let out = [("Bksp", if path.len() > 1 { "back" } else { "close" }), ("Esc", "close")];
+    // Backspace only when it goes back: at the first key it closes, as
+    // Esc does, and one "close" is enough.
+    let out: &[(&str, &str)] = if path.len() > 1 { &[("Bksp", "back"), ("Esc", "close")] } else { &[("Esc", "close")] };
     let out_w: usize = out.iter().map(|(k, w)| keys_width(k) + w.chars().count() + 4).sum();
     let mut oc = cols.saturating_sub(out_w) + 2;
-    for (k, w) in out {
+    for &(k, w) in out {
         let end = put_keys(&mut head, &mut boxes, 0, oc, k, accent);
         oc = head.put(end + 1, w, quiet, false) + 3;
     }
@@ -776,6 +778,23 @@ pub(super) fn command_name(label: Option<&str>, description: &str) -> String {
 
 /// Each command bound under the leader: its keys (`SPC g g`), the
 /// groups on the way (`git`), and its own label (`status page`).
+/// The least a recently run command is ranked up by: more than any
+/// command's usefulness (`command_usefulness`), so the two never mix.
+const RECENT_BOOST: i64 = 10;
+
+/// How much a command is ranked up among ones its query matches as well:
+/// bound under the leader (`keys`, as "SPC g g"), and the more for fewer
+/// keys; and an area's own main command -- its last key its group's
+/// again, as `SPC g g` (Git's status page), `SPC p p`, `SPC a a` --
+/// first of all. Small: only an even match is decided by it.
+pub(super) fn command_usefulness(keys: Option<&str>) -> i64 {
+    let Some(keys) = keys else { return 0 };
+    let parts: Vec<&str> = keys.split(' ').collect();
+    let shallow = if parts.len() <= 3 { 1 } else { 0 };
+    let main = if parts.len() >= 3 && parts[parts.len() - 1] == parts[parts.len() - 2] { 2 } else { 0 };
+    3 + shallow + main
+}
+
 pub(super) type Places = HashMap<&'static str, (String, Vec<&'static str>, &'static str)>;
 
 /// Each command bound under the leader (see `Places`).
@@ -831,7 +850,7 @@ impl App {
     pub(super) fn command_candidates(&self) -> Vec<fenix_picker::Candidate<String>> {
         let places = self.places();
         let rank = |id: &str| self.recent_commands.iter().position(|c| c == id);
-        let mut rows: Vec<(i64, String, fenix_picker::Candidate<String>)> = self
+        let mut rows: Vec<(i64, String, i64, fenix_picker::Candidate<String>)> = self
             .commands
             .iter()
             .filter(|c| c.id != "commands.palette")
@@ -839,20 +858,22 @@ impl App {
                 let area = command_area(&c.id);
                 let name = command_name(places.get(c.id.as_ref()).map(|p| p.2), &c.description);
                 let from = c.source.map(|id| format!(" {}", extension_name(id))).unwrap_or_default();
-                let boost = match (self.command_unavailable(&c.id), rank(&c.id)) {
+                let recent = match (self.command_unavailable(&c.id), rank(&c.id)) {
                     (Some(_), _) => -1000,
                     (None, Some(r)) if r < 5 => 30 - r as i64 * 2,
-                    (None, Some(_)) => 4,
+                    (None, Some(_)) => RECENT_BOOST,
                     (None, None) => 0,
                 };
+                let useful = command_usefulness(places.get(c.id.as_ref()).map(|p| p.0.as_str()));
                 let label = format!("{area} › {name}  {}", c.id);
-                (boost, area, fenix_picker::Candidate::new(label, c.id.to_string()).with_keywords(format!("{}{from}", c.description)).with_boost(boost))
+                (recent, area, useful, fenix_picker::Candidate::new(label, c.id.to_string()).with_keywords(format!("{}{from}", c.description)).with_boost(recent + useful))
             })
             .collect();
         // With nothing typed they show in this order: lately run, then by
-        // area, then the ones that can't run here.
-        rows.sort_by(|a, b| b.0.min(1).cmp(&a.0.min(1)).then(b.0.cmp(&a.0)).then(a.1.cmp(&b.1)).then(a.2.label.cmp(&b.2.label)));
-        rows.into_iter().map(|(_, _, c)| c).collect()
+        // area -- in an area its main commands first -- then the ones that
+        // can't run here.
+        rows.sort_by(|a, b| b.0.min(1).cmp(&a.0.min(1)).then(b.0.cmp(&a.0)).then(a.1.cmp(&b.1)).then(b.2.cmp(&a.2)).then(a.3.label.cmp(&b.3.label)));
+        rows.into_iter().map(|(_, _, _, c)| c).collect()
     }
 
     /// The recently opened files among `candidates` ranked up, so with
@@ -964,7 +985,7 @@ impl App {
                     let section_name = if unavailable.is_some() {
                         "can't run here".to_string()
                     } else if query.is_empty() {
-                        if c.boost > 0 { "recent".to_string() } else { area.clone() }
+                        if c.boost >= RECENT_BOOST { "recent".to_string() } else { area.clone() }
                     } else {
                         match &named_area {
                             Some(a) if *a == area && offset + i < in_area => a.clone(),
@@ -1129,6 +1150,24 @@ mod tests {
     }
 
     /// The leader's places: keys, the groups on the way, the label.
+    /// Among commands a query matches as well, an area's main one comes
+    /// first, then the bound ones by how few keys they take.
+    #[test]
+    fn an_areas_main_command_is_first_among_equals() {
+        assert!(command_usefulness(Some("SPC g g")) > command_usefulness(Some("SPC g B")));
+        assert!(command_usefulness(Some("SPC g B")) > command_usefulness(Some("SPC g x a")));
+        assert!(command_usefulness(Some("SPC g x a")) > command_usefulness(None));
+        assert!(command_usefulness(Some("SPC g g")) < RECENT_BOOST, "never mistaken for a recent one");
+        let mut app = App::with_file(None);
+        app.open_command_palette();
+        for c in "git".chars() {
+            app.picker_key(KeyPress::char(c));
+        }
+        let Some(ActivePicker::Commands(state)) = app.active_picker.as_ref() else { panic!("the command picker") };
+        let first = state.visible_rows(0, 1).next().map(|(_, c)| c.payload.clone());
+        assert_eq!(first.as_deref(), Some("git.open"), "git selects the status page first");
+    }
+
     #[test]
     fn the_leader_knows_where_each_command_is() {
         let places = leader_places();
