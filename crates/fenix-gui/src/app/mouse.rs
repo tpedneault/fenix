@@ -310,6 +310,9 @@ impl App {
     /// The pointer moved to `pos` with the left button held: the divider
     /// or the selection follows it.
     pub(super) fn mouse_drag_to(&mut self, pos: (f32, f32), window_width: f32, window_height: f32) {
+        if self.terminal_mouse_drag(pos) {
+            return;
+        }
         if let Some(divider) = self.mouse.split {
             if self.windows_mut().set_split_ratio(divider.index, divider.ratio_at(pos.0, pos.1)) {
                 self.wake_caret();
@@ -362,6 +365,7 @@ impl App {
 
     /// The left button let go.
     pub(super) fn mouse_release(&mut self) {
+        self.terminal_mouse_release();
         self.mouse.drag = None;
         self.mouse.scrolled_at = None;
         if self.mouse.split.take().is_some() {

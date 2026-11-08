@@ -31,6 +31,25 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The values the debugger writes at the ends of lines are on chips, a
   changed one in ember.
 - Every page's key strip shows its keys on caps.
+- Terminals start PowerShell 7 (`pwsh`) on Windows when it's installed, else
+  Windows PowerShell as before, without its banner; `terminal.shell` names
+  another shell and its arguments (`bash -l`, a quoted path).
+- Terminals draw in the theme's own colours: the 16 ANSI colours come from
+  its Git and syntax colours, its text and its page, unless the theme file
+  lists its own (`[terminal] ansi`). Bold, dim, italic, underline and inverse
+  are drawn, so PowerShell's menu completion shows the item it's on and its
+  suggestions read as quieter than what you typed.
+
+### Added
+
+- Copy and paste in terminals: drag across the text to select it,
+  `Ctrl-Shift-C` copies and `Ctrl-Shift-V` pastes, and a right click copies
+  the selection or pastes when there's none. A paste is bracketed when the
+  program asked for it.
+- `Ctrl`-click on a `path:line:col` in a terminal -- a compiler's error, a
+  stack trace, PowerShell's `At C:\x.ps1:12 char:5` -- opens the file at that
+  line beside the terminal; on a URL, in the browser. Relative paths are read
+  from where the shell says it is (`OSC 7`, `OSC 9;9`), else where it started.
 
 ## [1.3.0] - 2026-11-06
 

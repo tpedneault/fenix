@@ -183,6 +183,10 @@ staged = "#9ece6a"
 untracked = "#7aa2f7"
 ignored = "#929bb9"
 conflicted = "#f7768e"
+
+# [terminal]  # a terminal's 16 ANSI colours; worked out from the above when left out
+# ansi = ["#111219", "#f7768e", "#9ece6a", "#ff9e64", "#7aa2f7", "#bb9af7", "#2ac3de", "#a2aad0",
+#         "#929bb9", "#ec87a3", "#a5cd86", "#f2a781", "#88aaf7", "#bca4f7", "#48c4e3", "#c0caf5"]
 ```
 
 Colours are `#rrggbb`; a surface drawn over another (a highlight) can be
@@ -424,6 +428,7 @@ when it's out of date).
 | `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
 | `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
+| `terminal.shell` | text | PowerShell 7, else Windows PowerShell; $SHELL | The shell a terminal starts, with its arguments: pwsh -NoLogo, bash -l; a path with spaces in double quotes. Empty: PowerShell 7 on Windows when it's installed, else Windows PowerShell; $SHELL elsewhere. |
 | `search.smart_case` | true / false | on | A search in lower case matches any case; a capital letter makes it exact. For / and the Search page; Alt-c on the page, \C in /, match case anyway. |
 | `search.regex` | true / false | off | Whether the Search page (SPC /) starts reading the query as a regex rather than literal text. Alt-r flips it there; / and :s are always regexes. |
 | `search.exclude` | a list | – | Globs the Search page leaves out to begin with ("target", "*.lock"). Ignored files are left out anyway; f on the page edits the globs. |

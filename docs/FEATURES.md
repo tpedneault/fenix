@@ -1633,9 +1633,16 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   reused, since a recycled one would point at a different shell than the
   one you remembered.
 
-  Both run `powershell.exe` on Windows, `$SHELL` (falling back to
-  `/bin/sh`) elsewhere, with full ANSI color support (16-color,
-  256-color, and RGB foreground/background). Neither is killed by
+  Both run the shell `terminal.shell` names, with its arguments; left
+  empty, PowerShell 7 (`pwsh`) on Windows when it's installed, else
+  Windows PowerShell, and `$SHELL` (falling back to `/bin/sh`) elsewhere.
+  PowerShell starts without its banner. The 16 ANSI colours are the
+  theme's own -- its Git colours for red, green and yellow, its syntax
+  accents for blue, magenta and cyan, its text and page for white and
+  black -- unless the theme lists its own (`[terminal] ansi`); 256-colour
+  and RGB are as the program asks. Bold, dim, italic, underline and
+  inverse are drawn, so PowerShell's menu completion shows the item it's
+  on and its suggestions from history read as quieter than what you typed. Neither is killed by
   looking away: hiding the panel, or pointing a pane at another buffer,
   leaves the shell and anything running in it going, and coming back
   shows it caught up to wherever it got to. Closing a terminal *buffer*
@@ -1657,7 +1664,18 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   for `:w` to write to a file and nothing Vim's editing commands can
   corrupt.
 
-  v1 limitations: no mouse reporting, no bracketed paste, no F-keys, no
+  **Copy, paste and links.** Dragging across a terminal's text selects
+  it; `Ctrl-Shift-C` copies it and `Ctrl-Shift-V` pastes, and a right
+  click copies the selection or, with none, pastes. A paste is
+  bracketed when the program asked for that, so a shell doesn't run a
+  multi-line paste line by line. `Ctrl`-click on a `path:line:col` -- a
+  compiler's error, a stack trace, PowerShell's `At C:\x.ps1:12 char:5`
+  -- opens the file at that line beside the terminal; on a URL, in the
+  browser. A relative path is read from where the shell says it is
+  (`OSC 7`, or `OSC 9;9` from a PowerShell prompt), else where it
+  started, else the project.
+
+  v1 limitations: no mouse reporting, no F-keys, no
   application-cursor-mode variants -- covers ordinary shell/REPL/pager
   use, not a full terminfo-correct implementation. Terminal *queries*
   are answered, though (cursor position, device attributes), which is

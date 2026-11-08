@@ -37,7 +37,10 @@ mod debug_drawer;
 mod debug_trail;
 mod debug_breakpoints;
 mod panels;
+mod terminal_view;
+mod terminal_mouse;
 pub(crate) use debug_host::{debug_dock_height, DOCK_TEXT_X, DOCK_TEXT_Y};
+pub(crate) use terminal_view::{BOLD as TERM_BOLD, ITALIC as TERM_ITALIC};
 pub(crate) use projects::window_title;
 pub(crate) use debug_breakpoints::BreakpointPart;
 mod polish;
@@ -3530,20 +3533,6 @@ fn fetch_git_refresh_data(repo_root: &Path) -> GitRefreshData {
     GitRefreshData { status, files, branches, commits, stashes, in_progress, sides }
 }
 
-/// Resolves a `vt100` cell color to a real theme color -- `Default`
-/// falls back to whatever's passed (the active theme's own fg/bg), so a
-/// program that never sets a color inherits Fenix's current theme, the
-/// same "everything reads from `Theme`" convention every other color in
-/// this app already follows. `Rgb` is truecolor, direct. `Idx` is the
-/// standard 256-color palette (`xterm_256_rgb`).
-fn vt100_color(color: vt100::Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
-    match color {
-        vt100::Color::Default => default,
-        vt100::Color::Rgb(r, g, b) => (r, g, b),
-        vt100::Color::Idx(idx) => xterm_256_rgb(idx),
-    }
-}
-
 /// Encodes one keypress into the raw bytes a real terminal would send
 /// for it -- `None` for anything with no sensible terminal meaning
 /// (function keys, mouse, etc., simply not forwarded in v1). Covers
@@ -3578,14 +3567,6 @@ fn encode_terminal_key(keypress: KeyPress) -> Option<Vec<u8>> {
         KeyCode::Named(FenixNamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
         KeyCode::Named(FenixNamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
     }
-}
-
-/// An `(r, g, b)` byte triple as the rect-fill `[f32; 4]` representation
-/// every other themed background already uses (`Theme::bg`/`hl_line`/
-/// selection, etc.) -- opaque (alpha `1.0`), matching a real terminal
-/// cell's own background always being a solid fill, never translucent.
-fn rgb_f32((r, g, b): (u8, u8, u8)) -> [f32; 4] {
-    [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0]
 }
 
 /// The standard xterm 256-color palette -- 0-15 the fixed default
@@ -4681,6 +4662,8 @@ pub struct App {
     /// Where each pane-resident shell was started, for the ones opened
     /// somewhere in particular (`SPC e T`).
     terminal_buffer_cwds: HashMap<BufferId, PathBuf>,
+    /// What's selected in a terminal with the mouse (`terminal_mouse`).
+    term_select: Option<terminal_mouse::TermSelection>,
     /// A terminal buffer that runs one program instead of a shell (a
     /// serial monitor, a debugger console) -- what `spawn_terminal_for`
     /// starts, and restarts, in it.
@@ -5867,6 +5850,7 @@ impl App {
             terminal_buffers_spawning: HashSet::new(),
             terminal_buffer_labels: HashMap::new(),
             terminal_buffer_cwds: HashMap::new(),
+            term_select: None,
             terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
@@ -9080,10 +9064,15 @@ impl App {
             let rows = text::TERMINAL_ROWS as u16;
             let cols = self.terminal_cols();
             let cwd = self.terminal_start_dir();
+            let shell = self.terminal_shell();
+            let spawn = move || match &shell {
+                Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
+                None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
+            };
             match self.event_proxy.clone() {
                 Some(proxy) => {
                     std::thread::spawn(move || {
-                        let result = fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref());
+                        let result = spawn();
                         let _ = proxy.send_event(FenixUserEvent::TerminalSpawned(TerminalTarget::Panel, TerminalSpawnResult(result)));
                     });
                 }
@@ -9092,7 +9081,7 @@ impl App {
                     // -- run synchronously and apply the result directly,
                     // same "no fake event loop needed" posture `git_
                     // refresh_session`'s own `None` branch already has.
-                    let result = fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref());
+                    let result = spawn();
                     self.apply_terminal_spawned(result);
                 }
             }
@@ -9260,6 +9249,16 @@ impl App {
         self.wake_caret();
     }
 
+    /// The shell `terminal.shell` names, as a program and its arguments;
+    /// none when it's empty (or can't be read), for the platform's own
+    /// (`fenix_terminal::default_shell`).
+    pub(super) fn terminal_shell(&self) -> Option<(String, Vec<String>)> {
+        let line = self.config.text_value("terminal.shell")?.trim();
+        let mut words = fenix_project::tools::split_command_line(line).ok()?.into_iter();
+        let program = words.next().filter(|p| !p.is_empty())?;
+        Some((program, words.collect()))
+    }
+
     /// Starts a shell for one terminal buffer, sized to the pane
     /// currently showing it. Backgrounded for the same reason the
     /// panel's spawn is (see `toggle_terminal`): process creation is not
@@ -9270,7 +9269,7 @@ impl App {
         // Remembered rather than passed once, so a shell respawned after
         // `exit` comes back where it was rather than somewhere else.
         let cwd = self.terminal_buffer_cwds.get(&id).cloned();
-        let program = self.terminal_buffer_programs.get(&id).cloned();
+        let program = self.terminal_buffer_programs.get(&id).cloned().or_else(|| self.terminal_shell());
         let spawn = move || match &program {
             Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
             None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
@@ -15902,7 +15901,8 @@ impl App {
         if self.terminal_focused {
             if keypress == KeyPress::char('\\').with_ctrl() {
                 self.terminal_focused = false;
-            } else {
+            } else if !self.terminal_clipboard_key(terminal_mouse::TermTarget::Panel, keypress) {
+                self.terminal_typed(terminal_mouse::TermTarget::Panel);
                 self.write_terminal_input(keypress);
             }
             self.wake_caret();
@@ -15918,7 +15918,8 @@ impl App {
         if let Some(id) = self.active_terminal_buffer() {
             if keypress == KeyPress::char('\\').with_ctrl() {
                 self.unfocus_terminal_buffer();
-            } else {
+            } else if !self.terminal_clipboard_key(terminal_mouse::TermTarget::Buffer(id), keypress) {
+                self.terminal_typed(terminal_mouse::TermTarget::Buffer(id));
                 self.write_terminal_buffer_input(id, keypress);
             }
             self.wake_caret();
@@ -18646,7 +18647,7 @@ impl App {
     /// kicking off a background spawn and `apply_terminal_spawned`
     /// hearing back -- see `toggle_terminal`'s own doc comment for why
     /// that gap can be long enough to matter, particularly on Windows.
-    fn terminal_panel_render(&self) -> Option<(RowSpans, Vec<(usize, usize, usize, [f32; 4])>)> {
+    fn terminal_panel_render(&self) -> Option<terminal_view::TermView> {
         if !self.terminal_open {
             return None;
         }
@@ -18659,58 +18660,15 @@ impl App {
             // panel grabs focus -- there's no other UI surface that
             // mentions the chord at all, and this is exactly the moment
             // a user unfamiliar with it needs to see it.
-            return Some((vec![("Starting shell... (Ctrl-\\ to unfocus)".to_string(), self.theme.fg, false)], Vec::new()));
+            return Some(terminal_view::TermView { spans: vec![("Starting shell... (Ctrl-\\ to unfocus)".to_string(), self.theme.fg, false)], ..Default::default() });
         }
         None
     }
 
-    fn terminal_row_spans(&self, screen: &vt100::Screen) -> (RowSpans, Vec<(usize, usize, usize, [f32; 4])>) {
-        let theme = self.theme;
-        let default_fg = (theme.fg.r(), theme.fg.g(), theme.fg.b());
-        let default_bg = ((theme.bg[0] * 255.0) as u8, (theme.bg[1] * 255.0) as u8, (theme.bg[2] * 255.0) as u8);
-        let (rows, cols) = screen.size();
-        let mut spans: RowSpans = Vec::new();
-        let mut bg_segments = Vec::new();
-        for row in 0..rows {
-            let mut run_color = theme.fg;
-            let mut run_text = String::new();
-            let mut bg_run: Option<(usize, (u8, u8, u8))> = None;
-            for col in 0..cols {
-                let cell = screen.cell(row, col);
-                let (fr, fg_g, fb) = cell.map(|c| vt100_color(c.fgcolor(), default_fg)).unwrap_or(default_fg);
-                let fg = glyphon::Color::rgb(fr, fg_g, fb);
-                let bg = cell.map(|c| vt100_color(c.bgcolor(), default_bg)).unwrap_or(default_bg);
-                let text = cell.map(|c| c.contents()).filter(|t| !t.is_empty()).unwrap_or(" ");
-                if col == 0 {
-                    run_color = fg;
-                } else if fg != run_color {
-                    spans.push((std::mem::take(&mut run_text), run_color, false));
-                    run_color = fg;
-                }
-                run_text.push_str(text);
-
-                if bg != default_bg {
-                    match bg_run {
-                        Some((_, c)) if c == bg => {}
-                        Some((start, c)) => {
-                            bg_segments.push((row as usize, start, col as usize, rgb_f32(c)));
-                            bg_run = Some((col as usize, bg));
-                        }
-                        None => bg_run = Some((col as usize, bg)),
-                    }
-                } else if let Some((start, c)) = bg_run.take() {
-                    bg_segments.push((row as usize, start, col as usize, rgb_f32(c)));
-                }
-            }
-            if let Some((start, c)) = bg_run.take() {
-                bg_segments.push((row as usize, start, cols as usize, rgb_f32(c)));
-            }
-            spans.push((run_text, run_color, false));
-            if row + 1 < rows {
-                spans.push(("\n".to_string(), theme.fg, false));
-            }
-        }
-        (spans, bg_segments)
+    /// A terminal's screen as it's drawn: the theme's ANSI colours, and
+    /// bold, dim, italic, underline and inverse (`terminal_view`).
+    fn terminal_row_spans(&self, screen: &vt100::Screen) -> terminal_view::TermView {
+        terminal_view::view(self.theme, screen)
     }
 
     /// Builds the picker's visible rows as rich-text spans: row 0 is the
@@ -19445,6 +19403,7 @@ impl App {
         let show_terminal = self.terminal_open;
         let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
         let terminal_render = self.terminal_panel_render();
+        let terminal_selection = self.terminal_selection_for(terminal_mouse::TermTarget::Panel);
         let dock_h = self.debug_dock_px();
         // The sidebar's rows: as many as fit its panel, above the terminal
         // and the debug dock, which run under it.
@@ -19678,8 +19637,8 @@ impl App {
                         let _ = state.session.resize(want_rows, want_cols);
                     }
                 }
-                let screen_spans = self.terminal_buffers.get(&buffer_id).map(|state| self.terminal_row_spans(state.session.screen()));
-                let (spans, colored_bg_segments) = screen_spans.unwrap_or_default();
+                let view = self.terminal_buffers.get(&buffer_id).map(|state| self.terminal_row_spans(state.session.screen())).unwrap_or_default();
+                let terminal_view::TermView { spans, styles, backgrounds: colored_bg_segments, underlines } = view;
                 // The caret is the shell's own cursor, and is drawn only
                 // while this terminal actually has the keyboard -- an
                 // idle blinking block in a pane that ignores your typing
@@ -19705,7 +19664,7 @@ impl App {
                     marked_rows: Vec::new(),
                     row_tints: Vec::new(),
                     colored_bg_segments,
-                    selection_segments: Segments::new(),
+                    selection_segments: self.terminal_selection_for(terminal_mouse::TermTarget::Buffer(buffer_id)),
                     pulse_overlay: None,
                     bracket_match_segments: Segments::new(),
                     hlsearch_segments: Segments::new(),
@@ -19723,7 +19682,7 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
-                    extra: motion_host::PaneExtras::default(),
+                    extra: motion_host::PaneExtras { underlines, span_styles: styles, ..Default::default() },
                 });
                 continue;
             }
@@ -20334,7 +20293,7 @@ impl App {
         for pane in &panes_render {
             let content_refs: Vec<(&str, glyphon::Color, bool)> =
                 pane.spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_pane_rich(pane.pane, pane.rect.w, pane.rect.h, &content_refs, pane.extra.grid);
+            text.set_pane_rich(pane.pane, pane.rect.w, pane.rect.h, &content_refs, pane.extra.grid, &pane.extra.span_styles);
             let sticky: RowSpans = polish::join_rows(pane.extra.sticky.clone());
             let sticky_refs: Vec<(&str, glyphon::Color, bool)> = sticky.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_pane_sticky(pane.pane, pane.rect.w, &sticky_refs);
@@ -20421,10 +20380,9 @@ impl App {
                 sidebar_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
             text.set_sidebar_rich(&sidebar_refs);
         }
-        if let Some((terminal_spans, _)) = &terminal_render {
-            let terminal_refs: Vec<(&str, glyphon::Color, bool)> =
-                terminal_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-            text.set_terminal_rich(&terminal_refs);
+        if let Some(view) = &terminal_render {
+            let terminal_refs: Vec<(&str, glyphon::Color, bool)> = view.spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+            text.set_terminal_rich(&terminal_refs, &view.styles);
         }
         if let Some(dock_spans) = &debug_dock_render {
             let dock_refs: Vec<(&str, glyphon::Color, bool)> = dock_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
@@ -20792,17 +20750,22 @@ impl App {
         if show_terminal {
             let terminal_top = modeline_top - dock_h - terminal_h;
             // Base fill, matching what a "default background" cell
-            // resolves to (`vt100_color`'s own `Default => theme.bg`) --
-            // so an ordinary cell blends seamlessly into the strip
+            // resolves to (`terminal_view`: none of its own, so the page)
+            // -- so an ordinary cell blends seamlessly into the strip
             // rather than needing its own explicit background segment.
             let panel = panels::strip_panel(window_width, terminal_top, terminal_h);
             bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
-            if let Some((_, bg_segments)) = &terminal_render {
-                for &(row, col_start, col_end, color) in bg_segments {
-                    let x = text::PAD_LEFT + text::STRIP_INSET + col_start as f32 * char_width;
-                    let y = terminal_top + text::PAD_TOP + text::STRIP_INSET / 2.0 + row as f32 * line_height;
-                    let w = (col_end - col_start) as f32 * char_width;
-                    bg_rect.push_rect(gpu, x, y, w, line_height, color);
+            if let Some(view) = &terminal_render {
+                let cell_x = |col: usize| text::PAD_LEFT + text::STRIP_INSET + col as f32 * char_width;
+                let row_y = |row: usize| terminal_top + text::PAD_TOP + text::STRIP_INSET / 2.0 + row as f32 * line_height;
+                for &(row, col_start, col_end, color) in &view.backgrounds {
+                    bg_rect.push_rect(gpu, cell_x(col_start), row_y(row), (col_end - col_start) as f32 * char_width, line_height, color);
+                }
+                for &(row, col_start, col_end, color) in &view.underlines {
+                    bg_rect.push_rect(gpu, cell_x(col_start), (row_y(row) + line_height - 2.0).round(), (col_end - col_start) as f32 * char_width, 1.0, color);
+                }
+                for &(row, col_start, col_end) in &terminal_selection {
+                    bg_rect.push_rect(gpu, cell_x(col_start), row_y(row), (col_end - col_start) as f32 * char_width, line_height, theme.selection);
                 }
             }
         }
@@ -21935,7 +21898,18 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
                 if state == ElementState::Pressed && button == MouseButton::Left {
                     if let Some(pos) = self.cursor_pos {
+                        // A terminal's text: a selection starts, or a
+                        // Ctrl-click follows the link there.
+                        if self.terminal_mouse_press(pos) {
+                            return;
+                        }
                         self.handle_click(pos);
+                    }
+                }
+                // A right click on a terminal copies or pastes.
+                if let (MouseButton::Right, ElementState::Pressed, Some(pos)) = (button, state, self.cursor_pos) {
+                    if self.terminal_right_click(pos) {
+                        return;
                     }
                 }
                 // A right click in text or on a tab: its menu.
@@ -27748,7 +27722,8 @@ configure_board stm32
         let mut app = App::with_file(None);
         app.terminal_open = true;
         app.terminal_spawning = true;
-        let (spans, bg_segments) = app.terminal_panel_render().expect("expected a placeholder while spawning");
+        let view = app.terminal_panel_render().expect("expected a placeholder while spawning");
+        let (spans, bg_segments) = (view.spans, view.backgrounds);
         let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
         assert!(joined.contains("Starting shell"));
         assert!(bg_segments.is_empty());
@@ -27758,7 +27733,7 @@ configure_board stm32
     fn terminal_panel_render_shows_real_content_once_a_session_exists() {
         let mut app = App::with_file(None);
         app.toggle_terminal(); // synchronous spawn in a test, see the test above
-        let (spans, _) = app.terminal_panel_render().expect("expected real terminal content");
+        let spans = app.terminal_panel_render().expect("expected real terminal content").spans;
         let joined: String = spans.iter().map(|(s, _, _)| s.as_str()).collect();
         assert!(!joined.contains("Starting shell"), "a live session must not still show the placeholder");
     }
@@ -28041,6 +28016,20 @@ configure_board stm32
         assert_eq!(app.gutter_chars(ob), 0);
     }
 
+    /// `terminal.shell` is a program and its arguments, a quoted path
+    /// one word; empty is the platform's own.
+    #[test]
+    fn the_terminal_shell_setting_is_a_program_and_its_arguments() {
+        let mut app = App::with_file(None);
+        assert_eq!(app.terminal_shell(), None, "unset: the platform's");
+        app.config.set_value("terminal.shell", Some(fenix_config::Value::Text("  ".into())));
+        assert_eq!(app.terminal_shell(), None, "empty: the platform's");
+        app.config.set_value("terminal.shell", Some(fenix_config::Value::Text(r#""C:\Program Files\Git\bin\bash.exe" -l"#.into())));
+        assert_eq!(app.terminal_shell(), Some((r"C:\Program Files\Git\bin\bash.exe".to_string(), vec!["-l".to_string()])));
+        app.config.set_value("terminal.shell", Some(fenix_config::Value::Text("pwsh -NoLogo -NoProfile".into())));
+        assert_eq!(app.terminal_shell(), Some(("pwsh".to_string(), vec!["-NoLogo".to_string(), "-NoProfile".to_string()])));
+    }
+
     #[test]
     fn write_terminal_input_is_a_no_op_without_a_live_session() {
         let mut app = App::with_file(None);
@@ -28122,7 +28111,7 @@ configure_board stm32
         type_line(|key| app.write_terminal_input(key), "echo fenix-panel-marker");
 
         let render = |app: &App| {
-            app.terminal_panel_render().map(|(spans, _)| spans.iter().map(|(text, _, _)| text.as_str()).collect::<String>()).unwrap_or_default()
+            app.terminal_panel_render().map(|view| view.spans.iter().map(|(text, _, _)| text.as_str()).collect::<String>()).unwrap_or_default()
         };
         match pump_until(&mut app, TerminalTarget::Panel, reader, "fenix-panel-marker", render) {
             Ok(_) => {}
@@ -28147,7 +28136,7 @@ configure_board stm32
 
         let render = move |app: &App| match app.terminal_buffers.get(&id) {
             Some(state) => {
-                let (spans, _) = app.terminal_row_spans(state.session.screen());
+                let spans = app.terminal_row_spans(state.session.screen()).spans;
                 spans.iter().map(|(text, _, _)| text.as_str()).collect::<String>()
             }
             None => String::new(),

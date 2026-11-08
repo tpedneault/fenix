@@ -761,9 +761,15 @@ impl TextPipeline {
     /// `grid`: each character kept to the cells a page counts for it
     /// (`page::char_cells`) -- a wide one two, its fallback glyph's own
     /// advance made up to that -- so what follows stays on its columns.
-    pub fn set_pane_rich(&mut self, pane: PaneId, w: f32, h: f32, segments: &[(&str, Color, bool)], grid: bool) {
+    /// `styles`: spans drawn bold or italic, by index (a terminal's);
+    /// only for a pane that isn't kept to a grid, where spans are
+    /// segments one for one.
+    pub fn set_pane_rich(&mut self, pane: PaneId, w: f32, h: f32, segments: &[(&str, Color, bool)], grid: bool, styles: &[(usize, u8)]) {
         let _profile = crate::profile::Scope::new("shape pane");
-        let spans = if grid { self.grid_spans(segments) } else { self.cell_spans(segments) };
+        let mut spans = if grid { self.grid_spans(segments) } else { self.cell_spans(segments) };
+        if !grid {
+            apply_styles(&mut spans, styles);
+        }
         let default_attrs = Attrs::new().family(self.content_family());
 
         if !self.content_buffers.contains_key(&pane) {
@@ -1033,9 +1039,10 @@ impl TextPipeline {
         self.debug_dock.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
 
-    pub fn set_terminal_rich(&mut self, segments: &[(&str, Color, bool)]) {
+    pub fn set_terminal_rich(&mut self, segments: &[(&str, Color, bool)], styles: &[(usize, u8)]) {
         let default_attrs = Attrs::new().family(self.content_family());
-        let spans = self.rich_spans(segments);
+        let mut spans = self.rich_spans(segments);
+        apply_styles(&mut spans, styles);
         self.terminal.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         self.terminal.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
     }
@@ -1358,6 +1365,23 @@ fn resolve_font_size(requested: f32) -> (f32, f32) {
 
 fn content_height(window_height: f32, modeline_height: f32) -> f32 {
     (window_height - modeline_height).max(0.0)
+}
+
+/// Draws the spans `styles` names bold or italic (`terminal_view::BOLD`,
+/// `ITALIC`): a terminal's text, which a program styles cell by cell.
+fn apply_styles(spans: &mut [(&str, Attrs<'_>)], styles: &[(usize, u8)]) {
+    for &(i, style) in styles {
+        if let Some((_, attrs)) = spans.get_mut(i) {
+            let mut a = attrs.clone();
+            if style & crate::app::TERM_BOLD != 0 {
+                a = a.weight(glyphon::cosmic_text::Weight::BOLD);
+            }
+            if style & crate::app::TERM_ITALIC != 0 {
+                a = a.style(glyphon::cosmic_text::Style::Italic);
+            }
+            *attrs = a;
+        }
+    }
 }
 
 /// Pixel height of the terminal panel's `TERMINAL_ROWS` rows, at the

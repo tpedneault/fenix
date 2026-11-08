@@ -126,6 +126,9 @@ pub(super) struct PaneExtras {
     pub ruler: Option<Ruler>,
     /// Sticky scroll's rows, one span list each, outermost first.
     pub sticky: Vec<RowSpans>,
+    /// Spans drawn bold or italic, by index: a terminal's
+    /// (`terminal_view::BOLD`, `ITALIC`).
+    pub span_styles: Vec<(usize, u8)>,
 }
 
 /// The overview ruler down a code pane's right edge.

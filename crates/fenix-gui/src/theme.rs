@@ -64,6 +64,11 @@ pub struct Theme {
     /// towards `fg`, or -- where that would cost the text its contrast --
     /// a step the other way, sunk into the page.
     pub input: [f32; 4],
+    /// The 16 ANSI colours a terminal's programs name (black, red, green,
+    /// yellow, blue, magenta, cyan, white, then their bright forms), in
+    /// this theme's own: its Git and syntax accents, its text and its
+    /// surfaces -- unless its file lists its own (`[terminal] ansi`).
+    pub ansi: [[f32; 4]; 16],
     pub bg_modeline: [f32; 4],
     pub fg: glyphon::Color,
     pub fg_modeline: glyphon::Color,
@@ -338,6 +343,8 @@ struct ThemeFile {
     #[serde(default)]
     border: Option<ColorSpec>,
     surfaces: Surfaces,
+    #[serde(default)]
+    terminal: Option<TerminalColors>,
     text: Text,
     modes: Modes,
     syntax: Syntax,
@@ -368,6 +375,13 @@ struct Surfaces {
     selection: ColorSpec,
     bracket_match: ColorSpec,
     search_match: ColorSpec,
+}
+
+/// `[terminal]`: the 16 ANSI colours, when a theme wants its own.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TerminalColors {
+    ansi: Vec<ColorSpec>,
 }
 
 #[derive(serde::Deserialize)]
@@ -485,6 +499,23 @@ pub fn luminance_of(c: [f32; 4]) -> f32 {
     0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
 }
 
+/// The 16 ANSI colours from a theme's own: red, green and yellow are its
+/// Git colours (removed, added, changed), blue, magenta and cyan its
+/// functions, keywords and types; black and white are its page and its
+/// text -- the other way round on a light theme, where black is the ink
+/// -- and bright black is its line numbers' quiet grey. Each bright one
+/// is a step towards the text, so it stands out more on the same page.
+fn ansi_for(bg: [f32; 4], fg: [f32; 4], quiet: [f32; 4], [red, green, yellow, blue, magenta, cyan]: [[f32; 4]; 6]) -> [[f32; 4]; 16] {
+    let light = luminance_of(bg) > 0.5;
+    let (black, white, bright_white) = if light {
+        (fg, mix(bg, fg, 0.28), mix(bg, fg, 0.12))
+    } else {
+        (mix(bg, [0.0, 0.0, 0.0, 1.0], 0.35), mix(fg, bg, 0.18), fg)
+    };
+    let bright = |c: [f32; 4]| mix(c, fg, 0.2);
+    [black, red, green, yellow, blue, magenta, cyan, white, quiet, bright(red), bright(green), bright(yellow), bright(blue), bright(magenta), bright(cyan), bright_white]
+}
+
 /// How far apart two colours are to read, 1 to 21 (WCAG's ratio).
 pub fn contrast_of(a: [f32; 4], b: [f32; 4]) -> f32 {
     let (a, b) = (luminance_of(a), luminance_of(b));
@@ -576,7 +607,36 @@ pub fn parse(text: &str) -> Result<Theme, String> {
             mix(bg, [0.0, 0.0, 0.0, 1.0], INPUT_STEP * 1.6)
         }
     });
+    let ansi = match &f.terminal {
+        Some(t) => {
+            if t.ansi.len() != 16 {
+                return Err(format!("terminal.ansi: 16 colours -- black, red, green, yellow, blue, magenta, cyan, white, then the bright ones -- not {}", t.ansi.len()));
+            }
+            let mut out = [[0.0; 4]; 16];
+            for (i, c) in t.ansi.iter().enumerate() {
+                out[i] = c.text(&format!("terminal.ansi[{i}]")).map(rgba_of)?;
+            }
+            out
+        }
+        None => {
+            let accent = |spec: &ColorSpec, key: &str| spec.text(key).map(rgba_of);
+            ansi_for(
+                bg,
+                rgba_of(fg),
+                rgba_of(f.text.gutter_fg.text("text.gutter_fg")?),
+                [
+                    accent(&f.git.conflicted, "git.conflicted")?,
+                    accent(&f.git.staged, "git.staged")?,
+                    accent(&f.git.modified, "git.modified")?,
+                    accent(&f.syntax.function, "syntax.function")?,
+                    accent(&f.syntax.keyword, "syntax.keyword")?,
+                    accent(&f.syntax.ty, "syntax.type")?,
+                ],
+            )
+        }
+    };
     Ok(Theme {
+        ansi,
         name: leak(f.name.trim().to_string()),
         font_family: f.font_family.filter(|s| !s.trim().is_empty()).map(leak),
         border: f.border.as_ref().map(|c| c.rgba("border")).transpose()?,
@@ -1190,6 +1250,30 @@ mod tests {
         assert!(luminance_of(orbit.card) > luminance_of(orbit.bg), "a dark theme's cards are lighter than its page");
         let light = named("GitHub Light");
         assert!(luminance_of(light.card) < luminance_of(light.bg), "a light theme's are darker");
+    }
+
+    /// A terminal's ANSI colours are the theme's: its Git colours for red,
+    /// green and yellow, its text for bright white on a dark page and its
+    /// ink for black on a light one; a theme file can list its own 16.
+    #[test]
+    fn a_terminals_colours_are_the_themes() {
+        let orbit = default_theme();
+        assert_eq!(orbit.ansi[1], rgba_of(orbit.git_conflicted));
+        assert_eq!(orbit.ansi[2], rgba_of(orbit.git_staged));
+        assert_eq!(orbit.ansi[15], rgba_of(orbit.fg));
+        assert!(luminance_of(orbit.ansi[0]) < luminance_of(orbit.bg), "black is under a dark page");
+        let light = named("GitHub Light");
+        assert_eq!(light.ansi[0], rgba_of(light.fg), "on a light page black is the ink");
+        for theme in all().iter().filter(|t| t.name != "TempleOS") {
+            for (i, c) in theme.ansi.iter().enumerate().filter(|(i, _)| ![0, 7, 15].contains(i)) {
+                assert!(contrast_of(*c, theme.bg) >= 2.0, "{}: ANSI {i} reads on the page", theme.name);
+            }
+        }
+        let mine = BUILT_IN[0].1.replace("[text]", "[terminal]\nansi = [\"#000000\", \"#ff0000\"]\n\n[text]");
+        assert!(parse(&mine).err().unwrap().contains("16 colours"));
+        let sixteen = format!("[terminal]\nansi = [{}]\n\n[text]", vec!["\"#102030\""; 16].join(", "));
+        let theme = parse(&BUILT_IN[0].1.replace("[text]", &sixteen)).expect("reads");
+        assert!((theme.ansi[9][0] - 16.0 / 255.0).abs() < 1e-6);
     }
 
     /// A theme file can set its own tray, card and input.

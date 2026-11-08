@@ -27,8 +27,9 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    /// Spawns the platform shell (`powershell.exe` on Windows, `$SHELL`
-    /// -- falling back to `/bin/sh` -- elsewhere) into a fresh PTY sized
+    /// Spawns the platform shell (`default_shell`: PowerShell 7 on Windows
+    /// when it's installed, else Windows PowerShell; `$SHELL` -- falling
+    /// back to `/bin/sh` -- elsewhere) into a fresh PTY sized
     /// `rows` x `cols`. Returns the `Terminal` plus the PTY's reader
     /// half separately: the reader needs to move into a background
     /// thread the *caller* owns (`fenix-gui`'s own reader thread,
@@ -108,6 +109,37 @@ impl Terminal {
         }
     }
 
+    /// Pastes `text` as typed: its line breaks as Enter (`\r`), and --
+    /// when the program asked for it (bracketed paste, `ESC [ ? 2004 h`)
+    /// -- between the markers that tell it this is a paste, so a shell
+    /// doesn't run a multi-line paste a line at a time. Escapes in it are
+    /// dropped: a paste can't end the bracket early or drive the terminal.
+    pub fn paste(&mut self, text: &str) -> std::io::Result<()> {
+        let bytes = paste_bytes(text, self.parser.screen().bracketed_paste());
+        self.write_input(&bytes)
+    }
+
+    /// The text from one cell to another (either way round), as rows of
+    /// the screen shown -- scrolled back or not -- a row's trailing
+    /// spaces dropped, a row the program wrapped joined to the next.
+    pub fn text_between(&self, a: (u16, u16), b: (u16, u16)) -> String {
+        let (from, to) = if a <= b { (a, b) } else { (b, a) };
+        let text = self.parser.screen().contents_between(from.0, from.1, to.0, to.1.saturating_add(1));
+        text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
+    }
+
+    /// Row `row` of the screen shown, as text.
+    pub fn row_text(&self, row: u16) -> String {
+        let (_, cols) = self.parser.screen().size();
+        self.parser.screen().contents_between(row, 0, row, cols)
+    }
+
+    /// The folder the shell last said it's in (`OSC 7` / `OSC 9;9`), if
+    /// it has.
+    pub fn cwd(&self) -> Option<&std::path::Path> {
+        self.parser.callbacks().cwd.as_deref()
+    }
+
     /// Writes raw input bytes (already encoded, e.g. by a caller's own
     /// key-to-terminal-sequence mapping) to the shell.
     pub fn write_input(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -170,18 +202,41 @@ impl Terminal {
     }
 }
 
-/// `powershell.exe` on Windows; `$SHELL` (falling back to `/bin/sh`)
-/// elsewhere -- the platform's own default interactive shell, not a
-/// configurable choice in v1.
-fn shell_command() -> CommandBuilder {
+/// The platform's own interactive shell, when `terminal.shell` doesn't
+/// name one: on Windows PowerShell 7 (`pwsh`) when it's installed --
+/// on `PATH` or where its installer puts it -- else Windows PowerShell
+/// 5.1, which every Windows has; elsewhere `$SHELL`, falling back to
+/// `/bin/sh`. PowerShell starts without its banner (`-NoLogo`): a
+/// terminal opened beside the code is for the prompt, not the copyright.
+pub fn default_shell() -> (String, Vec<String>) {
     #[cfg(windows)]
     {
-        CommandBuilder::new("powershell.exe")
+        let on_path = std::env::var_os("PATH").is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("pwsh.exe").is_file()));
+        let installed = std::env::var_os("ProgramFiles").map(|p| std::path::PathBuf::from(p).join("PowerShell").join("7").join("pwsh.exe")).filter(|p| p.is_file());
+        let program = if on_path { "pwsh.exe".to_string() } else { installed.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "powershell.exe".to_string()) };
+        (program, vec!["-NoLogo".to_string()])
     }
     #[cfg(not(windows))]
     {
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        CommandBuilder::new(shell)
+        (std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "/bin/sh".to_string()), Vec::new())
+    }
+}
+
+fn shell_command() -> CommandBuilder {
+    let (program, args) = default_shell();
+    let mut command = CommandBuilder::new(program);
+    command.args(args);
+    command
+}
+
+/// What a paste of `text` sends: line breaks as `\r`, escapes dropped,
+/// and the bracketed-paste markers around it when `bracketed`.
+fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let clean: String = text.replace("\r\n", "\r").replace('\n', "\r").chars().filter(|&c| c != '\x1b').collect();
+    if bracketed {
+        [b"\x1b[200~".as_slice(), clean.as_bytes(), b"\x1b[201~"].concat()
+    } else {
+        clean.into_bytes()
     }
 }
 
@@ -189,6 +244,15 @@ fn shell_command() -> CommandBuilder {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// A paste's lines end in Enter, it's bracketed when the program
+    /// asked, and nothing in it can close the bracket early.
+    #[test]
+    fn a_paste_is_typed_bracketed_when_asked() {
+        assert_eq!(paste_bytes("ls\nexit\r\n", false), b"ls\rexit\r");
+        assert_eq!(paste_bytes("a\nb", true), b"\x1b[200~a\rb\x1b[201~");
+        assert_eq!(paste_bytes("x\x1b[201~rm", true), b"\x1b[200~x[201~rm\x1b[201~");
+    }
 
     #[test]
     fn a_shell_can_be_started_somewhere_in_particular() {
@@ -207,7 +271,7 @@ mod tests {
         let cmd = shell_command();
         let program = cmd.get_argv()[0].to_string_lossy().to_lowercase();
         #[cfg(windows)]
-        assert!(program.contains("powershell"), "expected powershell, got {program:?}");
+        assert!(program.contains("pwsh") || program.contains("powershell"), "expected PowerShell, got {program:?}");
         #[cfg(not(windows))]
         assert!(!program.is_empty());
     }

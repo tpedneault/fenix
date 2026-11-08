@@ -40,6 +40,35 @@ const SECONDARY_DEVICE_ATTRIBUTES: &[u8] = b"\x1b[>0;10;0c";
 #[derive(Default)]
 pub(crate) struct QueryReplies {
     pending: Vec<u8>,
+    /// The folder the shell last said it's in, when it says: `OSC 7`
+    /// (`file://host/path`, what bash, zsh and fish integrations send)
+    /// or `OSC 9;9` (`"C:\\path"`, Windows Terminal's, which a PowerShell
+    /// prompt can send). A path in the output is read from there.
+    pub(crate) cwd: Option<std::path::PathBuf>,
+}
+
+/// The path in an `OSC 7` file URL: its host dropped, `%xx` decoded, and
+/// on Windows the slash before a drive letter (`/C:/x`) too.
+fn path_of_file_url(url: &str) -> Option<std::path::PathBuf> {
+    let rest = url.strip_prefix("file://")?;
+    let path = &rest[rest.find('/')?..];
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(b) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).ok()?, 16) {
+                out.push(b);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    let path = String::from_utf8(out).ok()?;
+    let drive = path.len() > 2 && path.as_bytes()[2] == b':' && path.as_bytes()[1].is_ascii_alphabetic();
+    Some(std::path::PathBuf::from(if drive { &path[1..] } else { &path[..] }))
 }
 
 impl QueryReplies {
@@ -75,6 +104,26 @@ impl vt100::Callbacks for QueryReplies {
             }
             (None, 'c', 0) => self.pending.extend_from_slice(PRIMARY_DEVICE_ATTRIBUTES),
             (Some(b'>'), 'c', _) => self.pending.extend_from_slice(SECONDARY_DEVICE_ATTRIBUTES),
+            _ => {}
+        }
+    }
+
+    /// The shell saying where it is (`OSC 7`, `OSC 9;9`).
+    fn unhandled_osc(&mut self, _: &mut vt100::Screen, params: &[&[u8]]) {
+        let text = |p: &[u8]| String::from_utf8_lossy(p).into_owned();
+        match params {
+            [b"7", url, ..] => {
+                if let Some(path) = path_of_file_url(&text(url)) {
+                    self.cwd = Some(path);
+                }
+            }
+            [b"9", b"9", path, ..] => {
+                let path = text(path);
+                let path = path.trim().trim_matches('"');
+                if !path.is_empty() {
+                    self.cwd = Some(std::path::PathBuf::from(path));
+                }
+            }
             _ => {}
         }
     }
@@ -161,6 +210,20 @@ mod tests {
         assert!(parser.callbacks_mut().take().is_empty(), "nothing to answer yet -- the query isn't complete");
         parser.process(b"6n");
         assert_eq!(parser.callbacks_mut().take(), b"\x1b[1;1R");
+    }
+
+    /// Where the shell says it is: an `OSC 7` URL, or Windows Terminal's
+    /// `OSC 9;9`; neither is owed a reply.
+    #[test]
+    fn the_shell_saying_where_it_is_is_kept() {
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, QueryReplies::default());
+        parser.process(b"\x1b]7;file://host/home/me/My%20Project\x07");
+        assert_eq!(parser.callbacks().cwd.as_deref(), Some(std::path::Path::new("/home/me/My Project")));
+        parser.process(b"\x1b]9;9;\"C:\\src\\fenix\"\x1b\\");
+        assert_eq!(parser.callbacks().cwd.as_deref(), Some(std::path::Path::new("C:\\src\\fenix")));
+        parser.process(b"\x1b]7;file://host/C:/Users/me\x07");
+        assert_eq!(parser.callbacks().cwd.as_deref(), Some(std::path::Path::new("C:/Users/me")), "no slash before a drive");
+        assert!(parser.callbacks_mut().take().is_empty());
     }
 
     #[test]
