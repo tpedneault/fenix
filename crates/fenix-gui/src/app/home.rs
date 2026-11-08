@@ -40,6 +40,11 @@ pub(super) struct HomeOverlay {
     /// Hairlines down the page: (cell, first row, which may be above the
     /// pane; rows).
     pub(super) vertical_rules: Vec<(usize, isize, usize)>,
+    /// Cards behind lines: (first row, which may be above the pane;
+    /// rows; first cell; end cell; fill; outline, if it has one).
+    pub(super) cards: Vec<(isize, usize, usize, usize, [f32; 4], Option<[f32; 4]>)>,
+    /// Chips behind cells: (row, first cell, end cell, fill, outline).
+    pub(super) chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>)>,
 }
 
 /// (row, first cell, end cell, colour) -- the shape `PaneRender`'s

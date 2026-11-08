@@ -75,9 +75,11 @@ prompt goes to and in which mode.
   beside the panel), `@diagnostics` and `@diff`. `/` offers the agent's
   own commands. `Ctrl-V` pastes a picture.
 - When the agent asks before it edits or runs something, the question is
-  a card in the thread with its answers (`y`, `n`, …), and the modeline
-  says an agent is waiting on you. The same keys answer it from an empty
-  prompt, without going back to the thread. When Fenix isn't in front,
+  an outlined card in the thread with its answers, one a line on its
+  key's cap (`y`, `Y`, `n`, …), and the modeline says an agent is waiting
+  on you. On the card, `j` and `k` move between the answers and Enter
+  gives the one they're on. The keys answer it from anywhere in the
+  thread, and from an empty prompt, without going back to the thread. When Fenix isn't in front,
   it asks for your attention (`agents.notify`).
 - A command's card says what ran (`$ rg -n session`) when the agent's
   own title for it doesn't ("Ran command").

@@ -133,6 +133,9 @@ tabs = "underline"        # or "block" (Visual Studio's filled tabs)
 [surfaces]
 bg = "#1a1b26"
 # sidebar_bg = "#1a1b26"  # the explorer's; bg when left out
+# tray = "#12121a"        # between the panels; worked out when left out
+# card = "#222430"        # a card in a panel (a tool call, a debugger column)
+# input = "#292b39"       # an input or a key's cap
 bg_modeline = "#24283b"
 divider = "#565f89"
 caret = "#e0af68"
@@ -183,7 +186,11 @@ conflicted = "#f7768e"
 ```
 
 Colours are `#rrggbb`; a surface drawn over another (a highlight) can be
-see-through, as `#rrggbbaa` or `{ color, alpha }`; text can't. The
+see-through, as `#rrggbbaa` or `{ color, alpha }`; text can't. Left out,
+`tray` is a shade under `bg` -- towards black on a dark theme, towards
+the text on a light one -- and `card` and `input` step from `bg` towards
+`fg` only as far as keeps every text colour as readable on them as the
+bars below (an input that can't step further sinks the other way). The
 shipped themes keep body text, comments and line numbers at 4.5:1 against every surface
 they're drawn on (accents 3:1 on a light theme),
 comments quieter than code, and operators distinct from both -- worth

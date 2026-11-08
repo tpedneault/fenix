@@ -44,6 +44,11 @@ pub const MAX_FONT_SIZE: f32 = 40.0;
 pub const CHAR_WIDTH: f32 = FONT_SIZE * 0.6;
 pub const PAD_LEFT: f32 = 8.0;
 pub const PAD_TOP: f32 = 4.0;
+
+/// How far the sidebar's and the terminal's text sit inside their panels
+/// beyond `PAD_LEFT`/`PAD_TOP`: the panels are inset from the window's
+/// edge by the tray, so their text is too.
+pub const STRIP_INSET: f32 = 6.0;
 /// Smallest and largest a popup like which-key is allowed to size itself
 /// to its own content (see `App::which_key_popup`) -- always at least
 /// this wide even for a short list, never wider than this even for a
@@ -1211,8 +1216,8 @@ impl TextPipeline {
         if sidebar_open {
             areas.push(TextArea {
                 buffer: &self.sidebar,
-                left: PAD_LEFT,
-                top: PAD_TOP,
+                left: PAD_LEFT + STRIP_INSET,
+                top: PAD_TOP + STRIP_INSET,
                 scale: 1.0,
                 bounds: TextBounds { left: 0, top: 0, right: self.sidebar_width as i32, bottom: modeline_top as i32 },
                 default_color: theme.fg,
@@ -1225,8 +1230,8 @@ impl TextPipeline {
         if debug_dock_h > 0.0 {
             areas.push(TextArea {
                 buffer: &self.debug_dock,
-                left: PAD_LEFT,
-                top: dock_top + PAD_TOP,
+                left: crate::app::DOCK_TEXT_X,
+                top: dock_top + crate::app::DOCK_TEXT_Y,
                 scale: 1.0,
                 bounds: TextBounds { left: 0, top: dock_top as i32, right: gpu.config.width as i32, bottom: modeline_top as i32 },
                 default_color: theme.fg,
@@ -1237,8 +1242,8 @@ impl TextPipeline {
             let top = dock_top - terminal_height(self.line_height);
             areas.push(TextArea {
                 buffer: &self.terminal,
-                left: PAD_LEFT,
-                top: top + PAD_TOP,
+                left: PAD_LEFT + STRIP_INSET,
+                top: top + PAD_TOP + STRIP_INSET / 2.0,
                 scale: 1.0,
                 bounds: TextBounds { left: 0, top: top as i32, right: gpu.config.width as i32, bottom: dock_top as i32 },
                 default_color: theme.fg,
@@ -1359,7 +1364,7 @@ fn content_height(window_height: f32, modeline_height: f32) -> f32 {
 /// given `line_height` -- mirrors `content_height`'s role for the
 /// sidebar, just for a row count instead of "whatever's left."
 pub fn terminal_height(line_height: f32) -> f32 {
-    TERMINAL_ROWS as f32 * line_height + PAD_TOP * 2.0
+    TERMINAL_ROWS as f32 * line_height + PAD_TOP * 2.0 + STRIP_INSET
 }
 
 /// How many full text lines fit in a content area of the given pixel

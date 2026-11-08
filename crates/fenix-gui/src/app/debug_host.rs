@@ -64,13 +64,48 @@ pub(super) fn function_key_action(key: &winit::keyboard::NamedKey, shift: bool, 
     })
 }
 
-/// The debug dock's height in rows: its header, the columns' titles, ten
-/// rows of each and the evaluate line.
-pub(super) const DEBUG_DOCK_ROWS: usize = 13;
+/// The debug dock's height in rows: its header and its step keys, a row
+/// for the columns' cards to stand off it, the columns' titles, nine rows
+/// of each, a row again, and the evaluate line.
+pub(super) const DEBUG_DOCK_ROWS: usize = 14;
+
+/// Where the dock's text starts in from the window's left edge and down
+/// from the dock's top: inside its panel, with room for the cards' and
+/// the evaluate box's edges around it.
+pub(crate) const DOCK_TEXT_X: f32 = 20.0;
+pub(crate) const DOCK_TEXT_Y: f32 = 8.0;
 
 /// The dock's height in pixels, at `line_height`.
 pub(crate) fn debug_dock_height(line_height: f32) -> f32 {
-    DEBUG_DOCK_ROWS as f32 * line_height + crate::text::PAD_TOP * 2.0
+    DEBUG_DOCK_ROWS as f32 * line_height + DOCK_TEXT_Y * 2.0
+}
+
+/// How many of the dock's characters fit across a window `window_width`
+/// wide.
+pub(crate) fn debug_dock_cols(window_width: f32, char_width: f32) -> usize {
+    ((window_width - DOCK_TEXT_X * 2.0) / char_width).max(0.0) as usize
+}
+
+/// Each of `shares`' columns' first character and width, `width`
+/// characters across with three between them -- where `dock_columns`
+/// puts them. The last takes what the shares' rounding left, so the
+/// columns reach across.
+pub(super) fn column_spans(shares: &[usize], width: usize) -> Vec<(usize, usize)> {
+    let total: usize = shares.iter().sum::<usize>().max(1);
+    let usable = width.saturating_sub(shares.len().saturating_sub(1) * 3);
+    let mut x = 0;
+    let mut given = 0;
+    shares
+        .iter()
+        .enumerate()
+        .map(|(i, share)| {
+            let w = if i + 1 == shares.len() { usable - given } else { usable * share / total };
+            given += w;
+            let at = x;
+            x += w + 3;
+            (at, w)
+        })
+        .collect()
 }
 
 /// Columns side by side in `width` characters, each `(title, lines,
@@ -78,10 +113,8 @@ pub(crate) fn debug_dock_height(line_height: f32) -> f32 {
 /// and cut at `rows`: the rows, each column's text apart, the titles
 /// first.
 pub(super) fn dock_columns(columns: &[(&str, Vec<String>, usize)], width: usize, rows: usize) -> Vec<Vec<String>> {
-    let total: usize = columns.iter().map(|(_, _, share)| share).sum::<usize>().max(1);
-    let gaps = columns.len().saturating_sub(1) * 3;
-    let usable = width.saturating_sub(gaps);
-    let widths: Vec<usize> = columns.iter().map(|(_, _, share)| usable * share / total).collect();
+    let shares: Vec<usize> = columns.iter().map(|(_, _, share)| *share).collect();
+    let widths: Vec<usize> = column_spans(&shares, width).into_iter().map(|(_, w)| w).collect();
     let fit = |text: &str, w: usize| -> String {
         let n = text.chars().count();
         if n > w {
@@ -213,18 +246,21 @@ fn cut_value(value: &str) -> String {
 fn value_decorations(at: usize, pieces: &[(String, String)], changed: &[(String, String)]) -> Vec<crate::decorations::Decoration> {
     use crate::decorations::{Decoration, Look};
     use crate::page::Role;
-    let text = |text: String, role: Role| Decoration { start: at, end: at, look: Look::Text { text, role, after: true }, id: None };
+    let place = |look: Look| Decoration { start: at, end: at, look, id: None };
+    let text = |text: String| place(Look::Text { text, role: Role::Muted, after: true });
+    // Each value on a chip of its own: the accent's, or a changed one's
+    // in the warning's, with what it was struck through after it.
     let mut out = Vec::new();
-    let mut lead = "    ".to_string();
+    let mut lead = "   ".to_string();
     for (name, value) in pieces {
+        out.push(text(lead.clone()));
         match changed.iter().find(|(n, _)| n == name) {
             Some((_, old)) => {
-                out.push(text(format!("{lead}{name} = "), Role::Muted));
-                out.push(text(value.clone(), Role::Warn));
-                out.push(text(" ".to_string(), Role::Muted));
-                out.push(Decoration { start: at, end: at, look: Look::Struck(cut_value(old)), id: None });
+                out.push(place(Look::Chip { text: format!("{name} = {value}"), role: Role::Warn }));
+                out.push(text(" ".to_string()));
+                out.push(place(Look::Struck(cut_value(old))));
             }
-            None => out.push(text(format!("{lead}{name} = {value}"), Role::Muted)),
+            None => out.push(place(Look::Chip { text: format!("{name} = {value}"), role: Role::Accent })),
         }
         lead = "  ".to_string();
     }
@@ -504,6 +540,7 @@ mod tests {
         assert_eq!(rows[0], ["STACK     ", "VARS      "], "23 less one gap of 3, halved");
         assert_eq!(rows[1], ["main  app…", "a = 1     "]);
         assert_eq!(rows[2], ["          ", "a_very_lo…"]);
+        assert_eq!(column_spans(&[1, 1], 24), [(0, 10), (13, 11)], "the last takes what's left over");
     }
 
     #[test]

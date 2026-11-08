@@ -36,7 +36,8 @@ mod debug_host;
 mod debug_drawer;
 mod debug_trail;
 mod debug_breakpoints;
-pub(crate) use debug_host::debug_dock_height;
+mod panels;
+pub(crate) use debug_host::{debug_dock_height, DOCK_TEXT_X, DOCK_TEXT_Y};
 pub(crate) use projects::window_title;
 pub(crate) use debug_breakpoints::BreakpointPart;
 mod polish;
@@ -9154,7 +9155,7 @@ impl App {
             (Some(gpu), Some(text)) => (gpu.size.width as f32, text.char_width()),
             _ => (800.0, text::CHAR_WIDTH),
         };
-        (((width - text::PAD_LEFT * 2.0) / char_width).floor().max(1.0)) as u16
+        (((width - (text::PAD_LEFT + text::STRIP_INSET) * 2.0) / char_width).floor().max(1.0)) as u16
     }
 
     /// `pane_cols` with the caller's own headless fallback -- the merge
@@ -18886,7 +18887,12 @@ impl App {
             w: (window_width - sidebar_px).max(0.0),
             h: (modeline_top - terminal_h).max(0.0),
         };
-        let panes = self.windows().layout(pane_area);
+        // Each pane is drawn as a panel on the tray, a gap from the next:
+        // its rect is where that panel is, so the text, the mouse and the
+        // drawing all agree. The split's dividers stay where the layout
+        // put them, in the gaps, for dragging.
+        let outer = panels::Edges { left: sidebar_px <= 0.0, top: true, right: true };
+        let panes: Vec<_> = self.windows().layout(pane_area).into_iter().map(|(id, rect)| (id, panels::framed(rect, pane_area, outer))).collect();
         // The tabs the last frame measured and drew, not a fresh estimate.
         // Re-deriving them here from character counts is what used to make
         // a click land on a different tab than the one under the cursor:
@@ -19043,7 +19049,7 @@ impl App {
             Some(ScrollTarget::Sidebar) => {
                 self.sidebar_focused = true;
                 self.terminal_focused = false;
-                let (line, col) = self.cell_at(pos, (0.0, 0.0), 0);
+                let (line, col) = self.cell_at(pos, (text::STRIP_INSET, text::STRIP_INSET), 0);
                 self.explorer_click(ExplorerTarget::Sidebar, line, col);
             }
             Some(ScrollTarget::Terminal) => {
@@ -19393,7 +19399,6 @@ impl App {
                 text::CHAR_WIDTH * text::MODELINE_FONT_SCALE,
             ),
         };
-        let visible_lines = text::visible_line_count(window_height, modeline_height, line_height);
         let caret_is_block = self.caret_is_block();
         // Resize the git dashboard's sections to suit whichever one is
         // focused, before anything reads the layout. Done here, once a
@@ -19428,7 +19433,6 @@ impl App {
         if let Some(text) = &mut self.text {
             text.set_sidebar_width(sidebar_width, window_height);
         }
-        let sidebar_render = if show_sidebar { self.sidebar_rows(text::cols_that_fit(sidebar_width, char_width), visible_lines) } else { None };
 
         // The terminal panel: a frame-level strip like the sidebar, but
         // shrinking height instead of width, and -- deliberately unlike
@@ -19442,8 +19446,15 @@ impl App {
         let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
         let terminal_render = self.terminal_panel_render();
         let dock_h = self.debug_dock_px();
-        let dock_cols = ((window_width - text::PAD_LEFT * 2.0) / char_width).max(0.0) as usize;
-        let debug_dock_render = self.debug_dock_shown().then(|| self.debug_dock_spans(dock_cols));
+        // The sidebar's rows: as many as fit its panel, above the terminal
+        // and the debug dock, which run under it.
+        let sidebar_lines = text::lines_that_fit(window_height - modeline_height - terminal_h - dock_h - text::STRIP_INSET * 2.0, line_height);
+        let sidebar_render = if show_sidebar { self.sidebar_rows(text::cols_that_fit(sidebar_width - text::STRIP_INSET * 2.0, char_width), sidebar_lines) } else { None };
+        let dock_cols = debug_host::debug_dock_cols(window_width, char_width);
+        let (debug_dock_render, dock_decor) = match self.debug_dock_shown().then(|| self.debug_dock_layout(dock_cols)) {
+            Some((spans, decor)) => (Some(spans), decor),
+            None => (None, debug_drawer::DockDecor::default()),
+        };
         let debug_drawer_highlight = self.debug_drawer_highlight(dock_cols);
 
         let modeline_top = window_height - modeline_height;
@@ -19451,6 +19462,8 @@ impl App {
         let pane_area = geometry.pane_area;
         let layout = self.motion_layout(geometry.panes, pane_area, now);
         let focused_pane = self.windows().focused_id();
+        // The agents' prompt is drawn as a box you type in.
+        let composer_pane = self.agents_composer_pane();
 
         // One entry per visible window pane -- built fresh every frame
         // from whatever `WindowTree::layout` currently reports (splits/
@@ -20056,6 +20069,7 @@ impl App {
             // underlines under it -- already in visual columns.
             let mut decoration_underlines = Vec::new();
             let mut decoration_strikes = Vec::new();
+            let mut decoration_chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>)> = Vec::new();
             for (row, layout) in &decoration_rows {
                 for (cols, mark) in &layout.marks {
                     let (a, b) = (cols.start.saturating_sub(shown_scroll_col), cols.end.saturating_sub(shown_scroll_col));
@@ -20067,6 +20081,10 @@ impl App {
                         crate::decorations::Mark::Tint(shade) => todo_bg_segments.push((*row, a, b, pages::shade_color(theme, *shade))),
                         crate::decorations::Mark::Underline(role) => decoration_underlines.push((*row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
                         crate::decorations::Mark::Strike(role) => decoration_strikes.push((*row, a, b, glyphon_to_rgba(pages::role_color(theme, *role)))),
+                        crate::decorations::Mark::Chip(role) => {
+                            let [r, g, b2, _] = glyphon_to_rgba(pages::role_color(theme, *role));
+                            decoration_chips.push((*row, a, b, [r, g, b2, 0.13], None));
+                        }
                     }
                 }
             }
@@ -20121,7 +20139,7 @@ impl App {
                 row_tints.push((row, [r, g, b, 0.14]));
             }
 
-            let (home_segments, home_overlay) =
+            let (home_segments, mut home_overlay) =
                 if is_page {
                     self.page_backgrounds(buffer_id, render_base_line, pane_visible_lines)
                 } else if is_home {
@@ -20201,7 +20219,10 @@ impl App {
                 trail_marks,
                 indent_guides,
                 row_accents,
-                home: home_overlay,
+                home: {
+                    home_overlay.chips.extend(decoration_chips);
+                    home_overlay
+                },
                 extra,
             });
         }
@@ -20519,9 +20540,16 @@ impl App {
         }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());
 
-        let sidebar_row_y = |row: usize| text::PAD_TOP + row as f32 * line_height;
+        let sidebar_row_y = |row: usize| text::PAD_TOP + text::STRIP_INSET + row as f32 * line_height;
 
         bg_rect.clear();
+        // Every pane's panel, its chrome and all, rounded on the tray.
+        for pane in &panes_render {
+            let chrome_h = pane_chrome_height(line_height, pane.has_breadcrumb);
+            let r = pane.rect;
+            let fill = if Some(pane.pane) == composer_pane { theme.input } else { theme.bg };
+            bg_rect.push_box(gpu, r.x, r.y - chrome_h, r.w, r.h + chrome_h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill, border: 0.0, border_color: [0.0; 4] });
+        }
         for pane in &panes_render {
             // Row index (relative to that pane's own render_base_line, or
             // its explorer/picker listing's own scroll) -> pixel y within
@@ -20547,6 +20575,15 @@ impl App {
             // prepare`'s `TextArea` for this pane actually renders the
             // text, or these rects drift out of alignment with it.
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
+            // A page's cards: under its tints, so the focused row's still
+            // shows on one. A little wider than their cells.
+            for &(row, rows, a, b, fill, outline) in &pane.home.cards {
+                let pad = (char_width * 0.6).round();
+                let r = panels::card_rect(content_x + a as f32 * char_width - pad, (b - a) as f32 * char_width + pad * 2.0, pane.rect.y + text::PAD_TOP - pane.content_frac * line_height, line_height, 0, rows.saturating_sub(1));
+                let y = r.y + row as f32 * line_height;
+                let style = crate::rect::BoxStyle { radius: panels::CARD_RADIUS, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
+                bg_rect.push_box(gpu, r.x, y, r.w, r.h, style);
+            }
             // Drawn before selection/search/pulse so those still read as
             // overlays on top of whatever the shell painted, rather than
             // being covered by it.
@@ -20555,6 +20592,11 @@ impl App {
                 let y = row_y(row);
                 let w = (col_end - col_start) as f32 * char_width;
                 bg_rect.push_rect(gpu, x, y, w, line_height, color);
+            }
+            for &(row, a, b, fill, outline) in &pane.home.chips {
+                let r = panels::key_cap(content_x, char_width, row_y(row), line_height, a, b);
+                let style = crate::rect::BoxStyle { radius: panels::KEY_RADIUS, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
             }
             for &(row, start, end) in &pane.home.rules {
                 let y = (row_y(row) + line_height / 2.0).round();
@@ -20628,9 +20670,6 @@ impl App {
         }
 
         bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, modeline_height, theme.bg_modeline);
-        // A hairline boundary makes the status surface feel intentionally
-        // separate from the editor canvas without adding visual weight.
-        bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, 1.0, theme.divider);
         // A full-height accent rail instead of a filled badge box behind
         // the mode label -- Signal Rail's own "read the mode from the
         // eye-corner" bit, borrowed from a mixing console's channel-status
@@ -20683,11 +20722,12 @@ impl App {
             // `sidebar_bg` defaults to exactly `bg` on every theme but one
             // (see its own doc comment), so this is only a real change for
             // a theme that deliberately wants the two surfaces distinct.
-            bg_rect.push_rect(gpu, 0.0, 0.0, sidebar_width, modeline_top, theme.sidebar_bg);
+            let panel = panels::sidebar_panel(sidebar_width, modeline_top - dock_h - terminal_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill: theme.sidebar_bg, border: 0.0, border_color: [0.0; 4] });
             if let Some((_, _, tinted, _)) = &sidebar_render {
                 // Marked rows, and the file being edited.
                 for &row in tinted {
-                    bg_rect.push_rect(gpu, 0.0, sidebar_row_y(row), sidebar_width, line_height, theme.hl_line);
+                    bg_rect.push_rect(gpu, panel.x, sidebar_row_y(row), panel.w, line_height, theme.hl_line);
                 }
             }
             if let Some((_, Some(selected_row), _, _)) = &sidebar_render {
@@ -20699,28 +20739,55 @@ impl App {
                 // than the subtle current-line tint meant to be a secondary
                 // cue alongside a visible caret.
                 let y = sidebar_row_y(*selected_row);
-                bg_rect.push_rect(gpu, 0.0, y, sidebar_width, line_height, theme.selection);
+                bg_rect.push_rect(gpu, panel.x, y, panel.w, line_height, theme.selection);
             }
             if let Some((_, _, _, underlines)) = &sidebar_render {
                 for &(row, start, end) in underlines {
                     let y = (sidebar_row_y(row) + line_height - 2.0).round();
-                    bg_rect.push_rect(gpu, text::PAD_LEFT + start as f32 * char_width, y, (end - start) as f32 * char_width, 1.0, theme.caret);
+                    bg_rect.push_rect(gpu, text::PAD_LEFT + text::STRIP_INSET + start as f32 * char_width, y, (end - start) as f32 * char_width, 1.0, theme.caret);
                 }
             }
-            // A thin divider along the sidebar's own right edge, same
-            // color/weight as the ones between split panes, so there's a
-            // visible seam now that it's no longer a different color
-            // from the content area next to it.
-            bg_rect.push_rect(gpu, sidebar_width - 1.0, 0.0, 2.0, modeline_top, theme.divider);
         }
         if dock_h > 0.0 {
             let dock_top = modeline_top - dock_h;
-            bg_rect.push_rect(gpu, 0.0, dock_top, window_width, dock_h, theme.bg);
-            bg_rect.push_rect(gpu, 0.0, dock_top, window_width, 2.0, theme.divider);
-            if let Some((row, col, width)) = debug_drawer_highlight {
-                let x = text::PAD_LEFT + col as f32 * char_width;
-                bg_rect.push_rect(gpu, x, dock_top + text::PAD_TOP + row as f32 * line_height, width as f32 * char_width, line_height, theme.selection);
+            let panel = panels::strip_panel(window_width, dock_top, dock_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
+            // Concept A's drawer: its text is a grid; behind it, the
+            // state's chip and the keys' caps in the header, a card per
+            // column -- the one with the keys outlined -- and the
+            // evaluate line's box.
+            let text_top = dock_top + DOCK_TEXT_Y;
+            let row_y = |row: usize| text_top + row as f32 * line_height;
+            let col_x = |col: usize| DOCK_TEXT_X + col as f32 * char_width;
+            let pad = (char_width * 0.8).round();
+            let faded = |c: [f32; 4], a: f32| [c[0], c[1], c[2], a];
+            let plain = |fill: [f32; 4], radius: f32| crate::rect::BoxStyle { radius, fill, border: 0.0, border_color: [0.0; 4] };
+            if let Some((row, a, b, stopped)) = dock_decor.status {
+                let color = if stopped { glyphon_to_rgba(theme.git_modified) } else { glyphon_to_rgba(theme.gutter_fg) };
+                let r = panels::key_cap(DOCK_TEXT_X, char_width, row_y(row), line_height, a, b);
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, plain(faded(color, 0.16), r.h / 2.0));
             }
+            for &(row, a, b) in &dock_decor.caps {
+                let r = panels::key_cap(DOCK_TEXT_X, char_width, row_y(row), line_height, a, b);
+                let outline = faded(glyphon_to_rgba(theme.fg), 0.16);
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, crate::rect::BoxStyle { radius: panels::KEY_RADIUS, fill: theme.input, border: 1.0, border_color: outline });
+            }
+            let last_row = debug_drawer::TITLE_ROW + debug_drawer::LIST_ROWS;
+            for (c, &(x, w)) in dock_decor.columns.iter().enumerate() {
+                let r = panels::card_rect(col_x(x) - pad, w as f32 * char_width + pad * 2.0, text_top, line_height, debug_drawer::TITLE_ROW, last_row);
+                let focus = dock_decor.focused == Some(c);
+                let style = crate::rect::BoxStyle { radius: panels::CARD_RADIUS, fill: theme.card, border: if focus { 1.5 } else { 0.0 }, border_color: if focus { theme.mode_command } else { [0.0; 4] } };
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
+            }
+            if let Some((row, col, width)) = debug_drawer_highlight {
+                let x = col_x(col) - pad * 0.5;
+                bg_rect.push_box(gpu, x, row_y(row), width as f32 * char_width + pad, line_height, plain(theme.selection, panels::KEY_RADIUS));
+            }
+            // As wide as the cards above it.
+            let across = dock_decor.columns.last().map(|&(x, w)| x + w).unwrap_or(dock_cols);
+            let eval = panels::card_rect(col_x(0) - pad, across as f32 * char_width + pad * 2.0, text_top, line_height, debug_drawer::EVAL_ROW, debug_drawer::EVAL_ROW);
+            let typing = dock_decor.typing;
+            bg_rect.push_box(gpu, eval.x, eval.y, eval.w, eval.h, crate::rect::BoxStyle { radius: panels::CARD_RADIUS, fill: theme.input, border: if typing { 1.0 } else { 0.0 }, border_color: if typing { faded(theme.caret, 0.6) } else { [0.0; 4] } });
         }
         if show_terminal {
             let terminal_top = modeline_top - dock_h - terminal_h;
@@ -20728,32 +20795,18 @@ impl App {
             // resolves to (`vt100_color`'s own `Default => theme.bg`) --
             // so an ordinary cell blends seamlessly into the strip
             // rather than needing its own explicit background segment.
-            bg_rect.push_rect(gpu, 0.0, terminal_top, window_width, terminal_h, theme.bg);
+            let panel = panels::strip_panel(window_width, terminal_top, terminal_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
             if let Some((_, bg_segments)) = &terminal_render {
                 for &(row, col_start, col_end, color) in bg_segments {
-                    let x = text::PAD_LEFT + col_start as f32 * char_width;
-                    let y = terminal_top + text::PAD_TOP + row as f32 * line_height;
+                    let x = text::PAD_LEFT + text::STRIP_INSET + col_start as f32 * char_width;
+                    let y = terminal_top + text::PAD_TOP + text::STRIP_INSET / 2.0 + row as f32 * line_height;
                     let w = (col_end - col_start) as f32 * char_width;
                     bg_rect.push_rect(gpu, x, y, w, line_height, color);
                 }
             }
-            // A thin divider along the strip's own top edge, same
-            // reasoning as the sidebar's own right-edge divider.
-            bg_rect.push_rect(gpu, 0.0, terminal_top, window_width, 2.0, theme.divider);
         }
-        // Divider lines along every split boundary the layout computed --
-        // drawn from each pane's own right/bottom edge, so two adjacent
-        // panes each contribute one line and they land on top of each
-        // other exactly on the boundary. Skipped for the last column/row
-        // (nothing to divide from past the window edge).
-        for pane in &panes_render {
-            if pane.rect.x + pane.rect.w < pane_area.x + pane_area.w - 0.5 {
-                bg_rect.push_rect(gpu, pane.rect.x + pane.rect.w - 1.0, pane.rect.y, 2.0, pane.rect.h, theme.divider);
-            }
-            if pane.rect.y + pane.rect.h < pane_area.y + pane_area.h - 0.5 {
-                bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y + pane.rect.h - 1.0, pane.rect.w, 2.0, theme.divider);
-            }
-        }
+        // No lines between panes: the tray's gap is the seam.
         // Title-bar backgrounds -- same `bg_modeline` color the modeline
         // itself uses, so a titled pane reads as "a small modeline for
         // just this section" rather than an unrelated new chrome color.
@@ -20765,8 +20818,18 @@ impl App {
         // divider` line closing off the strip's own bottom edge (the
         // divider loop above only draws *between* panes, not under a
         // pane's own title/tab strip).
-        for &(_, rect) in &title_rects {
-            bg_rect.push_rect(gpu, rect.x, rect.y, rect.w, rect.h, theme.bg_modeline);
+        let top_corners = [panels::PANEL_RADIUS, panels::PANEL_RADIUS, 0.0, 0.0];
+        for &(pane, rect) in &title_rects {
+            // A pane with a title rather than tabs: the agents' dock and
+            // the other tool panels. Their title is on the panel itself.
+            let fill = if Some(pane) == composer_pane {
+                theme.input
+            } else if panes_render.iter().any(|p| p.pane == pane && p.tabs_layout.is_empty()) {
+                theme.bg
+            } else {
+                theme.bg_modeline
+            };
+            bg_rect.push_corners(gpu, rect.x, rect.y, rect.w, rect.h, top_corners, fill);
         }
         for pane in &panes_render {
             if pane.tabs_layout.is_empty() {
@@ -20789,7 +20852,7 @@ impl App {
                 // tab is its bright text over an underline in the mode's
                 // colour -- muted in a pane without the keyboard -- and a
                 // hairline sets Home apart from the tabs after it.
-                bg_rect.push_rect(gpu, pane.rect.x, strip_y, pane.rect.w, strip_h + breadcrumb_h, theme.bg);
+                bg_rect.push_corners(gpu, pane.rect.x, strip_y, pane.rect.w, strip_h + breadcrumb_h, top_corners, theme.bg);
                 bg_rect.push_rect(gpu, pane.rect.x, strip_y + strip_h - 1.0, pane.rect.w, 1.0, theme.divider);
                 if let Some(home) = pane.tabs_layout.first() {
                     let x = (home.body.x + home.body.w + 2.0).round();
@@ -21393,7 +21456,8 @@ impl App {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
-            let [r, g, b, a] = theme.bg;
+            // The tray: what shows between the panels.
+            let [r, g, b, a] = theme.tray;
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -27264,7 +27328,8 @@ configure_board stm32
 
     /// Where on screen the sidebar's cell (`line`, `col`) is.
     fn sidebar_pos(line: usize, col: usize) -> (f32, f32) {
-        (text::PAD_LEFT + col as f32 * text::CHAR_WIDTH + 1.0, text::PAD_TOP + line as f32 * text::LINE_HEIGHT + 1.0)
+        // Where the sidebar draws it: inside its panel (`STRIP_INSET`).
+        (text::PAD_LEFT + text::STRIP_INSET + col as f32 * text::CHAR_WIDTH + 1.0, text::PAD_TOP + text::STRIP_INSET + line as f32 * text::LINE_HEIGHT + 1.0)
     }
 
     #[test]
@@ -30882,7 +30947,7 @@ configure_board stm32
         }
         app.refresh_debug_panes();
         assert_eq!(app.debug_marks(buffer, &[0, 1, 2], 3), vec![(2, debug_host::DebugMark::StopOnBreakpoint(debug_breakpoints::BreakpointLook::Plain))]);
-        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { crate::decorations::Look::Text { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
+        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { crate::decorations::Look::Chip { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
         assert_eq!(texts, vec!["a = 1", "b = 2"], "a on the def line, b on its last line above the stop");
         app.apply_dap_event(fenix_dap::DapEvent::Event(fenix_dap::events::Event::Continued(fenix_dap::events::ContinuedEventBody::builder().thread_id(1).build())));
         assert!(app.code_decorations(buffer).is_empty(), "running: no values");
@@ -30941,7 +31006,7 @@ configure_board stm32
         app.debug_scopes_came(on, 20, vec![dap_scope("Locals", 3)]);
         app.debug_variables_came(on, 20, vec!["Locals".into()], vec![dap_var("rows", "[]", 0), dap_var("o", "Order(2)", 8)]);
         assert!(asked_vars(&app).contains(&(20, vec!["Locals".to_string(), "o".to_string()])), "o stays open");
-        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { crate::decorations::Look::Text { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
+        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { crate::decorations::Look::Chip { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
         assert_eq!(texts, vec!["rows = []"], "main's values, in caller.py");
         let stack: Vec<String> = app.debug_drawer_rows(debug_drawer::Column::Stack).into_iter().map(|(t, _)| t).collect();
         assert_eq!(stack, ["  run  callee.py:3", "▸ main  caller.py:2"]);
@@ -30978,7 +31043,8 @@ configure_board stm32
         trail_stop(&mut app, &file, 3, &[("total", "0"), ("i", "0")]);
         trail_stop(&mut app, &file, 3, &[("total", "1"), ("i", "1")]);
         let looks: Vec<Look> = app.code_decorations(buffer).into_iter().map(|d| d.look.clone()).collect();
-        assert!(looks.contains(&Look::Text { text: "1".into(), role: crate::page::Role::Warn, after: true }), "{looks:?}");
+        assert!(looks.contains(&Look::Chip { text: "total = 1".into(), role: crate::page::Role::Warn }), "a changed value on a chip of its own: {looks:?}");
+        assert!(looks.contains(&Look::Chip { text: "i = 1".into(), role: crate::page::Role::Warn }), "{looks:?}");
         assert!(looks.contains(&Look::Struck("0".into())), "{looks:?}");
         let marks = app.debug_trail_marks(buffer, &[0, 1, 2], 3);
         assert_eq!(marks.iter().map(|(row, c)| (*row, c[3])).collect::<Vec<_>>(), [(2, 1.0)]);
@@ -30988,7 +31054,7 @@ configure_board stm32
         app.debug_trail_scrub(false, 1);
         assert_eq!(app.debug_trail.viewing, Some(0));
         assert!(app.debug_modeline_segment().contains("stop 1/2"), "{}", app.debug_modeline_segment());
-        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { Look::Text { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
+        let texts: Vec<String> = app.code_decorations(buffer).into_iter().filter_map(|d| match &d.look { Look::Chip { text, .. } => Some(text.trim().to_string()), _ => None }).collect();
         assert_eq!(texts, ["total = 0", "i = 0"], "the first stop, as it was");
         assert!(app.debug_trail_key(KeyPress::named(FenixNamedKey::Enter)));
         assert_eq!(app.debug_trail.viewing, None);

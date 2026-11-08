@@ -60,6 +60,30 @@ pub(super) fn shade_color(theme: &Theme, shade: crate::page::Shade) -> [f32; 4] 
     }
 }
 
+/// A card's fill and outline in `theme`.
+pub(super) fn card_colors(theme: &Theme, look: crate::page::CardLook) -> ([f32; 4], Option<[f32; 4]>) {
+    use crate::page::CardLook;
+    match look {
+        CardLook::Plain => (theme.card, None),
+        CardLook::Input => (theme.input, None),
+        CardLook::Ask => (theme.card, Some([theme.caret[0], theme.caret[1], theme.caret[2], 0.6])),
+    }
+}
+
+/// A chip's fill and outline in `theme`: a key's cap is an input's
+/// surface, outlined faintly so it shows on a card as on the page; the
+/// chosen key and a status are their colour, faded, so their text (in
+/// that colour) still reads on them.
+pub(super) fn chip_color(theme: &Theme, chip: crate::page::Chip) -> ([f32; 4], Option<[f32; 4]>) {
+    use crate::page::Chip;
+    let faded = |c: [f32; 4], a: f32| [c[0], c[1], c[2], a];
+    match chip {
+        Chip::Key => (theme.input, Some(faded(glyphon_to_rgba(theme.fg), 0.16))),
+        Chip::Chosen => (faded(theme.caret, 0.22), Some(faded(theme.caret, 0.55))),
+        Chip::Status(role) => (faded(glyphon_to_rgba(role_color(theme, role)), 0.16), None),
+    }
+}
+
 pub(super) enum PageModel {
     Wizard(Wizard),
     Hub(Hub),
@@ -1081,6 +1105,26 @@ impl App {
             .map(|(col, lines)| (*col, lines.start as isize - first_line as isize, lines.len()))
             .collect();
         overlay.rule_color = home::home_rule(theme);
+        // Cards and chips: the page's own boxes, in the theme's panel
+        // surfaces (`Theme::card`, `Theme::input`).
+        overlay.cards = state
+            .page
+            .cards
+            .iter()
+            .filter(|c| c.lines.end > first_line && c.lines.start <= first_line + rows)
+            .map(|c| {
+                let map = state.page.cells(c.lines.start);
+                let (a, b) = (crate::page::cell_of(map.as_deref(), c.cols.start), crate::page::cell_of(map.as_deref(), c.cols.end));
+                let (fill, outline) = card_colors(theme, c.look);
+                (c.lines.start as isize - first_line as isize, c.lines.len(), a, b, fill, outline)
+            })
+            .collect();
+        overlay.chips = state
+            .page
+            .chips
+            .iter()
+            .filter_map(|(line, cols, chip)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); let (fill, outline) = chip_color(theme, *chip); (row, a, b, fill, outline) }))
+            .collect();
         overlay.images = state
             .page
             .images

@@ -117,6 +117,41 @@ pub struct Page {
     pub vertical_rules: Vec<(usize, Range<usize>)>,
     /// Focused rows besides `focus`: tinted, not kept in view.
     pub focuses: Vec<(usize, Range<usize>)>,
+    /// Rounded boxes behind lines of the page: what belongs together
+    /// (an agent's tool calls, a question it asks), set off as a card.
+    pub cards: Vec<Card>,
+    /// Small rounded boxes behind a few cells: a key's cap, a status.
+    pub chips: Vec<(usize, Range<usize>, Chip)>,
+}
+
+/// A card behind `lines` of a page, across `cols`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Card {
+    pub lines: Range<usize>,
+    pub cols: Range<usize>,
+    pub look: CardLook,
+}
+
+/// How a card is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardLook {
+    /// A step off the page: what a tool did.
+    Plain,
+    /// A step further, where you type or what you wrote.
+    Input,
+    /// Waiting on you: outlined in the accent.
+    Ask,
+}
+
+/// How a chip is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Chip {
+    /// A key's cap.
+    Key,
+    /// The key of the choice the cursor is on: in the accent.
+    Chosen,
+    /// A status, faded in its role's colour.
+    Status(Role),
 }
 
 /// A background for cells: one of the theme's tints, or a colour.
@@ -236,6 +271,8 @@ pub struct Grid {
     pub popup: Option<Popup>,
     pub images: Vec<PageImage>,
     pub underlines: Vec<(usize, Range<usize>, Role)>,
+    pub cards: Vec<Card>,
+    pub chips: Vec<(usize, Range<usize>, Chip)>,
 }
 
 /// Cuts `s` to `max` chars, ending in "…" when it had to.
@@ -509,7 +546,7 @@ impl Default for Grid {
 
 impl Grid {
     pub fn new() -> Self {
-        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None, images: Vec::new(), underlines: Vec::new() }
+        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None, images: Vec::new(), underlines: Vec::new(), cards: Vec::new(), chips: Vec::new() }
     }
 
     /// Draws `page` with its top-left at (`line`, `col`): its text, its
@@ -533,6 +570,29 @@ impl Grid {
         }
         self.images.extend(page.images.iter().map(|i| PageImage { line: i.line + line, col: i.col + col, ..i.clone() }));
         self.underlines.extend(page.underlines.iter().map(|(l, c, r)| (l + line, shift(c), *r)));
+        self.cards.extend(page.cards.iter().map(|c| Card { lines: c.lines.start + line..c.lines.end + line, cols: shift(&c.cols), look: c.look }));
+        self.chips.extend(page.chips.iter().map(|(l, c, chip)| (l + line, shift(c), *chip)));
+    }
+
+    /// Sets `lines` off as a card across `cols`.
+    pub fn card(&mut self, lines: Range<usize>, cols: Range<usize>, look: CardLook) {
+        if lines.is_empty() {
+            return;
+        }
+        if self.lines.len() < lines.end {
+            self.lines.resize(lines.end, Vec::new());
+        }
+        self.cards.push(Card { lines, cols, look });
+    }
+
+    /// Writes `text` at (`line`, `col`) on a chip; returns the column
+    /// after it.
+    pub fn chip(&mut self, line: usize, col: usize, text: &str, role: Role, chip: Chip) -> usize {
+        let end = self.put(line, col, text, role);
+        if end > col {
+            self.chips.push((line, col..end, chip));
+        }
+        end
     }
 
     /// Leaves `rows` lines for a picture `cols` wide at (`line`, `col`).
@@ -636,14 +696,14 @@ impl Grid {
             if x + key.chars().count() + 1 + label.chars().count() > left + width {
                 break;
             }
-            x = self.put(foot + 1, x, key, Role::Accent) + 1;
+            x = self.chip(foot + 1, x, key, Role::Accent, Chip::Key) + 1;
             x = self.put(foot + 1, x, label, Role::Muted) + 3;
         }
     }
 
     pub fn finish(self) -> Page {
         let text = self.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
-        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup, images: self.images, underlines: self.underlines, ..Page::default() }
+        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup, images: self.images, underlines: self.underlines, cards: self.cards, chips: self.chips, ..Page::default() }
     }
 }
 
@@ -682,6 +742,23 @@ mod tests {
         let page = g.finish();
         assert!(page.text.lines().all(|l| l.chars().count() <= 20), "{}", page.text);
         assert!(page.text.contains("Enter open"));
+        assert_eq!(page.chips.first(), Some(&(3, 0..5, Chip::Key)), "each key on its cap");
+    }
+
+    /// A card is kept, and moved with the page it's in.
+    #[test]
+    fn cards_and_chips_move_with_an_embedded_page() {
+        let mut inner = Grid::new();
+        inner.put(0, 0, "a", Role::Text);
+        inner.card(0..2, 0..10, CardLook::Ask);
+        inner.chip(1, 2, "y", Role::Accent, Chip::Chosen);
+        let inner = inner.finish();
+        let mut g = Grid::new();
+        g.embed(&inner, 5, 3, false);
+        let page = g.finish();
+        assert_eq!(page.cards, vec![Card { lines: 5..7, cols: 3..13, look: CardLook::Ask }]);
+        assert_eq!(page.chips, vec![(6, 5..6, Chip::Chosen)]);
+        assert!(page.text.lines().count() >= 7, "the card's lines are the page's");
     }
 
     #[test]

@@ -528,6 +528,15 @@ its extension. The rest is built into Fenix.
 
 ## Windows and the UI
 
+- **Panels.** The window is a tray, and everything in it sits on it as a
+  rounded panel a small gap from the next: each pane, the sidebar, the
+  terminal, the agents' dock and the debug drawer. There are no lines
+  between them; dragging in the gap between two panes resizes the split.
+  Inside a panel, what belongs together is a card -- an agent's tool
+  calls, a debugger column -- and keys are shown on caps. The tray, the
+  cards and the inputs are the theme's (`[surfaces]`'s `tray`, `card` and
+  `input`), worked out from its colours when it doesn't set them.
+
 - **Notifications**, in the manner of Dunst: toasts stacked in a corner
   of the window (`notifications.position`), newest nearest it, for what
   finished or wants you -- an agent's turn or its question, a task that
@@ -946,9 +955,12 @@ the guide.
 - **The thread** (`SPC a a`) opens beside your code: your prompts, the
   agent's answers and its thinking (folded), each tool call as a card --
   what it read, the diff of what it edited, the output of what it ran --
-  and its plan below them. The prompt is a buffer under the thread, with
-  Vim's keys: `Enter` in Normal mode sends it. A prompt written while the
-  agent works waits its turn.
+  and its plan below them. Tool calls in a row are one card, your prompts
+  have one of their own, and a question the agent asks is an outlined
+  card, its answers on their keys' caps (`j` `k` and Enter choose one, or
+  its key). The prompt is a box under the thread, a buffer with Vim's
+  keys: `Enter` in Normal mode sends it. A prompt written while the agent
+  works waits its turn.
 - **Context**: `@` in the prompt mentions a file (its text goes along,
   unsaved edits included, when the agent takes it that way), what you
   selected (`@selection`, from `SPC a e`), the file beside the panel
@@ -1301,16 +1313,18 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   time (`SPC u U` asks again).
   - **In the code.** Breakpoints are squares in the gutter (F9 or `SPC u b`),
     the stop a bar beside them, the stopped line tinted, and the selected
-    frame's values written at the ends of the lines above it.
+    frame's values on chips at the ends of the lines above it.
   - **DEBUG.** A stop puts the editor in DEBUG: `n` `s` `o` step over, in
     and out, `c` continues, `r` runs to the cursor, every other key is
     Normal's, and Esc goes back to Normal still stopped. The F-keys work in
     every mode.
-  - **The drawer.** Under the panes: the call stack, the variables, the
-    watches and pins, the breakpoints and the console, side by side. `SPC u f`
-    goes into it -- Enter selects a frame (the values in the code move with
-    it) or opens a variable; `SPC u e` evaluates in the selected frame, the
-    answer in the console beside the program's output.
+  - **The drawer.** Under the panes: the session's state and the step keys
+    on their caps, then the call stack, the variables, the watches and pins,
+    the breakpoints and the console, side by side, each a card. `SPC u f`
+    goes into it -- the column with the keys is outlined; Enter selects a
+    frame (the values in the code move with it) or opens a variable; `SPC u
+    e` evaluates in the selected frame, in the box at its foot, the answer
+    in the console beside the program's output.
   - **The lens.** `K` on a name while stopped shows its value and what's in
     it; the language server's hover otherwise.
   - **The Ember Trail.** Each stop is kept (`debug.trail_stops`, 200): the

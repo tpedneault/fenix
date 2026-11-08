@@ -330,6 +330,8 @@ fn canvas(ext: &str, c: &wit::Canvas, page: &wit::Page) -> Page {
         underlines: styles.iter().filter_map(|s| s.underline.as_ref().map(|r| { let (line, cols) = cells(&s.cells); (line, cols, role(r)) })).collect(),
         vertical_rules: page.vertical_rules.iter().map(|v| (v.column as usize, v.top as usize..v.bottom.max(v.top) as usize)).collect(),
         focuses: page.focuses.iter().map(cells).collect(),
+        cards: Vec::new(),
+        chips: Vec::new(),
         text: c.text.clone(),
         spans: colored(c.spans.iter().map(|s| { let (line, cols) = cells(&s.cells); Span { line, cols, role: role(&s.role) } }).collect(), colors.iter().map(|c| { let (line, cols) = cells(&c.cells); (line, cols, c.color) })),
         rules: c.rules.iter().map(cells).collect(),

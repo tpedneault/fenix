@@ -51,6 +51,19 @@ pub struct Theme {
     /// push documents) -- only a theme that actually wants the two
     /// surfaces to read as visually distinct sets this to something else.
     pub sidebar_bg: [f32; 4],
+    /// What the window shows between its panels: the editor, the
+    /// sidebar, the terminal and the docks sit on it as rounded
+    /// surfaces. Darker than `bg` on a dark theme, a shade of grey under
+    /// a light one; worked out from `bg` unless the theme file says.
+    pub tray: [f32; 4],
+    /// A card inside a panel: an agent's tool calls, a permission it
+    /// asks for, a debugger column. A step from `bg` towards `fg`.
+    pub card: [f32; 4],
+    /// Somewhere you type or a key you press, apart from `card`: the
+    /// evaluate line, a key's cap, your own message. A step further
+    /// towards `fg`, or -- where that would cost the text its contrast --
+    /// a step the other way, sunk into the page.
+    pub input: [f32; 4],
     pub bg_modeline: [f32; 4],
     pub fg: glyphon::Color,
     pub fg_modeline: glyphon::Color,
@@ -339,6 +352,15 @@ struct Surfaces {
     /// The explorer sidebar's; the editor's `bg` when left out.
     #[serde(default)]
     sidebar_bg: Option<ColorSpec>,
+    /// Between the panels; worked out from `bg` when left out.
+    #[serde(default)]
+    tray: Option<ColorSpec>,
+    /// A card in a panel; worked out from `bg` and `fg` when left out.
+    #[serde(default)]
+    card: Option<ColorSpec>,
+    /// An input or a key's cap; worked out when left out.
+    #[serde(default)]
+    input: Option<ColorSpec>,
     bg_modeline: ColorSpec,
     divider: ColorSpec,
     caret: ColorSpec,
@@ -442,6 +464,70 @@ impl ColorSpec {
     }
 }
 
+/// How far a card is from `bg` towards `fg`, and an input.
+const CARD_STEP: f32 = 0.05;
+const INPUT_STEP: f32 = 0.09;
+
+/// `a` moved `t` of the way to `b`, opaque.
+pub fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    let at = |i: usize| a[i] + (b[i] - a[i]) * t;
+    [at(0), at(1), at(2), 1.0]
+}
+
+/// Text's colour as a fill.
+pub fn rgba_of(c: glyphon::Color) -> [f32; 4] {
+    [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, 1.0]
+}
+
+/// How bright a colour looks, 0 to 1 (WCAG's relative luminance).
+pub fn luminance_of(c: [f32; 4]) -> f32 {
+    let lin = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+}
+
+/// How far apart two colours are to read, 1 to 21 (WCAG's ratio).
+pub fn contrast_of(a: [f32; 4], b: [f32; 4]) -> f32 {
+    let (a, b) = (luminance_of(a), luminance_of(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// A surface `want` of the way from `bg` towards `fg`, or less: as far
+/// as all of `reading` stays at 4.5:1 on it and all of `accents` at
+/// `accent_bar` -- or, for one already under its bar on `bg`, about as
+/// readable as it is there. Worked out in whole 8-bit steps, as it's
+/// shown.
+fn step_off(bg: [f32; 4], fg: glyphon::Color, reading: &[glyphon::Color], accents: &[glyphon::Color], accent_bar: f32, want: f32) -> [f32; 4] {
+    let shown = |c: [f32; 4]| [(c[0] * 255.0).round() / 255.0, (c[1] * 255.0).round() / 255.0, (c[2] * 255.0).round() / 255.0, 1.0];
+    let keeps = |surface: [f32; 4], texts: &[glyphon::Color], bar: f32| {
+        texts.iter().all(|&t| {
+            let t = rgba_of(t);
+            let on_bg = contrast_of(t, bg);
+            contrast_of(t, surface) >= if on_bg >= bar + 0.01 { bar + 0.01 } else { on_bg - 0.01 }
+        })
+    };
+    let mut step = want;
+    while step > want * 0.2 {
+        let surface = shown(mix(bg, rgba_of(fg), step));
+        if keeps(surface, reading, 4.5) && keeps(surface, accents, accent_bar) {
+            return surface;
+        }
+        step -= 0.0025;
+    }
+    // Nothing holds (a theme already at its bars on `bg`): a hint of one.
+    shown(mix(bg, rgba_of(fg), want * 0.2))
+}
+
+/// The tray under a theme's panels: a dark theme's sinks below its page,
+/// towards black; a light theme's is a grey a step under its page,
+/// towards its ink, so the white panels still read as lifted off it.
+fn tray_for(bg: [f32; 4], fg: glyphon::Color) -> [f32; 4] {
+    if luminance_of(bg) > 0.5 {
+        mix(bg, rgba_of(fg), 0.08)
+    } else {
+        mix(bg, [0.0, 0.0, 0.0, 1.0], 0.32)
+    }
+}
+
 /// A fill's color as text.
 fn opaque([r, g, b, _]: [f32; 4]) -> glyphon::Color {
     let byte = |v: f32| (v * 255.0).round() as u8;
@@ -470,6 +556,26 @@ pub fn parse(text: &str) -> Result<Theme, String> {
     let fg = f.text.fg.text("text.fg")?;
     let m = &f.modes;
     let text_dark = m.text_dark.text("modes.text_dark")?;
+    // What's read on a card: a card may not make any of it harder to
+    // read than the theme's bars (`every_theme_keeps_text_readable_...`).
+    let reading = vec![fg, f.text.gutter_fg.text("text.gutter_fg")?, f.syntax.comment.text("syntax.comment")?, f.syntax.variable.text("syntax.variable")?, f.explorer.file.text("explorer.file")?, f.text.caret_text.as_ref().map(|c| c.text("text.caret_text")).transpose()?.unwrap_or(opaque(caret))];
+    let mut accents = Vec::new();
+    for (key, spec) in [("syntax.keyword", &f.syntax.keyword), ("syntax.string", &f.syntax.string), ("syntax.function", &f.syntax.function), ("syntax.type", &f.syntax.ty), ("syntax.number", &f.syntax.number), ("syntax.constant", &f.syntax.constant), ("syntax.operator", &f.syntax.operator), ("syntax.punctuation", &f.syntax.punctuation), ("syntax.attribute", &f.syntax.attribute), ("explorer.folder", &f.explorer.folder), ("git.modified", &f.git.modified), ("git.staged", &f.git.staged), ("git.untracked", &f.git.untracked), ("git.ignored", &f.git.ignored), ("git.conflicted", &f.git.conflicted)] {
+        accents.push(spec.text(key)?);
+    }
+    let accent_bar = if luminance_of(bg) > 0.5 { 3.0 } else { 4.5 };
+    let card = s.card.as_ref().map(|c| c.rgba("surfaces.card")).transpose()?.unwrap_or_else(|| step_off(bg, fg, &reading, &accents, accent_bar, CARD_STEP));
+    let input = s.input.as_ref().map(|c| c.rgba("surfaces.input")).transpose()?.unwrap_or_else(|| {
+        let towards_text = step_off(bg, fg, &reading, &accents, accent_bar, INPUT_STEP);
+        // Where the text's own contrast stops both at the same shade, an
+        // input sinks the other way instead -- a well, not a lift -- which
+        // only makes its text easier to read.
+        if luminance_of(towards_text) - luminance_of(bg) > (luminance_of(card) - luminance_of(bg)) * 1.2 || luminance_of(bg) > 0.5 {
+            towards_text
+        } else {
+            mix(bg, [0.0, 0.0, 0.0, 1.0], INPUT_STEP * 1.6)
+        }
+    });
     Ok(Theme {
         name: leak(f.name.trim().to_string()),
         font_family: f.font_family.filter(|s| !s.trim().is_empty()).map(leak),
@@ -478,6 +584,9 @@ pub fn parse(text: &str) -> Result<Theme, String> {
         tabs,
         bg,
         sidebar_bg: s.sidebar_bg.as_ref().map(|c| c.rgba("surfaces.sidebar_bg")).transpose()?.unwrap_or(bg),
+        tray: s.tray.as_ref().map(|c| c.rgba("surfaces.tray")).transpose()?.unwrap_or_else(|| tray_for(bg, fg)),
+        card,
+        input,
         bg_modeline: s.bg_modeline.rgba("surfaces.bg_modeline")?,
         fg,
         fg_modeline: f.text.fg_modeline.as_ref().map(|c| c.text("text.fg_modeline")).transpose()?.unwrap_or(fg),
@@ -750,7 +859,7 @@ mod tests {
             ];
             let accent_need = if is_light(theme) { 3.0 } else { 4.5 };
             let line = composite(theme.hl_line, theme.bg);
-            for surface in [theme.bg, line, theme.bg_modeline, theme.sidebar_bg] {
+            for surface in [theme.bg, line, theme.bg_modeline, theme.sidebar_bg, theme.card, theme.input] {
                 for (colors, need) in [(&reading[..], 4.5), (&accents[..], accent_need)] {
                     for &color in colors {
                         let ratio = contrast(color, surface);
@@ -1063,6 +1172,34 @@ mod tests {
         let tabs = mine.replace("tabs = \"underline\"", "tabs = \"round\"");
         assert!(parse(&tabs).err().unwrap().contains("underline or block"));
         assert!(parse(&mine.replace("[git]", "[gits]")).is_err(), "an unknown section is an error, not ignored");
+    }
+
+    /// Every theme's panels sit on a tray they stand out from: darker
+    /// under a dark theme's page, a grey under a light one's; cards and
+    /// inputs stand off the page, and apart.
+    #[test]
+    fn every_theme_works_out_a_tray_cards_and_inputs() {
+        for theme in all() {
+            let (bg, tray) = (luminance_of(theme.bg), luminance_of(theme.tray));
+            assert!(tray < bg, "{}: the tray is under the panels", theme.name);
+            let off = |c: [f32; 4]| (luminance_of(c) - bg).abs();
+            assert!(off(theme.card) > 0.0, "{}: a card stands off the page", theme.name);
+            assert!(off(theme.input) > 0.0 && theme.input != theme.card, "{}: an input stands off the page and a card", theme.name);
+        }
+        let orbit = default_theme();
+        assert!(luminance_of(orbit.card) > luminance_of(orbit.bg), "a dark theme's cards are lighter than its page");
+        let light = named("GitHub Light");
+        assert!(luminance_of(light.card) < luminance_of(light.bg), "a light theme's are darker");
+    }
+
+    /// A theme file can set its own tray, card and input.
+    #[test]
+    fn a_theme_file_can_set_its_panel_surfaces() {
+        let mine = BUILT_IN[0].1.replace("hl_line = ", "tray = \"#000000\"\ncard = \"#101010\"\ninput = { color = \"#ffffff\", alpha = 0.1 }\nhl_line = ");
+        let theme = parse(&mine).expect("reads");
+        assert_eq!(theme.tray, [0.0, 0.0, 0.0, 1.0]);
+        assert!((theme.card[0] - 16.0 / 255.0).abs() < 1e-6);
+        assert!((theme.input[3] - 0.1).abs() < 1e-6);
     }
 
     /// Yours are read from a folder, sorted; a broken one is said, not
