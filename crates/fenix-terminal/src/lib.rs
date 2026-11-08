@@ -367,6 +367,18 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
 
+    /// Whether this Windows's ConPTY is Windows 11's (build 22000 on):
+    /// the one that asks for win32-input-mode and passes a live shell's
+    /// prompts through as these tests expect. Windows Server 2022's --
+    /// CI's runner -- is older, and Fenix falls back to plain keys there.
+    #[cfg(windows)]
+    fn modern_conpty() -> bool {
+        let out = std::process::Command::new("cmd").args(["/c", "ver"]).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+        // "Microsoft Windows [Version 10.0.22631.4460]"
+        let build = out.split("10.0.").nth(1).and_then(|r| r.split(['.', ']']).next()).and_then(|b| b.parse::<u32>().ok());
+        build.is_some_and(|b| b >= 22000)
+    }
+
     /// As output scrolls rows up into the history, `top_row` counts them,
     /// and scrolling the view back moves it the other way: a row's place
     /// in everything printed stays the same.
@@ -445,6 +457,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn powershell_says_where_it_is_after_a_cd() {
+        if !modern_conpty() {
+            eprintln!("skipped: needs Windows 11's ConPTY");
+            return;
+        }
         let (program, args) = default_shell();
         let (mut term, mut reader) = Terminal::spawn_program(24, 120, None, &program, &args).expect("PowerShell");
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
@@ -458,6 +474,8 @@ mod tests {
         });
         let dir = std::env::temp_dir().join(format!("fenix-cwd-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        // Its long name, as PowerShell says it (not `RUNNER~1`).
+        let dir = std::fs::canonicalize(&dir).map(fenix_rpc::normalize).unwrap_or(dir);
         let pump = |term: &mut Terminal, secs: u64, done: &dyn Fn(&Terminal) -> bool| {
             let deadline = Instant::now() + Duration::from_secs(secs);
             while !done(term) && Instant::now() < deadline {
@@ -487,6 +505,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn conpty_asks_for_windows_key_events() {
+        if !modern_conpty() {
+            eprintln!("skipped: needs Windows 11's ConPTY");
+            return;
+        }
         let (mut term, mut reader) = Terminal::spawn_program(24, 80, None, "cmd.exe", &[]).expect("cmd.exe");
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         std::thread::spawn(move || {
