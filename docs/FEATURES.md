@@ -532,6 +532,10 @@ its extension. The rest is built into Fenix.
   rounded panel a small gap from the next: each pane, the sidebar, the
   terminal, the agents' dock and the debug drawer. There are no lines
   between them; dragging in the gap between two panes resizes the split.
+  The panel that has the keyboard -- a pane, the sidebar, the terminal,
+  the debug drawer -- has a quiet edge in the mode's colour, once there's
+  more than one to tell apart. `appearance.panels = "flat"` draws them as
+  before 1.4 instead: edge to edge, lines between them, no tray.
   Inside a panel, what belongs together is a card -- an agent's tool
   calls, a debugger column -- and keys are shown on caps. The tray, the
   cards and the inputs are the theme's (`[surfaces]`'s `tray`, `card` and

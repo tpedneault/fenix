@@ -12,7 +12,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Panels: the window is a tray, and the panes, the sidebar, the terminal and
   the docks sit on it as rounded panels a small gap apart, with no lines
-  between them. Dragging between two panes still resizes the split.
+  between them. Dragging between two panes still resizes the split. The panel
+  with the keyboard has a quiet edge in the mode's colour, when there's more
+  than one to tell apart. `appearance.panels = "flat"` keeps the look from
+  before: edge to edge, with lines between the panes.
 - Themes work out three more surfaces from their own colours: the `tray`
   between panels, a `card` and an `input`. Each steps away from the page
   only as far as keeps the theme's text at its contrast; a theme file can

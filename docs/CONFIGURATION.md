@@ -453,6 +453,7 @@ when it's out of date).
 | `which_key.order` | key / label | key | The key menu's order: by key, so a key never moves, or by what it does. |
 | `appearance.rainbow_brackets` | true / false | off | Brackets are coloured by how deeply they're nested. |
 | `appearance.tabs` | auto / block / underline / off | auto | How each pane's tabs are drawn: the theme's own look (Visual Studio Dark uses blocks, the rest an underline), always blocks, always an underline, or no tab strip at all -- gt and gT still move between tabs then. |
+| `appearance.panels` | framed / flat | framed | How the window's panes, sidebar, terminal and docks are drawn: rounded panels on a darker tray a gap apart, with an edge on the one that has the keyboard, or flat and edge to edge with lines between them, as before 1.4. |
 | `editor.preview_tab` | true / false | on | A jump (gd, a search result, a symbol) opens in one reusable tab, in italics, until you edit it or keep it with SPC b P. |
 | `screenshot.style` | accent / solid / sunset / ocean / candy / forest / none | accent | What's behind a code screenshot's window: a gradient of the theme's accent, the accent flat, one of four gradients, or nothing (see-through). |
 | `screenshot.title` | true / false | on | A code screenshot's window has a title bar with three dots and the file's name. |

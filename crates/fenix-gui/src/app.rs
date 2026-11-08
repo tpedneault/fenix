@@ -18909,6 +18909,11 @@ impl App {
             (layout, active_flags, spans, crumbs, ranges, italic)
     }
 
+    /// How the panels are drawn (`appearance.panels`).
+    pub(super) fn panel_look(&self) -> panels::Look {
+        panels::Look::from_setting(self.config.text_value("appearance.panels"))
+    }
+
     fn pane_has_breadcrumb(&self, pane: fenix_window::WindowId) -> bool {
         self.tab_style().is_some() && !self.pane_titles.contains_key(&pane)
     }
@@ -18928,8 +18933,10 @@ impl App {
         // its rect is where that panel is, so the text, the mouse and the
         // drawing all agree. The split's dividers stay where the layout
         // put them, in the gaps, for dragging.
+        // Flat (`appearance.panels`): edge to edge, as before 1.4.
         let outer = panels::Edges { left: sidebar_px <= 0.0, top: true, right: true };
-        let panes: Vec<_> = self.windows().layout(pane_area).into_iter().map(|(id, rect)| (id, panels::framed(rect, pane_area, outer))).collect();
+        let framed = self.panel_look() == panels::Look::Framed;
+        let panes: Vec<_> = self.windows().layout(pane_area).into_iter().map(|(id, rect)| (id, if framed { panels::framed(rect, pane_area, outer) } else { rect })).collect();
         // The tabs the last frame measured and drew, not a fresh estimate.
         // Re-deriving them here from character counts is what used to make
         // a click land on a different tab than the one under the cursor:
@@ -19506,6 +19513,9 @@ impl App {
         let focused_pane = self.windows().focused_id();
         // The agents' prompt is drawn as a box you type in.
         let composer_pane = self.agents_composer_pane();
+        let look = self.panel_look();
+        let panel_radius = look.radius();
+        let keyboard_panel = panels::keyboard_panel(focused_pane, self.terminal_focused && self.terminal_open, self.sidebar_focused, self.debug_drawer_focused());
 
         // One entry per visible window pane -- built fresh every frame
         // from whatever `WindowTree::layout` currently reports (splits/
@@ -20598,7 +20608,7 @@ impl App {
             let chrome_h = pane_chrome_height(line_height, pane.has_breadcrumb);
             let r = pane.rect;
             let fill = if Some(pane.pane) == composer_pane { theme.input } else { theme.bg };
-            bg_rect.push_box(gpu, r.x, r.y - chrome_h, r.w, r.h + chrome_h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill, border: 0.0, border_color: [0.0; 4] });
+            bg_rect.push_box(gpu, r.x, r.y - chrome_h, r.w, r.h + chrome_h, crate::rect::BoxStyle { radius: panel_radius, fill, border: 0.0, border_color: [0.0; 4] });
         }
         for pane in &panes_render {
             // Row index (relative to that pane's own render_base_line, or
@@ -20772,8 +20782,8 @@ impl App {
             // `sidebar_bg` defaults to exactly `bg` on every theme but one
             // (see its own doc comment), so this is only a real change for
             // a theme that deliberately wants the two surfaces distinct.
-            let panel = panels::sidebar_panel(sidebar_width, modeline_top - dock_h - terminal_h);
-            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill: theme.sidebar_bg, border: 0.0, border_color: [0.0; 4] });
+            let panel = panels::sidebar_in(look, sidebar_width, modeline_top - dock_h - terminal_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panel_radius, fill: theme.sidebar_bg, border: 0.0, border_color: [0.0; 4] });
             if let Some((_, _, tinted, _)) = &sidebar_render {
                 // Marked rows, and the file being edited.
                 for &row in tinted {
@@ -20800,8 +20810,8 @@ impl App {
         }
         if dock_h > 0.0 {
             let dock_top = modeline_top - dock_h;
-            let panel = panels::strip_panel(window_width, dock_top, dock_h);
-            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
+            let panel = panels::strip_in(look, window_width, dock_top, dock_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panel_radius, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
             // Concept A's drawer: its text is a grid; behind it, the
             // state's chip and the keys' caps in the header, a card per
             // column -- the one with the keys outlined -- and the
@@ -20845,8 +20855,8 @@ impl App {
             // resolves to (`terminal_view`: none of its own, so the page)
             // -- so an ordinary cell blends seamlessly into the strip
             // rather than needing its own explicit background segment.
-            let panel = panels::strip_panel(window_width, terminal_top, terminal_h);
-            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panels::PANEL_RADIUS, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
+            let panel = panels::strip_in(look, window_width, terminal_top, terminal_h);
+            bg_rect.push_box(gpu, panel.x, panel.y, panel.w, panel.h, crate::rect::BoxStyle { radius: panel_radius, fill: theme.bg, border: 0.0, border_color: [0.0; 4] });
             if let Some(view) = &terminal_render {
                 let cell_x = |col: usize| text::PAD_LEFT + text::STRIP_INSET + col as f32 * char_width;
                 let row_y = |row: usize| terminal_top + text::PAD_TOP + text::STRIP_INSET / 2.0 + row as f32 * line_height;
@@ -20864,7 +20874,31 @@ impl App {
                 }
             }
         }
-        // No lines between panes: the tray's gap is the seam.
+        // Framed, no lines between panes: the tray's gap is the seam. Flat,
+        // the lines it had before 1.4: between panes, along the sidebar's
+        // edge, over the terminal, the debug drawer and the modeline.
+        if look == panels::Look::Flat {
+            for pane in &panes_render {
+                let chrome_h = pane_chrome_height(line_height, pane.has_breadcrumb);
+                let (top, h) = (pane.rect.y - chrome_h, pane.rect.h + chrome_h);
+                if pane.rect.x + pane.rect.w < pane_area.x + pane_area.w - 0.5 {
+                    bg_rect.push_rect(gpu, pane.rect.x + pane.rect.w - 1.0, top, 2.0, h, theme.divider);
+                }
+                if pane.rect.y + pane.rect.h < pane_area.y + pane_area.h - 0.5 {
+                    bg_rect.push_rect(gpu, pane.rect.x, pane.rect.y + pane.rect.h - 1.0, pane.rect.w, 2.0, theme.divider);
+                }
+            }
+            if show_sidebar {
+                bg_rect.push_rect(gpu, sidebar_width - 1.0, 0.0, 2.0, modeline_top - dock_h - terminal_h, theme.divider);
+            }
+            if show_terminal {
+                bg_rect.push_rect(gpu, 0.0, modeline_top - dock_h - terminal_h, window_width, 2.0, theme.divider);
+            }
+            if dock_h > 0.0 {
+                bg_rect.push_rect(gpu, 0.0, modeline_top - dock_h, window_width, 2.0, theme.divider);
+            }
+            bg_rect.push_rect(gpu, 0.0, modeline_top, window_width, 1.0, theme.divider);
+        }
         // Title-bar backgrounds -- same `bg_modeline` color the modeline
         // itself uses, so a titled pane reads as "a small modeline for
         // just this section" rather than an unrelated new chrome color.
@@ -20876,7 +20910,7 @@ impl App {
         // divider` line closing off the strip's own bottom edge (the
         // divider loop above only draws *between* panes, not under a
         // pane's own title/tab strip).
-        let top_corners = [panels::PANEL_RADIUS, panels::PANEL_RADIUS, 0.0, 0.0];
+        let top_corners = [panel_radius, panel_radius, 0.0, 0.0];
         for &(pane, rect) in &title_rects {
             // A pane with a title rather than tabs: the agents' dock and
             // the other tool panels. Their title is on the panel itself.
@@ -21059,6 +21093,25 @@ impl App {
                 let active = active_guide.is_some_and(|(row, column)| column == col && first_row <= row && row <= last_row);
                 let color = if active { glyphon_to_rgba(theme.gutter_fg) } else { indent_guide_color };
                 bg_rect.push_rect(gpu, x, y, 1.0, height, color);
+            }
+        }
+        // The focus edge: round the panel with the keyboard, over what's in
+        // it, when there's more than one to tell apart. Framed only; flat
+        // keeps the look it had, the focused pane's title in the accent.
+        let panels_shown = panes_render.len() + usize::from(show_sidebar) + usize::from(show_terminal) + usize::from(dock_h > 0.0);
+        if look == panels::Look::Framed && panels_shown > 1 && overlays_here {
+            let edge_rect = match keyboard_panel {
+                panels::KeyboardPanel::Pane(id) => panes_render.iter().find(|p| p.pane == id).map(|p| {
+                    let chrome_h = pane_chrome_height(line_height, p.has_breadcrumb);
+                    fenix_window::Rect { x: p.rect.x, y: p.rect.y - chrome_h, w: p.rect.w, h: p.rect.h + chrome_h }
+                }),
+                panels::KeyboardPanel::Sidebar => show_sidebar.then(|| panels::sidebar_in(look, sidebar_width, modeline_top - dock_h - terminal_h)),
+                panels::KeyboardPanel::Terminal => show_terminal.then(|| panels::strip_in(look, window_width, modeline_top - dock_h - terminal_h, terminal_h)),
+                panels::KeyboardPanel::Dock => (dock_h > 0.0).then(|| panels::strip_in(look, window_width, modeline_top - dock_h, dock_h)),
+            };
+            if let Some(r) = edge_rect {
+                let style = crate::rect::BoxStyle { radius: panel_radius, fill: [0.0; 4], border: 1.0, border_color: panels::focus_edge(badge_bg) };
+                bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
             }
         }
         // Layered last -- on top of everything else pushed to `bg_rect`
@@ -21514,8 +21567,8 @@ impl App {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
         {
-            // The tray: what shows between the panels.
-            let [r, g, b, a] = theme.tray;
+            // The tray: what shows between the panels -- flat, the page.
+            let [r, g, b, a] = if look == panels::Look::Flat { theme.bg } else { theme.tray };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -28342,6 +28395,50 @@ configure_board stm32
             Some(fenix_window::Rect { x: 0.0, y: modeline_top - terminal_h, w: 800.0, h: terminal_h })
         );
         assert_eq!(geometry.panes.len(), 1); // no splits yet
+    }
+
+    /// Framed, each pane is inset on the tray; flat (`appearance.panels`),
+    /// it's the layout's rect edge to edge, as before 1.4, and a click
+    /// still lands on the pane drawn there either way.
+    #[test]
+    fn panes_are_framed_on_the_tray_or_flat_edge_to_edge() {
+        let mut app = App::with_file(None);
+        let first = app.windows().focused_id();
+        app.split_vertical();
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let layout = app.windows().layout(fenix_window::Rect { x: 0.0, y: 0.0, w: 800.0, h: modeline_top - terminal_h });
+        let framed = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        assert_eq!(app.panel_look(), panels::Look::Framed, "framed unless set");
+        for ((id, raw), (_, drawn)) in layout.iter().zip(&framed.panes) {
+            assert!(drawn.x > raw.x && drawn.w < raw.w, "{id:?} inset: {drawn:?} in {raw:?}");
+        }
+        app.config.set_value("appearance.panels", Some(fenix_config::Value::Text("flat".into())));
+        assert_eq!(app.panel_look(), panels::Look::Flat);
+        let flat = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top);
+        assert_eq!(flat.panes, layout, "edge to edge");
+        let first_rect = flat.panes.iter().find(|(id, _)| *id == first).unwrap().1;
+        app.handle_click_at((first_rect.x + 2.0, first_rect.y + 30.0), 800.0, 600.0);
+        assert_eq!(app.windows().focused_id(), first, "a click at its very edge is the pane's");
+    }
+
+    /// The focus edge follows the keyboard: the pane clicked or moved to,
+    /// the terminal panel while it's typed in, the sidebar while it is.
+    #[test]
+    fn the_focus_edge_follows_the_keyboard() {
+        let mut app = App::with_file(None);
+        let first = app.windows().focused_id();
+        app.split_vertical();
+        let second = app.windows().focused_id();
+        let edge = |app: &App| panels::keyboard_panel(app.windows().focused_id(), app.terminal_focused && app.terminal_open, app.sidebar_focused, app.debug_drawer_focused());
+        assert_eq!(edge(&app), panels::KeyboardPanel::Pane(second));
+        app.windows_mut().focus(first);
+        assert_eq!(edge(&app), panels::KeyboardPanel::Pane(first));
+        app.terminal_open = true;
+        app.terminal_focused = true;
+        assert_eq!(edge(&app), panels::KeyboardPanel::Terminal);
+        app.terminal_focused = false;
+        app.sidebar_focused = true;
+        assert_eq!(edge(&app), panels::KeyboardPanel::Sidebar);
     }
 
     #[test]
