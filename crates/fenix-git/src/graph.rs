@@ -217,6 +217,14 @@ pub fn assign_lanes(commits: &[GraphCommit]) -> Vec<GraphRow> {
     rows
 }
 
+/// How many lanes `rows` use at their widest: the graph's width in lanes.
+pub fn lane_count(rows: &[GraphRow]) -> usize {
+    rows.iter()
+        .flat_map(|r| r.live_before.iter().chain(&r.live_after).chain(std::iter::once(&r.lane)))
+        .max()
+        .map_or(0, |&widest| widest + 1)
+}
+
 /// The indices of every lane currently heading toward something.
 fn occupied(lanes: &[Option<String>]) -> Vec<usize> {
     lanes.iter().enumerate().filter(|(_, l)| l.is_some()).map(|(i, _)| i).collect()
@@ -310,6 +318,13 @@ mod tests {
         assert!(merge.is_merge);
         assert_eq!(merge.branching.len(), 1);
         assert_eq!(merge.branching[0], 0, "reuses the lane already heading toward `s` instead of opening a second");
+    }
+
+    #[test]
+    fn the_lane_count_is_the_widest_row() {
+        assert_eq!(lane_count(&[]), 0);
+        assert_eq!(lane_count(&assign_lanes(&[c("c", &["b"]), c("b", &["a"]), c("a", &[])])), 1);
+        assert_eq!(lane_count(&assign_lanes(&[c("m", &["p", "s"]), c("p", &["a"]), c("s", &["a"]), c("a", &[])])), 2);
     }
 
     #[test]

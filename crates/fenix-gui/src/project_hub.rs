@@ -551,6 +551,16 @@ pub fn layout(hub: &Hub, cols: usize) -> Page {
 mod tests {
     use super::*;
 
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = hub();
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
+
     fn project(name: &str, kind: ProjectKind, group: Option<&str>, pinned: bool) -> HubProject {
         let mut p = HubProject::new(PathBuf::from(format!("/work/{name}")), kind);
         p.group = group.map(str::to_string);

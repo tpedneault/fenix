@@ -142,10 +142,29 @@ pub fn brief(t: &Tally, mode: &str) -> String {
 }
 
 /// The columns after the name: turns, time, tokens, cache read, cost.
-const COLUMNS: [(&str, usize); 5] = [("turns", 6), ("time", 9), ("tokens", 9), ("cache read", 12), ("cost", 10)];
-const FIGURES: usize = 6 + 9 + 9 + 12 + 10;
+const COLUMNS: [(&str, usize); 5] = [("turns", 6), ("time", 9), ("tokens", 9), ("cache read", 12), ("cost", 9)];
+/// The least the names get beside the figures.
+const NAME_MIN: usize = 12;
 
-fn figures(t: &Tally) -> String {
+/// Which columns fit `width` beside the names: all of them while they
+/// do, then without "cache read", then without "time".
+fn columns(width: usize) -> Vec<usize> {
+    let mut shown = vec![0, 1, 2, 3, 4];
+    for drop in [3, 1, 2] {
+        if shown.iter().map(|&i| COLUMNS[i].1).sum::<usize>() + NAME_MIN <= width {
+            break;
+        }
+        shown.retain(|&i| i != drop);
+    }
+    shown
+}
+
+/// The columns' heads, right-aligned over their figures.
+fn heads(shown: &[usize]) -> String {
+    shown.iter().map(|&i| COLUMNS[i]).map(|(h, w)| format!("{h:>w$}")).collect()
+}
+
+fn figures(t: &Tally, shown: &[usize]) -> String {
     let dash = || "—".to_string();
     let cells = [
         t.turns.to_string(),
@@ -154,7 +173,7 @@ fn figures(t: &Tally) -> String {
         if t.has_tokens() { tokens_text(t.cache_read) } else { dash() },
         if t.has_cost() { cost_of(t) } else { dash() },
     ];
-    cells.iter().zip(COLUMNS).map(|(cell, (_, w))| format!("{cell:>w$}")).collect()
+    shown.iter().map(|&i| (&cells[i], COLUMNS[i].1)).map(|(cell, w)| format!("{cell:>w$}")).collect()
 }
 
 /// The day's date, shorter: `Fri 06`.
@@ -180,14 +199,14 @@ pub fn layout(page: &UsagePage, cols: usize) -> Page {
             Role::Muted
         };
     }
-    g.put(1, left + 12, &said, role);
+    g.put(1, left + 12, &fit(&said, width.saturating_sub(12)), role);
     g.rule(2, left..left + width);
-    let name_w = width.saturating_sub(FIGURES).max(10);
+    let shown = columns(width);
+    let name_w = width.saturating_sub(shown.iter().map(|&i| COLUMNS[i].1).sum::<usize>()).max(NAME_MIN);
     let mut row = 4;
     let header = |g: &mut Grid, row: usize, title: &str| {
-        g.put(row, left, title, Role::Title);
-        let heads: String = COLUMNS.iter().map(|(h, w)| format!("{h:>w$}")).collect();
-        g.put(row, left + name_w, &heads, Role::Muted);
+        g.put(row, left, &fit(title, name_w.saturating_sub(1)), Role::Title);
+        g.put(row, left + name_w, &heads(&shown), Role::Muted);
     };
     let week = page.day(Period::Week);
     if week.agents.is_empty() && page.ledger.session.agents.is_empty() {
@@ -205,12 +224,12 @@ pub fn layout(page: &UsagePage, cols: usize) -> Page {
         }
         for (agent, tally) in &day.agents {
             g.put(row, left + 2, &fit(agent, name_w.saturating_sub(3)), Role::Accent);
-            g.put(row, left + name_w, &figures(tally), Role::Text);
+            g.put(row, left + name_w, &figures(tally, &shown), Role::Text);
             row += 1;
         }
         if day.agents.len() > 1 {
             g.put(row, left + 2, "all", Role::Muted);
-            g.put(row, left + name_w, &figures(&day.total()), Role::Muted);
+            g.put(row, left + name_w, &figures(&day.total(), &shown), Role::Muted);
             row += 1;
         }
         row += 1;
@@ -248,8 +267,8 @@ pub fn layout(page: &UsagePage, cols: usize) -> Page {
     }
     row += 1;
 
-    g.put(row, left, &format!("Threads · {}", page.period.label().to_lowercase()), Role::Title);
-    g.put(row, left + name_w, &COLUMNS.iter().map(|(h, w)| format!("{h:>w$}")).collect::<String>(), Role::Muted);
+    g.put(row, left, &fit(&format!("Threads · {}", page.period.label().to_lowercase()), name_w.saturating_sub(1)), Role::Title);
+    g.put(row, left + name_w, &heads(&shown), Role::Muted);
     row += 1;
     let threads = page.threads();
     if threads.is_empty() {
@@ -260,7 +279,7 @@ pub fn layout(page: &UsagePage, cols: usize) -> Page {
         let title = if t.title.is_empty() { "(untitled)" } else { &t.title };
         g.put(row, left + 2, &fit(title, name_w.saturating_sub(agent_w + 4)), Role::Text);
         g.put(row, left + name_w.saturating_sub(agent_w + 1), &fit(&t.agent, agent_w), Role::Muted);
-        g.put(row, left + name_w, &figures(&t.tally), Role::Text);
+        g.put(row, left + name_w, &figures(&t.tally, &shown), Role::Text);
         if i == page.focus {
             g.focus(row, left..left + width);
         }
@@ -273,6 +292,16 @@ pub fn layout(page: &UsagePage, cols: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = UsagePage::new(ledger(), week(), Budget::parse("$1"));
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
     use fenix_acp::protocol::TurnUsage;
 
     fn tokens(input: u64, output: u64) -> Tally {

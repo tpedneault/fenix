@@ -1549,22 +1549,24 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
 
     // The header: the project, then where this branch stands, as chips.
     let key = |g: &mut Grid, y: usize, label: &str| g.put(y, left, label, Role::Muted) + (8 - label.len().min(7));
-    let x = g.put(y, left, &page.name, Role::Title) + 2;
-    let x = g.chip(y, x, &format!(" {} ", status.map(|s| s.branch.as_str()).unwrap_or("(no branch)")), Role::Accent, Chip::Status(Role::Accent)) + 1;
+    // Each chip cut, or left out, to keep to the pane.
+    let end = left + width;
+    let x = g.put(y, left, &fit(&page.name, width / 3), Role::Title) + 2;
+    let x = g.chip_within(y, x, end, &format!(" {} ", status.map(|s| s.branch.as_str()).unwrap_or("(no branch)")), Role::Accent, Chip::Status(Role::Accent)) + 1;
     let mut x = match status.and_then(|s| s.upstream.as_ref()) {
         Some(upstream) => {
             let s = status.unwrap();
             let role = if s.behind > 0 { Role::Warn } else if s.ahead > 0 { Role::Good } else { Role::Muted };
-            g.chip(y, x, &format!(" {upstream} ↑{} ↓{} ", s.ahead, s.behind), role, Chip::Status(role)) + 1
+            g.chip_within(y, x, end, &format!(" {upstream} ↑{} ↓{} ", s.ahead, s.behind), role, Chip::Status(role)) + 1
         }
         None => match &snap.push_remote {
-            Some(remote) => g.chip(y, x, &format!(" {remote}/{} not pushed yet · P p creates it ", status.map(|s| s.branch.as_str()).unwrap_or("")), Role::Muted, Chip::Badge) + 1,
-            None => g.chip(y, x, " no remote ", Role::Muted, Chip::Badge) + 1,
+            Some(remote) => g.chip_within(y, x, end, &format!(" {remote}/{} not pushed yet · P p creates it ", status.map(|s| s.branch.as_str()).unwrap_or("")), Role::Muted, Chip::Badge) + 1,
+            None => g.chip_within(y, x, end, " no remote ", Role::Muted, Chip::Badge) + 1,
         },
     };
     let changes = snap.files.len();
     if changes > 0 {
-        x = g.chip(y, x, &format!(" {} ", count(changes, "change")), Role::Muted, Chip::Badge) + 1;
+        x = g.chip_within(y, x, end, &format!(" {} ", count(changes, "change")), Role::Muted, Chip::Badge) + 1;
     }
     // Quieter, at the right: when it was fetched, the last commit.
     let mut right = Vec::new();
@@ -1576,7 +1578,8 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
     }
     let right = right.join(" · ");
     let room = (left + width).saturating_sub(x + 2);
-    let right = fit(&right, room);
+    // Not a lone "…" when there's no room for it.
+    let right = if room >= 12 { fit(&right, room) } else { String::new() };
     g.put(y, (left + width).saturating_sub(right.chars().count()), &right, Role::Muted);
     y += 1;
     if let Some((base, ahead, behind)) = &snap.base {
@@ -1696,7 +1699,9 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                     },
                     s => s.title().to_string(),
                 };
-                let x = g.put(y, x, &title.to_uppercase(), if *section == Section::Conflicted { Role::Bad } else { Role::Muted }) + 1;
+                // Cut to leave its count room.
+                let room = (left + width).saturating_sub(x + n.to_string().len() + 3);
+                let x = g.put(y, x, &fit(&title.to_uppercase(), room), if *section == Section::Conflicted { Role::Bad } else { Role::Muted }) + 1;
                 g.badge(y, x, n);
             }
             Row::File { section, path } => {
@@ -1717,11 +1722,15 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                     (add, del)
                 }).or_else(|| snap.stats.get(&(*section == Section::Staged, path.clone())).copied());
                 let room = (left + width).saturating_sub(x + 14);
-                let (dir, name) = match path.rsplit_once('/') {
+                // An untracked folder (`notes/`) by its own name, slash and
+                // all, not an empty name before it.
+                let folder = path.ends_with('/');
+                let (dir, name) = match path.trim_end_matches('/').rsplit_once('/') {
                     Some((dir, name)) => (dir, name),
-                    None => ("", path.as_str()),
+                    None => ("", path.trim_end_matches('/')),
                 };
-                let nx = g.put(y, x, &fit(name, room), Role::Text);
+                let name = if folder { format!("{name}/") } else { name.to_string() };
+                let nx = g.put(y, x, &fit(&name, room), Role::Text);
                 if !dir.is_empty() && nx + 2 < x + room {
                     g.put(y, nx + 1, &fit(dir, (x + room).saturating_sub(nx + 1)), Role::Muted);
                 }
@@ -1950,6 +1959,30 @@ pub(crate) fn popup(line: usize, col: usize, menu: Option<(&Menu, &str)>, input:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = expanded();
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
+
+    /// An untracked folder shows as its name and a slash, lined up with
+    /// the files.
+    #[test]
+    fn an_untracked_folder_is_named_like_a_file() {
+        let mut p = page();
+        p.snap.as_mut().unwrap().files.push(file("notes/", '?', '?'));
+        let text = layout(&p, 120).text;
+        let line = text.lines().find(|l| l.contains("notes")).expect("the folder");
+        let at = |l: &str, s: &str| l.find(s).unwrap();
+        let new = text.lines().find(|l| l.contains("new.txt")).unwrap();
+        assert_eq!(at(line, "notes/"), at(new, "new.txt"), "{line:?}
+{new:?}");
+    }
 
     fn file(path: &str, index: char, worktree: char) -> FileEntry {
         FileEntry { path: path.to_string(), index_status: index, worktree_status: worktree }

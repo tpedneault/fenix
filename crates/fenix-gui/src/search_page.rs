@@ -182,6 +182,9 @@ pub struct SearchPage {
     /// This project's searches, newest first, and where `↑` has got to.
     pub history: Vec<String>,
     pub history_at: Option<usize>,
+    /// The query is selected, as `SPC /` leaves it on a page already
+    /// open: what's typed next replaces it, an arrow keeps it.
+    pub query_selected: bool,
 }
 
 impl SearchPage {
@@ -211,6 +214,9 @@ impl SearchPage {
     /// The text pasted into the field being typed.
     pub fn paste(&mut self, text: &str) -> Action {
         let Some(field) = self.editing else { return Action::None };
+        if field == Field::Query && std::mem::take(&mut self.query_selected) {
+            self.query.set("");
+        }
         let input = self.input_mut(field);
         insert_at(&mut input.text, &mut input.caret, text.lines().next().unwrap_or(""));
         self.changed(field)
@@ -459,6 +465,16 @@ impl SearchPage {
     }
 
     fn field_key(&mut self, field: Field, key: Key) -> Action {
+        if field == Field::Query && std::mem::take(&mut self.query_selected) {
+            match key {
+                Key::Char(_) | Key::Space => self.query.set(""),
+                Key::Backspace | Key::Delete | Key::DeleteWordBack => {
+                    self.query.set("");
+                    return self.changed(field);
+                }
+                _ => {}
+            }
+        }
         match key {
             Key::Enter => {
                 self.editing = None;
@@ -568,9 +584,15 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
         g.put(line, left, label, if editing { Role::Accent } else { Role::Muted });
         let x = left + label_w;
         let room = room.max(6);
-        let shown = if editing { with_caret(&input.text, input.caret, room) } else if input.text.is_empty() { fit(hint, room) } else { fit(&input.text, room) };
+        // Selected (a search opened again): lit, with no caret in it.
+        let selected = editing && label == "Search" && page.query_selected && !input.text.is_empty();
+        let shown = if selected { fit(&input.text, room) } else if editing { with_caret(&input.text, input.caret, room) } else if input.text.is_empty() { fit(hint, room) } else { fit(&input.text, room) };
         let role = if !editing && input.text.is_empty() { Role::Muted } else { Role::Title };
-        g.put(line, x, &shown, role);
+        if selected {
+            g.chip(line, x, &shown, Role::Title, Chip::Status(Role::Accent));
+        } else {
+            g.put(line, x, &shown, role);
+        }
         // An input box, outlined in the accent while it's being typed in.
         g.card(line..line + 1, x.saturating_sub(1)..x + room + 1, if editing { CardLook::FieldFocused } else { CardLook::Field });
     };
@@ -854,6 +876,16 @@ fn line_pieces(page: &SearchPage, file: &ResultFile, line: &Line, replacing: boo
 mod tests {
     use super::*;
 
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = page();
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols, Some(30)), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
+
     fn found(path: &str, lines: &[(usize, &str, &str)]) -> FileResult {
         let pattern = |needle: &str, text: &str| text.match_indices(needle).map(|(i, m)| i..i + m.len()).collect();
         FileResult {
@@ -935,6 +967,27 @@ mod tests {
         assert_eq!(p.key(Key::Char('R')), Action::None);
         assert!(p.confirm && layout(&p, 80, Some(30)).all_text().contains("Replace 1 match in 1 file?"));
         assert_eq!(p.key(Key::Char('y')), Action::Apply);
+    }
+
+    /// A search opened again has its query selected: typing replaces it,
+    /// Backspace clears it, and an arrow keeps it to edit.
+    #[test]
+    fn a_selected_query_is_typed_over() {
+        let mut p = page();
+        p.edit(Field::Query);
+        p.query_selected = true;
+        assert!(layout(&p, 80, Some(30)).chips.iter().any(|(l, _, c)| *l == 0 && *c == Chip::Status(Role::Accent)), "lit");
+        p.key(Key::Char('x'));
+        assert_eq!(p.query.text, "x", "replaced, not appended to");
+        p.query = Input::new("helper");
+        p.query_selected = true;
+        p.key(Key::Backspace);
+        assert_eq!(p.query.text, "");
+        p.query = Input::new("helper");
+        p.query_selected = true;
+        p.key(Key::Left);
+        p.key(Key::Char('s'));
+        assert_eq!(p.query.text, "helpesr", "an arrow keeps it to edit");
     }
 
     #[test]

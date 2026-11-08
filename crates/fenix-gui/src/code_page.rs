@@ -332,6 +332,7 @@ fn canvas(ext: &str, c: &wit::Canvas, page: &wit::Page) -> Page {
         focuses: page.focuses.iter().map(cells).collect(),
         cards: Vec::new(),
         chips: Vec::new(),
+        graph: Vec::new(),
         text: c.text.clone(),
         spans: colored(c.spans.iter().map(|s| { let (line, cols) = cells(&s.cells); Span { line, cols, role: role(&s.role) } }).collect(), colors.iter().map(|c| { let (line, cols) = cells(&c.cells); (line, cols, c.color) })),
         rules: c.rules.iter().map(cells).collect(),

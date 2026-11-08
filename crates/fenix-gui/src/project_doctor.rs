@@ -183,13 +183,6 @@ fn health_role(health: Health) -> Role {
 pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
     let (left, width) = frame(cols, 100);
     let mut g = Grid::new();
-    let end = g.put(1, left, doctor.kind.tag(), Role::Kind(doctor.kind));
-    let end = g.put(1, end + 2, &doctor.name, Role::Title);
-    let end = match (&doctor.language, doctor.kind) {
-        (Some(language), ProjectKind::Other) => g.put(1, end + 2, &format!("· {language}"), Role::Muted),
-        _ => end,
-    };
-    g.put(1, end + 2, "· doctor", Role::Muted);
     let status = match &doctor.checks {
         None => "checking…".to_string(),
         Some(checks) => {
@@ -205,6 +198,21 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
         None => Role::Muted,
     };
     let role = if role == Role::Muted && doctor.checks.is_some() { Role::Good } else { role };
+    // The name, cut short of the status at the right; what else there's
+    // room for after it.
+    let stop = (left + width).saturating_sub(status.chars().count() + 2);
+    let end = g.put(1, left, doctor.kind.tag(), Role::Kind(doctor.kind));
+    let end = g.put(1, end + 2, &fit(&doctor.name, stop.saturating_sub(end + 2)), Role::Title);
+    let language = match (&doctor.language, doctor.kind) {
+        (Some(language), ProjectKind::Other) => format!("· {language}"),
+        _ => String::new(),
+    };
+    let mut end = end;
+    for extra in [language.as_str(), "· doctor"] {
+        if !extra.is_empty() && end + 2 + extra.chars().count() <= stop {
+            end = g.put(1, end + 2, extra, Role::Muted);
+        }
+    }
     g.put(1, (left + width).saturating_sub(status.chars().count()), &status, role);
     g.rule(2, left..left + width);
     if let Some((label, result)) = &doctor.last_fix {
@@ -279,6 +287,16 @@ pub fn layout(doctor: &DoctorPage, cols: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let (p, _dir) = page("narrow");
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
     use fenix_project::doctor::{diagnose, Probe};
     use std::path::Path;
 

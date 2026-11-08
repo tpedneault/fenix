@@ -26,9 +26,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Search: the query, the replacement and the files in input boxes, case, word
   and regex as toggles that show when they're on, the scope as chips, each
   file's results on a card with its count, and matches on a chip.
-- Git log: the branches' lanes in their own colours, branches and tags as
-  chips, the author's initials on a badge and the hash quieter; the commit the
-  cursor is on opens under it with its author and its keys.
+- Git log: the graph is drawn rather than typed in `*`, `|`, `\` and `/`:
+  each branch a line in its own colour, a commit a dot (a merge a ring, HEAD
+  ringed), and a merge or a branch's end a rounded bend, a row a commit with
+  no rows of connectors between. The lanes run on through a commit opened to
+  its files. With many branches at once the lanes close up to fit a fifth of
+  the page and the furthest share its edge; each commit's text starts just
+  past the lanes in use near it. Branches and tags as chips, the author's
+  initials on a badge in a column of their own and the hash quieter; the
+  commit the cursor is on opens under it with its author, when, and its whole
+  hash.
 
 - Panels: the window is a tray, and the panes, the sidebar, the terminal and
   the docks sit on it as rounded panels a small gap apart, with no lines
@@ -133,6 +140,51 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The debug drawer: a column with nothing in it says why in full, wrapped
   in the column, and the selected row's value, when its column cut it, is
   shown whole on the drawer's bottom line.
+- Pages keep inside a narrow pane, down to a third of a laptop's screen:
+  their headers' chips, titles and notes are cut or left out rather than
+  running off the edge or over each other, and a pane under 40 columns is
+  no longer laid out as if it were 40. In a narrow pane Settings shows its
+  settings at the whole width, and Tab trades them for the categories;
+  Extensions closes up its tabs; Agent usage drops the cache, time and token
+  columns; a section heading is cut to its width (the Snippets preview's ran
+  off the page at 80 columns).
+- A page's modeline names it as its tab does (`Log · fenix`, not
+  `*log: fenix*`), without the line and column of a caret it doesn't have,
+  and the modeline never ends on a separator. A pane too narrow for its tabs
+  is titled the same way.
+- Git status shows an untracked folder as `notes/`, lined up with the files,
+  rather than a blank name and the folder a cell further on.
+- The Log's tab names what it follows -- the branch (`Log · master`), the
+  file (`Log · main.rs`, `Log · a.rs:3–9`) or every branch -- rather than
+  the repository.
+- Settings: stepping a setting back on to its default takes it out of
+  `settings.toml` rather than writing the default there and counting it as
+  changed; one that overrides an inherited value still writes it.
+- `SPC /` with a Search page open selects the last query, so typing
+  replaces it rather than adding to it; an arrow keeps it to edit.
+- The agents' dock: a question the agent asks takes the cursor when it
+  comes, even when you'd moved up the thread, and the answer `j`, `k` and
+  Enter are on is lit across its row. A page is never scrolled past its
+  end, so a dock that grows shows the cards above rather than blank rows.
+  The prompt's title (and any pane's) is cut with a "…" in a narrow dock
+  rather than at its edge, an empty thread's hint wraps, and the modeline
+  calls the prompt "Agent prompt", not `*agent prompt*`.
+- `SPC b b` is the same card as the file picker: each buffer's icon, its
+  name then its folder (in the project, else from `~`) or its tab's name,
+  and `unsaved` at the right; Home and the empty scratches are listed once.
+- The panel terminal, from Home or a page with no project, starts in the
+  folder of the file used last rather than Fenix's own.
+- The `SPC` menu: its count of commands is the command picker's; *Recent*
+  lists a command once, with its area's icon; a section's heading is never
+  left at the foot of a page with nothing under it.
+- A file outside any project has `C: › Users › …` as its breadcrumb, not
+  `C: › \ › Users`.
+- Every pane showing Home has the logo, not only the first.
+- The debugger's trail ribbon gives the breadcrumb back once the session
+  has ended; `[t` still goes back along the trail.
+- `fenix <folder>` opens the folder as the project, as `--project` does,
+  rather than trying to open it as a file.
+- The `SPC` menu's local leader (`m`, mode) has an icon like the rest.
 
 ## [1.3.0] - 2026-11-06
 

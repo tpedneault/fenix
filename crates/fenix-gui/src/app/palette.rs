@@ -143,7 +143,8 @@ pub(super) enum Body {
     List(Vec<Row>),
     /// The leader's menu: recent chords, then sections of entries in
     /// columns -- `(key, label, group, count)`.
-    Grid { recent: Vec<(String, String)>, sections: Vec<(String, Vec<(String, String, bool, usize)>)> },
+    /// A recent chord is (its keys, what it runs, its command's area).
+    Grid { recent: Vec<(String, String, String)>, sections: Vec<(String, Vec<(String, String, bool, usize)>)> },
 }
 
 /// A palette to lay out.
@@ -200,6 +201,8 @@ pub(super) fn area_icon(name: &str) -> Option<char> {
         "notifications" => icon::BELL,
         "extensions" => icon::PUZZLE,
         "tasks" | "task" => icon::TASKS,
+        // `SPC m`: the keys for what the focused buffer is.
+        "mode" => icon::SLIDERS,
         "commands" | "run a command" => icon::COMMAND,
         "history" | "log" => icon::HISTORY,
         "diff" | "compare" => icon::DIFF,
@@ -437,11 +440,11 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
             };
             let ncols = if cols >= 70 { 2 } else { 1 };
             let colw = cols.saturating_sub(2) / ncols;
-            let key_w = recent.iter().map(|(k, _)| keys_width(k)).chain(sections.iter().flat_map(|(_, e)| e.iter().map(|(k, ..)| keys_width(k)))).max().unwrap_or(1).max(3);
+            let key_w = recent.iter().map(|(k, ..)| keys_width(k)).chain(sections.iter().flat_map(|(_, e)| e.iter().map(|(k, ..)| keys_width(k)))).max().unwrap_or(1).max(3);
             let name_col = key_w + 5;
-            let entry = |l: &mut Line, b: &mut Vec<CardBox>, c0: usize, key: &str, label: &str, is_group: bool, count: Option<usize>| {
+            let entry = |l: &mut Line, b: &mut Vec<CardBox>, c0: usize, key: &str, label: &str, area: &str, is_group: bool, count: Option<usize>| {
                 put_keys(l, b, 0, c0, key, accent);
-                if let Some(i) = area_icon(label) {
+                if let Some(i) = area_icon(label).or_else(|| area_icon(area)) {
                     l.put(c0 + key_w + 2, &i.to_string(), if is_group { group } else { quiet }, true);
                 }
                 let count_text = count.map(|n| n.to_string()).unwrap_or_default();
@@ -458,8 +461,8 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
                 for chunk in recent.chunks(ncols) {
                     let mut l = Line::default();
                     let mut b = Vec::new();
-                    for (i, (keys, label)) in chunk.iter().enumerate() {
-                        entry(&mut l, &mut b, 1 + i * colw, keys, label, false, None);
+                    for (i, (keys, label, area)) in chunk.iter().enumerate() {
+                        entry(&mut l, &mut b, 1 + i * colw, keys, label, area, false, None);
                     }
                     all.push((l, b));
                 }
@@ -470,14 +473,41 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
                     let mut l = Line::default();
                     let mut b = Vec::new();
                     for (i, (key, label, is_group, count)) in chunk.iter().enumerate() {
-                        entry(&mut l, &mut b, 1 + i * colw, key, label, *is_group, is_group.then_some(*count));
+                        entry(&mut l, &mut b, 1 + i * colw, key, label, "", *is_group, is_group.then_some(*count));
                     }
                     all.push((l, b));
                 }
             }
-            pages = all.len().div_ceil(avail.max(1)).max(1);
+            // Cut into pages so a section's heading never ends a page with
+            // nothing of its own under it, and no page starts on a gap.
+            // A gap is a blank line; a heading has text and no key caps.
+            let blank = |i: usize| all.get(i).is_some_and(|(l, _)| l.spans.is_empty());
+            let heading = |i: usize| all.get(i).is_some_and(|(l, b)| !l.spans.is_empty() && b.is_empty());
+            let mut cut: Vec<Vec<usize>> = vec![Vec::new()];
+            for i in 0..all.len() {
+                let gap = blank(i);
+                // Room for a heading's first entry with it (and its gap).
+                let needs = match (gap, heading(i)) {
+                    (true, _) if heading(i + 1) => 3,
+                    (_, true) => 2,
+                    _ => 1,
+                };
+                let current = cut.last().map_or(0, Vec::len);
+                if current > 0 && current + needs > avail.max(1) {
+                    cut.push(Vec::new());
+                }
+                if gap && cut.last().is_some_and(Vec::is_empty) {
+                    continue;
+                }
+                cut.last_mut().expect("a page").push(i);
+            }
+            pages = cut.len().max(1);
             page = page.min(pages - 1);
-            for (l, b) in all.into_iter().skip(page * avail).take(avail) {
+            let shown: HashSet<usize> = cut[page].iter().copied().collect();
+            for (i, (l, b)) in all.into_iter().enumerate() {
+                if !shown.contains(&i) {
+                    continue;
+                }
                 let r = first + body.len();
                 boxes.extend(b.into_iter().map(|bx| CardBox { row: r, ..bx }));
                 body.push(l);
@@ -1054,6 +1084,24 @@ impl App {
                 view.body = Body::List(rows);
                 view.empty = if total == 0 { "Listing the files…".to_string() } else { "No file matches".to_string() };
             }
+            ActivePicker::SwitchBuffer(state) => {
+                view.placeholder = "Switch to a buffer by its name".to_string();
+                view.footer[0].1 = "switch".to_string();
+                let mut rows = Vec::new();
+                for (sel, c) in state.visible_rows(offset, per_view) {
+                    let id = c.payload;
+                    let ob = self.buffers.get(id);
+                    let hits = state.positions(&c.label);
+                    // A file: its name, then its folder; anything else whole.
+                    let (title, title_hits, aside, aside_hits) = if ob.is_some_and(|ob| ob.buffer.path().is_some()) { split_path(&c.label, &hits) } else { (c.label.clone(), hits, String::new(), Vec::new()) };
+                    let home = ob.is_some_and(|ob| ob.kind == BufferKind::Dashboard);
+                    let glyph = self.page_tab_icon(id).or(home.then_some(icon::HOME)).unwrap_or_else(|| icon::file_icon(&title));
+                    let unsaved = ob.is_some_and(|ob| ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty());
+                    rows.push(Row { icon: Some((glyph, theme.icon_file)), title, title_hits, aside, aside_hits, right: if unsaved { "unsaved".to_string() } else { String::new() }, selected: sel, ..Row::default() });
+                }
+                view.body = Body::List(rows);
+                view.empty = "No buffer matches".to_string();
+            }
             ActivePicker::Commands(state) => {
                 view.prompt = ":".to_string();
                 view.placeholder = "Run a command: type its name, its area or its key".to_string();
@@ -1236,7 +1284,7 @@ mod tests {
         let menu = View {
             prompt: "SPC".into(),
             prompt_is_key: true,
-            body: Body::Grid { recent: vec![("g g".into(), "status page".into())], sections: vec![("groups".into(), vec![("g".into(), "git".into(), true, 28)]), ("commands".into(), vec![("SPC".into(), "find file".into(), false, 0)])] },
+            body: Body::Grid { recent: vec![("g g".into(), "status page".into(), "Git".into())], sections: vec![("groups".into(), vec![("g".into(), "git".into(), true, 28)]), ("commands".into(), vec![("SPC".into(), "find file".into(), false, 0)])] },
             ..view(Vec::new())
         };
         let card = layout(&menu, crate::theme::default_theme(), area(), 9.0, 20.0, 0);
@@ -1248,6 +1296,28 @@ mod tests {
         assert!(line.trim_end().ends_with("28") && line.chars().count() > col("git") + 10, "the count at the right: {line:?}");
     }
 
+    /// However many groups push it down, the COMMANDS heading never ends
+    /// a page with nothing under it; a recent chord has its area's icon.
+    #[test]
+    fn a_heading_keeps_its_first_entry_on_its_page() {
+        for n in 1..60 {
+            let groups = (0..n).map(|i| (format!("{i}"), format!("group {i}"), true, 3)).collect();
+            let menu = View {
+                prompt: "SPC".into(),
+                prompt_is_key: true,
+                body: Body::Grid { recent: vec![("w v".into(), "split vertical".into(), "Window".into())], sections: vec![("groups".into(), groups), ("commands".into(), vec![("m".into(), "mode".into(), false, 0)])] },
+                ..view(Vec::new())
+            };
+            let card = layout(&menu, crate::theme::default_theme(), area(), 9.0, 20.0, 0);
+            let t = text(&card);
+            let lines: Vec<&str> = t.lines().collect();
+            if let Some(at) = lines.iter().position(|l| l.contains("COMMANDS")) {
+                assert!(lines.get(at + 1).is_some_and(|l| l.contains("mode")), "{n} groups: the heading's entry is under it\n{t}");
+            }
+            assert!(t.contains(icon::WINDOW), "the recent chord's area icon");
+        }
+    }
+
     /// Areas and groups have icons: Git's branch, the explorer's folder.
     #[test]
     fn areas_have_icons() {
@@ -1256,6 +1326,7 @@ mod tests {
         assert_eq!(area_icon("Files"), Some(icon::FILE));
         assert_eq!(area_icon("search"), Some(icon::SEARCH));
         assert_eq!(area_icon("Debug"), Some(icon::BUG));
+        assert_eq!(area_icon("mode"), Some(icon::SLIDERS));
         assert_eq!(area_icon("nothing like it"), None);
     }
 

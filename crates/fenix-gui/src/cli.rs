@@ -234,6 +234,19 @@ pub fn parse(
     Ok(invocation)
 }
 
+/// A folder named as a file (`fenix C:\code\orbit`) is a project to
+/// open, as `--project` is, rather than a file Windows won't read: the
+/// first such folder becomes the project when none was given, and the
+/// rest are dropped. `is_dir` says which paths are folders.
+pub fn folders_as_project(mut invocation: Invocation, is_dir: impl Fn(&Path) -> bool) -> Invocation {
+    let (folders, files): (Vec<PathPosition>, Vec<PathPosition>) = std::mem::take(&mut invocation.files).into_iter().partition(|f| f.line.is_none() && is_dir(&f.path));
+    invocation.files = files;
+    if invocation.project.is_none() {
+        invocation.project = folders.into_iter().next().map(|f| f.path);
+    }
+    invocation
+}
+
 /// `path` against `cwd`, without touching the disk: a file that doesn't
 /// exist yet is still a file to create.
 fn absolute(cwd: &Path, path: &Path) -> PathBuf {
@@ -347,6 +360,19 @@ mod tests {
                 at(cwd().join("x.rs"), Some(1), Some(2))
             ]
         );
+    }
+
+    /// `fenix <folder>` opens it as the project, not as a file.
+    #[test]
+    fn a_folder_given_as_a_file_is_the_project() {
+        let inv = parse(&args(&["orbit", "notes.md"]), &cwd(), |_| false).unwrap();
+        let inv = folders_as_project(inv, |p| p.ends_with("orbit"));
+        assert_eq!(inv.project, Some(cwd().join("orbit")));
+        assert_eq!(inv.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>(), vec![cwd().join("notes.md")]);
+        let inv = parse(&args(&["--project", "a", "b"]), &cwd(), |_| false).unwrap();
+        let inv = folders_as_project(inv, |p| p.ends_with("b"));
+        assert_eq!(inv.project, Some(cwd().join("a")), "--project still wins");
+        assert!(inv.files.is_empty());
     }
 
     #[test]

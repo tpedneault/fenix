@@ -56,6 +56,7 @@ pub const OPEN: char = '\u{f08e}'; // nf-fa-external_link
 pub const POWER: char = '\u{f011}'; // nf-fa-power_off
 pub const WORKSPACE: char = '\u{f009}'; // nf-fa-th_large
 pub const TASKS: char = '\u{f0ae}'; // nf-fa-tasks
+pub const SLIDERS: char = '\u{f1de}'; // nf-fa-sliders
 pub const COMMAND: char = '\u{f120}'; // nf-fa-terminal
 const FOLDER_OPEN: char = '\u{f07c}'; // nf-fa-folder_open
 const FILE_GENERIC: char = '\u{f15b}'; // nf-fa-file

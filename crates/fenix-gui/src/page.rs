@@ -122,6 +122,54 @@ pub struct Page {
     pub cards: Vec<Card>,
     /// Small rounded boxes behind a few cells: a key's cap, a status.
     pub chips: Vec<(usize, Range<usize>, Chip)>,
+    /// A commit graph's rows, drawn as lines over blank cells.
+    pub graph: Vec<GraphStrip>,
+}
+
+/// One row of a commit graph, drawn over the blank cells `cols` of
+/// `line`: its lanes' rails, the bends into and out of its commit, and
+/// the commit's dot. Drawn rather than written, so lanes are spaced to
+/// fit the cells however many there are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphStrip {
+    pub line: usize,
+    pub cols: Range<usize>,
+    /// How many lanes the whole graph has: every row spaces them alike.
+    pub lanes: usize,
+    pub marks: Vec<GraphMark>,
+}
+
+/// What a commit graph's row draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphMark {
+    /// A lane's rail through the row: its upper half, its lower half, or
+    /// both.
+    Rail { lane: usize, top: bool, bottom: bool, role: Role },
+    /// A lane bending from `from` to `to`: down from the row's top into
+    /// the commit at its middle (`into`), or out of the commit at its
+    /// middle and down to the row's bottom.
+    Bend { from: usize, to: usize, into: bool, role: Role },
+    /// The commit itself, in its lane.
+    Node { lane: usize, look: NodeLook, role: Role },
+}
+
+impl GraphMark {
+    /// The colour it's drawn in.
+    pub fn role(&self) -> Role {
+        match self {
+            GraphMark::Rail { role, .. } | GraphMark::Bend { role, .. } | GraphMark::Node { role, .. } => *role,
+        }
+    }
+}
+
+/// How a commit's dot is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeLook {
+    Commit,
+    /// A merge: a ring.
+    Merge,
+    /// Where HEAD is: ringed in the caret's colour.
+    Head,
 }
 
 /// A card behind `lines` of a page, across `cols`.
@@ -287,6 +335,7 @@ pub struct Grid {
     pub underlines: Vec<(usize, Range<usize>, Role)>,
     pub cards: Vec<Card>,
     pub chips: Vec<(usize, Range<usize>, Chip)>,
+    pub graph: Vec<GraphStrip>,
 }
 
 /// Cuts `s` to `max` chars, ending in "…" when it had to.
@@ -545,10 +594,12 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// Where a page's content goes in a pane `cols` wide: its left edge and
-/// width, centred and capped the way Home's is.
+/// width, centred and capped the way Home's is. A pane under 40 columns
+/// gets a cell of margin a side rather than two -- never a frame wider
+/// than it, which would run every page past its edge.
 pub fn frame(cols: usize, max_width: usize) -> (usize, usize) {
-    let cols = cols.max(40);
-    let width = cols.saturating_sub(4).min(max_width);
+    let margin = if cols >= 40 { 4 } else { 2 };
+    let width = cols.saturating_sub(margin).min(max_width);
     (cols.saturating_sub(width) / 2, width)
 }
 
@@ -560,7 +611,7 @@ impl Default for Grid {
 
 impl Grid {
     pub fn new() -> Self {
-        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None, images: Vec::new(), underlines: Vec::new(), cards: Vec::new(), chips: Vec::new() }
+        Grid { lines: Vec::new(), spans: Vec::new(), rules: Vec::new(), panels: Vec::new(), focus: None, popup: None, images: Vec::new(), underlines: Vec::new(), cards: Vec::new(), chips: Vec::new(), graph: Vec::new() }
     }
 
     /// Draws `page` with its top-left at (`line`, `col`): its text, its
@@ -586,6 +637,19 @@ impl Grid {
         self.underlines.extend(page.underlines.iter().map(|(l, c, r)| (l + line, shift(c), *r)));
         self.cards.extend(page.cards.iter().map(|c| Card { lines: c.lines.start + line..c.lines.end + line, cols: shift(&c.cols), look: c.look }));
         self.chips.extend(page.chips.iter().map(|(l, c, chip)| (l + line, shift(c), *chip)));
+        self.graph.extend(page.graph.iter().map(|g| GraphStrip { line: g.line + line, cols: shift(&g.cols), ..g.clone() }));
+    }
+
+    /// Draws a commit graph's row over cells `cols` of `line`, which are
+    /// left blank.
+    pub fn graph(&mut self, line: usize, cols: Range<usize>, lanes: usize, marks: Vec<GraphMark>) {
+        if marks.is_empty() || cols.is_empty() {
+            return;
+        }
+        if self.lines.len() <= line {
+            self.lines.resize(line + 1, Vec::new());
+        }
+        self.graph.push(GraphStrip { line, cols, lanes, marks });
     }
 
     /// Sets `lines` off as a card across `cols`.
@@ -619,6 +683,22 @@ impl Grid {
             self.chips.push((line, col..end, chip));
         }
         end
+    }
+
+    /// A chip that keeps short of `end`: `text` (padded " like this ")
+    /// cut to fit, or left out when even a few letters wouldn't -- for a
+    /// row of chips in a narrow pane. Returns the column after it, or
+    /// `col` when it's left out.
+    pub fn chip_within(&mut self, line: usize, col: usize, end: usize, text: &str, role: Role, chip: Chip) -> usize {
+        let room = end.saturating_sub(col);
+        let inner = text.trim();
+        if text.chars().count() <= room {
+            return self.chip(line, col, text, role, chip);
+        }
+        if room < 6 {
+            return col;
+        }
+        self.chip(line, col, &format!(" {} ", fit(inner, room - 2)), role, chip)
     }
 
     /// A count beside a title, on a quiet badge; returns the column after.
@@ -743,9 +823,9 @@ impl Grid {
         self.rules.push((line, cols));
     }
 
-    /// A section heading: "FILES · 8 ─────────".
+    /// A section heading: "FILES · 8 ─────────", cut to `width`.
     pub fn heading(&mut self, line: usize, x: usize, width: usize, text: &str) {
-        let end = self.put(line, x, &text.to_uppercase(), Role::Muted);
+        let end = self.put(line, x, &fit(&text.to_uppercase(), width), Role::Muted);
         if end + 2 < x + width {
             self.rule(line, end + 1..x + width);
         }
@@ -773,8 +853,43 @@ impl Grid {
 
     pub fn finish(self) -> Page {
         let text = self.lines.iter().map(|row| row.iter().collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n");
-        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup, images: self.images, underlines: self.underlines, cards: self.cards, chips: self.chips, ..Page::default() }
+        Page { text, spans: self.spans, rules: self.rules, focus: self.focus, panels: self.panels, popup: self.popup, images: self.images, underlines: self.underlines, cards: self.cards, chips: self.chips, graph: self.graph, ..Page::default() }
     }
+}
+
+/// What of `page` runs past `cols` cells: text, a chip or a card that
+/// would be cut at the pane's edge. Empty when it all fits -- for pages'
+/// tests to check they keep inside a narrow window.
+#[cfg(test)]
+pub fn overflow(page: &Page, cols: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for (n, line) in page.text.lines().enumerate() {
+        let width = line.trim_end().chars().count();
+        if width > cols {
+            out.push(format!("line {n} is {width} wide: {:?}", line.trim_end()));
+        }
+    }
+    // Text written over text: the later wins, and the line reads as a
+    // jumble of the two.
+    let mut by_line: Vec<&Span> = page.spans.iter().filter(|s| !s.cols.is_empty()).collect();
+    by_line.sort_by_key(|s| (s.line, s.cols.start));
+    for pair in by_line.windows(2) {
+        if pair[0].line == pair[1].line && pair[1].cols.start < pair[0].cols.end {
+            let line = page.text.lines().nth(pair[0].line).unwrap_or_default().trim_end();
+            out.push(format!("text over text on line {} at {:?} and {:?}: {line:?}", pair[0].line, pair[0].cols, pair[1].cols));
+        }
+    }
+    for (line, cells, _) in &page.chips {
+        if cells.end > cols {
+            out.push(format!("a chip on line {line} ends at {}", cells.end));
+        }
+    }
+    for card in &page.cards {
+        if card.cols.end > cols {
+            out.push(format!("a card on lines {:?} ends at {}", card.lines, card.cols.end));
+        }
+    }
+    out
 }
 
 #[cfg(test)]

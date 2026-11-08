@@ -154,6 +154,19 @@ impl RectRenderer {
         }
     }
 
+    /// A quarter of a circle's outline, `thickness` wide along radius
+    /// `radius` around (`cx`, `cy`): the quarter toward `right` and `down`
+    /// of its centre. A ring's border, seen through one quadrant -- a
+    /// smooth bend for a line that turns a corner.
+    pub fn push_arc(&mut self, gpu: &GpuState, cx: f32, cy: f32, radius: f32, thickness: f32, right: bool, down: bool, color: [f32; 4]) {
+        let outer = radius + thickness / 2.0;
+        let shape = (cx - outer, cy - outer, outer * 2.0, outer * 2.0);
+        let reach = outer + 1.0;
+        let quad = (if right { cx } else { cx - reach }, if down { cy } else { cy - reach }, reach, reach);
+        let clear = [color[0], color[1], color[2], 0.0];
+        self.push_quad(gpu, quad, shape, clear, [outer, thickness, 0.0, 0.0], color);
+    }
+
     /// A box with its own radius at each corner: top-left, top-right,
     /// bottom-right, bottom-left -- a selection's rows, rounded only
     /// where no neighbouring row continues them.

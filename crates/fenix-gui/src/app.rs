@@ -26,6 +26,7 @@ mod git_editor;
 mod git_compare_page;
 mod side_by_side;
 mod git_log_page;
+mod graph_draw;
 mod git_rebase_page;
 mod settings_host;
 mod snippets_host;
@@ -3138,6 +3139,29 @@ fn pane_chrome_height(line_height: f32, has_breadcrumb: bool) -> f32 {
 /// the tail of the previous tab's own text instead of the gap between
 /// tabs, and a click square on the last tab's visible `×` landed `PAD_
 /// LEFT` short of it.
+/// `path` inside `root`, as `src/main.rs`: matched however either was
+/// spelt -- `\\?\`, the drive letter's case, `/` or `\` -- since a root is
+/// kept canonical and a buffer's path as it was opened.
+fn path_within(root: &Path, path: &Path) -> Option<String> {
+    if let Ok(rest) = path.strip_prefix(root) {
+        return Some(rest.to_string_lossy().replace('\\', "/"));
+    }
+    let plain = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('/', "\\");
+    let (root, path) = (plain(root), plain(path));
+    let root = format!("{}\\", root.trim_end_matches('\\'));
+    let inside = path.len() > root.len() && path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
+    inside.then(|| path[root.len()..].replace('\\', "/"))
+}
+
+/// `path` whole, its home folder as `~`: a file outside the project.
+fn home_relative(path: &Path) -> String {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
+    match home.and_then(|h| path_within(&h, path)) {
+        Some(rest) => format!("~/{rest}"),
+        None => path.display().to_string(),
+    }
+}
+
 fn tab_strip_rect(rect: fenix_window::Rect) -> fenix_window::Rect {
     fenix_window::Rect { x: rect.x + text::PAD_LEFT, w: (rect.w - text::PAD_LEFT).max(0.0), ..rect }
 }
@@ -3161,7 +3185,10 @@ fn modeline_suffix_spans(suffix: &str, theme: &Theme, foreground: glyphon::Color
     }
 
     let mut spans = Vec::new();
-    for (index, field) in suffix.split("   ").enumerate() {
+    // An empty field -- a page's details, say -- gets no dot of its own,
+    // so the line never ends on one.
+    let fields = suffix.split("   ").enumerate().filter(|(index, field)| *index == 0 || !field.trim().is_empty());
+    for (index, field) in fields {
         if index != 0 {
             spans.push((" · ".to_string(), theme.gutter_fg));
         }
@@ -9008,11 +9035,8 @@ impl App {
     /// machinery as `picker_switch_buffer`, restricted to just the
     /// buffers blocking `:qa`/`SPC q q`.
     fn picker_switch_dirty_buffers(&mut self) {
-        let candidates = self
-            .dirty_tracked_buffer_ids()
-            .into_iter()
-            .map(|id| fenix_picker::Candidate::new(format!("+ {}", self.buffer_display_name(id)), id))
-            .collect();
+        let ids = self.dirty_tracked_buffer_ids();
+        let candidates = self.buffer_candidates(&ids);
         self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
     }
 
@@ -9213,10 +9237,14 @@ impl App {
     /// you're in, else the focused file's folder -- not Fenix's own
     /// working folder (your home, started from the Start menu).
     fn terminal_start_dir(&self) -> Option<PathBuf> {
+        let folder_of = |id: BufferId| self.buffers.get(id).and_then(|ob| ob.buffer.path()).and_then(Path::parent).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf);
         self.project_root
             .clone()
-            .or_else(|| self.open().buffer.path().and_then(Path::parent).filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf))
             .filter(|p| p.is_dir())
+            .or_else(|| folder_of(self.focused_buffer_id()).filter(|p| p.is_dir()))
+            // From Home or a page, with no project: where the file used
+            // last is, rather than wherever Fenix itself was started.
+            .or_else(|| self.buffers.mru().iter().filter_map(|&id| folder_of(id)).find(|p| p.is_dir()))
     }
 
     /// `open_terminal_buffer`, starting the shell somewhere in
@@ -9747,28 +9775,55 @@ impl App {
     }
 
     /// `SPC b b`: a fuzzy picker over every open buffer, MRU-ordered
-    /// (most-recently-touched first, matching Doom's own buffer switcher),
-    /// each labeled with its path (a page, terminal or Home by what its
-    /// tab says, `*scratch*` for a plain unnamed buffer) and a leading `+`
-    /// marker for unsaved changes.
+    /// (most-recently-touched first, matching Doom's own buffer switcher).
+    /// The palette draws each with its icon, its name then its folder,
+    /// and whether it has unsaved changes.
     pub(crate) fn picker_switch_buffer(&mut self) {
-        let candidates = self
-            .buffers
-            .mru()
-            .iter()
-            .map(|&id| {
-                let ob = self.buffers.get(id).expect("mru only lists open buffers");
-                // A page, a terminal, Home... by what it shows, as its tab
-                // says; a plain unnamed buffer is the scratch (#50).
-                let name = ob.buffer.path().map(|p| p.display().to_string()).unwrap_or_else(|| match self.buffer_display_name(id) {
-                    unnamed if unnamed == "[No Name]" => "*scratch*".to_string(),
-                    shown => shown,
-                });
-                let marker = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { "+ " } else { "" };
-                fenix_picker::Candidate::new(format!("{marker}{name}"), id)
-            })
-            .collect();
+        let ids = self.buffers.mru().to_vec();
+        let candidates = self.buffer_candidates(&ids);
         self.enter_picker(ActivePicker::SwitchBuffer(fenix_picker::PickerState::new(candidates)));
+    }
+
+    /// The buffer picker's rows for `ids`, in order: a file by its path
+    /// in the project (outside it, whole); a page, terminal or Home by
+    /// its tab's name; a plain unnamed buffer as the scratch (#50), a
+    /// second as `scratch 2`. What reads the same as one already listed
+    /// -- each pane's Home, another empty scratch -- is listed once.
+    fn buffer_candidates(&self, ids: &[BufferId]) -> Vec<fenix_picker::Candidate<BufferId>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut scratches = 0;
+        let mut out = Vec::new();
+        for &id in ids {
+            let Some(ob) = self.buffers.get(id) else { continue };
+            let label = if let Some(path) = ob.buffer.path() {
+                self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
+            } else if ob.kind == BufferKind::Dashboard {
+                // Each pane's Home is the one Home: by the workspace's
+                // name, as its tab has it.
+                if !seen.insert("home".to_string()) {
+                    continue;
+                }
+                self.workspaces.active_workspace().name.clone()
+            } else {
+                let shown = self.buffer_display_name(id);
+                if shown == "[No Name]" {
+                    let empty = ob.buffer.rope().len_chars() == 0 && !ob.buffer.is_dirty();
+                    if empty && !seen.insert("empty scratch".to_string()) {
+                        continue;
+                    }
+                    scratches += 1;
+                    if scratches == 1 { "scratch".to_string() } else { format!("scratch {scratches}") }
+                } else {
+                    let name = self.tab_label(id);
+                    if !seen.insert(name.clone()) {
+                        continue;
+                    }
+                    name
+                }
+            };
+            out.push(fenix_picker::Candidate::new(label, id));
+        }
+        out
     }
 
     /// `SPC s l`: a fuzzy picker over every line in the focused buffer --
@@ -17338,7 +17393,11 @@ impl App {
             return (label, suffix);
         }
         let ob = self.open();
-        let filename = self.buffer_display_name(self.focused_buffer_id());
+        // A page (Home, the Log, Settings...) by its tab's plain name, and
+        // with no line and column: it has no caret to have them.
+        let id = self.focused_buffer_id();
+        let on_page = ob.kind == BufferKind::Dashboard || self.is_page_buffer(id);
+        let filename = if on_page { self.tab_label(id) } else { tabs::plain_name(&self.buffer_display_name(id)) };
         let modified = if ob.kind.tracks_unsaved_changes() && ob.buffer.is_dirty() { " [+]" } else { "" };
         // A file that moved under an unsaved buffer is worth seeing
         // without pressing anything: the message that announced it
@@ -17413,10 +17472,9 @@ impl App {
             None if self.terminal_has_keyboard() => "   Ctrl-\\ back to the editor".to_string(),
             None => String::new(),
         };
+        let place = if on_page { String::new() } else { format!("   Ln {}, Col {}", line + 1, col + 1) };
         let suffix = format!(
-            "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}   Ln {}, Col {}   {details} ",
-            line + 1,
-            col + 1
+            "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}{place}   {details} "
         );
         (mode_label, suffix)
     }
@@ -19683,6 +19741,9 @@ impl App {
                 .get(&pane)
                 .cloned()
                 .or_else(|| self.table_view_header(buffer_id))
+                // A page by its tab's name (`Settings`, not `*settings*`):
+                // a pane too narrow for its tabs shows this instead.
+                .or_else(|| self.is_page_buffer(buffer_id).then(|| self.tab_label(buffer_id)))
                 .unwrap_or_else(|| self.buffer_display_name(buffer_id));
             // Every pane has a title bar, and an editing pane a
             // breadcrumb bar under it too, so its *content* area is
@@ -20425,7 +20486,11 @@ impl App {
             let tab_rect = fenix_window::Rect { x: pane.rect.x, y: top, w: pane.rect.w, h: tab_h };
             if pane.tabs_layout.is_empty() {
                 let color = if pane.pane == focused_pane { theme.caret_text } else { theme.fg_modeline };
-                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(pane.title.as_str(), color, false)], &[]);
+                // Cut to the pane with a "…", rather than at its edge
+                // mid-word (the agents' prompt says what sends it there).
+                let fits = ((tab_rect.w - text::PAD_LEFT * 2.0).max(0.0) / text.title_char_width().max(1.0)).floor() as usize;
+                let title = crate::page::fit(&pane.title, fits);
+                text.set_pane_title_rich(pane.pane, tab_rect.w, &[(title.as_str(), color, false)], &[]);
             } else {
                 let refs: Vec<(&str, glyphon::Color, bool)> =
                     pane.tab_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
@@ -20664,6 +20729,30 @@ impl App {
                 let radius = if pill { r.h / 2.0 } else { panels::KEY_RADIUS };
                 let style = crate::rect::BoxStyle { radius, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
                 bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
+            }
+            // A commit graph's rows: rails, bends and dots, kept to the
+            // pane like the rest.
+            for (row, a, b, lanes, marks) in &pane.home.graph {
+                let x = content_x + *a as f32 * char_width;
+                let w = ((*b - *a) as f32 * char_width).min(inside_right - x);
+                if w <= 0.0 {
+                    continue;
+                }
+                let ring = theme.caret;
+                for shape in graph_draw::shapes(x, w, row_y(*row), line_height, char_width, *lanes, marks, ring) {
+                    match shape {
+                        graph_draw::Shape::Bar(x, y, w, h, color) => bg_rect.push_rect(gpu, x, y, w, h, color),
+                        graph_draw::Shape::Arc { cx, cy, r, right, down, color } => bg_rect.push_arc(gpu, cx, cy, r, graph_draw::thickness(char_width), right, down, color),
+                        graph_draw::Shape::Dot { cx, cy, r, ring, color } => {
+                            let style = if ring {
+                                crate::rect::BoxStyle { radius: r, fill: [color[0], color[1], color[2], 0.0], border: graph_draw::thickness(char_width), border_color: color }
+                            } else {
+                                crate::rect::BoxStyle { radius: r, fill: color, border: 0.0, border_color: [0.0; 4] }
+                            };
+                            bg_rect.push_box(gpu, cx - r, cy - r, r * 2.0, r * 2.0, style);
+                        }
+                    }
+                }
             }
             // A switch's knob, at the end it's on.
             for &(row, a, b, on) in &pane.home.switches {
@@ -21486,17 +21575,21 @@ impl App {
         // Every other quad this frame draws, after the surfaces: Home's
         // logo, and the pictures on pages fitted into the cells their page
         // left for them. Resolved back to their surfaces inside the pass.
-        let logo_slot = (|| {
-            let logo = self.home_logo.as_ref()?;
-            logo.texture.as_ref()?;
-            let pane = panes_render.iter().find(|p| p.home.logo.is_some())?;
-            let (row, col, lines) = pane.home.logo.expect("found by it");
-            let (w, h) = (logo.image.width as f32, logo.image.height as f32);
-            let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + col as f32 * char_width;
-            let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
-            let y = top + (lines as f32 * line_height - h) / 2.0;
-            Some(surfaces.push(gpu, (x.round(), y.round(), w, h), crate::surface::FULL, None))
-        })();
+        // In every pane showing a Home, not only the first.
+        let logo_slots: Vec<usize> = match self.home_logo.as_ref().filter(|logo| logo.texture.is_some()) {
+            None => Vec::new(),
+            Some(logo) => panes_render
+                .iter()
+                .filter_map(|pane| {
+                    let (row, col, lines) = pane.home.logo?;
+                    let (w, h) = (logo.image.width as f32, logo.image.height as f32);
+                    let x = pane.rect.x + text::PAD_LEFT + pane.gutter_px + col as f32 * char_width;
+                    let top = pane.rect.y + text::PAD_TOP + (row as f32 - pane.content_frac) * line_height;
+                    let y = top + (lines as f32 * line_height - h) / 2.0;
+                    Some(surfaces.push(gpu, (x.round(), y.round(), w, h), crate::surface::FULL, None))
+                })
+                .collect(),
+        };
         let mut picture_draws: Vec<(&crate::page::ImageKey, usize)> = Vec::new();
         for pane in &panes_render {
             for (row, col, rows, cols, key, view) in &pane.home.images {
@@ -21631,8 +21724,8 @@ impl App {
                 }
             }
 
-            if let Some(slot) = logo_slot {
-                if let Some(texture) = self.home_logo.as_ref().and_then(|logo| logo.texture.as_ref()) {
+            if let Some(texture) = self.home_logo.as_ref().and_then(|logo| logo.texture.as_ref()) {
+                for &slot in &logo_slots {
                     surfaces.draw(&mut pass, texture, slot, Blend::Over);
                 }
             }
@@ -23856,6 +23949,7 @@ index 0000000..1111111 100644
     #[test]
     fn prompt_popup_shows_command_line_while_typing_an_ex_command() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         for ch in [':', 'w', 'q'] {
             app.test_vim_key(KeyPress::char(ch));
         }
@@ -23868,6 +23962,7 @@ index 0000000..1111111 100644
     #[test]
     fn prompt_popup_shows_the_search_query_while_typing_it() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         for ch in ['/', 'f', 'o', 'o'] {
             app.test_vim_key(KeyPress::char(ch));
         }
@@ -25857,6 +25952,10 @@ configure_board stm32
         app.project_root = None;
         let code = app.buffers.open_path(&file);
         app.open_buffer_in_focused_pane(code);
+        assert_eq!(app.terminal_start_dir().map(|p| p.canonicalize().unwrap()), Some(dir.0.canonicalize().unwrap()));
+        // From a buffer of no file, still no project: the folder of the
+        // file used last, not Fenix's own.
+        app.new_scratch_buffer();
         assert_eq!(app.terminal_start_dir().map(|p| p.canonicalize().unwrap()), Some(dir.0.canonicalize().unwrap()));
     }
 
@@ -30108,8 +30207,8 @@ configure_board stm32
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
                 let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-                assert_eq!(labels[0], b.display().to_string());
-                assert!(labels.contains(&a.display().to_string().as_str()));
+                assert_eq!(labels[0], home_relative(&b), "outside a project: the whole path, from ~ when under it");
+                assert!(labels.contains(&home_relative(&a).as_str()));
             }
             _ => panic!("expected picker_switch_buffer to open a SwitchBuffer picker"),
         }
@@ -30123,8 +30222,39 @@ configure_board stm32
         app.picker_switch_buffer();
         let Some(ActivePicker::SwitchBuffer(state)) = &app.active_picker else { panic!("expected a SwitchBuffer picker") };
         let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-        assert!(labels.contains(&"*new project*"), "{labels:?}");
-        assert!(!labels.contains(&"*scratch*"), "{labels:?}");
+        assert!(labels.contains(&"New project"), "by its tab's name: {labels:?}");
+        assert!(!labels.contains(&"scratch"), "{labels:?}");
+    }
+
+    /// Each pane's Home and the empty scratches are listed once; a second
+    /// scratch with something in it is `scratch 2`.
+    #[test]
+    fn picker_switch_buffer_lists_lookalikes_once() {
+        // However the root and the file were spelt, a file in the project
+        // is by its place in it.
+        assert_eq!(path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
+        assert_eq!(path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
+        let mut homes = App::with_file(None);
+        // A second Home, as a session restored with one a pane can have.
+        let other = homes.new_home_buffer();
+        let mut ids = homes.buffers.mru().to_vec();
+        if !ids.contains(&other) {
+            ids.push(other);
+        }
+        assert!(ids.iter().filter(|id| homes.buffers.get(**id).is_some_and(|ob| ob.kind == BufferKind::Dashboard)).count() >= 2, "a Home a pane");
+        let names: Vec<String> = homes.buffer_candidates(&ids).into_iter().map(|c| c.label).collect();
+        assert_eq!(names.iter().filter(|n| **n == homes.workspaces.active_workspace().name).count(), 1, "one Home: {names:?}");
+        assert!(!names.iter().any(|n| n == "home"), "{names:?}");
+        let mut app = App::with_file(None);
+        app.new_scratch_buffer();
+        app.new_scratch_buffer();
+        app.new_scratch_buffer();
+        app.test_insert('x');
+        app.picker_switch_buffer();
+        let Some(ActivePicker::SwitchBuffer(state)) = &app.active_picker else { panic!() };
+        let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
+        assert_eq!(labels.iter().filter(|l| l.starts_with("scratch")).count(), 2, "the one written in, and one empty: {labels:?}");
+        assert!(labels.contains(&"scratch") && labels.contains(&"scratch 2"), "{labels:?}");
     }
 
     #[test]
@@ -30134,19 +30264,17 @@ configure_board stm32
         app.picker_switch_buffer();
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
-                assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "*scratch*");
+                assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "scratch");
             }
             _ => panic!("expected a SwitchBuffer picker"),
         }
 
         app.test_insert('x'); // now dirty
         app.picker_switch_buffer();
-        match &app.active_picker {
-            Some(ActivePicker::SwitchBuffer(state)) => {
-                assert_eq!(state.visible_rows(0, 10).next().unwrap().1.label, "+ *scratch*");
-            }
-            _ => panic!("expected a SwitchBuffer picker"),
-        }
+        let view = app.palette_view(20).expect("the buffer picker's card");
+        let palette::Body::List(rows) = view.body else { panic!() };
+        assert_eq!(rows[0].title, "scratch");
+        assert_eq!(rows[0].right, "unsaved", "its changes said at the right");
     }
 
     #[test]
@@ -31387,6 +31515,14 @@ configure_board stm32
         app.debug_trail_scrub(false, 1);
         app.debug_trail_scrub(true, 1);
         assert_eq!(app.debug_trail.viewing, None, "]t past the newest is now");
+
+        // Ended: the breadcrumb is back under the tabs, and `[t` still
+        // goes back along the trail, showing it again.
+        app.debug_session.as_mut().unwrap().ended = true;
+        assert!(app.debug_ribbon_spans().is_none(), "no ribbon once the session's over");
+        app.debug_trail_scrub(false, 1);
+        assert!(app.debug_ribbon_spans().is_some(), "looking back along the trail shows it");
+        app.debug_trail_now();
 
         // Restarted: the trail stays, dim.
         debug_test_session(&mut app);
@@ -34654,9 +34790,26 @@ configure_board stm32
         assert!(!app.modeline_pieces().1.contains("fresh"));
     }
 
+    /// A page's modeline names it as its tab does, with no line and
+    /// column, and doesn't end on a separator.
+    #[test]
+    fn a_pages_modeline_has_no_caret_place_or_dangling_dot() {
+        let mut app = App::with_file(None);
+        app.open_extensions_page();
+        let suffix = app.modeline_pieces().1;
+        assert!(!suffix.contains("Ln ") && !suffix.contains('*'), "{suffix:?}");
+        let theme = &app.theme;
+        let spans = modeline_suffix_spans(&suffix, theme, theme.fg_modeline);
+        let line: String = spans.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(!line.trim_end().ends_with('·'), "{line:?}");
+        let spans = modeline_suffix_spans("a.rs   Ln 1, Col 1   Rust   LF ", theme, theme.fg_modeline);
+        assert_eq!(spans.iter().filter(|(t, _)| t == " · ").count(), 3);
+    }
+
     #[test]
     fn an_expired_message_falls_back_to_the_ordinary_modeline() {
         let mut app = App::with_file(None);
+        app.new_scratch_buffer();
         app.set_message("stale");
         app.status_message.as_mut().unwrap().set_at = Instant::now() - MESSAGE_DURATION * 2;
         assert!(app.modeline_pieces().1.contains("Ln 1, Col"));

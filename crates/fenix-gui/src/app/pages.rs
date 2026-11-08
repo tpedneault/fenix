@@ -433,7 +433,7 @@ impl App {
                 None => "*files*".to_string(),
             },
             Some(PageModel::Git(g)) => format!("*git: {}*", g.name),
-            Some(PageModel::Log(l)) => format!("*log: {}*", l.name),
+            Some(PageModel::Log(l)) => format!("*log: {}*", l.tab_name()),
             Some(PageModel::Compare(c)) => format!("*compare: {}*", c.target),
             Some(PageModel::Rebase(r)) => format!("*rebase: {}*", r.branch),
             Some(PageModel::Snippets(_)) => "*snippets*".to_string(),
@@ -591,12 +591,21 @@ impl App {
         let Some(state) = self.pages.get_mut(&id) else { return };
         let focus = state.page.focus.as_ref().map(|(line, _)| *line);
         let was = std::mem::replace(&mut state.last_focus, focus);
+        // Never scrolled further than the page needs: a pane that grew
+        // (the agents' dock with its drawer hidden) shows the lines above
+        // rather than blank rows below.
+        let most = state.page.text.lines().count().saturating_sub(visible);
         if let (Some(before), Some(now)) = (was, focus) {
             if now < before && now + 2 <= visible {
                 let ps = self.pane_state_mut(pane);
                 ps.scroll_line = 0;
                 ps.rendered_scroll = 0.0;
             }
+        }
+        let ps = self.pane_state_mut(pane);
+        if ps.scroll_line > most {
+            ps.scroll_line = most;
+            ps.rendered_scroll = ps.rendered_scroll.min(most as f32);
         }
     }
 
@@ -1159,6 +1168,17 @@ impl App {
             .chips
             .iter()
             .filter_map(|(line, cols, chip)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); let (fill, outline) = chip_color(theme, *chip); (row, a, b, fill, outline, chip_is_pill(*chip)) }))
+            .collect();
+        overlay.graph = state
+            .page
+            .graph
+            .iter()
+            .filter_map(|s| {
+                let row = visible(s.line)?;
+                let (a, b) = cells(s.line, &s.cols);
+                let marks = s.marks.iter().map(|m| (*m, glyphon_to_rgba(role_color(theme, m.role())))).collect();
+                Some((row, a, b, s.lanes, marks))
+            })
             .collect();
         overlay.switches = state
             .page
@@ -1835,6 +1855,22 @@ mod tests {
         }
     }
 
+    /// A pane that grows doesn't leave a page scrolled past its end, its
+    /// first lines off the top and blank rows below.
+    #[test]
+    fn a_page_is_never_scrolled_past_its_end() {
+        let mut app = App::with_file(None);
+        app.open_settings_page(crate::settings_page::Scope::You, None);
+        let (id, pane) = (app.focused_buffer_id(), app.focused_pane_id());
+        app.ensure_page_layout(id, pane, 160);
+        let lines = app.pages[&id].page.text.lines().count();
+        app.pane_state_mut(pane).scroll_line = lines;
+        app.page_scroll_to_top(id, pane, 10);
+        assert_eq!(app.pane_state(pane).scroll_line, lines - 10, "its last screenful");
+        app.page_scroll_to_top(id, pane, lines + 20);
+        assert_eq!(app.pane_state(pane).scroll_line, 0, "it all fits: from the top");
+    }
+
     #[test]
     fn a_page_shows_from_its_top_when_its_selection_moves_back_up() {
         let mut app = App::with_file(None);
@@ -1849,7 +1885,9 @@ mod tests {
         app.ensure_page_layout(id, pane, 160);
         app.page_scroll_to_top(id, pane, 40);
         app.pane_state_mut(pane).scroll_line = 3;
-        app.page_scroll_to_top(id, pane, 40);
+        // A pane shorter than the page, so 3 lines down is a place it can be.
+        let short = app.pages[&id].page.text.lines().count() - 3;
+        app.page_scroll_to_top(id, pane, short.min(40));
         assert_eq!(app.pane_state(pane).scroll_line, 3, "no move: the page stays where it was put");
         app.page_key(KeyPress::char('k'));
         app.ensure_page_layout(id, pane, 160);

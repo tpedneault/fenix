@@ -26,6 +26,8 @@ pub struct AgentPage {
     /// The cursor follows the newest card as the agent writes, until you
     /// move it up.
     pub follow: bool,
+    /// The last question the cursor was taken to.
+    pub asked: Option<String>,
     /// `]` or `[` just pressed: an `s` after it is a step, not a turn.
     pub bracket: Option<bool>,
     /// The answer `j` and `k` are on in the question waiting, by the
@@ -123,7 +125,7 @@ pub enum Action {
 
 impl AgentPage {
     pub fn new(thread: ThreadId) -> Self {
-        AgentPage { thread, focus: 0, open: HashSet::new(), closed: HashSet::new(), filter: Filter::default(), follow: true, bracket: None, choice: None }
+        AgentPage { thread, focus: 0, open: HashSet::new(), closed: HashSet::new(), filter: Filter::default(), follow: true, bracket: None, choice: None, asked: None }
     }
 
     pub fn typing(&self) -> bool {
@@ -171,6 +173,14 @@ impl AgentPage {
         if self.follow {
             if let Some(&last) = self.visible(thread).last() {
                 self.focus = last;
+            }
+        }
+        // A question the agent has just asked takes the cursor, once, even
+        // when you'd moved up the thread: `j`, `k` and Enter answer it.
+        if let Some((i, card)) = waiting_permission(thread) {
+            if self.asked.as_deref() != Some(card.key.as_str()) {
+                self.asked = Some(card.key.clone());
+                self.focus = i;
             }
         }
     }
@@ -524,8 +534,12 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
     let visible = page.visible(thread);
     if visible.is_empty() {
         let hint = if thread.entries.is_empty() { "Write a prompt below (i), and Enter in Normal mode sends it." } else { "Nothing matches the filter." };
-        g.put(y, left, hint, Role::Muted);
-        y += 2;
+        // Wrapped in a narrow dock, not run past its edge.
+        for line in wrap(hint, width.max(12)) {
+            g.put(y, left, &line, Role::Muted);
+            y += 1;
+        }
+        y += 1;
     }
     let inner = width.saturating_sub(2);
     // Tool calls one after another are one card: where it started.
@@ -670,6 +684,10 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
                         let on = page.chosen(card);
                         for (n, option) in card.options.iter().enumerate() {
                             let chosen = n == on;
+                            if chosen {
+                                // Its whole row, not only its cap.
+                                g.panels.push((y, left + 2..(left + width).saturating_sub(1)));
+                            }
                             let x = g.chip(y, left + 3, &option_key(option, n), Role::Accent, if chosen { Chip::Chosen } else { Chip::Key });
                             g.put(y, x + 2, &fit(&option.name, (left + width).saturating_sub(x + 3)), if chosen { Role::Accent } else { Role::Text });
                             y += 1;
@@ -1002,10 +1020,36 @@ mod tests {
         page.key(&t, Key::Char('k'));
         page.key(&t, Key::Char('k'));
         assert_ne!(page.focus, question, "past the first answer, on to the card above");
+        assert!(laid.panels.iter().any(|(line, _)| *line == always), "the chosen answer's row is lit");
+    }
+
+    /// A new question takes the cursor even when you'd moved up the
+    /// thread -- once, so you can still move away from it.
+    #[test]
+    fn a_new_question_takes_the_cursor_once() {
+        let t = asking();
+        let mut page = AgentPage::new(ThreadId("x".into()));
+        page.follow = false;
+        page.focus = 0;
+        page.follow_up(&t);
+        assert_eq!(page.focus, t.entries.len() - 1, "on the question");
+        page.focus = 0;
+        page.follow_up(&t);
+        assert_eq!(page.focus, 0, "not pulled back to it");
     }
 
     /// Tool calls one after another are one card, what you wrote is on
     /// an input's, and the question waiting is outlined.
+    /// An empty thread's hint wraps in a narrow dock.
+    #[test]
+    fn the_empty_threads_hint_keeps_inside_a_narrow_dock() {
+        let t = Thread::default();
+        let page = AgentPage::new(ThreadId("x".into()));
+        let laid = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 44);
+        assert!(laid.text.lines().all(|l| l.trim_end().chars().count() <= 44), "{}", laid.text);
+        assert!(laid.text.contains("sends it."), "{}", laid.text);
+    }
+
     #[test]
     fn the_thread_is_set_off_in_cards() {
         let t = asking();

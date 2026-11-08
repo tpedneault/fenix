@@ -128,7 +128,7 @@ pub fn layout(page: &NotificationsPage, cols: usize) -> Page {
     let mut g = Grid::new();
     g.put(1, left, "Notifications", Role::Title);
     let state = if page.dnd { "do not disturb: on -- only critical ones show" } else { "do not disturb: off" };
-    g.put(1, left + 15, &format!("· {} kept · {state}", page.notes.len()), if page.dnd { Role::Warn } else { Role::Muted });
+    g.put(1, left + 15, &fit(&format!("· {} kept · {state}", page.notes.len()), width.saturating_sub(15)), if page.dnd { Role::Warn } else { Role::Muted });
     g.rule(2, left..left + width);
     let mut row = 3;
     if page.filtering || !page.filter.is_empty() {
@@ -187,6 +187,16 @@ pub fn layout(page: &NotificationsPage, cols: usize) -> Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let (notes, _) = notes(); let p = NotificationsPage::new(notes, false);
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
     use crate::notify::{Center, Request, Settings};
 
     fn notes() -> (Vec<Note>, Vec<u64>) {

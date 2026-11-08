@@ -188,19 +188,22 @@ impl App {
         // and what they run.
         let here = pending.path.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
         let places = self.places();
-        let recent: Vec<(String, String)> = if pending.source == Source::Leader {
+        // Two commands of one name (`SPC SPC` and `SPC f f`, both "find
+        // file") show once; each with its area's icon.
+        let mut named = std::collections::HashSet::new();
+        let recent: Vec<(String, String, String)> = if pending.source == Source::Leader {
             self.recent_commands
                 .iter()
-                .filter_map(|id| places.get(id.as_str()))
-                .filter_map(|(keys, _, label)| keys.strip_prefix(&here).map(|rest| (rest.trim().to_string(), label.to_string())))
-                .filter(|(rest, _)| !rest.is_empty())
+                .filter_map(|id| places.get(id.as_str()).map(|p| (id, p)))
+                .filter_map(|(id, (keys, _, label))| keys.strip_prefix(&here).map(|rest| (rest.trim().to_string(), label.to_string(), palette::command_area(id))))
+                .filter(|(rest, label, _)| !rest.is_empty() && named.insert(label.clone()))
                 .take(4)
                 .collect()
         } else {
             Vec::new()
         };
         let top = pending.path.len() == 1 && pending.source == Source::Leader;
-        let placeholder = if top { format!("Type the next key, or : to search all {} commands by name", self.commands.iter().count()) } else { "Type the next key".to_string() };
+        let placeholder = if top { format!("Type the next key, or : to search all {} commands by name", self.commands.iter().filter(|c| c.id != "commands.palette").count()) } else { "Type the next key".to_string() };
 
         let view = palette::View {
             prompt: here,

@@ -918,28 +918,56 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
     let (left, width) = frame(cols, if welcome { 100 } else { 160 });
     let mut g = Grid::new();
     let end = g.put(1, left, if welcome { "Welcome to Fenix" } else { "Extensions" }, Role::Title);
-    g.put(1, end + 2, if welcome { "· pick what you'll use" } else { "· installed and in the registry" }, Role::Muted);
     let plain = |r: &&InstalledRow| r.runtime != Some(Runtime::Bundle);
-    if !welcome {
+    let status = if welcome {
+        String::new()
+    } else {
         let on = page.installed.iter().filter(plain).filter(|r| r.on).count();
-        let status = format!("{on} of {} on", page.installed.iter().filter(plain).count());
+        format!("{on} of {} on", page.installed.iter().filter(plain).count())
+    };
+    // What the page is, when there's room for it before the status.
+    let subtitle = if welcome { "· pick what you'll use" } else { "· installed and in the registry" };
+    if end + 2 + subtitle.chars().count() + 2 + status.chars().count() <= left + width {
+        g.put(1, end + 2, subtitle, Role::Muted);
+    }
+    if !status.is_empty() {
         g.put(1, (left + width).saturating_sub(status.chars().count()), &status, Role::Muted);
     }
     g.rule(2, left..left + width);
     let available = page.available();
     let bundles = page.bundles();
     if !welcome {
-        // The tabs, each with what it has that the search keeps.
+        // The tabs, each with what it has that the search keeps: with
+        // their keys and room between while that fits, closer and
+        // without the keys when it doesn't, then without the counts, cut
+        // as a last resort.
+        let counts: Vec<usize> = Tab::ALL.iter().map(|t| page.entries_of(*t, &available, &bundles).len()).collect();
+        let labels = |keys: bool, counts_too: bool| -> Vec<String> {
+            Tab::ALL
+                .iter()
+                .zip(&counts)
+                .enumerate()
+                .map(|(i, (t, n))| match (keys, counts_too) {
+                    (true, _) => format!("{} {} {n}", i + 1, t.label()),
+                    (false, true) => format!("{} {n}", t.label()),
+                    (false, false) => t.label().to_string(),
+                })
+                .collect()
+        };
+        let across = |l: &[String], gap: usize| l.iter().map(|s| s.chars().count()).sum::<usize>() + gap * (l.len() - 1);
+        let (labels, gap) = [(true, true, 4), (true, true, 2), (false, true, 2), (false, false, 2)]
+            .into_iter()
+            .map(|(keys, counts_too, gap)| (labels(keys, counts_too), gap))
+            .find(|(l, gap)| across(l, *gap) <= width)
+            .unwrap_or_else(|| (labels(false, false).iter().map(|l| fit(l, (width / Tab::ALL.len()).saturating_sub(2))).collect(), 2));
         let mut x = left;
-        for (i, tab) in Tab::ALL.iter().enumerate() {
-            let n = page.entries_of(*tab, &available, &bundles).len();
-            let label = format!("{} {} {n}", i + 1, tab.label());
+        for (tab, label) in Tab::ALL.iter().zip(labels) {
             let role = if *tab == page.tab { Role::Title } else { Role::Muted };
             let end = g.put(3, x, &label, role);
             if *tab == page.tab {
                 g.panels.push((3, x.saturating_sub(1)..end + 1));
             }
-            x = end + 4;
+            x = end + gap;
         }
     }
     let pending = page.pending();
@@ -1308,6 +1336,16 @@ fn demote(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let mut p = page(); p.installed = vec![installed("acme.dusk", true, None), installed("acme.broken", true, Some("extension.toml: no version"))];
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
 
     fn page() -> ExtensionsPage {
         ExtensionsPage::new()

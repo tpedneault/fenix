@@ -12,11 +12,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use fenix_diff::{FileDiff, LineKind};
-use fenix_git::{CommitFlags, GraphCommit, ResetMode};
+use fenix_git::{CommitFlags, GraphCommit, GraphRow, ResetMode};
 
 use crate::git_status::{count, danger, popup, short, verb, Action, Compose, Confirm, DiffState, Input, InputPurpose, Job, Menu};
-use crate::graph_view::GraphSpan;
-use crate::page::{CardLook, Chip, fit, frame, Grid, Key, Page, Role};
+use crate::page::{CardLook, Chip, fit, frame, GraphMark, Grid, Key, NodeLook, Page, Role};
 
 /// Which history.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,20 +40,30 @@ impl Scope {
     }
 }
 
-/// One drawn line of the graph: its text, the spans that colour it, and
-/// the commit it draws (a connector row draws none).
-#[derive(Debug, Clone, PartialEq)]
-pub struct GraphLine {
-    pub text: String,
-    pub spans: Vec<(usize, GraphSpan)>,
-    pub commit: Option<String>,
+impl GitLog {
+    /// What the tab calls the page: the branch it follows (`master`), or
+    /// the file, rather than the repository the other pages are named for.
+    pub fn tab_name(&self) -> String {
+        let file = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+        match &self.scope {
+            Scope::Branch => self.data.as_ref().map(|d| d.branch.clone()).filter(|b| !b.is_empty()).unwrap_or_else(|| self.name.clone()),
+            Scope::All => format!("{} · every branch", self.name),
+            Scope::File(path) => file(path),
+            Scope::Lines { path, start, end } if start == end => format!("{}:{start}", file(path)),
+            Scope::Lines { path, start, end } => format!("{}:{start}–{end}", file(path)),
+        }
+    }
 }
 
 /// What the page shows, read off the UI thread.
 #[derive(Debug, Clone, Default)]
 pub struct LogData {
     pub commits: Vec<GraphCommit>,
-    pub lines: Vec<GraphLine>,
+    /// Each commit's place in the graph (`fenix_git::assign_lanes`), one
+    /// for one with `commits`.
+    pub graph: Vec<GraphRow>,
+    /// How many lanes the graph has at its widest.
+    pub lanes: usize,
     /// Commits already on the current branch.
     pub on_head: HashSet<String>,
     /// HEAD's commit and the branch's name.
@@ -73,8 +82,6 @@ pub enum Detail {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Row {
-    /// A connector line of the graph, by index -- drawn, never the cursor's.
-    Rail(usize),
     Commit(String),
     File { hash: String, path: String },
     Hunk { hash: String, path: String, hunk: usize },
@@ -82,13 +89,8 @@ pub enum Row {
 }
 
 impl Row {
-    fn focusable(&self) -> bool {
-        !matches!(self, Row::Rail(_))
-    }
-
     fn hash(&self) -> Option<&str> {
         match self {
-            Row::Rail(_) => None,
             Row::Commit(h) | Row::File { hash: h, .. } | Row::Hunk { hash: h, .. } | Row::Line { hash: h, .. } => Some(h),
         }
     }
@@ -186,7 +188,6 @@ impl GitLog {
         let rows = self.rows();
         self.cursor = before
             .and_then(|h| rows.iter().position(|r| *r == Row::Commit(h.clone())))
-            .or_else(|| rows.iter().position(Row::focusable))
             .unwrap_or(0);
     }
 
@@ -226,11 +227,8 @@ impl GitLog {
     pub fn rows(&self) -> Vec<Row> {
         let Some(data) = &self.data else { return Vec::new() };
         let mut rows = Vec::new();
-        for (i, line) in data.lines.iter().enumerate() {
-            let Some(hash) = &line.commit else {
-                rows.push(Row::Rail(i));
-                continue;
-            };
+        for commit in &data.commits {
+            let hash = &commit.hash;
             rows.push(Row::Commit(hash.clone()));
             let files: Vec<String> = match (self.open.get(hash), data.patches.get(hash)) {
                 (Some(_), Some(patches)) => patches.iter().map(|d| d.display_path().to_string()).collect(),
@@ -286,7 +284,7 @@ impl GitLog {
             Key::Down | Key::Char('j') => self.step(&rows, true),
             Key::Up | Key::Char('k') => self.step(&rows, false),
             Key::Char('g') if g => {
-                self.cursor = rows.iter().position(Row::focusable).unwrap_or(0);
+                self.cursor = 0;
                 none
             }
             Key::Char('g') => {
@@ -294,7 +292,7 @@ impl GitLog {
                 none
             }
             Key::Char('G') => {
-                self.cursor = rows.iter().rposition(Row::focusable).unwrap_or(0);
+                self.cursor = rows.len().saturating_sub(1);
                 none
             }
             Key::Tab => self.toggle(&rows),
@@ -341,11 +339,7 @@ impl GitLog {
     }
 
     fn step(&mut self, rows: &[Row], forward: bool) -> LogAction {
-        let found = if forward {
-            rows.iter().enumerate().skip(self.cursor + 1).find(|(_, r)| r.focusable()).map(|(i, _)| i)
-        } else {
-            rows.iter().enumerate().take(self.cursor).rev().find(|(_, r)| r.focusable()).map(|(i, _)| i)
-        };
+        let found = if forward { (self.cursor + 1 < rows.len()).then_some(self.cursor + 1) } else { self.cursor.checked_sub(1) };
         if let Some(i) = found {
             self.cursor = i;
         }
@@ -522,21 +516,63 @@ impl GitLog {
     }
 }
 
-/// The colour of the lane in graph column `col`: two columns a lane, the
-/// theme's accents in turn, so a branch keeps its colour down the page.
-fn lane_role(col: usize) -> Role {
+/// The colour of lane `lane`: the theme's accents in turn, so a branch
+/// keeps its colour down the page.
+fn lane_role(lane: usize) -> Role {
     const LANES: [&str; 6] = ["attribute", "function", "string", "keyword", "type", "number"];
-    Role::Syntax(LANES[(col / 2) % LANES.len()])
+    Role::Syntax(LANES[lane % LANES.len()])
 }
 
-/// Graph art in its lanes' colours, a character at a time: `text` from
-/// column `start`.
-fn put_rails(g: &mut Grid, y: usize, left: usize, start: usize, text: &str) {
-    for (i, c) in text.chars().enumerate() {
-        if c != ' ' {
-            g.put(y, left + start + i, &c.to_string(), lane_role(start + i));
+/// The cells the graph takes for `lanes` lanes on a page `width` wide:
+/// two a lane, up to a fifth of the page. Past that the lanes are drawn
+/// closer together, and past that the rightmost fold into the last
+/// (`App`'s drawing), so a history with many branches keeps room for
+/// its messages.
+fn graph_cols(lanes: usize, width: usize) -> usize {
+    (lanes.max(1) * 2).min((width / 5).max(6))
+}
+
+/// How many rows either side of a commit decide where its text starts:
+/// enough that it doesn't step left and right with every branch that
+/// opens and closes nearby.
+const TEXT_WINDOW: usize = 4;
+
+/// A commit's row of the graph: the rails of the lanes passing it, its
+/// own lane in from above (when a child heads here) and on down (when it
+/// has a parent), the lanes ending at it bending in, the ones a merge
+/// opens bending out, and its dot -- `head` when HEAD is on it.
+pub(crate) fn commit_marks(row: &GraphRow, head: bool) -> Vec<GraphMark> {
+    let mut marks = Vec::new();
+    for &lane in &row.live_before {
+        if lane != row.lane && !row.closing.contains(&lane) {
+            marks.push(GraphMark::Rail { lane, top: true, bottom: row.live_after.contains(&lane), role: lane_role(lane) });
         }
     }
+    let (top, bottom) = (row.live_before.contains(&row.lane), row.live_after.contains(&row.lane));
+    if top || bottom {
+        marks.push(GraphMark::Rail { lane: row.lane, top, bottom, role: lane_role(row.lane) });
+    }
+    for &from in &row.closing {
+        marks.push(GraphMark::Bend { from, to: row.lane, into: true, role: lane_role(from) });
+    }
+    for &to in &row.branching {
+        marks.push(GraphMark::Bend { from: row.lane, to, into: false, role: lane_role(to) });
+    }
+    let look = if head {
+        NodeLook::Head
+    } else if row.is_merge {
+        NodeLook::Merge
+    } else {
+        NodeLook::Commit
+    };
+    marks.push(GraphMark::Node { lane: row.lane, look, role: lane_role(row.lane) });
+    marks
+}
+
+/// The graph through a row under a commit (its details, files, diff):
+/// the lanes live below it, straight on.
+pub(crate) fn through_marks(row: &GraphRow) -> Vec<GraphMark> {
+    row.live_after.iter().map(|&lane| GraphMark::Rail { lane, top: true, bottom: true, role: lane_role(lane) }).collect()
 }
 
 /// A person's initials, for their badge: `Thomas Pedneault` is `TP`.
@@ -558,10 +594,10 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
         g.put(y, left, &format!("Reading the history of {}…", page.name), Role::Muted);
         return g.finish();
     };
-    let x = g.put(y, left, &page.scope.title(&data.branch), Role::Title) + 2;
+    let x = g.put(y, left, &fit(&page.scope.title(&data.branch), width), Role::Title) + 2;
     let authors: std::collections::HashSet<&str> = data.commits.iter().map(|c| c.author.as_str()).collect();
-    let x = g.chip(y, x, &format!(" {} ", count(data.commits.len(), "commit")), Role::Muted, Chip::Badge) + 1;
-    g.chip(y, x, &format!(" {} ", count(authors.len(), "author")), Role::Muted, Chip::Badge);
+    let x = g.chip_within(y, x, left + width, &format!(" {} ", count(data.commits.len(), "commit")), Role::Muted, Chip::Badge) + 1;
+    g.chip_within(y, x, left + width, &format!(" {} ", count(authors.len(), "author")), Role::Muted, Chip::Badge);
     y += 1;
     if !page.filter.is_empty() {
         let x = g.put(y, left, "filtered by", Role::Muted) + 1;
@@ -581,88 +617,100 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
         g.put(y, left, "No commits match.", Role::Muted);
     }
     let rows = page.rows();
-    // Each commit's line and details, looked up once rather than scanned
-    // for on every row: with every branch, a history runs to hundreds.
-    let line_of: HashMap<&str, usize> = data.lines.iter().enumerate().filter_map(|(n, l)| Some((l.commit.as_deref()?, n))).collect();
-    let commit_of: HashMap<&str, &GraphCommit> = data.commits.iter().map(|c| (c.hash.as_str(), c)).collect();
+    // Each commit's place, looked up once rather than scanned for on
+    // every row: with every branch, a history runs to hundreds.
+    let index_of: HashMap<&str, usize> = data.commits.iter().enumerate().map(|(n, c)| (c.hash.as_str(), n)).collect();
     let list_top = y;
     let left = left + 1;
     let width = width.saturating_sub(2);
+    // The graph's cells, then everything else after them.
+    let gcols = if data.commits.is_empty() { 0 } else { graph_cols(data.lanes, width) };
+    // A cell clear of the focused row's rail, then the graph.
+    let graph_at = left + 1..left + 1 + gcols;
+    // The lanes keep one spacing down the whole graph, so its lines meet
+    // from row to row; the text starts just past the lanes in use around
+    // its row, rather than past the widest the history ever gets -- the
+    // newest commits of a repository with many branches often need few.
+    let extent: Vec<usize> = data.graph.iter().map(|r| r.live_before.iter().chain(&r.live_after).copied().chain([r.lane]).max().map_or(1, |l| l + 1)).collect();
+    let pitch = (gcols as f32 / data.lanes.max(1) as f32).clamp(0.75, 2.0);
+    let shown = ((gcols as f32 / pitch).floor() as usize).max(1);
+    let text_at = |n: usize| {
+        let near = extent.get(n.saturating_sub(TEXT_WINDOW)..(n + TEXT_WINDOW + 1).min(extent.len())).and_then(|e| e.iter().copied().max()).unwrap_or(1);
+        // Past two lanes, room for four more at a time: the text moves in
+        // a few steps, not a cell with every lane.
+        let near = if near <= 2 { near } else { near.div_ceil(4) * 4 };
+        graph_at.start + ((near.min(shown) as f32 * pitch).ceil() as usize).min(gcols) + 1
+    };
+    let hash_width = data.commits.iter().map(|c| c.short_hash.chars().count()).max().unwrap_or(7);
+    // Who and when, in columns of their own at the right: the badges line
+    // up whatever the dates' lengths.
+    let who_width = data.commits.iter().map(|c| initials(&c.author).chars().count()).max().unwrap_or(2);
+    let age_width = data.commits.iter().map(|c| c.relative_date.chars().count()).max().unwrap_or(0).min(20);
+    // The commit whose lanes run on down through the rows under it.
+    let mut through: Option<usize> = None;
     for (i, row) in rows.iter().enumerate() {
         let line_y = y;
-        match row {
-            Row::Rail(n) => {
-                if let Some(line) = data.lines.get(*n) {
-                    put_rails(&mut g, y, left, 0, &line.text);
-                }
+        // Where this row's text starts: its commit's, or the one it's under.
+        let owner = match row {
+            Row::Commit(h) => index_of.get(h.as_str()).copied(),
+            _ => through,
+        };
+        let inner = owner.map(text_at).unwrap_or(graph_at.end + 1);
+        // The graph straight on through a row under a commit.
+        let carry = |g: &mut Grid, y: usize, through: Option<usize>| {
+            if let Some(gr) = through.and_then(|n| data.graph.get(n)) {
+                g.graph(y, graph_at.clone(), data.lanes, through_marks(gr));
             }
+        };
+        match row {
             Row::Commit(hash) => {
-                let Some(&n) = line_of.get(hash.as_str()) else { continue };
-                let line = &data.lines[n];
-                let chars: Vec<char> = line.text.chars().collect();
-                let commit = commit_of.get(hash.as_str());
-                let age = commit.map(|c| c.relative_date.clone()).unwrap_or_default();
-                let room = width.saturating_sub(age.chars().count() + 6);
-                // The graph at its columns, in its lanes' colours; then the
-                // hash, the refs as chips and the subject, one after another.
-                let mut x = left;
-                for (k, (start, span)) in line.spans.iter().enumerate() {
-                    let end = line.spans.get(k + 1).map(|s| s.0).unwrap_or(chars.len()).min(chars.len());
-                    if *start >= end {
-                        continue;
-                    }
-                    let text: String = chars[*start..end].iter().collect();
-                    match span {
-                        GraphSpan::Rails | GraphSpan::Node => {
-                            put_rails(&mut g, y, left, *start, &text);
-                            x = x.max(left + end);
-                        }
-                        GraphSpan::Hash => x = g.put(y, x.max(left + start), text.trim_end(), Role::Muted) + 1,
-                        GraphSpan::Refs => {
-                            for r in text.trim().trim_start_matches('(').trim_end_matches(')').split(", ").filter(|r| !r.is_empty()) {
-                                let (shown, role) = match r {
-                                    r if r.starts_with("HEAD") => (r.replace("->", "→"), Role::Accent),
-                                    r if r.starts_with("tag: ") => (r.trim_start_matches("tag: ").to_string(), Role::Good),
-                                    r => (r.to_string(), Role::Syntax("function")),
-                                };
-                                if x + shown.chars().count() + 3 < left + room {
-                                    x = g.chip(y, x, &format!(" {shown} "), role, Chip::Status(role)) + 1;
-                                }
-                            }
-                        }
-                        GraphSpan::Subject => {
-                            let role = if data.on_head.contains(hash) || matches!(page.scope, Scope::File(_) | Scope::Lines { .. }) { Role::Text } else { Role::Muted };
-                            x = g.put(y, x, &fit(text.trim(), (left + room).saturating_sub(x)), role) + 1;
-                        }
-                        GraphSpan::Meta => {}
+                let Some(&n) = index_of.get(hash.as_str()) else { continue };
+                let c = &data.commits[n];
+                if let Some(gr) = data.graph.get(n) {
+                    g.graph(y, graph_at.clone(), data.lanes, commit_marks(gr, data.head.as_deref() == Some(hash.as_str())));
+                }
+                through = Some(n);
+                let age = fit(&c.relative_date, age_width);
+                let room = width.saturating_sub(age_width + who_width + 6);
+                // The hash, the refs as chips and the subject, one after
+                // another.
+                let mut x = g.put(y, inner, &format!("{:<hash_width$}", c.short_hash), Role::Muted) + 1;
+                for r in c.refs.iter().filter(|r| !r.is_empty()) {
+                    let (shown, role) = match r.as_str() {
+                        r if r.starts_with("HEAD") => (r.replace("->", "→"), Role::Accent),
+                        r if r.starts_with("tag: ") => (r.trim_start_matches("tag: ").to_string(), Role::Good),
+                        r => (r.to_string(), Role::Syntax("function")),
+                    };
+                    if x + shown.chars().count() + 3 < left + room {
+                        x = g.chip(y, x, &format!(" {shown} "), role, Chip::Status(role)) + 1;
                     }
                 }
+                let role = if data.on_head.contains(hash) || matches!(page.scope, Scope::File(_) | Scope::Lines { .. }) { Role::Text } else { Role::Muted };
+                g.put(y, x, &fit(c.subject.trim(), (left + room).saturating_sub(x)), role);
                 // Who, on a badge, and when.
-                if let Some(c) = commit {
-                    let who = initials(&c.author);
-                    let role = lane_role(c.author.bytes().map(usize::from).sum::<usize>() * 2);
-                    let at = (left + width).saturating_sub(age.chars().count() + who.chars().count() + 4);
-                    g.chip(y, at, &format!(" {who} "), role, Chip::Status(role));
-                }
-                g.put(y, (left + width).saturating_sub(age.chars().count()), &age, Role::Muted);
-                // The commit the cursor is on, opened under it: who in full.
+                let who = initials(&c.author);
+                let role = lane_role(c.author.bytes().map(usize::from).sum::<usize>());
+                let at = (left + width).saturating_sub(age_width + who_width + 4);
+                g.chip(y, at, &format!(" {who:^who_width$} "), role, Chip::Status(role));
+                g.put(y, (left + width).saturating_sub(age_width), &age, Role::Muted);
+                // The commit the cursor is on, opened under it: who in full,
+                // when, and the whole hash -- kept inside its card, which
+                // hugs its rows; its keys are on the bar at the foot.
                 if i == page.cursor {
-                    if let Some(c) = commit {
-                        y += 1;
-                        let x = g.put(y, left + 10, &c.short_hash, Role::Muted) + 1;
-                        let x = g.put(y, x, &fit(&c.author, 32), Role::Text) + 1;
-                        let x = g.put(y, x, &format!("· {}", c.relative_date), Role::Muted) + 3;
-                        let x = g.chip(y, x, "Tab", Role::Accent, Chip::Key) + 1;
-                        let x = g.put(y, x, "files", Role::Muted) + 2;
-                        let x = g.chip(y, x, "Enter", Role::Accent, Chip::Key) + 1;
-                        let x = g.put(y, x, "commit menu", Role::Muted) + 2;
-                        let x = g.chip(y, x, "y", Role::Accent, Chip::Key) + 1;
-                        g.put(y, x, "copy hash", Role::Muted);
-                        g.card(line_y..y + 1, left.saturating_sub(1)..left + width + 1, CardLook::Selected);
+                    y += 1;
+                    carry(&mut g, y, through);
+                    let end = left + width - 1;
+                    let x = g.put(y, inner, &fit(&c.author, 32.min(end.saturating_sub(inner))), Role::Text) + 1;
+                    let when = format!("· {}", c.relative_date);
+                    let x = if x + when.chars().count() <= end { g.put(y, x, &when, Role::Muted) + 1 } else { x };
+                    if x + 10 <= end {
+                        g.put(y, x, &fit(&format!("· {}", c.hash), end - x), Role::Muted);
                     }
+                    g.card(line_y..y + 1, left.saturating_sub(1)..left + width + 1, CardLook::Selected);
                 }
             }
             Row::File { hash, path } => {
+                carry(&mut g, y, through);
                 let letter = match page.open.get(hash) {
                     Some(Detail::Files(files)) => files.iter().find(|f| &f.1 == path).map(|f| f.0).unwrap_or('M'),
                     _ => 'M',
@@ -672,38 +720,42 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
                     'D' => Role::Bad,
                     _ => Role::Warn,
                 };
-                let x = g.put(y, left + 6, &letter.to_string(), role) + 2;
+                let x = g.put(y, inner + 1, &letter.to_string(), role) + 2;
                 g.put(y, x, &fit(path, (left + width).saturating_sub(x)), Role::Text);
             }
             Row::Hunk { hash, path, hunk } => {
+                carry(&mut g, y, through);
                 if let Some(h) = page.diff(hash, path).and_then(|d| d.hunks.get(*hunk)) {
-                    g.put(y, left + 8, &fit(&h.header, width.saturating_sub(8)), Role::Accent);
+                    g.put(y, inner + 3, &fit(&h.header, (left + width).saturating_sub(inner + 3)), Role::Accent);
                 }
             }
             Row::Line { hash, path, hunk, line } => {
+                carry(&mut g, y, through);
                 if let Some(l) = page.diff(hash, path).and_then(|d| d.hunks.get(*hunk)).and_then(|h| h.lines.get(*line)) {
                     let number = l.new_line.or(l.old_line).map(|n| n.to_string()).unwrap_or_default();
-                    g.put(y, left + 8 + 5usize.saturating_sub(number.len()), &number, Role::Muted);
+                    g.put(y, inner + 3 + 5usize.saturating_sub(number.len()), &number, Role::Muted);
                     let role = match l.kind {
                         LineKind::Added => Role::Good,
                         LineKind::Removed => Role::Bad,
                         _ => Role::Text,
                     };
                     let text = l.raw().trim_end_matches('\r').replace('\t', "    ");
-                    g.put(y, left + 15, &fit(&text, width.saturating_sub(15)), role);
+                    g.put(y, inner + 10, &fit(&text, (left + width).saturating_sub(inner + 10)), role);
                 }
             }
         }
         if let Row::Commit(hash) = row {
             if page.open.get(hash) == Some(&Detail::Loading) {
                 y += 1;
-                g.put(y, left + 6, "reading its files…", Role::Muted);
+                carry(&mut g, y, through);
+                g.put(y, inner + 1, "reading its files…", Role::Muted);
             }
         }
         if let Row::File { hash, path } = row {
             if let Some(DiffState::Loading) = page.diffs.get(&(hash.clone(), path.clone())) {
                 y += 1;
-                g.put(y, left + 8, "reading the diff…", Role::Muted);
+                carry(&mut g, y, through);
+                g.put(y, inner + 3, "reading the diff…", Role::Muted);
             }
         }
         if i == page.cursor {
@@ -732,6 +784,16 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
 mod tests {
     use super::*;
 
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let mut p = page(); p.key(Key::Char('j'));
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
+
     fn commit(n: usize, parents: &[usize], subject: &str) -> GraphCommit {
         let hash = format!("{n:0>40}");
         GraphCommit {
@@ -746,17 +808,13 @@ mod tests {
     }
 
     fn data(commits: Vec<GraphCommit>, on_head: &[usize]) -> LogData {
-        let rows = fenix_git::assign_lanes(&commits);
-        let panel = crate::graph_view::render_graph(&commits, &rows, crate::graph_view::GraphStyle::Ascii);
-        let lines = panel.text.lines().zip(panel.lines).map(|(text, line)| {
-            let line = line.unwrap();
-            GraphLine { text: text.to_string(), spans: line.spans, commit: line.commit }
-        });
+        let graph = fenix_git::assign_lanes(&commits);
         LogData {
             head: commits.first().map(|c| c.hash.clone()),
             on_head: on_head.iter().map(|n| format!("{n:0>40}")).collect(),
             branch: "main".into(),
-            lines: lines.collect(),
+            lanes: fenix_git::lane_count(&graph),
+            graph,
             commits,
             patches: HashMap::new(),
         }
@@ -772,12 +830,72 @@ mod tests {
         format!("{n:0>40}")
     }
 
+    /// The graph is drawn, not written: each commit's row has its marks
+    /// over blank cells, HEAD's commit ringed, a merge bending out to its
+    /// second parent, and the lanes running on through an opened commit.
+    #[test]
+    fn the_graph_is_drawn_over_blank_cells() {
+        let mut p = GitLog::new(PathBuf::from("/repo/fenix"), Scope::All);
+        p.set_data(data(vec![commit(4, &[3, 2], "merge"), commit(3, &[1], "main work"), commit(2, &[1], "side work"), commit(1, &[], "first")], &[4, 3, 1]));
+        let page = layout(&p, 120);
+        assert!(!page.text.contains('*') && !page.text.contains('\\') && !page.text.contains("|/"), "{}", page.text);
+        let merge = &page.graph[0];
+        assert_eq!(merge.lanes, 2);
+        assert!(merge.marks.contains(&GraphMark::Node { lane: 0, look: NodeLook::Head, role: lane_role(0) }));
+        assert!(merge.marks.contains(&GraphMark::Bend { from: 0, to: 1, into: false, role: lane_role(1) }), "{:?}", merge.marks);
+        // The cursor's commit is opened under it: the lanes run on through.
+        let opened = &page.graph[1];
+        assert_eq!(opened.line, merge.line + 1);
+        assert!(opened.marks.iter().all(|m| matches!(m, GraphMark::Rail { top: true, bottom: true, .. })) && opened.marks.len() == 2);
+        // Both sides meet again at the root: lane 1 bends in.
+        let root = page.graph.last().unwrap();
+        assert!(root.marks.contains(&GraphMark::Bend { from: 1, to: 0, into: true, role: lane_role(1) }), "{:?}", root.marks);
+    }
+
+    /// Where few lanes are in use, the text starts just past them, though
+    /// the history is wider further down.
+    #[test]
+    fn the_text_starts_past_the_lanes_in_use_nearby() {
+        // Ten commits in a line, then six branches off the root.
+        let mut commits: Vec<GraphCommit> = (11..=20).rev().map(|n| commit(n, &[if n == 11 { 1 } else { n - 1 }], "line")).collect();
+        commits.extend((2..=7).map(|n| commit(n, &[1], "tip")));
+        commits.push(commit(1, &[], "root"));
+        let mut p = GitLog::new(PathBuf::from("/repo/fenix"), Scope::All);
+        p.set_data(data(commits, &[]));
+        let page = layout(&p, 120);
+        let col = |n: usize| page.text.lines().find_map(|l| l.find(&hash(n)[33..])).unwrap();
+        assert!(col(20) + 6 <= col(5), "the top's one lane: {} vs {}\n{}", col(20), col(5), page.text);
+        assert_eq!(col(20), col(19), "steady from row to row");
+    }
+
+    /// A history with many branches live at once keeps its graph to a
+    /// fifth of the page; the drawing closes the lanes up to fit.
+    #[test]
+    fn many_lanes_keep_the_graph_narrow() {
+        assert_eq!(graph_cols(1, 150), 2);
+        assert_eq!(graph_cols(8, 150), 16);
+        assert_eq!(graph_cols(200, 150), 30);
+        assert_eq!(graph_cols(200, 20), 6, "never narrower than three lanes' room");
+    }
+
     #[test]
     fn a_persons_badge_is_their_initials() {
         assert_eq!(initials("Thomas Pedneault"), "TP");
         assert_eq!(initials("ada"), "AD");
         assert_eq!(initials("Grace B. Hopper"), "GH");
         assert_eq!(initials(""), "?");
+    }
+
+    #[test]
+    fn the_tab_names_the_branch_or_the_file() {
+        let p = page();
+        assert_eq!(p.tab_name(), "main", "the branch, once read");
+        let mut f = GitLog::new(PathBuf::from("/repo/fenix"), Scope::File("src/app/main.rs".into()));
+        assert_eq!(f.tab_name(), "main.rs");
+        f.scope = Scope::Lines { path: "src/a.rs".into(), start: 3, end: 9 };
+        assert_eq!(f.tab_name(), "a.rs:3–9");
+        let all = GitLog::new(PathBuf::from("/repo/fenix"), Scope::All);
+        assert_eq!(all.tab_name(), "fenix · every branch");
     }
 
     #[test]
@@ -793,6 +911,25 @@ mod tests {
         assert_eq!(p.key(Key::Tab), LogAction::LoadFile { hash: hash(2), path: "src/a.rs".into() });
         let text = layout(&p, 120).text;
         assert!(text.contains("History of main") && text.contains("second") && text.contains("src/a.rs"), "{text}");
+    }
+
+    /// The open commit's row of who and when stays on its card however
+    /// narrow the page, and keeps no keys to poke through its edge.
+    #[test]
+    fn the_open_commit_stays_inside_its_card() {
+        let mut p = page();
+        p.data.as_mut().unwrap().commits[0].author = "Margaret Hamilton-Lovelace of the Apollo Guidance Computer".into();
+        for cols in [50, 70, 120] {
+            let out = layout(&p, cols);
+            let (left, width) = frame(cols, 150);
+            let card = out.cards.iter().find(|c| c.look == CardLook::Selected).expect("the open commit's card");
+            let detail = card.lines.end - 1;
+            let line = out.text.lines().nth(detail).unwrap_or_default().trim_end();
+            assert!(line.chars().count() <= left + width, "{cols}: {line:?}");
+            assert!(!out.chips.iter().any(|(l, _, _)| *l == detail), "{cols}: no key caps on the open row");
+            assert!(line.contains("Margaret"), "{line:?}");
+        }
+        assert!(layout(&p, 120).text.contains(&hash(3)), "the whole hash, room allowing");
     }
 
     #[test]
@@ -822,6 +959,24 @@ mod tests {
         p.key(Key::Char('r'));
         assert_eq!(p.key(Key::Char('h')), LogAction::Git(Action::None));
         assert_eq!(p.key(Key::Char('y')), LogAction::Git(Action::Run(Job::Reset { target: hash(1), mode: ResetMode::Hard })));
+    }
+
+    /// The author badges sit in one column whatever the dates' lengths
+    /// and whoever's initials are one letter or two.
+    #[test]
+    fn author_badges_line_up_down_the_page() {
+        let mut p = GitLog::new(PathBuf::from("/repo/fenix"), Scope::Branch);
+        let mut a = commit(3, &[2], "third");
+        a.relative_date = "5 minutes ago".into();
+        let mut b = commit(2, &[1], "second");
+        (b.relative_date, b.author) = ("2 days ago".into(), "Q".into());
+        let mut c = commit(1, &[], "first");
+        (c.relative_date, c.author) = ("11 months ago".into(), "Grace Hopper".into());
+        p.set_data(data(vec![a, b, c], &[3, 2, 1]));
+        let out = layout(&p, 120);
+        let badges: Vec<_> = out.chips.iter().filter(|(_, cols, _)| cols.start > 80 && cols.len() == 4).map(|(_, cols, _)| cols.clone()).collect();
+        assert_eq!(badges.len(), 3, "{badges:?}");
+        assert!(badges.iter().all(|r| *r == badges[0]), "{badges:?}");
     }
 
     #[test]

@@ -461,6 +461,10 @@ impl SettingsPage {
             _ => None,
         };
         match next {
+            // Back on the default, the setting comes out of the file rather
+            // than being written as it -- unless it's overriding something
+            // inherited (a project's over yours), which it must still do.
+            Some(v) if is_default(s, &v) && !self.snap.inherited.contains_key(s.key) => self.set(s.key, None),
             Some(v) => self.set(s.key, Some(v)),
             None => Action::None,
         }
@@ -929,6 +933,21 @@ fn hint(page: &SettingsPage, s: &Setting) -> String {
 /// The most of a value an entry's form shows; past it, the end.
 const FORM_FIELD_WIDTH: usize = 60;
 
+/// Whether `v` is what `s` is when it isn't set.
+fn is_default(s: &Setting, v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => s.default == if *b { "on" } else { "off" },
+        Value::Int(n) => s.default.parse::<i64>() == Ok(*n),
+        Value::Float(f) => s.default.parse::<f64>().is_ok_and(|d| d == *f),
+        Value::Text(t) => t == s.default,
+        _ => false,
+    }
+}
+
+/// Below this many columns the categories and the settings take turns
+/// at the whole width rather than sharing it.
+const STACK_BELOW: usize = 56;
+
 pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     let (left, width) = frame(cols, 132);
     let mut g = Grid::new();
@@ -943,14 +962,17 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         let yours = matches!(page.scope, Scope::You);
         x = g.toggle(1, x, "You", yours) + 1;
         x = g.toggle(1, x, name, !yours) + 1;
-        g.put(1, x + 1, "p switches", Role::Muted);
+        x = g.put(1, x + 1, "p switches", Role::Muted);
     } else if let Scope::Project { .. } = page.scope {
         x = g.toggle(1, x, "You", false) + 1;
-        g.put(1, x + 1, "p switches", Role::Muted);
+        x = g.put(1, x + 1, "p switches", Role::Muted);
     }
     let changed = page.snap.here.len();
     let file = page.snap.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-    let right = format!("{file} · {changed} changed");
+    // The file and what's changed at the right, as much of it as fits
+    // past the title and chips.
+    let room = (left + width).saturating_sub(x + 2);
+    let right = [format!("{file} · {changed} changed"), format!("{changed} changed")].into_iter().find(|r| r.chars().count() <= room).unwrap_or_default();
     g.put(1, (left + width).saturating_sub(right.chars().count()), &right, Role::Muted);
     let mut y = 3;
     // The search box.
@@ -974,22 +996,32 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     }
     let top = y;
 
-    // Categories.
-    let cat_w = 30;
+    // Categories beside the settings; in a narrow pane, one or the other
+    // at the whole width -- the categories while Tab has them.
+    let stacked = width < STACK_BELOW;
+    let show_categories = !stacked || page.focus == Focus::Categories;
+    let show_settings = !stacked || page.focus != Focus::Categories;
+    let cat_w = if stacked { width + 1 } else { (width * 3 / 10).clamp(16, 30) };
+    // Room for "12 changed" after a name, or only the number.
+    let roomy = cat_w >= 26;
     let sections = page.sections();
     let searching = page.search.as_deref().is_some_and(|s| !s.trim().is_empty());
-    for (i, c) in sections.iter().enumerate() {
+    for (i, c) in sections.iter().enumerate().filter(|_| show_categories) {
         let set = settings().iter().filter(|s| Some(s.category) == *c && page.visible(s) && page.snap.here.contains_key(s.key)).count();
         let all = settings().iter().filter(|s| Some(s.category) == *c && page.visible(s)).count();
         let role = if i == page.category && !searching { Role::Title } else { Role::Text };
         let label = c.map(|c| c.label()).unwrap_or("Project & tasks");
-        g.put(top + i, left + 1, &fit(label, cat_w - 8), role);
         // How many it holds, or -- when some are -- how many are changed.
+        let tag = match (set, c.is_some()) {
+            (0, false) => String::new(),
+            (0, true) => format!(" {all} "),
+            (set, _) if roomy => format!(" {set} changed "),
+            (set, _) => format!(" {set} "),
+        };
+        g.put(top + i, left + 1, &fit(label, (cat_w - 3).saturating_sub(tag.chars().count() + 1)), role);
         if set > 0 {
-            let tag = format!(" {set} changed ");
             g.chip(top + i, (left + cat_w - 2).saturating_sub(tag.chars().count()), &tag, Role::Accent, Chip::Status(Role::Accent));
         } else if c.is_some() {
-            let tag = format!(" {all} ");
             g.chip(top + i, (left + cat_w - 2).saturating_sub(tag.chars().count()), &tag, Role::Muted, Chip::Badge);
         }
         if i == page.category && !searching {
@@ -1001,26 +1033,25 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         }
     }
 
-    if !sections.is_empty() {
+    if !sections.is_empty() && show_categories {
         g.card(top..top + sections.len(), left..left + cat_w - 1, CardLook::Plain);
     }
 
     // Settings, on a card of their own, their names whole.
-    let sx = left + cat_w + 3;
-    let sw = width.saturating_sub(cat_w + 4);
+    let (sx, sw) = if stacked { (left + 2, width.saturating_sub(3)) } else { (left + cat_w + 3, width.saturating_sub(cat_w + 4)) };
     let label_w = 36.min(sw * 45 / 100).max(20.min(sw / 2));
     let vx = sx + label_w + 2;
     let selected = page.selected();
     let mut y = top;
-    let rows = page.rows();
-    if page.on_project_page() {
+    let rows = if show_settings { page.rows() } else { Vec::new() };
+    if show_settings && page.on_project_page() {
         match &page.project_page {
             Some(project) => g.embed(&crate::project_settings::layout(project, sw), y, sx, page.focus == Focus::Settings),
             None => {
                 g.put(y, sx, "The project's own settings aren't readable right now.", Role::Muted);
             }
         }
-    } else if rows.is_empty() {
+    } else if show_settings && rows.is_empty() {
         g.put(y, sx, "Nothing matches.", Role::Muted);
     }
     for row in rows {
@@ -1039,9 +1070,14 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 let row_top = y;
                 g.put(y, sx + 1, &fit(s.label, label_w.saturating_sub(1)), if is_sel { Role::Title } else { Role::Text });
                 let editing = matches!(&page.edit, Some(Edit::Inline { key, .. }) if *key == s.key);
-                // The value comes first: a long marker is cut, not it.
-                let hint_text = fit(&hint(page, s), sw.saturating_sub(label_w + 30).max(8));
-                let room = (sx + sw).saturating_sub(vx + hint_text.chars().count() + 2);
+                // The value comes first: a long marker is cut, not it, and
+                // in a narrow pane it goes rather than sit on the value.
+                let mut hint_text = fit(&hint(page, s), sw.saturating_sub(label_w + 30).max(8));
+                let mut room = (sx + sw).saturating_sub(vx + hint_text.chars().count() + 2);
+                if room < 14 {
+                    hint_text.clear();
+                    room = (sx + sw).saturating_sub(vx + 1);
+                }
                 if editing {
                     let Some(Edit::Inline { text, .. }) = &page.edit else { unreachable!() };
                     let shown = if matches!(s.kind, Kind::Secret(_)) { "•".repeat(text.chars().count()) } else { text.clone() };
@@ -1054,7 +1090,10 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                         Kind::Bool => {
                             let on = !(matches!(page.value(s), Some(Value::Bool(false))) || (page.value(s).is_none() && s.default == "off"));
                             let x = g.switch(y, vx, on);
-                            g.put(y, x + 1, if on { "on" } else { "off" }, role);
+                            // The switch says it; the word when there's room.
+                            if x + 4 <= sx + sw {
+                                g.put(y, x + 1, if on { "on" } else { "off" }, role);
+                            }
                         }
                         // A stepper while it's the one selected, else its value.
                         Kind::Choice(_) | Kind::Theme | Kind::Font | Kind::Int { .. } | Kind::Float { .. } | Kind::Minutes if is_sel => {
@@ -1125,7 +1164,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         }
     }
 
-    if y > top && !page.on_project_page() {
+    if y > top && show_settings && !page.on_project_page() {
         g.card_behind(top..y, sx.saturating_sub(2)..sx + sw + 1, CardLook::Plain);
     }
 
@@ -1192,6 +1231,8 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         }
     } else if page.edit.is_some() {
         vec![("Tab", "next field"), ("Enter", "save"), ("Esc", "cancel")]
+    } else if page.focus == Focus::Categories && !page.on_project_page() {
+        vec![("j/k", "category"), ("Enter", "its settings"), ("Tab", "settings"), ("/", "search"), ("q", "close")]
     } else {
         match selected {
             Some(Row::Setting(s)) if s.kind == Kind::Font => vec![("Enter", "choose"), ("h/l", "change"), ("r", "reset"), ("/", "search"), ("e", "open the file"), ("q", "close")],
@@ -1217,6 +1258,34 @@ fn secret_of(s: &Setting) -> Secret {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// In a narrow pane the settings have the whole width, and Tab trades
+    /// them for the categories, also at the whole width; Enter goes back.
+    #[test]
+    fn a_narrow_pane_shows_the_settings_or_the_categories() {
+        let mut p = page();
+        let text = layout(&p, 44).text;
+        assert!(text.contains("Indent width") && !text.contains("Appearance"), "the settings, whole:
+{text}");
+        p.key(Key::Tab);
+        let text = layout(&p, 44).text;
+        assert!(text.contains("Appearance") && !text.contains("Indent width") && text.contains("its settings"), "the categories:
+{text}");
+        p.key(Key::Enter);
+        assert!(layout(&p, 44).text.contains("Indent width"));
+        let text = layout(&p, 100).text;
+        assert!(text.contains("Appearance") && text.contains("Indent width"), "side by side when there's room");
+    }
+
+    /// Nothing runs past the pane's edge, from a narrow split up.
+    #[test]
+    fn it_keeps_inside_a_narrow_pane() {
+        let p = page();
+        for cols in [34, 38, 40, 50, 60, 72, 80, 100, 120, 160] {
+            let over = crate::page::overflow(&layout(&p, cols), cols);
+            assert!(over.is_empty(), "{cols} cols: {over:#?}");
+        }
+    }
 
     /// A records setting of the kind 1.x's `vnc.hosts` was, registered as a feature's or an extension's is.
     static HOSTS: [Setting; 1] = [Setting::stored(
@@ -1361,6 +1430,23 @@ mod tests {
         assert_eq!(p.key(Key::Space), Action::Set { key: "editor.animations", value: Some(Value::Bool(false)) }, "on by default, so off");
         goto(&mut p, "git.layout");
         assert_eq!(p.key(Key::Enter), Action::Set { key: "git.layout", value: Some(Value::Text("panes".into())) });
+    }
+
+    /// Stepping back on to the default takes the setting out of the file,
+    /// rather than writing the default and counting it as changed -- but
+    /// not where it overrides something inherited.
+    #[test]
+    fn stepping_back_to_the_default_unsets_it() {
+        let mut p = page();
+        p.snap.here.insert("appearance.panels", Value::Text("flat".into()));
+        goto(&mut p, "appearance.panels");
+        assert_eq!(p.key(Key::Char('h')), Action::Set { key: "appearance.panels", value: None });
+        p.snap.here.insert("editor.animations", Value::Bool(false));
+        goto(&mut p, "editor.animations");
+        assert_eq!(p.key(Key::Space), Action::Set { key: "editor.animations", value: None }, "on is the default");
+        p.snap.inherited.insert("appearance.panels", Value::Text("flat".into()));
+        goto(&mut p, "appearance.panels");
+        assert_eq!(p.key(Key::Char('h')), Action::Set { key: "appearance.panels", value: Some(Value::Text("framed".into())) }, "overriding what's inherited");
     }
 
     #[test]

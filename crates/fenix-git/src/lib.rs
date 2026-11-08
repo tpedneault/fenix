@@ -38,7 +38,7 @@ pub use compare::{changed_file_diff, changed_files, fetch_remote, remote_of, sho
 pub use conflict::{find_conflicts, resolve_conflict, Conflict, Resolution};
 pub use diff::{commit_diff, diff_refs, file_diff, stash_diff};
 pub use files::{list_files, FileEntry};
-pub use graph::{assign_lanes, commit_graph, GraphCommit, GraphRow};
+pub use graph::{assign_lanes, commit_graph, lane_count, GraphCommit, GraphRow};
 pub use practice::practice_repository;
 pub use log::{checkout_detached, commit_file_diff, commit_files, line_log, log, reachable, LogQuery};
 pub use rebase::{rebase_interactive, replayed, todo as rebase_todo, Planned, Replayed, Step};
