@@ -53,6 +53,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Text is drawn in the theme's own colours. It used to come out darker than the
+  theme file said on every machine (Orbit Dark's `#bb9af7` keywords as
+  `#6142b2`), and with less contrast than the themes are tested for.
+
 - A jump lands in the middle of the window rather than on its last row: a
   symbol picked (a language pack's `SPC m s`), a search result, `gd`, the
   jumplist, a path followed from a terminal. One already on screen stays

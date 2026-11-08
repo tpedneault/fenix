@@ -227,6 +227,17 @@ pub struct FontContext {
     default_family: &'static str,
 }
 
+/// The glyph atlas, in glyphon's `Web` colour mode: text colours go to
+/// the surface as they are, as the rects' do. The surface is deliberately
+/// not sRGB (`GpuState`), and glyphon's default (`Accurate`) converts
+/// colours from sRGB to linear for an sRGB one -- on this surface that
+/// drew every theme's text darker than its file says (Orbit Dark's
+/// `#bb9af7` keywords came out `#6142b2`), and darker than the contrast
+/// the themes are tested for.
+fn text_atlas(gpu: &GpuState, cache: &Cache) -> TextAtlas {
+    TextAtlas::with_color_mode(&gpu.device, &gpu.queue, cache, gpu.config.format, glyphon::ColorMode::Web)
+}
+
 impl FontContext {
     pub fn new(gpu: &GpuState) -> Self {
         let mut font_system = FontSystem::new();
@@ -234,7 +245,7 @@ impl FontContext {
         let default_family: &'static str =
             Box::leak(default_monospace_family(&font_system).into_boxed_str());
         let cache = Cache::new(&gpu.device);
-        let atlas = TextAtlas::new(&gpu.device, &gpu.queue, &cache, gpu.config.format);
+        let atlas = text_atlas(gpu, &cache);
         Self { font_system, swash_cache: SwashCache::new(), atlas, cache, default_family }
     }
 
@@ -242,7 +253,7 @@ impl FontContext {
     /// they're drawn. The font database stays: reading it is the slow part.
     pub fn rebuild_gpu(&mut self, gpu: &GpuState) {
         self.cache = Cache::new(&gpu.device);
-        self.atlas = TextAtlas::new(&gpu.device, &gpu.queue, &self.cache, gpu.config.format);
+        self.atlas = text_atlas(gpu, &self.cache);
     }
 
     /// The font database, for drawing text off screen (a code screenshot)
