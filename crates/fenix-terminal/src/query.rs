@@ -50,6 +50,11 @@ pub(crate) struct QueryReplies {
     /// Terminal's shell integrations send): `C` a command started, `A`
     /// a prompt and `D` a command done. None from a shell that doesn't.
     pub(crate) running: Option<bool>,
+    /// Whether the session asked for keys as Windows key events
+    /// (`ESC [ ? 9001 h`, win32-input-mode): ConPTY does, to be told keys
+    /// VT has no bytes for -- Ctrl-Space, Shift-Enter -- as the console
+    /// gives them.
+    pub(crate) win32_input: bool,
 }
 
 /// The path in an `OSC 7` file URL: its host dropped, `%xx` decoded, and
@@ -92,6 +97,10 @@ impl vt100::Callbacks for QueryReplies {
         // to 0 when omitted (`ESC [ n` and `ESC [ 0 n` mean the same
         // thing) -- which is also what a bare `ESC [ c` relies on.
         let arg = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
+        // A private mode `vt100` doesn't know: win32-input-mode's on or off.
+        if i1 == Some(b'?') && matches!(c, 'h' | 'l') && params.iter().any(|p| p.first() == Some(&9001)) {
+            self.win32_input = c == 'h';
+        }
         match (i1, c, arg) {
             // DSR: "are you all right?" -- yes, no malfunction.
             (None, 'n', 5) => self.pending.extend_from_slice(b"\x1b[0n"),
@@ -245,6 +254,19 @@ mod tests {
         assert_eq!(parser.callbacks().running, Some(true));
         parser.process(b"done\r\n\x1b]133;D;0\x07");
         assert_eq!(parser.callbacks().running, Some(false));
+    }
+
+    /// ConPTY asking for Windows key events is noticed, among other modes,
+    /// and owed no reply.
+    #[test]
+    fn win32_input_mode_is_noticed() {
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, QueryReplies::default());
+        assert!(!parser.callbacks().win32_input);
+        parser.process(b"\x1b[?9001h\x1b[?1004h");
+        assert!(parser.callbacks().win32_input);
+        parser.process(b"\x1b[?25;9001l");
+        assert!(!parser.callbacks().win32_input);
+        assert!(parser.callbacks_mut().take().is_empty());
     }
 
     #[test]

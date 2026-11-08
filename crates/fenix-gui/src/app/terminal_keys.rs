@@ -57,8 +57,17 @@ fn control_code(c: char) -> Option<u8> {
 /// The bytes `key` sends, `shift` held or not, the arrows in application
 /// mode when the program asked (`application`). None for a key a terminal
 /// has no bytes for.
-pub(super) fn encode(key: KeyPress, shift: bool, application: bool) -> Option<Vec<u8>> {
+///
+/// In a session that takes Windows key events (`win32`, ConPTY's
+/// win32-input-mode), Ctrl-Space is sent as the key itself: as NUL,
+/// ConPTY gives PowerShell Ctrl-@, and its menu completion
+/// (`Ctrl+Spacebar`) never opens.
+pub(super) fn encode(key: KeyPress, shift: bool, application: bool, win32: bool) -> Option<Vec<u8>> {
     let (ctrl, alt) = (key.mods.ctrl, key.mods.alt);
+    if win32 && ctrl && !alt && key.code == KeyCode::Char(' ') {
+        let state = fenix_terminal::LEFT_CTRL_PRESSED | if shift { fenix_terminal::SHIFT_PRESSED } else { 0 };
+        return Some(fenix_terminal::win32_key(0x20, 0x39, ' ', state));
+    }
     let esc = |mut bytes: Vec<u8>, alt: bool| {
         if alt {
             bytes.insert(0, 0x1b);
@@ -137,38 +146,48 @@ mod tests {
     /// word, Shift-arrows selecting, both together, Home and End.
     #[test]
     fn modifiers_on_the_arrows_are_xterms() {
-        assert_eq!(encode(named(NamedKey::Left, false, false), false, false).unwrap(), b"\x1b[D");
-        assert_eq!(encode(named(NamedKey::Left, true, false), false, false).unwrap(), b"\x1b[1;5D", "Ctrl-Left: a word back");
-        assert_eq!(encode(named(NamedKey::Right, false, false), true, false).unwrap(), b"\x1b[1;2C", "Shift-Right selects");
-        assert_eq!(encode(named(NamedKey::Right, true, false), true, false).unwrap(), b"\x1b[1;6C", "Ctrl-Shift-Right selects a word");
-        assert_eq!(encode(named(NamedKey::Up, false, true), false, false).unwrap(), b"\x1b[1;3A", "Alt-Up");
-        assert_eq!(encode(named(NamedKey::Home, false, false), true, false).unwrap(), b"\x1b[1;2H");
-        assert_eq!(encode(named(NamedKey::Delete, true, false), false, false).unwrap(), b"\x1b[3;5~");
-        assert_eq!(encode(named(NamedKey::PageUp, false, false), false, false).unwrap(), b"\x1b[5~");
+        assert_eq!(encode(named(NamedKey::Left, false, false), false, false, false).unwrap(), b"\x1b[D");
+        assert_eq!(encode(named(NamedKey::Left, true, false), false, false, false).unwrap(), b"\x1b[1;5D", "Ctrl-Left: a word back");
+        assert_eq!(encode(named(NamedKey::Right, false, false), true, false, false).unwrap(), b"\x1b[1;2C", "Shift-Right selects");
+        assert_eq!(encode(named(NamedKey::Right, true, false), true, false, false).unwrap(), b"\x1b[1;6C", "Ctrl-Shift-Right selects a word");
+        assert_eq!(encode(named(NamedKey::Up, false, true), false, false, false).unwrap(), b"\x1b[1;3A", "Alt-Up");
+        assert_eq!(encode(named(NamedKey::Home, false, false), true, false, false).unwrap(), b"\x1b[1;2H");
+        assert_eq!(encode(named(NamedKey::Delete, true, false), false, false, false).unwrap(), b"\x1b[3;5~");
+        assert_eq!(encode(named(NamedKey::PageUp, false, false), false, false, false).unwrap(), b"\x1b[5~");
     }
 
     /// A full-screen program that asks for application mode gets `ESC O`;
     /// with a modifier it's the same `ESC [ 1 ;` either way.
     #[test]
     fn application_mode_arrows() {
-        assert_eq!(encode(named(NamedKey::Up, false, false), false, true).unwrap(), b"\x1bOA");
-        assert_eq!(encode(named(NamedKey::End, false, false), false, true).unwrap(), b"\x1bOF");
-        assert_eq!(encode(named(NamedKey::Up, true, false), false, true).unwrap(), b"\x1b[1;5A");
+        assert_eq!(encode(named(NamedKey::Up, false, false), false, true, false).unwrap(), b"\x1bOA");
+        assert_eq!(encode(named(NamedKey::End, false, false), false, true, false).unwrap(), b"\x1bOF");
+        assert_eq!(encode(named(NamedKey::Up, true, false), false, true, false).unwrap(), b"\x1b[1;5A");
     }
 
     /// Ctrl-Space is NUL (PSReadLine's menu completion), Shift-Tab goes
     /// back, Alt is an ESC first, Ctrl-Backspace deletes a word.
     #[test]
     fn the_keys_line_editors_bind() {
-        assert_eq!(encode(key(KeyCode::Char(' '), true, false), false, false).unwrap(), [0]);
-        assert_eq!(encode(named(NamedKey::Tab, false, false), true, false).unwrap(), b"\x1b[Z");
-        assert_eq!(encode(key(KeyCode::Char('b'), false, true), false, false).unwrap(), b"\x1bb", "Alt-b: a word back");
-        assert_eq!(encode(key(KeyCode::Char('c'), true, false), false, false).unwrap(), [3]);
-        assert_eq!(encode(key(KeyCode::Char('A'), false, false), true, false).unwrap(), b"A");
-        assert_eq!(encode(named(NamedKey::Backspace, false, true), false, false).unwrap(), b"\x1b\x7f");
-        let word = encode(named(NamedKey::Backspace, true, false), false, false).unwrap();
+        assert_eq!(encode(key(KeyCode::Char(' '), true, false), false, false, false).unwrap(), [0]);
+        assert_eq!(encode(named(NamedKey::Tab, false, false), true, false, false).unwrap(), b"\x1b[Z");
+        assert_eq!(encode(key(KeyCode::Char('b'), false, true), false, false, false).unwrap(), b"\x1bb", "Alt-b: a word back");
+        assert_eq!(encode(key(KeyCode::Char('c'), true, false), false, false, false).unwrap(), [3]);
+        assert_eq!(encode(key(KeyCode::Char('A'), false, false), true, false, false).unwrap(), b"A");
+        assert_eq!(encode(named(NamedKey::Backspace, false, true), false, false, false).unwrap(), b"\x1b\x7f");
+        let word = encode(named(NamedKey::Backspace, true, false), false, false, false).unwrap();
         assert_eq!(word, [if cfg!(windows) { 0x08 } else { 0x17 }]);
-        assert_eq!(encode(key(KeyCode::Char('@'), true, true), false, false).unwrap(), b"@", "AltGr's @ types @");
+        assert_eq!(encode(key(KeyCode::Char('@'), true, true), false, false, false).unwrap(), b"@", "AltGr's @ types @");
+    }
+
+    /// Under ConPTY, Ctrl-Space is the Windows key event, which PowerShell
+    /// reads as `Ctrl+Spacebar`; other keys are VT as before.
+    #[test]
+    fn ctrl_space_is_a_windows_key_event_under_conpty() {
+        assert_eq!(encode(key(KeyCode::Char(' '), true, false), false, false, true).unwrap(), b"\x1b[32;57;32;1;8;1_\x1b[32;57;32;0;8;1_");
+        assert_eq!(encode(key(KeyCode::Char(' '), true, false), true, false, true).unwrap(), b"\x1b[32;57;32;1;24;1_\x1b[32;57;32;0;24;1_", "with Shift");
+        assert_eq!(encode(key(KeyCode::Char('c'), true, false), false, false, true).unwrap(), [3]);
+        assert_eq!(encode(key(KeyCode::Char(' '), false, false), false, false, true).unwrap(), b" ");
     }
 
     #[test]

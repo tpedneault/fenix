@@ -157,9 +157,32 @@ pub(crate) fn key_cap(x0: f32, char_width: f32, y: f32, line_height: f32, start:
     Rect { x, y: y + inset_y, w, h: line_height - inset_y * 2.0 }
 }
 
+/// `r` cut at `right`, the inside edge of the pane it's drawn in: a
+/// page's chip or card past the pane's last column would otherwise be
+/// drawn over the pane beside it, where the text it's behind is cut
+/// off. `None` when too little of it is left to read as a box.
+pub(crate) fn clip_right(r: Rect, right: f32) -> Option<Rect> {
+    let w = r.w.min(right - r.x);
+    (w >= MIN_CLIPPED).then_some(Rect { w, ..r })
+}
+
+/// The narrowest a box cut by `clip_right` is still drawn.
+const MIN_CLIPPED: f32 = 6.0;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chip inside the pane is drawn whole; one running past its edge is
+    /// cut there; one past it isn't drawn at all.
+    #[test]
+    fn a_box_is_cut_at_the_panes_edge() {
+        let chip = Rect { x: 100.0, y: 10.0, w: 40.0, h: 16.0 };
+        assert_eq!(clip_right(chip, 500.0), Some(chip));
+        assert_eq!(clip_right(chip, 120.0), Some(Rect { w: 20.0, ..chip }));
+        assert_eq!(clip_right(chip, 103.0), None, "a sliver");
+        assert_eq!(clip_right(Rect { x: 700.0, ..chip }, 500.0), None, "beside the pane");
+    }
 
     const AREA: Rect = Rect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
     const ALL: Edges = Edges { left: true, top: true, right: true };

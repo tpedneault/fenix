@@ -9070,7 +9070,7 @@ impl App {
             let rows = text::TERMINAL_ROWS as u16;
             let cols = self.terminal_cols();
             let cwd = self.terminal_start_dir();
-            let shell = self.terminal_shell();
+            let shell = self.terminal_shell_to_spawn();
             let spawn = move || match &shell {
                 Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
                 None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
@@ -9265,6 +9265,16 @@ impl App {
         Some((program, words.collect()))
     }
 
+    /// `terminal_shell` as it's started: a PowerShell it names reports its
+    /// folder at each prompt, as the platform's own does
+    /// (`fenix_terminal::shell_args`).
+    fn terminal_shell_to_spawn(&self) -> Option<(String, Vec<String>)> {
+        self.terminal_shell().map(|(program, args)| {
+            let args = fenix_terminal::shell_args(&program, args);
+            (program, args)
+        })
+    }
+
     /// Starts a shell for one terminal buffer, sized to the pane
     /// currently showing it. Backgrounded for the same reason the
     /// panel's spawn is (see `toggle_terminal`): process creation is not
@@ -9275,7 +9285,7 @@ impl App {
         // Remembered rather than passed once, so a shell respawned after
         // `exit` comes back where it was rather than somewhere else.
         let cwd = self.terminal_buffer_cwds.get(&id).cloned();
-        let program = self.terminal_buffer_programs.get(&id).cloned().or_else(|| self.terminal_shell());
+        let program = self.terminal_buffer_programs.get(&id).cloned().or_else(|| self.terminal_shell_to_spawn());
         let spawn = move || match &program {
             Some((program, args)) => fenix_terminal::Terminal::spawn_program(rows, cols, cwd.as_deref(), program, args),
             None => fenix_terminal::Terminal::spawn_in(rows, cols, cwd.as_deref()),
@@ -9383,7 +9393,7 @@ impl App {
     fn write_terminal_buffer_input(&mut self, id: BufferId, keypress: KeyPress) {
         let shift = self.modifiers.shift_key();
         let Some(state) = self.terminal_buffers.get_mut(&id) else { return };
-        let Some(bytes) = terminal_keys::encode(keypress, shift, state.session.screen().application_cursor()) else { return };
+        let Some(bytes) = terminal_keys::encode(keypress, shift, state.session.screen().application_cursor(), state.session.win32_input()) else { return };
         let _ = state.session.write_input(&bytes);
     }
 
@@ -9548,7 +9558,7 @@ impl App {
     fn write_terminal_input(&mut self, keypress: KeyPress) {
         let shift = self.modifiers.shift_key();
         let Some(state) = self.terminal.as_mut() else { return };
-        let Some(bytes) = terminal_keys::encode(keypress, shift, state.session.screen().application_cursor()) else { return };
+        let Some(bytes) = terminal_keys::encode(keypress, shift, state.session.screen().application_cursor(), state.session.win32_input()) else { return };
         let _ = state.session.write_input(&bytes);
     }
 
@@ -19871,14 +19881,22 @@ impl App {
                 let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
                 let gutter_px = gutter_chars as f32 * char_width;
                 let visible_cols = text::cols_that_fit(rect.w - gutter_px, char_width);
-                self.ensure_cursor_visible_horizontally(visible_cols);
+                if !is_dashboard {
+                    self.ensure_cursor_visible_horizontally(visible_cols);
+                }
+            }
+            // Home and a page are laid out to the pane's width and never
+            // scroll sideways: their chips, cards and switches are placed by
+            // cell, so text scrolled under them would slide off its boxes.
+            if is_dashboard && self.pane_state(pane).scroll_col != 0 {
+                self.pane_state_mut(pane).scroll_col = 0;
             }
             // Every pane -- not just the focused one -- has its own
             // `PaneState` (seeded when it was created), so each renders
             // from its own independent cursor/scroll position.
             let pane_state = *self.pane_state(pane);
             // Sideways scrolling eases a column at a time.
-            let shown_scroll_col = self.scroll_col(pane, pane_state.scroll_col, now);
+            let shown_scroll_col = if is_dashboard { 0 } else { self.scroll_col(pane, pane_state.scroll_col, now) };
             let rendered_scroll = pane_state.rendered_scroll;
             // Scroll positions are display-row based once a scope is
             // collapsed. This mapping is the single conversion point back
@@ -20615,6 +20633,9 @@ impl App {
             // prepare`'s `TextArea` for this pane actually renders the
             // text, or these rects drift out of alignment with it.
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
+            // Where a page's boxes stop: its text is cut at the pane's edge,
+            // and a chip or card past it would be drawn over the pane beside.
+            let inside_right = pane.rect.x + pane.rect.w - (char_width * 0.5).round();
             // A page's cards: under its tints, so the focused row's still
             // shows on one. A little wider than their cells.
             for &(row, rows, a, b, fill, outline, tight) in &pane.home.cards {
@@ -20623,6 +20644,7 @@ impl App {
                 // A selected row among others keeps to its own rows, or it
                 // would run into the ones above and below.
                 let r = if tight { panels::row_rect(x, w, top, line_height, 0, rows.saturating_sub(1)) } else { panels::card_rect(x, w, top, line_height, 0, rows.saturating_sub(1)) };
+                let Some(r) = panels::clip_right(r, inside_right) else { continue };
                 let y = r.y + row as f32 * line_height;
                 let style = crate::rect::BoxStyle { radius: panels::CARD_RADIUS, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
                 bg_rect.push_box(gpu, r.x, y, r.w, r.h, style);
@@ -20638,6 +20660,7 @@ impl App {
             }
             for &(row, a, b, fill, outline, pill) in &pane.home.chips {
                 let r = panels::key_cap(content_x, char_width, row_y(row), line_height, a, b);
+                let Some(r) = panels::clip_right(r, inside_right) else { continue };
                 let radius = if pill { r.h / 2.0 } else { panels::KEY_RADIUS };
                 let style = crate::rect::BoxStyle { radius, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
                 bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
@@ -20645,6 +20668,9 @@ impl App {
             // A switch's knob, at the end it's on.
             for &(row, a, b, on) in &pane.home.switches {
                 let r = panels::key_cap(content_x, char_width, row_y(row), line_height, a, b);
+                if r.x + r.w > inside_right {
+                    continue;
+                }
                 let d = (r.h - 4.0).max(2.0);
                 let x = if on { r.x + r.w - d - 2.0 } else { r.x + 2.0 };
                 let color = if on { glyphon_to_rgba(theme.git_staged) } else { glyphon_to_rgba(theme.gutter_fg) };
@@ -20652,7 +20678,11 @@ impl App {
             }
             for &(row, start, end) in &pane.home.rules {
                 let y = (row_y(row) + line_height / 2.0).round();
-                bg_rect.push_rect(gpu, content_x + start as f32 * char_width, y, (end - start) as f32 * char_width, 1.0, pane.home.rule_color);
+                let x = content_x + start as f32 * char_width;
+                let w = ((end - start) as f32 * char_width).min(inside_right - x);
+                if w > 0.0 {
+                    bg_rect.push_rect(gpu, x, y, w, 1.0, pane.home.rule_color);
+                }
             }
             // A canvas's hairlines down it, in the middle of their cells.
             for &(col, row, rows) in &pane.home.vertical_rules {

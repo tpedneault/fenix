@@ -318,13 +318,16 @@ impl App {
     }
 
     /// Where a relative path a terminal printed is read from: where the
-    /// shell said it is, else where it started, else the project.
+    /// shell said it is, else where it started, else the project. Where it
+    /// started is the session's own, not where a terminal opened now
+    /// would: the panel's start follows the buffer in front.
     fn terminal_base_dir(&self, target: TermTarget) -> PathBuf {
-        let said = self.term_session(target).and_then(|s| s.cwd()).map(Path::to_path_buf);
-        let started = match target {
+        let session = self.term_session(target);
+        let said = session.and_then(|s| s.cwd()).map(Path::to_path_buf);
+        let started = session.and_then(|s| s.start_dir()).map(Path::to_path_buf).or_else(|| match target {
             TermTarget::Panel => self.terminal_start_dir(),
             TermTarget::Buffer(id) => self.terminal_buffer_cwds.get(&id).cloned(),
-        };
+        });
         said.or(started).unwrap_or_else(|| self.find_file_root())
     }
 
