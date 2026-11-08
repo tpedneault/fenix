@@ -18846,7 +18846,7 @@ impl App {
                 // lines up like every other tab.
                 let is_home = self.workspaces.active_workspace().home == Some(tab.buffer);
                 let name = self.tab_label(tab.buffer);
-                let icon_ch = if is_home { icon::HOME } else { icon::navigation_icon_for(&name) };
+                let icon_ch = if is_home { icon::HOME } else { self.page_tab_icon(tab.buffer).unwrap_or_else(|| icon::navigation_icon_for(&name)) };
                 let dirty = self
                     .buffers
                     .get(tab.buffer)
@@ -18897,8 +18897,16 @@ impl App {
         panels::Look::from_setting(self.config.text_value("appearance.panels"))
     }
 
+    /// Whether `pane` has a breadcrumb row under its tabs: a file's, or
+    /// a text buffer's, does -- where in it the cursor is; a page or a
+    /// tool's buffer doesn't, its tab already says what it is, and starts
+    /// right under the tabs.
     fn pane_has_breadcrumb(&self, pane: fenix_window::WindowId) -> bool {
-        self.tab_style().is_some() && !self.pane_titles.contains_key(&pane)
+        if self.tab_style().is_none() || self.pane_titles.contains_key(&pane) {
+            return false;
+        }
+        let Some(ob) = self.windows().content(pane).and_then(|b| self.buffers.get(*b)) else { return true };
+        ob.buffer.path().is_some() || matches!(ob.kind, BufferKind::Text | BufferKind::Table)
     }
 
     fn frame_geometry(&self, window_width: f32, sidebar_px: f32, terminal_h: f32, modeline_top: f32) -> FrameGeometry {

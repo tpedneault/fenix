@@ -88,8 +88,36 @@ impl App {
         if ws.home == Some(id) {
             ws.name.clone()
         } else {
-            self.buffer_display_name(id)
+            plain_name(&self.buffer_display_name(id))
         }
+    }
+
+    /// The icon a tab shows for a page or a tool's buffer -- Settings'
+    /// gear, Search's glass, Git's branch -- none for a file, whose icon
+    /// is its language's.
+    pub(super) fn page_tab_icon(&self, id: BufferId) -> Option<char> {
+        use super::pages::PageModel as P;
+        let ob = self.buffers.get(id)?;
+        let glyph = match ob.kind {
+            BufferKind::Git => crate::icon::GIT_BRANCH,
+            BufferKind::Debug => crate::icon::BUG,
+            BufferKind::Terminal => crate::icon::TERMINAL,
+            BufferKind::Diff | BufferKind::Merge => crate::icon::DIFF,
+            BufferKind::Graph => crate::icon::HISTORY,
+            BufferKind::Page => match self.pages.get(&id).map(|s| &s.model) {
+                Some(P::UserSettings(_)) => crate::icon::GEAR,
+                Some(P::Search(_)) => crate::icon::SEARCH,
+                Some(P::Git(_)) | Some(P::Compare(_)) | Some(P::Rebase(_)) => crate::icon::GIT_BRANCH,
+                Some(P::Log(_)) => crate::icon::HISTORY,
+                Some(P::Hub(_)) | Some(P::Wizard(_)) | Some(P::Doctor(_)) => crate::icon::PROJECTS,
+                Some(P::Notifications(_)) => crate::icon::BELL,
+                Some(P::Extensions(_)) | Some(P::ExtensionOutput(_)) => crate::icon::PUZZLE,
+                Some(P::Agent(_)) | Some(P::AgentReview(_)) | Some(P::AgentUsage(_)) => crate::icon::SPARK,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        Some(glyph)
     }
 
     /// The active workspace's Home, made if it has none yet: a Home
@@ -426,9 +454,33 @@ impl App {
     }
 }
 
+
+/// A buffer's name as a tab shows it: a page's or a tool's Emacs-style
+/// `*git: orbit-ground*` as `Git · orbit-ground`, capitalised, without
+/// the stars; a file's as it is.
+pub(super) fn plain_name(name: &str) -> String {
+    let Some(inner) = name.strip_prefix('*').and_then(|n| n.strip_suffix('*')).filter(|n| !n.is_empty()) else { return name.to_string() };
+    let inner = inner.replacen(": ", " · ", 1);
+    let mut chars = inner.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => inner,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pages_tab_is_its_plain_name() {
+        assert_eq!(plain_name("*git: orbit-ground*"), "Git · orbit-ground");
+        assert_eq!(plain_name("*settings*"), "Settings");
+        assert_eq!(plain_name("*search: HEADER*"), "Search · HEADER");
+        assert_eq!(plain_name("frames.rs"), "frames.rs");
+        assert_eq!(plain_name("**"), "**");
+    }
+
 
     fn ids(n: usize) -> Vec<BufferId> {
         let mut buffers = fenix_buffers::BufferList::new();

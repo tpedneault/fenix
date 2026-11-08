@@ -31,6 +31,18 @@ pub const ICON_FONT_FAMILY: &str = "Symbols Nerd Font Mono";
 const FOLDER: char = '\u{f07b}'; // nf-fa-folder
 /// A workspace's Home tab.
 pub const HOME: char = '\u{f015}'; // nf-fa-home
+// A page's or a tool's tab (`App::page_tab_icon`).
+pub const GEAR: char = '\u{f013}'; // nf-fa-cog
+pub const SEARCH: char = '\u{f002}'; // nf-fa-search
+pub const GIT_BRANCH: char = '\u{e725}'; // nf-dev-git_branch
+pub const HISTORY: char = '\u{f1da}'; // nf-fa-history
+pub const PROJECTS: char = '\u{f07c}'; // nf-fa-folder_open
+pub const BELL: char = '\u{f0f3}'; // nf-fa-bell
+pub const PUZZLE: char = '\u{f12e}'; // nf-fa-puzzle_piece
+pub const SPARK: char = '\u{f0e7}'; // nf-fa-bolt
+pub const TERMINAL: char = '\u{f120}'; // nf-fa-terminal
+pub const BUG: char = '\u{f188}'; // nf-fa-bug
+pub const DIFF: char = '\u{f440}'; // nf-oct-diff
 const FOLDER_OPEN: char = '\u{f07c}'; // nf-fa-folder_open
 const FILE_GENERIC: char = '\u{f15b}'; // nf-fa-file
 const FILE_CODE: char = '\u{f1c9}'; // nf-fa-file_code_o -- fallback for a recognized-but-iconless extension
