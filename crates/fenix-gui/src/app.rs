@@ -39,6 +39,7 @@ mod debug_breakpoints;
 mod panels;
 mod terminal_view;
 mod terminal_mouse;
+mod terminal_keys;
 pub(crate) use debug_host::{debug_dock_height, DOCK_TEXT_X, DOCK_TEXT_Y};
 pub(crate) use terminal_view::{BOLD as TERM_BOLD, ITALIC as TERM_ITALIC};
 pub(crate) use projects::window_title;
@@ -3562,42 +3563,6 @@ fn fetch_git_refresh_data(repo_root: &Path) -> GitRefreshData {
     GitRefreshData { status, files, branches, commits, stashes, in_progress, sides }
 }
 
-/// Encodes one keypress into the raw bytes a real terminal would send
-/// for it -- `None` for anything with no sensible terminal meaning
-/// (function keys, mouse, etc., simply not forwarded in v1). Covers
-/// ordinary interactive use (shell prompts, REPLs, pagers, basic arrow-
-/// key navigation inside programs like `less`) -- disclosed cuts:
-/// no mouse reporting, no bracketed paste, no F-keys, no application-
-/// cursor-mode variants (a full terminfo-correct implementation is a
-/// much bigger, separate undertaking than this).
-fn encode_terminal_key(keypress: KeyPress) -> Option<Vec<u8>> {
-    if keypress.mods.ctrl {
-        if let KeyCode::Char(c) = keypress.code {
-            let upper = c.to_ascii_uppercase();
-            if upper.is_ascii_uppercase() {
-                return Some(vec![upper as u8 - b'A' + 1]);
-            }
-        }
-        return None;
-    }
-    match keypress.code {
-        KeyCode::Char(c) => Some(c.to_string().into_bytes()),
-        KeyCode::Named(FenixNamedKey::Enter) => Some(b"\r".to_vec()),
-        KeyCode::Named(FenixNamedKey::Backspace) => Some(vec![0x7f]),
-        KeyCode::Named(FenixNamedKey::Tab) => Some(b"\t".to_vec()),
-        KeyCode::Named(FenixNamedKey::Escape) => Some(vec![0x1b]),
-        KeyCode::Named(FenixNamedKey::Left) => Some(b"\x1b[D".to_vec()),
-        KeyCode::Named(FenixNamedKey::Right) => Some(b"\x1b[C".to_vec()),
-        KeyCode::Named(FenixNamedKey::Up) => Some(b"\x1b[A".to_vec()),
-        KeyCode::Named(FenixNamedKey::Down) => Some(b"\x1b[B".to_vec()),
-        KeyCode::Named(FenixNamedKey::Home) => Some(b"\x1b[H".to_vec()),
-        KeyCode::Named(FenixNamedKey::End) => Some(b"\x1b[F".to_vec()),
-        KeyCode::Named(FenixNamedKey::PageUp) => Some(b"\x1b[5~".to_vec()),
-        KeyCode::Named(FenixNamedKey::PageDown) => Some(b"\x1b[6~".to_vec()),
-        KeyCode::Named(FenixNamedKey::Delete) => Some(b"\x1b[3~".to_vec()),
-    }
-}
-
 /// The standard xterm 256-color palette -- 0-15 the fixed default
 /// 16-color set (verified against xterm's own documented defaults, not
 /// guessed), 16-231 a closed-form 6x6x6 RGB cube (component levels
@@ -4693,6 +4658,12 @@ pub struct App {
     terminal_buffer_cwds: HashMap<BufferId, PathBuf>,
     /// What's selected in a terminal with the mouse (`terminal_mouse`).
     term_select: Option<terminal_mouse::TermSelection>,
+    /// The link `Ctrl` is held over in a terminal: which, its row and
+    /// columns (`terminal_mouse::terminal_hover`).
+    term_hover: Option<(terminal_mouse::TermTarget, u16, usize, usize)>,
+    /// A run of clicks in a terminal: a second selects a word, a third
+    /// the line.
+    term_clicks: crate::mouse::ClickCounter,
     /// The pane a jump just moved the cursor in (`mark_jump`): its next
     /// scroll centres the cursor when it's out of view.
     jump_view: Option<fenix_window::WindowId>,
@@ -5883,6 +5854,8 @@ impl App {
             terminal_buffer_labels: HashMap::new(),
             terminal_buffer_cwds: HashMap::new(),
             term_select: None,
+            term_hover: None,
+            term_clicks: crate::mouse::ClickCounter::default(),
             jump_view: None,
             terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
@@ -9406,12 +9379,54 @@ impl App {
     }
 
     /// Writes one keypress to a pane-resident terminal, encoded exactly
-    /// as the panel encodes its own (`encode_terminal_key`) -- a key
+    /// as the panel encodes its own (`terminal_keys::encode`) -- a key
     /// with no terminal meaning is dropped rather than guessed at.
     fn write_terminal_buffer_input(&mut self, id: BufferId, keypress: KeyPress) {
-        let Some(bytes) = encode_terminal_key(keypress) else { return };
+        let shift = self.modifiers.shift_key();
         let Some(state) = self.terminal_buffers.get_mut(&id) else { return };
+        let Some(bytes) = terminal_keys::encode(keypress, shift, state.session.screen().application_cursor()) else { return };
         let _ = state.session.write_input(&bytes);
+    }
+
+    /// F1 to F12 while a terminal has the keyboard: its program's, unless
+    /// a debug session is running, whose F5, F10 and F11 step it from
+    /// anywhere. True when the key went to the terminal.
+    fn terminal_function_key(&mut self, key: &NamedKey) -> bool {
+        if self.debug_session.is_some() {
+            return false;
+        }
+        let n = match key {
+            NamedKey::F1 => 1,
+            NamedKey::F2 => 2,
+            NamedKey::F3 => 3,
+            NamedKey::F4 => 4,
+            NamedKey::F5 => 5,
+            NamedKey::F6 => 6,
+            NamedKey::F7 => 7,
+            NamedKey::F8 => 8,
+            NamedKey::F9 => 9,
+            NamedKey::F10 => 10,
+            NamedKey::F11 => 11,
+            NamedKey::F12 => 12,
+            _ => return false,
+        };
+        let (shift, alt, ctrl) = (self.modifiers.shift_key(), self.modifiers.alt_key(), self.modifiers.control_key());
+        let Some(bytes) = terminal_keys::encode_function(n, shift, alt, ctrl) else { return false };
+        let session = if self.terminal_focused {
+            self.terminal.as_mut().map(|t| &mut *t.session)
+        } else {
+            match self.active_terminal_buffer() {
+                Some(id) => self.terminal_buffers.get_mut(&id).map(|t| &mut *t.session),
+                None => None,
+            }
+        };
+        match session {
+            Some(session) => {
+                let _ = session.write_input(&bytes);
+                true
+            }
+            None => false,
+        }
     }
 
     /// How many rows and columns of shell fit in `pane`, from the same
@@ -9532,8 +9547,9 @@ impl App {
     /// if it does). Errors (the shell's pipe closed, e.g. it just
     /// exited) are swallowed -- the next `SPC o t` respawns.
     fn write_terminal_input(&mut self, keypress: KeyPress) {
-        let Some(bytes) = encode_terminal_key(keypress) else { return };
+        let shift = self.modifiers.shift_key();
         let Some(state) = self.terminal.as_mut() else { return };
+        let Some(bytes) = terminal_keys::encode(keypress, shift, state.session.screen().application_cursor()) else { return };
         let _ = state.session.write_input(&bytes);
     }
 
@@ -15856,6 +15872,10 @@ impl App {
         }
 
         if let Key::Named(named) = &event.logical_key {
+            if self.terminal_function_key(named) {
+                self.wake_caret();
+                return;
+            }
             if self.debug_function_key(named) {
                 return;
             }
@@ -17365,7 +17385,12 @@ impl App {
         };
         let debug_indicator = self.debug_modeline_segment();
         // How to get the keyboard back, while a shell has it (#42).
-        let terminal_hint = if self.terminal_has_keyboard() { "   Ctrl-\\ back to the editor" } else { "" };
+        let terminal_hint = match self.terminal_focused.then(|| self.terminal_title(terminal_mouse::TermTarget::Panel)).flatten() {
+            // The panel has no title of its own: what it runs is here.
+            Some(what) => format!("   {what}   Ctrl-\\ back to the editor"),
+            None if self.terminal_has_keyboard() => "   Ctrl-\\ back to the editor".to_string(),
+            None => String::new(),
+        };
         let suffix = format!(
             "{filename}{modified}{terminal_hint}{workspace_indicator}{git_indicator}{recording_indicator}{feature_indicators}{diagnostics_indicator}{search_indicator}{debug_indicator}   Ln {}, Col {}   {details} ",
             line + 1,
@@ -19012,6 +19037,9 @@ impl App {
             icon
         } else if self.tab_drag.is_some() {
             winit::window::CursorIcon::Grabbing
+        } else if self.term_hover.is_some() {
+            // Ctrl over a terminal's link: a click follows it.
+            winit::window::CursorIcon::Pointer
         } else {
             cursor_icon_for(&geometry, pos, line_height)
         };
@@ -19458,6 +19486,7 @@ impl App {
         let terminal_h = if show_terminal { text::terminal_height(line_height) } else { 0.0 };
         let terminal_render = self.terminal_panel_render();
         let terminal_selection = self.terminal_selection_for(terminal_mouse::TermTarget::Panel);
+        let terminal_link = self.terminal_hover_for(terminal_mouse::TermTarget::Panel);
         let dock_h = self.debug_dock_px();
         // The sidebar's rows: as many as fit its panel, above the terminal
         // and the debug dock, which run under it.
@@ -19708,10 +19737,15 @@ impl App {
                         let (row, col) = screen.cursor_position();
                         (row as usize, col as usize)
                     });
+                // Its name, then what it runs and where.
+                let title = match self.terminal_title(terminal_mouse::TermTarget::Buffer(buffer_id)) {
+                    Some(what) => format!("{} · {what}", pane_title.trim_matches('*')),
+                    None => pane_title,
+                };
                 panes_render.push(PaneRender {
                     pane,
                     rect,
-                    title: pane_title,
+                    title,
                     spans,
                     hl_row: None,
                     hl_row_strong: false,
@@ -19736,7 +19770,11 @@ impl App {
                     row_accents: Vec::new(),
                     indent_guides: Vec::new(),
                     home: home::HomeOverlay::default(),
-                    extra: motion_host::PaneExtras { underlines, span_styles: styles, ..Default::default() },
+                    extra: motion_host::PaneExtras {
+                        underlines: underlines.into_iter().chain(self.terminal_hover_for(terminal_mouse::TermTarget::Buffer(buffer_id)).map(|(r, a, b)| (r, a, b, theme.caret))).collect(),
+                        span_styles: styles,
+                        ..Default::default()
+                    },
                 });
                 continue;
             }
@@ -20818,6 +20856,9 @@ impl App {
                 for &(row, col_start, col_end, color) in &view.underlines {
                     bg_rect.push_rect(gpu, cell_x(col_start), (row_y(row) + line_height - 2.0).round(), (col_end - col_start) as f32 * char_width, 1.0, color);
                 }
+                if let Some((row, a, b)) = terminal_link {
+                    bg_rect.push_rect(gpu, cell_x(a), (row_y(row) + line_height - 2.0).round(), (b - a) as f32 * char_width, 1.0, theme.caret);
+                }
                 for &(row, col_start, col_end) in &terminal_selection {
                     bg_rect.push_rect(gpu, cell_x(col_start), row_y(row), (col_end - col_start) as f32 * char_width, line_height, theme.selection);
                 }
@@ -21869,6 +21910,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                // Ctrl pressed or let go over a terminal's link.
+                self.terminal_hover(self.cursor_pos);
+                if let (Some(pos), Some((w, h))) = (self.cursor_pos, self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))) {
+                    self.update_hover_cursor(pos, w, h);
+                }
             }
             // Alt-Tabbing (or otherwise switching) away from the window
             // while a surface has the keyboard releases it: keys typed
@@ -21902,6 +21948,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
                 }
                 self.code_surface_pointer(pos, None);
                 self.code_page_pointer(pos, None);
+                self.terminal_hover(Some(pos));
                 if let Some((window_width, window_height)) = self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32)) {
                     self.update_hover_cursor(pos, window_width, window_height);
                 }
@@ -28264,17 +28311,6 @@ configure_board stm32
             }
         }
         out
-    }
-
-    #[test]
-    fn encode_terminal_key_covers_printable_chars_and_common_control_sequences() {
-        assert_eq!(encode_terminal_key(KeyPress::char('a')), Some(b"a".to_vec()));
-        assert_eq!(encode_terminal_key(KeyPress::char('c').with_ctrl()), Some(vec![0x03])); // Ctrl-C
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Enter)), Some(b"\r".to_vec()));
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Backspace)), Some(vec![0x7f]));
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Escape)), Some(vec![0x1b]));
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Left)), Some(b"\x1b[D".to_vec()));
-        assert_eq!(encode_terminal_key(KeyPress::named(FenixNamedKey::Up)), Some(b"\x1b[A".to_vec()));
     }
 
     #[test]

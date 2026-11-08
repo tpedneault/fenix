@@ -1674,11 +1674,28 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   -- opens the file at that line beside the terminal; on a URL, in the
   browser. A relative path is read from where the shell says it is
   (`OSC 7`, or `OSC 9;9` from a PowerShell prompt), else where it
-  started, else the project.
+  started, else the project. Holding `Ctrl` over one underlines it and
+  shows a hand. A double click selects a word -- a path, a URL or a hash
+  whole -- and a triple click the line; a selection stays on its text as
+  more output comes in or the view scrolls back.
 
-  v1 limitations: no mouse reporting, no F-keys, no
-  application-cursor-mode variants -- covers ordinary shell/REPL/pager
-  use, not a full terminfo-correct implementation. Terminal *queries*
+  **Keys.** Every key reaches the shell as xterm sends it: `Ctrl`,
+  `Shift` and `Alt` on the arrows, Home, End, Page Up and Down and Delete
+  (`Ctrl-Left` a word back, `Shift-Right` selecting in PSReadLine),
+  `Ctrl-Space` (PowerShell's menu completion), `Shift-Tab`,
+  `Ctrl-Backspace` deleting a word, `Alt` as an `ESC` first, F1-F12, and
+  the arrows' application mode when a program asks for it. While a debug
+  session runs, F5, F10 and F11 still step it.
+
+  **Titles.** A terminal in a pane is titled with what it runs and
+  where -- `terminal 1 · pwsh · orbit-ground` -- and the panel says the
+  same on the modeline. A shell that marks its prompts (`OSC 133`, as VS
+  Code's and Windows Terminal's shell integrations do) adds `· running`
+  while a command runs.
+
+  Limitations: no mouse reporting to programs -- covers shells, REPLs,
+  pagers and most full-screen tools, not a full terminfo-correct
+  implementation. Terminal *queries*
   are answered, though (cursor position, device attributes), which is
   not optional on Windows: ConPTY opens every session by asking where
   the cursor is and produces no further output at all until it is told

@@ -119,6 +119,10 @@ the other way round after `\v`.
 | `SPC o .` | Do what the newest notification offers (a click on it does too) |
 | `SPC o x` / `SPC o X` | Dismiss the newest notification / all of them (any button but the left on one dismisses it) |
 | `SPC o T` | Open a shell in the focused pane |
+| In a terminal: `Ctrl-Shift-C` / `Ctrl-Shift-V` | Copy the selection / paste (a right click does whichever fits) |
+| In a terminal: double / triple click | Select a word (a path or URL whole) / the line |
+| In a terminal: `Ctrl`-click | Open the `path:line:col` or URL under the pointer (`Ctrl` alone underlines it) |
+| In a terminal: `Ctrl-\` | Give the keyboard back to the editor; every other key goes to the shell, `Ctrl`, `Shift` and `Alt` as xterm sends them |
 | `SPC d d` | Containers (the `fenix.containers` extension, when installed) |
 | `SPC d p` / `SPC d b` | Its performance page / build the project's `Dockerfile` |
 | `SPC ,` | Every setting, on one page -- search, change, reset |

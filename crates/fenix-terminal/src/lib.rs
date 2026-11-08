@@ -24,6 +24,11 @@ pub struct Terminal {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
     parser: vt100::Parser<query::QueryReplies>,
+    /// Rows that have gone up into the history since the shell started
+    /// (`top_row`).
+    scrolled: u64,
+    /// What it runs, as its file is named: `pwsh`, `bash`.
+    program: String,
 }
 
 impl Terminal {
@@ -66,6 +71,7 @@ impl Terminal {
     }
 
     fn spawn_command(rows: u16, cols: u16, cwd: Option<&std::path::Path>, mut command: CommandBuilder) -> std::io::Result<(Terminal, Box<dyn Read + Send>)> {
+        let program = command.get_argv().first().map(|p| program_name(&p.to_string_lossy())).unwrap_or_default();
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -85,7 +91,7 @@ impl Terminal {
         let writer = pair.master.take_writer().map_err(|err| std::io::Error::other(err.to_string()))?;
         let writer: Box<dyn Write + Send> = Box::new(fenix_rpc::QueueWriter::spawn("fenix-terminal-writer", writer)?);
         let parser = vt100::Parser::new_with_callbacks(rows, cols, SCROLLBACK_LINES, query::QueryReplies::default());
-        Ok((Terminal { child, writer, master: pair.master, parser }, reader))
+        Ok((Terminal { child, writer, master: pair.master, parser, scrolled: 0, program }, reader))
     }
 
     /// Feeds raw PTY output bytes (from the caller's own reader thread)
@@ -99,7 +105,12 @@ impl Terminal {
     /// so a host that skipped the step would see an empty panel and a
     /// live shell with no hint of why.
     pub fn process(&mut self, bytes: &[u8]) {
+        let before = self.history_len();
         self.parser.process(bytes);
+        let after = self.history_len();
+        // Once the history is full it stays the same length as rows go up
+        // through it; then the rows that went are the ones that came in.
+        self.scrolled += if after > before { (after - before) as u64 } else if after == SCROLLBACK_LINES && before == SCROLLBACK_LINES { bytes.iter().filter(|&&b| b == b'\n').count() as u64 } else { 0 };
         let replies = self.parser.callbacks_mut().take();
         if !replies.is_empty() {
             // A failed write means the shell is gone, which `is_alive`
@@ -132,6 +143,34 @@ impl Terminal {
     pub fn row_text(&self, row: u16) -> String {
         let (_, cols) = self.parser.screen().size();
         self.parser.screen().contents_between(row, 0, row, cols)
+    }
+
+    /// What the terminal runs, as its file is named: `pwsh`, `bash`.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
+    /// Whether a command is running in it, when its shell marks its
+    /// prompts (`OSC 133`); None when it doesn't say.
+    pub fn running(&self) -> Option<bool> {
+        self.parser.callbacks().running
+    }
+
+    /// How many rows the history holds: the most the view scrolls back.
+    fn history_len(&mut self) -> usize {
+        let screen = self.parser.screen_mut();
+        let at = screen.scrollback();
+        screen.set_scrollback(usize::MAX);
+        let len = screen.scrollback();
+        screen.set_scrollback(at);
+        len
+    }
+
+    /// The first row shown, counted from the first the shell ever printed
+    /// -- a place in everything it's printed that stays the same as more
+    /// comes in and the view scrolls. Row `r` shown is `top_row() + r`.
+    pub fn top_row(&self) -> u64 {
+        self.scrolled.saturating_sub(self.parser.screen().scrollback() as u64)
     }
 
     /// The folder the shell last said it's in (`OSC 7` / `OSC 9;9`), if
@@ -229,6 +268,13 @@ fn shell_command() -> CommandBuilder {
     command
 }
 
+/// A program's name from its path: its file name, `.exe` dropped.
+fn program_name(path: &str) -> String {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".exe") { name[..name.len() - 4].to_string() } else { name.to_string() }
+}
+
 /// What a paste of `text` sends: line breaks as `\r`, escapes dropped,
 /// and the bracketed-paste markers around it when `bracketed`.
 fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
@@ -244,6 +290,37 @@ fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// As output scrolls rows up into the history, `top_row` counts them,
+    /// and scrolling the view back moves it the other way: a row's place
+    /// in everything printed stays the same.
+    #[cfg(unix)]
+    #[test]
+    fn top_row_counts_the_rows_gone_up_into_the_history() {
+        let (mut term, mut reader) = Terminal::spawn_program(10, 40, None, "sh", &["-c".to_string(), "seq 1 25; sleep 2".to_string()]).expect("sh");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut buf = [0u8; 4096];
+        while Instant::now() < deadline && !term.screen().contents().contains("25") {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => term.process(&buf[..n]),
+            }
+        }
+        // 25 lines and the cursor's row on a 10-row screen: 16 went up.
+        assert_eq!(term.top_row(), 16, "{}", term.screen().contents());
+        assert_eq!(term.row_text(0).trim(), "17");
+        term.scroll(5);
+        assert_eq!(term.top_row(), 11, "scrolled back five");
+        assert_eq!(term.row_text(0).trim(), "12");
+        term.kill();
+    }
+
+    #[test]
+    fn a_programs_name_is_its_file_name() {
+        assert_eq!(program_name(r"C:\Program Files\PowerShell\7\pwsh.exe"), "pwsh");
+        assert_eq!(program_name("powershell.exe"), "powershell");
+        assert_eq!(program_name("/bin/bash"), "bash");
+    }
 
     /// A paste's lines end in Enter, it's bracketed when the program
     /// asked, and nothing in it can close the bracket early.

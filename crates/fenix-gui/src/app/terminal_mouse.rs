@@ -26,14 +26,17 @@ pub(super) enum TermTarget {
     Buffer(BufferId),
 }
 
-/// Cells of a terminal selected with the mouse: (row, column) on its
-/// screen as shown, where the drag started and where it is.
+/// Cells of a terminal selected with the mouse: (row, column), the row
+/// counted from the first its shell printed (`Terminal::top_row`), so the
+/// selection stays on its text as more comes in or the view scrolls.
+/// Where the drag started and where it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct TermSelection {
     pub target: TermTarget,
-    pub anchor: (u16, u16),
-    pub head: (u16, u16),
-    /// The button is still down.
+    pub anchor: (u64, u16),
+    pub head: (u64, u16),
+    /// The button is still down, after a single click: a drag goes on
+    /// from it. A double or triple click's word or line stays as it is.
     pub dragging: bool,
 }
 
@@ -58,17 +61,49 @@ pub(super) fn link_in(row: &str, col: usize) -> Option<TermLink> {
     looks_like_a_path.then_some(TermLink::File { path, line: at.line, col: at.column })
 }
 
-/// The cells from `a` to `b` (either way round), `cols` wide, as rows:
-/// (row, first column, end column).
-pub(super) fn selection_segments(a: (u16, u16), b: (u16, u16), cols: u16) -> Vec<(usize, usize, usize)> {
+/// The link under column `col` of `row`, and the columns it takes: what
+/// a `Ctrl` held over it underlines.
+pub(super) fn link_span_in(row: &str, col: usize) -> Option<(TermLink, usize, usize)> {
+    let link = link_in(row, col)?;
+    let chars: Vec<char> = row.chars().collect();
+    let stop = |c: char| c.is_whitespace() || "()[]<>\"'`|".contains(c);
+    let start = (0..col).rev().take_while(|&i| !stop(chars[i])).last().unwrap_or(col);
+    let mut end = (col..chars.len()).take_while(|&i| !stop(chars[i])).last()? + 1;
+    while end > start && matches!(chars[end - 1], '.' | ',' | ';' | ':' | '!' | '?') {
+        end -= 1;
+    }
+    Some((link, start, end))
+}
+
+/// The cells from `a` to `b` (either way round), rows counted from the
+/// first printed, as the rows of a screen `rows` x `cols` whose first is
+/// `top` shows them: (row, first column, end column). A part scrolled out
+/// of view isn't drawn.
+pub(super) fn selection_segments(a: (u64, u16), b: (u64, u16), top: u64, rows: u16, cols: u16) -> Vec<(usize, usize, usize)> {
     let (from, to) = if a <= b { (a, b) } else { (b, a) };
+    let shown = top..top + rows as u64;
     (from.0..=to.0)
+        .filter(|row| shown.contains(row))
         .map(|row| {
             let start = if row == from.0 { from.1 } else { 0 };
             let end = if row == to.0 { to.1 + 1 } else { cols };
-            (row as usize, start as usize, end.min(cols).max(start) as usize)
+            ((row - top) as usize, start as usize, end.min(cols).max(start) as usize)
         })
         .collect()
+}
+
+/// The word under column `col` of `row`: a run of anything but spaces,
+/// brackets and quotes -- a path, a URL or a hash whole, as a terminal
+/// selects it. (first column, last column), or none on a space.
+pub(super) fn word_in(row: &str, col: usize) -> Option<(usize, usize)> {
+    let chars: Vec<char> = row.chars().collect();
+    let stop = |c: char| c.is_whitespace() || "()[]<>{}\"'`|,;".contains(c);
+    if col >= chars.len() || stop(chars[col]) {
+        return None;
+    }
+    let start = (0..col).rev().take_while(|&i| !stop(chars[i])).last().unwrap_or(col);
+    let end = (col..chars.len()).take_while(|&i| !stop(chars[i])).last().unwrap_or(col);
+    Some((start, end))
 }
 
 impl App {
@@ -114,6 +149,29 @@ impl App {
         Some((target, (row, col)))
     }
 
+    /// The pointer at `pos`, `Ctrl` held or not: the link under it, in a
+    /// terminal, is underlined and the pointer a hand -- what a click
+    /// would follow. True when there's one.
+    pub(super) fn terminal_hover(&mut self, pos: Option<(f32, f32)>) -> bool {
+        let found = pos.filter(|_| self.modifiers.control_key()).and_then(|pos| {
+            let (target, (row, col)) = self.terminal_cell_at(pos)?;
+            let text = self.term_session(target)?.row_text(row);
+            let (_, a, b) = link_span_in(&text, col as usize)?;
+            Some((target, row, a, b))
+        });
+        if found != self.term_hover {
+            self.term_hover = found;
+            self.wake_caret();
+        }
+        found.is_some()
+    }
+
+    /// The link `Ctrl` is over in `target`, to underline: (row, first
+    /// column, end).
+    pub(super) fn terminal_hover_for(&self, target: TermTarget) -> Option<(usize, usize, usize)> {
+        self.term_hover.filter(|h| h.0 == target).map(|(_, row, a, b)| (row as usize, a, b))
+    }
+
     /// The left button down at `pos`: on a terminal's text, a selection
     /// starts there -- or, with `Ctrl`, the link there is followed.
     /// True when the click was the link's alone.
@@ -129,7 +187,21 @@ impl App {
                 return true;
             }
         }
-        self.term_select = Some(TermSelection { target, anchor: cell, head: cell, dragging: true });
+        // A second click selects the word, a third the line.
+        let clicks = self.term_clicks.press(Instant::now(), pos);
+        let Some(session) = self.term_session(target) else { return false };
+        let top = session.top_row();
+        let row = top + cell.0 as u64;
+        let text = session.row_text(cell.0);
+        let (anchor, head, dragging) = match clicks {
+            2 => match word_in(&text, cell.1 as usize) {
+                Some((a, b)) => ((row, a as u16), (row, b as u16), false),
+                None => ((row, cell.1), (row, cell.1), true),
+            },
+            3 => ((row, 0), (row, text.trim_end().chars().count().saturating_sub(1) as u16), false),
+            _ => ((row, cell.1), (row, cell.1), true),
+        };
+        self.term_select = Some(TermSelection { target, anchor, head, dragging });
         false
     }
 
@@ -138,6 +210,8 @@ impl App {
     pub(super) fn terminal_mouse_drag(&mut self, pos: (f32, f32)) -> bool {
         let Some(sel) = self.term_select.filter(|s| s.dragging) else { return false };
         if let Some((target, cell)) = self.terminal_cell_at(pos) {
+            let top = self.term_session(target).map(|s| s.top_row()).unwrap_or(0);
+            let cell = (top + cell.0 as u64, cell.1);
             if target == sel.target && cell != sel.head {
                 self.term_select = Some(TermSelection { head: cell, ..sel });
                 self.wake_caret();
@@ -149,7 +223,9 @@ impl App {
     /// The button let go: a drag's selection stays; a click's is none.
     pub(super) fn terminal_mouse_release(&mut self) {
         if let Some(sel) = self.term_select {
-            self.term_select = (sel.anchor != sel.head).then_some(TermSelection { dragging: false, ..sel });
+            // A click without a drag selects nothing; a word or a line
+            // double or triple clicked stays, one letter long or not.
+            self.term_select = (!sel.dragging || sel.anchor != sel.head).then_some(TermSelection { dragging: false, ..sel });
         }
     }
 
@@ -186,8 +262,18 @@ impl App {
 
     /// Copies `target`'s selection and lets it go. False when it has none.
     pub(super) fn terminal_copy(&mut self, target: TermTarget) -> bool {
-        let Some(sel) = self.term_select.filter(|s| s.target == target && s.anchor != s.head) else { return false };
-        let Some(text) = self.term_session(target).map(|s| s.text_between(sel.anchor, sel.head)) else { return false };
+        let Some(sel) = self.term_select.filter(|s| s.target == target && !s.dragging) else { return false };
+        // The part still on the screen shown.
+        let Some(text) = self.term_session(target).and_then(|s| {
+            let (top, rows) = (s.top_row(), s.screen().size().0 as u64);
+            let (from, to) = if sel.anchor <= sel.head { (sel.anchor, sel.head) } else { (sel.head, sel.anchor) };
+            if to.0 < top || from.0 >= top + rows {
+                return None;
+            }
+            let from = if from.0 < top { (0, 0) } else { ((from.0 - top) as u16, from.1) };
+            let to = if to.0 >= top + rows { ((rows - 1) as u16, u16::MAX) } else { ((to.0 - top) as u16, to.1) };
+            Some(s.text_between(from, to))
+        }) else { return false };
         if let Some(clipboard) = &mut self.clipboard {
             let _ = clipboard.set_text(text.clone());
         }
@@ -215,9 +301,20 @@ impl App {
 
     /// `target`'s selection, as rows to tint.
     pub(super) fn terminal_selection_for(&self, target: TermTarget) -> Segments {
-        let Some(sel) = self.term_select.filter(|s| s.target == target && s.anchor != s.head) else { return Segments::new() };
-        let cols = self.term_session(target).map(|s| s.screen().size().1).unwrap_or(0);
-        selection_segments(sel.anchor, sel.head, cols)
+        let Some(sel) = self.term_select.filter(|s| s.target == target && (!s.dragging || s.anchor != s.head)) else { return Segments::new() };
+        let Some(session) = self.term_session(target) else { return Segments::new() };
+        let (rows, cols) = session.screen().size();
+        selection_segments(sel.anchor, sel.head, session.top_row(), rows, cols)
+    }
+
+    /// What a terminal is running and where: "pwsh · orbit-ground", and
+    /// "· running" while a command runs, when its shell marks its prompts.
+    pub(super) fn terminal_title(&self, target: TermTarget) -> Option<String> {
+        let session = self.term_session(target)?;
+        let folder = self.terminal_base_dir(target);
+        let folder = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| folder.display().to_string());
+        let running = if session.running() == Some(true) { " · running" } else { "" };
+        Some(format!("{} · {folder}{running}", session.program()))
     }
 
     /// Where a relative path a terminal printed is read from: where the
@@ -300,9 +397,14 @@ mod tests {
     /// from the start of the last, whichever way it was dragged.
     #[test]
     fn a_selection_is_rows_of_cells() {
-        assert_eq!(selection_segments((0, 4), (2, 1), 10), [(0, 4, 10), (1, 0, 10), (2, 0, 2)]);
-        assert_eq!(selection_segments((2, 1), (0, 4), 10), [(0, 4, 10), (1, 0, 10), (2, 0, 2)]);
-        assert_eq!(selection_segments((1, 3), (1, 6), 10), [(1, 3, 7)]);
+        assert_eq!(selection_segments((0, 4), (2, 1), 0, 24, 10), [(0, 4, 10), (1, 0, 10), (2, 0, 2)]);
+        assert_eq!(selection_segments((2, 1), (0, 4), 0, 24, 10), [(0, 4, 10), (1, 0, 10), (2, 0, 2)]);
+        assert_eq!(selection_segments((1, 3), (1, 6), 0, 24, 10), [(1, 3, 7)]);
+        // Three rows of output later, it's three rows up; scrolled out,
+        // it isn't drawn.
+        assert_eq!(selection_segments((5, 3), (5, 6), 3, 24, 10), [(2, 3, 7)]);
+        assert_eq!(selection_segments((0, 4), (2, 1), 2, 24, 10), [(0, 0, 2)], "only its last row is still shown");
+        assert!(selection_segments((0, 0), (1, 1), 5, 24, 10).is_empty());
     }
 
     /// End to end with a real shell: what it printed is selected and
@@ -357,10 +459,15 @@ mod tests {
         }
         let row = pump(&mut app, "--> src/lib.rs:2:4");
 
+        // Its title: what it runs, and where.
+        let program = app.term_session(target).unwrap().program().to_string();
+        let folder = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(app.terminal_title(target), Some(format!("{program} · {folder}")));
+
         // Selected across the row, it reads back as it was printed.
         let line = app.term_session(target).unwrap().row_text(row);
         let at = line.find("src/").unwrap() as u16;
-        app.term_select = Some(TermSelection { target, anchor: (row, at), head: (row, at + 13), dragging: false });
+        app.term_select = Some(TermSelection { target, anchor: (row as u64, at), head: (row as u64, at + 13), dragging: false });
         assert_eq!(app.term_session(target).unwrap().text_between((row, at), (row, at + 13)), "src/lib.rs:2:4");
         assert_eq!(app.terminal_selection_for(target), [(row as usize, at as usize, at as usize + 14)]);
 
@@ -375,6 +482,27 @@ mod tests {
         if let Some(state) = app.terminal_buffers.get_mut(&id) {
             state.session.kill();
         }
+    }
+
+    /// A double click selects a word: a path, a URL or a hash whole.
+    #[test]
+    fn a_word_is_a_run_of_anything_but_spaces_brackets_and_quotes() {
+        let row = "  --> src/frames.rs:46:9 (here)";
+        let (a, b) = word_in(row, row.find("frames").unwrap()).unwrap();
+        assert_eq!(&row[a..=b], "src/frames.rs:46:9");
+        let (a, b) = word_in(row, row.find("here").unwrap()).unwrap();
+        assert_eq!(&row[a..=b], "here");
+        assert_eq!(word_in(row, 0), None);
+    }
+
+    /// The underline goes under the whole of the link, and stops before
+    /// what follows it.
+    #[test]
+    fn a_links_span_is_the_whole_of_it() {
+        let row = "  --> src/frames.rs:46:9, then";
+        let (_, a, b) = link_span_in(row, row.find("frames").unwrap()).unwrap();
+        assert_eq!(&row[a..b], "src/frames.rs:46:9");
+        assert_eq!(link_span_in("error: oops", 2), None);
     }
 
     /// Dragging in a pane's terminal selects; letting go keeps it; a

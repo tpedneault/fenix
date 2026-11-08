@@ -46,6 +46,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `Ctrl-Shift-C` copies and `Ctrl-Shift-V` pastes, and a right click copies
   the selection or pastes when there's none. A paste is bracketed when the
   program asked for it.
+- Terminals send the keys line editors bind, as xterm does: `Ctrl`, `Shift`
+  and `Alt` on the arrows, Home, End, Page Up and Down and Delete (PowerShell's
+  `Ctrl-Left` and `Ctrl-Right` by word, `Shift`-arrows selecting),
+  `Ctrl-Space` (PowerShell's menu completion), `Shift-Tab`, `Ctrl-Backspace`,
+  `Alt` combinations, F1-F12, and the arrows' application mode. While a debug
+  session runs, F5, F10 and F11 still step it.
+- In a terminal, a double click selects a word (a path or URL whole), a triple
+  click the line, and a selection stays on its text as output scrolls.
+  Holding `Ctrl` over a link underlines it and shows a hand.
+- A terminal in a pane is titled with what it runs and where (`terminal 1 ·
+  pwsh · orbit-ground`), and the panel says the same on the modeline; a shell
+  that marks its prompts (`OSC 133`) adds `· running` while a command runs.
 - `Ctrl`-click on a `path:line:col` in a terminal -- a compiler's error, a
   stack trace, PowerShell's `At C:\x.ps1:12 char:5` -- opens the file at that
   line beside the terminal; on a URL, in the browser. Relative paths are read

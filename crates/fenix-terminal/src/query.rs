@@ -45,6 +45,11 @@ pub(crate) struct QueryReplies {
     /// or `OSC 9;9` (`"C:\\path"`, Windows Terminal's, which a PowerShell
     /// prompt can send). A path in the output is read from there.
     pub(crate) cwd: Option<std::path::PathBuf>,
+    /// Whether a command is running, when the shell marks its prompts
+    /// (`OSC 133`, FinalTerm's marks that VS Code's and Windows
+    /// Terminal's shell integrations send): `C` a command started, `A`
+    /// a prompt and `D` a command done. None from a shell that doesn't.
+    pub(crate) running: Option<bool>,
 }
 
 /// The path in an `OSC 7` file URL: its host dropped, `%xx` decoded, and
@@ -117,6 +122,11 @@ impl vt100::Callbacks for QueryReplies {
                     self.cwd = Some(path);
                 }
             }
+            [b"133", mark, ..] => match mark.first() {
+                Some(b'C') => self.running = Some(true),
+                Some(b'A' | b'D') => self.running = Some(false),
+                _ => {}
+            },
             [b"9", b"9", path, ..] => {
                 let path = text(path);
                 let path = path.trim().trim_matches('"');
@@ -224,6 +234,17 @@ mod tests {
         parser.process(b"\x1b]7;file://host/C:/Users/me\x07");
         assert_eq!(parser.callbacks().cwd.as_deref(), Some(std::path::Path::new("C:/Users/me")), "no slash before a drive");
         assert!(parser.callbacks_mut().take().is_empty());
+    }
+
+    /// A shell that marks its prompts says when a command runs.
+    #[test]
+    fn prompt_marks_say_when_a_command_runs() {
+        let mut parser = vt100::Parser::new_with_callbacks(24, 80, 0, QueryReplies::default());
+        assert_eq!(parser.callbacks().running, None, "no marks: not known");
+        parser.process(b"\x1b]133;A\x07$ \x1b]133;B\x07make\r\n\x1b]133;C\x07");
+        assert_eq!(parser.callbacks().running, Some(true));
+        parser.process(b"done\r\n\x1b]133;D;0\x07");
+        assert_eq!(parser.callbacks().running, Some(false));
     }
 
     #[test]
