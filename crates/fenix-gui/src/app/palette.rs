@@ -24,13 +24,27 @@ use crate::theme::{mix, rgba_of};
 /// The card's text inset from its edge.
 pub(super) const PAD_X: f32 = 14.0;
 pub(super) const PAD_Y: f32 = 14.0;
-/// Room left between the card and the window's sides, its top, and the
-/// modeline.
+/// Room left between the card and the window's sides, and the most kept
+/// above and below it when the window is short. `TOP` and `BOTTOM` are
+/// what the list's height leaves for that.
 const MARGIN_X: f32 = 48.0;
+const MARGIN_Y: f32 = 24.0;
 const TOP: f32 = 44.0;
 const BOTTOM: f32 = 30.0;
 /// The widest the card gets.
 const MAX_WIDTH: f32 = 1040.0;
+/// A palette's rows are this much taller than the editor's lines, so a
+/// list reads as rows with air between them rather than as a page of text.
+const PITCH: f32 = 1.4;
+
+/// The most rows a palette's list takes: on a tall window the card stays
+/// a card, not a second window over the first.
+const MAX_LIST_ROWS: usize = 16;
+
+/// The height of a palette's rows, for the editor's `line_height`.
+pub(super) fn pitch(line_height: f32) -> f32 {
+    (line_height * PITCH).round()
+}
 /// Below this many columns the side pane goes: the list needs the room.
 const SIDE_MIN_COLS: usize = 88;
 /// The most of a file the preview reads, and shows.
@@ -83,6 +97,9 @@ pub(super) struct Card {
     /// Pages of a menu too long for the card, and the one shown.
     pub page: usize,
     pub pages: usize,
+    /// The height of its rows: taller than the editor's lines on a
+    /// floating card (`pitch`), the editor's on the hint bar.
+    pub pitch: f32,
 }
 
 /// One row of a palette's list.
@@ -108,12 +125,6 @@ pub(super) struct Row {
     pub selected: bool,
     /// Can't be used here: drawn faded.
     pub dimmed: bool,
-}
-
-impl Row {
-    fn lines(&self) -> usize {
-        usize::from(self.section.is_some()) + 1 + usize::from(self.detail.is_some())
-    }
 }
 
 /// What the pane beside the list shows.
@@ -158,7 +169,44 @@ pub(super) struct View {
 /// modeline): what's left between the input row and the foot.
 pub(super) fn list_lines(area: fenix_window::Rect, line_height: f32) -> usize {
     let h = area.h - TOP - BOTTOM - PAD_Y * 2.0;
-    ((h / line_height).floor() as usize).saturating_sub(4).max(3)
+    ((h / pitch(line_height)).floor() as usize).saturating_sub(4).clamp(3, MAX_LIST_ROWS)
+}
+
+/// The icon for a command's area or a leader group, by its name
+/// (`Git`, `explorer`, ...): the same Nerd Font glyphs the tabs and the
+/// explorer use. None for a name it doesn't know.
+pub(super) fn area_icon(name: &str) -> Option<char> {
+    let key = name.trim().to_lowercase();
+    let icon = match key.as_str() {
+        "git" | "forge" | "review" => icon::GIT_BRANCH,
+        "explorer" => icon::FOLDER,
+        "files" | "file" | "find file" => icon::FILE,
+        "search" | "search project" => icon::SEARCH,
+        "buffer" | "buffers" => icon::BUFFERS,
+        "code" | "refactor" | "format" => icon::CODE,
+        "debug" => icon::BUG,
+        "agents" | "agent" => icon::SPARK,
+        "project" | "projects" => icon::PROJECTS,
+        "window" | "windows" => icon::WINDOW,
+        "view" | "toggle" | "appearance" => icon::TOGGLE,
+        "help" => icon::HELP,
+        "insert" | "snippets" => icon::PENCIL,
+        "lsp" => icon::BULB,
+        "open" => icon::OPEN,
+        "quit" | "fenix" | "app" => icon::POWER,
+        "workspace" | "workspaces" => icon::WORKSPACE,
+        "terminal" => icon::TERMINAL,
+        "settings" => icon::GEAR,
+        "notifications" => icon::BELL,
+        "extensions" => icon::PUZZLE,
+        "tasks" | "task" => icon::TASKS,
+        "commands" | "run a command" => icon::COMMAND,
+        "history" | "log" => icon::HISTORY,
+        "diff" | "compare" => icon::DIFF,
+        "home" => icon::HOME,
+        _ => return None,
+    };
+    Some(icon)
 }
 
 /// `text` cut to `max` characters, ending in "…" when it had to be.
@@ -239,6 +287,7 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
     let left = if side.is_some() { (cols * 44 / 100).clamp(36, 64) } else { cols };
     let side_col = left + 2;
     let avail = list_lines(area, line_height);
+    let line_height = pitch(line_height);
     let (fg, quiet, accent, group) = (theme.fg, theme.gutter_fg, theme.caret_text, theme.syntax_keyword);
     let mut boxes = Vec::new();
     let mut lines: Vec<Line> = Vec::new();
@@ -282,21 +331,26 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
     let mut page = page;
     match &view.body {
         Body::List(rows) => {
+            // Each row as a block of lines -- a gap and its section's name
+            // first, where one starts -- then the run of blocks that fits,
+            // from the top unless that would leave the selected row out.
+            let mut blocks: Vec<(Vec<Line>, Vec<CardBox>, bool)> = Vec::new();
             for row in rows {
-                if body.len() + row.lines() > avail {
-                    break;
-                }
+                let mut ls: Vec<Line> = Vec::new();
+                let mut bs: Vec<CardBox> = Vec::new();
                 if let Some((name, count)) = &row.section {
+                    // A gap before every section but the first shown.
+                    ls.push(Line::default());
                     let mut l = Line::default();
                     let end = l.put(1, &name.to_uppercase(), quiet, false);
                     if let Some(n) = count {
                         let text = n.to_string();
-                        boxes.push(CardBox { row: first + body.len(), rows: 1, col: end + 1, cols: text.chars().count(), kind: BoxKind::Badge });
+                        bs.push(CardBox { row: ls.len(), rows: 1, col: end + 1, cols: text.chars().count(), kind: BoxKind::Badge });
                         l.put(end + 1, &text, quiet, false);
                     }
-                    body.push(l);
+                    ls.push(l);
                 }
-                let r = first + body.len();
+                let r = ls.len();
                 let mut l = Line::default();
                 let (title_color, hit) = if row.dimmed { (quiet, quiet) } else { (fg, accent) };
                 let mut c = 1;
@@ -325,21 +379,41 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
                 let right_col = left.saturating_sub(right_w + 1);
                 match &row.keys {
                     Some(k) => {
-                        put_keys(&mut l, &mut boxes, r, right_col, k, if row.dimmed { quiet } else { accent });
+                        put_keys(&mut l, &mut bs, r, right_col, k, if row.dimmed { quiet } else { accent });
                     }
                     None => {
                         l.put(right_col, &row.right, quiet, false);
                     }
                 }
-                body.push(l);
+                ls.push(l);
                 if let Some(detail) = &row.detail {
                     let mut d = Line::default();
                     d.put(text_col, &fit(detail, left.saturating_sub(text_col + 1)), quiet, false);
-                    body.push(d);
+                    ls.push(d);
                 }
                 if row.selected {
-                    boxes.push(CardBox { row: r, rows: 1 + usize::from(row.detail.is_some()), col: 0, cols: left, kind: BoxKind::Selected });
+                    bs.push(CardBox { row: r, rows: 1 + usize::from(row.detail.is_some()), col: 0, cols: left, kind: BoxKind::Selected });
                 }
+                blocks.push((ls, bs, row.selected));
+            }
+            // The first block shown has no gap above it.
+            let lens: Vec<usize> = blocks.iter().map(|b| b.0.len()).collect();
+            let size = |i: usize, first: bool| lens[i] - usize::from(first && rows[i].section.is_some());
+            let selected = blocks.iter().position(|b| b.2).unwrap_or(0);
+            let mut start = 0;
+            while start < selected && (start..=selected).map(|i| size(i, i == start)).sum::<usize>() > avail {
+                start += 1;
+            }
+            for i in start..blocks.len() {
+                let skip = usize::from(i == start && rows[i].section.is_some());
+                let n = size(i, i == start);
+                if body.len() + n > avail {
+                    break;
+                }
+                let base = first + body.len();
+                let (ls, bs, _) = &mut blocks[i];
+                body.extend(ls.drain(skip..));
+                boxes.extend(bs.iter().map(|b| CardBox { row: base + b.row - skip, ..*b }));
             }
             if rows.is_empty() {
                 let mut l = Line::default();
@@ -348,47 +422,55 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
             }
         }
         Body::Grid { recent, sections } => {
-            // Everything as lines first, then the page that fits.
+            // Everything as lines first, then the page that fits. Every
+            // section shares one key column, so the names line up from
+            // Recent to Commands; a cell for an icon after the key, then
+            // the name; a group's count right-aligned in its column.
             let mut all: Vec<(Line, Vec<CardBox>)> = Vec::new();
-            let header = |name: &str| {
+            let header = |name: &str, gap: bool, all: &mut Vec<(Line, Vec<CardBox>)>| {
+                if gap {
+                    all.push((Line::default(), Vec::new()));
+                }
                 let mut l = Line::default();
                 l.put(1, &name.to_uppercase(), quiet, false);
-                (l, Vec::new())
+                all.push((l, Vec::new()));
             };
-            if !recent.is_empty() {
-                all.push(header("recent"));
-                let mut l = Line::default();
-                let mut b = Vec::new();
-                let mut c = 1;
-                for (keys, label) in recent {
-                    let w = keys_width(keys) + 1 + label.chars().count();
-                    if c + w + 2 > cols {
-                        break;
-                    }
-                    b.push(CardBox { row: 0, rows: 1, col: c.saturating_sub(1), cols: w + 2, kind: BoxKind::Chip { accent: false } });
-                    let end = put_keys(&mut l, &mut b, 0, c, keys, accent);
-                    c = l.put(end + 1, label, fg, false) + 4;
-                }
-                all.push((l, b));
-            }
             let ncols = if cols >= 70 { 2 } else { 1 };
             let colw = cols.saturating_sub(2) / ncols;
+            let key_w = recent.iter().map(|(k, _)| keys_width(k)).chain(sections.iter().flat_map(|(_, e)| e.iter().map(|(k, ..)| keys_width(k)))).max().unwrap_or(1).max(3);
+            let name_col = key_w + 5;
+            let entry = |l: &mut Line, b: &mut Vec<CardBox>, c0: usize, key: &str, label: &str, is_group: bool, count: Option<usize>| {
+                put_keys(l, b, 0, c0, key, accent);
+                if let Some(i) = area_icon(label) {
+                    l.put(c0 + key_w + 2, &i.to_string(), if is_group { group } else { quiet }, true);
+                }
+                let count_text = count.map(|n| n.to_string()).unwrap_or_default();
+                let badge_col = c0 + colw.saturating_sub(count_text.chars().count() + 3);
+                let room = badge_col.saturating_sub(c0 + name_col + 1);
+                l.put(c0 + name_col, &fit(label, room), if is_group { group } else { fg }, false);
+                if count.is_some() {
+                    b.push(CardBox { row: 0, rows: 1, col: badge_col, cols: count_text.chars().count(), kind: BoxKind::Badge });
+                    l.put(badge_col, &count_text, quiet, false);
+                }
+            };
+            if !recent.is_empty() {
+                header("recent", false, &mut all);
+                for chunk in recent.chunks(ncols) {
+                    let mut l = Line::default();
+                    let mut b = Vec::new();
+                    for (i, (keys, label)) in chunk.iter().enumerate() {
+                        entry(&mut l, &mut b, 1 + i * colw, keys, label, false, None);
+                    }
+                    all.push((l, b));
+                }
+            }
             for (name, entries) in sections {
-                all.push(header(name));
+                header(name, !all.is_empty(), &mut all);
                 for chunk in entries.chunks(ncols) {
                     let mut l = Line::default();
                     let mut b = Vec::new();
                     for (i, (key, label, is_group, count)) in chunk.iter().enumerate() {
-                        let c0 = 1 + i * colw;
-                        let end = put_keys(&mut l, &mut b, 0, c0, key, accent);
-                        let after = c0 + keys_width(key).max(3) + 2;
-                        let count_text = if *is_group { count.to_string() } else { String::new() };
-                        let room = colw.saturating_sub(after - c0 + count_text.chars().count() + 3);
-                        let e = l.put(after.max(end + 2), &fit(label, room), if *is_group { group } else { fg }, false);
-                        if *is_group {
-                            b.push(CardBox { row: 0, rows: 1, col: e + 1, cols: count_text.chars().count(), kind: BoxKind::Badge });
-                            l.put(e + 1, &count_text, quiet, false);
-                        }
+                        entry(&mut l, &mut b, 1 + i * colw, key, label, *is_group, is_group.then_some(*count));
                     }
                     all.push((l, b));
                 }
@@ -403,11 +485,13 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
         }
     }
 
-    // The side pane, beside the list.
-    let side_rows = if side.is_some() { body.len().max(avail.min(18)) } else { body.len() };
-    while body.len() < side_rows {
+    // Every palette the same size, whatever it holds: switching from the
+    // leader's menu to the files or the commands doesn't move the card.
+    while body.len() < avail {
         body.push(Line::default());
     }
+    // The side pane, beside the list.
+    let side_rows = body.len();
     if let Some(side) = side {
         let width = cols.saturating_sub(side_col + 2);
         let mut side_lines: Vec<Vec<(usize, String, glyphon::Color, bool, bool)>> = Vec::new();
@@ -483,8 +567,12 @@ pub(super) fn layout(view: &View, theme: &Theme, area: fenix_window::Rect, char_
 
     let rows = lines.len();
     let height = rows as f32 * line_height + PAD_Y * 2.0;
-    let rect = fenix_window::Rect { x: (area.x + (area.w - width) / 2.0).round(), y: area.y + TOP.min((area.h - height).max(0.0)), w: width, h: height.min(area.h) };
-    Card { rect, spans: join(lines, fg), boxes, style: CardStyle::Floating, page, pages }
+    // Centred in the window above the modeline, both ways; in a short one,
+    // a margin kept above and below.
+    let h = height.min(area.h);
+    let y = ((area.h - h) / 2.0).max(MARGIN_Y.min((area.h - h).max(0.0) / 2.0));
+    let rect = fenix_window::Rect { x: (area.x + (area.w - width) / 2.0).round(), y: (area.y + y).round(), w: width, h };
+    Card { rect, spans: join(lines, fg), boxes, style: CardStyle::Floating, page, pages, pitch: line_height }
 }
 
 /// The lines as one span list, rows ended by "\n".
@@ -568,7 +656,7 @@ pub(super) fn hint_bar(path: &[KeyPress], title: &str, hints: &[fenix_keymap::Hi
     let grows_up = cursor_y.is_none_or(|y| y + line_height < bottom - height - 4.0);
     let y = if grows_up { bottom - height } else { area.y + 6.0 };
     let rect = fenix_window::Rect { x: area.x + 6.0, y, w: width, h: height };
-    Card { rect, spans: join(lines, fg), boxes, style: CardStyle::Bar { grows_up }, page, pages }
+    Card { rect, spans: join(lines, fg), boxes, style: CardStyle::Bar { grows_up }, page, pages, pitch: line_height }
 }
 
 /// Draws `card`'s surface and boxes under its text, at `alpha`; a
@@ -595,7 +683,11 @@ pub(super) fn paint(rects: &mut RectRenderer, gpu: &GpuState, card: &Card, rect:
         }
     }
     let origin = (rect.x + PAD_X, rect.y + if matches!(card.style, CardStyle::Bar { .. }) { PAD_Y * 0.75 } else { PAD_Y });
-    let at = |b: &CardBox| (origin.0 + b.col as f32 * char_width, origin.1 + b.row as f32 * line_height);
+    // Rows are `card.pitch` apart; a cap, chip or badge is a line of
+    // text's height, centred in its row as the text is.
+    let row_h = card.pitch;
+    let lift = ((row_h - line_height) / 2.0).max(0.0);
+    let at = |b: &CardBox| (origin.0 + b.col as f32 * char_width, origin.1 + b.row as f32 * row_h);
     // Under everything: the side pane, then the selected row; the caps
     // and chips over them.
     let order = |k: BoxKind| match k {
@@ -609,29 +701,29 @@ pub(super) fn paint(rects: &mut RectRenderer, gpu: &GpuState, card: &Card, rect:
     for b in &boxes {
         let (x, y) = at(b);
         let w = b.cols as f32 * char_width;
-        let h = b.rows as f32 * line_height;
+        let h = b.rows as f32 * row_h;
         match b.kind {
             BoxKind::Input => {
-                let pad = (line_height * 0.3).round();
+                let pad = (row_h * 0.22).round();
                 rects.push_box(gpu, rect.x + PAD_X * 0.6, y - pad, rect.w - PAD_X * 1.2, h + pad * 2.0, style(8.0, a(theme.input, 1.0), 0.0, [0.0; 4]));
             }
             BoxKind::Side => {
-                rects.push_box(gpu, x - char_width * 0.5, y - 4.0, (rect.x + rect.w - PAD_X * 0.6) - (x - char_width * 0.5), h + 8.0, style(8.0, a(theme.bg, 1.0), 0.0, [0.0; 4]));
+                rects.push_box(gpu, x - char_width * 0.5, y, (rect.x + rect.w - PAD_X * 0.6) - (x - char_width * 0.5), h, style(8.0, a(theme.bg, 1.0), 0.0, [0.0; 4]));
             }
             BoxKind::Selected => {
-                rects.push_box(gpu, x + char_width * 0.2, y, w - char_width * 0.4, h, style(6.0, a(theme.selection, 1.0), 0.0, [0.0; 4]));
+                rects.push_box(gpu, x + char_width * 0.2, y + 2.0, w - char_width * 0.4, h - 4.0, style(6.0, a(theme.selection, 1.0), 0.0, [0.0; 4]));
             }
             BoxKind::Key => {
-                let r = panels::key_cap(origin.0, char_width, y, line_height, b.col, b.col + b.cols);
+                let r = panels::key_cap(origin.0, char_width, y + lift, line_height, b.col, b.col + b.cols);
                 rects.push_box(gpu, r.x, r.y, r.w, r.h, style(panels::KEY_RADIUS, a(theme.input, 1.0), 1.0, hair));
             }
             BoxKind::Chip { accent } => {
-                let r = panels::key_cap(origin.0, char_width, y, line_height, b.col, b.col + b.cols);
+                let r = panels::key_cap(origin.0, char_width, y + lift, line_height, b.col, b.col + b.cols);
                 let fill = if accent { a(theme.caret, 0.16) } else { a(mix(theme.input, rgba_of(theme.fg), 0.05), 1.0) };
                 rects.push_box(gpu, r.x - char_width * 0.4, r.y, r.w + char_width * 0.8, r.h, style(r.h / 2.0, fill, 0.0, [0.0; 4]));
             }
             BoxKind::Badge => {
-                let r = panels::key_cap(origin.0, char_width, y, line_height, b.col, b.col + b.cols);
+                let r = panels::key_cap(origin.0, char_width, y + lift, line_height, b.col, b.col + b.cols);
                 rects.push_box(gpu, r.x, r.y + 1.0, r.w, r.h - 2.0, style((r.h - 2.0) / 2.0, a(theme.input, 1.0), 0.0, [0.0; 4]));
             }
         }
@@ -1016,6 +1108,7 @@ impl App {
                     let detail = unavailable.map(str::to_string).or_else(|| (description.to_lowercase() != name.to_lowercase()).then_some(description));
                     rows.push(Row {
                         section,
+                        icon: area_icon(&area).map(|i| (i, theme.gutter_fg)),
                         area: Some(area),
                         area_hits,
                         title: name,
@@ -1105,6 +1198,65 @@ mod tests {
         assert_eq!(card.boxes.iter().filter(|b| b.kind == BoxKind::Key && b.row == 2).count(), 3, "SPC, f and f each on a cap");
         assert!(lines.last().unwrap().contains("Enter open"));
         assert!(card.rect.w <= MAX_WIDTH && card.rect.x > 0.0);
+    }
+
+    /// Every palette is the same card, whatever it holds: the files with
+    /// a preview, a short list, the leader's menu -- switching between them
+    /// doesn't move or resize it. It's centred in the window above the
+    /// modeline, and its rows are taller than the editor's.
+    #[test]
+    fn every_palette_is_the_same_card() {
+        let theme = crate::theme::default_theme();
+        let short = layout(&view(vec![Row { title: "a".into(), selected: true, ..Row::default() }]), theme, area(), 9.0, 20.0, 0);
+        let long_rows: Vec<Row> = (0..60).map(|i| Row { title: format!("file {i}"), selected: i == 0, ..Row::default() }).collect();
+        let mut with_side = view(long_rows);
+        with_side.side = Some(Side::Preview { icon: None, title: "a.rs".into(), about: String::new(), lines: vec!["fn a() {}".into()] });
+        let long = layout(&with_side, theme, area(), 9.0, 20.0, 0);
+        let menu = View { prompt: "SPC".into(), prompt_is_key: true, body: Body::Grid { recent: Vec::new(), sections: vec![("groups".into(), vec![("g".into(), "git".into(), true, 28)])] }, ..view(Vec::new()) };
+        let leader = layout(&menu, theme, area(), 9.0, 20.0, 0);
+        assert_eq!(short.rect, long.rect);
+        assert_eq!(short.rect, leader.rect);
+        let a = area();
+        let (above, below) = (short.rect.y - a.y, a.y + a.h - (short.rect.y + short.rect.h));
+        assert!((above - below).abs() <= 1.0, "centred in the window: {above} above, {below} below");
+        assert!((short.rect.x - a.x - (a.x + a.w - short.rect.x - short.rect.w)).abs() <= 1.0, "and across it");
+        let short_window = fenix_window::Rect { h: 300.0, ..a };
+        let small = layout(&with_side, theme, short_window, 9.0, 20.0, 0);
+        assert!(small.rect.y >= short_window.y && small.rect.y + small.rect.h <= short_window.y + short_window.h, "inside a short window: {:?}", small.rect);
+        assert!(short.pitch > 20.0, "rows with air between them");
+        let big = fenix_window::Rect { h: 3000.0, ..area() };
+        assert!(list_lines(big, 20.0) <= MAX_LIST_ROWS, "a card, not a second window");
+    }
+
+    /// The leader's sections share one key column: a one-key group and a
+    /// three-letter key's command start their names in the same column,
+    /// and a group's count sits at its column's right.
+    #[test]
+    fn the_leaders_names_line_up_under_one_key_column() {
+        let menu = View {
+            prompt: "SPC".into(),
+            prompt_is_key: true,
+            body: Body::Grid { recent: vec![("g g".into(), "status page".into())], sections: vec![("groups".into(), vec![("g".into(), "git".into(), true, 28)]), ("commands".into(), vec![("SPC".into(), "find file".into(), false, 0)])] },
+            ..view(Vec::new())
+        };
+        let card = layout(&menu, crate::theme::default_theme(), area(), 9.0, 20.0, 0);
+        let t = text(&card);
+        let col = |needle: &str| t.lines().find_map(|l| l.find(needle).map(|i| l[..i].chars().count())).unwrap();
+        assert_eq!(col("git"), col("find file"));
+        assert_eq!(col("git"), col("status page"));
+        let line = t.lines().find(|l| l.contains("git")).unwrap();
+        assert!(line.trim_end().ends_with("28") && line.chars().count() > col("git") + 10, "the count at the right: {line:?}");
+    }
+
+    /// Areas and groups have icons: Git's branch, the explorer's folder.
+    #[test]
+    fn areas_have_icons() {
+        assert_eq!(area_icon("Git"), Some(icon::GIT_BRANCH));
+        assert_eq!(area_icon("explorer"), Some(icon::FOLDER));
+        assert_eq!(area_icon("Files"), Some(icon::FILE));
+        assert_eq!(area_icon("search"), Some(icon::SEARCH));
+        assert_eq!(area_icon("Debug"), Some(icon::BUG));
+        assert_eq!(area_icon("nothing like it"), None);
     }
 
     /// The matched characters are in the accent; a dimmed row isn't.

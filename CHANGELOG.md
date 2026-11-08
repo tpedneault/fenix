@@ -64,7 +64,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   suggestions read as quieter than what you typed.
 - Pickers float: every picker opens as a card over the dimmed window rather
   than taking over the pane, its matches lit in the theme's accent and its
-  keys in a footer on caps. Enter, Esc, `C-n`/`C-p`, the arrows, Tab and
+  keys in a footer on caps. Every picker, the command picker and the `SPC`
+  menu are the same card, centred in the window, so going from one to
+  another doesn't move it; its rows are taller than the editor's lines, with
+  a gap before each section, and commands and the menu's groups have their
+  area's icon. Enter, Esc, `C-n`/`C-p`, the arrows, Tab and
   `C-v` are as before.
 - The file picker shows each file's icon, its name then its folder, the files
   opened lately first (under *Recent* while nothing's typed), and the first

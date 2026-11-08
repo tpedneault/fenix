@@ -20575,7 +20575,7 @@ impl App {
         for draw in &popup_draws {
             let fade = |c: glyphon::Color| glyphon::Color::rgba(c.r(), c.g(), c.b(), (c.a() as f32 * draw.alpha).round() as u8);
             let refs: Vec<(&str, glyphon::Color, bool)> = draw.spans.iter().map(|(s, c, i)| (s.as_str(), fade(*c), *i)).collect();
-            text.set_popup_rich(draw.id, draw.rect.w, &refs);
+            text.set_popup_rich(draw.id, draw.rect.w, &refs, motion_state.cards.get(&draw.id).map(|c| c.pitch));
             popup_rects.push((draw.id, draw.rect));
         }
         text.retain_popups(&popup_rects.iter().map(|(id, _)| *id).collect::<Vec<_>>());

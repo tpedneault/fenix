@@ -1015,8 +1015,11 @@ impl TextPipeline {
     /// their own content, clamped by `popup::resolve`'s position math
     /// and (for how many rows are offered in the first place)
     /// `popup::max_rows` -- not by wrapping/clipping inside the buffer.
-    pub fn set_popup_rich(&mut self, id: PopupId, width: f32, segments: &[(&str, Color, bool)]) {
-        let key = pane_key(segments, (width, 0.0), false, &[], (self.font_size, self.line_height, self.icon_spacing), self.content_family());
+    /// `pitch`: its rows' height, when not the editor's line height (the
+    /// palette's taller rows).
+    pub fn set_popup_rich(&mut self, id: PopupId, width: f32, segments: &[(&str, Color, bool)], pitch: Option<f32>) {
+        let line_height = pitch.unwrap_or(self.line_height);
+        let key = pane_key(segments, (width, 0.0), false, &[], (self.font_size, line_height, self.icon_spacing), self.content_family());
         if self.popups.contains_key(&id) && self.popup_keys.get(&id) == Some(&key) {
             return;
         }
@@ -1032,6 +1035,7 @@ impl TextPipeline {
             self.popups.insert(id, buf);
         }
         let buf = self.popups.get_mut(&id).expect("just inserted if missing");
+        buf.set_metrics(Metrics::new(self.font_size, line_height));
         buf.set_size(Some(width), None);
         buf.set_rich_text(spans, &default_attrs, Shaping::Advanced, None);
         buf.shape_until_scroll(&mut self.fonts.borrow_mut().font_system, false);
