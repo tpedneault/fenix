@@ -185,8 +185,8 @@ ignored = "#929bb9"
 conflicted = "#f7768e"
 
 # [terminal]  # a terminal's 16 ANSI colours; worked out from the above when left out
-# ansi = ["#111219", "#f7768e", "#9ece6a", "#ff9e64", "#7aa2f7", "#bb9af7", "#2ac3de", "#a2aad0",
-#         "#929bb9", "#ec87a3", "#a5cd86", "#f2a781", "#88aaf7", "#bca4f7", "#48c4e3", "#c0caf5"]
+# ansi = ["#4c5064", "#f7768e", "#9ece6a", "#ff9e64", "#7aa2f7", "#bb9af7", "#2ac3de", "#a2aad0",
+#         "#929bb9", "#ff97aa", "#b2e27f", "#ffb88d", "#9bbbff", "#d3bcfe", "#41d6f0", "#c0caf5"]
 ```
 
 Colours are `#rrggbb`; a surface drawn over another (a highlight) can be

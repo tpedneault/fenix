@@ -2775,6 +2775,35 @@ fn scroll_to_include(scroll_line: usize, cursor_line: usize, visible_lines: usiz
     }
 }
 
+/// Where a pane's view goes for its cursor on `cursor_line`, `total`
+/// display lines long: as Vim does it, a cursor more than half a window
+/// past the view's edge -- a jump to a symbol, a search result, a
+/// definition, another file -- is put in the middle of the window, as
+/// `zz` would; one that only stepped past the edge (`j` on the last
+/// line) scrolls just far enough to show it. A jump near the end of the
+/// file keeps the last line at the bottom rather than scrolling past it.
+/// `jumped`: the cursor got there by a jump (a picker, a search result,
+/// a definition, the jumplist), which is centred whenever it's out of
+/// view at all -- a function found just past the bottom edge is shown
+/// with its body, not on the last row.
+fn scroll_for_cursor(scroll_line: usize, cursor_line: usize, visible_lines: usize, total: usize, jumped: bool) -> usize {
+    let visible = visible_lines.max(1);
+    let past = if cursor_line < scroll_line {
+        scroll_line - cursor_line
+    } else if cursor_line >= scroll_line + visible {
+        cursor_line + 1 - (scroll_line + visible)
+    } else {
+        0
+    };
+    if past > visible / 2 || (jumped && past > 0) {
+        // Never past the last line's own top -- but always showing the cursor.
+        let last_top = total.saturating_sub(visible).max(cursor_line.saturating_sub(visible - 1));
+        cursor_line.saturating_sub(visible / 2).min(last_top)
+    } else {
+        scroll_to_include(scroll_line, cursor_line, visible)
+    }
+}
+
 /// Ease-out cubic: fast start, gentle settle. Used for every short
 /// transition animation (caret fade now; scroll/pulse reuse it too).
 fn ease_out_cubic(t: f32) -> f32 {
@@ -4664,6 +4693,9 @@ pub struct App {
     terminal_buffer_cwds: HashMap<BufferId, PathBuf>,
     /// What's selected in a terminal with the mouse (`terminal_mouse`).
     term_select: Option<terminal_mouse::TermSelection>,
+    /// The pane a jump just moved the cursor in (`mark_jump`): its next
+    /// scroll centres the cursor when it's out of view.
+    jump_view: Option<fenix_window::WindowId>,
     /// A terminal buffer that runs one program instead of a shell (a
     /// serial monitor, a debugger console) -- what `spawn_terminal_for`
     /// starts, and restarts, in it.
@@ -5851,6 +5883,7 @@ impl App {
             terminal_buffer_labels: HashMap::new(),
             terminal_buffer_cwds: HashMap::new(),
             term_select: None,
+            jump_view: None,
             terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
@@ -7624,6 +7657,7 @@ impl App {
     /// usable both for "jump to a different file" and "jump within the
     /// one already focused," e.g. a same-file `gd`).
     fn goto_lsp_position(&mut self, position: lsp_types::Position) {
+        self.mark_jump();
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         cursor.char_idx = fenix_lsp::position_to_char_offset(buffer.rope(), position).min(buffer.len_chars());
         let (_, sticky) = buffer.line_col(cursor);
@@ -14709,6 +14743,7 @@ impl App {
     }
 
     fn jump_to_grep_match(&mut self, m: &fenix_project::GrepMatch) {
+        self.mark_jump();
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target_line = m.line.saturating_sub(1).min(buffer.visual_line_count().saturating_sub(1));
         let start = buffer.line_start_char(target_line);
@@ -14723,6 +14758,7 @@ impl App {
     /// this always lands at the start of it rather than on a specific
     /// character within.
     fn jump_to_tag(&mut self, tag: &fenix_completion::ctags::TagEntry) {
+        self.mark_jump();
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target_line = tag.line.saturating_sub(1).min(buffer.visual_line_count().saturating_sub(1));
         cursor.char_idx = buffer.line_start_char(target_line);
@@ -14737,6 +14773,13 @@ impl App {
     fn record_jump(&mut self, from: JumpEntry) {
         self.jump_back_stack.push(from);
         self.jump_forward_stack.clear();
+        self.mark_jump();
+    }
+
+    /// The cursor in the focused pane is jumping, not stepping: the next
+    /// scroll centres it if it lands out of view (`scroll_for_cursor`).
+    fn mark_jump(&mut self) {
+        self.jump_view = Some(self.focused_pane_id());
     }
 
     /// `Ctrl-O`: jumps to the most recently recorded position, pushing
@@ -14830,6 +14873,7 @@ impl App {
             self.open_buffer_in_focused_pane_as(entry.buffer, true);
             self.refresh_project_root();
         }
+        self.mark_jump();
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
         let target = entry.char_idx.min(buffer.len_chars());
         cursor.char_idx = if linewise {
@@ -16930,14 +16974,20 @@ impl App {
     fn ensure_cursor_visible(&mut self, visible_lines: usize) {
         let buffer_id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
-        let (line, scroll_line) = {
+        let (line, scroll_line, total) = {
             let ob = self.buffers.get(buffer_id).expect("focused window always has an open buffer");
             let cursor = self.pane_state(pane).cursor;
             let document_line = ob.buffer.line_col(&cursor).0;
-            let display_line = self.pane_display_lines(pane, buffer_id).iter().position(|&row| row == document_line).unwrap_or(document_line);
-            (display_line, self.pane_state(pane).scroll_line)
+            let display = self.pane_display_lines(pane, buffer_id);
+            let display_line = display.iter().position(|&row| row == document_line).unwrap_or(document_line);
+            (display_line, self.pane_state(pane).scroll_line, display.len())
         };
-        let target = scroll_to_include(scroll_line, line, visible_lines);
+        // A jump into this pane since the last frame: centred if out of view.
+        let jumped = self.jump_view == Some(pane);
+        if jumped {
+            self.jump_view = None;
+        }
+        let target = scroll_for_cursor(scroll_line, line, visible_lines, total, jumped);
         if target != scroll_line {
             let jump = target.abs_diff(scroll_line);
             // A jump bigger than a few screens (`G`, a search landing far
@@ -17620,6 +17670,9 @@ impl App {
             // thinks it drew.
             || ob.kind == BufferKind::Terminal
             || ob.kind == BufferKind::Page
+            // A prompt (the agents' composer) is a box you type in: what
+            // you wrote, with no line numbers beside it.
+            || ob.kind == BufferKind::Prompt
         {
             return 0;
         }
@@ -17754,7 +17807,8 @@ impl App {
                         spans.push((" ".to_string(), color));
                     }
                 }
-            } else if !has_line {
+            } else if !has_line && ob.kind != BufferKind::Prompt {
+                // A prompt's rows past what was written are just the box.
                 spans.push(("~".to_string(), theme.gutter_fg));
             }
             if has_line {
@@ -23542,11 +23596,12 @@ index 0000000..1111111 100644
             app.test_insert('\n');
         }
         app.test_set_cursor(Cursor::at_start());
-        for _ in 0..15 {
+        for _ in 0..12 {
             let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
             buffer.move_down(cursor);
         }
-        // Cursor now on line 15; a 10-line viewport wants scroll_line = 6.
+        // Cursor now on line 12; a 10-line viewport wants scroll_line = 3
+        // (a step past the edge, not a jump, which would be centred).
         app.ensure_cursor_visible(10);
         let pane = app.focused_pane_id();
         assert!(app.workspaces.active_scroll_anims().contains_key(&pane)); // mid-ease from that first scroll
@@ -23586,6 +23641,41 @@ index 0000000..1111111 100644
         let ps = app.pane_state(pane);
         assert!(app.workspaces.active_scroll_anims().contains_key(&pane), "still easing");
         assert!(ps.rendered_scroll < ps.scroll_line as f32);
+    }
+
+    /// A jump far off the view lands mid-window, as `zz` puts it; a step
+    /// past the edge scrolls a line; near the end the last line stays at
+    /// the bottom; a cursor in view leaves the view alone.
+    #[test]
+    fn a_far_jump_lands_mid_window_and_a_step_scrolls_a_line() {
+        assert_eq!(scroll_for_cursor(0, 120, 30, 400, false), 105, "far below: centred");
+        assert_eq!(scroll_for_cursor(200, 20, 30, 400, false), 5, "far above too");
+        assert_eq!(scroll_for_cursor(0, 30, 30, 400, false), 1, "j on the last line: one line");
+        assert_eq!(scroll_for_cursor(0, 44, 30, 400, false), 15, "a motion within half a window past the edge: just far enough");
+        assert_eq!(scroll_for_cursor(0, 33, 30, 400, true), 18, "a jump just past the edge: centred all the same");
+        assert_eq!(scroll_for_cursor(10, 20, 30, 400, true), 10, "a jump already in view: stays");
+        assert_eq!(scroll_for_cursor(0, 395, 30, 400, true), 370, "near the end: the last line at the bottom");
+        assert_eq!(scroll_for_cursor(0, 3, 30, 10, true), 0, "a short file never scrolls");
+    }
+
+    /// Opening a file at a line far down -- what a symbol picker, a search
+    /// result or `gd` does -- puts that line in the middle of the pane.
+    #[test]
+    fn a_jump_into_a_file_shows_the_line_in_the_middle_of_the_pane() {
+        let dir = TempDir::new("jump_centre");
+        let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+        let file = dir.write("long.tcl", &text);
+        let mut app = App::with_file(None);
+        app.open_file_from_picker(&file);
+        app.jump_to_grep_match(&fenix_project::GrepMatch { path: file.clone(), line: 151, col: 1, text: String::new() });
+        app.ensure_cursor_visible(20);
+        let scroll = app.pane_state(app.focused_pane_id()).scroll_line;
+        assert_eq!(scroll, 140, "line 151 (row 150) sits ten rows down a 20-row pane");
+        // Just past the bottom edge, as a search result often is: centred
+        // too, where a step down would only scroll a line.
+        app.jump_to_grep_match(&fenix_project::GrepMatch { path: file, line: 162, col: 1, text: String::new() });
+        app.ensure_cursor_visible(20);
+        assert_eq!(app.pane_state(app.focused_pane_id()).scroll_line, 151);
     }
 
     #[test]
@@ -23994,6 +24084,19 @@ index 0000000..1111111 100644
         let spans = app.content_spans(app.open(), 0, 3, gutter, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
         let joined: String = spans.iter().map(|(s, _)| s.as_str()).collect();
         assert_eq!(joined, "1 \n~ \n~ ");
+    }
+
+    /// The agents' prompt is a box: no line numbers, no `~` rows under
+    /// what you've written.
+    #[test]
+    fn a_prompt_has_no_gutter_and_no_tildes() {
+        let mut app = App::with_file(None);
+        let id = app.buffers.open_prompt();
+        app.open_buffer_in_focused_pane(id);
+        let ob = app.buffers.get(id).unwrap();
+        assert_eq!(app.gutter_chars(ob), 0);
+        let spans = app.content_spans(ob, 0, 4, 0, None, &[], 0, &TabStops::Fixed(DEFAULT_TAB_WIDTH), 0);
+        assert!(!spans.iter().any(|(s, _)| s.contains('~')), "{spans:?}");
     }
 
     #[test]
@@ -30741,6 +30844,33 @@ configure_board stm32
     /// requests sent through `session.client` actually reach anything
     /// alive doesn't matter here -- only the dispatch logic on the
     /// receiving side is under test.
+    /// A narrow column's hint wraps in it rather than stopping after a
+    /// few words; a value too long for its column is shown whole on the
+    /// drawer's bottom line while it's selected.
+    #[test]
+    fn the_drawer_wraps_its_hints_and_shows_a_cut_value_whole() {
+        let mut app = App::with_file(None);
+        debug_test_session(&mut app);
+        let dock: String = app.debug_dock_spans(100).into_iter().map(|(text, _, _)| text).collect();
+        let squeezed: String = dock.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(squeezed.contains("SPC u P pins one"), "the Watches hint whole, over its rows: {dock}");
+        let long = format!("b'{}'", "\\x0c".repeat(40));
+        {
+            let s = app.debug_session.as_mut().unwrap();
+            s.stopped_thread = Some(1);
+            s.variables = vec![debug_drawer::DebugScope::of("Locals", &[("raw", long.as_str())])];
+        }
+        app.debug_dock_open = true;
+        app.debug_drawer.focused = true;
+        app.debug_drawer.column = 1;
+        let rows = app.debug_drawer_rows(debug_drawer::Column::Variables);
+        let at = rows.iter().position(|(t, _)| t.contains("raw")).unwrap();
+        app.debug_drawer.selected[1] = at;
+        let dock: String = app.debug_dock_spans(100).into_iter().map(|(text, _, _)| text).collect();
+        let bottom = dock.lines().last().unwrap_or("");
+        assert!(bottom.starts_with("› ") && bottom.contains("raw = b'"), "the selected value on the bottom line: {bottom}");
+    }
+
     fn debug_test_session(app: &mut App) {
         let dir = TempDir::new("debug_session_probe");
         // A process that stays alive: requests the test makes must reach it.

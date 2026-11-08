@@ -1638,8 +1638,9 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   Windows PowerShell, and `$SHELL` (falling back to `/bin/sh`) elsewhere.
   PowerShell starts without its banner. The 16 ANSI colours are the
   theme's own -- its Git colours for red, green and yellow, its syntax
-  accents for blue, magenta and cyan, its text and page for white and
-  black -- unless the theme lists its own (`[terminal] ansi`); 256-colour
+  accents for blue, magenta and cyan, its text for white, and for black
+  a grey that still reads on the page; the bright ones are the same hues,
+  livelier -- unless the theme lists its own (`[terminal] ansi`); 256-colour
   and RGB are as the program asks. Bold, dim, italic, underline and
   inverse are drawn, so PowerShell's menu completion shows the item it's
   on and its suggestions from history read as quieter than what you typed. Neither is killed by

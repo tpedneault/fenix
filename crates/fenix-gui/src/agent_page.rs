@@ -470,34 +470,42 @@ pub fn layout(page: &AgentPage, thread: &Thread, link: &Link, turn: &Turn, statu
     let (left, width) = frame(cols, 110);
     let mut g = Grid::new();
     let mut y = 1;
-    g.put(y, left, &fit(&thread.display_title(), width), Role::Title);
-    y += 1;
-    let mut x = g.put(y, left, &status.agent, Role::Accent);
-    let piece = |g: &mut Grid, x: &mut usize, text: &str, role: Role| {
-        if text.is_empty() {
-            return;
-        }
-        *x = g.put(y, *x, " · ", Role::Muted);
-        *x = g.put(y, *x, text, role);
-    };
+    // The thread's title is the dock's own title bar's; here, the agent
+    // and how it's doing, then its mode, model and what it has used --
+    // each part whole, going on to a second row rather than off the edge.
+    let mut parts: Vec<(String, Role, Option<Chip>)> = vec![(status.agent.clone(), Role::Accent, None)];
     if !status.state.is_empty() {
         let role = status.state_role.unwrap_or(Role::Muted);
-        x = g.put(y, x, "  ", Role::Muted);
-        x = g.chip(y, x, &status.state, role, Chip::Status(role));
+        parts.push((status.state.clone(), role, Some(Chip::Status(role))));
     }
     if let Some(modes) = &thread.modes {
         let name = modes.available.iter().find(|m| m.id == modes.current).map(|m| m.name.as_str()).unwrap_or(modes.current.as_str());
-        piece(&mut g, &mut x, name, Role::Text);
+        parts.push((name.to_string(), Role::Text, None));
     }
     if let Some(model) = thread.config_options.iter().find(|o| o.category.as_deref() == Some("model")) {
-        piece(&mut g, &mut x, &model.current_label(), Role::Text);
+        parts.push((model.current_label(), Role::Text, None));
     }
     if let Some(usage) = &thread.usage {
         let mut text = format!("{}% context", usage.percent());
         if let Some((amount, currency)) = &usage.cost {
             text.push_str(&format!(" · {amount:.2} {currency}"));
         }
-        piece(&mut g, &mut x, &text, Role::Muted);
+        parts.push((text, Role::Muted, None));
+    }
+    let mut x = left;
+    for (i, (text, role, chip)) in parts.iter().enumerate() {
+        let text = fit(text, width);
+        let gap = if i == 0 { 0 } else if chip.is_some() { 2 } else { 3 };
+        if i > 0 && x + gap + text.chars().count() > left + width {
+            y += 1;
+            x = left;
+        } else if i > 0 {
+            x = if chip.is_some() { g.put(y, x, "  ", Role::Muted) } else { g.put(y, x, " · ", Role::Muted) };
+        }
+        x = match chip {
+            Some(chip) => g.chip(y, x, &text, *role, *chip),
+            None => g.put(y, x, &text, *role),
+        };
     }
     let _ = (link, turn);
     y += 1;
@@ -834,7 +842,7 @@ mod tests {
         let mut page = AgentPage::new(ThreadId("x".into()));
         page.follow_up(&t);
         let text = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
-        for want in ["Fix the parser", "Claude Code  ready", "› You", "▸ thinking  Look at parse.rs first.", "✓ edit Edit src/parse.rs", "/p/src/parse.rs:2", "-b", "+B", "✓ run cargo test", "Fixed it.", "fn x() {}", "PLAN · 1/2", "☑ Fix", "◐ Test"] {
+        for want in ["Claude Code  ready", "› You", "▸ thinking  Look at parse.rs first.", "✓ edit Edit src/parse.rs", "/p/src/parse.rs:2", "-b", "+B", "✓ run cargo test", "Fixed it.", "fn x() {}", "PLAN · 1/2", "☑ Fix", "◐ Test"] {
             assert!(text.contains(want), "missing {want:?} in\n{text}");
         }
         assert!(!text.contains("test ok"), "a command's output is folded");
@@ -949,6 +957,26 @@ mod tests {
             state: PermissionState::Pending,
         });
         t
+    }
+
+    /// The thread's title is the dock's title bar's, not a line of the
+    /// page; the status row's parts go on to a second row in a narrow
+    /// dock, each whole, rather than off the edge.
+    #[test]
+    fn the_header_has_no_title_and_wraps_its_parts_whole() {
+        let t = thread();
+        let page = AgentPage::new(ThreadId("x".into()));
+        let wide = layout(&page, &t, &Link::Detached, &Turn::Idle, &status(), 100).all_text();
+        let first = wide.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        assert!(first.trim_start().starts_with("Claude Code"), "the status first; the title is the dock's: {wide}");
+        let busy = Status { agent: "Claude Code".into(), state: "waiting on you".into(), ..Status::default() };
+        let mut t = t;
+        t.modes = Some(fenix_acp::protocol::Modes { current: "default".into(), available: vec![fenix_acp::protocol::Mode { id: "default".into(), name: "Default (recommended)".into(), description: None }] });
+        let narrow = layout(&page, &t, &Link::Detached, &Turn::Idle, &busy, 44).text;
+        let rows: Vec<&str> = narrow.lines().take(4).collect();
+        assert!(rows.iter().any(|r| r.contains("Claude Code") && r.contains("waiting on you")), "{rows:?}");
+        assert!(rows.iter().any(|r| r.trim_start().starts_with("Default (recommended)")), "the mode whole, on a row of its own: {rows:?}");
+        assert!(narrow.lines().all(|l| l.chars().count() <= 44), "nothing past the edge");
     }
 
     /// On the question, `j` and `k` go from answer to answer, Enter gives

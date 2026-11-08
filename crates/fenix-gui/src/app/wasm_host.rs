@@ -2599,6 +2599,7 @@ impl App {
                     self.open_file_from_picker(&path);
                 }
                 if let Some(line) = line {
+                    self.mark_jump();
                     let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
                     let line = (line as usize).saturating_sub(1).min(buffer.visual_line_count().saturating_sub(1));
                     cursor.char_idx = buffer.line_start_char(line);

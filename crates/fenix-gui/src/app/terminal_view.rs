@@ -172,6 +172,16 @@ mod tests {
         assert!(v.styles.contains(&(dir, BOLD)));
     }
 
+    /// Black text reads on a dark page: it's the theme's black, a grey.
+    #[test]
+    fn black_text_reads_on_a_dark_page() {
+        let p = screen(b"\x1b[30mansi0\x1b[0m");
+        let v = view(theme(), p.screen());
+        let span = v.spans.iter().find(|(t, _, _)| t.starts_with("ansi0")).expect("its own span");
+        let c = crate::theme::rgba_of(span.1);
+        assert!(crate::theme::contrast_of(c, theme().bg) >= 2.5, "{:?}", span.1);
+    }
+
     /// Inverse swaps a cell's colours: what a menu's selected item is.
     #[test]
     fn inverse_swaps_the_colours() {

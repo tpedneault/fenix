@@ -51,6 +51,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   line beside the terminal; on a URL, in the browser. Relative paths are read
   from where the shell says it is (`OSC 7`, `OSC 9;9`), else where it started.
 
+### Fixed
+
+- A jump lands in the middle of the window rather than on its last row: a
+  symbol picked (a language pack's `SPC m s`), a search result, `gd`, the
+  jumplist, a path followed from a terminal. One already on screen stays
+  where it is; a step past the edge (`j`) still scrolls a line.
+- A terminal's ANSI black is a grey that reads on a dark page, and the
+  bright colours are the same hues, livelier, rather than washed towards
+  white.
+- The agents' dock: the thread's title is in its title bar once, not again
+  as the page's first line; the agent's state, mode, model and usage go on
+  to a second row in a narrow dock instead of off its edge; and the prompt
+  box shows only what you've written, without line numbers or `~` rows.
+- The debug drawer: a column with nothing in it says why in full, wrapped
+  in the column, and the selected row's value, when its column cut it, is
+  shown whole on the drawer's bottom line.
+
 ## [1.3.0] - 2026-11-06
 
 ### Added

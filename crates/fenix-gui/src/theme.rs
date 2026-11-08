@@ -501,19 +501,65 @@ pub fn luminance_of(c: [f32; 4]) -> f32 {
 
 /// The 16 ANSI colours from a theme's own: red, green and yellow are its
 /// Git colours (removed, added, changed), blue, magenta and cyan its
-/// functions, keywords and types; black and white are its page and its
-/// text -- the other way round on a light theme, where black is the ink
-/// -- and bright black is its line numbers' quiet grey. Each bright one
-/// is a step towards the text, so it stands out more on the same page.
+/// functions, keywords and types; white is its text a step quieter and
+/// bright white its text. Black is a grey that still reads on the page --
+/// a dark theme's a third of the way to its text, a light theme's its ink
+/// -- and bright black its line numbers' quiet grey. Each bright colour is
+/// the same hue, livelier: lighter and more saturated on a dark page,
+/// deeper on a light one, rather than washed towards white.
 fn ansi_for(bg: [f32; 4], fg: [f32; 4], quiet: [f32; 4], [red, green, yellow, blue, magenta, cyan]: [[f32; 4]; 6]) -> [[f32; 4]; 16] {
     let light = luminance_of(bg) > 0.5;
-    let (black, white, bright_white) = if light {
-        (fg, mix(bg, fg, 0.28), mix(bg, fg, 0.12))
-    } else {
-        (mix(bg, [0.0, 0.0, 0.0, 1.0], 0.35), mix(fg, bg, 0.18), fg)
+    // A dark page's black: a third of the way to the text, or further,
+    // until it reads at 2.6:1 -- dim, but there.
+    let dark_black = {
+        let mut step = 0.3;
+        while step < 0.7 && contrast_of(mix(bg, fg, step), bg) < 2.6 {
+            step += 0.02;
+        }
+        mix(bg, fg, step)
     };
-    let bright = |c: [f32; 4]| mix(c, fg, 0.2);
+    let (black, white, bright_white) = if light { (fg, mix(bg, fg, 0.28), mix(bg, fg, 0.12)) } else { (dark_black, mix(fg, bg, 0.18), fg) };
+    let bright = |c: [f32; 4]| {
+        let (h, s, l) = hsl(c);
+        if light { from_hsl(h, (s + 0.1).min(1.0), (l - 0.1).max(0.0)) } else { from_hsl(h, (s + 0.12).min(1.0), (l + 0.08).min(0.92)) }
+    };
     [black, red, green, yellow, blue, magenta, cyan, white, quiet, bright(red), bright(green), bright(yellow), bright(blue), bright(magenta), bright(cyan), bright_white]
+}
+
+/// A colour as hue (0-1), saturation and lightness.
+fn hsl(c: [f32; 4]) -> (f32, f32, f32) {
+    let (r, g, b) = (c[0], c[1], c[2]);
+    let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+    let l = (max + min) / 2.0;
+    if (max - min).abs() < 1e-6 {
+        return (0.0, 0.0, l);
+    }
+    let d = max - min;
+    let s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+    let h = if max == r { (g - b) / d + if g < b { 6.0 } else { 0.0 } } else if max == g { (b - r) / d + 2.0 } else { (r - g) / d + 4.0 };
+    (h / 6.0, s, l)
+}
+
+/// `hsl`'s inverse, opaque.
+fn from_hsl(h: f32, s: f32, l: f32) -> [f32; 4] {
+    if s <= 0.0 {
+        return [l, l, l, 1.0];
+    }
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+    let channel = |t: f32| {
+        let t = t.rem_euclid(1.0);
+        if t < 1.0 / 6.0 {
+            p + (q - p) * 6.0 * t
+        } else if t < 0.5 {
+            q
+        } else if t < 2.0 / 3.0 {
+            p + (q - p) * (2.0 / 3.0 - t) * 6.0
+        } else {
+            p
+        }
+    };
+    [channel(h + 1.0 / 3.0), channel(h), channel(h - 1.0 / 3.0), 1.0]
 }
 
 /// How far apart two colours are to read, 1 to 21 (WCAG's ratio).
@@ -1261,14 +1307,29 @@ mod tests {
         assert_eq!(orbit.ansi[1], rgba_of(orbit.git_conflicted));
         assert_eq!(orbit.ansi[2], rgba_of(orbit.git_staged));
         assert_eq!(orbit.ansi[15], rgba_of(orbit.fg));
-        assert!(luminance_of(orbit.ansi[0]) < luminance_of(orbit.bg), "black is under a dark page");
+        assert!(luminance_of(orbit.ansi[0]) > luminance_of(orbit.bg) && luminance_of(orbit.ansi[0]) < luminance_of(orbit.ansi[8]), "black is a grey above a dark page, under bright black");
         let light = named("GitHub Light");
         assert_eq!(light.ansi[0], rgba_of(light.fg), "on a light page black is the ink");
         for theme in all().iter().filter(|t| t.name != "TempleOS") {
-            for (i, c) in theme.ansi.iter().enumerate().filter(|(i, _)| ![0, 7, 15].contains(i)) {
-                assert!(contrast_of(*c, theme.bg) >= 2.0, "{}: ANSI {i} reads on the page", theme.name);
+            // On a light page its whites are meant to be faint, as a dark
+            // page's black was before; everything else reads, black too.
+            let faint: &[usize] = if is_light(theme) { &[7, 15] } else { &[] };
+            for (i, c) in theme.ansi.iter().enumerate().filter(|(i, _)| !faint.contains(i)) {
+                assert!(contrast_of(*c, theme.bg) >= 2.0, "{}: ANSI {i} reads on the page: {:.2}", theme.name, contrast_of(*c, theme.bg));
+            }
+            // Each bright colour stands further from the page than its
+            // plain one, and keeps its hue rather than turning white.
+            for i in 1..7 {
+                let (plain, bright) = (theme.ansi[i], theme.ansi[i + 8]);
+                assert!(contrast_of(bright, theme.bg) > contrast_of(plain, theme.bg), "{}: bright {i} stands out more", theme.name);
+                let (_, s_plain, _) = hsl(plain);
+                let (_, s_bright, _) = hsl(bright);
+                assert!(s_bright >= s_plain - 1e-3 || s_plain > 0.95, "{}: bright {i} isn't washed out", theme.name);
             }
         }
+        let (h, s, l) = hsl([0.2, 0.6, 0.4, 1.0]);
+        let back = from_hsl(h, s, l);
+        assert!((back[0] - 0.2).abs() < 1e-4 && (back[1] - 0.6).abs() < 1e-4 && (back[2] - 0.4).abs() < 1e-4, "hsl goes there and back");
         let mine = BUILT_IN[0].1.replace("[text]", "[terminal]\nansi = [\"#000000\", \"#ff0000\"]\n\n[text]");
         assert!(parse(&mine).err().unwrap().contains("16 colours"));
         let sixteen = format!("[terminal]\nansi = [{}]\n\n[text]", vec!["\"#102030\""; 16].join(", "));

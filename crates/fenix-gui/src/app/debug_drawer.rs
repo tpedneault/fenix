@@ -466,21 +466,39 @@ impl App {
         let theme = &self.theme;
         let (accent, muted) = (theme.git_modified, theme.gutter_fg);
         let focused = self.debug_drawer_focused();
+        let shares: Vec<usize> = COLUMNS.iter().map(|c| c.share()).collect();
+        let spans_at = debug_host::column_spans(&shares, width);
         let mut columns: Vec<(String, Vec<String>, usize)> = Vec::new();
+        // The selected row's text when its column cut it: shown whole on
+        // the bottom line while the drawer has the keys.
+        let mut cut: Option<String> = None;
         for (c, column) in COLUMNS.iter().enumerate() {
             let rows = self.debug_drawer_rows(*column);
             let first = self.debug_drawer_first_row(c, rows.len());
+            let w = spans_at[c].1;
             let mut title = column.title().to_string();
             if rows.len() > LIST_ROWS {
                 title.push_str(&format!("  {}-{}/{}", first + 1, (first + LIST_ROWS).min(rows.len()), rows.len()));
             }
-            columns.push((title, rows.into_iter().skip(first).take(LIST_ROWS).map(|(text, _)| text).collect(), column.share()));
+            // A column with nothing in it says why in a line or two of its
+            // own width, rather than cut off after a few words.
+            let lines: Vec<String> = match rows.as_slice() {
+                [(hint, RowAct::None)] if hint.chars().count() > w => crate::page::wrap(hint, w.max(1)),
+                _ => rows.iter().skip(first).take(LIST_ROWS).map(|(text, _)| text.clone()).collect(),
+            };
+            if focused && self.debug_drawer.column == c {
+                if let Some((text, _)) = rows.get(self.debug_drawer.selected[c].min(rows.len().saturating_sub(1))) {
+                    if text.chars().count() > w {
+                        cut = Some(text.trim().to_string());
+                    }
+                }
+            }
+            columns.push((title, lines, column.share()));
         }
         let borrowed: Vec<(&str, Vec<String>, usize)> = columns.iter().map(|(t, l, s)| (t.as_str(), l.clone(), *s)).collect();
         let rows = dock_columns(&borrowed, width, LIST_ROWS + 1);
-        let shares: Vec<usize> = COLUMNS.iter().map(|c| c.share()).collect();
         let mut decor = DockDecor {
-            columns: debug_host::column_spans(&shares, width),
+            columns: spans_at.clone(),
             focused: focused.then_some(self.debug_drawer.column),
             typing: focused && self.debug_drawer.line.is_some(),
             ..DockDecor::default()
@@ -533,6 +551,11 @@ impl App {
             Some(line) if focused => {
                 out.push((line.purpose.prompt().to_string(), accent, false));
                 out.push((format!("{}▏", line.text), theme.fg, false));
+            }
+            _ if focused && cut.is_some() => {
+                let whole = cut.unwrap_or_default();
+                out.push(("› ".to_string(), muted, false));
+                out.push((crate::page::fit(&whole, width.saturating_sub(2)), theme.fg, false));
             }
             _ if focused && COLUMNS[self.debug_drawer.column] == Column::Breakpoints => out.push(("t on/off  e condition  H hit count  L log message  x remove".to_string(), muted, true)),
             _ if focused => out.push(("› i evaluates in the selected frame, a adds a watch".to_string(), muted, true)),
