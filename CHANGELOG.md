@@ -6,6 +6,32 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-08
+
+### Changed
+
+- Panels: the window is a tray, and the panes, the sidebar, the terminal and
+  the docks sit on it as rounded panels a small gap apart, with no lines
+  between them. Dragging between two panes still resizes the split.
+- Themes work out three more surfaces from their own colours: the `tray`
+  between panels, a `card` and an `input`. Each steps away from the page
+  only as far as keeps the theme's text at its contrast; a theme file can
+  set them itself, under `[surfaces]`.
+- The agents' dock: tool calls in a row are one card, what you wrote is on a
+  card of its own, and a question the agent asks is an outlined card with an
+  answer a line, each on its key's cap. The prompt under it is drawn as a
+  box you type in, and the state beside the agent's name is a chip.
+- A question the agent asks takes `j` and `k` to move between its answers,
+  and Enter to give the one they're on, as well as `y`, `Y`, `n` and the
+  numbers from anywhere.
+- The debug drawer: the step keys are on caps in its header beside the
+  session's state, each column is a card -- the one with the keys outlined
+  -- and the evaluate line is a box. It's a row taller, and each column
+  shows nine rows.
+- The values the debugger writes at the ends of lines are on chips, a
+  changed one in ember.
+- Every page's key strip shows its keys on caps.
+
 ## [1.3.0] - 2026-11-06
 
 ### Added
@@ -604,7 +630,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.3.1...HEAD
+[1.3.1]: https://github.com/tpedneault/fenix/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/tpedneault/fenix/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/tpedneault/fenix/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/tpedneault/fenix/compare/v1.0.1...v1.1.0
