@@ -10,6 +10,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Pages: a page's tab has its icon and plain name (Settings, Search · HEADER,
+  Git · orbit-ground, Log · master) rather than `*settings*`, and a page starts
+  right under its tabs, with no breadcrumb row.
+- Settings: whole names, switches for what's on or off, a stepper for the value
+  being changed, values on fields, and whether each is changed or the default.
+  The setting selected opens with what it does and its key in `settings.toml`;
+  the categories are a card with their counts, and you and the project are
+  chips.
+- Git status: the branch, where it stands against its upstream and the changes
+  are chips; each section is a card with its count, each file shows its status
+  on a badge, its name before its folder and the lines it adds and removes
+  (read once a refresh), and an open diff is a well inside its card. With
+  changes but nothing staged, the page says how to stage.
+- Search: the query, the replacement and the files in input boxes, case, word
+  and regex as toggles that show when they're on, the scope as chips, each
+  file's results on a card with its count, and matches on a chip.
+- Git log: the branches' lanes in their own colours, branches and tags as
+  chips, the author's initials on a badge and the hash quieter; the commit the
+  cursor is on opens under it with its author and its keys.
+
 - Panels: the window is a tray, and the panes, the sidebar, the terminal and
   the docks sit on it as rounded panels a small gap apart, with no lines
   between them. Dragging between two panes still resizes the split. The panel

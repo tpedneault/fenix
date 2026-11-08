@@ -540,6 +540,11 @@ its extension. The rest is built into Fenix.
   calls, a debugger column -- and keys are shown on caps. The tray, the
   cards and the inputs are the theme's (`[surfaces]`'s `tray`, `card` and
   `input`), worked out from its colours when it doesn't set them.
+  A page's tab has its icon and plain name -- Settings, Search · HEADER,
+  Git · orbit-ground -- and the page starts right under it. Pages draw
+  their fields as input boxes, their options as toggles, what's on or off
+  as switches and their sections as cards: Settings, Git status, Search and
+  the Git log.
 
 - **Notifications**, in the manner of Dunst: toasts stacked in a corner
   of the window (`notifications.position`), newest nearest it, for what

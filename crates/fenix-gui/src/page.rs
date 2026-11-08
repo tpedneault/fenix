@@ -141,6 +141,12 @@ pub enum CardLook {
     Input,
     /// Waiting on you: outlined in the accent.
     Ask,
+    /// A box you type in: an input's surface, outlined faintly.
+    Field,
+    /// A box you're typing in: outlined in the accent.
+    FieldFocused,
+    /// The row the cursor is on, opened: tinted and outlined.
+    Selected,
 }
 
 /// How a chip is drawn.
@@ -152,6 +158,14 @@ pub enum Chip {
     Chosen,
     /// A status, faded in its role's colour.
     Status(Role),
+    /// An option that's on or off: on, tinted and outlined; off, plain.
+    Toggle(bool),
+    /// A count beside a title, quiet.
+    Badge,
+    /// A value you can change: on an input's surface.
+    Value,
+    /// On or off, drawn as a switch over its blank cells.
+    Switch(bool),
 }
 
 /// A background for cells: one of the theme's tints, or a colour.
@@ -585,6 +599,18 @@ impl Grid {
         self.cards.push(Card { lines, cols, look });
     }
 
+    /// Sets `lines` off as a card behind every card already made: a list's
+    /// card, drawn under the card of the row selected in it.
+    pub fn card_behind(&mut self, lines: Range<usize>, cols: Range<usize>, look: CardLook) {
+        if lines.is_empty() {
+            return;
+        }
+        if self.lines.len() < lines.end {
+            self.lines.resize(lines.end, Vec::new());
+        }
+        self.cards.insert(0, Card { lines, cols, look });
+    }
+
     /// Writes `text` at (`line`, `col`) on a chip; returns the column
     /// after it.
     pub fn chip(&mut self, line: usize, col: usize, text: &str, role: Role, chip: Chip) -> usize {
@@ -593,6 +619,50 @@ impl Grid {
             self.chips.push((line, col..end, chip));
         }
         end
+    }
+
+    /// A count beside a title, on a quiet badge; returns the column after.
+    pub fn badge(&mut self, line: usize, col: usize, count: usize) -> usize {
+        self.chip(line, col, &format!(" {count} "), Role::Muted, Chip::Badge)
+    }
+
+    /// A box you type in across `cols` of `line`: `text`, or the
+    /// `placeholder` quieter while it's empty, outlined in the accent
+    /// while `focused`.
+    pub fn input_box(&mut self, line: usize, cols: Range<usize>, text: &str, placeholder: &str, focused: bool) {
+        let width = cols.len().saturating_sub(2);
+        if text.is_empty() {
+            self.put(line, cols.start + 1, &fit(placeholder, width), Role::Muted);
+        } else {
+            self.put(line, cols.start + 1, &fit(text, width), Role::Text);
+        }
+        self.card(line..line + 1, cols, if focused { CardLook::FieldFocused } else { CardLook::Field });
+    }
+
+    /// An option shown on or off (`Aa`, `.*`, a scope); returns the column after.
+    pub fn toggle(&mut self, line: usize, col: usize, label: &str, on: bool) -> usize {
+        self.chip(line, col, &format!(" {label} "), if on { Role::Accent } else { Role::Muted }, Chip::Toggle(on))
+    }
+
+    /// A switch, three cells wide; returns the column after.
+    pub fn switch(&mut self, line: usize, col: usize, on: bool) -> usize {
+        self.write(line, col, "   ");
+        self.chips.push((line, col..col + 3, Chip::Switch(on)));
+        col + 3
+    }
+
+    /// A number you step with h and l: `‹ 4 ›`; returns the column after.
+    pub fn stepper(&mut self, line: usize, col: usize, value: &str) -> usize {
+        let x = self.put(line, col, "‹ ", Role::Muted);
+        let x = self.put(line, x, value, Role::Accent);
+        let end = self.put(line, x, " ›", Role::Muted);
+        self.chips.push((line, col..end, Chip::Value));
+        end
+    }
+
+    /// A value on a field: a setting's text, a path.
+    pub fn value(&mut self, line: usize, col: usize, text: &str, role: Role) -> usize {
+        self.chip(line, col, &format!(" {text} "), role, Chip::Value)
     }
 
     /// Leaves `rows` lines for a picture `cols` wide at (`line`, `col`).
@@ -743,6 +813,30 @@ mod tests {
         assert!(page.text.lines().all(|l| l.chars().count() <= 20), "{}", page.text);
         assert!(page.text.contains("Enter open"));
         assert_eq!(page.chips.first(), Some(&(3, 0..5, Chip::Key)), "each key on its cap");
+    }
+
+    /// The widgets write their text and the box they're drawn on.
+    #[test]
+    fn widgets_are_text_on_their_boxes() {
+        let mut g = Grid::new();
+        g.input_box(0, 0..21, "", "Search 133 settings", false);
+        let x = g.toggle(1, 0, "Aa", false);
+        let x = g.toggle(1, x + 1, "ab", true);
+        g.switch(2, 0, true);
+        g.stepper(2, 6, "4");
+        g.badge(3, 0, 28);
+        let x2 = g.value(3, 6, "pwsh -NoLogo", Role::Text);
+        let page = g.finish();
+        let lines: Vec<&str> = page.text.lines().collect();
+        assert_eq!(lines[0], " Search 133 settings");
+        assert_eq!(lines[1], " Aa   ab");
+        assert_eq!(lines[2].trim_end(), "      ‹ 4 ›");
+        assert_eq!(lines[3], " 28    pwsh -NoLogo");
+        assert_eq!(page.cards[0].look, CardLook::Field);
+        assert!(page.chips.contains(&(1, 0..4, Chip::Toggle(false))) && page.chips.contains(&(1, 5..9, Chip::Toggle(true))));
+        assert!(page.chips.contains(&(2, 0..3, Chip::Switch(true))));
+        assert!(page.chips.contains(&(2, 6..11, Chip::Value)));
+        assert_eq!((x, x2), (9, 20), "each returns the column after it");
     }
 
     /// A card is kept, and moved with the page it's in.

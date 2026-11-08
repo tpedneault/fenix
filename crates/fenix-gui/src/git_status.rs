@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use fenix_diff::{FileDiff, LineKind};
 use fenix_git::{ApplyTarget, Commit, CommitFlags, CommitKind, FileEntry, PushOptions, RepoStatus, ResetMode, Stash, StashOptions};
 
-use crate::page::{fit, frame, Grid, Key, Page, Popup, Role};
+use crate::page::{fit, frame, CardLook, Chip, Grid, Key, Page, Popup, Role};
 
 /// Everything the page shows, read in one go off the UI thread.
 #[derive(Debug, Clone, Default)]
@@ -48,6 +48,9 @@ pub struct Snapshot {
     pub ops: Vec<Op>,
     /// The repository's worktrees -- listed when there's more than one.
     pub worktrees: Vec<fenix_git::Worktree>,
+    /// Lines added and removed per changed file, by (staged, path): read
+    /// once with the rest, so a row's counts cost nothing to draw.
+    pub stats: std::collections::HashMap<(bool, String), (usize, usize)>,
 }
 
 /// The branch's pull request, as the header shows it.
@@ -1544,35 +1547,37 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
     };
     let status = snap.status.as_ref();
 
-    // The header: where this branch stands.
+    // The header: the project, then where this branch stands, as chips.
     let key = |g: &mut Grid, y: usize, label: &str| g.put(y, left, label, Role::Muted) + (8 - label.len().min(7));
-    let x = key(&mut g, y, "Head");
-    let x = g.put(y, x, status.map(|s| s.branch.as_str()).unwrap_or("(no branch)"), Role::Accent) + 2;
-    if let Some(subject) = &snap.head_subject {
-        g.put(y, x, &fit(subject, (left + width).saturating_sub(x)), Role::Text);
-    }
-    y += 1;
-    let x = key(&mut g, y, "Push");
-    match status.and_then(|s| s.upstream.as_ref()) {
+    let x = g.put(y, left, &page.name, Role::Title) + 2;
+    let x = g.chip(y, x, &format!(" {} ", status.map(|s| s.branch.as_str()).unwrap_or("(no branch)")), Role::Accent, Chip::Status(Role::Accent)) + 1;
+    let mut x = match status.and_then(|s| s.upstream.as_ref()) {
         Some(upstream) => {
             let s = status.unwrap();
-            let x = g.put(y, x, upstream, Role::Text) + 1;
-            let x = g.put(y, x, &format!("↑{}", s.ahead), if s.ahead > 0 { Role::Good } else { Role::Muted }) + 1;
-            let x = g.put(y, x, &format!("↓{}", s.behind), if s.behind > 0 { Role::Warn } else { Role::Muted }) + 1;
-            if let Some(secs) = snap.fetched_secs_ago {
-                g.put(y, x, &format!("· fetched {}", ago(secs)), Role::Muted);
-            }
+            let role = if s.behind > 0 { Role::Warn } else if s.ahead > 0 { Role::Good } else { Role::Muted };
+            g.chip(y, x, &format!(" {upstream} ↑{} ↓{} ", s.ahead, s.behind), role, Chip::Status(role)) + 1
         }
         None => match &snap.push_remote {
-            Some(remote) => {
-                let x = g.put(y, x, &format!("{remote}/{}", status.map(|s| s.branch.as_str()).unwrap_or("")), Role::Muted) + 1;
-                g.put(y, x, "not pushed yet · P p creates it", Role::Muted);
-            }
-            None => {
-                g.put(y, x, "no remote", Role::Muted);
-            }
+            Some(remote) => g.chip(y, x, &format!(" {remote}/{} not pushed yet · P p creates it ", status.map(|s| s.branch.as_str()).unwrap_or("")), Role::Muted, Chip::Badge) + 1,
+            None => g.chip(y, x, " no remote ", Role::Muted, Chip::Badge) + 1,
         },
+    };
+    let changes = snap.files.len();
+    if changes > 0 {
+        x = g.chip(y, x, &format!(" {} ", count(changes, "change")), Role::Muted, Chip::Badge) + 1;
     }
+    // Quieter, at the right: when it was fetched, the last commit.
+    let mut right = Vec::new();
+    if let Some(secs) = snap.fetched_secs_ago {
+        right.push(format!("fetched {}", ago(secs)));
+    }
+    if let Some(subject) = &snap.head_subject {
+        right.push(format!("last commit “{subject}”"));
+    }
+    let right = right.join(" · ");
+    let room = (left + width).saturating_sub(x + 2);
+    let right = fit(&right, room);
+    g.put(y, (left + width).saturating_sub(right.chars().count()), &right, Role::Muted);
     y += 1;
     if let Some((base, ahead, behind)) = &snap.base {
         if status.is_some_and(|s| &s.branch != base) {
@@ -1649,9 +1654,25 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
     }
     let selection = page.anchor.map(|a| (a.min(page.cursor), a.max(page.cursor)));
     let mut cursor_line = None;
+    // Each section is a card, from its title to its last row; a file's
+    // open diff a well inside it.
+    let mut section_from: Option<usize> = None;
+    let mut diff_from: Option<usize> = None;
+    let close = |g: &mut Grid, from: &mut Option<usize>, to: usize, cols: std::ops::Range<usize>, look: CardLook| {
+        if let Some(f) = from.take() {
+            g.card(f..to, cols, look);
+        }
+    };
     for (i, row) in rows.iter().enumerate() {
+        if !matches!(row, Row::Hunk { .. } | Row::Line { .. }) {
+            close(&mut g, &mut diff_from, y, left + 5..left + width - 1, CardLook::Input);
+        }
         if matches!(row, Row::Section(_)) {
+            close(&mut g, &mut section_from, y, left..left + width, CardLook::Plain);
             y += 1;
+            section_from = Some(y);
+        } else if matches!(row, Row::Hunk { .. } | Row::Line { .. }) && diff_from.is_none() {
+            diff_from = Some(y);
         }
         let line_y = y;
         match row {
@@ -1666,7 +1687,7 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                     Section::Worktrees => snap.worktrees.len(),
                     s => files_in(snap, *s).len(),
                 };
-                let x = g.put(y, left, if folded { "▸" } else { "▾" }, Role::Muted) + 1;
+                let x = g.put(y, left + 1, if folded { "▸" } else { "▾" }, Role::Muted) + 1;
                 let title = match section {
                     Section::Unpulled => format!("Unpulled from {}", status.and_then(|s| s.upstream.clone()).unwrap_or_default()),
                     Section::Unpushed => match status.and_then(|s| s.upstream.clone()) {
@@ -1675,11 +1696,8 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                     },
                     s => s.title().to_string(),
                 };
-                let x = g.put(y, x, &title.to_uppercase(), if *section == Section::Conflicted { Role::Bad } else { Role::Text }) + 1;
-                let x = g.put(y, x, &n.to_string(), Role::Muted) + 1;
-                if x + 2 < left + width {
-                    g.rule(y, x..left + width);
-                }
+                let x = g.put(y, x, &title.to_uppercase(), if *section == Section::Conflicted { Role::Bad } else { Role::Muted }) + 1;
+                g.badge(y, x, n);
             }
             Row::File { section, path } => {
                 let letter = files_in(snap, *section).into_iter().find(|(_, p)| p == path).map(|(l, _)| l).unwrap_or(' ');
@@ -1691,18 +1709,26 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
                     '?' => Role::Muted,
                     _ => Role::Warn,
                 };
-                let x = g.put(y, x, &letter.to_string(), role) + 2;
+                // Its status on a badge, the name before its folder.
+                let x = g.chip(y, x, &format!(" {letter} "), role, Chip::Status(role)) + 1;
                 let stats = page.diff(*section, path).map(|d| {
                     let add = d.hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == LineKind::Added).count();
                     let del = d.hunks.iter().flat_map(|h| &h.lines).filter(|l| l.kind == LineKind::Removed).count();
                     (add, del)
-                });
-                let room = (left + width).saturating_sub(x + 12);
-                g.put(y, x, &fit(path, room), Role::Text);
+                }).or_else(|| snap.stats.get(&(*section == Section::Staged, path.clone())).copied());
+                let room = (left + width).saturating_sub(x + 14);
+                let (dir, name) = match path.rsplit_once('/') {
+                    Some((dir, name)) => (dir, name),
+                    None => ("", path.as_str()),
+                };
+                let nx = g.put(y, x, &fit(name, room), Role::Text);
+                if !dir.is_empty() && nx + 2 < x + room {
+                    g.put(y, nx + 1, &fit(dir, (x + room).saturating_sub(nx + 1)), Role::Muted);
+                }
                 if let Some((add, del)) = stats {
                     let text_add = format!("+{add}");
                     let text_del = format!("−{del}");
-                    let end = left + width;
+                    let end = left + width - 1;
                     let xd = end.saturating_sub(text_del.chars().count());
                     g.put(y, xd, &text_del, Role::Bad);
                     g.put(y, xd.saturating_sub(text_add.len() + 1), &text_add, Role::Good);
@@ -1793,6 +1819,22 @@ pub fn layout(page: &GitStatus, cols: usize) -> Page {
         y += 1;
     }
     let _ = cursor_line;
+    close(&mut g, &mut diff_from, y, left + 5..left + width - 1, CardLook::Input);
+    close(&mut g, &mut section_from, y, left..left + width, CardLook::Plain);
+    // Nothing staged while there are changes: what to do, in its place.
+    let staged = files_in(snap, Section::Staged).len();
+    let changed = files_in(snap, Section::Unstaged).len() + files_in(snap, Section::Untracked).len();
+    if staged == 0 && changed > 0 && !rows.is_empty() {
+        y += 1;
+        let x = g.put(y, left + 1, "▾", Role::Muted) + 1;
+        let x = g.put(y, x, "STAGED", Role::Muted) + 1;
+        g.badge(y, x, 0);
+        y += 1;
+        let x = g.put(y, left + 4, "Nothing staged yet.", Role::Muted) + 1;
+        let x = g.chip(y, x, "s", Role::Accent, Chip::Key) + 1;
+        g.put(y, x, "stages the file or hunk under the cursor.", Role::Muted);
+        g.card(y - 1..y + 1, left..left + width, CardLook::Plain);
+    }
 
     let keys: Vec<(&str, &str)> = if page.input.is_some() {
         vec![("Enter", "done"), ("Esc", "cancel")]
@@ -1923,6 +1965,7 @@ mod tests {
             head_subject: Some("Git: a status page".into()),
             push_remote: Some("origin".into()),
             base: Some(("main".into(), 7, 1)),
+            stats: [((false, "src/a.rs".to_string()), (3, 1))].into_iter().collect(),
             fetched_secs_ago: Some(240),
             files: vec![file("new.txt", '?', '?'), file("src/a.rs", '.', 'M'), file("README.md", 'M', '.'), file("both.rs", 'M', 'M')],
             stashes: vec![Stash { index: 0, message: "WIP on main".into() }],
@@ -1934,6 +1977,22 @@ mod tests {
             ops: Vec::new(),
             worktrees: Vec::new(),
         }
+    }
+
+    /// Each section is a card with its count on a badge; a file shows its
+    /// status on a badge, its name before its folder, and the lines it
+    /// adds and removes from the refresh's counts, with no diff read.
+    #[test]
+    fn sections_are_cards_and_files_show_their_counts() {
+        let p = page();
+        let laid = layout(&p, 120);
+        let lines: Vec<&str> = laid.text.lines().collect();
+        let a = lines.iter().position(|l| l.contains(" a.rs src")).expect("name, then folder");
+        assert!(lines[a].contains("+3") && lines[a].contains("−1"), "{}", lines[a]);
+        assert!(laid.chips.iter().any(|(l, _, c)| *l == a && matches!(c, Chip::Status(_))), "its status on a badge");
+        let unstaged = lines.iter().position(|l| l.contains("UNSTAGED")).unwrap();
+        assert!(laid.cards.iter().any(|c| c.look == CardLook::Plain && c.lines.start == unstaged && c.lines.contains(&a)), "the section's card holds its files");
+        assert!(laid.text.lines().nth(1).unwrap().contains("feature/git"), "the branch on the header's chips");
     }
 
     fn page() -> GitStatus {
@@ -2150,9 +2209,9 @@ mod tests {
     fn the_header_says_where_the_branch_stands() {
         let text = layout(&page(), 120).text;
         assert!(text.contains("feature/git") && text.contains("Git: a status page"), "{text}");
-        assert!(text.contains("origin/feature/git ↑2 ↓0 · fetched 4 min ago"), "{text}");
+        assert!(text.contains("origin/feature/git ↑2 ↓0") && text.contains("fetched 4 min ago"), "{text}");
         assert!(text.contains("main ↑7 ↓1"), "{text}");
-        assert!(text.contains("UNPUSHED TO ORIGIN/FEATURE/GIT 2"), "{text}");
+        assert!(text.contains("UNPUSHED TO ORIGIN/FEATURE/GIT  2"), "{text}");
     }
 
     #[test]
@@ -2188,7 +2247,7 @@ mod tests {
         assert_eq!(p.key(Key::Char('U')), Action::PlanUndo(None), "U anywhere else: the latest");
         p.show_operations();
         let text = layout(&p, 120).text;
-        assert!(text.contains("OPERATIONS 2") && text.contains("reset --hard to e81a4f2") && text.contains("U undoes"), "{text}");
+        assert!(text.contains("OPERATIONS  2") && text.contains("reset --hard to e81a4f2") && text.contains("U undoes"), "{text}");
         p.key(Key::Char('j'));
         p.key(Key::Char('j'));
         assert_eq!(p.key(Key::Char('U')), Action::PlanUndo(Some(10)));

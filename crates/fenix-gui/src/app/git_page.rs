@@ -39,7 +39,14 @@ fn read_snapshot(root: &Path, base: Option<&str>) -> Snapshot {
         .into_iter()
         .map(|e| Op { age: now.saturating_sub(e.time) / 1000, undoable: e.undo.possible(), undone: undone.contains(&e.time), ok: e.ok, time: e.time, label: e.label })
         .collect();
+    let mut stats = std::collections::HashMap::new();
+    for staged in [false, true] {
+        for (path, added, removed) in fenix_git::working_numstat(root, staged) {
+            stats.insert((staged, path), (added, removed));
+        }
+    }
     Snapshot {
+        stats,
         ops,
         head_subject: recent.first().map(|c| c.message.clone()),
         push_remote: fenix_git::default_remote(root),
@@ -717,13 +724,13 @@ mod tests {
         repo.write("a.txt", "one\nTWO\nthree\n");
         let mut app = app_on(&repo, "a.txt");
         let shown = text(&mut app);
-        assert!(shown.contains("Head    main  first") && shown.contains("UNSTAGED 1") && shown.contains("a.txt"), "{shown}");
+        assert!(shown.contains(" main ") && shown.contains("last commit “first”") && shown.contains("UNSTAGED  1") && shown.contains("a.txt"), "{shown}");
         assert!(shown.contains("origin/main") && shown.contains("not pushed yet"), "{shown}");
         goto(&mut app, |r| matches!(r, Row::File { path, .. } if path == "a.txt"));
         press(&mut app, "s");
         assert_eq!(repo.git(&["diff", "--cached", "--name-only"]), "a.txt");
         let shown = text(&mut app);
-        assert!(shown.contains("STAGED 1") && !shown.contains("UNSTAGED"), "the page read the tree again:\n{shown}");
+        assert!(shown.contains("STAGED  1") && !shown.contains("UNSTAGED"), "the page read the tree again:\n{shown}");
         assert!(shown.contains("stage a.txt ✓"), "{shown}");
     }
 
@@ -825,7 +832,7 @@ mod tests {
         app.git_switch_to("origin/review");
         assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]), "review");
         assert_eq!(repo.git(&["rev-parse", "--abbrev-ref", "review@{upstream}"]), "origin/review");
-        assert!(text(&mut app).contains("Head    review"));
+        assert!(text(&mut app).contains(" review "));
     }
 
     #[test]

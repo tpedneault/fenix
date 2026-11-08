@@ -67,7 +67,16 @@ pub(super) fn card_colors(theme: &Theme, look: crate::page::CardLook) -> ([f32; 
         CardLook::Plain => (theme.card, None),
         CardLook::Input => (theme.input, None),
         CardLook::Ask => (theme.card, Some([theme.caret[0], theme.caret[1], theme.caret[2], 0.6])),
+        CardLook::Field => (theme.input, Some(faded_fg(theme, 0.10))),
+        CardLook::FieldFocused => (theme.input, Some([theme.caret[0], theme.caret[1], theme.caret[2], 0.6])),
+        CardLook::Selected => ([theme.mode_command[0], theme.mode_command[1], theme.mode_command[2], 0.10], Some([theme.mode_command[0], theme.mode_command[1], theme.mode_command[2], 0.45])),
     }
+}
+
+/// The text's colour at `alpha`: a faint outline that reads on any surface.
+fn faded_fg(theme: &Theme, alpha: f32) -> [f32; 4] {
+    let c = glyphon_to_rgba(theme.fg);
+    [c[0], c[1], c[2], alpha]
 }
 
 /// A chip's fill and outline in `theme`: a key's cap is an input's
@@ -81,7 +90,18 @@ pub(super) fn chip_color(theme: &Theme, chip: crate::page::Chip) -> ([f32; 4], O
         Chip::Key => (theme.input, Some(faded(glyphon_to_rgba(theme.fg), 0.16))),
         Chip::Chosen => (faded(theme.caret, 0.22), Some(faded(theme.caret, 0.55))),
         Chip::Status(role) => (faded(glyphon_to_rgba(role_color(theme, role)), 0.16), None),
+        Chip::Toggle(true) => (faded(theme.mode_command, 0.16), Some(faded(theme.mode_command, 0.5))),
+        Chip::Toggle(false) => ([0.0; 4], None),
+        Chip::Badge | Chip::Value => (theme.input, None),
+        // Its track; the knob is drawn over it (`HomeOverlay::switches`).
+        Chip::Switch(on) => (if on { faded(glyphon_to_rgba(theme.git_staged), 0.35) } else { theme.input }, (!on).then(|| faded(glyphon_to_rgba(theme.fg), 0.16))),
     }
+}
+
+/// Whether a chip is a pill (round ends) rather than a key's cap.
+pub(super) fn chip_is_pill(chip: crate::page::Chip) -> bool {
+    use crate::page::Chip;
+    matches!(chip, Chip::Status(_) | Chip::Toggle(_) | Chip::Badge | Chip::Switch(_))
 }
 
 pub(super) enum PageModel {
@@ -1123,7 +1143,16 @@ impl App {
             .page
             .chips
             .iter()
-            .filter_map(|(line, cols, chip)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); let (fill, outline) = chip_color(theme, *chip); (row, a, b, fill, outline) }))
+            .filter_map(|(line, cols, chip)| visible(*line).map(|row| { let (a, b) = cells(*line, cols); let (fill, outline) = chip_color(theme, *chip); (row, a, b, fill, outline, chip_is_pill(*chip)) }))
+            .collect();
+        overlay.switches = state
+            .page
+            .chips
+            .iter()
+            .filter_map(|(line, cols, chip)| match chip {
+                crate::page::Chip::Switch(on) => visible(*line).map(|row| { let (a, b) = cells(*line, cols); (row, a, b, *on) }),
+                _ => None,
+            })
             .collect();
         overlay.images = state
             .page

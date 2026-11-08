@@ -18812,7 +18812,7 @@ impl App {
                 self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
             let strip_rect = tab_strip_rect(fenix_window::Rect {
                 x: rect.x,
-                y: rect.y - title_reserved_height(line_height),
+                y: rect.y - pane_chrome_height(line_height, self.pane_has_breadcrumb(pane)),
                 w: rect.w,
                 h: tab_strip_height(line_height),
             });
@@ -20233,7 +20233,7 @@ impl App {
                 indent_guides,
                 row_accents,
                 home: {
-                    home_overlay.chips.extend(decoration_chips);
+                    home_overlay.chips.extend(decoration_chips.into_iter().map(|(r, a, b, f, o)| (r, a, b, f, o, false)));
                     home_overlay
                 },
                 extra,
@@ -20440,12 +20440,15 @@ impl App {
                     tab.close.x = text_origin + close_left;
                     tab.close.w = close_right - close_left;
                 }
-                let crumb_rect =
-                    fenix_window::Rect { x: pane.rect.x, y: top + tab_h, w: pane.rect.w, h: breadcrumb_strip_height(line_height) };
-                let crumb_refs: Vec<(&str, glyphon::Color, bool)> =
-                    pane.breadcrumb_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
-                text.set_pane_breadcrumb_rich(pane.pane, crumb_rect.w, &crumb_refs);
-                breadcrumb_text_rects.push((pane.pane, crumb_rect));
+                // A page has no breadcrumb row: its tab says what it is.
+                if pane.has_breadcrumb {
+                    let crumb_rect =
+                        fenix_window::Rect { x: pane.rect.x, y: top + tab_h, w: pane.rect.w, h: breadcrumb_strip_height(line_height) };
+                    let crumb_refs: Vec<(&str, glyphon::Color, bool)> =
+                        pane.breadcrumb_spans.iter().map(|(s, c, i)| (s.as_str(), *c, *i)).collect();
+                    text.set_pane_breadcrumb_rich(pane.pane, crumb_rect.w, &crumb_refs);
+                    breadcrumb_text_rects.push((pane.pane, crumb_rect));
+                }
             }
             title_rects.push((pane.pane, title_rect));
             tab_text_rects.push((pane.pane, tab_rect));
@@ -20630,10 +20633,19 @@ impl App {
                 let w = (col_end - col_start) as f32 * char_width;
                 bg_rect.push_rect(gpu, x, y, w, line_height, color);
             }
-            for &(row, a, b, fill, outline) in &pane.home.chips {
+            for &(row, a, b, fill, outline, pill) in &pane.home.chips {
                 let r = panels::key_cap(content_x, char_width, row_y(row), line_height, a, b);
-                let style = crate::rect::BoxStyle { radius: panels::KEY_RADIUS, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
+                let radius = if pill { r.h / 2.0 } else { panels::KEY_RADIUS };
+                let style = crate::rect::BoxStyle { radius, fill, border: if outline.is_some() { 1.0 } else { 0.0 }, border_color: outline.unwrap_or([0.0; 4]) };
                 bg_rect.push_box(gpu, r.x, r.y, r.w, r.h, style);
+            }
+            // A switch's knob, at the end it's on.
+            for &(row, a, b, on) in &pane.home.switches {
+                let r = panels::key_cap(content_x, char_width, row_y(row), line_height, a, b);
+                let d = (r.h - 4.0).max(2.0);
+                let x = if on { r.x + r.w - d - 2.0 } else { r.x + 2.0 };
+                let color = if on { glyphon_to_rgba(theme.git_staged) } else { glyphon_to_rgba(theme.gutter_fg) };
+                bg_rect.push_box(gpu, x, r.y + 2.0, d, d, crate::rect::BoxStyle { radius: d / 2.0, fill: color, border: 0.0, border_color: [0.0; 4] });
             }
             for &(row, start, end) in &pane.home.rules {
                 let y = (row_y(row) + line_height / 2.0).round();
@@ -20904,10 +20916,10 @@ impl App {
             if pane.tabs_layout.is_empty() {
                 continue;
             }
-            let strip_y = pane.rect.y - title_reserved_height(line_height);
+            let strip_y = pane.rect.y - pane_chrome_height(line_height, pane.has_breadcrumb);
             let strip_h = tab_strip_height(line_height);
             let breadcrumb_y = strip_y + strip_h;
-            let breadcrumb_h = breadcrumb_strip_height(line_height);
+            let breadcrumb_h = if pane.has_breadcrumb { breadcrumb_strip_height(line_height) } else { 0.0 };
             // Breadcrumbs are navigation chrome, but a shade closer to the
             // editing canvas than the tab row -- and, per the design's own
             // `.crumbs-b`, a visibly shorter bar than the tab row above it
@@ -20954,7 +20966,9 @@ impl App {
                     bg_rect.push_rect(gpu, x, strip_y, w, 3.0, theme.mode_normal);
                 }
             }
-            bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, theme.divider);
+            if pane.has_breadcrumb {
+                bg_rect.push_rect(gpu, pane.rect.x, breadcrumb_y + breadcrumb_h - 1.0, pane.rect.w, 1.0, theme.divider);
+            }
         }
         // Inline git gutter marks (Part 5) -- a thin colored bar, one per
         // changed line still in view. Sits within the pane's own left

@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 use fenix_config::{settings, Category, Kind, Problem, Secret, Setting, Value};
 
+use crate::page::{CardLook, Chip};
 use crate::page::{edit_line, fit, frame, insert_at, with_caret, wrap, Grid, Key, Page, Popup, Role};
 
 /// Whose settings the page is showing.
@@ -917,8 +918,8 @@ fn hint(page: &SettingsPage, s: &Setting) -> String {
                 return format!("{project} uses {}", value.show());
             }
             match (here, s.default.is_empty()) {
-                (true, false) => format!("default {}", s.default),
-                (true, true) => String::new(),
+                (true, false) => format!("changed · default {}", s.default),
+                (true, true) => "changed".into(),
                 (false, _) => "default".into(),
             }
         }
@@ -936,53 +937,60 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         Scope::Project { name, .. } => format!("Settings · {name}"),
     };
     let x = g.put(1, left, &title, Role::Title) + 2;
+    // Whose settings these are, as scope chips: yours, the project's.
+    let mut x = x;
+    if let Some((_, name)) = &page.snap.project {
+        let yours = matches!(page.scope, Scope::You);
+        x = g.toggle(1, x, "You", yours) + 1;
+        x = g.toggle(1, x, name, !yours) + 1;
+        g.put(1, x + 1, "p switches", Role::Muted);
+    } else if let Scope::Project { .. } = page.scope {
+        x = g.toggle(1, x, "You", false) + 1;
+        g.put(1, x + 1, "p switches", Role::Muted);
+    }
     let changed = page.snap.here.len();
     let file = page.snap.file.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
-    let scope_hint = match (&page.scope, &page.snap.project) {
-        (Scope::You, Some((_, name))) => format!("p: {name}'s own"),
-        (Scope::Project { .. }, _) => "p: yours".to_string(),
-        _ => String::new(),
-    };
-    g.put(1, x, &scope_hint, Role::Muted);
-    let right = format!("{file} · {changed} set");
+    let right = format!("{file} · {changed} changed");
     g.put(1, (left + width).saturating_sub(right.chars().count()), &right, Role::Muted);
-    let mut y = 2;
-    // The search field.
-    let search_label = match (&page.search, page.searching) {
-        (Some(s), true) => format!("/ {}", with_caret(s, page.caret_at(s), width.saturating_sub(2))),
-        (Some(s), false) if !s.is_empty() => format!("/ {s}  (Esc clears)"),
-        _ => format!("/ search {} settings", settings().iter().filter(|s| page.visible(s)).count()),
-    };
-    let end = g.put(y, left, &fit(&search_label, width), if page.searching { Role::Title } else { Role::Muted });
-    if page.searching {
-        g.panels.push((y, left..end.max(left + 30).min(left + width)));
+    let mut y = 3;
+    // The search box.
+    let box_w = 44.min(width);
+    let count = settings().iter().filter(|s| page.visible(s)).count();
+    match (&page.search, page.searching) {
+        (Some(s), true) => g.input_box(y, left..left + box_w, &format!("/ {}", with_caret(s, page.caret_at(s), box_w.saturating_sub(5))), "", true),
+        (Some(s), false) if !s.is_empty() => g.input_box(y, left..left + box_w, &format!("/ {s}  (Esc clears)"), "", false),
+        _ => g.input_box(y, left..left + box_w, "", &format!("/  Search {count} settings"), false),
     }
-    y += 1;
+    y += 2;
     let problems = &page.snap.problems;
     if let Some((text, bad)) = &page.note {
         g.put(y, left, &fit(text, width), if *bad { Role::Bad } else { Role::Good });
-        y += 1;
+        y += 2;
     } else if !problems.is_empty() {
         let first = &problems[0];
         let more = if problems.len() > 1 { format!(" (+{} more)", problems.len() - 1) } else { String::new() };
         g.put(y, left, &fit(&format!("{first}{more}"), width), Role::Warn);
-        y += 1;
+        y += 2;
     }
-    g.rule(y, left..left + width);
-    y += 1;
     let top = y;
 
     // Categories.
-    let cat_w = 28;
+    let cat_w = 30;
     let sections = page.sections();
     let searching = page.search.as_deref().is_some_and(|s| !s.trim().is_empty());
     for (i, c) in sections.iter().enumerate() {
         let set = settings().iter().filter(|s| Some(s.category) == *c && page.visible(s) && page.snap.here.contains_key(s.key)).count();
+        let all = settings().iter().filter(|s| Some(s.category) == *c && page.visible(s)).count();
         let role = if i == page.category && !searching { Role::Title } else { Role::Text };
         let label = c.map(|c| c.label()).unwrap_or("Project & tasks");
-        g.put(top + i, left, &fit(label, cat_w - 5), role);
+        g.put(top + i, left + 1, &fit(label, cat_w - 8), role);
+        // How many it holds, or -- when some are -- how many are changed.
         if set > 0 {
-            g.put(top + i, left + cat_w - 4, &format!("• {set}"), Role::Accent);
+            let tag = format!(" {set} changed ");
+            g.chip(top + i, (left + cat_w - 2).saturating_sub(tag.chars().count()), &tag, Role::Accent, Chip::Status(Role::Accent));
+        } else if c.is_some() {
+            let tag = format!(" {all} ");
+            g.chip(top + i, (left + cat_w - 2).saturating_sub(tag.chars().count()), &tag, Role::Muted, Chip::Badge);
         }
         if i == page.category && !searching {
             if page.focus == Focus::Categories {
@@ -993,10 +1001,14 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
         }
     }
 
-    // Settings.
-    let sx = left + cat_w + 2;
-    let sw = width.saturating_sub(cat_w + 2);
-    let label_w = 26.min(sw / 3);
+    if !sections.is_empty() {
+        g.card(top..top + sections.len(), left..left + cat_w - 1, CardLook::Plain);
+    }
+
+    // Settings, on a card of their own, their names whole.
+    let sx = left + cat_w + 3;
+    let sw = width.saturating_sub(cat_w + 4);
+    let label_w = 36.min(sw * 45 / 100).max(20.min(sw / 2));
     let vx = sx + label_w + 2;
     let selected = page.selected();
     let mut y = top;
@@ -1024,13 +1036,11 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
             Row::Setting(s) => {
                 let is_sel = selected == Some(row);
                 let set_here = page.snap.here.contains_key(s.key);
-                // Apart, not over each other: spans mustn't overlap.
-                if set_here {
-                    g.put(y, sx, "•", Role::Accent);
-                }
-                g.put(y, sx + 2, &fit(s.label, label_w.saturating_sub(2)), if is_sel { Role::Title } else { Role::Text });
+                let row_top = y;
+                g.put(y, sx + 1, &fit(s.label, label_w.saturating_sub(1)), if is_sel { Role::Title } else { Role::Text });
                 let editing = matches!(&page.edit, Some(Edit::Inline { key, .. }) if *key == s.key);
-                let hint_text = hint(page, s);
+                // The value comes first: a long marker is cut, not it.
+                let hint_text = fit(&hint(page, s), sw.saturating_sub(label_w + 30).max(8));
                 let room = (sx + sw).saturating_sub(vx + hint_text.chars().count() + 2);
                 if editing {
                     let Some(Edit::Inline { text, .. }) = &page.edit else { unreachable!() };
@@ -1039,14 +1049,24 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                     g.panels.push((y, vx.saturating_sub(1)..(end + 1).max(vx + 24).min(sx + sw)));
                 } else {
                     let (text, role) = shown(page, s);
-                    let text = match s.kind {
-                        Kind::Bool => format!("{} {text}", if matches!(page.value(s), Some(Value::Bool(false))) || (page.value(s).is_none() && s.default == "off") { "[ ]" } else { "[x]" }),
-                        Kind::Choice(_) | Kind::Theme | Kind::Font | Kind::Int { .. } | Kind::Float { .. } | Kind::Minutes if is_sel => format!("‹ {text} ›"),
-                        _ => text,
-                    };
-                    g.put(y, vx, &fit(&text, room), role);
+                    match s.kind {
+                        // A switch, and what it is beside it.
+                        Kind::Bool => {
+                            let on = !(matches!(page.value(s), Some(Value::Bool(false))) || (page.value(s).is_none() && s.default == "off"));
+                            let x = g.switch(y, vx, on);
+                            g.put(y, x + 1, if on { "on" } else { "off" }, role);
+                        }
+                        // A stepper while it's the one selected, else its value.
+                        Kind::Choice(_) | Kind::Theme | Kind::Font | Kind::Int { .. } | Kind::Float { .. } | Kind::Minutes if is_sel => {
+                            g.stepper(y, vx, &fit(&text, room.saturating_sub(4)));
+                        }
+                        _ if text.is_empty() => {}
+                        _ => {
+                            g.value(y, vx, &fit(&text, room.saturating_sub(2)), role);
+                        }
+                    }
                 }
-                g.put(y, (sx + sw).saturating_sub(hint_text.chars().count()), &hint_text, Role::Muted);
+                g.put(y, (sx + sw).saturating_sub(hint_text.chars().count() + 1), &hint_text, if set_here { Role::Accent } else { Role::Muted });
                 if is_sel {
                     g.focus(y, sx..sx + sw);
                 }
@@ -1066,13 +1086,15 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                     if s.restart {
                         help.push_str(" Takes effect when Fenix restarts (SPC q r).");
                     }
-                    for line in wrap(&help, sw.saturating_sub(label_w + 2)) {
-                        g.put(y, vx, &line, Role::Muted);
+                    // Opened: what it does, under its name, and its key.
+                    for line in wrap(&help, sw.saturating_sub(4)) {
+                        g.put(y, sx + 1, &line, Role::Muted);
                         y += 1;
                     }
                     let key_line = if matches!(s.kind, Kind::Secret(_)) { format!("{} · {}", s.key, page.snap.secrets.get(&secret_of(s)).map(|x| x.source.as_str()).unwrap_or("not set")) } else { s.key.to_string() };
-                    g.put(y, vx, &fit(&key_line, sw.saturating_sub(label_w + 2)), Role::Accent);
+                    g.value(y, sx + 1, &fit(&key_line, sw.saturating_sub(6)), Role::Accent);
                     y += 1;
+                    g.card(row_top..y, sx.saturating_sub(1)..sx + sw, CardLook::Selected);
                 }
             }
             Row::Entry(s, i) => {
@@ -1101,6 +1123,10 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 y += 1;
             }
         }
+    }
+
+    if y > top && !page.on_project_page() {
+        g.card_behind(top..y, sx.saturating_sub(2)..sx + sw + 1, CardLook::Plain);
     }
 
     // The entry form floats beside the row it's about.
@@ -1305,9 +1331,9 @@ mod tests {
         let mut p = page();
         goto(&mut p, "editor.font_size");
         let text = layout(&p, 130).text;
-        assert!(text.contains("• Font size") && text.contains("‹ 18 ›") && text.contains("default 16"), "{text}");
+        assert!(text.contains("Font size") && text.contains("‹ 18 ›") && text.contains("changed · default 16"), "{text}");
         assert!(text.contains("Text size, in points.") && text.contains("editor.font_size"), "the selected one explains itself:\n{text}");
-        assert!(text.contains("Appearance") && text.contains("• 1"), "{text}");
+        assert!(text.contains("Appearance") && text.contains("1 changed"), "{text}");
     }
 
     #[test]

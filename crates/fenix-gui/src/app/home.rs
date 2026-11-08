@@ -43,8 +43,11 @@ pub(super) struct HomeOverlay {
     /// Cards behind lines: (first row, which may be above the pane;
     /// rows; first cell; end cell; fill; outline, if it has one).
     pub(super) cards: Vec<(isize, usize, usize, usize, [f32; 4], Option<[f32; 4]>)>,
-    /// Chips behind cells: (row, first cell, end cell, fill, outline).
-    pub(super) chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>)>,
+    /// Chips behind cells: (row, first cell, end cell, fill, outline,
+    /// whether it's a pill rather than a key's cap).
+    pub(super) chips: Vec<(usize, usize, usize, [f32; 4], Option<[f32; 4]>, bool)>,
+    /// Switches' knobs: (row, first cell, end cell, on).
+    pub(super) switches: Vec<(usize, usize, usize, bool)>,
 }
 
 /// (row, first cell, end cell, colour) -- the shape `PaneRender`'s

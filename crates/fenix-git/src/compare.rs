@@ -222,6 +222,18 @@ fn parse_name_status(out: &str) -> Vec<ChangedFile> {
     files
 }
 
+/// Lines added and removed in each changed file of the working tree --
+/// what's staged with `staged`, else what isn't -- by path, one
+/// `git diff --numstat` for all of them. A binary file has no counts.
+pub fn working_numstat(root: &std::path::Path, staged: bool) -> Vec<(String, usize, usize)> {
+    let mut args = vec!["diff", "--numstat", "-z", "--no-color", "--no-ext-diff"];
+    if staged {
+        args.push("--cached");
+    }
+    let Ok(out) = crate::run_args(root, &args) else { return Vec::new() };
+    parse_numstat(&out).into_iter().filter_map(|(path, a, r)| Some((path, a?, r?))).collect()
+}
+
 /// `--numstat -z`: `added\tremoved\tpath\0`, or for a rename
 /// `added\tremoved\t\0old\0new\0`; `-` for both counts of a binary
 /// file. Returns (new path, added, removed).

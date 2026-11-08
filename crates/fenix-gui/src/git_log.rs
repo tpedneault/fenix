@@ -16,7 +16,7 @@ use fenix_git::{CommitFlags, GraphCommit, ResetMode};
 
 use crate::git_status::{count, danger, popup, short, verb, Action, Compose, Confirm, DiffState, Input, InputPurpose, Job, Menu};
 use crate::graph_view::GraphSpan;
-use crate::page::{fit, frame, Grid, Key, Page, Role};
+use crate::page::{CardLook, Chip, fit, frame, Grid, Key, Page, Role};
 
 /// Which history.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -522,6 +522,34 @@ impl GitLog {
     }
 }
 
+/// The colour of the lane in graph column `col`: two columns a lane, the
+/// theme's accents in turn, so a branch keeps its colour down the page.
+fn lane_role(col: usize) -> Role {
+    const LANES: [&str; 6] = ["attribute", "function", "string", "keyword", "type", "number"];
+    Role::Syntax(LANES[(col / 2) % LANES.len()])
+}
+
+/// Graph art in its lanes' colours, a character at a time: `text` from
+/// column `start`.
+fn put_rails(g: &mut Grid, y: usize, left: usize, start: usize, text: &str) {
+    for (i, c) in text.chars().enumerate() {
+        if c != ' ' {
+            g.put(y, left + start + i, &c.to_string(), lane_role(start + i));
+        }
+    }
+}
+
+/// A person's initials, for their badge: `Thomas Pedneault` is `TP`.
+fn initials(name: &str) -> String {
+    let words: Vec<&str> = name.split(|c: char| c.is_whitespace() || c == '.' || c == '-' || c == '_').filter(|w| !w.is_empty()).collect();
+    let pick: String = match words.as_slice() {
+        [] => "?".into(),
+        [one] => one.chars().take(2).collect(),
+        [first, .., last] => first.chars().take(1).chain(last.chars().take(1)).collect(),
+    };
+    pick.to_uppercase()
+}
+
 pub fn layout(page: &GitLog, cols: usize) -> Page {
     let (left, width) = frame(cols, 150);
     let mut g = Grid::new();
@@ -531,7 +559,9 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
         return g.finish();
     };
     let x = g.put(y, left, &page.scope.title(&data.branch), Role::Title) + 2;
-    g.put(y, x, &count(data.commits.len(), "commit"), Role::Muted);
+    let authors: std::collections::HashSet<&str> = data.commits.iter().map(|c| c.author.as_str()).collect();
+    let x = g.chip(y, x, &format!(" {} ", count(data.commits.len(), "commit")), Role::Muted, Chip::Badge) + 1;
+    g.chip(y, x, &format!(" {} ", count(authors.len(), "author")), Role::Muted, Chip::Badge);
     y += 1;
     if !page.filter.is_empty() {
         let x = g.put(y, left, "filtered by", Role::Muted) + 1;
@@ -555,42 +585,82 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
     // for on every row: with every branch, a history runs to hundreds.
     let line_of: HashMap<&str, usize> = data.lines.iter().enumerate().filter_map(|(n, l)| Some((l.commit.as_deref()?, n))).collect();
     let commit_of: HashMap<&str, &GraphCommit> = data.commits.iter().map(|c| (c.hash.as_str(), c)).collect();
+    let list_top = y;
+    let left = left + 1;
+    let width = width.saturating_sub(2);
     for (i, row) in rows.iter().enumerate() {
         let line_y = y;
         match row {
             Row::Rail(n) => {
                 if let Some(line) = data.lines.get(*n) {
-                    g.put(y, left, &line.text, Role::Muted);
+                    put_rails(&mut g, y, left, 0, &line.text);
                 }
             }
             Row::Commit(hash) => {
                 let Some(&n) = line_of.get(hash.as_str()) else { continue };
                 let line = &data.lines[n];
                 let chars: Vec<char> = line.text.chars().collect();
-                let age = commit_of.get(hash.as_str()).map(|c| format!("{} · {}", c.author, c.relative_date)).unwrap_or_default();
-                let room = width.saturating_sub(age.chars().count() + 2);
+                let commit = commit_of.get(hash.as_str());
+                let age = commit.map(|c| c.relative_date.clone()).unwrap_or_default();
+                let room = width.saturating_sub(age.chars().count() + 6);
+                // The graph at its columns, in its lanes' colours; then the
+                // hash, the refs as chips and the subject, one after another.
+                let mut x = left;
                 for (k, (start, span)) in line.spans.iter().enumerate() {
-                    let end = line.spans.get(k + 1).map(|s| s.0).unwrap_or(chars.len()).min(room);
+                    let end = line.spans.get(k + 1).map(|s| s.0).unwrap_or(chars.len()).min(chars.len());
                     if *start >= end {
                         continue;
                     }
                     let text: String = chars[*start..end].iter().collect();
-                    let role = match span {
-                        GraphSpan::Rails => Role::Muted,
-                        GraphSpan::Node | GraphSpan::Hash => Role::Accent,
-                        GraphSpan::Refs => Role::Good,
-                        GraphSpan::Subject => {
-                            if data.on_head.contains(hash) || matches!(page.scope, Scope::File(_) | Scope::Lines { .. }) {
-                                Role::Text
-                            } else {
-                                Role::Muted
+                    match span {
+                        GraphSpan::Rails | GraphSpan::Node => {
+                            put_rails(&mut g, y, left, *start, &text);
+                            x = x.max(left + end);
+                        }
+                        GraphSpan::Hash => x = g.put(y, x.max(left + start), text.trim_end(), Role::Muted) + 1,
+                        GraphSpan::Refs => {
+                            for r in text.trim().trim_start_matches('(').trim_end_matches(')').split(", ").filter(|r| !r.is_empty()) {
+                                let (shown, role) = match r {
+                                    r if r.starts_with("HEAD") => (r.replace("->", "→"), Role::Accent),
+                                    r if r.starts_with("tag: ") => (r.trim_start_matches("tag: ").to_string(), Role::Good),
+                                    r => (r.to_string(), Role::Syntax("function")),
+                                };
+                                if x + shown.chars().count() + 3 < left + room {
+                                    x = g.chip(y, x, &format!(" {shown} "), role, Chip::Status(role)) + 1;
+                                }
                             }
                         }
-                        GraphSpan::Meta => Role::Muted,
-                    };
-                    g.put(y, left + start, &text, role);
+                        GraphSpan::Subject => {
+                            let role = if data.on_head.contains(hash) || matches!(page.scope, Scope::File(_) | Scope::Lines { .. }) { Role::Text } else { Role::Muted };
+                            x = g.put(y, x, &fit(text.trim(), (left + room).saturating_sub(x)), role) + 1;
+                        }
+                        GraphSpan::Meta => {}
+                    }
+                }
+                // Who, on a badge, and when.
+                if let Some(c) = commit {
+                    let who = initials(&c.author);
+                    let role = lane_role(c.author.bytes().map(usize::from).sum::<usize>() * 2);
+                    let at = (left + width).saturating_sub(age.chars().count() + who.chars().count() + 4);
+                    g.chip(y, at, &format!(" {who} "), role, Chip::Status(role));
                 }
                 g.put(y, (left + width).saturating_sub(age.chars().count()), &age, Role::Muted);
+                // The commit the cursor is on, opened under it: who in full.
+                if i == page.cursor {
+                    if let Some(c) = commit {
+                        y += 1;
+                        let x = g.put(y, left + 10, &c.short_hash, Role::Muted) + 1;
+                        let x = g.put(y, x, &fit(&c.author, 32), Role::Text) + 1;
+                        let x = g.put(y, x, &format!("· {}", c.relative_date), Role::Muted) + 3;
+                        let x = g.chip(y, x, "Tab", Role::Accent, Chip::Key) + 1;
+                        let x = g.put(y, x, "files", Role::Muted) + 2;
+                        let x = g.chip(y, x, "Enter", Role::Accent, Chip::Key) + 1;
+                        let x = g.put(y, x, "commit menu", Role::Muted) + 2;
+                        let x = g.chip(y, x, "y", Role::Accent, Chip::Key) + 1;
+                        g.put(y, x, "copy hash", Role::Muted);
+                        g.card(line_y..y + 1, left.saturating_sub(1)..left + width + 1, CardLook::Selected);
+                    }
+                }
             }
             Row::File { hash, path } => {
                 let letter = match page.open.get(hash) {
@@ -642,6 +712,10 @@ pub fn layout(page: &GitLog, cols: usize) -> Page {
             g.popup = popup(line_y, left + 4, menu.as_ref().map(|(m, t)| (m, t.as_str())), page.input.as_ref(), page.confirm.as_ref());
         }
         y += 1;
+    }
+    // The history on a card, under the selected commit's.
+    if y > list_top && !rows.is_empty() {
+        g.card_behind(list_top..y, left.saturating_sub(2)..left + width + 2, CardLook::Plain);
     }
     let keys: Vec<(&str, &str)> = if page.input.is_some() {
         vec![("Enter", "done"), ("Esc", "cancel")]
@@ -696,6 +770,14 @@ mod tests {
 
     fn hash(n: usize) -> String {
         format!("{n:0>40}")
+    }
+
+    #[test]
+    fn a_persons_badge_is_their_initials() {
+        assert_eq!(initials("Thomas Pedneault"), "TP");
+        assert_eq!(initials("ada"), "AD");
+        assert_eq!(initials("Grace B. Hopper"), "GH");
+        assert_eq!(initials(""), "?");
     }
 
     #[test]
