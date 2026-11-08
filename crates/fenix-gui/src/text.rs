@@ -291,6 +291,12 @@ pub struct TextPipeline {
     /// only ever touches `popup_renderer`'s own buffer.
     popup_renderer: TextRenderer,
     content_buffers: HashMap<PaneId, GlyphBuffer>,
+    /// What each of `content_buffers` was last shaped from (`pane_key`):
+    /// the same again is not shaped again.
+    content_keys: HashMap<PaneId, u64>,
+    /// The same for `popups`: the palette's card and the menus are drawn
+    /// every frame the caret blinks under them.
+    popup_keys: HashMap<PopupId, u64>,
     /// The body font's own advance for characters a page's grid gives a
     /// cell count of their own (`grid_spans`), by the family and size it
     /// was measured at.
@@ -475,6 +481,8 @@ impl TextPipeline {
             renderer,
             popup_renderer,
             content_buffers: HashMap::new(),
+            content_keys: HashMap::new(),
+            popup_keys: HashMap::new(),
             advances: RefCell::new(((default_family, 0), HashMap::new())),
             titles: HashMap::new(),
             breadcrumbs: HashMap::new(),
@@ -777,6 +785,14 @@ impl TextPipeline {
     /// segments one for one.
     pub fn set_pane_rich(&mut self, pane: PaneId, w: f32, h: f32, segments: &[(&str, Color, bool)], grid: bool, styles: &[(usize, u8)]) {
         let _profile = crate::profile::Scope::new("shape pane");
+        // The same text, colours and size as last frame, in the same font:
+        // it's shaped already. Most frames change one pane, or none --
+        // the caret moved, a popup or the palette is over them.
+        let key = pane_key(segments, (w, h), grid, styles, (self.font_size, self.line_height, self.icon_spacing), self.content_family());
+        if self.content_buffers.contains_key(&pane) && self.content_keys.get(&pane) == Some(&key) {
+            return;
+        }
+        self.content_keys.insert(pane, key);
         let mut spans = if grid { self.grid_spans(segments) } else { self.cell_spans(segments) };
         if !grid {
             apply_styles(&mut spans, styles);
@@ -857,6 +873,7 @@ impl TextPipeline {
     /// atlas entries) would accumulate forever.
     pub fn retain_panes(&mut self, keep: &[PaneId]) {
         self.content_buffers.retain(|id, _| keep.contains(id));
+        self.content_keys.retain(|id, _| keep.contains(id));
     }
 
     /// Sets one pane's tab-strip text -- same rich-span/lazy-create
@@ -999,6 +1016,11 @@ impl TextPipeline {
     /// and (for how many rows are offered in the first place)
     /// `popup::max_rows` -- not by wrapping/clipping inside the buffer.
     pub fn set_popup_rich(&mut self, id: PopupId, width: f32, segments: &[(&str, Color, bool)]) {
+        let key = pane_key(segments, (width, 0.0), false, &[], (self.font_size, self.line_height, self.icon_spacing), self.content_family());
+        if self.popups.contains_key(&id) && self.popup_keys.get(&id) == Some(&key) {
+            return;
+        }
+        self.popup_keys.insert(id, key);
         // An icon a cell wide, as in a listing: the palette's rows line up
         // their keys and folders by cell.
         let spans = self.cell_spans(segments);
@@ -1021,6 +1043,7 @@ impl TextPipeline {
     /// forever, same reasoning as `retain_panes`.
     pub fn retain_popups(&mut self, keep: &[PopupId]) {
         self.popups.retain(|id, _| keep.contains(id));
+        self.popup_keys.retain(|id, _| keep.contains(id));
     }
 
     /// Sets the sidebar's rows -- same icon/color rich-text mechanism as
@@ -1380,6 +1403,21 @@ fn content_height(window_height: f32, modeline_height: f32) -> f32 {
     (window_height - modeline_height).max(0.0)
 }
 
+/// What a pane's text is shaped from, as one number: its spans and their
+/// colours and fonts, its size, its look and the font's metrics.
+fn pane_key(segments: &[(&str, Color, bool)], size: (f32, f32), grid: bool, styles: &[(usize, u8)], metrics: (f32, f32, f32), family: Family<'_>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (text, color, icon) in segments {
+        text.hash(&mut h);
+        color.0.hash(&mut h);
+        icon.hash(&mut h);
+    }
+    (size.0.to_bits(), size.1.to_bits(), grid, styles, metrics.0.to_bits(), metrics.1.to_bits(), metrics.2.to_bits()).hash(&mut h);
+    format!("{family:?}").hash(&mut h);
+    h.finish()
+}
+
 /// Draws the spans `styles` names bold or italic (`terminal_view::BOLD`,
 /// `ITALIC`): a terminal's text, which a program styles cell by cell.
 fn apply_styles(spans: &mut [(&str, Attrs<'_>)], styles: &[(usize, u8)]) {
@@ -1469,6 +1507,22 @@ mod tests {
         }
     }
     use super::*;
+
+    /// A pane is shaped again only when what it's shaped from changed:
+    /// its text, a colour, its size, a style or the font's metrics.
+    #[test]
+    fn a_pane_is_shaped_again_only_when_its_text_or_look_changed() {
+        let red = Color::rgb(255, 0, 0);
+        let f = Family::Monospace;
+        let key = |text: &str, color: Color, w: f32, styles: &[(usize, u8)], size: f32| pane_key(&[(text, color, false)], (w, 100.0), false, styles, (size, 20.0, 0.0), f);
+        let base = key("fn a()", red, 400.0, &[], 14.0);
+        assert_eq!(base, key("fn a()", red, 400.0, &[], 14.0), "the same: not again");
+        assert_ne!(base, key("fn b()", red, 400.0, &[], 14.0));
+        assert_ne!(base, key("fn a()", Color::rgb(0, 255, 0), 400.0, &[], 14.0));
+        assert_ne!(base, key("fn a()", red, 500.0, &[], 14.0));
+        assert_ne!(base, key("fn a()", red, 400.0, &[(0, 1)], 14.0));
+        assert_ne!(base, key("fn a()", red, 400.0, &[], 16.0));
+    }
 
     #[test]
     fn embedded_symbols_nerd_font_mono_loads_and_resolves_by_the_expected_family_name() {
