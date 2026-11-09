@@ -7544,7 +7544,8 @@ impl App {
                     .flatten();
                 let complete = gather.is_complete();
                 if text.is_some() {
-                    self.lsp_hover = text;
+                    // The leader's keys in it, as the key scheme writes them.
+                    self.lsp_hover = text.map(|t| if self.standard_keys() { keys_host::translate_leader(&t, &self.leader_chord_text()) } else { t });
                     self.wake_caret();
                 }
                 complete
@@ -14629,7 +14630,15 @@ impl App {
     /// buffer's folder, then the project -- in the preview tab. A file an
     /// extension opens (a PDF) goes to it, at the page a `#page=38` after
     /// it names.
-    pub(super) fn follow_link_under_cursor(&mut self) {
+    /// Whether there's a file name (`spec.pdf#page=3`, `src/a.rs:12`) under
+    /// the cursor that `gf` would follow.
+    pub(crate) fn link_under_cursor(&self) -> bool {
+        let (line, col) = self.open().buffer.line_col(&self.cursor());
+        let text = self.open().buffer.line(line).to_string();
+        crate::file_link::link_at(text.trim_end_matches(['\n', '\r']), col).is_some()
+    }
+
+    pub(crate) fn follow_link_under_cursor(&mut self) {
         let (line, col) = self.open().buffer.line_col(&self.cursor());
         let text = self.open().buffer.line(line).to_string();
         let Some((name, page)) = crate::file_link::link_at(text.trim_end_matches(['\n', '\r']), col) else {

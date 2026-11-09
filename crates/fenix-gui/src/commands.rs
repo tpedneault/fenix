@@ -299,6 +299,7 @@ impl CommandRegistry {
         registry.register("buffer.kill", "Close the focused buffer (refuses if it has unsaved changes)", cmd_kill_buffer);
         registry.register("code.hover", "What the name under the cursor is: the language server's hover, or the debugger's lens while stopped (K)", |ctx| ctx.app.cmd_hover());
         registry.register("code.goto_definition", "Go to where the name under the cursor is defined (gd)", |ctx| ctx.app.request_goto_definition());
+        registry.register("nav.follow_link", "Open the file named under the cursor -- spec.pdf#page=3, src/a.rs:12 (gf)", |ctx| ctx.app.follow_link_under_cursor());
         registry.register("code.references", "List where the name under the cursor is used (gr)", |ctx| ctx.app.request_references());
         registry.register("code.toggle_comment", "Comment or uncomment the cursor's line, or the selection's lines (gcc, gc)", |ctx| ctx.app.cmd_toggle_comment());
         registry.register("edit.copy", "Copy the selection, or the cursor's line, to the clipboard", |ctx| ctx.app.cmd_copy());

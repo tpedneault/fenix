@@ -1347,6 +1347,11 @@ label = "TODO"
 command = "nav.next_todo"
 
 [[leader]]
+keys = "SPC ] f"
+label = "the file named here (gf)"
+command = "nav.follow_link"
+
+[[leader]]
 keys = "SPC ] c"
 label = "change (side by side)"
 command = "nav.next_side_change"
@@ -1641,6 +1646,12 @@ scheme = "standard"
 [[keys]]
 keys = "F12"
 command = "code.goto_definition"
+scheme = "standard"
+when = "text"
+
+[[keys]]
+keys = "M-F12"
+command = "nav.follow_link"
 scheme = "standard"
 when = "text"
 

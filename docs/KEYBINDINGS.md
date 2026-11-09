@@ -87,7 +87,8 @@ desktops that move windows with `Alt`+drag; go to definition then moves to
 | `Ctrl+F` / `Ctrl+H` | Search / replace in this file, on the Search page |
 | `Ctrl+Shift+F` / `Ctrl+Shift+H` | Search / replace across the project |
 | `F3` / `Shift+F3` | The last search's next / previous match |
-| `F12`, `Ctrl`+click | Go to definition |
+| `F12`, `Ctrl`+click | Go to definition; on a file's name (`spec.pdf#page=3`), open it |
+| `Alt+F12` | Open the file named under the cursor, as `gf` |
 | `Shift+F12` / `Ctrl+F12` | References / implementations |
 | `Ctrl+K Ctrl+I` | Hover (the debugger's lens while stopped) |
 | `F2` | Rename the symbol; in a listing, the file |
@@ -246,6 +247,7 @@ keys'; the palette has the commands).
 | `SPC h T` | The tutorial: Fenix's keys, a lesson at a time, each in a practice buffer |
 | `SPC h ?` | The keys in use, on a page: the chords and the leader's groups |
 | `SPC ] d` / `SPC [ d` | Next / previous problem (also `h` hunk, `a` agent's change, `t` TODO, `c` side by side's change) |
+| `SPC ] f` | Open the file named under the cursor, as `gf` |
 | `SPC C-i` | Hover, as `K` (standard keys' `Ctrl+K Ctrl+I`) |
 | `SPC h x` / `SPC h w` | The Extensions page / the welcome's packs |
 | `SPC h k` / `SPC h c` | Say what a key runs / what a command does |

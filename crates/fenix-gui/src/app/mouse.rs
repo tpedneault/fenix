@@ -291,9 +291,15 @@ impl App {
                 return true;
             }
             if defines && !shift {
+                // A file's name under it opens the file, as `gf` does;
+                // anything else goes to its definition.
                 self.clear_carets();
                 self.put_cursor(pane, at);
-                self.request_goto_definition();
+                if self.link_under_cursor() {
+                    self.follow_link_under_cursor();
+                } else {
+                    self.request_goto_definition();
+                }
                 return true;
             }
         }
