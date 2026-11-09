@@ -42,7 +42,9 @@ impl App {
         if matches!(key.code, KeyCode::Char(_)) && !(key.mods.ctrl || key.mods.alt || key.mods.super_) {
             return None;
         }
-        keymap::chord_map().lookup(key, &self.chord_context())
+        let contexts = self.local_contexts();
+        let names: Vec<&str> = contexts.iter().map(|c| c.name()).collect();
+        keymap::chord_map().lookup_in(key, &self.chord_context(), &names)
     }
 }
 

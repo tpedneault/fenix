@@ -1026,6 +1026,7 @@ keys = "F5"
 command = "task.rerun_last"
 scheme = "standard"     # vim, standard or any (the default)
 when = "text"           # anywhere (the default), text, typing, not_typing, page, terminal
+# context = "sql"       # only in a buffer of that SPC m menu
 ```
 
 Keys are written as the key menu writes them: `C-` Ctrl, `M-` Alt, `s-`

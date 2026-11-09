@@ -10,7 +10,7 @@ use crate::keymap::LocalContext;
 impl App {
     /// Which `SPC m` menus apply to the focused buffer, most specific
     /// first -- the project it belongs to, then its language.
-    pub(super) fn local_contexts(&self) -> Vec<LocalContext> {
+    pub(crate) fn local_contexts(&self) -> Vec<LocalContext> {
         let mut contexts: Vec<LocalContext> = Vec::new();
         // The code extensions' contexts, by their markers.
         let here = self.open().buffer.path().map(Path::to_path_buf).unwrap_or_else(|| self.integration_root());

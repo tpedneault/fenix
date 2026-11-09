@@ -113,6 +113,9 @@ pub struct Chord {
     pub label: Option<&'static str>,
     /// Who it's from: `None` for Fenix's own, the file's name otherwise.
     pub from: Option<&'static str>,
+    /// Only in a buffer of this `SPC m` context (`sql`, `http`): an
+    /// extension's chord for its own kind of file.
+    pub context: Option<&'static str>,
 }
 
 /// Every chord in use, in the order they were laid.
@@ -130,11 +133,17 @@ impl ChordMap {
         self.entries.push(chord);
     }
 
-    /// The command `key` runs here, if any.
+    /// The command `key` runs here, if any (in no `SPC m` context).
     pub fn lookup(&self, key: KeyPress, at: &ChordContext) -> Option<&'static str> {
+        self.lookup_in(key, at, &[])
+    }
+
+    /// The command `key` runs here, in a buffer of `contexts`.
+    pub fn lookup_in(&self, key: KeyPress, at: &ChordContext, contexts: &[&str]) -> Option<&'static str> {
         let key = key.chord();
         let scheme = if at.scheme == Scheme::Any { Scheme::Vim } else { at.scheme };
-        let found = self.entries.iter().rev().find(|c| c.key == key && c.scheme.applies(scheme) && (c.command.is_none() || c.when.fits(at)))?;
+        let here = |c: &Chord| c.context.is_none_or(|name| contexts.contains(&name));
+        let found = self.entries.iter().rev().find(|c| c.key == key && c.scheme.applies(scheme) && here(c) && (c.command.is_none() || c.when.fits(at)))?;
         found.command
     }
 
@@ -166,7 +175,20 @@ mod tests {
     use super::*;
 
     fn chord(key: KeyPress, scheme: Scheme, when: When, command: Option<&'static str>) -> Chord {
-        Chord { key, scheme, when, command, label: None, from: None }
+        Chord { key, scheme, when, command, label: None, from: None, context: None }
+    }
+
+    #[test]
+    fn a_context_s_chord_applies_in_its_buffers_only() {
+        let mut map = ChordMap::new();
+        let run = KeyPress::named(fenix_keymap::NamedKey::Enter).with_ctrl();
+        map.push(Chord { context: Some("sql"), ..chord(run, Scheme::Any, When::Text, Some("database.run")) });
+        map.push(Chord { context: Some("http"), ..chord(run, Scheme::Any, When::Text, Some("http.send")) });
+        let at = ChordContext { scheme: Scheme::Standard, text: true, ..ChordContext::default() };
+        assert_eq!(map.lookup_in(run, &at, &["sql"]), Some("database.run"));
+        assert_eq!(map.lookup_in(run, &at, &["http"]), Some("http.send"));
+        assert_eq!(map.lookup_in(run, &at, &["tcl"]), None);
+        assert_eq!(map.lookup(run, &at), None);
     }
 
     #[test]

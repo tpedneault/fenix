@@ -422,7 +422,7 @@ fn lay_chords(map: &mut ChordMap, data: &'static KeymapData, from: Option<&'stat
             if replaced.is_none() && source == ChordSource::Yours {
                 problems.push(format!("{text}: nothing to unbind"));
             }
-            map.push(Chord { key, scheme, when, command: None, label: None, from });
+            map.push(Chord { key, scheme, when, command: None, label: None, from, context: entry.context.as_deref() });
             bound.push(UserKey { keys: text, command: None, replaced });
             continue;
         }
@@ -439,7 +439,7 @@ fn lay_chords(map: &mut ChordMap, data: &'static KeymapData, from: Option<&'stat
             problems.push(format!("{text}: {command} isn't a command (SPC h c lists them)"));
             continue;
         }
-        map.push(Chord { key, scheme, when, command: Some(command), label: entry.label.as_deref(), from });
+        map.push(Chord { key, scheme, when, command: Some(command), label: entry.label.as_deref(), from, context: entry.context.as_deref() });
         bound.push(UserKey { keys: text, command: Some(command.to_string()), replaced: replaced.filter(|r| *r != command) });
     }
     bound
@@ -616,6 +616,9 @@ struct ChordEntry {
     when: Option<String>,
     #[serde(default)]
     scheme: Option<String>,
+    /// Only in a buffer of this `SPC m` context.
+    #[serde(default)]
+    context: Option<String>,
     #[serde(default)]
     unbind: bool,
 }

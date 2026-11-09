@@ -1005,10 +1005,15 @@ and only Fenix's chords and yours reach past a terminal:
 ```toml
 [[keys]]
 keys = "C-Enter"
-command = "database.run_statement"
+command = "database.run"
 scheme = "standard"
 when = "text"
+context = "sql"     # only in a buffer of its SPC m context
 ```
+
+`context` names one of its contexts (`[[contributes.contexts]]`): the
+chord is there only in the buffers that menu is for, so two extensions'
+`Ctrl+Enter` each run their own.
 
 With standard keys a page's own keys work as they do with Vim keys --
 letters act where you can't type -- and the leader opens on `Ctrl+K`, so
