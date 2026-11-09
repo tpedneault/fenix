@@ -21624,6 +21624,14 @@ impl App {
             let content_x = pane.rect.x + text::PAD_LEFT + pane.gutter_px;
             let row_y = |row: usize| pane.rect.y + text::PAD_TOP + row as f32 * line_height - pane.content_frac * line_height;
             let sticky_h = if pane.extra.sticky.is_empty() { 0.0 } else { text::PAD_TOP + pane.extra.sticky.len() as f32 * line_height };
+            // A mark's columns as x and width, cut to the pane's text: a
+            // problem at the end of a long line, scrolled sideways, mustn't
+            // be drawn over the pane beside it.
+            let span_x = |col_start: usize, col_end: usize| -> Option<(f32, f32)> {
+                let from = (content_x + col_start as f32 * char_width).max(content_x);
+                let to = (content_x + col_end as f32 * char_width).min(pane.rect.x + pane.rect.w);
+                (to > from).then_some((from, to - from))
+            };
             // An extension's underlines: a buffer's decorations, a canvas's
             // cells.
             for &(row, col_start, col_end, color) in pane.extra.underlines.iter().chain(&pane.home.underlines) {
@@ -21631,7 +21639,8 @@ impl App {
                 if y < pane.rect.y + sticky_h || y > pane.rect.y + pane.rect.h {
                     continue;
                 }
-                overlay.push_rect(gpu, content_x + col_start as f32 * char_width, y, (col_end - col_start) as f32 * char_width, 1.0, color);
+                let Some((x, w)) = span_x(col_start, col_end) else { continue };
+                overlay.push_rect(gpu, x, y, w, 1.0, color);
             }
             // Struck through: a value the Ember Trail says was.
             for &(row, col_start, col_end, color) in &pane.extra.strikes {
@@ -21639,7 +21648,8 @@ impl App {
                 if y < pane.rect.y + sticky_h || y > pane.rect.y + pane.rect.h {
                     continue;
                 }
-                overlay.push_rect(gpu, content_x + col_start as f32 * char_width, y, (col_end - col_start) as f32 * char_width, 1.0, color);
+                let Some((x, w)) = span_x(col_start, col_end) else { continue };
+                overlay.push_rect(gpu, x, y, w, 1.0, color);
             }
             // Problems, underlined with a wave.
             for &(row, col_start, col_end, color) in &pane.extra.squiggles {
@@ -21647,8 +21657,8 @@ impl App {
                 if y < pane.rect.y + sticky_h || y > pane.rect.y + pane.rect.h {
                     continue;
                 }
-                let x = content_x + col_start as f32 * char_width;
-                overlay.push_wave(gpu, x, y - 1.0, (col_end - col_start) as f32 * char_width, 5.0, 6.0, 1.3, 1.2, color);
+                let Some((x, w)) = span_x(col_start, col_end) else { continue };
+                overlay.push_wave(gpu, x, y - 1.0, w, 5.0, 6.0, 1.3, 1.2, color);
             }
             // Sticky scroll's edge: a hairline and a soft shadow on the
             // text scrolling under it.

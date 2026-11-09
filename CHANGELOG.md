@@ -47,6 +47,28 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`C-s`) over the leader's keys, which standard keys write with their
   chord (`C-k g g`).
 - Hints, messages and toasts say the keys of the scheme in use.
+- The refactor preview (a rename, a code action) shows each change as its
+  own hunk, files named from the project root; `code.undo_refactor`
+  (`SPC c R`) undoes a refactor with either keys.
+- Rename (`F2`, `SPC c r`) starts from the whole name under the cursor;
+  Ctrl+Backspace deletes a word in one-line prompts.
+- Find references says how many there are and the key for the next.
+- The keys page is a buffer of its own, with no file behind it.
+
+### Fixed
+
+- Enter on an indented blank line kept no indent for the next.
+- Task Output could show a program's stdout before stderr it had written
+  earlier (`cargo test`'s `Running …`).
+- Completion opened when the cursor merely moved after a word; with
+  standard keys it followed every arrow, and Escape didn't close it.
+- The Search page went on following F3 after references replaced its list.
+- The sidebar's Git badges stayed as they were after a save, a commit or
+  a change made in a terminal.
+- A problem's underline at the end of a long line could be drawn over the
+  pane beside it.
+- Save and delete messages named files by their whole path, the question
+  cut off at the prompt's edge.
 
 ## [1.4.0] - 2026-11-08
 

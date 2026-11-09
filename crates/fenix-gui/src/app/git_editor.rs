@@ -22,6 +22,9 @@ pub(crate) struct ChromeGit {
     pub dirty: usize,
     /// A suspended operation: `REBASING 3/7`.
     pub op: Option<String>,
+    /// Which files have which changes, as a hash: when it moves, the
+    /// sidebar's badges are read again.
+    pub changes: u64,
 }
 
 impl ChromeGit {
@@ -256,11 +259,46 @@ impl App {
                 branch: status.branch,
                 tracking: status.upstream.is_some().then_some((status.ahead, status.behind)),
                 dirty: files.len(),
+                changes: {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    for f in &files {
+                        (&f.path, f.index_status, f.worktree_status).hash(&mut hasher);
+                    }
+                    hasher.finish()
+                },
                 op: fenix_git::in_progress(&root).map(|op| op.label()),
                 root,
             };
             send(PageEvent::ChromeGit(Some(Box::new(state))));
         });
+    }
+
+    /// The modeline's Git state has come back: when the repository's
+    /// changes moved since the last (a save, a commit, a checkout in the
+    /// terminal), the sidebar's badges are read again, off the UI thread.
+    pub(super) fn apply_chrome_git(&mut self, state: Option<ChromeGit>) {
+        let moved = state.as_ref().is_some_and(|new| self.chrome_git.as_ref().is_none_or(|old| old.root != new.root || old.changes != new.changes));
+        self.chrome_git = state;
+        if !moved || !self.sidebar_open {
+            return;
+        }
+        let Some(dir) = self.sidebar.as_ref().map(|s| s.cwd.clone()) else { return };
+        let root = self.chrome_git.as_ref().map(|c| c.root.clone()).unwrap_or_default();
+        if !(dir.starts_with(&root) || root.starts_with(&dir)) {
+            return;
+        }
+        self.page_spawn(move |send| {
+            let statuses = fenix_explorer::status_for_dir(&dir);
+            send(PageEvent::SidebarGit { dir, statuses });
+        });
+    }
+
+    pub(super) fn apply_sidebar_git(&mut self, dir: PathBuf, statuses: HashMap<PathBuf, fenix_explorer::GitStatus>) {
+        let Some(sidebar) = self.sidebar.as_mut().filter(|s| s.cwd == dir) else { return };
+        sidebar.apply_git_statuses(statuses);
+        self.render_explorer(ExplorerTarget::Sidebar, false);
+        self.wake_caret();
     }
 
     /// `[git] auto_fetch`: fetches the focused file's repository in the
@@ -584,6 +622,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn the_sidebar_s_badges_follow_changes_made_outside_fenix() {
+        let repo = Repo::new("sidebar-badges");
+        let file = repo.0.join("a.txt");
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.sidebar = Some(fenix_explorer::ExplorerState::opened(&repo.0).unwrap());
+        app.sidebar_open = true;
+        let badge = |app: &App| app.sidebar.as_ref().unwrap().entries.iter().find(|e| e.name == "a.txt").and_then(|e| e.git_status);
+        app.refresh_chrome_git();
+        assert_eq!(badge(&app), None);
+
+        std::fs::write(&file, "changed in a terminal\n").unwrap();
+        app.refresh_chrome_git();
+        assert_eq!(badge(&app), Some(fenix_explorer::GitStatus::Modified));
+
+        git(&repo.0, &["checkout", "a.txt"]);
+        app.refresh_chrome_git();
+        assert_eq!(badge(&app), None, "back as committed");
     }
 
     /// Twenty numbered lines, the ones in `upper` shouted -- far enough

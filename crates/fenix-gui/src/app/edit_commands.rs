@@ -396,13 +396,13 @@ impl App {
     /// `help.keys_sheet`: every chord in use and the leader's groups, by
     /// area, on a page of their own.
     pub(crate) fn open_keys_sheet(&mut self) {
+        // A buffer with no file: nothing is written, and the sidebar
+        // doesn't go looking for it in the temp folder.
         let text = self.keys_sheet_text();
-        let path = std::env::temp_dir().join(format!("fenix-keys-{}.md", self.key_scheme().name()));
-        if let Err(e) = std::fs::write(&path, text) {
-            self.set_error(format!("couldn't write the keys page: {e}"));
-            return;
-        }
-        self.open_file_from_picker(&path);
+        let syntax = fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Markdown, &text);
+        let id = self.buffers.open_text(&text, Some(syntax));
+        self.open_buffer_in_focused_pane(id);
+        self.wake_caret();
     }
 
     /// The keys page's Markdown.
@@ -411,8 +411,9 @@ impl App {
         let describe = |id: &str| self.commands().get(id).map(|c| c.description.to_string()).unwrap_or_default();
         let leader = if scheme == crate::keymap::Scheme::Standard { self.leader_chord_text() } else { "SPC".to_string() };
         let mut out = format!(
-            "# Keys\n\n{} keys. `{leader}` opens the leader's menu: its groups are below. `SPC h b` lists every key, `SPC t k` switches between Vim and standard keys.\n\n## Chords\n\n| Keys | Runs | What it does |\n|---|---|---|\n",
-            if scheme == crate::keymap::Scheme::Standard { "Standard" } else { "Vim" }
+            "# Keys\n\n{} keys. `{leader}` opens the leader's menu: its groups are below. {}\n\n## Chords\n\n| Keys | Runs | What it does |\n|---|---|---|\n",
+            if scheme == crate::keymap::Scheme::Standard { "Standard" } else { "Vim" },
+            self.keys_text("`SPC h b` lists every key, `SPC t k` switches between Vim and standard keys.")
         );
         let mut chords: Vec<_> = crate::keymap::chord_map().in_use(scheme).into_iter().filter_map(|c| Some((c.command?, crate::keymap::describe_keypress(&c.key)))).collect();
         chords.sort_by(|a, b| a.0.cmp(b.0).then(a.1.cmp(&b.1)));
@@ -581,6 +582,18 @@ mod tests {
         let text = app.keys_sheet_text();
         assert!(text.contains("| `C-s` | `file.save` |"), "{text}");
         assert!(text.contains("`SPC g` | git"), "{text}");
+    }
+
+    #[test]
+    fn the_keys_page_is_a_buffer_with_no_file_in_the_keys_in_use() {
+        let (mut app, _f) = app_on_file("a.txt", "");
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        app.run_cmd("help.keys_sheet");
+        assert_eq!(app.open().buffer.path(), None, "nothing written to disk");
+        assert!(!app.open().buffer.is_dirty(), "nothing to save on the way out");
+        let text = app.open().buffer.text();
+        assert!(text.contains("`C-k h b` lists every key"), "{text}");
     }
 }
 #[cfg(test)]

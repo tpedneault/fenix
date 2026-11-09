@@ -131,7 +131,12 @@ impl App {
                     let Some(row) = row_of(line) else { continue };
                     let s = if line == start_line { start_col } else { 0 };
                     let e = if line == end_line { end_col } else { ob.buffer.line_len(line) };
+                    let raw_end = e;
                     let (s, e) = ((view.remap_col)(row, s), (view.remap_col)(row, e));
+                    // All of it left of a pane scrolled sideways: nothing to mark.
+                    if view.scroll_col > 0 && e == 0 && raw_end > 0 {
+                        continue;
+                    }
                     out.squiggles.push((row, s, e.max(s + 1), [r, g, b, alpha]));
                 }
             }

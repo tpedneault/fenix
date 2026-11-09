@@ -241,6 +241,12 @@ impl BufferList {
         self.insert(Buffer::empty(), None, BufferKind::Text)
     }
 
+    /// An unnamed buffer holding `text`, unchanged and with no file
+    /// behind it: a page Fenix writes for reading (the keys page).
+    pub fn open_text(&mut self, text: &str, syntax: Option<fenix_syntax::SyntaxState>) -> BufferId {
+        self.insert(Buffer::from_text(text), syntax, BufferKind::Text)
+    }
+
     /// A real buffer seeded with `text` up front (no undo history, via
     /// `Buffer::from_text`) and tagged `Dashboard` -- the startup
     /// dashboard, `SPC d d`. A real buffer like any other: splittable,
