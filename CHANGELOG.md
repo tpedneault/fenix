@@ -6,6 +6,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Extensions: the memory an extension that runs code may have is a setting,
+  `extensions.memory_mb` (128 MiB by default, 16 MiB to 4 GiB), and
+  `extensions.memory` gives one extension its own (`fenix.mib = 1024`). An
+  extension stopped for running out of memory says how much it had and which
+  setting gives it more.
+
 ## [1.4.0] - 2026-11-08
 
 ### Changed

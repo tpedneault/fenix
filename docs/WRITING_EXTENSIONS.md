@@ -1027,7 +1027,10 @@ in a few milliseconds, handling what came and leaving the rest for the
 next event or a timer, since a frame's layout waits for the call under
 way. Work longer than a call belongs in a program it runs
 (`spawn`), an HTTP request or a timer, whose answers come as events. Its
-memory is capped at 128 MiB. Past any of those, endless recursion, or a
+memory is capped at 128 MiB unless the user gives it more
+(`extensions.memory_mb` for every extension, `extensions.memory` for
+one, up to 4 GiB) -- an extension that reads large files should keep
+them compact and say in its README what it may need. Past any of those, endless recursion, or a
 panic, the extension stops with the reason on its output page, its
 callers are answered, and Fenix carries on. It starts again with Fenix.
 

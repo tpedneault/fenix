@@ -526,6 +526,8 @@ when it's out of date).
 | `session.workspace_per_project` | true / false | on | Opening a project gives it a workspace of its own. |
 | **Extensions** | | | |
 | `extensions.store` | true / false | on | Whether Fenix may look up and download extensions from the registry. Off on a machine that installs only from files (fenix --install-extension x.fenixext). |
+| `extensions.memory_mb` | 16–4096 | 128 | The most memory, in MiB, an extension that runs code may have before it's stopped. Raise it for one working on large files (a large MIB); extensions.memory gives one extension its own. |
+| `extensions.memory` | extension (fenix.mib) = 16 to 4096 | – | An extension's own memory limit, in MiB, in place of extensions.memory_mb's. |
 | `extensions.registry` | text | https://raw.githubusercontent.com/tpedneault/fenix-extensions/registry/index.json | Where the registry's index.json is: Fenix's own, or a mirror of it. The index must be signed with Fenix's registry key either way. |
 | **Agents** | | | |
 | `agents.default` | text | – | The agent a new thread talks to: claude, codex, devin, gemini, or one of yours. Empty: the first one found. *A project can set it.* |

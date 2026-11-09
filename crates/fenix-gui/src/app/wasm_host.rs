@@ -25,8 +25,12 @@ const COMMAND_TICKS: u64 = 500;
 const ACTIVATE_TICKS: u64 = 1000;
 /// How long laying out a page, or a key on one, may take.
 const PAGE_TICKS: u64 = 100;
-/// The most memory one may have.
-const MEMORY: usize = 128 << 20;
+/// The most memory one may have, in MiB, when `extensions.memory_mb`
+/// doesn't say.
+const MEMORY_MB: i64 = 128;
+/// What the memory settings may give one, in MiB: a wasm32 module can't
+/// address more than 4 GiB.
+const MEMORY_MB_RANGE: std::ops::RangeInclusive<i64> = 16..=4096;
 /// The most lines its output page keeps.
 const KEPT_LINES: usize = 2000;
 
@@ -34,6 +38,14 @@ const KEPT_LINES: usize = 2000;
 pub(crate) fn system_keychain() -> &'static fenix_config::keychain::Keychain {
     static SYSTEM: std::sync::OnceLock<fenix_config::keychain::Keychain> = std::sync::OnceLock::new();
     SYSTEM.get_or_init(|| if cfg!(test) { fenix_config::keychain::Keychain::none() } else { fenix_config::keychain::Keychain::system() })
+}
+
+/// The most memory extension `id` may have, in bytes: its own
+/// `extensions.memory` entry, else `extensions.memory_mb`, else 128 MiB.
+pub(crate) fn memory_for(config: &fenix_config::Config, id: &str) -> usize {
+    let own = config.map_value("extensions.memory").iter().find(|(k, _)| k.trim() == id).and_then(|(_, v)| v.trim().parse::<i64>().ok());
+    let mb = own.or_else(|| config.int_value("extensions.memory_mb")).unwrap_or(MEMORY_MB).clamp(*MEMORY_MB_RANGE.start(), *MEMORY_MB_RANGE.end());
+    (mb as usize) << 20
 }
 
 /// How many epoch ticks a command or an event of extension `manifest`'s
@@ -992,7 +1004,7 @@ impl App {
                 spec.cache = cache.join("extensions").join(&ext.id);
             }
         }
-        spec.memory = MEMORY;
+        spec.memory = memory_for(&self.config, &ext.id);
         spec.activate_ticks = ACTIVATE_TICKS;
         // Its own deadline, when its manifest gives one (`limits.call_ms`,
         //): what `code_call` gives a command or an event.
@@ -2463,6 +2475,12 @@ impl App {
                 self.code_call_finished(&ext, pending, result);
             }
             Event::Stopped(why) => {
+                // Out of memory: what it had, and the setting that gives more.
+                let why = if why.contains("ran out of memory") {
+                    format!("{why}: {} MiB -- extensions.memory gives it more", memory_for(&self.config, &ext) >> 20)
+                } else {
+                    why
+                };
                 self.note_output(&ext, format!("-- {why}"));
                 self.wasm.status.insert(ext.clone(), Status::Stopped(why.clone()));
                 if self.wasm.prompt.as_ref().is_some_and(|p| p.ext == ext) {
@@ -4357,6 +4375,22 @@ pub(crate) mod tests {
     fn a_call_has_the_deadline_its_manifest_gives() {
         assert_eq!(call_ticks(&hello("").manifest), COMMAND_TICKS);
         assert_eq!(call_ticks(&hello("[limits]\ncall_ms = 30000\n").manifest), 3000);
+    }
+
+    /// An extension has 128 MiB unless the settings say: a default for
+    /// every one, one's own, each held to 16 MiB..4 GiB.
+    #[test]
+    fn memory_comes_from_the_settings() {
+        let mut config = fenix_config::Config::load_or_default(tempfile::tempdir().unwrap().keep().join("settings.toml"));
+        assert_eq!(memory_for(&config, "fenix.mib"), 128 << 20);
+        config.set_value("extensions.memory_mb", Some(fenix_config::Value::Int(512)));
+        assert_eq!(memory_for(&config, "fenix.mib"), 512 << 20);
+        config.set_value("extensions.memory", Some(fenix_config::Value::Map(vec![("fenix.mib".into(), "2048".into()), ("fenix.pets".into(), "99999".into())])));
+        assert_eq!(memory_for(&config, "fenix.mib"), 2048 << 20);
+        assert_eq!(memory_for(&config, "fenix.pets"), 4096 << 20, "held to 4 GiB");
+        assert_eq!(memory_for(&config, "fenix.ccsds"), 512 << 20, "the default for the rest");
+        config.set_value("extensions.memory_mb", Some(fenix_config::Value::Int(1)));
+        assert_eq!(memory_for(&config, "fenix.ccsds"), 16 << 20, "at least 16 MiB");
     }
 
     /// a file it opens whose first bytes aren't what its manifest
