@@ -269,6 +269,22 @@ pub fn prefix_at_cursor(buffer: &Buffer, cursor: &Cursor) -> Option<(usize, Stri
     Some((start, prefix))
 }
 
+/// The whole identifier the cursor is in or just after: what a rename
+/// starts from. A cursor in the middle of `count_words` (or on its `c`, in
+/// Normal mode) answers all of it, not the part before the cursor.
+pub fn identifier_at_cursor(buffer: &Buffer, cursor: &Cursor) -> Option<String> {
+    let at = cursor.char_idx.min(buffer.len_chars());
+    let mut start = at;
+    while start > 0 && buffer.char_at(start - 1).is_some_and(is_ident_char) {
+        start -= 1;
+    }
+    let mut end = at;
+    while buffer.char_at(end).is_some_and(is_ident_char) {
+        end += 1;
+    }
+    (start < end).then(|| buffer.text_range(start, end))
+}
+
 /// Best-effort "is the cursor typing inside a string literal that
 /// hasn't been closed yet" check, purely textual -- counts unescaped
 /// `"` characters from the start of the cursor's line up to the
@@ -399,6 +415,16 @@ mod tests {
             char_idx,
             sticky_col: 0,
         }
+    }
+
+    #[test]
+    fn identifier_at_cursor_is_the_whole_word_wherever_the_cursor_is_in_it() {
+        let buffer = buf("fn count_words(x)");
+        for at in 3..=14 {
+            assert_eq!(identifier_at_cursor(&buffer, &cur(at)).as_deref(), Some("count_words"), "at {at}");
+        }
+        assert_eq!(identifier_at_cursor(&buffer, &cur(2)).as_deref(), Some("fn"), "just after a word");
+        assert_eq!(identifier_at_cursor(&buffer, &cur(buffer.len_chars())), None, "after `)`");
     }
 
     #[test]

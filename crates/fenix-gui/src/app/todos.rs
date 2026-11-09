@@ -137,6 +137,7 @@ impl App {
         let kinds: Vec<TodoKind> = matches.iter().map(|(kind, _)| *kind).collect();
         self.quickfix = matches.iter().map(|(_, m)| QuickfixEntry::Grep(m.clone())).collect();
         self.quickfix_index = None;
+        self.search.quickfix_page = None;
         let candidates = matches
             .into_iter()
             .map(|(kind, m)| {

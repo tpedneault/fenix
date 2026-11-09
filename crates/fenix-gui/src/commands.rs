@@ -141,7 +141,7 @@ impl CommandRegistry {
         registry.register("file.yank_path", "Copy the current file's path to the clipboard", cmd_file_yank_path);
         registry.external("project.find_file", "Fuzzy-find a file in the current project", |app| app.picker_find_file());
         registry.external("project.grep", "Search the project, live, on the Search page", |app| app.search_open(crate::app::SearchOpen::Project));
-        registry.register("project.quickfix_next", "Jump to the next match in the last project search", cmd_quickfix_next);
+        registry.register("project.quickfix_next", "Jump to the next entry in the list: search matches, references, a task's errors", cmd_quickfix_next);
         registry.register(
             "project.quickfix_prev",
             "Jump to the previous match in the last project search",
@@ -375,6 +375,11 @@ impl CommandRegistry {
             "code.lsp_rename",
             "Rename the symbol under the cursor across the project (LSP)",
             cmd_lsp_rename,
+        );
+        registry.register(
+            "code.undo_refactor",
+            "Undo the last refactor (a rename, a code action, a project replace) in every file it changed",
+            |ctx| ctx.app.undo_refactor(),
         );
         registry.register(
             "code.lsp_code_action",

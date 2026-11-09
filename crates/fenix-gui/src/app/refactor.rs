@@ -128,7 +128,7 @@ impl App {
             Err(error) => self.set_error(format!("Refactor rejected: {error}")),
             Ok(plan) if plan.is_empty() => self.set_message("no changes proposed"),
             Ok(plan) => {
-                let text = render(&plan);
+                let text = render(&plan, self.project_root.as_deref(), &self.undo_refactor_keys());
                 self.open_refactor_preview(&text, Contents::Edits(plan, targets));
             }
         }
@@ -279,11 +279,12 @@ impl App {
         self.close_refactor_preview();
         self.sync_refactor_buffers(&ids);
         self.snapshot_dirty_buffers();
-        self.set_message(format!("refactor applied to {} file(s), left unsaved — :undo-refactor reverses all", ids.len()));
+        let undo = self.undo_refactor_keys();
+        self.set_message(format!("refactor applied to {} file(s), left unsaved — {undo} reverses all", ids.len()));
         self.wake_caret();
     }
 
-    pub(super) fn undo_refactor(&mut self) {
+    pub(crate) fn undo_refactor(&mut self) {
         let Some(undo) = &self.refactor_undo else {
             // A replace from the Search page is undone the same way.
             if self.search_can_undo() {
@@ -377,13 +378,29 @@ impl App {
     }
 }
 
-fn render(plan: &[PlannedDocument]) -> String {
+impl App {
+    /// How to undo a refactor, in the keys in use: `code.undo_refactor`'s
+    /// key, or `:undo-refactor` in Vim keys when it has none.
+    fn undo_refactor_keys(&self) -> String {
+        match self.key_for("code.undo_refactor") {
+            Some(keys) => keys,
+            None if !self.standard_keys() => ":undo-refactor".to_string(),
+            None => "the palette's \"undo the last refactor\"".to_string(),
+        }
+    }
+}
+
+/// Lines of context around each change in the preview.
+const CONTEXT: usize = 2;
+
+fn render(plan: &[PlannedDocument], root: Option<&Path>, undo: &str) -> String {
     let mut out = format!(
-        "Refactor preview — {} file(s)\na / Enter: apply all in memory   q: cancel   :undo-refactor: undo last refactor\nFiles stay unsaved until you save them.\n",
+        "Refactor preview — {} file(s)\na / Enter: apply all in memory   q: cancel   {undo}: undo the last refactor\nFiles stay unsaved until you save them.\n",
         plan.len()
     );
     for change in plan {
-        out.push_str(&format!("\n--- {}\n+++ {}\n", change.path.display(), change.path.display()));
+        let shown = root.and_then(|root| change.path.strip_prefix(root).ok()).unwrap_or(&change.path).display();
+        out.push_str(&format!("\n--- {shown}\n+++ {shown}\n"));
         let visible = |text: &str| -> Vec<String> {
             text.split_inclusive('\n')
                 .map(|line| {
@@ -399,20 +416,40 @@ fn render(plan: &[PlannedDocument]) -> String {
         };
         let old = visible(&change.before);
         let new = visible(&change.after);
-        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-        let suffix = old[prefix..].iter().rev().zip(new[prefix..].iter().rev()).take_while(|(a, b)| a == b).count();
-        out.push_str(&format!("@@ line {} @@\n", prefix + 1));
-        for line in &old[prefix.saturating_sub(2)..prefix] {
-            out.push_str(&format!(" {line}\n"));
-        }
-        for line in &old[prefix..old.len() - suffix] {
-            out.push_str(&format!("-{line}\n"));
-        }
-        for line in &new[prefix..new.len() - suffix] {
-            out.push_str(&format!("+{line}\n"));
-        }
-        for line in old[old.len() - suffix..].iter().take(2) {
-            out.push_str(&format!(" {line}\n"));
+        // Line by line, so a rename's two changed lines read as two small
+        // hunks rather than everything between them removed and re-added.
+        let alignment = fenix_diff::align(&old.join("\n"), &new.join("\n"));
+        let clamp = |lines: &[String], range: std::ops::Range<usize>| -> Vec<String> {
+            let end = range.end.min(lines.len());
+            lines[range.start.min(end)..end].to_vec()
+        };
+        let changes: Vec<_> = alignment.changes().cloned().collect();
+        let mut k = 0;
+        while k < changes.len() {
+            // Changes close enough that their context would touch share a hunk.
+            let mut last = k;
+            while last + 1 < changes.len() && changes[last + 1].old.start - changes[last].old.end <= 2 * CONTEXT {
+                last += 1;
+            }
+            let first = &changes[k];
+            out.push_str(&format!("@@ line {} @@\n", first.new.start + 1));
+            for line in clamp(&old, first.old.start.saturating_sub(CONTEXT)..first.old.start) {
+                out.push_str(&format!(" {line}\n"));
+            }
+            for i in k..=last {
+                let block = &changes[i];
+                for line in clamp(&old, block.old.clone()) {
+                    out.push_str(&format!("-{line}\n"));
+                }
+                for line in clamp(&new, block.new.clone()) {
+                    out.push_str(&format!("+{line}\n"));
+                }
+                let until = if i < last { changes[i + 1].old.start } else { block.old.end + CONTEXT };
+                for line in clamp(&old, block.old.end..until) {
+                    out.push_str(&format!(" {line}\n"));
+                }
+            }
+            k = last + 1;
         }
     }
     out
@@ -545,8 +582,21 @@ mod tests {
     }
     #[test]
     fn preview_exposes_newline_only_changes() {
-        let text = render(&[PlannedDocument { path: "a.txt".into(), before: "a\r\n".into(), after: "a".into() }]);
+        let text = render(&[PlannedDocument { path: "a.txt".into(), before: "a\r\n".into(), after: "a".into() }], None, ":undo-refactor");
         assert!(text.contains("-a [CRLF]"));
         assert!(text.contains("+a [no final newline]"));
+    }
+
+    #[test]
+    fn preview_shows_each_changed_line_in_its_own_hunk_with_a_relative_path() {
+        let before: String = (1..=20).map(|i| if i == 3 || i == 17 { format!("call old {i}\n") } else { format!("line {i}\n") }).collect();
+        let after = before.replace("old", "new");
+        let text = render(&[PlannedDocument { path: "/p/src/lib.rs".into(), before, after }], Some(Path::new("/p")), "C-k c R");
+        assert!(text.contains("--- src/lib.rs\n"), "{text}");
+        assert!(text.contains("C-k c R: undo the last refactor"), "{text}");
+        assert_eq!(text.matches("@@").count(), 4, "two hunks: {text}");
+        assert!(text.contains("@@ line 3 @@\n line 1\n line 2\n-call old 3\n+call new 3\n line 4\n line 5\n"), "{text}");
+        assert!(text.contains("@@ line 17 @@\n line 15\n line 16\n-call old 17\n+call new 17\n line 18\n line 19\n"), "{text}");
+        assert!(!text.contains("-line"), "unchanged lines stay context: {text}");
     }
 }

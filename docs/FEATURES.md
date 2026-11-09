@@ -1766,7 +1766,7 @@ LSP rename and edit-based code actions open a read-only multi-file preview.
 For a list of code actions, move to an action and press Enter to preview it.
 Press `a` or Enter to apply every proposed text edit in memory, or `q` / Escape
 to cancel. Files remain unsaved; use the usual save commands after review.
-`:undo-refactor` reverses the latest refactor across all affected buffers, provided
+`SPC c R` (`code.undo_refactor`, or `:undo-refactor`) reverses the latest refactor across all affected buffers, provided
 none has since been edited, renamed, or closed. Normal `u` undoes only one file.
 
 Edits validate document versions, exact UTF-16 ranges, overlapping ranges, and

@@ -2915,6 +2915,19 @@ fn popup_beside_row(
     Some(fenix_window::Rect { x, y, w: width, h: height })
 }
 
+/// Ctrl+Backspace in a one-line prompt: the word before the end goes,
+/// with any spaces or punctuation after it -- `count_words` all at once,
+/// `src/lib` back to `src/`.
+fn delete_word_back(input: &mut String) {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    while input.ends_with(|c: char| !is_word(c)) {
+        input.pop();
+    }
+    while input.ends_with(is_word) {
+        input.pop();
+    }
+}
+
 fn caret_pixel_pos(rect: fenix_window::Rect, row: usize, col: usize, gutter_px: f32, content_frac: f32, char_width: f32, line_height: f32) -> (f32, f32) {
     let content_x = rect.x + text::PAD_LEFT + gutter_px;
     let x = content_x + col as f32 * char_width;
@@ -5381,6 +5394,9 @@ pub struct App {
     /// string, where only servers are asked.
     completion_local: bool,
     completion_context: Option<(BufferId, fenix_window::WindowId, usize, u64)>,
+    /// The focused buffer and its edit count when `sync_completion` last
+    /// ran: a key that changed neither doesn't open the popup.
+    completion_edit_seen: Option<(BufferId, u64)>,
     snippet: Option<snippets::ActiveSnippet>,
     /// Same role as `picker_scroll`, for the completion popup's own
     /// candidate window.
@@ -6119,6 +6135,7 @@ impl App {
             completion_generation: 0,
             completion_local: true,
             completion_context: None,
+            completion_edit_seen: None,
             snippet: None,
             completion_scroll: 0,
             find_file_prompt: None,
@@ -7796,10 +7813,18 @@ impl App {
             .filter_map(|loc| fenix_lsp::uri_to_path(&loc.uri).map(|path| QuickfixEntry::Lsp { path, position: loc.range.start }))
             .collect();
         self.quickfix_index = None;
+        // The Search page's results aren't the list any more: it stops
+        // following F3 and `]q`.
+        self.search.quickfix_page = None;
         if self.quickfix.is_empty() {
             self.set_error("no references found".to_string());
         } else {
             self.quickfix_step(1);
+            let n = self.quickfix.len();
+            if n > 1 {
+                let next = self.key_for("project.quickfix_next").unwrap_or_else(|| "]q".to_string());
+                self.set_message(format!("{n} references -- {next} goes to the next"));
+            }
         }
     }
 
@@ -8115,8 +8140,8 @@ impl App {
         }
     }
 
-    /// `SPC c r` -- opens the rename prompt, pre-filled with whatever
-    /// identifier-prefix precedes the cursor (real editors' own
+    /// `SPC c r` -- opens the rename prompt, pre-filled with the
+    /// identifier the cursor is in (real editors' own
     /// convention: rename almost always starts from "call this
     /// something else," not a blank field), same capturing-prompt shape
     /// as `start_rename_file_prompt`. A no-op (with a message) if no
@@ -8129,7 +8154,7 @@ impl App {
         }
         let cursor = self.cursor();
         let ob = self.open();
-        let current = completion::prefix_at_cursor(&ob.buffer, &cursor).map(|(_, prefix)| prefix).unwrap_or_default();
+        let current = completion::identifier_at_cursor(&ob.buffer, &cursor).unwrap_or_default();
         self.lsp_rename_prompt = Some(current);
     }
 
@@ -8153,6 +8178,7 @@ impl App {
                 let new_name = self.lsp_rename_prompt.take().unwrap_or_default();
                 self.send_lsp_rename(&new_name);
             }
+            KeyCode::Named(FenixNamedKey::Backspace) if key.mods.ctrl || key.mods.alt => delete_word_back(input),
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
             }
@@ -8271,6 +8297,15 @@ impl App {
     /// identifier prefix at the cursor, or the prefix no longer matches
     /// anything.
     fn sync_completion(&mut self) {
+        // The popup opens on an edit (a character typed, one deleted) and
+        // only follows the cursor once open: an arrow or a click that
+        // lands after a word is not asking for it -- in standard keys,
+        // where a buffer rests in Insert, it would follow every move.
+        let seen = self.buffers.get(self.focused_buffer_id()).map(|b| (self.focused_buffer_id(), b.buffer.edit_count()));
+        let edited = std::mem::replace(&mut self.completion_edit_seen, seen) != seen;
+        if self.completion.is_none() && !edited {
+            return;
+        }
         if self.snippet_is_valid() {
             self.completion = None;
             return;
@@ -8353,6 +8388,12 @@ impl App {
         }
         if self.completion.is_none() {
             return false;
+        }
+        // With standard keys Escape never leaves Insert, so it is free to
+        // do what it does in every other editor: close the popup.
+        if keypress == KeyPress::named(FenixNamedKey::Escape) && self.standard_keys() {
+            self.completion = None;
+            return true;
         }
         if self.completion.as_ref().is_some_and(|s| s.picker.is_empty()) { return false; }
         if keypress.code == KeyCode::Named(FenixNamedKey::Enter) && keypress.mods == Mods::default() && self.enter_is_a_new_line() {
@@ -8869,7 +8910,7 @@ impl App {
                 self.note_disk_state(id);
                 self.discard_recovery_for(id);
                 self.refresh_project_root();
-                self.set_message(format!("saved {}", path.display()));
+                self.set_message(format!("saved {}", self.shown_path(&path)));
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
         }
@@ -8943,13 +8984,13 @@ impl App {
                     self.lsp_settings_changed(&project, Some(&server));
                 }
                 match (self.xml_save_problem(&path), Self::snippet_save_note(&path)) {
-                    (Some(problem), _) => self.set_error(format!("saved {} -- {problem}", path.display())),
+                    (Some(problem), _) => self.set_error(format!("saved {} -- {problem}", self.shown_path(&path))),
                     (None, Some(Ok(note))) => self.set_message(format!("saved -- {note}")),
                     (None, Some(Err(why))) => self.set_error(format!("saved -- {why}")),
-                    (None, None) => self.set_message(format!("saved {}", path.display())),
+                    (None, None) => self.set_message(format!("saved {}", self.shown_path(&path))),
                 }
                 if let Some(why) = unformatted {
-                    self.set_error(format!("saved {}, unformatted -- {why}", path.display()));
+                    self.set_error(format!("saved {}, unformatted -- {why}", self.shown_path(&path)));
                 }
             }
             Err(err) => self.set_error(format!("save failed: {err}")),
@@ -10308,6 +10349,7 @@ impl App {
         task.args = spec.args.clone();
         self.project_last_tasks.insert(root.clone(), task.clone());
         self.quickfix.clear();
+        self.search.quickfix_page = None;
         self.quickfix_index = None;
         let header = format!("$ {} {}\n", task.command, task.args.join(" "));
 
@@ -14736,6 +14778,7 @@ impl App {
                 let input = self.find_file_prompt.take().unwrap_or_default();
                 self.open_typed_path(&input);
             }
+            KeyCode::Named(FenixNamedKey::Backspace) if key.mods.ctrl || key.mods.alt => delete_word_back(input),
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
             }
@@ -14827,6 +14870,7 @@ impl App {
                 let input = self.rename_file_prompt.take().unwrap_or_default();
                 self.apply_rename_file(&input);
             }
+            KeyCode::Named(FenixNamedKey::Backspace) if key.mods.ctrl || key.mods.alt => delete_word_back(input),
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
             }
@@ -14914,8 +14958,14 @@ impl App {
             return None;
         }
         // The question first: a long path is cut at the prompt's edge.
-        let name = self.open().buffer.path().map(|p| self.project_root.as_deref().and_then(|r| path_within(r, p)).unwrap_or_else(|| home_relative(p))).unwrap_or_default();
+        let name = self.open().buffer.path().map(|p| self.shown_path(p)).unwrap_or_default();
         Some(format!("Delete? y deletes, n keeps -- {name}"))
+    }
+
+    /// `path` as a message says it: inside the project from its root
+    /// (`src/lib.rs`), else from home (`~/notes.md`).
+    fn shown_path(&self, path: &Path) -> String {
+        self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
     }
 
     /// What happens after a key has been through Vim, whatever it did:
@@ -15544,6 +15594,7 @@ impl App {
                     self.workspaces.rename_active(trimmed.to_string());
                 }
             }
+            KeyCode::Named(FenixNamedKey::Backspace) if key.mods.ctrl || key.mods.alt => delete_word_back(input),
             KeyCode::Named(FenixNamedKey::Backspace) => {
                 input.pop();
             }
@@ -18798,7 +18849,8 @@ impl App {
                 extra.push((format!("{prefix}{}", completion::clipped_line(line, 72)), self.theme.fg_modeline));
             }
         }
-        extra.push((format!("{}/{}  ↑↓ choose · Tab/Enter accept · C-e close", state.picker.selected_row() + 1, state.picker.len()), self.theme.gutter_fg));
+        let close = if self.standard_keys() { "Esc" } else { "C-e" };
+        extra.push((format!("{}/{}  ↑↓ choose · Tab/Enter accept · {close} close", state.picker.selected_row() + 1, state.picker.len()), self.theme.gutter_fg));
         extra.truncate(available.saturating_sub(1).min(4));
         let shown_rows = (available - extra.len()).min(COMPLETION_MAX_ROWS);
         let offset = completion::scroll_offset(state.picker.selected_row(), self.completion_scroll, shown_rows);

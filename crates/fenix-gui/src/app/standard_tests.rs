@@ -299,3 +299,53 @@ fn enter_on_an_indented_blank_line_keeps_the_indent_with_vim_keys_too() {
     app.type_text("mod tests {\nuse super::*;\n\n#[test]");
     assert_eq!(app.text(), "mod tests {\n    use super::*;\n    \n    #[test]\n}", "{:?}", app.text());
 }
+
+#[test]
+fn escape_closes_the_completion_popup_and_keeps_typing() {
+    let (mut app, _f) = standard_on("a.txt", "alphabet\n");
+    app.press_all("C-End");
+    app.type_text("alp");
+    assert!(app.completion.is_some(), "typing a word's start offers the rest");
+    app.press("Esc");
+    assert!(app.completion.is_none(), "Escape closes the popup");
+    assert_eq!(app.vim.mode(), Mode::Insert);
+    app.type_text("s");
+    assert_eq!(app.text(), "alphabet\nalps");
+}
+
+#[test]
+fn moving_the_cursor_after_a_word_does_not_open_completion() {
+    let (mut app, _f) = standard_on("a.txt", "alphabet\nalp and more\n");
+    app.press_all("Down Right Right Right");
+    assert_eq!(app.line_col(), (1, 3));
+    assert!(app.completion.is_none(), "an arrow isn't asking for completion");
+    app.press_all("Left Right");
+    assert!(app.completion.is_none());
+}
+
+#[test]
+fn ctrl_backspace_deletes_a_word_in_a_prompt() {
+    let (mut app, _f) = standard_on("old_name.txt", "x\n");
+    app.run_cmd("file.rename");
+    let before = app.rename_file_prompt.clone().unwrap();
+    app.type_text("_v2");
+    app.press("C-Backspace");
+    assert_eq!(app.rename_file_prompt.as_deref(), Some(before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_')), "from {before}");
+    app.press("Esc");
+    assert!(app.rename_file_prompt.is_none());
+}
+
+#[test]
+fn references_say_how_many_and_the_key_for_the_next() {
+    let (mut app, f) = standard_on("a.rs", "fn a() {}\nfn b() { a(); a(); }\n");
+    let uri = fenix_lsp::path_to_uri(&f.path).unwrap();
+    let at = |line, character| lsp_types::Location { uri: uri.clone(), range: lsp_types::Range::new(lsp_types::Position::new(line, character), lsp_types::Position::new(line, character + 1)) };
+    app.search.quickfix_page = Some(app.focused_buffer_id());
+    app.apply_lsp_references(vec![at(0, 3), at(1, 9), at(1, 14)]);
+    assert_eq!(app.line_col(), (0, 3), "at the first");
+    let message = app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default();
+    assert_eq!(message, "3 references -- F3 goes to the next");
+    assert!(app.search.quickfix_page.is_none(), "the Search page no longer follows the list");
+    app.press("F3");
+    assert_eq!(app.line_col(), (1, 9));
+}

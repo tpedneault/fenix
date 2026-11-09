@@ -72,7 +72,7 @@ pub(super) struct SearchHost {
     last: Option<SearchPage>,
     undo: Option<Vec<UndoFile>>,
     /// The page the quickfix list came from.
-    quickfix_page: Option<BufferId>,
+    pub(super) quickfix_page: Option<BufferId>,
 }
 
 impl App {
