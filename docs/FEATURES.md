@@ -10,6 +10,20 @@ its extension. The rest is built into Fenix.
 
 ## Editing
 
+- **Two key schemes.** Vim keys (the default): Vim's modes and editing
+  grammar, and the `SPC` leader for everything else. Standard keys
+  (`editor.keys = "standard"`, `SPC t k`, or the welcome's question): a
+  traditional IDE's, modelled on VS Code's on Windows and Linux -- a
+  file's text is typed into at once, Shift with a movement selects,
+  Ctrl+C/X/V/Z/S, Ctrl+F, F12, F2, Ctrl+/ and the rest, Alt+click and
+  Alt+Shift+drag for more cursors, and the whole leader menu, every
+  extension's included, on `Ctrl+K`. Both schemes run the same commands;
+  hints and menus say the keys of the one in use. See
+  [Standard keys](KEYBINDINGS.md#standard-keys).
+- **Your own keys**: `keybindings.toml`'s `[[leader]]` and `[[keys]]`
+  entries rebind or unbind any leader key or chord (Ctrl+S included), for
+  either scheme or both; the palette's `Tab` binds the command picked.
+
 - **Modal editing**: Normal/Insert/Visual (char/line/block)/Replace/Command
   modes, the standard motion set (`h j k l w b e 0 ^ $ gg G f F t T ; , % { }`),
   operators (`d c y` composing with motions and text objects, plus the

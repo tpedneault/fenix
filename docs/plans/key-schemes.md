@@ -1,7 +1,8 @@
 # Plan: key schemes -- Vim, and standard keys
 
 - **Status:** decisions reviewed 2026-11-09 (§10 lists every one), recorded
-  in [ADR 0004](../adr/0004-key-schemes.md). M0 done
+  in [ADR 0004](../adr/0004-key-schemes.md). Implemented for Fenix 1.5;
+  §12 lists where the implementation differs from this plan
 - **Scope:** a second way to edit in Fenix, for people who want the keys of a
   traditional IDE (no modes, no leader typed as `SPC`), with nothing taken
   away from the Vim and leader experience that stays the default
@@ -869,3 +870,35 @@ Settled in review on 2026-11-09.
 - **Pressure to grow standard mode** (IDE-exact behaviour, keyboard cursor
   adding, multiple cursors in Vim mode, a menu bar). §2.5, §2.6 and §2.9 are
   the line; anything past them is its own plan.
+
+---
+
+## 12. As built (Fenix 1.5)
+
+Where the implementation differs from the plan above, and why:
+
+- **`when`'s list** is `anywhere`, `text`, `typing`, `not_typing`, `page`,
+  `terminal`: `editor` (§3.1) became `text`, and `not_typing` was needed
+  for Vim's Ctrl+O and Ctrl+I, which Insert keeps for its own.
+- **Extra cursors aren't mapped through an outside edit** (§4.2a): an edit
+  made elsewhere -- a language server's, an agent's, a reload, an undo --
+  goes back to one cursor. Mapping them would have meant draining the
+  buffer's anchor edits, which extensions' decorations already drain.
+- **Tabs already had a ×** (§2.8); the split button is the new part. It
+  sits right after the tabs.
+- **The keys page** is `SPC h ?` (`help.keys_sheet`), a Markdown page of
+  the chords in use and the leader's groups.
+- **Hints** (§4.6) are said for the scheme where they're shown --
+  messages, errors, toasts, compose titles, menus, Home and pages --
+  through one table of Vim phrases and their standard-keys forms, rather
+  than each string built with `key_for`. The test scans the source for
+  hints that name Vim's keys and fails on one the table doesn't translate.
+  On pages and Home only `SPC` is rewritten (to the leader chord, when it
+  is as wide), so a page's cells stay where they were laid.
+- **Compose's agent button** on the pane's title isn't there: Ctrl+Shift+A
+  is. The title says so.
+- **Key routing** takes the event loop as optional, so tests drive the
+  real `dispatch_keypress` (`app/test_keys.rs`); the standard-keys tests
+  are in `app/standard_tests.rs`, `app/carets.rs` and `fenix-vim`'s
+  `state/standard.rs`.
+

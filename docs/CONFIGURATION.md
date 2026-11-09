@@ -225,8 +225,8 @@ An extension is a `.fenixext` file -- a zip with an `extension.toml` at
 its root -- or, while you make one, the folder it's made from. For now
 Fenix installs extensions of data: themes, snippets, project templates,
 keys and language files, in `themes/`, `snippets/`, `templates/`,
-`keymaps/` and `languages/` folders laid out like your own (a keymap is a `.toml` of `[[leader]]` entries,
-as in `keybindings.toml`). They're read beside the built-in ones and
+`keymaps/` and `languages/` folders laid out like your own (a keymap is a `.toml` of `[[leader]]` and
+`[[keys]]` entries, as in `keybindings.toml`: see [Your keys](KEYBINDINGS.md#your-keys-keybindingstoml)). They're read beside the built-in ones and
 below yours: your theme, snippet, template or key of the same name wins.
 A `launch/` folder holds launch configurations for the debugger
 (`SPC u u` offers them in a project that has none of its own; see

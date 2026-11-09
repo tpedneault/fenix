@@ -908,6 +908,23 @@ mod tests {
         assert_eq!(map.lookup(KeyPress::named(FenixNamedKey::Enter).with_ctrl(), &at), Some("file.save"));
     }
 
+    /// Fenix's own chords name commands Fenix has: a typo'd one would be
+    /// dropped without a word (as a feature's key is when it's off).
+    #[test]
+    fn every_default_chord_runs_a_command_fenix_has() {
+        let registry = crate::commands::CommandRegistry::with_builtins();
+        let missing: Vec<&str> = default_keymap().keys.iter().filter_map(|e| e.command.as_deref()).filter(|c| registry.get(c).is_none()).collect();
+        assert!(missing.is_empty(), "{missing:?}");
+        // Standard keys have the shortcuts the plan promised.
+        let map = chord_map();
+        let standard = ChordContext { scheme: Scheme::Standard, text: true, ..ChordContext::default() };
+        for (key, id) in [("C-c", "edit.copy"), ("C-v", "edit.paste"), ("C-x", "edit.cut"), ("C-p", "project.find_file"), ("C-S-p", "commands.palette"), ("F12", "code.goto_definition"), ("F2", "code.lsp_rename"), ("C-f", "search.file"), ("C-/", "code.toggle_comment"), ("C-w", "tab.close"), ("C-Tab", "buffer.switch_recent"), ("C-0", "window.focus_sidebar")] {
+            assert_eq!(map.lookup(parse_key(key).unwrap(), &standard), Some(id), "{key}");
+        }
+        // Every leader key is reached with standard keys too: Ctrl+K is SPC.
+        assert!(RESERVED_CHORDS.contains(&"C-k"));
+    }
+
     #[test]
     fn fenix_s_keymap_binds_nothing_twice() {
         assert_eq!(keymap_conflicts(), Vec::<String>::new());

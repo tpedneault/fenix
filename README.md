@@ -27,6 +27,9 @@ whatever else you add from the extension store.
   Visual char/line/block modes.
 - **`SPC` leader with which-key**: every command is a short mnemonic
   sequence, and a popup shows what comes next as you type.
+- **Or standard keys**: a traditional IDE's -- typing at once, Shift+arrows
+  to select, Ctrl+C/X/V, Alt+click for more cursors, F12 and F2 -- with the
+  same leader menu on `Ctrl+K` (`editor.keys = "standard"`, `SPC t k`).
 - **Projects**: a project hub, fuzzy file and symbol pickers, a search
   page with replace across the project, a file explorer and file manager,
   a new-project wizard with templates, and per-project settings, tasks,

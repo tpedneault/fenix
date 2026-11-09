@@ -8,8 +8,43 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Standard keys: a traditional IDE's way to edit, beside Vim's
+  (`editor.keys = "standard"`, `SPC t k`, or the welcome's question). A
+  file's text is typed into at once; Shift with a movement selects, and
+  typing replaces the selection; Ctrl+C/X/V/Z/Y/S/A, Ctrl+F and Ctrl+H on
+  the Search page, Ctrl+P, Ctrl+Shift+P, F12, F2, Ctrl+/, Alt+↑/↓ and the
+  rest of VS Code's keys on Windows and Linux; undo a word or a line at a
+  time. The leader's menu, every extension's keys in it, opens on Ctrl+K
+  (`keys.leader_chord`). Home, Git, diffs and listings are browsed with
+  their own keys. Compose panes send on Ctrl+Enter; an agent's question is
+  answered with a click, or Alt and its key. See KEYBINDINGS.md's Standard
+  keys, and ADR 0004.
+- More cursors, with standard keys: Alt+click adds one (or takes it away),
+  Alt+Shift+drag makes a column; typing, deleting, Enter, Tab, the arrows
+  and pasting happen at each, as one undo step
+  (`editor.multi_cursor_modifier = "ctrl"` for Ctrl+click instead).
+- Chords are keymap data: `[[keys]]` in `keybindings.toml` and in
+  extensions' keymaps binds or unbinds a key with its modifiers (`C-s`,
+  `C-S-p`, `F12`) for a key scheme and a place; Ctrl+S, Ctrl+Z and the
+  rest can be rebound with Vim keys too. `SPC h b`, `SPC h k` and `SPC h K`
+  cover chords, and the palette's `Tab` binds one.
+- Commands for what only Vim keys, Ex or the right-click menu did:
+  `code.hover`, `code.goto_definition`, `code.references`,
+  `code.toggle_comment`, `edit.copy`/`cut`/`paste`/`select_all`, moving
+  and copying lines, the `:sort` variants, `lsp.restart`,
+  `nav.goto_line`, the bracket jumps (`nav.next_problem`…, on `SPC ]` and
+  `SPC [` too), panes by number, a tab to the next pane, the recent-buffer
+  switcher, and a keys page (`SPC h ?`).
+- A split button after each pane's tabs.
 - Extensions: the welcome offers a Python pack -- the Python language pack, Jupyter
   notebooks (`fenix.jupyter`, `.ipynb` files run on a kernel) and the CSV table.
+
+### Changed
+
+- `fenix/commands` reports the keys that run a command now: a chord
+  (`C-s`) over the leader's keys, which standard keys write with their
+  chord (`C-k g g`).
+- Hints, messages and toasts say the keys of the scheme in use.
 
 ## [1.4.0] - 2026-11-08
 

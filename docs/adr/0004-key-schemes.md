@@ -1,6 +1,7 @@
 # ADR 0004: Key schemes -- Vim, and standard keys
 
-- **Status:** accepted 2026-11-09
+- **Status:** accepted 2026-11-09; implemented for Fenix 1.5 (the plan's §12
+  says where it differs)
 - **Date:** 2026-11-09
 - **Plan:** [`docs/plans/key-schemes.md`](../plans/key-schemes.md) (its §10
   lists every decision reviewed)

@@ -66,7 +66,8 @@ prompt goes to and in which mode.
   thinking (folded), each tool call as a card -- what it read, the diff
   of what it edited, the output of what it ran -- and its plan.
 - Below, the prompt: a buffer with Vim's keys. `Ctrl-Enter` sends it
-  from Insert mode, `Enter` from Normal mode. A prompt sent while the agent works waits its turn; `SPC a k`
+  from Insert mode, `Enter` from Normal mode. With standard keys you type
+  in it at once and `Ctrl+Enter` sends it. A prompt sent while the agent works waits its turn; `SPC a k`
   cancels the turn (or takes back the waiting prompt). `↑` in an empty
   prompt brings back the one sent before, again the one before that;
   `↓` goes the other way.
@@ -78,7 +79,9 @@ prompt goes to and in which mode.
   an outlined card in the thread with its answers, one a line on its
   key's cap (`y`, `Y`, `n`, …), and the modeline says an agent is waiting
   on you. On the card, `j` and `k` move between the answers and Enter
-  gives the one they're on. The keys answer it from anywhere in the
+  gives the one they're on. With standard keys a click on an answer gives
+  it, and from the prompt its key is taken with `Alt` (`Alt+Y`): the
+  plain letter is typed. The keys answer it from anywhere in the
   thread, and from an empty prompt, without going back to the thread. When Fenix isn't in front,
   it asks for your attention (`agents.notify`).
 - A command's card says what ran (`$ rg -n session`) when the agent's

@@ -4,12 +4,126 @@ Fenix follows real Vim for editing and a Doom-Emacs-style `SPC` leader
 for everything else. `SPC` starts a leader sequence from Normal mode; a
 popup shows what keys continue it.
 
+Fenix has **standard keys** too, a traditional IDE's
+(`editor.keys = "standard"`, or `SPC t k`, or the welcome's `s`): you
+type at once, Shift with an arrow selects, Ctrl+C/X/V/Z/S do what they
+do everywhere, Alt+click adds a cursor, and `Ctrl+K` opens the same
+leader menu `SPC` does -- so every `SPC …` key below is `Ctrl+K …` with
+standard keys. [Standard keys](#standard-keys) has what's different.
+
 `Ctrl+Alt+Q` does everything `Esc` does, for when Escape doesn't reach
 Fenix (some remote-desktop and UI-automation tools don't send it).
 
 A `:` command that doesn't exist says so. `:s` and `:g` take Vim's patterns:
 `\(`, `\|` and `\+` are operators and bare `(`, `|` and `+` are literal, or
 the other way round after `\v`.
+
+## Standard keys
+
+With `editor.keys = "standard"`. A file's text is typed into at once and
+Escape never leaves it; Home, Git's pages, diffs and listings are
+browsed: their own keys (`Enter`, `q`, `s`…) work as they do with Vim
+keys, and the arrows, PageUp/PageDown, Home/End and Shift with them too.
+The caret is a bar, and the modeline has no mode badge but `SELECT`.
+`Ctrl+K` opens the leader's menu (`keys.leader_chord`), and every
+extension's keys come with it.
+
+**Typing and selecting**
+
+| Keys | Action |
+|---|---|
+| Arrows, `Home`, `End` | Move; `Home` goes to the first character, then the line's start |
+| `Ctrl+←` / `Ctrl+→` | A word at a time |
+| `Ctrl+Home` / `Ctrl+End` | The buffer's start / end |
+| Shift with any of these | Select; typing, `Backspace` or `Enter` replace the selection |
+| `Ctrl+Backspace` / `Ctrl+Delete` | Delete a word back / on |
+| `Tab` / `Shift+Tab` | A snippet's next stop, else accept completion, else indent (the selection's lines) / dedent |
+| `Ctrl+Space` | Completion |
+| `Ctrl+Z` / `Ctrl+Y`, `Ctrl+Shift+Z` | Undo / redo -- a word, a line, or what came after a pause (`editor.undo_pause_ms`) at a time |
+| `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | Copy / cut / paste; with nothing selected, the line |
+| `Ctrl+A` | Select all |
+| `Ctrl+/` | Comment or uncomment the line, or the selection's lines |
+| `Alt+↑` / `Alt+↓` | Move the line (or the selected lines) up / down |
+| `Alt+Shift+↑` / `Alt+Shift+↓` | Copy it above / below |
+| `Ctrl+G` | Go to a line |
+
+**More cursors**
+
+| Input | Action |
+|---|---|
+| `Alt`+click | Add a cursor there; on one, take it away |
+| `Alt+Shift`+drag | A column of cursors, one a line (at most 10,000) |
+| `Esc`, a plain click | Back to one cursor |
+
+Typing, deleting, `Enter`, `Tab`, the arrows and Shift with them happen at
+every cursor, as one undo step. `Ctrl+V` pastes a line at each cursor when
+the clipboard has as many lines as there are cursors. Any other key, or an
+edit made elsewhere (a language server's, an agent's), goes back to one.
+`editor.multi_cursor_modifier = "ctrl"` makes it `Ctrl`+click, for
+desktops that move windows with `Alt`+drag; go to definition then moves to
+`Alt`+click.
+
+**Files, tabs and panes**
+
+| Keys | Action |
+|---|---|
+| `Ctrl+P` | Find a file in the project |
+| `Ctrl+O` / `Ctrl+E` | Open a file by its path / a recent one |
+| `Ctrl+N` | A new scratch buffer |
+| `Ctrl+S` | Save |
+| `Ctrl+W` / `Ctrl+Shift+T` | Close the tab / reopen it. A split pane goes with its last tab |
+| `Ctrl+Tab` | The buffers used last: held `Ctrl`, `Tab` steps, letting go picks |
+| `Ctrl+PageDown` / `Ctrl+PageUp` | Next / previous tab |
+| `Ctrl+1` … `Ctrl+9` | To pane N |
+| `Ctrl+Alt+→` / `Ctrl+Alt+←` | Move the tab to the next / previous pane |
+| `Ctrl+K w v` / `Ctrl+K w s` | Split right / down (the tab strip's split button does too) |
+| `Ctrl+K w q`, `w o`, `w =` | Close the pane / the others / balance |
+| `Ctrl+Shift+N` | Another OS window |
+
+**Finding and code**
+
+| Keys | Action |
+|---|---|
+| `Ctrl+F` / `Ctrl+H` | Search / replace in this file, on the Search page |
+| `Ctrl+Shift+F` / `Ctrl+Shift+H` | Search / replace across the project |
+| `F3` / `Shift+F3` | The last search's next / previous match |
+| `F12`, `Ctrl`+click | Go to definition |
+| `Shift+F12` / `Ctrl+F12` | References / implementations |
+| `Ctrl+K Ctrl+I` | Hover (the debugger's lens while stopped) |
+| `F2` | Rename the symbol; in a listing, the file |
+| `Ctrl+.` | Code actions |
+| `Shift+Alt+F` | Format the file (`Ctrl+K c f` the selection) |
+| `Ctrl+Shift+O` | The file's outline |
+| `F8` / `Shift+F8` | Next / previous problem |
+| `Alt+F5` / `Shift+Alt+F5` | Next / previous changed hunk |
+| `Alt+←` / `Alt+→` | Back / on along the jumplist |
+
+**The workbench**
+
+| Keys | Action |
+|---|---|
+| `Ctrl+Shift+P`, `F1` | Run any command by name |
+| `Ctrl+K` | The leader's menu |
+| `Ctrl+B` / `Ctrl+0` | Show or hide the sidebar / go into it |
+| `Ctrl+Shift+E` | The file being edited, in the sidebar |
+| `Ctrl+J` / ``Ctrl+` `` | Show or hide the terminal panel / go to it and back |
+| `Ctrl+,` | Settings |
+| `Ctrl+Q` | Quit |
+| `Delete` (a listing) | Delete the file, as `D` does |
+
+From a terminal, ``Ctrl+` ``, `Ctrl+J`, `Ctrl+P`, `Ctrl+Shift+P`, `Ctrl+Tab`
+and `Ctrl+B` are Fenix's; every other key is the shell's (`Ctrl+K` too)
+and `Ctrl+\` gives the keyboard back.
+
+**Pages and panels.** A compose pane (a commit message, a review's
+comment): `Ctrl+Enter` sends, `Esc` asks before it throws what's written
+away, `Ctrl+Shift+A` has the agent write it. An agent's question: click
+the answer, or its key with `Alt` (`Alt+Y`) from the prompt. The debugger
+is the F-keys. `SPC h ?` (`Ctrl+K h ?`) lists the keys in use on a page;
+`SPC h k` says what one runs.
+
+Not in standard keys: the `:` command line, `.` and macros (they're Vim
+keys'; the palette has the commands).
 
 ## Leader (`SPC ...`)
 
@@ -49,6 +163,7 @@ the other way round after `\v`.
 | `SPC t a` | Cycle motion: off, subtle, full |
 | `SPC t q` | Do not disturb: only critical notifications show; the rest are kept in the history |
 | `SPC t d` | Cycle inline problems: all, errors only, off |
+| `SPC t k` | Vim keys or standard keys (`editor.keys`) |
 | `SPC e e` | Open the file explorer here |
 | `SPC e H` | Open the file explorer at your home folder |
 | `SPC e h` | Show or hide hidden files and folders (dot-names, and on Windows those marked hidden), in every explorer; remembered |
@@ -129,6 +244,9 @@ the other way round after `\v`.
 | `SPC :` / `Alt-x` | Run any command by name (the command palette) |
 | In the command palette: `Tab` / `C-y` | Give the selected command a key / copy its id |
 | `SPC h T` | The tutorial: Fenix's keys, a lesson at a time, each in a practice buffer |
+| `SPC h ?` | The keys in use, on a page: the chords and the leader's groups |
+| `SPC ] d` / `SPC [ d` | Next / previous problem (also `h` hunk, `a` agent's change, `t` TODO, `c` side by side's change) |
+| `SPC C-i` | Hover, as `K` (standard keys' `Ctrl+K Ctrl+I`) |
 | `SPC h x` / `SPC h w` | The Extensions page / the welcome's packs |
 | `SPC h k` / `SPC h c` | Say what a key runs / what a command does |
 | `SPC h b` / `SPC h K` | The keys bound here / where keys disagree |
@@ -311,7 +429,7 @@ the other way round after `\v`.
 | `SPC m n` (Arduino) | New sketch next to this one |
 | `SPC m i` (Arduino) | Show the board, port, speed and whether completion is ready |
 | `SPC w v` / `SPC w s` | Split window vertically / horizontally |
-| `SPC w h/j/k/l` | Move focus between windows -- and across OS windows, by where they sit on the desktop |
+| `SPC w h/j/k/l`, `SPC w` + arrows | Move focus between windows -- and across OS windows, by where they sit on the desktop |
 | `SPC w w` | Cycle to the next window |
 | `SPC w q` / `SPC w o` / `SPC w =` | Close window / close all others / balance splits |
 | `SPC w n` | Open another OS window, on the next monitor with no Fenix window on it |
@@ -881,3 +999,38 @@ costs the one key the whole grammar rests on. Vim itself agrees -- `:h
 popupmenu-keys` lists every key with a special meaning while the menu is
 up, and `Esc` is not among them; `Ctrl-E` is the dismiss key and
 `Ctrl-Y` the accept key.
+
+## Your keys (`keybindings.toml`)
+
+`SPC h e` opens your keybindings file, beside `settings.toml`; saving it
+puts it in use, and `SPC h K` says what's wrong with it. `[[leader]]`
+entries are leader keys, `[[keys]]` entries chords -- one key with its
+modifiers -- over Fenix's:
+
+```toml
+[[leader]]
+keys = "SPC o s"
+command = "file.save"
+label = "save"
+
+[[leader]]
+keys = "SPC a i"
+unbind = true
+
+[[keys]]
+keys = "C-S-s"
+command = "file.save_force"
+
+[[keys]]
+keys = "F5"
+command = "task.rerun_last"
+scheme = "standard"     # vim, standard or any (the default)
+when = "text"           # anywhere (the default), text, typing, not_typing, page, terminal
+```
+
+Keys are written as the key menu writes them: `C-` Ctrl, `M-` Alt, `s-`
+Super, `S-` Shift (`C-S-p`, `S-Down`, `M-Left`, `F12`, `<F2>`), `SPC` the
+space bar. `when = "terminal"` reaches past a terminal that has the
+keyboard. `Tab` in the command palette (`SPC :`) binds the command
+picked: type a leader sequence or a chord, then `Enter`.
+
