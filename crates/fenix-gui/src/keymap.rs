@@ -764,10 +764,9 @@ pub(crate) fn keymap_conflicts() -> Vec<String> {
         let scheme = e.scheme.as_deref().unwrap_or("any");
         let when = e.when.as_deref().unwrap_or("anywhere");
         let what = e.command.clone().unwrap_or_else(|| "unbind".to_string());
-        let schemes: &[&str] = if scheme == "any" { &["vim", "standard"] } else { &[scheme] };
-        for s in schemes {
-            note(&mut chords, &mut conflicts, format!("{} ({s}, {when})", describe_keypress(&key)), what.clone());
-        }
+        // A scheme's own entry over an `any` one is how a scheme differs:
+        // only the same key twice for the same scheme is a clash.
+        note(&mut chords, &mut conflicts, format!("{} ({scheme}, {when})", describe_keypress(&key)), what.clone());
     }
     conflicts
 }

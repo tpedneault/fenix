@@ -13,6 +13,9 @@ use crate::motion::{self, Motion};
 use crate::operator::Operator;
 use crate::textobject;
 
+mod standard;
+pub use standard::EditPolicy;
+
 /// What `VimState::handle_key` wants the host application to do -- the one
 /// escape hatch out of pure buffer/cursor editing, for the handful of `:`
 /// ex-commands that need app-level action (save/quit) rather than a buffer
@@ -390,6 +393,8 @@ pub struct VimState {
     /// selection, for `gv` to restore.
     last_visual: Option<(VisualKind, usize, usize)>,
     block_insert: Option<BlockInsert>,
+    /// Vim's keys, or standard keys (`EditPolicy`).
+    policy: EditPolicy,
     /// Set by a yank or (non-block) paste; consumed by `handle_key` right
     /// after dispatch and turned into `VimEvent::Pulse`.
     pending_pulse: Option<Range<usize>>,
@@ -551,6 +556,7 @@ impl VimState {
             block_to_line_end: false,
             last_visual: None,
             block_insert: None,
+            policy: EditPolicy::Vim,
             pending_pulse: None,
             pending_jump: None,
             pending_error: None,
@@ -1010,6 +1016,12 @@ impl VimState {
         // separately, a block `d` deletes line by line, `:%s` replaces
         // match by match, and `u` should take back all of it at once.
         buffer.begin_undo_group();
+        if self.policy == EditPolicy::Standard {
+            if let Some(event) = self.handle_standard_key(buffer, cursor, key) {
+                buffer.end_undo_group();
+                return event;
+            }
+        }
         if self.sub_confirm.is_some() {
             let event = self.handle_sub_confirm_key(buffer, cursor, key);
             buffer.end_undo_group();
@@ -3147,6 +3159,12 @@ impl VimState {
                 let (anchor_line, _) = buffer.line_col(&anchor_cursor);
                 let (cursor_line, _) = buffer.line_col(cursor);
                 (linewise_range(buffer, anchor_line, cursor_line), true)
+            }
+            VisualKind::Char if self.policy == EditPolicy::Standard => {
+                // Standard keys select between the anchor and the cursor,
+                // as an IDE does: the cursor's character isn't in it.
+                let (lo, hi) = (self.visual_anchor.min(cursor.char_idx), self.visual_anchor.max(cursor.char_idx));
+                (lo..hi.min(buffer.len_chars()), false)
             }
             VisualKind::Char | VisualKind::Block => {
                 let (lo, hi) = if self.visual_anchor <= cursor.char_idx {

@@ -643,6 +643,13 @@ impl Buffer {
         removed
     }
 
+    /// Ends the typing run in progress here, so what's typed next is an
+    /// undo step of its own (standard keys' breaks: a new word, Enter, a
+    /// pause).
+    pub fn break_undo_run(&mut self) {
+        self.flush_pending();
+    }
+
     /// Commits the in-progress coalesced edit run (if any) to the undo
     /// stack, ending it as an undo boundary. Movement calls this so undo
     /// removes one "run" of typing/deleting at a time, not one char.

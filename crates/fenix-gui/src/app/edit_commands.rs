@@ -79,18 +79,20 @@ impl App {
         if !self.vim.is_inserting() {
             return;
         }
-        let pane = self.focused_pane_id();
-        let at = self.workspaces.active_pane_states().get(&pane).map(|s| s.cursor.char_idx);
-        self.mouse_leave_insert();
-        if let (Some(at), Some(state)) = (at, self.workspaces.active_pane_states_mut().get_mut(&pane)) {
-            state.cursor.char_idx = at;
+        let id = self.focused_buffer_id();
+        if let Some(ob) = self.buffers.get_mut(id) {
+            self.vim.leave_insert_here(&mut ob.buffer);
         }
     }
 
     /// Goes into Insert where the cursor is, as `i` does.
     pub(crate) fn enter_insert_in_place(&mut self) {
-        if self.vim.mode() == Mode::Normal {
-            self.mouse_vim_keys(&[KeyPress::char('i')]);
+        if self.vim.mode() != Mode::Normal {
+            return;
+        }
+        let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
+        if let (Some(ob), Some(state)) = (self.buffers.get(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+            self.vim.enter_insert_here(&ob.buffer, &mut state.cursor);
         }
     }
 
@@ -172,30 +174,88 @@ impl App {
         self.put_cursor(pane, b);
     }
 
+    /// The selection's range, its text, and whether it's whole lines.
+    fn selection(&self) -> Option<(std::ops::Range<usize>, String, bool)> {
+        let pane = self.focused_pane_id();
+        let cursor = self.workspaces.active_pane_states().get(&pane)?.cursor;
+        let buffer = &self.open().buffer;
+        let (range, linewise) = self.vim.visual_selection_range(buffer, &cursor)?;
+        let text = buffer.rope().slice(range.clone()).to_string();
+        Some((range, text, linewise))
+    }
+
     /// `edit.copy`: the selection to the clipboard, or the cursor's line.
     pub(crate) fn cmd_copy(&mut self) {
-        let keys: Vec<KeyPress> = if self.vim.mode() == Mode::Visual { vec![KeyPress::char('y')] } else { vec![KeyPress::char('y'), KeyPress::char('y')] };
+        if let Some((range, text, linewise)) = self.selection() {
+            self.vim.set_register(text, linewise);
+            self.push_clipboard_after_edit();
+            // Vim's `y` leaves Visual at the selection's start; standard
+            // keys keep what's selected selected.
+            if self.vim.policy() == fenix_vim::EditPolicy::Vim {
+                let pane = self.focused_pane_id();
+                self.leave_visual();
+                self.put_cursor(pane, range.start);
+            }
+            return;
+        }
         let pane = self.focused_pane_id();
         let at = self.workspaces.active_pane_states().get(&pane).map(|s| s.cursor.char_idx);
-        let visual = self.vim.mode() == Mode::Visual;
-        self.vim_keys_from_normal(&keys);
+        self.vim_keys_from_normal(&[KeyPress::char('y'), KeyPress::char('y')]);
         // Copying the line doesn't move you.
-        if let (false, Some(at)) = (visual, at) {
-            if let Some(state) = self.workspaces.active_pane_states_mut().get_mut(&pane) {
-                state.cursor.char_idx = at;
-            }
+        if let (Some(at), Some(state)) = (at, self.workspaces.active_pane_states_mut().get_mut(&pane)) {
+            state.cursor.char_idx = at;
         }
+        self.push_clipboard_after_edit();
     }
 
     /// `edit.cut`: the selection to the clipboard, or the cursor's line.
     pub(crate) fn cmd_cut(&mut self) {
-        let keys: Vec<KeyPress> = if self.vim.mode() == Mode::Visual { vec![KeyPress::char('d')] } else { vec![KeyPress::char('d'), KeyPress::char('d')] };
-        self.vim_keys_from_normal(&keys);
+        if let Some((range, text, linewise)) = self.selection() {
+            self.vim.set_register(text, linewise);
+            self.push_clipboard_after_edit();
+            self.delete_selected(range);
+            return;
+        }
+        self.vim_keys_from_normal(&[KeyPress::char('d'), KeyPress::char('d')]);
+        self.push_clipboard_after_edit();
+    }
+
+    /// `range` deleted and the selection over, the cursor where it was.
+    fn delete_selected(&mut self, range: std::ops::Range<usize>) {
+        self.leave_visual();
+        let pane = self.focused_pane_id();
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        buffer.begin_undo_group();
+        if !range.is_empty() {
+            buffer.delete_range(cursor, range.start, range.end.min(buffer.len_chars()));
+        }
+        buffer.end_undo_group();
+        let at = range.start.min(self.open().buffer.len_chars());
+        self.put_cursor(pane, at);
     }
 
     /// `edit.paste`: the clipboard at the cursor, or over the selection.
     pub(crate) fn cmd_paste(&mut self) {
-        self.run_menu_action(super::mouse::MenuAction::Paste);
+        let text = self.clipboard_text().or_else(|| Some(self.vim.register().0.to_string())).filter(|t| !t.is_empty());
+        if self.vim.policy() == fenix_vim::EditPolicy::Vim && !self.vim.is_inserting() {
+            self.run_menu_action(super::mouse::MenuAction::Paste);
+            return;
+        }
+        let Some(text) = text else { return };
+        if let Some((range, _, _)) = self.selection() {
+            self.delete_selected(range);
+        }
+        let linewise = text.ends_with('\n') && !self.vim.is_inserting();
+        let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
+        if linewise {
+            let (line, _) = buffer.line_col(cursor);
+            cursor.char_idx = buffer.line_start_char(line);
+        }
+        buffer.break_undo_run();
+        buffer.insert_str(cursor, &text);
+        buffer.break_undo_run();
+        let (_, col) = buffer.line_col(cursor);
+        cursor.sticky_col = col;
     }
 
     /// `edit.select_all`.
@@ -371,6 +431,19 @@ impl App {
     }
 }
 
+impl App {
+    /// Ctrl let go: the recent-buffer switcher, if it's up, goes to its
+    /// row.
+    pub(crate) fn recent_switch_released(&mut self) {
+        if !std::mem::take(&mut self.switching_recent) {
+            return;
+        }
+        if matches!(self.active_picker, Some(super::ActivePicker::SwitchBuffer(_))) {
+            self.picker_key(KeyPress::named(FenixNamedKey::Enter));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::test_keys::app_on_file;
@@ -499,5 +572,24 @@ mod tests {
         let text = app.keys_sheet_text();
         assert!(text.contains("| `C-s` | `file.save` |"), "{text}");
         assert!(text.contains("`SPC g` | git"), "{text}");
+    }
+}
+#[cfg(test)]
+mod switcher_tests {
+    use super::super::test_keys::app_on_file;
+
+    #[test]
+    fn ctrl_tab_picks_the_buffer_before_and_letting_go_of_ctrl_goes_there() {
+        let (mut app, _f) = app_on_file("a.txt", "a\n");
+        let a = app.focused_buffer_id();
+        app.run_cmd("buffer.scratch");
+        let scratch = app.focused_buffer_id();
+        assert_ne!(a, scratch);
+        app.run_cmd("buffer.switch_recent");
+        app.recent_switch_released();
+        assert_eq!(app.focused_buffer_id(), a, "the one before");
+        app.run_cmd("buffer.switch_recent");
+        app.recent_switch_released();
+        assert_eq!(app.focused_buffer_id(), scratch, "and back");
     }
 }

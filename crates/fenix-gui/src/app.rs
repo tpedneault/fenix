@@ -52,6 +52,8 @@ mod keys_host;
 mod edit_commands;
 #[cfg(test)]
 mod test_keys;
+#[cfg(test)]
+mod standard_tests;
 pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;
@@ -4941,6 +4943,8 @@ pub struct App {
     workspace_rename_prompt: Option<String>,
     /// `nav.goto_line`'s prompt: the number typed so far.
     goto_line_prompt: Option<String>,
+    /// When the last key came: standard keys' undo pause.
+    last_key_at: Option<Instant>,
     /// The switcher `buffer.switch_recent` (Ctrl+Tab) opened is up: letting
     /// go of Ctrl picks its row.
     switching_recent: bool,
@@ -6113,6 +6117,7 @@ impl App {
             refactor_undo: None,
             workspace_rename_prompt: None,
             goto_line_prompt: None,
+            last_key_at: None,
             switching_recent: false,
             delete_file_confirm: false,
             vim,
@@ -16050,6 +16055,9 @@ impl App {
     /// `repeat_last_change` -> `route_keypress` directly, same as a
     /// macro, so its own replayed keys never re-enter this tap.
     fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
+        self.sync_key_policy();
+        self.settle_keys();
+        self.note_typing_pause(Instant::now());
         // The right click's menu, open, has the keyboard.
         if self.mouse.menu.is_some() {
             if let Some(action) = self.menu_key(keypress.legacy()) {
@@ -16068,6 +16076,9 @@ impl App {
         let before = self.motion_before_key();
         self.route_keypress(keypress, event_loop);
         self.motion_after_key(before, keypress);
+        // Standard keys: back into Insert (or out of it) for where the key
+        // left you.
+        self.settle_keys();
         // A lesson of the tutorial's, under way, looks at what came of it.
         self.tutorial_check();
         if self.vim.is_idle() {
@@ -16108,6 +16119,15 @@ impl App {
         // is the one reserved chord that unfocuses (not closes) it
         // instead of forwarding, mirroring Neovim's own `:terminal`
         // convention -- see `App::terminal_focused`'s own doc comment.
+        // A chord that skips the shell (standard keys' Ctrl+P, Ctrl+`...)
+        // works from a terminal too.
+        if self.terminal_focused || self.terminal_buffer_focused.is_some() {
+            if let Some(id) = keymap::chord_map().skips_terminal(full, self.key_scheme()) {
+                self.run_command_with(event_loop, id);
+                self.wake_caret();
+                return;
+            }
+        }
         if self.terminal_focused {
             if keypress == KeyPress::char('\\').with_ctrl() {
                 self.terminal_focused = false;
@@ -16228,6 +16248,15 @@ impl App {
             self.wake_caret();
             return;
         }
+        // Ctrl+Tab again, with the recent-buffer switcher up: the next row
+        // (with Shift, the one before).
+        if self.switching_recent && full.code == KeyCode::Named(FenixNamedKey::Tab) && full.mods.ctrl {
+            if let Some(ActivePicker::SwitchBuffer(picker)) = &mut self.active_picker {
+                picker.move_selection(if full.mods.shift { -1 } else { 1 });
+            }
+            self.wake_caret();
+            return;
+        }
         if self.active_picker.is_some() {
             self.picker_key(keypress);
             if let Some(id) = self.queued_command.take() {
@@ -16267,7 +16296,7 @@ impl App {
         // back to the editor, since leader commands act on the window/
         // buffer layer, not the sidebar.
         if self.sidebar_focused {
-            if keypress == KeyPress::char(' ') && self.vim.mode() == Mode::Normal && !self.explorer_matcher.is_pending() && !self.explorer_editing(ExplorerTarget::Sidebar) {
+            if (keypress == KeyPress::char(' ') || self.leader_starts(full)) && self.leader_starts(full) && !self.explorer_matcher.is_pending() && !self.explorer_editing(ExplorerTarget::Sidebar) {
                 self.sidebar_focused = false;
             } else if self.explorer_page_key(ExplorerTarget::Sidebar, keypress) {
                 return;
@@ -16333,10 +16362,11 @@ impl App {
             }
             return;
         }
-        if self.leader_matcher.is_pending()
-            || (matches!(self.vim.mode(), Mode::Normal | Mode::Visual) && keypress == KeyPress::char(' '))
-        {
-            if let Step::Matched(&id) = self.leader_matcher.feed(keypress) {
+        if self.leader_matcher.is_pending() || self.leader_starts(full) {
+            // The leader chord starts the leader as SPC does: its keys
+            // follow.
+            let fed = if self.leader_matcher.is_pending() { keypress.chord().legacy() } else { KeyPress::char(' ') };
+            if let Step::Matched(&id) = self.leader_matcher.feed(fed) {
                 self.run_command_with(event_loop, id);
             }
             self.wake_caret();
@@ -16766,6 +16796,8 @@ impl App {
         self.pull_clipboard_before_paste(keypress);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
+        // Standard keys read Shift (Shift+arrows select); Vim's don't.
+        let vim_key = if self.vim.policy() == fenix_vim::EditPolicy::Standard { full } else { keypress };
         let vim_event = {
             let reverts_edits = self.buffers.get(id).is_some_and(|ob| self.buffer_edits_are_reverted(id, ob.kind));
             let Some(ob) = self.buffers.get_mut(id) else { return };
@@ -16780,7 +16812,7 @@ impl App {
                 });
                 self.vim.set_syntax_indent(indent);
             }
-            let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, keypress);
+            let event = self.vim.handle_key(&mut ob.buffer, &mut pane_state.cursor, vim_key);
             // See `dispatch_keypress`'s own doc comment for `change_
             // capture`/`replaying_change` -- suppressed only while `.`
             // itself is replaying, so its own outer span doesn't get
@@ -17300,6 +17332,9 @@ impl App {
         if self.debug_mode_active() {
             return "DEBUG";
         }
+        if let Some(badge) = self.standard_badge() {
+            return badge;
+        }
         if self.vim.mode() == Mode::Visual { self.vim.visual_kind().label() } else { self.vim.mode().label() }
     }
 
@@ -17574,7 +17609,8 @@ impl App {
     /// matches real Vim's own cursor-shape convention (block outside
     /// Insert, thin bar while actively typing).
     fn caret_is_block(&self) -> bool {
-        self.vim.mode() != Mode::Insert
+        // Standard keys' caret is a bar, always.
+        !self.standard_keys() && self.vim.mode() != Mode::Insert
     }
 
     /// three kinds all share one accent (matching orbit-emacs's own
@@ -17591,6 +17627,10 @@ impl App {
         // The stop's own colour, the gutter's bar.
         if self.debug_mode_active() {
             return (glyphon_to_rgba(theme.git_modified), theme.mode_text_dark);
+        }
+        // Standard keys: one quiet colour, but for a selection.
+        if self.standard_keys() && matches!(self.vim.mode(), Mode::Normal | Mode::Insert) {
+            return (theme.mode_normal, theme.mode_text_dark);
         }
         match self.vim.mode() {
             Mode::Normal => (theme.mode_normal, theme.mode_text_dark),
@@ -22103,6 +22143,10 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers.state();
+                // Ctrl let go with the recent-buffer switcher up: its row.
+                if !self.modifiers.control_key() {
+                    self.recent_switch_released();
+                }
                 // Ctrl pressed or let go over a terminal's link.
                 self.terminal_hover(self.cursor_pos);
                 if let (Some(pos), Some((w, h))) = (self.cursor_pos, self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))) {

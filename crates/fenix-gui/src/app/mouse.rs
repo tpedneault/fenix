@@ -239,6 +239,14 @@ impl App {
     /// Leaves Insert (or Replace) the way Escape does, before a selection
     /// starts.
     pub(super) fn mouse_leave_insert(&mut self) {
+        // Standard keys don't leave Insert on Escape: out, where it is.
+        if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+            let id = self.focused_buffer_id();
+            if let Some(ob) = self.buffers.get_mut(id) {
+                self.vim.leave_insert_here(&mut ob.buffer);
+            }
+            return;
+        }
         if self.vim.is_inserting() {
             let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
             if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
@@ -365,6 +373,9 @@ impl App {
 
     /// The left button let go.
     pub(super) fn mouse_release(&mut self) {
+        // Standard keys: typing where a click put you in a file, browsing
+        // where it put you in a listing.
+        self.settle_keys();
         self.terminal_mouse_release();
         self.mouse.drag = None;
         self.mouse.scrolled_at = None;
