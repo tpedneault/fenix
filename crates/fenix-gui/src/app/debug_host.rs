@@ -291,6 +291,8 @@ impl App {
         session.stopped_thread.is_some()
             && !session.ended
             && !self.debug_mode_left
+            // Standard keys use the F-keys: DEBUG's letters would be text.
+            && !self.standard_keys()
             && self.vim.mode() == Mode::Normal
             && self.main_view == MainView::Editor
             && !self.sidebar_focused

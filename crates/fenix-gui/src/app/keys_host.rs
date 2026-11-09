@@ -151,3 +151,22 @@ impl App {
     /// with API 1.5).
     pub(crate) fn key_scheme_changed(&mut self) {}
 }
+
+impl App {
+    /// Standard keys in a file listing (the sidebar, a pane's, the picker)
+    /// that isn't editing a name: F2 is its `R` (rename), Delete its `D`.
+    pub(crate) fn standard_explorer_alias(&self, key: KeyPress) -> Option<KeyPress> {
+        if !self.standard_keys() || !key.mods.none() {
+            return None;
+        }
+        let target = self.active_explorer_target()?;
+        if self.explorer_editing(target) {
+            return None;
+        }
+        match key.code {
+            KeyCode::Named(fenix_keymap::NamedKey::F(2)) => Some(KeyPress::char('R')),
+            KeyCode::Named(fenix_keymap::NamedKey::Delete) => Some(KeyPress::char('D')),
+            _ => None,
+        }
+    }
+}

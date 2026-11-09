@@ -123,3 +123,80 @@ fn vim_keys_are_left_as_they_were() {
     app.press("S-Right");
     assert_eq!(app.vim.mode(), Mode::Normal, "Shift+Right is Right");
 }
+
+fn code_compose(app: &mut App) {
+    app.open_compose(super::ComposePurpose::Code { ext: "fenix.test".into(), id: 1, what: "a comment".into(), verb: "send", allow_empty: true, ask: None });
+}
+
+#[test]
+fn a_compose_pane_is_typed_into_ctrl_enter_sends_it_and_escape_asks_first() {
+    let (mut app, _f) = standard_on("a.txt", "");
+    code_compose(&mut app);
+    assert_eq!(app.vim.mode(), Mode::Insert);
+    app.type_text("looks good");
+    app.press("Esc");
+    assert!(app.compose.is_some(), "the first Esc asks");
+    app.type_text("!");
+    app.press("Esc");
+    assert!(app.compose.is_some(), "typing in between: asked again");
+    app.press("Esc");
+    assert!(app.compose.is_none(), "the second throws it away");
+    code_compose(&mut app);
+    app.press("Esc");
+    assert!(app.compose.is_none(), "an empty one goes at once");
+    code_compose(&mut app);
+    app.type_text("ship it");
+    app.press("C-Enter");
+    assert!(app.compose.is_none(), "sent");
+}
+
+#[test]
+fn debug_s_letter_keys_are_text_with_standard_keys() {
+    let (mut app, _f) = standard_on("a.txt", "");
+    assert!(!app.debug_mode_active());
+    app.type_text("nsocr");
+    assert_eq!(app.text(), "nsocr");
+}
+
+#[test]
+fn a_split_pane_goes_with_its_last_tab_with_standard_keys_only() {
+    for standard_keys in [true, false] {
+        let (mut app, _f) = app_on_file("a.txt", "a\n");
+        if standard_keys {
+            standard(&mut app);
+        }
+        app.run_cmd("window.split_vertical");
+        assert_eq!(app.windows().window_count(), 2);
+        app.run_cmd("tab.close");
+        assert_eq!(app.windows().window_count(), if standard_keys { 1 } else { 2 }, "standard keys: {standard_keys}");
+        if standard_keys {
+            app.run_cmd("tab.close");
+            assert_eq!(app.windows().window_count(), 1, "the last pane stays");
+        }
+    }
+}
+
+#[test]
+fn f2_and_delete_rename_and_delete_in_a_listing() {
+    let (mut app, f) = standard_on("a.txt", "a\n");
+    let dir = f.path.parent().unwrap().to_path_buf();
+    app.explorer_open_path(&dir);
+    assert!(app.active_explorer_target().is_some());
+    assert_eq!(app.standard_explorer_alias(crate::keymap::parse_key("F2").unwrap()), Some(fenix_keymap::KeyPress::char('R')));
+    assert_eq!(app.standard_explorer_alias(crate::keymap::parse_key("Delete").unwrap()), Some(fenix_keymap::KeyPress::char('D')));
+}
+
+#[test]
+fn the_tab_strip_s_split_button_splits_its_pane() {
+    let (mut app, _f) = app_on_file("a.txt", "a\n");
+    let pane = app.focused_pane_id();
+    let file = app.focused_buffer_id();
+    let body = fenix_window::Rect { x: 10.0, y: 0.0, w: 80.0, h: 20.0 };
+    app.tab_geometry = vec![(pane, super::TabRect { buffer: file, body, close: fenix_window::Rect { x: 70.0, y: 0.0, w: 20.0, h: 20.0 } })];
+    let geometry = app.frame_geometry(800.0, 0.0, 0.0, 600.0);
+    let (_, button) = geometry.split_buttons.iter().find(|(p, _)| *p == pane).copied().expect("a split button");
+    assert_eq!(button.x, 90.0, "right after the last tab");
+    assert_eq!(super::hit_test(&geometry, (button.x + 2.0, 10.0)), Some(super::ScrollTarget::SplitPane(pane)));
+    app.handle_click_at((button.x + 2.0, 10.0), 800.0, 600.0);
+    assert_eq!(app.windows().window_count(), 2, "split");
+}

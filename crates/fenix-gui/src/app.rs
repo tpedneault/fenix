@@ -4942,6 +4942,9 @@ pub struct App {
     /// typing at a time, and it always acts on `self.workspaces`, which
     /// is always whichever frame is currently active.
     workspace_rename_prompt: Option<String>,
+    /// Standard keys: Escape was pressed once in a compose pane with text
+    /// in it; again throws the text away.
+    compose_discard_armed: bool,
     /// `nav.goto_line`'s prompt: the number typed so far.
     goto_line_prompt: Option<String>,
     /// When the last key came: standard keys' undo pause.
@@ -5507,6 +5510,9 @@ struct FrameGeometry {
     /// coarser `panes` rects, so a tab or its close glyph wins over
     /// "just focus whatever pane this is."
     tabs: Vec<(fenix_window::WindowId, TabRect)>,
+    /// Each tab strip's split button, right after its tabs: a click splits
+    /// that pane.
+    split_buttons: Vec<(fenix_window::WindowId, fenix_window::Rect)>,
 }
 
 /// What a click or wheel notch landed on, per `hit_test`.
@@ -5520,6 +5526,8 @@ enum ScrollTarget {
     /// A tab's close glyph was clicked -- drop it from that pane's tab
     /// list (see `App::handle_click_at`).
     CloseTab(fenix_window::WindowId, BufferId),
+    /// A tab strip's split button: split that pane.
+    SplitPane(fenix_window::WindowId),
 }
 
 /// Point-in-region hit test shared by click-to-focus and wheel-scroll --
@@ -5537,6 +5545,11 @@ fn hit_test(geometry: &FrameGeometry, pos: (f32, f32)) -> Option<ScrollTarget> {
     if let Some(rect) = geometry.sidebar_rect {
         if rect.contains_point(x, y) {
             return Some(ScrollTarget::Sidebar);
+        }
+    }
+    for (pane, rect) in &geometry.split_buttons {
+        if rect.contains_point(x, y) {
+            return Some(ScrollTarget::SplitPane(*pane));
         }
     }
     for (pane, tab) in &geometry.tabs {
@@ -5561,7 +5574,7 @@ fn hit_test(geometry: &FrameGeometry, pos: (f32, f32)) -> Option<ScrollTarget> {
 /// terminal, dividers, the modeline) is the plain arrow.
 fn cursor_icon_for(geometry: &FrameGeometry, pos: (f32, f32), line_height: f32) -> winit::window::CursorIcon {
     let (x, y) = pos;
-    if geometry.tabs.iter().any(|(_, tab)| tab.body.contains_point(x, y)) {
+    if geometry.tabs.iter().any(|(_, tab)| tab.body.contains_point(x, y)) || geometry.split_buttons.iter().any(|(_, r)| r.contains_point(x, y)) {
         return winit::window::CursorIcon::Pointer;
     }
     if geometry.sidebar_rect.is_some_and(|rect| rect.contains_point(x, y)) {
@@ -6120,6 +6133,7 @@ impl App {
             refactor_undo: None,
             workspace_rename_prompt: None,
             goto_line_prompt: None,
+            compose_discard_armed: false,
             last_key_at: None,
             carets: Default::default(),
             switching_recent: false,
@@ -13030,7 +13044,7 @@ impl App {
     /// Replaces any compose buffer already open rather than stacking a
     /// second one: there's only ever one thing being written, and two
     /// would leave no way to tell which `Enter` submits.
-    fn open_compose(&mut self, purpose: ComposePurpose) {
+    pub(super) fn open_compose(&mut self, purpose: ComposePurpose) {
         self.open_compose_seeded(purpose, "");
     }
 
@@ -13054,7 +13068,12 @@ impl App {
         // A blank one is there to be typed into: it opens in Insert, so
         // the first word written isn't run as commands (`P` pasting).
         // One with text to edit (an amend, a description) opens in Normal.
-        if seed.is_empty() && self.vim.mode() == Mode::Normal {
+        if self.standard_keys() {
+            // Standard keys type at once, wherever the text is.
+            self.settle_keys();
+            let agent = self.compose.as_ref().is_some_and(|c| c.purpose.agent_writes());
+            self.set_message(if agent { "write, or Ctrl+Shift+A for the agent; Ctrl+Enter sends -- Esc discards" } else { "write, then Ctrl+Enter to send -- Esc discards" });
+        } else if seed.is_empty() && self.vim.mode() == Mode::Normal {
             if let (Some(ob), Some(state)) = (self.buffers.get_mut(buffer), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
                 self.vim.handle_key(&mut ob.buffer, &mut state.cursor, KeyPress::char('i'));
             }
@@ -13143,7 +13162,7 @@ impl App {
     fn compose_agent_offered(&self) -> bool {
         let Some(compose) = self.compose.as_ref() else { return false };
         compose.pane == self.focused_pane_id()
-            && self.vim.mode() == Mode::Normal
+            && (self.vim.mode() == Mode::Normal || (self.standard_keys() && self.vim.is_inserting()))
             && !self.vim.is_pending()
             && compose.purpose.agent_writes()
             && self.buffers.get(compose.buffer).is_some_and(|ob| {
@@ -16098,6 +16117,9 @@ impl App {
         let _profile = crate::profile::Scope::new("route_keypress");
         // Everything but the chords reads keys as it always has, without
         // Shift (see `KeyPress::legacy`).
+        // Standard keys in a listing: F2 renames and Delete deletes, as
+        // its `R` and `D` do.
+        let keypress = self.standard_explorer_alias(keypress).unwrap_or(keypress);
         let full = keypress;
         let keypress = keypress.legacy();
         // A feature's informational menu (the Docker panel's `x`) is not a
@@ -16321,6 +16343,9 @@ impl App {
         // and all (`full`); a macro's recorded key carries its own
         // modifiers, so a replay runs the same chord.
         let in_leader = self.local_matcher.is_some() || self.leader_matcher.is_pending();
+        // A compose pane's own keys, with standard keys, go to it first.
+        let composing = self.standard_keys() && self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id());
+        let in_leader = in_leader || (composing && (full.chord() == KeyPress::named(FenixNamedKey::Enter).with_ctrl() || full.chord() == KeyPress::char('a').with_ctrl().with_shift()));
         if let Some(id) = self.chord_command(full).filter(|_| !in_leader) {
             // Only the clipboard's own work at every caret.
             if !matches!(id, "edit.copy" | "edit.paste") {
@@ -16404,7 +16429,8 @@ impl App {
         // Escape means anything, and it means "throw the edits away".
         if self.rename_mode.contains_key(&self.focused_buffer_id())
             && keypress.code == KeyCode::Named(FenixNamedKey::Escape)
-            && self.vim.mode() == Mode::Normal
+            // Standard keys type here, and Escape is how they say no.
+            && (self.vim.mode() == Mode::Normal || (self.standard_keys() && self.vim.is_inserting()))
         {
             let id = self.focused_buffer_id();
             self.cancel_rename_mode(id);
@@ -16475,8 +16501,38 @@ impl App {
         // writing a comment in a real buffer.
         // Not halfway through a leader key, though: `SPC q q` from the
         // pane quits, it doesn't drop what's written.
+        // Standard keys: Ctrl+Enter sends, Escape asks before it throws
+        // what's written away, Ctrl+Shift+A has the agent write it.
+        if self.standard_keys() && self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id()) && !self.leader_matcher.is_pending() && self.local_matcher.is_none() {
+            let chord = full.chord();
+            if chord == KeyPress::named(FenixNamedKey::Enter).with_ctrl() {
+                self.compose_discard_armed = false;
+                self.compose_submit();
+                return;
+            }
+            if chord == KeyPress::char('a').with_ctrl().with_shift() {
+                if self.compose_agent_offered() {
+                    self.compose_agent_write();
+                } else {
+                    self.set_message("the agent writes a box that's empty -- clear it to ask again");
+                }
+                return;
+            }
+            if full == KeyPress::named(FenixNamedKey::Escape) && self.vim.mode() != Mode::Visual && self.extra_carets().is_empty() {
+                let written = self.compose.as_ref().and_then(|c| self.buffers.get(c.buffer).map(|ob| (ob.buffer.text(), c.seed.clone()))).is_some_and(|(text, seed)| !text.trim().is_empty() && text.trim_end() != seed.trim_end());
+                if !written || std::mem::take(&mut self.compose_discard_armed) {
+                    self.compose_cancel();
+                } else {
+                    self.compose_discard_armed = true;
+                    self.set_message("Esc again throws what's written away -- Ctrl+Enter sends it");
+                }
+                return;
+            }
+            self.compose_discard_armed = false;
+        }
         if self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id())
             && self.vim.mode() == Mode::Normal
+            && !self.standard_keys()
             && keypress.mods == Mods::default()
             && !self.leader_matcher.is_pending()
             && self.local_matcher.is_none()
@@ -19032,6 +19088,10 @@ impl App {
                 spans.push((name_span, name_color, false));
                 spans.push((close_span, theme.gutter_fg, false));
             }
+            // The split button, right after the tabs.
+            if !layout.is_empty() {
+                spans.push((format!(" {} ", icon::WINDOW), theme.gutter_fg, true));
+            }
             // The focused pane's breadcrumb is the Ember Trail's ribbon while
             // there's one.
             let ribbon = if is_focused { self.debug_ribbon_spans() } else { None };
@@ -19085,6 +19145,19 @@ impl App {
         // measurement instead of two disagreeing calculations. Cheaper
         // too -- this used to resolve display names on every mouse move.
         let tabs = if self.tab_style().is_some() { self.tab_geometry.clone() } else { Vec::new() };
+        // Right after each strip's last tab, as wide as a close glyph.
+        let title_char_width = self.text.as_ref().map(|t| t.title_char_width()).unwrap_or(text::CHAR_WIDTH * text::TITLE_FONT_SCALE);
+        let mut split_buttons: Vec<(fenix_window::WindowId, fenix_window::Rect)> = Vec::new();
+        for (pane, tab) in &tabs {
+            let right = tab.body.x + tab.body.w;
+            match split_buttons.iter_mut().find(|(p, _)| p == pane) {
+                Some((_, r)) if r.x < right => r.x = right,
+                Some(_) => {}
+                None => split_buttons.push((*pane, fenix_window::Rect { x: right, y: tab.body.y, w: TAB_CLOSE_CHARS as f32 * title_char_width, h: tab.body.h })),
+            }
+        }
+        // Only where it fits in its pane.
+        split_buttons.retain(|(pane, r)| panes.iter().any(|(p, pr)| p == pane && r.x + r.w <= pr.x + pr.w));
         let breadcrumb_panes = panes.iter().map(|(id, _)| *id).filter(|id| self.pane_has_breadcrumb(*id)).collect();
         FrameGeometry {
             panes,
@@ -19094,6 +19167,7 @@ impl App {
             terminal_rect: (terminal_h > 0.0)
                 .then_some(fenix_window::Rect { x: 0.0, y: modeline_top - terminal_h, w: window_width, h: terminal_h }),
             tabs,
+            split_buttons,
         }
     }
 
@@ -19270,6 +19344,16 @@ impl App {
                         self.wake_caret();
                         return;
                     }
+                    // Standard keys: an answer on an agent's question card.
+                    if pos.1 >= content.y && self.standard_keys() {
+                        if let Some(&page) = self.windows().content(id) {
+                            let (line, _) = self.cell_at(pos, (content.x, content.y), self.pane_state(id).scroll_line);
+                            if self.agents_card_click(page, line) {
+                                self.wake_caret();
+                                return;
+                            }
+                        }
+                    }
                     // Text: the cursor to the glyph, a selection started.
                     if pos.1 >= content.y && self.text_press(id, rect, pos, Instant::now()) {
                         self.unfocus_terminal_buffer();
@@ -19291,6 +19375,13 @@ impl App {
                     Some(buffer) => self.focus_terminal_buffer(buffer),
                     None => self.unfocus_terminal_buffer(),
                 }
+            }
+            Some(ScrollTarget::SplitPane(pane)) => {
+                self.windows_mut().focus(pane);
+                self.sidebar_focused = false;
+                self.terminal_focused = false;
+                self.split_vertical();
+                self.refresh_project_root();
             }
             Some(ScrollTarget::SwitchTab(pane, buffer)) => {
                 self.windows_mut().focus(pane);
@@ -19427,7 +19518,7 @@ impl App {
         // tab's own pane, same as landing anywhere else in it -- neither
         // "switch tab" nor "close tab" is a wheel gesture.
         let target = match target {
-            ScrollTarget::SwitchTab(pane, _) | ScrollTarget::CloseTab(pane, _) => ScrollTarget::Pane(pane),
+            ScrollTarget::SwitchTab(pane, _) | ScrollTarget::CloseTab(pane, _) | ScrollTarget::SplitPane(pane) => ScrollTarget::Pane(pane),
             other => other,
         };
         match target {
@@ -19462,7 +19553,7 @@ impl App {
                     self.scroll_unfocused_pane(pane, lines, rect_h, line_height);
                 }
             }
-            ScrollTarget::SwitchTab(..) | ScrollTarget::CloseTab(..) => unreachable!("normalized to Pane above"),
+            ScrollTarget::SwitchTab(..) | ScrollTarget::CloseTab(..) | ScrollTarget::SplitPane(..) => unreachable!("normalized to Pane above"),
         }
         self.wake_caret();
     }
@@ -23015,7 +23106,7 @@ mod tests {
             body: fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 20.0 },
             close: fenix_window::Rect { x: 80.0, y: 0.0, w: 20.0, h: 20.0 },
         };
-        let geometry = FrameGeometry {
+        let geometry = FrameGeometry { split_buttons: Vec::new(),
             breadcrumb_panes: Vec::new(),
             pane_area: pane_rect,
             sidebar_rect: None,
@@ -23042,7 +23133,7 @@ mod tests {
             body: fenix_window::Rect { x: 0.0, y: 0.0, w: 100.0, h: 20.0 },
             close: fenix_window::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
         };
-        let geometry = FrameGeometry {
+        let geometry = FrameGeometry { split_buttons: Vec::new(),
             breadcrumb_panes: Vec::new(),
             pane_area: pane_rect,
             sidebar_rect: Some(fenix_window::Rect { x: -200.0, y: 0.0, w: 200.0, h: 200.0 }),
@@ -23059,7 +23150,7 @@ mod tests {
         let app = App::with_file(None);
         let pane = app.focused_pane_id();
         let pane_rect = fenix_window::Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
-        let geometry = FrameGeometry { breadcrumb_panes: Vec::new(), pane_area: pane_rect, sidebar_rect: None, terminal_rect: None, panes: vec![(pane, pane_rect)], tabs: Vec::new() };
+        let geometry = FrameGeometry { split_buttons: Vec::new(), breadcrumb_panes: Vec::new(), pane_area: pane_rect, sidebar_rect: None, terminal_rect: None, panes: vec![(pane, pane_rect)], tabs: Vec::new() };
         assert_eq!(cursor_icon_for(&geometry, (40.0, 50.0), 20.0), winit::window::CursorIcon::Text);
         // Within the title strip itself (not on a tab, since there are
         // none here) -- the plain arrow, not an I-beam.
@@ -23068,7 +23159,7 @@ mod tests {
 
     #[test]
     fn cursor_icon_for_empty_space_outside_every_region_is_the_plain_arrow() {
-        let geometry = FrameGeometry {
+        let geometry = FrameGeometry { split_buttons: Vec::new(),
             breadcrumb_panes: Vec::new(),
             pane_area: fenix_window::Rect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
             sidebar_rect: None,

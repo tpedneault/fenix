@@ -1606,3 +1606,57 @@ fn a_daily_budget_is_warned_of_at_80_and_100_percent() {
     f.app.open_agents_usage_page();
     assert!(usage_page_text(&mut f).contains("today's budget $1.80: "), "the page says it too");
 }
+
+fn standard_keys(app: &mut App) {
+    app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+    app.sync_key_policy();
+}
+
+/// The prompt focused, as `SPC a a` leaves it.
+fn focus_prompt(app: &mut App) {
+    let composer = app.agents.composer.unwrap();
+    let pane = app.windows().windows().into_iter().find(|p| app.windows().content(*p) == Some(&composer)).expect("the prompt's pane");
+    app.windows_mut().focus(pane);
+    app.settle_keys();
+}
+
+#[test]
+fn standard_keys_a_question_is_answered_with_alt_from_the_prompt_and_its_letter_is_text() {
+    let mut f = fixture("--fs");
+    standard_keys(&mut f.app);
+    let file = f.root.join("a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    f.app.test_open_path(&file);
+    f.app.agents_open_panel();
+    f.app.config.set_value("agents.save_before_prompt", Some(fenix_config::Value::Text("never".into())));
+    f.type_prompt("edit a.txt one=>two");
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.pending_permissions() > 0)));
+    focus_prompt(&mut f.app);
+    assert!(!f.app.agents_composer_key(KeyPress::char('y')), "y is typed, with standard keys");
+    assert!(f.app.agents_composer_key(KeyPress::char('y').with_alt()), "Alt+Y answers");
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+}
+
+#[test]
+fn standard_keys_a_click_on_an_answer_gives_it() {
+    let mut f = fixture("--fs");
+    standard_keys(&mut f.app);
+    let file = f.root.join("a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    f.app.test_open_path(&file);
+    f.app.agents_open_panel();
+    f.app.config.set_value("agents.save_before_prompt", Some(fenix_config::Value::Text("never".into())));
+    f.type_prompt("edit a.txt one=>two");
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.pending_permissions() > 0)));
+    let page = f.app.agents.page.unwrap();
+    let pane = f.app.windows().windows().into_iter().find(|p| f.app.windows().content(*p) == Some(&page)).expect("the thread's pane");
+    f.app.restale_page(page);
+    f.app.ensure_page_layout(page, pane, 100);
+    let text = f.app.pages[&page].page.text.clone();
+    let reject = text.lines().position(|l| l.contains(" n ") || l.trim_start().starts_with("n ")).expect("the no row");
+    assert!(!f.app.agents_card_click(page, 0), "not an answer");
+    assert!(f.app.agents_card_click(page, reject), "{text}");
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n", "refused");
+}

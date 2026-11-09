@@ -301,6 +301,15 @@ impl App {
             return;
         }
         self.close_pane_tab(pane, id);
+        // Standard keys: a split pane goes with its last tab, as an IDE's
+        // editor group does. The last pane left shows Home.
+        if self.standard_keys() && self.windows().window_count() > 1 {
+            let home = self.workspaces.active_workspace().home;
+            if self.pane_tab_order(pane).into_iter().all(|b| Some(b) == home) {
+                self.windows_mut().focus(pane);
+                self.close_window();
+            }
+        }
         self.refresh_project_root();
         self.wake_caret();
     }
