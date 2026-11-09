@@ -389,14 +389,19 @@ impl App {
         }
         let Some(root) = self.agents.hub.meta(thread).map(|m| m.root.clone()) else { return };
         let Some((call, path, line)) = self.agents_newest_place(thread) else { return };
-        // Gone to already -- maybe on to the line its write changed.
-        if self.agents.followed_call == Some(call) && self.agents.followed.as_ref().is_some_and(|(p, _)| *p == path) {
-            return;
+        // Gone to already: as it was then, or on to the line its write
+        // changed since. A line it names only now, before any write, is
+        // gone to.
+        let same_file = self.agents.followed.as_ref().is_some_and(|(p, _)| *p == path);
+        match self.agents.followed_call {
+            Some((c, _, true)) if c == call && same_file => return,
+            Some((c, l, false)) if c == call && l == line && same_file => return,
+            _ => {}
         }
         if !within(&root, &path) || !path.is_file() {
             return;
         }
-        self.agents.followed_call = Some(call);
+        self.agents.followed_call = Some((call, line, false));
         self.agents_follow_to(&path, line);
     }
 
@@ -415,8 +420,11 @@ impl App {
         if let Some(line) = line {
             self.jump_to_grep_match(&fenix_project::GrepMatch { path, line: line.max(1) as usize, col: 1, text: String::new() });
         }
-        if self.windows().windows().contains(&back) {
+        if self.windows().windows().contains(&back) && back != pane {
             self.windows_mut().focus(back);
+            // It no longer has the focus to follow its cursor: scrolled
+            // to it on the next frame.
+            self.reveal_panes.insert(pane);
         }
     }
 

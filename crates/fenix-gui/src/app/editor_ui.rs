@@ -448,6 +448,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A folder opened as the project from outside (`fenix <folder>`) stays
+    /// the project once a file in it is open, though nothing in it marks
+    /// a project -- so its files' breadcrumbs start there.
+    #[test]
+    fn a_folder_opened_from_outside_stays_the_project() {
+        let dir = std::env::temp_dir().join(format!("fenix-crumb-outside-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "x
+").unwrap();
+        let mut app = App::with_file(None);
+        app.apply_startup(&[], Some(&dir));
+        app.active_picker = None;
+        app.open_file_from_picker(&file);
+        assert!(app.project_root.is_some(), "still the project");
+        let id = app.focused_buffer_id();
+        let parts: Vec<String> = app.breadcrumb_parts(id, 0).into_iter().map(|(t, _)| t).collect();
+        assert_eq!(parts, ["notes.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_paths_root_is_not_a_breadcrumb_of_its_own() {
         let dir = std::env::temp_dir().join(format!("fenix-crumb-root-{}", std::process::id()));
@@ -587,3 +608,4 @@ mod tests {
     }
 
 }
+

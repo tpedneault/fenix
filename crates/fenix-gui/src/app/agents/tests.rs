@@ -575,6 +575,38 @@ fn following_goes_to_the_file_and_the_line_the_agent_changed() {
     assert_eq!(f.app.buffers.get(id).unwrap().buffer.line_col(&cursor).0 + 1, 20);
 }
 
+/// The same, for an agent that writes to disk itself (Claude Code's
+/// adapter): the buffer follows the disk, and the pane its first changed
+/// line.
+#[test]
+fn following_an_agent_that_writes_to_disk_goes_to_the_line_it_changed() {
+    let mut f = fixture("");
+    let other = f.root.join("other.txt");
+    std::fs::write(&other, "something else
+").unwrap();
+    let file = f.root.join("long.txt");
+    std::fs::write(&file, (1..=30).map(|n| format!("e{n}
+")).collect::<String>()).unwrap();
+    f.app.test_open_path(&other);
+    let code = f.app.focused_pane_id();
+    f.app.agents_open_panel();
+    f.app.agents_toggle_follow();
+    f.type_prompt("edit long.txt e20=>changed");
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.pending_permissions() > 0)));
+    f.key(Key::Char('y'));
+    let id = f.app.buffers.id_for_path(&file).expect("opened by following");
+    assert!(f.pump(|app| app.buffers.get(id).is_some_and(|ob| ob.buffer.text().contains("changed"))), "the buffer follows the disk");
+    assert_eq!(f.app.windows().content(code), Some(&id));
+    let cursor = f.app.pane_state(code).cursor;
+    assert_eq!(f.app.buffers.get(id).unwrap().buffer.line_col(&cursor).0 + 1, 20, "on the line it changed");
+    // Without the focus the pane wouldn't scroll to it by itself: it's
+    // scrolled, its line in view, on the next frame.
+    assert!(f.app.reveal_panes.contains(&code));
+    f.app.reveal_cursor(code, id, 8);
+    let top = f.app.pane_state(code).scroll_line;
+    assert!((top..top + 8).contains(&19), "line 20 in view from {top}");
+}
+
 #[test]
 fn a_write_over_your_unsaved_edits_asks_and_keep_mine_refuses_it() {
     let mut f = fixture("--fs");

@@ -4663,6 +4663,10 @@ pub struct App {
     /// The pane a jump just moved the cursor in (`mark_jump`): its next
     /// scroll centres the cursor when it's out of view.
     jump_view: Option<fenix_window::WindowId>,
+    /// Panes without the focus whose cursor was moved for you (following
+    /// an agent): scrolled to it, centred, on the next frame -- only the
+    /// focused pane follows its cursor by itself.
+    reveal_panes: HashSet<fenix_window::WindowId>,
     /// A terminal buffer that runs one program instead of a shell (a
     /// serial monitor, a debugger console) -- what `spawn_terminal_for`
     /// starts, and restarts, in it.
@@ -5858,6 +5862,7 @@ impl App {
             term_hover: None,
             term_clicks: crate::mouse::ClickCounter::default(),
             jump_view: None,
+            reveal_panes: HashSet::new(),
             terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
@@ -17090,6 +17095,20 @@ impl App {
         self.update_rendered_scroll();
     }
 
+    /// A pane without the focus scrolled to its cursor, centred when out of
+    /// view, as a jump in the focused pane is.
+    fn reveal_cursor(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId, visible_lines: usize) {
+        let Some(ob) = self.buffers.get(buffer_id) else { return };
+        let document_line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
+        let display = self.pane_display_lines(pane, buffer_id);
+        let line = display.iter().position(|&row| row == document_line).unwrap_or(document_line);
+        let target = scroll_for_cursor(self.pane_state(pane).scroll_line, line, visible_lines, display.len(), true);
+        self.workspaces.active_scroll_anims_mut().remove(&pane);
+        let state = self.pane_state_mut(pane);
+        state.scroll_line = target;
+        state.rendered_scroll = target as f32;
+    }
+
     /// Horizontal analog of `ensure_cursor_visible` -- keeps the cursor's
     /// *visual* column within the focused pane's visible window, snapping
     /// `scroll_col` instantly (no `rendered_scroll`-style easing on this
@@ -19907,6 +19926,9 @@ impl App {
                 // The Search page's preview, which never had the focus
                 // long enough to follow its cursor.
                 self.search_reveal(pane, pane_visible_lines);
+            }
+            if !is_focused && self.reveal_panes.remove(&pane) {
+                self.reveal_cursor(pane, buffer_id, pane_visible_lines);
             }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);

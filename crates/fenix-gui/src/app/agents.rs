@@ -137,9 +137,10 @@ pub(crate) struct AgentHost {
     /// Follow mode (`SPC a f`), and where it last went.
     following: bool,
     followed: Option<(PathBuf, Option<u32>)>,
-    /// The thread entry (a tool call) follow mode last went to: an
-    /// update to the same call doesn't pull the view back to it.
-    followed_call: Option<usize>,
+    /// The thread entry (a tool call) follow mode last went to, the line
+    /// it named then, and whether a write took the view on from there to
+    /// the line it changed -- which later updates to the call leave be.
+    followed_call: Option<(usize, Option<u32>, bool)>,
     /// `@selection`'s, from `SPC a e`.
     pub(super) selection: Option<context::Selection>,
     /// Pictures pasted into the prompt, to go with it.
@@ -1444,7 +1445,7 @@ impl App {
         // seldom says which line (Claude Code's doesn't).
         if self.agents.following && self.agents.shown(&self.pages).as_ref() == Some(thread) {
             let line = first_changed_line(before_text.as_deref().unwrap_or(""), content);
-            self.agents.followed_call = self.agents_newest_place(thread).map(|(i, ..)| i);
+            self.agents.followed_call = self.agents_newest_place(thread).map(|(i, _, l)| (i, l, true));
             self.agents_follow_to(path, Some(line as u32));
         }
         // An object, as ACP says: `null` reads as a failed write to a strict
@@ -1513,7 +1514,18 @@ impl App {
             }
             changed = true;
             if let Some(id) = self.buffers.id_for_path(&path) {
+                let before = self.buffers.get(id).map(|ob| ob.buffer.text());
                 self.check_one_file(id, &mut sweep, false, None);
+                // Following an agent that writes to disk itself (Claude
+                // Code's adapter): to the first line it changed.
+                let after = self.buffers.get(id).map(|ob| ob.buffer.text());
+                if let (true, Some(before), Some(after)) = (self.agents.following, before, after) {
+                    if before != after {
+                        let thread = self.agents.shown(&self.pages);
+                        self.agents.followed_call = thread.and_then(|t| self.agents_newest_place(&t)).map(|(i, _, l)| (i, l, true));
+                        self.agents_follow_to(&path, Some(first_changed_line(&before, &after) as u32));
+                    }
+                }
             }
         }
         self.agents_refresh_marks();

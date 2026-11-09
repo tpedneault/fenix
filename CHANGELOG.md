@@ -9,11 +9,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Following the agent (`SPC a f`) goes to the line it changed, not only the
-  file: when it writes, to the first line the write changed; before, to
-  the line it last read there -- an agent's edit seldom names one (Claude
-  Code's doesn't). An update to the same edit no longer pulls the view
-  back. With the dock across the whole window, `SPC a f` says there's no
-  pane beside it to follow in, and follows in any pane that isn't the dock's.
+  file, and scrolls there: the pane beside the dock moved its cursor but,
+  without the focus, never scrolled to it. When the agent writes -- through
+  Fenix, or to disk itself as Claude Code does -- it goes to the first line
+  the write changed; before that, to the line it last read there, as an
+  agent's edit seldom names one. A later update to the same edit doesn't
+  pull the view back. With the dock across the whole window, `SPC a f` says
+  there's no pane beside it to follow in, and follows in any pane that isn't
+  the dock's.
+- A folder opened as the project from outside (`fenix <folder>`,
+  `--project`, `fenix/openProject`) gets a workspace of its own, as `SPC p p`
+  gives it, and stays the project once a file in it is open -- a folder with
+  no `.git` or `Cargo.toml` stopped being the project then.
 - A file in the project has its breadcrumb from the project, however the
   project's folder was spelt (`\\?\`, a drive letter's case), not its whole
   path.
