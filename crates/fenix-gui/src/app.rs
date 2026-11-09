@@ -14780,7 +14780,9 @@ impl App {
     /// What to show in place of the modeline while `find_file_prompt` is
     /// active -- mirrors `explorer_prompt_text`.
     fn find_file_prompt_text(&self) -> Option<String> {
-        self.find_file_prompt.as_ref().map(|input| format!("find file: {input}"))
+        // Where a relative path starts: the project, else Fenix's folder.
+        let from = self.project_root.as_deref().and_then(Path::file_name).map(|n| format!(" (in {})", n.to_string_lossy())).unwrap_or_default();
+        self.find_file_prompt.as_ref().map(|input| format!("find file{from}: {input}"))
     }
 
     /// `SPC f y`: copies the focused buffer's file path to the OS
@@ -14911,8 +14913,9 @@ impl App {
         if !self.delete_file_confirm {
             return None;
         }
-        let name = self.open().buffer.path().map(|p| p.display().to_string()).unwrap_or_default();
-        Some(format!("Delete {name}? (y/n)"))
+        // The question first: a long path is cut at the prompt's edge.
+        let name = self.open().buffer.path().map(|p| self.project_root.as_deref().and_then(|r| path_within(r, p)).unwrap_or_else(|| home_relative(p))).unwrap_or_default();
+        Some(format!("Delete? y deletes, n keeps -- {name}"))
     }
 
     /// What happens after a key has been through Vim, whatever it did:

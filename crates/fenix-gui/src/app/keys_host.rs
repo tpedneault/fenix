@@ -245,13 +245,18 @@ pub(crate) fn translate_leader(text: &str, leader: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
+    // Where the last leader written ends: `SPC` right after it, one space
+    // on, is the next key of the sequence (`SPC SPC` is Ctrl+K, Space).
+    let mut leader_end: Option<usize> = None;
     while i < chars.len() {
         let starts_word = i == 0 || !chars[i - 1].is_alphanumeric();
         let is_spc = chars.get(i..i + 3).is_some_and(|w| w == ['S', 'P', 'C']);
         let ends_word = chars.get(i + 3).is_none_or(|c| !c.is_alphanumeric());
-        if starts_word && is_spc && ends_word {
+        let follows_leader = leader_end.is_some_and(|end| end + 1 == i && chars[end] == ' ');
+        if starts_word && is_spc && ends_word && !follows_leader {
             out.push_str(leader);
             i += 3;
+            leader_end = Some(i);
         } else {
             out.push(chars[i]);
             i += 1;

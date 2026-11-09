@@ -272,7 +272,7 @@ fn key_for_says_the_keys_the_scheme_has() {
     assert_eq!(app.key_for("code.goto_definition").as_deref(), Some("F12"));
     assert_eq!(app.key_for("git.open").as_deref(), Some("C-k g g"));
     assert_eq!(app.key_for("commands.palette").as_deref(), Some("F1"), "the shortest");
-    assert_eq!(super::translate_leader("SPC SPC, (SPC a a) SPCX", "C-k"), "C-k C-k, (C-k a a) SPCX");
+    assert_eq!(super::translate_leader("SPC SPC, (SPC a a) SPCX", "C-k"), "C-k SPC, (C-k a a) SPCX", "the second key of SPC SPC is Space");
 }
 
 #[test]
@@ -283,4 +283,19 @@ fn the_modeline_says_the_leader_s_chord_until_it_s_been_used() {
         app.press_all("C-k Esc");
     }
     assert!(!app.modeline_text().contains("C-k commands"));
+}
+
+#[test]
+fn enter_on_an_indented_blank_line_keeps_the_indent() {
+    let (mut app, _f) = standard_on("a.rs", "");
+    app.type_text("mod tests {\nuse super::*;\n\n#[test]");
+    assert_eq!(app.text(), "mod tests {\n    use super::*;\n    \n    #[test]\n}", "{:?}", app.text());
+}
+
+#[test]
+fn enter_on_an_indented_blank_line_keeps_the_indent_with_vim_keys_too() {
+    let (mut app, _f) = app_on_file("a.rs", "");
+    app.press("i");
+    app.type_text("mod tests {\nuse super::*;\n\n#[test]");
+    assert_eq!(app.text(), "mod tests {\n    use super::*;\n    \n    #[test]\n}", "{:?}", app.text());
 }
