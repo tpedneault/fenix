@@ -1218,6 +1218,17 @@ From the `fenix.notebook` and `fenix.diagrams` extensions.
   last. Requires `pdfium.dll` (see [Optional external
   tools](BUILDING.md#optional-external-tools)) -- without it, opening a
   PDF says so.
+- **Jupyter notebooks**, from the Jupyter extension (`fenix.jupyter`,
+  in the welcome's Python pack): an `.ipynb` opens on a page of its cells
+  -- code highlighted with its `[n]`, markdown as it reads, outputs below
+  each with tracebacks and matplotlib's plots as pictures. Jupyter's
+  command-mode keys: `Enter` edits a cell in a pane beside,
+  `Shift+Enter` runs it and moves on, `R` runs them all, `a`/`b`/`dd`,
+  `m`/`y`, `ii`/`00`. Changes are edits of the notebook's buffer, written
+  as Jupyter writes it, so undo and saving are the buffer's. Cells run in
+  the notebook's folder on the project's `.venv` (or `jupyter.python`, uv,
+  `python3`): on ipykernel when it's installed, on that Python itself
+  when it isn't, `input()` asked in the modeline.
 
 ## Code intelligence, tasks and debugging
 

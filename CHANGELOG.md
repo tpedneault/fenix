@@ -6,6 +6,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Extensions: the welcome offers a Python pack -- the Python language pack, Jupyter
+  notebooks (`fenix.jupyter`, `.ipynb` files run on a kernel) and the CSV table.
+
 ## [1.4.0] - 2026-11-08
 
 ### Changed

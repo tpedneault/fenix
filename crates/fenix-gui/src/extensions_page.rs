@@ -48,6 +48,7 @@ pub const FALLBACK_BUNDLES: &[Fallback] = &[
     Fallback { id: "fenix.review-bundle", name: "Review", about: "GitHub pull requests, GitLab merge requests", categories: &["tools"], members: &["fenix.review"] },
     Fallback { id: "fenix.jira-bundle", name: "Jira", about: "Jira, with the agenda kept in step", categories: &["tools"], members: &["fenix.jira", "fenix.agenda"] },
     Fallback { id: "fenix.lab-bundle", name: "Lab", about: "Arduino, containers, VNC", categories: &["tools"], members: &["fenix.containers", "fenix.arduino", "fenix.vnc"] },
+    Fallback { id: "fenix.python-bundle", name: "Python", about: "Python, Jupyter notebooks, CSV tables", categories: &["languages"], members: &["fenix.python", "fenix.jupyter", "fenix.csv"] },
     Fallback { id: "fenix.reading-bundle", name: "Reading", about: "The PDF reader", categories: &["tools"], members: &["fenix.pdf"] },
 ];
 
@@ -1654,7 +1655,7 @@ mod tests {
         let mut p = ExtensionsPage::welcome();
         let text = layout(&p, 120).all_text();
         assert!(text.contains("Welcome to Fenix") && text.contains("Looking at the registry") && !text.contains("Browse"), "{text}");
-        assert_eq!(p.bundles().iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Personal", "Mission", "Review", "Jira", "Lab", "Reading"]);
+        assert_eq!(p.bundles().iter().map(|b| b.name.as_str()).collect::<Vec<_>>(), ["Personal", "Mission", "Review", "Jira", "Lab", "Python", "Reading"]);
         p.focus = 1;
         let mission: Vec<String> = ["fenix.mib", "fenix.ccsds", "fenix.tcl"].map(String::from).to_vec();
         assert_eq!(p.key(Key::Enter), Action::SwitchBundle { on: true, members: mission.clone(), install: None });
