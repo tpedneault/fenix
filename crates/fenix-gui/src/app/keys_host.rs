@@ -149,7 +149,15 @@ impl App {
 impl App {
     /// The key scheme was switched: what reads it hears (the extensions,
     /// with API 1.5).
-    pub(crate) fn key_scheme_changed(&mut self) {}
+    pub(crate) fn key_scheme_changed(&mut self) {
+        // What's drawn with keys in it, again.
+        self.home_views.clear();
+        let pages: Vec<_> = self.pages.keys().copied().collect();
+        for id in pages {
+            self.restale_page(id);
+        }
+        self.code_key_scheme_changed();
+    }
 }
 
 impl App {
@@ -169,4 +177,87 @@ impl App {
             _ => None,
         }
     }
+}
+
+/// What Vim keys' hints say, and what standard keys' say instead: the
+/// longer first, so a phrase is translated whole.
+const STANDARD_PHRASES: &[(&str, &str)] = &[
+    ("A has the agent write it over this, i edits it -- Esc and Enter sends, q discards", "Ctrl+Shift+A has the agent write it over this -- Ctrl+Enter sends, Esc discards"),
+    ("Esc then Enter keeps it, q discards it", "Ctrl+Enter keeps it, Esc discards it"),
+    ("write (i to insert), then Esc and Enter to send -- q discards", "write, then Ctrl+Enter to send -- Esc discards"),
+    ("write, or Esc then A for the agent; Esc and Enter sends -- q discards", "write, or Ctrl+Shift+A for the agent; Ctrl+Enter sends -- Esc discards"),
+    ("write, then Esc and Enter to send -- q discards", "write, then Ctrl+Enter to send -- Esc discards"),
+    ("nothing written yet -- q discards this instead", "nothing written yet -- Esc discards this instead"),
+    (", A while it's untouched has the agent write it", ", Ctrl+Shift+A while it's untouched has the agent write it"),
+    ("Esc then Enter to ", "Ctrl+Enter to "),
+    ("Esc and Enter to ", "Ctrl+Enter to "),
+    ("then Esc and Enter", "then Ctrl+Enter"),
+    ("Esc and Enter", "Ctrl+Enter"),
+    ("Esc then Enter", "Ctrl+Enter"),
+    (", q to cancel", ", Esc to cancel"),
+    ("Write a prompt below (i), and Enter in Normal mode sends it.", "Write a prompt below, and Ctrl+Enter sends it."),
+    ("Enter in Normal mode sends it", "Ctrl+Enter sends it"),
+    (":w! keeps yours", "file.save_force (the palette) keeps yours"),
+    (":e! takes theirs", "file.reload (the palette) takes theirs"),
+    (":e! takes the agent's", "file.reload (the palette) takes the agent's"),
+    (":e! them away", "file.reload them away"),
+    (":w keeps it, :e! discards it", "Ctrl+S keeps it, file.reload (the palette) discards it"),
+    (":w and it's live", "Ctrl+S and it's live"),
+    ("use :q! to discard or :wq to save", "Ctrl+S saves it, buffer.kill_force (the palette) discards it"),
+    ("use :w <path> to save it", "file.rename (the palette) gives it a path"),
+    ("use :w <path> to save before closing", "give it a path first (file.rename, in the palette)"),
+    ("use :w <path> first", "give it a path first (file.rename, in the palette)"),
+    ("use :w <path>", "give it a path (file.rename, in the palette)"),
+    ("use :w to save", "Ctrl+S saves"),
+    ("K on a name shows its value", "Ctrl+K Ctrl+I on a name shows its value"),
+    ("K is the hover", "Ctrl+K Ctrl+I is the hover"),
+];
+
+impl App {
+    /// `text` as the key scheme in use says it: with standard keys the
+    /// leader is its chord (`C-k` for `SPC`) and Vim's phrases (Esc then
+    /// Enter, q discards, `:w!`) are standard keys'. Vim keys: as written.
+    pub(crate) fn keys_text(&self, text: &str) -> String {
+        if !self.standard_keys() {
+            return text.to_string();
+        }
+        let mut out = text.to_string();
+        for (vim, standard) in STANDARD_PHRASES {
+            if out.contains(vim) {
+                out = out.replace(vim, standard);
+            }
+        }
+        translate_leader(&out, &self.leader_chord_text())
+    }
+
+    /// The keys that run `command` now, as which-key writes them: yours
+    /// first, then the scheme's (a chord, else the leader's keys).
+    pub(crate) fn key_for(&self, command: &str) -> Option<String> {
+        keymap::key_for(command, self.key_scheme(), &self.leader_chord_text())
+    }
+}
+
+/// `SPC` as a key in `text` (`SPC g g`, `(SPC a a)`) written as `leader`.
+pub(crate) fn translate_leader(text: &str, leader: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let starts_word = i == 0 || !chars[i - 1].is_alphanumeric();
+        let is_spc = chars.get(i..i + 3).is_some_and(|w| w == ['S', 'P', 'C']);
+        let ends_word = chars.get(i + 3).is_none_or(|c| !c.is_alphanumeric());
+        if starts_word && is_spc && ends_word {
+            out.push_str(leader);
+            i += 3;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+impl App {
+    /// The extensions hear the key scheme changed (API 1.5).
+    pub(crate) fn code_key_scheme_changed(&mut self) {}
 }

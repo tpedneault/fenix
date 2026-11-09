@@ -401,9 +401,8 @@ impl App {
 }
 
 /// `fenix/commands`: every command in the registry, in its order, with
-/// the leader keys that run it and whether it may run from outside.
+/// the keys that run it (`App::key_for`) and whether it may run from outside.
 pub(crate) fn control_commands(app: &App) -> CommandsResult {
-    let keys = crate::keymap::leader_keys();
     CommandsResult {
         commands: app
             .commands()
@@ -411,7 +410,8 @@ pub(crate) fn control_commands(app: &App) -> CommandsResult {
             .map(|c| CommandInfo {
                 id: c.id.to_string(),
                 description: c.description.to_string(),
-                keys: keys.get(c.id.as_ref()).cloned(),
+                // The keys in use: the scheme's, yours over Fenix's.
+                keys: app.key_for(c.id.as_ref()),
                 external: c.external(),
             })
             .collect(),
@@ -676,11 +676,12 @@ mod tests {
         assert!(!switch.description.is_empty());
         let save = get("file.save");
         assert!(!save.external);
-        assert_eq!(save.keys.as_deref(), Some("SPC f s"));
+        // The keys in use: a chord over the leader's keys.
+        assert_eq!(save.keys.as_deref(), Some("C-s"));
         // Bound twice: the shorter sequence is the one listed.
         assert_eq!(get("project.find_file").keys.as_deref(), Some("SPC SPC"));
-        // Run by a Ctrl chord, not the leader: no keys.
-        assert_eq!(get("nav.jump_back").keys, None);
+        assert_eq!(get("nav.jump_back").keys.as_deref(), Some("C-o"));
+        assert_eq!(get("git.open").keys.as_deref(), Some("SPC g g"));
         for id in [
             "project.switch_project",
             "snippets.open",

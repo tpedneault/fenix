@@ -367,7 +367,11 @@ impl App {
             return;
         }
         let selected = self.home_selected_slot(id, pane).and_then(|i| self.home_views.get(&id).map(|v| v.slots[i].entry.clone()));
-        let view = dashboard::layout(self.home_data_for(id), cols, rows);
+        let mut view = dashboard::layout(self.home_data_for(id), cols, rows);
+        // Standard keys: the leader's keys with its chord, as wide as SPC.
+        if let Some(leader) = self.standard_keys().then(|| self.leader_chord_text()).filter(|l| l.chars().count() == 3) {
+            view.text = super::translate_leader(&view.text, &leader);
+        }
         let Some(ob) = self.buffers.get_mut(id) else { return };
         if ob.buffer.text() != view.text {
             let end = ob.buffer.len_chars();

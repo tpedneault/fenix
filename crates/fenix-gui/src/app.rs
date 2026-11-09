@@ -49,6 +49,7 @@ pub(crate) use debug_breakpoints::BreakpointPart;
 mod polish;
 mod which_key;
 mod keys_host;
+pub(crate) use keys_host::translate_leader;
 mod edit_commands;
 mod carets;
 #[cfg(test)]
@@ -4947,6 +4948,9 @@ pub struct App {
     compose_discard_armed: bool,
     /// `nav.goto_line`'s prompt: the number typed so far.
     goto_line_prompt: Option<String>,
+    /// How often the leader's chord opened it this run: the modeline says
+    /// which chord does until it's been used a few times.
+    leader_uses: u32,
     /// When the last key came: standard keys' undo pause.
     last_key_at: Option<Instant>,
     /// Each pane's extra carets (standard keys' more cursors).
@@ -6135,6 +6139,7 @@ impl App {
             goto_line_prompt: None,
             compose_discard_armed: false,
             last_key_at: None,
+            leader_uses: 0,
             carets: Default::default(),
             switching_recent: false,
             delete_file_confirm: false,
@@ -13062,7 +13067,8 @@ impl App {
         // what needs the room, and is what you're looking at while you
         // write.
         self.windows_mut().resize_focused(0.25);
-        self.pane_titles.insert(pane, purpose.title());
+        let title = self.keys_text(&purpose.title());
+        self.pane_titles.insert(pane, title);
         self.windows_mut().focus(pane);
         self.compose = Some(ComposeSession { pane, buffer, purpose, returning_to, seed: seed.to_string(), agent_over_seed: false });
         // A blank one is there to be typed into: it opens in Insert, so
@@ -16398,7 +16404,10 @@ impl App {
         if self.leader_matcher.is_pending() || self.leader_starts(full) {
             // The leader chord starts the leader as SPC does: its keys
             // follow.
-            let fed = if self.leader_matcher.is_pending() { keypress.chord().legacy() } else { KeyPress::char(' ') };
+            let fed = if self.leader_matcher.is_pending() { keypress.chord().legacy() } else {
+                self.leader_uses = self.leader_uses.saturating_add(1);
+                KeyPress::char(' ')
+            };
             if let Step::Matched(&id) = self.leader_matcher.feed(fed) {
                 self.run_command_with(event_loop, id);
             }
@@ -17367,7 +17376,8 @@ impl App {
     /// confirmations ("saved", "tags refreshed"), not failures -- use
     /// `set_error` for those, which also tints the text.
     fn set_message(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage { text: text.into(), is_error: false, set_at: Instant::now() });
+        let text = self.keys_text(&text.into());
+        self.status_message = Some(StatusMessage { text, is_error: false, set_at: Instant::now() });
     }
 
     /// Sets an error status message -- same display as `set_message`,
@@ -17376,7 +17386,8 @@ impl App {
     /// failure sites: invisible in a normally-launched GUI window, so
     /// the user had no way to know a search/save/format/etc. failed.
     fn set_error(&mut self, text: impl Into<String>) {
-        self.status_message = Some(StatusMessage { text: text.into(), is_error: true, set_at: Instant::now() });
+        let text = self.keys_text(&text.into());
+        self.status_message = Some(StatusMessage { text, is_error: true, set_at: Instant::now() });
     }
 
     /// The modeline's mode badge: "CAPTURE" while a surface has the
@@ -17552,6 +17563,9 @@ impl App {
         let recording_indicator =
             match self.vim.recording_register() {
                 _ if !self.extra_carets().is_empty() => format!("   {} cursors", self.extra_carets().len() + 1),
+                // Standard keys: which chord opens the leader, until it's
+                // been used a few times (`keys.leader_hint`).
+                None if self.standard_keys() && self.leader_uses < 3 && self.config.bool_value("keys.leader_hint") != Some(false) => format!("   {} commands", self.leader_chord_text()),
                 Some(reg) => format!("   recording @{reg}"),
                 None => String::new(),
             };

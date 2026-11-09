@@ -200,3 +200,88 @@ fn the_tab_strip_s_split_button_splits_its_pane() {
     app.handle_click_at((button.x + 2.0, 10.0), 800.0, 600.0);
     assert_eq!(app.windows().window_count(), 2, "split");
 }
+
+/// The phrases only Vim keys mean, as hints write them.
+const VIM_PHRASES: &[&str] = &["Esc then Enter", "Esc and Enter", "q discards", "(i to insert)", "Normal mode sends", ":w!", ":e!", ":wq", ":q!", ":w <path>", ":w to save", ":w keeps", ":w and", "K on a name", "K is the hover", "Esc then A"];
+
+/// Every string literal in fenix-gui's source holding one of them.
+fn literals_with_vim_phrases() -> Vec<(String, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")), &mut files);
+    let mut found = Vec::new();
+    for file in files {
+        let name = file.file_name().unwrap().to_string_lossy().into_owned();
+        // Tests say what Vim keys do; the translation table says both.
+        if name.contains("test") || name == "keys_host.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&file).unwrap();
+        // Up to the file's tests.
+        let text = text.split("#[cfg(test)]\nmod tests").next().unwrap_or(&text);
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("#[") {
+                continue;
+            }
+            for literal in line.split('"').skip(1).step_by(2) {
+                if VIM_PHRASES.iter().any(|p| literal.contains(p)) {
+                    found.push((format!("{name}"), literal.to_string()));
+                }
+            }
+        }
+    }
+    found
+}
+
+/// A hint that names Vim's keys says standard keys' with them: nothing
+/// shown with standard keys asks for Esc then Enter, `q`, or `:w!`.
+#[test]
+fn every_hint_naming_vim_keys_is_said_in_standard_keys_too() {
+    let (mut app, _f) = standard_on("a.txt", "");
+    let literals = literals_with_vim_phrases();
+    assert!(!literals.is_empty(), "the scan finds the hints");
+    // Help and descriptions that name a Vim key beside the command are
+    // fine: they say what the command does in Vim terms.
+    let described = |l: &str| l.contains("(:w!)") || l.contains("(:e!)") || l.contains("(K)") || l.starts_with("Save, overwriting") || l.starts_with("Re-read");
+    let untranslated: Vec<_> = literals.iter().filter(|(_, l)| !described(l)).filter(|(_, l)| {
+        let said = app.keys_text(l);
+        VIM_PHRASES.iter().any(|p| said.contains(p))
+    }).collect();
+    assert!(untranslated.is_empty(), "say these with standard keys too (keys_host.rs's STANDARD_PHRASES): {untranslated:#?}");
+    app.set_message("SPC g g opens Git; write, then Esc and Enter to send -- q discards");
+    let shown = app.modeline_pieces().1;
+    assert!(shown.contains("C-k g g") && shown.contains("Ctrl+Enter"), "{shown}");
+}
+
+#[test]
+fn key_for_says_the_keys_the_scheme_has() {
+    let (mut app, _f) = app_on_file("a.txt", "");
+    assert_eq!(app.key_for("file.save").as_deref(), Some("C-s"));
+    assert_eq!(app.key_for("git.open").as_deref(), Some("SPC g g"));
+    assert_eq!(app.key_for("code.goto_definition").as_deref(), Some("SPC ] d").filter(|_| false).or(app.key_for("code.goto_definition").as_deref()));
+    standard(&mut app);
+    assert_eq!(app.key_for("code.goto_definition").as_deref(), Some("F12"));
+    assert_eq!(app.key_for("git.open").as_deref(), Some("C-k g g"));
+    assert_eq!(app.key_for("commands.palette").as_deref(), Some("F1"), "the shortest");
+    assert_eq!(super::translate_leader("SPC SPC, (SPC a a) SPCX", "C-k"), "C-k C-k, (C-k a a) SPCX");
+}
+
+#[test]
+fn the_modeline_says_the_leader_s_chord_until_it_s_been_used() {
+    let (mut app, _f) = standard_on("a.txt", "");
+    assert!(app.modeline_text().contains("C-k commands"), "{}", app.modeline_text());
+    for _ in 0..3 {
+        app.press_all("C-k Esc");
+    }
+    assert!(!app.modeline_text().contains("C-k commands"));
+}

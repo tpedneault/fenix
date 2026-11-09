@@ -621,8 +621,8 @@ impl App {
 
     /// The text menu, for the focused pane where its cursor is.
     pub(super) fn text_menu_items(&self) -> Vec<MenuItem<MenuAction>> {
-        let leader = crate::keymap::leader_keys();
-        let key = |id: &str| leader.get(id).cloned().unwrap_or_default();
+        // The keys in use, as the scheme says them.
+        let key = |id: &str| self.key_for(id).unwrap_or_default();
         let item = |label: &str, key: String, action| MenuItem { label: label.to_string(), key, action };
         let ob = self.open();
         let selecting = self.vim.mode() == Mode::Visual;
@@ -659,8 +659,8 @@ impl App {
 
     /// The menu for `buffer`'s tab in `pane`.
     fn tab_menu_items(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Vec<MenuItem<MenuAction>> {
-        let leader = crate::keymap::leader_keys();
-        let key = |id: &str| leader.get(id).cloned().unwrap_or_default();
+        // The keys in use, as the scheme says them.
+        let key = |id: &str| self.key_for(id).unwrap_or_default();
         let item = |label: &str, key: String, action| MenuItem { label: label.to_string(), key, action: MenuAction::Tab(action, pane, buffer) };
         let mut items = Vec::new();
         if self.workspaces.active_workspace().home != Some(buffer) {

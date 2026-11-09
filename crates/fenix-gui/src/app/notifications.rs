@@ -71,7 +71,10 @@ impl App {
 
     /// Shows a notification: as a toast, in the history, and -- when
     /// Fenix isn't in front -- the system's too.
-    pub(crate) fn notify(&mut self, request: Request) -> Pushed {
+    pub(crate) fn notify(&mut self, mut request: Request) -> Pushed {
+        // Its keys as the scheme in use says them.
+        request.summary = self.keys_text(&request.summary);
+        request.body = self.keys_text(&request.body);
         let settings = self.notification_settings();
         let system = request.clone();
         let pushed = self.notifications.push(request, &settings);

@@ -219,16 +219,18 @@ Params: `{}`. Result:
 ```json
 { "commands": [
   { "id": "agenda.open", "description": "Open the agenda page where it was left", "keys": "SPC A a", "external": true },
-  { "id": "file.save", "description": "Save the current file", "keys": "SPC f s", "external": false },
-  { "id": "view.reset_font_size", "description": "Reset the body text size to the default", "external": false }
+  { "id": "file.save", "description": "Save the current file", "keys": "C-s", "external": false },
+  { "id": "git.open", "description": "Open the Git status page", "keys": "SPC g g", "external": false }
 ] }
 ```
 
-Every command Fenix has, in the order it registers them. `keys` is the
-leader sequence that runs it, written as Fenix's key menu writes it
-(`SPC` for the space bar, `C-x` for Ctrl+x, keys separated by spaces);
-the shortest one when there are several, and absent when no leader key
-runs it. The buffer-specific `SPC m` menu isn't included.
+Every command Fenix has, in the order it registers them. `keys` is what
+runs it now, written as Fenix's key menu writes it (`SPC` for the space
+bar, `C-x` for Ctrl+x, `F12`, keys separated by spaces): a chord when
+one runs it, else its leader sequence -- with standard keys
+(`editor.keys`), the leader is its chord (`C-k g g`). Yours win over
+Fenix's; the shortest when there are several; absent when no key runs
+it. The buffer-specific `SPC m` menu isn't included.
 
 `external` says whether `fenix/runCommand` runs it: true for commands
 that make sense with nobody looking at a file in Fenix (open the

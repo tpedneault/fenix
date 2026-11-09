@@ -771,6 +771,19 @@ pub(crate) fn keymap_conflicts() -> Vec<String> {
     conflicts
 }
 
+/// The keys that run `command` under `scheme`, as which-key writes them:
+/// a chord in use (the shortest, yours over Fenix's), else its leader
+/// keys, `SPC` written as `leader` (`C-k` with standard keys).
+pub fn key_for(command: &str, scheme: Scheme, leader: &str) -> Option<String> {
+    let mut chords: Vec<String> = chord_map().in_use(scheme).into_iter().filter(|c| c.command == Some(command)).map(|c| describe_keypress(&c.key)).collect();
+    chords.sort_by_key(|k| (k.len(), k.clone()));
+    if let Some(chord) = chords.into_iter().next() {
+        return Some(chord);
+    }
+    let keys = leader_keys().get(command)?.clone();
+    Some(if scheme == Scheme::Standard { crate::app::translate_leader(&keys, leader) } else { keys })
+}
+
 /// The leader sequence that runs each command, as the which-key menu
 /// writes it (`SPC a a`): what `fenix/commands` reports. A command bound
 /// twice gets its shortest sequence, the first in order among equals, so

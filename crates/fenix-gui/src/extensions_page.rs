@@ -22,7 +22,7 @@ use fenix_extensions::manifest::CATEGORIES;
 use fenix_extensions::registry::{Index, Listing};
 use fenix_extensions::{Permissions, Runtime};
 
-use crate::page::{fit, frame, wrap, Filter, Grid, ImageKey, Key, Page, Role};
+use crate::page::{Chip, fit, frame, wrap, Filter, Grid, ImageKey, Key, Page, Role};
 
 /// A bundle Fenix knows without the registry: the registry's own
 /// (fenix-extensions' `extensions/*-bundle`), as they were when this
@@ -184,6 +184,8 @@ pub enum Action {
     Say(String),
     /// The welcome's `t`: the tutorial.
     Tutorial,
+    /// The welcome's `v` and `s`: edit with Vim keys or standard keys.
+    KeyScheme(&'static str),
 }
 
 /// What `d` shows the details of.
@@ -270,6 +272,8 @@ const LIST_TOP: usize = 7;
 pub struct ExtensionsPage {
     /// The welcome: bundles alone, no tabs.
     pub welcome: bool,
+    /// The key scheme in use (`editor.keys`), for the welcome's question.
+    pub keys: &'static str,
     pub tab: Tab,
     /// The category the list keeps to (`other` for none of the page's);
     /// none, every one.
@@ -303,6 +307,7 @@ impl ExtensionsPage {
     pub fn new() -> Self {
         ExtensionsPage {
             welcome: false,
+            keys: "vim",
             tab: Tab::Installed,
             category: None,
             sidebar: false,
@@ -674,6 +679,8 @@ impl ExtensionsPage {
             }
             Key::Char('r') => Action::Refresh,
             Key::Char('t') if self.welcome => Action::Tutorial,
+            Key::Char('v') if self.welcome => Action::KeyScheme("vim"),
+            Key::Char('s') if self.welcome => Action::KeyScheme("standard"),
             Key::Char('d') => match entry {
                 Some(Entry::Installed(i)) => Action::Details(Target::Installed(self.installed[i].id.clone())),
                 Some(Entry::Available(i)) => self.available().get(i).map_or(Action::None, |r| Action::Details(Target::Available(r.id.clone()))),
@@ -989,6 +996,18 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         let x = g.put(welcome_top - 1, left, "New to Fenix's keys? ", Role::Text);
         let x = g.put(welcome_top - 1, x, "t", Role::Accent);
         g.put(welcome_top - 1, x, " starts the tutorial, a lesson at a time (SPC h T later).", Role::Text);
+        // How you edit: asked once, here; SPC t k switches later.
+        let standard = page.keys == "standard";
+        let x = g.put(welcome_top, left, "How do you like to edit?  ", Role::Text);
+        let x = g.chip(welcome_top, x, " v ", Role::Accent, if standard { Chip::Key } else { Chip::Chosen });
+        let x = g.put(welcome_top, x + 1, &fit("Vim keys: modes, SPC for the rest   ", width.saturating_sub(x + 1 - left)), if standard { Role::Muted } else { Role::Text });
+        let x = g.chip(welcome_top, x, " s ", Role::Accent, if standard { Chip::Chosen } else { Chip::Key });
+        g.put(welcome_top, x + 1, &fit("Standard keys: an IDE's, Ctrl+K for the rest", width.saturating_sub(x + 1 - left)), if standard { Role::Text } else { Role::Muted });
+        welcome_top += 1;
+        if standard && cfg!(target_os = "linux") {
+            g.put(welcome_top, left, &fit("Alt+click adds a cursor; if your desktop moves windows with it, editor.multi_cursor_modifier = ctrl (SPC ,).", width), Role::Muted);
+            welcome_top += 1;
+        }
         welcome_top += 1;
     } else {
         g.put(4, left, &fit(&note, width), note_role);
@@ -1721,4 +1740,16 @@ mod tests {
         assert_eq!(excerpt("# Changelog\n\n## 2.0.0\n\n- New\n\n## 1.0.0\n\n- Old", true, 8), ["2.0.0", "", "- New"]);
         assert_eq!(excerpt("## 2.0.0\n- New\n## 1.0.0", true, 8), ["2.0.0", "- New"], "no title");
     }
+
+    #[test]
+    fn the_welcome_asks_how_you_edit_and_v_and_s_answer() {
+        let mut p = ExtensionsPage::welcome();
+        let text = layout(&p, 120).all_text();
+        assert!(text.contains("How do you like to edit?") && text.contains("Vim keys") && text.contains("Standard keys"), "{text}");
+        assert_eq!(p.key(Key::Char('s')), Action::KeyScheme("standard"));
+        assert_eq!(p.key(Key::Char('v')), Action::KeyScheme("vim"));
+        let mut list = ExtensionsPage::new();
+        assert_ne!(list.key(Key::Char('s')), Action::KeyScheme("standard"), "only the welcome asks");
+    }
+
 }

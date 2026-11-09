@@ -634,6 +634,10 @@ impl App {
         if reading.as_ref().is_some_and(|r| r.laid_out()) {
             self.reading_ask(id);
         }
+        // Standard keys: a page's leader keys written with its chord, when
+        // the chord is as wide as `SPC` (the page's cells stay where they
+        // were laid).
+        let leader = self.standard_keys().then(|| self.leader_chord_text()).filter(|l| l.chars().count() == 3);
         let Some(state) = self.pages.get_mut(&id) else { return };
         if reading.as_ref().is_some_and(|r| r.changed()) {
             state.stale = true;
@@ -683,6 +687,11 @@ impl App {
         state.cols = cols;
         state.laid_rows = rows;
         state.stale = false;
+        if let Some(leader) = &leader {
+            if state.page.text.contains("SPC") && !matches!(state.model, PageModel::Reading(_)) {
+                state.page.text = super::translate_leader(&state.page.text, leader);
+            }
+        }
         let text = state.page.text.clone();
         let (mut line, mut col) = state.page.cursor();
         // An agent's thread following the newest card keeps its end in
