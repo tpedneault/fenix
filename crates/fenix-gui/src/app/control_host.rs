@@ -319,10 +319,10 @@ impl App {
                 params.root
             )));
         }
-        let root = std::fs::canonicalize(root)
-            .map(fenix_lsp::normalize)
-            .unwrap_or_else(|_| root.to_path_buf());
-        self.switch_to_project(root);
+        // As `SPC p p` opens it: in a workspace of its own, so it stays
+        // the project when a file with nothing to mark a project (no
+        // `.git`, no `Cargo.toml`) has the focus.
+        self.open_project(root.to_path_buf(), None, true);
         Ok(())
     }
 

@@ -375,6 +375,36 @@ pub(crate) fn store(doc: &mut toml_edit::DocumentMut, key: &str, item: Option<to
     }
 }
 
+/// Removes the tables on `key`'s path that are left empty, deepest first,
+/// stopping at one that still holds something. What was written over a
+/// removed table's header -- comments, the file's own at the top -- is
+/// returned, for the caller to keep.
+pub(crate) fn prune_empty(doc: &mut toml_edit::DocumentMut, key: &str) -> String {
+    let parts: Vec<&str> = key.split('.').collect();
+    let mut kept = String::new();
+    for depth in (1..parts.len()).rev() {
+        let (name, up) = parts[..depth].split_last().expect("a part");
+        let mut table: &mut dyn toml_edit::TableLike = doc.as_table_mut();
+        for part in up {
+            match table.get_mut(part).and_then(|i| i.as_table_like_mut()) {
+                Some(t) => table = t,
+                None => return kept,
+            }
+        }
+        let Some(item) = table.get(name) else { return kept };
+        if !item.as_table_like().is_some_and(|t| t.is_empty()) {
+            return kept;
+        }
+        if let Some(prefix) = item.as_table().and_then(|t| t.decor().prefix()).and_then(|p| p.as_str()) {
+            if prefix.contains('#') {
+                kept = format!("{prefix}{kept}");
+            }
+        }
+        table.remove(name);
+    }
+    kept
+}
+
 /// `header` (comments that had nothing after them) before the first
 /// thing in `doc`, or back as its trailing text when it's still empty.
 fn put_header_first(doc: &mut toml_edit::DocumentMut, header: String) {
@@ -625,7 +655,7 @@ impl Config {
         // with) keeps them as its trailing text, which toml_edit writes
         // after any table added: they're taken here and put back before
         // the first setting, where they were.
-        let header = if doc.as_table().is_empty() {
+        let mut header = if doc.as_table().is_empty() {
             let text = doc.trailing().as_str().unwrap_or_default().to_string();
             doc.set_trailing("");
             text
@@ -641,6 +671,12 @@ impl Config {
             let same_on_disk = lookup(&doc, setting.key).and_then(|i| setting.kind.read(i).ok()) == now;
             if !same_on_disk {
                 store(&mut doc, setting.key, now.as_ref().map(|v| setting.kind.write(v)));
+                // Unset: a table left with nothing in it goes too, the
+                // comments over its header (the file's own, when it was
+                // first) kept for the top.
+                if now.is_none() {
+                    header.push_str(&prune_empty(&mut doc, setting.key));
+                }
             }
             baseline.insert(setting.key, now);
         }
@@ -1201,6 +1237,32 @@ mod tests {
         let err = config.save().unwrap_err();
         assert!(err.to_string().contains("fix it first"), "{err}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The last setting of a table unset: the table goes too, and the
+    /// file's comment at the top stays at the top. A table with other
+    /// settings left is kept.
+    #[test]
+    fn a_table_left_empty_goes_and_the_header_stays() {
+        let path = temp_path("prune");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{HEADER}\n[editor]\nfont_size = 18\ntheme = \"Nord\"\n")).unwrap();
+        let mut config = Config::load(path.clone()).unwrap();
+        config.font_size = None;
+        config.save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("[editor]") && text.contains("Nord"), "still holds the theme:\n{text}");
+        config.theme = None;
+        config.save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("[editor]"), "nothing left in it:\n{text}");
+        assert!(text.trim_start().starts_with('#') && text.contains(HEADER.lines().next().unwrap()), "the header kept:\n{text}");
+        // And set again, it comes back under the header.
+        config.theme = Some("Nord".into());
+        config.save().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.find('#') < text.find("[editor]"), "{text}");
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 

@@ -137,6 +137,10 @@ pub(crate) struct AgentHost {
     /// Follow mode (`SPC a f`), and where it last went.
     following: bool,
     followed: Option<(PathBuf, Option<u32>)>,
+    /// The thread entry (a tool call) follow mode last went to, the line
+    /// it named then, and whether a write took the view on from there to
+    /// the line it changed -- which later updates to the call leave be.
+    followed_call: Option<(usize, Option<u32>, bool)>,
     /// `@selection`'s, from `SPC a e`.
     pub(super) selection: Option<context::Selection>,
     /// Pictures pasted into the prompt, to go with it.
@@ -212,6 +216,7 @@ impl AgentHost {
             to_review: 0,
             following: false,
             followed: None,
+            followed_call: None,
             selection: None,
             images: Vec::new(),
             sent: Vec::new(),
@@ -273,7 +278,7 @@ impl AgentHost {
             (Link::Detached, ..) => ("not started".into(), Some(crate::page::Role::Muted)),
         };
         let logins = view.connection.filter(|c| c.state == ConnState::NeedsAuth).and_then(|c| c.info.as_ref()).map(|i| i.auth_methods.iter().map(|m| (m.id.clone(), m.name.clone())).collect()).unwrap_or_default();
-        agent_page::Status { agent, state, state_role: role, logins, queued: view.queued, terminals: HashMap::new(), highlight: Some(super::reading_host::highlight_block) }
+        agent_page::Status { agent, state, state_role: role, logins, queued: view.queued, terminals: HashMap::new(), highlight: Some(super::reading_host::highlight_block), root: Some(view.meta.root.clone()) }
     }
 
     /// Reads the store's threads for `root` into the hub, newest first,
@@ -337,6 +342,13 @@ fn mcp_server(name: &str, line: &str) -> Option<McpServer> {
         return Some(if sse { McpServer::Sse { name, url, headers } } else { McpServer::Http { name, url, headers } });
     }
     Some(McpServer::Stdio { name: name.to_string(), command: first.clone(), args: rest.to_vec(), env: vec![] })
+}
+
+/// The first line (from 1) where `after` differs from `before`: where a
+/// write changed a file. Past the shorter's end when one only grew.
+fn first_changed_line(before: &str, after: &str) -> usize {
+    let (old, new): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+    old.iter().zip(&new).position(|(a, b)| a != b).unwrap_or(old.len().min(new.len())) + 1
 }
 
 fn within(root: &Path, path: &Path) -> bool {
@@ -1406,6 +1418,7 @@ impl App {
             Some(ob) => Some(ob.buffer.text()),
             None => std::fs::read_to_string(path).ok(),
         };
+        let before_text = before.clone();
         self.agents.baselines.entry(thread.clone()).or_default().entry(path.to_path_buf()).or_insert(before);
         match open {
             Some(id) => {
@@ -1428,6 +1441,13 @@ impl App {
         }
         self.agents.dirty.insert(thread.clone());
         self.agents_refresh_marks();
+        // Following: to the first line it changed -- an agent's edit
+        // seldom says which line (Claude Code's doesn't).
+        if self.agents.following && self.agents.shown(&self.pages).as_ref() == Some(thread) {
+            let line = first_changed_line(before_text.as_deref().unwrap_or(""), content);
+            self.agents.followed_call = self.agents_newest_place(thread).map(|(i, _, l)| (i, l, true));
+            self.agents_follow_to(path, Some(line as u32));
+        }
         // An object, as ACP says: `null` reads as a failed write to a strict
         // agent, though the file was written.
         Ok(serde_json::json!({}))
@@ -1494,7 +1514,18 @@ impl App {
             }
             changed = true;
             if let Some(id) = self.buffers.id_for_path(&path) {
+                let before = self.buffers.get(id).map(|ob| ob.buffer.text());
                 self.check_one_file(id, &mut sweep, false, None);
+                // Following an agent that writes to disk itself (Claude
+                // Code's adapter): to the first line it changed.
+                let after = self.buffers.get(id).map(|ob| ob.buffer.text());
+                if let (true, Some(before), Some(after)) = (self.agents.following, before, after) {
+                    if before != after {
+                        let thread = self.agents.shown(&self.pages);
+                        self.agents.followed_call = thread.and_then(|t| self.agents_newest_place(&t)).map(|(i, _, l)| (i, l, true));
+                        self.agents_follow_to(&path, Some(first_changed_line(&before, &after) as u32));
+                    }
+                }
             }
         }
         self.agents_refresh_marks();

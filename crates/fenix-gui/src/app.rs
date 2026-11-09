@@ -3210,29 +3210,6 @@ fn pane_chrome_height(line_height: f32, has_breadcrumb: bool) -> f32 {
 /// the tail of the previous tab's own text instead of the gap between
 /// tabs, and a click square on the last tab's visible `×` landed `PAD_
 /// LEFT` short of it.
-/// `path` inside `root`, as `src/main.rs`: matched however either was
-/// spelt -- `\\?\`, the drive letter's case, `/` or `\` -- since a root is
-/// kept canonical and a buffer's path as it was opened.
-fn path_within(root: &Path, path: &Path) -> Option<String> {
-    if let Ok(rest) = path.strip_prefix(root) {
-        return Some(rest.to_string_lossy().replace('\\', "/"));
-    }
-    let plain = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('/', "\\");
-    let (root, path) = (plain(root), plain(path));
-    let root = format!("{}\\", root.trim_end_matches('\\'));
-    let inside = path.len() > root.len() && path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
-    inside.then(|| path[root.len()..].replace('\\', "/"))
-}
-
-/// `path` whole, its home folder as `~`: a file outside the project.
-fn home_relative(path: &Path) -> String {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
-    match home.and_then(|h| path_within(&h, path)) {
-        Some(rest) => format!("~/{rest}"),
-        None => path.display().to_string(),
-    }
-}
-
 fn tab_strip_rect(rect: fenix_window::Rect) -> fenix_window::Rect {
     fenix_window::Rect { x: rect.x + text::PAD_LEFT, w: (rect.w - text::PAD_LEFT).max(0.0), ..rect }
 }
@@ -4757,6 +4734,10 @@ pub struct App {
     /// The pane a jump just moved the cursor in (`mark_jump`): its next
     /// scroll centres the cursor when it's out of view.
     jump_view: Option<fenix_window::WindowId>,
+    /// Panes without the focus whose cursor was moved for you (following
+    /// an agent): scrolled to it, centred, on the next frame -- only the
+    /// focused pane follows its cursor by itself.
+    reveal_panes: HashSet<fenix_window::WindowId>,
     /// A terminal buffer that runs one program instead of a shell (a
     /// serial monitor, a debugger console) -- what `spawn_terminal_for`
     /// starts, and restarts, in it.
@@ -5980,6 +5961,7 @@ impl App {
             term_hover: None,
             term_clicks: crate::mouse::ClickCounter::default(),
             jump_view: None,
+            reveal_panes: HashSet::new(),
             terminal_buffer_programs: HashMap::new(),
             terminal_buffers_opened: 0,
             cursor_pos: None,
@@ -9927,7 +9909,7 @@ impl App {
         for &id in ids {
             let Some(ob) = self.buffers.get(id) else { continue };
             let label = if let Some(path) = ob.buffer.path() {
-                self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
+                self.project_root.as_deref().and_then(|r| crate::page::path_within(r, path)).unwrap_or_else(|| crate::page::home_relative(path))
             } else if ob.kind == BufferKind::Dashboard {
                 // Each pane's Home is the one Home: by the workspace's
                 // name, as its tab has it.
@@ -14965,7 +14947,7 @@ impl App {
     /// `path` as a message says it: inside the project from its root
     /// (`src/lib.rs`), else from home (`~/notes.md`).
     fn shown_path(&self, path: &Path) -> String {
-        self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
+        self.project_root.as_deref().and_then(|r| crate::page::path_within(r, path)).unwrap_or_else(|| crate::page::home_relative(path))
     }
 
     /// What happens after a key has been through Vim, whatever it did:
@@ -17304,6 +17286,20 @@ impl App {
             self.pane_state_mut(pane).scroll_line = target;
         }
         self.update_rendered_scroll();
+    }
+
+    /// A pane without the focus scrolled to its cursor, centred when out of
+    /// view, as a jump in the focused pane is.
+    fn reveal_cursor(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId, visible_lines: usize) {
+        let Some(ob) = self.buffers.get(buffer_id) else { return };
+        let document_line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
+        let display = self.pane_display_lines(pane, buffer_id);
+        let line = display.iter().position(|&row| row == document_line).unwrap_or(document_line);
+        let target = scroll_for_cursor(self.pane_state(pane).scroll_line, line, visible_lines, display.len(), true);
+        self.workspaces.active_scroll_anims_mut().remove(&pane);
+        let state = self.pane_state_mut(pane);
+        state.scroll_line = target;
+        state.rendered_scroll = target as f32;
     }
 
     /// Horizontal analog of `ensure_cursor_visible` -- keeps the cursor's
@@ -20178,6 +20174,9 @@ impl App {
                 // The Search page's preview, which never had the focus
                 // long enough to follow its cursor.
                 self.search_reveal(pane, pane_visible_lines);
+            }
+            if !is_focused && self.reveal_panes.remove(&pane) {
+                self.reveal_cursor(pane, buffer_id, pane_visible_lines);
             }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
@@ -30493,8 +30492,8 @@ configure_board stm32
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
                 let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-                assert_eq!(labels[0], home_relative(&b), "outside a project: the whole path, from ~ when under it");
-                assert!(labels.contains(&home_relative(&a).as_str()));
+                assert_eq!(labels[0], crate::page::home_relative(&b), "outside a project: the whole path, from ~ when under it");
+                assert!(labels.contains(&crate::page::home_relative(&a).as_str()));
             }
             _ => panic!("expected picker_switch_buffer to open a SwitchBuffer picker"),
         }
@@ -30518,8 +30517,8 @@ configure_board stm32
     fn picker_switch_buffer_lists_lookalikes_once() {
         // However the root and the file were spelt, a file in the project
         // is by its place in it.
-        assert_eq!(path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
-        assert_eq!(path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
+        assert_eq!(crate::page::path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
+        assert_eq!(crate::page::path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
         let mut homes = App::with_file(None);
         // A second Home, as a session restored with one a pane can have.
         let other = homes.new_home_buffer();
