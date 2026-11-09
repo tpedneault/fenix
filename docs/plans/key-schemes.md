@@ -1,6 +1,8 @@
 # Plan: key schemes -- Vim, and standard keys
 
-- **Status:** draft 2026-11-09, for review
+- **Status:** reviewed 2026-11-09. Leader chord `Ctrl+K`; Super written
+  `s-`; no `:`, `.` or macro keys in standard mode; multiple cursors in
+  standard mode, added with Alt+click
 - **Scope:** a second way to edit in Fenix, for people who want the keys of a
   traditional IDE (no modes, no leader typed as `SPC`), with nothing taken
   away from the Vim and leader experience that stays the default
@@ -52,6 +54,7 @@ Facts the plan builds on (paths in `fenix` unless said otherwise):
 | Shift | `Mods` has ctrl, alt, super (`crates/fenix-keymap/src/key.rs`) | Shift+arrow and Ctrl+Shift+P can't be expressed; the Ctrl+Shift+Z branch reads live modifiers and doesn't replay in macros |
 | Leader | Started by Space in Normal or Visual (`app.rs:16313`) | Unreachable while typing |
 | Editing | `VimState` owns all text keys; `handle_key` makes one undo group per key, and an Insert session coalesces into one step (`fenix-vim/src/state.rs:1007`) | A resting-Insert editor would undo a whole session at once without new break rules |
+| Cursors | One `Cursor { char_idx, sticky_col }` per pane (`crates/fenix-core/src/cursor.rs`). V-BLOCK's `I`/`A` record what's typed and replay it on Esc (`BlockInsert`, `fenix-vim/src/state.rs:294`). Alt-drag selects a block (`app/mouse.rs:286`) | Multiple cursors are new: a cursor set, and edits applied live at each |
 | Mode checks in the GUI | `Mode::Normal` / `is_inserting()`: 18 in `app.rs`, 7 in `app/mouse.rs`, 4 in `tutorial_host.rs`, a few elsewhere | Page behaviours assume Normal mode: compose's "Esc then Enter" (`app.rs:581`), `A` for the agent, `q` on side by side, Enter on Home |
 | Vim-only actions | `K` is `VimAction::RequestLsp(Hover)`; `gd`, `gr` likewise. The right-click menu has its own `MenuAction::{Definition, References, Hover, Cut, Copy, Paste, SelectAll}` (`app/mouse.rs:90`) | Implementations exist; they aren't commands |
 | Page key order | `page_key` (`app.rs:16180`) runs before the global chord block; a `more_keys` page gets Ctrl chords first (`app/pages.rs:798`) | Hex's and Logs' Ctrl+F/B already win on their pages |
@@ -59,7 +62,9 @@ Facts the plan builds on (paths in `fenix` unless said otherwise):
 
 ---
 
-## 2. Decisions to make first (ADR 0004)
+## 2. Decisions (ADR 0004)
+
+§2.2, §2.3, §2.5 and §2.6 were settled in review on 2026-11-09.
 
 ### 2.1 A core setting, with the base chord set in core
 
@@ -98,14 +103,33 @@ own Select mode, so operators, `format_selection`, `SPC c f` and "ask the
 agent about the selection" all keep working. The modeline says `SELECT`, or
 nothing while just typing (§3.4).
 
-### 2.5 What standard mode doesn't do (v1)
+### 2.5 What standard mode doesn't do
 
 - No `:` command line while typing (`:` types a colon). Ex commands stay in
   the palette (`Ctrl+Shift+P`) and in `Ctrl+K :`. `Ctrl+G` goes to a line.
-- No `.` repeat, no macro keys. Recording and playing macros can be commands
-  later.
-- No multiple cursors. That's a separate feature for both schemes.
+- No `.` repeat and no macro keys.
 - No attempt to match any one IDE exactly. The bar: productive on day one.
+
+### 2.6 Multiple cursors, with the usual click
+
+Standard mode has multiple cursors, added and removed the way IDEs do:
+
+| Input | Does |
+|---|---|
+| Alt+click | Add a cursor there; on an existing cursor, remove it |
+| Alt+Shift+drag | A column of cursors, one per line (column selection) |
+| Esc | Back to the one primary cursor |
+| A plain click | One cursor, there |
+
+`editor.multi_cursor_modifier = "alt" | "ctrl"` (default `alt`) is for
+desktops whose window manager takes Alt+click (KDE, some X11 setups). With
+`ctrl`, cursors are Ctrl+click and go to definition moves to Alt+click.
+
+In Vim mode nothing changes: Alt-drag still selects a block and V-BLOCK
+works as it does. The cursor set is built so Vim mode could use it later,
+but that isn't in this plan. Keyboard ways to add cursors (`Ctrl+D` for the
+next occurrence, `Ctrl+Alt+↑/↓`) are a small follow-up on the same cursor
+set, not part of v1.
 
 ---
 
@@ -171,6 +195,40 @@ nothing while just typing (§3.4).
 
 Vim's behaviour under `EditPolicy::Vim` is bit-for-bit what it is today;
 `fenix-vim`'s existing tests run under it unchanged.
+
+### 3.2a Multiple cursors (`fenix-core`, `fenix-vim`, `fenix-gui`)
+
+- **The cursor set.** A pane holds `Cursors { primary: Cursor, extra:
+  Vec<Caret> }`, where a `Caret` is a cursor plus an optional selection
+  anchor. `primary` stays the plain `Cursor` it is today, so code that
+  only knows one cursor (the viewport, LSP requests, the jumplist, session
+  restore, every Vim path) reads it and is unaffected. `extra` is empty
+  except in standard mode.
+- **Edits are applied at every caret, live.** Under `EditPolicy::Standard`,
+  each typed character, Backspace/Delete, Enter (with its auto-indent),
+  paste and movement runs once per caret, from the last in the buffer to
+  the first, so earlier offsets stay valid, inside the one undo group
+  `handle_key` already opens. One undo takes back the keystroke at every
+  caret.
+- **Carets stay sane.** After each key, carets that meet or whose
+  selections overlap merge. Every buffer edit that isn't the carets' own
+  (an LSP edit, an agent's hunk, a format, a reload) maps them the way
+  marks are mapped today, and a caret whose text is deleted collapses to
+  the edit's start.
+- **Clipboard.** Copy/cut with N carets puts N pieces on the clipboard (and
+  in the register), one per line on the system clipboard. Paste with the
+  same N gives each caret its piece; any other count pastes the whole text
+  at every caret.
+- **What stays primary-only:** completion's popup and accepting it (the
+  accepted text is then typed at every caret, as IDEs do), snippets' tab
+  stops, hover, signature help, rename, and every command that isn't
+  plain text editing. A command that would move the primary somewhere else
+  (go to definition, a picker, a search result) first drops the extras.
+- **Drawing.** Extra carets are drawn like the primary, in the caret
+  colour, without the motion glide. The modeline shows `3 cursors` while
+  there is more than one.
+- **The mouse** (`app/mouse.rs`): Alt+click and Alt+Shift+drag in standard
+  mode as §2.6 says. The existing Alt-drag block select stays Vim mode's.
 
 ### 3.3 The GUI's mode checks (`fenix-gui`)
 
@@ -278,6 +336,7 @@ Event::KeySchemeChanged(KeyScheme)
 | M1 | Shift in `Mods`, the notation, `[[keys]]`, the hard-coded chords moved into `default_keymap.toml` | M | none in Vim mode; chords become rebindable |
 | M2 | Vim-only actions as commands: `code.hover`, `code.goto_definition`, `code.references`, `edit.cut`/`copy`/`paste`/`select_all`, `nav.goto_line`, `code.toggle_comment`; the right-click menu runs them | S | none |
 | M3 | `EditPolicy::Standard` in `fenix-vim` (§3.2), with its own unit tests | L | none until switched on |
+| M3b | Multiple cursors (§2.6, §3.2a): the cursor set in `fenix-core`, edits at every caret in `fenix-vim`, drawing, Alt+click and Alt+Shift+drag, `editor.multi_cursor_modifier` | M–L | none until switched on |
 | M4 | The GUI predicates and the places in §3.3; modeline and which-key (§3.4); the leader chord | M | none in Vim mode |
 | M5 | `editor.keys`, live switching, the welcome question, the standard chord set in `default_keymap.toml`, `KEYBINDINGS.md`'s standard section | M | the feature, opt-in |
 | M6 | API 1.5 (§4) and `[[keys]]` in extensions' keymaps | S | none for existing extensions |
@@ -285,7 +344,8 @@ Event::KeySchemeChanged(KeyScheme)
 | M8 | The tutorial (§3.6) | M | standard users get lessons |
 
 M1 and M2 are worth landing whatever happens to the rest. M3 can be written
-next to M1/M2. M5 waits for M3 and M4.
+next to M1/M2. M3b needs M3. M5 waits for M3, M3b and M4: standard mode
+ships with multiple cursors, not after.
 
 ---
 
@@ -319,6 +379,12 @@ convenience:
 - **`fenix-vim`:** the existing suite unchanged under `EditPolicy::Vim`; a
   new suite for `Standard` (selection replace, Shift+motions, clipboard
   line copy, the undo breaks, Esc never leaving Insert).
+- **Multiple cursors:** typing, Backspace, Enter with auto-indent and paste
+  at 2 and 3 carets on the same and different lines; carets merging when
+  they meet; one undo per keystroke across all carets; carets mapped
+  through an outside edit (an LSP `WorkspaceEdit`, an agent's hunk);
+  copy/paste with matching and mismatched counts; Esc back to one;
+  `extra` always empty under `EditPolicy::Vim`.
 - **Keymap:** default `[[keys]]` reproduce today's chords exactly (a table
   test against the old `if/else`); Shift normalization (`A` binds as
   before, `C-S-p` and `S-<Down>` round-trip through `parse_keys` /
@@ -340,15 +406,23 @@ convenience:
 
 - **Undo granularity** is the part users will notice first. The break rules
   in §3.2 are a starting point. Tune them on real use before M5 ships.
-- **`Ctrl+K`.** Fine on every layout we know, but it's a decision for the
-  ADR. Alternatives: `Ctrl+;`, `F1`.
+- **Alt+click and window managers.** KDE and some X11 setups move windows on
+  Alt+drag, so Alt+click never reaches Fenix there. The
+  `editor.multi_cursor_modifier` setting is the answer; the welcome
+  question can mention it on Linux.
+- **Multiple cursors and the rest of the editor.** Everything that holds a
+  position into a buffer (decorations, agents' change ledger, the
+  debugger's lines) already maps through edits. Edits at N carets in one
+  undo group is a new pattern for them. The tests above apply edits at
+  several places and check those positions too.
 - **Ctrl+Alt on Windows** is AltGr on some layouts. Standard chords avoid
   Ctrl+Alt+letter.
 - **Two schemes to keep working.** The ground rules (commands first, the
   predicates, the coverage test) are what keep this cheap. A change that
   needs a scheme check outside §3.3's predicates should be questioned in
   review.
-- **Pressure to grow standard mode** (multi-cursor, IDE-exact behaviour).
-  §2.5 is the line for v1; anything past it is its own plan.
+- **Pressure to grow standard mode** (IDE-exact behaviour, keyboard
+  cursor adding, multiple cursors in Vim mode). §2.5 and §2.6 are the line;
+  anything past them is its own plan.
 - **Docs drift.** `KEYBINDINGS.md` gets a standard column only for what
   differs, not a second copy of the whole file.
