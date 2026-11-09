@@ -56,7 +56,8 @@ extension's keys come with it.
 | `Esc`, a plain click | Back to one cursor |
 
 Typing, deleting, `Enter`, `Tab`, the arrows and Shift with them happen at
-every cursor, as one undo step. `Ctrl+V` pastes a line at each cursor when
+every cursor, as one undo step; `Ctrl+Z` and `Ctrl+Y` put the cursors back
+as they were. `Ctrl+V` pastes a line at each cursor when
 the clipboard has as many lines as there are cursors. Any other key, or an
 edit made elsewhere (a language server's, an agent's), goes back to one.
 `editor.multi_cursor_modifier = "ctrl"` makes it `Ctrl`+click, for

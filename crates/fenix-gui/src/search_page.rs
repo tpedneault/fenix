@@ -596,24 +596,38 @@ pub fn layout(page: &SearchPage, cols: usize, height: Option<usize>) -> Page {
         // An input box, outlined in the accent while it's being typed in.
         g.card(line..line + 1, x.saturating_sub(1)..x + room + 1, if editing { CardLook::FieldFocused } else { CardLook::Field });
     };
-    let room = width.saturating_sub(label_w + toggles_w + 2);
+    // Too narrow for the toggles beside a usable field (a split pane):
+    // the field takes the width, the toggles a line under it.
+    let narrow = width < label_w + toggles_w + 2 + 20;
+    let room = if narrow { width.saturating_sub(label_w + 1) } else { width.saturating_sub(label_w + toggles_w + 2) };
     field(&mut g, line, "Search", &page.query, page.editing == Some(Field::Query), "what to look for", room);
-    let mut x = left + label_w + room + 2;
+    if narrow {
+        line += 1;
+    }
+    let mut x = if narrow { left + label_w } else { left + label_w + room + 2 };
     for (text, on) in &toggles {
         x = g.toggle(line, x, text, *on) + 1;
     }
     line += 1;
     if page.replace_open {
         field(&mut g, line, "Replace", &page.replace, page.editing == Some(Field::Replace), "what it becomes", room);
-        let x = left + label_w + room + 2;
+        if narrow {
+            line += 1;
+        }
+        let x = if narrow { left + label_w } else { left + label_w + room + 2 };
         g.toggle(line, x, "AB→", page.preserve_case);
         line += 1;
     }
     // The scope and the files.
     g.put(line, left, "in", Role::Muted);
     let mut x = left + label_w;
-    // The scope as chips, the one searched in on.
+    // The scope as chips, the one searched in on -- wrapping under each
+    // other when the page is narrow.
     for &scope in &page.scopes {
+        if x > left + label_w && x + scope.label().chars().count() + 3 > left + width {
+            line += 1;
+            x = left + label_w;
+        }
         x = g.toggle(line, x, scope.label(), scope == page.scope()) + 1;
     }
     x += 1;
@@ -914,6 +928,18 @@ mod tests {
         assert!(laid.chips.iter().any(|(_, _, c)| *c == Chip::Status(Role::Accent)), "a match on a chip");
         assert!(text.contains("7 let v = helper();"), "indentation trimmed, numbered:\n{text}");
         assert!(text.lines().last().unwrap().contains("Enter open"));
+    }
+
+    #[test]
+    fn a_narrow_page_puts_the_toggles_under_the_field_and_wraps_the_scopes() {
+        let p = page();
+        let text = layout(&p, 36, Some(30)).text;
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(!lines[0].contains("Aa") && lines[1].contains("Aa"), "the toggles a line under:\n{text}");
+        assert!(lines.iter().all(|l| l.chars().count() <= 36), "nothing past the edge:\n{text}");
+        assert!(text.contains("open files"), "{text}");
+        let wide = layout(&p, 100, Some(30)).text;
+        assert!(wide.lines().next().unwrap().contains("Aa"), "beside it when there's room:\n{wide}");
     }
 
     #[test]

@@ -23,8 +23,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keys, and ADR 0004.
 - More cursors, with standard keys: Alt+click adds one (or takes it away),
   Alt+Shift+drag makes a column; typing, deleting, Enter, Tab, the arrows
-  and pasting happen at each, as one undo step
-  (`editor.multi_cursor_modifier = "ctrl"` for Ctrl+click instead).
+  and pasting happen at each, as one undo step, and undo and redo bring
+  the cursors back (`editor.multi_cursor_modifier = "ctrl"` for Ctrl+click
+  instead).
 - Chords are keymap data: `[[keys]]` in `keybindings.toml` and in
   extensions' keymaps binds or unbinds a key with its modifiers (`C-s`,
   `C-S-p`, `F12`) for a key scheme and a place; Ctrl+S, Ctrl+Z and the
@@ -50,8 +51,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The refactor preview (a rename, a code action) shows each change as its
   own hunk, files named from the project root; `code.undo_refactor`
   (`SPC c R`) undoes a refactor with either keys.
-- Rename (`F2`, `SPC c r`) starts from the whole name under the cursor;
-  Ctrl+Backspace deletes a word in one-line prompts.
+- Rename (`F2`, `SPC c r`) starts from the whole name under the cursor --
+  selected, with standard keys, so typing replaces it; Ctrl+Backspace
+  deletes a word in one-line prompts.
+- A snippet's previous field is Shift+Tab (and Ctrl+K with Vim keys: with
+  standard keys Ctrl+K stays the leader).
+- The Search page fits a narrow pane: its toggles go under the field and
+  its scopes wrap.
 - Find references says how many there are and the key for the next.
 - The keys page is a buffer of its own, with no file behind it.
 
@@ -90,6 +96,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   pane beside it.
 - Save and delete messages named files by their whole path, the question
   cut off at the prompt's edge.
+- With standard keys, the debugger's drawer, the agents' dock titles, the
+  Git and review popups, notification cards and the modeline's Git
+  operation said Vim's keys (`SPC u e`, `K`, `]h`).
 
 ## [1.4.0] - 2026-11-08
 

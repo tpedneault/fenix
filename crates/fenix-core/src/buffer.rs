@@ -47,7 +47,12 @@ enum PendingKind {
 /// edit a single command makes (a visual `r`, a block delete, a comment
 /// toggle across lines, ...) into one step, so `u` reverts the whole
 /// command rather than one character or line of it.
-type UndoStep = Vec<Edit>;
+struct UndoStep {
+    edits: Vec<Edit>,
+    /// What the host tagged it with (`tag_last_undo_step`), 0 for none: a
+    /// way to know the step again when it's undone or redone.
+    tag: u64,
+}
 
 /// An open `begin_undo_group`.
 struct UndoGroup {
@@ -670,7 +675,34 @@ impl Buffer {
     }
 
     fn push_undo(&mut self, edit: Edit) {
-        self.undo_stack.push(vec![edit]);
+        self.undo_stack.push(UndoStep { edits: vec![edit], tag: 0 });
+    }
+
+    /// Tags the newest undo step (none pending) with `tag`, so the host
+    /// knows it again when `undo_tag` or `redo_tag` names it: what the
+    /// cursors were around it, say. Returns whether there was a step.
+    pub fn tag_last_undo_step(&mut self, tag: u64) -> bool {
+        self.flush_pending();
+        match self.undo_stack.last_mut() {
+            Some(step) => {
+                step.tag = tag;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The tag of the step `undo` would take back now (0 for none).
+    pub fn undo_tag(&self) -> u64 {
+        if self.pending.is_some() {
+            return 0;
+        }
+        self.undo_stack.last().map_or(0, |s| s.tag)
+    }
+
+    /// The tag of the step `redo` would put back now (0 for none).
+    pub fn redo_tag(&self) -> u64 {
+        self.redo_stack.last().map_or(0, |s| s.tag)
     }
 
     /// Starts folding every edit made until the matching `end_undo_group`
@@ -701,8 +733,8 @@ impl Buffer {
         let start = group.start;
         self.undo_group = None;
         if self.undo_stack.len() > start + 1 {
-            let merged: UndoStep = self.undo_stack.drain(start..).flatten().collect();
-            self.undo_stack.push(merged);
+            let edits: Vec<Edit> = self.undo_stack.drain(start..).flat_map(|step| step.edits).collect();
+            self.undo_stack.push(UndoStep { edits, tag: 0 });
         }
     }
 
@@ -744,10 +776,10 @@ impl Buffer {
     pub fn undo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
         let Some(step) = self.undo_stack.pop() else { return false };
-        for edit in step.iter().rev() {
+        for edit in step.edits.iter().rev() {
             self.apply_inverse(edit);
         }
-        if let Some(first) = step.first() {
+        if let Some(first) = step.edits.first() {
             *cursor = first.cursor_before;
         }
         self.dirty = true;
@@ -762,10 +794,10 @@ impl Buffer {
     pub fn redo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
         let Some(step) = self.redo_stack.pop() else { return false };
-        for edit in &step {
+        for edit in &step.edits {
             self.apply_forward(edit);
         }
-        if let Some(last) = step.last() {
+        if let Some(last) = step.edits.last() {
             *cursor = last.cursor_after;
         }
         self.dirty = true;
@@ -1146,7 +1178,21 @@ bbb");
     }
 
     #[test]
-    fn editing_after_undo_clears_the_redo_stack() {
+    fn a_tagged_step_is_known_again_by_undo_and_redo() {
+        let mut b = Buffer::from_text("");
+        let mut c = Cursor::at_start();
+        b.insert_char(&mut c, 'a');
+        assert_eq!(b.undo_tag(), 0, "a pending run has no tag yet");
+        assert!(b.tag_last_undo_step(7));
+        assert_eq!(b.undo_tag(), 7);
+        b.undo(&mut c);
+        assert_eq!((b.undo_tag(), b.redo_tag()), (0, 7));
+        b.redo(&mut c);
+        assert_eq!(b.undo_tag(), 7);
+    }
+
+    #[test]
+        fn editing_after_undo_clears_the_redo_stack() {
         let mut buf = buffer_with("");
         let mut cur = Cursor::at_start();
         buf.insert_char(&mut cur, 'a');

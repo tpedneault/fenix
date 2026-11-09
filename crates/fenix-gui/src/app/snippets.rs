@@ -161,7 +161,9 @@ impl App {
         }
         let next =
             key == KeyPress::named(FenixNamedKey::Tab) || key == KeyPress::char('j').with_ctrl();
-        let previous = key == KeyPress::char('k').with_ctrl();
+        // Shift+Tab goes back, as everywhere; Ctrl+K too with Vim keys
+        // (with standard keys it's the leader).
+        let previous = key == KeyPress::named(FenixNamedKey::Tab).with_shift() || (key == KeyPress::char('k').with_ctrl() && !self.standard_keys());
         if let Some(mut active) = self.snippet.take() {
             self.completion = None;
             if next || previous {
@@ -256,10 +258,8 @@ impl App {
             },
         );
         if catalog.errors.is_empty() {
-            self.set_message(format!(
-                "{} — Tab: next field, Ctrl-K: previous, Esc: finish",
-                snippet.name
-            ));
+            let back = if self.standard_keys() { "Shift+Tab" } else { "Ctrl+K" };
+            self.set_message(format!("{} — Tab: next field, {back}: previous, Esc: finish", snippet.name));
         }
         true
     }

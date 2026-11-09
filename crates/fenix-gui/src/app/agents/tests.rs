@@ -1457,7 +1457,7 @@ fn a_pipelines_gate_takes_another_round() {
     assert_eq!(f.app.vim.mode(), Mode::Insert);
     assert!(!f.app.agents_composer_key(KeyPress::char('y')));
     assert!(at_gate(&f.app));
-    assert!(f.app.pane_titles.values().any(|t| t.contains("Ctrl-Enter sends another round")));
+    assert!(f.app.pane_titles.values().any(|t| t.contains("Ctrl+Enter sends another round")));
     // Another round: the question goes, and comes back at its end.
     f.type_prompt("second");
     assert!(!at_gate(&f.app) || f.view().is_working(), "taken back as it goes");

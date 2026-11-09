@@ -409,8 +409,8 @@ impl CommandRegistry {
         registry.register("notifications.act", "Do what the newest notification offers (its first action)", |ctx| ctx.app.notifications_act_newest());
         registry.external("notifications.do_not_disturb", "Do not disturb, on or off: only critical notifications show", |app| app.notifications_toggle_dnd());
         registry.external("notifications.test", "Show one notification of each kind, to see how they look", |app| app.notifications_test());
-        registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl-O)", cmd_jump_back);
-        registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl-I)", cmd_jump_forward);
+        registry.register("nav.jump_back", "Jump to the previous position in the jumplist (Ctrl+O)", cmd_jump_back);
+        registry.register("nav.jump_forward", "Jump to the next position in the jumplist (Ctrl+I)", cmd_jump_forward);
         registry.register("view.increase_font_size", "Increase the body text size", cmd_increase_font_size);
         registry.register("view.decrease_font_size", "Decrease the body text size", cmd_decrease_font_size);
         registry.register("view.reset_font_size", "Reset the body text size to the default", cmd_reset_font_size);

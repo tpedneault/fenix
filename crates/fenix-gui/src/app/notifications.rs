@@ -173,7 +173,7 @@ impl App {
                 hint.push(format!("+{} more", note.actions.len() - 1));
             }
             if Some(note.id) == newest && slot == 0 {
-                hint.push(if note.actions.is_empty() { "SPC o x dismiss".into() } else { "SPC o . · SPC o x".into() });
+                hint.push(self.keys_text(if note.actions.is_empty() { "SPC o x dismiss" } else { "SPC o . · SPC o x" }));
             }
             if slot + 1 == visible.len() && waiting > 0 {
                 hint.push(format!("{waiting} more waiting"));

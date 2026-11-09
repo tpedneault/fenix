@@ -202,7 +202,7 @@ fn the_tab_strip_s_split_button_splits_its_pane() {
 }
 
 /// The phrases only Vim keys mean, as hints write them.
-const VIM_PHRASES: &[&str] = &["Esc then Enter", "Esc and Enter", "q discards", "(i to insert)", "Normal mode sends", ":w!", ":e!", ":wq", ":q!", ":w <path>", ":w to save", ":w keeps", ":w and", "K on a name", "K is the hover", "Esc then A"];
+const VIM_PHRASES: &[&str] = &["]h next", "]a next", ", ]a)", "Esc then Enter", "Esc and Enter", "q discards", "(i to insert)", "Normal mode sends", ":w!", ":e!", ":wq", ":q!", ":w <path>", ":w to save", ":w keeps", ":w and", "K on a name", "K is the hover", "Esc then A"];
 
 /// Every string literal in fenix-gui's source holding one of them.
 fn literals_with_vim_phrases() -> Vec<(String, String)> {
@@ -327,12 +327,27 @@ fn moving_the_cursor_after_a_word_does_not_open_completion() {
 fn ctrl_backspace_deletes_a_word_in_a_prompt() {
     let (mut app, _f) = standard_on("old_name.txt", "x\n");
     app.run_cmd("file.rename");
-    let before = app.rename_file_prompt.clone().unwrap();
+    app.press("End");
     app.type_text("_v2");
+    assert_eq!(app.rename_file_prompt.as_deref(), Some("old_name.txt_v2"), "an arrow keeps the name to change");
     app.press("C-Backspace");
-    assert_eq!(app.rename_file_prompt.as_deref(), Some(before.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_')), "from {before}");
+    assert_eq!(app.rename_file_prompt.as_deref(), Some("old_name."));
     app.press("Esc");
     assert!(app.rename_file_prompt.is_none());
+}
+
+#[test]
+fn a_rename_prompt_s_prefilled_name_is_selected_and_typing_replaces_it() {
+    let (mut app, _f) = standard_on("old_name.txt", "x\n");
+    app.run_cmd("file.rename");
+    assert_eq!(app.prompt_selection(), Some(11..23), "`old_name.txt` after `rename to: `");
+    app.type_text("new.txt");
+    assert_eq!(app.rename_file_prompt.as_deref(), Some("new.txt"));
+    assert_eq!(app.prompt_selection(), None);
+    app.press("Esc");
+    app.run_cmd("file.rename");
+    app.press("Backspace");
+    assert_eq!(app.rename_file_prompt.as_deref(), Some(""), "Backspace clears the selected name");
 }
 
 #[test]
@@ -348,4 +363,28 @@ fn references_say_how_many_and_the_key_for_the_next() {
     assert!(app.search.quickfix_page.is_none(), "the Search page no longer follows the list");
     app.press("F3");
     assert_eq!(app.line_col(), (1, 9));
+}
+
+#[test]
+fn a_snippet_s_fields_go_back_with_shift_tab_and_ctrl_k_stays_the_leader() {
+    let (mut app, _f) = standard_on("a.tcl", "proc");
+    app.press("C-End");
+    app.press("Tab");
+    assert!(app.text().starts_with("proc name {args}"), "{:?}", app.text());
+    app.type_text("greet");
+    app.press("Tab");
+    app.type_text("x");
+    app.press("S-Tab");
+    app.type_text("f");
+    assert!(app.text().starts_with("proc f {x}"), "{:?}", app.text());
+    app.press("C-k");
+    assert!(app.leader_matcher.is_pending(), "Ctrl+K opens the leader mid-snippet");
+}
+
+#[test]
+fn hover_and_review_hints_say_the_leader_s_chord() {
+    let (app, _f) = standard_on("a.txt", "");
+    assert_eq!(app.keys_text("SPC a y keep · SPC a x reject · ]a next"), "C-k a y keep · C-k a x reject · C-k ] a next");
+    assert_eq!(app.keys_text("SPC g a stage · SPC g d discard · ]h next"), "C-k g a stage · C-k g d discard · M-F5 next");
+    assert_eq!(app.keys_text("   ✓ agent changes: 2 files to review (SPC a r, ]a)"), "   ✓ agent changes: 2 files to review (C-k a r, C-k ] a)");
 }

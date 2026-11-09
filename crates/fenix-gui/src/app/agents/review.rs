@@ -483,6 +483,7 @@ impl App {
             text.push_str(&format!("+ {line}\n"));
         }
         text.push_str("\nSPC a y keep · SPC a x reject · ]a next");
+        let text = self.keys_text(&text);
         self.lsp_hover = Some(text);
         self.wake_caret();
     }

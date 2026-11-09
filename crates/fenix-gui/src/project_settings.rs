@@ -163,7 +163,7 @@ impl Settings {
                         let start = (!text.trim().is_empty()).then(|| self.root.join(text.trim()));
                         return Action::Browse { start, folder: *field == Field::Cwd };
                     }
-                    _ => self.note = Some("Ctrl-O browses for the program or the cwd".to_string()),
+                    _ => self.note = Some("Ctrl+O browses for the program or the cwd".to_string()),
                 },
                 _ => {
                     let mut at = self.caret.unwrap_or(text.chars().count());

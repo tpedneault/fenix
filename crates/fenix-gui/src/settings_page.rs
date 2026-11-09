@@ -787,7 +787,7 @@ impl SettingsPage {
                     }
                 };
                 let Some(folder) = kind.and_then(|k| path_field(k, at)) else {
-                    self.note = Some(("Ctrl-O browses for a path -- this field isn't one".into(), true));
+                    self.note = Some(("Ctrl+O browses for a path -- this field isn't one".into(), true));
                     return Action::None;
                 };
                 if let Some(Edit::Entry { at: now, .. }) = &mut self.edit {
@@ -1204,7 +1204,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
                 rows.push(Vec::new());
                 rows.push(line);
             }
-            let browse = if path_field(&s.kind, *at).is_some() { " · Ctrl-O browse" } else { "" };
+            let browse = if path_field(&s.kind, *at).is_some() { " · C-o browse" } else { "" };
             let pick = if choices.is_empty() { "" } else { " · ← → choose" };
             rows.push(vec![(format!("Tab next field{pick} · Enter saves · Esc cancels{browse}"), Role::Muted)]);
             g.popup = Some(Popup { line, col: vx, rows });
@@ -1220,7 +1220,7 @@ pub fn layout(page: &SettingsPage, cols: usize) -> Page {
     } else if let Some(Edit::Inline { key, .. }) = &page.edit {
         let mut keys = vec![("Enter", "keep"), ("Esc", "put it back")];
         if fenix_config::setting(key).is_some_and(|s| s.kind == Kind::Path) {
-            keys.push(("Ctrl-O", "browse"));
+            keys.push(("C-o", "browse"));
         }
         keys
     } else if let Some(Edit::Entry { key, at, .. }) = &page.edit {
