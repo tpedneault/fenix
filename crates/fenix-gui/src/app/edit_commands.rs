@@ -186,6 +186,11 @@ impl App {
 
     /// `edit.copy`: the selection to the clipboard, or the cursor's line.
     pub(crate) fn cmd_copy(&mut self) {
+        if let Some(text) = self.copy_every_caret() {
+            self.vim.set_register(text, false);
+            self.push_clipboard_after_edit();
+            return;
+        }
         if let Some((range, text, linewise)) = self.selection() {
             self.vim.set_register(text, linewise);
             self.push_clipboard_after_edit();
@@ -242,6 +247,9 @@ impl App {
             return;
         }
         let Some(text) = text else { return };
+        if self.paste_at_every_caret(&text) {
+            return;
+        }
         if let Some((range, _, _)) = self.selection() {
             self.delete_selected(range);
         }

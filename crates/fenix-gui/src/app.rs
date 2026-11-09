@@ -50,6 +50,7 @@ mod polish;
 mod which_key;
 mod keys_host;
 mod edit_commands;
+mod carets;
 #[cfg(test)]
 mod test_keys;
 #[cfg(test)]
@@ -4945,6 +4946,8 @@ pub struct App {
     goto_line_prompt: Option<String>,
     /// When the last key came: standard keys' undo pause.
     last_key_at: Option<Instant>,
+    /// Each pane's extra carets (standard keys' more cursors).
+    carets: carets::PaneCarets,
     /// The switcher `buffer.switch_recent` (Ctrl+Tab) opened is up: letting
     /// go of Ctrl picks its row.
     switching_recent: bool,
@@ -6118,6 +6121,7 @@ impl App {
             workspace_rename_prompt: None,
             goto_line_prompt: None,
             last_key_at: None,
+            carets: Default::default(),
             switching_recent: false,
             delete_file_confirm: false,
             vim,
@@ -16318,6 +16322,10 @@ impl App {
         // modifiers, so a replay runs the same chord.
         let in_leader = self.local_matcher.is_some() || self.leader_matcher.is_pending();
         if let Some(id) = self.chord_command(full).filter(|_| !in_leader) {
+            // Only the clipboard's own work at every caret.
+            if !matches!(id, "edit.copy" | "edit.paste") {
+                self.clear_carets();
+            }
             self.run_command_with(event_loop, id);
             self.wake_caret();
             return;
@@ -16793,6 +16801,11 @@ impl App {
             return;
         }
 
+        // More than one caret: the key at each.
+        if self.multi_caret_key(full) {
+            self.wake_caret();
+            return;
+        }
         self.pull_clipboard_before_paste(keypress);
         let id = self.focused_buffer_id();
         let pane = self.focused_pane_id();
@@ -17482,6 +17495,7 @@ impl App {
         // indicator`.
         let recording_indicator =
             match self.vim.recording_register() {
+                _ if !self.extra_carets().is_empty() => format!("   {} cursors", self.extra_carets().len() + 1),
                 Some(reg) => format!("   recording @{reg}"),
                 None => String::new(),
             };
@@ -19691,6 +19705,8 @@ impl App {
             selection_segments: Segments,
             pulse_overlay: Option<(Segments, f32)>,
             bracket_match_segments: Segments,
+            /// Standard keys' extra cursors: (row, visual column) each.
+            extra_carets: Vec<(usize, usize)>,
             hlsearch_segments: Segments,
             caret: Option<(usize, usize)>,
             content_frac: f32,
@@ -19896,6 +19912,7 @@ impl App {
                     pulse_overlay: None,
                     bracket_match_segments: Segments::new(),
                     hlsearch_segments: Segments::new(),
+                    extra_carets: Vec::new(),
                     caret,
                     content_frac: 0.0,
                     gutter_px: 0.0,
@@ -19949,6 +19966,7 @@ impl App {
                         selection_segments: Segments::new(),
                         pulse_overlay: None,
                         bracket_match_segments: Segments::new(),
+                        extra_carets: Vec::new(),
                         hlsearch_segments: Segments::new(),
                         caret: None,
                         content_frac: 0.0,
@@ -20160,9 +20178,27 @@ impl App {
             let remap_segments = |segments: Segments| -> Segments {
                 segments.into_iter().map(|(row, s, e)| (row, remap_col(row, s), remap_col(row, e))).collect()
             };
+            // Standard keys' extra cursors, and their selections.
+            let (extra_carets, extra_selections): (Vec<(usize, usize)>, Segments) = if is_focused && !folds_active {
+                let buffer = &self.open().buffer;
+                let mut segs = Segments::new();
+                let mut carets = Vec::new();
+                for c in self.extra_carets() {
+                    let (l, col) = buffer.line_col(&Cursor { char_idx: c.at, sticky_col: 0 });
+                    if let Some(row) = l.checked_sub(render_base_line).filter(|&r| r <= pane_visible_lines) {
+                        carets.push((row, remap_col(row, col)));
+                    }
+                    if let Some(a) = c.anchor {
+                        segs.extend(remap_segments(self.range_to_segments(a.min(c.at)..a.max(c.at), pane_visible_lines + 1)));
+                    }
+                }
+                (carets, segs)
+            } else {
+                (Vec::new(), Segments::new())
+            };
             let (selection_segments, pulse_overlay, bracket_match_segments, hlsearch_segments, caret) = if is_focused && !folds_active {
                 (
-                    remap_segments(self.visual_selection_segments(pane_visible_lines + 1)),
+                    remap_segments(self.visual_selection_segments(pane_visible_lines + 1)).into_iter().chain(extra_selections).collect(),
                     self.pulse_overlay(pane_visible_lines + 1).map(|(segs, a)| (remap_segments(segs), a)),
                     remap_segments(self.bracket_match_segments(pane_visible_lines + 1)),
                     remap_segments(self.hlsearch_segments(pane_visible_lines + 1)),
@@ -20361,6 +20397,7 @@ impl App {
                 pulse_overlay,
                 bracket_match_segments,
                 hlsearch_segments,
+                extra_carets,
                 caret: if is_dashboard || (is_focused && main_view == MainView::Picker) { None } else { caret },
                 content_frac: render_frac,
                 gutter_px,
@@ -21340,6 +21377,11 @@ impl App {
                     // just marking its position.
                     let (width, block_alpha) = if caret_is_block { (char_width, 0.6) } else { (2.0, 1.0) };
                     caret_rect.push_rect(gpu, caret_x, caret_y, width, line_height, [r, g, b, a * caret_alpha * block_alpha]);
+                    // The extra cursors, where they are (no glide).
+                    for &(row, col) in &focused.extra_carets {
+                        let (x, y) = caret_pixel_pos(focused.rect, row, col, focused.gutter_px, focused.content_frac, char_width, line_height);
+                        caret_rect.push_rect(gpu, x, y, width, line_height, [r, g, b, a * caret_alpha * block_alpha]);
+                    }
                 }
             }
         }

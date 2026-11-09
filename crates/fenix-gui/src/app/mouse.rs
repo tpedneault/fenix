@@ -42,6 +42,9 @@ pub(super) struct MouseState {
     pub(super) hover: Option<MouseHover>,
     /// When a drag past the pane's edge last scrolled it.
     scrolled_at: Option<Instant>,
+    /// Alt+Shift held down in a pane's text (standard keys): the pane and
+    /// the line a column of cursors starts on.
+    column: Option<(fenix_window::WindowId, usize)>,
 }
 
 /// A selection the mouse is making in `pane`.
@@ -265,6 +268,39 @@ impl App {
         self.completion = None;
         self.close_mouse_hover();
         let cursor = self.pane_state(pane).cursor;
+        // Standard keys: Alt+click (or Ctrl+click) adds a cursor, Alt+Shift
+        // starts a column of them, and the other one goes to a definition.
+        if self.standard_keys() && clicks == 1 {
+            let ctrl = self.modifiers.control_key();
+            let by_ctrl = self.config.text_value("editor.multi_cursor_modifier") == Some("ctrl");
+            let (adds, defines) = if by_ctrl { (ctrl, alt) } else { (alt, ctrl) };
+            let at = self.hit_char(&hit);
+            if alt && shift {
+                if self.vim.mode() == Mode::Visual {
+                    self.vim.exit_visual_mode(&cursor);
+                }
+                self.mouse.column = Some((pane, hit.line));
+                self.column_carets(hit.line, hit.line, hit.col);
+                return true;
+            }
+            if adds && !shift {
+                if self.vim.mode() == Mode::Visual {
+                    self.vim.exit_visual_mode(&cursor);
+                }
+                self.toggle_caret_at(at);
+                return true;
+            }
+            if defines && !shift {
+                self.clear_carets();
+                self.put_cursor(pane, at);
+                self.request_goto_definition();
+                return true;
+            }
+        }
+        // A plain click: back to one cursor.
+        if !shift {
+            self.clear_carets();
+        }
         if shift && clicks == 1 {
             let (kind, anchor) = if self.vim.mode() == Mode::Visual { (self.vim.visual_kind(), self.vim.visual_anchor()) } else { (VisualKind::Char, cursor.char_idx) };
             self.mouse_leave_insert();
@@ -327,6 +363,16 @@ impl App {
             }
             return;
         }
+        if let Some((pane, from_line)) = self.mouse.column {
+            let geometry = self.geometry_at(window_width, window_height);
+            if let Some(&(_, rect)) = geometry.panes.iter().find(|(p, _)| *p == pane) {
+                if let Some(hit) = self.text_hit(pane, rect, pos) {
+                    self.column_carets(from_line, hit.line, hit.col);
+                    self.wake_caret();
+                }
+            }
+            return;
+        }
         let Some(mut drag) = self.mouse.drag else { return };
         let geometry = self.geometry_at(window_width, window_height);
         let Some(&(_, rect)) = geometry.panes.iter().find(|(p, _)| *p == drag.pane) else {
@@ -373,6 +419,7 @@ impl App {
 
     /// The left button let go.
     pub(super) fn mouse_release(&mut self) {
+        self.mouse.column = None;
         // Standard keys: typing where a click put you in a file, browsing
         // where it put you in a listing.
         self.settle_keys();
@@ -1295,4 +1342,74 @@ mod tests {
         let text: Vec<&str> = spans.iter().map(|(s, _, _)| s.as_str()).filter(|s| *s != "\n").collect();
         assert_eq!(text, ["expected `;`", "fn main()"]);
     }
+
+    fn standard(app: &mut App) {
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+    }
+
+    #[test]
+    fn standard_keys_alt_click_adds_a_cursor_and_a_plain_click_goes_back_to_one() {
+        let mut app = app_with("ab\ncd\nef");
+        standard(&mut app);
+        app.modifiers = ModifiersState::ALT;
+        let at_pos = at(&app, 1, 1);
+        click(&mut app, at_pos);
+        assert_eq!(app.extra_carets().len(), 1);
+        assert_eq!(cursor_at(&app), (0, 0), "the primary stays");
+        app.modifiers = ModifiersState::empty();
+        app.type_text("x");
+        assert_eq!(app.text(), "xab\ncxd\nef");
+        let at_pos = at(&app, 2, 0);
+        click(&mut app, at_pos);
+        assert!(app.extra_carets().is_empty());
+        assert_eq!(app.vim.mode(), Mode::Insert, "a click keeps typing");
+    }
+
+    #[test]
+    fn standard_keys_alt_shift_drag_makes_a_column_of_cursors() {
+        let mut app = app_with("abcd\nefgh\nijkl");
+        standard(&mut app);
+        app.modifiers = ModifiersState::ALT | ModifiersState::SHIFT;
+        let at_pos = at(&app, 0, 2);
+        app.handle_click_at(at_pos, W, H);
+        let at_pos = at(&app, 2, 2);
+        app.mouse_drag_to(at_pos, W, H);
+        app.mouse_release();
+        assert_eq!(app.extra_carets().len(), 2);
+        app.modifiers = ModifiersState::empty();
+        app.type_text("|");
+        assert_eq!(app.text(), "ab|cd\nef|gh\nij|kl");
+    }
+
+    #[test]
+    fn standard_keys_ctrl_as_the_modifier_moves_definition_to_alt() {
+        let mut app = app_with("ab\ncd");
+        standard(&mut app);
+        app.config.set_value("editor.multi_cursor_modifier", Some(fenix_config::Value::Text("ctrl".into())));
+        app.modifiers = ModifiersState::CONTROL;
+        let at_pos = at(&app, 1, 1);
+        click(&mut app, at_pos);
+        assert_eq!(app.extra_carets().len(), 1, "Ctrl+click adds a cursor");
+        app.modifiers = ModifiersState::ALT;
+        let at_pos = at(&app, 1, 0);
+        click(&mut app, at_pos);
+        assert!(app.extra_carets().is_empty(), "Alt+click goes to a definition, with one cursor");
+        assert_eq!(cursor_at(&app), (1, 0));
+    }
+
+    #[test]
+    fn standard_keys_drag_selects_between_the_press_and_the_pointer() {
+        let mut app = app_with("hello world");
+        standard(&mut app);
+        let at_pos = at(&app, 0, 0);
+        app.handle_click_at(at_pos, W, H);
+        let at_pos = at(&app, 0, 5);
+        app.mouse_drag_to(at_pos, W, H);
+        app.mouse_release();
+        assert_eq!(selection(&app).as_deref(), Some("hello"), "the pointer's character isn't in it");
+        app.type_text("bye");
+        assert_eq!(app.text(), "bye world");
+    }
+
 }
