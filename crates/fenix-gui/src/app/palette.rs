@@ -207,6 +207,8 @@ pub(super) fn area_icon(name: &str) -> Option<char> {
         "history" | "log" => icon::HISTORY,
         "diff" | "compare" => icon::DIFF,
         "home" => icon::HOME,
+        "next" => icon::NEXT,
+        "previous" => icon::PREVIOUS,
         _ => return None,
     };
     Some(icon)

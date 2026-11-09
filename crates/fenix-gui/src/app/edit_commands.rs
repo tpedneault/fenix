@@ -374,7 +374,8 @@ impl App {
         let next = if self.standard_keys() { "vim" } else { "standard" };
         match self.set_setting("editor.keys", Some(fenix_config::Value::Text(next.to_string()))) {
             Ok(()) => {
-                let lead = if next == "standard" { format!("Standard keys -- {} opens the leader's menu, SPC t k (as {} t k) switches back", self.leader_chord_text(), self.leader_chord_text()) } else { "Vim keys -- SPC opens the leader's menu, SPC t k switches back".to_string() };
+                // Said with the scheme's own keys (`set_message`).
+                let lead = if next == "standard" { "Standard keys -- SPC opens the leader's menu, SPC t k switches back" } else { "Vim keys -- SPC opens the leader's menu, SPC t k switches back" };
                 self.set_message(lead);
             }
             Err(e) => self.set_error(e),

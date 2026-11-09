@@ -997,16 +997,20 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         let x = g.put(welcome_top - 1, x, "t", Role::Accent);
         g.put(welcome_top - 1, x, " starts the tutorial, a lesson at a time (SPC h T later).", Role::Text);
         // How you edit: asked once, here; SPC t k switches later.
+        // Each answer on a line of its own, so a narrow pane cuts neither.
         let standard = page.keys == "standard";
-        let x = g.put(welcome_top, left, "How do you like to edit?  ", Role::Text);
-        let x = g.chip(welcome_top, x, " v ", Role::Accent, if standard { Chip::Key } else { Chip::Chosen });
-        let x = g.put(welcome_top, x + 1, &fit("Vim keys: modes, SPC for the rest   ", width.saturating_sub(x + 1 - left)), if standard { Role::Muted } else { Role::Text });
-        let x = g.chip(welcome_top, x, " s ", Role::Accent, if standard { Chip::Chosen } else { Chip::Key });
-        g.put(welcome_top, x + 1, &fit("Standard keys: an IDE's, Ctrl+K for the rest", width.saturating_sub(x + 1 - left)), if standard { Role::Text } else { Role::Muted });
+        g.put(welcome_top, left, "How do you like to edit?", Role::Text);
+        for (key, what, on) in [(" v ", "Vim keys: modes, and Space for the rest", !standard), (" s ", "Standard keys: an IDE's, and Ctrl+K for the rest", standard)] {
+            welcome_top += 1;
+            let x = g.chip(welcome_top, left + 2, key, Role::Accent, if on { Chip::Chosen } else { Chip::Key });
+            g.put(welcome_top, x + 1, &fit(what, width.saturating_sub(x + 1 - left)), if on { Role::Text } else { Role::Muted });
+        }
         welcome_top += 1;
         if standard && cfg!(target_os = "linux") {
-            g.put(welcome_top, left, &fit("Alt+click adds a cursor; if your desktop moves windows with it, editor.multi_cursor_modifier = ctrl (SPC ,).", width), Role::Muted);
-            welcome_top += 1;
+            for line in wrap("Alt+click adds a cursor; if your desktop moves windows with Alt+drag, set editor.multi_cursor_modifier to ctrl (SPC ,).", width) {
+                g.put(welcome_top, left, &line, Role::Muted);
+                welcome_top += 1;
+            }
         }
         welcome_top += 1;
     } else {
@@ -1202,6 +1206,7 @@ pub fn layout(page: &ExtensionsPage, cols: usize) -> Page {
         let mut keys = vec![("Enter", enter)];
         if welcome {
             keys.push(("t", "tutorial"));
+            keys.push(("v s", "Vim / standard keys"));
         } else {
             keys.extend([("Tab", "next tab"), ("d", "details"), ("/", "search"), ("h l", "categories")]);
         }
