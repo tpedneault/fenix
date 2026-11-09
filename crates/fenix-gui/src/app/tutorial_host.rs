@@ -40,9 +40,51 @@ impl App {
             }
             return;
         }
-        let (lessons, problems) = tutorial::load(&crate::installed::data_dirs("tutorial"));
+        let lessons = self.tutorial_lessons_for_scheme();
+        let problems = tutorial::load(&crate::installed::data_dirs("tutorial")).1;
         let done = tutorial::load_done(&self.tutorial_progress);
         self.open_page(PageModel::Tutorial(Box::new(TutorialPage::new(lessons, problems, done))));
+    }
+
+    /// The lessons for the key scheme in use, said as it has keys.
+    fn tutorial_lessons_for_scheme(&self) -> Vec<tutorial::Lesson> {
+        let (lessons, _) = tutorial::load(&crate::installed::data_dirs("tutorial"));
+        let leader = if self.standard_keys() {
+            match self.leader_chord_text().as_str() {
+                "C-k" => "Ctrl+K".to_string(),
+                other => other.to_string(),
+            }
+        } else {
+            "Space".to_string()
+        };
+        tutorial::for_scheme(lessons, self.key_scheme().name(), |text| self.lesson_words(text, &leader))
+    }
+
+    /// A lesson's words: `{leader}`, `{key:command.id}`, then the leader's
+    /// keys and Vim's phrases as the scheme in use says them.
+    fn lesson_words(&self, text: &str, leader: &str) -> String {
+        let mut out = text.replace("{leader}", leader);
+        while let Some(start) = out.find("{key:") {
+            let Some(len) = out[start..].find('}') else { break };
+            let id = &out[start + 5..start + len];
+            let keys = self.key_for(id).unwrap_or_else(|| id.to_string());
+            out.replace_range(start..start + len + 1, &keys);
+        }
+        self.keys_text(&out)
+    }
+
+    /// You switched key schemes: the tutorial's lessons are the new
+    /// scheme's, unless one's under way.
+    pub(crate) fn tutorial_scheme_changed(&mut self) {
+        let Some(id) = self.tutorial_page_id() else { return };
+        let lessons = self.tutorial_lessons_for_scheme();
+        if let Some(PageModel::Tutorial(p)) = self.pages.get_mut(&id).map(|s| &mut s.model) {
+            if p.run.is_none() {
+                p.focus = lessons.iter().position(|l| !p.done.contains(&l.id)).unwrap_or(0);
+                p.lessons = lessons;
+            }
+        }
+        self.restale_page(id);
     }
 
     pub(super) fn tutorial_action(&mut self, id: BufferId, action: TutorialAction) {
@@ -257,7 +299,8 @@ impl App {
         Seen {
             practice,
             mode,
-            idle: self.vim.mode() == Mode::Normal && self.vim.is_idle(),
+            // Standard keys rest typing: nothing pending is idle there.
+            idle: (self.vim.mode() == Mode::Normal && self.vim.is_idle()) || (self.standard_keys() && self.vim.mode() == Mode::Insert && !self.vim.is_pending()),
             windows: self.windows().window_count(),
             pane,
             page: self.tutorial_page_kind(focused),
@@ -477,6 +520,60 @@ mod tests {
         ("fenix.settings", &["<Space>,", "q", "<Space>hx", "<Tab><Tab>", "q"]),
         ("git.basics", &["<Space>gg", "s", "c", "ciFirst commit<Esc><CR>", "<Space>gl", "q", "<Space>ggb", "<Esc>q"]),
     ];
+
+    /// With standard keys the tutorial lists their lessons, not Vim's, its
+    /// words say the keys in use, and the standard keys' lesson and the
+    /// leader's are passed with standard keys -- through the real keys.
+    #[test]
+    fn standard_keys_have_lessons_of_their_own_and_say_their_keys() {
+        let mut app = App::with_file(None);
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        app.open_tutorial();
+        let id = app.tutorial_page_id().unwrap();
+        let ids: Vec<String> = page(&app).lessons.iter().map(|l| l.id.clone()).collect();
+        assert!(ids.contains(&"standard.basics".to_string()) && ids.contains(&"fenix.leader".to_string()), "{ids:?}");
+        assert!(!ids.iter().any(|i| i.starts_with("editing.")), "Vim's editing lessons are Vim keys': {ids:?}");
+        let leader = page(&app).lessons.iter().find(|l| l.id == "fenix.leader").unwrap().clone();
+        assert!(leader.steps[0].say.contains("Ctrl+K") && !leader.text.contains("SPC"), "{leader:?}");
+        for (lesson, steps) in [
+            ("standard.basics", vec![vec!["End", "."], vec!["Down", "Home", "S-End", "f", "i", "g", "s"], vec!["C-z", "C-z", "C-z"], vec!["C-Home", "Down", "Down", "C-c", "Down", "C-v"], vec!["@carets"], vec!["C-k"], vec!["Esc"]]),
+            ("fenix.leader", vec![vec!["C-k"], vec!["Esc"], vec!["C-k", ":"], vec!["Esc"], vec!["C-k", "h", "b"], vec!["Esc"]]),
+        ] {
+            let i = page(&app).lessons.iter().position(|l| l.id == lesson).unwrap();
+            let shown = app.windows().windows().into_iter().find(|&p| app.windows().content(p) == Some(&id));
+            match shown {
+                Some(pane) => {
+                    app.windows_mut().focus(pane);
+                }
+                None => app.open_tutorial(),
+            }
+            app.tutorial_action(id, TutorialAction::Start(i));
+            for (n, keys) in steps.iter().enumerate() {
+                assert_eq!(page(&app).run.as_ref().map(|r| r.step), Some(n), "{lesson}: step {}", n + 1);
+                for key in keys {
+                    if *key == "@carets" {
+                        // Alt+click before each plums, the cursor before pears.
+                        app.press("C-Home");
+                        app.press("Down");
+                        let text = app.text();
+                        let first = text.find("plums").unwrap();
+                        let second = text.rfind("plums").unwrap();
+                        app.toggle_caret_at(first);
+                        app.toggle_caret_at(second);
+                        app.type_text("-");
+                    } else {
+                        app.press(key);
+                    }
+                    app.tutorial_check();
+                }
+                let run = page(&app).run.clone().unwrap();
+                let text = app.buffers.get(run.practice).map(|ob| ob.buffer.text()).unwrap_or_default();
+                assert!(run.step > n || run.finished, "{lesson}: step {} ({keys:?}) didn't pass -- the practice buffer:\n{text}\nseen: {:?}", n + 1, app.tutorial_seen(run.practice));
+            }
+            assert!(page(&app).run.as_ref().unwrap().finished, "{lesson}");
+        }
+    }
 
     #[test]
     fn every_built_in_step_can_be_passed_with_fenixs_keys() {

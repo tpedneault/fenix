@@ -24,7 +24,7 @@ In a file, ]c and [c go to the next or previous change, SPC g a stages it.
 
 [[step]]
 say = "SPC g g: the Git status page, for the repository you're in -- this lesson's."
-hint = "Space, g (git), g."
+hint = "{leader}, g (git), g."
 page = "git"
 
 [[step]]
@@ -44,7 +44,7 @@ page = "git/clean"
 
 [[step]]
 say = "SPC g l: the log -- your commit on top of the one before."
-hint = "Space, g, l."
+hint = "{leader}, g, l."
 page = "git-log"
 
 [[step]]

@@ -1,4 +1,5 @@
 id = "editing.objects"
+scheme = "vim"
 track = "Editing"
 order = 3
 title = "Operators and text objects"

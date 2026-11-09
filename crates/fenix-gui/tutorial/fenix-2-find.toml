@@ -17,7 +17,7 @@ one more line
 
 [[step]]
 say = "SPC SPC: find a file."
-hint = "Space twice. Outside a project it looks in the folder Fenix started in."
+hint = "{leader}, then Space. Outside a project it looks in the folder Fenix started in."
 picker = "files"
 
 [[step]]
@@ -32,7 +32,7 @@ line = 8
 
 [[step]]
 say = "SPC p s opens the Search page: what you type is searched for in the project's files as you type -- this practice isn't one of them, so try a word from your own code."
-hint = "Space, p (project), s."
+hint = "{leader}, p (project), s."
 page = "search"
 
 [[step]]
@@ -42,5 +42,5 @@ closed = "search"
 
 [[step]]
 say = "SPC b b: the open buffers, to switch to one. Esc or Enter when you've looked."
-hint = "Space, b (buffer), b."
+hint = "{leader}, b (buffer), b."
 picker = "buffers"

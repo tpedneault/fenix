@@ -1,4 +1,5 @@
 id = "editing.macros"
+scheme = "vim"
 track = "Editing"
 order = 6
 title = "Registers and macros"

@@ -159,6 +159,7 @@ impl App {
             self.restale_page(id);
         }
         self.code_key_scheme_changed();
+        self.tutorial_scheme_changed();
     }
 }
 

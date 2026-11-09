@@ -6,6 +6,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-09
+
 ### Added
 
 - Standard keys: a traditional IDE's way to edit, beside Vim's
@@ -824,7 +826,8 @@ editing grammar and a `SPC` leader for everything else.
 - A Windows installer, for you alone or for everyone on the machine,
   and archives for Windows and Linux.
 
-[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.4.0...HEAD
+[Unreleased]: https://github.com/tpedneault/fenix/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/tpedneault/fenix/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/tpedneault/fenix/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/tpedneault/fenix/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/tpedneault/fenix/compare/v1.1.0...v1.2.0

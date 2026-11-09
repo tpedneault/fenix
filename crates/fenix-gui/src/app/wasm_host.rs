@@ -3909,6 +3909,14 @@ impl<V> Forget for HashMap<String, V> {
     }
 }
 
+/// Fenix's key scheme as the extension API has it.
+fn wit_key_scheme(scheme: crate::keymap::Scheme) -> fenix_wasm::host::KeyScheme {
+    match scheme {
+        crate::keymap::Scheme::Standard => fenix_wasm::host::KeyScheme::Standard,
+        _ => fenix_wasm::host::KeyScheme::Vim,
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -5899,10 +5907,3 @@ pub(crate) mod tests {
     }
 }
 
-/// Fenix's key scheme as the extension API has it.
-fn wit_key_scheme(scheme: crate::keymap::Scheme) -> fenix_wasm::host::KeyScheme {
-    match scheme {
-        crate::keymap::Scheme::Standard => fenix_wasm::host::KeyScheme::Standard,
-        _ => fenix_wasm::host::KeyScheme::Vim,
-    }
-}

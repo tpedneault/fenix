@@ -1,4 +1,5 @@
 id = "editing.visual"
+scheme = "vim"
 track = "Editing"
 order = 4
 title = "Visual mode"

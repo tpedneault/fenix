@@ -1,6 +1,7 @@
 # A lesson of the tutorial (`SPC h T`). See `src/tutorial.rs` for the
 # format; every step's result is reached in `app/tutorial_host.rs`'s tests.
 id = "editing.modes"
+scheme = "vim"
 track = "Editing"
 order = 1
 title = "Modes and moving"

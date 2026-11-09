@@ -12,7 +12,7 @@ it back to Fenix.
 
 [[step]]
 say = "SPC o t opens the terminal panel."
-hint = "Space, o (open), t."
+hint = "{leader}, o (open), t."
 terminal = "panel"
 
 [[step]]
@@ -22,12 +22,12 @@ terminal = "unfocused"
 
 [[step]]
 say = "SPC o t again hides the panel."
-hint = "Space, o, t."
+hint = "{leader}, o, t."
 terminal = "closed"
 
 [[step]]
 say = "SPC o T opens a shell in this window instead."
-hint = "Space, o, capital T."
+hint = "{leader}, o, capital T."
 terminal = "pane"
 
 [[step]]
