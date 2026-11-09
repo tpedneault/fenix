@@ -74,17 +74,6 @@ impl When {
         })
     }
 
-    pub fn name(self) -> &'static str {
-        match self {
-            When::Anywhere => "anywhere",
-            When::Text => "text",
-            When::Typing => "typing",
-            When::NotTyping => "not_typing",
-            When::Page => "page",
-            When::Terminal => "terminal",
-        }
-    }
-
     fn fits(self, at: &ChordContext) -> bool {
         if at.terminal {
             return self == When::Terminal;
@@ -170,10 +159,6 @@ impl ChordMap {
         out
     }
 
-    /// Every entry, as laid.
-    pub fn entries(&self) -> &[Chord] {
-        &self.entries
-    }
 }
 
 #[cfg(test)]

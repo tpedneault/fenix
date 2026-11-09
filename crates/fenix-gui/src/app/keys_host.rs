@@ -256,8 +256,3 @@ pub(crate) fn translate_leader(text: &str, leader: &str) -> String {
     }
     out
 }
-
-impl App {
-    /// The extensions hear the key scheme changed (API 1.5).
-    pub(crate) fn code_key_scheme_changed(&mut self) {}
-}

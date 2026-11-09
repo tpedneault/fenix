@@ -45,7 +45,7 @@ impl App {
         let pane = self.focused_pane_id();
         let id = self.focused_buffer_id();
         let Some(carets) = self.carets.get(&pane) else { return &[] };
-        let edits = self.buffers.get(id).map(|ob| ob.buffer.edit_count() as u64);
+        let edits = self.buffers.get(id).map(|ob| ob.buffer.edit_count());
         if carets.buffer != Some(id) || edits != Some(carets.edits) {
             return &[];
         }
@@ -70,7 +70,7 @@ impl App {
             self.carets.remove(&pane);
             return;
         }
-        let edits = self.buffers.get(id).map_or(0, |ob| ob.buffer.edit_count() as u64);
+        let edits = self.buffers.get(id).map_or(0, |ob| ob.buffer.edit_count());
         self.carets.insert(pane, Carets { buffer: Some(id), extra, edits });
     }
 

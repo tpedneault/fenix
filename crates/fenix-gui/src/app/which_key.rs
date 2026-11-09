@@ -226,6 +226,11 @@ impl App {
     }
 }
 
+/// Whether the leader was opened by standard keys' chord.
+fn app_standard_leader(app: &super::App) -> bool {
+    app.standard_keys()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,7 +358,3 @@ mod tests {
     }
 }
 
-/// Whether the leader was opened by standard keys' chord.
-fn app_standard_leader(app: &super::App) -> bool {
-    app.standard_keys()
-}

@@ -212,6 +212,10 @@ pub(crate) struct WasmHost {
     pub(crate) home: HashMap<String, fenix_wasm::host::HomeSection>,
     /// The editor theme's colours, as every worker reads them.
     theme: Option<Arc<RwLock<fenix_wasm::host::EditorTheme>>>,
+    /// The key scheme, as every worker reads it (`editor-keys`), and the
+    /// leader chord `key-for` writes `SPC` as.
+    keys: Option<Arc<RwLock<fenix_wasm::host::KeyScheme>>>,
+    leader: Arc<RwLock<String>>,
     /// Where you were when each one's command ran (`editor-here`), for
     /// those with `editor = "read"`.
     heres: HashMap<String, Arc<RwLock<Option<fenix_wasm::host::Here>>>>,
@@ -1026,6 +1030,19 @@ impl App {
         spec.opens = ext.manifest.contributes.opens.clone();
         spec.theme = self.wasm.theme.get_or_insert_with(|| Arc::new(RwLock::new(editor_theme(self.theme)))).clone();
         spec.palette = self.wasm.palette.get_or_insert_with(|| Arc::new(RwLock::new(self.theme.palette()))).clone();
+        // How you edit, and the keys of a command, as they are when asked.
+        let scheme = wit_key_scheme(self.key_scheme());
+        spec.key_scheme = self.wasm.keys.get_or_insert_with(|| Arc::new(RwLock::new(scheme))).clone();
+        *self.wasm.leader.write().unwrap_or_else(|p| p.into_inner()) = self.leader_chord_text();
+        let (keys, leader) = (spec.key_scheme.clone(), self.wasm.leader.clone());
+        spec.key_for = Arc::new(move |command: &str| {
+            let scheme = match *keys.read().unwrap_or_else(|p| p.into_inner()) {
+                fenix_wasm::host::KeyScheme::Standard => crate::keymap::Scheme::Standard,
+                fenix_wasm::host::KeyScheme::Vim => crate::keymap::Scheme::Vim,
+            };
+            let leader = leader.read().unwrap_or_else(|p| p.into_inner()).clone();
+            crate::keymap::key_for(command, scheme, &leader)
+        });
         spec.folders = self.code_folders(&ext);
         if ext.manifest.permissions.fonts {
             spec.fonts = fenix_wasm::host::font_dirs();
@@ -1902,6 +1919,20 @@ impl App {
         then(self, &progress);
         if let Some(s) = self.wasm.serving.get_mut(&key) {
             s.progress = Some(then);
+        }
+    }
+
+    /// The key scheme changed: the extensions read the new one, and those
+    /// that have `key-scheme-changed` (API 1.5) are told.
+    pub(crate) fn code_key_scheme_changed(&mut self) {
+        let scheme = wit_key_scheme(self.key_scheme());
+        if let Some(shared) = &self.wasm.keys {
+            *shared.write().unwrap_or_else(|p| p.into_inner()) = scheme;
+        }
+        *self.wasm.leader.write().unwrap_or_else(|p| p.into_inner()) = self.leader_chord_text();
+        let running: Vec<String> = self.wasm.workers.keys().cloned().collect();
+        for ext in running {
+            self.code_call(&ext, Call::KeySchemeChanged(scheme), COMMAND_TICKS, Pending::Other);
         }
     }
 
@@ -5865,5 +5896,13 @@ pub(crate) mod tests {
         app.tell_debug(fenix_wasm::host::DebugState::Started(fenix_wasm::host::DebugSession { id: 5, name: "app.js".into(), language: "javascript".into(), parent: None }));
         app.tell_debug(fenix_wasm::host::DebugState::Ended(5));
         pump_until(&mut app, |a| said(a, "debug started: 5 app.js javascript None") && said(a, "debug ended: 5"));
+    }
+}
+
+/// Fenix's key scheme as the extension API has it.
+fn wit_key_scheme(scheme: crate::keymap::Scheme) -> fenix_wasm::host::KeyScheme {
+    match scheme {
+        crate::keymap::Scheme::Standard => fenix_wasm::host::KeyScheme::Standard,
+        _ => fenix_wasm::host::KeyScheme::Vim,
     }
 }

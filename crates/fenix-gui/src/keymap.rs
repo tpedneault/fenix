@@ -661,8 +661,7 @@ pub(crate) fn parse_keys(text: &str) -> Result<Vec<KeyPress>, String> {
 pub(crate) fn parse_key(token: &str) -> Option<KeyPress> {
     let mut mods = Mods::default();
     let mut rest = token;
-    loop {
-        let (Some(prefix), true) = (rest.get(..2), rest.chars().count() > 2) else { break };
+    while let (Some(prefix), true) = (rest.get(..2), rest.chars().count() > 2) {
         match prefix {
             "C-" => mods.ctrl = true,
             "M-" => mods.alt = true,

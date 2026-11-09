@@ -56,7 +56,7 @@ impl App {
     pub(crate) fn leave_visual(&mut self) {
         let pane = self.focused_pane_id();
         if let Some(state) = self.workspaces.active_pane_states().get(&pane) {
-            let cursor = state.cursor.clone();
+            let cursor = state.cursor;
             self.vim.exit_visual_mode(&cursor);
         }
     }

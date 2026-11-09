@@ -235,7 +235,7 @@ fn literals_with_vim_phrases() -> Vec<(String, String)> {
             }
             for literal in line.split('"').skip(1).step_by(2) {
                 if VIM_PHRASES.iter().any(|p| literal.contains(p)) {
-                    found.push((format!("{name}"), literal.to_string()));
+                    found.push((name.clone(), literal.to_string()));
                 }
             }
         }
@@ -268,7 +268,6 @@ fn key_for_says_the_keys_the_scheme_has() {
     let (mut app, _f) = app_on_file("a.txt", "");
     assert_eq!(app.key_for("file.save").as_deref(), Some("C-s"));
     assert_eq!(app.key_for("git.open").as_deref(), Some("SPC g g"));
-    assert_eq!(app.key_for("code.goto_definition").as_deref(), Some("SPC ] d").filter(|_| false).or(app.key_for("code.goto_definition").as_deref()));
     standard(&mut app);
     assert_eq!(app.key_for("code.goto_definition").as_deref(), Some("F12"));
     assert_eq!(app.key_for("git.open").as_deref(), Some("C-k g g"));

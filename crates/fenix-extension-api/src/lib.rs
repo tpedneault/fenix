@@ -59,7 +59,7 @@ pub mod bindings {
 }
 
 pub use bindings::fenix::extension::host;
-pub use bindings::fenix::extension::types::{
+pub use bindings::fenix::extension::types::{KeyScheme, 
     Anchor, Canvas, CanvasPopup, CellSpan, Cells, Check, Command, Ease, EditorTheme, Glide, Health, Here, HomeMark, HomeRow, HomeSection, HttpRequest, HttpResponse, ImageInfo, Item, KeyHint,
     LayerLevel, Layout, Level, Line, Mark, ModelInfo, PaneBox, PickerItem, Picture, Place, Popup, Pose, ProcessOutput, ProjectInfo, Role, Section, Span, Style, Task, TextEdit,
     CursorImage, Datagram, KeyEvent, Modifiers, NamedKey, PointerEvent, SurfaceKey, SurfaceMark, SurfaceOptions, SurfaceScale, SurfaceSize, WheelEvent,
@@ -226,6 +226,10 @@ pub trait Extension: Default + 'static {
     /// [`agents::AskHandle::id`]) so far, all of it, while the agent
     /// writes it -- when it asked with [`agents::Ask::stream`]. 1.2.
     fn agent_ask_progress(&mut self, _call: u64, _text: &str) {}
+
+    /// You switched between Vim keys and standard keys: hints that name a
+    /// key ([`key_for`]) can be drawn again. API 1.5.
+    fn key_scheme_changed(&mut self, _scheme: KeyScheme) {}
 }
 
 thread_local! {
@@ -329,6 +333,9 @@ macro_rules! export {
             }
             fn agent_ask_progress(call: u64, text: String) {
                 $crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::agent_ask_progress(e, call, &text))
+            }
+            fn key_scheme_changed(scheme: $crate::KeyScheme) {
+                $crate::with::<$ty, _>(|e| <$ty as $crate::Extension>::key_scheme_changed(e, scheme))
             }
         }
 
@@ -803,6 +810,19 @@ pub fn compose(title: &str, verb: &str, initial: &str, allow_empty: bool) -> u64
 /// `permissions.agents`. API 1.4.
 pub fn compose_with_ask(title: &str, verb: &str, initial: &str, allow_empty: bool, ask: agents::Ask, over_initial: bool) -> u64 {
     host::compose_with_ask(title, verb, initial, allow_empty, &ask.stream(true).payload(), over_initial)
+}
+
+/// How you edit: Vim keys or standard keys (`editor.keys`). API 1.5.
+pub fn key_scheme() -> KeyScheme {
+    host::editor_keys()
+}
+
+/// The keys that run `command` now, as Fenix's key menu writes them --
+/// `gd` with Vim keys, `F12` with standard keys, `SPC g g` or `C-k g g`
+/// -- yours over Fenix's; `None` when no key runs it. For a hint: "`{}`
+/// on a name opens its page". API 1.5.
+pub fn key_for(command: &str) -> Option<String> {
+    host::key_for(command)
 }
 
 /// Where you were when the command it's running was picked: the file,

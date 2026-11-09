@@ -1718,3 +1718,33 @@ fn a_page_goes_before_the_service_calls_waiting() {
     assert!(at(render) <= 1, "behind at most the call under way: {order:?}");
     assert!(at(serves[1]) < at(serves[2]) && at(serves[2]) < at(serves[3]), "the rest in the order they came: {order:?}");
 }
+
+/// API 1.5: an extension asks how you edit and which keys run a command,
+/// and is told when you switch; one built before 1.5 (`hello`) isn't, and
+/// runs as it did.
+#[test]
+fn the_key_scheme_is_asked_and_told() {
+    let engine = engine(&Options::default()).unwrap();
+    let _ticker = Ticker::start(&engine);
+    let dir = tempfile::tempdir().unwrap();
+    let wasm = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/guests/keys.wasm");
+    let mut spec = Spec::new("test.keys", wasm, dir.path());
+    *spec.key_scheme.write().unwrap() = fenix_wasm::host::KeyScheme::Standard;
+    spec.key_for = Arc::new(|command| (command == "file.save").then(|| "C-s".to_string()));
+    let (tx, events) = mpsc::channel();
+    let worker = Worker::start(&engine, spec, move |e| {
+        let _ = tx.send(e);
+    });
+    let mut ext = Running { worker, events, dir, _ticker: Ticker::start(&engine) };
+    ext.until(|e| *e == Event::Ready);
+    let (ran, seen) = ext.run("keys.say");
+    assert_eq!(ran, Ok(()));
+    assert!(said(&seen, Level::Info, "scheme standard save C-s nothing true"), "{seen:?}");
+    let (told, seen) = ext.call(Call::KeySchemeChanged(fenix_wasm::host::KeyScheme::Vim));
+    assert_eq!(told, Ok(Reply::Done));
+    assert!(said(&seen, Level::Info, "changed to vim"), "{seen:?}");
+
+    // Built before 1.5: told nothing, and fine.
+    let mut old = start_with(Permissions::default(), &[]);
+    assert_eq!(old.call(Call::KeySchemeChanged(fenix_wasm::host::KeyScheme::Standard)).0, Ok(Reply::Done));
+}

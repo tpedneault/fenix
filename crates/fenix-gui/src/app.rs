@@ -1908,13 +1908,9 @@ fn extension_name(id: &str) -> String {
 }
 
 impl App {
-    /// Runs command `id` (see `CommandRegistry::run`).
-    pub(crate) fn run_command(&mut self, event_loop: &ActiveEventLoop, id: &str) -> bool {
-        self.run_command_with(Some(event_loop), id)
-    }
-
-    /// `run_command`, with or without an event loop to hand (a test
-    /// driving the keys has none; a command that needs one does nothing).
+    /// Runs command `id` (see `CommandRegistry::run`), with or without an
+    /// event loop to hand (a test driving the keys has none; a command
+    /// that needs one does nothing then).
     pub(crate) fn run_command_with(&mut self, event_loop: Option<&ActiveEventLoop>, id: &str) -> bool {
         self.note_command_run(id);
         let commands = Rc::clone(&self.commands);
@@ -13049,7 +13045,7 @@ impl App {
     /// Replaces any compose buffer already open rather than stacking a
     /// second one: there's only ever one thing being written, and two
     /// would leave no way to tell which `Enter` submits.
-    pub(super) fn open_compose(&mut self, purpose: ComposePurpose) {
+    fn open_compose(&mut self, purpose: ComposePurpose) {
         self.open_compose_seeded(purpose, "");
     }
 
@@ -14949,7 +14945,7 @@ impl App {
     /// `Ctrl-I` forward stack -- see `jump_back_stack`'s own doc comment
     /// for why a new jump invalidates old forward history rather than
     /// preserving it the way real Vim's jumplist does.
-    pub(super) fn record_jump(&mut self, from: JumpEntry) {
+    fn record_jump(&mut self, from: JumpEntry) {
         self.jump_back_stack.push(from);
         self.jump_forward_stack.clear();
         self.mark_jump();
