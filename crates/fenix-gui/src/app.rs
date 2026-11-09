@@ -48,6 +48,7 @@ pub(crate) use projects::window_title;
 pub(crate) use debug_breakpoints::BreakpointPart;
 mod polish;
 mod which_key;
+mod keys_host;
 mod file_index;
 mod explorer_host;
 mod search_host;
@@ -1929,6 +1930,9 @@ impl App {
         let Some(command) = self.commands().get(id) else { return format!("{id} isn't a command") };
         let mut keys: Vec<String> = keymap::leader_trie().bindings().into_iter().filter(|(_, c)| **c == id).map(|(seq, _)| seq.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ")).collect();
         keys.sort();
+        let mut chords: Vec<String> = keymap::chord_map().in_use(self.key_scheme()).into_iter().filter(|c| c.command == Some(id)).map(|c| keymap::describe_keypress(&c.key)).collect();
+        chords.dedup();
+        keys.splice(0..0, chords);
         let keys = if keys.is_empty() { "no key".to_string() } else { keys.join(", ") };
         let from = command.source.map_or_else(|| "core".to_string(), extension_name);
         format!("{id}: {} -- {keys} -- {from}", command.description)
@@ -1944,14 +1948,23 @@ impl App {
     /// can't), says what.
     fn describe_key_feed(&mut self, key: KeyPress) {
         let Some(mut keys) = self.describing_keys.take() else { return };
-        if key == KeyPress::named(FenixNamedKey::Escape) {
+        if key.legacy() == KeyPress::named(FenixNamedKey::Escape) {
             self.set_message("");
             return;
         }
-        keys.push(key);
+        // Leader keys are read as the leader reads them; a chord as it came.
+        keys.push(if keys.is_empty() { key } else { key.legacy() });
         let text = keys.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
         if keys[0] != KeyPress::char(' ') {
-            self.set_message(format!("{text} -- SPC h k describes leader keys (SPC ...); the palette (SPC :) lists the rest"));
+            match self.chord_command(key) {
+                Some(id) => {
+                    let what = self.describe_command(id);
+                    let yours = keymap::user_keys().iter().any(|u| u.keys == keymap::describe_keypress(&key.chord()));
+                    self.set_message(format!("{text} runs {what}{}", if yours { " -- yours" } else { "" }));
+                }
+                None if key.mods.ctrl || key.mods.alt || key.mods.super_ || key.is_function() => self.set_message(format!("{text} isn't bound here")),
+                None => self.set_message(format!("{text} -- SPC h k describes leader keys (SPC ...) and chords (C-s, F12); the palette (SPC :) lists the rest")),
+            }
             return;
         }
         let local = keys.get(1) == Some(&KeyPress::char('m'));
@@ -1988,7 +2001,9 @@ impl App {
         if !contexts.is_empty() {
             rows.extend(keymap::local_trie(&contexts).bindings().into_iter().map(|(seq, id)| (format!("SPC m {}", text(&seq)), id.to_string())));
         }
+        rows.extend(keymap::chord_map().in_use(self.key_scheme()).into_iter().filter_map(|c| Some((keymap::describe_keypress(&c.key), c.command?.to_string()))));
         rows.sort();
+        rows.dedup();
         let candidates = rows
             .into_iter()
             .map(|(keys, id)| {
@@ -2048,20 +2063,21 @@ impl App {
 
     /// Tab in the palette: the next keys typed are `command`'s.
     fn bind_keys_start(&mut self, command: String) {
-        self.set_message(format!("Keys for {command}: type them (SPC ...), Enter binds, Esc stops"));
+        self.set_message(format!("Keys for {command}: type them (SPC ..., or a chord: C-s, F12), Enter binds, Esc stops"));
         self.binding_keys = Some((command, Vec::new()));
     }
 
     /// A key while the palette waits for keys to bind.
     fn bind_keys_feed(&mut self, key: KeyPress) {
         let Some((command, mut keys)) = self.binding_keys.take() else { return };
-        if key == KeyPress::named(FenixNamedKey::Escape) {
+        if key.legacy() == KeyPress::named(FenixNamedKey::Escape) {
             self.set_message("");
             return;
         }
-        if key == KeyPress::named(FenixNamedKey::Enter) {
+        if key.legacy() == KeyPress::named(FenixNamedKey::Enter) {
             return self.bind_keys_finish(&command, &keys);
         }
+        let key = if keys.is_empty() { key } else { key.legacy() };
         if key == KeyPress::named(FenixNamedKey::Backspace) {
             keys.pop();
         } else {
@@ -2077,8 +2093,14 @@ impl App {
     /// or keys under another binding, which it would always run first.
     fn bind_keys_finish(&mut self, command: &str, keys: &[KeyPress]) {
         let text = keys.iter().map(keymap::describe_keypress).collect::<Vec<_>>().join(" ");
+        if let [key] = keys {
+            let key = key.chord();
+            if key.mods.ctrl || key.mods.alt || key.mods.super_ || key.is_function() {
+                return self.bind_chord_finish(command, key);
+            }
+        }
         if keys.first() != Some(&KeyPress::char(' ')) || keys.len() < 2 {
-            self.set_error(format!("{text}: your keys start with SPC, then at least one more"));
+            self.set_error(format!("{text}: your keys start with SPC, then at least one more -- or are one chord (C-s, F12)"));
             return;
         }
         let trie = keymap::leader_trie();
@@ -2097,6 +2119,32 @@ impl App {
         };
         let was = trie.get(keys).copied().filter(|old| *old != command);
         if let Err(e) = fenix_config::keybindings::write_binding(&path, &text, command) {
+            self.set_error(format!("couldn't write {}: {e}", path.display()));
+            return;
+        }
+        let problems = keymap::reload_leader();
+        self.leader_matcher = keymap::leader_trie().matcher();
+        *self.leader_places.borrow_mut() = None;
+        if !problems.is_empty() {
+            self.set_error(format!("keybindings.toml: {}", problems.join("; ")));
+            return;
+        }
+        self.set_message(match was {
+            Some(old) => format!("{text} runs {command} now (it ran {old}) -- in keybindings.toml"),
+            None => format!("{text} runs {command} now -- in keybindings.toml"),
+        });
+    }
+
+    /// A chord given to `command` from the palette: a `[[keys]]` entry in
+    /// your keybindings, for the key scheme in use.
+    fn bind_chord_finish(&mut self, command: &str, key: KeyPress) {
+        let text = keymap::describe_keypress(&key);
+        let Some(path) = keymap::user_keymap_path() else {
+            self.set_error("no settings folder to keep keybindings.toml in");
+            return;
+        };
+        let was = self.chord_command(key).filter(|old| *old != command);
+        if let Err(e) = fenix_config::keybindings::write_chord(&path, &text, command, self.key_scheme().name()) {
             self.set_error(format!("couldn't write {}: {e}", path.display()));
             return;
         }
@@ -15987,7 +16035,7 @@ impl App {
     fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
         // The right click's menu, open, has the keyboard.
         if self.mouse.menu.is_some() {
-            if let Some(action) = self.menu_key(keypress) {
+            if let Some(action) = self.menu_key(keypress.legacy()) {
                 self.run_menu_action(action);
             }
             return;
@@ -16016,6 +16064,10 @@ impl App {
 
     fn route_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
         let _profile = crate::profile::Scope::new("route_keypress");
+        // Everything but the chords reads keys as it always has, without
+        // Shift (see `KeyPress::legacy`).
+        let full = keypress;
+        let keypress = keypress.legacy();
         // A feature's informational menu (the Docker panel's `x`) is not a
         // capturing prompt -- cleared unconditionally on *every* keypress
         // before that keypress is dispatched normally below, so pressing
@@ -16146,12 +16198,12 @@ impl App {
         // state to check here -- it's the directory picker, an explorer
         // page routed the same way `SPC f j`'s is.
         if self.binding_keys.is_some() {
-            self.bind_keys_feed(keypress);
+            self.bind_keys_feed(full);
             self.wake_caret();
             return;
         }
         if self.describing_keys.is_some() {
-            self.describe_key_feed(keypress);
+            self.describe_key_feed(full);
             self.wake_caret();
             return;
         }
@@ -16201,69 +16253,27 @@ impl App {
             }
         }
 
-        // `keypress.mods.ctrl`, not `self.modifiers.control_key()` --
-        // the two always agree for a real hardware keypress (`keypress`
-        // is derived from `self.modifiers` at conversion time), but only
-        // `keypress` carries the *recorded* modifier state for a macro
-        // replay, which has no live hardware modifiers of its own to
-        // read. The Ctrl-Shift-Z-vs-Ctrl-Z distinction still reads the
-        // live `self.modifiers.shift_key()` rather than the char's case
-        // -- unlike Ctrl itself, this codebase has no evidence winit
-        // reliably reports the *shifted* character through a Ctrl-chord
-        // on every platform, so this one sub-branch keeps the original,
-        // proven-correct check; a macro that recorded Ctrl-Shift-Z
-        // specifically just won't replay that distinction faithfully, a
-        // narrow, disclosed gap far preferable to risking a regression
-        // in the everyday redo shortcut itself.
-        if keypress.mods.ctrl {
-            // The editors' own tab keys, in any mode -- Insert included,
-            // where `gt` would only type.
-            let tab_move = match keypress.code {
-                KeyCode::Named(FenixNamedKey::PageDown) => Some(fenix_vim::TabMove::Next),
-                KeyCode::Named(FenixNamedKey::PageUp) => Some(fenix_vim::TabMove::Prev(1)),
-                KeyCode::Named(FenixNamedKey::Tab) => Some(fenix_vim::TabMove::Last),
-                _ => None,
-            };
-            if let Some(mv) = tab_move {
-                self.move_tab(mv);
-                return;
-            }
-            if let KeyCode::Char(c) = keypress.code {
-                let id = if c.eq_ignore_ascii_case(&'s') {
-                    Some("file.save")
-                } else if c.eq_ignore_ascii_case(&'z') && self.modifiers.shift_key() {
-                    Some("edit.redo")
-                } else if c.eq_ignore_ascii_case(&'z') {
-                    Some("edit.undo")
-                } else if c.eq_ignore_ascii_case(&'y') {
-                    Some("edit.redo")
-                } else if c.eq_ignore_ascii_case(&'q') {
-                    Some("app.quit")
-                } else if c == '=' || c == '+' {
-                    Some("view.increase_font_size")
-                } else if c == '-' {
-                    Some("view.decrease_font_size")
-                } else if c == '0' {
-                    Some("view.reset_font_size")
-                } else if !self.vim.is_inserting() && c.eq_ignore_ascii_case(&'o') {
-                    // In Insert, Ctrl-O is Vim's: one Normal command.
-                    Some("nav.jump_back")
-                } else if !self.vim.is_inserting() && c.eq_ignore_ascii_case(&'i') {
-                    Some("nav.jump_forward")
-                } else {
-                    None
-                };
-                if let Some(id) = id {
-                    // Built fresh per chord rather than stored on App: it's
-                    // just a few fn-pointer entries, and this sidesteps
-                    // borrowing `self` both as receiver and argument.
-                    self.run_command(event_loop, id);
-                    self.wake_caret();
-                    return;
-                }
-            }
-            // Not a recognized global chord (e.g. Ctrl-r is Vim's redo):
-            // fall through instead of swallowing it.
+        // In an open leader menu, Backspace goes up a level and Ctrl-n /
+        // Ctrl-p page through it (see `which_key`) -- ahead of the chords,
+        // which may bind those keys elsewhere.
+        if (self.local_matcher.is_some() || self.leader_matcher.is_pending())
+            && (self.which_key_back(keypress) || self.which_key_paging(keypress))
+        {
+            self.wake_caret();
+            return;
+        }
+        // Chords: `[[keys]]` in Fenix's keymap, the extensions' and yours
+        // (`C-s`, `C-z`, `F12`...). They read the key as it came, Shift
+        // and all (`full`); a macro's recorded key carries its own
+        // modifiers, so a replay runs the same chord.
+        if let Some(id) = self.chord_command(full) {
+            self.run_command(event_loop, id);
+            self.wake_caret();
+            return;
+        }
+        // An F-key nothing took means nothing below.
+        if full.is_function() {
+            return;
         }
 
         // Window-size-aware paging is a GUI concern, handled the same way
@@ -16295,14 +16305,6 @@ impl App {
         // never reach `self.vim`, so the selection's anchor/cursor stay
         // exactly as they were until whatever command they resolve to
         // (e.g. `format_selection`) reads them.
-        // In an open leader menu, Backspace goes up a level and Ctrl-n /
-        // Ctrl-p page through it (see `which_key`).
-        if (self.local_matcher.is_some() || self.leader_matcher.is_pending())
-            && (self.which_key_back(keypress) || self.which_key_paging(keypress))
-        {
-            self.wake_caret();
-            return;
-        }
         if let Some(resolved) = self.local_leader_key(keypress) {
             if let Some(id) = resolved {
                 self.run_command(event_loop, id);

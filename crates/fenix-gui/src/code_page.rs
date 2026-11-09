@@ -123,6 +123,7 @@ pub fn surface_key(keypress: fenix_keymap::KeyPress, down: bool) -> Option<wit::
             N::End => wit::NamedKey::End,
             N::PageUp => wit::NamedKey::PageUp,
             N::PageDown => wit::NamedKey::PageDown,
+            N::F(_) => return None,
         }),
     };
     Some(wit::KeyEvent { key, down, mods: modifiers(keypress.mods) })

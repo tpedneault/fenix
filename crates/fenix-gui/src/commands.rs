@@ -296,6 +296,9 @@ impl CommandRegistry {
         registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
         registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
         registry.register("buffer.kill", "Close the focused buffer (refuses if it has unsaved changes)", cmd_kill_buffer);
+        registry.register("tab.next", "The next tab in the focused pane, wrapping round through Home", |ctx| ctx.app.move_tab_cmd(fenix_vim::TabMove::Next));
+        registry.register("tab.prev", "The previous tab in the focused pane, wrapping round through Home", |ctx| ctx.app.move_tab_cmd(fenix_vim::TabMove::Prev(1)));
+        registry.register("tab.last", "The tab this pane was on before", |ctx| ctx.app.move_tab_cmd(fenix_vim::TabMove::Last));
         registry.register("tab.close", "Close the focused pane's tab (the buffer stays open)", |ctx| ctx.app.close_focused_tab());
         registry.register("tab.close_others", "Close every other tab in the focused pane", |ctx| ctx.app.close_other_tabs());
         registry.register("tab.reopen", "Reopen the tab this pane closed last", |ctx| ctx.app.reopen_closed_tab());

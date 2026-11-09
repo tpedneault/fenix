@@ -1299,3 +1299,101 @@ command = "agents.delete"
 keys = "SPC a U"
 label = "usage: tokens, cost"
 command = "agents.usage"
+
+# Chords: keys with Ctrl, Alt or an F-key, outside the leader. `scheme`
+# says which key scheme an entry is for (vim, standard, any), `when` where
+# it applies (anywhere, text, typing, not_typing, page, terminal). Your
+# keybindings.toml's [[keys]] go over these.
+
+[[keys]]
+keys = "C-s"
+command = "file.save"
+
+[[keys]]
+keys = "C-z"
+command = "edit.undo"
+
+[[keys]]
+keys = "C-S-z"
+command = "edit.redo"
+
+[[keys]]
+keys = "C-y"
+command = "edit.redo"
+
+[[keys]]
+keys = "C-q"
+command = "app.quit"
+
+[[keys]]
+keys = "C-="
+command = "view.increase_font_size"
+
+[[keys]]
+keys = "C-+"
+command = "view.increase_font_size"
+
+[[keys]]
+keys = "C--"
+command = "view.decrease_font_size"
+
+[[keys]]
+keys = "C-0"
+command = "view.reset_font_size"
+
+[[keys]]
+keys = "C-PgDn"
+command = "tab.next"
+
+[[keys]]
+keys = "C-PgUp"
+command = "tab.prev"
+
+[[keys]]
+keys = "C-Tab"
+command = "tab.last"
+
+# In Insert, Ctrl-O is Vim's: one Normal command.
+[[keys]]
+keys = "C-o"
+command = "nav.jump_back"
+when = "not_typing"
+scheme = "vim"
+
+[[keys]]
+keys = "C-i"
+command = "nav.jump_forward"
+when = "not_typing"
+scheme = "vim"
+
+# Vim mode always read these letters in either case.
+[[keys]]
+keys = "C-S-s"
+command = "file.save"
+scheme = "vim"
+
+[[keys]]
+keys = "C-S-y"
+command = "edit.redo"
+scheme = "vim"
+
+[[keys]]
+keys = "C-S-q"
+command = "app.quit"
+scheme = "vim"
+
+[[keys]]
+keys = "C-S-o"
+command = "nav.jump_back"
+when = "not_typing"
+scheme = "vim"
+
+[[keys]]
+keys = "C-S-i"
+command = "nav.jump_forward"
+when = "not_typing"
+scheme = "vim"
+
+[[keys]]
+keys = "M-x"
+command = "commands.palette"

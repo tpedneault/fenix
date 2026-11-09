@@ -86,6 +86,7 @@ pub(super) fn encode(key: KeyPress, shift: bool, application: bool, win32: bool)
             }
             Some(esc(c.to_string().into_bytes(), alt))
         }
+        KeyCode::Named(NamedKey::F(n)) => encode_function(n, shift, alt, ctrl),
         KeyCode::Named(named) => {
             let mods = modifier_param(shift, alt, ctrl);
             Some(match named {
@@ -108,6 +109,7 @@ pub(super) fn encode(key: KeyPress, shift: bool, application: bool, win32: bool)
                 // take ^W.
                 NamedKey::Backspace if ctrl => vec![if cfg!(windows) { 0x08 } else { 0x17 }],
                 NamedKey::Backspace => esc(vec![0x7f], alt),
+                NamedKey::F(_) => return None,
             })
         }
     }
@@ -136,7 +138,7 @@ mod tests {
     use super::*;
 
     fn key(code: KeyCode, ctrl: bool, alt: bool) -> KeyPress {
-        KeyPress { code, mods: fenix_keymap::Mods { ctrl, alt, super_: false } }
+        KeyPress { code, mods: fenix_keymap::Mods { ctrl, alt, ..fenix_keymap::Mods::default() } }
     }
     fn named(n: NamedKey, ctrl: bool, alt: bool) -> KeyPress {
         key(KeyCode::Named(n), ctrl, alt)

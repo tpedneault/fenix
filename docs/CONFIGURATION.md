@@ -427,6 +427,11 @@ when it's out of date).
 | `editor.fold_markers` | true / false | on | A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does. |
 | `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
 | `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |
+| `editor.keys` | vim / standard | vim | How you edit. Vim: Vim's modes and keys, and SPC for everything else. Standard: the keys of a traditional IDE -- typing at once, Shift+arrows to select, Ctrl+C/X/V, Alt+click for more cursors -- and Ctrl+K for the leader's menu. SPC t k switches. |
+| `keys.leader_chord` | text | C-k | With standard keys: the chord that opens the leader's menu, as SPC does with Vim keys (C-k, C-;, F1...). |
+| `keys.leader_hint` | true / false | on | With standard keys: the modeline says which chord opens the leader's menu, until you've used it a few times. |
+| `editor.multi_cursor_modifier` | alt / ctrl | alt | With standard keys: the key held while clicking to add a cursor. Ctrl, for desktops that move windows with Alt+drag; go to definition then moves to Alt+click. |
+| `editor.undo_pause_ms` | 0–10000 | 1000 | With standard keys: a pause this long, in milliseconds, between keys you type starts a new undo step; 0 never does. |
 | `editor.iskeyword_extra` | text | none extra | Characters besides letters, digits and _ that count as part of a word, for w, * and completion. *A project can set it.* |
 | `terminal.shell` | text | PowerShell 7, else Windows PowerShell; $SHELL | The shell a terminal starts, with its arguments: pwsh -NoLogo, bash -l; a path with spaces in double quotes. Empty: PowerShell 7 on Windows when it's installed, else Windows PowerShell; $SHELL elsewhere. |
 | `search.smart_case` | true / false | on | A search in lower case matches any case; a capital letter makes it exact. For / and the Search page; Alt-c on the page, \C in /, match case anyway. |
@@ -567,6 +572,7 @@ when it's out of date).
 | `notifications.rules` | source (agents, tasks, an extension's id, fenix.*) = mute, history, low, normal or critical | – | What to do with a source's notifications: mute them, keep them to the history, or show them at another urgency. A source ending in * matches every one it begins. |
 | `notifications.agents` | all / unfocused / never | unfocused | Notify when an agent's turn ends or it asks you something: always, only when its thread isn't in front of you, or never. |
 | `notifications.tasks` | all / long / failed / never | long | Notify when a task ends: every one, those that took 10 seconds or more, only those that failed, or never. |
+test app::settings_host::tests::print_the_settings_table ... ok
 
 **Shelves, not autostart.** VNC hosts, documents and the workspace
 shelf make things selectable (`SPC v v`, `SPC r f`, `SPC TAB f`); none of

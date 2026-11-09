@@ -3331,7 +3331,7 @@ impl App {
         });
         let Some((buffer, rect)) = target else { return };
         let captured = self.wasm.captured == Some(buffer);
-        let mods = crate::code_page::modifiers(Mods { ctrl: self.modifiers.control_key(), alt: self.modifiers.alt_key(), super_: self.modifiers.super_key() });
+        let mods = crate::code_page::modifiers(Mods { ctrl: self.modifiers.control_key(), alt: self.modifiers.alt_key(), super_: self.modifiers.super_key(), shift: false });
         let Some(surface) = self.code_surface_mut(buffer) else {
             self.wasm.dragging = None;
             return;
@@ -3450,7 +3450,7 @@ impl App {
     pub(crate) fn code_surface_wheel(&mut self, pane: fenix_window::WindowId, pos: (f32, f32), lines: isize) -> bool {
         let Some(buffer) = self.code_surface_in_pane(pane) else { return false };
         let Some((_, rect)) = self.pane_rect_at(pos) else { return true };
-        let mods = crate::code_page::modifiers(Mods { ctrl: self.modifiers.control_key(), alt: self.modifiers.alt_key(), super_: self.modifiers.super_key() });
+        let mods = crate::code_page::modifiers(Mods { ctrl: self.modifiers.control_key(), alt: self.modifiers.alt_key(), super_: self.modifiers.super_key(), shift: false });
         let Some(at) = self.code_surface(buffer).and_then(|s| s.to_pixels((rect.x, rect.y, rect.w, rect.h), pos, true)) else { return true };
         self.code_surface_input(buffer, fenix_wasm::host::SurfaceInput::Wheel(fenix_wasm::host::WheelEvent { x: at.0, y: at.1, lines: lines as i32, mods }));
         true
