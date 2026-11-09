@@ -1,11 +1,11 @@
 # Plan: key schemes -- Vim, and standard keys
 
-- **Status:** decisions reviewed 2026-11-09 (§10 lists every one). Ready for
-  ADR 0004
+- **Status:** decisions reviewed 2026-11-09 (§10 lists every one), recorded
+  in [ADR 0004](../adr/0004-key-schemes.md). M0 done
 - **Scope:** a second way to edit in Fenix, for people who want the keys of a
   traditional IDE (no modes, no leader typed as `SPC`), with nothing taken
   away from the Vim and leader experience that stays the default
-- **Lands as:** ADR 0004, then the milestones in §8, one PR each. The
+- **Lands as:** [ADR 0004](../adr/0004-key-schemes.md), then the milestones in §8, one PR each. The
   extensions' part (§7) lands in fenix-extensions after API 1.5
 
 ## The idea in one paragraph
