@@ -1407,6 +1407,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fenix-remote"
+version = "1.5.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "fenix-rpc"
 version = "1.5.0"
 
@@ -1416,6 +1426,17 @@ version = "1.5.0"
 dependencies = [
  "chrono",
  "fenix-core",
+ "tempfile",
+]
+
+[[package]]
+name = "fenix-ssh"
+version = "1.5.0"
+dependencies = [
+ "fenix-remote",
+ "serde",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 
