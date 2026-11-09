@@ -381,11 +381,20 @@ Then the places that assumed Normal:
   Standard: `Ctrl+Enter` sends, Esc asks "discard?" when something is
   written, `Ctrl+Shift+A` has the agent write it (plus a button on the
   pane's title). Extensions call the same functions and need no change.
-- **The agents' prompt:** `Ctrl+Enter` sends, as it already does from
-  Insert. Today `y`/`Y`/`n` answer a question card "from an empty prompt";
-  in standard mode the prompt is for typing, so the card's keys answer from
-  the thread, and from the prompt with Alt (`Alt+Y`, `Alt+N`, …). A
-  pipeline's gate the same way.
+- **The agents' prompt and question cards:** `Ctrl+Enter` sends, as it
+  already does from Insert. Today `y`/`Y`/`n` answer a question card "from
+  an empty prompt", and the thread takes no clicks (a click only moves focus
+  between the prompt and the thread, `app/agents/dock.rs:253`). In standard
+  mode:
+  - **Each answer on a card is a button.** It's drawn as the card's answer
+    row is today, on its key's cap, lit under the pointer, and a click gives
+    that answer. A form's fields open their picker or the prompt line on a
+    click; a link card's "open" is a button too.
+  - **The keys still work:** plain (`y`, `Y`, `n`, …) with the thread
+    focused, and with Alt (`Alt+Y`, `Alt+N`, …) from the prompt, where the
+    plain letters are typed text.
+  - A pipeline's gate is a card like the others: its `y` / `e` / `n` are
+    buttons, and the same keys with Alt from the prompt.
 - **Side by side's `q`, Home's Enter, the refactor review, Task Output:**
   browsing, so `letter_keys_act()` keeps them. `Ctrl+W` closes them too.
 - **The file explorer** (browsing) also takes `F2` to rename, `Delete` to
@@ -528,23 +537,218 @@ convenience:
 
 ## 8. Milestones
 
-| | Milestone | Size | Behaviour change |
-|---|---|---|---|
-| M0 | ADR 0004: §2 and §10 | S | none |
-| M1 | Shift and F-keys in key presses, the notation, `[[keys]]`, the hard-coded chords moved into `default_keymap.toml` | M | none in Vim mode; chords become rebindable |
-| M2 | New commands: hover, definition, references, cut/copy/paste/select all, go to line, toggle comment, sort lines, LSP restart, move/copy lines, the bracket jumps, focus pane N, move tab to a pane, focus sidebar, focus terminal, the recent-tab switcher, the keys page. Leader groups `SPC ]`/`SPC [`, `SPC C-i`, arrow aliases under `SPC w`. The right-click menu runs them | M | new commands; Vim keys unchanged |
-| M3 | `EditPolicy::Standard` in `fenix-vim` (§4.2), with its own unit tests | L | none until switched on |
-| M3b | Multiple cursors (§2.6, §4.2a) | M–L | none until switched on |
-| M4 | The GUI (§4.3–§4.5): typing and browsing, the predicates, compose and the agents' prompt, the debugger, the mouse, the explorer, terminals' skip list, panes' last tab, the tab buttons, modeline, caret and which-key, the leader chord | L | tab buttons for everyone; the rest none in Vim mode |
-| M5 | Hints from the keymap (§4.6): core's strings, the lint test, the control protocol | M | none in Vim mode |
-| M6 | `editor.keys`, live switching, the welcome question, §2.7's shortcuts in `default_keymap.toml`, the modeline hint, the docs (§6) | M | the feature, opt-in |
-| M7 | API 1.5 (§5) and `[[keys]]` in extensions' keymaps | S | none for existing extensions |
-| M8 | fenix-extensions (§7) | S–M | hints read right in both schemes |
-| M9 | The tutorial (§4.8) | M | standard users get lessons |
+Sizes: S is a few days, M one to two weeks, L more. Each milestone is one PR
+or a few, and each leaves `master` releasable: nothing a Vim user sees
+changes until M6 switches the feature on, except the new commands (M2) and
+the tab buttons (M4b).
 
-M1 and M2 are worth landing whatever happens to the rest. M3 can be written
-next to M1/M2; M3b needs M3. M6 waits for M3, M3b, M4 and M5: standard mode
+| | Milestone | Size | Needs | Behaviour change |
+|---|---|---|---|---|
+| M0 | ADR 0004 | S | -- | none |
+| M1 | Keys as data | M | M0 | none in Vim mode; Ctrl chords become rebindable |
+| M2 | Commands for every action | M | M1 | new commands; Vim keys unchanged |
+| M3 | The standard editing policy | L | M1 | none until switched on |
+| M3b | Multiple cursors | M–L | M3 | none until switched on |
+| M4a | The GUI's foundations | M | M1, M3 | none in Vim mode |
+| M4b | Pages, panes and the mouse | L | M2, M4a | tab buttons for everyone |
+| M5 | Hints from the keymap | M | M1 | none in Vim mode |
+| M6 | Standard mode ships | M | M3b, M4b, M5 | the feature, opt-in |
+| M7 | Extension API 1.5 | S | M5 | none for existing extensions |
+| M8 | fenix-extensions | S–M | M7 | hints read right in both schemes |
+| M9 | The tutorial | M | M6 | standard users get lessons |
+
+```text
+M0 ─ M1 ─┬─ M2 ───────────────┐
+         ├─ M3 ─┬─ M3b ───────┤
+         │      └─ M4a ─ M4b ─┼─ M6 ─ M9
+         └─ M5 ─┬─────────────┘
+                └─ M7 ─ M8
+```
+
+M1 and M2 are worth landing whatever happens to the rest. M2, M3 and M5 can
+go in parallel once M1 is in. M6 waits for M3b, M4b and M5: standard mode
 ships with multiple cursors and with hints that say its keys.
+
+### M0 — ADR 0004 (S)
+
+- `docs/adr/0004-key-schemes.md`: the problem, §2's decisions, the decision
+  record (§10), what was rejected (a separate editing engine, a pure
+  extension, the base shortcuts as an extension, a menu bar).
+- **Done when:** the ADR is accepted.
+
+### M1 — Keys as data (M)
+
+- **`fenix-keymap`:** `Mods.shift`; `NamedKey::F(1..=12)`; `KeyPress`
+  helpers (`with_shift`).
+- **`keymap.rs`:** `to_keypress` normalizes Shift (§4.1) and reports F-keys
+  (the terminal's and the debugger's F-key handling move behind it, same
+  order). `describe_keypress` writes `s-` for Super, `S-` for Shift, `<F12>`.
+  `parse_keys` reads `C-`, `M-`, `s-`, `S-` and `<Name>`, so a leader entry
+  can take `SPC C-i`.
+- **`[[keys]]`:** `KeymapData.keys` with `keys`, `command`, `label`, `when`,
+  `scheme`, `unbind`. A `ChordMap` built from core's, the extensions' and
+  yours, like the leader trie, rebuilt by `reload_leader`. Problems reported
+  like `[[leader]]`'s.
+- **`route_keypress`:** the Ctrl block (`app.rs:16218`) becomes a
+  `ChordMap` lookup, in the same place in the order. Core's entries
+  reproduce it: Ctrl+S, Ctrl+Z, Ctrl+Shift+Z, Ctrl+Y, Ctrl+Q, font size,
+  Ctrl+PageUp/PageDown/Tab with `scheme = "any"`; Ctrl+O/Ctrl+I with
+  `scheme = "vim"` and `when = "editor"` (not while typing, as today).
+- **Yours:** `keybindings.toml` takes `[[keys]]`; `write_binding`
+  (`fenix-config/src/keybindings.rs`) writes one when the palette's `Tab`
+  is given a chord; `SPC h b`, `SPC h k` and `SPC h K` show chords.
+- **Done when:** the table test (today's `if/else` against the map) passes;
+  every existing test passes unchanged; Ctrl+S rebound in a test
+  `keybindings.toml` runs the new command; a macro replays Ctrl+Shift+Z as
+  redo.
+
+### M2 — Commands for every action (M)
+
+- **From Vim keys and the right-click menu:** `code.hover`,
+  `code.goto_definition`, `code.references`, `edit.cut`, `edit.copy`,
+  `edit.paste`, `edit.select_all`. `MenuAction`'s arms run them.
+- **The bracket jumps** (`VimAction::BracketJump`): `nav.next_problem` /
+  `prev_problem`, `nav.next_hunk` / `prev_hunk`, `nav.next_agent_change` /
+  `prev_…`, `nav.next_todo` / `prev_…`, `nav.next_side_change` / `prev_…`,
+  `debug.trail_back` / `trail_forward`. Leader groups `SPC ]` and `SPC [`.
+- **From Ex:** `edit.sort_lines` (options in a picker), `lsp.restart`
+  (servers in a picker).
+- **New:** `nav.goto_line`, `code.toggle_comment` (the language's line
+  comment, from its tree-sitter config, else its block comment),
+  `edit.move_lines_up` / `down`, `edit.copy_lines_up` / `down`,
+  `window.focus_nth` (1–9), `window.move_tab_next` / `prev`,
+  `window.focus_sidebar`, `terminal.focus`, `buffer.switch_recent` (the
+  held-Ctrl switcher), `help.keys_sheet`, `view.key_scheme`.
+- **Leader:** `SPC C-i` → `code.hover`; `SPC w <Left/Down/Up/Right>` beside
+  `h/j/k/l`.
+- **Done when:** each command has a test; `SPC h c` describes every one;
+  Vim's own keys for the same actions are unchanged (their tests pass).
+
+### M3 — The standard editing policy (L)
+
+- **`fenix-vim`:** `EditPolicy` and `set_policy`. Under `Standard`: resting
+  in Insert, Esc's meaning, the movement keys with Ctrl and Shift, SELECT
+  (Visual with the standard flag: replace on type, collapse on an unshifted
+  arrow), `Ctrl+Backspace/Delete`, `Tab`'s order (snippet, completion,
+  indent the selection, indent), Insert-mode Vim chords off.
+- **Clipboard:** a `VimEvent` asks the GUI for the system clipboard (as
+  paste does today); copy and cut with no selection take the line.
+- **Undo:** `fenix-core`'s buffer gets a way to cut the Insert session's
+  coalesced run (`break_undo_run`); the policy calls it on §4.2's breaks,
+  with `editor.undo_pause_ms`.
+- **Done when:** the standard suite (§9) passes; the Vim suite passes
+  unchanged under `EditPolicy::Vim`.
+
+### M3b — Multiple cursors (M–L)
+
+- **`fenix-core`:** `Cursors { primary, extra }` and `Caret`; carets mapped
+  through every edit as marks are; merging.
+- **`fenix-vim`:** under `Standard`, typing, deleting, Enter, paste and
+  movement applied at each caret, last first, in one undo group; the
+  clipboard's pieces; what stays primary-only (§4.2a).
+- **`fenix-gui`:** drawing the extra carets and their selections; `3
+  cursors` on the modeline; Alt+click (add, remove), Alt+Shift+drag (a
+  column, at most 10,000, with a message past it); Esc back to one;
+  `editor.multi_cursor_modifier`, with Ctrl+click's go-to-definition moving
+  to Alt+click under `ctrl`.
+- **Done when:** the multiple-cursor tests (§9) pass, agents' change ledger
+  and decorations included; Vim mode never has an extra caret.
+
+### M4a — The GUI's foundations (M)
+
+- **Typing or browsing:** a `writable` property per `BufferKind` and
+  pane-resident page; browsing under `Standard` is Normal underneath, with
+  arrows, PageUp/PageDown, Home/End, Shift+arrows and Ctrl+C.
+- **The predicates** (§4.3): `at_rest`, `typing_text`, `letter_keys_act`,
+  `leader_starts`, replacing the ~35 `Mode::Normal` / `is_inserting()`
+  checks outside rendering (`app.rs`, `app/mouse.rs`, `tutorial_host.rs`,
+  `motion_host.rs`, …).
+- **The leader chord:** `keys.leader_chord` starts the leader matcher in
+  standard mode; which-key writes it as `C-k`.
+- **Looks:** the modeline badge (none, `SELECT`, `DEBUG`), `[modes] select`,
+  the quiet rail, the bar caret, absolute line numbers as the default.
+- **Done when:** every predicate has a test per scheme; the app tests pass
+  unchanged in Vim mode; in a test App on `Standard`, `Ctrl+K g g` opens
+  Git and Home browses with arrows and Enter.
+
+### M4b — Pages, panes and the mouse (L)
+
+- **Compose panes:** `Ctrl+Enter`, Esc asks, `Ctrl+Shift+A` and the title's
+  button.
+- **The agents' thread:** clickable answers on every kind of card (a
+  question, a form's fields, a link, a pipeline's gate), lit under the
+  pointer; plain keys from the thread, Alt+key from the prompt.
+- **The debugger:** DEBUG's letter keys off in standard mode.
+- **The explorer:** F2, Delete, Enter while browsing.
+- **Terminals:** the skip list (`when = "terminal"`).
+- **The mouse:** a drag enters SELECT; Ctrl+click goes to definition.
+- **Panes and tabs:** a split pane closes with its last tab (standard); the
+  tab's × and the strip's split button, on hover, in both schemes.
+- **Done when:** the GUI tests in §9 pass in both schemes; the tab buttons
+  have screenshot tests in both themes.
+
+### M5 — Hints from the keymap (M)
+
+- `keymap::key_for(command)`: yours, then the scheme's, as which-key writes
+  keys.
+- **The strings** (~250 in `fenix-gui`): built with `key_for`, in a PR per
+  area -- the agents, Git, the explorer and file manager, search, the
+  debugger, projects and tasks, pages and pickers, Home, the welcome and
+  notifications.
+- **The lint test** (§4.6), with an allow-list for the keymap and tests.
+- **The control protocol:** `CommandInfo.keys` from `key_for`.
+- **Done when:** the lint test passes with an empty allow-list outside the
+  keymap; every compose, confirm and empty-page hint reads right in a test
+  App on each scheme.
+
+### M6 — Standard mode ships (M)
+
+- `editor.keys` in `fenix-config`'s schema (Editor), live switching
+  (§4.7), `SPC t k`.
+- §2.7's shortcuts in `default_keymap.toml` with `scheme = "standard"`.
+- The welcome question; the modeline's `Ctrl+K commands` hint
+  (`keys.leader_hint`); the keys page.
+- The docs (§6).
+- A week of use on standard mode by people who'd use it, then the undo
+  breaks tuned.
+- **Done when:** the coverage and conflict tests (§9) pass; `SPC h K` is
+  clean on a fresh install; the docs are in; the week's findings are fixed
+  or written down.
+
+### M7 — Extension API 1.5 (S)
+
+- `fenix-extension-api`: `KeyScheme`, `key_scheme()`, `key_for()`,
+  `Event::KeySchemeChanged`.
+- `fenix-wasm`: `editor_key_scheme`, `editor_key_for`, the event's dispatch.
+- `manifest.rs`: `API = "1.5.0"`. Extensions' `keymaps/*.toml` take
+  `[[keys]]`, refusing reserved chords and `when = "terminal"`.
+- `docs/WRITING_EXTENSIONS.md`.
+- **Done when:** a test extension's round trip (`key_for` before and after
+  a switch, the event) passes in `fenix-wasm`; every extension in
+  fenix-extensions still loads and passes its tests on the new host.
+
+### M8 — fenix-extensions (S–M)
+
+- MIB, Tcl, CCSDS, Notebook, PDF, Images: hints through `key_for`; these
+  move to `api = "1.5"` in their manifests and get a release each.
+- READMEs with Vim keys get the standard key beside them (Review's `A`
+  included).
+- Review and every `compose` user checked in both schemes.
+- The `more_keys` pages checked against the reserved chords.
+- Database and HTTP: `C-Enter` in `[[keys]]`.
+- `xtask validate`: `[[keys]]` checks.
+- **Done when:** CI is green; each changed extension's hints read right in
+  both schemes.
+
+### M9 — The tutorial (M)
+
+- `scheme` on lessons; `{leader}` and `{key:command.id}` expanded through
+  `key_for`.
+- `standard-1-basics.toml`: typing, selecting, multiple cursors, the
+  clipboard, undo, find, `Ctrl+K`.
+- The `fenix-*` lessons moved to `any`; the `editing-*` lessons kept Vim's.
+- **Done when:** every lesson runs in a test App on its schemes;
+  `SPC h T` in standard mode lists only lessons that apply.
 
 ---
 
@@ -571,8 +775,9 @@ ships with multiple cursors and with hints that say its keys.
 - **Hints:** the lint test (§4.6); `key_for` answers per scheme and after a
   rebinding.
 - **GUI:** the app tests that exercise compose, side by side, Home, the
-  explorer, the agents' prompt and cards, the debugger, terminals and the
-  mouse run once per scheme (a test helper sets the policy); browsing
+  explorer, the agents' prompt and cards (a click on each kind of answer,
+  `Alt+Y` from the prompt, `y` typed into it), the debugger, terminals and
+  the mouse run once per scheme (a test helper sets the policy); browsing
   buffers take arrows and their letter keys; a split pane closes with its
   last tab in standard mode only.
 - **Extensions:** fenix-extensions' suites against a host on API 1.5; a
@@ -635,7 +840,7 @@ Settled in review on 2026-11-09.
 | 47 | × and split buttons on hover, both schemes | §2.8 |
 | 48 | Workspaces on the leader | §2.8 |
 | 49 | No resize keys in v1 | §2.8 |
-| 50 | Agents' cards answer from the thread, or with Alt from the prompt | §4.3 |
+| 50 | Agents' question cards are clickable in standard mode, and answer with their keys from the thread or with Alt from the prompt | §4.3 |
 
 ---
 
