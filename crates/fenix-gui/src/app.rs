@@ -49,6 +49,10 @@ pub(crate) use debug_breakpoints::BreakpointPart;
 mod polish;
 mod which_key;
 mod keys_host;
+mod edit_commands;
+#[cfg(test)]
+mod test_keys;
+pub(crate) use edit_commands::SortLines;
 mod file_index;
 mod explorer_host;
 mod search_host;
@@ -1902,6 +1906,12 @@ fn extension_name(id: &str) -> String {
 impl App {
     /// Runs command `id` (see `CommandRegistry::run`).
     pub(crate) fn run_command(&mut self, event_loop: &ActiveEventLoop, id: &str) -> bool {
+        self.run_command_with(Some(event_loop), id)
+    }
+
+    /// `run_command`, with or without an event loop to hand (a test
+    /// driving the keys has none; a command that needs one does nothing).
+    pub(crate) fn run_command_with(&mut self, event_loop: Option<&ActiveEventLoop>, id: &str) -> bool {
         self.note_command_run(id);
         let commands = Rc::clone(&self.commands);
         commands.run(self, event_loop, id)
@@ -4929,6 +4939,11 @@ pub struct App {
     /// typing at a time, and it always acts on `self.workspaces`, which
     /// is always whichever frame is currently active.
     workspace_rename_prompt: Option<String>,
+    /// `nav.goto_line`'s prompt: the number typed so far.
+    goto_line_prompt: Option<String>,
+    /// The switcher `buffer.switch_recent` (Ctrl+Tab) opened is up: letting
+    /// go of Ctrl picks its row.
+    switching_recent: bool,
     /// `SPC f D`'s y/n gate, armed until the next keypress confirms
     /// (`y`) or cancels (anything else) -- same shape as `docker_
     /// confirm_remove`.
@@ -6097,6 +6112,8 @@ impl App {
             pipelines: agent_pipelines::Pipelines::default(),
             refactor_undo: None,
             workspace_rename_prompt: None,
+            goto_line_prompt: None,
+            switching_recent: false,
             delete_file_confirm: false,
             vim,
             clipboard: crate::clipboard::Clipboard::new().ok(),
@@ -9070,9 +9087,9 @@ impl App {
     /// the dirty buffers so the user can jump to and save them instead
     /// of guessing, anything else cancels. Same "captures the very
     /// next key" shape as `DockerHost::confirm_key`/`git_confirm_key`.
-    fn quit_confirm_key(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+    fn quit_confirm_key(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         match self.resolve_quit_confirm_action(keypress) {
-            QuitConfirmAction::Quit => { if self.discard_session_edits() { event_loop.exit(); } },
+            QuitConfirmAction::Quit => { if self.discard_session_edits() { if let Some(event_loop) = event_loop { event_loop.exit(); } } },
             QuitConfirmAction::ShowDirtyBuffers => self.picker_switch_dirty_buffers(),
             QuitConfirmAction::Cancel => {}
         }
@@ -14898,7 +14915,7 @@ impl App {
     /// `Ctrl-I` forward stack -- see `jump_back_stack`'s own doc comment
     /// for why a new jump invalidates old forward history rather than
     /// preserving it the way real Vim's jumplist does.
-    fn record_jump(&mut self, from: JumpEntry) {
+    pub(super) fn record_jump(&mut self, from: JumpEntry) {
         self.jump_back_stack.push(from);
         self.jump_forward_stack.clear();
         self.mark_jump();
@@ -16007,7 +16024,7 @@ impl App {
         }
         let Some(keypress) = keymap::to_keypress(event, self.modifiers) else { return };
         self.code_active();
-        self.dispatch_keypress(keypress, event_loop);
+        self.dispatch_keypress(keypress, Some(event_loop));
     }
 
     /// Every real keypress passes through here exactly once -- the tap
@@ -16032,7 +16049,7 @@ impl App {
     /// place `vim.handle_key` is called). `.` itself replays through
     /// `repeat_last_change` -> `route_keypress` directly, same as a
     /// macro, so its own replayed keys never re-enter this tap.
-    fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+    fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         // The right click's menu, open, has the keyboard.
         if self.mouse.menu.is_some() {
             if let Some(action) = self.menu_key(keypress.legacy()) {
@@ -16062,7 +16079,7 @@ impl App {
         }
     }
 
-    fn route_keypress(&mut self, keypress: KeyPress, event_loop: &ActiveEventLoop) {
+    fn route_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
         let _profile = crate::profile::Scope::new("route_keypress");
         // Everything but the chords reads keys as it always has, without
         // Shift (see `KeyPress::legacy`).
@@ -16181,6 +16198,10 @@ impl App {
             return;
         }
         // `SPC TAB r` -- same capturing-prompt tier.
+        if self.goto_line_prompt.is_some() {
+            self.goto_line_prompt_key(keypress);
+            return;
+        }
         if self.workspace_rename_prompt.is_some() {
             self.workspace_rename_prompt_key(keypress);
             return;
@@ -16210,7 +16231,7 @@ impl App {
         if self.active_picker.is_some() {
             self.picker_key(keypress);
             if let Some(id) = self.queued_command.take() {
-                self.run_command(event_loop, &id);
+                self.run_command_with(event_loop, &id);
                 self.wake_caret();
             }
             return;
@@ -16220,7 +16241,7 @@ impl App {
         // Alt-x: the command palette, from anywhere -- a page or Insert
         // too -- but not from inside a picker or prompt (`SPC :` in Normal).
         if keypress.mods.alt && !keypress.mods.ctrl && keypress.code == KeyCode::Char('x') {
-            self.run_command(event_loop, "commands.palette");
+            self.run_command_with(event_loop, "commands.palette");
             self.wake_caret();
             return;
         }
@@ -16266,8 +16287,9 @@ impl App {
         // (`C-s`, `C-z`, `F12`...). They read the key as it came, Shift
         // and all (`full`); a macro's recorded key carries its own
         // modifiers, so a replay runs the same chord.
-        if let Some(id) = self.chord_command(full) {
-            self.run_command(event_loop, id);
+        let in_leader = self.local_matcher.is_some() || self.leader_matcher.is_pending();
+        if let Some(id) = self.chord_command(full).filter(|_| !in_leader) {
+            self.run_command_with(event_loop, id);
             self.wake_caret();
             return;
         }
@@ -16307,7 +16329,7 @@ impl App {
         // (e.g. `format_selection`) reads them.
         if let Some(resolved) = self.local_leader_key(keypress) {
             if let Some(id) = resolved {
-                self.run_command(event_loop, id);
+                self.run_command_with(event_loop, id);
             }
             return;
         }
@@ -16315,7 +16337,7 @@ impl App {
             || (matches!(self.vim.mode(), Mode::Normal | Mode::Visual) && keypress == KeyPress::char(' '))
         {
             if let Step::Matched(&id) = self.leader_matcher.feed(keypress) {
-                self.run_command(event_loop, id);
+                self.run_command_with(event_loop, id);
             }
             self.wake_caret();
             return;
@@ -16811,47 +16833,47 @@ impl App {
         match vim_event {
             VimEvent::RequestSessionSave => { self.save_session_explicit(); }
             VimEvent::RequestProjectNew(args) => self.project_new_with(&args),
-            VimEvent::RequestSessionQuit => { if self.save_session_explicit() { event_loop.exit(); } }
+            VimEvent::RequestSessionQuit => { if self.save_session_explicit() { if let Some(event_loop) = event_loop { event_loop.exit(); } } }
             VimEvent::RequestRestartLsp(name) => { self.restart_project_lsp(&name); }
             VimEvent::RequestUndoRefactor => { self.undo_refactor(); }
             VimEvent::RequestSave => {
-                self.run_command(event_loop, "file.save");
+                self.run_command_with(event_loop, "file.save");
             }
             VimEvent::RequestSaveAs(path) => {
                 self.save_unnamed_as(&path);
             }
             VimEvent::RequestOpenFile { path, split } => {
                 if let Some(way) = split {
-                    self.run_command(event_loop, if way == fenix_vim::SplitWay::Vertical { "window.split_vertical" } else { "window.split_horizontal" });
+                    self.run_command_with(event_loop, if way == fenix_vim::SplitWay::Vertical { "window.split_vertical" } else { "window.split_horizontal" });
                 }
                 self.open_typed_path(&path);
             }
             VimEvent::RunCommand(id) => {
-                self.run_command(event_loop, id);
+                self.run_command_with(event_loop, id);
             }
             VimEvent::RequestForceSave => {
-                self.run_command(event_loop, "file.save_force");
+                self.run_command_with(event_loop, "file.save_force");
             }
             VimEvent::RequestReloadFile => {
-                self.run_command(event_loop, "file.reload");
+                self.run_command_with(event_loop, "file.reload");
             }
             VimEvent::RequestCloseBuffer => {
-                self.run_command(event_loop, "buffer.kill");
+                self.run_command_with(event_loop, "buffer.kill");
             }
             VimEvent::RequestForceCloseBuffer => {
-                self.run_command(event_loop, "buffer.kill_force");
+                self.run_command_with(event_loop, "buffer.kill_force");
             }
             VimEvent::RequestSaveAndCloseBuffer => {
-                self.run_command(event_loop, "buffer.save_and_kill");
+                self.run_command_with(event_loop, "buffer.save_and_kill");
             }
             VimEvent::RequestQuitAll => {
-                self.run_command(event_loop, "app.quit");
+                self.run_command_with(event_loop, "app.quit");
             }
             VimEvent::RequestForceQuitAll => {
-                self.run_command(event_loop, "app.quit_force");
+                self.run_command_with(event_loop, "app.quit_force");
             }
             VimEvent::RequestSaveAllAndQuit => {
-                self.run_command(event_loop, "app.save_all_and_quit");
+                self.run_command_with(event_loop, "app.save_all_and_quit");
             }
             VimEvent::Error(msg) => self.set_error(msg),
             VimEvent::Message(msg) => self.set_message(msg),
@@ -16953,7 +16975,7 @@ impl App {
     /// replay calls via a single counter on `self`, so a runaway macro
     /// bails out with a modeline-visible message instead of freezing
     /// the app.
-    fn play_macro(&mut self, register: char, count: u32, event_loop: &ActiveEventLoop) {
+    fn play_macro(&mut self, register: char, count: u32, event_loop: Option<&ActiveEventLoop>) {
         let register = if register == '@' { self.last_played_macro } else { Some(register) };
         let Some(register) = register else { return };
         if self.replay_depth >= MAX_MACRO_REPLAY_DEPTH {
@@ -16995,7 +17017,7 @@ impl App {
     /// keypress's own span look dirty too, and `last_change_keys` would
     /// get overwritten with just `['.']` on every repeat. A silent no-op
     /// if nothing's been recorded yet.
-    fn repeat_last_change(&mut self, event_loop: &ActiveEventLoop) {
+    fn repeat_last_change(&mut self, event_loop: Option<&ActiveEventLoop>) {
         let Some(keys) = self.last_change_keys.clone() else { return };
         self.replaying_change = true;
         for key in &keys {
@@ -17530,6 +17552,7 @@ impl App {
             .or_else(|| self.rename_file_prompt_text())
             .or_else(|| self.lsp_rename_prompt_text())
             .or_else(|| self.workspace_rename_prompt_text())
+            .or_else(|| self.goto_line_prompt_text())
             .or_else(|| self.delete_file_confirm_text())
     }
 

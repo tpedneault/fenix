@@ -227,7 +227,7 @@ impl App {
     }
 
     /// Puts `pane`'s cursor on char `at`, its column remembered for `j`/`k`.
-    fn put_cursor(&mut self, pane: fenix_window::WindowId, at: usize) {
+    pub(super) fn put_cursor(&mut self, pane: fenix_window::WindowId, at: usize) {
         let Some(&buffer) = self.windows().content(pane) else { return };
         let Some(ob) = self.buffers.get(buffer) else { return };
         let at = at.min(ob.buffer.len_chars());
@@ -238,7 +238,7 @@ impl App {
 
     /// Leaves Insert (or Replace) the way Escape does, before a selection
     /// starts.
-    fn mouse_leave_insert(&mut self) {
+    pub(super) fn mouse_leave_insert(&mut self) {
         if self.vim.is_inserting() {
             let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());
             if let (Some(ob), Some(state)) = (self.buffers.get_mut(id), self.workspaces.active_pane_states_mut().get_mut(&pane)) {
@@ -475,7 +475,7 @@ impl App {
     }
 
     /// `id`'s tab leaves `from` and opens in `to`, in front.
-    fn move_tab_to_pane(&mut self, from: fenix_window::WindowId, id: BufferId, to: fenix_window::WindowId) {
+    pub(super) fn move_tab_to_pane(&mut self, from: fenix_window::WindowId, id: BufferId, to: fenix_window::WindowId) {
         self.tab_leaves(from, id);
         self.windows_mut().focus(to);
         self.sidebar_focused = false;
@@ -777,7 +777,7 @@ impl App {
 
     /// Vim keys typed for a menu's row, the clipboard kept in step as
     /// typing them would.
-    fn mouse_vim_keys(&mut self, keys: &[KeyPress]) {
+    pub(super) fn mouse_vim_keys(&mut self, keys: &[KeyPress]) {
         for &key in keys {
             self.pull_clipboard_before_paste(key);
             let (id, pane) = (self.focused_buffer_id(), self.focused_pane_id());

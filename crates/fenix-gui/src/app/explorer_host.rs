@@ -880,7 +880,7 @@ impl App {
 
     /// Opens the sidebar on the file being edited's project, showing
     /// the file.
-    fn open_sidebar(&mut self) {
+    pub(super) fn open_sidebar(&mut self) {
         let file = self.followed_file();
         let dir = self.sidebar_root_for(file.as_deref());
         // As it was left in this project: its open folders, its filter,

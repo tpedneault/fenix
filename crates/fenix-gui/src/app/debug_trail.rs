@@ -166,7 +166,7 @@ impl App {
 
     /// `[t` (back) and `]t` (forward), `count` stops: the code and its
     /// values as they were then. Forward past the newest is now.
-    pub(super) fn debug_trail_scrub(&mut self, forward: bool, count: usize) {
+    pub(crate) fn debug_trail_scrub(&mut self, forward: bool, count: usize) {
         let len = self.debug_trail.stops.len();
         let Some(at) = self.debug_trail.shown() else { return };
         let to = if forward { at + count } else { at.saturating_sub(count) };

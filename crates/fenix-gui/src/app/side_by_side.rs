@@ -350,7 +350,7 @@ impl App {
     }
 
     /// `]c` / `[c`: the cursor to the next or previous change.
-    pub(super) fn side_by_side_jump(&mut self, forward: bool, count: u32) {
+    pub(crate) fn side_by_side_jump(&mut self, forward: bool, count: u32) {
         let pane = self.focused_pane_id();
         let Some(session) = self.side_by_side_at(pane) else {
             self.set_message("]c and [c walk a side-by-side diff -- SPC g v opens one");

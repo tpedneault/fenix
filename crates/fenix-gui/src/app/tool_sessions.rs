@@ -92,7 +92,7 @@ impl App {
     /// all of them, or the one called `NAME` (an additional server's name,
     /// a primary server's program, or a language). Each re-reads the
     /// project's tool configuration as it starts again.
-    pub(super) fn restart_project_lsp(&mut self, name: &str) {
+    pub(crate) fn restart_project_lsp(&mut self, name: &str) {
         let root = self.integration_root();
         let name = name.trim();
         let matches = |app: &App, key: &LspKey| {

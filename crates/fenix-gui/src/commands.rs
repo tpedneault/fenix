@@ -8,7 +8,8 @@ use crate::app::App;
 /// needed for app-level actions like quitting.
 pub struct CommandCtx<'a> {
     pub app: &'a mut App,
-    pub event_loop: &'a ActiveEventLoop,
+    /// `None` when there's none to hand: a test driving the keys.
+    pub event_loop: Option<&'a ActiveEventLoop>,
 }
 
 /// What a command runs. Boxed, so a command can be registered at run
@@ -296,6 +297,58 @@ impl CommandRegistry {
         registry.register("buffer.next", "Switch to the next open buffer", cmd_next_buffer);
         registry.register("buffer.prev", "Switch to the previous open buffer", cmd_prev_buffer);
         registry.register("buffer.kill", "Close the focused buffer (refuses if it has unsaved changes)", cmd_kill_buffer);
+        registry.register("code.hover", "What the name under the cursor is: the language server's hover, or the debugger's lens while stopped (K)", |ctx| ctx.app.cmd_hover());
+        registry.register("code.goto_definition", "Go to where the name under the cursor is defined (gd)", |ctx| ctx.app.request_goto_definition());
+        registry.register("code.references", "List where the name under the cursor is used (gr)", |ctx| ctx.app.request_references());
+        registry.register("code.toggle_comment", "Comment or uncomment the cursor's line, or the selection's lines (gcc, gc)", |ctx| ctx.app.cmd_toggle_comment());
+        registry.register("edit.copy", "Copy the selection, or the cursor's line, to the clipboard", |ctx| ctx.app.cmd_copy());
+        registry.register("edit.cut", "Cut the selection, or the cursor's line, to the clipboard", |ctx| ctx.app.cmd_cut());
+        registry.register("edit.paste", "Paste the clipboard at the cursor, or over the selection", |ctx| ctx.app.cmd_paste());
+        registry.register("edit.select_all", "Select the whole buffer", |ctx| ctx.app.cmd_select_all());
+        registry.register("edit.move_lines_up", "Move the cursor's line, or the selected lines, up one", |ctx| ctx.app.cmd_move_lines(false));
+        registry.register("edit.move_lines_down", "Move the cursor's line, or the selected lines, down one", |ctx| ctx.app.cmd_move_lines(true));
+        registry.register("edit.copy_lines_up", "Copy the cursor's line, or the selected lines, above them", |ctx| ctx.app.cmd_copy_lines(false));
+        registry.register("edit.copy_lines_down", "Copy the cursor's line, or the selected lines, below them", |ctx| ctx.app.cmd_copy_lines(true));
+        registry.register("edit.sort_lines", "Sort the selected lines, or the buffer's (:sort)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Plain));
+        registry.register("edit.sort_lines_reverse", "Sort the selected lines, or the buffer's, in reverse (:sort!)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Reverse));
+        registry.register("edit.sort_lines_ignore_case", "Sort the selected lines, or the buffer's, ignoring case (:sort i)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::IgnoreCase));
+        registry.register("edit.sort_lines_numeric", "Sort the selected lines, or the buffer's, by the number in each (:sort n)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Numeric));
+        registry.register("edit.sort_lines_unique", "Sort the selected lines, or the buffer's, dropping repeats (:sort u)", |ctx| ctx.app.cmd_sort_lines(crate::app::SortLines::Unique));
+        registry.register("lsp.restart", "Restart this project's language servers (:lsp-restart)", |ctx| ctx.app.restart_project_lsp(""));
+        registry.register("nav.goto_line", "Go to a line, by its number", |ctx| ctx.app.start_goto_line_prompt());
+        registry.register("nav.next_problem", "The next problem in the file (]d)", |ctx| ctx.app.jump_to_diagnostic(true, 1));
+        registry.register("nav.prev_problem", "The previous problem in the file ([d)", |ctx| ctx.app.jump_to_diagnostic(false, 1));
+        registry.register("nav.next_hunk", "The next changed hunk in the file (]h)", |ctx| ctx.app.jump_to_hunk(true, 1));
+        registry.register("nav.prev_hunk", "The previous changed hunk in the file ([h)", |ctx| ctx.app.jump_to_hunk(false, 1));
+        registry.register("nav.next_agent_change", "The next change a coding agent made and you haven't kept, across files (]a)", |ctx| ctx.app.agents_jump_to_hunk(true, 1));
+        registry.register("nav.prev_agent_change", "The previous change a coding agent made and you haven't kept ([a)", |ctx| ctx.app.agents_jump_to_hunk(false, 1));
+        registry.register("nav.next_todo", "The next TODO-style comment in the file (]t)", |ctx| ctx.app.jump_to_todo(true, 1));
+        registry.register("nav.prev_todo", "The previous TODO-style comment in the file ([t)", |ctx| ctx.app.jump_to_todo(false, 1));
+        registry.register("nav.next_side_change", "The next change, side by side (]c)", |ctx| ctx.app.side_by_side_jump(true, 1));
+        registry.register("nav.prev_side_change", "The previous change, side by side ([c)", |ctx| ctx.app.side_by_side_jump(false, 1));
+        registry.register("debug.trail_back", "Back along the Ember Trail: the code and its values as they were ([t while debugging)", |ctx| ctx.app.debug_trail_scrub(false, 1));
+        registry.register("debug.trail_forward", "On along the Ember Trail (]t while debugging)", |ctx| ctx.app.debug_trail_scrub(true, 1));
+        const FOCUS: [(&str, &str); 9] = [
+            ("window.focus_1", "To pane 1, in reading order"),
+            ("window.focus_2", "To pane 2, in reading order"),
+            ("window.focus_3", "To pane 3, in reading order"),
+            ("window.focus_4", "To pane 4, in reading order"),
+            ("window.focus_5", "To pane 5, in reading order"),
+            ("window.focus_6", "To pane 6, in reading order"),
+            ("window.focus_7", "To pane 7, in reading order"),
+            ("window.focus_8", "To pane 8, in reading order"),
+            ("window.focus_9", "To pane 9, in reading order"),
+        ];
+        for (n, (id, what)) in FOCUS.into_iter().enumerate() {
+            registry.register(id, what, move |ctx| ctx.app.cmd_focus_nth_pane(n + 1));
+        }
+        registry.register("window.move_tab_next", "Move the tab in front to the next pane", |ctx| ctx.app.cmd_move_tab_to_next_pane(true));
+        registry.register("window.move_tab_prev", "Move the tab in front to the pane before", |ctx| ctx.app.cmd_move_tab_to_next_pane(false));
+        registry.register("window.focus_sidebar", "To the file explorer's sidebar, opening it; again, back to the editor", |ctx| ctx.app.cmd_focus_sidebar());
+        registry.register("terminal.focus", "To the terminal panel, opening it; from it, back to the editor", |ctx| ctx.app.cmd_focus_terminal());
+        registry.register("buffer.switch_recent", "Switch between the buffers used last, the one before this picked first (Ctrl+Tab)", |ctx| ctx.app.cmd_switch_recent());
+        registry.register("help.keys_sheet", "Every key in use, on a page: the chords and the leader's groups", |ctx| ctx.app.open_keys_sheet());
+        registry.register("view.key_scheme", "Switch between Vim keys and standard keys (editor.keys)", |ctx| ctx.app.cmd_toggle_key_scheme());
         registry.register("tab.next", "The next tab in the focused pane, wrapping round through Home", |ctx| ctx.app.move_tab_cmd(fenix_vim::TabMove::Next));
         registry.register("tab.prev", "The previous tab in the focused pane, wrapping round through Home", |ctx| ctx.app.move_tab_cmd(fenix_vim::TabMove::Prev(1)));
         registry.register("tab.last", "The tab this pane was on before", |ctx| ctx.app.move_tab_cmd(fenix_vim::TabMove::Last));
@@ -402,7 +455,7 @@ impl CommandRegistry {
 
     /// Runs the command named `id` against `app`. Returns `false` if no
     /// command with that id is registered.
-    pub fn run(&self, app: &mut App, event_loop: &ActiveEventLoop, id: &str) -> bool {
+    pub fn run(&self, app: &mut App, event_loop: Option<&ActiveEventLoop>, id: &str) -> bool {
         let Some(cmd) = self.commands.iter().find(|c| c.id == id) else { return false };
         match &cmd.run {
             Handler::Ctx(run) => run(&mut CommandCtx { app, event_loop }),
@@ -451,19 +504,29 @@ fn cmd_redo(ctx: &mut CommandCtx) {
 }
 
 fn cmd_quit(ctx: &mut CommandCtx) {
-    ctx.app.request_quit(ctx.event_loop);
+    if let Some(event_loop) = ctx.event_loop {
+        ctx.app.request_quit(event_loop);
+    }
 }
 
 fn cmd_restart(ctx: &mut CommandCtx) {
-    ctx.app.request_restart(ctx.event_loop);
+    if let Some(event_loop) = ctx.event_loop {
+        ctx.app.request_restart(event_loop);
+    }
 }
 
 fn cmd_quit_force(ctx: &mut CommandCtx) {
-    if ctx.app.discard_session_edits() { ctx.event_loop.exit(); }
+    if ctx.app.discard_session_edits() {
+        if let Some(event_loop) = ctx.event_loop {
+            event_loop.exit();
+        }
+    }
 }
 
 fn cmd_save_all_and_quit(ctx: &mut CommandCtx) {
-    ctx.app.request_save_all_and_quit(ctx.event_loop);
+    if let Some(event_loop) = ctx.event_loop {
+        ctx.app.request_save_all_and_quit(event_loop);
+    }
 }
 
 fn cmd_cycle_line_numbers(ctx: &mut CommandCtx) {
@@ -739,11 +802,15 @@ fn cmd_only_window(ctx: &mut CommandCtx) {
 }
 
 fn cmd_new_frame(ctx: &mut CommandCtx) {
-    ctx.app.new_frame(ctx.event_loop);
+    if let Some(event_loop) = ctx.event_loop {
+        ctx.app.new_frame(event_loop);
+    }
 }
 
 fn cmd_close_frame(ctx: &mut CommandCtx) {
-    ctx.app.close_frame(ctx.event_loop);
+    if let Some(event_loop) = ctx.event_loop {
+        ctx.app.close_frame(event_loop);
+    }
 }
 
 fn cmd_cycle_frame(ctx: &mut CommandCtx) {

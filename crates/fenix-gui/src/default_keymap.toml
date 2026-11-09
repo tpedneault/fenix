@@ -922,6 +922,26 @@ label = "split horizontal"
 command = "window.split_horizontal"
 
 [[leader]]
+keys = "SPC w Left"
+label = "focus left"
+command = "window.navigate_left"
+
+[[leader]]
+keys = "SPC w Down"
+label = "focus down"
+command = "window.navigate_down"
+
+[[leader]]
+keys = "SPC w Up"
+label = "focus up"
+command = "window.navigate_up"
+
+[[leader]]
+keys = "SPC w Right"
+label = "focus right"
+command = "window.navigate_right"
+
+[[leader]]
 keys = "SPC w h"
 label = "focus left"
 command = "window.navigate_left"
@@ -1299,6 +1319,92 @@ command = "agents.delete"
 keys = "SPC a U"
 label = "usage: tokens, cost"
 command = "agents.usage"
+
+# `SPC ]` / `SPC [`: the bracket jumps (`]d`, `[h`...) as leader keys,
+# for standard keys, where `]` and `[` are typed text.
+[[leader]]
+keys = "SPC ]"
+group = "next"
+
+[[leader]]
+keys = "SPC ] d"
+label = "problem"
+command = "nav.next_problem"
+
+[[leader]]
+keys = "SPC ] h"
+label = "changed hunk"
+command = "nav.next_hunk"
+
+[[leader]]
+keys = "SPC ] a"
+label = "agent's change"
+command = "nav.next_agent_change"
+
+[[leader]]
+keys = "SPC ] t"
+label = "TODO"
+command = "nav.next_todo"
+
+[[leader]]
+keys = "SPC ] c"
+label = "change (side by side)"
+command = "nav.next_side_change"
+
+[[leader]]
+keys = "SPC ["
+group = "previous"
+
+[[leader]]
+keys = "SPC [ d"
+label = "problem"
+command = "nav.prev_problem"
+
+[[leader]]
+keys = "SPC [ h"
+label = "changed hunk"
+command = "nav.prev_hunk"
+
+[[leader]]
+keys = "SPC [ a"
+label = "agent's change"
+command = "nav.prev_agent_change"
+
+[[leader]]
+keys = "SPC [ t"
+label = "TODO"
+command = "nav.prev_todo"
+
+[[leader]]
+keys = "SPC [ c"
+label = "change (side by side)"
+command = "nav.prev_side_change"
+
+[[leader]]
+keys = "SPC u ["
+label = "back along the trail"
+command = "debug.trail_back"
+
+[[leader]]
+keys = "SPC u ]"
+label = "on along the trail"
+command = "debug.trail_forward"
+
+# `SPC C-i` is VS Code's Ctrl+K Ctrl+I with standard keys.
+[[leader]]
+keys = "SPC C-i"
+label = "hover"
+command = "code.hover"
+
+[[leader]]
+keys = "SPC t k"
+label = "Vim / standard keys"
+command = "view.key_scheme"
+
+[[leader]]
+keys = "SPC h ?"
+label = "the keys page"
+command = "help.keys_sheet"
 
 # Chords: keys with Ctrl, Alt or an F-key, outside the leader. `scheme`
 # says which key scheme an entry is for (vim, standard, any), `when` where
