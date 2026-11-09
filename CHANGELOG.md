@@ -6,6 +6,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Following the agent (`SPC a f`) goes to the line it changed, not only the
+  file: when it writes, to the first line the write changed; before, to
+  the line it last read there -- an agent's edit seldom names one (Claude
+  Code's doesn't). An update to the same edit no longer pulls the view
+  back. With the dock across the whole window, `SPC a f` says there's no
+  pane beside it to follow in, and follows in any pane that isn't the dock's.
+- A file in the project has its breadcrumb from the project, however the
+  project's folder was spelt (`\\?\`, a drive letter's case), not its whole
+  path.
+- The agents' tool cards show a file in the project from the project, and
+  one elsewhere from `~`, not the whole path the agent gave.
+- `settings.toml` loses a table once its last setting is unset (no bare
+  `[appearance]` left behind); the comment at the top of the file stays
+  there.
+
 ## [1.4.0] - 2026-11-08
 
 ### Changed

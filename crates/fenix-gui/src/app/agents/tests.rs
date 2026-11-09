@@ -540,6 +540,41 @@ fn a_write_through_fenix_lands_in_the_buffer_saved() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
 }
 
+/// Following, the pane beside the dock goes to the file the agent edits
+/// -- though another was open there -- and, once it writes, to the line
+/// it changed, which its edit doesn't name.
+#[test]
+fn following_goes_to_the_file_and_the_line_the_agent_changed() {
+    let mut f = fixture("--fs");
+    let other = f.root.join("other.txt");
+    std::fs::write(&other, "something else
+").unwrap();
+    let file = f.root.join("long.txt");
+    std::fs::write(&file, (1..=30).map(|n| format!("e{n}
+")).collect::<String>()).unwrap();
+    f.app.test_open_path(&other);
+    let code = f.app.focused_pane_id();
+    f.app.agents_open_panel();
+    f.app.config.set_value("agents.save_before_prompt", Some(fenix_config::Value::Text("never".into())));
+    f.app.agents_toggle_follow();
+    f.type_prompt("edit long.txt e20=>changed");
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.pending_permissions() > 0)));
+    let shown = |app: &App| app.windows().content(code).and_then(|id| app.buffers.get(*id)).and_then(|ob| ob.buffer.path().map(Path::to_path_buf));
+    assert_eq!(shown(&f.app).as_deref(), Some(file.as_path()), "the file it's editing, in place of the other");
+    assert!(f.app.agents_is_dock_pane(f.app.focused_pane_id()), "the keyboard left in the dock");
+    f.key(Key::Char('y'));
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default()));
+    let id = *f.app.windows().content(code).unwrap();
+    let cursor = f.app.pane_state(code).cursor;
+    let line = f.app.buffers.get(id).unwrap().buffer.line_col(&cursor).0;
+    assert_eq!(line + 1, 20, "on the line it changed");
+    // Another update to the same edit doesn't pull it back.
+    let thread = f.thread();
+    f.app.agents_follow(&thread);
+    let cursor = f.app.pane_state(code).cursor;
+    assert_eq!(f.app.buffers.get(id).unwrap().buffer.line_col(&cursor).0 + 1, 20);
+}
+
 #[test]
 fn a_write_over_your_unsaved_edits_asks_and_keep_mine_refuses_it() {
     let mut f = fixture("--fs");

@@ -3139,29 +3139,6 @@ fn pane_chrome_height(line_height: f32, has_breadcrumb: bool) -> f32 {
 /// the tail of the previous tab's own text instead of the gap between
 /// tabs, and a click square on the last tab's visible `×` landed `PAD_
 /// LEFT` short of it.
-/// `path` inside `root`, as `src/main.rs`: matched however either was
-/// spelt -- `\\?\`, the drive letter's case, `/` or `\` -- since a root is
-/// kept canonical and a buffer's path as it was opened.
-fn path_within(root: &Path, path: &Path) -> Option<String> {
-    if let Ok(rest) = path.strip_prefix(root) {
-        return Some(rest.to_string_lossy().replace('\\', "/"));
-    }
-    let plain = |p: &Path| fenix_lsp::normalize(p.to_path_buf()).to_string_lossy().replace('/', "\\");
-    let (root, path) = (plain(root), plain(path));
-    let root = format!("{}\\", root.trim_end_matches('\\'));
-    let inside = path.len() > root.len() && path.is_char_boundary(root.len()) && path[..root.len()].eq_ignore_ascii_case(&root);
-    inside.then(|| path[root.len()..].replace('\\', "/"))
-}
-
-/// `path` whole, its home folder as `~`: a file outside the project.
-fn home_relative(path: &Path) -> String {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from);
-    match home.and_then(|h| path_within(&h, path)) {
-        Some(rest) => format!("~/{rest}"),
-        None => path.display().to_string(),
-    }
-}
-
 fn tab_strip_rect(rect: fenix_window::Rect) -> fenix_window::Rect {
     fenix_window::Rect { x: rect.x + text::PAD_LEFT, w: (rect.w - text::PAD_LEFT).max(0.0), ..rect }
 }
@@ -9796,7 +9773,7 @@ impl App {
         for &id in ids {
             let Some(ob) = self.buffers.get(id) else { continue };
             let label = if let Some(path) = ob.buffer.path() {
-                self.project_root.as_deref().and_then(|r| path_within(r, path)).unwrap_or_else(|| home_relative(path))
+                self.project_root.as_deref().and_then(|r| crate::page::path_within(r, path)).unwrap_or_else(|| crate::page::home_relative(path))
             } else if ob.kind == BufferKind::Dashboard {
                 // Each pane's Home is the one Home: by the workspace's
                 // name, as its tab has it.
@@ -30207,8 +30184,8 @@ configure_board stm32
         match &app.active_picker {
             Some(ActivePicker::SwitchBuffer(state)) => {
                 let labels: Vec<&str> = state.visible_rows(0, 10).map(|(_, c)| c.label.as_str()).collect();
-                assert_eq!(labels[0], home_relative(&b), "outside a project: the whole path, from ~ when under it");
-                assert!(labels.contains(&home_relative(&a).as_str()));
+                assert_eq!(labels[0], crate::page::home_relative(&b), "outside a project: the whole path, from ~ when under it");
+                assert!(labels.contains(&crate::page::home_relative(&a).as_str()));
             }
             _ => panic!("expected picker_switch_buffer to open a SwitchBuffer picker"),
         }
@@ -30232,8 +30209,8 @@ configure_board stm32
     fn picker_switch_buffer_lists_lookalikes_once() {
         // However the root and the file were spelt, a file in the project
         // is by its place in it.
-        assert_eq!(path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
-        assert_eq!(path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
+        assert_eq!(crate::page::path_within(Path::new(r"\\?\C:\code\fenix"), Path::new(r"c:\code\fenix\src\main.rs")).as_deref(), Some("src/main.rs"));
+        assert_eq!(crate::page::path_within(Path::new(r"C:\code\fenix"), Path::new(r"C:\code\fenix-other\a.rs")), None, "a folder that only starts the same");
         let mut homes = App::with_file(None);
         // A second Home, as a session restored with one a pane can have.
         let other = homes.new_home_buffer();
