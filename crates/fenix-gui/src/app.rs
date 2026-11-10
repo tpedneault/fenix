@@ -20704,7 +20704,11 @@ impl App {
                 for line in row_map.text_lines() {
                     let shown = row_map.rows_of(line);
                     if let (Some(a), Some(b)) = (row_map.row(shown.start), row_map.row(shown.end.saturating_sub(1))) {
-                        columns.insert(line, (a.cols.start, b.cols.end));
+                        // The rows' columns are visual: as chars of the line.
+                        // The rows' columns are visual: as chars of the line,
+                        // the end one char on to take a char a break is in.
+                        let char_of = |v: usize| layout.col_maps.get(&line).map_or(v, |m| crate::mouse::char_col_at(m, v).0);
+                        columns.insert(line, (char_of(a.cols.start), char_of(b.cols.end) + 1));
                     }
                 }
                 columns
