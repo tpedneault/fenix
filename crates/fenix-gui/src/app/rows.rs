@@ -329,16 +329,14 @@ impl App {
     /// and `text` -- a file of no language -- unless set; then
     /// `editor.nowrap_languages`), else `editor.wrap`. A few lookups,
     /// nothing read from the file: what a frame can ask each time.
-    fn wrap_default(&self, buffer: BufferId) -> bool {
-        let Some(ob) = self.buffers.get(buffer) else { return false };
-        if ob.kind == BufferKind::Prompt {
-            return true;
-        }
-        // Its language's name; `text` only for a `.txt` or `.text` file
-        // (any case), not every file of no language Fenix knows, which
-        // follows `editor.wrap`. An extension in capitals counts here
-        // (`README.MD` is Markdown) whatever highlighting makes of it.
-        let language = match (ob.syntax.as_ref().map(|s| s.language()), ob.buffer.path()) {
+    /// `buffer`'s language, by the name the per-language settings use:
+    /// its grammar's; `text` only for a `.txt` or `.text` file (any case),
+    /// not every file of no language Fenix knows. An extension in
+    /// capitals counts (`README.MD` is Markdown) whatever highlighting
+    /// makes of it.
+    pub(super) fn buffer_language_name(&self, buffer: BufferId) -> Option<String> {
+        let ob = self.buffers.get(buffer)?;
+        match (ob.syntax.as_ref().map(|s| s.language()), ob.buffer.path()) {
             (Some(language), _) => Some(language.name()),
             (None, Some(path)) => {
                 let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
@@ -348,8 +346,15 @@ impl App {
                     .or_else(|| matches!(ext.as_deref(), Some("txt" | "text")).then(|| "text".to_string()))
             }
             (None, None) => None,
-        };
-        if let Some(language) = language {
+        }
+    }
+
+    fn wrap_default(&self, buffer: BufferId) -> bool {
+        let Some(ob) = self.buffers.get(buffer) else { return false };
+        if ob.kind == BufferKind::Prompt {
+            return true;
+        }
+        if let Some(language) = self.buffer_language_name(buffer) {
             let listed = |key: &str| self.config.list_value(key).iter().any(|l| l.trim().eq_ignore_ascii_case(&language));
             let wraps = match self.config.value("editor.wrap_languages") {
                 Some(_) => listed("editor.wrap_languages"),

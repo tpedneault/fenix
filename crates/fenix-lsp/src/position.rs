@@ -65,7 +65,7 @@ pub fn position_to_char_offset(rope: &ropey::Rope, position: lsp_types::Position
 /// `position_to_char_offset` walk into it and land one line too far in
 /// when a position's `character` overruns the real content (a stale-
 /// position race, same reasoning as this function's own caller).
-fn line_content_char_len(line: RopeSlice) -> usize {
+pub(crate) fn line_content_char_len(line: RopeSlice) -> usize {
     let total = line.len_chars();
     if total == 0 {
         return 0;

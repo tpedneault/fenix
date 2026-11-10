@@ -837,7 +837,7 @@ impl App {
             at(due);
         }
         // Semantic tokens due to be asked for once typing pauses.
-        if let Some(due) = self.semantic_wake(now) {
+        if let Some(due) = self.semantic_wake() {
             at(due);
         }
         // An extension's layer, while something on it moves.
