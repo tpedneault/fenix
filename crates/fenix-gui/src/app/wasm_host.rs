@@ -846,6 +846,7 @@ impl App {
         wasm.stale.remove(ext);
         wasm.scratches.retain(|_, s| s.ext != ext);
         let by_rule = rules_key(ext);
+        wasm.decorations_rev += 1;
         for sets in wasm.decorations.values_mut() {
             sets.retain(|(e, _)| e != ext && *e != by_rule);
         }
@@ -1467,6 +1468,7 @@ impl App {
         // again as it starts.
         self.wasm.scratches.retain(|_, s| s.ext != ext);
         let by_rule = rules_key(ext);
+        self.wasm.decorations_rev += 1;
         for sets in self.wasm.decorations.values_mut() {
             sets.retain(|(e, _)| e != ext && *e != by_rule);
         }
@@ -2023,7 +2025,6 @@ impl App {
         ob.buffer.track_anchors();
         let edits = ob.buffer.take_anchor_edits();
         self.wasm.decorations_rev += 1;
-
         let sets = self.wasm.decorations.entry(buffer).or_default();
         for (_, set) in sets.iter_mut() {
             crate::decorations::shift(set, &edits);
@@ -2035,7 +2036,6 @@ impl App {
         }
         if sets.is_empty() {
             self.wasm.decorations_rev += 1;
-
             self.wasm.decorations.remove(&buffer);
         }
         self.request_window_redraw();
@@ -2267,16 +2267,26 @@ impl App {
     /// a closed buffer's gone.
     pub(crate) fn shift_code_decorations(&mut self) {
         let buffers = &mut self.buffers;
-        self.wasm.decorations_rev += 1;
-
+        // Moved only when there were edits, or a buffer went: then the
+        // copies moves by row keep are stale (`decorations_rev`).
+        let mut changed = false;
         self.wasm.decorations.retain(|id, sets| {
-            let Some(ob) = buffers.get_mut(*id) else { return false };
+            let Some(ob) = buffers.get_mut(*id) else {
+                changed = true;
+                return false;
+            };
             let edits = ob.buffer.take_anchor_edits();
+            if !edits.is_empty() && !sets.is_empty() {
+                changed = true;
+            }
             for (_, set) in sets.iter_mut() {
                 crate::decorations::shift(set, &edits);
             }
             true
         });
+        if changed {
+            self.wasm.decorations_rev += 1;
+        }
     }
 
     /// The extensions' rules for decorating files, applied to each buffer on
@@ -2297,7 +2307,6 @@ impl App {
             let path = ob.buffer.path().filter(|_| ob.kind.tracks_unsaved_changes() && !self.wasm.sealed.contains(&id)).map(Path::to_path_buf);
             let small = ob.buffer.len_chars() <= MAX_RULED;
             self.wasm.decorations_rev += 1;
-
             let sets = self.wasm.decorations.entry(id).or_default();
             for (ext, rules) in &self.wasm.rules {
                 let key = rules_key(ext);
@@ -2317,7 +2326,6 @@ impl App {
             sets.retain(|(e, _)| !e.ends_with(":#rules") || self.wasm.rules.contains_key(e.trim_end_matches(":#rules")));
             if sets.is_empty() {
                 self.wasm.decorations_rev += 1;
-
                 self.wasm.decorations.remove(&id);
             }
         }

@@ -1039,6 +1039,13 @@ impl VimState {
         *self.row_goals.kept.borrow_mut() = keeping;
     }
 
+    /// The cursor was put somewhere by other than a key (a click, the
+    /// wheel): the cells moves by row kept are forgotten.
+    pub fn forget_row_goals(&self) {
+        self.row_goals.kept.borrow_mut().clear();
+        self.row_goals.keeping.borrow_mut().clear();
+    }
+
     /// Whether the keys so far are the start of a command.
     fn has_pending_input(&self) -> bool {
         matches!(self.mode, Mode::Normal | Mode::Visual)

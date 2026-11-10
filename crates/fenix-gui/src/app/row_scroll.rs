@@ -461,6 +461,7 @@ impl App {
         let col = col_map[..col_map.len().saturating_sub(1)].partition_point(|&v| v < vcol);
         let at = ob.buffer.line_start_char(line) + col;
         self.pane_state_mut(pane).cursor = Cursor { char_idx: at, sticky_col: col };
+        self.vim.forget_row_goals();
         true
     }
 
@@ -916,6 +917,38 @@ mod tests {
         at.push(app.line_col());
         at.sort();
         assert_eq!(at, vec![(4, 10), (5, 10)], "both back at column 10");
+    }
+
+    #[test]
+    fn a_cursor_moving_onto_another_s_char_doesn_t_take_its_cell() {
+        // Row 0 long, row 1 three chars, row 2 long: caret A on row 0's
+        // tenth cell, caret B at row 1's end.
+        let (mut app, _f) = wrapped("0123456789012\n012\n0123456789012\n", 20);
+        standard(&mut app);
+        app.press_all("Right Right Right Right Right Right Right Right Right Right C-M-Down");
+        let carets = |app: &App| {
+            let mut at: Vec<(usize, usize)> = app.extra_carets().iter().map(|c| app.open().buffer.line_col(&Cursor { char_idx: c.at, sticky_col: 0 })).collect();
+            at.push(app.line_col());
+            at.sort();
+            at
+        };
+        assert_eq!(carets(&app), vec![(0, 10), (1, 3)]);
+        app.press("Down");
+        assert_eq!(carets(&app), vec![(1, 3), (2, 3)]);
+        app.press("Up");
+        assert_eq!(carets(&app), vec![(0, 10), (1, 3)], "each back at its own cell");
+    }
+
+    #[test]
+    fn a_click_forgets_the_cell_kept() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        app.press_all("0 8 l g j g j");
+        assert_eq!(app.line_col(), (0, 24));
+        // Clicked onto the same char: a fresh start, its own cell.
+        let pane = app.focused_pane_id();
+        app.put_cursor(pane, 24);
+        app.press_all("g j");
+        assert_eq!(app.line_col(), (1, 4));
     }
 
     #[test]
