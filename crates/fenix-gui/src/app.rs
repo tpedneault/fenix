@@ -1395,6 +1395,53 @@ fn is_tcl_path(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).and_then(fenix_syntax::detect_language) == Some(fenix_syntax::LanguageId::Tcl)
 }
 
+/// `buffer`'s text made `new` by replacing only the lines that differ,
+/// the last first, as one undo step -- so what's anchored in the lines
+/// that didn't change (extra cursors, marks, an extension's decorations)
+/// stays where it was. `cursor` is moved as the text around it moved;
+/// in a line that was replaced, it keeps its line and column (or the
+/// line's end). The syntax tree hears of it as one edit.
+pub(crate) fn replace_text_by_lines(buffer: &mut Buffer, cursor: &mut Cursor, new: &str) {
+    let old = buffer.text();
+    let replacements = fenix_diff::replacements(&old, new);
+    if replacements.is_empty() {
+        return;
+    }
+    let at = cursor_through_replacements(&old, &replacements, cursor.char_idx);
+    let mut scratch = *cursor;
+    buffer.replace_ranges(&mut scratch, &replacements);
+    cursor.char_idx = at.min(buffer.len_chars());
+    cursor.sticky_col = buffer.line_col(cursor).1;
+}
+
+/// Where `at` in `old` is once `replacements` (in order, char ranges of
+/// `old`) are made: moved by those before it; in one, on the same line of
+/// what replaced it (or its last) at the same column, or the line's end.
+fn cursor_through_replacements(old: &str, replacements: &[(std::ops::Range<usize>, String)], at: usize) -> usize {
+    let mut moved: isize = 0;
+    for (range, text) in replacements {
+        if at <= range.start {
+            break;
+        }
+        let new_len = text.chars().count();
+        if at >= range.end {
+            moved += new_len as isize - range.len() as isize;
+            continue;
+        }
+        let start = (range.start as isize + moved) as usize;
+        let before: String = old.chars().skip(range.start).take(at - range.start).collect();
+        let line = before.matches('\n').count();
+        let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count());
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        let Some(last) = lines.len().checked_sub(1) else { return start };
+        let line = line.min(last);
+        let ahead: usize = lines[..line].iter().map(|l| l.chars().count()).sum();
+        let width = lines[line].trim_end_matches(['\n', '\r']).chars().count();
+        return start + ahead + column.min(width);
+    }
+    (at as isize + moved).max(0) as usize
+}
+
 /// The functions and methods a `workspace/symbol` answer names.
 fn functions_named(response: lsp_types::WorkspaceSymbolResponse) -> std::collections::HashSet<String> {
     let function = |kind: lsp_types::SymbolKind| matches!(kind, lsp_types::SymbolKind::FUNCTION | lsp_types::SymbolKind::METHOD);
@@ -7962,8 +8009,7 @@ impl App {
         match fenix_lsp::workspace_edit::apply_text_edits(&ob.buffer.text(), &edits) {
             Ok(text) => {
                 if text != ob.buffer.text() {
-                    let end = ob.buffer.len_chars();
-                    ob.buffer.replace_range(&mut ob.cursor, 0, end, &text);
+                    replace_text_by_lines(&mut ob.buffer, &mut ob.cursor, &text);
                 }
             }
             Err(error) => self.set_error(format!("LSP edits rejected: {error}")),
@@ -8865,8 +8911,7 @@ impl App {
             Ok(formatted) => {
                 let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
                 let (line, col) = buffer.line_col(cursor);
-                let end = buffer.len_chars();
-                buffer.replace_range(cursor, 0, end, &formatted);
+                replace_text_by_lines(buffer, cursor, &formatted);
                 let line = line.min(buffer.line_count().saturating_sub(1));
                 cursor.char_idx = buffer.line_start_char(line) + col.min(buffer.line_len(line));
                 cursor.sticky_col = col;
@@ -8900,8 +8945,7 @@ impl App {
             return;
         }
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = buffer.len_chars();
-        buffer.replace_range(cursor, 0, end, &formatted);
+        replace_text_by_lines(buffer, cursor, &formatted);
     }
 
     /// `SPC c f` -- reindents the active Visual selection's lines in
@@ -12928,8 +12972,11 @@ impl App {
             .map(|state| ob.buffer.line_col(&Cursor { char_idx: state.cursor.char_idx.min(old_len), sticky_col: 0 }).0)
             .collect();
 
+        // Only the lines that changed are replaced, so what's anchored
+        // in the rest (extra cursors, an extension's decorations) stays
+        // where it was.
         let mut scratch = Cursor::at_start();
-        ob.buffer.replace_range(&mut scratch, 0, old_len, on_disk);
+        replace_text_by_lines(&mut ob.buffer, &mut scratch, on_disk);
         // A reload isn't user work: leaving it dirty would make every
         // touched file look unsaved and block `:qa`.
         ob.buffer.mark_saved();
@@ -13986,9 +14033,8 @@ impl App {
         let start_char = self.open().buffer.line_start_char(conflict.start);
 
         let (buffer, cursor) = self.focused_buffer_and_cursor_mut();
-        let end = buffer.len_chars();
         let mut scratch = Cursor::at_start();
-        buffer.replace_range(&mut scratch, 0, end, &resolved);
+        replace_text_by_lines(buffer, &mut scratch, &resolved);
         // Land on where the conflict was, so the next one is a `SPC g j`
         // away rather than needing the file re-navigated.
         cursor.char_idx = start_char.min(buffer.len_chars());
@@ -16349,6 +16395,8 @@ impl App {
     /// `repeat_last_change` -> `route_keypress` directly, same as a
     /// macro, so its own replayed keys never re-enter this tap.
     fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
+        // Extra cursors follow whatever edited their text since.
+        self.follow_outside_edits();
         self.sync_key_policy();
         self.settle_keys();
         self.note_typing_pause(Instant::now());
@@ -16370,6 +16418,8 @@ impl App {
         let before = self.motion_before_key();
         let carets_before = self.caret_mark();
         self.route_keypress(keypress, event_loop);
+        // And whatever the key itself did that wasn't theirs (an undo).
+        self.follow_outside_edits();
         self.motion_after_key(before, keypress);
         self.note_caret_move(carets_before);
         // Standard keys: back into Insert (or out of it) for where the key
@@ -16666,6 +16716,11 @@ impl App {
         // (e.g. `format_selection`) reads them.
         if let Some(resolved) = self.local_leader_key(keypress) {
             if let Some(id) = resolved {
+                // As by its chord: the extra cursors stay only for what
+                // works at each of them.
+                if !carets::keeps_carets(id) {
+                    self.clear_carets();
+                }
                 self.run_command_with(event_loop, id);
             }
             return;
@@ -16678,6 +16733,9 @@ impl App {
                 KeyPress::char(' ')
             };
             if let Step::Matched(&id) = self.leader_matcher.feed(fed) {
+                if !carets::keeps_carets(id) {
+                    self.clear_carets();
+                }
                 self.run_command_with(event_loop, id);
             }
             self.wake_caret();
@@ -16690,7 +16748,14 @@ impl App {
 
         // Shift+Tab keeps its Shift for a snippet: it goes back a field.
         let snippet_key = if full == KeyPress::named(FenixNamedKey::Tab).with_shift() { full } else { keypress };
+        let before = (self.open().buffer.edit_count(), self.cursor().char_idx);
         if self.snippet_key(snippet_key) || self.completion_key(keypress) {
+            // A completion taken or a snippet's field moved to is the
+            // primary's alone: the others go, as for any other key that
+            // edits. Moving in the completion menu leaves them be.
+            if (self.open().buffer.edit_count(), self.cursor().char_idx) != before {
+                self.clear_carets();
+            }
             self.wake_caret();
             return;
         }
@@ -19944,6 +20009,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        self.follow_outside_edits();
         // Every pane's strip starts with the workspace's Home.
         self.ensure_workspace_home();
         // A pane that left the agents' dock gets its tabs back.
@@ -22590,6 +22656,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.follow_outside_edits();
         let _busy = crate::watchdog::enter(match &event {
             WindowEvent::RedrawRequested => "redraw",
             WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) | WindowEvent::Ime(_) => "a key",
@@ -36096,6 +36163,57 @@ name = \"orbit\"
         assert_eq!(app.buffers.get(b_id).unwrap().buffer.text(), "new\n");
         assert!(app.lsp_sessions[&a_key].pending.contains_key(&9));
         assert!(!app.lsp_sessions[&b_key].pending.contains_key(&9));
+    }
+
+    /// A server's whole-file format, as its answer arrives: the extra
+    /// cursor in a line it didn't change stays, the main one keeps its
+    /// line and column, and one undo takes it back.
+    #[test]
+    fn a_servers_format_keeps_the_cursors_in_lines_it_left_alone() {
+        let (_dir, path) = project_scope_fixture("lsp_format_cursors");
+        std::fs::write(&path, "fn a() {\n  b();\n}\nzz\n").unwrap();
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        let id = app.focused_buffer_id();
+        let key = install_test_lsp(&mut app, &path);
+        let z = app.open().buffer.text().find("zz").unwrap() + 1;
+        app.toggle_caret_at(z);
+        app.focused_buffer_and_cursor_mut().1.char_idx = app.open().buffer.text().find("b()").unwrap() + 2;
+        let revision = app.open().buffer.edit_count();
+        app.lsp_sessions.get_mut(&key).unwrap().pending.insert(9, PendingLspRequest::Format { buffer: id, revision });
+        let generation = app.lsp_sessions[&key].generation;
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Response { id: 9, result: Ok(serde_json::json!([
+            {"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}},"newText":"fn a() {\n    b();\n}\nzz\n"}
+        ])) });
+        app.follow_outside_edits();
+        assert_eq!(app.open().buffer.text(), "fn a() {\n    b();\n}\nzz\n");
+        assert_eq!(app.open().buffer.line_col(&app.cursor()), (1, 4), "its line, its column");
+        let z = app.open().buffer.text().find("zz").unwrap() + 1;
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [z]);
+        app.press("C-z");
+        assert_eq!(app.open().buffer.text(), "fn a() {\n  b();\n}\nzz\n", "one undo");
+    }
+
+    /// Taking a side of a conflict changes only its lines: an extra
+    /// cursor below it stays, and one undo brings the markers back.
+    #[test]
+    fn resolving_a_conflict_keeps_the_cursors_outside_it() {
+        let dir = TempDir::new("conflict_resolve_cursors");
+        let text = "x\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\nyy\n";
+        let file = dir.write("a.txt", text);
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        let y = text.find("yy").unwrap() + 1;
+        app.toggle_caret_at(y);
+        app.focused_buffer_and_cursor_mut().1.char_idx = text.find("a\n=").unwrap();
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+        app.follow_outside_edits();
+        assert_eq!(app.open().buffer.text(), "x\na\nyy\n");
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), ["x\na\ny".len()], "where it was in yy");
+        app.press("C-z");
+        assert_eq!(app.open().buffer.text(), text, "one undo");
     }
 
     #[test]

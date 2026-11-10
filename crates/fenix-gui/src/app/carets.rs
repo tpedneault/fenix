@@ -3,9 +3,10 @@
 //! A pane's carets are its cursor -- the primary, which everything that
 //! knows one cursor reads -- and the extras here. Typing, deleting,
 //! Enter, Tab, pasting and moving happen at every caret, the last in the
-//! buffer first, as one undo step. Any other key or command, or an edit
-//! made elsewhere (a language server's, an agent's, a reload), leaves the
-//! primary alone.
+//! buffer first, as one undo step. Any other key or command leaves the
+//! primary alone. An edit made elsewhere (a language server's, an
+//! agent's, a reload, an undo) moves the extras with the text
+//! (`follow_outside_edits`).
 
 use std::collections::HashMap;
 
@@ -32,9 +33,11 @@ pub(crate) struct Caret {
 pub(crate) struct Carets {
     pub(crate) buffer: Option<BufferId>,
     pub(crate) extra: Vec<Caret>,
-    /// The buffer's edit count when the carets were last right: an edit
-    /// since, made elsewhere, drops them.
+    /// The buffer's edit count when the carets were last right, and how
+    /// many edits it had logged then: an edit since, made elsewhere,
+    /// moves them as it moved the text (`follow_outside_edits`).
     pub(crate) edits: u64,
+    pub(crate) logged: u64,
 }
 
 pub(crate) type PaneCarets = HashMap<fenix_window::WindowId, Carets>;
@@ -100,8 +103,69 @@ impl App {
     pub(crate) fn restore_pane_carets(&mut self, pane: fenix_window::WindowId, buffer: BufferId, mut extra: Vec<Caret>, edits: u64) {
         extra.sort_by_key(|c| c.at);
         extra.dedup_by_key(|c| c.at);
+        let logged = self.buffers.get(buffer).map_or(0, |ob| ob.buffer.edits_logged());
         if !extra.is_empty() {
-            self.carets.insert(pane, Carets { buffer: Some(buffer), extra, edits });
+            self.carets.insert(pane, Carets { buffer: Some(buffer), extra, edits, logged });
+        }
+    }
+
+    /// Every pane's extra carets moved by the edits made to their buffer
+    /// since they were last right -- a language server's, an agent's, a
+    /// reload, an undo -- as the text moved: a caret whose text was
+    /// deleted goes to where it was, and carets that meet are one. When
+    /// those edits are too many to have been kept, back to one cursor.
+    pub(crate) fn follow_outside_edits(&mut self) {
+        if self.carets.is_empty() {
+            return;
+        }
+        // Each pane's own cursor, which an extra one must never sit on.
+        // Every workspace's: a pane parked in another keeps its carets too.
+        let primaries: HashMap<fenix_window::WindowId, usize> = self.workspaces.workspaces.iter().flat_map(|w| w.pane_states.iter()).map(|(p, s)| (*p, s.cursor.char_idx)).collect();
+        let mut gone = Vec::new();
+        for (pane, carets) in &mut self.carets {
+            let Some(ob) = carets.buffer.and_then(|id| self.buffers.get(id)) else {
+                gone.push(*pane);
+                continue;
+            };
+            let buffer = &ob.buffer;
+            if buffer.edit_count() == carets.edits {
+                continue;
+            }
+            // Each caret where the text took it -- or none, when what it
+            // was in was replaced (a language server's rewrite of those
+            // lines): it has no place there, and goes. `None` overall
+            // when the edits since are too many to have been kept.
+            let mapped: Option<Vec<Caret>> = carets
+                .extra
+                .iter()
+                .map(|c| {
+                    let Some(at) = buffer.map_since_kept(carets.logged, c.at)? else { return Some(None) };
+                    // A selection whose start's text went is no selection.
+                    let anchor = match c.anchor {
+                        Some(a) => buffer.map_since_kept(carets.logged, a)?,
+                        None => None,
+                    };
+                    Some(Some(Caret { at, anchor: anchor.filter(|a| *a != at), ..*c }))
+                })
+                .collect::<Option<Vec<Option<Caret>>>>()
+                .map(|carets| carets.into_iter().flatten().collect());
+            let Some(mut extra) = mapped else {
+                gone.push(*pane);
+                continue;
+            };
+            extra.sort_by_key(|c| c.at);
+            extra.dedup_by_key(|c| c.at);
+            if let Some(primary) = primaries.get(pane) {
+                extra.retain(|c| c.at != *primary);
+            }
+            if extra.is_empty() {
+                gone.push(*pane);
+                continue;
+            }
+            *carets = Carets { buffer: carets.buffer, extra, edits: buffer.edit_count(), logged: buffer.edits_logged() };
+        }
+        for pane in gone {
+            self.carets.remove(&pane);
         }
     }
 
@@ -123,8 +187,8 @@ impl App {
             self.carets.remove(&pane);
             return;
         }
-        let edits = self.buffers.get(id).map_or(0, |ob| ob.buffer.edit_count());
-        self.carets.insert(pane, Carets { buffer: Some(id), extra, edits });
+        let (edits, logged) = self.buffers.get(id).map_or((0, 0), |ob| (ob.buffer.edit_count(), ob.buffer.edits_logged()));
+        self.carets.insert(pane, Carets { buffer: Some(id), extra, edits, logged });
     }
 
     /// Alt+click (or Ctrl+click, `editor.multi_cursor_modifier`): a caret at
@@ -277,8 +341,9 @@ impl App {
         let pane = self.focused_pane_id();
         let primary_cursor = self.cursor();
         let primary_anchor = (self.vim.mode() == Mode::Visual).then(|| self.vim.visual_anchor());
-        // (caret, is the primary)
-        let mut carets: Vec<(Caret, bool)> = self.extra_carets().iter().map(|c| (*c, false)).collect();
+        // (caret, is the primary): an extra on the primary's place is the
+        // primary, never a second edit there.
+        let mut carets: Vec<(Caret, bool)> = self.extra_carets().iter().filter(|c| c.at != primary_cursor.char_idx).map(|c| (*c, false)).collect();
         carets.push((Caret { at: primary_cursor.char_idx, sticky: primary_cursor.sticky_col, anchor: primary_anchor }, true));
         let before = (carets.last().map(|(c, _)| *c).unwrap_or(Caret { at: 0, sticky: 0, anchor: None }), self.extra_carets().to_vec());
         carets.sort_by_key(|(c, _)| std::cmp::Reverse(c.at));
@@ -583,7 +648,7 @@ impl App {
 /// Whether command `id`, run from a chord, keeps the extra carets: the
 /// clipboard's (at every caret) and those that add carets.
 pub(crate) fn keeps_carets(id: &str) -> bool {
-    matches!(id, "edit.copy" | "edit.paste" | "edit.add_next_occurrence" | "edit.select_all_occurrences" | "edit.add_cursor_above" | "edit.add_cursor_below" | "edit.cursor_undo")
+    matches!(id, "edit.copy" | "edit.paste" | "edit.add_next_occurrence" | "edit.select_all_occurrences" | "edit.add_cursor_above" | "edit.add_cursor_below" | "edit.cursor_undo" | "edit.undo" | "edit.redo")
 }
 
 /// `text` on one line, short, for a message.
@@ -704,15 +769,136 @@ mod tests {
         assert_eq!(app.copy_every_caret().as_deref(), Some("1+a\n2+b"));
     }
 
+    /// An edit made elsewhere -- a language server's, an agent's -- at
+    /// `at`, as the focused buffer takes it.
+    fn outside_insert(app: &mut App, at: usize, text: &str) {
+        let (buffer, _) = app.focused_buffer_and_cursor_mut();
+        let mut c = Cursor { char_idx: at, sticky_col: 0 };
+        buffer.insert_str(&mut c, text);
+    }
+
     #[test]
-    fn an_edit_made_elsewhere_drops_the_extras() {
+    fn an_edit_made_elsewhere_moves_the_extras_with_the_text() {
+        let (mut app, _f) = app_on_file("a.txt", "a\nb\nc\n");
+        standard(&mut app);
+        app.toggle_caret_at(2);
+        app.toggle_caret_at(4);
+        outside_insert(&mut app, 0, "// new\n");
+        assert!(app.extra_carets().is_empty(), "not right until they've followed");
+        app.follow_outside_edits();
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [9, 11]);
+        app.type_text("x");
+        assert_eq!(app.text(), "x// new\na\nxb\nxc\n", "all three type; the primary, at the start, stayed before what was put there");
+    }
+
+    #[test]
+    fn a_caret_whose_text_is_replaced_elsewhere_goes_and_the_rest_stay() {
+        let (mut app, _f) = app_on_file("a.txt", "one two three\n");
+        standard(&mut app);
+        app.toggle_caret_at(5);
+        app.toggle_caret_at(6);
+        app.toggle_caret_at(10);
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        let mut c = *cursor;
+        buffer.delete_range(&mut c, 4, 8);
+        app.follow_outside_edits();
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [6], "5 and 6 were inside what went: gone; 10 moved");
+    }
+
+    #[test]
+    fn a_language_server_s_edit_keeps_the_carets_in_the_lines_it_left_alone() {
+        let (mut app, _f) = app_on_file("a.rs", "fn a() {}\nlet x = 1;\nfn b() {}\nlet y = 2;\n");
+        standard(&mut app);
+        let line = |app: &App, n: usize| app.open().buffer.line_start_char(n);
+        let (l1, l3) = (line(&app, 1), line(&app, 3));
+        app.toggle_caret_at(l1 + 4);
+        app.toggle_caret_at(l3 + 4);
+        // A rename of b, as a server sends it: one text edit on line 2.
+        let id = app.focused_buffer_id();
+        let edit = lsp_types::TextEdit { range: lsp_types::Range { start: lsp_types::Position { line: 2, character: 3 }, end: lsp_types::Position { line: 2, character: 4 } }, new_text: "bee".into() };
+        app.apply_lsp_text_edits(id, vec![edit]);
+        app.follow_outside_edits();
+        let after: Vec<(usize, usize)> = app.extra_carets().iter().map(|c| app.open().buffer.line_col(&Cursor { char_idx: c.at, sticky_col: 0 })).collect();
+        assert_eq!(after, [(1, 4), (3, 4)], "both where they were: the edit was another line's");
+        app.type_text("!");
+        assert_eq!(app.text(), "!fn a() {}\nlet !x = 1;\nfn bee() {}\nlet !y = 2;\n");
+    }
+
+    #[test]
+    fn a_format_of_the_whole_file_keeps_the_carets_in_unchanged_lines() {
+        let (mut app, _f) = app_on_file("a.txt", "a\nb\nc\nd\n");
+        standard(&mut app);
+        app.toggle_caret_at(2);
+        app.toggle_caret_at(6);
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        super::super::replace_text_by_lines(buffer, cursor, "a\nb\nC\nd\n");
+        app.follow_outside_edits();
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [2, 6], "lines b and d untouched");
+        app.press("C-z");
+        assert_eq!(app.text(), "a\nb\nc\nd\n", "one undo");
+        assert_eq!(app.extra_carets().len(), 2, "still there");
+    }
+
+    #[test]
+    fn an_extra_caret_never_sits_on_its_own_pane_s_cursor() {
+        let (mut app, _f) = app_on_file("a.txt", "ab\ncd\n");
+        standard(&mut app);
+        app.toggle_caret_at(3);
+        // An edit moves the extra onto where the primary is.
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        cursor.char_idx = 1;
+        let mut c = Cursor { char_idx: 1, sticky_col: 0 };
+        buffer.delete_range(&mut c, 1, 3);
+        app.follow_outside_edits();
+        assert!(app.extra_carets().is_empty(), "the same place as the primary: one");
+        app.type_text("x");
+        assert_eq!(app.text().matches('x').count(), 1, "typed once: {:?}", app.text());
+    }
+
+    #[test]
+    fn the_extras_survive_an_undo_and_redo_of_an_edit_made_elsewhere() {
         let (mut app, _f) = app_on_file("a.txt", "a\nb\n");
         standard(&mut app);
         app.toggle_caret_at(2);
-        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
-        let mut c = *cursor;
-        buffer.insert_char(&mut c, 'z');
+        app.focused_buffer_and_cursor_mut().0.break_undo_run();
+        outside_insert(&mut app, 0, "zz");
+        app.press("C-z");
+        assert_eq!(app.text(), "a\nb\n");
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [2], "followed there and back");
+        app.press("C-y");
+        assert_eq!(app.text(), "zza\nb\n");
+        app.follow_outside_edits();
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [4]);
+        app.type_text("!");
+        assert_eq!(app.text().matches('!').count(), 2, "both still type: {:?}", app.text());
+    }
+
+    #[test]
+    fn a_reload_moves_only_the_carets_after_what_changed() {
+        let (mut app, _f) = app_on_file("a.txt", "head\nmid\ntail\n");
+        standard(&mut app);
+        app.toggle_caret_at(6);
+        app.toggle_caret_at(9);
+        app.toggle_caret_at(13);
+        let id = app.focused_buffer_id();
+        app.replace_buffer_from_disk(id, "head\nMIDDLE\ntail\n");
+        app.follow_outside_edits();
+        // 6, inside "mid", a line that was replaced: gone; 9 and 13, in
+        // "tail", moved by the three chars more.
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [12, 16]);
+    }
+
+    #[test]
+    fn edits_too_many_to_follow_go_back_to_one_cursor() {
+        let (mut app, _f) = app_on_file("a.txt", "a\nb\n");
+        standard(&mut app);
+        app.toggle_caret_at(2);
+        for _ in 0..5000 {
+            outside_insert(&mut app, 0, "x");
+        }
+        app.follow_outside_edits();
         assert!(app.extra_carets().is_empty());
+        assert!(!app.carets.contains_key(&app.focused_pane_id()));
     }
 
     #[test]
@@ -789,5 +975,84 @@ mod tests {
         app.press("x");
         assert!(app.extra_carets().is_empty());
         assert_eq!(app.text(), "\nb\n", "x is Vim's");
+    }
+
+    /// SPC c F, as the command runs it: the extras in lines it leaves
+    /// alone stay, the main cursor stays on its line at its column, and
+    /// undo and redo are one step each.
+    #[test]
+    fn a_reindent_of_the_file_keeps_the_main_cursor_on_its_line_and_the_extras_elsewhere() {
+        let (mut app, _f) = app_on_file("a.txt", "f {\na\n  bbbb\nc\n}\nzz\n");
+        standard(&mut app);
+        let z = app.text().find("zz").unwrap() + 1;
+        app.toggle_caret_at(z);
+        let b = app.text().find("bbbb").unwrap() + 1;
+        app.focused_buffer_and_cursor_mut().1.char_idx = b;
+        app.format_buffer();
+        app.follow_outside_edits();
+        assert_eq!(app.text(), "f {\n    a\n    bbbb\n    c\n}\nzz\n");
+        assert_eq!(app.open().buffer.line_col(&app.cursor()), (2, 3), "the same line, the same column");
+        let z = app.text().find("zz").unwrap() + 1;
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [z], "its line wasn't touched");
+        app.press("C-z");
+        assert_eq!(app.text(), "f {\na\n  bbbb\nc\n}\nzz\n", "one undo");
+        app.press("C-y");
+        assert_eq!(app.text(), "f {\n    a\n    bbbb\n    c\n}\nzz\n", "one redo");
+    }
+
+    /// The text comes out exactly, whatever ends its lines, and one undo
+    /// gives back exactly what was there.
+    #[test]
+    fn replacing_by_lines_is_exact_with_any_line_ending() {
+        let cases = [
+            ("a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\n"),
+            ("a\nb\nc\n", "a\r\nb\r\nc\r\n"),
+            ("a\rb\rc", "a\rB\rc"),
+            ("a\nb\rc\r\nd", "a\nX\rc\r\nd\n"),
+            ("a\nb", "a\nb\nc"),
+            ("a\nb\n", ""),
+            ("", "x\ny"),
+        ];
+        for (old, new) in cases {
+            let mut buffer = fenix_core::Buffer::from_text(old);
+            let mut cursor = Cursor::at_start();
+            super::super::replace_text_by_lines(&mut buffer, &mut cursor, new);
+            assert_eq!(buffer.text(), new, "{old:?} -> {new:?}");
+            assert!(cursor.char_idx <= buffer.len_chars());
+            buffer.undo(&mut cursor);
+            assert_eq!(buffer.text(), old, "undone: {old:?}");
+        }
+    }
+
+    /// Replacements in several places with text of more than one byte a
+    /// char leave the syntax tree as a fresh parse would have it -- there,
+    /// and after undo.
+    #[test]
+    fn a_replace_in_many_places_leaves_the_syntax_tree_as_a_fresh_parse() {
+        let old: String = (0..60).map(|i| if i % 3 == 0 { format!("let naïve_{i} = \"été\"; // ü\n") } else { format!("fn f{i}() {{ g({i}) }}\n") }).collect();
+        let new = old.replace("naïve", "naive").replace("été", "ete");
+        let (mut app, _f) = app_on_file("a.rs", &old);
+        let id = app.focused_buffer_id();
+        let fresh = |source: &str| {
+            let state = fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, source);
+            (state.highlights_in_range(source, 0..source.len()).into_iter().map(|(r, n)| (r, n.to_string())).collect::<Vec<_>>(), state.scope_ranges())
+        };
+        let incremental = |app: &mut App| {
+            let ob = app.buffers.get_mut(id).unwrap();
+            let edits: Vec<fenix_syntax::RawEdit> = ob.buffer.drain_edits().into_iter().map(|d| fenix_syntax::RawEdit { start_char: d.start_char, new_end_char: d.new_end_char, removed: d.removed }).collect();
+            assert!(edits.len() <= 1, "one edit for the tree: {}", edits.len());
+            let source = ob.buffer.text();
+            let syntax = ob.syntax.as_mut().expect("a Rust file has a tree");
+            syntax.apply_edits(&source, &edits);
+            (syntax.highlights_in_range(&source, 0..source.len()).into_iter().map(|(r, n)| (r, n.to_string())).collect::<Vec<_>>(), syntax.scope_ranges())
+        };
+        incremental(&mut app);
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        super::super::replace_text_by_lines(buffer, cursor, &new);
+        assert_eq!(app.text(), new);
+        assert_eq!(incremental(&mut app), fresh(&new));
+        app.undo();
+        assert_eq!(app.text(), old);
+        assert_eq!(incremental(&mut app), fresh(&old), "after undo");
     }
 }

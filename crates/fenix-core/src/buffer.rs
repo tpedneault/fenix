@@ -25,6 +25,40 @@ pub struct EditDelta {
 /// How many edits `take_changes` keeps before giving up on them.
 const MAX_LOGGED_CHANGES: usize = 2048;
 
+/// How many edits `edits_since` keeps, for positions mapped through
+/// them later.
+const MAX_KEPT_EDITS: usize = 4096;
+
+/// An edit, as a position moves by it: `removed` chars at `start` gave
+/// way to the text up to `new_end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptEdit {
+    pub start: usize,
+    pub removed: usize,
+    pub new_end: usize,
+}
+
+impl KeptEdit {
+    /// Where a position before this edit is after it: one before the
+    /// edit stays, one after it moves with the text, and one in what was
+    /// removed goes to the edit's start.
+    pub fn map(&self, at: usize) -> usize {
+        if at <= self.start {
+            at
+        } else if at >= self.start + self.removed {
+            at - self.removed + (self.new_end - self.start)
+        } else {
+            self.start
+        }
+    }
+
+    /// `map`, but `None` for a position strictly inside what was
+    /// replaced: something placed there (a cursor) has no place after.
+    pub fn map_kept(&self, at: usize) -> Option<usize> {
+        (at <= self.start || at >= self.start + self.removed).then(|| self.map(at))
+    }
+}
+
 /// A single undoable change: replaces `removed` with `inserted` at `at`.
 /// Applying it forward performs the edit; applying its inverse reverses it.
 struct Edit {
@@ -105,6 +139,11 @@ pub struct Buffer {
     /// asks (`track_anchors`), so a buffer nothing is anchored in keeps
     /// nothing.
     anchor_edits: Option<Vec<EditDelta>>,
+    /// The last `MAX_KEPT_EDITS` edits, kept without anyone draining them,
+    /// for positions that follow the text (extra cursors), and how many
+    /// edits there have been in all.
+    kept_edits: std::collections::VecDeque<KeptEdit>,
+    edits_logged: u64,
     /// Monotonically increasing on every real content mutation (insert,
     /// delete, undo, redo) -- unlike `dirty` (which only ever flips
     /// false-to-true once, until the next save), this changes on *every*
@@ -131,6 +170,8 @@ impl Buffer {
             change_log: Vec::new(),
             changes_overflowed: false,
             anchor_edits: None,
+            kept_edits: std::collections::VecDeque::new(),
+            edits_logged: 0,
             edit_count: 0,
         }
     }
@@ -156,6 +197,8 @@ impl Buffer {
             change_log: Vec::new(),
             changes_overflowed: false,
             anchor_edits: None,
+            kept_edits: std::collections::VecDeque::new(),
+            edits_logged: 0,
             edit_count: 0,
         }
     }
@@ -184,6 +227,8 @@ impl Buffer {
             change_log: Vec::new(),
             changes_overflowed: false,
             anchor_edits: None,
+            kept_edits: std::collections::VecDeque::new(),
+            edits_logged: 0,
             edit_count: 0,
         })
     }
@@ -345,10 +390,43 @@ impl Buffer {
             self.change_log.clear();
             self.changes_overflowed = true;
         }
+        if self.kept_edits.len() == MAX_KEPT_EDITS {
+            self.kept_edits.pop_front();
+        }
+        self.kept_edits.push_back(KeptEdit { start: start_char, removed: removed.chars().count(), new_end: new_end_char });
+        self.edits_logged += 1;
         if let Some(anchors) = &mut self.anchor_edits {
             anchors.push(EditDelta { start_char, new_end_char, removed: removed.clone() });
         }
         self.pending_syntax_edits.push(EditDelta { start_char, new_end_char, removed });
+    }
+
+    /// How many edits there have been: what `edits_since` counts from.
+    pub fn edits_logged(&self) -> u64 {
+        self.edits_logged
+    }
+
+    /// The edits since `edits_logged` was `logged`, in order -- `None`
+    /// when some of them aren't kept any more, or `logged` is from the
+    /// future.
+    pub fn edits_since(&self, logged: u64) -> Option<impl Iterator<Item = &KeptEdit>> {
+        let since = self.edits_logged.checked_sub(logged)?;
+        let since = usize::try_from(since).ok().filter(|n| *n <= self.kept_edits.len())?;
+        Some(self.kept_edits.iter().skip(self.kept_edits.len() - since))
+    }
+
+    /// `at`, as of `edits_logged` being `logged`, where it is now: `None`
+    /// when the edits between aren't all kept.
+    pub fn map_since(&self, logged: u64, at: usize) -> Option<usize> {
+        Some(self.edits_since(logged)?.fold(at, |at, edit| edit.map(at)).min(self.len_chars()))
+    }
+
+    /// `at`, as of `edits_logged` being `logged`, where it is now: `None`
+    /// when the edits between aren't all kept, `Some(None)` when one of
+    /// them replaced the text around it.
+    pub fn map_since_kept(&self, logged: u64, at: usize) -> Option<Option<usize>> {
+        let mut edits = self.edits_since(logged)?;
+        Some(edits.try_fold(at, |at, edit| edit.map_kept(at)).map(|at| at.min(self.len_chars())))
     }
 
     /// From now on, keeps every edit for `take_anchor_edits` as well.
@@ -729,6 +807,54 @@ impl Buffer {
         self.redo_stack.last().map_or(0, |s| s.tag)
     }
 
+    /// `replacements` (char ranges of the text as it is, in order, not
+    /// overlapping) made as one undo step, from the last to the first so
+    /// each range is still where it was. The syntax tree hears of them as
+    /// one edit, from the first to the last: one place to look up, not
+    /// one per replacement. `cursor` is only a scratch place here.
+    pub fn replace_ranges(&mut self, cursor: &mut Cursor, replacements: &[(std::ops::Range<usize>, String)]) {
+        if replacements.is_empty() {
+            return;
+        }
+        let mark = self.pending_syntax_edits.len();
+        let before = (replacements.len() > 1).then(|| self.rope.clone());
+        self.begin_undo_group();
+        for (range, text) in replacements.iter().rev() {
+            self.replace_range(cursor, range.start, range.end, text);
+        }
+        self.end_undo_group();
+        if let Some(before) = before {
+            self.coalesce_syntax_edits(mark, &before);
+        }
+    }
+
+    /// The syntax edits logged since there were `mark`, when more than
+    /// one, as one: from where `before` and the text now first differ to
+    /// where they last do. A rope's clone is cheap; what's compared is
+    /// walked once.
+    fn coalesce_syntax_edits(&mut self, mark: usize, before: &Rope) {
+        if self.pending_syntax_edits.len() <= mark + 1 {
+            return;
+        }
+        self.pending_syntax_edits.truncate(mark);
+        let (old_len, new_len) = (before.len_chars(), self.rope.len_chars());
+        let prefix = before.chars().zip(self.rope.chars()).take_while(|(a, b)| a == b).count();
+        let room = old_len.min(new_len) - prefix;
+        let (mut old_back, mut new_back) = (before.chars_at(old_len), self.rope.chars_at(new_len));
+        let mut suffix = 0;
+        while suffix < room {
+            match (old_back.prev(), new_back.prev()) {
+                (Some(a), Some(b)) if a == b => suffix += 1,
+                _ => break,
+            }
+        }
+        if prefix == old_len && prefix == new_len {
+            return;
+        }
+        let removed = before.slice(prefix..old_len - suffix).to_string();
+        self.pending_syntax_edits.push(EditDelta { start_char: prefix, new_end_char: new_len - suffix, removed });
+    }
+
     /// Starts folding every edit made until the matching `end_undo_group`
     /// into a single undo step. Nests: only the outermost pair counts.
     /// A typing run still pending (not yet an undo step) is left out of
@@ -800,8 +926,13 @@ impl Buffer {
     pub fn undo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
         let Some(step) = self.undo_stack.pop() else { return false };
+        let mark = self.pending_syntax_edits.len();
+        let before = (step.edits.len() > 1).then(|| self.rope.clone());
         for edit in step.edits.iter().rev() {
             self.apply_inverse(edit);
+        }
+        if let Some(before) = before {
+            self.coalesce_syntax_edits(mark, &before);
         }
         if let Some(first) = step.edits.first() {
             *cursor = first.cursor_before;
@@ -818,8 +949,13 @@ impl Buffer {
     pub fn redo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
         let Some(step) = self.redo_stack.pop() else { return false };
+        let mark = self.pending_syntax_edits.len();
+        let before = (step.edits.len() > 1).then(|| self.rope.clone());
         for edit in &step.edits {
             self.apply_forward(edit);
+        }
+        if let Some(before) = before {
+            self.coalesce_syntax_edits(mark, &before);
         }
         if let Some(last) = step.edits.last() {
             *cursor = last.cursor_after;
@@ -893,6 +1029,74 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_position_follows_the_edits_since_and_falls_back_when_they_re_gone() {
+        let mut b = Buffer::from_text("hello world");
+        let logged = b.edits_logged();
+        let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+        b.insert_str(&mut c, ">> ");
+        assert_eq!(b.map_since(logged, 6), Some(9), "after an insertion before it");
+        let mut c = Cursor { char_idx: 9, sticky_col: 0 };
+        b.delete_range(&mut c, 3, 9);
+        assert_eq!(b.map_since(logged, 6), Some(3), "in what was deleted: its start");
+        assert_eq!(b.map_since(logged, 0), Some(0));
+        let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+        b.undo(&mut c);
+        b.undo(&mut c);
+        assert_eq!(b.text(), "hello world");
+        assert_eq!(b.map_since(logged, 6), Some(0), "undo puts the text back, not the position: it was deleted, then the >> before it went");
+        assert_eq!(b.map_since(logged + 1000, 6), None, "a count from the future");
+        let old = b.edits_logged();
+        for _ in 0..MAX_KEPT_EDITS + 1 {
+            let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+            b.insert_char(&mut c, 'x');
+        }
+        assert_eq!(b.map_since(old, 1), None, "too long ago");
+        assert!(b.map_since(b.edits_logged() - 1, 1).is_some());
+    }
+
+    #[test]
+    fn following_edits_takes_nothing_from_the_other_readers() {
+        let mut b = Buffer::from_text("abc");
+        b.track_anchors();
+        let logged = b.edits_logged();
+        let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+        b.insert_char(&mut c, 'x');
+        assert_eq!(b.map_since(logged, 1), Some(2));
+        assert_eq!(b.map_since(logged, 1), Some(2), "asked again: the same");
+        assert_eq!(b.take_anchor_edits().len(), 1, "decorations still get theirs");
+        assert_eq!(b.drain_edits().len(), 1, "and the syntax tree its");
+        assert_eq!(b.map_since(logged, 1), Some(2), "after they've drained");
+    }
+
+    #[test]
+    fn an_edit_maps_positions_before_after_and_inside_it() {
+        let e = KeptEdit { start: 5, removed: 3, new_end: 6 };
+        assert_eq!(e.map(4), 4);
+        assert_eq!(e.map(5), 5, "at its start: stays");
+        assert_eq!(e.map(6), 5, "inside what went");
+        assert_eq!(e.map(8), 6, "just after: moved by the difference");
+        assert_eq!(e.map(20), 18);
+        let insert = KeptEdit { start: 2, removed: 0, new_end: 4 };
+        assert_eq!(insert.map(2), 2, "an insertion at a position: it stays before the new text");
+        assert_eq!(insert.map(3), 5);
+    }
+
+    #[test]
+    fn a_position_inside_replaced_text_has_no_place_after() {
+        let e = KeptEdit { start: 5, removed: 3, new_end: 6 };
+        assert_eq!(e.map_kept(5), Some(5), "at its start");
+        assert_eq!(e.map_kept(6), None, "inside");
+        assert_eq!(e.map_kept(8), Some(6), "at its end");
+        let mut b = Buffer::from_text("one two three");
+        let logged = b.edits_logged();
+        let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+        b.replace_range(&mut c, 4, 7, "2");
+        assert_eq!(b.map_since_kept(logged, 5), Some(None));
+        assert_eq!(b.map_since_kept(logged, 10), Some(Some(8)));
+        assert_eq!(b.map_since_kept(logged + 9, 1), None, "from the future");
+    }
 
     #[test]
     fn positions_past_the_end_clamp_instead_of_panicking() {
@@ -1330,5 +1534,22 @@ bbb");
         buf.redo(&mut cur);
         let redo_edits = buf.drain_edits();
         assert_eq!(redo_edits, vec![EditDelta { start_char: 0, new_end_char: 1, removed: String::new() }]);
+    }
+
+    /// Many replacements at once are one edit to the syntax tree, there,
+    /// on undo and on redo: from the first change to the last.
+    #[test]
+    fn replace_ranges_is_one_syntax_edit_and_one_undo_step() {
+        let mut buf = buffer_with("naïve a\nb\nnaïve c\nd\n");
+        let mut cur = Cursor::at_start();
+        buf.drain_edits();
+        buf.replace_ranges(&mut cur, &[(0..8, "naive a\n".to_string()), (10..18, "naive c\n".to_string())]);
+        assert_eq!(buf.text(), "naive a\nb\nnaive c\nd\n");
+        assert_eq!(buf.drain_edits(), vec![EditDelta { start_char: 2, new_end_char: 13, removed: "ïve a\nb\nnaï".to_string() }]);
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "naïve a\nb\nnaïve c\nd\n");
+        assert_eq!(buf.drain_edits(), vec![EditDelta { start_char: 2, new_end_char: 13, removed: "ive a\nb\nnai".to_string() }]);
+        assert!(buf.redo(&mut cur));
+        assert_eq!(buf.drain_edits().len(), 1);
     }
 }
