@@ -472,11 +472,24 @@ stage by stage.
   and 1.6 ms with it off; `G` and ten `gk`, 13 ms against 8 ms. The
   `Vec` of display lines a frame builds a few times (as 1.5 does) is
   that cheap, so it stays.
-- The row walk's breaks are kept (`break_cache`, by buffer and line)
-  while the line's text, the width, the tab stops, the decorations and
-  (on a decorated line) whether the cursor is on it are the same, so a
-  long line stepped back into is broken once an edit, not once a frame;
-  a few thousand lines at most, then it starts again.
+- The row walk's breaks are kept (`break_cache`, by buffer and line,
+  `App::line_breaks`). They're kept while these stay the same:
+  - the buffer's edit count;
+  - the width;
+  - the tab stops;
+  - the decorations revision, which is global, so an extension setting
+    decorations on any buffer starts every line again;
+  - on a decorated line, whether the cursor is on it.
+  So a long line stepped back into is broken once per edit, not once per
+  frame. A hit costs a few comparisons and an `Arc` clone of the rows.
+  The cache holds at most 4096 lines, then starts again.
+- Only the row walk reads the cache: scrolling, follow, `zt`/`zz`/`zb`,
+  the wheel and the caret's row. Two others still break lines
+  themselves:
+  - drawing (`pane_layout`), which needs only the rows shown, so it
+    breaks no further than the bottom;
+  - Vim's motions by row (`PaneRows`), which take a snapshot per key
+    without borrowing the app.
 - No arithmetic long-line path: `break_line_rows` already reads only
   what the rows wanted can hold, and the cache covers stepping back. A
   very long line is still copied whole once a frame to be drawn, as it

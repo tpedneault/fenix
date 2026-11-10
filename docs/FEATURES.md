@@ -130,8 +130,8 @@ its extension. The rest is built into Fenix.
   are on its first row, a problem's message and a fold's `⋯ N lines` at
   the end of its last. `SPC t w` (`Alt+Z` with standard keys) turns it on
   or off for the buffer in front, until it's closed or Fenix restarts (it
-  isn't kept with the session); `editor.wrap` is the default, Markdown
-  and `.txt` files wrap whatever it says (`editor.wrap_languages`,
+  isn't kept with the session); `editor.wrap` is the default, Markdown,
+  `.txt` and `.text` files wrap whatever it says (`editor.wrap_languages`,
   `editor.nowrap_languages`), and an agent's prompt wraps by default. `gj` /
   `gk` move by screen rows, as `↑` / `↓` do with standard keys and in
   Insert, where `End` stops first after the row's last word (or on its

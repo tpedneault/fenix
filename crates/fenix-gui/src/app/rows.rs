@@ -309,7 +309,12 @@ impl App {
     /// The rows above `buffer`'s `line` that aren't text (a code lens's,
     /// one each): laid out in a wrapped pane, which scrolling, a click and
     /// the caret step over.
+    /// None above the empty line after a final line break, which has
+    /// no rows of its own to lay out.
     pub(super) fn virtual_rows_above(&self, buffer: BufferId, line: usize) -> &[String] {
+        if self.buffers.get(buffer).is_none_or(|ob| line >= ob.buffer.visual_line_count()) {
+            return &[];
+        }
         self.virtual_rows.get(&buffer).and_then(|lines| lines.get(&line)).map_or(&[], Vec::as_slice)
     }
 
@@ -576,7 +581,10 @@ impl App {
                 Some(row) if row.kind == RowKind::Filler => spans.push((" ".repeat(gutter_chars), theme.gutter_fg)),
                 // A row above its line that isn't its text: as its indent.
                 Some(row) if let RowKind::Virtual(i) = row.kind => {
-                    let lead = ob.buffer.rope().line(row.line.min(ob.buffer.line_count().saturating_sub(1))).chars().take_while(|c| *c == ' ' || *c == '\t').count();
+                    // Its line's leading whitespace in display columns: a
+                    // tab as wide as it's drawn.
+                    let leading: String = ob.buffer.rope().line(row.line.min(ob.buffer.line_count().saturating_sub(1))).chars().take_while(|c| *c == ' ' || *c == '\t').collect();
+                    let lead = tabstops::expand_line(&leading, tab_stops).0.chars().count();
                     let width = map.width().unwrap_or(usize::MAX);
                     let text: String = format!("{}{}", " ".repeat(lead.min(width / 2)), map.virtual_text(i)).chars().take(width.saturating_sub(1)).collect();
                     spans.push((format!("{}{text}", " ".repeat(gutter_chars)), theme.gutter_fg));
@@ -1289,6 +1297,30 @@ mod app_tests {
         assert_eq!(app.focused_overlays_now(4).caret, Some((2, 0)));
         app.press_all("k g j");
         assert_eq!(app.line_col(), (1, 0), "gj from `one` onto `two`, over the row above it");
+    }
+
+    #[test]
+    fn the_empty_line_after_the_last_break_has_no_rows_above_it() {
+        let (mut app, _f) = wrapped("a.txt", &"x\n".repeat(4), 20);
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        for line in 0..=4 {
+            app.virtual_rows.entry(buffer).or_default().insert(line, vec!["lens".into()]);
+        }
+        let laid = app.focused_layout(20).map.len();
+        let mut walk = app.row_walk(pane, buffer).unwrap();
+        let walked = walk.rows_to_end((0, 0), 100).unwrap() + 1;
+        assert_eq!((laid, walked), (9, 9), "four lines of two rows, and the last line's one");
+    }
+
+    #[test]
+    fn a_row_above_a_tab_indented_line_is_at_its_drawn_indent() {
+        let (mut app, _f) = wrapped("a.txt", "\ttwo\n", 40);
+        let buffer = app.focused_buffer_id();
+        app.virtual_rows.entry(buffer).or_default().insert(0, vec!["lens".into()]);
+        let gutter = app.gutter_chars(app.open());
+        let rows = drawn(&app, 2);
+        let text: Vec<String> = rows.iter().map(|r| r.chars().skip(gutter).collect()).collect();
+        assert_eq!(text, vec![format!("{}lens", " ".repeat(8)), format!("{}two", " ".repeat(8))]);
     }
 
     #[test]

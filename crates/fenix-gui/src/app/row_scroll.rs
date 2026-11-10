@@ -23,7 +23,7 @@ pub(super) struct RowWalk<'a> {
     width: usize,
     cursor_line: usize,
     /// Each line's rows found so far, and whether they're all of them.
-    rows: HashMap<usize, (Vec<std::ops::Range<usize>>, bool)>,
+    rows: HashMap<usize, (LineRows, bool)>,
 }
 
 impl RowWalk<'_> {
@@ -188,7 +188,7 @@ pub(super) fn follow(walk: &mut RowWalk, top: RowPos, cursor: RowPos, visible: u
     let centred = |walk: &mut RowWalk| walk.step(cursor, -((visible / 2) as isize));
     let target = if cursor < top {
         match walk.distance(cursor, top, visible / 2) {
-            Some(_) if !jumped => cursor,
+            Some(_) if !jumped => with_rows_above(walk, cursor, visible),
             _ => centred(walk),
         }
     } else {
@@ -204,6 +204,18 @@ pub(super) fn follow(walk: &mut RowWalk, top: RowPos, cursor: RowPos, visible: u
     match walk.rows_to_end(target, visible) {
         Some(d) if d + 1 < visible => walk.step(target, -((visible - 1 - d) as isize)),
         _ => target,
+    }
+}
+
+/// A top at `cursor`, or, with the cursor on its line's first text row,
+/// at the rows above it that aren't text (a code lens's) when they fit
+/// with it: scrolling up to a line shows what's above it.
+fn with_rows_above(walk: &mut RowWalk, cursor: RowPos, visible: usize) -> RowPos {
+    let above = walk.above(cursor.0);
+    if above > 0 && cursor.1 == above && above < visible {
+        (cursor.0, 0)
+    } else {
+        cursor
     }
 }
 
@@ -411,7 +423,7 @@ impl App {
             VimScrollTarget::Center => visible / 2,
             VimScrollTarget::Bottom => visible.saturating_sub(1),
         };
-        let top = walk.step(cursor, -(up as isize));
+        let top = if up == 0 { with_rows_above(&mut walk, cursor, visible.max(1)) } else { walk.step(cursor, -(up as isize)) };
         drop(walk);
         self.set_row_top(pane, top);
         true
@@ -459,7 +471,13 @@ impl App {
         let (index, row, top_side) = if cursor < top {
             (top.0, top.1, true)
         } else if walk.distance(top, cursor, visible - 1).is_none() {
-            let bottom = walk.step(top, visible as isize - 1);
+            let mut bottom = walk.step(top, visible as isize - 1);
+            // A bottom row above its line that isn't text: the line
+            // before's last row, the last text in view.
+            if bottom.1 < walk.above(bottom.0) && bottom.0 > top.0 {
+                let index = bottom.0 - 1;
+                bottom = (index, walk.count(index) - 1);
+            }
             (bottom.0, bottom.1, false)
         } else {
             return true;
@@ -494,8 +512,9 @@ impl App {
 
     /// The visual columns of `buffer`'s `line` on each of its rows,
     /// wrapped at `width` (`rows::NO_LINE`, a filler, is one row).
-    /// Its first `max_rows` of them, with whether they're all.
-    pub(super) fn line_breaks(&self, buffer: BufferId, line: usize, width: usize, cursor_line: usize, max_rows: usize) -> (Vec<std::ops::Range<usize>>, bool) {
+    /// At least its first `max_rows` of them (more when more were found
+    /// before), with whether they're all; shared with the cache.
+    pub(super) fn line_breaks(&self, buffer: BufferId, line: usize, width: usize, cursor_line: usize, max_rows: usize) -> (LineRows, bool) {
         let Some(ob) = self.buffers.get(buffer) else { return (std::iter::once(0..0).collect(), true) };
         if line == rows::NO_LINE || line >= ob.buffer.visual_line_count() {
             return (std::iter::once(0..usize::MAX).collect(), true);
@@ -506,10 +525,11 @@ impl App {
         // cursor going on or off it).
         let tab_stops = self.tab_stops_for(buffer);
         let decorated = self.wasm.decorations.contains_key(&buffer);
-        let stamp = BreakStamp { edits: ob.buffer.edit_count(), width, tabs: format!("{tab_stops:?}"), decorations: self.wasm.decorations_rev, cursor_on: decorated && line == cursor_line };
+        let (edits, decorations_rev, cursor_on) = (ob.buffer.edit_count(), self.wasm.decorations_rev, decorated && line == cursor_line);
         if let Some((was, rows, whole)) = self.break_cache.borrow().get(&(buffer, line)) {
-            if *was == stamp && (*whole || rows.len() >= max_rows) {
-                return (rows[..max_rows.min(rows.len())].to_vec(), *whole && max_rows >= rows.len());
+            let same = was.edits == edits && was.width == width && was.tabs == tab_stops && was.decorations == decorations_rev && was.cursor_on == cursor_on;
+            if same && (*whole || rows.len() >= max_rows) {
+                return (rows.clone(), *whole);
             }
         }
         let start = ob.buffer.line_start_char(line);
@@ -524,14 +544,16 @@ impl App {
             line_text
         };
         let indent = crate::wrap::continuation_indent(&display, width);
-        let found = crate::wrap::break_line_rows(&display, width, indent, max_rows);
+        let (rows, whole) = crate::wrap::break_line_rows(&display, width, indent, max_rows);
+        let rows: LineRows = rows.into();
         let mut cache = self.break_cache.borrow_mut();
         // Bounded: a few panes' worth of lines, or it starts again.
-        if cache.len() > 4096 {
+        if cache.len() >= BREAK_CACHE_LINES {
             cache.clear();
         }
-        cache.insert((buffer, line), (stamp, found.0.clone(), found.1));
-        found
+        let stamp = BreakStamp { edits, width, tabs: tab_stops, decorations: decorations_rev, cursor_on };
+        cache.insert((buffer, line), (stamp, rows.clone(), whole));
+        (rows, whole)
     }
 }
 
@@ -540,13 +562,20 @@ impl App {
 pub(super) struct BreakStamp {
     edits: u64,
     width: usize,
-    tabs: String,
+    tabs: TabStops,
     decorations: u64,
     cursor_on: bool,
 }
 
 /// Lines' rows found, by buffer and line.
-pub(super) type BreakCache = HashMap<(BufferId, usize), (BreakStamp, Vec<std::ops::Range<usize>>, bool)>;
+pub(super) type BreakCache = HashMap<(BufferId, usize), (BreakStamp, LineRows, bool)>;
+
+/// A line's rows, as visual columns: shared between the cache and the
+/// walks that read it.
+pub(super) type LineRows = std::sync::Arc<[std::ops::Range<usize>]>;
+
+/// How many lines' rows the cache keeps before it starts again.
+const BREAK_CACHE_LINES: usize = 4096;
 
 #[cfg(test)]
 mod tests {
@@ -808,6 +837,50 @@ mod tests {
         assert_eq!(tops.last(), Some(&(0, 0)), "up to the top: {tops:?}");
     }
 
+    /// `lines` lines of `x`, a row that isn't text above each, wrapped
+    /// at twenty columns.
+    fn lensed(lines: usize) -> (App, super::super::test_keys::TestFile) {
+        let (mut app, file) = wrapped(&"x\n".repeat(lines), 20);
+        let buffer = app.focused_buffer_id();
+        for line in 0..lines {
+            app.virtual_rows.entry(buffer).or_default().insert(line, vec!["lens".into()]);
+        }
+        (app, file)
+    }
+
+    #[test]
+    fn the_wheel_up_isn_t_stuck_when_the_bottom_row_isn_t_text() {
+        let (mut app, _f) = lensed(30);
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        // Line 15's text at the bottom of five rows: (13,1) .. (15,1).
+        app.press_all("1 6 G");
+        app.set_row_top(pane, (13, 1));
+        held_in_view(&mut app, 5);
+        for _ in 0..6 {
+            assert!(app.scroll_focused_by_rows(pane, buffer, -1, 5));
+            held_in_view(&mut app, 5);
+        }
+        assert_eq!(top(&app), (10, 1), "six rows up");
+    }
+
+    #[test]
+    fn scrolling_up_to_a_line_shows_the_rows_above_it() {
+        let (mut app, _f) = lensed(10);
+        app.press_all("5 G");
+        app.ensure_cursor_visible(5);
+        for _ in 0..4 {
+            app.press("k");
+            app.ensure_cursor_visible(5);
+        }
+        assert_eq!(app.line_col(), (0, 0));
+        assert_eq!(top(&app), (0, 0), "line 0's lens in view, not hidden above it");
+        // `zt` too: the cursor's line with what's above it at the top.
+        app.press_all("4 G");
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        assert!(app.scroll_rows_to_cursor(pane, buffer, VimScrollTarget::Top, 5));
+        assert_eq!(top(&app), (3, 0));
+    }
+
     #[test]
     fn a_cursor_in_a_closed_fold_is_its_header_s_row_not_the_file_s_top() {
         let text = format!("fn a() {{\n{}\n}}\nend\n", "    x;\n".repeat(40));
@@ -828,11 +901,12 @@ mod tests {
     fn a_line_s_rows_are_found_once_until_its_text_or_the_width_changes() {
         let (mut app, _f) = three_row_lines(3);
         let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
-        assert_eq!(app.line_breaks(buffer, 1, 10, 0, usize::MAX), (vec![0..10, 10..20, 20..24], true));
+        assert_eq!(app.line_breaks(buffer, 1, 10, 0, usize::MAX), (vec![0..10, 10..20, 20..24].into(), true));
         assert!(app.break_cache.borrow().contains_key(&(buffer, 1)));
-        // Asked for fewer: the first of those found, not all.
-        let (rows, whole) = app.line_breaks(buffer, 1, 10, 0, 1);
-        assert_eq!((rows.len(), rows.first().cloned(), whole), (1, Some(0..10), false));
+        // Asked for fewer: those found, shared, not found again.
+        let (again, whole) = app.line_breaks(buffer, 1, 10, 0, 1);
+        let (rows, _) = app.line_breaks(buffer, 1, 10, 0, usize::MAX);
+        assert!(whole && std::sync::Arc::ptr_eq(&again, &rows));
         // An edit: found again for the new text.
         app.press_all("j A");
         app.type_text(" ffff");
