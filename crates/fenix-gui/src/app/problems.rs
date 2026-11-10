@@ -232,8 +232,9 @@ mod tests {
 
     #[test]
     fn symbols_are_listed_with_their_kind_and_place() {
-        let root = PathBuf::from("/p");
-        let uri = fenix_lsp::path_to_uri(Path::new("/p/src/app.rs")).unwrap();
+        // Absolute on every platform: a URI needs a path that is.
+        let root = std::env::temp_dir().join("fenix-symbols-p");
+        let uri = fenix_lsp::path_to_uri(&root.join("src").join("app.rs")).unwrap();
         #[allow(deprecated)]
         let flat = lsp_types::SymbolInformation { name: "App".into(), kind: lsp_types::SymbolKind::STRUCT, tags: None, deprecated: None, location: lsp_types::Location { uri: uri.clone(), range: at(41, 4) }, container_name: Some("app".into()) };
         let rows = symbol_rows(&root, lsp_types::WorkspaceSymbolResponse::Flat(vec![flat]));
