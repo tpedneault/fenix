@@ -104,34 +104,71 @@ fn place(lines: &mut Vec<String>, current: &mut String, current_len: &mut usize,
 
 /// Where a code pane's line wider than `width` columns breaks: the
 /// visual columns of `display` (the line as drawn, tabs expanded and
-/// decorations laid out, a column a char) on each row. A row ends after
-/// the last whitespace that fits; a word wider than the row alone is
-/// broken where the row ends. The rows after the first are `indent`
-/// columns narrower (they're drawn that far in), but never narrower than
-/// one column. An empty line is one empty row.
+/// decorations laid out, a column a char) on each row. A row's text
+/// takes all but its last column, which is the caret's after the row's
+/// last char; it ends after the last word that fits, the blanks after
+/// that word hanging at its end (one in the kept column, any more past
+/// the pane's edge); a word wider than the row alone is broken where
+/// the row ends, never between a char and a mark drawn on it. The rows
+/// after the first are `indent` columns narrower (they're drawn that far
+/// in), never narrower than one column. An empty line is one empty row.
+#[cfg_attr(not(test), allow(dead_code))] // the row walk's, which scrolls
 pub fn break_line(display: &str, width: usize, indent: usize) -> Vec<std::ops::Range<usize>> {
+    break_line_rows(display, width, indent, usize::MAX).0
+}
+
+/// `break_line`'s first `max_rows` rows, reading no more of `display`
+/// than they need, and whether they are all its rows.
+pub fn break_line_rows(display: &str, width: usize, indent: usize, max_rows: usize) -> (Vec<std::ops::Range<usize>>, bool) {
     let width = width.max(1);
-    let rest = width.saturating_sub(indent).max(1);
-    let n = display.chars().count();
-    if n <= width {
-        return std::iter::once(0..n).collect();
-    }
-    let chars: Vec<char> = display.chars().collect();
-    let blank: Vec<bool> = chars.iter().map(|c| c.is_whitespace()).collect();
+    // A row's text: one column short of the row, for the caret.
+    let text_cols = |cols: usize| if cols > 1 { cols - 1 } else { 1 };
+    let (first, rest) = (text_cols(width), text_cols(width.saturating_sub(indent).max(1)));
+    // As much of the line as `max_rows` rows can hold, and a char more.
+    let limit = max_rows.saturating_mul(width).saturating_add(width + 1);
+    let chars: Vec<char> = display.chars().take(limit).collect();
+    let whole = chars.len() < limit || display.chars().nth(limit).is_none();
+    let n = chars.len();
+    let blank = |i: usize| chars[i].is_whitespace();
     let mut rows = Vec::new();
     let mut start = 0;
-    while n - start > if rows.is_empty() { width } else { rest } {
-        let fits = start + if rows.is_empty() { width } else { rest };
-        // After the last blank that fits, with something other than
-        // blanks before it on the row.
-        let soft = (start + 1..=fits).rev().find(|&end| blank[end - 1] && blank[start..end - 1].iter().any(|b| !b));
-        // A mark that goes on the char before it stays with it.
-        let end = soft.unwrap_or_else(|| (start + 1..=fits).rev().find(|&end| !joins(chars[end])).unwrap_or(fits));
+    loop {
+        let fits = if rows.is_empty() { first } else { rest };
+        if n - start <= fits && (whole || n - start < fits) {
+            rows.push(start..n);
+            return (rows, whole);
+        }
+        let edge = start + fits;
+        if edge >= n {
+            // Past what was read: the rest is beyond the rows wanted.
+            rows.push(start..n);
+            return (rows, false);
+        }
+        // After the last word that ends on the row, its blanks with it.
+        let soft = (start + 1..=edge).rev().find(|&end| !blank(end - 1) && blank(end));
+        let end = match soft {
+            Some(mut end) => {
+                while end < n && blank(end) {
+                    end += 1;
+                }
+                end
+            }
+            // Only blanks before a word on the row (an indent): before
+            // the word, when the next row has room for it.
+            None => match (start + 1..=edge).rev().find(|&end| blank(end - 1) && !blank(end)) {
+                Some(end) if (end..n).take_while(|&i| !blank(i)).count() <= rest => end,
+                _ => (start + 1..=edge).rev().find(|&end| !joins(chars[end])).unwrap_or(edge),
+            },
+        };
         rows.push(start..end);
+        if end >= n {
+            return (rows, whole);
+        }
+        if rows.len() >= max_rows {
+            return (rows, false);
+        }
         start = end;
     }
-    rows.push(start..n);
-    rows
 }
 
 /// Whether `c` is drawn on the char before it: a combining mark, a
@@ -146,7 +183,8 @@ fn joins(c: char) -> bool {
 /// alone doesn't fit on the first row, whose break is then inside it.
 pub fn continuation_indent(display: &str, width: usize) -> usize {
     let leading = display.chars().take_while(|c| *c == ' ' || *c == '\t').count();
-    if leading >= width { 0 } else { leading.min(width / 2) }
+    // A row's last column is the caret's: the indent must leave text room.
+    if leading + 1 >= width { 0 } else { leading.min(width / 2) }
 }
 
 #[cfg(test)]
@@ -162,22 +200,41 @@ mod tests {
     }
 
     #[test]
-    fn a_line_breaks_after_the_last_blank_that_fits() {
+    fn a_line_breaks_after_the_last_word_that_fits_keeping_a_column_for_the_caret() {
         assert_eq!(rows("the quick brown fox", 10, 0), vec!["the quick ", "brown fox"]);
-        assert_eq!(rows("aaa bbb ccc ddd", 7, 0), vec!["aaa ", "bbb ", "ccc ddd"]);
+        assert_eq!(rows("aaa bbb ccc ddd", 7, 0), vec!["aaa ", "bbb ", "ccc ", "ddd"]);
+    }
+
+    #[test]
+    fn a_word_ending_at_the_text_s_edge_stays_and_the_next_row_never_starts_with_its_blank() {
+        assert_eq!(rows("abcd efgh", 5, 0), vec!["abcd ", "efgh"]);
+        assert_eq!(rows("abcde fgh", 5, 0), vec!["abcd", "e ", "fgh"]);
+    }
+
+    #[test]
+    fn the_blanks_at_a_break_hang_at_the_end_of_its_row() {
+        assert_eq!(rows("aaa      bbb", 5, 0), vec!["aaa      ", "bbb"], "not `aaa  ` / `    b` / `bb`");
+        assert_eq!(rows("ab  cd", 3, 0), vec!["ab  ", "cd"]);
+        assert_eq!(rows("ab   ", 3, 0), vec!["ab   "]);
+    }
+
+    #[test]
+    fn a_word_after_an_indent_goes_whole_to_the_next_row_when_it_fits_there() {
+        assert_eq!(rows("        quick brown", 12, 6), vec!["        ", "quick ", "brown"]);
+        assert_eq!(rows("        abcdefghijk", 12, 6), vec!["        abc", "defgh", "ijk"], "too long for any row: broken");
     }
 
     #[test]
     fn a_word_wider_than_the_row_is_broken_where_the_row_ends() {
-        assert_eq!(rows("abcdefghijkl", 5, 0), vec!["abcde", "fghij", "kl"]);
-        assert_eq!(rows("ab cdefghijkl", 5, 0), vec!["ab ", "cdefg", "hijkl"]);
+        assert_eq!(rows("abcdefghijkl", 5, 0), vec!["abcd", "efgh", "ijkl"]);
+        assert_eq!(rows("ab cdefghijkl", 5, 0), vec!["ab ", "cdef", "ghij", "kl"]);
     }
 
     #[test]
-    fn a_line_as_wide_as_the_row_and_an_empty_one_are_one_row() {
-        assert_eq!(break_line("abcde", 5, 0), [0..5]);
+    fn a_line_one_short_of_the_pane_and_an_empty_one_are_one_row_and_a_full_one_is_two() {
+        assert_eq!(break_line("abcd", 5, 0), [0..4]);
         assert_eq!(break_line("", 5, 0), [0..0]);
-        assert_eq!(break_line("abcdef", 5, 0), vec![0..5, 5..6]);
+        assert_eq!(break_line("abcde", 5, 0), vec![0..4, 4..5], "the last column is the caret's, after the last char");
     }
 
     #[test]
@@ -187,32 +244,43 @@ mod tests {
         assert_eq!(indent, 4);
         // The first row's indent isn't a place to break.
         assert_eq!(rows(line, 16, indent), vec!["    let total = ", "first + ", "second;"]);
-        // Never more than half the pane, and none when the indent is
-        // wider than the pane.
+        // Never more than half the pane, and none when the indent leaves
+        // the first row no text.
         assert_eq!(continuation_indent("            x", 20), 10);
         assert_eq!(continuation_indent("            x", 10), 0);
-        assert_eq!(rows("        ab cd", 6, continuation_indent("        ab cd", 6)), vec!["      ", "  ab ", "cd"]);
+        assert_eq!(rows("        ab cd", 6, continuation_indent("        ab cd", 6)), vec!["     ", "   ab ", "cd"]);
     }
 
     #[test]
     fn a_pane_one_column_wide_is_a_char_a_row() {
-        assert_eq!(rows("a b", 1, 0), vec!["a", " ", "b"]);
+        assert_eq!(rows("a b", 1, 0), vec!["a ", "b"]);
         assert_eq!(rows("ab", 1, 3), vec!["a", "b"], "an indent wider than the pane still leaves a column");
         assert_eq!(break_line("ab", 0, 0), vec![0..1, 1..2]);
     }
 
     #[test]
     fn wide_and_combining_chars_are_a_column_each_as_the_caret_counts_them() {
-        assert_eq!(rows("日本語 テキスト", 4, 0), vec!["日本語 ", "テキスト"]);
-        assert_eq!(rows("e\u{301}e\u{301}e\u{301}", 4, 0), vec!["e\u{301}e\u{301}", "e\u{301}"]);
+        assert_eq!(rows("日本語 テキスト", 4, 0), vec!["日本語 ", "テキス", "ト"]);
+        assert_eq!(rows("e\u{301}e\u{301}e\u{301}", 5, 0), vec!["e\u{301}e\u{301}", "e\u{301}"]);
         // Not between a char and its mark.
-        assert_eq!(rows("e\u{301}e\u{301}e\u{301}", 3, 0), vec!["e\u{301}", "e\u{301}", "e\u{301}"]);
+        assert_eq!(rows("e\u{301}e\u{301}e\u{301}", 4, 0), vec!["e\u{301}", "e\u{301}", "e\u{301}"]);
     }
 
     #[test]
-    fn blanks_at_a_break_hang_on_the_row_they_end() {
-        assert_eq!(rows("ab  cd", 3, 0), vec!["ab ", " cd"]);
-        assert_eq!(rows("ab   ", 3, 0), vec!["ab ", "  "]);
+    fn only_the_rows_wanted_are_found_and_read() {
+        let long = "word ".repeat(200_000);
+        let (rows, whole) = break_line_rows(&long, 10, 0, 3);
+        assert_eq!(rows, vec![0..10, 10..20, 20..30]);
+        assert!(!whole);
+        let (rows, whole) = break_line_rows("abc def", 10, 0, 3);
+        assert_eq!(rows, [0..7]);
+        assert!(whole);
+        // A row of blanks a million long: no search over every end.
+        let blanks = format!("x{}y", " ".repeat(1_000_000));
+        let started = std::time::Instant::now();
+        let (rows, _) = break_line_rows(&blanks, 200, 0, 50);
+        assert_eq!(rows[0].start, 0);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
     }
 
     #[test]
