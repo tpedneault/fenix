@@ -252,10 +252,9 @@ impl App {
         let edge = map.row(if row < 0 { 0 } else { last })?.line;
         let (line, vcol, past) = match usize::try_from(row).ok().filter(|&r| r <= last) {
             Some(r) => {
-                let shown = map.row(r)?;
+                // Past a row's end, on a line that goes on below: its
+                // last char (`RowMap::at` holds it there).
                 let (line, vcol) = map.at(r, cell)?;
-                // Past a row's end, on a line that goes on below: its last char.
-                let vcol = if shown.last { vcol } else { vcol.min(shown.cols.end.saturating_sub(1)) };
                 (line, vcol, false)
             }
             None if row < 0 => (edge.saturating_sub(1), cell, false),
@@ -1562,8 +1561,36 @@ mod tests {
     #[test]
     fn a_wide_char_s_row_is_hit_a_cell_a_char() {
         let mut app = wrapped_app("日本語の文章です", 6);
+        // `日本語の文` / `章です`: five a row, the sixth column the caret's.
         let pos = at(&app, 1, 1);
         click(&mut app, pos);
-        assert_eq!(cursor_at(&app), (0, 7));
+        assert_eq!(cursor_at(&app), (0, 6));
+    }
+
+    #[test]
+    fn a_click_and_a_drag_on_a_wrapped_tab_indented_line_go_by_its_columns() {
+        // `\tlet total = first;` at twelve columns: the tab is eight, so
+        // `        let ` and then, six in, `total ` / `= ` / `first` / `;`.
+        let mut app = wrapped_app("\tlet total = first;", 12);
+        let pos = at(&app, 1, 6);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 5), "`total`'s `t`");
+        // To right of `first`'s row: its last char.
+        let (from, to) = (at(&app, 0, 8), at(&app, 3, 10));
+        app.handle_click_at(from, W, H);
+        app.mouse_drag_to(to, W, H);
+        assert_eq!(selection(&app).as_deref(), Some("let total = first"));
+        app.mouse_release();
+    }
+
+    #[test]
+    fn a_hover_s_card_goes_under_the_glyph_on_a_continuation_row() {
+        let app = wrapped_app("the quick brown fox jumps", 10);
+        let pane = app.focused_pane_id();
+        let rect = app.geometry_at(W, H).panes.into_iter().find(|(p, _)| *p == pane).unwrap().1;
+        let hit = app.text_hit(pane, rect, at(&app, 1, 2)).unwrap();
+        assert_eq!((hit.line, hit.col), (0, 12));
+        let below_row_1 = at(&app, 1, 0).1 + text::LINE_HEIGHT / 2.0;
+        assert_eq!(hit.anchor.1, below_row_1, "under row 1, not under the line's first row");
     }
 }

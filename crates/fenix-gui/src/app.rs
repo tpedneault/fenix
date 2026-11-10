@@ -2367,6 +2367,14 @@ struct CompletionState {
 /// Per-visible-line highlight segments: (view_row, col_start, col_end).
 type Segments = Vec<(usize, usize, usize)>;
 
+/// A line as drawn (`App::drawn_line`): its display text, the colours of
+/// its bytes, and what to add to a byte of `text` to find it in them.
+pub(super) struct DrawnLine<'a> {
+    pub text: String,
+    pub ranges: std::borrow::Cow<'a, [(std::ops::Range<usize>, glyphon::Color)]>,
+    pub base: usize,
+}
+
 /// Highlight segments in the text: (buffer line, start char column, end
 /// char column), put on rows by the pane's `rows::RowMap`.
 type LineSegments = Vec<(usize, usize, usize)>;
@@ -18494,60 +18502,56 @@ impl App {
         decorated: &HashMap<usize, crate::decorations::LineLayout>,
         spans: &mut Vec<(String, glyphon::Color)>,
     ) {
+        let drawn = self.drawn_line(ob, buffer_line, syntax_highlights, tab_stops, decorated);
+        let (sliced, from) = skip_chars(&drawn.text, cols.start);
+        let to = from + keep_chars(sliced, cols.end.saturating_sub(cols.start)).len();
+        self.push_drawn(&drawn, from..to, spans);
+    }
+
+    /// `buffer_line` as drawn, once for all the rows it's on: its text
+    /// with tabs expanded and decorations laid out, and the colours of
+    /// its bytes.
+    pub(super) fn drawn_line<'a>(
+        &self,
+        ob: &OpenBuffer,
+        buffer_line: usize,
+        syntax_highlights: &'a [(std::ops::Range<usize>, glyphon::Color)],
+        tab_stops: &TabStops,
+        decorated: &HashMap<usize, crate::decorations::LineLayout>,
+    ) -> DrawnLine<'a> {
         let theme = self.theme;
-        let width = cols.end.saturating_sub(cols.start);
         let start = ob.buffer.line_start_char(buffer_line);
         let len = ob.buffer.line_len(buffer_line);
-        let line_text = ob.buffer.text_range(start, start + len);
+        let line_byte_start = ob.buffer.char_to_byte(start);
+        let line_byte_end = ob.buffer.char_to_byte(start + len);
         if let Some(layout) = decorated.get(&buffer_line) {
             let display = &layout.display;
-            let line_byte_start = ob.buffer.char_to_byte(start);
-            let line_byte_end = ob.buffer.char_to_byte(start + len);
             let remapped = remap_highlights_for_display(&ob.buffer, start, &layout.col_map, display, line_byte_start, line_byte_end, syntax_highlights);
             let ranges = decorated_ranges(remapped, &layout.runs, |role| pages::role_color(theme, role));
-            let (sliced, skipped_bytes) = skip_chars(display, cols.start);
-            let sliced = keep_chars(sliced, width);
-            spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &ranges, theme.fg));
-        } else if line_text.contains('\t') {
+            return DrawnLine { text: display.clone(), ranges: std::borrow::Cow::Owned(ranges), base: 0 };
+        }
+        let line_text = ob.buffer.text_range(start, start + len);
+        if line_text.contains('\t') {
             let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
-            let (sliced, skipped_bytes) = skip_chars(&display, cols.start);
-            let sliced = keep_chars(sliced, width);
-            if syntax_highlights.is_empty() {
-                spans.push((sliced.to_string(), theme.fg));
+            // Local to `display` (0-based), as `remapped` is -- not the
+            // real buffer's byte offsets, unlike a line without a tab.
+            let ranges = if syntax_highlights.is_empty() {
+                Vec::new()
             } else {
-                let line_byte_start = ob.buffer.char_to_byte(start);
-                let line_byte_end = ob.buffer.char_to_byte(start + len);
-                let remapped = remap_highlights_for_display(
-                    &ob.buffer,
-                    start,
-                    &col_map,
-                    &display,
-                    line_byte_start,
-                    line_byte_end,
-                    syntax_highlights,
-                );
-                // `skipped_bytes`/`display.len()` here are local
-                // to `display` (0-based), matching `remapped`'s
-                // own coordinate space -- not the real buffer's
-                // byte offsets, unlike the plain branch below.
-                spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &remapped, theme.fg));
-            }
+                remap_highlights_for_display(&ob.buffer, start, &col_map, &display, line_byte_start, line_byte_end, syntax_highlights)
+            };
+            return DrawnLine { text: display, ranges: std::borrow::Cow::Owned(ranges), base: 0 };
+        }
+        DrawnLine { text: line_text, ranges: std::borrow::Cow::Borrowed(syntax_highlights), base: line_byte_start }
+    }
+
+    /// Bytes `bytes` of a line as drawn, in their colours.
+    pub(super) fn push_drawn(&self, drawn: &DrawnLine, bytes: std::ops::Range<usize>, spans: &mut Vec<(String, glyphon::Color)>) {
+        let sliced = &drawn.text[bytes.clone()];
+        if drawn.ranges.is_empty() {
+            spans.push((sliced.to_string(), self.theme.fg));
         } else {
-            let (sliced, skipped_bytes) = skip_chars(&line_text, cols.start);
-            let sliced = keep_chars(sliced, width);
-            if syntax_highlights.is_empty() {
-                spans.push((sliced.to_string(), theme.fg));
-            } else {
-                let line_byte_start = ob.buffer.char_to_byte(start) + skipped_bytes;
-                let line_byte_end = line_byte_start + sliced.len();
-                spans.extend(split_line_by_highlights(
-                    sliced,
-                    line_byte_start,
-                    line_byte_end,
-                    syntax_highlights,
-                    theme.fg,
-                ));
-            }
+            spans.extend(split_line_by_highlights(sliced, drawn.base + bytes.start, drawn.base + bytes.end, &drawn.ranges, self.theme.fg));
         }
     }
 
@@ -18581,6 +18585,20 @@ impl App {
         render_base_line: usize,
         rows: usize,
         scroll_col: usize,
+    ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        self.syntax_highlights_in_columns(id, render_base_line, rows, scroll_col, None)
+    }
+
+    /// `syntax_highlights_from_column`, with the columns of each line a
+    /// wrapped pane's rows show (`columns`, by line: from, to) in place of
+    /// the sideways scroll's for a very long line.
+    fn syntax_highlights_in_columns(
+        &mut self,
+        id: BufferId,
+        render_base_line: usize,
+        rows: usize,
+        scroll_col: usize,
+        columns: Option<&HashMap<usize, (usize, usize)>>,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
@@ -18649,8 +18667,8 @@ impl App {
                 .map(|line| {
                     let first = ob.buffer.line_start_char(line);
                     let len = ob.buffer.line_len(line);
-                    let from = first + scroll_col.min(len);
-                    let to = first + (scroll_col + MAX_ROW_CHARS).min(len);
+                    let (from, to) = columns.and_then(|c| c.get(&line)).copied().unwrap_or((scroll_col, scroll_col + MAX_ROW_CHARS));
+                    let (from, to) = (first + from.min(len), first + to.min(len));
                     ob.buffer.char_to_byte(from)..ob.buffer.char_to_byte(to)
                 })
                 .filter(|range| !range.is_empty())
@@ -18888,7 +18906,16 @@ impl App {
     /// `range_to_segments`, the same "windowed, computed fresh each
     /// frame" discipline `bracket_match_segments`/`syntax_highlights_
     /// for_visible_range` already use.
+    #[cfg(test)]
     fn hlsearch_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
+        let mut segments = self.search_match_segments(lines.clone());
+        segments.extend(self.substitute_segments(lines));
+        segments
+    }
+
+    /// `hlsearch_segments`' search matches alone: what a frame asks of
+    /// each run of lines shown.
+    fn search_match_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
         let buffer = &self.open().buffer;
         let last_visible = lines.end.min(buffer.line_count());
         let start_char = buffer.line_start_char(lines.start.min(last_visible));
@@ -18905,8 +18932,18 @@ impl App {
             let end = buffer.byte_to_char(m.end);
             segments.extend(self.range_to_segments(start..end, lines.clone()));
         }
-        // What a `:s` being typed would replace, and the match its `c`
-        // flag is asking about.
+        segments
+    }
+
+    /// What a `:s` being typed would replace on `lines`, and the match
+    /// its `c` flag is asking about: previewed once a frame, the command's
+    /// whole range at a time.
+    fn substitute_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
+        let buffer = &self.open().buffer;
+        let mut segments = LineSegments::new();
+        let last_visible = lines.end.min(buffer.line_count());
+        let start_char = buffer.line_start_char(lines.start.min(last_visible));
+        let end_char = if last_visible < buffer.line_count() { buffer.line_start_char(last_visible) } else { buffer.len_chars() };
         if let Some(Ok(preview)) = self.vim.substitute_preview(buffer, &self.cursor()) {
             for m in preview.matches.into_iter().filter(|m| m.end >= start_char && m.start <= end_char) {
                 segments.extend(self.range_to_segments(m, lines.clone()));
@@ -20642,18 +20679,7 @@ impl App {
             // in the text and a cell in the pane, for everything drawn over
             // the text below -- with each line's columns (tabs,
             // decorations) and the indent guides.
-            let mut layout = self.pane_layout(
-                buffer_id,
-                rows::RowsWanted {
-                    lines: &visible_document_lines[..visible_document_lines.len().min(pane_visible_lines + 1)],
-                    skip: if wrap.is_some() { pane_state.scroll_row } else { 0 },
-                    count: pane_visible_lines + 1,
-                    scroll_col: shown_scroll_col,
-                    wrap,
-                },
-                line,
-                is_dashboard,
-            );
+            let mut layout = self.frame_layout(pane, buffer_id, &display_lines, render_base_line, pane_state.scroll_row, pane_visible_lines + 1, shown_scroll_col, line, is_dashboard);
             let row_map = &layout.map;
 
             let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
@@ -20672,7 +20698,18 @@ impl App {
             }
             let syntax_start = shown_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
-            let syntax_highlights = self.syntax_highlights_from_column(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col);
+            // A wrapped pane: the columns its rows show of each line.
+            let row_columns: Option<HashMap<usize, (usize, usize)>> = wrap.map(|_| {
+                let mut columns: HashMap<usize, (usize, usize)> = HashMap::new();
+                for line in row_map.text_lines() {
+                    let shown = row_map.rows_of(line);
+                    if let (Some(a), Some(b)) = (row_map.row(shown.start), row_map.row(shown.end.saturating_sub(1))) {
+                        columns.insert(line, (a.cols.start, b.cols.end));
+                    }
+                }
+                columns
+            });
+            let syntax_highlights = self.syntax_highlights_in_columns(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col, row_columns.as_ref());
             let tab_stops = self.tab_stops_for(buffer_id);
             let content_spans = match self.buffers.get(buffer_id) {
                 // A wrapped pane is drawn by its rows.
