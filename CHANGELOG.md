@@ -84,9 +84,6 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `SPC a l` (`agents.threads_everywhere`, or `Alt+P` in the list) shows
   every project's threads by project. A step's thread keeps which run
   and step it is; threads kept before are single entries.
-- Extra cursors come back with the session, selections and all, when
-  the file's text is the one they were left in; a file changed since
-  gets its main cursor back only.
 - Auto-save, off unless chosen on the Settings page: `editor.auto_save =
   "after_delay"` saves a file a moment after its last edit
   (`editor.auto_save_delay_ms`, a second), `"on_focus_change"` when you
