@@ -82,6 +82,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leave it for another buffer, pane or application. It never writes over
   a file that changed on disk, a buffer with no file, a read-only one or
   a remote project's, and it doesn't format.
+- A newer Fenix, said on Home: with `updates.check` on (off unless you
+  turn it on, as Fenix goes on the network only when asked), GitHub's
+  latest release is looked for once a day; `app.check_for_updates` looks
+  now. Nothing is downloaded or installed. `update_check = false` in a
+  machine's `policy.toml` switches both off for everyone.
 - More of VS Code's keys, with standard keys: Ctrl+Shift+K deletes the
   line, Ctrl+Enter and Ctrl+Shift+Enter open one below or above, Ctrl+L
   selects the line (again, the next), Ctrl+U takes back the last cursor

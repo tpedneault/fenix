@@ -33,6 +33,8 @@ pub struct HomeData {
     pub sections: Vec<HomeSection>,
     /// Unsaved buffers a previous session left recoverable (`SPC f v`).
     pub recovery: usize,
+    /// A newer Fenix is out: "Fenix 1.6.0 is out -- ..." (`updates.check`).
+    pub update: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -335,6 +337,14 @@ pub fn layout(data: &HomeData, cols: usize, rows: usize) -> HomeView {
     if width > date_len + 30 {
         g.put(top + 1, left + width - date_len, &data.date, Role::Muted);
     }
+    // A newer Fenix, quietly, under the date.
+    if let Some(update) = &data.update {
+        let shown = fit(update, width.saturating_sub(30));
+        let len = shown.chars().count();
+        if len > 0 && width > len + 30 {
+            g.put(top + 2, left + width - len, &shown, Role::Muted);
+        }
+    }
 
     // Find field: a three-line panel; the whole of it is one slot.
     let find = top + 4;
@@ -619,6 +629,7 @@ mod tests {
             ],
             sections: vec![today(vec![("Pick a dashboard", RowMark::Live("0:18".into())), ("Review PR", RowMark::Task(true))])],
             todos: vec![TodoItem { kind: TodoKind::Fix, message: "group id is wrong".into(), file: "pom.xml".into(), path: "/p/pom.xml".into(), line: 5, col: 8 }],
+            update: None,
             recovery: 1,
         }
     }
@@ -641,6 +652,19 @@ mod tests {
 
     fn line_of(view: &HomeView, needle: &str) -> usize {
         view.text.lines().position(|l| l.contains(needle)).unwrap_or_else(|| panic!("{needle:?} not in:\n{}", view.text))
+    }
+
+    #[test]
+    fn a_newer_fenix_is_a_quiet_line_under_the_date() {
+        let mut data = sample();
+        let view = layout(&data, 120, 40);
+        assert!(!view.text.contains("is out"));
+        data.update = Some("Fenix 9.0.0 is out -- github.com/tpedneault/fenix/releases".into());
+        let view = layout(&data, 120, 40);
+        let date = line_of(&view, "Tuesday 22 September");
+        assert_eq!(line_of(&view, "Fenix 9.0.0 is out"), date + 1);
+        let narrow = layout(&data, 40, 40);
+        assert!(!narrow.text.contains("is out"), "no room: left out");
     }
 
     #[test]

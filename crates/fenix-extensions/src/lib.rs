@@ -13,6 +13,7 @@ pub mod manifest;
 pub mod package;
 pub mod registry;
 pub mod store;
+pub mod update;
 
 pub use manifest::{Manifest, Permissions, Runtime, ToolClass};
 /// The versions manifests are checked against.

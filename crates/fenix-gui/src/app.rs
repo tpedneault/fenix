@@ -52,6 +52,7 @@ mod keys_host;
 pub(crate) use keys_host::translate_leader;
 mod edit_commands;
 mod carets;
+mod updates;
 mod auto_save;
 mod problems;
 #[cfg(test)]
@@ -1869,6 +1870,8 @@ pub enum FenixUserEvent {
     /// The extension registry read, or an install from it done, for the
     /// Extensions page (`extensions_host`).
     Registry(extensions_host::RegistryEvent),
+    /// What the update check found (`app/updates.rs`).
+    Updates(updates::UpdateAnswer),
     /// What a code extension's worker sent (`wasm_host`).
     Wasm { ext: String, event: fenix_wasm::host::Event },
     /// One message from a coding agent's connection, or its end
@@ -2259,6 +2262,7 @@ impl FenixUserEvent {
             Self::RemoteStatus { .. } => "RemoteStatus",
             Self::RecentProbed { .. } => "RecentProbed",
             Self::Registry { .. } => "Registry",
+            Self::Updates(_) => "Updates",
             Self::Wasm { .. } => "Wasm",
             Self::Acp { .. } => "Acp",
             Self::FilesListed { .. } => "FilesListed",
@@ -5336,6 +5340,8 @@ pub struct App {
     caret_undoing: bool,
     /// What auto-save (`editor.auto_save`) has seen.
     auto_save: auto_save::AutoSaveState,
+    /// What the update check (`updates.check`) knows.
+    updates: updates::UpdateState,
     /// Each Tcl buffer's language servers, as last worked out (every few
     /// seconds, not every frame: it can touch the disk) -- whose
     /// `lsp_workspace_names` its calls are colored by.
@@ -6200,6 +6206,7 @@ impl App {
             caret_marks: Vec::new(),
             caret_undoing: false,
             auto_save: Default::default(),
+            updates: updates::UpdateState { file: Some(if cfg!(test) { isolated_test_path("updates.json") } else { fenix_storage::paths::state_file("updates.json").unwrap_or_else(|| PathBuf::from("updates.json")) }), ..Default::default() },
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
             lsp_starting: HashMap::new(),
@@ -16225,6 +16232,7 @@ impl App {
             FenixUserEvent::RemoteStatus(host, status) => self.remote_status(host, status),
             FenixUserEvent::RecentProbed(seen) => self.apply_recent_probed(seen),
             FenixUserEvent::Registry(event) => self.apply_registry_event(event),
+            FenixUserEvent::Updates(answer) => self.apply_update_answer(answer),
             FenixUserEvent::Wasm { ext, event } => self.apply_wasm_event(ext, event),
             FenixUserEvent::Acp { conn, generation, event } => self.apply_acp_event(conn, generation, event),
             FenixUserEvent::HomeTodos { root, items } => self.apply_home_todos(root, items),
@@ -22923,6 +22931,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
         };
         // Auto-save: edits that have rested, or a buffer just left.
         let wait_until = match self.auto_save_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // The daily look for a newer Fenix, when it's on.
+        let wait_until = match self.update_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };

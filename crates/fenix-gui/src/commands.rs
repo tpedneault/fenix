@@ -313,6 +313,7 @@ impl CommandRegistry {
         registry.register("edit.select_all_occurrences", "A cursor on every occurrence of the selection, or of the word under the cursor (standard keys)", |ctx| ctx.app.cmd_select_all_occurrences());
         registry.register("edit.add_cursor_above", "Add a cursor on the line above (standard keys)", |ctx| ctx.app.cmd_add_cursor_vertically(false));
         registry.register("edit.add_cursor_below", "Add a cursor on the line below (standard keys)", |ctx| ctx.app.cmd_add_cursor_vertically(true));
+        registry.register("app.check_for_updates", "Look now for a newer release of Fenix, and say what's found (nothing is downloaded)", |ctx| ctx.app.cmd_check_for_updates());
         registry.register("edit.cursor_undo", "Put the cursors back where they were before the last move or added cursor", |ctx| ctx.app.cmd_cursor_undo());
         registry.register("edit.delete_line", "Delete the cursor's line, or the selected lines (dd)", |ctx| ctx.app.cmd_delete_line());
         registry.register("edit.new_line_below", "Open a line below the cursor's and type there (o)", |ctx| ctx.app.cmd_new_line(true));
