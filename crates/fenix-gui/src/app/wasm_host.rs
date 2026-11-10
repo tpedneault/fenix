@@ -2330,11 +2330,7 @@ impl App {
         let row = ((pos.1 - pane.text_y) / lh).floor() as usize;
         let map = match &pane.map {
             Some(map) => map.clone(),
-            None => {
-                let display = self.pane_display_lines(window, buffer);
-                let from = pane.base_line.min(display.len());
-                super::rows::RowMap::lines(&display[from..from.saturating_add(row + 1).min(display.len())], pane.scroll_col)
-            }
+            None => self.pane_rows(window, buffer, pane.base_line, self.pane_state(window).scroll_row, row + 1),
         };
         let Some((line, col)) = map.at(row, ((pos.0 - pane.text_x) / cw).floor() as usize) else { return false };
         let Some(ob) = self.buffers.get(buffer) else { return false };

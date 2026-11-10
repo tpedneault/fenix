@@ -243,6 +243,32 @@ stage by stage.
 - Not yet: clicks in a wrapped pane (stage 3), following the cursor
   down the rows (stage 4), moving by rows (stage 5). Until then a
   wrapped pane can put the cursor below its bottom.
+- After review: a row's text takes all its columns but the last, which
+  is the caret's after the row's last char (so a line exactly as wide
+  as the pane takes two rows, and a caret is never past the edge). A row
+  ends after the last word that ends on it; the blanks after that word
+  hang at its end (one in the kept column, any more past the edge, where
+  `RowMap::locate` holds a caret to the last column), so no row starts
+  with the blank of a break. A word after nothing but blanks on its row
+  (an indent) goes whole to the next row when it fits there.
+  `break_line_rows` finds only the rows a frame wants and reads only the
+  chars they can hold; finding a break is linear in the row's width.
+- A wrapped pane reads, expands and colours each line once a frame
+  (`drawn_line`) and slices its rows from it in order (`push_drawn`).
+  A very long line's highlights are asked for by the columns its rows
+  show (`syntax_highlights_in_columns`).
+- `RowMap::first_row` is a line's first row only when that row is shown;
+  `rows_of` is the rows shown. `locate` says nowhere for a column below
+  the pane's bottom, and `at` holds a cell right of a row the line goes
+  on from to that row's last column. A problem's message and a fold's
+  count go after the line's last row only when it's shown, cut to the
+  room left on it. Guides are drawn on the columns each row shows of the
+  indent.
+- `frame_layout` builds what a frame lays out of a pane; `redraw`,
+  `pane_rows` (the hit-tests) and the tests' `focused_layout` all use
+  it. The `:s` preview is worked out once a frame, not per run of lines.
+- Left: `pane_text_cols` and `wrap_overrides` keep an entry for a pane
+  or buffer that's gone (one small entry each).
 
 ### Stage 3: everything mapped
 
@@ -265,6 +291,14 @@ stage by stage.
   rows that fit, or left of the sideways scroll, is nowhere), and
   `decoration_click` hits on it. This also fixes the fold mistake noted
   in stage 1.
+- After review: the rule for a cell right of a short row is
+  `RowMap::at`'s alone, which `wrapped_text_hit` and `decoration_click`
+  both use; `decoration_click` without a drawn map builds one by
+  `pane_rows`. Left: `Geometry::resolve` gives `locate` an extension's
+  column as it is, a visual column, as 1.5 used it; on a line with a tab
+  or a decoration a char column would be placed wrong, now perhaps on
+  the wrong row of a wrapped line. Which the extension API means is for
+  that API to say.
 - Left as they are: the caret's glide counts rows from the top's
   display line, which in a wrapped pane is the real row on screen; the
   jump beacon flashes a line's first row; the unfold reveal still
@@ -296,6 +330,10 @@ stage by stage.
 - The overview ruler's band is the lines shown in a wrapped pane.
 - Moved to stage 5: PageUp/PageDown by the pane's rows. They move the
   cursor, and a cursor moving by rows is stage 5's `ScreenRows`.
+- A walk breaks the whole of each line it passes, the cursor's included,
+  every frame: a single line of a million chars costs that much a
+  frame while the view follows it. Cached and bounded in stage 7 with
+  the long-line path.
 - Still O(lines) a frame, as in 1.5 and not made worse:
   `pane_display_lines` builds a `Vec` of every display line, called a
   few times a frame. For stage 7.
