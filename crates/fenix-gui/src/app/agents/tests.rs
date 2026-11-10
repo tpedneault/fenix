@@ -1824,6 +1824,29 @@ fn keep_thread(f: &Fixture, said: &str, run: Option<fenix_acp::hub::RunTag>, upd
     id
 }
 
+/// What each row of the thread list stands for.
+fn list_picks(app: &App) -> Vec<Pick> {
+    match &app.active_picker {
+        Some(ActivePicker::Agents(state)) => state.visible_rows(0, 50).map(|(_, c)| c.payload.clone()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn list_selected(app: &App) -> Option<Pick> {
+    match &app.active_picker {
+        Some(ActivePicker::Agents(state)) => state.selected().map(|c| c.payload.clone()),
+        _ => None,
+    }
+}
+
+fn status(app: &App) -> String {
+    app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+}
+
+fn kept_archived(f: &Fixture, id: &ThreadId) -> bool {
+    f.app.agents.store.as_ref().unwrap().load(id).unwrap().meta.archived
+}
+
 fn list_query(app: &App) -> String {
     match &app.active_picker {
         Some(ActivePicker::Agents(state)) => state.query().to_string(),
@@ -1859,9 +1882,11 @@ fn archiving_a_thread_not_yet_loaded_keeps_its_time_and_what_it_kept() {
 fn a_run_left_when_fenix_closed_says_so_and_a_step_run_again_is_its_second_round() {
     let mut f = fixture("");
     let tag = |step: usize, seq: usize, name: &str| fenix_acp::hub::RunTag { id: "run-1".into(), pipeline: "Plan and build".into(), request: "Fix it".into(), step, step_name: name.into(), seq, started: 10, ..Default::default() };
-    keep_thread(&f, "plan", Some(tag(0, 0, "plan")), 11, &[]);
-    keep_thread(&f, "build", Some(tag(1, 1, "build")), 12, &[]);
-    keep_thread(&f, "build again", Some(tag(1, 2, "build")), 13, &[]);
+    let plan = keep_thread(&f, "plan", Some(tag(0, 0, "plan")), 11, &[]);
+    // The second round was changed last, so newest first would put it
+    // ahead of the first: the order they ran in is what puts them right.
+    let first = keep_thread(&f, "build", Some(tag(1, 1, "build")), 12, &[]);
+    let second = keep_thread(&f, "build again", Some(tag(1, 2, "build")), 13, &[]);
     f.app.agents_pick_thread();
     let rows = list_rows(&f.app);
     assert_eq!(rows.len(), 1, "{rows:?}");
@@ -1870,6 +1895,7 @@ fn a_run_left_when_fenix_closed_says_so_and_a_step_run_again_is_its_second_round
     let rows = list_rows(&f.app);
     assert_eq!(rows.len(), 4, "{rows:?}");
     assert!(rows[1].contains("plan") && rows[2].contains("build") && !rows[2].contains("(2)") && rows[3].contains("build (2)"), "{rows:?}");
+    assert_eq!(list_picks(&f.app)[1..], [Pick::Thread(plan), Pick::Thread(first), Pick::Thread(second)], "each round where it ran");
     f.app.press("Up");
     f.app.press("Up");
     f.app.press("Up");
@@ -1897,12 +1923,12 @@ fn standard_keys_a_query_in_the_thread_list_stays_through_archiving() {
     assert!(rows.first().is_some_and(|r| r.contains("beta")), "{rows:?}");
     f.app.press("M-a");
     assert_eq!(list_query(&f.app), "beta", "the query stays");
-    assert!(f.app.agents.hub.meta(&beta).unwrap().archived && !f.app.agents.hub.meta(&alpha).is_some_and(|m| m.archived));
+    assert!(kept_archived(&f, &beta) && !kept_archived(&f, &alpha));
     f.app.press("M-h");
     let rows = list_rows(&f.app);
     assert!(rows.first().is_some_and(|r| r.contains("beta") && r.contains("archived")), "{rows:?}");
     f.app.press("M-a");
-    assert!(!f.app.agents.hub.meta(&beta).unwrap().archived, "brought back");
+    assert!(!kept_archived(&f, &beta), "brought back");
     assert_eq!(list_query(&f.app), "beta");
     for _ in 0..4 {
         f.app.press("BackSpace");
@@ -1929,4 +1955,101 @@ fn a_thread_waiting_on_you_is_not_archived() {
     f.app.press("Esc");
     f.app.agents_archive_shown();
     assert!(!f.app.agents.hub.meta(&id).unwrap().archived, "nor from the command");
+}
+
+/// Alt+A on one step of a run archives every step, and the row after it
+/// is the one selected; a run whose step can't be read archives what can
+/// be, says what couldn't, and comes back the same way.
+#[test]
+fn a_step_archives_its_whole_run_and_an_unreadable_step_does_not_keep_it_archived() {
+    let mut f = fixture("");
+    let tag = |step: usize, name: &str| fenix_acp::hub::RunTag { id: "run-7".into(), pipeline: "P".into(), request: "Do it".into(), step, step_name: name.into(), seq: step, started: 10, ended: Some("done".into()), ..Default::default() };
+    let a = keep_thread(&f, "plan it", Some(tag(0, "plan")), 30, &[]);
+    let b = keep_thread(&f, "build it", Some(tag(1, "build")), 31, &[]);
+    let lone = keep_thread(&f, "on its own", None, 20, &[]);
+    f.app.agents_pick_thread();
+    f.app.press("Tab");
+    assert_eq!(list_picks(&f.app), [Pick::Run("run-7".into()), Pick::Thread(a.clone()), Pick::Thread(b.clone()), Pick::Thread(lone.clone())]);
+    f.app.press("Down");
+    f.app.press("Down");
+    f.app.press("M-a");
+    assert!(kept_archived(&f, &a) && kept_archived(&f, &b), "the whole run");
+    assert_eq!(list_selected(&f.app), Some(Pick::Thread(lone.clone())), "the row that took its place");
+    // One step's file goes; the other comes back, and the failure is said.
+    f.app.press("M-h");
+    let store = f.app.agents.store.as_ref().unwrap().dir().join("threads");
+    let gone = std::fs::read_dir(&store).unwrap().map(|e| e.unwrap().path()).find(|p| std::fs::read_to_string(p).unwrap().contains("build it")).unwrap();
+    std::fs::remove_file(gone).unwrap();
+    // Archived ones still shown (Alt+H above): the list again.
+    f.app.agents_pick_thread();
+    let at = list_picks(&f.app).iter().position(|p| *p == Pick::Run("run-7".into())).unwrap_or_else(|| panic!("the run, archived: {:?}", list_rows(&f.app)));
+    for _ in 0..at {
+        f.app.press("Down");
+    }
+    f.app.press("M-a");
+    assert!(!kept_archived(&f, &a), "the step that can be read is brought back");
+    assert!(status(&f.app).contains("1 of 2 couldn't be kept as brought back"), "{}", status(&f.app));
+}
+
+/// A run under way isn't archived, even between its agents' turns (a
+/// command step), and nor is a thread at work.
+#[test]
+fn a_run_under_way_and_a_thread_at_work_are_not_archived() {
+    let mut f = fixture("--slow 400");
+    let tag = fenix_acp::hub::RunTag { id: "run-live".into(), pipeline: "P".into(), request: "Go".into(), step_name: "plan".into(), started: 10, ..Default::default() };
+    let step = keep_thread(&f, "plan it", Some(tag.clone()), 30, &[]);
+    let spec = fenix_acp::pipeline::PipelineSpec::parse("p", "[[steps]]\nname = \"plan\"\nprompt = \"{input}\"\n").unwrap();
+    let (run, _) = fenix_acp::pipeline::Run::start(spec, "Go");
+    f.app.pipelines.runs.insert(99, super::super::agent_pipelines::Running { run, root: f.root.clone(), threads: Vec::new(), ledger: None, usual_mode: None, tag });
+    f.app.agents_pick_thread();
+    f.app.press("M-a");
+    assert!(!kept_archived(&f, &step) && status(&f.app).contains("at work"), "{}", status(&f.app));
+    f.app.pipelines.runs.clear();
+    f.app.press("Escape");
+
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    f.type_prompt("tell me a long story");
+    let id = f.app.agents.shown(&f.app.pages).unwrap();
+    assert!(f.pump(|app| app.agents.hub.view(&id).is_some_and(|v| v.is_working())));
+    f.app.run_cmd("agents.archive");
+    assert!(!f.app.agents.hub.meta(&id).unwrap().archived && status(&f.app).contains("at work"), "{}", status(&f.app));
+}
+
+/// A new thread that's said nothing has nothing to archive, and says so;
+/// SPC a z (through the keymap) archives one that has.
+#[test]
+fn spc_a_z_archives_the_shown_thread_and_not_an_empty_one() {
+    let mut f = fixture("");
+    f.app.agents_open_panel();
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| matches!(v.link, Link::Live { .. }))));
+    let id = f.app.agents.shown(&f.app.pages).unwrap();
+    f.app.run_cmd("agents.archive");
+    assert!(status(&f.app).contains("nothing to archive yet"), "{}", status(&f.app));
+    assert!(!f.app.agents.hub.meta(&id).unwrap().archived);
+    f.type_prompt("hello there");
+    assert!(f.pump(|app| app.agents.hub.status() == Default::default() && app.agents.hub.view(&id).is_some_and(|v| !v.thread.entries.is_empty())));
+    f.app.agents_drain_inbox();
+    // From the code: Escape out of the prompt, then the leader.
+    f.app.agents_focus_code();
+    f.app.press("Escape");
+    f.app.press_all("SPC a z");
+    assert!(f.app.agents.hub.meta(&id).unwrap().archived, "{}", status(&f.app));
+    assert!(kept_archived(&f, &id), "kept so");
+}
+
+/// One project, however Windows spells it.
+#[test]
+fn a_project_is_one_project_in_any_spelling_windows_has_for_it() {
+    use std::path::Path;
+    let same = |a: &str, b: &str| super::list::same_project_for_tests(Path::new(a), Path::new(b));
+    if cfg!(windows) {
+        assert!(same(r"C:\Work\p", r"c:\work\p"));
+        assert!(same(r"C:\Work\p", "C:/Work/p/"));
+        assert!(same(r"\\?\C:\Work\p", r"C:\Work\p"));
+        assert!(!same(r"C:\Work\p", r"C:\Work\q"));
+    } else {
+        assert!(same("/work/p", "/work/p"));
+        assert!(!same("/work/p", "/Work/p"), "a case-sensitive file system's two folders");
+    }
 }

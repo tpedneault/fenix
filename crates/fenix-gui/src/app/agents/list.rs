@@ -44,6 +44,11 @@ fn same_project(a: &Path, b: &Path) -> bool {
     }
 }
 
+#[cfg(test)]
+pub(super) fn same_project_for_tests(a: &Path, b: &Path) -> bool {
+    same_project(a, b)
+}
+
 impl AgentHost {
     /// Every thread there is, as the list sees it: the store's index, and
     /// what's loaded and live over it. A brand-new thread that's said
@@ -318,29 +323,37 @@ impl App {
     pub(crate) fn thread_list_archive(&mut self, pick: &Pick) {
         let listed = self.thread_list_listed();
         let run_of = |id: &ThreadId| listed.iter().find(|l| &l.id == id).and_then(|l| l.run.as_ref().map(|r| r.id.clone()));
-        let (ids, what) = match pick {
+        let (ids, what, run) = match pick {
             Pick::Thread(id) => match run_of(id) {
-                Some(run) => (self.run_threads(&run).into_iter().map(|l| l.id).collect::<Vec<_>>(), "the run"),
-                None => (vec![id.clone()], "the thread"),
+                Some(run) => (self.run_threads(&run).into_iter().map(|l| l.id).collect::<Vec<_>>(), "the run", Some(run)),
+                None => (vec![id.clone()], "the thread", None),
             },
-            Pick::Run(run) => (self.run_threads(run).into_iter().map(|l| l.id).collect(), "the run"),
+            Pick::Run(run) => (self.run_threads(run).into_iter().map(|l| l.id).collect(), "the run", Some(run.clone())),
             _ => return,
         };
-        if ids.iter().any(|id| listed.iter().any(|l| &l.id == id && l.busy())) {
+        // A run under way (its command step too) isn't put away.
+        let live = run.as_ref().is_some_and(|r| self.pipelines.runs.values().any(|p| &p.tag.id == r));
+        if live || ids.iter().any(|id| listed.iter().any(|l| &l.id == id && l.busy())) {
             self.set_message(format!("{what} is at work or waiting on you -- archive it once it's done"));
             return;
         }
-        let archive = !ids.iter().all(|id| listed.iter().any(|l| &l.id == id && l.archived));
+        // A new thread that's said nothing isn't kept anywhere yet.
+        if ids.is_empty() || ids.iter().all(|id| !self.agents.readable(id)) {
+            let empty = ids.iter().any(|id| self.agents.hub.view(id).is_some_and(|v| v.thread.entries.is_empty()));
+            if empty {
+                self.set_message("nothing to archive yet: the thread hasn't been asked anything");
+            } else {
+                self.set_error(format!("{what} couldn't be read from where threads are kept"));
+            }
+            return;
+        }
+        // Which way, by the steps that can be read: one that can't stays
+        // as it is, and doesn't keep the rest from coming back.
+        let readable: Vec<&ThreadId> = ids.iter().filter(|id| self.agents.readable(id)).collect();
+        let archive = !readable.iter().all(|id| listed.iter().any(|l| &&l.id == id && l.archived));
         let mut failed = 0;
         for id in &ids {
-            if !self.agents.load_one(id) {
-                failed += 1;
-                continue;
-            }
-            if let Some(meta) = self.agents.hub.meta_mut(id) {
-                meta.archived = archive;
-            }
-            if self.agents.save_keeping_time(id).is_err() {
+            if self.agents.set_archived(id, archive).is_err() {
                 failed += 1;
             }
         }

@@ -80,6 +80,43 @@ impl Store {
         self.write_index(&index)
     }
 
+    /// Marks a kept thread archived, or not, on disk and nothing else:
+    /// its file and its index line are patched where they are, so what
+    /// another window wrote to it since is kept, and so is its time.
+    pub fn set_archived(&self, id: &ThreadId, archived: bool) -> io::Result<()> {
+        let path = self.thread_path(id);
+        let mut body: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("thread {id}: {what}"));
+        if body.get("version").and_then(Value::as_u64).unwrap_or(0) > VERSION {
+            return Err(invalid("written by a newer Fenix"));
+        }
+        let meta = body.get_mut("meta").and_then(Value::as_object_mut).ok_or_else(|| invalid("no meta"))?;
+        if archived {
+            meta.insert("archived".into(), json!(true));
+        } else {
+            meta.remove("archived");
+        }
+        fenix_storage::write(&path, &serde_json::to_vec(&body)?)?;
+        // The index line, as it is: patched, or made from the file.
+        let raw: Option<Value> = std::fs::read(self.index_path()).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        if let Some(mut raw) = raw {
+            if let Some(line) = raw.get_mut("threads").and_then(Value::as_array_mut).and_then(|a| a.iter_mut().find(|t| t.get("id").and_then(Value::as_str) == Some(id.0.as_str()))) {
+                if let Some(line) = line.as_object_mut() {
+                    if archived {
+                        line.insert("archived".into(), json!(true));
+                    } else {
+                        line.remove("archived");
+                    }
+                }
+                return fenix_storage::write(&self.index_path(), &serde_json::to_vec_pretty(&raw)?);
+            }
+        }
+        let saved = self.load(id)?;
+        let mut index = self.index();
+        index.push(IndexEntry { id: id.clone(), agent: saved.meta.agent, root: saved.meta.root, session_id: saved.meta.session_id, title: saved.thread.display_title(), updated: saved.updated, run: saved.meta.run, archived });
+        self.write_index(&index)
+    }
+
     pub fn load(&self, id: &ThreadId) -> io::Result<Saved> {
         let body: Value = serde_json::from_slice(&std::fs::read(self.thread_path(id))?)?;
         let invalid = |what: &str| io::Error::new(io::ErrorKind::InvalidData, format!("thread {id}: {what}"));
@@ -533,4 +570,37 @@ mod tests {
         assert!(store.load(&ThreadId("t-9".into())).is_err());
         let _ = std::fs::remove_dir_all(store.dir());
     }
+
+    #[test]
+    fn archiving_patches_the_file_and_the_line_and_keeps_what_another_window_wrote() {
+        let store = Store::new(temp());
+        let mut hub = crate::hub::Hub::new("t", "test");
+        let id = hub.new_thread("claude", Path::new("/work/p"));
+        hub.thread_mut(&id).unwrap().push_user(vec![ContentBlock::text("one")], false);
+        let old = hub.view(&id).unwrap();
+        store.save(old.meta, old.thread, &json!({ "unknown": ["a.rs"] }), 42).unwrap();
+        // Another window adds a turn and saves it.
+        let mut newer = hub.view(&id).unwrap().thread.clone();
+        newer.push_user(vec![ContentBlock::text("two")], false);
+        store.save(hub.view(&id).unwrap().meta, &newer, &json!({ "unknown": ["a.rs"] }), 50).unwrap();
+        store.set_archived(&id, true).unwrap();
+        let saved = store.load(&id).unwrap();
+        assert!(saved.meta.archived);
+        assert_eq!(saved.thread.entries.len(), 2, "the other window's turn is kept");
+        assert_eq!((saved.updated, saved.extra.clone()), (50, json!({ "unknown": ["a.rs"] })));
+        let line = store.index().into_iter().find(|e| e.id == id).unwrap();
+        assert!(line.archived && line.updated == 50);
+        store.set_archived(&id, false).unwrap();
+        assert!(!store.load(&id).unwrap().meta.archived && !store.index()[0].archived);
+        assert!(store.set_archived(&ThreadId("t-none".into()), true).is_err(), "nothing kept, nothing to archive");
+    }
+
+    #[test]
+    fn a_run_written_before_seq_takes_its_step_for_its_order() {
+        let run = parse_run(&json!({ "id": "r", "step": 3, "stepName": "review" })).unwrap();
+        assert_eq!((run.step, run.seq), (3, 3));
+        let run = parse_run(&json!({ "id": "r", "step": 1, "seq": 4 })).unwrap();
+        assert_eq!((run.step, run.seq), (1, 4));
+    }
+
 }

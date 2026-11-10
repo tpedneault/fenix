@@ -190,9 +190,11 @@ the list with archived threads shown.
 1.5 are single entries, unarchived. A Fenix before 1.5, run once on the
 same threads, rewrites the list without runs and archiving (a thread it
 didn't change keeps both, and comes back grouped and archived once it's
-saved again by 1.5). Two Fenix windows open on the same threads: the
-last to save one is what's kept, archived or not, as for everything else
-in a thread.
+saved again by 1.5). Archiving changes that mark alone where the
+thread is kept, so turns another Fenix window added to it since stay;
+otherwise, with two windows on the same threads, the last to save one is
+what's kept, as for everything else in a thread. A new thread that's
+said nothing yet has nothing to archive.
 
 An agent with no thread open stops after `agents.idle_minutes`. One that
 crashes is started again (after 1, 2, then 4 seconds) and its thread

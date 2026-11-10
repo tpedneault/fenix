@@ -320,14 +320,41 @@ impl AgentHost {
         }
     }
 
-    /// Saved with the time it was last changed kept as it was: archiving
-    /// (or bringing back) a thread doesn't move it up the list.
-    pub(super) fn save_keeping_time(&mut self, id: &ThreadId) -> Result<(), String> {
-        let updated = match &self.store {
-            Some(store) => store.load(id).map(|s| s.updated).unwrap_or_else(|_| SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)),
-            None => return Err("nowhere to keep threads".into()),
-        };
-        self.save_as_of(id, updated).map_err(|e| e.to_string())
+    /// Archived (or brought back) where it's kept: the file and its index
+    /// line patched as they are on disk -- what another window wrote to
+    /// it since stays -- and then this window's copy. One never kept (a
+    /// thread of this window's not saved yet) is saved with the mark.
+    /// On failure nothing here changes.
+    pub(super) fn set_archived(&mut self, id: &ThreadId, archived: bool) -> Result<(), String> {
+        let Some(store) = &self.store else { return Err("nowhere to keep threads".into()) };
+        match store.set_archived(id, archived) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && self.hub.view(id).is_some_and(|v| !v.thread.entries.is_empty()) => {
+                let was = self.hub.meta(id).is_some_and(|m| m.archived);
+                if let Some(meta) = self.hub.meta_mut(id) {
+                    meta.archived = archived;
+                }
+                let updated = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                if let Err(e) = self.save_as_of(id, updated) {
+                    if let Some(meta) = self.hub.meta_mut(id) {
+                        meta.archived = was;
+                    }
+                    return Err(e.to_string());
+                }
+                return Ok(());
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+        if let Some(meta) = self.hub.meta_mut(id) {
+            meta.archived = archived;
+        }
+        Ok(())
+    }
+
+    /// Whether `id` can be read: kept where threads are, or here with
+    /// something in it.
+    pub(super) fn readable(&self, id: &ThreadId) -> bool {
+        self.hub.view(id).is_some_and(|v| !v.thread.entries.is_empty()) || self.store.as_ref().is_some_and(|s| s.load(id).is_ok())
     }
 
     fn save_as_of(&mut self, id: &ThreadId, updated: u64) -> std::io::Result<()> {
