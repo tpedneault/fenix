@@ -163,8 +163,9 @@ impl App {
         if col + 2 != gutter && col + 1 != gutter {
             return false;
         }
-        let scroll = self.pane_state(pane).scroll_line;
-        let Some(line) = self.pane_rows(pane, buffer, scroll + row, 1).row(0).filter(|r| r.kind == super::rows::RowKind::Text).map(|r| r.line) else { return false };
+        let state = *self.pane_state(pane);
+        // A marker is on a line's first row only.
+        let Some(line) = self.pane_rows(pane, buffer, state.scroll_line, state.scroll_row, row + 1).row(row).filter(|r| r.kind == super::rows::RowKind::Text && r.first).map(|r| r.line) else { return false };
         let ranges = self.fold_ranges_of(ob);
         if !ranges.iter().any(|r| r.0 == line) {
             return false;

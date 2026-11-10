@@ -104,6 +104,7 @@ impl CommandRegistry {
         registry.register("view.toggle_fullscreen", "Toggle fullscreen", cmd_toggle_fullscreen);
         registry.register("view.toggle_animations", "Cycle motion: off, subtle, full", cmd_toggle_animations);
         registry.register("view.cycle_diagnostics", "Cycle inline problems: all, errors, off", |ctx| ctx.app.cycle_inline_diagnostics());
+        registry.register("view.toggle_wrap", "Wrap long lines in the current buffer, or stop", |ctx| ctx.app.toggle_wrap());
         registry.register(
             "explorer.jump",
             "Open a full-buffer directory listing at the current file's directory",

@@ -209,3 +209,79 @@ stage by stage.
 - Still per row, for stage 2: `content_spans_decorated` /
   `folded_content_spans`, the indent guides, rainbow brackets (by
   `scroll_col`), sticky headers, Home's and pages' backgrounds.
+
+### Stage 2: breaking and drawing
+
+- `wrap::break_line(display, width, indent)` and
+  `wrap::continuation_indent(display, width)`, as §3 has them. Two
+  rules the plan didn't have: a break never falls between a char and a
+  combining mark, joiner or variation selector after it; and a line
+  whose indent alone is as wide as the pane (a tab in a narrow pane)
+  gets no continuation indent, its break being inside the indent.
+- `App::wrap_cols(pane, buffer)` is `buffer_wraps` (the per-buffer
+  `wrap_overrides`, default off until stage 6) and `pane_can_wrap`
+  (Text and Prompt buffers, not a table, terminal, page, extension
+  surface or side-by-side pane), at `pane_text_cols`: the text columns
+  each frame finds for the pane, with `set_pane_text_cols` for tests.
+- `pane_layout` takes `RowsWanted` (display lines from the top, the
+  `skip` of `scroll_row`, how many rows, the sideways scroll, the wrap
+  width) and builds the rows itself, breaking each shown line's display
+  text (decorated, tab-expanded or plain). With wrap off it is stage
+  1's map. `pane_rows` builds the same rows for the hit-tests.
+- A wrapped pane is drawn by `row_content_spans`, a row at a time;
+  `content_spans_decorated`'s gutter and line text became
+  `push_gutter` and `push_line_text`, which both use. A row's text is
+  its columns of the line, with the syntax's colours; a continuation
+  row has a blank gutter and its indent; a closed fold's count follows
+  its header's last row; the guides continue down a continuation row's
+  indent; rainbow brackets are placed by the row's columns.
+- `PaneState::scroll_row` exists and the rows honour it; nothing sets it
+  yet (stage 4). A wrapped pane draws with no fractional scroll offset,
+  and `scroll_col` is held at 0.
+- The current-line highlight is on the caret's row of a wrapped line,
+  not all its rows.
+- Not yet: clicks in a wrapped pane (stage 3), following the cursor
+  down the rows (stage 4), moving by rows (stage 5). Until then a
+  wrapped pane can put the cursor below its bottom.
+- After review: a row's text takes all its columns but the last, which
+  is the caret's after the row's last char (so a line exactly as wide
+  as the pane takes two rows, and a caret is never past the edge). A row
+  ends after the last word that ends on it; the blanks after that word
+  hang at its end (one in the kept column, any more past the edge, where
+  `RowMap::locate` holds a caret to the last column), so no row starts
+  with the blank of a break. A word after nothing but blanks on its row
+  (an indent) goes whole to the next row when it fits there.
+  `break_line_rows` finds only the rows a frame wants and reads only the
+  chars they can hold; finding a break is linear in the row's width.
+- A wrapped pane reads, expands and colours each line once a frame
+  (`drawn_line`) and slices its rows from it in order (`push_drawn`).
+  A very long line's highlights are asked for by the columns its rows
+  show (`syntax_highlights_in_columns`).
+- `RowMap::first_row` is a line's first row only when that row is shown;
+  `rows_of` is the rows shown. `locate` says nowhere for a column below
+  the pane's bottom, and `at` holds a cell right of a row the line goes
+  on from to that row's last column. A problem's message and a fold's
+  count go after the line's last row only when it's shown, cut to the
+  room left on it. Guides are drawn on the columns each row shows of the
+  indent.
+- `frame_layout` builds what a frame lays out of a pane; `redraw`,
+  `pane_rows` (the hit-tests) and the tests' `focused_layout` all use
+  it. The `:s` preview is worked out once a frame, not per run of lines.
+- Second review: blanks after a row's last word hang only as far as the
+  row's last (kept) column; any more go on to the next rows like other
+  chars, so a row, blanks and all, is never wider than the pane, every
+  column of a wrapped line has a cell of its own, and `break_line_rows`'
+  first k rows are the first k of the whole break whatever k is (a
+  property test checks it over blank runs, tabs, wide chars and marks).
+  A blank that would fill a line's last row goes to a row of its own,
+  so the place after the line's last char always has a cell (a row of
+  `abcd ` at five columns is `abcd` / ` `).
+  `locate` and `at` are each other's inverse on every cell but two: a
+  click in a continuation row's indent is its first column, and a click
+  right of a row that the line goes on from is that row's last column
+  (on a full row, the kept column's own column: the blank hanging there,
+  or the row's last char). `segments` is held to the pane's edge as a
+  guard. A very long line's highlights are asked for by the char columns
+  its rows' visual ones come to.
+- Left: `pane_text_cols` and `wrap_overrides` keep an entry for a pane
+  or buffer that's gone (one small entry each).

@@ -318,11 +318,14 @@ struct PaneState {
     /// this axis isn't worth it yet). See `ensure_cursor_visible_
     /// horizontally`.
     scroll_col: usize,
+    /// In a pane whose lines wrap: how many rows of the line at
+    /// `scroll_line` are above the top.
+    scroll_row: usize,
 }
 
 impl PaneState {
     fn seeded_at(cursor: Cursor) -> Self {
-        Self { cursor, scroll_line: 0, rendered_scroll: 0.0, scroll_col: 0 }
+        Self { cursor, scroll_line: 0, rendered_scroll: 0.0, scroll_col: 0, scroll_row: 0 }
     }
 }
 
@@ -2362,6 +2365,14 @@ struct CompletionState {
 
 /// Per-visible-line highlight segments: (view_row, col_start, col_end).
 type Segments = Vec<(usize, usize, usize)>;
+
+/// A line as drawn (`App::drawn_line`): its display text, the colours of
+/// its bytes, and what to add to a byte of `text` to find it in them.
+pub(super) struct DrawnLine<'a> {
+    pub text: String,
+    pub ranges: std::borrow::Cow<'a, [(std::ops::Range<usize>, glyphon::Color)]>,
+    pub base: usize,
+}
 
 /// Highlight segments in the text: (buffer line, start char column, end
 /// char column), put on rows by the pane's `rows::RowMap`.
@@ -5215,6 +5226,12 @@ pub struct App {
     /// row list is derived from the current syntax tree every frame, so an
     /// edit can never leave stale byte or character offsets behind.
     code_folds: HashMap<BufferId, HashSet<usize>>,
+    /// Buffers whose wrap was turned on or off (`view.toggle_wrap`),
+    /// whatever the default for them is.
+    wrap_overrides: HashMap<BufferId, bool>,
+    /// The columns of text each pane had room for at the last frame:
+    /// what its lines wrap at.
+    pane_text_cols: HashMap<fenix_window::WindowId, usize>,
     /// Each buffer's fold level (`zm`, `zr`): folds this deep or more are
     /// closed. None: every one open.
     fold_levels: HashMap<BufferId, usize>,
@@ -6197,6 +6214,8 @@ impl App {
             chrome_git: None,
             fetch_attempts: HashMap::new(),
             code_folds: HashMap::new(),
+            wrap_overrides: HashMap::new(),
+            pane_text_cols: HashMap::new(),
             fold_levels: HashMap::new(),
             notifications: crate::notify::Center::new(),
             toast_rects: Vec::new(),
@@ -18391,108 +18410,140 @@ impl App {
         for r in 0..rows {
             let buffer_line = render_base_line + r;
             let has_line = buffer_line < visual_lines;
-            if let Some(pad) = dashboard_pad {
-                let n = pad.get(buffer_line).copied().unwrap_or(0);
-                if n > 0 {
-                    spans.push((" ".repeat(n), theme.fg));
-                }
-            } else if gutter_chars > 0 {
-                let blame = self.blame_width(ob);
-                if blame > 0 {
-                    spans.push(self.blame_cell(ob, buffer_line, blame));
-                }
-                let numbers = gutter_chars - blame;
-                if numbers > 0 {
-                    let marker_cells = usize::from(fold_marks.is_some());
-                    let gutter = if has_line {
-                        let n = match self.line_number_mode {
-                            LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
-                            _ => buffer_line + 1,
-                        };
-                        format!("{:>width$}", n, width = numbers.saturating_sub(1 + marker_cells))
-                    } else {
-                        format!("{:<width$}", "~", width = numbers.saturating_sub(marker_cells))
-                    };
-                    let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
-                    spans.push((gutter, color));
-                    if let Some((starts, closed)) = &fold_marks {
-                        let marker = match (has_line && starts.contains_key(&buffer_line), closed.contains(&buffer_line)) {
-                            (true, true) => "▸",
-                            (true, false) => "▾",
-                            _ => " ",
-                        };
-                        let marker_color = if closed.contains(&buffer_line) { rgba_to_glyphon(theme.caret) } else { theme.gutter_fg };
-                        spans.push((marker.to_string(), marker_color));
-                    }
-                    if has_line {
-                        spans.push((" ".to_string(), color));
-                    }
-                }
-            } else if !has_line && ob.kind != BufferKind::Prompt {
-                // A prompt's rows past what was written are just the box.
-                spans.push(("~".to_string(), theme.gutter_fg));
-            }
+            self.push_gutter(ob, buffer_line, has_line, gutter_chars, dashboard_pad, cursor_line, fold_marks.as_ref(), &mut spans);
             if has_line {
-                let start = ob.buffer.line_start_char(buffer_line);
-                let len = ob.buffer.line_len(buffer_line);
-                let line_text = ob.buffer.text_range(start, start + len);
-                if let Some(layout) = decorated.get(&buffer_line) {
-                    let display = &layout.display;
-                    let line_byte_start = ob.buffer.char_to_byte(start);
-                    let line_byte_end = ob.buffer.char_to_byte(start + len);
-                    let remapped = remap_highlights_for_display(&ob.buffer, start, &layout.col_map, display, line_byte_start, line_byte_end, syntax_highlights);
-                    let theme = self.theme;
-                    let ranges = decorated_ranges(remapped, &layout.runs, |role| pages::role_color(theme, role));
-                    let (sliced, skipped_bytes) = skip_chars(display, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
-                    spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &ranges, theme.fg));
-                } else if line_text.contains('\t') {
-                    let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
-                    let (sliced, skipped_bytes) = skip_chars(&display, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
-                    if syntax_highlights.is_empty() {
-                        spans.push((sliced.to_string(), theme.fg));
-                    } else {
-                        let line_byte_start = ob.buffer.char_to_byte(start);
-                        let line_byte_end = ob.buffer.char_to_byte(start + len);
-                        let remapped = remap_highlights_for_display(
-                            &ob.buffer,
-                            start,
-                            &col_map,
-                            &display,
-                            line_byte_start,
-                            line_byte_end,
-                            syntax_highlights,
-                        );
-                        // `skipped_bytes`/`display.len()` here are local
-                        // to `display` (0-based), matching `remapped`'s
-                        // own coordinate space -- not the real buffer's
-                        // byte offsets, unlike the plain branch below.
-                        spans.extend(split_line_by_highlights(sliced, skipped_bytes, skipped_bytes + sliced.len(), &remapped, theme.fg));
-                    }
-                } else {
-                    let (sliced, skipped_bytes) = skip_chars(&line_text, scroll_col);
-                    let sliced = keep_chars(sliced, MAX_ROW_CHARS);
-                    if syntax_highlights.is_empty() {
-                        spans.push((sliced.to_string(), theme.fg));
-                    } else {
-                        let line_byte_start = ob.buffer.char_to_byte(start) + skipped_bytes;
-                        let line_byte_end = line_byte_start + sliced.len();
-                        spans.extend(split_line_by_highlights(
-                            sliced,
-                            line_byte_start,
-                            line_byte_end,
-                            syntax_highlights,
-                            theme.fg,
-                        ));
-                    }
-                }
+                self.push_line_text(ob, buffer_line, scroll_col..scroll_col.saturating_add(MAX_ROW_CHARS), syntax_highlights, tab_stops, decorated, &mut spans);
             }
             if r + 1 < rows {
                 spans.push(("\n".to_string(), theme.fg));
             }
         }
         spans
+    }
+
+    /// The start of a content row: `dashboard_pad`'s pad, or the gutter
+    /// -- `buffer_line`'s blame, number (`~` past the end, `has_line`
+    /// false) and fold marker -- or, with no gutter, `~` past the end.
+    #[allow(clippy::too_many_arguments)]
+    fn push_gutter(
+        &self,
+        ob: &OpenBuffer,
+        buffer_line: usize,
+        has_line: bool,
+        gutter_chars: usize,
+        dashboard_pad: Option<&[usize]>,
+        cursor_line: usize,
+        fold_marks: Option<&(HashMap<usize, usize>, HashSet<usize>)>,
+        spans: &mut Vec<(String, glyphon::Color)>,
+    ) {
+        let theme = self.theme;
+        if let Some(pad) = dashboard_pad {
+            let n = pad.get(buffer_line).copied().unwrap_or(0);
+            if n > 0 {
+                spans.push((" ".repeat(n), theme.fg));
+            }
+        } else if gutter_chars > 0 {
+            let blame = self.blame_width(ob);
+            if blame > 0 {
+                spans.push(self.blame_cell(ob, buffer_line, blame));
+            }
+            let numbers = gutter_chars - blame;
+            if numbers > 0 {
+                let marker_cells = usize::from(fold_marks.is_some());
+                let gutter = if has_line {
+                    let n = match self.line_number_mode {
+                        LineNumberMode::Relative => buffer_line.abs_diff(cursor_line),
+                        _ => buffer_line + 1,
+                    };
+                    format!("{:>width$}", n, width = numbers.saturating_sub(1 + marker_cells))
+                } else {
+                    format!("{:<width$}", "~", width = numbers.saturating_sub(marker_cells))
+                };
+                let color = if has_line && buffer_line == cursor_line { theme.fg } else { theme.gutter_fg };
+                spans.push((gutter, color));
+                if let Some((starts, closed)) = fold_marks {
+                    let marker = match (has_line && starts.contains_key(&buffer_line), closed.contains(&buffer_line)) {
+                        (true, true) => "▸",
+                        (true, false) => "▾",
+                        _ => " ",
+                    };
+                    let marker_color = if closed.contains(&buffer_line) { rgba_to_glyphon(theme.caret) } else { theme.gutter_fg };
+                    spans.push((marker.to_string(), marker_color));
+                }
+                if has_line {
+                    spans.push((" ".to_string(), color));
+                }
+            }
+        } else if !has_line && ob.kind != BufferKind::Prompt {
+            // A prompt's rows past what was written are just the box.
+            spans.push(("~".to_string(), theme.gutter_fg));
+        }
+    }
+
+    /// Visual columns `cols` of `buffer_line` as drawn -- tabs expanded,
+    /// the decorations in `decorated` laid out -- in its syntax's colours.
+    #[allow(clippy::too_many_arguments)]
+    fn push_line_text(
+        &self,
+        ob: &OpenBuffer,
+        buffer_line: usize,
+        cols: std::ops::Range<usize>,
+        syntax_highlights: &[(std::ops::Range<usize>, glyphon::Color)],
+        tab_stops: &TabStops,
+        decorated: &HashMap<usize, crate::decorations::LineLayout>,
+        spans: &mut Vec<(String, glyphon::Color)>,
+    ) {
+        let drawn = self.drawn_line(ob, buffer_line, syntax_highlights, tab_stops, decorated);
+        let (sliced, from) = skip_chars(&drawn.text, cols.start);
+        let to = from + keep_chars(sliced, cols.end.saturating_sub(cols.start)).len();
+        self.push_drawn(&drawn, from..to, spans);
+    }
+
+    /// `buffer_line` as drawn, once for all the rows it's on: its text
+    /// with tabs expanded and decorations laid out, and the colours of
+    /// its bytes.
+    pub(super) fn drawn_line<'a>(
+        &self,
+        ob: &OpenBuffer,
+        buffer_line: usize,
+        syntax_highlights: &'a [(std::ops::Range<usize>, glyphon::Color)],
+        tab_stops: &TabStops,
+        decorated: &HashMap<usize, crate::decorations::LineLayout>,
+    ) -> DrawnLine<'a> {
+        let theme = self.theme;
+        let start = ob.buffer.line_start_char(buffer_line);
+        let len = ob.buffer.line_len(buffer_line);
+        let line_byte_start = ob.buffer.char_to_byte(start);
+        let line_byte_end = ob.buffer.char_to_byte(start + len);
+        if let Some(layout) = decorated.get(&buffer_line) {
+            let display = &layout.display;
+            let remapped = remap_highlights_for_display(&ob.buffer, start, &layout.col_map, display, line_byte_start, line_byte_end, syntax_highlights);
+            let ranges = decorated_ranges(remapped, &layout.runs, |role| pages::role_color(theme, role));
+            return DrawnLine { text: display.clone(), ranges: std::borrow::Cow::Owned(ranges), base: 0 };
+        }
+        let line_text = ob.buffer.text_range(start, start + len);
+        if line_text.contains('\t') {
+            let (display, col_map) = tabstops::expand_line(&line_text, tab_stops);
+            // Local to `display` (0-based), as `remapped` is -- not the
+            // real buffer's byte offsets, unlike a line without a tab.
+            let ranges = if syntax_highlights.is_empty() {
+                Vec::new()
+            } else {
+                remap_highlights_for_display(&ob.buffer, start, &col_map, &display, line_byte_start, line_byte_end, syntax_highlights)
+            };
+            return DrawnLine { text: display, ranges: std::borrow::Cow::Owned(ranges), base: 0 };
+        }
+        DrawnLine { text: line_text, ranges: std::borrow::Cow::Borrowed(syntax_highlights), base: line_byte_start }
+    }
+
+    /// Bytes `bytes` of a line as drawn, in their colours.
+    pub(super) fn push_drawn(&self, drawn: &DrawnLine, bytes: std::ops::Range<usize>, spans: &mut Vec<(String, glyphon::Color)>) {
+        let sliced = &drawn.text[bytes.clone()];
+        if drawn.ranges.is_empty() {
+            spans.push((sliced.to_string(), self.theme.fg));
+        } else {
+            spans.extend(split_line_by_highlights(sliced, drawn.base + bytes.start, drawn.base + bytes.end, &drawn.ranges, self.theme.fg));
+        }
     }
 
     /// Drains buffer `id`'s edits since the last frame, feeds them through
@@ -18525,6 +18576,20 @@ impl App {
         render_base_line: usize,
         rows: usize,
         scroll_col: usize,
+    ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
+        self.syntax_highlights_in_columns(id, render_base_line, rows, scroll_col, None)
+    }
+
+    /// `syntax_highlights_from_column`, with the columns of each line a
+    /// wrapped pane's rows show (`columns`, by line: from, to) in place of
+    /// the sideways scroll's for a very long line.
+    fn syntax_highlights_in_columns(
+        &mut self,
+        id: BufferId,
+        render_base_line: usize,
+        rows: usize,
+        scroll_col: usize,
+        columns: Option<&HashMap<usize, (usize, usize)>>,
     ) -> Vec<(std::ops::Range<usize>, glyphon::Color)> {
         let _profile = crate::profile::Scope::new("syntax highlights");
         let theme = self.theme;
@@ -18593,8 +18658,8 @@ impl App {
                 .map(|line| {
                     let first = ob.buffer.line_start_char(line);
                     let len = ob.buffer.line_len(line);
-                    let from = first + scroll_col.min(len);
-                    let to = first + (scroll_col + MAX_ROW_CHARS).min(len);
+                    let (from, to) = columns.and_then(|c| c.get(&line)).copied().unwrap_or((scroll_col, scroll_col + MAX_ROW_CHARS));
+                    let (from, to) = (first + from.min(len), first + to.min(len));
                     ob.buffer.char_to_byte(from)..ob.buffer.char_to_byte(to)
                 })
                 .filter(|range| !range.is_empty())
@@ -18832,7 +18897,16 @@ impl App {
     /// `range_to_segments`, the same "windowed, computed fresh each
     /// frame" discipline `bracket_match_segments`/`syntax_highlights_
     /// for_visible_range` already use.
+    #[cfg(test)]
     fn hlsearch_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
+        let mut segments = self.search_match_segments(lines.clone());
+        segments.extend(self.substitute_segments(lines));
+        segments
+    }
+
+    /// `hlsearch_segments`' search matches alone: what a frame asks of
+    /// each run of lines shown.
+    fn search_match_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
         let buffer = &self.open().buffer;
         let last_visible = lines.end.min(buffer.line_count());
         let start_char = buffer.line_start_char(lines.start.min(last_visible));
@@ -18849,8 +18923,18 @@ impl App {
             let end = buffer.byte_to_char(m.end);
             segments.extend(self.range_to_segments(start..end, lines.clone()));
         }
-        // What a `:s` being typed would replace, and the match its `c`
-        // flag is asking about.
+        segments
+    }
+
+    /// What a `:s` being typed would replace on `lines`, and the match
+    /// its `c` flag is asking about: previewed once a frame, the command's
+    /// whole range at a time.
+    fn substitute_segments(&self, lines: std::ops::Range<usize>) -> LineSegments {
+        let buffer = &self.open().buffer;
+        let mut segments = LineSegments::new();
+        let last_visible = lines.end.min(buffer.line_count());
+        let start_char = buffer.line_start_char(lines.start.min(last_visible));
+        let end_char = if last_visible < buffer.line_count() { buffer.line_start_char(last_visible) } else { buffer.len_chars() };
         if let Some(Ok(preview)) = self.vim.substitute_preview(buffer, &self.cursor()) {
             for m in preview.matches.into_iter().filter(|m| m.end >= start_char && m.start <= end_char) {
                 segments.extend(self.range_to_segments(m, lines.clone()));
@@ -20524,18 +20608,26 @@ impl App {
             if !is_focused && self.reveal_panes.remove(&pane) {
                 self.reveal_cursor(pane, buffer_id, pane_visible_lines);
             }
+            // The columns of text it has room for, which its lines wrap at
+            // if they do; a wrapped pane never scrolls sideways.
+            // Recomputes `gutter_chars`/`gutter_px` redundantly rather
+            // than reordering the real computation below (`gutter_px`
+            // there also folds in dashboard centering, which doesn't
+            // apply here) -- cheap, and keeps this already-large
+            // function's existing flow untouched.
+            let visible_cols = {
+                let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
+                text::cols_that_fit(rect.w - gutter_chars as f32 * char_width, char_width)
+            };
+            self.set_pane_text_cols(pane, visible_cols);
+            let wrap = if is_dashboard { None } else { self.wrap_cols(pane, buffer_id) };
+            if wrap.is_some() && self.pane_state(pane).scroll_col != 0 {
+                self.pane_state_mut(pane).scroll_col = 0;
+            }
             if is_focused {
                 self.normalize_cursor_for_folds(buffer_id, pane);
                 self.ensure_cursor_visible(pane_visible_lines);
-                // Recomputes `gutter_chars`/`gutter_px` redundantly rather
-                // than reordering the real computation below (`gutter_px`
-                // there also folds in dashboard centering, which doesn't
-                // apply here) -- cheap, and keeps this already-large
-                // function's existing flow untouched.
-                let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
-                let gutter_px = gutter_chars as f32 * char_width;
-                let visible_cols = text::cols_that_fit(rect.w - gutter_px, char_width);
-                if !is_dashboard {
+                if !is_dashboard && wrap.is_none() {
                     self.ensure_cursor_visible_horizontally(visible_cols);
                 }
             }
@@ -20550,7 +20642,7 @@ impl App {
             // from its own independent cursor/scroll position.
             let pane_state = *self.pane_state(pane);
             // Sideways scrolling eases a column at a time.
-            let shown_scroll_col = if is_dashboard { 0 } else { self.scroll_col(pane, pane_state.scroll_col, now) };
+            let shown_scroll_col = if is_dashboard || wrap.is_some() { 0 } else { self.scroll_col(pane, pane_state.scroll_col, now) };
             let rendered_scroll = pane_state.rendered_scroll;
             // Scroll positions are display-row based once a scope is
             // collapsed. This mapping is the single conversion point back
@@ -20558,17 +20650,20 @@ impl App {
             let display_lines = self.pane_display_lines(pane, buffer_id);
             let render_base_line = rendered_scroll.floor().max(0.0) as usize;
             let visible_document_lines = &display_lines[render_base_line.min(display_lines.len())..];
-            // What is on each row: the one translation between a place in
-            // the text and a cell in the pane, for everything drawn over
-            // the text below.
-            let row_map = rows::RowMap::lines(&visible_document_lines[..visible_document_lines.len().min(pane_visible_lines + 1)], shown_scroll_col);
             let folds_active = display_lines.len() != self.buffers.get(buffer_id).map(|ob| ob.buffer.line_count()).unwrap_or(0);
-            let render_frac = rendered_scroll - rendered_scroll.floor();
+            // A wrapped pane's scroll snaps a row at a time.
+            let render_frac = if wrap.is_some() { 0.0 } else { rendered_scroll - rendered_scroll.floor() };
             // Computed here (rather than at its previous spot, further
             // down) so the dashboard-centering block below can look up
             // the cursor's own row in the per-line pad table.
             let (line, col) =
                 self.buffers.get(buffer_id).map(|ob| ob.buffer.line_col(&pane_state.cursor)).unwrap_or((0, 0));
+            // What is on each row -- the one translation between a place
+            // in the text and a cell in the pane, for everything drawn over
+            // the text below -- with each line's columns (tabs,
+            // decorations) and the indent guides.
+            let mut layout = self.frame_layout(pane, buffer_id, &display_lines, render_base_line, pane_state.scroll_row, pane_visible_lines + 1, shown_scroll_col, line, is_dashboard);
+            let row_map = &layout.map;
 
             let gutter_chars = self.buffers.get(buffer_id).map(|ob| self.gutter_chars(ob)).unwrap_or(0);
             let gutter_px = gutter_chars as f32 * char_width;
@@ -20579,21 +20674,31 @@ impl App {
             // keeps `~` off the rows past its last line.
             let dashboard_pad: Option<Vec<usize>> = is_dashboard.then(Vec::new);
             // Filler rows (`side_by_side::FILLER`) have no line to highlight.
-            let shown_lines: Vec<usize> = visible_document_lines.iter().take(pane_visible_lines + 1).copied().filter(|&l| l != side_by_side::FILLER).collect();
+            let shown_lines: Vec<usize> = row_map.text_lines().collect();
             // What it shows, for the extensions that ask (`view-changed`).
             if let (Some(&first), Some(&last), false) = (shown_lines.first(), shown_lines.get(pane_visible_lines.saturating_sub(1)).or(shown_lines.last()), is_page || is_dashboard) {
                 self.wasm.views_drawn.push((buffer_id, pane.number() as u64, first as u32, last as u32));
             }
             let syntax_start = shown_lines.first().copied().unwrap_or(0);
             let syntax_end = visible_document_end_line(&shown_lines, pane_visible_lines);
-            let syntax_highlights = self.syntax_highlights_from_column(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col);
+            // A wrapped pane: the columns its rows show of each line.
+            let row_columns: Option<HashMap<usize, (usize, usize)>> = wrap.map(|_| {
+                let mut columns: HashMap<usize, (usize, usize)> = HashMap::new();
+                for line in row_map.text_lines() {
+                    if let Some(window) = rows::shown_char_columns(row_map, line, layout.col_maps.get(&line)) {
+                        columns.insert(line, window);
+                    }
+                }
+                columns
+            });
+            let syntax_highlights = self.syntax_highlights_in_columns(buffer_id, syntax_start, syntax_end.saturating_sub(syntax_start) + 1, shown_scroll_col, row_columns.as_ref());
             let tab_stops = self.tab_stops_for(buffer_id);
-            // Each line's columns (tabs, decorations) and the indent
-            // guides, by `row_map`: what everything drawn over the text
-            // below is placed through.
-            let mut layout = self.pane_layout(buffer_id, row_map, line, is_dashboard);
-            let row_map = &layout.map;
             let content_spans = match self.buffers.get(buffer_id) {
+                // A wrapped pane is drawn by its rows.
+                Some(ob) if wrap.is_some() => self.row_content_spans(
+                    ob, row_map, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
+                    line, &tab_stops, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &layout.decorated,
+                ),
                 Some(ob) if folds_active => self.folded_content_spans(
                     ob, visible_document_lines, pane_visible_lines + 1, gutter_chars, &syntax_highlights,
                     line, &tab_stops, shown_scroll_col, self.code_folds.get(&buffer_id).unwrap_or(&HashSet::new()), &layout.decorated,
@@ -20613,7 +20718,8 @@ impl App {
             // part of the transition (it hasn't panned into view yet) --
             // `None` means "don't draw the hl-line/caret this frame," not
             // a bug.
-            let hl_row = row_map.first_row(line);
+            // The row the cursor is on, of its line's.
+            let hl_row = layout.locate(line, col).map(|(row, _)| row);
 
             let (vcol, locate, to_rows) = (|l, c| layout.vcol(l, c), |l, c| layout.locate(l, c), |segs| layout.to_rows(segs));
             let shown_span = row_map.span();
@@ -20746,7 +20852,8 @@ impl App {
                 let polished = self.polish_pane(&view, &mut spans, now);
                 extra.squiggles = polished.squiggles;
                 extra.ruler = polished.ruler;
-                if !folds_active {
+                // Off in a wrapped pane, for now.
+                if !folds_active && wrap.is_none() {
                     extra.sticky = self.sticky_rows(buffer_id, render_base_line, hl_row, gutter_chars, &tab_stops, line);
                 }
             }
