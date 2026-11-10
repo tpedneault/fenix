@@ -22,7 +22,7 @@ pub use charclass::DEFAULT_ISKEYWORD_EXTRA;
 pub use indent::{toggle_checkbox, DEFAULT_INDENT_WIDTH};
 pub use keymaps::{FoldCommand, InsertEntry, ScrollTarget, VimAction};
 pub use mode::{Mode, VisualKind};
-pub use occurrence::{at_column, is_whole_word, next_occurrence, occurrences, word_to_select};
+pub use occurrence::{at_column, is_whole_word, next_occurrence, occurrences, occurrences_around, word_to_select};
 pub use motion::Motion;
 pub use operator::Operator;
 pub use state::{BracketTarget, EditPolicy, LspRequestKind, SplitWay, TabMove, VimEvent, VimState};
