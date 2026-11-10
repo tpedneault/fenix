@@ -36174,6 +36174,57 @@ name = \"orbit\"
         assert!(!app.lsp_sessions[&b_key].pending.contains_key(&9));
     }
 
+    /// A server's whole-file format, as its answer arrives: the extra
+    /// cursor in a line it didn't change stays, the main one keeps its
+    /// line and column, and one undo takes it back.
+    #[test]
+    fn a_servers_format_keeps_the_cursors_in_lines_it_left_alone() {
+        let (_dir, path) = project_scope_fixture("lsp_format_cursors");
+        std::fs::write(&path, "fn a() {\n  b();\n}\nzz\n").unwrap();
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        let id = app.focused_buffer_id();
+        let key = install_test_lsp(&mut app, &path);
+        let z = app.open().buffer.text().find("zz").unwrap() + 1;
+        app.toggle_caret_at(z);
+        app.focused_buffer_and_cursor_mut().1.char_idx = app.open().buffer.text().find("b()").unwrap() + 2;
+        let revision = app.open().buffer.edit_count();
+        app.lsp_sessions.get_mut(&key).unwrap().pending.insert(9, PendingLspRequest::Format { buffer: id, revision });
+        let generation = app.lsp_sessions[&key].generation;
+        app.apply_lsp_event(key.clone(), generation, fenix_lsp::LspEvent::Response { id: 9, result: Ok(serde_json::json!([
+            {"range":{"start":{"line":0,"character":0},"end":{"line":4,"character":0}},"newText":"fn a() {\n    b();\n}\nzz\n"}
+        ])) });
+        app.follow_outside_edits();
+        assert_eq!(app.open().buffer.text(), "fn a() {\n    b();\n}\nzz\n");
+        assert_eq!(app.open().buffer.line_col(&app.cursor()), (1, 4), "its line, its column");
+        let z = app.open().buffer.text().find("zz").unwrap() + 1;
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [z]);
+        app.press("C-z");
+        assert_eq!(app.open().buffer.text(), "fn a() {\n  b();\n}\nzz\n", "one undo");
+    }
+
+    /// Taking a side of a conflict changes only its lines: an extra
+    /// cursor below it stays, and one undo brings the markers back.
+    #[test]
+    fn resolving_a_conflict_keeps_the_cursors_outside_it() {
+        let dir = TempDir::new("conflict_resolve_cursors");
+        let text = "x\n<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\nyy\n";
+        let file = dir.write("a.txt", text);
+        let mut app = App::with_file(Some(file.to_string_lossy().into_owned()));
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+        let y = text.find("yy").unwrap() + 1;
+        app.toggle_caret_at(y);
+        app.focused_buffer_and_cursor_mut().1.char_idx = text.find("a\n=").unwrap();
+        app.resolve_conflict_at_cursor(fenix_git::Resolution::Ours);
+        app.follow_outside_edits();
+        assert_eq!(app.open().buffer.text(), "x\na\nyy\n");
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), ["x\na\ny".len()], "where it was in yy");
+        app.press("C-z");
+        assert_eq!(app.open().buffer.text(), text, "one undo");
+    }
+
     #[test]
     fn project_scoped_lsp_ignores_retired_generations_and_foreign_diagnostics() {
         let (_a, a) = project_scope_fixture("lsp_generation_a");
