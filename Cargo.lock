@@ -1445,6 +1445,7 @@ version = "1.5.0"
 dependencies = [
  "fenix-remote",
  "fenix-vfs",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "sha2",

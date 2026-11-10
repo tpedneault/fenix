@@ -84,6 +84,10 @@ fn transfer_one(source: &Path, dest: &Path, on_conflict: OnConflict, cancel: &dy
     let name = source.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no filename to copy under"))?.to_string_lossy().into_owned();
     // The name as its own machine has it, not as this one spells it.
     let name = fenix_vfs::split(source).map_or(name, |(_, there)| there.rsplit('/').next().unwrap_or_default().to_string());
+    // Onto this machine, only under a name that stays in `dest`.
+    if !fenix_vfs::is_remote(dest) && !fenix_vfs::path::is_local_name(&name) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{name:?} can't be a file's name on this machine")));
+    }
     let mut target = fenix_vfs::child(dest, &name);
     if target == source {
         match on_conflict {

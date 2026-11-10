@@ -60,13 +60,11 @@ impl Askpass {
         let memory: Arc<Mutex<Memory>> = Arc::default();
         let remembering = memory.clone();
         let door = local::listen("fenix-askpass", move |stream, token| {
-            let mut line = String::new();
-            let Ok(mut reader) = stream.try_clone().map(BufReader::new) else { return };
-            if reader.read_line(&mut line).is_err() {
-                return;
-            }
+            let Ok((line, _)) = local::first_line(&stream) else { return };
             let answer = match serde_json::from_str::<Question>(&line) {
-                Ok(question) if question.token == token => answer(&remembering, &question.prompt, &ask),
+                Ok(question) if local::same_token(&question.token, token) => answer(&remembering, &question.prompt, &ask),
+                // Not `ssh`'s hook: nothing is asked of anyone, and what's
+                // remembered stays so.
                 _ => None,
             };
             let mut stream = stream;
