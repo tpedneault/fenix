@@ -162,8 +162,13 @@ pub fn slot_for_type(name: &str) -> Option<Slot> {
 #[derive(Debug, Clone, Default)]
 pub struct Styles {
     types: Vec<(Option<Slot>, Layer)>,
-    /// Bits that make a variable or property a constant.
+    /// Bits that make a variable or property a constant: `constant`
+    /// (rust-analyzer's, on a `const` or `static` item) alone, or
+    /// `readonly` with `static` (a `static final`, a C# `const`, a
+    /// TypeScript `static readonly`).
     constant: u32,
+    readonly: u32,
+    statics: u32,
     deprecated: u32,
     mutable: u32,
     /// Which types `constant` applies to.
@@ -177,7 +182,9 @@ impl Styles {
         };
         Styles {
             types: legend.token_types.iter().map(|t| kind_for_type(t.as_str())).collect(),
-            constant: bit(&["readonly", "constant"]),
+            constant: bit(&["constant"]),
+            readonly: bit(&["readonly"]),
+            statics: bit(&["static"]),
             deprecated: bit(&["deprecated"]),
             mutable: bit(&["mutable"]),
             variable_like: legend.token_types.iter().map(|t| matches!(t.as_str(), "variable" | "property")).collect(),
@@ -192,7 +199,10 @@ impl Styles {
         let variable_like = self.variable_like.get(ty as usize).copied().unwrap_or(false);
         if modifiers & self.deprecated != 0 && (slot.is_some() || variable_like) {
             slot = Some(Slot::Comment);
-        } else if modifiers & self.constant != 0 && variable_like {
+        } else if variable_like && (modifiers & self.constant != 0 || (modifiers & self.readonly != 0 && modifiers & self.statics != 0)) {
+            // A local that's only readonly (TypeScript's every `const`)
+            // keeps the grammar's colour: a constant is a declaration
+            // that's constant as an item, not any binding never assigned.
             slot = Some(Slot::Constant);
         }
         let underline = modifiers & self.mutable != 0;
@@ -496,11 +506,14 @@ mod tests {
 
     #[test]
     fn modifiers_make_constants_deprecations_and_underlines() {
-        let s = Styles::new(&legend(&["variable", "function", "property"], &["declaration", "readonly", "deprecated", "mutable"]));
+        let s = Styles::new(&legend(&["variable", "function", "property"], &["declaration", "readonly", "deprecated", "mutable", "static", "constant"]));
         assert_eq!(s.style(0, 0), None, "a plain variable: the grammar's");
-        assert_eq!(s.style(0, 0b0010), Some(style(Slot::Constant)), "a readonly variable");
-        assert_eq!(s.style(2, 0b0010), Some(style(Slot::Constant)), "a readonly property");
-        assert_eq!(s.style(1, 0b0010), Some(style(Slot::Function)), "readonly says nothing of a function");
+        assert_eq!(s.style(0, 0b0010), None, "a readonly local (TypeScript's const): the grammar's");
+        assert_eq!(s.style(0, 0b10_0000), Some(style(Slot::Constant)), "rust-analyzer's constant");
+        assert_eq!(s.style(0, 0b01_0010), Some(style(Slot::Constant)), "static readonly");
+        assert_eq!(s.style(2, 0b01_0010), Some(style(Slot::Constant)), "a static readonly property");
+        assert_eq!(s.style(0, 0b01_0000), None, "static alone isn't constant");
+        assert_eq!(s.style(1, 0b10_0010), Some(style(Slot::Function)), "says nothing of a function");
         assert_eq!(s.style(1, 0b0100), Some(style(Slot::Comment)), "deprecated");
         assert_eq!(s.style(0, 0b1000), Some(Style { slot: None, underline: true, layer: Layer::Over }), "mutable: underlined, the grammar's colour");
         assert_eq!(s.style(0, 0b0001), None, "other modifiers say nothing");
