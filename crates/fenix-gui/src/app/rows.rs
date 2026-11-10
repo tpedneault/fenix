@@ -88,6 +88,10 @@ impl RowMap {
         RowMap { rows, scroll_col, firsts, width: None }
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.rows.len()
+    }
+
     /// The map, its rows `width` columns wide: the lines wrap.
     pub(crate) fn wrapped_at(mut self, width: usize) -> RowMap {
         self.width = Some(width.max(1));
@@ -916,6 +920,42 @@ mod app_tests {
             app.buffers.get_mut(buffer).unwrap().kind = kind;
             assert_eq!(app.wrap_cols(pane, buffer), None, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn a_fold_marker_is_on_its_line_s_first_row_only() {
+        let (mut app, _f) = app_on_file("a.rs", "fn a_long_function_name(first: u32, second: u32) {\n    x;\n}\n");
+        app.line_number_mode = LineNumberMode::Absolute;
+        app.run_cmd("view.toggle_wrap");
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 30);
+        let marker = app.gutter_chars(app.open()) - 2;
+        let buffer = app.focused_buffer_id();
+        assert!(!app.fold_marker_click(pane, 1, marker), "row 1 is the header's second row");
+        assert!(!app.code_folds.contains_key(&buffer));
+        assert!(app.fold_marker_click(pane, 0, marker));
+        assert_eq!(app.folded_display_lines(buffer)[..2], [0, 3]);
+    }
+
+    #[test]
+    fn an_extension_s_place_in_the_text_is_on_its_row_in_a_wrapped_pane() {
+        let (app, _f) = wrapped("a.txt", "the quick brown fox jumps\nnext\n", 10);
+        let map = app.focused_layout(10).map;
+        let pane = super::super::layers::GeoPane {
+            id: 1,
+            rect: fenix_window::Rect { x: 0.0, y: 0.0, w: 400.0, h: 400.0 },
+            text_x: 0.0,
+            text_y: 0.0,
+            base_line: 0,
+            scroll_col: 0,
+            rows: 10,
+            focused: true,
+            map: Some(map),
+        };
+        let geometry = super::super::layers::Geometry { cell: (10.0, 20.0), panes: vec![pane], ..Default::default() };
+        let at = |line: u32, col: u32| geometry.resolve(&fenix_wasm::host::Place { anchor: fenix_wasm::host::Anchor::Text((1, line, col)), x: 0.0, y: 0.0 });
+        assert_eq!(at(0, 12), Some((20.0, 20.0)), "`brown`'s `o`: row 1, cell 2");
+        assert_eq!(at(1, 0), Some((0.0, 60.0)), "line 1 is row 3");
     }
 
     #[test]

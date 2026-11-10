@@ -20818,7 +20818,9 @@ impl App {
             let mut row_tints = side_tints;
             if let Some(&(row, _)) = debug_marks.iter().find(|(_, m)| matches!(m, debug_host::DebugMark::Stop | debug_host::DebugMark::StopOnBreakpoint(_))) {
                 let [r, g, b, _] = glyphon_to_rgba(theme.git_modified);
-                row_tints.push((row, [r, g, b, 0.14]));
+                // Every row of the stopped line; the mark is on its first.
+                let stopped = row_map.row(row).map_or(row..row + 1, |shown| row_map.rows_of(shown.line));
+                row_tints.extend(stopped.map(|row| (row, [r, g, b, 0.14])));
             }
 
             let (home_segments, mut home_overlay) =
@@ -20829,7 +20831,16 @@ impl App {
                 } else {
                     Default::default()
                 };
-            let mut extra = motion_host::PaneExtras { buffer: Some(buffer_id), base_line: render_base_line, scroll_col: shown_scroll_col, underlines: decoration_underlines, strikes: decoration_strikes, grid: is_page, ..Default::default() };
+            let mut extra = motion_host::PaneExtras {
+                buffer: Some(buffer_id),
+                base_line: render_base_line,
+                scroll_col: shown_scroll_col,
+                rows: (!is_dashboard).then(|| layout.map.clone()),
+                underlines: decoration_underlines,
+                strikes: decoration_strikes,
+                grid: is_page,
+                ..Default::default()
+            };
             // A code pane's polish: problems, brackets, selection
             // whitespace, the overview ruler, sticky scroll.
             if !is_dashboard && self.buffers.get(buffer_id).is_some_and(|ob| ob.kind == BufferKind::Text) {
@@ -21904,6 +21915,7 @@ impl App {
                     scroll_col: p.extra.scroll_col,
                     rows: text::lines_that_fit(p.rect.h, line_height),
                     focused: p.pane == focused_pane,
+                    map: p.extra.rows.clone(),
                 })
                 .collect(),
             caret: caret_px,
