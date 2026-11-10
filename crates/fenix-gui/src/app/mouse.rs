@@ -145,6 +145,14 @@ impl App {
         self.frame_geometry(window_width, sidebar_px, terminal_h, modeline_top)
     }
 
+    /// The rows of text `pane` has room for, as the window is now.
+    pub(super) fn pane_text_rows(&self, pane: fenix_window::WindowId) -> Option<usize> {
+        let (w, h) = self.window_size()?;
+        let rect = self.geometry_at(w, h).panes.into_iter().find(|(p, _)| *p == pane)?.1;
+        let (_, line_height) = self.cell_size();
+        Some(text::lines_that_fit(pane_content_rect(rect, line_height, self.pane_has_breadcrumb(pane)).h, line_height))
+    }
+
     fn window_size(&self) -> Option<(f32, f32)> {
         self.gpu.as_ref().map(|gpu| (gpu.size.width as f32, gpu.size.height as f32))
     }
@@ -287,6 +295,7 @@ impl App {
         let mut cursor = Cursor { char_idx: at, sticky_col: 0 };
         cursor.sticky_col = ob.buffer.line_col(&cursor).1;
         self.pane_state_mut(pane).cursor = cursor;
+        self.vim.forget_row_goals();
     }
 
     /// Leaves Insert (or Replace) the way Escape does, before a selection

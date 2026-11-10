@@ -197,7 +197,154 @@ pub(super) fn follow(walk: &mut RowWalk, top: RowPos, cursor: RowPos, visible: u
     }
 }
 
+/// The focused pane's rows as Vim's motions by row see them: its width,
+/// tab stops and decorations, taken when a key comes, so they don't
+/// borrow the app.
+pub(super) struct PaneRows {
+    width: usize,
+    tab_stops: TabStops,
+    /// The buffer's decorations, shared with the next key's while they
+    /// haven't changed.
+    decorations: std::sync::Arc<Vec<crate::decorations::Decoration>>,
+    cursor_line: usize,
+}
+
+/// A line as `PaneRows` lays it out: char column -> visual column, the
+/// line as drawn, the continuation rows' indent, and the rows found so
+/// far (all of them, `whole`).
+struct LaidLine {
+    col_map: Vec<usize>,
+    display: String,
+    indent: usize,
+    breaks: Vec<std::ops::Range<usize>>,
+    whole: bool,
+}
+
+impl LaidLine {
+    /// At least `k` rows found, or all there are.
+    fn upto(&mut self, k: usize, width: usize) -> &[std::ops::Range<usize>] {
+        if !self.whole && self.breaks.len() < k {
+            let want = k.max(self.breaks.len().saturating_mul(2)).max(8);
+            (self.breaks, self.whole) = crate::wrap::break_line_rows(&self.display, width, self.indent, want);
+        }
+        &self.breaks
+    }
+}
+
+impl PaneRows {
+    fn lay(&self, buffer: &fenix_core::Buffer, line: usize) -> LaidLine {
+        let start = buffer.line_start_char(line);
+        let len = buffer.line_len(line);
+        let text = buffer.text_range(start, start + len);
+        let here: Vec<&crate::decorations::Decoration> = self.decorations.iter().filter(|d| d.start <= start + len && d.end >= start).collect();
+        let (display, col_map) = if here.is_empty() {
+            tabstops::expand_line(&text, &self.tab_stops)
+        } else {
+            let laid = crate::decorations::layout_line(&text, start, &here, &self.tab_stops, line == self.cursor_line);
+            (laid.display, laid.col_map)
+        };
+        let indent = crate::wrap::continuation_indent(&display, self.width);
+        LaidLine { col_map, display, indent, breaks: Vec::new(), whole: false }
+    }
+
+    /// `at`'s line, row of it and cell on that row, and the line laid out
+    /// as far as that row.
+    fn place(&self, buffer: &fenix_core::Buffer, at: usize) -> (usize, usize, usize, LaidLine) {
+        let cursor = Cursor { char_idx: at.min(buffer.len_chars()), sticky_col: 0 };
+        let (line, col) = buffer.line_col(&cursor);
+        let mut laid = self.lay(buffer, line);
+        let vcol = tabstops::visual_col(&laid.col_map, col);
+        let mut k = 8;
+        let row = loop {
+            let rows = laid.upto(k, self.width);
+            if let Some(row) = rows.iter().position(|r| vcol < r.end) {
+                break row;
+            }
+            if laid.whole {
+                break laid.breaks.len() - 1;
+            }
+            k = k.saturating_mul(2);
+        };
+        let x = vcol - laid.breaks[row].start.min(vcol) + if row > 0 { laid.indent } else { 0 };
+        (line, row, x, laid)
+    }
+}
+
+impl fenix_vim::ScreenRows for PaneRows {
+    fn row_move(&self, buffer: &fenix_core::Buffer, at: usize, delta: isize, x: Option<usize>) -> Option<(usize, usize)> {
+        let (mut line, mut row, here, mut laid) = self.place(buffer, at);
+        let goal = x.unwrap_or(here);
+        // As far as the last line, the empty one after a last newline too.
+        let last = buffer.rope().len_lines().saturating_sub(1);
+        let width = self.width;
+        for _ in 0..delta.unsigned_abs() {
+            if delta > 0 {
+                if row + 1 < laid.upto(row + 2, width).len() {
+                    row += 1;
+                } else if line < last {
+                    line += 1;
+                    laid = self.lay(buffer, line);
+                    row = 0;
+                } else {
+                    break;
+                }
+            } else if row > 0 {
+                row -= 1;
+            } else if line > 0 {
+                line -= 1;
+                laid = self.lay(buffer, line);
+                // Into a line from its end: all its rows.
+                row = laid.upto(usize::MAX, width).len() - 1;
+            } else {
+                break;
+            }
+        }
+        // Whether this row is the line's last.
+        let is_last = laid.upto(row + 2, width).len() == row + 1 && laid.whole;
+        let cols = laid.breaks[row].clone();
+        let indent = if row > 0 { laid.indent } else { 0 };
+        let vcol = cols.start + goal.saturating_sub(indent);
+        // On the row: its last char, or past the line's end on its last.
+        let vcol = if !is_last { vcol.min(cols.end.saturating_sub(1)) } else { vcol.min(cols.end) };
+        let (col, _) = crate::mouse::char_col_at(&laid.col_map, vcol);
+        Some((buffer.line_start_char(line) + col, goal))
+    }
+
+    fn row_bounds(&self, buffer: &fenix_core::Buffer, at: usize) -> Option<std::ops::Range<usize>> {
+        let (line, row, _, laid) = self.place(buffer, at);
+        let start = buffer.line_start_char(line);
+        let char_at = |vcol: usize| start + crate::mouse::char_col_at(&laid.col_map, vcol).0;
+        let cols = &laid.breaks[row];
+        Some(char_at(cols.start)..char_at(cols.end))
+    }
+}
+
 impl App {
+    /// The rows Vim's motions by row go by for the key being routed: the
+    /// focused pane's, when it's text and wraps, else a row a line.
+    pub(super) fn sync_screen_rows(&mut self) {
+        let (pane, buffer) = (self.focused_pane_id(), self.focused_buffer_id());
+        let wrap = (self.main_view == MainView::Editor && !self.terminal_focused && !self.sidebar_focused).then(|| self.wrap_cols(pane, buffer)).flatten();
+        let rows: std::sync::Arc<dyn fenix_vim::ScreenRows> = match wrap {
+            Some(width) => {
+                let cursor_line = self.buffers.get(buffer).map_or(0, |ob| ob.buffer.line_col(&self.pane_state(pane).cursor).0);
+                // Copied once while they're unchanged, not at every key.
+                let rev = self.wasm.decorations_rev;
+                let decorations = match &self.screen_decorations {
+                    Some((b, r, d)) if *b == buffer && *r == rev => d.clone(),
+                    _ => {
+                        let d = std::sync::Arc::new(self.code_decorations(buffer).into_iter().cloned().collect::<Vec<_>>());
+                        self.screen_decorations = Some((buffer, rev, d.clone()));
+                        d
+                    }
+                };
+                std::sync::Arc::new(PaneRows { width, tab_stops: self.tab_stops_for(buffer), decorations, cursor_line })
+            }
+            None => std::sync::Arc::new(fenix_vim::LineRows),
+        };
+        self.vim.set_screen_rows(rows);
+    }
+
     /// `pane`'s rows to walk, when it shows `buffer` wrapped.
     pub(super) fn row_walk(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Option<RowWalk<'_>> {
         let width = self.wrap_cols(pane, buffer)?;
@@ -329,6 +476,7 @@ impl App {
         let col = if self.vim.is_inserting() { col.min(len) } else { col.min(len.saturating_sub(1)) };
         let at = ob.buffer.line_start_char(line) + col;
         self.pane_state_mut(pane).cursor = Cursor { char_idx: at, sticky_col: col };
+        self.vim.forget_row_goals();
         true
     }
 
@@ -645,4 +793,276 @@ mod tests {
         assert_eq!(walk.distance((0, 1), (2, 0), 4), None);
         assert_eq!(walk.distance((2, 0), (0, 1), 10), None);
     }
+
+    fn wrapped(text: &str, cols: usize) -> (App, super::super::test_keys::TestFile) {
+        let (mut app, file) = app_on_file("a.txt", text);
+        app.run_cmd("view.toggle_wrap");
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, cols);
+        (app, file)
+    }
+
+    fn standard(app: &mut App) {
+        app.config.set_value("editor.keys", Some(fenix_config::Value::Text("standard".into())));
+        app.sync_key_policy();
+    }
+
+    // `the quick ` / `brown fox ` / `jumps`, at ten columns.
+    const FOX: &str = "the quick brown fox jumps\nover the lazy dog\n";
+
+    #[test]
+    fn gj_and_gk_go_by_rows_keeping_the_cell_and_j_and_k_stay_by_lines() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        app.press("w");
+        assert_eq!(app.line_col(), (0, 4));
+        app.press_all("g j");
+        assert_eq!(app.line_col(), (0, 14), "`brown`'s `n`, under `q`");
+        app.press_all("g j");
+        assert_eq!(app.line_col(), (0, 24), "`jumps` is shorter: its last char");
+        app.press_all("g j");
+        assert_eq!(app.line_col(), (1, 4), "the next line's first row, back at the cell kept");
+        app.press_all("g k g k");
+        assert_eq!(app.line_col(), (0, 14));
+        app.press_all("2 g k");
+        assert_eq!(app.line_col(), (0, 4), "a count");
+        app.press("j");
+        assert_eq!(app.line_col(), (1, 4), "j is by line");
+        // From `k`, the ninth cell: through `jumps`, too short for it.
+        app.press_all("g g 0 8 l g j g j");
+        assert_eq!(app.line_col(), (0, 24));
+        app.press_all("g j");
+        assert_eq!(app.line_col(), (1, 8), "the ninth cell kept through the short row");
+    }
+
+    #[test]
+    fn gj_with_an_operator_and_in_visual_is_charwise() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        app.press_all("w d g j");
+        assert_eq!(app.text(), "the n fox jumps\nover the lazy dog\n", "exclusive, as Vim's");
+        app.press("u");
+        app.press_all("0 w v g j y");
+        assert_eq!(app.vim.register().0, "quick brown");
+    }
+
+    #[test]
+    fn without_wrap_gj_is_j() {
+        let (mut app, _f) = app_on_file("a.txt", FOX);
+        app.press_all("w g j");
+        assert_eq!(app.line_col(), (1, 4));
+    }
+
+    #[test]
+    fn standard_keys_up_and_down_go_by_rows_and_select_by_them_with_shift() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        standard(&mut app);
+        app.press_all("Right Right Right Right Down");
+        assert_eq!(app.line_col(), (0, 14));
+        app.press("Down");
+        assert_eq!(app.line_col(), (0, 24), "`jumps`'s `s`, under `n`");
+        app.press("Down");
+        assert_eq!(app.line_col(), (1, 4));
+        app.press_all("Up Up");
+        assert_eq!(app.line_col(), (0, 14), "the cell kept");
+        app.press("S-Up");
+        assert_eq!(app.line_col(), (0, 4));
+        let o = app.focused_overlays_now(6);
+        assert_eq!(o.selection, vec![(0, 4, 10), (1, 0, 4)], "from `q` to `n`, across the break");
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_row_s_ends_first_then_the_line_s() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        standard(&mut app);
+        app.press_all("Down Right Right");
+        assert_eq!(app.line_col(), (0, 12));
+        app.press("Home");
+        assert_eq!(app.line_col(), (0, 10), "the row's start");
+        app.press("Home");
+        assert_eq!(app.line_col(), (0, 0), "then the line's");
+        app.press_all("Down End");
+        assert_eq!(app.line_col(), (0, 19), "the row's last char, before its break");
+        app.press("End");
+        assert_eq!(app.line_col(), (0, 25), "then the line's end");
+    }
+
+    #[test]
+    fn insert_s_arrows_go_by_rows_too() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        app.press_all("w i Down");
+        assert_eq!(app.line_col(), (0, 14));
+        app.press("End");
+        assert_eq!(app.line_col(), (0, 19));
+        app.type_text("!");
+        assert_eq!(app.text(), "the quick brown fox! jumps\nover the lazy dog\n");
+        app.press("Esc");
+        app.press("u");
+        assert_eq!(app.text(), FOX, "one undo step");
+    }
+
+    #[test]
+    fn extra_cursors_are_added_by_line_and_each_moves_by_its_own_rows() {
+        let (mut app, _f) = wrapped("aaaa bbbb cccc\ndddd eeee ffff\n", 10);
+        standard(&mut app);
+        app.press("C-M-Down");
+        assert_eq!(app.line_col(), (1, 0), "added a line down, not a row");
+        app.press("Down");
+        assert_eq!(app.line_col(), (1, 10));
+        app.type_text("X");
+        assert_eq!(app.text(), "aaaa bbbb Xcccc\ndddd eeee Xffff\n");
+    }
+
+    #[test]
+    fn a_macro_that_edits_then_moves_by_row_goes_by_the_rows_its_edit_made() {
+        let (mut app, _f) = wrapped("aaaa\naaaa\nend\n", 10);
+        app.press_all("q a A");
+        app.type_text(" bbbb cccc");
+        app.press_all("Esc 0 g j q");
+        assert_eq!(app.line_col(), (0, 10), "the append made a second row");
+        // One key, `@a`: the append, then gj on the rows it made.
+        app.press_all("j @ a");
+        assert_eq!(app.line_col(), (1, 10));
+    }
+
+    #[test]
+    fn end_on_a_row_ending_in_a_blank_goes_after_its_last_word_and_on_a_broken_word_to_its_last_char() {
+        // `the quick ` ends in a blank: End goes after `quick`, where
+        // typing goes on with it; Shift+End selects to there.
+        let (mut app, _f) = wrapped(FOX, 10);
+        standard(&mut app);
+        app.press("End");
+        assert_eq!(app.line_col(), (0, 9));
+        app.press("Home");
+        app.press("S-End");
+        assert_eq!(app.vim.visual_selection_range(&app.open().buffer, &app.cursor()).map(|(r, _)| r), Some(0..9));
+        // A word broken by the row: its row's last char.
+        let (mut app, _f) = wrapped("abcdefghijklmnop\n", 5);
+        standard(&mut app);
+        app.press("End");
+        assert_eq!(app.line_col(), (0, 3));
+        app.press("End");
+        assert_eq!(app.line_col(), (0, 16));
+        // And in Insert, with Vim keys.
+        let (mut app, _f) = wrapped(FOX, 10);
+        app.press_all("i End");
+        assert_eq!(app.line_col(), (0, 9));
+    }
+
+    #[test]
+    fn gj_on_the_last_row_stays_and_a_count_stops_there() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        // `over the ` / `lazy dog`: `l` of `lazy` is on the last row.
+        app.press_all("j 0 9 l");
+        assert_eq!(app.line_col(), (1, 9));
+        app.press_all("g j");
+        assert_eq!(app.line_col(), (1, 9), "the last row: nowhere to go, as with j");
+        app.press_all("d g j");
+        assert_eq!(app.text(), FOX, "nothing deleted");
+        app.press_all("g g 0 4 l 9 g j");
+        assert_eq!(app.line_col(), (1, 13), "as far as the last row");
+    }
+
+    #[test]
+    fn each_cursor_keeps_its_own_cell_through_short_rows() {
+        let (mut app, _f) = wrapped("012345678901\n012345678901\n--\n--\n012345678901\n012345678901\n", 20);
+        standard(&mut app);
+        app.press_all("End Left Left C-M-Down");
+        assert_eq!(app.line_col(), (1, 10));
+        for _ in 0..4 {
+            app.press("Down");
+        }
+        let mut at: Vec<(usize, usize)> = app.extra_carets().iter().map(|c| app.open().buffer.line_col(&Cursor { char_idx: c.at, sticky_col: 0 })).collect();
+        at.push(app.line_col());
+        at.sort();
+        assert_eq!(at, vec![(4, 10), (5, 10)], "both back at column 10");
+    }
+
+    #[test]
+    fn a_cursor_moving_onto_another_s_char_doesn_t_take_its_cell() {
+        // Row 0 long, row 1 three chars, row 2 long: caret A on row 0's
+        // tenth cell, caret B at row 1's end.
+        let (mut app, _f) = wrapped("0123456789012\n012\n0123456789012\n", 20);
+        standard(&mut app);
+        app.press_all("Right Right Right Right Right Right Right Right Right Right C-M-Down");
+        let carets = |app: &App| {
+            let mut at: Vec<(usize, usize)> = app.extra_carets().iter().map(|c| app.open().buffer.line_col(&Cursor { char_idx: c.at, sticky_col: 0 })).collect();
+            at.push(app.line_col());
+            at.sort();
+            at
+        };
+        assert_eq!(carets(&app), vec![(0, 10), (1, 3)]);
+        app.press("Down");
+        assert_eq!(carets(&app), vec![(1, 3), (2, 3)]);
+        app.press("Up");
+        assert_eq!(carets(&app), vec![(0, 10), (1, 3)], "each back at its own cell");
+    }
+
+    #[test]
+    fn a_click_forgets_the_cell_kept() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        app.press_all("0 8 l g j g j");
+        assert_eq!(app.line_col(), (0, 24));
+        // Clicked onto the same char: a fresh start, its own cell.
+        let pane = app.focused_pane_id();
+        app.put_cursor(pane, 24);
+        app.press_all("g j");
+        assert_eq!(app.line_col(), (1, 4));
+    }
+
+    #[test]
+    fn another_move_forgets_the_cell_kept() {
+        let (mut app, _f) = wrapped(FOX, 10);
+        app.press_all("0 8 l g j g j");
+        assert_eq!(app.line_col(), (0, 24), "kept the ninth cell through the short row");
+        app.press_all("h l g j");
+        assert_eq!(app.line_col(), (1, 4), "from `s`'s own cell, the fifth");
+    }
+
+    #[test]
+    fn a_macro_into_another_pane_moves_by_that_pane_s_rows() {
+        let (mut app, _f) = wrapped(&format!("{}\nend\n", "word ".repeat(10)), 10);
+        let wrapped_pane = app.focused_pane_id();
+        app.run_cmd("window.split_vertical");
+        let other_buffer = app.buffers.open_scratch();
+        for pane in app.windows().windows() {
+            if pane != wrapped_pane {
+                app.set_pane_content(pane, other_buffer);
+            }
+        }
+        let other = app.focused_pane_id();
+        app.test_insert_str(&format!("{}\nend\n", "word ".repeat(10)));
+        app.test_set_cursor(Cursor::at_start());
+        assert_eq!(app.wrap_cols(other, other_buffer), None);
+        // Recorded from the wrapped pane: to the other, then Down in Insert.
+        app.windows_mut().focus(wrapped_pane);
+        app.press_all("q a SPC w w i Down Esc q");
+        assert_ne!(app.focused_pane_id(), wrapped_pane);
+        assert_eq!(app.focused_buffer_id(), other_buffer);
+        assert_eq!(app.line_col().0, 1, "Down by line in the pane that doesn't wrap");
+        app.test_set_cursor(Cursor::at_start());
+        app.windows_mut().focus(wrapped_pane);
+        app.press_all("@ a");
+        assert_eq!(app.focused_buffer_id(), other_buffer);
+        assert_eq!(app.line_col().0, 1, "played back, still by line there");
+    }
+
+    #[test]
+    fn without_wrap_dgj_and_a_count_are_dj_and_a_count_of_j() {
+        let (mut app, _f) = app_on_file("a.rs", "one\ntwo\nthree\nfour\n");
+        app.press_all("2 g j");
+        assert_eq!(app.line_col(), (2, 0));
+        app.press_all("g g d g j");
+        assert_eq!(app.text(), "two\nthree\nfour\n", "charwise, as dj is here");
+    }
+
+    #[test]
+    fn page_down_in_a_wrapped_pane_goes_by_rows() {
+        let line = "word ".repeat(60);
+        let (mut app, _f) = wrapped(&format!("{line}\nnext\n"), 10);
+        app.press("PageDown");
+        // Without a window the page is twenty rows: nineteen down.
+        assert_eq!(app.line_col(), (0, 190));
+        app.press("PageUp");
+        assert_eq!(app.line_col(), (0, 0));
+    }
 }
+

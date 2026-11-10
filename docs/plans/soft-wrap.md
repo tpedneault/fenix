@@ -370,3 +370,63 @@ stage by stage.
 - Still O(lines) a frame, as in 1.5 and not made worse:
   `pane_display_lines` builds a `Vec` of every display line, called a
   few times a frame. For stage 7.
+
+### Stage 5: motion
+
+- `fenix_vim::ScreenRows` (`row_move(buffer, at, delta, x)`,
+  `row_bounds(buffer, at)`) and `LineRows`, the no-wrap one, in
+  `fenix-vim/src/screen.rs`. Rather than `handle_key_with`, the GUI
+  sets it before each key (`VimState::set_screen_rows`, from
+  `dispatch_keypress` by `sync_screen_rows`): everything a key runs --
+  the extra cursors' replay, `.`, a macro -- then goes by the same
+  rows without another parameter through every key handler. The GUI's
+  is `PaneRows`, a snapshot of the focused pane's width, tab stops and
+  decorations that doesn't borrow `App`.
+- The goal cell is kept for each cursor (the char it's on, and the
+  cell), so extra cursors each keep their own, and only from one key to
+  the next: `VimState::begin_key`, called for every key routed, makes
+  the cells the last key kept the ones kept now, and a key that moved
+  no cursor by row (`h`, `x`, an undo, a switch of buffer) forgets them
+  -- unless it only began a command (`g`, a count), whose next key goes
+  on with them.
+- `Motion::ScreenDown` / `ScreenUp` (`gj`, `gk`, `g<Down>`, `g<Up>`) in
+  Normal, Visual (Block too) and after an operator: charwise and
+  exclusive, as Vim's, with a count; never onto the empty line after a
+  last newline; without wrap, the line motions.
+- Up and Down with standard keys and in Insert go by rows. Home and End
+  go to the row's ends first, then the line's: End on a row before the
+  line's last that ends in a blank goes after its last word (the blank's
+  place, where typing goes on with that word); on a row ending inside a
+  word broken by the row, to that row's last char, since the place after
+  it is drawn at the next row's start. Shift+End selects to there.
+- `gj` on the last row, or a count of them past it, stops on the last
+  row there is, as `j` does: never onto the empty line after a last
+  newline (a row back from it, at the same cell).
+- The rows are set (`sync_screen_rows`) and the cells kept rotate
+  (`begin_key`) where every key is routed, `route_keypress`: a macro or
+  `.` that goes to another pane moves by that pane's rows. In a
+  picker, the sidebar or a terminal they're a row a line. The rows'
+  copy of the buffer's decorations is shared from key to key while
+  `decorations_rev` says they haven't changed: it's bumped wherever an
+  extension's, the debugger's or the agents' decorations are set, and
+  by the shift ahead of a frame only when an edit moved them or a
+  buffer went. A line is broken only as far as the rows a move needs.
+- A move by row reads only the cells the last key kept, never this
+  key's: with extra cursors, one moved first may land on another's
+  char. A cursor put by a click or the wheel's hold forgets them.
+- PageUp/PageDown in a wrapped pane move the cursor by the pane's rows
+  less one (`VimState::move_rows`; twenty rows without a window).
+- Adding a cursor above or below (Ctrl+Alt+Up/Down) stays by line; the
+  extra cursors then each move by their own rows.
+- One stage 2 test changed: End now stops at a row's end first, so the
+  test presses it twice.
+- The rows a key moves by can't go stale within it: `PaneRows` holds
+  only the pane's width, tab stops and decorations, and lays each line
+  out from the buffer as it is when asked, so a macro, `.`, an operator
+  whose motion is `gj` after an edit, or the extra cursors' replay
+  (each caret's edit moving the text under the next) see the text as
+  edited. What it holds can lag within one key: decorations an edit
+  moves are moved by their extension later, so a key that edits and
+  then moves by row on a decorated line goes by where they were; and
+  the cursor's line, whose decorations are laid out as on it, is the
+  one the key started on.
