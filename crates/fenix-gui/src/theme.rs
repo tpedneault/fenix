@@ -174,14 +174,6 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Resolves a tree-sitter capture name (e.g. `"function.method"`,
-    /// `"constant.builtin"`) to a color, falling back to whichever
-    /// `syntax_*` field its first `.`-segment names -- the same
-    /// hierarchical-fallback convention every real `highlights.scm`
-    /// relies on (a theme need not enumerate every sub-capture a grammar
-    /// might produce). Anything unrecognized falls back to plain `fg`,
-    /// so an unfamiliar capture name reads as ordinary text instead of
-    /// vanishing or breaking.
     /// A semantic token's colour, by its slot: the three the grammar has
     /// no word for fall back to the nearest it has.
     pub fn semantic_color(&self, slot: fenix_lsp::semantic::Slot) -> glyphon::Color {
@@ -200,6 +192,14 @@ impl Theme {
         }
     }
 
+    /// Resolves a tree-sitter capture name (e.g. `"function.method"`,
+    /// `"constant.builtin"`) to a color, falling back to whichever
+    /// `syntax_*` field its first `.`-segment names -- the same
+    /// hierarchical-fallback convention every real `highlights.scm`
+    /// relies on (a theme need not enumerate every sub-capture a grammar
+    /// might produce). Anything unrecognized falls back to plain `fg`,
+    /// so an unfamiliar capture name reads as ordinary text instead of
+    /// vanishing or breaking.
     pub fn syntax_color(&self, capture_name: &str) -> glyphon::Color {
         // Markdown's inline/heading captures share one top-level "text"
         // segment (`text.title`/`text.strong`/`text.emphasis`/`text.

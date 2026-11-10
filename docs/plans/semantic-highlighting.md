@@ -356,6 +356,43 @@ These supersede the table and rules above where they differ.
   `every_setting_round_trips_through_the_file` asserted that no `[lsp]`
   header is ever written. `[lsp]` now has settings of its own, so the
   empty-header check covers `[vnc]` only.
+- **Revised after review.** These supersede the stage-2 notes above
+  where they differ.
+  - **Only buffers ask.** `sync_lsp_for` takes the buffer shown, which
+    is none for an agent's look at a file. For a buffer it resolves the
+    tokens' server and path once and keeps them in `App::semantic_of`,
+    so drawing touches nothing on disk and copies no legend.
+    `lsp_canonical` is gone. An agent's sync only moves tokens already
+    held (`SemanticSync::Follow`).
+  - **Tokens belong to a buffer.** `SemanticDoc::buffer` records which
+    one, and tokens are drawn only for that buffer at the stamped edit
+    count. A document whose buffer closed is dropped, along with its
+    `semantic_of` entry, on the next frame or wake.
+  - **A reopened buffer is synced.** Before, it started its edit count
+    at 0 again, and the "already in sync" check let a file changed on
+    disk go unsent: the server, diagnostics included, kept the old
+    text. That was a sync bug from before this feature.
+    `sync_lsp_document` now sends a `didChange` whenever the text
+    differs from what was last sent, not only when the edit count
+    moved. A document shown for the first time, or in a new buffer, is
+    asked at once. Fenix still sends no `didClose`; that's unchanged.
+  - **Asks go out from the wake.** `about_to_wait` calls
+    `ask_due_semantic_tokens` (so an ask isn't held for an unrelated
+    frame), and `semantic_wake` returns the due time itself.
+  - **Timeout.** An ask unanswered for 10 s is cancelled with
+    `$/cancelRequest` and asked once more; a second timeout waits for
+    an edit. RequestCancelled (-32800) is retried, like the other two.
+  - **Refresh** marks a server's documents stale. Each is asked when
+    it's next drawn, not all at once.
+  - **Nothing is spent on a buffer with no tokens to draw.**
+    `semantic_to_draw` runs before any window copy or comment-and-string
+    list is built.
+  - **No grammar.** A buffer with no grammar gets the server's tokens
+    over nothing.
+  - **The language checked** is `buffer_language_name`, the same one
+    `editor.wrap_languages` uses.
+  - **Redraw.** An answer redraws every window.
+  - **`lay_over` follows each token's layer.**
 - **Not yet:**
   - the theme keys and the modifier rules' underline (stage 3);
   - delta and range (stage 4).
