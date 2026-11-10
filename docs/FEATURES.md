@@ -192,10 +192,12 @@ its extension. The rest is built into Fenix.
   file at once and the server's colours land on top when they arrive.
   While you type, the colours move with the edit until the server
   answers again, about a quarter of a second after you pause. Comments
-  and strings keep the grammar's colours.
+  and strings keep the grammar's colours, except where the server marks
+  code it has left out (an inactive `#if`), which greys as a comment.
   - Only the first of a file's servers that offers tokens is asked.
-  - A file over 10 000 lines is asked only for the lines in view, when
-    its server answers that way.
+  - A file over 10 000 lines or 1 MiB is asked only for the lines in
+    view, when its server answers that way. A file over 50 000 lines
+    whose server can't answer for a range gets no server colours.
   - Themes may name `syntax.interface`, `syntax.parameter` and
     `syntax.macro`; every built-in theme does.
   - `lsp.semantic_highlighting_off` lists languages that keep the

@@ -1160,9 +1160,15 @@ mod tests {
     #[test]
     fn every_built_in_theme_tells_apart_what_only_a_language_server_knows() {
         for t in all() {
-            assert_ne!(t.syntax_interface, t.syntax_type, "{}: interface", t.name);
-            assert_ne!(t.syntax_parameter, t.syntax_variable, "{}: parameter", t.name);
-            assert_ne!(t.syntax_macro, t.syntax_function, "{}: macro", t.name);
+            let new = [("parameter", t.syntax_parameter), ("interface", t.syntax_interface), ("macro", t.syntax_macro)];
+            let others = [("variable", t.syntax_variable), ("constant", t.syntax_constant), ("type", t.syntax_type), ("function", t.syntax_function), ("keyword", t.syntax_keyword), ("text", t.fg)];
+            for (i, (name, colour)) in new.iter().enumerate() {
+                for (other, c) in others.iter().chain(&new[i + 1..]) {
+                    assert_ne!(colour, c, "{}: {name} is {other}'s colour", t.name);
+                }
+                let contrast = contrast_of(t.bg, rgba_of(*colour));
+                assert!(contrast >= 4.0, "{}: {name} at {contrast:.2}:1", t.name);
+            }
             use fenix_lsp::semantic::Slot;
             assert_eq!(t.semantic_color(Slot::Parameter), t.syntax_parameter);
             assert_eq!(t.semantic_color(Slot::Type), t.syntax_type);

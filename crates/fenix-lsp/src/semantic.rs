@@ -8,6 +8,8 @@
 //! [`Style`] Fenix looks up a theme colour for. They can then be moved
 //! through an edit ([`shift`]) and looked up by window ([`within`]).
 
+use std::ops::Range;
+
 use lsp_types::{SemanticTokenModifier, SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensServerCapabilities};
 
 /// What a server offers.
@@ -162,8 +164,13 @@ pub fn slot_for_type(name: &str) -> Option<Slot> {
 #[derive(Debug, Clone, Default)]
 pub struct Styles {
     types: Vec<(Option<Slot>, Layer)>,
-    /// Bits that make a variable or property a constant.
+    /// Bits that make a variable or property a constant: `constant`
+    /// (rust-analyzer's, on a `const` or `static` item) alone, or
+    /// `readonly` with `static` (a `static final`, a C# `const`, a
+    /// TypeScript `static readonly`).
     constant: u32,
+    readonly: u32,
+    statics: u32,
     deprecated: u32,
     mutable: u32,
     /// Which types `constant` applies to.
@@ -177,7 +184,9 @@ impl Styles {
         };
         Styles {
             types: legend.token_types.iter().map(|t| kind_for_type(t.as_str())).collect(),
-            constant: bit(&["readonly", "constant"]),
+            constant: bit(&["constant"]),
+            readonly: bit(&["readonly"]),
+            statics: bit(&["static"]),
             deprecated: bit(&["deprecated"]),
             mutable: bit(&["mutable"]),
             variable_like: legend.token_types.iter().map(|t| matches!(t.as_str(), "variable" | "property")).collect(),
@@ -192,7 +201,10 @@ impl Styles {
         let variable_like = self.variable_like.get(ty as usize).copied().unwrap_or(false);
         if modifiers & self.deprecated != 0 && (slot.is_some() || variable_like) {
             slot = Some(Slot::Comment);
-        } else if modifiers & self.constant != 0 && variable_like {
+        } else if variable_like && (modifiers & self.constant != 0 || (modifiers & self.readonly != 0 && modifiers & self.statics != 0)) {
+            // A local that's only readonly (TypeScript's every `const`)
+            // keeps the grammar's colour: a constant is a declaration
+            // that's constant as an item, not any binding never assigned.
             slot = Some(Slot::Constant);
         }
         let underline = modifiers & self.mutable != 0;
@@ -378,6 +390,39 @@ pub fn apply_edits(data: &[u32], edits: &[Edit]) -> Option<Vec<u32>> {
     out.len().is_multiple_of(5).then_some(out)
 }
 
+/// What a document's ask by range needs of its text, worked out once a
+/// sync: how many lines it has (as ropey and every position sent count
+/// them) and where it ends, as a position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Extent {
+    pub lines: usize,
+    pub bytes: usize,
+    pub end: lsp_types::Position,
+}
+
+pub fn extent(text: &str) -> Extent {
+    let rope = ropey::Rope::from_str(text);
+    Extent { lines: rope.len_lines(), bytes: text.len(), end: crate::char_offset_to_position(&rope, rope.len_chars()) }
+}
+
+/// The chars of `text`'s lines `lines` (a range of line numbers): from the
+/// first's start to the start of the line after the last, or the end.
+pub fn line_chars(text: &str, lines: Range<usize>) -> Range<usize> {
+    let rope = ropey::Rope::from_str(text);
+    let at = |line: usize| if line >= rope.len_lines() { rope.len_chars() } else { rope.line_to_char(line) };
+    at(lines.start)..at(lines.end)
+}
+
+/// `tokens` with those reaching into chars `chars` replaced by `answered`
+/// (what an ask for those lines found): the rest of the document's kept.
+/// Both in order and not overlapping, and so is what's left.
+pub fn merge(tokens: &mut Vec<Token>, answered: Vec<Token>, chars: Range<usize>) {
+    tokens.retain(|t| t.end <= chars.start || t.start >= chars.end);
+    let answered: Vec<Token> = answered.into_iter().filter(|t| t.start >= chars.start && t.end <= chars.end).collect();
+    let at = tokens.partition_point(|t| t.start < chars.start);
+    tokens.splice(at..at, answered);
+}
+
 /// `tokens` moved through one edit: chars `[start, old_end)` became
 /// `[start, new_end)`. Those before stay, those after move by the
 /// difference, those touching the replaced chars (or with an insertion
@@ -496,11 +541,14 @@ mod tests {
 
     #[test]
     fn modifiers_make_constants_deprecations_and_underlines() {
-        let s = Styles::new(&legend(&["variable", "function", "property"], &["declaration", "readonly", "deprecated", "mutable"]));
+        let s = Styles::new(&legend(&["variable", "function", "property"], &["declaration", "readonly", "deprecated", "mutable", "static", "constant"]));
         assert_eq!(s.style(0, 0), None, "a plain variable: the grammar's");
-        assert_eq!(s.style(0, 0b0010), Some(style(Slot::Constant)), "a readonly variable");
-        assert_eq!(s.style(2, 0b0010), Some(style(Slot::Constant)), "a readonly property");
-        assert_eq!(s.style(1, 0b0010), Some(style(Slot::Function)), "readonly says nothing of a function");
+        assert_eq!(s.style(0, 0b0010), None, "a readonly local (TypeScript's const): the grammar's");
+        assert_eq!(s.style(0, 0b10_0000), Some(style(Slot::Constant)), "rust-analyzer's constant");
+        assert_eq!(s.style(0, 0b01_0010), Some(style(Slot::Constant)), "static readonly");
+        assert_eq!(s.style(2, 0b01_0010), Some(style(Slot::Constant)), "a static readonly property");
+        assert_eq!(s.style(0, 0b01_0000), None, "static alone isn't constant");
+        assert_eq!(s.style(1, 0b10_0010), Some(style(Slot::Function)), "says nothing of a function");
         assert_eq!(s.style(1, 0b0100), Some(style(Slot::Comment)), "deprecated");
         assert_eq!(s.style(0, 0b1000), Some(Style { slot: None, underline: true, layer: Layer::Over }), "mutable: underlined, the grammar's colour");
         assert_eq!(s.style(0, 0b0001), None, "other modifiers say nothing");
@@ -689,6 +737,22 @@ mod tests {
         let n: usize = (0..1000).map(|i| within(&got, i * 37_000, i * 37_000 + 6000).len()).sum();
         let looked = started.elapsed();
         println!("decoded {} tokens in {decoded:?}; shifted in {moved:?}; 1000 window lookups ({n} tokens) in {looked:?}", got.len());
+    }
+
+    #[test]
+    fn an_extent_and_line_chars_count_lines_as_positions_do() {
+        let e = extent("ab\ncd\u{c}ef");
+        assert_eq!(e.lines, 3, "a form feed breaks a line for ropey, so for every position sent");
+        assert_eq!(e.end, lsp_types::Position { line: 2, character: 2 });
+        assert_eq!(line_chars("ab\ncd\nef", 1..2), 3..6);
+        assert_eq!(line_chars("ab\ncd", 1..9), 3..5);
+    }
+
+    #[test]
+    fn a_range_s_answer_replaces_only_the_tokens_in_its_lines() {
+        let mut tokens = vec![t(0, 2), t(5, 7), t(9, 10), t(20, 22)];
+        merge(&mut tokens, vec![t(5, 6), t(8, 9), t(30, 31)], 4..12);
+        assert_eq!(ranges(&tokens), [(0, 2), (5, 6), (8, 9), (20, 22)], "one outside the lines asked isn't taken");
     }
 
     #[test]
