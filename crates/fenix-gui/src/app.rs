@@ -27,6 +27,7 @@ mod git_compare_page;
 mod side_by_side;
 mod rows;
 mod row_scroll;
+mod semantic;
 mod git_log_page;
 mod graph_draw;
 mod git_rebase_page;
@@ -1229,6 +1230,9 @@ struct LspSession {
     /// (`textDocument/diagnostic`), each document's: its last
     /// result id, and whether an ask is out and another is due after it.
     pulls: HashMap<PathBuf, LspPull>,
+    /// Each document's semantic tokens, from the one server of its asked
+    /// for them (`App::semantic_server`).
+    semantic: HashMap<PathBuf, semantic::SemanticDoc>,
 }
 
 /// Why `SPC u u` can't debug a `language` file: no adapter from the
@@ -1314,7 +1318,10 @@ fn push_python_environment(session: &mut LspSession) {
 /// Brings one server's picture of one document up to date: `didOpen` the
 /// first time (once the server is initialized, and only if it serves
 /// `language`), `didChange` whenever the buffer was edited since.
-fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &str, by_pattern: bool, text: &str, edit_count: u64) {
+///
+/// `semantic`: whether this server is the one asked for the document's
+/// semantic tokens (`semantic::after_sync`).
+fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &str, by_pattern: bool, text: &str, edit_count: u64, semantic: bool) {
     if session.capabilities.is_none() {
         return;
     }
@@ -1332,6 +1339,7 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
                 session.open_documents.insert(canonical.to_path_buf(), (edit_count, 1));
                 session.synced_text.insert(canonical.to_path_buf(), text.to_string());
                 pull_lsp_diagnostics(session, canonical);
+                semantic::after_sync(session, canonical, None, text, edit_count, semantic);
             }
         }
         Some((last_synced_edit_count, next_version)) if last_synced_edit_count != edit_count => {
@@ -1343,11 +1351,16 @@ fn sync_lsp_document(session: &mut LspSession, canonical: &Path, language_id: &s
             };
             if session.client.notify::<lsp_types::notification::DidChangeTextDocument>(params).is_ok() {
                 session.open_documents.insert(canonical.to_path_buf(), (edit_count, next_version + 1));
-                session.synced_text.insert(canonical.to_path_buf(), text.to_string());
+                let old = session.synced_text.insert(canonical.to_path_buf(), text.to_string());
                 pull_lsp_diagnostics(session, canonical);
+                semantic::after_sync(session, canonical, old.as_deref().map(|old| (old, last_synced_edit_count)), text, edit_count, semantic);
             }
         }
-        Some(_) => {} // already open and already in sync -- the common case, most frames
+        // Already open and already in sync -- the common case, most
+        // frames; its tokens asked for if it's become the server asked
+        // (one before it stopped), let go if it no longer is.
+        Some(_) if semantic != session.semantic.contains_key(canonical) => semantic::after_sync(session, canonical, None, text, edit_count, semantic),
+        Some(_) => {}
     }
 }
 
@@ -1371,6 +1384,9 @@ enum PendingLspRequest {
     Completion { buffer: BufferId, prefix_start: usize, generation: u64 },
     /// `textDocument/diagnostic` for the document at `path` (canonical).
     PullDiagnostics { path: PathBuf },
+    /// `textDocument/semanticTokens/full` for `path` (canonical) as it
+    /// was at `edit_count`.
+    SemanticTokens { path: PathBuf, edit_count: u64 },
     /// `workspace/symbol`, for the project's procs a Tcl call is colored
     /// by (`App::known_commands`).
     WorkspaceNames,
@@ -5235,6 +5251,10 @@ pub struct App {
     /// Rows above lines that aren't text, by buffer and line: what a code
     /// lens will put there. A wrapped pane lays them out.
     virtual_rows: HashMap<BufferId, std::collections::BTreeMap<usize, Vec<String>>>,
+    /// Paths as language servers know them (canonical), by the path a
+    /// buffer has: worked out once, for drawing a buffer's semantic
+    /// tokens without asking the file system each frame.
+    lsp_canonical: HashMap<PathBuf, PathBuf>,
     /// The focused buffer's decorations as moves by row see them, and the
     /// `decorations_rev` they were copied at.
     screen_decorations: Option<(BufferId, u64, std::sync::Arc<Vec<crate::decorations::Decoration>>)>,
@@ -6226,6 +6246,7 @@ impl App {
             wrap_overrides: HashMap::new(),
             break_cache: std::cell::RefCell::new(HashMap::new()),
             virtual_rows: HashMap::new(),
+            lsp_canonical: HashMap::new(),
             screen_decorations: None,
             pane_text_cols: HashMap::new(),
             fold_levels: HashMap::new(),
@@ -7197,9 +7218,12 @@ impl App {
         // own keys) needs the same normalized form, or two spellings of
         // the same file stop matching each other.
         let canonical = fenix_lsp::normalize(std::fs::canonicalize(&path).unwrap_or(path.clone()));
+        // Semantic tokens from one of them, if it's wanted.
+        let asked = self.semantic_wanted(&path).then(|| self.semantic_server(&path)).flatten();
         for (key, language_id, by_pattern) in self.lsp_targets(&path) {
+            let semantic = asked.as_ref() == Some(&key);
             let Some(session) = self.lsp_sessions.get_mut(&key) else { continue };
-            sync_lsp_document(session, &canonical, &language_id, by_pattern, text, edit_count);
+            sync_lsp_document(session, &canonical, &language_id, by_pattern, text, edit_count, semantic);
         }
     }
 
@@ -7289,7 +7313,7 @@ impl App {
         let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
         self.lsp_sessions.insert(key.clone(), LspSession {
             generation, client, name: name.to_string(), languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
-            open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
         });
         self.send_lsp_initialize(key, cwd);
     }
@@ -7426,7 +7450,7 @@ impl App {
                 let reader = self.event_proxy.clone().map(|proxy| LspReader::spawn(receiver, key.clone(), generation, move |event| proxy.send_event(event).is_ok()));
                 self.lsp_sessions.insert(key.clone(), LspSession {
                     generation, client, name, languages, root: key.root.clone(), reader, capabilities: None, started: Instant::now(),
-                    open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+                    open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
                 });
                 self.send_lsp_initialize(key, cwd);
             }
@@ -7443,13 +7467,14 @@ impl App {
     /// later reconnect (once one exists) can re-send just this without
     /// re-spawning the process.
     fn send_lsp_initialize(&mut self, key: LspKey, cwd: &Path) {
+        let semantic = self.semantic_highlighting_on();
         let Some(session) = self.lsp_sessions.get_mut(&key) else { return };
         let root_uri = fenix_lsp::path_to_uri(cwd);
         let params = lsp_types::InitializeParams {
             process_id: Some(std::process::id()),
             #[allow(deprecated)] // still set alongside workspace_folders for servers that only look at this
             root_uri: root_uri.clone(),
-            capabilities: crate::lsp::client_capabilities(),
+            capabilities: crate::lsp::client_capabilities(semantic),
             workspace_folders: root_uri.map(|uri| vec![lsp_types::WorkspaceFolder { uri, name: "root".to_string() }]),
             ..Default::default()
         };
@@ -7487,6 +7512,9 @@ impl App {
                 // registration, a refresh) are accepted; everything else
                 // is refused with "method not found" rather than left
                 // unanswered.
+                if method == "workspace/semanticTokens/refresh" {
+                    self.refresh_semantic_tokens(&key);
+                }
                 if let Some(session) = self.lsp_sessions.get_mut(&key) {
                     let _ = session.client.respond(id, fenix_lsp::server_request_reply(&method));
                     // What it says of every open document, asked again.
@@ -7637,6 +7665,7 @@ impl App {
                     self.wake_caret();
                 }
             }
+            PendingLspRequest::SemanticTokens { path, edit_count } => self.semantic_tokens_answered(&key, path, edit_count, result),
             PendingLspRequest::PullDiagnostics { path } => {
                 let name = self.lsp_server_name(&key);
                 let read = result.map_err(|e| (e.code, e.data)).and_then(|value| fenix_lsp::pull::report(value).map_err(|_| (0, None)));
@@ -18704,6 +18733,7 @@ impl App {
         };
 
         let syntax = &*syntax;
+        let windows = byte_ranges.clone();
         let highlights: Vec<(std::ops::Range<usize>, &str)> = byte_ranges
             .into_iter()
             .flat_map(|window| {
@@ -18729,11 +18759,15 @@ impl App {
             .iter()
             .filter_map(|(range, name)| fenix_syntax::TodoKind::from_capture_name(name).map(|kind| (range.clone(), kind)))
             .collect();
+        // What the grammar says is a comment or a string: a language
+        // server's tokens aren't laid there.
+        let protected: Vec<std::ops::Range<usize>> =
+            highlights.iter().filter(|(_, name)| matches!(name.split('.').next(), Some("comment" | "string" | "spell"))).map(|(range, _)| range.clone()).collect();
         let colored = highlights.into_iter().map(|(range, name)| (range, theme.syntax_color(name))).collect();
         if !todos.is_empty() {
             self.todo_spans.insert(id, todos);
         }
-        colored
+        self.with_semantic_tokens(id, colored, &windows, &protected)
     }
 
     /// For a Tcl buffer, the words its `function` capture may color as
@@ -20191,6 +20225,7 @@ impl App {
         // buffer, its edits or the servers have moved since the last, as
         // the sync itself copies the text and looks at the disk (#74).
         self.sync_lsp_if_changed();
+        self.ask_due_semantic_tokens();
         self.sync_window_title();
         // Coalesces however many `WindowEvent::Resized` events landed
         // since the last frame into at most one real swapchain
@@ -32788,7 +32823,7 @@ configure_board stm32
         let started = Instant::now();
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "typescript-language-server".into(), languages: vec!["typescript".into()], root: key.root.clone(), reader: None,
-            started, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started, capabilities: None, open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
         });
         assert!(app.background_jobs().iter().any(|j| j == "starting typescript-language-server"));
         // Not yet: when it's due is said.
@@ -36157,7 +36192,7 @@ name = \"orbit\"
         let (client, _) = fenix_lsp::LspClient::spawn(&program, &args, &key.root).unwrap();
         let mut session = LspSession {
             generation: tool_sessions::generation(), client, name: "pyright-langserver".into(), languages: vec!["python".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
         };
         push_python_environment(&mut session);
         app.lsp_sessions.insert(key.clone(), session);
@@ -36190,7 +36225,7 @@ name = \"orbit\"
         let canonical = fenix_lsp::normalize(refactor::identity(path));
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client, name: "rust-analyzer".into(), languages: vec!["rust".into()], root: key.root.clone(), reader: None,
-            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            started: Instant::now(), capabilities: Some(Default::default()), open_documents: HashMap::from([(canonical, (0,1))]), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
         });
         key
     }
@@ -36471,7 +36506,7 @@ name = \"orbit\"
         }
         app.lsp_sessions.insert(key.clone(), LspSession {
             generation: tool_sessions::generation(), client: sink_client(&key.root), name: name.into(), languages: languages.iter().map(|l| l.to_string()).collect(),
-            root: key.root.clone(), reader: None, started: Instant::now(), capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(),
+            root: key.root.clone(), reader: None, started: Instant::now(), capabilities: Some(capabilities), open_documents: HashMap::new(), synced_text: HashMap::new(), pending: HashMap::new(), python_env: None, pulls: HashMap::new(), semantic: HashMap::new(),
         });
         key
     }
@@ -36504,6 +36539,116 @@ name = \"orbit\"
             capabilities(serde_json::json!({"textDocumentSync": 1, "hoverProvider": true, "definitionProvider": true, "completionProvider": {"triggerCharacters": ["-"]}, "documentFormattingProvider": true})));
         app.sync_lsp_for_focused_buffer();
         (dir, app, path, primary, extra)
+    }
+
+    fn semantic_capabilities() -> lsp_types::ServerCapabilities {
+        capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function", "macro"], "tokenModifiers": []}, "full": true}}))
+    }
+
+    /// `fn main() { let x = 1; }` with a server offering semantic tokens.
+    fn semantic_fixture(name: &str) -> (TempDir, App, PathBuf, LspKey) {
+        let dir = TempDir::new(name);
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() { let x = 1; }\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], semantic_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        (dir, app, path, key)
+    }
+
+    /// `main` a function and `x` a macro (so it's drawn as a function,
+    /// where the grammar says variable).
+    const MAIN_AND_X: [u32; 10] = [0, 3, 4, 0, 0, 0, 13, 1, 1, 0];
+
+    fn colour_at(app: &mut App, byte: usize) -> Option<glyphon::Color> {
+        let id = app.focused_buffer_id();
+        app.syntax_highlights_for_visible_range(id, 0, 1).into_iter().find(|(r, _)| r.contains(&byte)).map(|(_, c)| c)
+    }
+
+    #[test]
+    fn semantic_tokens_are_asked_on_open_and_laid_over_the_grammar_s_colours() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_open");
+        let grammar = colour_at(&mut app, 16);
+        app.ask_due_semantic_tokens();
+        let (id, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { edit_count: 0, .. }), "{pending:?}");
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        let function = app.theme.syntax_function;
+        assert_ne!(grammar, Some(function), "the grammar calls `x` something else");
+        assert_eq!(colour_at(&mut app, 16), Some(function), "`x` as the server says");
+        assert_eq!(colour_at(&mut app, 3), Some(function), "`main` too");
+        assert_eq!(colour_at(&mut app, 0), Some(app.theme.syntax_keyword), "`fn` the grammar's still");
+    }
+
+    #[test]
+    fn semantic_tokens_move_with_an_edit_until_the_next_answer_and_a_stale_answer_is_let_go() {
+        let (_dir, mut app, _path, key) = semantic_fixture("semantic_shift");
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
+        let function = app.theme.syntax_function;
+        // Two chars typed at the start: `x` moves with them, and no ask
+        // is sent until typing pauses.
+        app.test_insert_str("  ");
+        app.sync_lsp_for_focused_buffer();
+        assert_eq!(colour_at(&mut app, 18), Some(function));
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "not while typing");
+        // Once it's due: asked; an edit before the answer makes it stale.
+        let file = app.open().buffer.path().unwrap().to_path_buf();
+        let canonical = app.lsp_path(&file);
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        app.ask_due_semantic_tokens();
+        let (id, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { edit_count, .. } if edit_count == app.open().buffer.edit_count()));
+        app.test_insert_str(" ");
+        app.sync_lsp_for_focused_buffer();
+        answer(&mut app, &key, id, serde_json::json!({"data": [0, 0, 2, 0, 0]}));
+        assert_eq!(colour_at(&mut app, 19), Some(function), "the moved tokens stand, not the stale answer");
+        assert!(app.lsp_sessions[&key].semantic[&canonical].due.is_some(), "asked again");
+    }
+
+    #[test]
+    fn semantic_tokens_are_neither_asked_nor_drawn_with_the_setting_off_or_the_language_left_out() {
+        assert!(crate::lsp::client_capabilities(false).text_document.unwrap().semantic_tokens.is_none(), "not advertised");
+        assert!(crate::lsp::client_capabilities(true).text_document.unwrap().semantic_tokens.is_some());
+        for (key, value) in [("lsp.semantic_highlighting", fenix_config::Value::Bool(false)), ("lsp.semantic_highlighting_off", fenix_config::Value::List(vec!["Rust".into()]))] {
+            let (_dir, mut app, _path, server) = semantic_fixture("semantic_off");
+            let grammar = colour_at(&mut app, 16);
+            app.ask_due_semantic_tokens();
+            let (id, _) = only_pending(&app, &server);
+            answer(&mut app, &server, id, serde_json::json!({"data": MAIN_AND_X}));
+            app.config.set_value(key, Some(value));
+            assert_eq!(colour_at(&mut app, 16), grammar, "{key}: the grammar's alone");
+            // And after an edit, nothing kept or asked.
+            app.test_insert_str(" ");
+            app.sync_lsp_for_focused_buffer();
+            assert!(app.lsp_sessions[&server].semantic.is_empty(), "{key}");
+        }
+    }
+
+    #[test]
+    fn semantic_tokens_come_from_the_first_server_offering_them_and_a_refresh_asks_again() {
+        let dir = TempDir::new("semantic_two");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() { let x = 1; }\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let primary = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], capabilities(serde_json::json!({"textDocumentSync": 2})));
+        let extra = install_server(&mut app, &path, LspServer::Additional("kiln".into()), "kiln", &["rust"], semantic_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&primary].pending.is_empty(), "it offers none");
+        let (id, _) = only_pending(&app, &extra);
+        answer(&mut app, &extra, id, serde_json::json!({"data": MAIN_AND_X}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_function));
+        // Its refresh: asked again.
+        let generation = app.lsp_sessions[&extra].generation;
+        app.apply_lsp_event(extra.clone(), generation, fenix_lsp::LspEvent::ServerRequest { id: serde_json::json!(7), method: "workspace/semanticTokens/refresh".into(), params: serde_json::Value::Null });
+        app.ask_due_semantic_tokens();
+        assert!(matches!(only_pending(&app, &extra).1, PendingLspRequest::SemanticTokens { .. }));
+        // Both offering them: the first only.
+        app.lsp_sessions.get_mut(&primary).unwrap().capabilities = Some(semantic_capabilities());
+        assert_eq!(app.semantic_server(&path), Some(primary));
     }
 
     #[test]

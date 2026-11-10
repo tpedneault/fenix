@@ -182,6 +182,24 @@ impl Theme {
     /// might produce). Anything unrecognized falls back to plain `fg`,
     /// so an unfamiliar capture name reads as ordinary text instead of
     /// vanishing or breaking.
+    /// A semantic token's colour, by its slot: the three the grammar has
+    /// no word for fall back to the nearest it has.
+    pub fn semantic_color(&self, slot: fenix_lsp::semantic::Slot) -> glyphon::Color {
+        use fenix_lsp::semantic::Slot;
+        match slot {
+            Slot::Type | Slot::Interface => self.syntax_type,
+            Slot::Parameter | Slot::Variable => self.syntax_variable,
+            Slot::Constant => self.syntax_constant,
+            Slot::Function | Slot::Macro => self.syntax_function,
+            Slot::Keyword => self.syntax_keyword,
+            Slot::Comment => self.syntax_comment,
+            Slot::String => self.syntax_string,
+            Slot::Number => self.syntax_number,
+            Slot::Operator => self.syntax_operator,
+            Slot::Attribute => self.syntax_attribute,
+        }
+    }
+
     pub fn syntax_color(&self, capture_name: &str) -> glyphon::Color {
         // Markdown's inline/heading captures share one top-level "text"
         // segment (`text.title`/`text.strong`/`text.emphasis`/`text.

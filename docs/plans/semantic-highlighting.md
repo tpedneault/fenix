@@ -1,6 +1,6 @@
 # Plan: semantic highlighting
 
-- **Status:** planned, for the release after 1.5 (issue #105).
+- **Status:** stages 1 and 2 built, for the release after 1.5 (issue #105); see §5.
 - **Scope:** code coloured by what its language server knows
   (`textDocument/semanticTokens`), on top of tree-sitter's colours:
   a parameter apart from a local, a macro apart from a function, an
@@ -259,4 +259,65 @@ per-language list covers a server whose tokens are poor.
 
 ## 5. As built
 
-To be filled in as the stages land.
+### Stage 1
+
+- `fenix_lsp::semantic`, as planned. Two additions to the type table:
+  `typeAlias` maps to type, and `trait` to interface.
+- `fenix_lsp::changed_span` is factored out of the ranged `didChange`,
+  with the same result.
+
+### Stage 2
+
+- **Settings.** `lsp.semantic_highlighting` (on) and
+  `lsp.semantic_highlighting_off` (none).
+  - `crate::lsp::client_capabilities(semantic)` advertises the
+    capability, and refresh support, only when the setting is on.
+  - Language names in the list are matched without regard to case.
+- **Where the code is.** `app/semantic.rs`:
+  - `SemanticDoc` per server and document (`LspSession::semantic`),
+    holding the tokens, their stamp, an ask that's out and when the next
+    ask is due;
+  - `after_sync`, called by `sync_lsp_document` after each `didOpen`
+    or `didChange`;
+  - `ask_due_semantic_tokens`, run each frame after the LSP sync;
+  - `semantic_wake`, which wakes the loop when the next ask is due;
+  - `semantic_tokens_answered`;
+  - `refresh_semantic_tokens`;
+  - `with_semantic_tokens`, the last step of
+    `syntax_highlights_in_columns`.
+- **Which server is asked.** `semantic_server` picks the first of the
+  path's servers whose capabilities offer `full`. `sync_lsp_for` passes
+  each server whether it's that one:
+  - the chosen server's document gets an ask due;
+  - any other server's tokens for it are let go.
+  A document already in sync is picked up, or let go, when the choice
+  changes. That happens on the next sync, which runs when a server
+  becomes ready or the buffer is edited.
+- **Moving with edits.** On `didChange`, the tokens move through
+  `changed_span(old synced text, new text)`. That's one more char walk
+  of the text, on top of the one the ranged change already does. It
+  runs only when the chosen server holds tokens with the old stamp;
+  otherwise the stamp is cleared, so nothing is drawn until the answer.
+- **Answers.**
+  - An answer for an edit count the server has moved past is thrown
+    away, and the ask is made due again.
+  - `ContentModified` and `ServerCancelled` are asked again after the
+    pause.
+  - Any other error is left until the next edit.
+  - `null` means no tokens.
+- **Drawing.**
+  - The grammar's comments and strings (captures `comment`, `string`
+    and `spell`) are protected.
+  - `lay_over` cuts the grammar's ranges by the tokens, keeping the
+    order and non-overlap that `split_line_by_highlights` and the tab
+    remap need.
+  - Paths are canonicalized once per buffer path (`App::lsp_canonical`),
+    not each frame.
+  - Nothing is looked up while no server holds any tokens.
+- **Changed test.** `fenix-config`'s
+  `every_setting_round_trips_through_the_file` asserted that no `[lsp]`
+  header is ever written. `[lsp]` now has settings of its own, so the
+  empty-header check covers `[vnc]` only.
+- **Not yet:**
+  - the theme keys and the modifier rules' underline (stage 3);
+  - delta and range (stage 4).
