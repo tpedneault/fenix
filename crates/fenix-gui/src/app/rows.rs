@@ -175,9 +175,9 @@ impl RowMap {
     /// Where visual column `col` of `line` is drawn: its row and cell,
     /// `None` when the line isn't shown, or that part of it is above the
     /// top or below the bottom. A column at the end of a row that isn't
-    /// the line's last is the next row's start. In a wrapped pane the
-    /// cell is never past a row's last (where blanks hanging at a break
-    /// would put it).
+    /// the line's last is the next row's start. A wrapped row is never
+    /// wider than the pane, so the cell is in it; the hold to its last
+    /// column is a guard.
     pub(crate) fn locate(&self, line: usize, col: usize) -> Option<(usize, usize)> {
         let rows = self.rows_of(line);
         if rows.is_empty() || col < self.rows[rows.start].cols.start {
@@ -201,7 +201,9 @@ impl RowMap {
             let lo = cols.start.max(row.cols.start);
             let hi = if row.last { cols.end } else { cols.end.min(row.cols.end) };
             if lo < hi {
-                out.push((i, self.x(row, lo), self.x(row, hi)));
+                // Never past a wrapped pane's edge.
+                let edge = |x: usize| self.width.map_or(x, |w| x.min(w));
+                out.push((i, edge(self.x(row, lo)), edge(self.x(row, hi))));
             }
         }
         out
@@ -315,9 +317,13 @@ impl App {
         let (buffer, pane) = (self.focused_buffer_id(), self.focused_pane_id());
         let on = !self.buffer_wraps(buffer);
         self.wrap_overrides.insert(buffer, on);
-        let state = self.pane_state_mut(pane);
-        state.scroll_col = 0;
-        state.scroll_row = 0;
+        // Every pane showing it starts its lines' rows afresh.
+        let showing: Vec<fenix_window::WindowId> = self.windows().windows().into_iter().filter(|&p| self.windows().content(p) == Some(&buffer)).collect();
+        for p in showing.into_iter().chain(std::iter::once(pane)) {
+            let state = self.pane_state_mut(p);
+            state.scroll_col = 0;
+            state.scroll_row = 0;
+        }
         let shown = if !on { "Wrap off" } else if self.pane_can_wrap(pane, buffer) { "Wrap on" } else { "Wrap on (not in this pane)" };
         self.set_message(shown);
         self.wake_caret();
@@ -1020,6 +1026,36 @@ mod app_tests {
         assert_eq!(app.focused_overlays_now(3).hlsearch, vec![(0, 4, 6), (1, 0, 1)], "`e q` across the break");
         app.press_all("0 l");
         assert_eq!(app.focused_overlays_now(3).brackets, vec![(0, 1, 2), (1, 5, 6)]);
+    }
+
+    #[test]
+    fn a_blank_run_longer_than_the_pane_goes_on_to_the_next_rows_and_every_cell_is_its_own() {
+        // `ab` + 12 blanks + `cd` at five columns: blanks hang up to the
+        // kept column, the rest of the run goes on, `cd` after it.
+        let (mut app, _f) = wrapped("a.txt", &format!("ab{}cd\n", " ".repeat(12)), 5);
+        app.line_number_mode = LineNumberMode::Off;
+        assert_eq!(drawn(&app, 5), vec!["ab   ", "    ", "    ", " cd", "~"]);
+        let layout = app.focused_layout(6);
+        let map = &layout.map;
+        for col in 0..16 {
+            let (row, x) = map.locate(0, col).unwrap();
+            assert!(x < 5, "column {col} at cell {x}");
+            assert_eq!(map.at(row, x), Some((0, col)), "column {col} and its cell are each other's");
+        }
+        // A selection of the whole line never runs past the pane.
+        assert!(map.segments(0, 0..16).iter().all(|&(_, _, e)| e <= 5), "{:?}", map.segments(0, 0..16));
+    }
+
+    #[test]
+    fn a_fold_s_count_after_a_row_its_blanks_fill_has_no_room_and_isn_t_drawn() {
+        let (mut app, _f) = folded("fn a() {    \n    x;\n}\nfn b() {}\n");
+        app.run_cmd("view.toggle_wrap");
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 9);
+        app.line_number_mode = LineNumberMode::Off;
+        let rows = drawn(&app, 4);
+        assert_eq!(rows[0], "fn a() { ", "{rows:?}");
+        assert!(rows[1].chars().count() <= 9, "{rows:?}");
     }
 
     #[test]

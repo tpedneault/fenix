@@ -22,41 +22,92 @@ pub(super) struct RowWalk<'a> {
     pub lines: Vec<usize>,
     width: usize,
     cursor_line: usize,
-    rows: HashMap<usize, Vec<std::ops::Range<usize>>>,
+    /// Each line's rows found so far, and whether they're all of them.
+    rows: HashMap<usize, (Vec<std::ops::Range<usize>>, bool)>,
 }
 
 impl RowWalk<'_> {
-    /// Display line `index`'s rows: their visual columns.
-    pub(super) fn breaks(&mut self, index: usize) -> &[std::ops::Range<usize>] {
+    /// Display line `index`'s first `k` rows (all of them, if fewer):
+    /// their visual columns. Only as much of the line is broken as that.
+    fn rows_upto(&mut self, index: usize, k: usize) -> &[std::ops::Range<usize>] {
         let (app, buffer, width, cursor_line) = (self.app, self.buffer, self.width, self.cursor_line);
         let line = self.lines.get(index).copied().unwrap_or(rows::NO_LINE);
-        self.rows.entry(index).or_insert_with(|| app.line_breaks(buffer, line, width, cursor_line))
+        let known = self.rows.get(&index).is_some_and(|(r, whole)| *whole || r.len() >= k);
+        if !known {
+            // Asked for more than was found: twice as many, so a walk
+            // down a long line breaks it a few times, not a row at a time.
+            let had = self.rows.get(&index).map_or(0, |(r, _)| r.len());
+            let want = k.max(had.saturating_mul(2)).max(8);
+            let found = app.line_breaks(buffer, line, width, cursor_line, want);
+            self.rows.insert(index, found);
+        }
+        let (rows, _) = &self.rows[&index];
+        &rows[..k.min(rows.len())]
+    }
+
+    /// Display line `index`'s rows, all of them.
+    pub(super) fn breaks(&mut self, index: usize) -> &[std::ops::Range<usize>] {
+        self.rows_upto(index, usize::MAX)
+    }
+
+    /// How many rows display line `index` has, if no more than `cap`;
+    /// `cap + 1` when it has more.
+    fn count_capped(&mut self, index: usize, cap: usize) -> usize {
+        self.rows_upto(index, cap.saturating_add(1)).len().max(1)
     }
 
     fn count(&mut self, index: usize) -> usize {
         self.breaks(index).len().max(1)
     }
 
+    /// `pos` held to the rows there are: a top a resize, an edit or a
+    /// fold left past its line's rows, or past the last line, is the
+    /// last of them.
+    pub(super) fn clamp(&mut self, pos: RowPos) -> RowPos {
+        let index = pos.0.min(self.lines.len().saturating_sub(1));
+        let rows = self.count_capped(index, pos.1);
+        (index, pos.1.min(rows - 1))
+    }
+
     /// The last row of all.
+    #[cfg(test)]
     pub(super) fn end(&mut self) -> RowPos {
         let last = self.lines.len().saturating_sub(1);
         (last, self.count(last) - 1)
     }
 
+    /// How many rows there are from `pos` to the very last, if no more
+    /// than `cap`.
+    pub(super) fn rows_to_end(&mut self, pos: RowPos, cap: usize) -> Option<usize> {
+        let mut n = 0usize;
+        let mut at = pos;
+        loop {
+            let rows = self.count_capped(at.0, at.1.saturating_add(cap - n.min(cap)));
+            n += rows.saturating_sub(at.1 + 1);
+            if n > cap {
+                return None;
+            }
+            if at.0 + 1 >= self.lines.len() {
+                return Some(n);
+            }
+            n += 1;
+            at = (at.0 + 1, 0);
+        }
+    }
+
     /// `delta` rows on from `pos` (back, when negative), held to the
     /// first row and the last.
     pub(super) fn step(&mut self, pos: RowPos, delta: isize) -> RowPos {
-        let (mut index, mut row) = (pos.0.min(self.lines.len().saturating_sub(1)), pos.1);
-        row = row.min(self.count(index) - 1);
+        let (mut index, mut row) = self.clamp(pos);
         let mut left = delta.unsigned_abs();
         if delta >= 0 {
             while left > 0 {
-                let here = self.count(index) - 1 - row;
+                let here = self.count_capped(index, row + left) - 1 - row;
                 if left <= here {
                     return (index, row + left);
                 }
                 if index + 1 >= self.lines.len() {
-                    return (index, self.count(index) - 1);
+                    return (index, row + here);
                 }
                 left -= here + 1;
                 index += 1;
@@ -72,6 +123,7 @@ impl RowWalk<'_> {
                 }
                 left -= row + 1;
                 index -= 1;
+                // Back into a line from its end: all its rows.
                 row = self.count(index) - 1;
             }
         }
@@ -80,26 +132,38 @@ impl RowWalk<'_> {
 
     /// How many rows `to` is below `from`, if it's no more than `cap`.
     pub(super) fn distance(&mut self, from: RowPos, to: RowPos, cap: usize) -> Option<usize> {
+        let (from, to) = (self.clamp(from), self.clamp(to));
         if to < from {
             return None;
         }
         let mut n = 0;
         let mut at = from;
         while at.0 < to.0 {
-            n += self.count(at.0) - at.1;
+            n += self.count_capped(at.0, at.1 + cap) - at.1;
             if n > cap {
                 return None;
             }
             at = (at.0 + 1, 0);
         }
-        n += to.1.saturating_sub(at.1);
+        n += to.1 - at.1;
         (n <= cap).then_some(n)
     }
 
     /// The row of display line `index` that visual column `col` is on.
     pub(super) fn row_of(&mut self, index: usize, col: usize) -> usize {
-        let breaks = self.breaks(index);
-        breaks.iter().position(|r| col < r.end).unwrap_or(breaks.len().saturating_sub(1))
+        let mut k = 8;
+        loop {
+            let rows = self.rows_upto(index, k);
+            let found = rows.iter().position(|r| col < r.end);
+            let all = rows.len() < k;
+            if let Some(row) = found {
+                return row;
+            }
+            if all {
+                return rows.len().saturating_sub(1);
+            }
+            k = k.saturating_mul(2);
+        }
     }
 }
 
@@ -118,19 +182,17 @@ pub(super) fn follow(walk: &mut RowWalk, top: RowPos, cursor: RowPos, visible: u
             _ => centred(walk),
         }
     } else {
-        match walk.distance(top, cursor, visible + visible / 2) {
+        // Past the bottom by no more than half a pane: just far enough,
+        // as above the top.
+        match walk.distance(top, cursor, visible - 1 + visible / 2) {
             Some(d) if d < visible => return top,
             Some(_) if !jumped => walk.step(cursor, -((visible - 1) as isize)),
             _ => centred(walk),
         }
     };
     // Not past the point where the last row is at the bottom.
-    let end = walk.end();
-    match walk.distance(target, end, visible) {
-        Some(d) if d + 1 < visible => {
-            let last_top = walk.step(end, -((visible - 1) as isize));
-            last_top.min(target)
-        }
+    match walk.rows_to_end(target, visible) {
+        Some(d) if d + 1 < visible => walk.step(target, -((visible - 1 - d) as isize)),
         _ => target,
     }
 }
@@ -253,7 +315,9 @@ impl App {
     pub(super) fn cursor_row_pos(&self, walk: &mut RowWalk, pane: fenix_window::WindowId, buffer: BufferId) -> RowPos {
         let Some(ob) = self.buffers.get(buffer) else { return (0, 0) };
         let (line, col) = ob.buffer.line_col(&self.pane_state(pane).cursor);
-        let index = walk.lines.iter().position(|&l| l == line).unwrap_or(0);
+        // A line in a closed fold is its header's row, the last line
+        // shown at or before it.
+        let index = walk.lines.partition_point(|&l| l <= line).saturating_sub(1);
         let vcol = tabstops::visual_col(&self.line_col_map(buffer, line, line), col);
         (index, walk.row_of(index, vcol))
     }
@@ -274,7 +338,9 @@ impl App {
         let Some(mut walk) = self.row_walk(pane, buffer) else { return false };
         let state = *self.pane_state(pane);
         let cursor = self.cursor_row_pos(&mut walk, pane, buffer);
-        let top = follow(&mut walk, (state.scroll_line, state.scroll_row), cursor, visible, jumped);
+        // The top as it is now: held to its line's rows.
+        let top = walk.clamp((state.scroll_line, state.scroll_row));
+        let top = follow(&mut walk, top, cursor, visible, jumped);
         drop(walk);
         if top != (state.scroll_line, state.scroll_row) || state.rendered_scroll != state.scroll_line as f32 {
             self.set_row_top(pane, top);
@@ -305,23 +371,60 @@ impl App {
     pub(super) fn scroll_by_rows(&mut self, pane: fenix_window::WindowId, buffer: BufferId, rows: isize, visible: usize) -> bool {
         let Some(mut walk) = self.row_walk(pane, buffer) else { return false };
         let state = *self.pane_state(pane);
-        let mut top = walk.step((state.scroll_line, state.scroll_row), rows);
+        let was = walk.clamp((state.scroll_line, state.scroll_row));
+        let mut top = walk.step(was, rows);
         if rows > 0 {
-            let end = walk.end();
-            let last_top = walk.step(end, -(visible.max(1) as isize - 1));
-            top = top.min(last_top.max((state.scroll_line, state.scroll_row)));
+            // No further than the last row at the bottom.
+            let visible = visible.max(1);
+            if let Some(d) = walk.rows_to_end(top, visible) {
+                if d + 1 < visible {
+                    top = walk.step(top, -((visible - 1 - d) as isize)).max(was);
+                }
+            }
         }
         drop(walk);
         self.set_row_top(pane, top);
         true
     }
 
+    /// The wheel on a wrapped pane with the focus: its view `rows` rows
+    /// on, as without it, and the cursor moved by rows only as far as
+    /// keeps it in view, onto the first char of the row it's held to.
+    /// False when it doesn't wrap.
+    pub(super) fn scroll_focused_by_rows(&mut self, pane: fenix_window::WindowId, buffer: BufferId, rows: isize, visible: usize) -> bool {
+        if !self.scroll_by_rows(pane, buffer, rows, visible) {
+            return false;
+        }
+        let Some(mut walk) = self.row_walk(pane, buffer) else { return true };
+        let state = *self.pane_state(pane);
+        let top = walk.clamp((state.scroll_line, state.scroll_row));
+        let cursor = self.cursor_row_pos(&mut walk, pane, buffer);
+        let visible = visible.max(1);
+        let held = if cursor < top {
+            Some(top)
+        } else if walk.distance(top, cursor, visible - 1).is_none() {
+            Some(walk.step(top, visible as isize - 1))
+        } else {
+            None
+        };
+        let Some((index, row)) = held else { return true };
+        let line = walk.lines.get(index).copied().unwrap_or(0);
+        let vcol = walk.breaks(index).get(row).map_or(0, |r| r.start);
+        drop(walk);
+        let Some(ob) = self.buffers.get(buffer) else { return true };
+        let col = crate::mouse::char_col_at(&self.line_col_map(buffer, line, line), vcol).0;
+        let at = ob.buffer.line_start_char(line) + col;
+        self.pane_state_mut(pane).cursor = Cursor { char_idx: at, sticky_col: col };
+        true
+    }
+
     /// The visual columns of `buffer`'s `line` on each of its rows,
     /// wrapped at `width` (`rows::NO_LINE`, a filler, is one row).
-    pub(super) fn line_breaks(&self, buffer: BufferId, line: usize, width: usize, cursor_line: usize) -> Vec<std::ops::Range<usize>> {
-        let Some(ob) = self.buffers.get(buffer) else { return std::iter::once(0..0).collect() };
+    /// Its first `max_rows` of them, with whether they're all.
+    pub(super) fn line_breaks(&self, buffer: BufferId, line: usize, width: usize, cursor_line: usize, max_rows: usize) -> (Vec<std::ops::Range<usize>>, bool) {
+        let Some(ob) = self.buffers.get(buffer) else { return (std::iter::once(0..0).collect(), true) };
         if line == rows::NO_LINE || line >= ob.buffer.visual_line_count() {
-            return std::iter::once(0..usize::MAX).collect();
+            return (std::iter::once(0..usize::MAX).collect(), true);
         }
         let start = ob.buffer.line_start_char(line);
         let len = ob.buffer.line_len(line);
@@ -336,7 +439,7 @@ impl App {
             line_text
         };
         let indent = crate::wrap::continuation_indent(&display, width);
-        crate::wrap::break_line(&display, width, indent)
+        crate::wrap::break_line_rows(&display, width, indent, max_rows)
     }
 }
 
@@ -482,9 +585,84 @@ mod tests {
     }
 
     #[test]
+    fn a_top_left_past_its_line_s_rows_by_a_resize_is_held_to_them() {
+        let line = "word ".repeat(40);
+        let (mut app, _f) = app_on_file("a.txt", &format!("{line}\nnext\n"));
+        if !app.buffer_wraps(app.focused_buffer_id()) {
+            app.run_cmd("view.toggle_wrap");
+        }
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 10);
+        app.press("$");
+        app.ensure_cursor_visible(5);
+        app.press("j");
+        app.ensure_cursor_visible(5);
+        assert_eq!(top(&app), (0, 17));
+        // Four times as wide: line 0 is six rows now, the top's row 17 gone.
+        app.set_pane_text_cols(pane, 40);
+        app.ensure_cursor_visible(5);
+        let (index, row) = top(&app);
+        assert!(index == 0 && row < 6 || index == 1, "{:?}", (index, row));
+        assert_eq!(app.focused_overlays_now(5).caret.map(|(r, _)| r < 5), Some(true), "the cursor on `next` shown");
+    }
+
+    #[test]
+    fn turning_wrap_off_and_on_starts_every_pane_s_rows_afresh() {
+        let (mut app, _f) = three_row_lines(10);
+        let first = app.focused_pane_id();
+        app.pane_state_mut(first).scroll_row = 2;
+        app.run_cmd("window.split_vertical");
+        let second = app.focused_pane_id();
+        app.pane_state_mut(second).scroll_row = 1;
+        app.run_cmd("view.toggle_wrap");
+        assert_eq!((app.pane_state(first).scroll_row, app.pane_state(second).scroll_row), (0, 0));
+    }
+
+    #[test]
+    fn the_wheel_on_a_focused_wrapped_pane_scrolls_its_rows_and_keeps_the_cursor_in_view() {
+        // One line of five thousand chars: without rows it couldn't scroll.
+        let (mut app, _f) = app_on_file("a.txt", &"word ".repeat(1000));
+        if !app.buffer_wraps(app.focused_buffer_id()) {
+            app.run_cmd("view.toggle_wrap");
+        }
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 10);
+        let (sidebar_px, terminal_h, modeline_top) = app.frame_metrics(600.0);
+        let rect = app.frame_geometry(800.0, sidebar_px, terminal_h, modeline_top).panes.into_iter().find(|(id, _)| *id == pane).unwrap().1;
+        let pos = (rect.x + 50.0, rect.y + 50.0);
+        let notch = |app: &mut App| app.handle_wheel_at(pos, MouseScrollDelta::LineDelta(0.0, -1.0), 800.0, 600.0);
+        notch(&mut app);
+        let (_, row) = top(&app);
+        assert!(row > 0, "scrolled by rows");
+        assert_eq!(app.line_col(), (0, row * 10), "the cursor onto the top row's first char");
+        for _ in 0..3 {
+            notch(&mut app);
+        }
+        assert_eq!(app.line_col().1, top(&app).1 * 10);
+    }
+
+    #[test]
+    fn a_cursor_in_a_closed_fold_is_its_header_s_row_not_the_file_s_top() {
+        let text = format!("fn a() {{\n{}\n}}\nend\n", "    x;\n".repeat(40));
+        let (mut app, _f) = app_on_file("a.rs", &text);
+        app.run_cmd("view.toggle_wrap");
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 10);
+        app.press("j");
+        app.run_cmd("code.toggle_fold");
+        // The cursor on a hidden line: as on the header.
+        app.press_all("2 0 G");
+        let buffer = app.focused_buffer_id();
+        let mut walk = app.row_walk(pane, buffer).unwrap();
+        assert_eq!(app.cursor_row_pos(&mut walk, pane, buffer).0, 0);
+    }
+
+    #[test]
     fn a_walk_steps_and_measures_rows_across_lines() {
         let (app, _f) = three_row_lines(3);
         let mut walk = app.row_walk(app.focused_pane_id(), app.focused_buffer_id()).unwrap();
+        assert_eq!(walk.clamp((0, 9)), (0, 2), "a row past the line's held to its last");
+        assert_eq!(walk.distance((0, 9), (1, 0), 10), Some(1));
         assert_eq!(walk.step((0, 1), 4), (1, 2));
         assert_eq!(walk.step((1, 2), -4), (0, 1));
         assert_eq!(walk.step((0, 0), -3), (0, 0));
