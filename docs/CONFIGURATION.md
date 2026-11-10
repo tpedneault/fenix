@@ -93,6 +93,23 @@ the rest of what's the project's own: its kind, group, pin and Jira key,
 and its tasks, language servers and debug launch (`.fenix/tools.json`).
 `p` switches the page between yours and the project's.
 
+**A project's programs wait for you.** `.fenix/tools.json` names
+programs: a language server, a debug adapter, tasks. So does
+`.fenix/lsp/<server>.json`, since some servers' settings are commands.
+Fenix starts a language server as soon as a file is opened, so for a
+project you didn't write (a repository just cloned, an archive just
+unpacked) those files would be a way to run something by opening a
+file. Until you've allowed them, Fenix treats such a project as naming
+nothing: your own settings and its defaults apply, and a notification
+says the project is waiting. `SPC p y` (`project.trust`) opens the file
+and asks; only a typed `yes` allows it, and `no` is remembered too. The
+answer is kept in Fenix's own state folder, never in the project, and
+for those files as they are: change them (a pull, an edit outside
+Fenix) and it asks again. What Fenix writes there for you (the new
+project wizard, the settings page, a doctor's fix) doesn't need
+allowing again. The projects you already used before this question
+existed go on working as they did.
+
 A project's MIBs and how it writes a telecommand are its own too; they
 take the place of yours there (`mib.include_yours` adds yours back), and
 a folder is relative to the project:

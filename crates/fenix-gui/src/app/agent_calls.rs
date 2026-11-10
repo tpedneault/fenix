@@ -154,7 +154,7 @@ impl App {
         let lsp = self.lsp_sessions.keys().any(|k| k.root.starts_with(&root) || root.starts_with(&k.root));
         let git = root.ancestors().any(|dir| dir.join(".git").exists());
         let tasks = self.tasks_for(&root).is_ok_and(|t| !t.is_empty());
-        let launches = fenix_project::tools::ProjectTools::read(&root).is_ok_and(|t| !t.launch.is_empty());
+        let launches = self.project_tools(&root).is_ok_and(|t| !t.launch.is_empty());
         Facts { lsp, git, tasks, debug: self.debug_session.is_some() || launches }
     }
 

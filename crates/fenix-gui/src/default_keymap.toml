@@ -403,6 +403,11 @@ keys = "SPC p R"
 label = "remote project"
 command = "project.open_remote"
 
+[[leader]]
+keys = "SPC p y"
+label = "allow its programs"
+command = "project.trust"
+
 # `SPC t` is already "toggle" (theme/font-size/fullscreen/...),
 # so the build/task runner nests under `SPC p` instead --
 # Doom Emacs' own `SPC p c` ("project compile") convention,

@@ -6,6 +6,10 @@ or Rust projects no longer routes their requests to the same server.
 Relative aliases of a root reuse the same session. The nearest project marker
 determines ownership; `.fenix/settings.toml` and `.fenix/tools.json` are also markers.
 
+What `.fenix/tools.json` names is run only once you've allowed it for
+that project (`SPC p y`); see "A project's programs wait for you" in
+[Configuration](CONFIGURATION.md#a-projects-own-settings).
+
 Add `.fenix/tools.json` to a project for structured commands:
 
 ```json
