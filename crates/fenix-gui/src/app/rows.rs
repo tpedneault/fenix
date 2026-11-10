@@ -19,6 +19,10 @@ use crate::decorations::LineLayout;
 /// No line: a filler row's.
 pub(crate) const NO_LINE: usize = usize::MAX;
 
+/// The width a pane that doesn't wrap goes by rows at, while its buffer
+/// has rows that aren't text (a code lens's): no line is ever broken.
+pub(crate) const UNBOUNDED: usize = usize::MAX / 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RowKind {
     Text,
@@ -114,6 +118,11 @@ impl RowMap {
     /// The columns a row has, when the lines wrap.
     pub(crate) fn width(&self) -> Option<usize> {
         self.width
+    }
+
+    /// The first visual column shown: the pane's sideways scroll.
+    pub(crate) fn scroll_col(&self) -> usize {
+        self.scroll_col
     }
 
 
@@ -406,6 +415,18 @@ impl App {
         (self.buffer_wraps(buffer) && self.pane_can_wrap(pane, buffer)).then(|| self.pane_text_cols.get(&pane).copied().unwrap_or(80).max(1))
     }
 
+    /// The width `pane`'s rows of `buffer` are laid out at, when it goes
+    /// by rows: the columns its lines wrap at, or, when they don't but
+    /// the buffer has rows that aren't text (a code lens's), `UNBOUNDED`
+    /// -- a row a line, scrolled sideways as a pane without them is.
+    /// `None`: a row a line, as 1.5 drew every pane that didn't wrap.
+    pub(super) fn row_cols(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Option<usize> {
+        self.wrap_cols(pane, buffer).or_else(|| {
+            let rows_above = self.force_row_path || self.virtual_rows.get(&buffer).is_some_and(|lines| !lines.is_empty());
+            (rows_above && self.pane_can_wrap(pane, buffer)).then_some(UNBOUNDED)
+        })
+    }
+
     /// `pane` has room for `cols` columns of text: what a frame found,
     /// and what a test says.
     pub(super) fn set_pane_text_cols(&mut self, pane: fenix_window::WindowId, cols: usize) {
@@ -433,6 +454,35 @@ impl App {
         self.wake_caret();
     }
 
+    /// `buffer`'s rows above its lines that aren't text (a code lens's),
+    /// by line, `rows` in place of what it had. Every pane showing it
+    /// keeps its top text row where it was: the rows that come or go
+    /// above its top line are counted into, or out of, how far into that
+    /// line the top is, and a top that was on one of the rows that went
+    /// is on the line's text.
+    pub(super) fn set_virtual_rows(&mut self, buffer: BufferId, rows: std::collections::BTreeMap<usize, Vec<String>>) {
+        let showing: Vec<fenix_window::WindowId> = self.windows().windows().into_iter().filter(|&p| self.windows().content(p) == Some(&buffer)).collect();
+        let tops: Vec<(fenix_window::WindowId, usize)> = showing
+            .iter()
+            .map(|&pane| {
+                let state = self.pane_state(pane);
+                let line = self.pane_display_lines(pane, buffer).get(state.scroll_line).copied().unwrap_or(NO_LINE);
+                (pane, line)
+            })
+            .collect();
+        let before: Vec<usize> = tops.iter().map(|&(_, line)| self.virtual_rows_above(buffer, line).len()).collect();
+        if rows.is_empty() {
+            self.virtual_rows.remove(&buffer);
+        } else {
+            self.virtual_rows.insert(buffer, rows);
+        }
+        for ((pane, line), old_above) in tops.into_iter().zip(before) {
+            let new_above = self.virtual_rows_above(buffer, line).len();
+            let state = self.pane_state_mut(pane);
+            state.scroll_row = if state.scroll_row < old_above { new_above } else { state.scroll_row - old_above + new_above };
+        }
+    }
+
     /// `count` rows of `pane` from display row `top`, `skip` rows of its
     /// line above the top, as it shows `buffer` at its scroll.
     pub(super) fn pane_rows(&self, pane: fenix_window::WindowId, buffer: BufferId, top: usize, skip: usize, count: usize) -> RowMap {
@@ -449,13 +499,15 @@ impl App {
     /// What `redraw`, the hit-tests and the tests all build rows by.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn frame_layout(&self, pane: fenix_window::WindowId, buffer: BufferId, display: &[usize], top: usize, skip: usize, count: usize, scroll_col: usize, cursor_line: usize, dashboard: bool) -> PaneLayout {
-        let wrap = if dashboard { None } else { self.wrap_cols(pane, buffer) };
+        let wrap = if dashboard { None } else { self.row_cols(pane, buffer) };
+        // Only lines that really wrap lose the sideways scroll.
+        let wrapped = wrap.is_some_and(|w| w != UNBOUNDED);
         let from = top.min(display.len());
         let want = RowsWanted {
             lines: &display[from..from.saturating_add(count).min(display.len())],
             skip: if wrap.is_some() { skip } else { 0 },
             count,
-            scroll_col: if wrap.is_some() { 0 } else { scroll_col },
+            scroll_col: if wrapped { 0 } else { scroll_col },
             wrap,
         };
         self.pane_layout(buffer, want, cursor_line, dashboard)
@@ -617,9 +669,15 @@ impl App {
                                 *at_char += 1;
                             }
                         };
-                        advance(row.cols.start, at_char, at_byte);
+                        // Scrolled sideways (a row a line, not wrapped): from
+                        // the scroll, no further than a line without rows
+                        // above would be drawn.
+                        let scroll = map.scroll_col();
+                        let start = row.cols.start.max(scroll);
+                        let end = if scroll > 0 || map.width() == Some(UNBOUNDED) { row.cols.end.min(start.saturating_add(super::MAX_ROW_CHARS)) } else { row.cols.end };
+                        advance(start, at_char, at_byte);
                         let from = *at_byte;
-                        advance(row.cols.end, at_char, at_byte);
+                        advance(end.max(start), at_char, at_byte);
                         self.push_drawn(line, from..*at_byte, &mut spans);
                     }
                     if row.last && collapsed_headers.contains(&row.line) {
@@ -1326,6 +1384,150 @@ mod app_tests {
         let rows = drawn(&app, 2);
         let text: Vec<String> = rows.iter().map(|r| r.chars().skip(gutter).collect()).collect();
         assert_eq!(text, vec![format!("{}lens", " ".repeat(8)), format!("{}two", " ".repeat(8))]);
+    }
+
+    /// What `rows` rows of the focused pane draw, char by char in their
+    /// colours, as a frame chooses its drawer: by rows, or a row a line.
+    fn shown(app: &mut App, rows: usize) -> Vec<Vec<(char, glyphon::Color)>> {
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        let state = *app.pane_state(pane);
+        let display = app.pane_display_lines(pane, buffer);
+        let base = state.rendered_scroll.floor().max(0.0) as usize;
+        let line = app.open().buffer.line_col(&app.cursor()).0;
+        let layout = app.frame_layout(pane, buffer, &display, base, state.scroll_row, rows, state.scroll_col, line, false);
+        let lines: Vec<usize> = layout.map.text_lines().collect();
+        let (start, end) = (lines.first().copied().unwrap_or(0), lines.last().copied().unwrap_or(0));
+        let highlights = app.syntax_highlights_in_columns(buffer, start, end - start + 1, state.scroll_col, None);
+        let folds = app.code_folds.get(&buffer).cloned().unwrap_or_default();
+        let ob = app.open();
+        let (gutter, tab_stops) = (app.gutter_chars(ob), app.tab_stops_for(buffer));
+        let folds_active = display.len() != ob.buffer.line_count();
+        let spans = if app.row_cols(pane, buffer).is_some() {
+            app.row_content_spans(ob, &layout.map, rows, gutter, &highlights, line, &tab_stops, &folds, &layout.decorated)
+        } else if folds_active {
+            app.folded_content_spans(ob, &display[base.min(display.len())..], rows, gutter, &highlights, line, &tab_stops, state.scroll_col, &folds, &layout.decorated)
+        } else {
+            app.content_spans_decorated(ob, base, rows, gutter, None, &highlights, line, &tab_stops, state.scroll_col, &layout.decorated)
+        };
+        let mut out = vec![Vec::new()];
+        for (text, colour) in spans {
+            for c in text.chars() {
+                if c == '\n' {
+                    out.push(Vec::new());
+                } else {
+                    out.last_mut().unwrap().push((c, colour));
+                }
+            }
+        }
+        out
+    }
+
+    /// Everything a frame works out of the focused pane, by row and cell:
+    /// what's drawn, the overlays, and what each cell is.
+    #[derive(Debug, PartialEq)]
+    struct Frame {
+        shown: Vec<Vec<(char, glyphon::Color)>>,
+        overlays: crate::app::rows::FocusedOverlays,
+        cells: Vec<Option<(usize, usize)>>,
+        scroll: (usize, usize, usize),
+        cursor: (usize, usize),
+    }
+
+    fn frame(app: &mut App, rows: usize) -> Frame {
+        app.ensure_cursor_visible(rows);
+        app.ensure_cursor_visible_horizontally(30);
+        // Settled: a row a line eases there, by rows snaps.
+        let pane = app.focused_pane_id();
+        let settled = app.pane_state(pane).scroll_line as f32;
+        app.pane_state_mut(pane).rendered_scroll = settled;
+        let layout = app.focused_layout(rows);
+        let cells = (0..rows).flat_map(|r| (0..34).map(move |x| (r, x))).map(|(r, x)| layout.map.at(r, x)).collect();
+        let state = *app.pane_state(app.focused_pane_id());
+        Frame { shown: shown(app, rows), overlays: app.focused_overlays_now(rows), cells, scroll: (state.scroll_line, state.scroll_col, app.pane_state(app.focused_pane_id()).cursor.char_idx), cursor: app.line_col() }
+    }
+
+    /// `keys` pressed in a pane a row a line, and again in one going by
+    /// rows at `crate::app::rows::UNBOUNDED` with no rows above its lines: every frame the
+    /// same.
+    fn the_same_both_ways(name: &str, text: &str, setup: &dyn Fn(&mut App), steps: &[&str]) {
+        let mut runs = Vec::new();
+        for forced in [false, true] {
+            let (mut app, _f) = app_on_file(name, text);
+            if app.buffer_wraps(app.focused_buffer_id()) {
+                app.run_cmd("view.toggle_wrap");
+            }
+            app.force_row_path = forced;
+            let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+            assert_eq!(app.row_cols(pane, buffer), forced.then_some(crate::app::rows::UNBOUNDED));
+            app.set_pane_text_cols(pane, 30);
+            setup(&mut app);
+            let mut frames = vec![frame(&mut app, 6)];
+            for keys in steps {
+                app.press_all(keys);
+                frames.push(frame(&mut app, 6));
+            }
+            runs.push(frames);
+        }
+        for (i, (a, b)) in runs[0].iter().zip(&runs[1]).enumerate() {
+            assert_eq!(a, b, "step {i} ({:?})", steps.get(i.wrapping_sub(1)));
+        }
+    }
+
+    #[test]
+    fn by_rows_without_rows_above_a_pane_moves_and_draws_as_a_row_a_line_does() {
+        let long = format!("let x = \"{}\"; // end\n", "é漢\tab".repeat(20));
+        let text = format!("fn main() {{\n\tlet a = 1;\n{long}    if a {{ b(); }}\n}}\n{}", "// more\n".repeat(12));
+        the_same_both_ways("a.rs", &text, &|_| {}, &["j", "j", "$", "0", "4 0 l", "k", "j j j", "g j", "g k", "G", "g g", "v j j l", "Escape", "/ b ( Enter", "w", "%"]);
+    }
+
+    #[test]
+    fn by_rows_without_rows_above_folds_and_extra_lines_draw_as_a_row_a_line_does() {
+        the_same_both_ways("a.rs", FOLDED, &|app| {
+            app.press("j");
+            app.run_cmd("code.toggle_fold");
+        }, &["j", "j", "k", "k", "G"]);
+    }
+
+    #[test]
+    fn a_lens_row_offsets_what_s_below_it_and_changes_nothing_else() {
+        let text = "fn a() {}\nfn b() {}\n\nfn c() { x }\nend\n";
+        let mut frames = Vec::new();
+        for lensed in [false, true] {
+            let (mut app, _f) = app_on_file("a.rs", text);
+            let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+            app.set_pane_text_cols(pane, 30);
+            if lensed {
+                app.set_virtual_rows(buffer, [(1, vec!["▶ Run".to_string()]), (3, vec!["2 references".to_string()])].into());
+                assert_eq!(app.row_cols(pane, buffer), Some(crate::app::rows::UNBOUNDED), "by rows, not wrapped");
+            }
+            app.press_all("j j j w");
+            app.ensure_cursor_visible(8);
+            frames.push((app.line_col(), app.focused_overlays_now(8), (0..8).map(|r| app.focused_layout(8).map.row(r).map(|r| (r.line, r.kind))).collect::<Vec<_>>()));
+        }
+        let (plain, lensed) = (&frames[0], &frames[1]);
+        assert_eq!(plain.0, lensed.0, "the same moves: j by line, lens rows stepped over");
+        assert_eq!(lensed.1.caret, plain.1.caret.map(|(r, c)| (r + 2, c)), "line 3's caret two rows down: below two lens rows");
+        assert_eq!(lensed.2[1], Some((1, crate::app::rows::RowKind::Virtual(0))));
+        assert_eq!(lensed.2[4], Some((3, crate::app::rows::RowKind::Virtual(1))));
+    }
+
+    #[test]
+    fn lens_rows_coming_and_going_keep_the_top_text_row_where_it_was() {
+        let (mut app, _f) = app_on_file("a.rs", &"x\n".repeat(30));
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_pane_text_cols(pane, 30);
+        app.pane_state_mut(pane).scroll_line = 5;
+        app.pane_state_mut(pane).rendered_scroll = 5.0;
+        // A lens appears on the top line: still its text at the top.
+        app.set_virtual_rows(buffer, [(5, vec!["lens".to_string()]), (9, vec!["lens".to_string()])].into());
+        assert_eq!(app.pane_state(pane).scroll_row, 1);
+        assert_eq!(app.focused_layout(3).map.row(0).map(|r| (r.line, r.kind)), Some((5, crate::app::rows::RowKind::Text)));
+        // Scrolled up onto the lens row, then the lenses go: the line's text.
+        app.pane_state_mut(pane).scroll_row = 0;
+        app.set_virtual_rows(buffer, Default::default());
+        assert_eq!(app.pane_state(pane).scroll_row, 0);
+        assert_eq!(app.row_cols(pane, buffer), None, "a row a line again, as in 1.5");
+        assert_eq!(app.pane_state(pane).scroll_line, 5);
     }
 
     #[test]

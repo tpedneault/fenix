@@ -190,12 +190,12 @@ impl App {
         let gutter_px = self.gutter_chars(ob) as f32 * char_width;
         let x = pos.0 - content.x - text::PAD_LEFT - gutter_px;
         let cursor_line = ob.buffer.line_col(&state.cursor).0;
-        if self.wrap_cols(pane, buffer).is_some() {
+        if self.row_cols(pane, buffer).is_some() {
             return self.wrapped_text_hit(pane, buffer, content, row, x);
         }
         // Sticky scroll's headers sit over the top rows, unscrolled.
         let folds_active = lines.len() != ob.buffer.line_count();
-        let sticky = if row >= 0 && !folds_active && ob.kind == BufferKind::Text && ob.syntax.is_some() && self.wrap_cols(pane, buffer).is_none() {
+        let sticky = if row >= 0 && !folds_active && ob.kind == BufferKind::Text && ob.syntax.is_some() && self.row_cols(pane, buffer).is_none() {
             let cursor_row = lines.iter().position(|&l| l == cursor_line).and_then(|r| r.checked_sub(base));
             self.sticky_headers(buffer, base, cursor_row)
         } else {

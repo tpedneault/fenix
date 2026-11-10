@@ -346,6 +346,9 @@ impl App {
     /// focused pane's, when it's text and wraps, else a row a line.
     pub(super) fn sync_screen_rows(&mut self) {
         let (pane, buffer) = (self.focused_pane_id(), self.focused_buffer_id());
+        // Only wrapping gives a line more than one row of text; a pane by
+        // rows at `UNBOUNDED` (rows above its lines that aren't text) moves
+        // by lines exactly as 1.5 did.
         let wrap = (self.main_view == MainView::Editor && !self.terminal_focused && !self.sidebar_focused).then(|| self.wrap_cols(pane, buffer)).flatten();
         let rows: std::sync::Arc<dyn fenix_vim::ScreenRows> = match wrap {
             Some(width) => {
@@ -367,9 +370,10 @@ impl App {
         self.vim.set_screen_rows(rows);
     }
 
-    /// `pane`'s rows to walk, when it shows `buffer` wrapped.
+    /// `pane`'s rows to walk, when it shows `buffer` by rows (wrapped,
+    /// or with rows that aren't text).
     pub(super) fn row_walk(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Option<RowWalk<'_>> {
-        let width = self.wrap_cols(pane, buffer)?;
+        let width = self.row_cols(pane, buffer)?;
         let ob = self.buffers.get(buffer)?;
         let cursor_line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
         Some(RowWalk { app: self, buffer, lines: self.pane_display_lines(pane, buffer), width, cursor_line, rows: HashMap::new() })
