@@ -159,7 +159,9 @@ impl App {
             self.set_error("no language server running here finds the project's symbols");
             return;
         }
-        self.symbol_search = SymbolSearch::default();
+        // The question count goes on from the last time, so a late answer
+        // to an earlier picker's question is never taken for this one's.
+        self.symbol_search = SymbolSearch { generation: self.symbol_search.generation, ..SymbolSearch::default() };
         self.enter_picker(ActivePicker::ProjectSymbols(fenix_picker::PickerState::new(Vec::new())));
         self.ask_project_symbols();
     }

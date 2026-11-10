@@ -103,7 +103,9 @@ pub struct Http;
 
 impl Fetch for Http {
     fn get(&self, url: &str, limit: u64) -> Result<Vec<u8>, String> {
-        let response = ureq::get(url).timeout(std::time::Duration::from_secs(30)).call().map_err(|e| format!("{url}: {e}"))?;
+        // Fenix and its version, nothing more: GitHub's API wants a
+        // User-Agent, and this one says no more than that.
+        let response = ureq::get(url).set("User-Agent", concat!("fenix/", env!("CARGO_PKG_VERSION"))).timeout(std::time::Duration::from_secs(30)).call().map_err(|e| format!("{url}: {e}"))?;
         let mut bytes = Vec::new();
         response.into_reader().take(limit + 1).read_to_end(&mut bytes).map_err(|e| format!("{url}: {e}"))?;
         if bytes.len() as u64 > limit {
