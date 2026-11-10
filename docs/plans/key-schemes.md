@@ -880,10 +880,19 @@ Where the implementation differs from the plan above, and why:
 - **`when`'s list** is `anywhere`, `text`, `typing`, `not_typing`, `page`,
   `terminal`: `editor` (§3.1) became `text`, and `not_typing` was needed
   for Vim's Ctrl+O and Ctrl+I, which Insert keeps for its own.
-- **Extra cursors aren't mapped through an outside edit** (§4.2a): an edit
-  made elsewhere -- a language server's, an agent's, a reload, an undo --
-  goes back to one cursor. Mapping them would have meant draining the
-  buffer's anchor edits, which extensions' decorations already drain.
+- **Extra cursors are mapped through an outside edit** (§4.2a), since
+  after 1.5's first cut, which went back to one cursor: mapping them
+  would have meant draining the buffer's anchor edits, which extensions'
+  decorations already drain. `Buffer` keeps a fourth record instead,
+  read without draining: the last 4,096 edits as positions and lengths
+  (`edits_since`, `map_since`), with a count of edits logged that each
+  pane's carets remember. They follow what's happened since at each key,
+  window event and frame; a caret in deleted text goes to the edit's
+  start, carets that meet are one, and edits too many to have been kept
+  go back to one cursor. Undo and redo keep the carets now (a step typed
+  at every caret still brings back its own). A reload replaces only the
+  part of the file that changed, so carets -- and decorations -- in the
+  rest stay put.
 - **Keyboard cursors** (§2.6's follow-up) are built: `Ctrl+D` selects
   the word, then adds the next occurrence (the newest is the primary, so
   the view follows it); `Ctrl+Shift+L` every occurrence;

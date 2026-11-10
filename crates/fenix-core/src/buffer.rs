@@ -25,6 +25,46 @@ pub struct EditDelta {
 /// How many edits `take_changes` keeps before giving up on them.
 const MAX_LOGGED_CHANGES: usize = 2048;
 
+/// How many edits `edits_since` keeps, for positions mapped through
+/// them later.
+const MAX_KEPT_EDITS: usize = 4096;
+
+/// An edit, as a position moves by it: `removed` chars at `start` gave
+/// way to the text up to `new_end`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptEdit {
+    pub start: usize,
+    pub removed: usize,
+    pub new_end: usize,
+}
+
+impl KeptEdit {
+    /// Where a position before this edit is after it: one before the
+    /// edit stays, one after it moves with the text, and one in what was
+    /// removed goes to the edit's start.
+    pub fn map(&self, at: usize) -> usize {
+        if at <= self.start {
+            at
+        } else if at >= self.start + self.removed {
+            at - self.removed + (self.new_end - self.start)
+        } else {
+            self.start
+        }
+    }
+}
+
+/// The span of `old` that `new` differs in: `(chars both start with,
+/// where the difference ends in old, in chars, the new text there)` --
+/// what replacing `old` with `new` needs to change, and no more.
+pub fn changed_span<'a>(old: &str, new: &'a str) -> (usize, usize, &'a str) {
+    let prefix_bytes: usize = old.chars().zip(new.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a.len_utf8()).sum();
+    let (old_rest, new_rest) = (&old[prefix_bytes..], &new[prefix_bytes..]);
+    let suffix_bytes: usize = old_rest.chars().rev().zip(new_rest.chars().rev()).take_while(|(a, b)| a == b).map(|(a, _)| a.len_utf8()).sum();
+    let prefix = old[..prefix_bytes].chars().count();
+    let old_end = prefix + old_rest[..old_rest.len() - suffix_bytes].chars().count();
+    (prefix, old_end, &new_rest[..new_rest.len() - suffix_bytes])
+}
+
 /// A single undoable change: replaces `removed` with `inserted` at `at`.
 /// Applying it forward performs the edit; applying its inverse reverses it.
 struct Edit {
@@ -105,6 +145,11 @@ pub struct Buffer {
     /// asks (`track_anchors`), so a buffer nothing is anchored in keeps
     /// nothing.
     anchor_edits: Option<Vec<EditDelta>>,
+    /// The last `MAX_KEPT_EDITS` edits, kept without anyone draining them,
+    /// for positions that follow the text (extra cursors), and how many
+    /// edits there have been in all.
+    kept_edits: std::collections::VecDeque<KeptEdit>,
+    edits_logged: u64,
     /// Monotonically increasing on every real content mutation (insert,
     /// delete, undo, redo) -- unlike `dirty` (which only ever flips
     /// false-to-true once, until the next save), this changes on *every*
@@ -131,6 +176,8 @@ impl Buffer {
             change_log: Vec::new(),
             changes_overflowed: false,
             anchor_edits: None,
+            kept_edits: std::collections::VecDeque::new(),
+            edits_logged: 0,
             edit_count: 0,
         }
     }
@@ -156,6 +203,8 @@ impl Buffer {
             change_log: Vec::new(),
             changes_overflowed: false,
             anchor_edits: None,
+            kept_edits: std::collections::VecDeque::new(),
+            edits_logged: 0,
             edit_count: 0,
         }
     }
@@ -184,6 +233,8 @@ impl Buffer {
             change_log: Vec::new(),
             changes_overflowed: false,
             anchor_edits: None,
+            kept_edits: std::collections::VecDeque::new(),
+            edits_logged: 0,
             edit_count: 0,
         })
     }
@@ -345,10 +396,35 @@ impl Buffer {
             self.change_log.clear();
             self.changes_overflowed = true;
         }
+        if self.kept_edits.len() == MAX_KEPT_EDITS {
+            self.kept_edits.pop_front();
+        }
+        self.kept_edits.push_back(KeptEdit { start: start_char, removed: removed.chars().count(), new_end: new_end_char });
+        self.edits_logged += 1;
         if let Some(anchors) = &mut self.anchor_edits {
             anchors.push(EditDelta { start_char, new_end_char, removed: removed.clone() });
         }
         self.pending_syntax_edits.push(EditDelta { start_char, new_end_char, removed });
+    }
+
+    /// How many edits there have been: what `edits_since` counts from.
+    pub fn edits_logged(&self) -> u64 {
+        self.edits_logged
+    }
+
+    /// The edits since `edits_logged` was `logged`, in order -- `None`
+    /// when some of them aren't kept any more, or `logged` is from the
+    /// future.
+    pub fn edits_since(&self, logged: u64) -> Option<impl Iterator<Item = &KeptEdit>> {
+        let since = self.edits_logged.checked_sub(logged)?;
+        let since = usize::try_from(since).ok().filter(|n| *n <= self.kept_edits.len())?;
+        Some(self.kept_edits.iter().skip(self.kept_edits.len() - since))
+    }
+
+    /// `at`, as of `edits_logged` being `logged`, where it is now: `None`
+    /// when the edits between aren't all kept.
+    pub fn map_since(&self, logged: u64, at: usize) -> Option<usize> {
+        Some(self.edits_since(logged)?.fold(at, |at, edit| edit.map(at)).min(self.len_chars()))
     }
 
     /// From now on, keeps every edit for `take_anchor_edits` as well.
@@ -893,6 +969,69 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_position_follows_the_edits_since_and_falls_back_when_they_re_gone() {
+        let mut b = Buffer::from_text("hello world");
+        let logged = b.edits_logged();
+        let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+        b.insert_str(&mut c, ">> ");
+        assert_eq!(b.map_since(logged, 6), Some(9), "after an insertion before it");
+        let mut c = Cursor { char_idx: 9, sticky_col: 0 };
+        b.delete_range(&mut c, 3, 9);
+        assert_eq!(b.map_since(logged, 6), Some(3), "in what was deleted: its start");
+        assert_eq!(b.map_since(logged, 0), Some(0));
+        let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+        b.undo(&mut c);
+        b.undo(&mut c);
+        assert_eq!(b.text(), "hello world");
+        assert_eq!(b.map_since(logged, 6), Some(0), "undo puts the text back, not the position: it was deleted, then the >> before it went");
+        assert_eq!(b.map_since(logged + 1000, 6), None, "a count from the future");
+        let old = b.edits_logged();
+        for _ in 0..MAX_KEPT_EDITS + 1 {
+            let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+            b.insert_char(&mut c, 'x');
+        }
+        assert_eq!(b.map_since(old, 1), None, "too long ago");
+        assert!(b.map_since(b.edits_logged() - 1, 1).is_some());
+    }
+
+    #[test]
+    fn following_edits_takes_nothing_from_the_other_readers() {
+        let mut b = Buffer::from_text("abc");
+        b.track_anchors();
+        let logged = b.edits_logged();
+        let mut c = Cursor { char_idx: 0, sticky_col: 0 };
+        b.insert_char(&mut c, 'x');
+        assert_eq!(b.map_since(logged, 1), Some(2));
+        assert_eq!(b.map_since(logged, 1), Some(2), "asked again: the same");
+        assert_eq!(b.take_anchor_edits().len(), 1, "decorations still get theirs");
+        assert_eq!(b.drain_edits().len(), 1, "and the syntax tree its");
+        assert_eq!(b.map_since(logged, 1), Some(2), "after they've drained");
+    }
+
+    #[test]
+    fn an_edit_maps_positions_before_after_and_inside_it() {
+        let e = KeptEdit { start: 5, removed: 3, new_end: 6 };
+        assert_eq!(e.map(4), 4);
+        assert_eq!(e.map(5), 5, "at its start: stays");
+        assert_eq!(e.map(6), 5, "inside what went");
+        assert_eq!(e.map(8), 6, "just after: moved by the difference");
+        assert_eq!(e.map(20), 18);
+        let insert = KeptEdit { start: 2, removed: 0, new_end: 4 };
+        assert_eq!(insert.map(2), 2, "an insertion at a position: it stays before the new text");
+        assert_eq!(insert.map(3), 5);
+    }
+
+    #[test]
+    fn the_changed_span_is_only_what_differs() {
+        assert_eq!(changed_span("abcdef", "abXYef"), (2, 4, "XY"));
+        assert_eq!(changed_span("same", "same"), (4, 4, ""));
+        assert_eq!(changed_span("", "new"), (0, 0, "new"));
+        assert_eq!(changed_span("old", ""), (0, 3, ""));
+        assert_eq!(changed_span("aaa", "aa"), (2, 3, ""), "prefix first; the suffix never overlaps it");
+        assert_eq!(changed_span("été x été", "été y été"), (4, 5, "y"), "in chars");
+    }
 
     #[test]
     fn positions_past_the_end_clamp_instead_of_panicking() {

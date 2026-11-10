@@ -104,6 +104,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Extra cursors stay through an edit made elsewhere -- a language
+  server's, an agent's, the file reloaded, an undo or redo -- moving
+  with the text, where they went back to one cursor. One whose text was
+  deleted goes to where it was. A reload replaces only what changed in
+  the file, so cursors and an extension's decorations in the rest stay
+  where they were.
 - The overview ruler down a code pane's right edge marks extra cursors
   and information-level problems too, and a click on (or near) a mark
   goes to that line exactly. It's still on by default, as it has been

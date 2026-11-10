@@ -12915,8 +12915,14 @@ impl App {
             .map(|state| ob.buffer.line_col(&Cursor { char_idx: state.cursor.char_idx.min(old_len), sticky_col: 0 }).0)
             .collect();
 
+        // Only what changed is replaced, so what's anchored in the rest
+        // (extra cursors, an extension's decorations) stays where it was.
+        let old_text = ob.buffer.text();
+        let (from, to, middle) = fenix_core::changed_span(&old_text, on_disk);
         let mut scratch = Cursor::at_start();
-        ob.buffer.replace_range(&mut scratch, 0, old_len, on_disk);
+        if from != to || !middle.is_empty() {
+            ob.buffer.replace_range(&mut scratch, from, to, middle);
+        }
         // A reload isn't user work: leaving it dirty would make every
         // touched file look unsaved and block `:qa`.
         ob.buffer.mark_saved();
@@ -16328,6 +16334,8 @@ impl App {
     /// `repeat_last_change` -> `route_keypress` directly, same as a
     /// macro, so its own replayed keys never re-enter this tap.
     fn dispatch_keypress(&mut self, keypress: KeyPress, event_loop: Option<&ActiveEventLoop>) {
+        // Extra cursors follow whatever edited their text since.
+        self.follow_outside_edits();
         self.sync_key_policy();
         self.settle_keys();
         self.note_typing_pause(Instant::now());
@@ -16349,6 +16357,8 @@ impl App {
         let before = self.motion_before_key();
         let carets_before = self.caret_mark();
         self.route_keypress(keypress, event_loop);
+        // And whatever the key itself did that wasn't theirs (an undo).
+        self.follow_outside_edits();
         self.motion_after_key(before, keypress);
         self.note_caret_move(carets_before);
         // Standard keys: back into Insert (or out of it) for where the key
@@ -19908,6 +19918,7 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        self.follow_outside_edits();
         // Every pane's strip starts with the workspace's Home.
         self.ensure_workspace_home();
         // A pane that left the agents' dock gets its tabs back.
@@ -22553,6 +22564,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        self.follow_outside_edits();
         let _busy = crate::watchdog::enter(match &event {
             WindowEvent::RedrawRequested => "redraw",
             WindowEvent::KeyboardInput { .. } | WindowEvent::ModifiersChanged(_) | WindowEvent::Ime(_) => "a key",
