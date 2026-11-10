@@ -29,11 +29,12 @@ pub mod fanout;
 pub mod per_language;
 mod position;
 pub mod pull;
+pub mod semantic;
 mod sync;
 mod uri;
 
 pub use client::{LspClient, LspEvent};
 pub use envelope::{server_request_reply, ResponseError};
 pub use position::{char_offset_to_position, position_to_char_offset};
-pub use sync::{change_event, wants_incremental};
+pub use sync::{change_event, changed_span, wants_incremental};
 pub use uri::{normalize, path_to_uri, uri_to_path};
