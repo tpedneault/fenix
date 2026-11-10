@@ -7,7 +7,8 @@
   schemes. Fenix offers its own "▶ Run test" where the server gives none.
 - **Lands as:** the stages in §4. Each compiles and passes. With
   `lsp.code_lens` off, or a file with no lenses, every pane behaves
-  exactly as in 1.5.
+  exactly as in 1.5. `lsp.code_lens` is **off by default** for now; see
+  "Why off" in §3.
 
 ## 1. What it is
 
@@ -36,8 +37,8 @@
     list; rust-analyzer's `runSingle` and `debugSingle` run in Task
     Output or start the debugger.
   - Anything else says plainly that Fenix can't run it.
-- `lsp.code_lens` (on) turns it all off. `lsp.code_lens_off` lists
-  languages left out.
+- `lsp.code_lens` (off for now) turns it all on. `lsp.code_lens_off`
+  lists languages left out.
 
 ## 2. Where Fenix stands
 
@@ -91,8 +92,35 @@ width:
   has lenses:
   - the view snaps a row at a time instead of easing;
   - sticky headers are off.
-  Both are what a wrapped pane does today. Lifting either is follow-up
-  work, not this issue.
+  Both are what a wrapped pane does today. rust-analyzer, tsserver and
+  clangd send lenses for nearly every source file. With lenses on by
+  default, almost every code buffer would lose both, compared with 1.5.
+  That's why `lsp.code_lens` is off by default until "Easing and sticky
+  headers in the row path" (§4, stage 6) lands.
+- **Everything else as in 1.5.** A buffer with lenses and wrap off keeps
+  1.5's behaviour for:
+  - motion: `j`/`k` by line, and `gj`/`gk` the same as `j`/`k`;
+  - hit-testing;
+  - sideways scroll;
+  - selections;
+  - overlays: the caret, extra carets, brackets, search, problems,
+    tokens and decorations.
+  Only rows are offset, by the lens rows above. **How it's checked:** a
+  test seam (`App::force_row_path`) sends a pane down the row path with
+  no virtual rows at all. Its tests run the existing unwrapped-pane
+  scenarios both ways (moves, clicks and drags, sideways scroll past a
+  long line, Visual selections, search highlights, problems, folds, tabs
+  and wide chars) and assert the same results. Then the same scenarios
+  run with a lens row on some lines, asserting the same results apart
+  from those rows' offset.
+- **Lens rows going away.** The server stops, restarts, or answers with
+  no lenses, or the setting is turned off. The rows go, and the view
+  keeps its top text row where it was: a top inside the rows above a
+  line (`scroll_row < above`) moves to the line's first text row (row
+  0), and `scroll_row` drops by the rows removed. A pane left with no
+  virtual rows leaves the row path with `scroll_line` unchanged. The
+  same holds when rows appear: the top text row doesn't move, and the
+  new rows go above it, out of view, until scrolled to.
 - **Vim's motions by row** (`PaneRows`) get the same width, so `gj`/`gk`
   in such a pane are `j`/`k` with the lens rows stepped over.
   `PageUp`/`PageDown` go by rows.
@@ -161,14 +189,16 @@ that line. `lsp.code_lens_tests` (on) turns these off on their own.
 
 | | Default | |
 |---|---|---|
-| `lsp.code_lens` | on | Lenses from language servers, and Fenix's own. Off: none asked or drawn, and every pane as in 1.5. |
+| `lsp.code_lens` | off | Lenses from language servers, and Fenix's own. Off: none asked or drawn, and every pane as in 1.5. |
 | `lsp.code_lens_off` | none | Languages left out. |
 | `lsp.code_lens_tests` | on | Fenix's "▶ Run test" lenses. |
 | `SPC c l` (`code.lens`) | | The cursor line's lenses: one runs, several list. |
 
-**Why on:** a lens row is what the issue asks for and what other
-editors show. The cost is a row above some lines in files whose servers
-give lenses, plus a snapping view there. Turning it off is one setting.
+**Why off, for now:** most code files would get lenses. In the row path
+their panes snap and lose sticky headers, so lenses on by default would
+take eased scrolling and sticky headers away from almost every code
+buffer. They default on once stage 6 keeps both. Until then they're
+there for anyone who wants them.
 
 ### Not done
 
@@ -204,6 +234,17 @@ give lenses, plus a snapping view there. Turning it off is one setting.
    "can't run" message.
 5. **Fenix's own test lenses**, a measurement on a large file,
    CHANGELOG, FEATURES, KEYBINDINGS and "As built".
+6. **Easing and sticky headers in the row path**, before the default
+   turns on. In a pane that doesn't wrap, every line has exactly one
+   text row plus its lens rows.
+   - `rendered_scroll` becomes a fractional offset over rows there,
+     eased as lines are now. The absolute row of a line is its index
+     plus the lens rows above it, counted from `virtual_rows`' `BTreeMap`.
+   - Sticky headers are worked out from the top text row's line, as
+     today.
+   - Tests check that a lensed unwrapped pane eases and shows sticky
+     headers the same as an unlensed one.
+   - Then `lsp.code_lens` defaults on. Wrapped panes keep snapping.
 
 ## 5. As built
 
