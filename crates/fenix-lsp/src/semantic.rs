@@ -528,6 +528,29 @@ mod tests {
         assert!(within(&[], 0, 1).is_empty());
     }
 
+    /// How long a large answer takes to read (`--ignored --nocapture`,
+    /// in a release build): a million lines of five tokens each.
+    #[test]
+    #[ignore]
+    fn measure_decoding_a_million_lines() {
+        let text = "fn name(arg: Type) -> Out { body() }\n".repeat(1_000_000);
+        let line = [tok(1, 3, 4, 0, 0), tok(0, 5, 3, 1, 0), tok(0, 5, 4, 0, 0), tok(0, 9, 3, 0, 0), tok(0, 6, 4, 1, 0)];
+        let mut data: Vec<SemanticToken> = line.iter().cycle().take(5_000_000).copied().collect();
+        data[0].delta_line = 0;
+        let s = styles();
+        let started = std::time::Instant::now();
+        let got = decode(&data, &text, &s);
+        let decoded = started.elapsed();
+        let started = std::time::Instant::now();
+        let mut shifted = got.clone();
+        shift(&mut shifted, 1000, 1001, 1003);
+        let moved = started.elapsed();
+        let started = std::time::Instant::now();
+        let n: usize = (0..1000).map(|i| within(&got, i * 37_000, i * 37_000 + 6000).len()).sum();
+        let looked = started.elapsed();
+        println!("decoded {} tokens in {decoded:?}; shifted in {moved:?}; 1000 window lookups ({n} tokens) in {looked:?}", got.len());
+    }
+
     #[test]
     fn changed_span_is_the_one_replaced_range() {
         assert_eq!(crate::changed_span("let x = 1;", "let xy = 1;"), (5, 5, 6));

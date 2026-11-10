@@ -183,6 +183,23 @@ its extension. The rest is built into Fenix.
   between a syntax capture and the glyph it becomes, several of them
   shared by every other language's own highlighting, for a purely
   cosmetic gain on one language -- more risk than the result was worth.
+- **Colours from language servers** (semantic highlighting,
+  `lsp.semantic_highlighting`, on): where a file's language server
+  offers semantic tokens, code is coloured by what it knows, over the
+  grammar's colours. That tells apart a parameter from a local, a macro
+  from a function, an interface or trait from a type, and a constant
+  from a variable; a mutable name is underlined. The grammar colours a
+  file at once and the server's colours land on top when they arrive.
+  While you type, the colours move with the edit until the server
+  answers again, about a quarter of a second after you pause. Comments
+  and strings keep the grammar's colours.
+  - Only the first of a file's servers that offers tokens is asked.
+  - A file over 10 000 lines is asked only for the lines in view, when
+    its server answers that way.
+  - Themes may name `syntax.interface`, `syntax.parameter` and
+    `syntax.macro`; every built-in theme does.
+  - `lsp.semantic_highlighting_off` lists languages that keep the
+    grammar's colours alone.
 - **Bracket pairs by colour** (`appearance.rainbow_brackets`, off
   unless you turn it on): each `()`, `[]` and `{}` coloured by how deeply
   it's nested, a pair the same colour. They're the code's own brackets,

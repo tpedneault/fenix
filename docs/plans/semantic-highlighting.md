@@ -1,6 +1,6 @@
 # Plan: semantic highlighting
 
-- **Status:** stages 1 to 3 built, for the release after 1.5 (issue #105); see §5.
+- **Status:** built, for the release after 1.5 (issue #105); see §5.
 - **Scope:** code coloured by what its language server knows
   (`textDocument/semanticTokens`), on top of tree-sitter's colours:
   a parameter apart from a local, a macro apart from a function, an
@@ -344,3 +344,43 @@ per-language list covers a server whose tokens are poor.
   colour at 0.8 alpha.
 - **Stage 2's tests changed.** A macro token is now drawn in the macro
   colour, not the function colour.
+
+### Stage 4
+
+- **Delta.** `full/delta` is asked once a whole-document answer gave a
+  `resultId`. The answer's raw array and id (`SemanticDoc::data`,
+  `result_id`) are kept as the server's last answer even when its text
+  has since moved on; only decoding waits for text that matches.
+  - A delta that doesn't apply (edits off a token boundary, past the
+    end, or overlapping) clears the id, and the whole document is asked
+    again.
+  - An error on a delta does the same after the pause.
+  - A delta answered with whole tokens is taken as a whole answer.
+- **Range.** A document is asked by range when its server offers range
+  and either it has more than 10 000 lines or 1 MiB, or the server
+  offers no full. `with_semantic_tokens` notes the lines its windows
+  show (`note_semantic_view`). When they aren't all covered, the next
+  ask is for them with 100 lines of margin, made due at once. A range
+  answer replaces the tokens and records the lines it covers. One
+  refused with an error counts as covered, so it isn't asked again
+  every frame. Edits don't move `covered`; the ask after the pause uses
+  the last lines in view.
+- **No range and over 50 000 lines:** not asked, and no wake is set.
+- **Wake.** `semantic_wake` gives the next due time, or now for one
+  already due (a draw just made it due). `ask` clears `due` on every
+  path that doesn't send, so a due that can't be sent doesn't keep
+  waking the loop.
+- **Measured** (`measure_decoding_a_million_lines` in `fenix-lsp`,
+  ignored; run with `--release -- --ignored --nocapture`), on 1M lines
+  with 5M tokens:
+  - decode: 158 ms;
+  - moving all tokens through one edit: 86 ms;
+  - 1000 window lookups: 1.8 ms.
+  The whole-document path stops at 50 000 lines (about 250 000 tokens),
+  so an edit there moves tokens in about 4 ms. A larger document is
+  asked by range and holds only what's in view. Moving tokens is still
+  O(tokens) per edit; a tree or gap structure would fix that if it
+  shows up.
+- **Not done:**
+  - partial results;
+  - the theme colours picked by hand rather than by rule.

@@ -1384,9 +1384,9 @@ enum PendingLspRequest {
     Completion { buffer: BufferId, prefix_start: usize, generation: u64 },
     /// `textDocument/diagnostic` for the document at `path` (canonical).
     PullDiagnostics { path: PathBuf },
-    /// `textDocument/semanticTokens/full` for `path` (canonical) as it
-    /// was at `edit_count`.
-    SemanticTokens { path: PathBuf, edit_count: u64 },
+    /// `textDocument/semanticTokens/*` for `path` (canonical) as it was
+    /// at `edit_count`: the whole of it, a delta or a range (`how`).
+    SemanticTokens { path: PathBuf, edit_count: u64, how: semantic::SemanticAsk },
     /// `workspace/symbol`, for the project's procs a Tcl call is colored
     /// by (`App::known_commands`).
     WorkspaceNames,
@@ -7665,7 +7665,7 @@ impl App {
                     self.wake_caret();
                 }
             }
-            PendingLspRequest::SemanticTokens { path, edit_count } => self.semantic_tokens_answered(&key, path, edit_count, result),
+            PendingLspRequest::SemanticTokens { path, edit_count, how } => self.semantic_tokens_answered(&key, path, edit_count, how, result),
             PendingLspRequest::PullDiagnostics { path } => {
                 let name = self.lsp_server_name(&key);
                 let read = result.map_err(|e| (e.code, e.data)).and_then(|value| fenix_lsp::pull::report(value).map_err(|_| (0, None)));
@@ -36638,6 +36638,70 @@ name = \"orbit\"
         let out = app.polish_pane(&view, &mut spans, Instant::now());
         let rows: Vec<usize> = out.underlines.iter().map(|&(row, _, _, _)| row).collect();
         assert_eq!(rows, vec![1, 2], "{:?}", out.underlines);
+    }
+
+    #[test]
+    fn a_semantic_delta_is_asked_on_the_last_answer_and_one_that_doesn_t_fit_asks_the_whole_again() {
+        let dir = TempDir::new("semantic_delta");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "fn main() { let x = 1; }\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function", "macro"], "tokenModifiers": []}, "full": {"delta": true}}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        let (id, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Full, .. }), "the first is whole");
+        answer(&mut app, &key, id, serde_json::json!({"resultId": "1", "data": MAIN_AND_X}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro));
+        // Asked again: a delta on "1", turning `x` into a function.
+        app.refresh_semantic_tokens(&key);
+        app.ask_due_semantic_tokens();
+        let (id, pending) = only_pending(&app, &key);
+        assert!(matches!(pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Delta, .. }), "{pending:?}");
+        answer(&mut app, &key, id, serde_json::json!({"resultId": "2", "edits": [{"start": 5, "deleteCount": 5, "data": [0, 13, 1, 0, 0]}]}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_function), "the delta applied to what was kept");
+        // A delta off a token's boundary: the whole document asked again.
+        app.refresh_semantic_tokens(&key);
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        answer(&mut app, &key, id, serde_json::json!({"resultId": "3", "edits": [{"start": 3, "deleteCount": 0, "data": []}]}));
+        app.ask_due_semantic_tokens();
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Full, .. }));
+    }
+
+    #[test]
+    fn a_large_document_s_semantic_tokens_are_asked_for_the_lines_in_view_and_too_large_a_one_not_at_all() {
+        let dir = TempDir::new("semantic_range");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", &"fn main() { let x = 1; }\n".repeat(12_000));
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["function", "macro"], "tokenModifiers": []}, "full": true, "range": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].pending.is_empty(), "nothing in view yet");
+        let id = app.focused_buffer_id();
+        let _ = app.syntax_highlights_for_visible_range(id, 0, 1);
+        app.ask_due_semantic_tokens();
+        let (req, pending) = only_pending(&app, &key);
+        assert!(matches!(&pending, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } if *lines == (0..101)), "{pending:?}");
+        answer(&mut app, &key, req, serde_json::json!({"data": MAIN_AND_X}));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro));
+        // Further down, past what's covered: those lines asked.
+        let _ = app.syntax_highlights_for_visible_range(id, 5000, 10);
+        app.ask_due_semantic_tokens();
+        assert!(matches!(only_pending(&app, &key).1, PendingLspRequest::SemanticTokens { how: semantic::SemanticAsk::Range(lines), .. } if lines == (4900..5110)));
+
+        // Sixty thousand lines and a server that answers only for the
+        // whole: not asked.
+        let path = dir.write("big.rs", &"x\n".repeat(60_000));
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], semantic_capabilities());
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].pending.is_empty());
+        assert_eq!(app.semantic_wake(Instant::now()), None, "and not woken for");
     }
 
     #[test]
