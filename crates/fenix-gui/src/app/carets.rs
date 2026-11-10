@@ -119,7 +119,8 @@ impl App {
             return;
         }
         // Each pane's own cursor, which an extra one must never sit on.
-        let primaries: HashMap<fenix_window::WindowId, usize> = self.workspaces.active_pane_states().iter().map(|(p, s)| (*p, s.cursor.char_idx)).collect();
+        // Every workspace's: a pane parked in another keeps its carets too.
+        let primaries: HashMap<fenix_window::WindowId, usize> = self.workspaces.workspaces.iter().flat_map(|w| w.pane_states.iter()).map(|(p, s)| (*p, s.cursor.char_idx)).collect();
         let mut gone = Vec::new();
         for (pane, carets) in &mut self.carets {
             let Some(ob) = carets.buffer.and_then(|id| self.buffers.get(id)) else {
@@ -974,5 +975,84 @@ mod tests {
         app.press("x");
         assert!(app.extra_carets().is_empty());
         assert_eq!(app.text(), "\nb\n", "x is Vim's");
+    }
+
+    /// SPC c F, as the command runs it: the extras in lines it leaves
+    /// alone stay, the main cursor stays on its line at its column, and
+    /// undo and redo are one step each.
+    #[test]
+    fn a_reindent_of_the_file_keeps_the_main_cursor_on_its_line_and_the_extras_elsewhere() {
+        let (mut app, _f) = app_on_file("a.txt", "f {\na\n  bbbb\nc\n}\nzz\n");
+        standard(&mut app);
+        let z = app.text().find("zz").unwrap() + 1;
+        app.toggle_caret_at(z);
+        let b = app.text().find("bbbb").unwrap() + 1;
+        app.focused_buffer_and_cursor_mut().1.char_idx = b;
+        app.format_buffer();
+        app.follow_outside_edits();
+        assert_eq!(app.text(), "f {\n    a\n    bbbb\n    c\n}\nzz\n");
+        assert_eq!(app.open().buffer.line_col(&app.cursor()), (2, 3), "the same line, the same column");
+        let z = app.text().find("zz").unwrap() + 1;
+        assert_eq!(app.extra_carets().iter().map(|c| c.at).collect::<Vec<_>>(), [z], "its line wasn't touched");
+        app.press("C-z");
+        assert_eq!(app.text(), "f {\na\n  bbbb\nc\n}\nzz\n", "one undo");
+        app.press("C-y");
+        assert_eq!(app.text(), "f {\n    a\n    bbbb\n    c\n}\nzz\n", "one redo");
+    }
+
+    /// The text comes out exactly, whatever ends its lines, and one undo
+    /// gives back exactly what was there.
+    #[test]
+    fn replacing_by_lines_is_exact_with_any_line_ending() {
+        let cases = [
+            ("a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\n"),
+            ("a\nb\nc\n", "a\r\nb\r\nc\r\n"),
+            ("a\rb\rc", "a\rB\rc"),
+            ("a\nb\rc\r\nd", "a\nX\rc\r\nd\n"),
+            ("a\nb", "a\nb\nc"),
+            ("a\nb\n", ""),
+            ("", "x\ny"),
+        ];
+        for (old, new) in cases {
+            let mut buffer = fenix_core::Buffer::from_text(old);
+            let mut cursor = Cursor::at_start();
+            super::super::replace_text_by_lines(&mut buffer, &mut cursor, new);
+            assert_eq!(buffer.text(), new, "{old:?} -> {new:?}");
+            assert!(cursor.char_idx <= buffer.len_chars());
+            buffer.undo(&mut cursor);
+            assert_eq!(buffer.text(), old, "undone: {old:?}");
+        }
+    }
+
+    /// Replacements in several places with text of more than one byte a
+    /// char leave the syntax tree as a fresh parse would have it -- there,
+    /// and after undo.
+    #[test]
+    fn a_replace_in_many_places_leaves_the_syntax_tree_as_a_fresh_parse() {
+        let old: String = (0..60).map(|i| if i % 3 == 0 { format!("let naïve_{i} = \"été\"; // ü\n") } else { format!("fn f{i}() {{ g({i}) }}\n") }).collect();
+        let new = old.replace("naïve", "naive").replace("été", "ete");
+        let (mut app, _f) = app_on_file("a.rs", &old);
+        let id = app.focused_buffer_id();
+        let fresh = |source: &str| {
+            let state = fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Rust, source);
+            (state.highlights_in_range(source, 0..source.len()).into_iter().map(|(r, n)| (r, n.to_string())).collect::<Vec<_>>(), state.scope_ranges())
+        };
+        let incremental = |app: &mut App| {
+            let ob = app.buffers.get_mut(id).unwrap();
+            let edits: Vec<fenix_syntax::RawEdit> = ob.buffer.drain_edits().into_iter().map(|d| fenix_syntax::RawEdit { start_char: d.start_char, new_end_char: d.new_end_char, removed: d.removed }).collect();
+            assert!(edits.len() <= 1, "one edit for the tree: {}", edits.len());
+            let source = ob.buffer.text();
+            let syntax = ob.syntax.as_mut().expect("a Rust file has a tree");
+            syntax.apply_edits(&source, &edits);
+            (syntax.highlights_in_range(&source, 0..source.len()).into_iter().map(|(r, n)| (r, n.to_string())).collect::<Vec<_>>(), syntax.scope_ranges())
+        };
+        incremental(&mut app);
+        let (buffer, cursor) = app.focused_buffer_and_cursor_mut();
+        super::super::replace_text_by_lines(buffer, cursor, &new);
+        assert_eq!(app.text(), new);
+        assert_eq!(incremental(&mut app), fresh(&new));
+        app.undo();
+        assert_eq!(app.text(), old);
+        assert_eq!(incremental(&mut app), fresh(&old), "after undo");
     }
 }

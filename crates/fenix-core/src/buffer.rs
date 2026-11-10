@@ -59,18 +59,6 @@ impl KeptEdit {
     }
 }
 
-/// The span of `old` that `new` differs in: `(chars both start with,
-/// where the difference ends in old, in chars, the new text there)` --
-/// what replacing `old` with `new` needs to change, and no more.
-pub fn changed_span<'a>(old: &str, new: &'a str) -> (usize, usize, &'a str) {
-    let prefix_bytes: usize = old.chars().zip(new.chars()).take_while(|(a, b)| a == b).map(|(a, _)| a.len_utf8()).sum();
-    let (old_rest, new_rest) = (&old[prefix_bytes..], &new[prefix_bytes..]);
-    let suffix_bytes: usize = old_rest.chars().rev().zip(new_rest.chars().rev()).take_while(|(a, b)| a == b).map(|(a, _)| a.len_utf8()).sum();
-    let prefix = old[..prefix_bytes].chars().count();
-    let old_end = prefix + old_rest[..old_rest.len() - suffix_bytes].chars().count();
-    (prefix, old_end, &new_rest[..new_rest.len() - suffix_bytes])
-}
-
 /// A single undoable change: replaces `removed` with `inserted` at `at`.
 /// Applying it forward performs the edit; applying its inverse reverses it.
 struct Edit {
@@ -819,6 +807,54 @@ impl Buffer {
         self.redo_stack.last().map_or(0, |s| s.tag)
     }
 
+    /// `replacements` (char ranges of the text as it is, in order, not
+    /// overlapping) made as one undo step, from the last to the first so
+    /// each range is still where it was. The syntax tree hears of them as
+    /// one edit, from the first to the last: one place to look up, not
+    /// one per replacement. `cursor` is only a scratch place here.
+    pub fn replace_ranges(&mut self, cursor: &mut Cursor, replacements: &[(std::ops::Range<usize>, String)]) {
+        if replacements.is_empty() {
+            return;
+        }
+        let mark = self.pending_syntax_edits.len();
+        let before = (replacements.len() > 1).then(|| self.rope.clone());
+        self.begin_undo_group();
+        for (range, text) in replacements.iter().rev() {
+            self.replace_range(cursor, range.start, range.end, text);
+        }
+        self.end_undo_group();
+        if let Some(before) = before {
+            self.coalesce_syntax_edits(mark, &before);
+        }
+    }
+
+    /// The syntax edits logged since there were `mark`, when more than
+    /// one, as one: from where `before` and the text now first differ to
+    /// where they last do. A rope's clone is cheap; what's compared is
+    /// walked once.
+    fn coalesce_syntax_edits(&mut self, mark: usize, before: &Rope) {
+        if self.pending_syntax_edits.len() <= mark + 1 {
+            return;
+        }
+        self.pending_syntax_edits.truncate(mark);
+        let (old_len, new_len) = (before.len_chars(), self.rope.len_chars());
+        let prefix = before.chars().zip(self.rope.chars()).take_while(|(a, b)| a == b).count();
+        let room = old_len.min(new_len) - prefix;
+        let (mut old_back, mut new_back) = (before.chars_at(old_len), self.rope.chars_at(new_len));
+        let mut suffix = 0;
+        while suffix < room {
+            match (old_back.prev(), new_back.prev()) {
+                (Some(a), Some(b)) if a == b => suffix += 1,
+                _ => break,
+            }
+        }
+        if prefix == old_len && prefix == new_len {
+            return;
+        }
+        let removed = before.slice(prefix..old_len - suffix).to_string();
+        self.pending_syntax_edits.push(EditDelta { start_char: prefix, new_end_char: new_len - suffix, removed });
+    }
+
     /// Starts folding every edit made until the matching `end_undo_group`
     /// into a single undo step. Nests: only the outermost pair counts.
     /// A typing run still pending (not yet an undo step) is left out of
@@ -890,8 +926,13 @@ impl Buffer {
     pub fn undo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
         let Some(step) = self.undo_stack.pop() else { return false };
+        let mark = self.pending_syntax_edits.len();
+        let before = (step.edits.len() > 1).then(|| self.rope.clone());
         for edit in step.edits.iter().rev() {
             self.apply_inverse(edit);
+        }
+        if let Some(before) = before {
+            self.coalesce_syntax_edits(mark, &before);
         }
         if let Some(first) = step.edits.first() {
             *cursor = first.cursor_before;
@@ -908,8 +949,13 @@ impl Buffer {
     pub fn redo(&mut self, cursor: &mut Cursor) -> bool {
         self.flush_pending();
         let Some(step) = self.redo_stack.pop() else { return false };
+        let mark = self.pending_syntax_edits.len();
+        let before = (step.edits.len() > 1).then(|| self.rope.clone());
         for edit in &step.edits {
             self.apply_forward(edit);
+        }
+        if let Some(before) = before {
+            self.coalesce_syntax_edits(mark, &before);
         }
         if let Some(last) = step.edits.last() {
             *cursor = last.cursor_after;
@@ -1050,16 +1096,6 @@ mod tests {
         assert_eq!(b.map_since_kept(logged, 5), Some(None));
         assert_eq!(b.map_since_kept(logged, 10), Some(Some(8)));
         assert_eq!(b.map_since_kept(logged + 9, 1), None, "from the future");
-    }
-
-    #[test]
-    fn the_changed_span_is_only_what_differs() {
-        assert_eq!(changed_span("abcdef", "abXYef"), (2, 4, "XY"));
-        assert_eq!(changed_span("same", "same"), (4, 4, ""));
-        assert_eq!(changed_span("", "new"), (0, 0, "new"));
-        assert_eq!(changed_span("old", ""), (0, 3, ""));
-        assert_eq!(changed_span("aaa", "aa"), (2, 3, ""), "prefix first; the suffix never overlaps it");
-        assert_eq!(changed_span("été x été", "été y été"), (4, 5, "y"), "in chars");
     }
 
     #[test]
@@ -1498,5 +1534,22 @@ bbb");
         buf.redo(&mut cur);
         let redo_edits = buf.drain_edits();
         assert_eq!(redo_edits, vec![EditDelta { start_char: 0, new_end_char: 1, removed: String::new() }]);
+    }
+
+    /// Many replacements at once are one edit to the syntax tree, there,
+    /// on undo and on redo: from the first change to the last.
+    #[test]
+    fn replace_ranges_is_one_syntax_edit_and_one_undo_step() {
+        let mut buf = buffer_with("naïve a\nb\nnaïve c\nd\n");
+        let mut cur = Cursor::at_start();
+        buf.drain_edits();
+        buf.replace_ranges(&mut cur, &[(0..8, "naive a\n".to_string()), (10..18, "naive c\n".to_string())]);
+        assert_eq!(buf.text(), "naive a\nb\nnaive c\nd\n");
+        assert_eq!(buf.drain_edits(), vec![EditDelta { start_char: 2, new_end_char: 13, removed: "ïve a\nb\nnaï".to_string() }]);
+        assert!(buf.undo(&mut cur));
+        assert_eq!(buf.text(), "naïve a\nb\nnaïve c\nd\n");
+        assert_eq!(buf.drain_edits(), vec![EditDelta { start_char: 2, new_end_char: 13, removed: "ive a\nb\nnai".to_string() }]);
+        assert!(buf.redo(&mut cur));
+        assert_eq!(buf.drain_edits().len(), 1);
     }
 }
