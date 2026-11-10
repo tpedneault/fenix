@@ -330,9 +330,13 @@ impl App {
         let (buffer, pane) = (self.focused_buffer_id(), self.focused_pane_id());
         let on = !self.buffer_wraps(buffer);
         self.wrap_overrides.insert(buffer, on);
-        let state = self.pane_state_mut(pane);
-        state.scroll_col = 0;
-        state.scroll_row = 0;
+        // Every pane showing it starts its lines' rows afresh.
+        let showing: Vec<fenix_window::WindowId> = self.windows().windows().into_iter().filter(|&p| self.windows().content(p) == Some(&buffer)).collect();
+        for p in showing.into_iter().chain(std::iter::once(pane)) {
+            let state = self.pane_state_mut(p);
+            state.scroll_col = 0;
+            state.scroll_row = 0;
+        }
         let shown = if !on { "Wrap off" } else if self.pane_can_wrap(pane, buffer) { "Wrap on" } else { "Wrap on (not in this pane)" };
         self.set_message(shown);
         self.wake_caret();

@@ -220,7 +220,7 @@ impl App {
     /// Char column -> visual column for `buffer`'s `line` as it's drawn:
     /// its tabs expanded, its decorations laid out (as on the cursor's
     /// line, `cursor_line`).
-    fn line_col_map(&self, buffer: BufferId, line: usize, cursor_line: usize) -> Vec<usize> {
+    pub(super) fn line_col_map(&self, buffer: BufferId, line: usize, cursor_line: usize) -> Vec<usize> {
         let Some(ob) = self.buffers.get(buffer) else { return Vec::new() };
         let start = ob.buffer.line_start_char(line);
         let len = ob.buffer.line_len(line);

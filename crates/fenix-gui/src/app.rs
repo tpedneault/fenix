@@ -26,6 +26,7 @@ mod git_editor;
 mod git_compare_page;
 mod side_by_side;
 mod rows;
+mod row_scroll;
 mod git_log_page;
 mod graph_draw;
 mod git_rebase_page;
@@ -13015,6 +13016,7 @@ impl App {
             // lines the file no longer has.
             if state.scroll_line > line {
                 state.scroll_line = 0;
+                state.scroll_row = 0;
                 state.rendered_scroll = 0.0;
             }
         }
@@ -17584,6 +17586,10 @@ impl App {
         if jumped {
             self.jump_view = None;
         }
+        // A wrapped pane follows by rows, and snaps.
+        if self.follow_cursor_by_rows(pane, buffer_id, visible_lines, jumped) {
+            return;
+        }
         let target = scroll_for_cursor(scroll_line, line, visible_lines, total, jumped);
         if target != scroll_line {
             let jump = target.abs_diff(scroll_line);
@@ -17616,6 +17622,9 @@ impl App {
     /// A pane without the focus scrolled to its cursor, centred when out of
     /// view, as a jump in the focused pane is.
     fn reveal_cursor(&mut self, pane: fenix_window::WindowId, buffer_id: BufferId, visible_lines: usize) {
+        if self.follow_cursor_by_rows(pane, buffer_id, visible_lines, true) {
+            return;
+        }
         let Some(ob) = self.buffers.get(buffer_id) else { return };
         let document_line = ob.buffer.line_col(&self.pane_state(pane).cursor).0;
         let display = self.pane_display_lines(pane, buffer_id);
@@ -19710,6 +19719,10 @@ impl App {
         let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) else { return };
         let content_rect = pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane));
         let visible_lines = text::lines_that_fit(content_rect.h, line_height);
+        // A wrapped pane: the cursor's row, not its line's first.
+        if self.scroll_rows_to_cursor(pane, buffer_id, target, visible_lines) {
+            return;
+        }
 
         let scroll_line = match target {
             VimScrollTarget::Top => line,
@@ -19947,8 +19960,12 @@ impl App {
     fn scroll_unfocused_pane(&mut self, pane: fenix_window::WindowId, lines: isize, rect_h: f32, line_height: f32) {
         let Some(&buffer_id) = self.windows().content(pane) else { return };
         if self.buffers.get(buffer_id).is_none() { return; }
-        let total = self.pane_display_lines(pane, buffer_id).len();
         let visible = text::lines_that_fit(rect_h, line_height);
+        // A wrapped pane: by rows.
+        if self.scroll_by_rows(pane, buffer_id, -lines, visible) {
+            return;
+        }
+        let total = self.pane_display_lines(pane, buffer_id).len();
         let max_scroll = total.saturating_sub(visible);
         let state = self.pane_state_mut(pane);
         state.scroll_line = state.scroll_line.saturating_add_signed(-lines).min(max_scroll);
@@ -20044,7 +20061,17 @@ impl App {
                         state.session.scroll(lines);
                     }
                 } else if pane == self.focused_pane_id() {
-                    self.scroll_focused_pane(lines);
+                    // A wrapped pane's view goes by rows, the cursor only
+                    // as far as keeps it in view.
+                    let wrapped = self.main_view == MainView::Editor
+                        && geometry.panes.iter().find(|(id, _)| *id == pane).is_some_and(|(_, rect)| {
+                            let visible = text::lines_that_fit(pane_content_rect(*rect, line_height, self.pane_has_breadcrumb(pane)).h, line_height);
+                            let buffer = self.focused_buffer_id();
+                            self.scroll_focused_by_rows(pane, buffer, -lines, visible)
+                        });
+                    if !wrapped {
+                        self.scroll_focused_pane(lines);
+                    }
                 } else if let Some((_, rect)) = geometry.panes.iter().find(|(id, _)| *id == pane) {
                     // Match `redraw`'s own chrome shrink for this pane so
                     // `max_scroll` agrees with what's actually visible.
@@ -20850,6 +20877,7 @@ impl App {
                     buffer: buffer_id,
                     map: row_map,
                     rows: pane_visible_lines + 1,
+                    wrapped: wrap.is_some(),
                     gutter_chars,
                     scroll_col: shown_scroll_col,
                     rendered_scroll,

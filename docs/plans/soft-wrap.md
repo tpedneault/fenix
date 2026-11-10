@@ -319,3 +319,54 @@ stage by stage.
   display line, which in a wrapped pane is the real row on screen; the
   jump beacon flashes a line's first row; the unfold reveal still
   counts display lines (cosmetic, with wrap on).
+
+### Stage 4: scrolling
+
+- `app/row_scroll.rs`: a `RowWalk` over a pane's display lines breaks
+  each line it passes once (`line_breaks`) and answers `step(pos, ±n)`,
+  `distance(from, to, cap)`, `end()` and `row_of(line, col)`. This is
+  the plan's `row_step` / `rows_from_top`: every walk starts from the
+  view's top or the cursor and is bounded by the pane's rows (`cap`),
+  so nothing breaks more lines than about two panes' worth.
+- `follow` is `scroll_for_cursor` by rows: a cursor more than half a
+  pane out of view, or one that jumped, is centred; one that stepped
+  past an edge scrolls just far enough; the last row never goes above
+  the bottom. `ensure_cursor_visible`, `reveal_cursor` (an unfocused
+  pane's jump) and `search_reveal` use it when the pane wraps
+  (`follow_cursor_by_rows`), and snap (`set_row_top`): no easing.
+- `zt` / `zz` / `zb` (`scroll_window_at`) put the cursor's row, not its
+  line's first, at the top, middle or bottom (`scroll_rows_to_cursor`).
+- The wheel over a wrapped pane without the focus scrolls it by rows
+  (`scroll_by_rows`). Over the focused pane it still moves the cursor
+  by lines, as in 1.5, and the view follows by rows.
+- A drag held above or below a wrapped pane moves the cursor a line at
+  a time (stage 3's `wrapped_text_hit`), and the view follows.
+- The reload clamp resets `scroll_row` with `scroll_line`. A resize
+  needs nothing: a `scroll_row` past a line's rows is held to its last.
+- The overview ruler's band is the lines shown in a wrapped pane.
+- Moved to stage 5: PageUp/PageDown by the pane's rows. They move the
+  cursor, and a cursor moving by rows is stage 5's `ScreenRows`.
+- After review: a walk breaks a line only as far as the rows it needs
+  (`rows_upto`, by `break_line_rows`, doubling when it needs more), so
+  following a cursor down a long line, measuring from the top to it and
+  checking the end of the file cost the rows walked, not the lines'
+  lengths. Stepping back into a line from its end still breaks all of
+  it (its rows are counted from its start); the cache is stage 7's.
+- The top is held to its line's rows once, where it's read
+  (`RowWalk::clamp`): a resize, an edit from another pane or a fold can
+  leave `scroll_row` past them. `view.toggle_wrap` resets `scroll_row`
+  in every pane showing the buffer.
+- The wheel over a focused wrapped pane scrolls its view by rows, three
+  a notch, and moves the cursor by rows only as far as keeps it in view,
+  onto the first char of the top or bottom row (`scroll_focused_by_rows`);
+  an unwrapped pane is as in 1.5.
+- A cursor on a line inside a closed fold is on its header's row. The
+  downward reach of "just far enough" is half a pane past the bottom,
+  as upward. `search_reveal` in a wrapped pane may centre where 1.5
+  scrolled just far enough. The ruler's band counts the line of the
+  partly shown last row.
+- Still O(lines) a frame, as in 1.5: `pane_display_lines`, and finding
+  the cursor's display line in it (now a binary search).
+- Still O(lines) a frame, as in 1.5 and not made worse:
+  `pane_display_lines` builds a `Vec` of every display line, called a
+  few times a frame. For stage 7.

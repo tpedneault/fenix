@@ -531,6 +531,9 @@ impl App {
         }
         self.search.reveal = None;
         let Some(&buffer) = self.windows().content(pane) else { return };
+        if self.follow_cursor_by_rows(pane, buffer, visible, false) {
+            return;
+        }
         let Some(ob) = self.buffers.get(buffer) else { return };
         let state = *self.pane_state(pane);
         let line = ob.buffer.line_col(&state.cursor).0;
