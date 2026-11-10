@@ -147,6 +147,9 @@ Bug reports and ideas are welcome in
 [Issues](https://github.com/tpedneault/fenix/issues). Before opening a
 pull request, please read [CONTRIBUTING.md](CONTRIBUTING.md).
 
+Found something that could put Fenix's users at risk? Please report it
+privately: [SECURITY.md](SECURITY.md) says how.
+
 ## License
 
 Fenix is licensed under either of
