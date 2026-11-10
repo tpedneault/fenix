@@ -243,3 +243,29 @@ stage by stage.
 - Not yet: clicks in a wrapped pane (stage 3), following the cursor
   down the rows (stage 4), moving by rows (stage 5). Until then a
   wrapped pane can put the cursor below its bottom.
+- After review: a row's text takes all its columns but the last, which
+  is the caret's after the row's last char (so a line exactly as wide
+  as the pane takes two rows, and a caret is never past the edge). A row
+  ends after the last word that ends on it; the blanks after that word
+  hang at its end (one in the kept column, any more past the edge, where
+  `RowMap::locate` holds a caret to the last column), so no row starts
+  with the blank of a break. A word after nothing but blanks on its row
+  (an indent) goes whole to the next row when it fits there.
+  `break_line_rows` finds only the rows a frame wants and reads only the
+  chars they can hold; finding a break is linear in the row's width.
+- A wrapped pane reads, expands and colours each line once a frame
+  (`drawn_line`) and slices its rows from it in order (`push_drawn`).
+  A very long line's highlights are asked for by the columns its rows
+  show (`syntax_highlights_in_columns`).
+- `RowMap::first_row` is a line's first row only when that row is shown;
+  `rows_of` is the rows shown. `locate` says nowhere for a column below
+  the pane's bottom, and `at` holds a cell right of a row the line goes
+  on from to that row's last column. A problem's message and a fold's
+  count go after the line's last row only when it's shown, cut to the
+  room left on it. Guides are drawn on the columns each row shows of the
+  indent.
+- `frame_layout` builds what a frame lays out of a pane; `redraw`,
+  `pane_rows` (the hit-tests) and the tests' `focused_layout` all use
+  it. The `:s` preview is worked out once a frame, not per run of lines.
+- Left: `pane_text_cols` and `wrap_overrides` keep an entry for a pane
+  or buffer that's gone (one small entry each).

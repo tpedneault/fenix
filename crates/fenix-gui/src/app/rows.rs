@@ -51,8 +51,11 @@ pub(crate) struct RowMap {
     rows: Vec<Row>,
     /// The first visual column shown: the pane's sideways scroll.
     scroll_col: usize,
-    /// Each line shown and its first row, by line.
+    /// Each line shown and the first of its rows shown, by line.
     firsts: Vec<(usize, usize)>,
+    /// The columns a row has when the lines wrap: the caret is never
+    /// drawn past its last.
+    width: Option<usize>,
 }
 
 impl RowMap {
@@ -82,22 +85,41 @@ impl RowMap {
             }
         }
         debug_assert!(firsts.windows(2).all(|w| w[0].0 < w[1].0), "a pane's lines go down in order");
-        RowMap { rows, scroll_col, firsts }
+        RowMap { rows, scroll_col, firsts, width: None }
     }
+
+    /// The map, its rows `width` columns wide: the lines wrap.
+    pub(crate) fn wrapped_at(mut self, width: usize) -> RowMap {
+        self.width = Some(width.max(1));
+        self
+    }
+
+    /// The columns a row has, when the lines wrap.
+    pub(crate) fn width(&self) -> Option<usize> {
+        self.width
+    }
+
 
     pub(crate) fn row(&self, row: usize) -> Option<&Row> {
         self.rows.get(row)
     }
 
-    /// The row `line` starts on, if it's shown.
-    pub(crate) fn first_row(&self, line: usize) -> Option<usize> {
+    /// The first of `line`'s rows shown, which may be one after its
+    /// first when the pane's top is inside the line.
+    fn first_shown(&self, line: usize) -> Option<usize> {
         let i = self.firsts.binary_search_by_key(&line, |&(l, _)| l).ok()?;
         Some(self.firsts[i].1)
     }
 
-    /// The rows `line` is on (empty when it isn't shown).
+    /// The row `line` starts on, if that row is shown: where its number
+    /// and gutter marks go.
+    pub(crate) fn first_row(&self, line: usize) -> Option<usize> {
+        self.first_shown(line).filter(|&row| self.rows[row].first)
+    }
+
+    /// The rows of `line` shown (empty when it isn't).
     pub(crate) fn rows_of(&self, line: usize) -> Range<usize> {
-        let Some(first) = self.first_row(line) else { return 0..0 };
+        let Some(first) = self.first_shown(line) else { return 0..0 };
         let end = self.rows[first..].iter().position(|r| r.line != line || r.kind != RowKind::Text).map_or(self.rows.len(), |n| first + n);
         first..end
     }
@@ -148,15 +170,18 @@ impl RowMap {
 
     /// Where visual column `col` of `line` is drawn: its row and cell,
     /// `None` when the line isn't shown, or that part of it is above the
-    /// top. A column at the end of a row that isn't the line's last is
-    /// the next row's start.
+    /// top or below the bottom. A column at the end of a row that isn't
+    /// the line's last is the next row's start. In a wrapped pane the
+    /// cell is never past a row's last (where blanks hanging at a break
+    /// would put it).
     pub(crate) fn locate(&self, line: usize, col: usize) -> Option<(usize, usize)> {
         let rows = self.rows_of(line);
         if rows.is_empty() || col < self.rows[rows.start].cols.start {
             return None;
         }
-        let at = rows.clone().find(|&i| col < self.rows[i].cols.end || self.rows[i].last).or(rows.clone().last())?;
-        Some((at, self.x(&self.rows[at], col)))
+        let at = rows.clone().find(|&i| col < self.rows[i].cols.end || self.rows[i].last)?;
+        let x = self.x(&self.rows[at], col);
+        Some((at, self.width.map_or(x, |w| x.min(w - 1))))
     }
 
     /// Visual columns `cols` of `line`, as the pieces drawn on each of
@@ -179,11 +204,13 @@ impl RowMap {
     }
 
     /// What's under cell `x` of `row`: its line and visual column, `None`
-    /// on a row of no line.
+    /// on a row of no line. Right of a row the line goes on from is that
+    /// row's last column, not the next row's first.
     pub(crate) fn at(&self, row: usize, x: usize) -> Option<(usize, usize)> {
         let r = self.rows.get(row).filter(|r| r.kind == RowKind::Text)?;
         let indent = if r.first { 0 } else { r.indent };
-        Some((r.line, r.cols.start + (x + self.scroll_col).saturating_sub(indent)))
+        let col = r.cols.start + (x + self.scroll_col).saturating_sub(indent);
+        Some((r.line, if r.last { col } else { col.min(r.cols.end.saturating_sub(1).max(r.cols.start)) }))
     }
 }
 
@@ -296,12 +323,28 @@ impl App {
     /// line above the top, as it shows `buffer` at its scroll.
     pub(super) fn pane_rows(&self, pane: fenix_window::WindowId, buffer: BufferId, top: usize, skip: usize, count: usize) -> RowMap {
         let lines = self.pane_display_lines(pane, buffer);
-        let from = top.min(lines.len());
-        let wrap = self.wrap_cols(pane, buffer);
-        let scroll_col = if wrap.is_some() { 0 } else { self.pane_state(pane).scroll_col };
-        let line = self.buffers.get(buffer).map_or(0, |ob| ob.buffer.line_col(&self.pane_state(pane).cursor).0);
-        let want = RowsWanted { lines: &lines[from..from.saturating_add(count).min(lines.len())], skip, count, scroll_col, wrap };
-        self.pane_layout(buffer, want, line, false).map
+        let state = *self.pane_state(pane);
+        let line = self.buffers.get(buffer).map_or(0, |ob| ob.buffer.line_col(&state.cursor).0);
+        self.frame_layout(pane, buffer, &lines, top, skip, count, state.scroll_col, line, false).map
+    }
+
+    /// What a frame lays out of `pane` showing `buffer`: `count` rows
+    /// from display line `top` of `display` (`skip` rows into it when the
+    /// lines wrap), scrolled `scroll_col` sideways unless they wrap, the
+    /// cursor on `cursor_line`; Home and a page (`dashboard`) never wrap.
+    /// What `redraw`, the hit-tests and the tests all build rows by.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn frame_layout(&self, pane: fenix_window::WindowId, buffer: BufferId, display: &[usize], top: usize, skip: usize, count: usize, scroll_col: usize, cursor_line: usize, dashboard: bool) -> PaneLayout {
+        let wrap = if dashboard { None } else { self.wrap_cols(pane, buffer) };
+        let from = top.min(display.len());
+        let want = RowsWanted {
+            lines: &display[from..from.saturating_add(count).min(display.len())],
+            skip: if wrap.is_some() { skip } else { 0 },
+            count,
+            scroll_col: if wrap.is_some() { 0 } else { scroll_col },
+            wrap,
+        };
+        self.pane_layout(buffer, want, cursor_line, dashboard)
     }
 
     /// `buffer`'s text on the rows `want` asks for: the rows, each line's
@@ -352,14 +395,18 @@ impl App {
                 Some(width) => {
                     let display = display.as_deref().unwrap_or(&line_text);
                     let indent = crate::wrap::continuation_indent(display, width);
-                    let breaks = crate::wrap::break_line(display, width, indent);
+                    // Only as many rows as are wanted are found: a line
+                    // far longer than the pane costs what it shows.
+                    let skip = if first_row == 0 { want.skip } else { 0 };
+                    let (breaks, whole) = crate::wrap::break_line_rows(display, width, indent, skip.saturating_add(want.count - rows.len()));
                     let n = breaks.len();
-                    let skip = if first_row == 0 { want.skip.min(n - 1) } else { 0 };
+                    // Past the line's last row: its last.
+                    let skip = skip.min(n - 1);
                     for (i, cols) in breaks.into_iter().enumerate().skip(skip) {
                         if rows.len() >= want.count {
                             break;
                         }
-                        rows.push(Row { line, kind: RowKind::Text, cols, indent, first: i == 0, last: i + 1 == n });
+                        rows.push(Row { line, kind: RowKind::Text, cols, indent, first: i == 0, last: whole && i + 1 == n });
                     }
                 }
                 None => rows.push(Row { line, kind: RowKind::Text, cols: 0..usize::MAX, indent: 0, first: true, last: true }),
@@ -367,12 +414,19 @@ impl App {
             // Home's leading spaces are layout, not indentation.
             if !dashboard {
                 for (r, row) in rows.iter().enumerate().skip(first_row) {
-                    let guides = if row.first { leading_columns } else { leading_columns.min(row.indent) };
-                    layout.indent_guides.extend(super::indent_guide_columns(guides, indent_width).map(|col| (r, col)));
+                    // A guide where the row has the line's indent: on a
+                    // first row the columns it shows of it, on a
+                    // continuation row its own indent and any of the
+                    // line's it goes on showing.
+                    let shown = |g: usize| if row.first { (g < row.cols.end).then_some(g) } else if g < row.indent { Some(g) } else { (g >= row.cols.start && g < row.cols.end).then(|| g - row.cols.start + row.indent).filter(|&x| x >= row.indent) };
+                    layout.indent_guides.extend(super::indent_guide_columns(leading_columns, indent_width).filter_map(shown).map(|col| (r, col)));
                 }
             }
         }
         layout.map = RowMap::from_rows(rows, want.scroll_col);
+        if let Some(width) = want.wrap {
+            layout.map = layout.map.wrapped_at(width);
+        }
         layout
     }
 
@@ -398,6 +452,9 @@ impl App {
         let fold_marks = if gutter_chars > 0 { self.fold_marks(ob) } else { None };
         let fold_ends: HashMap<usize, usize> = if collapsed_headers.is_empty() { HashMap::new() } else { self.fold_ranges_of(ob).into_iter().collect() };
         let visual_lines = ob.buffer.visual_line_count();
+        // The line being drawn, once for all its rows, and how far into
+        // its text the rows so far have read: (chars, bytes).
+        let mut drawn: Option<(usize, super::DrawnLine, usize, usize)> = None;
         for r in 0..rows {
             match map.row(r) {
                 Some(row) if row.kind == RowKind::Filler => spans.push((" ".repeat(gutter_chars), theme.gutter_fg)),
@@ -410,10 +467,32 @@ impl App {
                             spans.push((" ".repeat(blank), theme.gutter_fg));
                         }
                     }
-                    self.push_line_text(ob, row.line, row.cols.clone(), syntax_highlights, tab_stops, decorated, &mut spans);
+                    if drawn.as_ref().is_none_or(|d| d.0 != row.line) {
+                        drawn = Some((row.line, self.drawn_line(ob, row.line, syntax_highlights, tab_stops, decorated), 0, 0));
+                    }
+                    if let Some((_, line, at_char, at_byte)) = drawn.as_mut() {
+                        // Its rows come in order: read on from the last.
+                        let advance = |to: usize, at_char: &mut usize, at_byte: &mut usize| {
+                            for ch in line.text[*at_byte..].chars() {
+                                if *at_char >= to {
+                                    break;
+                                }
+                                *at_byte += ch.len_utf8();
+                                *at_char += 1;
+                            }
+                        };
+                        advance(row.cols.start, at_char, at_byte);
+                        let from = *at_byte;
+                        advance(row.cols.end, at_char, at_byte);
+                        self.push_drawn(line, from..*at_byte, &mut spans);
+                    }
                     if row.last && collapsed_headers.contains(&row.line) {
                         let hidden = fold_ends.get(&row.line).map_or(0, |end| end - row.line);
-                        spans.push((format!("  ⋯ {hidden} line{}", if hidden == 1 { "" } else { "s" }), theme.gutter_fg));
+                        let used = if row.first { 0 } else { row.indent } + row.cols.end.saturating_sub(row.cols.start);
+                        let room = map.width().unwrap_or(usize::MAX).saturating_sub(used);
+                        let suffix = format!("  ⋯ {hidden} line{}", if hidden == 1 { "" } else { "s" });
+                        // Cut to what's left of the row.
+                        spans.push((suffix.chars().take(room).collect(), theme.gutter_fg));
                     }
                 }
                 _ => self.push_gutter(ob, visual_lines, false, gutter_chars, None, cursor_line, fold_marks.as_ref(), &mut spans),
@@ -446,8 +525,9 @@ impl App {
             extra_carets,
             selection: by_runs(&|run| self.visual_selection_segments(run)).into_iter().chain(extra_selections).collect(),
             pulse: self.pulse_overlay(span.clone()).map(|(segs, a)| (layout.to_rows(segs), a)),
-            brackets: layout.to_rows(self.bracket_match_segments(span)),
-            hlsearch: by_runs(&|run| self.hlsearch_segments(run)),
+            brackets: layout.to_rows(self.bracket_match_segments(span.clone())),
+            // The search per run of lines, the `:s` preview once.
+            hlsearch: by_runs(&|run| self.search_match_segments(run)).into_iter().chain(layout.to_rows(self.substitute_segments(span.clone()))).collect(),
             caret: self.focused_caret(line, col).and_then(|(line, col)| layout.locate(line, col)),
         }
     }
@@ -460,11 +540,7 @@ impl App {
         let state = *self.pane_state(pane);
         let top = state.rendered_scroll.floor().max(0.0) as usize;
         let line = self.open().buffer.line_col(&self.cursor()).0;
-        let lines = self.pane_display_lines(pane, buffer);
-        let wrap = self.wrap_cols(pane, buffer);
-        let from = top.min(lines.len());
-        let want = RowsWanted { lines: &lines[from..(from + rows).min(lines.len())], skip: state.scroll_row, count: rows, scroll_col: if wrap.is_some() { 0 } else { state.scroll_col }, wrap };
-        self.pane_layout(buffer, want, line, false)
+        self.frame_layout(pane, buffer, &self.pane_display_lines(pane, buffer), top, state.scroll_row, rows, state.scroll_col, line, false)
     }
 
     /// The focused pane's overlays as the next frame draws them.
@@ -500,6 +576,18 @@ mod tests {
         assert_eq!(map.at(3, 0), None);
         assert_eq!(map.runs(), [4..7]);
         assert_eq!(map.span(), 4..7);
+    }
+
+    #[test]
+    fn right_of_a_short_row_the_line_goes_on_from_is_that_row_s_last_column() {
+        let mut rows = wrapped(3, &[0..8, 8..14], 2);
+        rows[0].cols = 0..6;
+        rows[1].cols = 6..14;
+        let map = RowMap::from_rows(rows, 0).wrapped_at(10);
+        assert_eq!(map.at(0, 9), Some((3, 5)), "not column 9, which is the next row's");
+        assert_eq!(map.at(1, 30), Some((3, 34)), "past the last row: past the line's end");
+        // A caret past a row's last column is held to it.
+        assert_eq!(map.locate(3, 30), Some((1, 9)));
     }
 
     #[test]
@@ -682,18 +770,24 @@ mod app_tests {
     fn a_word_wider_than_the_pane_tabs_wide_chars_and_marks_are_broken_by_columns() {
         let (mut app, _f) = wrapped("a.txt", "abcdefghijklmnop\n\tab cd\n日本語の文章です\ne\u{301}e\u{301}e\u{301}\n", 6);
         app.line_number_mode = LineNumberMode::Off;
+        // Five columns of text a row, the sixth the caret's.
         assert_eq!(
-            drawn(&app, 10),
-            vec!["abcdef", "ghijkl", "mnop", "      ", "  ab ", "cd", "日本語の文章", "です", "e\u{301}e\u{301}e\u{301}", "~"],
+            drawn(&app, 12),
+            vec!["abcde", "fghij", "klmno", "p", "     ", "   ab ", "cd", "日本語の文", "章です", "e\u{301}e\u{301}", "e\u{301}", "~"],
             "a tab is eight columns, wider than the pane: broken inside, and no indent after it",
         );
     }
 
     #[test]
-    fn an_empty_line_a_line_as_wide_as_the_pane_and_the_last_line_without_a_newline_are_one_row() {
-        let (mut app, _f) = wrapped("a.txt", "\r\nabcdef\r\nabcdefg", 6);
+    fn an_empty_line_a_line_one_short_of_the_pane_and_the_last_line_without_a_newline() {
+        let (mut app, _f) = wrapped("a.txt", "\r\nabcde\r\nabcdef\r\nabcdefg", 6);
         app.line_number_mode = LineNumberMode::Off;
-        assert_eq!(drawn(&app, 5), vec!["", "abcdef", "abcdef", "g", "~"], "CRLF's \\r isn't a column");
+        assert_eq!(drawn(&app, 7), vec!["", "abcde", "abcde", "f", "abcde", "fg", "~"], "CRLF's \\r isn't a column; a full row is one short of the pane");
+        // The caret after a full row's last char is in the pane's last column.
+        app.press_all("j A");
+        assert_eq!(app.focused_overlays_now(7).caret, Some((1, 5)));
+        app.press_all("Esc j A");
+        assert_eq!(app.focused_overlays_now(7).caret, Some((3, 1)));
     }
 
     #[test]
@@ -701,12 +795,15 @@ mod app_tests {
         let (mut app, _f) = folded("fn a_long_function_name(first: u32, second: u32) {\n    x;\n}\nfn b() {}\n");
         app.run_cmd("view.toggle_wrap");
         let pane = app.focused_pane_id();
-        app.set_pane_text_cols(pane, 30);
+        app.set_pane_text_cols(pane, 31);
         app.line_number_mode = LineNumberMode::Off;
-        let rows = drawn(&app, 4);
-        // The last blank that fits the first row is after `fn`.
-        assert_eq!(rows[..3], ["fn ", "a_long_function_name(first: ", "u32, second: u32) {  ⋯ 2 lines"], "{rows:?}");
-        assert_eq!(rows[3], "fn b() {}");
+        let rows = drawn(&app, 3);
+        // `first:` ends at the text's edge, its blank hanging in the last column.
+        assert_eq!(rows, ["fn a_long_function_name(first: ", "u32, second: u32) {  ⋯ 2 lines", "fn b() {}"]);
+        // In a narrower pane the count is cut to what's left of the row.
+        app.set_pane_text_cols(pane, 20);
+        let rows = drawn(&app, 5);
+        assert_eq!(rows[..4], ["fn ", "a_long_function_nam", "e(first: u32, ", "second: u32) {  ⋯ 2 "], "fourteen columns of text, six left for the count");
     }
 
     #[test]
@@ -729,15 +826,16 @@ mod app_tests {
         // Columns 3 to 6 of both lines: across each line's break.
         app.press_all("3 l C-v j 3 l");
         let o = app.focused_overlays_now(6);
-        assert_eq!(o.selection, vec![(0, 3, 5), (1, 0, 2), (2, 3, 5), (3, 0, 2)]);
+        // `abcd` / `efgh`: columns 3 to 6 are `d` and `efg`.
+        assert_eq!(o.selection, vec![(0, 3, 4), (1, 0, 3), (2, 3, 4), (3, 0, 3)]);
         app.press_all("Esc g g");
         standard(&mut app);
         app.press_all("Home C-M-Down");
         app.press_all("End");
         let o = app.focused_overlays_now(6);
         // Both ends of the lines, on their second rows.
-        assert_eq!(o.caret, Some((3, 3)));
-        assert_eq!(o.extra_carets, vec![(1, 3)]);
+        assert_eq!(o.caret, Some((3, 4)));
+        assert_eq!(o.extra_carets, vec![(1, 4)]);
     }
 
     #[test]
@@ -788,6 +886,108 @@ mod app_tests {
             app.buffers.get_mut(buffer).unwrap().kind = kind;
             assert_eq!(app.wrap_cols(pane, buffer), None, "{kind:?}");
         }
+    }
+
+    #[test]
+    fn a_cursor_below_the_pane_s_bottom_draws_no_caret_and_no_line_highlight() {
+        let line = "word ".repeat(40);
+        let (mut app, _f) = wrapped("a.txt", &format!("{line}\nnext\n"), 10);
+        app.press("$");
+        let layout = app.focused_layout(3);
+        assert_eq!(layout.locate(0, 199), None, "row 19 of the line, the pane showing 0 to 2");
+        assert_eq!(app.focused_overlays_now(3).caret, None);
+        assert!(layout.map.segments(0, 199..199).is_empty());
+    }
+
+    #[test]
+    fn a_scroll_row_past_the_line_s_rows_shows_its_last_and_its_number_isn_t_drawn() {
+        let line = "word ".repeat(40);
+        let (mut app, _f) = wrapped("a.txt", &format!("{line}\nnext\n"), 10);
+        let pane = app.focused_pane_id();
+        app.pane_state_mut(pane).scroll_row = 100;
+        let layout = app.focused_layout(3);
+        assert_eq!(layout.map.row(0).map(|r| r.last), Some(true));
+        // The top inside line 0: its first row isn't shown, and neither
+        // its number nor its gutter marks are.
+        assert_eq!(layout.map.first_row(0), None);
+        assert_eq!(layout.map.gutter_lines(), vec![super::NO_LINE, 1, 2]);
+        assert_eq!(layout.map.first_row(1), Some(1));
+        assert_eq!(layout.map.rows_of(0), 0..1, "its rows shown are still its own");
+    }
+
+    #[test]
+    fn a_continuation_row_s_number_and_marks_aren_t_drawn_with_relative_numbers_either() {
+        let (mut app, _f) = wrapped("a.txt", "x\nthe quick brown fox\n", 10);
+        app.line_number_mode = LineNumberMode::Relative;
+        app.press("j");
+        let rows = drawn(&app, 3);
+        let gutter = app.gutter_chars(app.open());
+        assert!(rows[1][..gutter].trim().starts_with('0'), "{rows:?}");
+        assert!(rows[2][..gutter].trim().is_empty(), "{rows:?}");
+    }
+
+    #[test]
+    fn indent_guides_are_on_the_columns_each_row_shows_of_the_indent() {
+        // Twenty spaces at six columns: rows `     ` five times... the
+        // indent wider than the pane, so no continuation indent.
+        let (app, _f) = wrapped("a.txt", &format!("{}x\n    y\n", " ".repeat(20)), 6);
+        let guides = app.focused_layout(6).indent_guides;
+        let on = |row: usize| guides.iter().filter(|(r, _)| *r == row).map(|&(_, c)| c).collect::<Vec<_>>();
+        // The file's step is four: guides at 0, 4, 8, 12, 16 of the line.
+        assert_eq!(on(0), vec![0, 4], "row 0 shows columns 0 to 5");
+        assert_eq!(on(1), vec![3], "row 1 shows 5 to 9: the guide at 8");
+        assert_eq!(on(2), vec![2], "row 2 shows 10 to 14: 12");
+        assert_eq!(on(3), vec![1], "row 3 shows 15 to 19: 16");
+    }
+
+    #[test]
+    fn a_syntax_colour_across_a_break_goes_on_both_rows_with_a_tab_too() {
+        let red = glyphon::Color::rgb(200, 0, 0);
+        let colours = |app: &App, highlights: &[(std::ops::Range<usize>, glyphon::Color)]| -> Vec<(String, bool)> {
+            let layout = app.focused_layout(3);
+            let ob = app.open();
+            app.row_content_spans(ob, &layout.map, 3, 0, highlights, 0, &app.tab_stops_for(app.focused_buffer_id()), &Default::default(), &layout.decorated)
+                .into_iter()
+                .filter(|(t, _)| !t.is_empty() && t != "\n" && t != "~")
+                .map(|(t, c)| (t, c == red))
+                .collect()
+        };
+        let (mut app, _f) = wrapped("a.txt", "the quick brown\n", 10);
+        app.line_number_mode = LineNumberMode::Off;
+        // `quick brown`, bytes 4 to 15.
+        assert_eq!(colours(&app, &[(4..15, red)]), vec![("the ".into(), false), ("quick ".into(), true), ("brown".into(), true)]);
+        let (mut app, _f) = wrapped("a.txt", "\tquick brown\n", 12);
+        app.line_number_mode = LineNumberMode::Off;
+        // The tab is eight columns, and `quick` goes whole to the next
+        // row, six columns in.
+        let indent = ("      ".to_string(), false);
+        assert_eq!(colours(&app, &[(1..12, red)]), vec![("        ".into(), false), indent.clone(), ("quick ".into(), true), indent, ("brown".into(), true)]);
+    }
+
+    #[test]
+    fn a_line_selection_a_search_match_and_a_bracket_split_across_rows() {
+        let (mut app, _f) = wrapped("a.txt", "f(the quick) brown\n", 10);
+        // `f(the ` / `quick) ` / `brown`.
+        app.press("V");
+        assert_eq!(app.focused_overlays_now(3).selection, vec![(0, 0, 6), (1, 0, 7), (2, 0, 5)]);
+        app.press_all("Esc /");
+        app.type_text("e q");
+        app.press("Enter");
+        assert_eq!(app.focused_overlays_now(3).hlsearch, vec![(0, 4, 6), (1, 0, 1)], "`e q` across the break");
+        app.press_all("0 l");
+        assert_eq!(app.focused_overlays_now(3).brackets, vec![(0, 1, 2), (1, 5, 6)]);
+    }
+
+    #[test]
+    fn a_prompt_wraps_a_pane_of_no_width_is_one_column_and_an_undrawn_pane_is_eighty() {
+        let (mut app, _f) = wrapped("a.txt", "x\n", 10);
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.buffers.get_mut(buffer).unwrap().kind = BufferKind::Prompt;
+        assert_eq!(app.wrap_cols(pane, buffer), Some(10));
+        app.set_pane_text_cols(pane, 0);
+        assert_eq!(app.wrap_cols(pane, buffer), Some(1));
+        app.pane_text_cols.clear();
+        assert_eq!(app.wrap_cols(pane, buffer), Some(80));
     }
 
     #[test]
