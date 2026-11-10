@@ -18629,8 +18629,16 @@ impl App {
         match self.vim.visual_kind() {
             VisualKind::Char => {
                 let cursor_idx = self.cursor().char_idx;
-                let (lo, hi) =
-                    if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
+                // Standard keys select between the anchor and the cursor,
+                // the cursor's character not in it -- drawn so, as the
+                // extra cursors' selections are.
+                let (lo, hi) = if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+                    (anchor.min(cursor_idx), anchor.max(cursor_idx))
+                } else if anchor <= cursor_idx {
+                    (anchor, cursor_idx + 1)
+                } else {
+                    (cursor_idx, anchor + 1)
+                };
                 let hi = hi.min(self.open().buffer.len_chars());
                 segments = self.range_to_segments(lo..hi, visible_lines);
             }

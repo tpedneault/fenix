@@ -448,8 +448,9 @@ impl App {
         if !self.carets_can_be_added() {
             return;
         }
-        let primary = self.primary_caret();
-        let selected = self.vim.mode() == Mode::Visual && primary.anchor.is_some_and(|a| a != primary.at);
+        // Selected: what the selection really holds (a whole line for a
+        // triple-click), not where its ends are.
+        let selected = matches!(self.selection_or_word(), Some((_, false)));
         if !selected {
             let Some((word, _)) = self.selection_or_word() else {
                 self.set_message("no word under the cursor to select");
@@ -476,7 +477,9 @@ impl App {
             self.set_message(format!("no other {}", one_line(&needle)));
             return;
         };
-        extra.push(primary);
+        // The old primary as the extra it becomes, its selection as it
+        // was (a whole line's, a word's) -- not its raw ends.
+        extra.push(Caret { at: range.end, sticky: self.col_of(range.end), anchor: Some(range.start) });
         let sticky = self.col_of(next.end);
         self.put_carets(Caret { at: next.end, sticky, anchor: Some(next.start) }, extra);
         self.say_carets();
@@ -497,7 +500,7 @@ impl App {
         let needle = buffer.text_range(range.start, range.end);
         let extra_kw = self.vim.iskeyword_extra();
         let whole = from_word || fenix_vim::is_whole_word(buffer, &range, extra_kw);
-        let found = match fenix_vim::occurrences(buffer, &needle, whole, extra_kw, MAX_CARETS) {
+        let found = match fenix_vim::occurrences_around(buffer, &needle, whole, extra_kw, MAX_CARETS, Some(&range)) {
             Ok(found) => found,
             Err(n) => {
                 self.set_error(format!("{n} of {} is more cursors than {MAX_CARETS}", one_line(&needle)));
@@ -538,6 +541,12 @@ impl App {
             _ => return,
         };
         let at = fenix_vim::at_column(buffer, target, edge.sticky);
+        // The old primary with its selection as it was, a linewise one
+        // whole.
+        let primary = match self.selection_or_word().filter(|(_, word)| !*word) {
+            Some((range, _)) => Caret { at: range.end, sticky: primary.sticky, anchor: Some(range.start) },
+            None => primary,
+        };
         extra.push(primary);
         self.put_carets(Caret { at, sticky: edge.sticky, anchor: None }, extra);
         self.say_carets();
