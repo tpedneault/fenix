@@ -243,3 +243,29 @@ stage by stage.
 - Not yet: clicks in a wrapped pane (stage 3), following the cursor
   down the rows (stage 4), moving by rows (stage 5). Until then a
   wrapped pane can put the cursor below its bottom.
+
+### Stage 3: everything mapped
+
+- Most of the plan's list was mapped in stage 1, and lands on its row
+  once stage 2's map has wrapped rows: the caret and the completion and
+  hover cards anchored to it, selections, search matches, brackets, the
+  pulse, underlines and decoration marks, todo tints, problems, and the
+  Git and debug marks (`first_row`, `gutter_lines`). The debugger's
+  stopped line is tinted on all its rows.
+- `text_hit` in a wrapped pane (`wrapped_text_hit`) goes through the
+  pane's rows: right of a row the line goes on from is that row's last
+  char, inside a continuation row's indent its first, above or below
+  the rows shown the line before or after. Click, drag, double and
+  triple click, Alt+drag and the hover card all use it. The column
+  maps it needs are `line_col_map`, shared with the unwrapped path.
+- `fold_marker_click` takes a marker only on a line's first row.
+- The layers' geometry: `PaneExtras::rows` carries the row map a code
+  pane was drawn with into `GeoPane::map`; `Geometry::resolve` places an
+  extension's `Anchor::Text` through it (keeping 1.5's bounds: off the
+  rows that fit, or left of the sideways scroll, is nowhere), and
+  `decoration_click` hits on it. This also fixes the fold mistake noted
+  in stage 1.
+- Left as they are: the caret's glide counts rows from the top's
+  display line, which in a wrapped pane is the real row on screen; the
+  jump beacon flashes a line's first row; the unfold reveal still
+  counts display lines (cosmetic, with wrap on).

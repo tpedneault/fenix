@@ -2325,12 +2325,17 @@ impl App {
         let Some(window) = self.windows().windows().into_iter().find(|w| w.number() as u64 == pane.id) else { return false };
         let Some(&buffer) = self.windows().content(window) else { return false };
         let Some(sets) = self.wasm.decorations.get(&buffer).filter(|sets| sets.iter().any(|(_, set)| set.iter().any(|d| d.id.is_some()))) else { return false };
-        // `base_line` is the display row at the pane's top, `scroll_col`
-        // the sideways scroll it was drawn at.
-        let display = self.pane_display_lines(window, buffer);
+        // On the rows it was drawn with: `base_line` is the display row at
+        // the pane's top, `scroll_col` the sideways scroll.
         let row = ((pos.1 - pane.text_y) / lh).floor() as usize;
-        let from = pane.base_line.min(display.len());
-        let map = super::rows::RowMap::lines(&display[from..from.saturating_add(row + 1).min(display.len())], pane.scroll_col);
+        let map = match &pane.map {
+            Some(map) => map.clone(),
+            None => {
+                let display = self.pane_display_lines(window, buffer);
+                let from = pane.base_line.min(display.len());
+                super::rows::RowMap::lines(&display[from..from.saturating_add(row + 1).min(display.len())], pane.scroll_col)
+            }
+        };
         let Some((line, col)) = map.at(row, ((pos.0 - pane.text_x) / cw).floor() as usize) else { return false };
         let Some(ob) = self.buffers.get(buffer) else { return false };
         if line >= ob.buffer.line_count() {
@@ -5656,7 +5661,7 @@ pub(crate) mod tests {
         app.wasm.layers.geometry = super::super::layers::Geometry {
             cell: (10.0, 20.0),
             window: (400.0, 400.0),
-            panes: vec![super::super::layers::GeoPane { id: window.number() as u64, rect, text_x: 0.0, text_y: 0.0, base_line: 0, scroll_col: 0, rows: 20, focused: true }],
+            panes: vec![super::super::layers::GeoPane { id: window.number() as u64, rect, text_x: 0.0, text_y: 0.0, base_line: 0, scroll_col: 0, rows: 20, focused: true, map: None }],
             ..Default::default()
         };
         assert!(!app.decoration_click((45.0, 5.0)), "on the text beside it");

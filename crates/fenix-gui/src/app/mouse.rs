@@ -182,6 +182,9 @@ impl App {
         let gutter_px = self.gutter_chars(ob) as f32 * char_width;
         let x = pos.0 - content.x - text::PAD_LEFT - gutter_px;
         let cursor_line = ob.buffer.line_col(&state.cursor).0;
+        if self.wrap_cols(pane, buffer).is_some() {
+            return self.wrapped_text_hit(pane, buffer, content, row, x);
+        }
         // Sticky scroll's headers sit over the top rows, unscrolled.
         let folds_active = lines.len() != ob.buffer.line_count();
         let sticky = if row >= 0 && !folds_active && ob.kind == BufferKind::Text && ob.syntax.is_some() && self.wrap_cols(pane, buffer).is_none() {
@@ -201,16 +204,7 @@ impl App {
                 (line, state.scroll_col)
             }
         };
-        let start = ob.buffer.line_start_char(line);
-        let len = ob.buffer.line_len(line);
-        let line_text = ob.buffer.text_range(start, start + len);
-        let tab_stops = self.tab_stops_for(buffer);
-        let decorations: Vec<&crate::decorations::Decoration> = self.code_decorations(buffer).into_iter().filter(|d| d.start <= start + len && d.end >= start).collect();
-        let col_map = if decorations.is_empty() {
-            tabstops::expand_line(&line_text, &tab_stops).1
-        } else {
-            crate::decorations::layout_line(&line_text, start, &decorations, &tab_stops, line == cursor_line).col_map
-        };
+        let col_map = self.line_col_map(buffer, line, cursor_line);
         let gutter = x < 0.0;
         // The row it's on, through the pane's map of them.
         let map = super::rows::RowMap::lines(&[line], scroll_col);
@@ -221,6 +215,60 @@ impl App {
         let glyph_x = content.x + text::PAD_LEFT + gutter_px + glyph_col as f32 * char_width;
         let glyph_bottom = content.y + text::PAD_TOP + (shown_row as f32 + 1.0 - frac) * line_height;
         Some(TextHit { buffer, line, col, past_end: past_end || index >= lines.len() as isize, gutter, anchor: (glyph_x, glyph_bottom) })
+    }
+
+    /// Char column -> visual column for `buffer`'s `line` as it's drawn:
+    /// its tabs expanded, its decorations laid out (as on the cursor's
+    /// line, `cursor_line`).
+    fn line_col_map(&self, buffer: BufferId, line: usize, cursor_line: usize) -> Vec<usize> {
+        let Some(ob) = self.buffers.get(buffer) else { return Vec::new() };
+        let start = ob.buffer.line_start_char(line);
+        let len = ob.buffer.line_len(line);
+        let line_text = ob.buffer.text_range(start, start + len);
+        let tab_stops = self.tab_stops_for(buffer);
+        let decorations: Vec<&crate::decorations::Decoration> = self.code_decorations(buffer).into_iter().filter(|d| d.start <= start + len && d.end >= start).collect();
+        if decorations.is_empty() {
+            tabstops::expand_line(&line_text, &tab_stops).1
+        } else {
+            crate::decorations::layout_line(&line_text, start, &decorations, &tab_stops, line == cursor_line).col_map
+        }
+    }
+
+    /// `text_hit` in a pane whose lines wrap: `row` (from the top of
+    /// `content`, negative above it) and `x` (pixels from the text's left
+    /// edge) through the pane's rows. Right of a row that goes on below
+    /// is that row's last char; above or below the rows shown is the line
+    /// before the first or after the last, by its first row.
+    fn wrapped_text_hit(&self, pane: fenix_window::WindowId, buffer: BufferId, content: fenix_window::Rect, row: isize, x: f32) -> Option<TextHit> {
+        let ob = self.buffers.get(buffer)?;
+        let (char_width, line_height) = self.cell_size();
+        let state = *self.pane_state(pane);
+        let fit = text::lines_that_fit(content.h, line_height);
+        let top = state.rendered_scroll.floor().max(0.0) as usize;
+        let map = self.pane_rows(pane, buffer, top, state.scroll_row, fit + 1);
+        let last = map.len().checked_sub(1)?;
+        let cell = (x / char_width).floor().max(0.0) as usize;
+        let lines = ob.buffer.visual_line_count().max(1);
+        let edge = map.row(if row < 0 { 0 } else { last })?.line;
+        let (line, vcol, past) = match usize::try_from(row).ok().filter(|&r| r <= last) {
+            Some(r) => {
+                let shown = map.row(r)?;
+                let (line, vcol) = map.at(r, cell)?;
+                // Past a row's end, on a line that goes on below: its last char.
+                let vcol = if shown.last { vcol } else { vcol.min(shown.cols.end.saturating_sub(1)) };
+                (line, vcol, false)
+            }
+            None if row < 0 => (edge.saturating_sub(1), cell, false),
+            None => (edge.saturating_add(1).min(lines - 1), cell, edge + 1 >= lines),
+        };
+        let cursor_line = ob.buffer.line_col(&state.cursor).0;
+        let col_map = self.line_col_map(buffer, line, cursor_line);
+        let (col, past_end) = char_col_at(&col_map, vcol);
+        // Under the glyph it lands on, for a hover's card.
+        let (glyph_row, glyph_col) = map.locate(line, tabstops::visual_col(&col_map, col)).unwrap_or((row.clamp(0, last as isize) as usize, cell));
+        let glyph_x = content.x + text::PAD_LEFT + self.gutter_chars(ob) as f32 * char_width + glyph_col as f32 * char_width;
+        let glyph_bottom = content.y + text::PAD_TOP + (glyph_row as f32 + 1.0) * line_height;
+        Some(TextHit { buffer, line, col, past_end: past_end || past, gutter: x < 0.0, anchor: (glyph_x, glyph_bottom) })
     }
 
     /// The char `hit` puts the cursor on: past the line's end is its last
@@ -1459,4 +1507,63 @@ mod tests {
         assert_eq!(app.text(), "bye world");
     }
 
+    /// `text`, its lines wrapped at `cols` columns.
+    fn wrapped_app(text: &str, cols: usize) -> App {
+        let mut app = app_with(text);
+        app.run_cmd("view.toggle_wrap");
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, cols);
+        app
+    }
+
+    #[test]
+    fn a_click_on_a_continuation_row_is_on_that_part_of_the_line() {
+        // `the quick ` / `brown fox ` / `jumps`, then `next`.
+        let mut app = wrapped_app("the quick brown fox jumps\nnext", 10);
+        let pos = at(&app, 1, 2);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 12));
+        let pos = at(&app, 3, 1);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (1, 1), "the row after a line's last is the next line");
+        let pos = at(&app, 0, 30);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 9), "right of a row the line goes on from: that row's last char");
+        let pos = at(&app, 2, 30);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 24), "right of its last row: the line's last char");
+        let pos = at(&app, 9, 0);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (1, 0), "below the text: the last line");
+    }
+
+    #[test]
+    fn a_click_in_a_continuation_row_s_indent_is_its_first_char() {
+        // `    let total = ` / `    first + ` / `    second;`
+        let mut app = wrapped_app("    let total = first + second;", 16);
+        let pos = at(&app, 1, 1);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 16));
+        let pos = at(&app, 1, 6);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 18));
+    }
+
+    #[test]
+    fn a_drag_across_a_wrapped_line_s_rows_selects_what_is_between() {
+        let mut app = wrapped_app("the quick brown fox jumps", 10);
+        let (from, to) = (at(&app, 0, 4), at(&app, 1, 8));
+        app.handle_click_at(from, W, H);
+        app.mouse_drag_to(to, W, H);
+        assert_eq!(selection(&app).as_deref(), Some("quick brown fox"));
+        app.mouse_release();
+    }
+
+    #[test]
+    fn a_wide_char_s_row_is_hit_a_cell_a_char() {
+        let mut app = wrapped_app("日本語の文章です", 6);
+        let pos = at(&app, 1, 1);
+        click(&mut app, pos);
+        assert_eq!(cursor_at(&app), (0, 7));
+    }
 }

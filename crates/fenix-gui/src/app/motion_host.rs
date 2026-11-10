@@ -106,6 +106,8 @@ pub(super) struct PaneExtras {
     /// column shown -- what a caret glide converts through.
     pub base_line: usize,
     pub scroll_col: usize,
+    /// What is on each of its rows, for the extensions' layers.
+    pub rows: Option<super::rows::RowMap>,
     /// Whole rows flashing: the jump beacon.
     pub row_flashes: Vec<(usize, [f32; 4])>,
     /// Cells flashing: what a change added.
