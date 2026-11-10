@@ -296,21 +296,78 @@ impl App {
     /// Whether `buffer`'s lines wrap where a pane lets them: as it was
     /// turned, else the default for it.
     pub(super) fn buffer_wraps(&self, buffer: BufferId) -> bool {
-        self.wrap_overrides.get(&buffer).copied().unwrap_or(false)
+        self.wrap_overrides.get(&buffer).copied().unwrap_or_else(|| self.wrap_default(buffer))
     }
 
-    /// Whether `pane` can wrap what it shows of `buffer`: ordinary text
-    /// (a file, an agent's prompt), not a table, a terminal, a page or an
-    /// extension's surface, and not one side of a side by side, whose
-    /// filler rows need a row a line.
-    pub(super) fn pane_can_wrap(&self, pane: fenix_window::WindowId, buffer: BufferId) -> bool {
+    /// Whether `buffer` wraps unless turned: an agent's prompt does; a
+    /// file by its language's list (`editor.wrap_languages`, Markdown
+    /// and `text` -- a file of no language -- unless set; then
+    /// `editor.nowrap_languages`), else `editor.wrap`. A few lookups,
+    /// nothing read from the file: what a frame can ask each time.
+    fn wrap_default(&self, buffer: BufferId) -> bool {
         let Some(ob) = self.buffers.get(buffer) else { return false };
-        matches!(ob.kind, BufferKind::Text | BufferKind::Prompt)
-            && !self.table_views.contains_key(&buffer)
-            && !self.terminal_buffers.contains_key(&buffer)
-            && !self.is_page_buffer(buffer)
-            && self.code_surface(buffer).is_none()
-            && !self.is_side_by_side_pane(pane)
+        if ob.kind == BufferKind::Prompt {
+            return true;
+        }
+        // Its language's name; `text` only for a `.txt` or `.text` file
+        // (any case), not every file of no language Fenix knows, which
+        // follows `editor.wrap`. An extension in capitals counts here
+        // (`README.MD` is Markdown) whatever highlighting makes of it.
+        let language = match (ob.syntax.as_ref().map(|s| s.language()), ob.buffer.path()) {
+            (Some(language), _) => Some(language.name()),
+            (None, Some(path)) => {
+                let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+                fenix_syntax::detect_language_from_path(path)
+                    .or_else(|| ext.as_deref().and_then(fenix_syntax::detect_language))
+                    .map(|l| l.name())
+                    .or_else(|| matches!(ext.as_deref(), Some("txt" | "text")).then(|| "text".to_string()))
+            }
+            (None, None) => None,
+        };
+        if let Some(language) = language {
+            let listed = |key: &str| self.config.list_value(key).iter().any(|l| l.trim().eq_ignore_ascii_case(&language));
+            let wraps = match self.config.value("editor.wrap_languages") {
+                Some(_) => listed("editor.wrap_languages"),
+                None => language == "markdown" || language == "text",
+            };
+            if listed("editor.nowrap_languages") {
+                return false;
+            }
+            if wraps {
+                return true;
+            }
+        }
+        self.config.bool_value("editor.wrap").unwrap_or(false)
+    }
+
+    /// Why `pane` can't wrap what it shows of `buffer`, if it can't: only
+    /// ordinary text (a file, an agent's prompt) wraps -- not a table, a
+    /// terminal, a page or an extension's surface, and not one side of a
+    /// side by side, whose filler rows need a row a line.
+    pub(super) fn wrap_refusal(&self, pane: fenix_window::WindowId, buffer: BufferId) -> Option<&'static str> {
+        let Some(ob) = self.buffers.get(buffer) else { return Some("this pane") };
+        if self.terminal_buffers.contains_key(&buffer) || ob.kind == BufferKind::Terminal {
+            Some("a terminal")
+        } else if self.table_views.contains_key(&buffer) || ob.kind == BufferKind::Table {
+            Some("a table")
+        } else if self.is_page_buffer(buffer) || self.code_surface(buffer).is_some() || matches!(ob.kind, BufferKind::Page | BufferKind::Dashboard) {
+            Some("a page")
+        } else if self.is_side_by_side_pane(pane) {
+            Some("a side by side")
+        } else if !matches!(ob.kind, BufferKind::Text | BufferKind::Prompt) {
+            Some(match ob.kind {
+                BufferKind::Diff | BufferKind::Merge => "a diff",
+                BufferKind::Git | BufferKind::Graph => "a Git page",
+                _ => "this pane",
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Whether `pane` can wrap what it shows of `buffer` (`wrap_refusal`).
+    pub(super) fn pane_can_wrap(&self, pane: fenix_window::WindowId, buffer: BufferId) -> bool {
+        self.wrap_refusal(pane, buffer).is_none()
     }
 
     /// The columns `pane`'s lines of `buffer` wrap at: `None` when they
@@ -328,6 +385,11 @@ impl App {
     /// `view.toggle_wrap`: the focused buffer's lines wrapped, or not.
     pub(crate) fn toggle_wrap(&mut self) {
         let (buffer, pane) = (self.focused_buffer_id(), self.focused_pane_id());
+        // Nothing to turn where lines never wrap: say why.
+        if let Some(reason) = self.wrap_refusal(pane, buffer) {
+            self.set_message(format!("Lines don't wrap in {reason}"));
+            return;
+        }
         let on = !self.buffer_wraps(buffer);
         self.wrap_overrides.insert(buffer, on);
         // Every pane showing it starts its lines' rows afresh.
@@ -337,8 +399,7 @@ impl App {
             state.scroll_col = 0;
             state.scroll_row = 0;
         }
-        let shown = if !on { "Wrap off" } else if self.pane_can_wrap(pane, buffer) { "Wrap on" } else { "Wrap on (not in this pane)" };
-        self.set_message(shown);
+        self.set_message(if on { "Wrap on" } else { "Wrap off" });
         self.wake_caret();
     }
 
@@ -729,7 +790,8 @@ mod app_tests {
 
     #[test]
     fn a_tab_widens_the_columns_after_it_and_a_sideways_scroll_takes_them_off() {
-        let (mut app, _f) = app_on_file("a.txt", "\tabc def\n");
+        // A file of a language that doesn't wrap: it scrolls sideways.
+        let (mut app, _f) = app_on_file("a.rs", "\tabc def\n");
         app.press_all("w w v e");
         let o = app.focused_overlays_now(10);
         // A tab is eight columns: `def` is chars 5..8, columns 12..15.
@@ -763,7 +825,10 @@ mod app_tests {
     /// `text` in a file whose lines wrap at `cols` columns.
     fn wrapped(name: &str, text: &str, cols: usize) -> (App, super::super::test_keys::TestFile) {
         let (mut app, file) = app_on_file(name, text);
-        app.run_cmd("view.toggle_wrap");
+        // A plain text file wraps unless turned off; another is turned on.
+        if !app.buffer_wraps(app.focused_buffer_id()) {
+            app.run_cmd("view.toggle_wrap");
+        }
         let pane = app.focused_pane_id();
         app.set_pane_text_cols(pane, cols);
         (app, file)
@@ -1096,6 +1161,73 @@ mod app_tests {
         assert_eq!(app.wrap_cols(pane, buffer), Some(1));
         app.pane_text_cols.clear();
         assert_eq!(app.wrap_cols(pane, buffer), Some(80));
+    }
+
+    fn said(app: &App) -> String {
+        app.status_message.as_ref().map(|m| m.text.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn markdown_and_plain_text_wrap_and_code_follows_editor_wrap() {
+        let wraps = |name: &str, app_set: &dyn Fn(&mut App)| {
+            let (mut app, _f) = app_on_file(name, "x\n");
+            app_set(&mut app);
+            app.buffer_wraps(app.focused_buffer_id())
+        };
+        let none = |_: &mut App| {};
+        assert!(wraps("a.md", &none));
+        assert!(wraps("README.MD", &none), "an extension in capitals");
+        assert!(wraps("notes.txt", &none), "a plain text file");
+        assert!(wraps("a.TXT", &none));
+        // A file of no language Fenix knows isn't text unless it's .txt:
+        // it follows editor.wrap, as in 1.5.
+        for name in ["README", "a.rb", "Makefile", "x.log", "a.csv", "Cargo.lock", "a.proto"] {
+            assert!(!wraps(name, &none), "{name}");
+        }
+        assert!(!wraps("a.rs", &none));
+        let on_for_all = |app: &mut App| app.config.set_value("editor.wrap", Some(fenix_config::Value::Bool(true)));
+        assert!(wraps("x.log", &on_for_all));
+        let on = |app: &mut App| app.config.set_value("editor.wrap", Some(fenix_config::Value::Bool(true)));
+        assert!(wraps("a.rs", &on));
+        let not_md = |app: &mut App| app.config.set_value("editor.nowrap_languages", Some(fenix_config::Value::List(vec!["markdown".into()])));
+        assert!(!wraps("a.md", &not_md));
+        let only_rust = |app: &mut App| app.config.set_value("editor.wrap_languages", Some(fenix_config::Value::List(vec!["rust".into()])));
+        assert!(wraps("a.rs", &only_rust));
+        assert!(!wraps("a.md", &only_rust), "the list set: Markdown not on it");
+        // Turned, a buffer is as it was turned, whatever the settings.
+        let (mut app, _f) = app_on_file("a.md", "x\n");
+        app.run_cmd("view.toggle_wrap");
+        assert_eq!(said(&app), "Wrap off");
+        assert!(!app.buffer_wraps(app.focused_buffer_id()));
+    }
+
+    #[test]
+    fn an_agent_s_prompt_wraps_whatever_the_settings_say() {
+        let (mut app, _f) = app_on_file("a.rs", "x\n");
+        let buffer = app.focused_buffer_id();
+        app.buffers.get_mut(buffer).unwrap().kind = BufferKind::Prompt;
+        app.config.set_value("editor.nowrap_languages", Some(fenix_config::Value::List(vec!["rust".into()])));
+        assert!(app.buffer_wraps(buffer));
+        assert!(app.wrap_cols(app.focused_pane_id(), buffer).is_some());
+    }
+
+    #[test]
+    fn a_table_and_a_page_never_wrap_and_turning_wrap_there_says_why() {
+        let (mut app, _f) = app_on_file("a.csv", "a,b\n1,2\n");
+        app.config.set_value("editor.wrap", Some(fenix_config::Value::Bool(true)));
+        app.run_cmd("table.toggle");
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        assert_eq!(app.open().kind, BufferKind::Table);
+        assert_eq!(app.wrap_cols(pane, buffer), None);
+        app.run_cmd("view.toggle_wrap");
+        assert_eq!(said(&app), "Lines don't wrap in a table");
+        assert!(!app.wrap_overrides.contains_key(&buffer), "nothing turned");
+        app.run_cmd("settings.open");
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        assert!(app.is_page_buffer(buffer));
+        assert_eq!(app.wrap_cols(pane, buffer), None);
+        app.run_cmd("view.toggle_wrap");
+        assert_eq!(said(&app), "Lines don't wrap in a page");
     }
 
     #[test]

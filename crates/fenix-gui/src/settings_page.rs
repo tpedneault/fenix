@@ -20,6 +20,10 @@ use fenix_config::{settings, Category, Kind, Problem, Secret, Setting, Value};
 use crate::page::{CardLook, Chip};
 use crate::page::{edit_line, fit, frame, insert_at, with_caret, wrap, Grid, Key, Page, Popup, Role};
 
+/// List settings whose default is itself a list, not none: they open
+/// with it to edit, and emptied they're an empty list, not the default.
+const LISTED_DEFAULTS: &[&str] = &["editor.wrap_languages"];
+
 /// Whose settings the page is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
@@ -475,6 +479,8 @@ impl SettingsPage {
             (Kind::Secret(_), _) => String::new(),
             (Kind::List, Some(Value::List(l))) => l.join(", "),
             (_, Some(v)) => v.show(),
+            // A list whose default is a list: as it is, to edit from.
+            (Kind::List, None) if LISTED_DEFAULTS.contains(&s.key) => s.default.to_string(),
             (_, None) => String::new(),
         };
         self.edit = Some(Edit::Inline { key: s.key, text });
@@ -822,6 +828,11 @@ impl SettingsPage {
                     return Action::SetSecret { secret, token: Some(text).filter(|t| !t.trim().is_empty()) };
                 }
                 if text.trim().is_empty() {
+                    // Emptied, a list with a default of its own is empty;
+                    // another list is unset, which is empty too.
+                    if LISTED_DEFAULTS.contains(&k) {
+                        return self.set(k, Some(Value::List(Vec::new())));
+                    }
                     return self.set(k, None);
                 }
                 match s.kind.parse(&text) {
@@ -1337,6 +1348,25 @@ mod tests {
 
     fn page() -> SettingsPage {
         SettingsPage::new(Scope::You, snap())
+    }
+
+    /// The languages that wrap open as they are by default, so taking one
+    /// off leaves the other; emptied, the list is empty, not the default.
+    #[test]
+    fn the_languages_that_wrap_open_with_their_default_and_empty_is_none() {
+        let mut p = page();
+        goto(&mut p, "editor.wrap_languages");
+        p.key(Key::Enter);
+        assert_eq!(p.typed().cloned().as_deref(), Some("markdown, text"));
+        for _ in 0.."text".len() + 2 {
+            p.key(Key::Backspace);
+        }
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "editor.wrap_languages", value: Some(Value::List(vec!["markdown".into()])) });
+        p.key(Key::Enter);
+        while p.typed().is_some_and(|t| !t.is_empty()) {
+            p.key(Key::Backspace);
+        }
+        assert_eq!(p.key(Key::Enter), Action::Set { key: "editor.wrap_languages", value: Some(Value::List(Vec::new())) });
     }
 
     fn goto(p: &mut SettingsPage, key: &str) {

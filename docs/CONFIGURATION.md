@@ -458,6 +458,9 @@ when it's out of date).
 | **Editor** | | | |
 | `editor.indent_width` | 1–16 | 4 | Spaces a Tab or >> inserts; Fenix always indents with spaces. *A project can set it.* |
 | `editor.tab_width` | 1–16 | 8 | Columns a tab character already in a file takes up. *A project can set it.* |
+| `editor.wrap` | true / false | off | A line wider than its pane goes on under itself, at the pane's width; SPC t w (Alt+Z with standard keys) turns it on or off for one buffer until it's closed or Fenix restarts. Not tables, diffs, Git pages, terminals or a side by side. |
+| `editor.wrap_languages` | a list | markdown, text | Languages whose lines wrap whatever Wrap long lines says (markdown; text for .txt files). |
+| `editor.nowrap_languages` | a list | none | Languages whose lines never wrap unless SPC t w says so: over Wrap long lines and the list of those that do. |
 | `editor.fold_markers` | true / false | on | A column in the gutter of a file's lines: ▾ where a fold starts, ▸ where it's closed; a click opens or closes it, as za does. |
 | `editor.mouse_hover` | true / false | on | The pointer resting on a symbol shows what K would -- its problems first -- under it; moving away or typing closes it. |
 | `editor.hover_delay_ms` | 0–5000 | 500 | Milliseconds the pointer rests on a symbol before its hover shows; 0 never shows it. |

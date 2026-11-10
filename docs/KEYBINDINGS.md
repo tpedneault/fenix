@@ -45,6 +45,7 @@ extension's keys come with it.
 | `Ctrl+/` | Comment or uncomment the line, or the selection's lines |
 | `Alt+↑` / `Alt+↓` | Move the line (or the selected lines) up / down |
 | `Alt+Shift+↑` / `Alt+Shift+↓` | Copy it above / below |
+| `Alt+Z` | Wrap long lines in the buffer, or stop (as `SPC t w`) |
 | `Ctrl+G` | Go to a line |
 | `Ctrl+Shift+K` | Delete the line, or the selected lines (not to the clipboard) |
 | `Ctrl+Enter` / `Ctrl+Shift+Enter` | A new line below / above, indented, wherever the cursor is on the line |
@@ -191,6 +192,7 @@ keys'; the palette has the commands).
 | `SPC q q` | Quit |
 | `SPC q r` | Restart where you are (windows, files, unsaved text): extensions installed or switched on since start are loaded |
 | `SPC t n` | Cycle line numbers (off / absolute / relative) |
+| `SPC t w` | Wrap long lines in the buffer, or stop (`editor.wrap`) |
 | `SPC t p` | Pick a theme by name (fuzzy picker) |
 | `SPC t =` / `SPC t -` / `SPC t 0` | Font size: increase / decrease / reset |
 | `SPC t f` | Toggle fullscreen |
@@ -500,6 +502,16 @@ keys'; the palette has the commands).
 
 The arrow keys are `h`, `j`, `k` and `l` wherever a motion is taken: with a
 count, extending a selection, after an operator (`d<Down>`).
+
+Where a buffer's long lines wrap (`SPC t w`), `j` and `k` still go a line
+at a time and `gj` / `gk` (or `g↓` / `g↑`) go a screen row, keeping the
+column on screen, with a count, in Visual and after an operator (`dgj`,
+charwise). With standard keys and in Insert, `↑` / `↓` go by screen
+rows; `Home` and `End` go to the row's start or end first, then the
+line's (`End` stops after the row's last word, or on its last char when
+the row ends inside a word); `PageUp` / `PageDown` go a pane of rows; the
+wheel scrolls by rows. Adding a cursor above or
+below (`Ctrl+Alt+↑/↓`) still goes by lines.
 
 ## The mouse
 

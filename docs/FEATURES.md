@@ -121,6 +121,22 @@ its extension. The rest is built into Fenix.
   Vim. Folds come from the syntax tree (a grammar's `folds.scm`), or from
   the indentation in a file with none; they're kept with the session.
   `editor.fold_markers` turns the column off.
+- **Soft wrap**: a line wider than its pane goes on under itself, broken
+  after the last word that fits (inside a word only when the word alone
+  is wider), at the pane's real width, so a resize or a split wraps again;
+  each row keeps its last column for the cursor, so a line exactly as wide
+  as the pane takes two rows. A continuation row keeps the line's indent
+  (at most half the pane); the line number, gutter marks and fold marker
+  are on its first row, a problem's message and a fold's `⋯ N lines` at
+  the end of its last. `SPC t w` (`Alt+Z` with standard keys) turns it on
+  or off for the buffer in front, until it's closed or Fenix restarts (it
+  isn't kept with the session); `editor.wrap` is the default, Markdown
+  and `.txt` files wrap whatever it says (`editor.wrap_languages`,
+  `editor.nowrap_languages`), and an agent's prompt wraps by default. `gj` /
+  `gk` move by screen rows, as `↑` / `↓` do with standard keys and in
+  Insert, where `End` stops first after the row's last word (or on its
+  last char, when the row ends inside a word). Tables, diffs, Git pages, terminals, pages, Home and a side by
+  side never wrap.
 - **Code screenshots** (`SPC c s`): the Visual selection's lines, or the
   whole file (500 lines at most), as a picture in the theme's syntax
   colours and your font, drawn on the CPU: a window with rounded corners,

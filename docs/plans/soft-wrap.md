@@ -430,3 +430,36 @@ stage by stage.
   then moves by row on a decorated line goes by where they were; and
   the cursor's line, whose decorations are laid out as on it, is the
   one the key started on.
+
+### Stage 6: settings and keys
+
+- `editor.wrap` (default off), `editor.wrap_languages` (default
+  `markdown, text`; `text` is a `.txt` or `.text` file, any case -- a
+  file of no language Fenix knows otherwise follows `editor.wrap`, as
+  in 1.5 -- and an extension in capitals counts for wrap, `README.MD`
+  being Markdown, though highlighting still goes by its own case) and `editor.nowrap_languages` (default none), read
+  in that order of strength from the bottom: the nowrap list, then the
+  wrap list, then `editor.wrap`. An agent's `Prompt` buffer wraps
+  whatever they say; `view.toggle_wrap` for a buffer outranks them all.
+  The default is a few map lookups and the buffer's language, nothing
+  read from the file, so asking it every frame costs nothing.
+- `wrap_refusal` says why a pane doesn't wrap (a terminal, a table, a
+  page or Home, a side by side, a diff, a Git page), and gates the
+  setting, a language's default and `Prompt` alike; `view.toggle_wrap`
+  there changes nothing and says why.
+- `SPC t w` and, with standard keys, `Alt+Z` (free in 1.5).
+- Tested with real panes: a table (`table.toggle`), a page (the
+  settings page) and a side by side refuse, and say so; a terminal's
+  refusal is tested by its kind only (a real one starts a shell).
+- Not covered by a test: `decoration_click` with a fold closed or at a
+  break, the redraw half of debug marks and change seams, a decorated
+  line wrapped, the blame column on continuation rows, Block-visual
+  `gj`, `.` repeating `dgj`, PageDown with a real pane's height and at
+  the buffer's ends, an unfocused pane's `reveal_cursor` and
+  `search_reveal`, the reload clamp, folds, tabs, decorations and wide
+  chars inside a move by row.
+- After review: the settings page opens `editor.wrap_languages` with its
+  default to edit, and emptied it stores an empty list rather than the
+  default (`LISTED_DEFAULTS`); other list settings, whose unset is
+  empty, are as they were. The per-buffer toggle isn't kept with the
+  session and goes when its buffer closes.
