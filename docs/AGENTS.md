@@ -162,7 +162,10 @@ thread started on its own is a row of its own. `SPC a l` lists every
 project's, under a heading each, the current project first.
 
 In the list, typing filters it (a run's heading matches what was asked,
-its pipeline and its steps), and with either keys:
+its pipeline and its steps; archived threads only once `Alt+H` shows
+them). While there's a query the rows are flat, in the order they
+match, each step saying its run and, by project, its project. A thread
+that's said nothing yet isn't listed. With either keys:
 
 | Key | Does |
 |---|---|
@@ -173,8 +176,16 @@ its pipeline and its steps), and with either keys:
 | `Alt+H` | Shows archived threads too, marked, or hides them |
 | `Alt+P` | This project's threads, or every project's |
 
-Archiving puts a thread away, never deletes it: it's stored as it was,
-can be found with `Alt+H`, opened, continued and brought back.
+Archiving puts a thread away, never deletes it: it's stored as it was
+(its place in the list too), can be found with `Alt+H`, opened,
+continued and brought back. A run is archived whole, from its heading or
+any step; one at work or waiting on you isn't, until it's done. A run
+Fenix was closed on is marked stopped, interrupted. A step run again (a
+pipeline's loop) is a row of its own, named by its round: `build (2)`.
+`SPC a a` comes back to the project's last thread that isn't archived.
+From anywhere, `SPC a z` (`agents.archive`) archives the thread the
+agents' panel shows, or brings it back; `agents.threads_archived` opens
+the list with archived threads shown.
 `SPC a T` (threads at work, anywhere) is as it was. Threads kept before
 1.5 are single entries, unarchived.
 

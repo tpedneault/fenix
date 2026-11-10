@@ -135,7 +135,7 @@ impl Store {
             .iter()
             .map(|e| {
                 let mut line = json!({ "id": e.id.0, "agent": e.agent, "root": e.root.to_string_lossy(), "sessionId": e.session_id, "title": e.title, "updated": e.updated });
-                add_run_and_archived(&mut line, e.run.as_ref(), e.archived);
+                add_run_and_archived(&mut line, e.run.as_ref(), e.archived, true);
                 line
             })
             .collect();
@@ -145,15 +145,19 @@ impl Store {
 
 fn meta_value(meta: &ThreadMeta) -> Value {
     let mut v = json!({ "id": meta.id.0, "agent": meta.agent, "root": meta.root.to_string_lossy(), "sessionId": meta.session_id, "handedOffFrom": meta.handed_off_from.as_ref().map(|t| &t.0) });
-    add_run_and_archived(&mut v, meta.run.as_ref(), meta.archived);
+    add_run_and_archived(&mut v, meta.run.as_ref(), meta.archived, false);
     v
 }
 
+/// The most of a run's request the index keeps (the thread keeps it all).
+const INDEX_REQUEST: usize = 200;
+
 /// `run` and `archived`, written only when there's something to say, so
 /// a thread that's neither reads as it did before 1.5.
-fn add_run_and_archived(v: &mut Value, run: Option<&RunTag>, archived: bool) {
+fn add_run_and_archived(v: &mut Value, run: Option<&RunTag>, archived: bool, index: bool) {
     if let Some(run) = run {
-        v["run"] = json!({ "id": run.id, "pipeline": run.pipeline, "request": run.request, "step": run.step, "stepName": run.step_name, "started": run.started, "ended": run.ended, "ledger": run.ledger.as_ref().map(|t| &t.0) });
+        let request: String = if index { run.request.chars().take(INDEX_REQUEST).collect() } else { run.request.clone() };
+        v["run"] = json!({ "id": run.id, "pipeline": run.pipeline, "request": request, "step": run.step, "stepName": run.step_name, "seq": run.seq, "started": run.started, "ended": run.ended, "ledger": run.ledger.as_ref().map(|t| &t.0) });
     }
     if archived {
         v["archived"] = json!(true);
@@ -167,6 +171,7 @@ fn parse_run(v: &Value) -> Option<RunTag> {
         request: v.get("request").and_then(Value::as_str).unwrap_or("").to_string(),
         step: v.get("step").and_then(Value::as_u64).unwrap_or(0) as usize,
         step_name: v.get("stepName").and_then(Value::as_str).unwrap_or("").to_string(),
+        seq: v.get("seq").and_then(Value::as_u64).map_or_else(|| v.get("step").and_then(Value::as_u64).unwrap_or(0) as usize, |n| n as usize),
         started: v.get("started").and_then(Value::as_u64).unwrap_or(0),
         ended: v.get("ended").and_then(Value::as_str).map(str::to_string),
         ledger: v.get("ledger").and_then(Value::as_str).map(|s| ThreadId(s.to_string())),
@@ -439,7 +444,7 @@ mod tests {
         let dir = temp().join("run");
         let store = Store::new(&dir);
         let (mut meta, t) = sample();
-        let run = RunTag { id: "r1".into(), pipeline: "Review and fix".into(), request: "Fix the login test".into(), step: 1, step_name: "build".into(), started: 100, ended: Some("done: fixed".into()), ledger: Some(ThreadId("t-0".into())) };
+        let run = RunTag { id: "r1".into(), pipeline: "Review and fix".into(), request: "Fix the login test".into(), step: 1, step_name: "build".into(), seq: 3, started: 100, ended: Some("done: fixed".into()), ledger: Some(ThreadId("t-0".into())) };
         meta.run = Some(run.clone());
         meta.archived = true;
         store.save(&meta, &t, &Value::Null, 5).unwrap();
@@ -447,6 +452,11 @@ mod tests {
         assert_eq!(back.meta, meta);
         let line = &store.index()[0];
         assert_eq!((line.run.as_ref(), line.archived), (Some(&run), true));
+        // A long request: whole in the thread, cut in the index.
+        meta.run = Some(RunTag { request: "x".repeat(1000), ..run.clone() });
+        store.save(&meta, &t, &Value::Null, 5).unwrap();
+        assert_eq!(store.load(&meta.id).unwrap().meta.run.unwrap().request.len(), 1000);
+        assert_eq!(store.index()[0].run.as_ref().unwrap().request.len(), INDEX_REQUEST);
         // Brought back, and not a step: nothing written for either.
         meta.archived = false;
         meta.run = None;

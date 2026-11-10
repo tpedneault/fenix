@@ -1266,6 +1266,11 @@ label = "threads, every project's"
 command = "agents.threads_everywhere"
 
 [[leader]]
+keys = "SPC a z"
+label = "archive thread"
+command = "agents.archive"
+
+[[leader]]
 keys = "SPC a p"
 label = "agents, logins"
 command = "agents.agents"

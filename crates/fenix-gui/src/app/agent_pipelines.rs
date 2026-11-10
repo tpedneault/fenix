@@ -323,7 +323,8 @@ impl App {
             return self.pipeline_finished(id, "stopped: no agent to run it");
         };
         let thread = self.agents.hub.new_thread(&agent, &root);
-        let tag = fenix_acp::hub::RunTag { step, step_name: spec.name.clone(), ..self.pipelines.runs[&id].tag.clone() };
+        let seq = self.pipelines.runs[&id].threads.len();
+        let tag = fenix_acp::hub::RunTag { step, seq, step_name: spec.name.clone(), ..self.pipelines.runs[&id].tag.clone() };
         if let Some(meta) = self.agents.hub.meta_mut(&thread) {
             meta.run = Some(tag);
         }

@@ -82,7 +82,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   summary, `Alt+R` reviews its changes as one; `Alt+A` archives a thread
   or a whole run (it's never deleted; `Alt+H` shows archived ones), and
   `SPC a l` (`agents.threads_everywhere`, or `Alt+P` in the list) shows
-  every project's threads by project. A step's thread keeps which run
+  every project's threads by project; `SPC a z` (`agents.archive`)
+  archives the thread the panel shows. A step's thread keeps which run
   and step it is; threads kept before are single entries.
 - Auto-save, off unless chosen on the Settings page: `editor.auto_save =
   "after_delay"` saves a file a moment after its last edit

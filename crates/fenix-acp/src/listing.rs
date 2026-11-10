@@ -5,7 +5,7 @@
 //! they're asked for. Plain data in, rows out, so the editor only draws
 //! them.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::hub::{RunTag, ThreadId};
@@ -22,12 +22,19 @@ pub struct Listed {
     pub updated: u64,
     pub run: Option<RunTag>,
     pub archived: bool,
+    /// Its state now: `working`, `waiting on you`, `read-only`, or
+    /// nothing.
     pub state: String,
 }
 
 impl Listed {
     fn waiting(&self) -> bool {
         self.state.contains("waiting")
+    }
+
+    /// At work, or waiting on you: not a thread to put away.
+    pub fn busy(&self) -> bool {
+        self.waiting() || self.state == "working"
     }
 }
 
@@ -43,15 +50,21 @@ pub struct Options {
     /// folded).
     pub folded: HashSet<String>,
     pub unfolded: HashSet<String>,
+    /// A query typed: every thread a row of its own, each saying its run
+    /// and project, nothing folded and no headings for projects -- the
+    /// rows are sorted by how well they match, so nothing can lean on
+    /// the row above it.
+    pub flat: bool,
 }
 
 /// A row of the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Row {
-    Project { root: PathBuf, threads: usize, current: bool },
+    Project { root: PathBuf, name: String, threads: usize, current: bool },
     Run { id: String, pipeline: String, request: String, ended: Option<String>, updated: u64, steps: Vec<ThreadId>, folded: bool, archived: bool, waiting: bool },
-    Step { id: ThreadId, run: String, step: usize, name: String, agent: String, state: String, archived: bool },
-    Thread { id: ThreadId, title: String, agent: String, state: String, updated: u64, archived: bool },
+    /// `mark`: its state now, or how it ended (`✓`, `■ stopped`).
+    Step { id: ThreadId, run: String, step: usize, name: String, agent: String, mark: String, archived: bool, request: String, pipeline: String, project: String },
+    Thread { id: ThreadId, title: String, agent: String, state: String, updated: u64, archived: bool, project: String },
 }
 
 /// A run's or a lone thread's place in a project's list.
@@ -87,17 +100,36 @@ pub fn rows(threads: &[Listed], current: &Path, options: &Options) -> Vec<Row> {
     let mut roots: Vec<(&Path, Vec<&Listed>)> = by_root.into_iter().collect();
     // The current project first, then the most recently active.
     roots.sort_by_key(|(root, threads)| (*root != current, std::cmp::Reverse(threads.iter().map(|t| t.updated).max().unwrap_or(0))));
+    let all: Vec<&Path> = roots.iter().map(|(r, _)| *r).collect();
     let mut out = Vec::new();
-    for (root, threads) in roots {
-        if options.by_project {
-            out.push(Row::Project { root: root.to_path_buf(), threads: threads.len(), current: root == current });
+    for (root, threads) in &roots {
+        let name = project_name(root, &all);
+        if options.by_project && !options.flat {
+            out.push(Row::Project { root: root.to_path_buf(), name: name.clone(), threads: threads.len(), current: *root == current });
         }
-        project_rows(&threads, options, &mut out);
+        project_rows(threads, options, &name, &mut out);
     }
     out
 }
 
-fn project_rows(threads: &[&Listed], options: &Options, out: &mut Vec<Row>) {
+/// A project's name as the list says it: its folder's, or with the
+/// folder above when another project has the same name; none for a
+/// thread with no project.
+fn project_name(root: &Path, all: &[&Path]) -> String {
+    let leaf = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = leaf(root);
+    if name.is_empty() || name == "." {
+        return "(no project)".to_string();
+    }
+    if all.iter().any(|o| *o != root && leaf(o) == name) {
+        if let Some(parent) = root.parent().map(leaf).filter(|p| !p.is_empty()) {
+            return format!("{parent}/{name}");
+        }
+    }
+    name
+}
+
+fn project_rows(threads: &[&Listed], options: &Options, project: &str, out: &mut Vec<Row>) {
     let mut entries: Vec<Entry> = Vec::new();
     for &t in threads {
         match &t.run {
@@ -112,14 +144,18 @@ fn project_rows(threads: &[&Listed], options: &Options, out: &mut Vec<Row>) {
     entries.sort_by_key(|e| (!e.waiting(), std::cmp::Reverse(e.updated())));
     for entry in entries {
         match entry {
-            Entry::Thread(t) => out.push(Row::Thread { id: t.id.clone(), title: t.title.clone(), agent: t.agent.clone(), state: t.state.clone(), updated: t.updated, archived: t.archived }),
+            Entry::Thread(t) => out.push(Row::Thread { id: t.id.clone(), title: t.title.clone(), agent: t.agent.clone(), state: t.state.clone(), updated: t.updated, archived: t.archived, project: project.to_string() }),
             Entry::Run(id, mut steps) => {
-                steps.sort_by_key(|s| s.run.as_ref().map_or(0, |r| r.step));
+                // In the order they were started: a round of a step run
+                // again comes after what came before it.
+                steps.sort_by_key(|s| s.run.as_ref().map_or((0, 0), |r| (r.seq, r.step)));
                 let first = steps[0].run.clone().unwrap_or_default();
                 // How it ended is said on whichever step was told.
                 let ended = steps.iter().find_map(|s| s.run.as_ref().and_then(|r| r.ended.clone()));
-                let working = ended.is_none() && steps.iter().any(|s| !s.state.is_empty());
-                let folded = if options.folded.contains(&id) {
+                let working = ended.is_none() && steps.iter().any(|s| s.busy());
+                let folded = if options.flat {
+                    false
+                } else if options.folded.contains(&id) {
                     true
                 } else if options.unfolded.contains(&id) {
                     false
@@ -131,7 +167,7 @@ fn project_rows(threads: &[&Listed], options: &Options, out: &mut Vec<Row>) {
                     id: id.clone(),
                     pipeline: first.pipeline.clone(),
                     request: first.request.clone(),
-                    ended,
+                    ended: ended.clone(),
                     updated: steps.iter().map(|s| s.updated).max().unwrap_or(0),
                     steps: steps.iter().map(|s| s.id.clone()).collect(),
                     folded,
@@ -139,13 +175,46 @@ fn project_rows(threads: &[&Listed], options: &Options, out: &mut Vec<Row>) {
                     waiting,
                 });
                 if !folded {
-                    for s in steps {
+                    let stopped = ended.as_deref().is_some_and(|e| !e.starts_with("done"));
+                    let last = steps.len().saturating_sub(1);
+                    let mut rounds: HashMap<usize, usize> = HashMap::new();
+                    for (i, s) in steps.iter().enumerate() {
                         let tag = s.run.as_ref();
-                        out.push(Row::Step { id: s.id.clone(), run: id.clone(), step: tag.map_or(0, |r| r.step), name: tag.map(|r| r.step_name.clone()).unwrap_or_default(), agent: s.agent.clone(), state: s.state.clone(), archived: s.archived });
+                        let step = tag.map_or(0, |r| r.step);
+                        let round = *rounds.entry(step).and_modify(|n| *n += 1).or_insert(1);
+                        let name = tag.map(|r| r.step_name.clone()).unwrap_or_default();
+                        let name = if round > 1 { format!("{name} ({round})") } else { name };
+                        // What it's doing, or how it went: the step a run
+                        // stopped at stopped, the others done.
+                        let mark = if !s.state.is_empty() {
+                            format!("● {}", s.state)
+                        } else if stopped && i == last {
+                            "■ stopped".to_string()
+                        } else {
+                            "✓".to_string()
+                        };
+                        out.push(Row::Step { id: s.id.clone(), run: id.clone(), step, name, agent: s.agent.clone(), mark, archived: s.archived, request: first.request.clone(), pipeline: first.pipeline.clone(), project: project.to_string() });
                     }
                 }
             }
         }
+    }
+}
+
+/// A row as the list writes it while a query is typed: each one whole,
+/// its run and its project said, since the rows are in the order they
+/// match, not under their headings.
+pub fn flat_label(row: &Row, now: u64) -> String {
+    let cut = |t: &str| {
+        let t = t.lines().next().unwrap_or("").trim();
+        if t.chars().count() > 40 { format!("{}…", t.chars().take(39).collect::<String>()) } else { t.to_string() }
+    };
+    match row {
+        Row::Step { step, name, agent, mark, archived, request, pipeline, project, .. } => {
+            format!("{} {name} · {agent} {mark} -- {} ({pipeline}) · {project}{}", step + 1, cut(request), if *archived { " · archived" } else { "" })
+        }
+        Row::Thread { project, .. } => format!("{} · {project}", label(row, now).trim_start()),
+        _ => label(row, now),
     }
 }
 
@@ -165,8 +234,7 @@ pub fn age(now: u64, then: u64) -> String {
 pub fn label(row: &Row, now: u64) -> String {
     let archived = |a: bool| if a { " · archived" } else { "" };
     match row {
-        Row::Project { root, threads, current } => {
-            let name = root.file_name().map_or_else(|| root.to_string_lossy().into_owned(), |n| n.to_string_lossy().into_owned());
+        Row::Project { name, threads, current, .. } => {
             format!("{name}{} · {threads} thread{}", if *current { " (this project)" } else { "" }, if *threads == 1 { "" } else { "s" })
         }
         Row::Run { pipeline, request, ended, updated, steps, folded, archived: a, waiting, .. } => {
@@ -182,8 +250,7 @@ pub fn label(row: &Row, now: u64) -> String {
             let count = if *folded { format!("  ({} step{})", steps.len(), if steps.len() == 1 { "" } else { "s" }) } else { String::new() };
             format!("{} {asked} · {pipeline} · {how} · {}{}{count}", if *folded { "▸" } else { "▾" }, age(now, *updated), archived(*a))
         }
-        Row::Step { step, name, agent, state, archived: a, .. } => {
-            let mark = if state.is_empty() { "✓".to_string() } else { format!("● {state}") };
+        Row::Step { step, name, agent, mark, archived: a, .. } => {
             format!("    {} {name}  {agent}  {mark}{}", step + 1, archived(*a))
         }
         Row::Thread { title, agent, state, updated, archived: a, .. } => {
@@ -202,7 +269,7 @@ mod tests {
     }
 
     fn step(id: &str, run: &str, n: usize, name: &str, updated: u64) -> Listed {
-        let tag = RunTag { id: run.into(), pipeline: "Review and fix".into(), request: "Fix the login test\nand more".into(), step: n, step_name: name.into(), started: 1, ended: None, ledger: None };
+        let tag = RunTag { id: run.into(), pipeline: "Review and fix".into(), request: "Fix the login test\nand more".into(), step: n, step_name: name.into(), seq: n, started: 1, ended: None, ledger: None };
         Listed { run: Some(tag), ..thread(id, "/p", updated) }
     }
 
@@ -272,6 +339,42 @@ mod tests {
         assert_eq!(ids(&rows), ["P /p", "a", "P /q", "w", "b", "P /r", "c"], "this project, then by activity; waiting first within one");
         assert_eq!(label(&rows[0], 0), "p (this project) · 1 thread");
         assert_eq!(label(&rows[2], 0), "q · 2 threads");
+    }
+
+    #[test]
+    fn rounds_come_in_the_order_they_ran_named_by_their_round() {
+        let mut threads = Vec::new();
+        for (seq, (n, name)) in [(0, "plan"), (1, "build"), (2, "review"), (1, "build"), (2, "review")].into_iter().enumerate() {
+            let mut t = step(&format!("t{seq}"), "r1", n, name, 100 - seq as u64);
+            t.run.as_mut().unwrap().seq = seq;
+            threads.push(t);
+        }
+        threads[4].run.as_mut().unwrap().ended = Some("stopped: still fails".into());
+        let options = Options { unfolded: ["r1".to_string()].into(), ..Options::default() };
+        let rows = rows(&threads, Path::new("/p"), &options);
+        assert_eq!(ids(&rows), ["R r1", "  t0", "  t1", "  t2", "  t3", "  t4"]);
+        let labels: Vec<String> = rows.iter().map(|r| label(r, 0)).collect();
+        assert!(labels[4].contains("2 build (2)"), "{labels:?}");
+        assert!(labels[5].contains("3 review (2)") && labels[5].contains("■ stopped"), "the step it stopped at: {labels:?}");
+        assert!(labels[3].contains('✓'), "{labels:?}");
+    }
+
+    #[test]
+    fn a_query_lists_each_thread_whole_with_its_run_and_project() {
+        let threads = vec![step("p", "r1", 0, "plan", 10), thread("lone", "/p", 5)];
+        let options = Options { flat: true, by_project: true, ..Options::default() };
+        let rows = rows(&threads, Path::new("/p"), &options);
+        assert_eq!(ids(&rows), ["R r1", "  p", "lone"], "no project headings; nothing folded");
+        assert_eq!(flat_label(&rows[1], 10), "1 plan · claude ✓ -- Fix the login test (Review and fix) · p");
+        assert!(flat_label(&rows[2], 10).ends_with("· p"));
+    }
+
+    #[test]
+    fn projects_with_the_same_name_are_told_apart() {
+        let threads = vec![thread("a", "/a/api", 1), thread("b", "/b/api", 2), thread("c", "", 3)];
+        let options = Options { by_project: true, ..Options::default() };
+        let names: Vec<String> = rows(&threads, Path::new("/a/api"), &options).iter().filter_map(|r| if let Row::Project { name, .. } = r { Some(name.clone()) } else { None }).collect();
+        assert_eq!(names, ["a/api", "(no project)", "b/api"]);
     }
 
     #[test]

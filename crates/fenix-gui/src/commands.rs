@@ -226,6 +226,8 @@ impl CommandRegistry {
         registry.external("agents.toggle_dock", "Show or put away the agents' dock, wherever you are (SPC a A)", |app| app.agents_toggle_dock());
         registry.external("agents.new", "A new thread with a coding agent", |app| app.agents_new_thread());
         registry.external("agents.threads", "This project's agent threads, a pipeline's runs grouped: show one, archive one (Alt+A)", |app| app.agents_pick_thread());
+        registry.external("agents.threads_archived", "This project's agent threads, archived ones too (Alt+H in the list)", |app| app.agents_pick_thread_archived());
+        registry.external("agents.archive", "Archive the agent thread shown (its whole run, for a pipeline's step), or bring it back (SPC a z)", |app| app.agents_archive_shown());
         registry.external("agents.threads_everywhere", "Every project's agent threads, by project, the current one first", |app| app.agents_pick_thread_everywhere());
         registry.external("agents.running", "Every agent thread at work or waiting on you, in any project or workspace: show one, in its workspace (SPC a T)", |app| app.agents_pick_running());
         registry.external("agents.agents", "The coding agents: a thread with one, a login, a restart", |app| app.agents_pick_agent());

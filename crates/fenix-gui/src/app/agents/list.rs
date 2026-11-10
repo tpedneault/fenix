@@ -7,7 +7,12 @@
 //! the same with Vim keys and standard keys: `Tab` folds a run, `Alt+A`
 //! archives (or brings back), `Alt+H` shows archived threads, `Alt+P`
 //! switches between this project and every project, `Alt+R` reviews a
-//! run's changes.
+//! run's changes. The commands (`agents.archive`, `agents.threads_archived`,
+//! `agents.threads_everywhere`) do the same from the palette and keymap.
+//! While a query is typed the rows are flat -- each one saying its run
+//! and project -- since they come in the order they match.
+
+use std::path::{Path, PathBuf};
 
 use fenix_acp::listing::{self, Listed, Options, Row};
 use fenix_keymap::{KeyCode, KeyPress, NamedKey};
@@ -20,15 +25,29 @@ pub(crate) struct ThreadList {
     /// It's the picker up now.
     pub(crate) open: bool,
     pub(crate) options: Options,
+    /// Each run's summary page, by run id: opened again, not anew.
+    pub(crate) summaries: HashMap<String, BufferId>,
 }
 
 fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// One project, however it's spelt: on Windows in any letter case, with
+/// either slash, with or without `\\?\` -- as `within` compares paths.
+fn same_project(a: &Path, b: &Path) -> bool {
+    if cfg!(windows) {
+        let spelt = |p: &Path| p.to_string_lossy().replace('/', "\\").trim_start_matches(r"\\?\").trim_end_matches('\\').to_lowercase();
+        spelt(a) == spelt(b)
+    } else {
+        a == b
+    }
+}
+
 impl AgentHost {
     /// Every thread there is, as the list sees it: the store's index, and
-    /// what's loaded and live over it.
+    /// what's loaded and live over it. A brand-new thread that's said
+    /// nothing yet isn't one to list.
     fn listed(&self) -> Vec<Listed> {
         let mut out: Vec<Listed> = Vec::new();
         let mut seen: HashSet<ThreadId> = HashSet::new();
@@ -41,6 +60,8 @@ impl AgentHost {
                 "waiting on you"
             } else if view.is_working() {
                 "working"
+            } else if matches!(view.link, Link::ReadOnly(_)) {
+                "read-only"
             } else {
                 ""
             };
@@ -62,6 +83,14 @@ impl AgentHost {
             }
             out.push(Listed { id: e.id, agent: e.agent, root: e.root, title: e.title, updated: e.updated, run: e.run, archived: e.archived, state: String::new() });
         }
+        // One project, one spelling: the first one met.
+        let mut roots: Vec<PathBuf> = Vec::new();
+        for l in &mut out {
+            match roots.iter().find(|r| same_project(r, &l.root)) {
+                Some(r) => l.root = r.clone(),
+                None => roots.push(l.root.clone()),
+            }
+        }
         out
     }
 }
@@ -72,58 +101,91 @@ impl App {
         self.agents.save(id);
     }
 
+    /// The threads as the list shows them: a run left behind by a Fenix
+    /// that stopped mid-run (no step of it at work, and not running here)
+    /// said to have been interrupted, not running.
+    fn thread_list_listed(&self) -> Vec<Listed> {
+        let mut listed = self.agents.listed();
+        let live: HashSet<&str> = self.pipelines.runs.values().map(|r| r.tag.id.as_str()).collect();
+        let busy: HashSet<String> = listed.iter().filter(|l| l.busy()).filter_map(|l| l.run.as_ref().map(|r| r.id.clone())).collect();
+        for l in &mut listed {
+            if let Some(run) = l.run.as_mut().filter(|r| r.ended.is_none() && !live.contains(r.id.as_str()) && !busy.contains(&r.id)) {
+                run.ended = Some("stopped: interrupted, when Fenix closed".to_string());
+            }
+        }
+        listed
+    }
+
+    /// The project the list is about, as the list spells it.
+    fn thread_list_root(&self, listed: &[Listed]) -> PathBuf {
+        let root = self.agents_root();
+        listed.iter().map(|l| &l.root).find(|r| same_project(r, &root)).cloned().unwrap_or(root)
+    }
+
     /// `SPC a t`: this project's threads.
     pub(crate) fn agents_pick_thread(&mut self) {
         self.agents.list.options.by_project = false;
+        self.agents.list.options.flat = false;
         self.thread_list_show(None, true);
     }
 
     /// `SPC a l`: every project's threads, by project.
     pub(crate) fn agents_pick_thread_everywhere(&mut self) {
         self.agents.list.options.by_project = true;
+        self.agents.list.options.flat = false;
         self.thread_list_show(None, true);
     }
 
-    /// The list, laid out again (after a fold, an archive, a filter), the
-    /// row `keep` names selected.
+    /// `agents.threads_archived`: this project's threads, archived ones
+    /// too -- or, again, without them.
+    pub(crate) fn agents_pick_thread_archived(&mut self) {
+        let options = &mut self.agents.list.options;
+        options.archived = !options.archived;
+        options.flat = false;
+        let shown = options.archived;
+        self.thread_list_show(None, true);
+        self.set_message(if shown { "archived threads shown too -- again hides them" } else { "archived threads hidden" });
+    }
+
+    /// The list, laid out again (after a fold, an archive, a filter, a
+    /// query), the row `keep` names selected -- else the one at `row`.
     fn thread_list_show(&mut self, keep: Option<Pick>, first: bool) {
         self.agents_configure();
-        let root = self.agents_root();
-        let listed = self.agents.listed();
-        let rows = listing::rows(&listed, &root, &self.agents.list.options);
+        let listed = self.thread_list_listed();
+        let root = self.thread_list_root(&listed);
+        let options = self.agents.list.options.clone();
+        let rows = listing::rows(&listed, &root, &options);
         if rows.is_empty() && first {
-            let why = if self.agents.list.options.by_project { "no agent threads yet" } else { "no agent threads in this project yet" };
-            let more = if listed.iter().any(|l| l.archived) { " -- Alt+H in the list shows archived ones" } else { "" };
+            let why = if options.by_project { "no agent threads yet" } else { "no agent threads in this project yet" };
+            // Archived ones there are, here: Alt+H.
+            let hidden = listed.iter().any(|l| l.archived && (options.by_project || same_project(&l.root, &root)));
+            let more = if hidden && !options.archived { " -- Alt+H in the list shows the archived ones" } else { "" };
             self.set_message(format!("{why}: SPC a n starts one{more}"));
-            if listed.iter().all(|l| !l.archived) {
+            if !hidden {
                 return;
             }
         }
         let now = now_secs();
+        let flat = options.flat;
         let by_id: HashMap<&ThreadId, &Listed> = listed.iter().map(|l| (&l.id, l)).collect();
         let candidates: Vec<fenix_picker::Candidate<Pick>> = rows
             .iter()
             .map(|row| {
-                let label = listing::label(row, now);
+                let label = if flat { listing::flat_label(row, now) } else { listing::label(row, now) };
                 match row {
                     Row::Project { root, .. } => fenix_picker::Candidate::new(label, Pick::Project(root.clone())),
                     Row::Run { id, pipeline, request, steps, .. } => {
                         let words: Vec<String> = steps.iter().filter_map(|s| by_id.get(s)).map(|l| format!("{} {}", l.run.as_ref().map(|r| r.step_name.as_str()).unwrap_or(""), l.agent)).collect();
                         fenix_picker::Candidate::new(label, Pick::Run(id.clone())).with_keywords(format!("{pipeline} {request} {}", words.join(" ")))
                     }
-                    Row::Step { id, .. } => {
-                        let run = by_id.get(id).and_then(|l| l.run.as_ref());
-                        let words = run.map(|r| format!("{} {}", r.pipeline, r.request)).unwrap_or_default();
-                        fenix_picker::Candidate::new(label, Pick::Thread(id.clone())).with_keywords(words)
-                    }
+                    Row::Step { id, request, pipeline, .. } => fenix_picker::Candidate::new(label, Pick::Thread(id.clone())).with_keywords(format!("{pipeline} {request}")),
                     Row::Thread { id, .. } => fenix_picker::Candidate::new(label, Pick::Thread(id.clone())),
                 }
             })
             .collect();
-        let at = keep.and_then(|k| candidates.iter().position(|c| c.payload == k));
-        let query = match &self.active_picker {
-            Some(ActivePicker::Agents(state)) if !first => state.query().to_string(),
-            _ => String::new(),
+        let (query, row) = match &self.active_picker {
+            Some(ActivePicker::Agents(state)) if !first => (state.query().to_string(), state.selected_row()),
+            _ => (String::new(), 0),
         };
         self.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(candidates)));
         self.agents.list.open = true;
@@ -131,9 +193,29 @@ impl App {
             if !query.is_empty() {
                 state.set_query(&query);
             }
-            if let Some(at) = at.filter(|_| query.is_empty()) {
-                state.move_selection(at as isize);
-            }
+            // The row it was on, as the list now has it; else the one at
+            // the same place, so the next key doesn't land at the top.
+            let len = state.len();
+            let at = keep.and_then(|k| state.visible_rows(0, len).position(|(_, c)| c.payload == k)).unwrap_or(row.min(len.saturating_sub(1)));
+            state.move_selection(at as isize);
+        }
+    }
+
+    /// After a key in the list: typing a query (or clearing it) lays the
+    /// rows out flat (or grouped again).
+    pub(crate) fn thread_list_follow_query(&mut self) {
+        if !self.agents.list.open {
+            return;
+        }
+        let Some(ActivePicker::Agents(state)) = &self.active_picker else {
+            self.agents.list.open = false;
+            return;
+        };
+        let typed = !state.query().is_empty();
+        if typed != self.agents.list.options.flat {
+            self.agents.list.options.flat = typed;
+            let keep = state.selected().map(|c| c.payload.clone());
+            self.thread_list_show(keep, false);
         }
     }
 
@@ -165,7 +247,8 @@ impl App {
                 match &selected {
                     Some(pick @ (Pick::Run(_) | Pick::Thread(_))) => {
                         self.thread_list_archive(pick);
-                        self.thread_list_show(selected.clone(), false);
+                        // The row after it, now where it was.
+                        self.thread_list_show(None, false);
                     }
                     _ => self.set_message("archive a thread or a run: Alt+A on it"),
                 }
@@ -207,8 +290,8 @@ impl App {
     }
 
     fn thread_list_toggle_fold(&mut self, id: &str) {
-        let root = self.agents_root();
-        let listed = self.agents.listed();
+        let listed = self.thread_list_listed();
+        let root = self.thread_list_root(&listed);
         let folded_now = listing::rows(&listed, &root, &self.agents.list.options).iter().any(|r| matches!(r, Row::Run { id: rid, folded: true, .. } if rid == id));
         let options = &mut self.agents.list.options;
         if folded_now {
@@ -220,32 +303,62 @@ impl App {
         }
     }
 
-    /// The threads of run `id`, in step order.
+    /// The threads of run `id`, in the order they were started.
     fn run_threads(&self, id: &str) -> Vec<Listed> {
-        let mut steps: Vec<Listed> = self.agents.listed().into_iter().filter(|l| l.run.as_ref().is_some_and(|r| r.id == id)).collect();
-        steps.sort_by_key(|l| l.run.as_ref().map_or(0, |r| r.step));
+        let mut steps: Vec<Listed> = self.thread_list_listed().into_iter().filter(|l| l.run.as_ref().is_some_and(|r| r.id == id)).collect();
+        steps.sort_by_key(|l| l.run.as_ref().map_or((0, 0), |r| (r.seq, r.step)));
         steps
     }
 
-    /// `Alt+A`: the thread, or every step of the run, archived -- or, when
-    /// it already is, brought back. Nothing is deleted.
-    fn thread_list_archive(&mut self, pick: &Pick) {
-        let ids: Vec<ThreadId> = match pick {
-            Pick::Thread(id) => vec![id.clone()],
-            Pick::Run(run) => self.run_threads(run).into_iter().map(|l| l.id).collect(),
+    /// `Alt+A` (`agents.archive`): the thread, or every step of the run --
+    /// a step of a run is archived with its run -- archived, or, when it
+    /// already is, brought back. Nothing is deleted, and when it was
+    /// last at work stays as it was. A thread at work or waiting on you
+    /// isn't put away.
+    pub(crate) fn thread_list_archive(&mut self, pick: &Pick) {
+        let listed = self.thread_list_listed();
+        let run_of = |id: &ThreadId| listed.iter().find(|l| &l.id == id).and_then(|l| l.run.as_ref().map(|r| r.id.clone()));
+        let (ids, what) = match pick {
+            Pick::Thread(id) => match run_of(id) {
+                Some(run) => (self.run_threads(&run).into_iter().map(|l| l.id).collect::<Vec<_>>(), "the run"),
+                None => (vec![id.clone()], "the thread"),
+            },
+            Pick::Run(run) => (self.run_threads(run).into_iter().map(|l| l.id).collect(), "the run"),
             _ => return,
         };
-        let all_archived = ids.iter().all(|id| self.agents.listed().iter().any(|l| &l.id == id && l.archived));
-        let archive = !all_archived;
+        if ids.iter().any(|id| listed.iter().any(|l| &l.id == id && l.busy())) {
+            self.set_message(format!("{what} is at work or waiting on you -- archive it once it's done"));
+            return;
+        }
+        let archive = !ids.iter().all(|id| listed.iter().any(|l| &l.id == id && l.archived));
+        let mut failed = 0;
         for id in &ids {
-            self.agents.load_one(id);
+            if !self.agents.load_one(id) {
+                failed += 1;
+                continue;
+            }
             if let Some(meta) = self.agents.hub.meta_mut(id) {
                 meta.archived = archive;
             }
-            self.agents_keep_thread(id);
+            if self.agents.save_keeping_time(id).is_err() {
+                failed += 1;
+            }
         }
-        let what = if matches!(pick, Pick::Run(_)) { "the run" } else { "the thread" };
+        if failed > 0 {
+            self.set_error(format!("{failed} of {} couldn't be kept as {} -- where threads are kept can't be read or written", ids.len(), if archive { "archived" } else { "brought back" }));
+            return;
+        }
         self.set_message(if archive { format!("{what} archived -- Alt+H shows archived ones, Alt+A brings it back") } else { format!("{what} brought back") });
+    }
+
+    /// `agents.archive`: the thread the agents' panel shows (its run, when
+    /// it's a step of one) archived, or brought back.
+    pub(crate) fn agents_archive_shown(&mut self) {
+        let Some(thread) = self.agents.shown(&self.pages) else {
+            self.set_message("no agent thread open: SPC a t lists them, Alt+A there archives one");
+            return;
+        };
+        self.thread_list_archive(&Pick::Thread(thread));
     }
 
     /// A thread picked from the list: read in if it isn't, then shown.
@@ -280,11 +393,33 @@ impl App {
 
     /// `Enter` on a run: its summary, on a page of its own -- what was
     /// asked, each step and how it went, how it ended, and the key that
-    /// reviews its changes.
+    /// reviews its changes. The same run's page is reused.
     pub(crate) fn thread_list_open_run(&mut self, id: String) {
         let steps = self.run_threads(&id);
         let Some(first) = steps.first().and_then(|l| l.run.clone()) else { return };
+        // The whole request: the index keeps only its start.
+        if let Some(tag) = self.agents.load_one(&steps[0].id).then(|| self.agents.hub.meta(&steps[0].id).and_then(|m| m.run.clone())).flatten() {
+            if tag.request.len() > first.request.len() {
+                return self.thread_list_open_run_with(id, steps, RunTagWhole(tag));
+            }
+        }
+        self.thread_list_open_run_with(id, steps, RunTagWhole(first));
+    }
+
+    fn thread_list_open_run_with(&mut self, id: String, steps: Vec<Listed>, first: RunTagWhole) {
+        let first = first.0;
         let ended = steps.iter().find_map(|l| l.run.as_ref().and_then(|r| r.ended.clone()));
+        // Each step's mark, as the list says it.
+        let listed = self.thread_list_listed();
+        let root = self.thread_list_root(&listed);
+        let options = Options { unfolded: [id.clone()].into(), archived: true, by_project: true, ..Options::default() };
+        let marks: HashMap<ThreadId, (String, String)> = listing::rows(&listed, &root, &options)
+            .into_iter()
+            .filter_map(|r| match r {
+                Row::Step { id, name, mark, .. } => Some((id, (name, mark))),
+                _ => None,
+            })
+            .collect();
         let mut text = format!("# {}\n\n", first.pipeline);
         text.push_str(&format!("Asked {}:\n\n", listing::age(now_secs(), first.started).replace("now", "just now")));
         for line in first.request.lines() {
@@ -292,10 +427,9 @@ impl App {
         }
         text.push_str("\n## Steps\n\n");
         for l in &steps {
-            let tag = l.run.as_ref();
-            let state = if l.state.is_empty() { "✓".to_string() } else { format!("● {}", l.state) };
+            let (name, mark) = marks.get(&l.id).cloned().unwrap_or_default();
             let archived = if l.archived { ", archived" } else { "" };
-            text.push_str(&format!("{}. {} -- {} {state}{archived}: {}\n", tag.map_or(0, |r| r.step) + 1, tag.map(|r| r.step_name.as_str()).unwrap_or(""), l.agent, l.title));
+            text.push_str(&format!("{}. {name} -- {} {mark}{archived}: {}\n", l.run.as_ref().map_or(0, |r| r.step) + 1, l.agent, l.title));
         }
         text.push_str(&format!("\n## How it ended\n\n{}\n", ended.as_deref().unwrap_or("It's still going.")));
         let ledger = self.run_ledger(&id);
@@ -303,8 +437,24 @@ impl App {
             Some(_) => self.keys_text("\nSPC a r reviews what the run changed, every step's, as one review; SPC a t lists its steps.\n"),
             None => "\nIt changed nothing to review.\n".to_string(),
         });
-        let syntax = fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Markdown, &text);
-        let buffer = self.buffers.open_text(&text, Some(syntax));
+        // Its page again, when it's still open: brought up to date.
+        let buffer = match self.agents.list.summaries.get(&id).copied().filter(|b| self.buffers.get(*b).is_some()) {
+            Some(buffer) => {
+                if let Some(ob) = self.buffers.get_mut(buffer) {
+                    let mut scratch = Cursor::at_start();
+                    let end = ob.buffer.len_chars();
+                    ob.buffer.replace_range(&mut scratch, 0, end, &text);
+                    ob.buffer.mark_saved();
+                }
+                buffer
+            }
+            None => {
+                let syntax = fenix_syntax::SyntaxState::new(fenix_syntax::LanguageId::Markdown, &text);
+                self.buffers.open_text(&text, Some(syntax))
+            }
+        };
+        self.agents.list.summaries.insert(id, buffer);
+        self.agents.run_summaries.retain(|b, _| self.buffers.get(*b).is_some());
         if let Some(ledger) = ledger {
             self.agents.run_summaries.insert(buffer, ledger);
         }
@@ -315,3 +465,6 @@ impl App {
         self.wake_caret();
     }
 }
+
+/// A run's tag with its whole request, read from its thread.
+struct RunTagWhole(fenix_acp::hub::RunTag);

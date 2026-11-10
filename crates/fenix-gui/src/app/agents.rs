@@ -296,18 +296,13 @@ impl AgentHost {
     /// at most `limit`.
     fn load_threads(&mut self, root: &Path, limit: usize) -> Vec<ThreadId> {
         let Some(store) = &self.store else { return Vec::new() };
+        let index = store.index();
         let mut ids = Vec::new();
-        for entry in store.index().into_iter().filter(|e| e.root == root).take(limit) {
+        for entry in index.into_iter().filter(|e| e.root == root).take(limit) {
             if !self.loaded.contains(&entry.id) && self.hub.view(&entry.id).is_none() {
-                if let Ok(saved) = store.load(&entry.id) {
-                    self.hub.restore(saved.meta, saved.thread);
-                    if let Some(baselines) = saved.extra.get("baselines").and_then(Value::as_object) {
-                        let map = baselines.iter().map(|(k, v)| (PathBuf::from(k), v.as_str().map(str::to_string))).collect();
-                        self.baselines.insert(entry.id.clone(), map);
-                    }
-                    if let Some(unknown) = saved.extra.get("unknown").and_then(Value::as_array) {
-                        self.unknown.insert(entry.id.clone(), unknown.iter().filter_map(Value::as_str).map(PathBuf::from).collect());
-                    }
+                let loaded = self.store.as_ref().map(|store| store.load(&entry.id));
+                if let Some(Ok(saved)) = loaded {
+                    self.restore_saved(&entry.id, saved);
                 }
                 self.loaded.insert(entry.id.clone());
             }
@@ -319,17 +314,31 @@ impl AgentHost {
     }
 
     fn save(&mut self, id: &ThreadId) {
-        self.dirty.remove(id);
-        let (Some(store), Some(view)) = (&self.store, self.hub.view(id)) else { return };
-        if view.thread.entries.is_empty() {
-            return;
-        }
-        let baselines: serde_json::Map<String, Value> = self.baselines.get(id).map(|b| b.iter().map(|(p, t)| (p.to_string_lossy().into_owned(), json!(t))).collect()).unwrap_or_default();
         let updated = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        let unknown: Vec<String> = self.unknown.get(id).map(|u| u.iter().map(|p| p.to_string_lossy().into_owned()).collect()).unwrap_or_default();
-        if let Err(e) = store.save(view.meta, view.thread, &json!({ "baselines": baselines, "unknown": unknown }), updated) {
+        if let Err(e) = self.save_as_of(id, updated) {
             eprintln!("fenix: couldn't save agent thread {id}: {e}");
         }
+    }
+
+    /// Saved with the time it was last changed kept as it was: archiving
+    /// (or bringing back) a thread doesn't move it up the list.
+    pub(super) fn save_keeping_time(&mut self, id: &ThreadId) -> Result<(), String> {
+        let updated = match &self.store {
+            Some(store) => store.load(id).map(|s| s.updated).unwrap_or_else(|_| SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)),
+            None => return Err("nowhere to keep threads".into()),
+        };
+        self.save_as_of(id, updated).map_err(|e| e.to_string())
+    }
+
+    fn save_as_of(&mut self, id: &ThreadId, updated: u64) -> std::io::Result<()> {
+        self.dirty.remove(id);
+        let (Some(store), Some(view)) = (&self.store, self.hub.view(id)) else { return Ok(()) };
+        if view.thread.entries.is_empty() {
+            return Ok(());
+        }
+        let baselines: serde_json::Map<String, Value> = self.baselines.get(id).map(|b| b.iter().map(|(p, t)| (p.to_string_lossy().into_owned(), json!(t))).collect()).unwrap_or_default();
+        let unknown: Vec<String> = self.unknown.get(id).map(|u| u.iter().map(|p| p.to_string_lossy().into_owned()).collect()).unwrap_or_default();
+        store.save(view.meta, view.thread, &json!({ "baselines": baselines, "unknown": unknown }), updated)
     }
 }
 
@@ -468,8 +477,10 @@ impl App {
         }
         let entries = self.agents_configure();
         let root = self.agents_root();
+        // The project's last thread, not one put away (archived).
         let existing = self.agents.load_threads(&root, 20);
-        let thread = existing.into_iter().next().or_else(|| self.agents.hub.thread_ids().iter().rev().find(|t| self.agents.hub.meta(t).is_some_and(|m| m.root == root)).cloned());
+        let archived = |hub: &fenix_acp::hub::Hub, t: &ThreadId| hub.meta(t).is_some_and(|m| m.archived);
+        let thread = existing.into_iter().find(|t| !archived(&self.agents.hub, t)).or_else(|| self.agents.hub.thread_ids().iter().rev().find(|t| self.agents.hub.meta(t).is_some_and(|m| m.root == root && !m.archived)).cloned());
         let thread = match thread {
             Some(t) => t,
             None => {

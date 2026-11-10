@@ -1811,3 +1811,122 @@ fn the_thread_list_s_keys_leave_typing_to_the_query_and_other_pickers_alone() {
     f.app.enter_picker(ActivePicker::Agents(fenix_picker::PickerState::new(vec![fenix_picker::Candidate::new("x", Pick::Nothing)])));
     assert!(!f.app.thread_list_key(KeyPress::char('a').with_alt()));
 }
+
+/// A thread kept in the store as an earlier Fenix left it, not loaded:
+/// `updated` its last change, `unknown` the files it changed unseen.
+fn keep_thread(f: &Fixture, said: &str, run: Option<fenix_acp::hub::RunTag>, updated: u64, unknown: &[&str]) -> ThreadId {
+    let mut hub = fenix_acp::hub::Hub::new(format!("kept-{}", said.replace(' ', "-")), "test");
+    let id = hub.new_thread("mock", &f.root);
+    hub.thread_mut(&id).unwrap().push_user(vec![ContentBlock::text(said)], false);
+    hub.meta_mut(&id).unwrap().run = run;
+    let view = hub.view(&id).unwrap();
+    f.app.agents.store.as_ref().unwrap().save(view.meta, view.thread, &json!({ "baselines": {}, "unknown": unknown }), updated).unwrap();
+    id
+}
+
+fn list_query(app: &App) -> String {
+    match &app.active_picker {
+        Some(ActivePicker::Agents(state)) => state.query().to_string(),
+        _ => panic!("the list is down"),
+    }
+}
+
+/// Archiving a thread that isn't loaded yet keeps it as it was -- its
+/// time in the list, the files it changed unseen -- and the panel's
+/// "last thread" passes over it.
+#[test]
+fn archiving_a_thread_not_yet_loaded_keeps_its_time_and_what_it_kept() {
+    let mut f = fixture("");
+    let id = keep_thread(&f, "Old work", None, 42, &["/elsewhere/x.rs"]);
+    f.app.agents_pick_thread();
+    assert_eq!(list_rows(&f.app).len(), 1, "{:?}", list_rows(&f.app));
+    f.app.press("M-a");
+    assert!(list_rows(&f.app).is_empty(), "archived");
+    let store = f.app.agents.store.as_ref().unwrap();
+    let entry = store.index().into_iter().find(|e| e.id == id).unwrap();
+    assert!(entry.archived);
+    assert_eq!(entry.updated, 42, "archiving isn't a change to the thread");
+    let saved = store.load(&id).unwrap();
+    assert_eq!(saved.extra.get("unknown"), Some(&json!(["/elsewhere/x.rs"])), "kept: {:?}", saved.extra);
+    f.app.press("Esc");
+    f.app.agents_open_panel();
+    assert_ne!(f.app.agents.shown(&f.app.pages), Some(id), "an archived thread isn't the one the panel comes back to");
+}
+
+/// A run Fenix closed on says it was interrupted, and a step run again
+/// is named by its round, in the order they ran.
+#[test]
+fn a_run_left_when_fenix_closed_says_so_and_a_step_run_again_is_its_second_round() {
+    let mut f = fixture("");
+    let tag = |step: usize, seq: usize, name: &str| fenix_acp::hub::RunTag { id: "run-1".into(), pipeline: "Plan and build".into(), request: "Fix it".into(), step, step_name: name.into(), seq, started: 10, ..Default::default() };
+    keep_thread(&f, "plan", Some(tag(0, 0, "plan")), 11, &[]);
+    keep_thread(&f, "build", Some(tag(1, 1, "build")), 12, &[]);
+    keep_thread(&f, "build again", Some(tag(1, 2, "build")), 13, &[]);
+    f.app.agents_pick_thread();
+    let rows = list_rows(&f.app);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert!(rows[0].contains("stopped"), "not at work: {rows:?}");
+    f.app.press("Tab");
+    let rows = list_rows(&f.app);
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    assert!(rows[1].contains("plan") && rows[2].contains("build") && !rows[2].contains("(2)") && rows[3].contains("build (2)"), "{rows:?}");
+    f.app.press("Up");
+    f.app.press("Up");
+    f.app.press("Up");
+    f.app.press("Enter");
+    let text = f.app.open().buffer.text();
+    assert!(text.contains("interrupted, when Fenix closed"), "its summary says how: {text}");
+}
+
+/// With standard keys too: what's typed is the query, the rows go flat
+/// while it is, and archiving (or bringing back) keeps the query and the
+/// row it was on.
+#[test]
+fn standard_keys_a_query_in_the_thread_list_stays_through_archiving() {
+    let mut f = fixture("");
+    standard_keys(&mut f.app);
+    let alpha = keep_thread(&f, "alpha one", None, 20, &[]);
+    let beta = keep_thread(&f, "beta two", None, 21, &[]);
+    f.app.agents_pick_thread();
+    assert_eq!(list_rows(&f.app).len(), 2);
+    for c in ["b", "e", "t", "a"] {
+        f.app.press(c);
+    }
+    assert!(f.app.agents.list.options.flat, "flat while there's a query");
+    let rows = list_rows(&f.app);
+    assert!(rows.first().is_some_and(|r| r.contains("beta")), "{rows:?}");
+    f.app.press("M-a");
+    assert_eq!(list_query(&f.app), "beta", "the query stays");
+    assert!(f.app.agents.hub.meta(&beta).unwrap().archived && !f.app.agents.hub.meta(&alpha).is_some_and(|m| m.archived));
+    f.app.press("M-h");
+    let rows = list_rows(&f.app);
+    assert!(rows.first().is_some_and(|r| r.contains("beta") && r.contains("archived")), "{rows:?}");
+    f.app.press("M-a");
+    assert!(!f.app.agents.hub.meta(&beta).unwrap().archived, "brought back");
+    assert_eq!(list_query(&f.app), "beta");
+    for _ in 0..4 {
+        f.app.press("BackSpace");
+    }
+    assert!(!f.app.agents.list.options.flat, "grouped again once the query's gone");
+}
+
+/// A thread waiting on you isn't archived from under you.
+#[test]
+fn a_thread_waiting_on_you_is_not_archived() {
+    let mut f = fixture("--fs");
+    let file = f.root.join("a.txt");
+    std::fs::write(&file, "one\n").unwrap();
+    f.app.test_open_path(&file);
+    f.app.agents_open_panel();
+    f.app.config.set_value("agents.save_before_prompt", Some(fenix_config::Value::Text("never".into())));
+    f.type_prompt("edit a.txt one=>two");
+    assert!(f.pump(|app| app.agents.shown(&app.pages).and_then(|t| app.agents.hub.view(&t)).is_some_and(|v| v.thread.pending_permissions() > 0)));
+    let id = f.app.agents.shown(&f.app.pages).unwrap();
+    f.app.agents_pick_thread();
+    f.app.press("M-a");
+    assert!(!f.app.agents.hub.meta(&id).unwrap().archived);
+    assert!(f.app.status_message.as_ref().is_some_and(|m| m.text.contains("once it's done")), "{:?}", f.app.status_message.as_ref().map(|m| &m.text));
+    f.app.press("Esc");
+    f.app.agents_archive_shown();
+    assert!(!f.app.agents.hub.meta(&id).unwrap().archived, "nor from the command");
+}

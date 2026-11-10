@@ -16590,6 +16590,7 @@ impl App {
         if self.active_picker.is_some() {
             self.picker_key(keypress);
             self.ask_project_symbols();
+            self.thread_list_follow_query();
             if let Some(id) = self.queued_command.take() {
                 self.run_command_with(event_loop, &id);
                 self.wake_caret();

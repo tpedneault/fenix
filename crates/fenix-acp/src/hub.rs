@@ -83,6 +83,9 @@ pub struct RunTag {
     /// Which step, from 0, and its name.
     pub step: usize,
     pub step_name: String,
+    /// The order the run's threads were started in, from 0: a step run
+    /// again (another round) is a thread of its own, later.
+    pub seq: usize,
     /// When the run started, in seconds since 1970.
     pub started: u64,
     /// How it ended (`done: ...`, `stopped: ...`); none while it runs.

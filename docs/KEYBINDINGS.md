@@ -335,6 +335,7 @@ keys'; the palette has the commands).
 | `SPC a A` | Show or put away the agents' dock, wherever you are |
 | `SPC a n` / `SPC a t` | A new thread with the default agent (`SPC a p` for another) / this project's threads, a pipeline's run as one entry (in the list: `Tab` folds a run, `Alt+A` archives, `Alt+H` shows archived, `Alt+P` every project, `Alt+R` a run's changes) |
 | `SPC a l` | Every project's threads, by project, the current one first |
+| `SPC a z` | Archive the thread the agents' panel shows (its whole run, for a step), or bring it back |
 | `SPC a T` | Every thread at work or waiting on you, in any project or workspace: the one picked is shown in its workspace |
 | `SPC a p` | The agents: a thread with one, a login, a restart |
 | `SPC a P` | Run the next prompt through a pipeline: plan, build and review by agents in turn |
