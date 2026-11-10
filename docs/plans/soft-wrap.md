@@ -209,3 +209,37 @@ stage by stage.
 - Still per row, for stage 2: `content_spans_decorated` /
   `folded_content_spans`, the indent guides, rainbow brackets (by
   `scroll_col`), sticky headers, Home's and pages' backgrounds.
+
+### Stage 2: breaking and drawing
+
+- `wrap::break_line(display, width, indent)` and
+  `wrap::continuation_indent(display, width)`, as §3 has them. Two
+  rules the plan didn't have: a break never falls between a char and a
+  combining mark, joiner or variation selector after it; and a line
+  whose indent alone is as wide as the pane (a tab in a narrow pane)
+  gets no continuation indent, its break being inside the indent.
+- `App::wrap_cols(pane, buffer)` is `buffer_wraps` (the per-buffer
+  `wrap_overrides`, default off until stage 6) and `pane_can_wrap`
+  (Text and Prompt buffers, not a table, terminal, page, extension
+  surface or side-by-side pane), at `pane_text_cols`: the text columns
+  each frame finds for the pane, with `set_pane_text_cols` for tests.
+- `pane_layout` takes `RowsWanted` (display lines from the top, the
+  `skip` of `scroll_row`, how many rows, the sideways scroll, the wrap
+  width) and builds the rows itself, breaking each shown line's display
+  text (decorated, tab-expanded or plain). With wrap off it is stage
+  1's map. `pane_rows` builds the same rows for the hit-tests.
+- A wrapped pane is drawn by `row_content_spans`, a row at a time;
+  `content_spans_decorated`'s gutter and line text became
+  `push_gutter` and `push_line_text`, which both use. A row's text is
+  its columns of the line, with the syntax's colours; a continuation
+  row has a blank gutter and its indent; a closed fold's count follows
+  its header's last row; the guides continue down a continuation row's
+  indent; rainbow brackets are placed by the row's columns.
+- `PaneState::scroll_row` exists and the rows honour it; nothing sets it
+  yet (stage 4). A wrapped pane draws with no fractional scroll offset,
+  and `scroll_col` is held at 0.
+- The current-line highlight is on the caret's row of a wrapped line,
+  not all its rows.
+- Not yet: clicks in a wrapped pane (stage 3), following the cursor
+  down the rows (stage 4), moving by rows (stage 5). Until then a
+  wrapped pane can put the cursor below its bottom.

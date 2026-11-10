@@ -1,25 +1,28 @@
-//! Plain word-wrapping for generated panel text -- the Docker/Git/Jira
-//! panels' own `label: value` detail rows and Jira's issue description/
-//! comment prose, specifically (see each panel module's own call
-//! sites), *not* their list rows (Containers/Images/Files/Branches/
-//! Commits/...) or Git's diff pane, which stay single-line/unwrapped on
-//! purpose: a wrapped list row would misalign against its neighbors the
-//! same way `docker_panel::render_containers`' own doc comment already
-//! rejected letting a row's content get clipped instead of trimmed, and
-//! wrapping a unified diff would break the one-line-per-change
-//! convention every diff viewer (this app's own included) relies on to
-//! stay readable.
+//! Wrapping, two kinds.
 //!
-//! This has no notion of the pane it'll actually be rendered in --
-//! there's no wrap-aware rendering pipeline in this app (every screen
-//! row still maps 1:1 to one buffer line; see `app.rs`'s `content_
-//! spans`), so `width` is a fixed, generous approximation of a typical
-//! split's width rather than the pane's real current column count.
-//! Good enough to keep long prose (a Jira description, a long Docker
-//! mount path) from silently running off the pane's right edge and
-//! being unreadable; genuinely dynamic wrapping would need `content_
-//! spans` itself to know about wrap points, which none of Docker/Git/
-//! Jira's panel generation does today.
+//! `break_line` is a code pane's soft wrap: where a line wider than its
+//! pane breaks into rows, at the pane's real width, for the row map
+//! (`app/rows.rs`) to lay out -- the text isn't changed, only drawn on
+//! more than one row. A row ends after the last whitespace that fits, in
+//! the middle of a word only when the word alone is wider; the rows after
+//! the first keep the line's indent (`continuation_indent`), at most half
+//! the pane. Columns are the grid's, a char each (tabs expanded and
+//! decorations laid out first), as the caret counts them.
+//!
+//! `wrap_text` is plain word-wrapping for generated panel text -- the
+//! Docker/Git/Jira panels' own `label: value` detail rows and Jira's
+//! issue description/comment prose, specifically (see each panel
+//! module's own call sites), *not* their list rows (Containers/Images/
+//! Files/Branches/Commits/...) or Git's diff pane, which stay single-
+//! line/unwrapped on purpose: a wrapped list row would misalign against
+//! its neighbors the same way `docker_panel::render_containers`' own doc
+//! comment already rejected letting a row's content get clipped instead
+//! of trimmed, and wrapping a unified diff would break the one-line-per-
+//! change convention every diff viewer (this app's own included) relies
+//! on to stay readable. It has no notion of the pane it'll be rendered
+//! in: the text it returns is the panel's lines, so `width` is a fixed,
+//! generous approximation of a typical split's width rather than the
+//! pane's real current column count.
 
 /// The wrap width panel builders default to, in characters -- a
 /// comfortable prose-reading width (`rustfmt`'s own default `max_width`
@@ -99,9 +102,118 @@ fn place(lines: &mut Vec<String>, current: &mut String, current_len: &mut usize,
     }
 }
 
+/// Where a code pane's line wider than `width` columns breaks: the
+/// visual columns of `display` (the line as drawn, tabs expanded and
+/// decorations laid out, a column a char) on each row. A row ends after
+/// the last whitespace that fits; a word wider than the row alone is
+/// broken where the row ends. The rows after the first are `indent`
+/// columns narrower (they're drawn that far in), but never narrower than
+/// one column. An empty line is one empty row.
+pub fn break_line(display: &str, width: usize, indent: usize) -> Vec<std::ops::Range<usize>> {
+    let width = width.max(1);
+    let rest = width.saturating_sub(indent).max(1);
+    let n = display.chars().count();
+    if n <= width {
+        return std::iter::once(0..n).collect();
+    }
+    let chars: Vec<char> = display.chars().collect();
+    let blank: Vec<bool> = chars.iter().map(|c| c.is_whitespace()).collect();
+    let mut rows = Vec::new();
+    let mut start = 0;
+    while n - start > if rows.is_empty() { width } else { rest } {
+        let fits = start + if rows.is_empty() { width } else { rest };
+        // After the last blank that fits, with something other than
+        // blanks before it on the row.
+        let soft = (start + 1..=fits).rev().find(|&end| blank[end - 1] && blank[start..end - 1].iter().any(|b| !b));
+        // A mark that goes on the char before it stays with it.
+        let end = soft.unwrap_or_else(|| (start + 1..=fits).rev().find(|&end| !joins(chars[end])).unwrap_or(fits));
+        rows.push(start..end);
+        start = end;
+    }
+    rows.push(start..n);
+    rows
+}
+
+/// Whether `c` is drawn on the char before it: a combining mark, a
+/// joiner, a variation selector.
+fn joins(c: char) -> bool {
+    matches!(c as u32, 0x300..=0x36F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x200D | 0x20D0..=0x20FF | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F)
+}
+
+/// How far a line's continuation rows are drawn in, in a pane `width`
+/// columns wide: as far as its own indent (`display`'s leading blanks),
+/// but no more than half the pane -- and not at all when the indent
+/// alone doesn't fit on the first row, whose break is then inside it.
+pub fn continuation_indent(display: &str, width: usize) -> usize {
+    let leading = display.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+    if leading >= width { 0 } else { leading.min(width / 2) }
+}
+
 #[cfg(test)]
+// A line of one row is a list of one range.
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
+
+    fn rows(display: &str, width: usize, indent: usize) -> Vec<&str> {
+        let chars: Vec<(usize, char)> = display.char_indices().collect();
+        let byte = |col: usize| chars.get(col).map_or(display.len(), |&(b, _)| b);
+        break_line(display, width, indent).into_iter().map(|r| &display[byte(r.start)..byte(r.end)]).collect()
+    }
+
+    #[test]
+    fn a_line_breaks_after_the_last_blank_that_fits() {
+        assert_eq!(rows("the quick brown fox", 10, 0), vec!["the quick ", "brown fox"]);
+        assert_eq!(rows("aaa bbb ccc ddd", 7, 0), vec!["aaa ", "bbb ", "ccc ddd"]);
+    }
+
+    #[test]
+    fn a_word_wider_than_the_row_is_broken_where_the_row_ends() {
+        assert_eq!(rows("abcdefghijkl", 5, 0), vec!["abcde", "fghij", "kl"]);
+        assert_eq!(rows("ab cdefghijkl", 5, 0), vec!["ab ", "cdefg", "hijkl"]);
+    }
+
+    #[test]
+    fn a_line_as_wide_as_the_row_and_an_empty_one_are_one_row() {
+        assert_eq!(break_line("abcde", 5, 0), [0..5]);
+        assert_eq!(break_line("", 5, 0), [0..0]);
+        assert_eq!(break_line("abcdef", 5, 0), vec![0..5, 5..6]);
+    }
+
+    #[test]
+    fn continuation_rows_are_narrower_by_the_indent() {
+        let line = "    let total = first + second;";
+        let indent = continuation_indent(line, 16);
+        assert_eq!(indent, 4);
+        // The first row's indent isn't a place to break.
+        assert_eq!(rows(line, 16, indent), vec!["    let total = ", "first + ", "second;"]);
+        // Never more than half the pane, and none when the indent is
+        // wider than the pane.
+        assert_eq!(continuation_indent("            x", 20), 10);
+        assert_eq!(continuation_indent("            x", 10), 0);
+        assert_eq!(rows("        ab cd", 6, continuation_indent("        ab cd", 6)), vec!["      ", "  ab ", "cd"]);
+    }
+
+    #[test]
+    fn a_pane_one_column_wide_is_a_char_a_row() {
+        assert_eq!(rows("a b", 1, 0), vec!["a", " ", "b"]);
+        assert_eq!(rows("ab", 1, 3), vec!["a", "b"], "an indent wider than the pane still leaves a column");
+        assert_eq!(break_line("ab", 0, 0), vec![0..1, 1..2]);
+    }
+
+    #[test]
+    fn wide_and_combining_chars_are_a_column_each_as_the_caret_counts_them() {
+        assert_eq!(rows("日本語 テキスト", 4, 0), vec!["日本語 ", "テキスト"]);
+        assert_eq!(rows("e\u{301}e\u{301}e\u{301}", 4, 0), vec!["e\u{301}e\u{301}", "e\u{301}"]);
+        // Not between a char and its mark.
+        assert_eq!(rows("e\u{301}e\u{301}e\u{301}", 3, 0), vec!["e\u{301}", "e\u{301}", "e\u{301}"]);
+    }
+
+    #[test]
+    fn blanks_at_a_break_hang_on_the_row_they_end() {
+        assert_eq!(rows("ab  cd", 3, 0), vec!["ab ", " cd"]);
+        assert_eq!(rows("ab   ", 3, 0), vec!["ab ", "  "]);
+    }
 
     #[test]
     fn text_no_wider_than_width_is_returned_unchanged_as_one_line() {

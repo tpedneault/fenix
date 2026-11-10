@@ -184,7 +184,7 @@ impl App {
         let cursor_line = ob.buffer.line_col(&state.cursor).0;
         // Sticky scroll's headers sit over the top rows, unscrolled.
         let folds_active = lines.len() != ob.buffer.line_count();
-        let sticky = if row >= 0 && !folds_active && ob.kind == BufferKind::Text && ob.syntax.is_some() {
+        let sticky = if row >= 0 && !folds_active && ob.kind == BufferKind::Text && ob.syntax.is_some() && self.wrap_cols(pane, buffer).is_none() {
             let cursor_row = lines.iter().position(|&l| l == cursor_line).and_then(|r| r.checked_sub(base));
             self.sticky_headers(buffer, base, cursor_row)
         } else {

@@ -178,14 +178,19 @@ impl App {
             let palette = self.theme.brackets.clone();
             if let Some(ob) = self.buffers.get(view.buffer) {
                 for (row, cells) in rows.iter_mut().enumerate().take(view.rows) {
-                    let Some(line) = view.map.row(row).filter(|r| r.kind == super::rows::RowKind::Text).map(|r| r.line) else { continue };
+                    let Some(shown) = view.map.row(row).filter(|r| r.kind == super::rows::RowKind::Text) else { continue };
+                    let line = shown.line;
                     if view.tab_lines.contains(&line) || line >= ob.buffer.line_count() {
                         continue;
                     }
-                    let start = ob.buffer.line_start_char(line) + view.scroll_col;
-                    let end = ob.buffer.line_start_char(line) + ob.buffer.line_len(line);
+                    // The chars on this row (a column a char on a line
+                    // without tabs), and how far in it's drawn.
+                    let line_start = ob.buffer.line_start_char(line);
+                    let start = line_start + shown.cols.start.min(ob.buffer.line_len(line)) + view.scroll_col;
+                    let end = line_start + shown.cols.end.min(ob.buffer.line_len(line));
+                    let indent = if shown.first { 0 } else { shown.indent };
                     let from = depths.partition_point(|(at, _)| *at < start);
-                    let here: HashMap<usize, usize> = depths[from..].iter().take_while(|(at, _)| *at < end).map(|&(at, d)| (at - start, d)).collect();
+                    let here: HashMap<usize, usize> = depths[from..].iter().take_while(|(at, _)| *at < end).map(|&(at, d)| (at - start + indent, d)).collect();
                     if here.is_empty() {
                         continue;
                     }
@@ -611,6 +616,34 @@ y = zed
         assert_eq!((out.squiggles[0].0, out.squiggles[0].1, out.squiggles[0].2), (1, 4, 7));
         let text: String = spans.iter().map(|s| s.0.as_str()).collect();
         assert!(text.contains("y = zed    ■ name is not defined"), "{text}");
+    }
+
+    #[test]
+    fn in_a_wrapped_pane_a_problem_is_underlined_on_each_row_and_its_message_ends_the_last() {
+        let mut app = with_problem("x = 1\ny = zed + other_name_here\n", 1, 4, 25);
+        app.line_number_mode = LineNumberMode::Off;
+        app.run_cmd("view.toggle_wrap");
+        let (pane, buffer) = (app.focused_pane_id(), app.focused_buffer_id());
+        app.set_pane_text_cols(pane, 12);
+        app.press("j");
+        let layout = app.focused_layout(6);
+        let ob = app.open();
+        let mut spans: RowSpans = app
+            .row_content_spans(ob, &layout.map, 6, 0, &[], 1, &app.tab_stops_for(buffer), &HashSet::new(), &layout.decorated)
+            .into_iter()
+            .map(|(t, c)| (t, c, false))
+            .collect();
+        let tab_lines = HashSet::new();
+        let selection = Segments::new();
+        let vcol = |line: usize, col: usize| layout.vcol(line, col);
+        let view = PaneView { buffer, map: &layout.map, rows: 6, gutter_chars: 0, scroll_col: 0, rendered_scroll: 0.0, cursor_line: 1, tab_lines: &tab_lines, selection: &selection, vcol: &vcol, carets: &[], pane };
+        let out = app.polish_pane(&view, &mut spans, Instant::now());
+        // `y = zed + ` / `other_name_h` / `ere`.
+        let squiggles: Vec<(usize, usize, usize)> = out.squiggles.iter().map(|&(r, s, e, _)| (r, s, e)).collect();
+        assert_eq!(squiggles, vec![(1, 4, 10), (2, 0, 12), (3, 0, 3)]);
+        let rows: Vec<String> = spans.iter().map(|s| s.0.as_str()).collect::<String>().split('\n').map(str::to_string).collect();
+        assert_eq!(rows[3], "ere    ■ name is not defined", "{rows:?}");
+        assert_eq!(rows[1], "y = zed + ");
     }
 
     #[test]

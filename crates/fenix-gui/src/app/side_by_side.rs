@@ -105,6 +105,11 @@ impl App {
         self.side_by_sides.iter().find(|s| s.workspace == here && s.side_of(pane).is_some())
     }
 
+    /// Whether `pane` is one side of a side by side.
+    pub(super) fn is_side_by_side_pane(&self, pane: fenix_window::WindowId) -> bool {
+        self.side_by_side_at(pane).is_some()
+    }
+
     /// A pane's display lines: its buffer's lines with folds applied,
     /// and -- in a side-by-side pane -- the filler rows that keep it lined
     /// up with the other side.
