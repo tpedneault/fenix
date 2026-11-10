@@ -20805,6 +20805,7 @@ impl App {
                     selection: &selection_segments,
                     remap_col: &remap_col,
                     carets: &pane_caret_ats,
+                    pane,
                 };
                 let polished = self.polish_pane(&view, &mut spans, now);
                 extra.squiggles = polished.squiggles;

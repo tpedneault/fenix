@@ -304,7 +304,7 @@ pub(super) struct MotionState {
     /// they're for, and each bracket's char index and depth.
     /// The lines of each buffer's ruler marks, as last drawn: where a
     /// click on the ruler snaps to.
-    pub ruler_targets: HashMap<BufferId, Vec<usize>>,
+    pub ruler_targets: HashMap<fenix_window::WindowId, Vec<usize>>,
     pub brackets: HashMap<BufferId, ((u64, Option<u64>), std::sync::Arc<Vec<(usize, usize)>>)>,
     /// When the focused buffer was last typed into, for holding new
     /// diagnostics back while typing.
