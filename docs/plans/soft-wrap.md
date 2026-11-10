@@ -330,6 +330,10 @@ stage by stage.
 - The overview ruler's band is the lines shown in a wrapped pane.
 - Moved to stage 5: PageUp/PageDown by the pane's rows. They move the
   cursor, and a cursor moving by rows is stage 5's `ScreenRows`.
+- A walk breaks the whole of each line it passes, the cursor's included,
+  every frame: a single line of a million chars costs that much a
+  frame while the view follows it. Cached and bounded in stage 7 with
+  the long-line path.
 - Still O(lines) a frame, as in 1.5 and not made worse:
   `pane_display_lines` builds a `Vec` of every display line, called a
   few times a frame. For stage 7.
