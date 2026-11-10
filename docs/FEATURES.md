@@ -1095,7 +1095,12 @@ the guide.
   A thread whose agent can't take it back is read-only; `C` continues it
   in a new session the same way.
 - **Threads** are kept: `SPC a t` lists the project's, and one picked up
-  again continues its session where the agent can (resume, or load).
+  again continues its session where the agent can (resume, or load). A
+  pipeline's run is one entry there -- what was asked, the pipeline, how
+  it ended, its steps folded under it -- whose summary and whole review
+  are a key away; `Alt+A` archives a thread or a run (put away, never
+  deleted; `Alt+H` shows them; `SPC a z` from anywhere), and `SPC a l`
+  (or `Alt+P`) lists every project's, by project.
   `SPC a i` continues a session started in the agent's own CLI. The
   panel comes back with the session after a restart, the prompt you
   hadn't sent included; the agent starts again when you look at it.

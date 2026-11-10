@@ -18,12 +18,21 @@ impl AgentHost {
         }
         let Some(store) = &self.store else { return false };
         let Ok(saved) = store.load(id) else { return false };
+        self.restore_saved(id, saved);
+        self.loaded.insert(id.clone());
+        true
+    }
+
+    /// A saved thread back in the hub, with what's kept beside it: the
+    /// files' baselines and the ones it changed that weren't seen first.
+    pub(super) fn restore_saved(&mut self, id: &ThreadId, saved: fenix_acp::store::Saved) {
         self.hub.restore(saved.meta, saved.thread);
         if let Some(baselines) = saved.extra.get("baselines").and_then(Value::as_object) {
             self.baselines.insert(id.clone(), baselines.iter().map(|(k, v)| (PathBuf::from(k), v.as_str().map(str::to_string))).collect());
         }
-        self.loaded.insert(id.clone());
-        true
+        if let Some(unknown) = saved.extra.get("unknown").and_then(Value::as_array) {
+            self.unknown.insert(id.clone(), unknown.iter().filter_map(Value::as_str).map(PathBuf::from).collect());
+        }
     }
 }
 

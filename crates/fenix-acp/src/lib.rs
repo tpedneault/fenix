@@ -19,6 +19,7 @@ pub mod catalog;
 pub mod client;
 pub mod driver;
 pub mod hub;
+pub mod listing;
 pub mod mock;
 pub mod pipeline;
 pub mod protocol;

@@ -6,7 +6,7 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [1.5.0] - 2026-11-09
+## [1.5.0] - 2026-11-10
 
 ### Security
 
@@ -76,6 +76,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Extra cursors come back with the session (without their selections,
   as the main cursor's isn't kept) when the file's text is the one they
   were left in; a file changed since gets its main cursor back only.
+- The thread list (`SPC a t`) groups a pipeline's run as one entry:
+  what was asked, the pipeline, how it ended and when, its steps folded
+  under it with their agent and state. `Enter` on a run shows its
+  summary, `Alt+R` reviews its changes as one; `Alt+A` archives a thread
+  or a whole run (it's never deleted; `Alt+H` shows archived ones), and
+  `SPC a l` (`agents.threads_everywhere`, or `Alt+P` in the list) shows
+  every project's threads by project; `SPC a z` (`agents.archive`)
+  archives the thread the panel shows. A step's thread keeps which run
+  and step it is; threads kept before are single entries.
 - Auto-save, off unless chosen on the Settings page: `editor.auto_save =
   "after_delay"` saves a file a moment after its last edit
   (`editor.auto_save_delay_ms`, a second), `"on_focus_change"` when you
