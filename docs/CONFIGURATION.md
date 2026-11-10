@@ -189,6 +189,11 @@ variable = "#c0caf5"
 operator = "#89ddff"
 punctuation = "#89ddff"
 attribute = "#e0af68"
+# What only a language server tells apart (lsp.semantic_highlighting);
+# left out: type's, variable's and function's colours.
+# interface = "#e0af68"   # an interface or trait
+# parameter = "#ff9e64"   # a function's parameter
+# macro = "#89ddff"       # a macro
 
 [explorer]
 folder = "#7aa2f7"

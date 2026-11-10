@@ -151,6 +151,12 @@ pub struct Theme {
     pub syntax_operator: glyphon::Color,
     pub syntax_punctuation: glyphon::Color,
     pub syntax_attribute: glyphon::Color,
+    /// What only a language server tells apart (semantic tokens): an
+    /// interface or trait, a parameter, a macro. A theme that doesn't
+    /// name them has the type's, the variable's and the function's.
+    pub syntax_interface: glyphon::Color,
+    pub syntax_parameter: glyphon::Color,
+    pub syntax_macro: glyphon::Color,
 
     /// File explorer: icon tint. Two-tone for v1 -- folders get their own
     /// accent since they're usually the most useful thing to spot at a
@@ -182,15 +188,17 @@ impl Theme {
     /// might produce). Anything unrecognized falls back to plain `fg`,
     /// so an unfamiliar capture name reads as ordinary text instead of
     /// vanishing or breaking.
-    /// A semantic token's colour, by its slot: the three the grammar has
-    /// no word for fall back to the nearest it has.
+    /// A semantic token's colour, by its slot.
     pub fn semantic_color(&self, slot: fenix_lsp::semantic::Slot) -> glyphon::Color {
         use fenix_lsp::semantic::Slot;
         match slot {
-            Slot::Type | Slot::Interface => self.syntax_type,
-            Slot::Parameter | Slot::Variable => self.syntax_variable,
+            Slot::Type => self.syntax_type,
+            Slot::Interface => self.syntax_interface,
+            Slot::Parameter => self.syntax_parameter,
+            Slot::Variable => self.syntax_variable,
             Slot::Constant => self.syntax_constant,
-            Slot::Function | Slot::Macro => self.syntax_function,
+            Slot::Function => self.syntax_function,
+            Slot::Macro => self.syntax_macro,
             Slot::Keyword => self.syntax_keyword,
             Slot::Comment => self.syntax_comment,
             Slot::String => self.syntax_string,
@@ -461,6 +469,12 @@ struct Syntax {
     operator: ColorSpec,
     punctuation: ColorSpec,
     attribute: ColorSpec,
+    #[serde(default)]
+    interface: Option<ColorSpec>,
+    #[serde(default)]
+    parameter: Option<ColorSpec>,
+    #[serde(default, rename = "macro")]
+    macro_: Option<ColorSpec>,
 }
 
 #[derive(serde::Deserialize)]
@@ -765,6 +779,9 @@ pub fn parse(text: &str) -> Result<Theme, String> {
         syntax_operator: f.syntax.operator.text("syntax.operator")?,
         syntax_punctuation: f.syntax.punctuation.text("syntax.punctuation")?,
         syntax_attribute: f.syntax.attribute.text("syntax.attribute")?,
+        syntax_interface: f.syntax.interface.as_ref().map(|c| c.text("syntax.interface")).transpose()?.unwrap_or(f.syntax.ty.text("syntax.type")?),
+        syntax_parameter: f.syntax.parameter.as_ref().map(|c| c.text("syntax.parameter")).transpose()?.unwrap_or(f.syntax.variable.text("syntax.variable")?),
+        syntax_macro: f.syntax.macro_.as_ref().map(|c| c.text("syntax.macro")).transpose()?.unwrap_or(f.syntax.function.text("syntax.function")?),
         icon_folder: f.explorer.folder.text("explorer.folder")?,
         icon_file: f.explorer.file.text("explorer.file")?,
         git_modified: f.git.modified.text("git.modified")?,
@@ -1138,6 +1155,25 @@ mod tests {
 
     fn named(name: &str) -> &'static Theme {
         by_name(name).unwrap_or_else(|| panic!("{name} ships"))
+    }
+
+    #[test]
+    fn every_built_in_theme_tells_apart_what_only_a_language_server_knows() {
+        for t in all() {
+            assert_ne!(t.syntax_interface, t.syntax_type, "{}: interface", t.name);
+            assert_ne!(t.syntax_parameter, t.syntax_variable, "{}: parameter", t.name);
+            assert_ne!(t.syntax_macro, t.syntax_function, "{}: macro", t.name);
+            use fenix_lsp::semantic::Slot;
+            assert_eq!(t.semantic_color(Slot::Parameter), t.syntax_parameter);
+            assert_eq!(t.semantic_color(Slot::Type), t.syntax_type);
+        }
+    }
+
+    #[test]
+    fn a_theme_without_the_language_server_colours_falls_back_to_the_grammar_s() {
+        let text: String = include_str!("../themes/one-dark.toml").lines().filter(|l| !l.starts_with("interface =") && !l.starts_with("parameter =") && !l.starts_with("macro =")).map(|l| format!("{l}\n")).collect();
+        let t = parse(&text).unwrap();
+        assert_eq!((t.syntax_interface, t.syntax_parameter, t.syntax_macro), (t.syntax_type, t.syntax_variable, t.syntax_function));
     }
 
     #[test]

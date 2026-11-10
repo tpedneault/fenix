@@ -37,6 +37,8 @@ pub(super) struct PaneView<'a> {
 #[derive(Default)]
 pub(super) struct PanePolish {
     pub squiggles: Vec<(usize, usize, usize, [f32; 4])>,
+    /// A language server's mutable names, underlined: as squiggles are.
+    pub underlines: Vec<(usize, usize, usize, [f32; 4])>,
     pub ruler: Option<Ruler>,
 }
 
@@ -100,6 +102,18 @@ impl App {
         let mut out = PanePolish::default();
         let polish = self.config.polish.clone();
         let mut rows = split_rows(std::mem::take(spans));
+
+        // A language server's mutable names: a line under each, on each
+        // row it's drawn on.
+        let shown = view.map.span();
+        for (line, cols, color) in self.underlined_tokens(view.buffer, shown) {
+            let [r, g, b, _] = glyphon_to_rgba(color);
+            for (row, s, e) in view.map.segments(line, (view.vcol)(line, cols.start)..(view.vcol)(line, cols.end)) {
+                if e > s {
+                    out.underlines.push((row, s, e, [r, g, b, 0.8]));
+                }
+            }
+        }
 
         // Problems.
         let inline = polish.diagnostics_inline.as_deref().unwrap_or("all");

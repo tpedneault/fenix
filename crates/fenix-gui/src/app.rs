@@ -20956,6 +20956,7 @@ impl App {
                 };
                 let polished = self.polish_pane(&view, &mut spans, now);
                 extra.squiggles = polished.squiggles;
+                extra.underlines.extend(polished.underlines);
                 extra.ruler = polished.ruler;
                 // Off in a wrapped pane, for now.
                 if !folds_active && wrap.is_none() {
@@ -36556,7 +36557,7 @@ name = \"orbit\"
         (dir, app, path, key)
     }
 
-    /// `main` a function and `x` a macro (so it's drawn as a function,
+    /// `main` a function and `x` a macro (drawn in the macro colour,
     /// where the grammar says variable).
     const MAIN_AND_X: [u32; 10] = [0, 3, 4, 0, 0, 0, 13, 1, 1, 0];
 
@@ -36573,10 +36574,10 @@ name = \"orbit\"
         let (id, pending) = only_pending(&app, &key);
         assert!(matches!(pending, PendingLspRequest::SemanticTokens { edit_count: 0, .. }), "{pending:?}");
         answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
-        let function = app.theme.syntax_function;
-        assert_ne!(grammar, Some(function), "the grammar calls `x` something else");
-        assert_eq!(colour_at(&mut app, 16), Some(function), "`x` as the server says");
-        assert_eq!(colour_at(&mut app, 3), Some(function), "`main` too");
+        let (function, macro_) = (app.theme.syntax_function, app.theme.syntax_macro);
+        assert_ne!(grammar, Some(macro_), "the grammar calls `x` something else");
+        assert_eq!(colour_at(&mut app, 16), Some(macro_), "`x` as the server says");
+        assert_eq!(colour_at(&mut app, 3), Some(function), "`main` a function");
         assert_eq!(colour_at(&mut app, 0), Some(app.theme.syntax_keyword), "`fn` the grammar's still");
     }
 
@@ -36586,12 +36587,12 @@ name = \"orbit\"
         app.ask_due_semantic_tokens();
         let (id, _) = only_pending(&app, &key);
         answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
-        let function = app.theme.syntax_function;
+        let macro_ = app.theme.syntax_macro;
         // Two chars typed at the start: `x` moves with them, and no ask
         // is sent until typing pauses.
         app.test_insert_str("  ");
         app.sync_lsp_for_focused_buffer();
-        assert_eq!(colour_at(&mut app, 18), Some(function));
+        assert_eq!(colour_at(&mut app, 18), Some(macro_));
         app.ask_due_semantic_tokens();
         assert!(app.lsp_sessions[&key].pending.is_empty(), "not while typing");
         // Once it's due: asked; an edit before the answer makes it stale.
@@ -36604,8 +36605,39 @@ name = \"orbit\"
         app.test_insert_str(" ");
         app.sync_lsp_for_focused_buffer();
         answer(&mut app, &key, id, serde_json::json!({"data": [0, 0, 2, 0, 0]}));
-        assert_eq!(colour_at(&mut app, 19), Some(function), "the moved tokens stand, not the stale answer");
+        assert_eq!(colour_at(&mut app, 19), Some(macro_), "the moved tokens stand, not the stale answer");
         assert!(app.lsp_sessions[&key].semantic[&canonical].due.is_some(), "asked again");
+    }
+
+    #[test]
+    fn a_mutable_name_from_semantic_tokens_is_underlined_on_each_row_it_s_drawn_on() {
+        let dir = TempDir::new("semantic_mutable");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "let mut counter_of_things = 0;\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["variable"], "tokenModifiers": ["mutable"]}, "full": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        // `counter_of_things`, chars 8..25, mutable.
+        answer(&mut app, &key, id, serde_json::json!({"data": [0, 8, 17, 0, 1]}));
+        let buffer = app.focused_buffer_id();
+        assert_eq!(app.underlined_tokens(buffer, 0..1).into_iter().map(|(l, c, _)| (l, c)).collect::<Vec<_>>(), vec![(0, 8..25)]);
+        // Wrapped at twelve columns: the name is broken across rows 1
+        // and 2, and underlined on both.
+        app.run_cmd("view.toggle_wrap");
+        let pane = app.focused_pane_id();
+        app.set_pane_text_cols(pane, 12);
+        let layout = app.focused_layout(4);
+        let vcol = |_: usize, c: usize| c;
+        let selection = Segments::default();
+        let tab_lines = HashSet::new();
+        let view = polish::PaneView { buffer, map: &layout.map, rows: 4, wrapped: true, gutter_chars: 0, scroll_col: 0, rendered_scroll: 0.0, cursor_line: 0, tab_lines: &tab_lines, selection: &selection, vcol: &vcol, carets: &[], pane };
+        let mut spans = Vec::new();
+        let out = app.polish_pane(&view, &mut spans, Instant::now());
+        let rows: Vec<usize> = out.underlines.iter().map(|&(row, _, _, _)| row).collect();
+        assert_eq!(rows, vec![1, 2], "{:?}", out.underlines);
     }
 
     #[test]
@@ -36640,7 +36672,7 @@ name = \"orbit\"
         assert!(app.lsp_sessions[&primary].pending.is_empty(), "it offers none");
         let (id, _) = only_pending(&app, &extra);
         answer(&mut app, &extra, id, serde_json::json!({"data": MAIN_AND_X}));
-        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_function));
+        assert_eq!(colour_at(&mut app, 16), Some(app.theme.syntax_macro));
         // Its refresh: asked again.
         let generation = app.lsp_sessions[&extra].generation;
         app.apply_lsp_event(extra.clone(), generation, fenix_lsp::LspEvent::ServerRequest { id: serde_json::json!(7), method: "workspace/semanticTokens/refresh".into(), params: serde_json::Value::Null });

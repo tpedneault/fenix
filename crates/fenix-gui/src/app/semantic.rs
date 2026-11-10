@@ -230,6 +230,20 @@ impl App {
         canonical
     }
 
+    /// Buffer `id`'s tokens, when it has some that describe its text as
+    /// it is: the server they're from and the document's path.
+    fn drawn_tokens(&mut self, id: BufferId) -> Option<(LspKey, PathBuf)> {
+        let path = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf)?;
+        if self.lsp_sessions.values().all(|s| s.semantic.is_empty()) || !self.semantic_wanted(&path) {
+            return None;
+        }
+        let key = self.semantic_server(&path)?;
+        let canonical = self.lsp_path(&path);
+        let edit_count = self.buffers.get(id)?.buffer.edit_count();
+        let doc = self.lsp_sessions.get(&key)?.semantic.get(&canonical)?;
+        (doc.stamp == Some(edit_count)).then_some((key, canonical))
+    }
+
     /// The grammar's colours for buffer `id` (`syntax`), with its server's
     /// tokens in `windows` (bytes) laid over them; unchanged when it has
     /// none that describe the text as it is.
@@ -240,14 +254,8 @@ impl App {
         windows: &[Range<usize>],
         protected: &[Range<usize>],
     ) -> Vec<(Range<usize>, glyphon::Color)> {
-        let Some(path) = self.buffers.get(id).and_then(|ob| ob.buffer.path()).map(Path::to_path_buf) else { return syntax };
-        if self.lsp_sessions.values().all(|s| s.semantic.is_empty()) || !self.semantic_wanted(&path) {
-            return syntax;
-        }
-        let Some(key) = self.semantic_server(&path) else { return syntax };
-        let canonical = self.lsp_path(&path);
-        let (Some(session), Some(ob)) = (self.lsp_sessions.get(&key), self.buffers.get(id)) else { return syntax };
-        let Some(doc) = session.semantic.get(&canonical).filter(|d| d.stamp == Some(ob.buffer.edit_count())) else { return syntax };
+        let Some((key, canonical)) = self.drawn_tokens(id) else { return syntax };
+        let (Some(doc), Some(ob)) = (self.lsp_sessions.get(&key).and_then(|s| s.semantic.get(&canonical)), self.buffers.get(id)) else { return syntax };
         let theme = self.theme;
         let mut laid = Vec::new();
         for window in windows {
@@ -260,6 +268,27 @@ impl App {
             }
         }
         lay_over(syntax, &laid, protected)
+    }
+
+    /// Buffer `id`'s tokens drawn underlined (`mutable`) on `lines`: each
+    /// as its line, its char columns and its colour.
+    pub(super) fn underlined_tokens(&mut self, id: BufferId, lines: Range<usize>) -> Vec<(usize, Range<usize>, glyphon::Color)> {
+        let Some((key, canonical)) = self.drawn_tokens(id) else { return Vec::new() };
+        let (Some(doc), Some(ob)) = (self.lsp_sessions.get(&key).and_then(|s| s.semantic.get(&canonical)), self.buffers.get(id)) else { return Vec::new() };
+        let last = ob.buffer.visual_line_count();
+        if lines.start >= last {
+            return Vec::new();
+        }
+        let (from, to) = (ob.buffer.line_start_char(lines.start), ob.buffer.line_start_char(lines.end.min(last) - 1) + ob.buffer.line_len(lines.end.min(last) - 1));
+        tokens::within(&doc.tokens, from, to)
+            .iter()
+            .filter(|t| t.style.underline)
+            .map(|t| {
+                let line = ob.buffer.rope().char_to_line(t.start);
+                let first = ob.buffer.line_start_char(line);
+                (line, t.start - first..t.end - first, self.theme.semantic_color(t.style.slot))
+            })
+            .collect()
     }
 }
 

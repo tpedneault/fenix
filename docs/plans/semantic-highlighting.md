@@ -1,6 +1,6 @@
 # Plan: semantic highlighting
 
-- **Status:** stages 1 and 2 built, for the release after 1.5 (issue #105); see §5.
+- **Status:** stages 1 to 3 built, for the release after 1.5 (issue #105); see §5.
 - **Scope:** code coloured by what its language server knows
   (`textDocument/semanticTokens`), on top of tree-sitter's colours:
   a parameter apart from a local, a macro apart from a function, an
@@ -318,6 +318,29 @@ per-language list covers a server whose tokens are poor.
   `every_setting_round_trips_through_the_file` asserted that no `[lsp]`
   header is ever written. `[lsp]` now has settings of its own, so the
   empty-header check covers `[vnc]` only.
-- **Not yet:**
-  - the theme keys and the modifier rules' underline (stage 3);
-  - delta and range (stage 4).
+- **Not yet:** delta and range (stage 4).
+
+### Stage 3
+
+- **Theme keys.** `[syntax]` takes optional `interface`, `parameter`
+  and `macro` keys (`Theme::syntax_interface`, `syntax_parameter`,
+  `syntax_macro`). Left out, they're type, variable and function.
+- **Built-in themes.** Every built-in theme names all three, each
+  picked from that theme's own `[syntax]` colours, so contrast is what
+  the theme already had:
+  - parameter: the first of constant, attribute, number and type that
+    is neither the variable's nor the function's colour;
+  - interface: the first of attribute, constant, number, keyword and
+    operator that is neither type, variable nor parameter;
+  - macro: the first of operator, number, constant and attribute that
+    is neither function, variable nor keyword.
+  A test checks that each differs from its fallback in every built-in
+  theme. Parameter is the constant colour in most themes.
+- **The `mutable` underline.** `App::underlined_tokens` gives the
+  mutable tokens on the lines shown. `polish_pane` turns them into row
+  segments (`RowMap::segments`, so one split by a row break is
+  underlined on each row). The segments are drawn as underlines,
+  through the path extensions' decorations already use, in the token's
+  colour at 0.8 alpha.
+- **Stage 2's tests changed.** A macro token is now drawn in the macro
+  colour, not the function colour.
