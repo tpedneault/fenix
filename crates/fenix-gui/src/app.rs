@@ -16550,8 +16550,9 @@ impl App {
         let composing = self.standard_keys() && self.compose.as_ref().is_some_and(|c| c.pane == self.focused_pane_id());
         let in_leader = in_leader || (composing && (full.chord() == KeyPress::named(FenixNamedKey::Enter).with_ctrl() || full.chord() == KeyPress::char('a').with_ctrl().with_shift()));
         if let Some(id) = self.chord_command(full).filter(|_| !in_leader) {
-            // Only the clipboard's own work at every caret.
-            if !matches!(id, "edit.copy" | "edit.paste") {
+            // Only the clipboard's own work at every caret, and the
+            // commands that add carets keep those there are.
+            if !carets::keeps_carets(id) {
                 self.clear_carets();
             }
             self.run_command_with(event_loop, id);
@@ -18588,8 +18589,16 @@ impl App {
         match self.vim.visual_kind() {
             VisualKind::Char => {
                 let cursor_idx = self.cursor().char_idx;
-                let (lo, hi) =
-                    if anchor <= cursor_idx { (anchor, cursor_idx + 1) } else { (cursor_idx, anchor + 1) };
+                // Standard keys select between the anchor and the cursor,
+                // the cursor's character not in it -- drawn so, as the
+                // extra cursors' selections are.
+                let (lo, hi) = if self.vim.policy() == fenix_vim::EditPolicy::Standard {
+                    (anchor.min(cursor_idx), anchor.max(cursor_idx))
+                } else if anchor <= cursor_idx {
+                    (anchor, cursor_idx + 1)
+                } else {
+                    (cursor_idx, anchor + 1)
+                };
                 let hi = hi.min(self.open().buffer.len_chars());
                 segments = self.range_to_segments(lo..hi, visible_lines);
             }
