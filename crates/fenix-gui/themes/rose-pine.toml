@@ -41,9 +41,9 @@ variable = "#e0def4"
 operator = "#908caa"
 punctuation = "#908caa"
 attribute = "#c4a7e7"
-interface = "#c4a7e7"
-parameter = "#f6c177"
-macro = "#908caa"
+interface = "#eb6f92"
+parameter = "#c4a7e7"
+macro = "#aeaeb8"
 
 [explorer]
 folder = "#9ccfd8"
