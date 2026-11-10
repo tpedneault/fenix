@@ -227,9 +227,14 @@ These supersede the table and rules above where they differ.
   `namespace` and `lifetime` map to none, so the grammar's colour stays.
   In themes where the variable colour isn't the text colour, colouring
   every local and field would change most of a file. A path like
-  `std::collections` isn't a type. A modifier still counts: readonly or
-  constant makes a constant, deprecated makes a comment, and mutable
-  underlines the name in its grammar colour.
+  `std::collections` isn't a type. A modifier still counts:
+  - a constant is a `variable` or `property` with rust-analyzer's
+    `constant` modifier (its `const` and `static` items), or with
+    `readonly` together with `static` (a `static final`, a C# `const`,
+    a TypeScript `static readonly`). `readonly` alone (every TypeScript
+    `const` local) keeps the grammar's colour;
+  - deprecated makes a comment;
+  - mutable underlines the name in its grammar colour.
 - **Layers.** Each type says how it's laid.
   - `Over`, for what only the server knows (types, parameters,
     functions, macros, enum members and the like): over the grammar,
@@ -393,6 +398,19 @@ These supersede the table and rules above where they differ.
     `editor.wrap_languages` uses.
   - **Redraw.** An answer redraws every window.
   - **`lay_over` follows each token's layer.**
+- **Second review.**
+  - An agent's sync that moves held tokens also makes an ask due.
+  - A refresh that comes while an ask is out stays pending until an ask
+    is sent after it.
+  - An answer counts only if its request is the document's current ask;
+    any other is ignored.
+  - Refusals (cancelled, modified) back off from 250 ms, doubling each
+    time up to 4 s.
+  - Documents are dropped when their buffer closes, is renamed or saved
+    under another name, or is asked of another server, and all of them
+    when the setting goes off.
+  - A buffer with no grammar works out its windows only when it has
+    tokens to lay.
 - **Not yet:** delta and range (stage 4).
 
 ### Stage 3
@@ -400,22 +418,26 @@ These supersede the table and rules above where they differ.
 - **Theme keys.** `[syntax]` takes optional `interface`, `parameter`
   and `macro` keys (`Theme::syntax_interface`, `syntax_parameter`,
   `syntax_macro`). Left out, they're type, variable and function.
-- **Built-in themes.** Every built-in theme names all three, each
-  picked from that theme's own `[syntax]` colours, so contrast is what
-  the theme already had:
-  - parameter: the first of constant, attribute, number and type that
-    is neither the variable's nor the function's colour;
-  - interface: the first of attribute, constant, number, keyword and
-    operator that is neither type, variable nor parameter;
-  - macro: the first of operator, number, constant and attribute that
-    is neither function, variable nor keyword.
-  A test checks that each differs from its fallback in every built-in
-  theme. Parameter is the constant colour in most themes.
+- **Built-in themes.** Every built-in theme names all three.
+  - Each must differ from variable, constant, type, function, keyword,
+    string, comment and the text colour, and from the other two. "Differ"
+    means a distance of at least 0.15 in RGB (0 to 1 per channel), not
+    only a different hex value.
+  - Each must keep at least 4:1 contrast with the background.
+  - Each is the first that qualifies of the theme's own attribute,
+    number and operator colours, then its other syntax, mode, Git and
+    explorer colours. Where none qualifies, it's the fallback colour
+    blended toward one of those.
+  - A test checks the three are pairwise distinct, differ from the
+    colours above, and have 4:1 contrast. The lowest is 4.07:1
+    (everforest-dark).
 - **The `mutable` underline.** `App::underlined_tokens` gives the
   mutable tokens on the lines shown. `polish_pane` turns them into row
   segments (`RowMap::segments`, so one split by a row break is
   underlined on each row). The segments are drawn as underlines,
   through the path extensions' decorations already use, in the token's
-  colour at 0.8 alpha.
+  colour at 0.8 alpha. None is drawn inside the grammar's comments and
+  strings (`App::semantic_protected`, kept from the frame's highlight
+  pass), where a token's colour isn't laid either.
 - **Stage 2's tests changed.** A macro token is now drawn in the macro
   colour, not the function colour.

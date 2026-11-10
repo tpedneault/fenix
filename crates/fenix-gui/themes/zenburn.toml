@@ -42,9 +42,9 @@ variable = "#dcdccc"
 operator = "#f0efd0"
 punctuation = "#b1bebe"
 attribute = "#e0b293"
-interface = "#e0b293"
-parameter = "#bfebbf"
-macro = "#f0efd0"
+interface = "#dc8cc3"
+parameter = "#cc9393"
+macro = "#e5c792"
 
 [explorer]
 folder = "#8cd0d3"

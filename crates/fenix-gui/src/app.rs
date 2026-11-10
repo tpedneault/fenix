@@ -1400,7 +1400,7 @@ enum PendingLspRequest {
     PullDiagnostics { path: PathBuf },
     /// `textDocument/semanticTokens/full` for `path` (canonical) as it
     /// was at `edit_count`.
-    SemanticTokens { path: PathBuf, edit_count: u64 },
+    SemanticTokens { path: PathBuf, edit_count: u64, request: i64 },
     /// `workspace/symbol`, for the project's procs a Tcl call is colored
     /// by (`App::known_commands`).
     WorkspaceNames,
@@ -5299,6 +5299,9 @@ pub struct App {
     /// path as servers know it), worked out when it's synced, so drawing
     /// it looks at nothing on disk.
     semantic_of: HashMap<BufferId, semantic::SemanticTarget>,
+    /// The grammar's comments and strings (bytes) in what was last drawn
+    /// of each buffer with semantic tokens: where none is laid.
+    semantic_protected: HashMap<BufferId, Vec<std::ops::Range<usize>>>,
     /// The focused buffer's decorations as moves by row see them, and the
     /// `decorations_rev` they were copied at.
     screen_decorations: Option<(BufferId, u64, std::sync::Arc<Vec<crate::decorations::Decoration>>)>,
@@ -6291,6 +6294,7 @@ impl App {
             break_cache: std::cell::RefCell::new(HashMap::new()),
             virtual_rows: HashMap::new(),
             semantic_of: HashMap::new(),
+            semantic_protected: HashMap::new(),
             screen_decorations: None,
             pane_text_cols: HashMap::new(),
             fold_levels: HashMap::new(),
@@ -7731,7 +7735,7 @@ impl App {
                     self.wake_caret();
                 }
             }
-            PendingLspRequest::SemanticTokens { path, edit_count } => self.semantic_tokens_answered(&key, path, edit_count, result),
+            PendingLspRequest::SemanticTokens { path, edit_count, request } => self.semantic_tokens_answered(&key, path, edit_count, request, result),
             PendingLspRequest::PullDiagnostics { path } => {
                 let name = self.lsp_server_name(&key);
                 let read = result.map_err(|e| (e.code, e.data)).and_then(|value| fenix_lsp::pull::report(value).map_err(|_| (0, None)));
@@ -18769,15 +18773,18 @@ impl App {
             return conflict_ranges;
         }
 
-        let windows = highlight_windows(&ob.buffer, render_base_line, rows, scroll_col, columns);
         let Some(syntax) = &mut ob.syntax else {
             // No grammar: a language server's tokens are all the colour
             // there is.
-            return match windows {
-                Some(windows) if semantic => self.with_semantic_tokens(id, Vec::new(), &windows, &[]),
-                _ => Vec::new(),
+            if !semantic {
+                return Vec::new();
+            }
+            return match highlight_windows(&ob.buffer, render_base_line, rows, scroll_col, columns) {
+                Some(windows) => self.with_semantic_tokens(id, Vec::new(), &windows, &[]),
+                None => Vec::new(),
             };
         };
+        let windows = highlight_windows(&ob.buffer, render_base_line, rows, scroll_col, columns);
 
         let edits: Vec<fenix_syntax::RawEdit> = deltas
             .into_iter()
@@ -18829,7 +18836,11 @@ impl App {
         if !semantic {
             return colored;
         }
-        self.with_semantic_tokens(id, colored, &windows, &protected)
+        let laid = self.with_semantic_tokens(id, colored, &windows, &protected);
+        // Kept for the underlines drawn over this frame's text: none where
+        // a token's colour isn't laid either.
+        self.semantic_protected.insert(id, protected);
+        laid
     }
 
     /// For a Tcl buffer, the words its `function` capture may color as
@@ -36746,6 +36757,62 @@ name = \"orbit\"
     }
 
     #[test]
+    fn semantic_asks_follow_an_agent_s_sync_a_late_refresh_and_only_the_ask_that_s_out() {
+        let (_dir, mut app, path, key) = semantic_fixture("semantic_round3");
+        let canonical = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        app.ask_due_semantic_tokens();
+        let (first, _) = only_pending(&app, &key);
+        // A refresh while the ask is out: kept, and asked once it's answered.
+        app.refresh_semantic_tokens(&key);
+        let _ = colour_at(&mut app, 0);
+        assert!(app.lsp_sessions[&key].semantic[&canonical].stale, "kept while an ask is out");
+        answer(&mut app, &key, first, serde_json::json!({"data": MAIN_AND_X}));
+        let _ = colour_at(&mut app, 0);
+        app.ask_due_semantic_tokens();
+        let (second, _) = only_pending(&app, &key);
+        // An answer to an ask that isn't out any more: let go.
+        answer(&mut app, &key, first, serde_json::json!({"data": []}));
+        assert!(app.lsp_sessions[&key].semantic[&canonical].asking.is_some(), "the second still out");
+        answer(&mut app, &key, second, serde_json::json!({"data": MAIN_AND_X}));
+        // An edit an agent's sync sends first: asked again all the same.
+        app.test_insert_str(" ");
+        let (text, count) = (app.open().buffer.text(), app.open().buffer.edit_count());
+        app.sync_lsp_for(&path, &text, count, None);
+        assert!(app.semantic_wake().is_some(), "asked again after the pause");
+        // Refused while modified: asked again later each time, not every 250 ms.
+        app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        let mut waits = Vec::new();
+        for _ in 0..4 {
+            app.ask_due_semantic_tokens();
+            let (id, _) = only_pending(&app, &key);
+            let before = Instant::now();
+            answer_error(&mut app, &key, id, -32801);
+            let due = app.lsp_sessions[&key].semantic[&canonical].due.unwrap();
+            waits.push(due.saturating_duration_since(before));
+            app.lsp_sessions.get_mut(&key).unwrap().semantic.get_mut(&canonical).unwrap().due = Some(Instant::now());
+        }
+        assert!(waits.windows(2).all(|w| w[1] > w[0]), "backing off: {waits:?}");
+    }
+
+    #[test]
+    fn semantic_tokens_are_let_go_when_turned_off_or_the_file_is_renamed() {
+        let (dir, mut app, _path, key) = semantic_fixture("semantic_letgo");
+        assert!(!app.lsp_sessions[&key].semantic.is_empty());
+        app.config.set_value("lsp.semantic_highlighting", Some(fenix_config::Value::Bool(false)));
+        app.ask_due_semantic_tokens();
+        assert!(app.lsp_sessions[&key].semantic.is_empty() && app.semantic_of.is_empty(), "nothing held or asked");
+        app.config.set_value("lsp.semantic_highlighting", Some(fenix_config::Value::Bool(true)));
+        app.sync_lsp_for_focused_buffer();
+        let old = app.semantic_of[&app.focused_buffer_id()].path.clone();
+        // Saved under another name: the old path's tokens go.
+        let renamed = dir.path().join("renamed.rs");
+        app.open_mut().buffer.save_as(&renamed).unwrap();
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        assert!(!app.lsp_sessions[&key].semantic.contains_key(&old));
+    }
+
+    #[test]
     fn an_agent_s_look_at_a_file_asks_for_no_semantic_tokens() {
         let (dir, mut app, _path, key) = semantic_fixture("semantic_agent");
         let other = dir.write("lib.rs", "pub fn lib() {}\n");
@@ -36764,6 +36831,25 @@ name = \"orbit\"
         answer(&mut app, &key, id, serde_json::json!({"data": MAIN_AND_X}));
         assert_eq!(colour_at(&mut app, 16), Some(macro_colour(&app)));
         assert_eq!(colour_at(&mut app, 3), Some(app.theme.syntax_function));
+    }
+
+    #[test]
+    fn a_mutable_name_inside_a_string_isn_t_underlined_and_no_lines_ask_for_none() {
+        let dir = TempDir::new("semantic_mutable_string");
+        dir.write(".fenix/project.ini", "");
+        let path = dir.write("main.rs", "let s = \"abc\";\n");
+        let mut app = App::with_file(Some(path.to_string_lossy().into_owned()));
+        let caps = capabilities(serde_json::json!({"textDocumentSync": 2, "semanticTokensProvider": {"legend": {"tokenTypes": ["variable"], "tokenModifiers": ["mutable"]}, "full": true}}));
+        let key = install_server(&mut app, &path, LspServer::Primary(fenix_syntax::LanguageId::Rust), "rust-analyzer", &["rust"], caps);
+        app.sync_lsp_for_focused_buffer();
+        app.ask_due_semantic_tokens();
+        let (id, _) = only_pending(&app, &key);
+        // `s` (4) and the `b` inside the string (10), both mutable.
+        answer(&mut app, &key, id, serde_json::json!({"data": [0, 4, 1, 0, 1, 0, 6, 1, 0, 1]}));
+        let _ = colour_at(&mut app, 0);
+        let buffer = app.focused_buffer_id();
+        assert_eq!(app.underlined_tokens(buffer, 0..1).into_iter().map(|(_, c, _)| c).collect::<Vec<_>>(), vec![4..5], "not the one in the string");
+        assert!(app.underlined_tokens(buffer, 0..0).is_empty());
     }
 
     #[test]
