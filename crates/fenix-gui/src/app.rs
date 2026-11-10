@@ -52,6 +52,7 @@ mod keys_host;
 pub(crate) use keys_host::translate_leader;
 mod edit_commands;
 mod carets;
+mod auto_save;
 mod problems;
 #[cfg(test)]
 mod test_keys;
@@ -5333,6 +5334,8 @@ pub struct App {
     /// (`edit.cursor_undo`); and whether it's Ctrl+U moving them now.
     caret_marks: Vec<carets::CaretMark>,
     caret_undoing: bool,
+    /// What auto-save (`editor.auto_save`) has seen.
+    auto_save: auto_save::AutoSaveState,
     /// Each Tcl buffer's language servers, as last worked out (every few
     /// seconds, not every frame: it can touch the disk) -- whose
     /// `lsp_workspace_names` its calls are colored by.
@@ -6196,6 +6199,7 @@ impl App {
             symbol_search: Default::default(),
             caret_marks: Vec::new(),
             caret_undoing: false,
+            auto_save: Default::default(),
             tcl_name_servers: HashMap::new(),
             lsp_unavailable: std::collections::HashSet::new(),
             lsp_starting: HashMap::new(),
@@ -22632,6 +22636,7 @@ impl ApplicationHandler<FenixUserEvent> for App {
             }
             WindowEvent::Focused(false) => {
                 self.code_surface_release();
+                self.auto_save_all();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let pos = (position.x as f32, position.y as f32);
@@ -22913,6 +22918,11 @@ impl ApplicationHandler<FenixUserEvent> for App {
             None => wait_until,
         };
         let wait_until = match self.hover_tick(now) {
+            Some(due) => wait_until.min(due),
+            None => wait_until,
+        };
+        // Auto-save: edits that have rested, or a buffer just left.
+        let wait_until = match self.auto_save_tick(now) {
             Some(due) => wait_until.min(due),
             None => wait_until,
         };

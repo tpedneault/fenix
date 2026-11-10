@@ -508,6 +508,16 @@ its extension. The rest is built into Fenix.
   moment where being approximately right costs somebody their work.
   `[editor] watch_files = false` turns the whole thing off, for a
   working copy on a network share.
+- **Auto-save**, off unless you turn it on (`editor.auto_save` on the
+  Settings page): `after_delay` saves a file once its edits have rested
+  `editor.auto_save_delay_ms` (a second), `on_focus_change` when you
+  leave it for another buffer, pane or application. It saves the same
+  way `:w` does, with the same check first, so a file that changed on
+  disk since it was read is never written over -- the conflict is yours
+  to settle. A buffer with no file yet, one shown read-only and a
+  remote project's file are left alone, and auto-saving doesn't run
+  `editor.format_on_save`'s formatter: text moving while you type is
+  worse than a file left unformatted until you save it yourself.
 - **Safe saves**: documents, settings, and recovery snapshots are staged beside
   their destination, explicitly flushed and synced, then replaced. Windows
   replacement preserves destination ACLs and refuses sharing violations; failed
